@@ -16,7 +16,7 @@ import { mensagemDeErro, formataErro } from './errosApi';
 import { passarBastao, getSyncSetupForServer, setupSyncForServer, disableSyncForServer } from './api';
 import { probeServerResponse } from './api';
 import { scanDir, scanDirForServer, listClaudeConfigs, listClaudeConfigsForServer } from './api';
-import { answerQuestions, interrupt, openEventStreamForServer, pressPluginButton, sendInputForServer, skipQuestion } from './api';
+import { answerQuestions, inputPluginField, interrupt, openEventStreamForServer, pressPluginButton, sendInputForServer, showPluginPane, skipQuestion } from './api';
 import { discardFile, fileAuthHeader, fileUrlNative, getPairContract, getPlans, listFiles, pathDiff, readFile, searchFiles, setPlanPin, unpairSession, writeFile } from './api';
 import type { Server } from './servers';
 import { exportShortcuts } from './api';
@@ -348,6 +348,8 @@ describe('contratos de conversa com servidor explícito', () => {
     { path: '/interrupt', body: {}, run: (s?: Server) => interrupt('mesma/sessão', false, s) },
     { path: '/interrupt?clear=true', body: {}, run: (s?: Server) => interrupt('mesma/sessão', true, s) },
     { path: '/plugin/press', body: { site: 'above-prompt', key: 'rv-1' }, run: (s?: Server) => pressPluginButton('mesma/sessão', 'above-prompt', 'rv-1', s) },
+    { path: '/plugin/show', body: { site: 'pm-mock-mr' }, run: (s?: Server) => showPluginPane('mesma/sessão', 'pm-mock-mr', s) },
+    { path: '/plugin/input', body: { site: 'vitrine-campos', key: 'V18-campo', kind: 'change', value: 'oi' }, run: (s?: Server) => inputPluginField('mesma/sessão', 'vitrine-campos', 'V18-campo', 'change', 'oi', s) },
     { path: '/answer', body: { answers: [], request_id: 0 }, run: (s?: Server) => answerQuestions('mesma/sessão', [], 0, s) },
     { path: '/answer', body: { answers: [] }, run: (s?: Server) => answerQuestions('mesma/sessão', [], undefined, s) },
     { path: '/question/skip', body: { request_id: 'req-b' }, run: (s?: Server) => skipQuestion('mesma/sessão', 'req-b', s) },
@@ -1016,4 +1018,54 @@ it('503 de custos vira a frase traduzida com o código; sem envelope fica o stat
   const semEnvelope = await fetchCostsForServer(server, 'all').catch((e: unknown) => e);
   expect(motivoDoServidor(semEnvelope)).toBeNull();
   expect((semEnvelope as Error).message).toBe('502');
+});
+
+it.each([404, 405])('plugin/show num servidor sem a rota rejeita com status %i, que isMissingRoute reconhece', async (status) => {
+  const { isMissingRoute } = await import('./pluginUi');
+  vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ detail: 'Not Found' }), { status }));
+  const erro = await showPluginPane('sessao', 'pm-mock-mr', server).catch((e: unknown) => e);
+  expect(isMissingRoute(erro)).toBe(true);
+});
+
+it('plugin/press, plugin/show e plugin/input com servidor explícito levam o código do servidor no erro', async () => {
+  const envelope = { ok: false, error_code: 'erro_mod_guarda_indisponivel', message: 'motivo',
+    detail: { code: 'erro_mod_guarda_indisponivel', params: { motivo: 'motivo' }, msg: 'motivo — erro_mod_guarda_indisponivel' } };
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify(envelope), { status: 503 }));
+  for (const chamada of [() => pressPluginButton('sessao', 'above-prompt', 'abrir', server),
+                         () => showPluginPane('sessao', 'painel', server),
+                         () => inputPluginField('sessao', 'painel', 'V18-campo', 'change', 'a', server)]) {
+    const erro = await chamada().catch((e: unknown) => e);
+    expect(erro).toMatchObject({ status: 503, code: 'erro_mod_guarda_indisponivel' });
+  }
+});
+
+it('plugin/input sem resposta e sem servidor explícito é cortado em 8 s, e a fila do campo segue', async () => {
+  const { fieldSender } = await import('./pluginField');
+  vi.useFakeTimers();
+  // O `AbortSignal.timeout` do Node não anda com o relógio falso: o mesmo prazo, pelo `setTimeout` falso.
+  const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
+    const c = new AbortController();
+    setTimeout(() => c.abort(new DOMException('signal timed out', 'TimeoutError')), ms);
+    return c.signal;
+  });
+  try {
+    // Servidor que aceita a conexão e nunca responde: o pedido só termina pelo sinal.
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation((_url, init) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal!.reason));
+    }));
+    const errors: unknown[] = [];
+    const input = fieldSender((kind, value) => inputPluginField('sessao', 'vitrine-campos', 'V18-campo', kind, value),
+      (err) => errors.push(err));
+    input('change', 'a');
+    input('submit', 'a');
+    await vi.advanceTimersByTimeAsync(7999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(errors).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(fetchMock.mock.calls[1][1]?.body as string)).toMatchObject({ kind: 'submit', value: 'a' });
+    expect(timeout).toHaveBeenCalledWith(8000);
+  } finally {
+    vi.useRealTimers();
+  }
 });

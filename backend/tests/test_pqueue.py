@@ -339,6 +339,28 @@ def test_committed_lines_include_queue_ops_and_raw_meta(tmp_path):
     assert "na fila interna" in lines
 
 
+def test_committed_lines_ignore_path_stat_ctime_that_differs_from_handle(tmp_path, monkeypatch):
+    # Windows: o st_ctime_ns de os.stat(caminho) nunca bate com o de os.fstat(handle).
+    import json
+    import os
+    from types import SimpleNamespace
+    j = tmp_path / "t.jsonl"
+    j.write_text(json.dumps({"type": "user", "message": {"role": "user", "content": "chegou"}}) + "\n",
+                 encoding="utf-8")
+    real_stat = os.stat
+
+    def windows_stat(path, *args, **kwargs):
+        st = real_stat(path, *args, **kwargs)
+        if str(path) != str(j):
+            return st
+        return SimpleNamespace(st_dev=st.st_dev, st_ino=st.st_ino, st_size=st.st_size,
+                               st_mtime_ns=st.st_mtime_ns, st_ctime_ns=st.st_ctime_ns + 1)
+
+    monkeypatch.setattr(pqueue.os, "stat", windows_stat)
+    lines = pqueue.committed_user_lines(str(j))
+    assert lines is not None and "chegou" in lines
+
+
 def test_committed_lines_contam_orientada_no_claude_sem_terminal(tmp_path):
     # Msg mandada no meio do turno pelo stdin: o CLI grava `attachment/queued_command`, sem entrada
     # `user`. Conta como aterrissada, senão a entrega orientada nunca confirmava.

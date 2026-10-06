@@ -13,6 +13,7 @@ import os
 import pathlib
 import runpy
 import subprocess
+import tempfile
 from types import SimpleNamespace
 import sys
 
@@ -26,6 +27,7 @@ CLI = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "hangar-engine"
 @pytest.fixture(autouse=True)
 def _isola(tmp_path, monkeypatch):
     monkeypatch.setattr(eng, "caminho", lambda: tmp_path / "engines.json")
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     yield
 
 
@@ -38,6 +40,136 @@ def _kimi() -> dict:
         "context_window": 262144,
         "vision": True,
     }
+
+
+@pytest.mark.parametrize("tier,speed", [("priority", "fast"), ("default", "fast"), ("default", "slow")])
+def test_service_tier_merges_extra_body(tier, speed):
+    original = {"speed": speed, "metadata": {"trace": "keep"}, "service_tier": "old"}
+    env = eng.service_tier_env(tier, json.dumps(original))
+    expected = {**original, "service_tier": tier}
+    if tier == "default" and speed == "fast":
+        expected.pop("speed")
+    assert json.loads(env["CLAUDE_CODE_EXTRA_BODY"]) == expected
+    assert env["CP_ENGINE_SERVICE_TIER"] == tier
+
+
+@pytest.mark.parametrize("body", ["", "{broken", "[]", "null", '{"x":NaN}', '{"x":Infinity}'])
+def test_service_tier_rejects_invalid_extra_body(body):
+    with pytest.raises(ValueError, match="CLAUDE_CODE_EXTRA_BODY"):
+        eng.service_tier_env("priority", body)
+
+
+@pytest.mark.parametrize("source", ["shell", "user", "project", "local", "explicit"])
+@pytest.mark.parametrize("tier", ["default", "priority"])
+def test_cli_service_tier_preserves_settings_and_precedence(tmp_path, monkeypatch, source, tier):
+    eng.salvar("kimi", _kimi())
+    config = tmp_path / "account"
+    project = tmp_path / "project"
+    config.mkdir()
+    project.mkdir()
+    (project / ".claude").mkdir()
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    monkeypatch.setenv("CLAUDE_CODE_EXTRA_BODY", '{"origin":"shell","speed":"fast"}')
+    monkeypatch.setenv("CP_ENGINE_SERVICE_TIER", "inherited")
+    layers = ["shell", "user", "project", "local", "explicit"]
+    files = [config / "settings.json", project / ".claude/settings.json", project / ".claude/settings.local.json"]
+    for layer, path in zip(layers[1:4], files):
+        if layers.index(layer) <= layers.index(source):
+            path.write_text(json.dumps({"env": {"CLAUDE_CODE_EXTRA_BODY": json.dumps({"origin": layer, "speed": "fast"}),
+                                                "DO_NOT_COPY": "account-value"}}), encoding="utf-8")
+    explicit = {"permissionMode": "plan", "env": {"KEEP": "cli-value"}}
+    if source == "explicit":
+        explicit["env"]["CLAUDE_CODE_EXTRA_BODY"] = '{"origin":"explicit","speed":"fast"}'
+    before = {path: path.read_bytes() for path in files if path.exists()}
+    captured = {}
+    def capture(cmd, env):
+        captured.update(cmd=cmd, env=env, settings=json.loads(pathlib.Path(cmd[2]).read_text(encoding="utf-8")))
+        return SimpleNamespace(returncode=127)
+    monkeypatch.setattr(os, "execvpe", lambda binary, cmd, env: capture(cmd, env), raising=False)
+    monkeypatch.setattr(subprocess, "run", capture)
+    main = runpy.run_path(str(CLI))["main"]
+    assert main(["hangar-engine", "--exec", "kimi", "--service-tier", tier, "--", "claude", "--settings", json.dumps(explicit)]) == 127
+    settings = captured["settings"]
+    body = json.loads(settings["env"]["CLAUDE_CODE_EXTRA_BODY"])
+    assert body == {"origin": source, "service_tier": tier, **({"speed": "fast"} if tier == "priority" else {})}
+    assert settings["permissionMode"] == "plan"
+    assert settings["env"]["KEEP"] == "cli-value"
+    assert "DO_NOT_COPY" not in settings["env"]
+    assert captured["env"]["CP_ENGINE_SERVICE_TIER"] == tier
+    assert captured["env"]["CLAUDE_CODE_EXTRA_BODY"] == settings["env"]["CLAUDE_CODE_EXTRA_BODY"]
+    assert _kimi()["api_key"] not in json.dumps(captured["cmd"])
+    assert all(path.read_bytes() == content for path, content in before.items())
+
+
+def test_cli_service_tier_local_git_root_and_explicit_file(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / ".git").mkdir()
+    (root / ".claude").mkdir()
+    nested = root / "nested"
+    nested.mkdir()
+    (nested / ".claude").mkdir()
+    (root / ".claude/settings.local.json").write_text('{"env":{"CLAUDE_CODE_EXTRA_BODY":"{\\"origin\\":\\"root\\"}"}}', encoding="utf-8")
+    (nested / ".claude/settings.local.json").write_text('{"env":{"CLAUDE_CODE_EXTRA_BODY":"{\\"origin\\":\\"cwd\\"}"}}', encoding="utf-8")
+    explicit = tmp_path / "explicit.json"
+    explicit.write_text('{"env":{"KEEP":"kept","PRIVATE_KEY":"explicit-secret"},"model":"gpt-5.5"}', encoding="utf-8")
+    before = explicit.read_bytes()
+    monkeypatch.chdir(nested)
+    launcher = runpy.run_path(str(CLI))
+    env = {"CLAUDE_CONFIG_DIR": str(tmp_path / "unused"), "ANTHROPIC_AUTH_TOKEN": "engine-secret"}
+    cmd = launcher["_apply_service_tier"](["claude", f"--settings={explicit}", "--setting-sources", "local"], env, "priority")
+    private = pathlib.Path(cmd[2])
+    settings = json.loads(private.read_text(encoding="utf-8"))
+    assert "explicit-secret" not in json.dumps(cmd) and "engine-secret" not in private.read_text(encoding="utf-8")
+    assert settings["env"]["PRIVATE_KEY"] == "explicit-secret"
+    if os.name != "nt":
+        assert private.stat().st_mode & 0o777 == 0o600
+    assert settings["model"] == "gpt-5.5" and settings["env"]["KEEP"] == "kept"
+    assert json.loads(env["CLAUDE_CODE_EXTRA_BODY"])["origin"] == ("cwd" if os.name == "nt" else "root")
+    assert explicit.read_bytes() == before
+    env = {"CLAUDE_CONFIG_DIR": str(tmp_path / "unused"), "CLAUDE_CODE_EXTRA_BODY": '{"origin":"shell"}'}
+    eng.service_tier_settings(["claude", "--setting-sources="], env, "default")
+    assert json.loads(env["CLAUDE_CODE_EXTRA_BODY"]) == {"origin": "shell", "service_tier": "default"}
+
+
+def test_cli_service_tier_removes_private_settings_on_launch_failure(tmp_path, monkeypatch):
+    eng.salvar("kimi", _kimi())
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "unused"))
+    monkeypatch.delenv("CLAUDE_CODE_EXTRA_BODY", raising=False)
+    paths = []
+    def fail(cmd, env):
+        paths.append(pathlib.Path(cmd[2]))
+        assert paths[-1].exists()
+        raise FileNotFoundError("claude ausente")
+    monkeypatch.setattr(os, "execvpe", lambda binary, cmd, env: fail(cmd, env), raising=False)
+    monkeypatch.setattr(subprocess, "run", fail)
+    main = runpy.run_path(str(CLI))["main"]
+    with pytest.raises(FileNotFoundError, match="claude ausente"):
+        main(["hangar-engine", "--exec", "kimi", "--service-tier", "priority", "--", "claude"])
+    assert paths and not paths[0].exists()
+
+
+def test_cli_service_tier_fails_before_exec_and_clears_inherited_marker(tmp_path, monkeypatch, capsys):
+    eng.salvar("kimi", _kimi())
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "unused"))
+    monkeypatch.setenv("CP_ENGINE_SERVICE_TIER", "priority")
+    monkeypatch.setenv("CLAUDE_CODE_EXTRA_BODY", "broken")
+    captured = []
+    def capture(cmd, env):
+        captured.append(env)
+        return SimpleNamespace(returncode=127)
+    monkeypatch.setattr(os, "execvpe", lambda binary, cmd, env: capture(cmd, env), raising=False)
+    monkeypatch.setattr(subprocess, "run", capture)
+    main = runpy.run_path(str(CLI))["main"]
+    for tier in ("priority", "invalid"):
+        assert main(["hangar-engine", "--exec", "kimi", "--service-tier", tier, "--", "claude"]) == 2
+    assert not captured
+    assert "JSON inválido" in capsys.readouterr().err
+    assert main(["hangar-engine", "--exec", "kimi", "--", "claude"]) == 127
+    assert "CP_ENGINE_SERVICE_TIER" not in captured[0]
 
 
 def test_fixed_account_prefixes_main_and_subagents(monkeypatch):

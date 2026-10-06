@@ -230,10 +230,10 @@ def _under(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
-def account_for_rollout(path: Path) -> Account | None:
+def account_for_rollout(path: Path, accounts: list[Account] | None = None) -> Account | None:
     rollout = _canonical(Path(path))
     matches = []
-    for account in list_accounts():
+    for account in list_accounts() if accounts is None else accounts:
         home = _canonical(account.home)
         if _under(rollout, home / "sessions") or _under(rollout, home / "archived_sessions"):
             matches.append(account)

@@ -1104,6 +1104,40 @@ def test_terminal_session_registers_in_rust_without_python_phase(monkeypatch, tm
     asyncio.run(flow())
 
 
+@pytest.mark.parametrize('guest', [True, False])
+def test_guest_click_is_refused_when_the_click_itself_opens_the_terminal_in_rust(monkeypatch, tmp_path, guest):
+    # Primeira operação depois de reiniciar o backend: ainda não há slot, e a fotografia da rota diria
+    # "terminal fora do Rust". O próprio clique abre a sessão no Rust, e a recusa vem sob a barreira.
+    from app import plugin_click, tmux, runtime_terminal as terminal
+    gateway = LoanGateway()
+    owner = _born_terminal(monkeypatch, tmp_path, gateway)
+    sent = []
+    def send_keys(name, keys, literal=False):
+        terminal.assert_writer(name)
+        sent.append(name)
+        return True
+    monkeypatch.setattr(tmux, 'send_keys', send_keys)
+    async def flow():
+        owner.loop = asyncio.get_running_loop()
+        assert 'session' not in owner.names and not owner.terminal_in_rust('session')
+        marca = terminal.guest_admin.set(guest)
+        try:
+            if guest:
+                with pytest.raises(terminal.GuestRefused):
+                    await plugin_click._click('session', 2, 5)
+            else:
+                await plugin_click._click('session', 2, 5)
+        finally:
+            terminal.guest_admin.reset(marca)
+        assert owner.slot('session').phase == Phase.Rust and gateway.calls.count('open') == 1
+        if guest:
+            assert sent == [] and gateway.controls == [], 'o convidado não recebe o teclado'
+        else:
+            assert sent == ['session'] and [kind for kind, _ in gateway.controls] == ['keyboard_loan', 'keyboard_return']
+        await owner.change('session', lambda: asyncio.sleep(0), remove=True)
+    asyncio.run(flow())
+
+
 def test_admin_borrows_keyboard_without_moving_queue(monkeypatch, tmp_path):
     from app import runtime_terminal as terminal
     gateway = LoanGateway()

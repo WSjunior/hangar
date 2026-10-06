@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { buttonKey, decodeRaster, inkColor, isEmptyBand, parsePluginToast, parsePluginUi, textOf } from './pluginUi';
+import { activePaneId, buttonKey, followLocalTab, hoverProps, inputKey, isHoverScope, isMissingRoute, isPluginServerFailure, pluginFailureText, tabFollowsServer, decodeRaster, inkColor, isEmptyBand, parsePluginToast, parsePluginUi, textOf, type PluginElement } from './pluginUi';
+import { mensagemDeErro } from './errosApi';
+import amostras from './__fixtures__/plugin-ui-arvores.json';
 
 function cells(words: number[]): string {
   const bytes = new Uint8Array(new Uint32Array(words).buffer);
@@ -61,7 +63,7 @@ describe('parsePluginUi', () => {
   });
 
   it('aceita o formato antigo, só com a faixa', () => {
-    expect(parsePluginUi({ above: null })).toEqual({ above: null, panes: [] });
+    expect(parsePluginUi({ above: null })).toEqual({ above: null, panes: [], shownId: undefined, columns: null, source: null });
   });
 
   it('placement desconhecido vira inline', () => {
@@ -88,4 +90,139 @@ it('buttonKey só para Button com key em texto', () => {
   expect(buttonKey({ type: 'Button', props: { key: 'cp-1' } })).toBe('cp-1');
   expect(buttonKey({ type: 'Button', props: {} })).toBeNull();
   expect(buttonKey({ type: 'Text', props: { key: 'x' } })).toBeNull();
+});
+
+describe('parsePluginUi: campos novos da fase 1', () => {
+  const evento = (extra: Record<string, unknown>) => ({
+    above: amostras.faixaPm,
+    panes: amostras.rolPm.panes.map((p) => ({ ...p, placement: 'dock', columns: 58, tree: { type: 'engine', ref: 0 } })),
+    ...extra,
+  });
+
+  it('lê shown_id, columns e source quando o servidor manda', () => {
+    const s = parsePluginUi(evento({ shown_id: 'pm-mock-mr', columns: 110, source: 'surface' }));
+    expect([s.shownId, s.columns, s.source]).toEqual(['pm-mock-mr', 110, 'surface']);
+    expect(s.panes.map((p) => p.id)).toEqual(['pm-mock-pm', 'pm-mock-mr', 'pm-mock-jenkins']);
+  });
+
+  it('servidor de hoje: sem os campos, shownId fica undefined e o resto null', () => {
+    const s = parsePluginUi(evento({}));
+    expect(s.shownId).toBeUndefined();
+    expect(s.columns).toBeNull();
+    expect(s.source).toBeNull();
+  });
+
+  it('shown_id null quer dizer "sem painel"; valores estranhos valem como ausentes', () => {
+    expect(parsePluginUi({ shown_id: null }).shownId).toBeNull();
+    const s = parsePluginUi({ shown_id: 7, columns: -3, source: 'mobile' });
+    expect([s.shownId, s.columns, s.source]).toEqual([undefined, null, null]);
+    expect(parsePluginUi({ shown_id: '' }).shownId).toBeUndefined();
+  });
+});
+
+describe('aba ativa', () => {
+  const ids = ['pm-mock-pm', 'pm-mock-mr', 'pm-mock-jenkins'];
+
+  it('segue o shown_id quando ele nomeia um painel da lista', () => {
+    expect(tabFollowsServer(ids, 'pm-mock-pm')).toBe(true);
+    expect(activePaneId(ids, 'pm-mock-pm', 'pm-mock-mr')).toBe('pm-mock-pm');
+  });
+
+  it('shown_id de painel que ainda não chegou: vale a escolha local, nunca nada', () => {
+    expect(tabFollowsServer(ids, 'pm-mock-novo')).toBe(false);
+    expect(activePaneId(ids, 'pm-mock-novo', 'pm-mock-mr')).toBe('pm-mock-mr');
+    expect(activePaneId(ids, 'pm-mock-novo', null)).toBe('pm-mock-jenkins');
+  });
+
+  it('sem shown_id (servidor antigo), escolha local; sem ela, o último aberto; sem painel, null', () => {
+    expect(activePaneId(ids, undefined, 'pm-mock-pm')).toBe('pm-mock-pm');
+    expect(activePaneId(ids, null, null)).toBe('pm-mock-jenkins');
+    expect(activePaneId([], 'x', 'y')).toBeNull();
+  });
+
+  it('escolha local que não está mais na lista cai no último aberto', () => {
+    expect(activePaneId(ids, undefined, 'fechado')).toBe('pm-mock-jenkins');
+  });
+});
+
+describe('escolha local da aba', () => {
+  it('começa no último painel aberto', () => {
+    expect(followLocalTab([], ['a', 'b', 'c'], null)).toBe('c');
+  });
+
+  it('sobrevive a um redesenho sem painel novo', () => {
+    expect(followLocalTab(['a', 'b', 'c'], ['a', 'b', 'c'], 'a')).toBe('a');
+  });
+
+  it('painel que acaba de abrir vai para a frente, como no terminal', () => {
+    expect(followLocalTab(['a', 'b'], ['a', 'b', 'd'], 'a')).toBe('d');
+  });
+
+  it('fechado o escolhido, fica o vizinho anterior; sem anterior, o seguinte', () => {
+    expect(followLocalTab(['a', 'b', 'c'], ['a', 'c'], 'b')).toBe('a');
+    expect(followLocalTab(['a', 'b'], ['b'], 'a')).toBe('b');
+    expect(followLocalTab(['a'], [], 'a')).toBeNull();
+  });
+});
+
+describe('rota ausente', () => {
+  it('404 e 405 são servidor anterior à rota; 409 e erro sem status não são', () => {
+    expect(isMissingRoute(Object.assign(new Error('Not Found'), { status: 404 }))).toBe(true);
+    expect(isMissingRoute(Object.assign(new Error('Method Not Allowed'), { status: 405 }))).toBe(true);
+    expect(isMissingRoute(Object.assign(new Error('x'), { status: 409, code: 'erro_mod_dialogo_aberto' }))).toBe(false);
+    expect(isMissingRoute(new Error('rede'))).toBe(false);
+    expect(isMissingRoute(null)).toBe(false);
+  });
+});
+
+describe('falha de servidor numa rota de mod', () => {
+  it('sem status ou 5xx é falha do servidor ou da rede; 4xx traz o motivo da recusa', () => {
+    expect(isPluginServerFailure(new Error('rede'))).toBe(true);
+    expect(isPluginServerFailure(Object.assign(new Error('x'), { status: 500 }))).toBe(true);
+    expect(isPluginServerFailure(Object.assign(new Error('x'), { status: 503 }))).toBe(true);
+    expect(isPluginServerFailure(Object.assign(new Error('409: frase'), { status: 409 }))).toBe(false);
+    expect(isPluginServerFailure(Object.assign(new Error('x'), { status: 404 }))).toBe(false);
+  });
+});
+
+describe('frase da falha numa rota de mod', () => {
+  const generica = () => 'frase-generica';
+  it('código conhecido vira a frase dele em qualquer status, inclusive o 503 do dono único', () => {
+    const guarda = Object.assign(new Error('503: motivo — erro_mod_guarda_indisponivel'), { status: 503, code: 'erro_mod_guarda_indisponivel' });
+    expect(pluginFailureText(guarda, generica)).toBe(mensagemDeErro('erro_mod_guarda_indisponivel'));
+    const recusa = Object.assign(new Error('409: x'), { status: 409, code: 'erro_mod_sem_digitacao' });
+    expect(pluginFailureText(recusa, generica)).toBe(mensagemDeErro('erro_mod_sem_digitacao'));
+  });
+  it('sem código: 5xx ou sem resposta é a frase genérica; 4xx é o motivo que veio', () => {
+    expect(pluginFailureText(Object.assign(new Error('500: Internal Server Error'), { status: 500 }), generica)).toBe('frase-generica');
+    expect(pluginFailureText(new Error('rede'), generica)).toBe('frase-generica');
+    expect(pluginFailureText(Object.assign(new Error('503: x'), { status: 503, code: 'codigo_desconhecido' }), generica)).toBe('frase-generica');
+    expect(pluginFailureText(Object.assign(new Error('409: motivo'), { status: 409 }), generica)).toBe('409: motivo');
+  });
+});
+
+describe('hover', () => {
+  it('Box com key é escopo; sem key ou outro tipo, não', () => {
+    expect(isHoverScope(amostras.hoverV29 as unknown as PluginElement)).toBe(true);
+    expect(isHoverScope({ type: 'Box', props: {} })).toBe(false);
+    expect(isHoverScope({ type: 'Text', props: { key: 'x' } })).toBe(false);
+  });
+
+  it('com o escopo aceso, o hover do nó vence as props; apagado, as props valem', () => {
+    const cartao = amostras.hoverV29.children[1] as unknown as PluginElement;
+    expect(hoverProps(cartao, false).display).toBe('none');
+    expect(hoverProps(cartao, true).display).toBe('flex');
+    expect(hoverProps(cartao, true).position).toBe('absolute');
+  });
+
+  it('hover com scope (grupo entre lugares) fica para depois: o nó segue sem hover', () => {
+    const v30 = { type: 'Text', hover: { scope: 'vitrine-V30', color: '#e8a33d' } } as PluginElement;
+    expect(hoverProps(v30, true)).toEqual({});
+  });
+
+  it('inputKey só para Input com key em texto', () => {
+    expect(inputKey(amostras.campoV18 as unknown as PluginElement)).toBe('V18-campo');
+    expect(inputKey({ type: 'Input', props: {} })).toBeNull();
+    expect(inputKey({ type: 'Button', props: { key: 'x' } })).toBeNull();
+  });
 });

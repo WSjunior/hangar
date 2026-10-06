@@ -57,9 +57,30 @@ def _mtime(p: Path) -> float:
         return 0.0
 
 
+# O cabeçalho não muda depois de gravado, e o do Codex chega a centenas de KB: sem isto o índice
+# relia todos os rollouts a cada passada. Chave com inode: arquivo recriado no mesmo caminho relê.
+# Sem o extrator na chave: cada caminho é de um provider só, e o do Pi é um lambda novo por chamada.
+# Entrada de arquivo apagado fica: cresce com o total de transcripts, não com o tempo.
+_CWD_CACHE: dict[tuple[str, int], str] = {}
+
+
 def _cwd_do_cabecalho(p: Path, campo: Callable[[dict], Optional[str]], max_linhas: int = 5) -> Optional[str]:
     """cwd lido das PRIMEIRAS linhas do transcript. Pi e Codex gravam na 1a, mas ler algumas a mais
-    e barato e cobre um cabecalho que ganhe linha nova."""
+    cobre um cabecalho que ganhe linha nova."""
+    try:
+        chave = (str(p), p.stat().st_ino)
+    except OSError:
+        chave = None
+    if chave is not None and (cwd := _CWD_CACHE.get(chave)) is not None:
+        return cwd
+    cwd = _ler_cwd_do_cabecalho(p, campo, max_linhas)
+    # Sem cwd não guarda: o cabeçalho pode ainda não ter sido escrito.
+    if chave is not None and cwd is not None:
+        _CWD_CACHE[chave] = cwd
+    return cwd
+
+
+def _ler_cwd_do_cabecalho(p: Path, campo: Callable[[dict], Optional[str]], max_linhas: int) -> Optional[str]:
     try:
         with open(p, encoding="utf-8", errors="replace") as fh:
             for _, linha in zip(range(max_linhas), fh):
@@ -195,6 +216,7 @@ def _codex_cwd(obj: dict) -> Optional[str]:
 
 def _codex_conversas(codex_account: str | None = None) -> list[Conversa]:
     out: list[Conversa] = []
+    todas = codex_contas.list_accounts()
     for account in _codex_contas(codex_account):
         try:
             arquivos = _codex_rollouts(account.home)
@@ -206,7 +228,7 @@ def _codex_conversas(codex_account: str | None = None) -> list[Conversa]:
             if not UUID_RE.match(sid):
                 continue
             try:
-                owner = codex_contas.account_for_rollout(f)
+                owner = codex_contas.account_for_rollout(f, todas)
             except codex_contas.AccountError:
                 raise
             if owner is None or owner.id != account.id:

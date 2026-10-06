@@ -36,6 +36,7 @@ export * from './askquestion';
 export * from './optionKind';
 export * from './errosApi';
 export * from './pluginUi';
+export * from './pluginField';
 export { foldTasks, contarTasks } from './tasks';
 export type { Task, TaskStatus as TaskStatusFromTasks } from './tasks';
 export { configureLocale, localeAtual, intlLocale } from './i18n';

@@ -78,7 +78,7 @@ mod stats;
 mod search;
 mod topbar;
 
-actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, FindProjectFile, FindProjectText, NextSession, PreviousSession, ToggleDictation, NewChat, CloseSession, OpenCosts, OpenSearch,
+actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, FindProjectFile, FindProjectText, NextSession, PreviousSession, ToggleDictation, NewChat, CloseSession, RenameSession, OpenCosts, OpenSearch,
     ToggleSidebar, CyclePermission, OpenWorktrees]);
 
 const LIVE_THINKING: &str = "__thinking__";
@@ -218,6 +218,11 @@ enum Payload {
     Transfer(EntityId, create::TransferReply),
     // Clique num botão de mod: o que o mod copiou ou mandou abrir vem na resposta.
     PluginPressed(Result<Value, Failure>),
+    // Troca de aba de mod: só a falha interessa; a aba nova chega pelo `shown_id`.
+    PluginShown(Result<Value, Failure>),
+    // Digitação num campo de mod: o lugar, a `key` e a identidade do campo que mandou; a volta libera o próximo pedido
+    // da fila dele, e só a falha aparece.
+    PluginInput(String, String, EntityId, Result<Value, Failure>),
     // Lista de outra máquina: a geração dos SSE de lista, a chave do servidor e o que chegou.
     Remote(u64, String, servers::RemoteUpdate),
     HeadlessPlan(SessionKey, controls::PlanOutcome),
@@ -349,6 +354,10 @@ enum Changed { Nothing, Screen, Rows, Tail, Bottom }
 
 /// Tipo das notificações que espelham aviso de mod; a chave de cada uma é o id do aviso.
 struct PluginToast;
+
+/// Tipo fixo do aviso de falha na digitação ou na troca de aba de um mod: um aviso novo substitui o anterior, e uma
+/// sequência de teclas que falham não empilha um aviso por tecla.
+struct PluginFailure;
 
 // Formulário da pergunta atual; refeito quando a pergunta (identidade + conteúdo) muda.
 #[derive(Default)]
@@ -483,6 +492,24 @@ pub struct Hangar {
     plugin_band: Value,
     /// Painéis que os mods abriram e o terminal desenhou, do mesmo SSE.
     plugin_panes: Vec<Value>,
+    /// Painel na frente segundo o servidor (`shown_id`); `None` quando o servidor não manda.
+    plugin_shown: Option<Option<String>>,
+    /// Largura, em colunas, para a qual a faixa foi desenhada; `None` num servidor antigo.
+    plugin_columns: Option<f64>,
+    /// De onde vem a interface dos mods; `None` vale como terminal (sem digitação).
+    plugin_source: Option<crate::plugin_ui::UiSource>,
+    /// Escolha local da aba: começa no último painel aberto e sobrevive aos redesenhos.
+    plugin_local_tab: Option<String>,
+    /// Rolagem da fileira de abas dos mods e a aba ativa para a qual ela já rolou.
+    plugin_tabs_scroll: ScrollHandle,
+    plugin_tabs_seen: Option<String>,
+    plugin_tabs_waits: u8,
+    /// Trechos dos mods (escopo de hover ou cartão absoluto) com o ponteiro em cima: lugar e caminho na árvore.
+    plugin_hovered: HashSet<String>,
+    /// Campos (`Input`) dos mods, por `plugin_ui::field_id`: nascem quando a árvore os traz e saem com ela.
+    plugin_fields: HashMap<String, crate::plugin_ui::Field>,
+    /// Quantos eventos `plugin_ui` chegaram: separa o desenho novo do mod do redesenho do app, para os campos.
+    plugin_draws: u64,
     /// Últimos ids de aviso de mod (SSE `plugin_toast`) já mostrados; só os recentes voltam na reconexão.
     plugin_toasts_seen: std::collections::VecDeque<String>,
     /// Avisos de mod na tela, do mais antigo ao mais novo.
@@ -496,7 +523,7 @@ pub struct Hangar {
     // Página de configurações aberta por cima da janela inteira; `None` é a janela da conversa.
     settings: Option<settings::Page>,
     settings_ui: settings::SettingsUi,
-    // Abas no topo: foco de cada aba pelo nome da sessão (setas andam entre elas) e a rolagem da faixa,
+    // Abas: foco de cada aba pelo nome da sessão (setas andam entre elas) e a rolagem da faixa,
     // que traz a aba ativa para a vista quando a seleção muda.
     tab_focus: HashMap<String, FocusHandle>,
     tabs_scroll: ScrollHandle,
@@ -794,7 +821,7 @@ impl Hangar {
             attachments: HashMap::new(), attach_seq: 0, uploading: HashMap::new(), commands: HashMap::new(),
             suggest_pick: 0, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None, confirm_no_ask: false,
             mention: Default::default(),
-            terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
+            terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_shown: None, plugin_columns: None, plugin_source: None, plugin_local_tab: None, plugin_tabs_scroll: ScrollHandle::new(), plugin_tabs_seen: None, plugin_tabs_waits: 0, plugin_hovered: HashSet::new(), plugin_fields: HashMap::new(), plugin_draws: 0, plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
             settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(),
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
@@ -939,10 +966,32 @@ impl Hangar {
         if error.status.is_none() && error.uncertain { tr("connection_failed") } else { Self::failure(error) }
     }
 
-    /// Clique num botão de mod: a recusa do backend (409) diz o motivo dela; sem resposta ou 5xx não é entrega de mensagem,
-    /// e a frase de reenviar enganaria.
+    /// Falha numa rota de mod. Recusa com código `erro_mod_*` que o app traduz (o mesmo critério do `failure_detail`) vale
+    /// em qualquer status, inclusive o 503 do dono único (`erro_mod_guarda_indisponivel`): o `detail` já é a frase dela.
+    /// Sem esse código, sem resposta ou 5xx é a frase `generic` do app, e a recusa (4xx) diz o motivo dela.
+    fn plugin_failure(error: &Failure, generic: impl FnOnce() -> String) -> String {
+        let known = error.code.as_deref()
+            .is_some_and(|code| code.starts_with("erro_mod_") && crate::i18n::tr_web(code, &HashMap::new()).is_some());
+        if known { error.detail.clone() }
+        else if error.status.is_none_or(|status| status >= 500) { generic() }
+        else { Self::failure(error) }
+    }
+
+    /// Clique num botão de mod: sem resposta ou 5xx não é entrega de mensagem, e a frase de reenviar enganaria.
     fn press_failure(error: &Failure) -> String {
-        if error.status.is_none_or(|status| status >= 500) { tr("plugin_press_failed") } else { Self::failure(error) }
+        Self::plugin_failure(error, || tr_shared("plugin_clique_falhou", &[]))
+    }
+
+    /// Digitação num campo de mod que não chegou: a frase genérica é a mesma do web.
+    fn input_failure(error: &Failure) -> String {
+        Self::plugin_failure(error, || tr_shared("plugin_input_falhou", &[]))
+    }
+
+    /// Troca de aba recusada. Servidor sem a rota (404 ou 405) é servidor antigo, não erro: a troca local já valeu. A frase
+    /// genérica é a da troca de aba do web.
+    fn show_failure(error: &Failure) -> Option<String> {
+        if matches!(error.status, Some(404 | 405)) { return None; }
+        Some(Self::plugin_failure(error, || tr_shared("plugin_aba_falhou", &[])))
     }
 
     fn selected_key(&self) -> Option<SessionKey> {
@@ -1159,7 +1208,7 @@ impl Hangar {
         self.open_api = open_api;
         // Avisos, atalhos globais e contas passam a ser os da máquina desta conversa.
         if !same_server { self.load_notification_preferences(); }
-        // Com as abas no topo (só a lista ativa), a aba da sessão aberta entra na vista da faixa.
+        // Com abas (só a lista ativa), a aba da sessão aberta entra na vista da faixa.
         if self.open_api.is_none() && let Some(ix) = self.sessions.iter().position(|s| s.name == session.name) { self.tabs_scroll.scroll_to_item(ix); }
         self.selection += 1;
         self.revision += 1;
@@ -1197,6 +1246,13 @@ impl Hangar {
         self.terminal_suggestion.clear();
         self.plugin_band = Value::Null;
         self.plugin_panes.clear();
+        self.plugin_shown = None;
+        self.plugin_columns = None;
+        self.plugin_source = None;
+        self.plugin_local_tab = None;
+        self.plugin_tabs_seen = None;
+        self.plugin_hovered.clear();
+        self.plugin_fields.clear();
         self.recent = None;
         self.command_panel = false;
         // Os menus são da tela sem sessão: sem isto, o Esc seguinte seria gasto num deles, já fora da tela.
@@ -1595,6 +1651,22 @@ impl Hangar {
             Payload::Create(dialog, reply) => { self.receive_create(dialog, reply, window, cx); return; }
             Payload::Transfer(dialog, reply) => { self.receive_agent_transfer(dialog, reply, window, cx); return; }
             Payload::PluginPressed(result) => { self.receive_plugin_press(result, window, cx); return; }
+            Payload::PluginShown(result) => {
+                if let Some(text) = result.err().and_then(|error| Self::show_failure(&error)) {
+                    window.push_notification(Notification::warning(text).id::<PluginFailure>(), cx);
+                }
+                return;
+            }
+            Payload::PluginInput(site, key, field, result) => {
+                if let Err(error) = result {
+                    window.push_notification(Notification::warning(Self::input_failure(&error)).id::<PluginFailure>(), cx);
+                }
+                // O próximo da fila só sai pelo mesmo campo: um campo recriado com a mesma `key` tem fila própria.
+                let next = self.plugin_fields.get_mut(&crate::plugin_ui::field_id(&site, &key))
+                    .filter(|f| f.state.entity_id() == field).and_then(|f| f.outbox.done());
+                if let Some(next) = next { self.send_plugin_input(&site, &key, next); }
+                return;
+            }
             Payload::Sidebar(reply) => {
                 // Só o silenciar da máquina da conversa aberta muda as preferências que os avisos desta janela leem.
                 if matches!(&reply, sidebar::SidebarReply::Wrote(t, sidebar::Write::Mute(_), _) if t.server == self.open_server()) { self.load_notification_preferences(); }
@@ -1751,7 +1823,10 @@ impl Hangar {
                     self.open_session(self.open_api.clone(), new, window, cx);
                     if let Some(from) = moved { self.drafts.remove(&from); }
                 }
-                Some(new) => self.selected = Some(new),
+                Some(new) => {
+                    if let Some(key) = self.selected_key() { self.controls.on_session_update(&key, &new); }
+                    self.selected = Some(new);
+                }
                 None => {
                     self.close_terminal(false, window, cx);
                     self.selection += 1;
@@ -1787,10 +1862,17 @@ impl Hangar {
                 return (true, Changed::Screen);
             }
             "plugin_ui" => {
-                // A árvore chega por valor: `take` move em vez de copiar centenas de KB por evento.
-                let mut data = data;
-                self.plugin_band = data["above"].take();
-                self.plugin_panes = match data["panes"].take() { Value::Array(panes) => panes, _ => Vec::new() };
+                // A árvore chega por valor: `surfaces` move em vez de copiar centenas de KB por evento.
+                let s = crate::plugin_ui::surfaces(data);
+                self.plugin_local_tab = crate::plugin_ui::follow_local(&crate::plugin_ui::pane_ids(&self.plugin_panes),
+                    &crate::plugin_ui::pane_ids(&s.panes), self.plugin_local_tab.as_deref());
+                self.plugin_band = s.above;
+                self.plugin_panes = s.panes;
+                self.plugin_shown = s.shown_id;
+                self.plugin_columns = s.columns;
+                self.plugin_source = s.source;
+                self.plugin_draws += 1;
+                self.keep_plugin_hovered();
                 return (true, Changed::Screen);
             }
             "plugin_toast" => {
@@ -1921,6 +2003,13 @@ impl Hangar {
                 self.terminal_suggestion.clear();
                 self.plugin_band = Value::Null;
                 self.plugin_panes.clear();
+                self.plugin_shown = None;
+                self.plugin_columns = None;
+                self.plugin_source = None;
+                self.plugin_local_tab = None;
+                self.plugin_tabs_seen = None;
+                self.plugin_hovered.clear();
+                self.plugin_fields.clear();
                 if let Some(task) = self.history_task.take() { task.abort(); }
                 self.chat = Chat::default();
                 self.turn_seen = None;
@@ -4490,6 +4579,9 @@ fn ask_option<E: Styled + InteractiveElement + ParentElement + IntoElement>(cont
             .font_family(crate::theme::MONO).text_xs().whitespace_nowrap().overflow_x_hidden().child(preview)))
 }
 
+/// Quadros seguidos que a fileira de abas dos mods espera pela geometria antes de desistir.
+const TAB_SCROLL_WAITS: u8 = 3;
+
 fn scrolled(id: &'static str, handle: &ScrollHandle, max: f32, content: impl IntoElement) -> AnyElement {
     div().relative()
         .child(div().id(id).max_h(px(max)).overflow_y_scroll().track_scroll(handle).pr_4().child(content))
@@ -4743,7 +4835,7 @@ impl Hangar {
             .into_any_element()
     }
 
-    /// Abas no topo (como o web): todas as sessões numa faixa, e o servidor e a conexão que moravam
+    /// Abas no topo (como o web) ou embaixo: todas as sessões numa faixa, e o servidor e a conexão que moravam
     /// no rodapé da barra lateral. ←/→ andam o foco entre as abas; Enter ou Espaço abrem a sessão.
     fn render_tabs(&mut self, selected_name: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let floating = theme::is_floating();
@@ -4814,8 +4906,9 @@ impl Hangar {
             .when(self.sessions.is_empty() && self.list_error.is_none(), |el| el.child(div().px_2().text_xs().text_color(theme::faint())
                 .child(tr(if self.list_online { "empty_sessions" } else { "connecting" }))));
         chrome::glass_panel(div().h(px(44.)).w_full().flex_shrink_0().px(px(8.)).flex().items_center().gap(px(6.))
-            .map(|el| if floating { el.rounded(px(theme::PANEL_RADIUS)).border_1().border_color(theme::border()).bg(theme::chrome()).shadow(theme::panel_shadow()) }
-                else { el.bg(theme::chrome()).border_b_1().border_color(theme::border()) })
+            .bg(theme::chrome()).border_color(theme::border())
+            .map(|el| if floating { el.rounded(px(theme::PANEL_RADIUS)).border_1().shadow(theme::panel_shadow()) }
+                else if appearance::get().navigation == appearance::Navigation::BottomTabs { el.border_t_1() } else { el.border_b_1() })
             .child(div().px(px(6.)).child(chrome::hangar_mark(16., theme::accent())))
             .children(self.render_hangar_chip(hangar_live::Chip::Label, cx))
             .child(strip)
@@ -5444,10 +5537,10 @@ async fn forward_stream(api: Api, name: Option<String>, connection: u64, selecti
 }
 
 impl Hangar {
-    /// Barra lateral ou abas no topo, conforme Aparência.
+    /// Barra lateral ou faixa de abas (em cima ou embaixo), conforme Aparência.
     fn render_nav(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let selected_name = self.selected.as_ref().map(|s| s.name.clone());
-        if appearance::get().navigation == appearance::Navigation::Tabs { self.render_tabs(selected_name.as_deref(), window, cx) }
+        if appearance::get().navigation.tabs() { self.render_tabs(selected_name.as_deref(), window, cx) }
             else { self.render_sidebar(selected_name.as_deref(), window, cx) }
     }
 
@@ -5560,14 +5653,176 @@ impl Hangar {
         }))
     }
 
-    fn press_plugin(&mut self, site: String, key: String, cx: &mut Context<Self>) {
+    /// Chama uma rota `plugin/<ação>` da sessão aberta; a resposta volta como o `Payload` que `wrap` monta.
+    fn spawn_plugin(&self, action: &'static str, body: Value, wrap: impl FnOnce(Result<Value, Failure>) -> Payload + Send + 'static) {
         let (Some(api), Some(session)) = (self.session_api(), self.selected.clone()) else { return };
         let (connection, selection, tx) = (self.connection, self.selection, self.tx.clone());
         self.runtime.spawn(async move {
-            let result = api.act(&session.name, &["plugin", "press"], Some(json!({"site": site, "key": key})), false, 10).await;
-            let _ = tx.send(Envelope { connection, selection: Some(selection), payload: Payload::PluginPressed(result) }).await;
+            let result = api.act(&session.name, &["plugin", action], Some(body), false, 10).await;
+            let _ = tx.send(Envelope { connection, selection: Some(selection), payload: wrap(result) }).await;
         });
+    }
+
+    fn press_plugin(&mut self, site: String, key: String, cx: &mut Context<Self>) {
+        // O `✕` tira o painel da tela: o hover dele sai junto, sem esperar o evento que confirma o fechamento.
+        if key == crate::plugin_ui::PANE_CLOSE_KEY { self.keep_plugin_hovered_without(Some(&site)); }
+        self.spawn_plugin("press", json!({"site": site, "key": key}), Payload::PluginPressed);
         cx.notify();
+    }
+
+    /// Hover dos mods depois de um evento novo ou de uma troca de aba: fica só o trecho ainda desenhado na faixa ou no
+    /// painel da frente.
+    fn keep_plugin_hovered(&mut self) { self.keep_plugin_hovered_without(None); }
+
+    /// Como `keep_plugin_hovered`, tirando o painel `gone` (fechado pelo `✕`) dos lugares à vista.
+    fn keep_plugin_hovered_without(&mut self, gone: Option<&str>) {
+        if self.plugin_hovered.is_empty() { return; }
+        let ids = crate::plugin_ui::pane_ids(&self.plugin_panes);
+        let active = crate::plugin_ui::active_pane(&ids, &self.plugin_shown, self.plugin_local_tab.as_deref()).filter(|id| Some(id.as_str()) != gone);
+        let pane = active.as_deref()
+            .and_then(|id| self.plugin_panes.iter().find(|p| p["id"].as_str() == Some(id)).map(|p| (id, &p["tree"])));
+        let places: Vec<(&str, &Value)> = std::iter::once((crate::plugin_ui::BAND_SITE, &self.plugin_band)).chain(pane).collect();
+        crate::plugin_ui::keep_hovered(&mut self.plugin_hovered, &places);
+    }
+
+    /// Hover dos mods: o app guarda os trechos com o ponteiro e redesenha só a área de baixo quando muda.
+    fn plugin_hover(&self, cx: &mut Context<Self>) -> crate::plugin_ui::Hover {
+        let view = cx.entity().downgrade();
+        std::rc::Rc::new(move |id: &str, on: bool, _: &mut Window, cx: &mut App| {
+            let id = id.to_owned();
+            let _ = view.update(cx, |this, cx| {
+                let changed = if on { this.plugin_hovered.insert(id) } else { this.plugin_hovered.remove(&id) };
+                if changed { this.redraw(panes::Area::Bottom, cx); }
+            });
+        })
+    }
+
+    /// Os campos dos mods acompanham a árvore. O valor desenhado entra conforme o `FieldSync`: com a pessoa no campo ele
+    /// fica pendente (um redesenho atrasado não apaga o que se digita) e entra quando o campo perde o foco; logo depois
+    /// do envio, entra mesmo com foco.
+    fn sync_plugin_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let wanted: Vec<(String, String, crate::plugin_ui::FieldSpec)> =
+            std::iter::once((crate::plugin_ui::BAND_SITE.to_owned(), &self.plugin_band))
+                .chain(self.plugin_panes.iter().map(|p| (p["id"].as_str().unwrap_or("").to_owned(), &p["tree"])))
+                .flat_map(|(site, tree)| crate::plugin_ui::fields(tree).into_iter()
+                    .map(move |f| (crate::plugin_ui::field_id(&site, &f.key), site.clone(), f)))
+                .collect();
+        self.plugin_fields.retain(|id, _| wanted.iter().any(|(w, _, _)| w == id));
+        for (id, site, spec) in wanted {
+            if let Some(field) = self.plugin_fields.get_mut(&id) {
+                // Este desenho só é novo para o campo uma vez por evento `plugin_ui`; os outros são redesenhos do app.
+                let fresh = (field.seen != self.plugin_draws).then_some(spec.value.as_str());
+                field.seen = self.plugin_draws;
+                let (shown, focused) = {
+                    let input = field.state.read(cx);
+                    (input.value().to_string(), input.focus_handle(cx).is_focused(window))
+                };
+                // O texto de ajuda segue o mod; só é reposto quando mudou, porque o `set_placeholder` redesenha o campo.
+                if field.placeholder != spec.placeholder {
+                    field.placeholder = spec.placeholder.clone();
+                    field.state.update(cx, |input, cx| input.set_placeholder(spec.placeholder, window, cx));
+                }
+                if let Some(value) = field.sync.draw(fresh, &shown, focused) {
+                    field.state.update(cx, |input, cx| input.set_value(value, window, cx));
+                }
+                continue;
+            }
+            let state = cx.new(|cx| InputState::new(window, cx).placeholder(spec.placeholder.clone()).default_value(spec.value.clone()));
+            let key = spec.key.clone();
+            let changes = cx.subscribe_in(&state, window, move |this, input, event: &InputEvent, _, cx| {
+                // A faixa de baixo é uma área guardada: sem redesenho, o valor pendente só entraria no próximo evento.
+                if matches!(event, InputEvent::Blur) { this.redraw(panes::Area::Bottom, cx); return; }
+                let Some(kind) = crate::plugin_ui::input_kind(event) else { return };
+                let value = input.read(cx).value().to_string();
+                this.input_plugin(&site, &key, kind, value);
+            });
+            let field = crate::plugin_ui::Field { state, sync: crate::plugin_ui::FieldSync::new(&spec.value), outbox: Default::default(),
+                placeholder: spec.placeholder, seen: self.plugin_draws, _changes: changes };
+            self.plugin_fields.insert(id, field);
+        }
+    }
+
+    /// Digitação num `Input` de mod, só na sessão sem terminal e fora do só leitura. Todo `change` vai: o `set_value`
+    /// que repõe o valor desenhado não emite `Change`, então o que chega aqui é a pessoa digitando. Sai pela fila do
+    /// campo (`Outbox`): um pedido em voo por vez, para as teclas chegarem ao mod na ordem. Sem `notify`: nada do app
+    /// muda, e cada tecla redesenharia a janela inteira; o campo se redesenha sozinho e o mod responde por evento.
+    fn input_plugin(&mut self, site: &str, key: &str, kind: &'static str, value: String) {
+        let read_only = self.selected.as_ref().is_some_and(|s| s.read_only());
+        if !crate::plugin_ui::accepts_typing(self.plugin_source, read_only) { return; }
+        let Some(field) = self.plugin_fields.get_mut(&crate::plugin_ui::field_id(site, key)) else { return };
+        if kind == "submit" { field.sync.submitted() } else { field.sync.typed(&value) }
+        if let Some(request) = field.outbox.push(kind, value) { self.send_plugin_input(site, key, request); }
+    }
+
+    /// Manda à rota o pedido que a fila do campo liberou. Se a sessão deixou de aceitar digitação no meio, a fila acaba.
+    fn send_plugin_input(&mut self, site: &str, key: &str, (kind, value): crate::plugin_ui::InputRequest) {
+        let read_only = self.selected.as_ref().is_some_and(|s| s.read_only());
+        let Some(field) = self.plugin_fields.get_mut(&crate::plugin_ui::field_id(site, key)) else { return };
+        let Some(body) = crate::plugin_ui::input_request(self.plugin_source, read_only, site, key, kind, &value) else {
+            field.outbox = Default::default();
+            return;
+        };
+        let (site, key, id) = (site.to_owned(), key.to_owned(), field.state.entity_id());
+        self.spawn_plugin("input", body, move |result| Payload::PluginInput(site, key, id, result));
+    }
+
+    /// O rótulo de envio do `Input`: manda o que está no campo.
+    fn submit_plugin_field(&mut self, site: &str, key: &str, cx: &mut Context<Self>) {
+        let Some(value) = self.plugin_fields.get(&crate::plugin_ui::field_id(site, key)).map(|f| f.state.read(cx).value().to_string()) else { return };
+        self.input_plugin(site, key, "submit", value);
+    }
+
+    /// O que a faixa e os painéis dos mods precisam do app. A digitação só existe na sessão sem terminal e fora do só
+    /// leitura; nas outras o campo aparece desabilitado.
+    fn plugin_view(&self, cx: &mut Context<Self>) -> crate::plugin_ui::View<'_> {
+        let entity = cx.entity().downgrade();
+        let shown = entity.clone();
+        let show: crate::plugin_ui::Show = std::rc::Rc::new(move |site: &str, _: &mut Window, cx: &mut App| {
+            let site = site.to_owned();
+            let _ = shown.update(cx, |this, cx| this.show_plugin(site, cx));
+        });
+        let typing = crate::plugin_ui::accepts_typing(self.plugin_source, self.selected.as_ref().is_some_and(|s| s.read_only()));
+        let submit = typing.then(|| -> crate::plugin_ui::Submit {
+            std::rc::Rc::new(move |site: &str, key: &str, _: &mut Window, cx: &mut App| {
+                let (site, key) = (site.to_owned(), key.to_owned());
+                let _ = entity.update(cx, |this, cx| this.submit_plugin_field(&site, &key, cx));
+            })
+        });
+        crate::plugin_ui::View { press: self.plugin_press(cx), show, tabs_scroll: &self.plugin_tabs_scroll, columns: self.plugin_columns,
+            hover: Some(self.plugin_hover(cx)), hovered: &self.plugin_hovered, fields: &self.plugin_fields, submit }
+    }
+
+    /// Rola a fileira de abas até a ativa quando ela mudou. No primeiro quadro o handle ainda não tem geometria (ela só
+    /// é gravada no prepaint): a aba fica pendente e o quadro seguinte tenta de novo, no máximo `TAB_SCROLL_WAITS` vezes.
+    fn follow_plugin_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ids = crate::plugin_ui::pane_ids(&self.plugin_panes);
+        let active = crate::plugin_ui::active_pane(&ids, &self.plugin_shown, self.plugin_local_tab.as_deref());
+        let laid_out = self.plugin_tabs_scroll.bounds().size.width > px(0.);
+        match crate::plugin_ui::tab_scroll_target(self.plugin_tabs_seen.as_deref(), &ids, active.as_deref(), laid_out) {
+            crate::plugin_ui::TabScroll::To(ix) => {
+                self.plugin_tabs_scroll.scroll_to_item(ix);
+                self.plugin_tabs_seen = active;
+                self.plugin_tabs_waits = 0;
+            }
+            crate::plugin_ui::TabScroll::Wait if self.plugin_tabs_waits < TAB_SCROLL_WAITS => {
+                self.plugin_tabs_waits += 1;
+                cx.on_next_frame(window, |_, _, cx| cx.notify());
+            }
+            _ => self.plugin_tabs_waits = 0,
+        }
+    }
+
+    /// Troca de aba: seguindo o `shown_id`, a aba só muda quando o novo chega; sem ele (servidor antigo), a troca é
+    /// local. O servidor é avisado nos dois casos, menos em sessão só leitura.
+    fn show_plugin(&mut self, site: String, cx: &mut Context<Self>) {
+        if !crate::plugin_ui::follows_server(&crate::plugin_ui::pane_ids(&self.plugin_panes), &self.plugin_shown) {
+            self.plugin_local_tab = Some(site.clone());
+            self.keep_plugin_hovered();
+            cx.notify();
+            self.redraw(panes::Area::Bottom, cx);
+        }
+        if self.selected.as_ref().is_some_and(|s| s.read_only()) { return; }
+        self.spawn_plugin("show", json!({"site": site}), Payload::PluginShown);
     }
 
     // O que o mod copiou ou mandou abrir acontece aqui, na máquina de quem clicou, e não na do terminal.
@@ -5613,6 +5868,7 @@ impl Hangar {
     fn render_bottom_area(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if self.new_chat_screen() && self.reopen.is_some() { return self.render_reopen(window, cx); }
         if self.new_chat_screen() { return self.render_new_chat(window, cx); }
+        self.sync_plugin_fields(window, cx);
         let selected_key = self.selected_key();
         let sending = selected_key.as_ref().is_some_and(|key| self.delivery.pending(key));
         let stopping = selected_key.as_ref().is_some_and(|key| self.stopping.contains(key));
@@ -5635,6 +5891,7 @@ impl Hangar {
         let busy = selected_key.as_ref().is_some_and(|key| self.flight.busy(key));
         let action_note = selected_key.as_ref().and_then(|key| self.action_feedback.get(key)).cloned();
         let readable = self.selected.as_ref().is_some_and(|s| s.readable());
+        if readable { self.follow_plugin_tab(window, cx); }
         let orq = self.selected.as_ref().filter(|s| s.orq()).map(|s| s.name.clone());
         // A sessão da outra pessoa não recebe resposta nem plano daqui: o servidor dela recusa.
         let read_only = self.selected.as_ref().is_some_and(|s| s.read_only());
@@ -5669,13 +5926,14 @@ impl Hangar {
             .when_some(delivery_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
             .when_some(stop_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
             .children(readable.then(|| {
-                let press = self.plugin_press(cx);
-                // Painel de mod fica acima da faixa, como o terminal o abre, em qualquer largura; a altura tem teto para o
-                // painel comprido rolar por dentro em vez de empurrar a conversa para fora.
+                let view = self.plugin_view(cx);
+                // Painéis de mod ficam acima da faixa, como o terminal os abre, em qualquer largura: com mais de um, em abas,
+                // só o da frente desenhado. A altura tem teto para o painel comprido rolar por dentro.
                 let tallest = f32::from(window.viewport_size().height) * PLUGIN_PANE_MAX_SHARE;
-                let inline = self.plugin_panes.iter()
-                    .map(|p| in_column(crate::plugin_ui::pane(p, press.clone(), tallest))).collect::<Vec<_>>();
-                inline.into_iter().chain(crate::plugin_ui::band(&self.plugin_band, press).map(in_column))
+                let ids = crate::plugin_ui::pane_ids(&self.plugin_panes);
+                let active = crate::plugin_ui::active_pane(&ids, &self.plugin_shown, self.plugin_local_tab.as_deref());
+                crate::plugin_ui::panes(&self.plugin_panes, active.as_deref(), &view, tallest).map(in_column).into_iter()
+                    .chain(crate::plugin_ui::band(&self.plugin_band, &view).map(in_column)).collect::<Vec<_>>()
             }).into_iter().flatten())
             .map(|el| match orq {
                 Some(orq) => el.child(in_column(self.render_orq_footer(&orq, cx))),
@@ -5717,7 +5975,8 @@ impl Render for Hangar {
         let page = self.settings.filter(|_| !self.settings_ui.live);
         let costs_page = self.costs.view.is_some();
         let worktrees_page = self.worktrees.view.is_some();
-        let tabs = appearance::get().navigation == appearance::Navigation::Tabs;
+        let navigation = appearance::get().navigation;
+        let (tabs, bottom_tabs) = (navigation.tabs(), navigation == appearance::Navigation::BottomTabs);
         let cutout = chat_background && page.is_none() && !costs_page && !worktrees_page && (desktop_window || floating);
         let chat_bounds = std::rc::Rc::new(std::cell::Cell::new(Bounds::<Pixels>::default()));
         // Colados com barra lateral, ela sobe até o topo e a barra do app começa na borda dela, como no Zeron. O fundo
@@ -5907,6 +6166,7 @@ impl Render for Hangar {
             .on_action(cx.listener(|this, _: &PreviousSession, window, cx| this.step_session(-1, window, cx)))
             .on_action(cx.listener(|this, _: &NewChat, window, cx| this.go_home(window, cx)))
             .on_action(cx.listener(|this, _: &CloseSession, window, cx| this.close_selected(window, cx)))
+            .on_action(cx.listener(|this, _: &RenameSession, window, cx| this.rename_selected(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| if !this.connection_dialog { this.toggle_rail(cx) }))
             .on_action(cx.listener(|this, _: &ToggleDictation, window, cx| this.toggle_dictation(window, cx)))
             .on_action(cx.listener(|this, _: &CopyLastReply, _, cx| {
@@ -6019,10 +6279,12 @@ impl Render for Hangar {
                 _ if worktrees_page => el.child(self.render_worktrees(window, cx)),
                 _ if costs_page => el.child(self.render_costs(window, cx)),
                 (Some(page), _) => el.child(self.render_settings(page, window, cx)),
-                // Abas no topo: a faixa em cima, a conversa e o painel embaixo, sem barra lateral.
-                (None, Some(bar)) if tabs => el.flex_col().child(bar)
-                    .child(self.working_mark_float(panes::Area::Nav, WORKING_FADE, cx.reduce_motion()))
-                    .child(div().flex_1().min_h_0().flex().when(floating, |el| el.gap(px(10.))).child(content).when_some(side, |el, side| el.child(side))),
+                // Abas: a faixa em cima (ou embaixo), a conversa e o painel do outro lado, sem barra lateral.
+                (None, Some(bar)) if tabs => {
+                    let body = div().flex_1().min_h_0().flex().when(floating, |el| el.gap(px(10.))).child(content).when_some(side, |el, side| el.child(side));
+                    el.flex_col().map(|el| if bottom_tabs { el.child(body).child(bar) } else { el.child(bar).child(body) })
+                        .child(self.working_mark_float(panes::Area::Nav, WORKING_FADE, cx.reduce_motion()))
+                }
                 (None, sidebar) => el.children(sidebar)
                     .when(page.is_none(), |el| el.child(self.working_mark_float(panes::Area::Nav, WORKING_FADE, cx.reduce_motion())))
                     .map(|el| match topbar_beside {
@@ -6062,11 +6324,75 @@ mod tests {
     use std::{collections::HashSet, time::Duration};
 
     #[test]
+    fn plugin_show_404_is_an_older_server_not_an_error() {
+        use super::{Failure, Hangar};
+        let failure = |status| Failure { status, detail: "x".into(), retry_after: None, uncertain: false, code: None };
+        assert_eq!(Hangar::show_failure(&failure(Some(404))), None);
+        assert_eq!(Hangar::show_failure(&failure(Some(405))), None);
+        assert_eq!(Hangar::show_failure(&failure(Some(409))), Some(Hangar::failure(&failure(Some(409)))));
+        // Sem resposta ou 5xx, a frase da troca de aba (a mesma do web), não a do clique.
+        assert_eq!(Hangar::show_failure(&failure(None)), Some(crate::i18n::tr_shared("plugin_aba_falhou", &[])));
+        assert_eq!(Hangar::show_failure(&failure(Some(503))), Some(crate::i18n::tr_shared("plugin_aba_falhou", &[])));
+        assert_ne!(crate::i18n::tr_shared("plugin_aba_falhou", &[]), "plugin_aba_falhou");
+    }
+
+    #[test]
+    fn mod_field_failure_without_an_answer_or_with_5xx_is_the_app_phrase() {
+        use super::{Failure, Hangar};
+        use crate::i18n::tr_shared;
+        let failure = |status| Failure { status, detail: "x".into(), retry_after: None, uncertain: true, code: None };
+        assert_eq!(Hangar::input_failure(&failure(None)), tr_shared("plugin_input_falhou", &[]));
+        assert_eq!(Hangar::input_failure(&failure(Some(502))), tr_shared("plugin_input_falhou", &[]));
+        // A recusa traz o motivo, como no clique.
+        assert_eq!(Hangar::input_failure(&failure(Some(409))), Hangar::failure(&failure(Some(409))));
+        assert_ne!(tr_shared("plugin_input_falhou", &[]), "plugin_input_falhou");
+    }
+
+    #[test]
+    fn mod_refusal_with_a_known_code_uses_its_sentence_at_any_status() {
+        use super::{Failure, Hangar};
+        use crate::i18n::{tr_shared, tr_web};
+        use std::collections::HashMap;
+        // 503 do dono único com `erro_mod_guarda_indisponivel`: o `detail` já é a frase dele, nos três pedidos de mod.
+        let sentence = tr_web("erro_mod_guarda_indisponivel", &HashMap::new()).unwrap();
+        let guard = Failure { status: Some(503), detail: sentence.clone(), retry_after: None, uncertain: true,
+            code: Some("erro_mod_guarda_indisponivel".into()) };
+        assert_eq!(Hangar::show_failure(&guard), Some(sentence.clone()));
+        assert_eq!(Hangar::input_failure(&guard), sentence);
+        assert_eq!(Hangar::press_failure(&guard), sentence);
+        // 500 sem código: a frase genérica de cada um.
+        let bare = Failure { status: Some(500), detail: "HTTP 500".into(), retry_after: None, uncertain: true, code: None };
+        assert_eq!(Hangar::show_failure(&bare), Some(tr_shared("plugin_aba_falhou", &[])));
+        assert_eq!(Hangar::input_failure(&bare), tr_shared("plugin_input_falhou", &[]));
+        assert_eq!(Hangar::press_failure(&bare), tr_shared("plugin_clique_falhou", &[]));
+        // Código que o app não conhece não vale como frase: 5xx com ele segue a genérica.
+        let unknown = Failure { code: Some("internal_info".into()), ..bare };
+        assert_eq!(Hangar::show_failure(&unknown), Some(tr_shared("plugin_aba_falhou", &[])));
+    }
+
+    #[test]
+    fn mod_request_during_an_agent_switch_shows_the_translated_refusal() {
+        use super::{Failure, Hangar};
+        use std::collections::HashMap;
+        // O 409 `session_transfer_busy` do Python, repassado pelo Rust: o `failure_detail` já o traduziu, e os três
+        // pedidos de mod mostram a frase, não o texto cru do servidor.
+        let sentence = crate::i18n::tr_web("session_transfer_busy", &HashMap::new()).unwrap();
+        let busy = Failure { status: Some(409), detail: sentence.clone(), retry_after: None, uncertain: false,
+            code: Some("session_transfer_busy".into()) };
+        assert_eq!(Hangar::show_failure(&busy), Some(sentence.clone()));
+        assert_eq!(Hangar::input_failure(&busy), sentence);
+        assert_eq!(Hangar::press_failure(&busy), sentence);
+    }
+
+    #[test]
     fn mod_click_failure_is_not_a_message_delivery() {
         use super::{Failure, Hangar};
-        let failure = |status| Failure { status, detail: "x".into(), retry_after: None, uncertain: true };
-        assert_eq!(Hangar::press_failure(&failure(Some(500))), tr("plugin_press_failed"));
-        assert_eq!(Hangar::press_failure(&failure(None)), tr("plugin_press_failed"));
+        let failure = |status| Failure { status, detail: "x".into(), retry_after: None, uncertain: true, code: None };
+        // A frase do clique é a mesma do web (`plugin_clique_falhou`), não uma `native_*`.
+        let generic = crate::i18n::tr_shared("plugin_clique_falhou", &[]);
+        assert_ne!(generic, "plugin_clique_falhou");
+        assert_eq!(Hangar::press_failure(&failure(Some(500))), generic);
+        assert_eq!(Hangar::press_failure(&failure(None)), generic);
         assert_eq!(Hangar::press_failure(&failure(Some(409))), Hangar::failure(&failure(Some(409))));
     }
 
@@ -6117,7 +6443,7 @@ mod tests {
     #[test]
     fn orq_texts_come_from_the_web_keys() {
         use crate::{api::Failure, i18n::tr_shared};
-        let refused = Failure { status: Some(409), detail: "erro_sessao_orq".into(), retry_after: None, uncertain: false };
+        let refused = Failure { status: Some(409), detail: "erro_sessao_orq".into(), retry_after: None, uncertain: false, code: None };
         assert_eq!(super::Hangar::failure(&refused), "O orquestrador não recebe mensagens; fale com o árbitro.");
         assert_eq!(tr_shared("orq_row_badge", &[]), "Orquestrador · sem LLM");
         assert_eq!(tr_shared("orq_talk_to_arbiter", &[]), "Falar com o árbitro");

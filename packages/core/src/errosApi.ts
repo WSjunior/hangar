@@ -497,6 +497,17 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_mod_clique_sem_resposta: () => m.erro_mod_clique_sem_resposta(),
   erro_mod_botao_inexistente: () => m.erro_mod_botao_inexistente(),
   erro_mod_terminal_em_modo: () => m.erro_mod_terminal_em_modo(),
+  erro_mod_sem_digitacao: () => m.erro_mod_sem_digitacao(),
+  erro_mod_desenho_vencido: () => m.erro_mod_desenho_vencido(),
+  erro_mod_dialogo_aberto: () => m.erro_mod_dialogo_aberto(),
+  erro_mod_rascunho_no_prompt: () => m.erro_mod_rascunho_no_prompt(),
+  erro_mod_painel_nao_alcancavel: () => m.erro_mod_painel_nao_alcancavel(),
+  erro_mod_fechar_recusado: () => m.erro_mod_fechar_recusado(),
+  erro_mod_guarda_indisponivel: () => m.erro_mod_guarda_indisponivel(),
+  erro_mod_painel_inexistente: () => m.erro_mod_painel_inexistente(),
+  erro_mod_convidado: () => m.erro_mod_convidado(),
+  // Troca de agente em curso: o Python recusa com este código, e o Rust o repassa nas rotas dos mods.
+  session_transfer_busy: () => m.session_transfer_busy(),
 };
 
 // Falha com código do servidor (503 do dono único): a frase traduzida já está no `message`.

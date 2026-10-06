@@ -1,0 +1,198 @@
+mod mods_support;
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use hangar_server::mods::state::*;
+use mods_support::NoLink;
+use serde_json::{Value, json};
+
+/// Um `plugin_ui` com o painel `painel` e o botão `abrir` do mod `vitrine`: é dele que a janela do clique
+/// toma a cópia.
+fn with_button() -> Value {
+    json!({"above": null, "panes": [{"id": "painel", "title": "Painel", "placement": "dock", "columns": 58,
+        "tree": {"type": "Button", "props": {"key": "abrir", "label": "Abrir"}, "press": {"plugin": "vitrine", "handle": 1}}}],
+        "shown_id": "painel", "columns": 110, "source": "surface"})
+}
+
+fn mods() -> Mods {
+    let mods = Mods::default();
+    mods.attach("s", 1, Arc::new(NoLink));
+    mods
+}
+
+fn replayed(mods: &Mods, event: &str) -> Vec<Value> {
+    mods.replay("s").into_iter().filter(|(name, _)| *name == event).map(|(_, data)| serde_json::from_str(&data).unwrap()).collect()
+}
+
+#[test]
+fn attach_owns_and_forget_checks_generation() {
+    let mods = mods();
+    assert!(mods.owns("s") && !mods.owns("outra"));
+    mods.forget("s", 2);
+    assert!(mods.owns("s"), "geração diferente não esquece a sessão de agora");
+    mods.forget("s", 1);
+    assert!(!mods.owns("s") && mods.link("s").is_none());
+}
+
+#[test]
+fn publish_keeps_the_latest_and_skips_repeats() {
+    let mods = mods();
+    let band = json!({"above": {"type": "Text"}, "panes": [], "shown_id": null, "columns": 110, "source": "surface"});
+    assert!(mods.publish_ui("s", 1, band.clone()));
+    assert!(!mods.publish_ui("s", 1, band.clone()), "igual ao último não sai de novo");
+    assert!(!mods.publish_ui("s", 0, json!({"above": null})), "geração velha não publica");
+    assert_eq!(replayed(&mods, "plugin_ui"), vec![band]);
+}
+
+#[test]
+fn toasts_follow_the_python_limits() {
+    let mods = mods();
+    mods.toast("s", 1, &"m".repeat(80), &"x".repeat(2500), 10);
+    mods.toast("s", 1, "vitrine", "padrão", 0);
+    mods.toast("s", 1, "vitrine", "longo", 10_000_000);
+    mods.toast("s", 1, "vitrine", "   ", 4000);
+    let toasts = replayed(&mods, "plugin_toast");
+    assert_eq!(toasts.len(), 3, "texto vazio não vira aviso");
+    assert_eq!(toasts[0]["text"].as_str().unwrap().chars().count(), 2000);
+    assert_eq!(toasts[0]["plugin"].as_str().unwrap().chars().count(), 64);
+    assert!(toasts[0]["timeoutMs"].as_u64().unwrap() <= 1000 && toasts[0]["timeoutMs"].as_u64().unwrap() > 900,
+        "10 ms sobe ao piso de 1000");
+    assert!(toasts[1]["timeoutMs"].as_u64().unwrap() <= 4000 && toasts[1]["timeoutMs"].as_u64().unwrap() > 3000);
+    assert!(toasts[2]["timeoutMs"].as_u64().unwrap() <= 300_000 && toasts[2]["timeoutMs"].as_u64().unwrap() > 299_000);
+    assert!(toasts.iter().all(|toast| toast["id"].as_str().unwrap().starts_with("rs-")));
+    for index in 0..25 { mods.toast("s", 1, "vitrine", &format!("n-{index}"), 9000); }
+    let kept = replayed(&mods, "plugin_toast");
+    assert_eq!(kept.len(), 20);
+    assert_eq!(kept[0]["text"], "n-5", "o mais antigo sai primeiro");
+}
+
+#[tokio::test]
+async fn click_effects_belong_to_the_open_click() {
+    let mods = mods();
+    mods.publish_ui("s", 1, with_button());
+    let attempt = mods.begin_click("s", "painel", "abrir");
+    assert_eq!(mods.match_click("s", "painel", "outra"), None);
+    assert_eq!(mods.match_click("s", "painel", "abrir").as_deref(), Some(attempt.as_str()));
+    assert_eq!(mods.match_click("s", "painel", "abrir"), None, "o press só casa uma vez");
+    assert!(!mods.opened("s", "outra-tentativa", "https://example.com"));
+    assert!(mods.opened("s", &attempt, "https://example.com"));
+    mods.copied("s", 1, "vitrine", "texto");
+    assert_eq!(mods.finish_click("s", &attempt, Duration::from_millis(300)).await,
+        (Some("texto".to_owned()), Some("https://example.com".to_owned())));
+    assert!(replayed(&mods, "plugin_toast").is_empty(), "cópia de clique em aberto não vira aviso");
+}
+
+#[tokio::test]
+async fn copy_from_another_mod_is_a_toast() {
+    // A janela de 1,5 s é do mod dono do botão (A11): um relógio de outro mod que copia no meio não vai
+    // para o aparelho de quem clicou.
+    let mods = mods();
+    mods.publish_ui("s", 1, with_button());
+    let attempt = mods.begin_click("s", "painel", "abrir");
+    mods.copied("s", 1, "outro-mod", "texto de outro");
+    assert_eq!(mods.finish_click("s", &attempt, Duration::from_millis(10)).await, (None, None));
+    let toasts = replayed(&mods, "plugin_toast");
+    assert_eq!((toasts[0]["text"].as_str(), toasts[0]["plugin"].as_str()), (Some("texto de outro"), Some("outro-mod")));
+}
+
+#[test]
+fn copy_without_click_becomes_a_toast() {
+    let mods = mods();
+    mods.copied("s", 1, "vitrine", "Texto copiado pela vitrine (V44)");
+    let toasts = replayed(&mods, "plugin_toast");
+    assert_eq!((toasts[0]["text"].as_str(), toasts[0]["plugin"].as_str()), (Some("Texto copiado pela vitrine (V44)"), Some("vitrine")));
+}
+
+#[tokio::test]
+async fn finish_waits_for_a_late_effect_only_when_the_plugin_matched() {
+    let mods = mods();
+    let attempt = mods.begin_click("s", "painel", "abrir");
+    let started = Instant::now();
+    assert_eq!(mods.finish_click("s", &attempt, Duration::from_millis(300)).await, (None, None));
+    assert!(started.elapsed() < Duration::from_millis(100), "sem o plugin no press não há efeito a esperar");
+
+    let attempt = mods.begin_click("s", "painel", "abrir");
+    mods.match_click("s", "painel", "abrir").unwrap();
+    let late = { let mods = mods.clone(); let attempt = attempt.clone();
+        tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(100)).await; mods.opened("s", &attempt, "https://example.com") }) };
+    assert_eq!(mods.finish_click("s", &attempt, Duration::from_millis(300)).await.1.as_deref(), Some("https://example.com"));
+    assert!(late.await.unwrap());
+}
+
+#[tokio::test]
+async fn finish_gives_up_when_the_matched_press_never_produces_an_effect() {
+    let mods = mods();
+    let attempt = mods.begin_click("s", "painel", "abrir");
+    mods.match_click("s", "painel", "abrir").unwrap();
+    let started = Instant::now();
+    assert_eq!(mods.finish_click("s", &attempt, Duration::from_millis(100)).await, (None, None));
+    assert!(started.elapsed() >= Duration::from_millis(100), "com o press casado espera até o prazo");
+}
+
+#[test]
+fn attach_keeps_the_live_toasts() {
+    let mods = mods();
+    mods.toast("s", 1, "vitrine", "fica", 9000);
+    mods.attach("s", 2, Arc::new(NoLink));
+    let toasts = replayed(&mods, "plugin_toast");
+    assert_eq!(toasts.len(), 1);
+    assert_eq!(toasts[0]["text"], "fica");
+}
+
+#[test]
+fn renamed_session_keeps_the_birth_name_of_its_process() {
+    let mods = Mods::default();
+    mods.attach_process("a", "p1", 1, Arc::new(NoLink));
+    assert_eq!(mods.bridge_session("a").as_deref(), Some("a"));
+    // Renomeada duas vezes sem relançar o processo: ele segue mandando o nome com que nasceu.
+    mods.forget("a", 1);
+    mods.attach_process("b", "p1", 2, Arc::new(NoLink));
+    mods.forget("b", 2);
+    mods.attach_process("c", "p1", 3, Arc::new(NoLink));
+    assert_eq!(mods.bridge_session("a").as_deref(), Some("c"));
+    assert_eq!(mods.bridge_session("b"), None, "nenhum processo nasceu com o nome do meio");
+    // Relançada (processo novo), nasce com o nome atual e não herda o de antes.
+    mods.forget("c", 3);
+    mods.attach_process("c", "p2", 4, Arc::new(NoLink));
+    assert_eq!((mods.bridge_session("c").as_deref(), mods.bridge_session("a")), (Some("c"), None));
+}
+
+#[test]
+fn a_new_session_with_an_old_name_inherits_nothing_and_shares_no_bridge() {
+    let mods = Mods::default();
+    mods.attach_process("a", "p1", 1, Arc::new(NoLink));
+    mods.publish_ui("a", 1, with_button());
+    mods.toast("a", 1, "vitrine", "da antiga", 60_000);
+    mods.begin_click("a", "painel", "abrir");
+    // A sessão é renomeada para `b` (mesmo processo) e outra nasce com o nome `a`.
+    mods.forget("a", 1);
+    mods.attach_process("b", "p1", 2, Arc::new(NoLink));
+    mods.attach_process("a", "p2", 3, Arc::new(NoLink));
+    let replay = mods.replay("a");
+    assert!(replay.is_empty(), "nem faixa nem aviso da antiga: {replay:?}");
+    assert_eq!(mods.match_click("a", "painel", "abrir"), None, "nem o clique em aberto");
+    // A vida da antiga não publica na nova, mesmo com o mesmo nome.
+    assert!(!mods.publish_ui("a", 1, json!({"above": {"type": "Text"}})));
+    mods.toast("a", 1, "vitrine", "atrasado", 4000);
+    assert!(mods.replay("a").is_empty());
+    // Os dois processos vivos nasceram como `a` e têm o mesmo token: a ponte não atende nenhum.
+    assert_eq!(mods.bridge_session("a"), None);
+    mods.forget("b", 2);
+    assert_eq!(mods.bridge_session("a").as_deref(), Some("a"));
+}
+
+#[test]
+fn another_process_replacing_a_live_session_takes_nothing_from_it() {
+    // Um `close` preso deixa a sessão no `Mods`; outra sessão aberta com o mesmo nome a substitui.
+    let mods = Mods::default();
+    mods.attach_process("x", "p1", 1, Arc::new(NoLink));
+    mods.toast("x", 1, "vitrine", "da antiga", 60_000);
+    mods.attach_process("x", "p2", 2, Arc::new(NoLink));
+    assert!(mods.replay("x").is_empty(), "outro processo não herda os avisos");
+    assert!(!mods.publish_ui("x", 1, json!({"above": null})), "o ator velho não publica na sessão nova");
+    // Reaberta no mesmo processo, os avisos vivos ficam.
+    mods.toast("x", 2, "vitrine", "da nova", 60_000);
+    mods.attach_process("x", "p2", 3, Arc::new(NoLink));
+    assert_eq!(mods.replay("x").len(), 1);
+}

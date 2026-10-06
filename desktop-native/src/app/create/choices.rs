@@ -24,6 +24,7 @@ pub(super) struct ModelOption {
     images: Option<bool>,
     #[serde(default)] efforts: Vec<String>,
     #[serde(default)] service_tiers: Vec<Value>,
+    #[serde(default, rename = "supports_fast")] fast: bool,
 }
 
 impl ModelOption {
@@ -59,6 +60,18 @@ fn remembered_choice(catalog: &[ModelOption], provider: &str, remembered: (Strin
 
 fn selected_model_valid(catalog: &[ModelOption], model: &str) -> bool {
     !model.is_empty() && catalog.iter().any(|m| m.value() == model)
+}
+
+fn fast_model_available(catalog: &[ModelOption], provider: &str, local_proxy: bool, model: &str) -> bool {
+    catalog.iter().find(|m| m.value() == model).is_some_and(|m| match provider {
+        "codex" => m.supports_fast(),
+        "claude" => local_proxy && m.fast,
+        _ => false,
+    })
+}
+
+fn creation_tier(tier: Option<&str>, available: bool, fresh: bool) -> Option<&str> {
+    tier.filter(|tier| available && fresh && matches!(*tier, "default" | "priority"))
 }
 
 fn model_memory_key(server: &str, provider: &str, account: &str, engine: &str, engine_account: &str) -> String {
@@ -277,6 +290,7 @@ impl NewSession {
     pub(super) fn load_models(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let seq = self.models.start();
         (self.model, self.effort, self.subagent) = (String::new(), String::new(), String::new());
+        self.service_tier = None;
         self.build_model_picks(window, cx);
         if (self.provider == "codex" && self.codex_account.is_empty())
             || (self.provider == "claude" && !self.engine.is_empty()
@@ -382,13 +396,19 @@ impl NewSession {
     }
 
     pub(super) fn fast_available(&self) -> bool {
-        self.provider == "codex" && self.catalog().iter().find(|m| m.id == self.model).is_some_and(ModelOption::supports_fast)
+        fast_model_available(self.catalog(), self.provider, self.proxy_accounts().is_some(), &self.model)
+    }
+
+    pub(super) fn service_tier_for_creation(&self) -> Option<&str> {
+        creation_tier(self.service_tier.as_deref(), self.fast_available(),
+            !self.is_transfer() && self.baton.is_none() && !self.want_resume)
     }
 
     pub(super) fn render_fast_choice(&self, cx: &mut Context<Self>) -> Option<Div> {
-        if self.provider != "codex" || self.is_transfer() || self.baton.is_some() || self.want_resume { return None; }
+        if !(self.provider == "codex" || (self.provider == "claude" && self.proxy_accounts().is_some()))
+            || self.is_transfer() || self.baton.is_some() || self.want_resume { return None; }
         let available = self.fast_available();
-        let on = self.service_tier.as_deref() == Some("priority");
+        let on = self.service_tier_for_creation() == Some("priority");
         let hint = if !available { "ctl_fast_unavailable" }
             else if self.service_tier.is_none() { "create_fast_default_hint" } else { "ctl_fast_hint" };
         Some(div().flex().items_center().gap_2().px_2().py_1()
@@ -396,8 +416,9 @@ impl NewSession {
                 .child(div().text_sm().child(tr("ctl_fast")))
                 .child(div().text_xs().text_color(theme::muted()).whitespace_normal().child(tr(hint))))
             .child(Switch::new("new-chat-fast").small().checked(on).accessibility_label(tr("ctl_fast"))
-                .disabled(self.creating || (!available && !on))
+                .disabled(self.creating || !available)
                 .on_change(cx.listener(|this, on: &bool, _, cx| {
+                    if !this.fast_available() { return; }
                     this.service_tier = Some(if *on { "priority" } else { "default" }.into());
                     cx.notify();
                 }))))
@@ -420,6 +441,7 @@ impl NewSession {
         self.model_pick = Some(picker(models, at, true, |this, id, window, cx| {
             this.model_choice_touched = true;
             this.model = id;
+            if !this.fast_available() { this.service_tier = None; }
             // Trocar de modelo pode tirar o nível escolhido da lista (só o Codex tem níveis por modelo).
             if !this.levels().contains(&this.effort) { this.effort.clear(); }
             this.build_effort_pick(window, cx);
@@ -464,7 +486,7 @@ impl NewSession {
             .child(chrome::provider_glyph(self.provider, 16.))
             .child(div().max_w(px(160.)).truncate().text_xs().font_weight(FontWeight::SEMIBOLD).child(model))
             .when(!self.effort.is_empty(), |el| el.child(div().text_xs().text_color(theme::muted()).child(self.effort.clone())))
-            .when(self.provider == "codex" && self.service_tier.as_deref() == Some("priority"), |el|
+            .when(self.service_tier_for_creation() == Some("priority"), |el|
                 el.child(div().id("new-chat-fast-active").text_xs().text_color(theme::muted()).child(tr("ctl_fast"))))
             .on_click(cx.listener(|this, _, window, cx| this.toggle_menu(Menu::Model, window, cx))))
     }
@@ -516,6 +538,7 @@ impl NewSession {
                                 // O menu fica aberto: o esforço, logo abaixo, costuma ser a escolha seguinte.
                                 this.model_choice_touched = true;
                                 this.model = id.clone();
+                                if !this.fast_available() { this.service_tier = None; }
                                 if !this.levels().contains(&this.effort) { this.effort.clear(); }
                                 this.build_effort_pick(window, cx);
                                 cx.notify();
@@ -1004,6 +1027,31 @@ mod tests {
             {"id":"standard"}
         ])).unwrap();
         assert_eq!(models.iter().map(ModelOption::supports_fast).collect::<Vec<_>>(), [true,false,false,false]);
+    }
+
+    #[test]
+    fn fast_creation_never_leaks_between_providers_engines_or_models() {
+        let models: Vec<ModelOption> = serde_json::from_value(serde_json::json!([
+            {"id":"gpt", "supports_fast":true}, {"id":"other", "supports_fast":false},
+            {"id":"codex", "service_tiers":[{"id":"priority"}]}
+        ])).unwrap();
+        let available = |provider, local, model| super::fast_model_available(&models, provider, local, model);
+        assert!(available("claude", true, "gpt"));
+        assert!(!available("claude", false, "gpt"));
+        assert!(!available("claude", true, "other"));
+        assert!(!available("claude", true, "account/gpt"));
+        assert!(!available("claude", true, "codex"));
+        assert!(!available("claude", true, ""));
+        assert!(!available("codex", false, "gpt"));
+        assert!(available("codex", false, "codex"));
+        for provider in ["pi", "omp", "kimi"] { assert!(!available(provider, true, "gpt")); }
+        for tier in ["priority", "default"] {
+            assert_eq!(super::creation_tier(Some(tier), true, true), Some(tier));
+            assert_eq!(super::creation_tier(Some(tier), false, true), None);
+            assert_eq!(super::creation_tier(Some(tier), true, false), None);
+        }
+        assert_eq!(super::creation_tier(None, true, true), None);
+        assert_eq!(super::creation_tier(Some("fast"), true, true), None);
     }
 
     #[test]

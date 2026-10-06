@@ -4,6 +4,7 @@ Nenhuma API do engine deixa um plugin disparar o botão de outro (o `onPress` mo
 O clique entra como clique de mouse SGR no pane, na célula do rótulo, e o plugin do Hangar confirma
 pelo `ui.press` que o press chegou ao botão certo."""
 import asyncio
+import contextvars
 import logging
 import os
 import time
@@ -105,7 +106,8 @@ def _regiao(tela: list[str], name: str, site: str, placement: str | None) -> tup
 async def _click(name: str, linha: int, coluna: int) -> None:
     """O clique pelo terminal; sem a posse da escrita (Rust mudo, vínculo em dúvida) é recusa, não 500."""
     try:
-        chegou = await run_tmux(click, name, linha, coluna)
+        # Com o contexto do pedido: a marca de convidado (`guest_admin`) chega à thread do driver.
+        chegou = await run_tmux(contextvars.copy_context().run, click, name, linha, coluna)
     except (TimeoutError, RuntimeError) as exc:
         # As causas viram o mesmo 409 para o app; o log é o que separa uma da outra.
         _log.warning("clique de mod em %s recusado: %s", name, exc)

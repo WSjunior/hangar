@@ -2,7 +2,9 @@ import { defineConfig } from 'vitest/config';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 
 export default defineConfig({
-  plugins: [svelte()],
+  // CSS dos componentes injetado no documento: o teste de componente (happy-dom) lê o estilo calculado
+  // das classes, não só o atributo `style`.
+  plugins: [svelte({ compilerOptions: { css: 'injected' } })],
   resolve: {
     // O vitest transforma em modo "server" e o pacote svelte resolveria pro build SERVER
     // (`mount` indisponível). O teste de componente (PushQuiet.test.ts, happy-dom) precisa do

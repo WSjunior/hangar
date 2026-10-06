@@ -118,6 +118,33 @@ async fn confirmed_prompt_does_not_consume_next_echo() {
 }
 
 #[tokio::test]
+async fn row_delivered_before_the_runtime_is_confirmed_once_by_a_later_echo() {
+    let (handle,server,dir) = setup(true).await;
+    let path = dir.path().join("chat.jsonl");
+    let echo = |text:&str| json!({"timestamp":"2026-10-06T12:00:00.000Z","type":"response_item","payload":{"type":"message",
+        "role":"user","content":[{"type":"input_text","text":text}]}}).to_string();
+    std::fs::write(&path, format!("{}\n{}\n{}\n",echo("sim"),echo("velha"),echo("continua"))).unwrap();
+    // Entregues pelo Python antes da troca: sem operação nem cursor de despacho.
+    for (id,text,ts) in [("a","sim",1791287980.0),("b","sim",1791287995.0),("c","velha",1791290000.0),("d","continua",1791287990.0)] {
+        handle.queue(format!("{id}:append"),Action::Append { text:text.into(),delivered:true,ts:Some(ts),
+            pre_transcript:false,entry_id:Some(id.into()) }).await.unwrap();
+    }
+    // Desistida não chegou: um "continua" digitado depois não a dá por entregue.
+    handle.queue("d:abandon".into(),Action::Abandon { entry_id:"d".into() }).await.unwrap();
+    assert_eq!(handle.confirm().await.unwrap()["confirmed"],1);
+    for index in 0..300 { handle.queue(format!("fill:{index}"),Action::SetRuntimeState { state:json!({}) }).await.unwrap(); }
+    // Compactada a fila, a linha usada continua gasta: o outro "sim" não a reaproveita.
+    assert_eq!(handle.confirm().await.unwrap()["confirmed"],0);
+    let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
+    let confirmed:Vec<_> = state.rows.iter().filter(|row|row["confirmed"] == true).filter_map(|row|row["id"].as_str()).collect();
+    // A única linha "sim" é do envio mais recente (b), não do perdido (a). A linha "velha" foi
+    // gravada antes do envio de "c": não prova a entrega dele.
+    assert_eq!(confirmed,["b"]);
+    handle.stop().await.unwrap();
+    assert_eq!(server.await.unwrap(),0);
+}
+
+#[tokio::test]
 async fn resubmit_after_prune_of_confirmed_row_does_not_send_again() {
     let input = ||RuntimeCommand { operation_id:"msg".into(),kind:OperationKind::Input,payload:json!({"text":"Olá","entry_id":"msg"}) };
     let (handle,server,dir) = setup(true).await;

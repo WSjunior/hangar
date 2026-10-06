@@ -45,7 +45,9 @@ def save(name: str, cwd: str, session_id: str, *, config_dir: str | None = None,
          previous_non_plan: str | None = None, subagent_model: str | None = None,
          jev: bool = False, key: str | None = None, transfer_id: str | None = None,
          engine_account: str | None = None, engine_credential_id: str | None = None,
-         engine_account_base_url: str | None = None) -> dict:
+         engine_account_base_url: str | None = None, service_tier: str | None = None) -> dict:
+    if service_tier is not None and service_tier not in ("default", "priority"):
+        raise ValueError("service_tier: use default ou priority")
     meta = {
         "name": name, "provider": "claude", "headless": True,
         # Identidade estável do processo pros scripts de dentro da sessão (hangar-send, hooks):
@@ -61,6 +63,8 @@ def save(name: str, cwd: str, session_id: str, *, config_dir: str | None = None,
         # troca para terminal o repassa pro `-e` do pane.
         "jev": jev,
     }
+    if service_tier is not None:
+        meta["service_tier"] = service_tier
     if engine_account is not None:
         meta.update(engine_account=engine_account, engine_credential_id=engine_credential_id,
                     engine_account_base_url=engine_account_base_url)

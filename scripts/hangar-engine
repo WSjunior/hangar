@@ -11,7 +11,7 @@ ambiente é aplicado DENTRO do processo e, depois do exec, o cmdline é o do com
 
   hangar-engine --list                       -> nome<TAB>label<TAB>modelo
   hangar-engine --env <motor>                -> CHAVE=VALOR por linha (diagnóstico)
-  hangar-engine --exec <motor> [--model <id>] [--context <n>] -- <cmd> ...
+  hangar-engine --exec <motor> [--model <id>] [--context <n>] [--service-tier default|priority] -- <cmd> ...
   Conta fixa: --account <id> --account-home <home> --account-base-url <url>, resolvidos no backend.
                                          -> executa cmd com o env do motor (substitui este processo)
 
@@ -19,8 +19,10 @@ ambiente é aplicado DENTRO do processo e, depois do exec, o cmdline é o do com
 está subindo, senão as cinco chaves ANTHROPIC_*, o subagente e a janela ficariam no modelo do
 motor com a flag num outro — o cenário "motor de 1M com modelo de 262k".
 """
+import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 # app.engines é stdlib pura (garantido por teste): importável sem instalar o backend.
@@ -47,6 +49,20 @@ def _env_ou_morre(nome: str, modelo: str | None = None, context: int | None = No
         raise SystemExit(1)
 
 
+def _apply_service_tier(cmd: list[str], env: dict[str, str], service_tier: str) -> list[str]:
+    args, settings = engines.service_tier_settings(cmd, env, service_tier)
+    # Settings explícitos podem ter segredos; o argv recebe só o caminho privado.
+    fd, value = tempfile.mkstemp(prefix="hangar-engine-", suffix=".json")
+    path = Path(value)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(settings, stream, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    return [args[0], "--settings", str(path), *args[1:]]
+
+
 def main(argv: list[str]) -> int:
     if len(argv) == 2 and argv[1] in ("--help", "-h"):
         print(__doc__)
@@ -67,10 +83,11 @@ def main(argv: list[str]) -> int:
         nome = argv[2]
         modelo = None
         context = None
+        service_tier = None
         account = account_home = account_base = None
         i = 3
         while i < corte:
-            if argv[i] in ("--model", "--context", "--account", "--account-home", "--account-base-url"):
+            if argv[i] in ("--model", "--context", "--account", "--account-home", "--account-base-url", "--service-tier"):
                 if i + 1 >= corte:
                     print(f"hangar-engine: {argv[i]} precisa de um valor", file=sys.stderr)
                     return 2
@@ -82,6 +99,11 @@ def main(argv: list[str]) -> int:
                     account_home = argv[i + 1]
                 elif argv[i] == "--account-base-url":
                     account_base = argv[i + 1]
+                elif argv[i] == "--service-tier":
+                    service_tier = argv[i + 1]
+                    if service_tier not in ("default", "priority"):
+                        print("hangar-engine: --service-tier precisa de default ou priority", file=sys.stderr)
+                        return 2
                 else:
                     try:
                         context = int(argv[i + 1])
@@ -111,6 +133,16 @@ def main(argv: list[str]) -> int:
             # __main__ não pega IndexError.
             print("hangar-engine: falta o comando depois de --", file=sys.stderr)
             return 2
+        launch_env = {**os.environ, **env}
+        launch_env.pop("CP_ENGINE_SERVICE_TIER", None)
+        settings_path = None
+        if service_tier is not None:
+            try:
+                cmd = _apply_service_tier(cmd, launch_env, service_tier)
+                settings_path = Path(cmd[2])
+            except ValueError as e:
+                print(f"hangar-engine: {e}", file=sys.stderr)
+                return 2
         # execvpe substitui este processo: o pane do tmux passa a ser o próprio claude (dono do tty),
         # que é o que faz o send-keys do app chegar nele. Um wrapper que ficasse no meio quebraria isso.
         #
@@ -135,11 +167,16 @@ def main(argv: list[str]) -> int:
         # `exec` lá). A resolução por descendentes do registry atravessa esse nível sem mudança.
         #
         # O ramo POSIX fica byte-idêntico ao que está em produção.
-        if os.name == "nt":
-            import subprocess
-            return subprocess.run(cmd, env={**os.environ, **env}).returncode
-        os.execvpe(cmd[0], cmd, {**os.environ, **env})
-        return 127  # inalcançável; o execvpe só retorna levantando OSError
+        try:
+            if os.name == "nt":
+                import subprocess
+                return subprocess.run(cmd, env=launch_env).returncode
+            os.execvpe(cmd[0], cmd, launch_env)
+            return 127  # inalcançável; o execvpe só retorna levantando OSError
+        finally:
+            # No POSIX o exec bem-sucedido mantém o arquivo disponível para recargas do Claude.
+            if settings_path is not None:
+                settings_path.unlink(missing_ok=True)
 
     print(__doc__, file=sys.stderr)
     return 2

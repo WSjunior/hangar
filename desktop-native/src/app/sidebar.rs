@@ -30,6 +30,16 @@ pub(super) enum Sub { Reply, Question, Working }
 
 type LastSubs = HashMap<Target, (Option<String>, (String, Sub))>;
 
+/// ↑↓ numa lista: dão a volta nas pontas; sem item atual, o sentido escolhe a ponta.
+pub(super) fn wrap_step(current: Option<usize>, count: usize, step: isize) -> Option<usize> {
+    if count == 0 { return None; }
+    Some(match current {
+        Some(i) => (i as isize + step).rem_euclid(count as isize) as usize,
+        None if step > 0 => 0,
+        None => count - 1,
+    })
+}
+
 // A linha só troca quando há texto novo: no vão entre estados (enviou e o turno ainda não pegou, parou e a resposta
 // ainda não chegou) ela segura a anterior, e o card nunca encolhe para crescer de novo logo depois. Só a conversa
 // trocada (`/clear`, outro transcript) a descarta; transcript ainda desconhecido não troca nada.
@@ -206,7 +216,7 @@ impl Tell {
     }
 }
 
-/// Nome em edição: na própria linha (barra lateral) ou num diálogo (abas no topo, como o web com a barra recolhida).
+/// Nome em edição: na própria linha (barra lateral) ou num diálogo (abas, como o web com a barra recolhida).
 pub(super) struct Edit {
     pub(super) target: Target, pub(super) input: Entity<InputState>, inline: bool, status: Rc<RefCell<Pending>>, _events: Subscription,
 }
@@ -463,7 +473,7 @@ impl Hangar {
     /// das abas.
     pub(super) fn visible_order(&self, cx: &App) -> Vec<Target> {
         let active = self.active_key();
-        if appearance::get().navigation == appearance::Navigation::Tabs {
+        if appearance::get().navigation.tabs() {
             return self.sessions.iter().filter(|s| !self.sidebar.is_hidden(&active, &s.name)).map(|s| Target::new(&active, &s.name)).collect();
         }
         // Na ordem dos blocos de grupo, sem os membros de um bloco recolhido.
@@ -499,11 +509,7 @@ impl Hangar {
         let order = self.visible_order(cx);
         if order.is_empty() { return; }
         let current = self.selected_target().and_then(|t| order.iter().position(|o| *o == t));
-        let next = match current {
-            Some(i) => (i as isize + step).rem_euclid(order.len() as isize) as usize,
-            None if step > 0 => 0,
-            None => order.len() - 1,
-        };
+        let Some(next) = wrap_step(current, order.len(), step) else { return };
         self.select_target(&order[next], window, cx);
     }
 
@@ -519,6 +525,13 @@ impl Hangar {
         // Orquestrador e sessão do par não têm "Fechar" no menu.
         if self.target_session(&target).is_none_or(|s| s.orq() || s.read_only()) { return; }
         self.close_target(target, window, cx);
+    }
+
+    /// F2: o mesmo Renomear do menu da linha, na sessão aberta.
+    pub(super) fn rename_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session_keys_blocked(window, cx) { return; }
+        let Some(target) = self.selected_target() else { return };
+        self.start_session_rename(target, window, cx);
     }
 
     pub(super) fn set_group(&mut self, project: bool, cx: &mut Context<Self>) {
@@ -1485,9 +1498,9 @@ fn rail_label(name: &str) -> (String, String) {
 }
 
 impl Hangar {
-    /// A lista recolhida no trilho, como o Ctrl+B do web. Com abas no topo não há barra para recolher.
+    /// A lista recolhida no trilho, como o Ctrl+B do web. Com abas não há barra para recolher.
     pub(super) fn rail(&self) -> bool {
-        appearance::get().navigation != appearance::Navigation::Tabs && self.sidebar.is_collapsed(RAIL_KEY)
+        !appearance::get().navigation.tabs() && self.sidebar.is_collapsed(RAIL_KEY)
     }
 
     pub(super) fn nav_width(&self) -> f32 {
@@ -1552,7 +1565,7 @@ impl Hangar {
     }
 
     pub(super) fn toggle_rail(&mut self, cx: &mut Context<Self>) {
-        if appearance::get().navigation == appearance::Navigation::Tabs { return; }
+        if appearance::get().navigation.tabs() { return; }
         self.hide_preview();
         // Movimento reduzido troca direto; senão a largura anda de onde estiver agora.
         self.sidebar.rail_anim = (!cx.reduce_motion()).then(|| (Instant::now(), !self.rail()));
@@ -1694,6 +1707,14 @@ mod tests {
         // `/clear` troca o transcript: a linha da conversa anterior não volta. A de outra sessão também não.
         assert_eq!(kept_sub(&mut last, &row, Some("b.jsonl"), None), None);
         assert_eq!(kept_sub(&mut last, &Target::new("m", "outra"), Some("a.jsonl"), None), None);
+    }
+
+    #[test]
+    fn list_step_wraps_and_enters_from_the_end_it_points_to() {
+        use super::wrap_step;
+        assert_eq!((wrap_step(Some(2), 3, 1), wrap_step(Some(0), 3, -1)), (Some(0), Some(2)));
+        assert_eq!((wrap_step(None, 3, 1), wrap_step(None, 3, -1)), (Some(0), Some(2)));
+        assert_eq!(wrap_step(None, 0, 1), None);
     }
 
     #[test]
