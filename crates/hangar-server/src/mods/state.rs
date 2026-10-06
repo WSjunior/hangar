@@ -191,7 +191,8 @@ impl Mods {
     /// O token da ponte é derivado só do nome: dois processos que nasceram com o mesmo nome têm o mesmo
     /// token, e o servidor não os distingue. Com duas sessões vivas nessa situação (uma renomeada, outra
     /// criada depois com o nome antigo), a ponte não atende nenhuma das duas, para um processo não agir no
-    /// clique da outra: o pedido segue ao Python, que não tem o clique, e o mod abre a URL no servidor.
+    /// clique da outra: o pedido segue ao Python, que não tem o clique, e o mod abre a URL no servidor. Uma
+    /// sessão de fora do Rust com esse nome não aparece aqui: quem confere é a ponte (`bridge::owned`).
     pub fn bridge_session(&self, sessao: &str) -> Option<String> {
         let inner = self.inner.lock().unwrap();
         let mut found = inner.sessions.iter().filter(|(_, session)| session.born == sessao).map(|(name, _)| name.clone());
