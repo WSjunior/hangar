@@ -220,11 +220,16 @@ def test_sigterm_encerra_o_filho_e_limpa_o_socket(cano):
     proc.send_signal(signal.SIGTERM)
     assert proc.wait(timeout=5) == 0
     assert not sock.exists()
+    inicio = _estado(filho)
+    vistos = []
     for _ in range(100):
-        if not _vivo(filho):
+        vivo = _vivo(filho)
+        vistos.append(f"{vivo}: {_estado(filho)}")
+        if not vivo:
             break
         time.sleep(0.05)
-    assert not _vivo(filho)
+    # O CI já viu o laço sair cedo e o mesmo pid "vivo" logo depois: o registro diz o que o /proc mostrou.
+    assert not _vivo(filho), f"antes={inicio} laço={vistos} agora={_estado(filho)} log={log.read_text() if log.exists() else 'sem log'}"
 
 
 def test_codigos_de_saida(cano_cmd, tmp_path):
@@ -388,6 +393,16 @@ def _vivo(pid: int) -> bool:
             return f.read().rsplit(") ", 1)[1][0] != "Z"
     except (FileNotFoundError, ProcessLookupError):
         return False
+
+
+def _estado(pid: int) -> str:
+    try:
+        with open(f"/proc/{pid}/stat", encoding="ascii") as f:
+            campos = f.read().rsplit(") ", 1)[1].split()
+        # estado, ppid e starttime: starttime diferente no mesmo pid é outro processo.
+        return f"{campos[0]} ppid={campos[1]} start={campos[19]} t={time.monotonic():.3f}"
+    except (OSError, IndexError) as e:
+        return f"{type(e).__name__} t={time.monotonic():.3f}"
 
 
 def test_process_disappears_during_stat_read(monkeypatch):
