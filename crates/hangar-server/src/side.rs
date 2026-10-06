@@ -532,13 +532,16 @@ async fn side_once(hub: &Arc<Hub>, attempt: &mut u32) -> SideEnd {
     }
 }
 
+/// O hub de cada sessão, com a contagem de aparelhos.
+type HubMap = Mutex<HashMap<String, (Arc<Hub>, usize)>>;
+
 /// Hubs vivos por nome de sessão, com a contagem de aparelhos.
 #[derive(Clone, Default)]
-pub struct Hubs(Arc<Mutex<HashMap<String, (Arc<Hub>, usize)>>>);
+pub struct Hubs(Arc<HubMap>);
 
 /// O mapa de hubs sem segurá-lo vivo: o `Mods` entrega por aqui sem formar ciclo com o `SideCtx`.
 #[derive(Clone)]
-pub struct WeakHubs(Weak<Mutex<HashMap<String, (Arc<Hub>, usize)>>>);
+pub struct WeakHubs(Weak<HubMap>);
 
 impl WeakHubs {
     pub fn upgrade(&self) -> Option<Hubs> {

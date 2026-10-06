@@ -42,15 +42,15 @@ pub fn mint(secret: &str, name: &str) -> String {
 /// Corpo lido uma vez: sessão que não é superfície do Rust volta ao Python com o mesmo corpo. Devolve o
 /// corpo e o nome atual da sessão, que pode não ser o `sessao` do plugin (sessão renomeada sem relançar
 /// o processo: o plugin manda o nome com que nasceu, e o token é o desse nome).
-async fn owned<T: DeserializeOwned>(st: &Arc<AppState>, peer: SocketAddr, req: Request) -> Result<(Envelope<T>, String), Response> {
+async fn owned<T: DeserializeOwned>(st: &Arc<AppState>, peer: SocketAddr, req: Request) -> Result<(Envelope<T>, String), Box<Response>> {
     let (fwd, _) = gate(st, peer, &req);
     let (parts, raw) = req.into_parts();
-    let Ok(bytes) = to_bytes(raw, BODY_LIMIT).await else { return Err(StatusCode::PAYLOAD_TOO_LARGE.into_response()) };
+    let Ok(bytes) = to_bytes(raw, BODY_LIMIT).await else { return Err(Box::new(StatusCode::PAYLOAD_TOO_LARGE.into_response())) };
     let parsed = serde_json::from_slice::<Envelope<T>>(&bytes).ok()
         .and_then(|envelope| st.mods.bridge_session(&envelope.sessao).map(|name| (envelope, name)));
     match parsed {
         Some(found) => Ok(found),
-        None => Err(pass(st, Request::from_parts(parts, Body::from(bytes)), &fwd).await),
+        None => Err(Box::new(pass(st, Request::from_parts(parts, Body::from(bytes)), &fwd).await)),
     }
 }
 
@@ -60,7 +60,7 @@ fn token_ok(st: &AppState, name: &str, token: &str) -> bool {
 }
 
 pub async fn press_start(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let (envelope, name) = match owned::<PressStart>(&st, peer, req).await { Ok(found) => found, Err(response) => return response };
+    let (envelope, name) = match owned::<PressStart>(&st, peer, req).await { Ok(found) => found, Err(response) => return *response };
     let body = &envelope.body;
     // Os limites do Pydantic do Python (`PressBody`) vêm antes do token, como lá.
     if !fits(&body.request_id, 64) || !fits(&body.element, 256) {
@@ -74,7 +74,7 @@ pub async fn press_start(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
 }
 
 pub async fn opened(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let (envelope, name) = match owned::<Opened>(&st, peer, req).await { Ok(found) => found, Err(response) => return response };
+    let (envelope, name) = match owned::<Opened>(&st, peer, req).await { Ok(found) => found, Err(response) => return *response };
     let body = &envelope.body;
     // Os limites do `OpenedBody`. A URL não tem mínimo no Pydantic: vazia passa daqui e cai no 400 do esquema.
     if !fits(&body.attempt, 64) || body.url.chars().count() > URL_MAX {

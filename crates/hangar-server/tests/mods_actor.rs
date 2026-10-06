@@ -66,7 +66,7 @@ async fn surface_session_publishes_the_band_and_answers_a_press() {
     assert!(mods.owns("session"));
     let band = wait_ui(&mods,|ui|ui["above"].to_string().contains("superfície desktop")).await;
     assert_eq!(band["source"],"surface");
-    let (link,_) = mods.link("session").unwrap();
+    let link = mods.link("session").unwrap().link;
     let pressed = link.call(ModsCall::Press { site:"above-prompt".into(),key:"abrir-vitrine-botoes".into() },budget()).await.unwrap();
     assert_eq!(pressed["element"],"abrir-vitrine-botoes");
     wait_ui(&mods,|ui|ui["panes"][0]["id"] == "vitrine-botoes").await;
@@ -85,7 +85,7 @@ async fn closing_the_session_answers_pending_calls() {
     let registry = registry(&mods);
     registry.open(claude_target(dir.path(),escuta,true)).await.unwrap();
     wait_ui(&mods,|ui|!ui["above"].is_null()).await;
-    let (link,_) = mods.link("session").unwrap();
+    let link = mods.link("session").unwrap().link;
     let pending = tokio::spawn(async move { link.call(ModsCall::Press { site:"above-prompt".into(),key:"abrir-vitrine-botoes".into() },budget()).await });
     // O clique tem que estar em aberto no ator, já no fio, quando a sessão fecha.
     wait_request(&seen,"ui_press").await;

@@ -66,7 +66,7 @@ async fn turn_and_guard_that_eat_the_budget_keep_the_press_off_the_mod() {
     // I1: a vez da sessão e a guarda gastam o orçamento da rota; o que sobra não cobre o prazo do
     // clique, e o `ui_press` não pode sair (rodaria no mod depois de o app mostrar o erro).
     let world = world(&[]).await;
-    let (_, turn) = world.mods.link("session").unwrap();
+    let turn = world.mods.link("session").unwrap().lock;
     let held = turn.lock().await;
     world.python.set_transfer_delay(Duration::from_millis(300));
     let start = Instant::now();
