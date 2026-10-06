@@ -11,6 +11,8 @@ pub struct Chat {
     pub preview: Preview,
     pub state: SessionState,
     pub ask: Option<Ask>,
+    /// Pergunta nativa vista neste aguardo: depois de respondida o pane ainda mostra o menu dela por um instante.
+    ask_seen: bool,
     pub live_thinking: String,
     pub live_tool: Option<LiveTool>,
     /// Turno visto terminar nesta conversa, já em texto: a linha de trabalhando fica no lugar com ele, como o
@@ -205,12 +207,20 @@ impl Chat {
     pub fn update_state(&mut self, state: SessionState) {
         // Pergunta do Claude fecha quando o pane sai do aguardo; a do Codex só pelo `null`; a do transcript, pelo `tool_result`.
         if state.state != "awaiting_input" && self.ask.as_ref().is_some_and(|ask| !ask.codex() && ask.tool_use_id.is_none()) { self.ask = None; }
+        if state.state != "awaiting_input" { self.ask_seen = false; }
         self.state = state;
+    }
+
+    /// O menu do pane é o de uma pergunta nativa, que o card responde. O formato sozinho não basta: o Claude Code usa o
+    /// mesmo seletor (com "Type something.") em menus próprios, como o de mods, que não têm `ask_question`.
+    pub fn ask_pane(&self) -> bool {
+        (self.ask.is_some() || self.ask_seen) && self.state.options.as_deref().is_some_and(crate::interaction::ask_picker)
     }
 
     /// Nova pergunta só troca a atual quando o conteúdo muda: o retrato de reconexão não apaga escolhas.
     pub fn update_ask(&mut self, ask: Option<Ask>) -> bool {
         if self.ask == ask { return false; }
+        self.ask_seen |= ask.is_some();
         self.ask = ask;
         true
     }
@@ -589,6 +599,25 @@ mod tests {
         chat.update_state(SessionState { state: "working".into(), ..Default::default() });
         assert!(chat.ask.is_some());
         assert!(chat.update_ask(None));
+    }
+
+    #[test]
+    fn claude_code_own_picker_is_not_the_native_card() {
+        let mods = ["How does this work?", "Enable for this session", "Not now", "Type something.", "Chat about this"];
+        let waiting = || SessionState { state: "awaiting_input".into(), question: Some("Mods in this session's folder load…".into()),
+            options: Some(mods.iter().map(|o| (*o).to_owned()).collect()), ..Default::default() };
+        let mut chat = Chat::default();
+        chat.update_state(waiting());
+        assert!(!chat.ask_pane(), "menu de mods sem ask_question precisa do cartão de opções");
+        chat.update_ask(Some(ask(None, "a?")));
+        assert!(chat.ask_pane());
+        // Respondida: o pane ainda mostra o menu até o Claude seguir, e o cartão não pisca por cima.
+        chat.update_ask(None);
+        chat.update_state(waiting());
+        assert!(chat.ask_pane());
+        chat.update_state(SessionState { state: "working".into(), ..Default::default() });
+        chat.update_state(waiting());
+        assert!(!chat.ask_pane());
     }
 
     #[test]
