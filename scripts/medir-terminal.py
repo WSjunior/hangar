@@ -17,6 +17,7 @@ as sessões são `bash` no tmux da prova. O relatório traz só números.
 import argparse
 import importlib.util
 import os
+import signal
 import statistics
 import subprocess
 import sys
@@ -59,9 +60,11 @@ class Medida(base.Prova):
     def preparar(self):
         server = base.REPO / "crates/target/release/hangar-server"
         cano = base.REPO / "crates/target/release/hangar-cano"
+        # Sempre: o build é incremental, e um binário velho (outro contrato) mediria o Python calado.
+        subprocess.run(["cargo", "build", "--locked", "--release", "-p", "hangar-server", "-p", "hangar-cano"],
+                       cwd=base.REPO / "crates", check=True, env={**os.environ, "CARGO_BUILD_JOBS": "4"})
         if not (server.exists() and cano.exists()):
-            subprocess.run(["cargo", "build", "--locked", "--release", "-p", "hangar-server", "-p", "hangar-cano"],
-                           cwd=base.REPO / "crates", check=True, env={**os.environ, "CARGO_BUILD_JOBS": "4"})
+            raise SystemExit("binários release não encontrados")
         for d in (self.home / ".claude", self.bin, self.work):
             d.mkdir(parents=True)
         (self.bin / "tmux").write_text(f'#!/bin/sh\nexec /usr/bin/tmux -L {self.tmux} "$@"\n')
@@ -109,6 +112,8 @@ def drenar(ws, ate=0.5):
 def medir(m):
     m.sessao_bash("med0")
     pids = m.pids()
+    if not m.args.reserva and not pids["rust"]:
+        raise SystemExit("o hangar-server não está de pé: a medida seria do Python sozinho")
     ws = m.painel("med0")
     drenar(ws, 1.0)
 
@@ -119,6 +124,8 @@ def medir(m):
     ws.send(f"cat {m.arquivo}; echo FIM-MED-$((1+1))X\r".encode())
     recebidos, cauda = 0, b""
     while True:
+        if time.monotonic() - t0 > 180:
+            raise SystemExit("o marcador do fim do cat não chegou em 180 s")
         b = ws.recv(timeout=120)
         if isinstance(b, str):
             continue
@@ -138,7 +145,8 @@ def medir(m):
     for _ in range(TECLAS):
         t = time.monotonic()
         ws.send(b"a")
-        ws.recv(timeout=5)
+        while not (isinstance(q := ws.recv(timeout=5), bytes) and b"a" in q):
+            pass
         ecos.append((time.monotonic() - t) * 1000)
         drenar(ws, 0.05)
     ws.send(b"\x15")
@@ -161,7 +169,7 @@ def medir(m):
         "modo": "reserva (Python sozinho)" if m.args.reserva else "Rust de pé",
         "vazao_mb_s": round(MB / dur, 1), "segundos": round(dur, 2), "bytes_no_cliente_mb": round(recebidos / 2**20, 1),
         "cpu_ms_por_mb": ms_por_mb,
-        "eco_ms": {"mediana": round(statistics.median(ecos), 2), "p95": round(ecos[int(len(ecos) * 0.95) - 1], 2)},
+        "eco_ms": {"mediana": round(statistics.median(ecos), 2), "p95": round(ecos[min(len(ecos) - 1, int(len(ecos) * 0.95))], 2)},
         "rss_mb_por_painel": {k: round((depois[k][0] - antes[k][0]) / PAINEIS, 2) for k in antes if pids[k]},
         "threads_por_painel": {k: (depois[k][1] - antes[k][1]) / PAINEIS for k in antes if pids[k]},
         "rss_mb_total": {k: round(depois[k][0], 1) for k in depois if pids[k]},
@@ -187,6 +195,9 @@ def main():
     ap.add_argument("--manter", action="store_true", help="não apaga a pasta da medida")
     args = ap.parse_args()
     args.conta_b = None
+    # Terminal fechado ou kill: o finally ainda para a unit e o tmux da medida.
+    for sinal in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sinal, lambda *_: sys.exit(1))
     m = Medida(args)
     try:
         m.preparar()

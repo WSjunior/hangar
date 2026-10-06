@@ -337,6 +337,17 @@ async fn origin_refused_before_upgrade() {
     *srv.py.origin_mode.lock().unwrap() = "fail";
     assert_eq!(connect_with(srv.addr, path, &[("origin", "https://x.com")]).await.err(), Some(503));
     assert!(tmux.clients("s9").is_empty(), "nenhum PTY antes da Origin aceita");
+    // Origin que não é texto não vira "sem Origin": recusa sem perguntar e sem abrir.
+    *srv.py.origin_mode.lock().unwrap() = "ok";
+    let asked = srv.py.origin_bodies.lock().unwrap().len();
+    let mut req = tungstenite::client::IntoClientRequest::into_client_request(format!("ws://{}{path}", srv.addr)).unwrap();
+    req.headers_mut().insert("origin", axum::http::HeaderValue::from_bytes(b"https://\xe9vil.com").unwrap());
+    match tokio_tungstenite::connect_async(req).await {
+        Err(tungstenite::Error::Http(resp)) => assert_eq!(resp.status().as_u16(), 403),
+        other => panic!("Origin ilegível abriu: {:?}", other.map(|_| ())),
+    }
+    assert_eq!(srv.py.origin_bodies.lock().unwrap().len(), asked);
+    assert!(tmux.clients("s9").is_empty());
     *srv.py.origin_mode.lock().unwrap() = "ok";
     let _ws = connect_with(srv.addr, path, &[("origin", "https://ok.com")]).await.expect("aceita");
     let asked = srv.py.origin_bodies.lock().unwrap().len();

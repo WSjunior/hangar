@@ -98,7 +98,7 @@ impl Terms {
 
     /// Registra o painel e derruba o anterior do mesmo alvo, esperando ele desmontar: o tamanho
     /// que ele repõe na saída não pode cair por cima do novo.
-    async fn claim(&self, target: &str) -> Claim {
+    async fn claim(&self, target: &str, diag: &crate::diag::DiagClient) -> Claim {
         let (done, done_rx) = watch::channel(false);
         let stop = Arc::new(Notify::new());
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -107,7 +107,7 @@ impl Terms {
         if let Some(mut previous) = previous {
             previous.stop.notify_one();
             if tokio::time::timeout(Duration::from_secs(10), previous.done.wait_for(|d| *d)).await.is_err() {
-                tracing::warn!(session = %target, "terminal: painel anterior não desmontou em 10 s");
+                diag.report("rust.term_failed", target, "takeover_timeout", "o painel anterior não desmontou em 10 s");
             }
         }
         Claim { id, stop, done }
@@ -171,7 +171,9 @@ async fn serve(st: Arc<AppState>, peer: SocketAddr, req: Request, want: Want) ->
         Err(_) => return pass(&st, Request::from_parts(parts, body), &fwd).await,
     };
     let label = match &want { Want::Session { name, .. } => name.clone(), Want::Hangar(_) => "hangar".into() };
-    if let Some(origin) = parts.headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()).filter(|o| !o.is_empty()) {
+    if let Some(origin) = parts.headers.get(header::ORIGIN).filter(|o| !o.is_empty()) {
+        // Origin que nem é texto não passa como "sem Origin".
+        let Ok(origin) = origin.to_str() else { return refuse("origem recusada") };
         let host = parts.headers.get(header::HOST).and_then(|v| v.to_str().ok());
         match origin::ask(&st.http, st.cfg.upstream, &st.cfg.internal_secret, origin, host).await {
             Ok(true) => {}
@@ -229,7 +231,15 @@ enum End { Client, Output, TakenOver, PingTimeout, InputGone }
 async fn run(st: Arc<AppState>, socket: WebSocket, target: String, cols: u16, rows: u16, slot: Arc<Slot>) {
     let terms = &st.term;
     let cfg = &terms.cfg;
-    let claim = terms.claim(&target).await;
+    let claim = terms.claim(&target, &st.diag).await;
+    let close = |code, reason: &'static str| Message::Close(Some(CloseFrame { code, reason: reason.into() }));
+    // Outra conexão já assumiu enquanto esta esperava a anterior: nem chega a anexar.
+    if futures_util::FutureExt::now_or_never(claim.stop.notified()).is_some() {
+        let mut socket = socket;
+        let _ = socket.send(close(1000, TAKEN_OVER)).await;
+        terms.release(&target, &claim);
+        return;
+    }
     // Lido ANTES do attach: depois dele a janela já está no tamanho do painel.
     let saved = pty::remember_size(cfg, &target).await;
     let open_cfg = cfg.clone();
@@ -241,9 +251,11 @@ async fn run(st: Arc<AppState>, socket: WebSocket, target: String, cols: u16, ro
         Err(code) => {
             st.diag.report("rust.term_failed", &target, code, "o terminal não abriu");
             let mut socket = socket;
-            let _ = socket.send(Message::Close(Some(CloseFrame { code: 1011, reason: "terminal nao abriu".into() }))).await;
+            let _ = socket.send(close(1011, "terminal nao abriu")).await;
             if let Some(saved) = saved {
-                pty::restore_size(cfg, &target, saved).await;
+                if let Err(code) = pty::restore_size(cfg, &target, saved).await {
+                    st.diag.report("rust.term_failed", &target, code, "o tamanho da janela não foi reposto");
+                }
             }
             terms.release(&target, &claim);
             return;
@@ -292,9 +304,11 @@ async fn run(st: Arc<AppState>, socket: WebSocket, target: String, cols: u16, ro
             },
             _ = tokio::time::sleep_until(pong_due.unwrap_or(start)), if pong_due.is_some() => break End::PingTimeout,
             msg = stream.next() => match msg {
-                // ponytail: escrita no PTY parado (tmux travado) segura este laço; o prazo do ping
-                // só volta a contar quando o tmux aceitar a entrada.
-                Some(Ok(Message::Binary(b))) => if input.send(b).await.is_err() { break End::InputGone },
+                // Escrita parada (tmux sem ler) não pode segurar a troca de painel.
+                Some(Ok(Message::Binary(b))) => tokio::select! {
+                    sent = input.send(b) => if sent.is_err() { break End::InputGone },
+                    _ = claim.stop.notified() => break End::TakenOver,
+                },
                 Some(Ok(Message::Text(t))) => match resize_of(t.as_str()) {
                     Ok(Some((c, r))) => pty.resize(c, r),
                     Ok(None) => {}
@@ -310,22 +324,31 @@ async fn run(st: Arc<AppState>, socket: WebSocket, target: String, cols: u16, ro
             },
         }
     };
-    match end {
-        End::TakenOver => {
-            let _ = ctl.send(Message::Close(Some(CloseFrame { code: 1000, reason: TAKEN_OVER.into() }))).await;
-            if tokio::time::timeout(Duration::from_secs(1), &mut sender).await.is_err() {
-                sender.abort();
-            }
-        }
+    let farewell = match end {
+        End::TakenOver => Some(close(1000, TAKEN_OVER)),
         End::PingTimeout => {
             tracing::info!(session = %target, "terminal: sem pong no prazo; painel fechado");
-            sender.abort();
+            Some(close(1011, "sem resposta ao ping"))
         }
-        End::Output => {}
-        End::Client | End::InputGone => sender.abort(),
+        End::InputGone => {
+            st.diag.report("rust.term_failed", &target, "input_write_failed", "a entrada do terminal parou de ser aceita");
+            Some(close(1011, "entrada do terminal falhou"))
+        }
+        End::Output | End::Client => None,
+    };
+    if let Some(m) = farewell {
+        // `try_send`: com o envio parado, o fechamento não espera a fila.
+        if ctl.try_send(m).is_ok() {
+            let _ = tokio::time::timeout(Duration::from_secs(1), &mut sender).await;
+        }
     }
+    sender.abort();
+    // Socket solto antes da desmontagem, que leva segundos: o cliente vê o fechamento na hora.
+    drop(stream);
     drop(input);
-    pty::teardown(cfg, &target, pty, saved).await;
+    if let Err(code) = pty::teardown(cfg, &target, pty, saved).await {
+        st.diag.report("rust.term_failed", &target, code, "a desmontagem do painel não terminou limpa");
+    }
     terms.release(&target, &claim);
     tracing::info!(session = %target, "terminal: desanexado");
 }

@@ -65,29 +65,37 @@ pub(crate) fn open(cfg: &TermConfig, target: &str, cols: u16, rows: u16, slot: A
     let child = pair.slave.spawn_command(cmd).map_err(|_| "pty_spawn")?;
     // Sem soltar o escravo aqui, o leitor nunca vê o fim quando o cliente sai.
     drop(pair.slave);
-    let master = pair.master;
-    let tty = master.tty_name().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-    let reader = master.try_clone_reader().map_err(|_| "pty_reader")?;
+    let tty = pair.master.tty_name().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    let pty = Pty { master: pair.master, child, tty };
+    // Daqui em diante todo erro mata e colhe o `tmux attach`, que senão ficaria anexado.
+    let fail = |mut pty: Pty, code| {
+        signal(&pty, libc::SIGKILL);
+        let _ = pty.child.wait();
+        Err(code)
+    };
+    // Sem o tty não dá para soltar só o nosso cliente na saída.
+    if pty.tty.is_empty() {
+        return fail(pty, "pty_tty");
+    }
+    let Ok(reader) = pty.master.try_clone_reader() else { return fail(pty, "pty_reader") };
     // Nunca o `take_writer`: o `Drop` dele escreve "\n" + EOF no PTY, e o tmux entrega ao pane —
     // fechar o painel mandaria Enter e Ctrl-D ao agente. Um `dup` do mestre só fecha.
-    let writer = master.as_raw_fd()
-        // SAFETY: duplica um descritor vivo do mestre; o `File` passa a ser dono só da cópia.
+    let writer = pty.master.as_raw_fd()
+        // SAFETY: duplica um descritor vivo do mestre.
         .map(|fd| unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) })
         .filter(|fd| *fd >= 0)
-        .map(|fd| unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd) })
-        .ok_or("pty_writer")?;
+        // SAFETY: o descritor acabou de nascer do `fcntl` e ninguém mais é dono dele.
+        .map(|fd| unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd) });
+    let Some(writer) = writer else { return fail(pty, "pty_writer") };
     let (out_tx, output) = mpsc::channel(OUTPUT_SLOTS);
     let (input, in_rx) = mpsc::channel(INPUT_SLOTS);
-    let mut pty = Pty { master, child, tty };
     let read_slot = slot.clone();
     let spawned = std::thread::Builder::new().name("term-read".into())
         .spawn(move || { pump(reader, out_tx); drop(read_slot); })
         .and_then(|_| std::thread::Builder::new().name("term-write".into())
             .spawn(move || { write_loop(writer, in_rx); drop(slot); }));
     if spawned.is_err() {
-        signal(&pty, libc::SIGKILL);
-        let _ = pty.child.wait();
-        return Err("pty_thread");
+        return fail(pty, "pty_thread");
     }
     Ok(Opened { pty, output, input })
 }
@@ -155,53 +163,69 @@ pub(crate) async fn remember_size(cfg: &TermConfig, target: &str) -> Option<(u32
         }
     }
     // Com `:`: só `={name}` deixa window_width vazio no `display -p`.
-    let out = tmux(cfg, &["display", "-p", "-t", &t, "#{window_width}\t#{window_height}"]).await.ok()?;
-    let (w, h) = out.status.success().then(|| parse_size(&String::from_utf8_lossy(&out.stdout), '\t')).flatten()?;
-    let _ = tmux(cfg, &["set-option", "-t", &t, SIZE_OPTION, &format!("{w}x{h}")]).await;
+    let size = match tmux(cfg, &["display", "-p", "-t", &t, "#{window_width}\t#{window_height}"]).await {
+        Ok(out) if out.status.success() => parse_size(&String::from_utf8_lossy(&out.stdout), '\t'),
+        _ => None,
+    };
+    let Some((w, h)) = size else {
+        tracing::warn!(session = %target, "terminal: tamanho da janela não lido; não será reposto na saída");
+        return None;
+    };
+    if !tmux(cfg, &["set-option", "-t", &t, SIZE_OPTION, &format!("{w}x{h}")]).await.is_ok_and(|o| o.status.success()) {
+        tracing::warn!(session = %target, "terminal: tamanho não guardado no tmux; uma queda do Rust não o repõe");
+    }
     Some((w, h))
 }
 
-/// `resize-window` sozinho deixa a janela em tamanho manual; o par com `setw latest` devolve o normal.
-pub(crate) async fn restore_size(cfg: &TermConfig, target: &str, (w, h): (u32, u32)) {
+/// `resize-window` sozinho deixa a janela em tamanho manual; o par com `setw latest` devolve o
+/// normal. A opção só sai depois dos dois: é a pista que a subida seguinte usaria.
+pub(crate) async fn restore_size(cfg: &TermConfig, target: &str, (w, h): (u32, u32)) -> Result<(), &'static str> {
     let s = format!("={target}");
-    let _ = tmux(cfg, &["resize-window", "-t", &s, "-x", &w.to_string(), "-y", &h.to_string()]).await;
-    let _ = tmux(cfg, &["setw", "-t", &s, "window-size", "latest"]).await;
+    let ok = |r: Result<std::process::Output, super::resolve::MuxDown>| r.is_ok_and(|o| o.status.success());
+    if !ok(tmux(cfg, &["resize-window", "-t", &s, "-x", &w.to_string(), "-y", &h.to_string()]).await)
+        || !ok(tmux(cfg, &["setw", "-t", &s, "window-size", "latest"]).await) {
+        return Err("size_restore_failed");
+    }
     let _ = tmux(cfg, &["set-option", "-u", "-t", &format!("={target}:"), SIZE_OPTION]).await;
+    Ok(())
 }
 
 /// Ordem do `termsock._desmontar`: soltar o nosso cliente, fechar, colher, esperar ele sair da
-/// lista e só então repor o tamanho (antes disso o tmux reimpõe o do cliente).
-pub(crate) async fn teardown(cfg: &TermConfig, target: &str, mut pty: Pty, saved: Option<(u32, u32)>) {
+/// lista e só então repor o tamanho (antes disso o tmux reimpõe o do cliente). `Err` = o código
+/// do que ficou para trás (cliente vivo ou janela no tamanho do painel).
+pub(crate) async fn teardown(cfg: &TermConfig, target: &str, mut pty: Pty, saved: Option<(u32, u32)>) -> Result<(), &'static str> {
     // `-t <tty>`, nunca `-s`: `-s` derruba também o `tmux attach` nativo do dono.
-    if !pty.tty.is_empty() {
-        let _ = tmux(cfg, &["detach-client", "-t", &pty.tty]).await;
-    }
+    let _ = tmux(cfg, &["detach-client", "-t", &pty.tty]).await;
     signal(&pty, libc::SIGHUP);
-    if !reaped(&mut pty, Duration::from_secs(3)).await {
+    let mut gone = reaped(&mut pty, Duration::from_secs(3)).await;
+    if !gone {
         signal(&pty, libc::SIGKILL);
-        if !reaped(&mut pty, Duration::from_secs(1)).await {
-            tracing::warn!(session = %target, "terminal: cliente do painel não saiu nem com SIGKILL");
-        }
+        gone = reaped(&mut pty, Duration::from_secs(1)).await;
     }
     let Pty { master, tty, .. } = pty;
     drop(master);
-    let Some(saved) = saved else { return };
+    if !gone {
+        return Err("client_not_reaped");
+    }
+    let Some(saved) = saved else { return Ok(()) };
     let until = tokio::time::Instant::now() + Duration::from_secs(3);
     loop {
-        let Ok(out) = tmux(cfg, &["list-clients", "-t", &format!("={target}"), "-F", "#{client_tty}"]).await else { return };
+        let Ok(out) = tmux(cfg, &["list-clients", "-t", &format!("={target}"), "-F", "#{client_tty}"]).await else {
+            return Err("size_restore_failed");
+        };
+        // Sessão que acabou não tem janela a repor.
         if !out.status.success() {
-            return;
+            return Ok(());
         }
         if !String::from_utf8_lossy(&out.stdout).split_whitespace().any(|t| t == tty) {
             break;
         }
         if tokio::time::Instant::now() >= until {
-            tracing::warn!(session = %target, "terminal: cliente do painel ainda anexado após 3 s; tamanho não reposto");
-            return;
+            return Err("client_still_attached");
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    restore_size(cfg, target, saved).await;
+    restore_size(cfg, target, saved).await
 }
 
 /// Ao subir: sessões que guardaram o tamanho e não têm painel são de um Rust que caiu no meio.
@@ -217,8 +241,8 @@ pub(crate) async fn restore_after_crash(cfg: &TermConfig, open: impl Fn(&str) ->
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         let Some((name, value)) = line.split_once('\t') else { continue };
         if let Some(saved) = parse_size(value, 'x') {
-            if !open(name) {
-                restore_size(cfg, name, saved).await;
+            if !open(name) && restore_size(cfg, name, saved).await.is_err() {
+                tracing::warn!(session = %name, "terminal: tamanho deixado por um Rust anterior não reposto");
             }
         }
     }

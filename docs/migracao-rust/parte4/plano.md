@@ -256,7 +256,7 @@ por painel, Python × Rust), contrato nos dois lados, `medicao.md`.
 
 - [x] **Step 17: Ler "Regras vigentes" de `windows.md` e as entradas do terminal em `frontend.md`; testes, vistos falhar; medida "antes" (`medir-terminal.py`, release)**
 - [x] **Step 18: Rotas, porta de entrada, PTY, desmontagem, reposição; contrato; testes focados**
-- [ ] **Step 19: Medida "depois"; `medicao.md`; revisar**
+- [x] **Step 19: Medida "depois"; `medicao.md`; revisar**
 
 ### Task 9: Python como porteiro, 409 e capacidade (contrato)
 
