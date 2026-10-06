@@ -499,6 +499,8 @@ pub struct Hangar {
     plugin_hovered: HashSet<String>,
     /// Campos (`Input`) dos mods, por `plugin_ui::field_id`: nascem quando a árvore os traz e saem com ela.
     plugin_fields: HashMap<String, crate::plugin_ui::Field>,
+    /// Quantos eventos `plugin_ui` chegaram: separa o desenho novo do mod do redesenho do app, para os campos.
+    plugin_draws: u64,
     /// Últimos ids de aviso de mod (SSE `plugin_toast`) já mostrados; só os recentes voltam na reconexão.
     plugin_toasts_seen: std::collections::VecDeque<String>,
     /// Avisos de mod na tela, do mais antigo ao mais novo.
@@ -810,7 +812,7 @@ impl Hangar {
             attachments: HashMap::new(), attach_seq: 0, uploading: HashMap::new(), commands: HashMap::new(),
             suggest_pick: 0, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None, confirm_no_ask: false,
             mention: Default::default(),
-            terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_shown: None, plugin_columns: None, plugin_source: None, plugin_local_tab: None, plugin_hovered: HashSet::new(), plugin_fields: HashMap::new(), plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
+            terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_shown: None, plugin_columns: None, plugin_source: None, plugin_local_tab: None, plugin_hovered: HashSet::new(), plugin_fields: HashMap::new(), plugin_draws: 0, plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
             settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(),
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
@@ -1836,6 +1838,7 @@ impl Hangar {
                 self.plugin_shown = s.shown_id;
                 self.plugin_columns = s.columns;
                 self.plugin_source = s.source;
+                self.plugin_draws += 1;
                 self.keep_plugin_hovered();
                 return (true, Changed::Screen);
             }
@@ -5656,8 +5659,9 @@ impl Hangar {
         })
     }
 
-    /// Os campos dos mods acompanham a árvore. O valor desenhado só entra com o campo fora de foco, para um redesenho
-    /// atrasado não apagar o que se digita.
+    /// Os campos dos mods acompanham a árvore. O valor desenhado entra conforme o `FieldSync`: com a pessoa no campo ele
+    /// fica pendente (um redesenho atrasado não apaga o que se digita) e entra quando o campo perde o foco; logo depois
+    /// do envio, entra mesmo com foco.
     fn sync_plugin_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let wanted: Vec<(String, String, crate::plugin_ui::FieldSpec)> =
             std::iter::once((crate::plugin_ui::BAND_SITE.to_owned(), &self.plugin_band))
@@ -5668,21 +5672,29 @@ impl Hangar {
         self.plugin_fields.retain(|id, _| wanted.iter().any(|(w, _, _)| w == id));
         for (id, site, spec) in wanted {
             if let Some(field) = self.plugin_fields.get_mut(&id) {
-                if field.drawn != spec.value && !field.state.read(cx).focus_handle(cx).is_focused(window) {
-                    let value = spec.value.clone();
+                // Este desenho só é novo para o campo uma vez por evento `plugin_ui`; os outros são redesenhos do app.
+                let fresh = (field.seen != self.plugin_draws).then_some(spec.value.as_str());
+                field.seen = self.plugin_draws;
+                let (shown, focused) = {
+                    let input = field.state.read(cx);
+                    (input.value().to_string(), input.focus_handle(cx).is_focused(window))
+                };
+                if let Some(value) = field.sync.draw(fresh, &shown, focused) {
                     field.state.update(cx, |input, cx| input.set_value(value, window, cx));
                 }
-                field.drawn = spec.value;
                 continue;
             }
             let state = cx.new(|cx| InputState::new(window, cx).placeholder(spec.placeholder.clone()).default_value(spec.value.clone()));
             let key = spec.key.clone();
             let changes = cx.subscribe_in(&state, window, move |this, input, event: &InputEvent, _, cx| {
+                // A faixa de baixo é uma área guardada: sem redesenho, o valor pendente só entraria no próximo evento.
+                if matches!(event, InputEvent::Blur) { this.redraw(panes::Area::Bottom, cx); return; }
                 let Some(kind) = crate::plugin_ui::input_kind(event) else { return };
                 let value = input.read(cx).value().to_string();
                 this.input_plugin(&site, &key, kind, value);
             });
-            self.plugin_fields.insert(id, crate::plugin_ui::Field { state, drawn: spec.value, _changes: changes });
+            let field = crate::plugin_ui::Field { state, sync: Default::default(), seen: self.plugin_draws, _changes: changes };
+            self.plugin_fields.insert(id, field);
         }
     }
 
@@ -5692,6 +5704,9 @@ impl Hangar {
     fn input_plugin(&mut self, site: &str, key: &str, kind: &'static str, value: String) {
         let read_only = self.selected.as_ref().is_some_and(|s| s.read_only());
         let Some(body) = crate::plugin_ui::input_request(self.plugin_source, read_only, site, key, kind, &value) else { return };
+        if let Some(field) = self.plugin_fields.get_mut(&crate::plugin_ui::field_id(site, key)) {
+            if kind == "submit" { field.sync.submitted() } else { field.sync.typed() }
+        }
         self.spawn_plugin("input", body, Payload::PluginInput);
     }
 

@@ -36,8 +36,39 @@ pub type Submit = Rc<dyn Fn(&str, &str, &mut Window, &mut App)>;
 #[derive(Debug, PartialEq)]
 pub struct FieldSpec { pub key: String, pub placeholder: String, pub value: String }
 
-/// O campo de texto que o app mantém para um `Input`, pela `key`: `drawn` é o último valor que o mod desenhou.
-pub struct Field { pub state: Entity<InputState>, pub drawn: String, pub _changes: Subscription }
+/// O campo de texto que o app mantém para um `Input`, pela `key`. `seen` é o desenho do mod (contador de eventos
+/// `plugin_ui`) que o campo já conferiu; `sync` decide quando o valor desenhado entra.
+pub struct Field { pub state: Entity<InputState>, pub sync: FieldSync, pub seen: u64, pub _changes: Subscription }
+
+/// Quando o valor que o mod desenha entra no campo. Só conta como posto quando é posto: com a pessoa no campo ele fica
+/// pendente e entra quando o campo perde o foco. Logo depois do envio do próprio campo, o desenho seguinte entra mesmo
+/// com foco: é como o mod limpa o campo depois do envio, e o valor pode ser igual ao de antes (vazio).
+#[derive(Default)]
+pub struct FieldSync { pending: Option<String>, submitted: bool }
+
+impl FieldSync {
+    /// Um desenho do app. `drawn` é o valor de um desenho novo do mod (`None` num redesenho do app sem evento novo),
+    /// `shown` o que o campo mostra e `focused` se a pessoa está nele. Devolve o valor a pôr no campo agora.
+    pub fn draw(&mut self, drawn: Option<&str>, shown: &str, focused: bool) -> Option<String> {
+        let Some(drawn) = drawn else {
+            return if focused { None } else { self.pending.take().filter(|v| v != shown) };
+        };
+        // Depois do envio, um desenho igual ao que se vê (o eco da última tecla) não é a resposta ao envio: a vez fica.
+        if !focused || (self.submitted && drawn != shown) {
+            self.pending = None;
+            self.submitted = false;
+            return (drawn != shown).then(|| drawn.to_owned());
+        }
+        self.pending = Some(drawn.to_owned());
+        None
+    }
+
+    /// O campo mandou `submit` (Enter ou o rótulo de envio): o próximo desenho do mod entra mesmo com foco.
+    pub fn submitted(&mut self) { self.submitted = true; }
+
+    /// A pessoa voltou a digitar: acabou a vez do desenho que responde ao envio.
+    pub fn typed(&mut self) { self.submitted = false; }
+}
 
 /// Os `Input` com `key` de uma árvore, na ordem dela.
 pub fn fields(tree: &Value) -> Vec<FieldSpec> {
@@ -784,7 +815,7 @@ fn unmark(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     // Importação explícita: `super::*` traz o `test` do gpui_kit, e o `#[test]` passaria a ser o dele.
-    use super::{accepts_typing, active_pane, box_background, button_key, cell_color, color, field_id, field_width, fields, CELL_W, fills_place, follow_local, follows_server,
+    use super::{accepts_typing, active_pane, box_background, button_key, cell_color, color, field_id, field_width, fields, FieldSync, CELL_W, fills_place, follow_local, follows_server,
         hover_props, input_kind, input_request, is_empty, keep_hovered, pane_ids, plain_deep, raster_row, raster_runs, safe_href,
         scope_active, surfaces, text_row, toast, wants_hover, FieldSpec, Surfaces, Toast, UiSource};
     use gpui_kit::component::input::InputEvent;
@@ -1034,6 +1065,41 @@ mod tests {
         let drawn = fields(&amostras()["campoV18"]).remove(0).value;
         assert_eq!(input_request(Some(UiSource::Surface), false, "vitrine-campos", "V18-campo", "change", &drawn),
             Some(json!({"site": "vitrine-campos", "key": "V18-campo", "kind": "change", "value": drawn})));
+    }
+
+    #[test]
+    fn focused_redraw_keeps_the_typed_text_and_blur_applies_the_pending_value() {
+        let mut sync = FieldSync::default();
+        // Desenho novo do mod com a pessoa digitando: o texto fica, o valor fica pendente.
+        assert_eq!(sync.draw(Some("ab"), "abc", true), None);
+        // Redesenho do app ainda em foco: nada muda.
+        assert_eq!(sync.draw(None, "abc", true), None);
+        // Fora de foco, o pendente entra uma vez só.
+        assert_eq!(sync.draw(None, "abc", false).as_deref(), Some("ab"));
+        assert_eq!(sync.draw(None, "ab", false), None);
+        // O desenho que chega com o campo fora de foco entra na hora; igual ao que se vê, nada a fazer.
+        assert_eq!(sync.draw(Some("x"), "ab", false).as_deref(), Some("x"));
+        assert_eq!(sync.draw(Some("x"), "x", false), None);
+    }
+
+    #[test]
+    fn the_redraw_right_after_the_own_submit_applies_even_with_focus() {
+        // É assim que o mod limpa o campo depois do envio: o valor desenhado é o mesmo de antes (vazio), mas entra.
+        let mut sync = FieldSync::default();
+        sync.submitted();
+        assert_eq!(sync.draw(Some(""), "abc", true).as_deref(), Some(""));
+        // Só o primeiro: o seguinte, em foco, volta a esperar.
+        assert_eq!(sync.draw(Some("zz"), "d", true), None);
+        // O eco da digitação que chega depois do Enter (igual ao que se vê) não gasta a vez da resposta ao envio.
+        let mut sync = FieldSync::default();
+        sync.submitted();
+        assert_eq!(sync.draw(Some("abc"), "abc", true), None);
+        assert_eq!(sync.draw(Some(""), "abc", true).as_deref(), Some(""));
+        // Digitar de novo fecha a vez: o desenho seguinte não apaga o que se digita.
+        let mut sync = FieldSync::default();
+        sync.submitted();
+        sync.typed();
+        assert_eq!(sync.draw(Some(""), "abcd", true), None);
     }
 
     #[test]

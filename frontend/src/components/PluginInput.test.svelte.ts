@@ -1,7 +1,9 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { flushSync, mount, tick, unmount } from 'svelte';
+import type { PluginNode as Node } from '@hangar/core';
 import * as m from '../paraglide/messages';
+import PluginBand from './PluginBand.svelte';
 import PluginInput from './PluginInput.svelte';
 
 let alvo: HTMLElement | null = null;
@@ -81,6 +83,82 @@ describe('Input de mod', () => {
     campo.blur();
     props.value = 'abcd';
     flushSync();
+    expect(campo.value).toBe('abcd');
+  });
+
+  // Cada evento `plugin_ui` traz uma árvore nova: `frame` muda mesmo quando o `value` desenhado é o mesmo.
+  function montarVivo(value: string) {
+    const onInput = vi.fn();
+    const props = $state({ label: '', placeholder: '', value, submitLabel: '', onInput, frame: {} as object });
+    alvo = document.createElement('div');
+    document.body.append(alvo);
+    comp = mount(PluginInput, { target: alvo, props });
+    flushSync();
+    const campo = alvo.querySelector('input')!;
+    const redesenho = (v: string) => { props.value = v; props.frame = {}; flushSync(); };
+    const digitar = (texto: string) => { campo.value = texto; campo.dispatchEvent(new Event('input', { bubbles: true })); };
+    const enter = () => campo.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    return { campo, redesenho, digitar, enter, onInput };
+  }
+
+  it('redesenho em foco fica pendente e entra quando o campo perde o foco', () => {
+    const { campo, redesenho, digitar } = montarVivo('');
+    campo.focus();
+    digitar('abc');
+    redesenho('ab');
+    expect(campo.value).toBe('abc');
+    campo.blur();
+    flushSync();
+    expect(campo.value).toBe('ab');
+  });
+
+  it('o redesenho logo depois do próprio envio entra mesmo com foco, ainda que o valor seja o mesmo de antes', () => {
+    const { campo, redesenho, digitar, enter, onInput } = montarVivo('');
+    campo.focus();
+    digitar('abc');
+    enter();
+    expect(onInput).toHaveBeenLastCalledWith('submit', 'abc');
+    // O eco da última tecla, igual ao que se vê, não gasta a vez da resposta ao envio.
+    redesenho('abc');
+    expect(campo.value).toBe('abc');
+    // O mod limpa o campo: o valor desenhado volta a ser vazio, como antes da digitação.
+    redesenho('');
+    expect(campo.value).toBe('');
+    expect(document.activeElement).toBe(campo);
+    // Só a resposta ao envio: o seguinte, em foco, volta a esperar.
+    digitar('x');
+    redesenho('y');
+    expect(campo.value).toBe('x');
+  });
+
+  it('na faixa, a árvore nova do evento seguinte ao envio limpa o campo mesmo com o mesmo valor desenhado', () => {
+    const arvore = (): Node => ({ type: 'Box', children: [
+      { type: 'Text', children: ['campo'] },
+      { type: 'Input', props: { key: 'E-campo', value: '', placeholder: 'digite' } }] });
+    const onInput = vi.fn();
+    const props = $state({ tree: arvore(), onInput });
+    alvo = document.createElement('div');
+    document.body.append(alvo);
+    comp = mount(PluginBand, { target: alvo, props });
+    flushSync();
+    const campo = alvo.querySelector('input')!;
+    campo.focus();
+    campo.value = 'abc';
+    campo.dispatchEvent(new Event('input', { bubbles: true }));
+    campo.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(onInput).toHaveBeenLastCalledWith('above-prompt', 'E-campo', 'submit', 'abc');
+    props.tree = arvore();
+    flushSync();
+    expect(campo.value).toBe('');
+  });
+
+  it('digitar de novo depois do envio fecha a vez: o redesenho seguinte não apaga o texto', () => {
+    const { campo, redesenho, digitar, enter } = montarVivo('');
+    campo.focus();
+    digitar('abc');
+    enter();
+    digitar('abcd');
+    redesenho('');
     expect(campo.value).toBe('abcd');
   });
 });
