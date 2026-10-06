@@ -48,6 +48,27 @@ const SECTIONS: [&[&str]; 6] = [&["transcription_base_url", "transcription_model
 /// Seção que contém outra: abrir a de dentro abre o caminho até ela.
 const PARENTS: [(usize, usize); 2] = [(2, 1), (4, 3)];
 
+/// Lista ordenada de serviços de transcrição; vazia, vale o serviço único das chaves de cima.
+const PROVIDERS: &str = "transcription_providers";
+/// Campos de texto de um serviço, na ordem dos campos em `provider_inputs`.
+const PROVIDER_FIELDS: [&str; 3] = ["base_url", "api_key", "model"];
+
+/// Espera de cota de um serviço, como `/api/transcription/providers/status` manda.
+#[derive(Clone, Debug, PartialEq)]
+struct ProviderStatus { id: String, name: String, waiting_until: Option<f64>, reason: Option<String> }
+
+fn parse_provider_status(value: &Value) -> Result<Vec<ProviderStatus>, String> {
+    let list = value.get("providers").and_then(Value::as_array).ok_or_else(|| tr("invalid_response"))?;
+    Ok(list.iter().filter_map(|p| Some(ProviderStatus {
+        id: p.get("id")?.as_str()?.to_owned(),
+        name: p.get("name").and_then(Value::as_str).unwrap_or("").to_owned(),
+        waiting_until: p.get("waiting_until").and_then(Value::as_f64),
+        reason: p.get("reason").and_then(Value::as_str).filter(|r| !r.is_empty()).map(str::to_owned),
+    })).collect())
+}
+
+fn provider_text<'a>(item: &'a Value, field: &str) -> &'a str { item.get(field).and_then(Value::as_str).unwrap_or("") }
+
 /// Um ajuste da voz (`AJUSTES_VOZ` do web): chave, nome das mensagens, padrão, mínimo e máximo.
 struct Tune { key: &'static str, name: &'static str, default: i64, min: i64, max: i64 }
 
@@ -212,6 +233,10 @@ pub(in crate::app) struct ServerConfig {
     /// Um slider por ajuste, com o foco do invólucro que dá teclado e nome a ele.
     tunes: Vec<(&'static str, Entity<SliderState>, FocusHandle)>,
     quiet: Quiet,
+    /// Campos de cada serviço da lista, pela identidade dele: subir e descer não troca o que está digitado.
+    provider_inputs: Vec<(String, [Entity<InputState>; 3], Vec<Subscription>)>,
+    /// Espera de cota de cada serviço, relida ao abrir a Voz.
+    provider_status: Remote<Vec<ProviderStatus>>,
     /// Servidor e chave do rascunho: trocar qualquer um dos dois é outro dono, e o rascunho não passa para ele.
     owner: String,
     _subscriptions: Vec<Subscription>,
@@ -246,6 +271,7 @@ pub(super) enum ServerConfigReply {
     QuietSaved(u64, [String; 2], Result<Value, Failure>),
     Voices(u64, Result<Value, Failure>),
     Usage(u64, Result<Value, Failure>),
+    ProviderStatus(u64, Result<Value, Failure>),
 }
 
 impl ServerConfig {
@@ -261,6 +287,7 @@ impl ServerConfig {
         (self.read, self.env) = (Map::new(), Vec::new());
         (self.quiet.load, self.quiet.saving, self.quiet.note) = (Remote::default(), false, None);
         (self.voices, self.usage, self.voice_picker) = (Remote::default(), Remote::default(), None);
+        self.provider_status = Remote::default();
     }
 
     /// Valor que a tela mostra: o do rascunho, senão o do servidor.
@@ -346,15 +373,72 @@ impl ServerConfig {
     /// Chave guardada no servidor e que não sai no próximo Salvar.
     fn key_set(&self, key: &str) -> bool { self.secret_mask(key).is_some() && !self.removing(key) }
 
-    /// Estado da transcrição, `None` desativada. Contra o rascunho, sem esperar o Salvar, como o web.
-    fn transcribe_status(&self) -> Option<&'static str> {
+    /// Estado do serviço único (chave e endpoint de cima), contra o rascunho.
+    fn legacy_status(&self) -> Option<&'static str> {
         self.key_set("groq_api_key").then(|| if self.filled("transcription_base_url") { "voice_status_custom" } else { "voice_status_on" })
     }
 
-    /// Estado da organização: com endpoint próprio vale a chave dele; sem, o padrão reusa a da transcrição padrão.
+    /// Estado da transcrição, `None` desativada. Com a lista, quem transcreve é ela.
+    fn transcribe_status(&self) -> Option<&'static str> {
+        if self.providers().is_empty() { self.legacy_status() } else { Some("voice_status_custom") }
+    }
+
+    /// Estado da organização: com endpoint próprio vale a chave dele; sem, o padrão reusa a chave do serviço único, que a
+    /// lista de transcrição não muda.
     fn cleanup_status(&self) -> Option<&'static str> {
         if self.filled("llm_base_url") { return self.key_set("llm_api_key").then_some("voice_status_custom"); }
-        (self.transcribe_status() == Some("voice_status_on")).then_some("voice_status_default")
+        (self.legacy_status() == Some("voice_status_on")).then_some("voice_status_default")
+    }
+
+    /// Lista de serviços de transcrição (rascunho ou servidor).
+    fn providers(&self) -> Vec<Value> { self.current(PROVIDERS).as_array().cloned().unwrap_or_default() }
+
+    /// Máscara da chave guardada de um serviço, como a última leitura trouxe.
+    fn provider_mask(&self, id: &str) -> Option<String> {
+        self.fields.get(PROVIDERS)?.get("valor")?.as_array()?.iter().find(|p| provider_text(p, "id") == id)
+            .map(|p| provider_text(p, "api_key").to_owned()).filter(|mask| !mask.is_empty())
+    }
+
+    /// Novo serviço no fim da lista; a identidade nasce aqui e não muda mais.
+    fn add_provider(&mut self, id: String) -> bool {
+        let mut list = self.providers();
+        list.push(json!({"id": id, "kind": "openai", "name": "", "base_url": "", "api_key": "", "model": ""}));
+        self.stage(PROVIDERS, Value::Array(list))
+    }
+
+    fn remove_provider(&mut self, id: &str) -> bool {
+        let list = self.providers().into_iter().filter(|p| provider_text(p, "id") != id).collect();
+        self.stage(PROVIDERS, Value::Array(list))
+    }
+
+    /// Troca de lugar com o vizinho de cima (`up`) ou de baixo; na ponta, nada muda.
+    fn move_provider(&mut self, id: &str, up: bool) -> bool {
+        let mut list = self.providers();
+        let Some(at) = list.iter().position(|p| provider_text(p, "id") == id) else { return false };
+        let Some(other) = (if up { at.checked_sub(1) } else { Some(at + 1).filter(|n| *n < list.len()) }) else { return false };
+        list.swap(at, other);
+        self.stage(PROVIDERS, Value::Array(list))
+    }
+
+    /// Um campo de um serviço. Chave apagada volta à máscara guardada: o servidor lê a máscara como "mantém a chave".
+    fn edit_provider(&mut self, id: &str, field: &str, text: String) -> bool {
+        let mask = self.provider_mask(id);
+        let mut list = self.providers();
+        let Some(item) = list.iter_mut().find(|p| provider_text(p, "id") == id) else { return false };
+        item[field] = Value::String(if field == "api_key" && text.is_empty() { mask.unwrap_or_default() } else { text });
+        self.stage(PROVIDERS, Value::Array(list))
+    }
+
+    /// Até quando o serviço espera a cota voltar, e por quê, se ainda espera.
+    fn provider_waiting(&self, id: &str, now: f64) -> Option<(f64, Option<String>)> {
+        let status = self.provider_status.ok()?.iter().find(|s| s.id == id)?;
+        status.waiting_until.filter(|until| *until > now).map(|until| (until, status.reason.clone()))
+    }
+
+    /// Serviço da lista no rascunho sem chave: o servidor recusaria (400) o Salvar inteiro, de todas as páginas, porque
+    /// o rascunho é um só. O Salvar espera a chave.
+    fn provider_missing_key(&self) -> bool {
+        self.draft.contains_key(PROVIDERS) && self.providers().iter().any(|p| provider_text(p, "api_key").is_empty())
     }
 
     /// A lista mostra o valor atual; valor que ela não conhece fica sem escolha, em vez de parecer o padrão.
@@ -441,6 +525,7 @@ impl Hangar {
     pub(super) fn server_config_opened(&mut self, page: Page, cx: &mut Context<Self>) {
         if !self.server_config.saving { self.load_server_config(cx); }
         if page == Page::Notifications && !self.server_config.quiet.saving && !self.quiet_dirty(cx) { self.load_quiet(cx); }
+        if page == Page::Voice { self.load_provider_status(cx); }
     }
 
     fn load_server_config(&mut self, cx: &mut Context<Self>) {
@@ -471,9 +556,85 @@ impl Hangar {
         cx.notify();
     }
 
+    /// Quem está em espera de cota e até quando: só leitura, nada vai ao rascunho.
+    fn load_provider_status(&mut self, cx: &mut Context<Self>) {
+        let Some(api) = self.api.clone() else { return };
+        let seq = self.server_config.provider_status.start();
+        let done = self.server_config_send_later();
+        self.runtime.spawn(async move {
+            done(ServerConfigReply::ProviderStatus(seq, api.server_read(&["transcription", "providers", "status"], &[], 15).await)).await
+        });
+        cx.notify();
+    }
+
+    /// Um campo por texto de cada serviço, criado quando o serviço aparece e solto quando ele sai. Sem a lista no
+    /// rascunho, os campos voltam ao que o servidor tem; a chave mostra só o que for digitado aqui.
+    fn sync_provider_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let providers = self.server_config.providers();
+        self.server_config.provider_inputs.retain(|(id, ..)| providers.iter().any(|p| provider_text(p, "id") == id));
+        for item in &providers {
+            let id = provider_text(item, "id").to_owned();
+            if id.is_empty() || self.server_config.provider_inputs.iter().any(|(known, ..)| *known == id) { continue; }
+            let mut subscriptions = Vec::new();
+            let inputs = PROVIDER_FIELDS.map(|field| {
+                let secret = field == "api_key";
+                let input = cx.new(|cx| InputState::new(window, cx).masked(secret));
+                let value = if secret { String::new() } else { provider_text(item, field).to_owned() };
+                input.update(cx, |state, cx| state.set_value(value, window, cx));
+                let id = id.clone();
+                subscriptions.push(cx.subscribe_in(&input, window, move |this: &mut Hangar, input, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.server_config.edit_provider(&id, field, input.read(cx).value().to_string());
+                        cx.notify();
+                    }
+                }));
+                input
+            });
+            self.server_config.provider_inputs.push((id, inputs, subscriptions));
+        }
+        let staged = self.server_config.draft.contains_key(PROVIDERS);
+        let s = &self.server_config;
+        for (id, [endpoint, key, model], _) in &s.provider_inputs {
+            let Some(item) = providers.iter().find(|p| provider_text(p, "id") == id) else { continue };
+            let key_hint = tr(if s.provider_mask(id).is_some() { "server_secret_paste_new" } else { "server_secret_paste" });
+            key.update(cx, |state, cx| state.set_placeholder(key_hint, window, cx));
+            // Modelo e endpoint padrão do servidor: identificadores, não frase de tela.
+            let model_hint = if provider_text(item, "kind") == "elevenlabs" { "scribe_v2" } else { "whisper-large-v3" };
+            model.update(cx, |state, cx| state.set_placeholder(model_hint, window, cx));
+            endpoint.update(cx, |state, cx| state.set_placeholder("https://api.groq.com/openai/v1", window, cx));
+            if staged { continue; }
+            for (field, input) in PROVIDER_FIELDS.iter().zip([endpoint, key, model]) {
+                let value = if *field == "api_key" { String::new() } else { provider_text(item, field).to_owned() };
+                input.update(cx, |state, cx| if state.value() != value.as_str() { state.set_value(value, window, cx) });
+            }
+        }
+    }
+
+    fn add_transcription_provider(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // ponytail: id pelo relógio em nanossegundos; dois cliques nunca caem no mesmo instante.
+        let id = format!("p{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()));
+        if self.server_config.add_provider(id) { self.sync_provider_inputs(window, cx); }
+        cx.notify();
+    }
+
+    fn remove_transcription_provider(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.server_config.remove_provider(id) { self.sync_provider_inputs(window, cx); }
+        cx.notify();
+    }
+
+    fn move_transcription_provider(&mut self, id: &str, up: bool, cx: &mut Context<Self>) {
+        self.server_config.move_provider(id, up);
+        cx.notify();
+    }
+
+    fn set_provider_kind(&mut self, id: &str, kind: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.server_config.edit_provider(id, "kind", kind.to_owned()) { self.sync_provider_inputs(window, cx); }
+        cx.notify();
+    }
+
     fn save_server_config(&mut self, cx: &mut Context<Self>) {
         let s = &mut self.server_config;
-        if s.saving || s.draft.is_empty() { return; }
+        if s.saving || s.draft.is_empty() || s.provider_missing_key() { return; }
         let Some(api) = self.api.clone() else { return };
         let sent = s.draft.snapshot();
         s.save_seq += 1;
@@ -628,6 +789,10 @@ impl Hangar {
                 let parsed = result.map_err(|e| Self::failure(&e)).map(|r| ["usados", "limite"].map(|k| r.get(k).and_then(Value::as_i64)));
                 self.server_config.usage.finish(seq, parsed);
             }
+            ServerConfigReply::ProviderStatus(seq, result) => {
+                let parsed = result.map_err(|e| Self::failure(&e)).and_then(|r| parse_provider_status(&r));
+                self.server_config.provider_status.finish(seq, parsed);
+            }
         }
         cx.notify();
     }
@@ -706,6 +871,7 @@ impl Hangar {
             if !self.server_config.draft.contains_key(key) { self.show_tune(key, window, cx); }
         }
         if !self.server_config.draft.contains_key("elevenlabs_voice_id") { self.show_voice(window, cx); }
+        self.sync_provider_inputs(window, cx);
     }
 
     /// O slider no valor atual (o do rascunho ou do servidor, senão o padrão).
@@ -1056,6 +1222,7 @@ impl Hangar {
                     .on_click(|_, _, cx| cx.open_url("https://console.groq.com/keys")))
                 .child(self.section_toggle(0, "voice_transcribe_other", cx)))
             .when(s.open[0], |el| el.child(div().mt(px(8.)).child(rows(SECTIONS[0], cx))))
+            .children(self.render_providers(cx))
             .child(div().mt(px(28.)).mb(px(10.)).text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(tr("voice_after")))
             .child(settings_box().child(self.hands_free_row(cx)).child(self.style_row(cx)).child(self.config_row(field("ditado_vocabulario"), cx)))
             .when_some(self.appearance_note.clone(), |el, note| el.child(div().id("voice-hands-free-save-error").role(Role::Alert)
@@ -1066,6 +1233,92 @@ impl Hangar {
                 .child(div().mt(px(8.)).flex().child(self.section_toggle(2, "voice_briefing_own", cx)))
                 .when(s.open[2], |el| el.child(div().mt(px(8.)).child(rows(SECTIONS[2], cx)))))
             .child(self.render_read_aloud(cx))
+    }
+
+    /// Serviços de transcrição em ordem: o primeiro transcreve, e quem falha ou fica sem cota passa a vez. Servidor cuja
+    /// leitura não trouxe a lista não mostra o bloco.
+    fn render_providers(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let s = &self.server_config;
+        if !s.fields.contains_key(PROVIDERS) { return None; }
+        let providers = s.providers();
+        let now = chrono::Utc::now().timestamp() as f64;
+        let last = providers.len().saturating_sub(1);
+        let line = || div().mt(px(-1.)).border_t_1().border_color(theme::border()).px_4().py(px(14.));
+        let rows = providers.iter().enumerate().map(|(n, item)| {
+            let id = provider_text(item, "id").to_owned();
+            let kind = provider_text(item, "kind");
+            let status_name = s.provider_status.ok().and_then(|list| list.iter().find(|st| st.id == id)).map(|st| st.name.clone());
+            let name = Some(provider_text(item, "name").to_owned()).filter(|n| !n.is_empty()).or(status_name.filter(|n| !n.is_empty()))
+                .unwrap_or_else(|| tr(if kind == "elevenlabs" { "voice_provider_kind_elevenlabs" } else { "voice_provider_kind_openai" }));
+            let title = format!("{}. {name}", n + 1);
+            let waiting = s.provider_waiting(&id, now).map(|(until, reason)| {
+                // Mesmo formato da hora das mensagens: só a hora hoje, com o dia traduzido antes disso.
+                let when = super::stamp(Some(until)).unwrap_or_default();
+                let text = tr("voice_provider_waiting").replace("{until}", &when);
+                match reason { Some(reason) => format!("{text}: {reason}"), None => text }
+            });
+            let mask = s.provider_mask(&id).filter(|mask| provider_text(item, "api_key") == mask);
+            let no_key = provider_text(item, "api_key").is_empty();
+            let inputs = s.provider_inputs.iter().find(|(known, ..)| *known == id).map(|(_, inputs, _)| inputs.clone());
+            let labeled = |label: &'static str, input: Entity<InputState>| div().flex().flex_col().gap(px(4.))
+                .child(div().text_size(px(12.5)).text_color(theme::muted()).child(tr(label)))
+                .child(Input::new(&input).small().aria_label(format!("{}, {title}", tr(label))));
+            let fields = inputs.map(|[endpoint, key, model]| div().flex().flex_col().gap(px(8.))
+                .when(kind != "elevenlabs", |el| el.child(labeled("voice_provider_endpoint", endpoint)))
+                .child(labeled("voice_provider_key", key))
+                .children(mask.map(|mask| div().flex().items_center().gap(px(6.)).text_size(px(12.5)).text_color(theme::muted())
+                    .child(div().font_family(theme::MONO).child(mask)).child(tr("server_secret_set"))))
+                .when(no_key, |el| el.child(div().id(SharedString::from(format!("provider-{id}-no-key"))).role(Role::Alert)
+                    .text_size(px(12.5)).text_color(theme::warning()).child(tr("voice_provider_missing_key"))))
+                .child(labeled("voice_provider_model", model)));
+            let kinds = div().flex().gap(px(6.)).children([("openai", "voice_provider_kind_openai"), ("elevenlabs", "voice_provider_kind_elevenlabs")]
+                .map(|(value, label)| {
+                    let id = id.clone();
+                    let on = if value == "elevenlabs" { kind == "elevenlabs" } else { kind != "elevenlabs" };
+                    // `selected` só pinta; o leitor de tela sabe o tipo escolhido pelo estado de alternância.
+                    Button::new(SharedString::from(format!("provider-{id}-kind-{value}"))).outline().xsmall().label(tr(label)).selected(on).toggled(on)
+                        .on_click(cx.listener(move |this, _, window, cx| this.set_provider_kind(&id, value, window, cx)))
+                }));
+            let (up, down, remove) = (id.clone(), id.clone(), id.clone());
+            let up_label = tr("voice_provider_up").replace("{name}", &name);
+            let down_label = tr("voice_provider_down").replace("{name}", &name);
+            line().flex().flex_col().gap(px(10.))
+                .child(div().flex().items_center().gap(px(6.))
+                    .child(div().flex_1().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(title.clone()))
+                    .child(Button::new(SharedString::from(format!("provider-{id}-up"))).ghost().xsmall().icon(IconName::ArrowUp)
+                        .disabled(n == 0).tooltip(up_label.clone()).accessibility_label(up_label)
+                        .on_click(cx.listener(move |this, _, _, cx| this.move_transcription_provider(&up, true, cx))))
+                    .child(Button::new(SharedString::from(format!("provider-{id}-down"))).ghost().xsmall().icon(IconName::ArrowDown)
+                        .disabled(n == last).tooltip(down_label.clone()).accessibility_label(down_label)
+                        .on_click(cx.listener(move |this, _, _, cx| this.move_transcription_provider(&down, false, cx))))
+                    .child(Button::new(SharedString::from(format!("provider-{id}-remove"))).ghost().xsmall().icon(IconName::Close)
+                        .label(tr("server_remove")).accessibility_label(tr("voice_provider_remove").replace("{name}", &name))
+                        .on_click(cx.listener(move |this, _, window, cx| this.remove_transcription_provider(&remove, window, cx)))))
+                .children(waiting.map(|text| div().id(SharedString::from(format!("provider-{id}-waiting"))).role(Role::Status)
+                    .text_size(px(12.5)).text_color(theme::warning()).whitespace_normal().child(text)))
+                .child(kinds)
+                .children(fields)
+        }).collect::<Vec<_>>();
+        let staged = s.draft.contains_key(PROVIDERS);
+        let status_error = s.provider_status.value.as_ref().and_then(|v| v.as_ref().err()).cloned();
+        Some(div().mt(px(16.))
+            .child(div().mb(px(10.)).flex().items_start().gap(px(16.))
+                .child(div().flex_1().min_w_0().flex().flex_col().gap(px(4.))
+                    .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(tr("voice_providers")))
+                    .child(div().text_size(px(13.)).text_color(theme::muted()).whitespace_normal().child(tr("voice_providers_help"))))
+                .when(staged, |el| el.child(Button::new("voice-providers-undo").ghost().xsmall().label(tr("server_undo"))
+                    .on_click(cx.listener(|this, _, window, cx| this.undo_config(PROVIDERS, window, cx))))))
+            .child(settings_box()
+                .when(providers.is_empty(), |el| el.child(line().text_sm().text_color(theme::muted()).whitespace_normal()
+                    .child(tr("voice_providers_empty"))))
+                .children(rows)
+                .child(line().py(px(10.)).flex().child(Button::new("voice-provider-add").outline().small().icon(IconName::Plus)
+                    .label(tr("voice_provider_add")).on_click(cx.listener(|this, _, window, cx| this.add_transcription_provider(window, cx))))))
+            .when_some(status_error, |el, error| el.child(div().mt_2().flex().items_center().gap(px(8.))
+                .child(div().id("voice-providers-status-error").role(Role::Alert).flex_1().min_w_0().text_sm().text_color(theme::danger())
+                    .whitespace_normal().child(tr("voice_providers_status_failed").replace("{error}", &error)))
+                .child(Button::new("voice-providers-status-retry").outline().small().label(tr("server_retry"))
+                    .on_click(cx.listener(|this, _, _, cx| this.load_provider_status(cx)))))))
     }
 
     /// Ler em voz alta (`VozSettings.svelte`, "Ler em voz alta"): ElevenLabs, leitor instalado e o limite da confirmação.
@@ -1304,13 +1557,14 @@ impl Hangar {
                 .when(s.saved.is_some(), |el| el.child(div().id("machines-saved").role(Role::Status).text_size(px(12.5))
                     .text_color(theme::success()).child(tr("server_saved"))))
                 .when(dirty || s.saving, |el| el.child(Button::new("machines-config-save").primary().small()
-                    .label(tr(if s.saving { "server_saving" } else { "server_save" })).loading(s.saving).disabled(s.saving)
+                    .label(tr(if s.saving { "server_saving" } else { "server_save" })).loading(s.saving).disabled(s.saving || s.provider_missing_key())
                     .on_click(cx.listener(|this, _, _, cx| this.save_server_config(cx)))))))
     }
 
     pub(super) fn server_config_footer(&self, page: Page, cx: &mut Context<Self>) -> Option<Div> {
         let s = &self.server_config;
         let dirty = !s.draft.is_empty();
+        let blocked = s.provider_missing_key();
         if !is_server_page(page) || s.load.loading || s.fields.is_empty() || !(dirty || s.saving || s.saved.is_some()) { return None; }
         // O botão fica na mesma coluna de 720px do conteúdo, não na borda da janela.
         // O erro do Salvar mora aqui, junto do botão, e não no fim da página: no Avançado ele ficava abaixo do `.env`, fora
@@ -1319,9 +1573,11 @@ impl Hangar {
             .when_some(s.save_error.clone(), |el, error| el.child(div().id("server-config-error").flex_1().min_w_0().truncate().text_right()
                 .text_size(px(12.5)).text_color(theme::danger()).child(error.clone())
                 .tooltip(move |window, cx| Tooltip::new(error.clone()).build(window, cx))))
+            .when(blocked, |el| el.child(div().id("server-config-blocked").role(Role::Status).flex_1().min_w_0().text_right()
+                .text_size(px(12.5)).text_color(theme::warning()).whitespace_normal().child(tr("server_save_blocked_provider_key"))))
             .when(s.saved.is_some(), |el| el.child(div().text_size(px(12.5)).text_color(theme::success()).child(tr("server_saved"))))
             .when(dirty || s.saving, |el| el.child(Button::new("server-config-save").primary().small()
-                .label(tr(if s.saving { "server_saving" } else { "server_save" })).loading(s.saving).disabled(s.saving)
+                .label(tr(if s.saving { "server_saving" } else { "server_save" })).loading(s.saving).disabled(s.saving || blocked)
                 .on_click(cx.listener(|this, _, _, cx| this.save_server_config(cx)))));
         Some(div().h(px(56.)).flex_shrink_0().border_t_1().border_color(theme::border()).bg(theme::chrome())
             .flex().items_center().justify_center().child(column))
@@ -1546,5 +1802,45 @@ mod tests {
         assert_eq!(text_of(&s.current("stall_seconds")), "30");
         assert!(s.edited_in_app("stall_seconds") && !s.edited_in_app("notify_dead"));
         assert_eq!(s.current("missing"), Value::Null);
+    }
+
+    #[test]
+    fn transcription_providers_edit_as_one_list_and_keep_the_stored_key() {
+        let mut s = ServerConfig::default();
+        assert!(!s.add_provider("a".into()), "sem leitura não há lista para editar");
+        s.fields.insert("transcription_providers".into(), json!({"valor": [
+            {"id": "a", "kind": "elevenlabs", "name": "", "base_url": "", "api_key": "sk_e••••1234", "model": ""}], "origem": "app"}));
+        assert!(!s.provider_missing_key(), "lista do servidor, sem rascunho");
+        assert!(s.add_provider("b".into()));
+        assert!(s.provider_missing_key(), "serviço novo sem chave segura o Salvar de todas as páginas");
+        assert!(s.edit_provider("b", "base_url", "https://api.groq.com/openai/v1".into()));
+        assert!(s.edit_provider("b", "api_key", "gsk_nova".into()));
+        assert!(!s.provider_missing_key());
+        assert!(s.move_provider("b", true));
+        assert!(!s.move_provider("b", true), "já é o primeiro");
+        let ids: Vec<String> = s.providers().iter().map(|p| super::provider_text(p, "id").to_owned()).collect();
+        assert_eq!(ids, ["b", "a"]);
+        assert!(s.edit_provider("a", "api_key", "digitada".into()));
+        assert!(s.edit_provider("a", "api_key", String::new()));
+        assert_eq!(super::provider_text(&s.providers()[1], "api_key"), "sk_e••••1234", "apagar o digitado volta à máscara: o servidor mantém a chave");
+        assert_eq!(super::provider_text(&s.providers()[0], "api_key"), "gsk_nova");
+        assert_eq!(s.transcribe_status(), Some("voice_status_custom"));
+        assert!(s.remove_provider("b") && s.remove_provider("a"));
+        assert_eq!(s.draft.get("transcription_providers"), Some(&json!([])), "lista vazia volta ao serviço único");
+        assert_eq!(s.transcribe_status(), None);
+    }
+
+    #[test]
+    fn provider_status_reads_the_wait_and_ignores_what_already_passed() {
+        let parsed = super::parse_provider_status(&json!({"providers": [
+            {"id": "a", "name": "ElevenLabs", "kind": "elevenlabs", "waiting_until": 2000.0, "reason": "cota esgotada"},
+            {"id": "b", "name": "api.groq.com · whisper-large-v3-turbo", "kind": "openai", "waiting_until": null, "reason": null}]})).unwrap();
+        assert_eq!(parsed.len(), 2);
+        let mut s = ServerConfig::default();
+        s.provider_status.value = Some(Ok(parsed));
+        assert_eq!(s.provider_waiting("a", 1000.), Some((2000., Some("cota esgotada".into()))));
+        assert_eq!(s.provider_waiting("a", 3000.), None, "o prazo passou");
+        assert_eq!(s.provider_waiting("b", 1000.), None);
+        assert!(super::parse_provider_status(&json!({"erro": 1})).is_err());
     }
 }
