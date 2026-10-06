@@ -2817,7 +2817,7 @@ não vazio da mesma thread e turno, antes do agrupamento da prévia, nos adapter
 A média usa os turnos observados desde a conexão do consumidor; turnos anteriores conservam
 a reserva do transcript quando não existe medida ao vivo. A identidade da mescla usa
 `session_key`, porque o nome do rollout Codex inclui data e hora antes do UUID.
-O evento privado `rate` ganhou a medida de primeira resposta; protocolo Python/Rust 35.
+O evento privado `rate` ganhou a medida de primeira resposta; protocolo Python/Rust 36.
 
 ## Contexto e cota sem a statusline do Hangar (03/10/2026)
 
