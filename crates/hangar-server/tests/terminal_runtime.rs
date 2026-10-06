@@ -6,8 +6,8 @@ use std::sync::{Arc,Mutex,atomic::AtomicU64};
 use std::time::Duration;
 use tokio::sync::{broadcast,Notify};
 
-struct Io { calls:Mutex<Vec<CommandRequest>>, text:Mutex<String>, gate:Notify, blocked:std::sync::atomic::AtomicBool, fail_write:std::sync::atomic::AtomicBool, fail_enter:std::sync::atomic::AtomicBool, rotate_enter:std::sync::atomic::AtomicBool, conversation:Arc<Mutex<String>>, socket_calls:Mutex<Vec<Vec<u8>>>, ghost:Mutex<String>, hold_capture:std::sync::atomic::AtomicBool, mods_screen:Mutex<Option<String>>, ring_keys:std::sync::atomic::AtomicUsize, ring_returns:std::sync::atomic::AtomicBool, swallow:std::sync::atomic::AtomicBool }
-impl Io { fn new()->Self { Self { calls:Mutex::new(vec![]),text:Mutex::new(String::new()),gate:Notify::new(),blocked:std::sync::atomic::AtomicBool::new(false),fail_write:std::sync::atomic::AtomicBool::new(false),fail_enter:std::sync::atomic::AtomicBool::new(false),rotate_enter:std::sync::atomic::AtomicBool::new(false),conversation:Arc::new(Mutex::new("sid".into())),socket_calls:Mutex::new(vec![]),ghost:Mutex::new(String::new()),hold_capture:std::sync::atomic::AtomicBool::new(false),mods_screen:Mutex::new(None),ring_keys:Default::default(),ring_returns:Default::default(),swallow:Default::default() } } }
+struct Io { calls:Mutex<Vec<CommandRequest>>, text:Mutex<String>, gate:Notify, blocked:std::sync::atomic::AtomicBool, fail_write:std::sync::atomic::AtomicBool, fail_enter:std::sync::atomic::AtomicBool, rotate_enter:std::sync::atomic::AtomicBool, conversation:Arc<Mutex<String>>, socket_calls:Mutex<Vec<Vec<u8>>>, ghost:Mutex<String>, hold_capture:std::sync::atomic::AtomicBool, mods_screen:Mutex<Option<String>>, ring_keys:std::sync::atomic::AtomicUsize, ring_returns:std::sync::atomic::AtomicBool, swallow:std::sync::atomic::AtomicBool, footer:std::sync::atomic::AtomicBool }
+impl Io { fn new()->Self { Self { calls:Mutex::new(vec![]),text:Mutex::new(String::new()),gate:Notify::new(),blocked:std::sync::atomic::AtomicBool::new(false),fail_write:std::sync::atomic::AtomicBool::new(false),fail_enter:std::sync::atomic::AtomicBool::new(false),rotate_enter:std::sync::atomic::AtomicBool::new(false),conversation:Arc::new(Mutex::new("sid".into())),socket_calls:Mutex::new(vec![]),ghost:Mutex::new(String::new()),hold_capture:std::sync::atomic::AtomicBool::new(false),mods_screen:Mutex::new(None),ring_keys:Default::default(),ring_returns:Default::default(),swallow:Default::default(),footer:Default::default() } } }
 impl TerminalIo for Io {
     fn command<'a>(&'a self,r:CommandRequest)->IoFuture<'a,CommandOutput> { Box::pin(async move {
         let cmd=r.args[0].clone();
@@ -20,7 +20,9 @@ impl TerminalIo for Io {
             "capture-pane" if !r.args.contains(&"-S".into()) && self.mods_screen.lock().unwrap().is_some()=>self.mods_screen.lock().unwrap().clone().unwrap().into_bytes(),
             "capture-pane"=>{let text=self.text.lock().unwrap().clone();let ghost=self.ghost.lock().unwrap().clone();
                 // O fantasma é rascunho que o Ctrl+S não guarda: o composer fica ocupado.
-                format!("────────────────────────────────\n❯ {}\n────────────────────────────────\n",if text.is_empty(){ghost}else{text}).into_bytes()},
+                // `footer`: o foco no painel de agentes, abaixo do composer, que o Esc não devolve.
+                let footer=if self.footer.load(std::sync::atomic::Ordering::Acquire) {"  ↑/↓ to select\n\n❯ ● main\n  ◯ general-purpose  sleep\n"} else {""};
+                format!("────────────────────────────────\n❯ {}\n────────────────────────────────\n{footer}",if text.is_empty(){ghost}else{text}).into_bytes()},
             // O `ctrl+x tab` da devolução do foco: com `ring_returns`, o foco volta ao prompt.
             "send-keys" if r.args.iter().any(|a|a=="C-x")=>{
                 self.ring_keys.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
@@ -589,6 +591,22 @@ async fn terminal_runtime_clear_while_busy_waits_for_the_turn_before_releasing()
     assert!(f.state()["runtime_state"]["clear_barrier"].is_object());
     f.idle.store(true,std::sync::atomic::Ordering::Release);
     f.wait_for("trava sai com a sessão parada",||f.state()["runtime_state"]["clear_barrier"].is_null()).await;
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_runtime_footer_focus_escape_has_a_ceiling_per_row() {
+    // O Esc devolve o foco do painel de agentes; se ele não volta, a linha tenta duas vezes e espera.
+    let f=Fixture::new().await; f.io.footer.store(true,std::sync::atomic::Ordering::Release); let h=f.start();
+    let result=h.command(f.command("stuck-focus","Olá")).await.unwrap();
+    assert_eq!(result.disposition,hangar_server::runtime::protocol::Disposition::Deferred); assert_eq!(result.payload["code"],"footer_focus");
+    let escapes=||f.io.calls.lock().unwrap().iter().filter(|r|r.args[0]=="send-keys" && r.args.last().unwrap()=="Escape").count();
+    f.wait_for("segunda tentativa",||escapes()==2).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(escapes(),2,"o Esc do rodapé não vira laço de teclas");
+    assert!(!f.io.calls.lock().unwrap().iter().any(|r|r.args.last().unwrap()=="Olá"));
+    f.io.footer.store(false,std::sync::atomic::Ordering::Release);
+    f.wait_for("entrega depois do foco voltar",||f.io.calls.lock().unwrap().iter().any(|r|r.args.last().unwrap()=="Olá")).await;
     h.stop().await.unwrap();
 }
 
