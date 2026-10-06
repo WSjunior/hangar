@@ -177,7 +177,7 @@ async fn alive(child: &mut std::process::Child, path: &Path, wait: Duration) -> 
         match child.try_wait() {
             Ok(None) => {}
             Ok(Some(status)) => return Err(format!("o processo novo saiu sem prova de vida ({status})")),
-            Err(error) => return Err(format!("o processo novo não pôde ser acompanhado: {error}")),
+            Err(error) => { let _ = child.kill(); return Err(format!("o processo novo não pôde ser acompanhado: {error}")); }
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }

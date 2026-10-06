@@ -86,7 +86,11 @@ impl Hangar {
         };
         let handle = window.window_handle();
         cx.spawn(async move |this, cx| {
-            let outcome = task.await.unwrap_or_else(|error| Err(format!("tarefa do reinício: {error}")));
+            let outcome = task.await.unwrap_or_else(|error| {
+                let reason = format!("tarefa do reinício: {error}");
+                crate::log_line(&reason);
+                Err(reason)
+            });
             let reached = handle.update(cx, |_, window, cx| this.update(cx, |this, cx| {
                 match &outcome {
                     Ok(()) => {
