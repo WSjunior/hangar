@@ -71,7 +71,7 @@ import { cachePrazo } from '../lib/cachePrazo';
   import { setCodexMode } from '@hangar/core';
   import { ttsPlayer } from '../lib/ttsPlayer.svelte';
   import {
-    dictations, dictationBarKey, draftStorageKey, parseStoredDraft, readMigrating,
+    dictations, dictationBarKey, draftStorageKey, onlyOnDevice, parseStoredDraft, readMigrating,
     type DictationEntry, type DictationOpts,
   } from '../lib/dictationStore.svelte';
 
@@ -1299,7 +1299,9 @@ import { cachePrazo } from '../lib/cachePrazo';
       opts: { ...opts, estilo: ditadoEstilo.pronto ? ditadoEstilo.valor : undefined },
     });
     // Uma por sessao: um segundo audio (multi-selecao no picker) avisa em vez de correr junto.
-    recError = ok ? '' : m.composer_aguarde_transcricao();
+    recError = ok ? ''
+      : src.arquivo && onlyOnDevice(dictations.get(dictationServerId, sessionName))
+        ? m.composer_ditado_so_no_aparelho() : m.composer_aguarde_transcricao();
   }
 
   // Resultado com a conversa aberta: entra no cursor (ou no fim, se a seleção guardada não vale

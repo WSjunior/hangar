@@ -88,6 +88,9 @@ let nextId = 0;
 const VERSOES = ['limpar', 'prosa', 'briefing'];
 const baseName = (p?: string) => p?.split(/[\\/]/).pop() || undefined;
 const recriada = (i: DictationIdentity) => sessionsStore.epoca(i.serverId, i.name) !== i.epoca;
+/** Falha cuja gravação nunca chegou ao servidor: o Blob na memória é a única cópia. */
+export const onlyOnDevice = (e?: DictationEntry) =>
+  e?.status === 'failed' && !!e.file && !e.path && !e.arquivo;
 const jsonlNaLista = (serverId: string, name: string) =>
   sessionsStore.sessionsForServer(serverId).find((s) => s.name === name)?.jsonl ?? null;
 
@@ -202,6 +205,8 @@ async function run(key: string, entry: DictationEntry, jsonlAgora: string | null
 function deliver(key: string) {
   const e = entries.get(key);
   if (!e || e.status !== 'ready') return;
+  // Resultado na memória da sessão morta não entra na recriada com o mesmo nome.
+  if (recriada(e.identity)) { entries.delete(key); forget(e.identity.serverId, e.identity.name); return; }
   const montados = receivers.get(key) ?? [];
   const r = montados.findLast((x) => x.accepts?.(e) ?? true);
   if (r) {
@@ -266,7 +271,11 @@ export const dictations = {
     file?: File; arquivo?: string; opts: DictationOpts;
   }): boolean {
     const key = dictationKey(input.serverId, input.name);
-    if (entries.get(key)?.status === 'inflight' || (!input.file && !input.arquivo)) return false;
+    const atual = entries.get(key);
+    if (atual?.status === 'inflight' || (!input.file && !input.arquivo)) return false;
+    // Substituir perderia o que só existe aqui: resultado ainda não entregue ou gravação que não subiu.
+    if (atual?.status === 'ready' && !atual.stored) return false;
+    if (input.arquivo && onlyOnDevice(atual)) return false;
     const { serverId, name, jsonl, server, file, arquivo, opts } = input;
     const entry: DictationEntry = {
       id: ++nextId, status: 'inflight', server, file, arquivo, opts,

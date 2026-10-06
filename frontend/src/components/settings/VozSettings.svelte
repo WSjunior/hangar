@@ -281,13 +281,16 @@
         {/if}
       </details>
 
-      {#if servicos.length}<p class="aviso">{m.voz_servicos_em_uso()}</p>{/if}
-      <details class="detalhes transcription-services" bind:open={servicosAbertos}>
-        <summary>{m.native_voice_providers()}</summary>
-        {#if servicosAbertos}
-          <TranscriptionProviders {store} />
-        {/if}
-      </details>
+      <!-- Servidor antigo ignora a chave desconhecida: a lista seria "salva" e perdida calada. -->
+      {#if 'transcription_providers' in store.campos}
+        {#if servicos.length}<p class="aviso">{m.voz_servicos_em_uso()}</p>{/if}
+        <details class="detalhes transcription-services" bind:open={servicosAbertos}>
+          <summary>{m.native_voice_providers()}</summary>
+          {#if servicosAbertos}
+            <TranscriptionProviders {store} />
+          {/if}
+        </details>
+      {/if}
 
       <div class="preferencias">
         <p class="grupo-rotulo">{m.voz_preferencias_transcricao()}</p>

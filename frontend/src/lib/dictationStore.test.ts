@@ -230,6 +230,44 @@ describe('ditado por sessão', () => {
     expect(dictations.get('a', 'x')).toBeUndefined();
   });
 
+  it('áudio da galeria não substitui a gravação que só existe no aparelho', async () => {
+    vi.mocked(uploadFile).mockRejectedValueOnce(new Error('rede'));
+    iniciar();
+    await flush();
+    const falha = dictations.get('a', 'x');
+    expect(falha).toMatchObject({ status: 'failed', file: expect.any(File) });
+    expect(dictations.start({ serverId: 'a', name: 'x', jsonl: 'j1', server: undefined,
+      arquivo: 'outro.webm', opts: { ditado: true } })).toBe(false);
+    expect(dictations.get('a', 'x')).toBe(falha);
+    expect(transcribeUploaded).not.toHaveBeenCalled();
+  });
+
+  it('resultado ainda não entregue não é substituído por outro áudio', async () => {
+    localStorage.setItem(RASCUNHO, JSON.stringify({ text: 'de outro', jsonl: 'j0' }));
+    vi.mocked(transcribeUploaded).mockResolvedValue({ path: CAMINHO, text: 'oi' });
+    iniciar();
+    await flush();
+    expect(dictations.get('a', 'x')).toMatchObject({ status: 'ready' });
+    expect(dictations.start({ serverId: 'a', name: 'x', jsonl: 'j1', server: undefined,
+      arquivo: 'outro.webm', opts: { ditado: true } })).toBe(false);
+    expect(iniciar()).toBe(false);
+    expect(dictations.get('a', 'x')?.result?.text).toBe('oi');
+  });
+
+  it('resultado na memória não entra na sessão recriada com o mesmo nome', async () => {
+    localStorage.setItem(RASCUNHO, JSON.stringify({ text: 'de outro', jsonl: 'j0' }));
+    vi.mocked(transcribeUploaded).mockResolvedValue({ path: CAMINHO, text: 'oi' });
+    iniciar();
+    await flush();
+    expect(dictations.get('a', 'x')).toMatchObject({ status: 'ready' });
+    lista.epoca = 1;
+    const deliver = vi.fn();
+    dictations.receive('a', 'x', { deliver });
+    await flush();
+    expect(deliver).not.toHaveBeenCalled();
+    expect(dictations.get('a', 'x')).toBeUndefined();
+  });
+
   it('503 diz onde configurar a chave', async () => {
     vi.mocked(transcribeUploaded).mockRejectedValue(Object.assign(new Error('x'), { status: 503 }));
     iniciar();

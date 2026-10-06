@@ -129,6 +129,9 @@ vi.mock('../lib/sessionsStore.svelte', () => ({
     sessionsForServer(id: string) { return (sessionsStoreCtl.rows as AggSession[]).filter(s => s.serverId === id); },
     get rows() { return sessionsStoreCtl.rows; },
     get byServer() { return sessionsStoreCtl.byServer; },
+    epoca: () => 0,
+    retain() {},
+    release() {},
   },
 }));
 vi.mock('../lib/ttsPlayer.svelte', () => ({ ttsPlayer: { active: false, loading: false } }));
