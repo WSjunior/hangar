@@ -717,6 +717,7 @@ export interface CreateSessionBody {
   cwd?: string | null;
   config_dir?: string | null;
   provider?: Provider;
+  remember_provider?: boolean;
   engine?: string | null;
   model?: string | null;
   effort?: string | null;
@@ -763,15 +764,24 @@ export function uniqueSessionName(base: string, taken: Set<string>): string {
 // com a sessão nascendo e o reenvio duplicá-la.
 const SESSION_BIRTH_MS = 120_000;
 
+function withCreationWarnings<T extends { avisos?: string[] }>(result: T): T {
+  if (result?.avisos?.length) {
+    try { apiEnv().onSessionWarnings?.(result.avisos); }
+    catch (error) { console.error('onSessionWarnings:', error); }
+  }
+  return result;
+}
+
 export function createSessionForServer(server: Server, body: CreateSessionBody): Promise<SessionInfo> {
-  return apiFetchForServer(server, '/api/sessions', { method: 'POST', body: JSON.stringify(buildCreateSessionBody(body)) }, SESSION_BIRTH_MS);
+  return apiFetchForServer<SessionInfo>(server, '/api/sessions', { method: 'POST', body: JSON.stringify(buildCreateSessionBody(body)) }, SESSION_BIRTH_MS)
+    .then(withCreationWarnings);
 }
 
 export function createSession(
   name: string,
   cwd?: string,
   configDir?: string | null,
-  provider: Provider = 'claude',
+  provider?: Provider,
   engine?: string | null,
   model?: string | null,
   effort?: string | null,
@@ -786,7 +796,7 @@ export function createSession(
   // `model`/`effort`/`permissionMode`/`ompProfile` no FIM de propósito: chamador antigo com 5 argumentos continua válido e abre
   // no padrão, byte por byte (o backend valida None = comportamento de hoje).
   const body: CreateSessionBody = { name, cwd, config_dir: configDir ?? null, provider, engine: engine ?? null,
-                           model: model ?? null, effort: effort ?? null, codex_account: codexAccount };
+                           model: model ?? null, effort: effort ?? null, codex_account: codexAccount, remember_provider: true };
   if (permissionMode) body.permission_mode = permissionMode;
   if (ompProfile) body.omp_profile = ompProfile;
   if (headless !== undefined && (provider === 'claude' || provider === 'codex')) body.headless = headless;
@@ -796,7 +806,7 @@ export function createSession(
   return apiFetch<SessionInfo>('/api/sessions', {
     method: 'POST',
     body: JSON.stringify(buildCreateSessionBody(body)),
-  });
+  }).then(withCreationWarnings);
 }
 
 // ── Passagem de bastão ──────────────────────────────────────────────────────
@@ -833,6 +843,7 @@ export interface BastaoResult {
   // Só quando a reescrita pelo modelo foi pedida e não deu (cota, tempo, CLI ausente): a sessão
   // nasceu com o resumo montado por código, e quem pediu tem de saber que recebeu o outro.
   aviso?: string | null;
+  avisos?: string[];
 }
 
 // Passo em curso da criação de `name` (sessão nova ou sucessora do bastão); `step` null = nada em curso.
@@ -852,6 +863,7 @@ export function passarBastao(
     cwd?: string | null;
     config_dir?: string | null;
     provider?: Provider;
+    remember_provider?: boolean;
     engine?: string | null;
     model?: string | null;
     effort?: string | null;
@@ -866,13 +878,13 @@ export function passarBastao(
   },
   server?: Server | null,
 ): Promise<BastaoResult> {
-  if (server) return apiFetchForServer(server, `/api/sessions/${encodeURIComponent(name)}/bastao`, {
+  if (server) return apiFetchForServer<BastaoResult>(server, `/api/sessions/${encodeURIComponent(name)}/bastao`, {
     method: 'POST', body: JSON.stringify(body),
-  });
+  }).then(withCreationWarnings);
   return apiFetch<BastaoResult>(`/api/sessions/${encodeURIComponent(name)}/bastao`, {
     method: 'POST',
     body: JSON.stringify(body),
-  });
+  }).then(withCreationWarnings);
 }
 
 // Modelo oferecido na tela de ABERTURA (GET /api/model-options). O backend devolve QUATRO formatos
@@ -1940,12 +1952,13 @@ export function getEngines(): Promise<EnginesResponse> {
   return apiFetch('/api/engines');
 }
 
-export function getProviders(): Promise<Record<string, { disponivel: boolean; motivo: string | null }>> {
-  return apiFetch('/api/providers');
+export function getProviders(): Promise<Record<string, { disponivel: boolean; motivo: string | null; default?: boolean }>> {
+  return apiFetch('/api/providers', { signal: AbortSignal.timeout(30_000) });
 }
 
-export function getProvidersForServer(s: Server, signal?: AbortSignal): Promise<Record<string, { disponivel: boolean; motivo: string | null }>> {
-  return apiFetchForServer(s, '/api/providers', { signal: comTeto(signal, 8000) });
+export function getProvidersForServer(s: Server, signal?: AbortSignal): Promise<Record<string, { disponivel: boolean; motivo: string | null; default?: boolean }>> {
+  // A sonda inclui leitura de login, que pode iniciar o CLI.
+  return apiFetchForServer(s, '/api/providers', { signal: comTeto(signal, 30_000) }, 30_000);
 }
 
 export function getEnginesForServer(s: Server): Promise<EnginesResponse> {

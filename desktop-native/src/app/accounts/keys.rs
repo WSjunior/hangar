@@ -103,6 +103,8 @@ impl SearchableListItem for ModelChoice {
     type Value = String;
     fn title(&self) -> SharedString { self.label.clone().into() }
     fn value(&self) -> &String { &self.id }
+    /// A busca casa rótulo ou dica (id e provedor do modelo), como o filtro do menu de modelo.
+    fn matches(&self, query: &str) -> bool { crate::app::create::wanted(&query.trim().to_lowercase(), &self.label, &self.hint) }
     fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
         div().w_full().flex().items_center().gap(px(8.)).child(div().flex_1().min_w_0().truncate().child(self.label.clone()))
             .when(!self.hint.is_empty(), |el| el.child(div().flex_shrink_0().text_color(theme::muted()).child(self.hint.clone())))
@@ -432,8 +434,9 @@ impl Hangar {
         sub_choices.extend(list.iter().map(|m| ModelChoice { id: m.id.clone(), label: m.id.clone(), hint: String::new() }));
         let at = |items: &[ModelChoice], id: &str| items.iter().position(|c| c.id == id).map(IndexPath::new);
         let (main_at, sub_at) = (pick.as_deref().and_then(|id| at(&choices, id)), at(&sub_choices, &subagent));
-        let main = cx.new(|cx| SelectState::new(SearchableVec::new(choices), main_at, window, cx));
-        let sub = cx.new(|cx| SelectState::new(SearchableVec::new(sub_choices), sub_at, window, cx));
+        // Catálogo como o da OpenRouter tem centenas de modelos: sem busca por digitação a lista não se usa.
+        let main = cx.new(|cx| SelectState::new(SearchableVec::new(choices), main_at, window, cx).searchable(true));
+        let sub = cx.new(|cx| SelectState::new(SearchableVec::new(sub_choices), sub_at, window, cx).searchable(true));
         form.pick_subscriptions = vec![cx.subscribe_in(&main, window, |this: &mut Hangar, _, event: &SelectEvent<SearchableVec<ModelChoice>>, window, cx| {
             let SelectEvent::Confirm(Some(id)) = event else { return };
             this.choose_model(id.clone(), window, cx);

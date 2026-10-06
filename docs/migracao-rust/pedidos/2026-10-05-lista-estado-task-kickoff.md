@@ -45,7 +45,8 @@ Quem coordena e junta é a sessão `lista-org`.
 - Testes reais, se o Step pedir: backend isolado (`HOME` temporário, portas livres fora de
   8765/8766/8768 e das outras sessões, `CP_AUTH_TOKEN` próprio, `tmux -L` próprio, lançador com
   `matar_orfaos` desligado), sessões Claude só Haiku (`--model claude-haiku-4-5`),
-  `CLAUDE_CONFIG_DIR=/home/jefferson/.claude-02-200`. Pare tudo e apague o `HOME` no fim.
+  `CLAUDE_CONFIG_DIR=/home/jefferson/.claude-02-200`; segunda conta (troca de conta) só
+  `~/.claude-jefferson`, nunca `claude-200-1` nem `claude-200-3`. Pare tudo e apague o `HOME` no fim.
 - Commits em inglês, `git add` de caminhos explícitos, `HANGAR_SEM_PASSO=1`. **Sem push** (pedido
   do dono: cada push em `crates/` dispara CI nos três sistemas e cria release). Só commit local;
   `lista-org` junta pela branch local, e o CI roda quando a integração sobe no fim do lote. Para

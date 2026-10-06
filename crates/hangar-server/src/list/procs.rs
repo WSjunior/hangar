@@ -18,14 +18,27 @@ pub const CHILDREN_TTL: Duration = Duration::from_secs(3);
 pub trait ProcessView: Send + Sync {
     /// Mapa reusado por até `max_age`; `Duration::ZERO` lê de novo (sessão criada há menos de 1 s).
     fn children(&self, max_age: Duration) -> io::Result<Arc<ChildrenMap>>;
-    fn argv(&self, pid: i64) -> Vec<String>;
+    /// Quem implementa escolhe um dos dois pares (`argv`/`argv_checked`, `fds`/`fds_checked`).
+    fn argv(&self, pid: i64) -> Vec<String> { self.argv_checked(pid).unwrap_or_default() }
+    /// O argv, com o erro que o separa de um processo sem argv (`vanished` = morreu no caminho).
+    fn argv_checked(&self, pid: i64) -> io::Result<Vec<String>> { Ok(self.argv(pid)) }
+    /// Os pids que a rodada vai ler por inteiro (argv e ambiente), numa leitura só onde reler um
+    /// pid custa o retrato de todos (`sysinfo`).
+    fn prefetch(&self, _pids: &[i64]) {}
     fn cwd(&self, pid: i64) -> Option<PathBuf>;
     /// `Ok(None)` = variável ausente; `Err` = ambiente ilegível (a exclusão de conta separa os dois).
     fn env_var(&self, pid: i64, name: &str) -> io::Result<Option<OsString>>;
     /// Nascimento em segundos desde a época.
     fn start_time(&self, pid: i64) -> Option<f64>;
     /// Destinos dos descritores abertos.
-    fn fds(&self, pid: i64) -> Vec<PathBuf>;
+    fn fds(&self, pid: i64) -> Vec<PathBuf> { self.fds_checked(pid).unwrap_or_default() }
+    fn fds_checked(&self, pid: i64) -> io::Result<Vec<PathBuf>> { Ok(self.fds(pid)) }
+}
+
+/// Processo que morreu entre a varredura e a leitura: não é falha, é corrida.
+pub fn vanished(error: &io::Error) -> bool {
+    // ESRCH: o `/proc/<pid>` ainda existe, o processo já não.
+    error.kind() == io::ErrorKind::NotFound || error.raw_os_error() == Some(3)
 }
 
 #[cfg(target_os = "linux")]
@@ -45,11 +58,23 @@ mod linux {
     use std::sync::Mutex;
     use std::time::Instant;
 
+    /// O ambiente lido de um pid: a rodada pergunta 5 a 8 variáveis do mesmo processo.
+    /// O erro guarda o código do sistema: o `vanished` reconhece o ESRCH por ele.
+    type Environ = (Instant, Result<Arc<[u8]>, (io::ErrorKind, Option<i32>)>);
+
+    fn rebuild((kind, raw): (io::ErrorKind, Option<i32>)) -> io::Error {
+        raw.map_or_else(|| kind.into(), io::Error::from_raw_os_error)
+    }
+
+    /// Abaixo da cadência do poll (1,5 s): serve uma rodada, nunca a seguinte.
+    const ENVIRON_TTL: Duration = Duration::from_secs(1);
+
     pub struct ProcFs {
         root: PathBuf,
         cache: Mutex<Option<(Instant, Arc<ChildrenMap>)>>,
         /// O boot não muda enquanto o processo vive.
         btime: std::sync::OnceLock<f64>,
+        environ: Mutex<crate::list::capped::Capped<i64, Environ>>,
     }
 
     impl Default for ProcFs {
@@ -59,7 +84,20 @@ mod linux {
     impl ProcFs {
         /// Raiz trocável só para o teste apontar para um /proc de mentira.
         pub fn with_root(root: impl Into<PathBuf>) -> Self {
-            Self { root: root.into(), cache: Mutex::new(None), btime: std::sync::OnceLock::new() }
+            Self { root: root.into(), cache: Mutex::new(None), btime: std::sync::OnceLock::new(),
+                environ: Mutex::new(crate::list::capped::Capped::new(crate::list::capped::SESSION_CAP)) }
+        }
+
+        fn environ(&self, pid: i64) -> io::Result<Arc<[u8]>> {
+            let mut cache = self.environ.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((at, read)) = cache.get(&pid)
+                && at.elapsed() < ENVIRON_TTL
+            {
+                return read.clone().map_err(rebuild);
+            }
+            let read = std::fs::read(self.path(pid, "environ")).map(Arc::from).map_err(|e| (e.kind(), e.raw_os_error()));
+            cache.insert(pid, (Instant::now(), read.clone()));
+            read.map_err(rebuild)
         }
 
         fn path(&self, pid: i64, leaf: &str) -> PathBuf { self.root.join(pid.to_string()).join(leaf) }
@@ -131,16 +169,16 @@ mod linux {
             Ok(map)
         }
 
-        fn argv(&self, pid: i64) -> Vec<String> {
-            let Ok(raw) = std::fs::read(self.path(pid, "cmdline")) else { return Vec::new() };
-            raw.split(|b| *b == 0).filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(a).into_owned()).collect()
+        fn argv_checked(&self, pid: i64) -> io::Result<Vec<String>> {
+            let raw = std::fs::read(self.path(pid, "cmdline"))?;
+            Ok(raw.split(|b| *b == 0).filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(a).into_owned()).collect())
         }
 
         fn cwd(&self, pid: i64) -> Option<PathBuf> { std::fs::read_link(self.path(pid, "cwd")).ok() }
 
         fn env_var(&self, pid: i64, name: &str) -> io::Result<Option<OsString>> {
             use std::os::unix::ffi::OsStringExt;
-            let raw = std::fs::read(self.path(pid, "environ"))?;
+            let raw = self.environ(pid)?;
             let prefix = [name.as_bytes(), b"="].concat();
             Ok(raw.split(|b| *b == 0).find_map(|kv| kv.strip_prefix(prefix.as_slice()))
                 .map(|v| OsString::from_vec(v.to_vec())))
@@ -151,9 +189,9 @@ mod linux {
             Some(self.btime()? + ticks as f64 / clock_ticks()?)
         }
 
-        fn fds(&self, pid: i64) -> Vec<PathBuf> {
-            let Ok(entries) = std::fs::read_dir(self.path(pid, "fd")) else { return Vec::new() };
-            entries.flatten().filter_map(|e| std::fs::read_link(e.path()).ok()).collect()
+        fn fds_checked(&self, pid: i64) -> io::Result<Vec<PathBuf>> {
+            // Um fd fechado entre a listagem e o `readlink` é corrida, não falha.
+            Ok(std::fs::read_dir(self.path(pid, "fd"))?.flatten().filter_map(|e| std::fs::read_link(e.path()).ok()).collect())
         }
     }
 }
@@ -168,15 +206,18 @@ mod other {
 
     struct Snapshot {
         system: System,
-        /// Quando a tabela inteira foi relida (com argv e ambiente) e o mapa que saiu dela.
+        /// Quando a tabela inteira foi relida (pai e nascimento) e o mapa que saiu dela.
         cache: Option<(Instant, Arc<ChildrenMap>)>,
-        /// Pids lidos por inteiro nesse retrato; um relido sozinho só tem o que aquela leitura pediu.
+        /// Pids desse retrato: fora dele, com o retrato fresco, o processo nasceu depois ou morreu.
+        listed: std::collections::HashSet<Pid>,
+        /// Pids com argv e ambiente lidos (`prefetch`); um relido sozinho só tem o que aquela
+        /// leitura pediu.
         full: std::collections::HashSet<Pid>,
     }
 
     /// O ramo `psutil` do `procinfo.py`. No Windows toda releitura, mesmo de um pid, tira o retrato
-    /// de todos os processos (`CreateToolhelp32Snapshot`): uma por tique serve argv, ambiente e
-    /// nascimento de todos os pids da rodada.
+    /// de todos os processos (`CreateToolhelp32Snapshot`): a tabela sai no modo mínimo e argv e
+    /// ambiente só dos pids das sessões, numa leitura por tique.
     pub struct SysInfo {
         state: Mutex<Snapshot>,
         #[cfg(test)]
@@ -186,7 +227,7 @@ mod other {
     impl Default for SysInfo {
         fn default() -> Self {
             Self {
-                state: Mutex::new(Snapshot { system: System::new(), cache: None, full: Default::default() }),
+                state: Mutex::new(Snapshot { system: System::new(), cache: None, listed: Default::default(), full: Default::default() }),
                 #[cfg(test)]
                 refreshes: Default::default(),
             }
@@ -199,13 +240,19 @@ mod other {
             self.refreshes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
-        /// Do retrato da rodada quando `from_snapshot` e o pid está nele; senão relê só `pid`, com
-        /// só o que `kind` pede. `None` = morto ou pid fora do alcance.
+        /// Do retrato da rodada quando `from_snapshot` e o pid já tem o que `kind` pede (`full`, ou
+        /// só o básico com `kind` vazio); senão relê só `pid`, com só o que `kind` pede. Retrato
+        /// fresco sem o pid responde `None` sem reler: no Windows cada releitura é um retrato inteiro,
+        /// e um pid morto custaria um por tique. `None` = morto, nascido depois ou fora do alcance.
         fn with<T>(&self, pid: i64, from_snapshot: bool, kind: ProcessRefreshKind, read: impl FnOnce(&Process) -> T) -> Option<T> {
             let pid = Pid::from_u32(u32::try_from(pid).ok()?);
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let fresh = state.cache.as_ref().is_some_and(|(at, _)| at.elapsed() < CHILDREN_TTL);
-            if !(from_snapshot && fresh && state.full.contains(&pid)) {
+            if fresh && !state.listed.contains(&pid) {
+                return None;
+            }
+            let have = if kind == ProcessRefreshKind::nothing() { &state.listed } else { &state.full };
+            if !(from_snapshot && fresh && have.contains(&pid)) {
                 self.counted();
                 state.system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, kind);
             }
@@ -224,11 +271,12 @@ mod other {
                 }
             }
             self.counted();
-            // `Always`: no macOS o pid sobrevive ao exec, e o argv guardado seria o do shell.
-            let kind = ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always).with_environ(UpdateKind::Always);
-            state.system.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
-            state.full = state.system.processes().keys().copied().collect();
-            if state.full.is_empty() {
+            // Modo mínimo: pai e nascimento. Argv e ambiente de todos custavam uma leitura de
+            // memória por processo da máquina; só os das sessões vêm, pelo `prefetch`.
+            state.system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+            state.listed = state.system.processes().keys().copied().collect();
+            state.full.clear();
+            if state.listed.is_empty() {
                 state.cache = None;
                 return Err(io::Error::other("nenhum processo listado"));
             }
@@ -245,9 +293,35 @@ mod other {
             Ok(map)
         }
 
-        fn argv(&self, pid: i64) -> Vec<String> {
-            self.with(pid, true, ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
-                |p| p.cmd().iter().map(|a| a.to_string_lossy().into_owned()).collect()).unwrap_or_default()
+        fn prefetch(&self, pids: &[i64]) {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let fresh = state.cache.as_ref().is_some_and(|(at, _)| at.elapsed() < CHILDREN_TTL);
+            let want: Vec<Pid> = pids.iter().filter_map(|p| u32::try_from(*p).ok()).map(Pid::from_u32)
+                .filter(|p| !fresh || (state.listed.contains(p) && !state.full.contains(p))).collect();
+            if want.is_empty() {
+                return;
+            }
+            self.counted();
+            // `Always`: no macOS o pid sobrevive ao exec, e o argv guardado seria o do shell.
+            let kind = ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always).with_environ(UpdateKind::Always);
+            state.system.refresh_processes_specifics(ProcessesToUpdate::Some(&want), true, kind);
+            // Fora de um retrato fresco o `full` valeria até o próximo e o pid sairia sem reler.
+            if fresh {
+                let state = &mut *state;
+                state.full.extend(want.into_iter().filter(|p| state.system.process(*p).is_some()));
+            }
+        }
+
+        /// Sumido do retrato é `NotFound` (corrida); vivo com argv vazio é o que o `sysinfo` devolve
+        /// quando não consegue ler (outro dono, processo protegido).
+        fn argv_checked(&self, pid: i64) -> io::Result<Vec<String>> {
+            let argv = self.with(pid, true, ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+                |p| p.cmd().iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>());
+            match argv {
+                None => Err(io::ErrorKind::NotFound.into()),
+                Some(argv) if argv.is_empty() => Err(io::Error::new(io::ErrorKind::PermissionDenied, "argv ilegível")),
+                Some(argv) => Ok(argv),
+            }
         }
 
         /// Fora do retrato: só a sessão sem terminal com a pasta renomeada pergunta.
@@ -318,20 +392,26 @@ mod other {
             wait_exec(pid_a);
             let procs = SysInfo::default();
             assert!(procs.children(Duration::ZERO).unwrap().get(&i64::from(std::process::id())).is_some_and(|k| k.contains(&pid_a)));
+            assert!(procs.start_time(pid_a).is_some(), "o nascimento sai do retrato mínimo");
+            procs.prefetch(&[pid_a, 1 << 30]);
             for _ in 0..3 {
                 assert!(procs.argv(pid_a).last().is_some_and(|x| x == "30" || x == "127.0.0.1"));
                 assert_eq!(procs.env_var(pid_a, "HANGAR_PROCS_MARK").unwrap(), Some(OsString::from("a")));
                 assert!(procs.start_time(pid_a).is_some());
             }
-            assert_eq!(procs.refreshes.load(Ordering::Relaxed), 1, "argv, ambiente e nascimento saem do retrato");
-            // Nascido depois do retrato: relido sozinho, sem esperar o próximo.
+            procs.prefetch(&[pid_a]);
+            assert_eq!(procs.refreshes.load(Ordering::Relaxed), 2, "tabela mínima + argv e ambiente dos pids pedidos");
+            // Nascido depois do retrato fresco: nem relido sozinho (no Windows seria outro retrato).
             let mut b = sleeper("b");
             let pid_b = i64::from(b.id());
             wait_exec(pid_b);
+            assert!(procs.argv(pid_b).is_empty() && procs.start_time(pid_b).is_none());
+            assert_eq!(procs.refreshes.load(Ordering::Relaxed), 2);
+            procs.children(Duration::ZERO).unwrap();
+            // Sem `prefetch`: relido sozinho só com o argv; o ambiente dele não pode sair vazio.
             assert!(!procs.argv(pid_b).is_empty());
-            // Relido só com o argv: o ambiente dele ainda não foi lido e não pode sair vazio.
             assert_eq!(procs.env_var(pid_b, "HANGAR_PROCS_MARK").unwrap(), Some(OsString::from("b")));
-            assert_eq!(procs.refreshes.load(Ordering::Relaxed), 3);
+            assert_eq!(procs.refreshes.load(Ordering::Relaxed), 5);
             for c in [&mut a, &mut b] {
                 c.kill().unwrap();
                 c.wait().unwrap();
@@ -396,6 +476,21 @@ mod tests {
         assert_eq!(procs.start_time(11), Some(1005.0), "o boot é lido uma vez");
         assert_eq!(procs.argv(99), Vec::<String>::new());
         assert_eq!(procs.start_time(99), None);
+    }
+
+    #[test]
+    fn environ_is_read_once_per_round_and_errors_are_kept() {
+        let root = fake_proc();
+        let dir = root.path().join("11");
+        fs::write(dir.join("environ"), b"A=1\0B=2\0").unwrap();
+        let procs = ProcFs::with_root(root.path());
+        assert_eq!(procs.env_var(11, "A").unwrap(), Some(OsString::from("1")));
+        fs::write(dir.join("environ"), b"A=9\0").unwrap();
+        assert_eq!(procs.env_var(11, "B").unwrap(), Some(OsString::from("2")), "a rodada lê o environ uma vez");
+        assert_eq!(procs.env_var(12, "A").unwrap_err().kind(), io::ErrorKind::NotFound, "o erro também fica");
+        assert!(procs.argv_checked(99).is_err_and(|e| vanished(&e)), "morto é corrida, não argv vazio");
+        assert!(procs.fds_checked(99).is_err_and(|e| vanished(&e)));
+        assert_eq!(procs.argv_checked(11).unwrap().len(), 4);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 // crates/hangar-server/src/routes.rs
-//! Rotas do hangar-server: saúde, custos, histórico e chat ao vivo do Claude e do Codex para o
-//! dono; todo o resto é repasse ao Python. Falha do Rust nessas rotas é 503 com código, nunca repasse.
+//! Rotas do hangar-server: saúde, custos, lista de sessões, histórico e chat ao vivo do Claude e do
+//! Codex para o dono; todo o resto é repasse ao Python. Falha do Rust nessas rotas é 503 com código, nunca repasse.
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
@@ -50,6 +50,8 @@ pub struct AppState {
     pub origins_home: std::path::PathBuf,
     pub origins: std::sync::Mutex<indexmap::IndexMap<std::path::PathBuf, crate::costs::origins::Origins>>,
     pub list: Arc<crate::list::bridge::ListBridge>,
+    /// Produtor único da lista do dono; liga com a primeira lista aberta.
+    pub hub: Arc<crate::list::hub::ListHub>,
 }
 
 impl AppState {
@@ -86,7 +88,8 @@ impl AppState {
             costs, fx, reports: Arc::new(crate::costs::ReportCache::default()),
             origins_home: std::path::PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default()),
             origins: std::sync::Mutex::new(indexmap::IndexMap::new()),
-            list: Arc::new(crate::list::bridge::ListBridge::new(crate::list::bridge::ListEnv::from_env(), facts)) }
+            list: Arc::new(crate::list::bridge::ListBridge::new(crate::list::bridge::ListEnv::from_env(), facts)),
+            hub: Arc::default() }
     }
 
     pub(crate) fn skill_origins(&self, repo: &std::path::Path) -> crate::costs::origins::Origins {
@@ -202,6 +205,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/workspace", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/list", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         // Outro método nessas rotas (preflight OPTIONS, HEAD) segue ao Python.
+        .route("/api/sessions", get(crate::list::hub::list).fallback(pass_any))
+        .route("/api/sessions/events", get(crate::list::hub::events).fallback(pass_any))
         .route("/api/sessions/{name}/history", get(history).fallback(pass_any))
         .route("/api/sessions/{name}/events", get(events).fallback(pass_any))
         .route("/api/sessions/{name}/cost", get(crate::costs_routes::session_cost).fallback(pass_any))

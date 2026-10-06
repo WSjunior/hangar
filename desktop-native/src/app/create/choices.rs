@@ -266,7 +266,7 @@ impl NewSession {
                 .into_iter().flatten().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · "),
         }).collect();
         let at = choices.iter().position(|a| a.id == self.engine_account);
-        self.engine_account_pick = Some(picker(choices, at, |this, account, window, cx| {
+        self.engine_account_pick = Some(picker(choices, at, false, |this, account, window, cx| {
             if this.creating || this.engine_account == account { return; }
             this.engine_account = account;
             this.load_models(window, cx);
@@ -417,7 +417,7 @@ impl NewSession {
         let models: Vec<ModelChoice> = std::iter::once(default()).chain(self.catalog().iter().filter(|m| m.id != "default")
             .map(|m| ModelChoice { id: m.value(), label: m.label(), hint: m.hint() })).collect();
         let at = Self::pick_at(&models, &self.model);
-        self.model_pick = Some(picker(models, at, |this, id, window, cx| {
+        self.model_pick = Some(picker(models, at, true, |this, id, window, cx| {
             this.model_choice_touched = true;
             this.model = id;
             // Trocar de modelo pode tirar o nível escolhido da lista (só o Codex tem níveis por modelo).
@@ -427,7 +427,7 @@ impl NewSession {
         let subagents: Vec<ModelChoice> = std::iter::once(ModelChoice { id: String::new(), label: tr("create_subagent_default"), hint: String::new() })
             .chain(self.catalog().iter().filter(|m| m.id != "default").map(|m| ModelChoice { id: m.value(), label: m.label(), hint: String::new() })).collect();
         let at = Self::pick_at(&subagents, &self.subagent);
-        self.subagent_pick = Some(picker(subagents, at, |this, id, _, _| { this.model_choice_touched = true; this.subagent = id; }, window, cx));
+        self.subagent_pick = Some(picker(subagents, at, true, |this, id, _, _| { this.model_choice_touched = true; this.subagent = id; }, window, cx));
         self.build_effort_pick(window, cx);
         self.build_permission_pick(window, cx);
     }
@@ -436,7 +436,7 @@ impl NewSession {
         let choices: Vec<ModelChoice> = std::iter::once(String::new()).chain(self.levels())
             .map(|n| ModelChoice { label: if n.is_empty() { tr("create_default") } else { n.clone() }, id: n, hint: String::new() }).collect();
         let at = Self::pick_at(&choices, &self.effort);
-        self.effort_pick = Some(picker(choices, at, |this, id, _, _| { this.model_choice_touched = true; this.effort = id; }, window, cx));
+        self.effort_pick = Some(picker(choices, at, false, |this, id, _, _| { this.model_choice_touched = true; this.effort = id; }, window, cx));
     }
 
     pub(super) fn build_permission_pick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -444,7 +444,7 @@ impl NewSession {
         let choices: Vec<ModelChoice> = std::iter::once(ModelChoice { id: String::new(), label: tr("create_permission_default"), hint: String::new() })
             .chain(modes.iter().map(|m| ModelChoice { id: (*m).into(), label: (*m).into(), hint: String::new() })).collect();
         let at = Self::pick_at(&choices, &self.permission);
-        self.permission_pick = Some(picker(choices, at, |this, id, _, _| (this.permission, this.permission_touched) = (id, true), window, cx));
+        self.permission_pick = Some(picker(choices, at, false, |this, id, _, _| (this.permission, this.permission_touched) = (id, true), window, cx));
     }
 
     /// A conta Claude com a cota de cada uma na dica ("atual · 5h 42% · 7d 18%").
@@ -563,7 +563,7 @@ impl NewSession {
             exhausted: Some(&c.path) != self.config.as_ref() && self.account_exhausted(&c.path),
         }).collect();
         let at = choices.iter().position(|c| Some(&c.choice.id) == self.config.as_ref());
-        self.config_pick = Some(picker(choices, at, |this, path, window, cx| {
+        self.config_pick = Some(picker(choices, at, false, |this, path, window, cx| {
             (this.config, this.account_touched) = (Some(path), true);
             this.load_models(window, cx);
         }, window, cx));
@@ -581,7 +581,7 @@ impl NewSession {
             .chain(list.iter().map(|(name, m)| ModelChoice { id: name.clone(), label: m.label.clone().unwrap_or_else(|| name.clone()), hint: m.model.clone() }))
             .collect();
         let at = choices.iter().position(|c| c.id == self.engine);
-        self.engine_pick = Some(picker(choices, at, |this, name, window, cx| {
+        self.engine_pick = Some(picker(choices, at, false, |this, name, window, cx| {
             if this.creating || this.engine == name { return; }
             this.engine = name;
             this.asking = false;

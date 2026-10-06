@@ -132,7 +132,7 @@ inválido trocado), `docs/decisoes/windows.md` (regra nova, se houver).
 `procs::sysinfo_reads_argv_and_env` (nos três sistemas no CI).
 
 - [x] **Step 9: Ler "Regras vigentes" de `docs/decisoes/windows.md`; testes, vistos falhar**
-- [ ] **Step 10: Leitor `sysinfo` e parse do psmux; jobs Windows e macOS do CI conferidos pelo log; revisar**
+- [x] **Step 10: Leitor `sysinfo` e parse do psmux; jobs Windows e macOS do CI conferidos pelo log; revisar**
 
 ### Task 5: Gerador de entradas e saídas gravadas
 
@@ -298,7 +298,7 @@ texto), `shadow::off_by_default`.
 
 - [x] **Step 32: Testes, vistos falhar**
 - [x] **Step 33: Sombra; testes focados; revisar**
-- [ ] **Step 34: Canal de testes na máquina do dono por 2 dias de uso normal; zerar as diferenças ou registrar cada uma aceita em `desenho.md` (verificação manual)**
+- [x] **Step 34: Sombra com sessões reais no backend isolado (no lugar dos 2 dias no canal de testes): 12 cenários, Claude Haiku e Codex gpt-6-luna com e sem terminal; 3 defeitos do instrumento corrigidos, o resto aceito com motivo em `desenho.md`; Python 16 ms e Rust 13 ms por atualização (mediana). Relatório: `sombra-isolada.md`**
 
 ### Task 16: Consumidores Python pela ponte
 
@@ -321,9 +321,9 @@ que falha), `test_resolve_tracked_uses_bridge_in_rust_mode`, `test_create_seeds_
 `test_stall_watch_reads_bridge_snapshot_without_clients`, `test_prune_keeps_files_on_bridge_error`,
 `test_guest_list_filters_bridge_snapshot`, `test_dead_pair_sweep_outside_discovery`.
 
-- [ ] **Step 35: Auditoria; testes, vistos falhar**
-- [ ] **Step 36: Delegação no modo `rust`/`pending`; o código atual só no modo `python`**
-- [ ] **Step 37: Testes focados; revisar**
+- [x] **Step 35: Auditoria; testes, vistos falhar**
+- [x] **Step 36: Delegação no modo `rust`/`pending`; o código atual só no modo `python`**
+- [x] **Step 37: Testes focados; revisar**
 
 ### Task 17: `ListHub` — as rotas da lista no Rust
 
@@ -344,9 +344,9 @@ Contrato público igual a `sse.py:578-671`: `sessions`, `list_error` uma vez na 
 `list_routes::guest_token_goes_to_python`, `list_routes::hidden_from_owner_not_listed`,
 `list_routes::facts_down_marks_rows_not_list`.
 
-- [ ] **Step 38: Testes, vistos falhar**
-- [ ] **Step 39: `ListHub` e rotas; diário `rust.list_failed` com código**
-- [ ] **Step 40: Regra no `CLAUDE.md` e em `plataforma.md`; testes focados; revisar**
+- [x] **Step 38: Testes, vistos falhar**
+- [x] **Step 39: `ListHub` e rotas; diário `rust.list_failed` com código**
+- [x] **Step 40: Regra no `CLAUDE.md` e em `plataforma.md`; testes focados; revisar**
 
 ### Task 18: Lista acordada por arquivo
 
@@ -356,8 +356,8 @@ contas; mudança reclassifica a sessão e publica na hora, coalescida em 150 ms)
 **Falha sem ela:** `list_routes::marker_change_publishes_without_tick`,
 `list_routes::burst_of_writes_coalesces`.
 
-- [ ] **Step 41: Testes, vistos falhar**
-- [ ] **Step 42: Observador e coalescência; testes focados; revisar**
+- [x] **Step 41: Testes, vistos falhar**
+- [x] **Step 42: Observador e coalescência; testes focados; revisar**
 
 ---
 

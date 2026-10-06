@@ -560,6 +560,7 @@ dependencies = [
  "hyper-util",
  "indexmap",
  "md-5",
+ "memchr",
  "mime_guess",
  "notify",
  "percent-encoding",

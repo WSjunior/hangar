@@ -38,14 +38,69 @@ pub struct PaneSession {
     pub repl_sid: Option<String>,
 }
 
-struct Marker { mtime: SystemTime, jsonl: Option<String>, pid: Option<i64>, ts: f64 }
+/// Falha que a descoberta contornou e que vai ao diário. `reason` é frase fixa do código e diz o
+/// campo; `key` é o arquivo, o pid ou a sessão, nunca texto lido do disco.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiscoveryProblem {
+    pub code: &'static str,
+    pub key: String,
+    pub reason: &'static str,
+}
 
-/// Caches da resolução por nome de sessão (`_jsonl_cache`, `_fd_locked`) e o dos marcadores.
+/// Teto por rodada: a lista roda a cada 1,5 s.
+pub const PROBLEMS_CAP: usize = 64;
+
+/// Os problemas de uma rodada, já com o teto de um aviso por minuto por (chave, código), e quantos
+/// passaram do teto.
+#[derive(Debug, Default)]
+pub struct Problems(Vec<DiscoveryProblem>, usize);
+
+impl Problems {
+    pub fn note(&mut self, code: &'static str, key: &str, reason: &'static str) {
+        if self.0.len() >= PROBLEMS_CAP {
+            self.1 += 1;
+            return;
+        }
+        if !crate::warn_limit::allow(Some(key), code) {
+            return;
+        }
+        tracing::warn!(code, key, reason, "list: descoberta contornou uma falha");
+        self.0.push(DiscoveryProblem { code, key: key.to_owned(), reason });
+    }
+
+    /// Passou do teto: uma entrada a mais diz que houve corte (a contagem vai ao log).
+    pub fn into_vec(mut self) -> Vec<DiscoveryProblem> {
+        if self.1 > 0 {
+            tracing::warn!(code = "list_problems_truncated", dropped = self.1, "list: problemas além do teto da rodada");
+            self.0.push(DiscoveryProblem { code: "list_problems_truncated", key: String::new(),
+                reason: "mais problemas que o teto da rodada; os demais só no log" });
+        }
+        self.0
+    }
+}
+
+/// `bad`: torto ou ilegível; guardado como está para voltar ao diário a cada rodada.
+struct Marker { mtime: SystemTime, jsonl: Option<String>, pid: Option<i64>, ts: f64, bad: bool }
+
+/// Os marcadores de uma pasta `.hangar-active` e o mtime dela quando foram lidos: o hook grava
+/// por `rename`, então pasta igual é marcador igual.
+struct MarkerDir { stamp: SystemTime, markers: HashMap<OsString, Marker> }
+
+/// O resultado do `newest_after_clear` de um projeto, valendo enquanto a pasta não muda.
+struct AfterClear { stamp: SystemTime, sid_jsonl: String, result: String, at: std::time::Instant }
+
+/// Teto da idade do resultado guardado: voltar a um transcript que já existia não muda a pasta.
+const AFTER_CLEAR_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Caches da resolução por nome de sessão (`_jsonl_cache`, `_fd_locked`), os dos marcadores e o
+/// do pós-/clear, e os problemas que a resolução viu desde a última rodada.
 #[derive(Default)]
 pub struct Resolver {
     jsonl: BTreeMap<String, String>,
     fd_locked: BTreeSet<String>,
-    markers: HashMap<PathBuf, HashMap<OsString, Marker>>,
+    markers: HashMap<PathBuf, MarkerDir>,
+    after_clear: HashMap<PathBuf, AfterClear>,
+    pub(super) problems: Problems,
 }
 
 impl Resolver {
@@ -148,14 +203,24 @@ struct Tree {
     pids: Vec<i64>,
     argvs: Vec<Vec<String>>,
     cmds: Vec<String>,
+    /// Pid vivo cujo argv não se leu: o agente pode ser ele, e a sessão sairia `claude`.
+    unreadable: Option<i64>,
 }
 
 impl Tree {
     fn new(procs: &dyn ProcessView, root: i64, children: &ChildrenMap) -> Self {
         let pids = descendants(root, children);
-        let argvs: Vec<Vec<String>> = pids.iter().map(|p| procs.argv(*p)).collect();
+        let mut unreadable = None;
+        // ponytail: argv lido vazio sem erro (no meio do `exec`, zumbi) não se distingue de um
+        // processo sem argv; a próxima rodada o lê inteiro.
+        let argvs: Vec<Vec<String>> = pids.iter().map(|p| procs.argv_checked(*p).unwrap_or_else(|error| {
+            if !super::procs::vanished(&error) {
+                unreadable.get_or_insert(*p);
+            }
+            Vec::new()
+        })).collect();
         let cmds = argvs.iter().map(|a| a.join(" ")).collect();
-        Self { pids, argvs, cmds }
+        Self { pids, argvs, cmds, unreadable }
     }
 
     fn iter(&self) -> impl Iterator<Item = (i64, &str)> { self.pids.iter().copied().zip(self.cmds.iter().map(String::as_str)) }
@@ -185,13 +250,22 @@ fn config_dir(procs: &dyn ProcessView, pid: i64) -> Option<PathBuf> {
 
 /// Primeiro fd aberto num `*.jsonl` dentro de `projects`. Fora do Linux o sinal não vale o custo:
 /// enumerar os handles do Windows leva segundos, e o Claude não segura o fd em idle.
-fn open_jsonl(procs: &dyn ProcessView, pid: i64, projects: &Path) -> Option<String> {
+fn open_jsonl(procs: &dyn ProcessView, pid: i64, projects: &Path, problems: &mut Problems) -> Option<String> {
     if !cfg!(target_os = "linux") {
         return None;
     }
     let base = format!("{}{}", projects.to_string_lossy(), std::path::MAIN_SEPARATOR);
-    procs.fds(pid).into_iter().map(|t| t.to_string_lossy().into_owned())
-        .find(|t| t.ends_with(".jsonl") && t.starts_with(&base))
+    let fds = match procs.fds_checked(pid) {
+        Ok(fds) => fds,
+        Err(error) => {
+            // Sem os fds o transcript sai do marcador ou do sid, que podem estar velhos.
+            if !super::procs::vanished(&error) {
+                problems.note("list_fds_unreadable", &pid.to_string(), "descritores do processo ilegíveis; transcript pelo marcador");
+            }
+            return None;
+        }
+    };
+    fds.into_iter().map(|t| t.to_string_lossy().into_owned()).find(|t| t.ends_with(".jsonl") && t.starts_with(&base))
 }
 
 fn projects_of(procs: &dyn ProcessView, pid: i64, default: &Path) -> PathBuf {
@@ -240,42 +314,83 @@ fn read_marker(path: &Path, mtime: SystemTime) -> Option<Marker> {
         jsonl: o.get("jsonl").and_then(|j| j.as_str()).map(String::from),
         pid: marker_pid(o.get("pid")),
         ts: marker_ts(o.get("ts"))?,
+        bad: false,
     })
 }
 
 impl Resolver {
-    /// Marcador do hook casado por pid da árvore (`_marker_by_pids`); o mais recente vence. Relê só
-    /// o marcador cujo mtime mudou: com centenas deles, ler todos a cada rodada era o custo.
+    /// Marcador do hook casado por pid da árvore (`_marker_by_pids`); o mais recente vence. Com
+    /// centenas de marcadores, listar e medir todos por sessão a cada rodada era o custo: a pasta só
+    /// é relida quando o mtime dela muda, e dentro dela só o marcador cujo mtime mudou.
     fn marker_by_pids(&mut self, config_base: &Path, pids: &[i64], exclude: &HashSet<String>) -> Option<String> {
         let dir = config_base.join(".hangar-active");
-        let entries = std::fs::read_dir(&dir).ok()?;
-        let mut previous = self.markers.remove(&dir).unwrap_or_default();
-        let mut current: HashMap<OsString, Marker> = HashMap::new();
-        let mut best: Option<(f64, String)> = None;
+        let stamp = match std::fs::metadata(&dir).and_then(|m| m.modified()) {
+            Ok(stamp) => stamp,
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    self.problems.note("list_markers_unreadable", &dir.to_string_lossy(), "pasta .hangar-active ilegível; sessão sem marcador");
+                }
+                return None;
+            }
+        };
+        if self.markers.get(&dir).is_none_or(|d| d.stamp != stamp || !settled(stamp)) {
+            let previous = self.markers.remove(&dir).map(|d| d.markers).unwrap_or_default();
+            let markers = self.read_markers(&dir, previous)?;
+            self.markers.insert(dir.clone(), MarkerDir { stamp, markers });
+        }
+        let mut best: Option<(f64, &str)> = None;
+        for (file, hit) in &self.markers.get(&dir)?.markers {
+            if hit.bad {
+                self.problems.note("list_marker_invalid", &dir.join(file).to_string_lossy(), "marcador .hangar-active ilegível ou torto, ignorado");
+                continue;
+            }
+            if let (Some(j), Some(pid)) = (hit.jsonl.as_deref().filter(|j| !j.is_empty()), hit.pid)
+                && pids.contains(&pid) && best.is_none_or(|(ts, _)| hit.ts > ts)
+                && Path::new(j).exists() && !exclude.contains(&real(j))
+            {
+                best = Some((hit.ts, j));
+            }
+        }
+        best.map(|(_, j)| j.to_owned())
+    }
+
+    fn read_markers(&mut self, dir: &Path, mut previous: HashMap<OsString, Marker>) -> Option<HashMap<OsString, Marker>> {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    self.problems.note("list_markers_unreadable", &dir.to_string_lossy(), "pasta .hangar-active ilegível; sessão sem marcador");
+                }
+                return None;
+            }
+        };
+        let mut current = HashMap::with_capacity(previous.len());
         for entry in entries.flatten() {
             let file = entry.file_name();
             if !file.to_string_lossy().ends_with(".json") {
                 continue;
             }
             // Segue o symlink, como o `stat` do Python; sem mtime não há como saber se mudou.
-            let Ok(when) = std::fs::metadata(entry.path()).and_then(|m| m.modified()) else { continue };
+            let when = match std::fs::metadata(entry.path()).and_then(|m| m.modified()) {
+                Ok(when) => when,
+                // Apagado entre a listagem e o `stat` (a poda): corrida.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => {
+                    self.problems.note("list_marker_invalid", &entry.path().to_string_lossy(), "marcador .hangar-active sem stat (link quebrado ou sem permissão), ignorado");
+                    continue;
+                }
+            };
             let hit = match previous.remove(&file) {
                 Some(hit) if hit.mtime == when => hit,
                 _ => match read_marker(&entry.path(), when) {
                     Some(hit) => hit,
-                    None => continue,
+                    // O Python também pula o torto; o mtime guardado o deixa sem reler até mudar.
+                    None => Marker { mtime: when, jsonl: None, pid: None, ts: 0.0, bad: true },
                 },
             };
-            if let (Some(j), Some(pid)) = (hit.jsonl.as_deref().filter(|j| !j.is_empty()), hit.pid) {
-                if pids.contains(&pid) && Path::new(j).exists() && !exclude.contains(&real(j))
-                    && best.as_ref().is_none_or(|(ts, _)| hit.ts > *ts) {
-                    best = Some((hit.ts, j.to_string()));
-                }
-            }
             current.insert(file, hit);
         }
-        self.markers.insert(dir, current);
-        best.map(|(_, j)| j)
+        Some(current)
     }
 
     /// `_resolve_tracked_impl`, na mesma ordem: fd aberto, marcador pelo sid, trava do fd,
@@ -285,9 +400,10 @@ impl Resolver {
         let tracked = |jsonl: String| Transcript { jsonl: Some(jsonl), tracked: true };
         if let Some((pid, tree)) = pane {
             // Transcripts que subagente ou daemon seguram abertos agora são de outra sessão lógica.
+            let problems = &mut self.problems;
             let aux_open: HashSet<String> = tree.iter()
                 .filter(|(_, c)| is_aux(c) && provider_from_argv(&split(c)).is_some())
-                .filter_map(|(p, _)| open_jsonl(procs, p, &projects_of(procs, p, projects_dir)))
+                .filter_map(|(p, _)| open_jsonl(procs, p, &projects_of(procs, p, projects_dir), problems))
                 .map(|j| real(&j)).collect();
             // 1. fd aberto do REPL: o transcript ativo agora, inclusive depois de um /clear. Só um
             //    CLI de agente abre transcript; ler o fd do resto da árvore era o passo mais caro.
@@ -295,7 +411,7 @@ impl Resolver {
                 if provider_from_argv(&split(cmd)).is_none() {
                     continue;
                 }
-                if let Some(j) = open_jsonl(procs, p, &projects_of(procs, p, projects_dir)) {
+                if let Some(j) = open_jsonl(procs, p, &projects_of(procs, p, projects_dir), &mut self.problems) {
                     self.jsonl.insert(name.into(), j.clone());
                     self.fd_locked.insert(name.into());
                     return tracked(j);
@@ -324,7 +440,7 @@ impl Resolver {
             if let Some((p, sid)) = tree.repl().find_map(|(p, c)| session_id(c).map(|s| (p, s))) {
                 let projdir = projects_of(procs, p, projects_dir).join(sanitize_cwd(cwd));
                 let sid_jsonl = projdir.join(format!("{sid}.jsonl")).to_string_lossy().into_owned();
-                let j = if has_siblings { sid_jsonl } else { newest_after_clear(&projdir, sid_jsonl, &aux_open) };
+                let j = if has_siblings { sid_jsonl } else { self.newest_after_clear(&projdir, sid_jsonl, &aux_open) };
                 self.jsonl.insert(name.into(), j.clone());
                 return tracked(j);
             }
@@ -355,6 +471,33 @@ fn newest(dir: &Path) -> Option<String> {
         }
     }
     best.map(|(_, f)| f.to_string_lossy().into_owned())
+}
+
+/// O relógio do mtime é grosso (milissegundos): duas gravações seguidas podem dar o mesmo valor.
+/// Pasta mexida há menos de um segundo é relida em vez de confiada ao mtime.
+pub(super) fn settled(stamp: SystemTime) -> bool {
+    SystemTime::now().duration_since(stamp).is_ok_and(|age| age >= std::time::Duration::from_secs(1))
+}
+
+impl Resolver {
+    /// `newest_after_clear` lembrado pelo mtime do projeto: o `/clear` cria arquivo, e só criar
+    /// ou apagar muda a pasta. Uma sessão sem irmã media todo transcript do projeto a cada rodada.
+    // ponytail: outro transcript do projeto que só cresce (sem arquivo novo) espera até
+    // `AFTER_CLEAR_MAX_AGE` para ser visto; o Python o pegaria na hora. Fd e marcador vêm antes.
+    fn newest_after_clear(&mut self, projdir: &Path, sid_jsonl: String, exclude: &HashSet<String>) -> String {
+        let stamp = mtime(projdir).filter(|s| settled(*s) && exclude.is_empty());
+        if let (Some(stamp), Some(hit)) = (stamp, self.after_clear.get(projdir))
+            && hit.stamp == stamp && hit.sid_jsonl == sid_jsonl && hit.at.elapsed() < AFTER_CLEAR_MAX_AGE
+        {
+            return hit.result.clone();
+        }
+        let result = newest_after_clear(projdir, sid_jsonl.clone(), exclude);
+        match stamp {
+            Some(stamp) => { self.after_clear.insert(projdir.to_path_buf(), AfterClear { stamp, sid_jsonl, result: result.clone(), at: std::time::Instant::now() }); }
+            None => { self.after_clear.remove(projdir); }
+        }
+        result
+    }
 }
 
 /// /clear rola um session-id novo sem mudar o cmdline: um `.jsonl` mais novo no projeto (que não
@@ -424,6 +567,9 @@ pub fn discover_panes(panes: &[Pane], procs: &dyn ProcessView, children: &Childr
     }
     // A marca de escondida é da sessão: a do shell nasce no cwd do agente e o tiraria do pós-/clear.
     groups.retain(|g| !g[0].hidden);
+    let wanted: Vec<i64> = groups.iter().flatten().filter_map(|p| p.pid).filter(|pid| *pid != 0)
+        .flat_map(|pid| descendants(pid.into(), children)).collect();
+    procs.prefetch(&wanted);
     let mut out = Vec::new();
     for group in &groups {
         let p = agent_pane(group, procs, children);
@@ -434,6 +580,10 @@ pub fn discover_panes(panes: &[Pane], procs: &dyn ProcessView, children: &Childr
         let pid = p.pid.filter(|pid| *pid != 0).map(i64::from);
         let tree = pid.map(|pid| Tree::new(procs, pid, children));
         let (mut provider, agent_pid) = agent_of_pane(tree.as_ref());
+        if agent_pid.is_none() && tree.as_ref().is_some_and(|t| t.unreadable.is_some()) {
+            // Pi, omp ou Kimi com o argv ilegível sairia `claude` sem ninguém saber.
+            resolver.problems.note("list_argv_unreadable", &p.session, "argv do processo do pane ilegível; agente não reconhecido");
+        }
         // Durante o boot só há shell: a escolha da criação já identifica o dono.
         if agent_pid.is_none() {
             if let Some(chosen) = p.provider.as_deref().and_then(exec_provider) {
@@ -457,6 +607,13 @@ pub fn discover_panes(panes: &[Pane], procs: &dyn ProcessView, children: &Childr
         resolver.jsonl.retain(|n, _| live.contains(n.as_str()));
         resolver.fd_locked.retain(|n| live.contains(n.as_str()));
     }
+    // Um por projeto e um por conta: acima do teto é resto de sessão que fechou, relido se voltar.
+    if resolver.after_clear.len() > SESSION_CAP {
+        resolver.after_clear.clear();
+    }
+    if resolver.markers.len() > SESSION_CAP {
+        resolver.markers.clear();
+    }
     out
 }
 
@@ -472,6 +629,9 @@ pub fn resolve_one(panes: &[Pane], procs: &dyn ProcessView, children: &ChildrenM
     sessions.sort_unstable();
     sessions.dedup();
     let tree = pid.map(|pid| Tree::new(procs, pid, children));
+    if tree.as_ref().is_some_and(|t| t.unreadable.is_some()) {
+        resolver.problems.note("list_argv_unreadable", name, "argv do processo do pane ilegível; transcript sem o sid");
+    }
     resolver.resolve(name, cwd, pid.zip(tree.as_ref()), procs, projects_dir, sessions.len() > 1)
 }
 
@@ -528,6 +688,120 @@ mod tests {
         r.seed("live", "/live.jsonl");
         discover_panes(&[pane("live", "/w")], &NoProcs, &ChildrenMap::new(), Path::new("/p"), &mut r, &|_| false);
         assert_eq!(r.cached().keys().collect::<Vec<_>>(), ["live"], "acima do teto só fica quem apareceu");
+    }
+
+    /// Pane 10 → filho 11; o filho tem o argv e os fds ilegíveis (EACCES), o pane não.
+    struct Locked { sid: Option<String> }
+    impl ProcessView for Locked {
+        fn children(&self, _: Duration) -> io::Result<Arc<ChildrenMap>> { unreachable!() }
+        fn argv_checked(&self, pid: i64) -> io::Result<Vec<String>> {
+            match (pid, &self.sid) {
+                (11, None) => Err(io::ErrorKind::PermissionDenied.into()),
+                (11, Some(sid)) => Ok(vec!["claude".into(), "--session-id".into(), sid.clone()]),
+                (12, _) => Err(io::ErrorKind::NotFound.into()),
+                _ => Ok(vec!["fish".into()]),
+            }
+        }
+        fn cwd(&self, _: i64) -> Option<PathBuf> { None }
+        fn env_var(&self, _: i64, _: &str) -> io::Result<Option<OsString>> { Ok(None) }
+        fn start_time(&self, _: i64) -> Option<f64> { None }
+        fn fds_checked(&self, _: i64) -> io::Result<Vec<PathBuf>> { Err(io::ErrorKind::PermissionDenied.into()) }
+    }
+
+    fn tree() -> ChildrenMap { [(10, vec![11, 12])].into_iter().collect() }
+
+    fn codes(r: &mut Resolver) -> Vec<&'static str> { std::mem::take(&mut r.problems).into_vec().iter().map(|p| p.code).collect() }
+
+    #[test]
+    fn unreadable_argv_and_fds_are_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = format!("argv-{}", dir.path().display());
+        let mut p = pane(&name, "/w");
+        p.pid = Some(10);
+        let mut r = Resolver::default();
+        let out = discover_panes(&[p.clone()], &Locked { sid: None }, &tree(), dir.path(), &mut r, &|_| false);
+        assert_eq!(out[0].provider, "claude");
+        assert_eq!(codes(&mut r), ["list_argv_unreadable"], "Pi/omp/Kimi ilegível não vira `claude` calado; o morto (12) não conta");
+        // Agente legível: os fds ilegíveis dele vão ao diário.
+        let sid = "00000000-0000-0000-0000-000000000001";
+        p.session = format!("fds-{}", dir.path().display());
+        discover_panes(&[p], &Locked { sid: Some(sid.into()) }, &tree(), dir.path(), &mut r, &|_| false);
+        // Os fds só são lidos no Linux (`_fd_locked`); fora dele não há o que reportar.
+        let want: &[&str] = if cfg!(target_os = "linux") { &["list_fds_unreadable"] } else { &[] };
+        assert_eq!(codes(&mut r), want);
+    }
+
+    fn age(path: &Path, secs: u64) {
+        let when = SystemTime::now() - Duration::from_secs(secs);
+        // Também recebe pasta. No Windows o mtime pede FILE_WRITE_ATTRIBUTES, e pasta só abre com
+        // FILE_FLAG_BACKUP_SEMANTICS; no Linux pasta não abre para escrita.
+        #[cfg(windows)]
+        let file = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::File::options().access_mode(0x100).custom_flags(0x0200_0000).open(path).unwrap()
+        };
+        #[cfg(not(windows))]
+        let file = std::fs::File::open(path).unwrap();
+        file.set_modified(when).unwrap();
+    }
+
+    #[test]
+    fn markers_are_reread_only_when_the_folder_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let active = dir.path().join(".hangar-active");
+        std::fs::create_dir(&active).unwrap();
+        let jsonl = dir.path().join("a.jsonl");
+        std::fs::write(&jsonl, "").unwrap();
+        let marker = active.join("boot.json");
+        std::fs::write(&marker, format!(r#"{{"jsonl":{:?},"pid":11,"ts":1}}"#, jsonl.to_str().unwrap())).unwrap();
+        std::fs::write(active.join("torto.json"), "{").unwrap();
+        age(&active, 10);
+        let mut r = Resolver::default();
+        let none = HashSet::new();
+        assert_eq!(r.marker_by_pids(dir.path(), &[11], &none).as_deref(), jsonl.to_str());
+        assert_eq!(codes(&mut r), ["list_marker_invalid"]);
+        // Reescrito no lugar, sem `rename`: a pasta não mudou e o marcador não é relido.
+        std::fs::write(&marker, r#"{"jsonl":"/outro.jsonl","pid":99,"ts":2}"#).unwrap();
+        assert_eq!(r.marker_by_pids(dir.path(), &[11], &none).as_deref(), jsonl.to_str(), "pasta igual, marcador igual");
+        // Pasta mexida (o `rename` do hook): relida.
+        std::fs::write(active.join("novo.json"), "{}").unwrap();
+        assert_eq!(r.marker_by_pids(dir.path(), &[11], &none), None);
+    }
+
+    #[test]
+    fn after_clear_is_remembered_until_the_project_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let sid = dir.path().join("sid.jsonl");
+        let other = dir.path().join("other.jsonl");
+        std::fs::write(&other, "").unwrap();
+        age(&other, 40);
+        std::fs::write(&sid, "").unwrap();
+        age(&sid, 30);
+        age(dir.path(), 10);
+        let mut r = Resolver::default();
+        let none = HashSet::new();
+        let sid_s = sid.to_string_lossy().into_owned();
+        assert_eq!(r.newest_after_clear(dir.path(), sid_s.clone(), &none), sid_s);
+        // Outro transcript só cresce: a pasta não muda, nada é medido de novo.
+        std::fs::write(&other, "x").unwrap();
+        age(&other, 20);
+        assert_eq!(r.newest_after_clear(dir.path(), sid_s.clone(), &none), sid_s);
+        // O `/clear` cria o arquivo novo: a pasta muda e ele vence.
+        let cleared = dir.path().join("cleared.jsonl");
+        std::fs::write(&cleared, "").unwrap();
+        assert_eq!(r.newest_after_clear(dir.path(), sid_s, &none), cleared.to_string_lossy());
+    }
+
+    #[test]
+    fn problems_over_the_ceiling_leave_a_mark() {
+        let mut p = Problems::default();
+        let base = format!("cap-{:?}", std::time::Instant::now());
+        for i in 0..PROBLEMS_CAP + 5 {
+            p.note("list_test_cap", &format!("{base}-{i}"), "teste");
+        }
+        let all = p.into_vec();
+        assert_eq!(all.len(), PROBLEMS_CAP + 1);
+        assert_eq!(all.last().map(|p| p.code), Some("list_problems_truncated"));
     }
 
     #[test]

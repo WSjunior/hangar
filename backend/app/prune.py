@@ -246,6 +246,7 @@ def prune_sidecars(infos=None, agora: float | None = None,
         # listagem, e o import local evita qualquer ciclo futuro (padrao do resto do app).
         from app.registry import SessionRegistry
 
+        # Com o Rust dono, vem da ponte; falha dela levanta e a rodada não poda nada.
         infos = SessionRegistry().list()
     if agora is None:
         agora = time.time()

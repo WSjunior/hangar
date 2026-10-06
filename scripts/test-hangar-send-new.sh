@@ -35,11 +35,14 @@ python3 - "$PORTA" "$TMP/corpo.json" <<'PY' &
 import http.server, sys
 porta, destino = int(sys.argv[1]), sys.argv[2]
 class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+        self.wfile.write(b'{"claude":{"disponivel":true,"default":true},"codex":{"disponivel":true,"default":false}}')
     def do_POST(self):
         corpo = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         open(destino, "wb").write(corpo)
         self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
-        self.wfile.write(b"{}")
+        self.wfile.write(b'{"avisos":["aviso-teste"]}')
     def log_message(self, *a): pass
 http.server.HTTPServer(("127.0.0.1", porta), H).serve_forever()
 PY
@@ -69,6 +72,13 @@ checa "--model junto" '"haiku"' "$(campo model 2>/dev/null)"
 rm -f "$TMP/corpo.json"
 bash "$TMP/scripts/hangar-send" --new sem-flag /tmp >/dev/null 2>&1
 checa "sem --headless, sem a chave" 'null' "$(campo headless 2>/dev/null)"
+
+# Auxiliares herdam o padrão; gravá-lo exige escolha explícita.
+checa "sem flag, não grava provedor" 'null' "$(campo remember_provider 2>/dev/null)"
+resultado=$(bash "$TMP/scripts/hangar-send" --new lembrar /tmp --provider codex --remember-provider 2>&1)
+checa "--remember-provider no corpo" 'true' "$(campo remember_provider 2>/dev/null)"
+[[ "$resultado" == *"aviso-teste"* ]]
+checa "aviso da criação aparece" '0' "$?"
 
 # 3. Codex também aceita o modo sem terminal.
 rm -f "$TMP/corpo.json"

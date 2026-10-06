@@ -13,6 +13,7 @@ function modGone(id: string | number): void {
 export const toast = {
   ok: (msg: string) => sonner.success(msg),
   erro: (msg: string) => sonner.error(msg),
+  aviso: (msg: string) => sonner(msg, { duration: 12_000 }),
   /** Aviso de um mod do Claude Code: o nome do mod é o título, como na caixa do terminal. */
   mod: (msg: string, plugin: string, ms: number) => {
     while (modVisible.length >= MOD_VISIBLE_MAX) sonner.dismiss(modVisible.shift());

@@ -456,6 +456,19 @@
     return () => window.removeEventListener('hangar-sync-disabled', disabled);
   });
 
+  // Aviso da criação de sessão: discreto e sem travar a tela; some sozinho ou no ×.
+  $effect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const show = (event: Event) => {
+      const warnings = (event as CustomEvent<string[]>).detail;
+      hangarNotice = warnings.join(' · ');
+      clearTimeout(timer);
+      timer = setTimeout(() => { if (hangarNotice === warnings.join(' · ')) hangarNotice = ''; }, 8000);
+    };
+    window.addEventListener('hangar-session-warnings', show);
+    return () => { clearTimeout(timer); window.removeEventListener('hangar-session-warnings', show); };
+  });
+
   // Login fresco no hub (vindo da tela de login): persiste a chave na aba e estabelece a sessao.
   async function onSyncLogin(key: CryptoKey) {
     await stashKey(key);
