@@ -104,19 +104,23 @@ async fn dropping_writer_writes_nothing() {
 
 /// O prompt entra na tela alternativa como o `tmux attach` do psmux: é o sinal de pronto. A tecla
 /// vai antes de qualquer saída, e a resposta ao pedido de cursor tem que passar pela entrada
-/// segurada, senão o conhost não sobe o filho e só o prazo abriria.
+/// segurada, senão o conhost não sobe o filho e só o prazo abriria. A primeira tecla tira o
+/// `?1049h` do prompt: repetido, ele limpa a tela alternativa e apaga a saída do `echo` antes de
+/// o ConPTY pintá-la.
 #[tokio::test(flavor = "multi_thread")]
 async fn held_input_reaches_the_child_after_ready() {
     let mut cmd = CommandBuilder::new("cmd.exe");
     cmd.args(["/d", "/k", "prompt $E[?1049hHGP$G"]);
     let pty::Opened { pty, mut output, input, held_failure } =
         pty::spawn(cmd, 80, 24, Arc::new(Slot(Arc::default())), true).expect("o ConPTY abre");
-    input.send(Bytes::from_static(b"echo hangar-^cedo\r")).await.unwrap();
+    input.send(Bytes::from_static(b"prompt HGP$G\recho hangar-^cedo\r")).await.unwrap();
     let mut seen = Vec::new();
     assert!(read_until(&mut output, Some(&input), &mut seen, Duration::from_secs(4), |s| count(s, "hangar-cedo") >= 1).await,
             "a tecla segurada não chegou antes do prazo: {}", text(&seen));
     let mut held_failure = held_failure.expect("portão ligado");
-    assert!(held_failure.try_recv().is_err(), "a porta abriu sem o sinal");
+    // `Closed`: a porta já saiu do laço, e saiu sem aviso.
+    assert!(matches!(held_failure.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Closed)),
+            "a porta abriu sem o sinal");
     drop(input);
     pty::close(pty).await.expect("o filho sai e o pseudoconsole fecha");
 }

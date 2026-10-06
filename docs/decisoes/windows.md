@@ -765,7 +765,11 @@ Windows. Diferenças conferidas na fonte do crate e no `conpty.py`:
   em 0 ms e chegou de 50 ms em diante. No Linux (tmux 3.7b, `-L` próprio) o `echo` escrito antes
   até do `exec` chega: o tty guarda; por isso a porta só liga no Windows. macOS não conferido.
   O `ESC[?1049h` atravessa o ConPTY também vindo de um `prompt $E[?1049h` do `cmd.exe`, que é o
-  teste `term::conpty::held_input_reaches_the_child_after_ready`.
+  teste `term::conpty::held_input_reaches_the_child_after_ready`. A primeira tecla do teste troca
+  o prompt por um sem `?1049h`: repetido a cada prompt, ele limpa a tela alternativa e apaga a
+  saída do comando antes de o ConPTY pintar o quadro (06/10/2026, DELPHI-02: sem portão, `echo`
+  mandado 1,5 s depois do pronto mostrou o eco da linha e nunca a saída; com o portão a tecla saiu
+  ~15 ms após o `?1049h`, com o mesmo resultado). Foi a falha do CI run 37489975761.
 
 ## Clique de mod no psmux
 
