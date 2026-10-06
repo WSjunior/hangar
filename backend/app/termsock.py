@@ -521,20 +521,22 @@ async def _motor_rust(ws: WebSocket, name: str, cols: int, rows: int) -> None:
         tarefas = {asyncio.ensure_future(do_cliente()), asyncio.ensure_future(do_rust())}
         await asyncio.wait(tarefas, return_when=asyncio.FIRST_COMPLETED)
     finally:
-        for t in tarefas:
-            t.cancel()
-        if tarefas:
-            # `wait`, não `await` em cada uma: o cancelamento desta task (convidado revogado) segue
-            # valendo em vez de ser engolido junto com o das filhas.
-            await asyncio.wait(tarefas)
-        for t in tarefas:
-            erro_t = None if t.cancelled() else t.exception()
-            if erro_t is not None and not isinstance(
-                    erro_t, (ConnectionClosed, WebSocketDisconnect, ClientDisconnected)):
-                _log.error("termsock: %r — repasse terminou com %s", name, type(erro_t).__name__)
-        # O Rust fechou primeiro: o código dele vale, quem terminou antes aqui não importa.
-        rust_fechou = upstream.state is not State.OPEN
+        # Cancelamento que chega durante a limpeza interrompe qualquer `await` daqui; o `abort` do
+        # fim roda mesmo assim, senão o Rust fica com a conexão do repasse presa.
         try:
+            for t in tarefas:
+                t.cancel()
+            if tarefas:
+                # `wait`, não `await` em cada uma: o cancelamento desta task (convidado revogado)
+                # segue valendo em vez de ser engolido junto com o das filhas.
+                await asyncio.wait(tarefas)
+            for t in tarefas:
+                erro_t = None if t.cancelled() else t.exception()
+                if erro_t is not None and not isinstance(
+                        erro_t, (ConnectionClosed, WebSocketDisconnect, ClientDisconnected)):
+                    _log.error("termsock: %r — repasse terminou com %s", name, type(erro_t).__name__)
+            # O Rust fechou primeiro: o código dele vale, quem terminou antes aqui não importa.
+            rust_fechou = upstream.state is not State.OPEN
             await upstream.close()
         finally:
             if upstream.state is not State.CLOSED:

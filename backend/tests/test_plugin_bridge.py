@@ -154,7 +154,8 @@ def test_portao_desligado_nao_poe_nada_na_sessao_e_ligado_poe_o_plugin(monkeypat
     assert get_adapter("claude").spawn_command("/tmp/p", "sid") == ["claude", "--session-id", "sid"]
 
     monkeypatch.setattr(pb, "ligado", lambda: True)
-    (raiz,) = pb.raizes_dos_plugins()
+    # Os outros mods do repo vêm depois; a ordem completa é do teste com pasta temporária.
+    raiz = pb.raizes_dos_plugins()[0]
     assert Path(raiz).parts[-2:] == ("plugins", "hangar")
     assert get_adapter("claude").spawn_command("/tmp/p", "sid")[:5] == [
         "claude", "--session-id", "sid", "--plugin-dir", raiz]
