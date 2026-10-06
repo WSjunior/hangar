@@ -297,3 +297,129 @@ async fn one_request_at_a_time_in_the_pane_counting_the_cleanup() {
     assert!(pane.actions().is_empty() && !pane.held());
     drop(held);
 }
+
+fn to_mr(pane: &FakePane) {
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-5-faixa")]);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-6-painel-1")]);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-7-painel-2")]);
+}
+fn back_from_mr(pane: &FakePane) {
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-8-painel-3")]);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-9-prompt")]);
+}
+fn keys(pane: &FakePane) -> Vec<String> { pane.actions().into_iter().filter_map(|a| a.strip_prefix("keys ").map(String::from)).collect() }
+
+#[tokio::test]
+async fn keyboard_reaches_the_pane_presses_and_comes_back() {
+    let (mods, pane) = setup("tmux-14-ciclo-4-prompt", pm());
+    pane.mouse(false);
+    to_mr(&pane);
+    pane.on_keys("Tab", vec![Focus("pm-mock-mr", "mr-a", false)]);
+    pane.on_keys("Enter", vec![Pressed("pm-mock-mr", "mr-a")]);
+    back_from_mr(&pane);
+    press(&mods, &pane, "pm-mock-mr", "mr-a").await.unwrap();
+    assert_eq!(keys(&pane), ["C-x Tab", "C-x Tab", "C-x Tab", "Tab", "Enter", "C-x Tab", "C-x Tab"]);
+    assert_eq!(mods.armed_focus(S), None, "o alvo é desarmado no fim");
+}
+
+#[tokio::test]
+async fn keyboard_without_focus_on_the_target_never_sends_enter() {
+    let (mods, pane) = setup("tmux-14-ciclo-4-prompt", pm());
+    pane.mouse(false);
+    to_mr(&pane);
+    pane.on_keys("Tab", vec![Focus("pm-mock-mr", "outro", true)]);
+    back_from_mr(&pane);
+    assert_eq!(code(press(&mods, &pane, "pm-mock-mr", "mr-a").await), "erro_mod_clique_sem_resposta");
+    assert!(!keys(&pane).contains(&"Enter".to_string()));
+}
+
+#[tokio::test]
+async fn keyboard_for_a_band_button() {
+    let (mods, pane) = setup("tmux-14-ciclo-4-prompt", pm());
+    pane.mouse(false);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-5-faixa"), Focus("above-prompt", "pm-abrir", false)]);
+    pane.on_keys("Enter", vec![Pressed("above-prompt", "pm-abrir")]);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-6-painel-1")]);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-7-painel-2")]);
+    back_from_mr(&pane);
+    press(&mods, &pane, "above-prompt", "pm-abrir").await.unwrap();
+    assert_eq!(keys(&pane), ["C-x Tab", "Enter", "C-x Tab", "C-x Tab", "C-x Tab", "C-x Tab"]);
+}
+
+#[tokio::test]
+async fn keyboard_refuses_with_a_draft_or_a_dialog_before_any_key() {
+    let (mods, pane) = setup("tmux-440-rascunho-150", pm());
+    pane.mouse(false);
+    assert_eq!(code(press(&mods, &pane, "pm-mock-mr", "mr-a").await), "erro_mod_rascunho_no_prompt");
+    assert!(pane.actions().is_empty());
+    let (mods, pane) = setup("tmux-510-dialogo-150", pm());
+    pane.mouse(false);
+    assert_eq!(code(press(&mods, &pane, "pm-mock-mr", "mr-a").await), "erro_mod_dialogo_aberto");
+    assert!(pane.actions().is_empty());
+}
+
+#[tokio::test]
+async fn a_dialog_in_the_middle_stops_the_keys() {
+    let (mods, pane) = setup("tmux-14-ciclo-4-prompt", pm());
+    pane.mouse(false);
+    pane.on_keys("C-x Tab", vec![Show("tmux-510-dialogo-150")]);
+    assert_eq!(code(press(&mods, &pane, "pm-mock-mr", "mr-a").await), "erro_mod_dialogo_aberto");
+    assert_eq!(keys(&pane), ["C-x Tab"], "com o diálogo na tela nenhuma tecla a mais, nem na limpeza ((y))");
+}
+
+#[tokio::test]
+async fn title_off_the_row_goes_to_the_keyboard() {
+    // Oito abas, Jenkins fora da linha: o mouse não alcança o título e a reserva chega pelo ctrl+x tab.
+    let (mods, pane) = setup("tmux-262-abas-transbordando-150", eight());
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-5-faixa")]);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-6-painel-1")]);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-7-painel-2")]);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-8-painel-3")]);
+    pane.on_keys("Tab", vec![Focus("pm-mock-jenkins", "jenkins-a", false)]);
+    pane.on_keys("Enter", vec![Pressed("pm-mock-jenkins", "jenkins-a")]);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-9-prompt")]);
+    press(&mods, &pane, "pm-mock-jenkins", "jenkins-a").await.unwrap();
+    assert_eq!(keys(&pane), ["C-x Tab", "C-x Tab", "C-x Tab", "C-x Tab", "Tab", "Enter", "C-x Tab"]);
+}
+
+#[tokio::test]
+async fn close_by_keyboard() {
+    let (mods, pane) = setup("tmux-14-ciclo-4-prompt", pm());
+    pane.mouse(false);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-5-faixa")]);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-6-painel-1")]);
+    pane.on_keys("C-x x", vec![Show("tmux-14-ciclo-9-prompt"), CloseAll]);
+    close(&mods, &pane, "pm-mock-pm").await.unwrap();
+    assert_eq!(keys(&pane), ["C-x Tab", "C-x Tab", "C-x x"]);
+}
+
+#[tokio::test]
+async fn the_keyboard_never_starts_without_time_for_the_enter() {
+    // 500 ms de prazo: a primeira tecla pediria a espera do foco (100 ms no `quick`), a confirmação do
+    // `Enter` (300 ms) e a folga (300 ms). Não sai tecla nenhuma, e o alvo armado é desarmado na limpeza.
+    let (mods, pane) = setup("tmux-14-ciclo-4-prompt", pm());
+    pane.mouse(false);
+    let result = run(&mods, &pane, Instant::now() + Duration::from_millis(500), ModsCall::Press { site: "pm-mock-mr".into(), key: "mr-a".into() }).await;
+    assert_eq!(code(result), "erro_mod_clique_sem_resposta");
+    assert!(keys(&pane).is_empty(), "{:?}", pane.actions());
+    assert_eq!(mods.armed_focus(S), None);
+}
+
+#[tokio::test]
+async fn a_cut_in_the_middle_of_the_keyboard_goes_back_and_disarms() {
+    let (mods, pane) = setup("tmux-14-ciclo-4-prompt", pm());
+    let pane = Arc::new(pane);
+    pane.mouse(false);
+    to_mr(&pane);
+    pane.on_keys("Tab", vec![]);
+    back_from_mr(&pane);
+    pane.stall_on("keys Tab");
+    let (task, _answer) = click::spawn(parts(&mods, &pane), ModsCall::Press { site: "pm-mock-mr".into(), key: "mr-a".into() }, far());
+    until(|| keys(&pane).contains(&"Tab".to_string())).await;
+    assert!(mods.armed_focus(S).is_some() && pane.held());
+    // A tarefa some com o teclado no painel e o alvo armado: a limpeza volta ao prompt e desarma.
+    task.abort();
+    until(|| !pane.held()).await;
+    assert_eq!(keys(&pane), ["C-x Tab", "C-x Tab", "C-x Tab", "Tab", "C-x Tab", "C-x Tab"]);
+    assert_eq!(mods.armed_focus(S), None, "o próximo ctrl+x tab da pessoa não é reescrito");
+}
