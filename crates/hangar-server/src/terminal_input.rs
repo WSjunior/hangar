@@ -274,15 +274,39 @@ fn overlay(screen: &str) -> bool {
     analysis.overlay || analysis.state == "awaiting_input"
 }
 
+/// O que o clique de mod precisa saber do pane antes de cada passo.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PaneFormats { pub mouse: bool, pub in_mode: bool, pub columns: u16, pub rows: u16 }
+/// `|` e não tab: o psmux devolve vazio para formato que não conhece, e o campo vazio precisa sobrar.
+pub const MODS_FORMATS: &str = "#{mouse_sgr_flag}|#{alternate_on}|#{pane_in_mode}|#{window_width}|#{window_height}";
+impl PaneFormats {
+    /// Valor vazio nunca vale 0: sem `mouse_sgr_flag` (psmux) o sinal do mouse é a tela alternativa, que o
+    /// Claude Code só usa em tela cheia; `pane_in_mode` vazio é ilegível, não "fora de modo".
+    pub fn parse(text: &str) -> Option<Self> {
+        let fields: Vec<&str> = text.trim_end_matches(['\n', '\r']).split('|').collect();
+        let [sgr, alternate, mode, columns, rows] = fields.as_slice() else { return None };
+        if !matches!(*mode, "0" | "1") { return None; }
+        let mouse = if sgr.is_empty() { *alternate == "1" } else { *sgr == "1" };
+        Some(Self { mouse, in_mode: *mode == "1", columns: columns.parse().ok()?, rows: rows.parse().ok()? })
+    }
+}
+/// As teclas da reserva por teclado (T5): uma por chamada, e só os dois acordes medidos juntos.
+const MODS_KEYS: [&[&str]; 4] = [&["C-x", "Tab"], &["Tab"], &["Enter"], &["C-x", "x"]];
+
 pub struct TerminalDriver {
     binding: TerminalBinding,
     services: Arc<dyn TerminalServices>,
     io: Arc<dyn TerminalIo>,
     limits: InputLimits,
     serial: Mutex<()>,
+    /// A identidade do pane já foi conferida por quem criou o driver: as operações de mod não a refazem.
+    pane_checked: bool,
 }
 impl TerminalDriver {
-    pub fn new(binding: TerminalBinding, services: Arc<dyn TerminalServices>, io: Arc<dyn TerminalIo>, limits: InputLimits) -> Self { Self { binding, services, io, limits, serial: Mutex::new(()) } }
+    pub fn new(binding: TerminalBinding, services: Arc<dyn TerminalServices>, io: Arc<dyn TerminalIo>, limits: InputLimits) -> Self { Self { binding, services, io, limits, serial: Mutex::new(()), pane_checked: false } }
+    /// Driver para as operações de um clique de mod cujo pane já teve a identidade conferida na mesma
+    /// reserva (`PaneOp::Hold`): sem a conferência, cada operação é um processo do multiplexador a menos.
+    pub fn pane_checked(mut self) -> Self { self.pane_checked = true; self }
     pub fn binding(&self) -> &TerminalBinding { &self.binding }
     fn request(&self, args: Vec<String>, stdin: Vec<u8>) -> Result<CommandRequest, IoFailure> {
         let (program, prefix) = self.binding.mux_argv.split_first().ok_or(IoFailure { code: "mux_missing", may_have_written: false })?;
@@ -304,6 +328,7 @@ impl TerminalDriver {
     }
     /// Mesmo pane e mesma vida do multiplexador, sem perguntar pela conversa.
     async fn verify_pane(&self) -> Result<(), IoFailure> {
+        if self.pane_checked { return Ok(()); }
         let output = self.raw(vec!["display-message".into(), "-p".into(), "-t".into(), self.binding.pane.clone(), "#{session_name}\t#{pane_id}\t#{session_created}".into()], vec![]).await?;
         if !output.success { return Err(IoFailure { code: "identity_failed", may_have_written: false }); }
         let output = std::str::from_utf8(&output.stdout).map_err(|_| IoFailure { code: "identity_utf8", may_have_written: false })?;
@@ -342,6 +367,72 @@ impl TerminalDriver {
         Ok((unstyle(&styled, true), unstyle(&styled, false)))
     }
     pub async fn capture(&self) -> Result<String, IoFailure> { let _serial = self.serial.lock().await; self.capture_inner().await }
+    /// Efeito de mod no pane: confere só a identidade do pane (sem os fatos do Python, que pesam e não
+    /// mudam um clique de mouse) e não entra no diário da fila.
+    async fn pane_effect(&self, args: Vec<String>) -> Result<(), IoFailure> {
+        self.verify_pane().await?;
+        let output = self.raw(args, vec![]).await?;
+        if !output.success { return Err(IoFailure { code: "mux_effect_failed", may_have_written: true }); }
+        Ok(())
+    }
+    fn window(&self) -> String { format!("={}:", self.binding.name) }
+    pub async fn mods_formats(&self) -> Result<PaneFormats, IoFailure> {
+        self.verify_pane().await?;
+        let output = self.raw(vec!["display-message".into(), "-p".into(), "-t".into(), self.binding.pane.clone(), MODS_FORMATS.into()], vec![]).await?;
+        if !output.success { return Err(IoFailure { code: "formats_failed", may_have_written: false }); }
+        PaneFormats::parse(&String::from_utf8_lossy(&output.stdout)).ok_or(IoFailure { code: "formats_unreadable", may_have_written: false })
+    }
+    /// Terminais de verdade ligados à sessão. No tmux, o observador da prévia e o vigia de tamanho do
+    /// Hangar são clientes de controle e entram no `#{session_attached}` (medido no tmux 3.7c): contam só os
+    /// outros. No psmux vale o `#{session_attached}`, e vazio nunca vale 0: o ramo depende de nenhum cliente
+    /// de controle do Hangar se ligar à sessão no Windows, o que o `TerminalPool` (observador da prévia) e o
+    /// `watch_notices` (vigia) garantem recusando lá. Quem fizer um deles rodar no Windows troca este ramo
+    /// pelo do tmux, conferido antes com o `list-clients -F` do psmux (Task 20).
+    pub async fn mods_clients(&self) -> Result<usize, IoFailure> {
+        self.verify_pane().await?;
+        if self.binding.windows {
+            let output = self.raw(vec!["display-message".into(), "-p".into(), "-t".into(), self.binding.pane.clone(), "#{session_attached}".into()], vec![]).await?;
+            if !output.success { return Err(IoFailure { code: "clients_failed", may_have_written: false }); }
+            return String::from_utf8_lossy(&output.stdout).trim().parse().map_err(|_| IoFailure { code: "clients_unreadable", may_have_written: false });
+        }
+        let output = self.raw(vec!["list-clients".into(), "-t".into(), format!("={}", self.binding.name), "-F".into(), "#{client_flags}".into()], vec![]).await?;
+        if !output.success { return Err(IoFailure { code: "clients_failed", may_have_written: false }); }
+        Ok(String::from_utf8_lossy(&output.stdout).lines().filter(|l| !l.trim().is_empty() && !l.split(',').any(|f| f == "control-mode")).count())
+    }
+    /// Só a parte visível, com atributos: é nela que as coordenadas do mouse valem.
+    pub async fn mods_screen(&self) -> Result<String, IoFailure> {
+        self.verify_pane().await?;
+        let output = self.raw(vec!["capture-pane".into(), "-p".into(), "-e".into(), "-t".into(), self.binding.pane.clone()], vec![]).await?;
+        if !output.success { return Err(IoFailure { code: "capture_failed", may_have_written: false }); }
+        String::from_utf8(output.stdout).map_err(|_| IoFailure { code: "capture_utf8", may_have_written: false })
+    }
+    /// Clique SGR (botão esquerdo, apertar e soltar), linha e coluna a partir de 0; não tira o teclado
+    /// do prompt. A sequência é montada só aqui: mal formada, ela vira texto no prompt (psmux).
+    pub async fn mouse(&self, row: u16, col: u16) -> Result<(), IoFailure> {
+        let (c, r) = (u32::from(col) + 1, u32::from(row) + 1);
+        self.pane_effect(vec!["send-keys".into(), "-t".into(), self.binding.pane.clone(), "-l".into(), "--".into(),
+            format!("\u{1b}[<0;{c};{r}M\u{1b}[<0;{c};{r}m")]).await
+    }
+    /// Um evento de roda, com o ponteiro sobre o corpo do painel.
+    pub async fn wheel(&self, row: u16, col: u16, down: bool) -> Result<(), IoFailure> {
+        let (c, r) = (u32::from(col) + 1, u32::from(row) + 1);
+        self.pane_effect(vec!["send-keys".into(), "-t".into(), self.binding.pane.clone(), "-l".into(), "--".into(),
+            format!("\u{1b}[<{};{c};{r}M", if down { 65 } else { 64 })]).await
+    }
+    pub async fn mods_keys(&self, keys: &[&str]) -> Result<(), IoFailure> {
+        if !MODS_KEYS.contains(&keys) { return Err(IoFailure { code: "key_not_allowed", may_have_written: false }); }
+        let mut args = vec!["send-keys".into(), "-t".into(), self.binding.pane.clone()];
+        // Enter como CR cru fora do Windows, como no `key_inner`: com `extended-keys` o nome sai codificado.
+        if keys == ["Enter"] && !self.binding.windows { args.extend(["-l".into(), "--".into(), "\r".into()]); }
+        else { args.extend(keys.iter().map(|k| k.to_string())); }
+        self.pane_effect(args).await
+    }
+    /// Redimensiona e devolve a janela ao `window-size latest`: sozinho, o `resize-window` a deixa em
+    /// `manual`, e o terminal de quem se ligar depois não manda mais no tamanho.
+    pub async fn resize(&self, columns: u16, rows: u16) -> Result<(), IoFailure> {
+        self.pane_effect(vec!["resize-window".into(), "-t".into(), self.window(), "-x".into(), columns.to_string(), "-y".into(), rows.to_string()]).await?;
+        self.pane_effect(vec!["set-window-option".into(), "-t".into(), self.window(), "window-size".into(), "latest".into()]).await
+    }
     /// Só leitura: composer legível e vazio, então uma entrega adiada pode tentar já. Quem chama
     /// acabou de conferir a conversa pelos fatos; aqui basta o mesmo pane.
     pub async fn composer_free(&self) -> bool {
@@ -580,7 +671,7 @@ impl TerminalDriver {
         let mut refresh_guard = false;
         if facts.plugin_live && !text.trim_start().starts_with('/') {
             // Com algo guardado, o envio vai pelo composer: só ele devolve o guardado.
-            let mode = if facts.plugin_user && facts.idle && !before.stashed && !text.contains('@') && !text.trim_start().starts_with('!') { PluginMode::User } else { PluginMode::Fill };
+            let mode = if user_mode(&facts, text, before.stashed) { PluginMode::User } else { PluginMode::Fill };
             let request = PluginRequest { id: id.into(), text: text.into(), mode: mode.clone() };
             if self.services.writing().await.is_err() { return DeliveryResult::new(Disposition::Deferred, DeliveryStage::Plugin, "write_journal"); }
             match self.services.publish(&self.binding, request).await {
@@ -742,6 +833,21 @@ impl TerminalDriver {
         DeliveryResult::new(Disposition::Unknown, DeliveryStage::Answer, "answer_unproved")
     }
 }
+/// O plugin entrega sem tecla nenhuma (`PluginMode::User`): sessão parada, sem rascunho guardado, sem `@`
+/// nem `!`. Com o plugin vivo e fora disso, `Fill`, que aperta `Enter`.
+fn user_mode(facts: &InputFacts, text: &str, stashed: bool) -> bool {
+    facts.plugin_user && facts.idle && !stashed && !text.contains('@') && !text.trim_start().starts_with('!')
+}
+
+/// A entrega de `text` com estes fatos vai apertar tecla no pane? Não no modo `User` do plugin nem na
+/// entrega nativa (socket), que não passam pelo teclado. Antes do rascunho ser lido: com um rascunho
+/// guardado o modo vira `Fill`, e a entrega nativa que não escreve cai na digitação.
+pub fn presses_keys(facts: &InputFacts, text: &str) -> bool {
+    if facts.native.is_some() && recognized_message(text).is_some() { return false; }
+    let slash = text.trim_start().starts_with('/');
+    !(facts.plugin_live && !slash && user_mode(facts, text, false))
+}
+
 fn recognized_message(text: &str) -> Option<&str> {
     let closing = text.find(']')?;
     let prefix = text.get(1..closing)?;

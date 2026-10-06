@@ -1,22 +1,32 @@
 use hangar_server::runtime::{actor::PolicyClient,protocol::{RuntimeCommand,OperationKind,ClockSample},queue::{self,QueueActor,Store,Action},terminal::{TerminalActor,TerminalTarget,TerminalOptions}};
 use hangar_server::terminal_input::*;
+use hangar_server::mods::click::{PaneOp,PaneReply};
 use serde_json::{Value,json};
 use std::sync::{Arc,Mutex,atomic::AtomicU64};
 use std::time::Duration;
 use tokio::sync::{broadcast,Notify};
 
-struct Io { calls:Mutex<Vec<CommandRequest>>, text:Mutex<String>, gate:Notify, blocked:std::sync::atomic::AtomicBool, fail_write:std::sync::atomic::AtomicBool, fail_enter:std::sync::atomic::AtomicBool, rotate_enter:std::sync::atomic::AtomicBool, conversation:Arc<Mutex<String>>, socket_calls:Mutex<Vec<Vec<u8>>>, ghost:Mutex<String>, hold_capture:std::sync::atomic::AtomicBool }
-impl Io { fn new()->Self { Self { calls:Mutex::new(vec![]),text:Mutex::new(String::new()),gate:Notify::new(),blocked:std::sync::atomic::AtomicBool::new(false),fail_write:std::sync::atomic::AtomicBool::new(false),fail_enter:std::sync::atomic::AtomicBool::new(false),rotate_enter:std::sync::atomic::AtomicBool::new(false),conversation:Arc::new(Mutex::new("sid".into())),socket_calls:Mutex::new(vec![]),ghost:Mutex::new(String::new()),hold_capture:std::sync::atomic::AtomicBool::new(false) } } }
+struct Io { calls:Mutex<Vec<CommandRequest>>, text:Mutex<String>, gate:Notify, blocked:std::sync::atomic::AtomicBool, fail_write:std::sync::atomic::AtomicBool, fail_enter:std::sync::atomic::AtomicBool, rotate_enter:std::sync::atomic::AtomicBool, conversation:Arc<Mutex<String>>, socket_calls:Mutex<Vec<Vec<u8>>>, ghost:Mutex<String>, hold_capture:std::sync::atomic::AtomicBool, mods_screen:Mutex<Option<String>>, ring_keys:std::sync::atomic::AtomicUsize, ring_returns:std::sync::atomic::AtomicBool }
+impl Io { fn new()->Self { Self { calls:Mutex::new(vec![]),text:Mutex::new(String::new()),gate:Notify::new(),blocked:std::sync::atomic::AtomicBool::new(false),fail_write:std::sync::atomic::AtomicBool::new(false),fail_enter:std::sync::atomic::AtomicBool::new(false),rotate_enter:std::sync::atomic::AtomicBool::new(false),conversation:Arc::new(Mutex::new("sid".into())),socket_calls:Mutex::new(vec![]),ghost:Mutex::new(String::new()),hold_capture:std::sync::atomic::AtomicBool::new(false),mods_screen:Mutex::new(None),ring_keys:Default::default(),ring_returns:Default::default() } } }
 impl TerminalIo for Io {
     fn command<'a>(&'a self,r:CommandRequest)->IoFuture<'a,CommandOutput> { Box::pin(async move {
         let cmd=r.args[0].clone();
         self.calls.lock().unwrap().push(r.clone());
         let stdout=match cmd.as_str() {
+            "display-message" if r.args.last().is_some_and(|a|a==MODS_FORMATS)=>b"1|0|0|80|12\n".to_vec(),
             "display-message"=>b"session\t%1\t1\n".to_vec(),
             "capture-pane" if self.hold_capture.load(std::sync::atomic::Ordering::Acquire)=>std::future::pending().await,
+            // A tela dos mods (só a parte visível, sem `-S`), quando o teste a define.
+            "capture-pane" if !r.args.contains(&"-S".into()) && self.mods_screen.lock().unwrap().is_some()=>self.mods_screen.lock().unwrap().clone().unwrap().into_bytes(),
             "capture-pane"=>{let text=self.text.lock().unwrap().clone();let ghost=self.ghost.lock().unwrap().clone();
                 // O fantasma é rascunho que o Ctrl+S não guarda: o composer fica ocupado.
                 format!("────────────────────────────────\n❯ {}\n────────────────────────────────\n",if text.is_empty(){ghost}else{text}).into_bytes()},
+            // O `ctrl+x tab` da devolução do foco: com `ring_returns`, o foco volta ao prompt.
+            "send-keys" if r.args.iter().any(|a|a=="C-x")=>{
+                self.ring_keys.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+                if self.ring_returns.load(std::sync::atomic::Ordering::Acquire) {*self.mods_screen.lock().unwrap()=None;}
+                vec![]
+            },
             "send-keys"=>{
                 if self.blocked.load(std::sync::atomic::Ordering::Acquire) { self.gate.notified().await; }
                 let text=r.args.last().unwrap();
@@ -77,9 +87,12 @@ impl Fixture {
         self.start_full(events,Duration::from_secs(30))
     }
     fn start_full(&self,events:broadcast::Sender<hangar_server::runtime::protocol::RuntimeEvent>,stall_notice:Duration)->hangar_server::runtime::terminal::TerminalHandle {
+        self.start_returning(events,stall_notice,TerminalOptions::default().focus_return)
+    }
+    fn start_returning(&self,events:broadcast::Sender<hangar_server::runtime::protocol::RuntimeEvent>,stall_notice:Duration,focus_return:Duration)->hangar_server::runtime::terminal::TerminalHandle {
         let lease=queue::acquire_lease(&self.target.lease_path).unwrap();
         let store=Store::open(&self.target.state_path,&self.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
-        let options=TerminalOptions {io:self.io.clone(),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_millis(15),stall_notice};
+        let options=TerminalOptions {io:self.io.clone(),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_millis(15),stall_notice,focus_return,..TerminalOptions::default()};
         TerminalActor::spawn(self.target.clone(),QueueActor::start(store,lease),self.policy.clone(),options,events,Arc::new(AtomicU64::new(0)))
     }
     fn command(&self,id:&str,text:&str)->RuntimeCommand { RuntimeCommand {operation_id:id.into(),kind:OperationKind::Input,payload:json!({"text":text,"pre_transcript":false})} }
@@ -128,7 +141,7 @@ elif mode=='send-keys' and '-l' in sys.argv:
     f.target.binding.mux_argv=vec![python,"-X".into(),"utf8".into(),script.to_str().unwrap().into()];*f.mux.lock().unwrap()=f.target.binding.mux_argv.clone();
     let lease=queue::acquire_lease(&f.target.lease_path).unwrap();let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
     let options=TerminalOptions {io:Arc::new(ProcessIo {command_timeout:Duration::from_millis(1500),socket_timeout:Duration::from_millis(150)}),
-        limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1,..InputLimits::default()},tick:Duration::from_secs(10),stall_notice:Duration::from_secs(30)};
+        limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1,..InputLimits::default()},tick:Duration::from_secs(10),stall_notice:Duration::from_secs(30),..TerminalOptions::default()};
     let h=TerminalActor::spawn(f.target.clone(),QueueActor::start(store,lease),f.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)));
     let result=tokio::time::timeout(Duration::from_secs(10),h.command(f.command("timeout","A"))).await.unwrap().unwrap();
     assert_eq!(result.disposition,hangar_server::runtime::protocol::Disposition::Unknown);
@@ -220,7 +233,7 @@ async fn unknown_fill_blocks_second_input_after_detach_restart_and_same_sid_gene
     f.unknown.store(false,std::sync::atomic::Ordering::Release);
     let lease=queue::acquire_lease(&f.target.lease_path).unwrap();
     let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",2,"session",vec![])).unwrap();
-    let options=TerminalOptions {io:f.io.clone(),limits:InputLimits::default(),tick:Duration::from_millis(15),stall_notice:Duration::from_secs(30)};
+    let options=TerminalOptions {io:f.io.clone(),limits:InputLimits::default(),tick:Duration::from_millis(15),stall_notice:Duration::from_secs(30),..TerminalOptions::default()};
     let h=TerminalActor::spawn(f.target.clone(),QueueActor::start(store,lease),f.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)));
     assert_eq!(h.drain().await.unwrap()["drained"],0);
     assert_eq!(h.command(f.command("C","C")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Deferred);
@@ -730,3 +743,372 @@ async fn terminal_runtime_restart_during_a_deferral_without_write_requeues_and_d
     h.stop().await.unwrap();
 }
 
+
+/// Bem longe: o teste não depende do prazo.
+fn far()->std::time::Instant {std::time::Instant::now()+Duration::from_secs(30)}
+
+/// Operação de mod pelo executor: serial com a entrada, fora do diário, recusada com o teclado emprestado.
+#[tokio::test]
+async fn pane_operations_skip_the_journal_and_respect_the_loan() {
+    let f=Fixture::new().await; let h=f.start();
+    // O retrato espera o ator terminar a recuperação do início, que grava no diário.
+    h.snapshot().await.unwrap();
+    let before=f.state()["operations"].as_object().map_or(0,|o|o.len());
+    assert_eq!(h.pane(PaneOp::Mouse{row:0,col:104},far()).await.unwrap(),PaneReply::Done);
+    assert!(matches!(h.pane(PaneOp::Screen,far()).await.unwrap(),PaneReply::Screen(s) if s.contains('❯')));
+    let sent:Vec<Vec<String>>=f.io.calls.lock().unwrap().iter().filter(|r|r.args[0]=="send-keys").map(|r|r.args.clone()).collect();
+    assert_eq!(sent,vec![vec!["send-keys".to_string(),"-t".into(),"%1".into(),"-l".into(),"--".into(),"\u{1b}[<0;105;1M\u{1b}[<0;105;1m".into()]]);
+    assert!(f.calls.lock().unwrap().iter().all(|v|v["kind"]!="terminal_facts"),"o clique não pergunta os fatos ao Python");
+    assert_eq!(f.state()["operations"].as_object().map_or(0,|o|o.len()),before,"operação de mod não entra no diário");
+    let loan=h.control("loan-1".into(),"keyboard_loan".into(),json!({"seconds":30})).await.unwrap();
+    assert_eq!(serde_json::to_value(loan.disposition).unwrap(),"accepted");
+    assert_eq!(h.pane(PaneOp::Mouse{row:0,col:104},far()).await.unwrap_err().code,"keyboard_loan");
+    assert_eq!(h.pane(PaneOp::Hold{millis:5000},far()).await.unwrap_err().code,"keyboard_loan","não reserva o pane emprestado");
+}
+
+/// Operação que chegou à vez dela depois do ponto de partida não age: o app já ouviu que o clique falhou.
+#[tokio::test]
+async fn pane_operation_past_its_start_does_not_run() {
+    let f=Fixture::new().await; let h=f.start();
+    let late=std::time::Instant::now();
+    assert_eq!(h.pane(PaneOp::Mouse{row:0,col:104},late).await.unwrap_err().code,"mods_deadline");
+    assert!(f.io.calls.lock().unwrap().iter().all(|r|r.args[0]!="send-keys"),"nada chega ao pane");
+}
+
+/// O `Release` atrasado (limpeza do clique depois do prazo) solta na hora: a fila não fica guardada até
+/// o fim da reserva.
+#[tokio::test]
+async fn a_late_release_still_frees_the_pane() {
+    let f=Fixture::new().await; let h=f.start();
+    assert_eq!(h.pane(PaneOp::Hold{millis:5000},far()).await.unwrap(),PaneReply::Done);
+    let past=std::time::Instant::now()-Duration::from_secs(1);
+    assert_eq!(h.pane(PaneOp::Release,past).await.unwrap(),PaneReply::Done,"soltar vale sempre");
+    let started=std::time::Instant::now();
+    h.command(f.command("depois","Depois do soltar")).await.unwrap();
+    assert!(started.elapsed()<Duration::from_secs(2),"o comando não esperou a reserva de 5 s");
+    f.wait_for("entrega depois do soltar",||f.state()["rows"].as_array().unwrap().iter().all(|r|r["delivered"]==true)).await;
+    h.stop().await.unwrap();
+}
+
+/// Com o pane reservado ao clique de mod, nem a fila nem um comando escrevem nele; o que chegou sai na
+/// ordem depois do `Release`.
+#[tokio::test]
+async fn mods_hold_parks_writes_until_release() {
+    let f=Fixture::new().await;
+    f.idle.store(false,std::sync::atomic::Ordering::Release); f.ready.store(false,std::sync::atomic::Ordering::Release);
+    let h=f.start();
+    h.command(f.command("fila","Na fila")).await.unwrap();
+    assert_eq!(h.pane(PaneOp::Hold{millis:5000},far()).await.unwrap(),PaneReply::Done);
+    f.idle.store(true,std::sync::atomic::Ordering::Release); f.ready.store(true,std::sync::atomic::Ordering::Release);
+    let direct={let h=h.clone();let command=f.command("direto","Durante o clique");tokio::spawn(async move {h.command(command).await})};
+    tokio::time::sleep(Duration::from_millis(150)).await;     // dez ciclos do relógio de 15 ms
+    assert!(!direct.is_finished(),"o comando espera o clique soltar o pane");
+    assert!(f.io.calls.lock().unwrap().iter().all(|r|r.args[0]!="send-keys"),"nada digitado com o pane reservado");
+    assert!(matches!(h.pane(PaneOp::Screen,far()).await.unwrap(),PaneReply::Screen(_)),"o clique segue lendo o pane");
+    assert_eq!(h.pane(PaneOp::Release,far()).await.unwrap(),PaneReply::Done);
+    direct.await.unwrap().unwrap();
+    let typed=|text:&str|f.io.calls.lock().unwrap().iter().filter(|r|r.args.iter().any(|a|a.contains(text))).count();
+    // A linha vira `delivered` no `Claim`, antes de digitar: a espera é pelas duas digitadas, e a parada,
+    // serial com a entrega em curso, garante que nada mais sai depois da contagem.
+    f.wait_for("entregas depois do clique",||f.state()["rows"].as_array().unwrap().iter().all(|r|r["delivered"]==true)
+        && typed("Na fila")>0 && typed("Durante o clique")>0).await;
+    h.stop().await.unwrap();
+    assert_eq!((typed("Na fila"),typed("Durante o clique")),(1,1),"cada entrada sai uma vez");
+}
+
+/// Sem `Release` (a tarefa do clique sumiu), a reserva vence sozinha no prazo dela.
+#[tokio::test]
+async fn a_mods_hold_ends_by_itself() {
+    let f=Fixture::new().await; let h=f.start();
+    assert_eq!(h.pane(PaneOp::Hold{millis:200},far()).await.unwrap(),PaneReply::Done);
+    let started=std::time::Instant::now();
+    h.command(f.command("depois","Depois da reserva")).await.unwrap();
+    let waited=started.elapsed();
+    assert!(waited>=Duration::from_millis(150),"o comando esperou a reserva vencer");
+    assert!(waited<Duration::from_secs(2),"a reserva vencida soltou o comando logo: {waited:?}");
+    f.wait_for("entrega depois da reserva",||f.state()["rows"].as_array().unwrap().iter().all(|r|r["delivered"]==true)).await;
+    h.stop().await.unwrap();
+}
+
+/// Posição de cada texto digitado na ordem das chamadas ao multiplexador.
+fn typed_at(f:&Fixture,text:&str)->Vec<usize> {
+    f.io.calls.lock().unwrap().iter().enumerate().filter(|(_,r)|r.args[0]=="send-keys" && r.args.iter().any(|a|a==text)).map(|(i,_)|i).collect()
+}
+
+/// Dois comandos guardados durante o clique saem na ordem em que chegaram, e o que chega com algo ainda
+/// guardado entra atrás dele.
+#[tokio::test]
+async fn mods_hold_releases_parked_commands_in_arrival_order() {
+    let f=Fixture::new().await; let h=f.start();
+    assert_eq!(h.pane(PaneOp::Hold{millis:5000},far()).await.unwrap(),PaneReply::Done);
+    let first={let h=h.clone();let command=f.command("primeiro","Primeiro");tokio::spawn(async move {h.command(command).await})};
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let second={let h=h.clone();let command=f.command("segundo","Segundo");tokio::spawn(async move {h.command(command).await})};
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert!(!first.is_finished() && !second.is_finished(),"os dois esperam o clique");
+    assert_eq!(h.pane(PaneOp::Release,far()).await.unwrap(),PaneReply::Done);
+    first.await.unwrap().unwrap(); second.await.unwrap().unwrap();
+    let (a,b)=(typed_at(&f,"Primeiro"),typed_at(&f,"Segundo"));
+    assert_eq!((a.len(),b.len()),(1,1),"cada um sai uma vez");
+    assert!(a[0]<b[0],"o primeiro guardado sai antes do segundo");
+    h.stop().await.unwrap();
+}
+
+/// A reserva vence sozinha mesmo com o relógio desligado por um erro de manutenção (`receipt_scan`): o
+/// comando guardado sai no prazo da reserva, sem esperar outra mensagem.
+#[tokio::test]
+async fn a_mods_hold_ends_by_itself_with_the_clock_stopped_by_an_error() {
+    let f=Fixture::new().await; let h=f.start();
+    h.command(f.command("accepted","Olá")).await.unwrap();
+    std::fs::remove_file(&f.target.transcript).unwrap(); std::fs::create_dir(&f.target.transcript).unwrap();
+    let start=std::time::Instant::now();
+    while h.snapshot().await.unwrap()["error"]!="receipt_scan" {assert!(start.elapsed()<WAIT,"o erro não apareceu"); tokio::time::sleep(Duration::from_millis(5)).await;}
+    assert_eq!(h.pane(PaneOp::Hold{millis:200},far()).await.unwrap(),PaneReply::Done);
+    let started=std::time::Instant::now();
+    // Comando sem linha na fila: não depende do transcript que o teste quebrou.
+    let reply=tokio::time::timeout(Duration::from_secs(2),h.command(f.command("barra","/help"))).await;
+    assert!(reply.is_ok(),"o comando guardado ficou esperando outra mensagem");
+    assert!(started.elapsed()>=Duration::from_millis(150),"o comando esperou a reserva vencer");
+    h.stop().await.unwrap();
+}
+
+/// Parada durante a reserva: quem estava guardado ouve que o ator está parando.
+#[tokio::test]
+async fn stop_during_a_mods_hold_answers_runtime_stopping() {
+    let f=Fixture::new().await; let h=f.start();
+    assert_eq!(h.pane(PaneOp::Hold{millis:5000},far()).await.unwrap(),PaneReply::Done);
+    let parked={let h=h.clone();let command=f.command("guardado","Guardado");tokio::spawn(async move {h.command(command).await})};
+    let drain={let h=h.clone();tokio::spawn(async move {h.drain().await})};
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    h.stop().await.unwrap();
+    assert_eq!(parked.await.unwrap().err().map(|e|e.code).as_deref(),Some("runtime_stopping"));
+    assert_eq!(drain.await.unwrap().unwrap_err().code,"runtime_stopping");
+    assert!(f.io.calls.lock().unwrap().iter().all(|r|r.args[0]!="send-keys"),"nada digitado");
+}
+
+const RULE_80:&str="────────────────────────────────────────────────────────────────────────────────";
+
+/// Foco na faixa de um mod que a leitura reconhece sem a âncora: a faixa recolhida, em inverso.
+fn band_focus_screen()->String {format!("Resposta do Claude\n\x1b[7m plugin panel hidden \x1b[0m\n{RULE_80}\n❯ \n{RULE_80}\n")}
+
+/// Um realce do próprio Claude Code logo acima do prompt, sem mod na tela, não segura a mensagem.
+#[tokio::test]
+async fn an_inverse_above_the_prompt_without_a_mod_does_not_defer() {
+    let f=Fixture::new().await;
+    *f.io.mods_screen.lock().unwrap()=Some(format!("Resposta do Claude\n\x1b[7m opção selecionada \x1b[0m  outra opção\n{RULE_80}\n❯ \n{RULE_80}\n"));
+    let h=f.start();
+    let reply=h.command(f.command("realce","Com um realce na tela")).await.unwrap();
+    assert_eq!(reply.disposition,hangar_server::runtime::protocol::Disposition::Accepted,"{:?}",reply.payload);
+    assert_eq!(typed_at(&f,"Com um realce na tela").len(),1);
+    h.stop().await.unwrap();
+}
+
+/// Foco no painel ao lado: a borda `│` na cor do foco até a régua do prompt.
+fn pane_focus_screen()->String {
+    let border="\x1b[38;2;177;185;249m│\x1b[0m";
+    let left=|text:&str|format!("{text:<50}{border} Painel do mod");
+    format!("{}\n{}\n{}\n{}\n❯ \n{}\n",left("Resposta do Claude"),left(""),left(""),&RULE_80[..50*3],&RULE_80[..50*3])
+}
+
+/// Com o foco fora do prompt (faixa ou painel de um mod), nada é escrito; a entrada fica na fila e sai
+/// sozinha quando o foco volta ao prompt.
+async fn focus_away_defers_until_it_returns(screen:String) {
+    let f=Fixture::new().await; *f.io.mods_screen.lock().unwrap()=Some(screen); let h=f.start();
+    let reply=h.command(f.command("foco","Com o foco no mod")).await.unwrap();
+    assert_eq!(reply.disposition,hangar_server::runtime::protocol::Disposition::Deferred);
+    assert_eq!(reply.payload["code"],"mods_focus");
+    tokio::time::sleep(Duration::from_millis(150)).await;     // dez ciclos do relógio de 15 ms
+    assert!(f.io.calls.lock().unwrap().iter().all(|r|r.args[0]!="send-keys"),"nada escrito com o foco fora do prompt");
+    // A linha vira `delivered` no `Claim` de cada tique e volta no adiamento: o que vale é não desistir e
+    // a tela ser relida a cada tentativa.
+    assert_ne!(f.state()["rows"][0]["desistiu"],true,"a linha continua na fila");
+    let reads=f.io.calls.lock().unwrap().iter().filter(|r|r.args[0]=="capture-pane" && !r.args.contains(&"-S".into())).count();
+    assert!(reads>=2,"a fila tenta de novo a cada tique: {reads} leituras");
+    *f.io.mods_screen.lock().unwrap()=None;
+    f.wait_for("entrega com o foco de volta",||!typed_at(&f,"Com o foco no mod").is_empty()).await;
+    h.stop().await.unwrap();
+    assert_eq!(typed_at(&f,"Com o foco no mod").len(),1,"sai uma vez");
+}
+
+#[tokio::test]
+async fn focus_on_the_mods_band_defers_the_queue() {focus_away_defers_until_it_returns(band_focus_screen()).await;}
+
+#[tokio::test]
+async fn focus_on_a_mods_pane_defers_the_queue() {focus_away_defers_until_it_returns(pane_focus_screen()).await;}
+
+/// A faixa inteira de um mod, com um botão em inverso (o foco que a pessoa levou com `ctrl+x tab`).
+fn full_band_focus_screen()->String {format!("Resposta do Claude\nRevisão do MR  \x1b[7m[ Abrir ]\x1b[0m  [ Fechar ]\n{RULE_80}\n❯ \n{RULE_80}\n")}
+
+/// A faixa inteira focada só é reconhecida pela âncora do mod: com ela, a escrita espera; sem ela, o
+/// inverso acima do prompt é tratado como realce do próprio Claude Code e não segura a mensagem.
+#[tokio::test]
+async fn the_full_band_focused_defers_the_queue_with_the_mods_anchor() {
+    let f=Fixture::new().await; *f.io.mods_screen.lock().unwrap()=Some(full_band_focus_screen()); let h=f.start();
+    *h.anchor().lock().unwrap()=Some("Revisão do MR".into());
+    let reply=h.command(f.command("faixa","Com a faixa focada")).await.unwrap();
+    assert_eq!(reply.disposition,hangar_server::runtime::protocol::Disposition::Deferred);
+    assert_eq!(reply.payload["code"],"mods_focus");
+    tokio::time::sleep(Duration::from_millis(150)).await;     // dez ciclos do relógio de 15 ms
+    assert!(typed_at(&f,"Com a faixa focada").is_empty(),"nada escrito com o botão da faixa focado");
+    // Sem a âncora (nenhum mod na tela), o mesmo inverso não segura a entrega.
+    *h.anchor().lock().unwrap()=None;
+    f.wait_for("entrega sem a âncora",||!typed_at(&f,"Com a faixa focada").is_empty()).await;
+    h.stop().await.unwrap();
+}
+
+/// Dentro da reserva de um clique de mod o pane é conferido uma vez: no psmux cada conferência é mais um
+/// processo, e a reserva por teclado com uma dúzia de botões na faixa estourava o prazo. Fora dela, cada
+/// operação confere de novo.
+#[tokio::test]
+async fn within_a_mods_hold_the_pane_is_checked_once() {
+    let f=Fixture::new().await; let h=f.start();
+    let checks=||f.io.calls.lock().unwrap().iter().filter(|r|r.args.last().is_some_and(|a|a.starts_with("#{session_name}"))).count();
+    let before=checks();
+    assert_eq!(h.pane(PaneOp::Hold{millis:5000},far()).await.unwrap(),PaneReply::Done);
+    for _ in 0..3 {
+        assert!(matches!(h.pane(PaneOp::Formats,far()).await.unwrap(),PaneReply::Formats(_)));
+        assert!(matches!(h.pane(PaneOp::Screen,far()).await.unwrap(),PaneReply::Screen(_)));
+        assert_eq!(h.pane(PaneOp::Keys(vec!["C-x".into(),"Tab".into()]),far()).await.unwrap(),PaneReply::Done);
+    }
+    assert_eq!(checks()-before,1,"uma conferência na reserva inteira");
+    assert_eq!(h.pane(PaneOp::Release,far()).await.unwrap(),PaneReply::Done);
+    assert!(matches!(h.pane(PaneOp::Screen,far()).await.unwrap(),PaneReply::Screen(_)));
+    assert!(matches!(h.pane(PaneOp::Screen,far()).await.unwrap(),PaneReply::Screen(_)));
+    assert_eq!(checks()-before,3,"fora da reserva, cada operação confere");
+    h.stop().await.unwrap();
+}
+
+/// Com o foco devolvido pelo `ctrl+x tab`, a entrada parada pelo foco num mod sai depois de `focus_return`.
+async fn focus_left_on_a_mod_is_returned(screen:String,anchor:Option<&str>) {
+    let f=Fixture::new().await; *f.io.mods_screen.lock().unwrap()=Some(screen);
+    f.io.ring_returns.store(true,std::sync::atomic::Ordering::Release);
+    let h=f.start_returning(broadcast::channel(128).0,Duration::from_secs(30),Duration::from_millis(300));
+    *h.anchor().lock().unwrap()=anchor.map(str::to_owned);
+    let started=std::time::Instant::now();
+    let reply=h.command(f.command("preso","Foco esquecido no mod")).await.unwrap();
+    assert_eq!(reply.payload["code"],"mods_focus");
+    f.wait_for("entrega depois da devolução do foco",||!typed_at(&f,"Foco esquecido no mod").is_empty()).await;
+    assert!(started.elapsed()>=Duration::from_millis(300),"a entrada esperou o prazo antes de mexer no foco");
+    assert!(f.io.ring_keys.load(std::sync::atomic::Ordering::SeqCst)>=1,"o foco voltou pelo ctrl+x tab");
+    h.stop().await.unwrap();
+    assert_eq!(typed_at(&f,"Foco esquecido no mod").len(),1);
+}
+
+/// Foco num botão da faixa com um painel aberto ao lado: a borda do painel apagada, o inverso na faixa.
+fn band_focus_with_pane_screen()->String {
+    let left=|text:&str|format!("{text:<50}│ Painel do mod");
+    // O preenchimento conta os caracteres do texto visível, não os da sequência de escape.
+    let band=format!("Revisão do MR  \x1b[7m[ Abrir ]\x1b[0m{}│ Painel do mod"," ".repeat(50-24));
+    format!("{}\n{}\n{band}\n{}\n❯ \n{}\n",left("Resposta do Claude"),left(""),&RULE_80[..50*3],&RULE_80[..50*3])
+}
+
+/// A pessoa levou o foco à faixa no terminal, com um painel aberto, e saiu: a mensagem do app não fica
+/// parada.
+#[tokio::test]
+async fn the_users_own_focus_on_the_band_with_a_pane_is_returned() {
+    focus_left_on_a_mod_is_returned(band_focus_with_pane_screen(),Some("Revisão do MR")).await;
+}
+
+/// Só com a faixa na tela o `ctrl+x tab` gira dentro dela e não volta ao prompt: nenhuma tecla, a entrada
+/// espera a pessoa.
+#[tokio::test]
+async fn with_only_the_band_no_key_is_sent() {
+    let f=Fixture::new().await; *f.io.mods_screen.lock().unwrap()=Some(full_band_focus_screen());
+    f.io.ring_returns.store(true,std::sync::atomic::Ordering::Release);
+    let h=f.start_returning(broadcast::channel(128).0,Duration::from_secs(30),Duration::from_millis(100));
+    *h.anchor().lock().unwrap()=Some("Revisão do MR".into());
+    assert_eq!(h.command(f.command("faixa","Só a faixa")).await.unwrap().payload["code"],"mods_focus");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(f.io.ring_keys.load(std::sync::atomic::Ordering::SeqCst),0);
+    assert!(typed_at(&f,"Só a faixa").is_empty());
+    *f.io.mods_screen.lock().unwrap()=None;
+    f.wait_for("entrega com o foco de volta",||!typed_at(&f,"Só a faixa").is_empty()).await;
+    h.stop().await.unwrap();
+}
+
+/// A devolução que não volta ao prompt é tentada duas vezes por linha e depois só registrada: nada de um
+/// laço de teclas. A entrada continua na fila até o foco sair do mod.
+#[tokio::test]
+async fn a_failed_return_is_tried_twice_and_keeps_the_entry() {
+    let f=Fixture::new().await; *f.io.mods_screen.lock().unwrap()=Some(pane_focus_screen());
+    let h=f.start_returning(broadcast::channel(128).0,Duration::from_secs(30),Duration::from_millis(100));
+    assert_eq!(h.command(f.command("preso","Sem volta")).await.unwrap().payload["code"],"mods_focus");
+    let rings=||f.io.ring_keys.load(std::sync::atomic::Ordering::SeqCst);
+    f.wait_for("a primeira devolução",||rings()>=32).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(rings(),32,"a segunda espera o dobro do prazo");
+    f.wait_for("a segunda devolução",||rings()>=64).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(rings(),64,"sem terceira");
+    assert!(typed_at(&f,"Sem volta").is_empty());
+    *f.io.mods_screen.lock().unwrap()=None;
+    f.wait_for("entrega com o foco de volta",||!typed_at(&f,"Sem volta").is_empty()).await;
+    h.stop().await.unwrap();
+}
+
+/// No modo `User` o plugin entrega sem tecla: a guarda do foco não roda (nenhuma leitura da tela dos mods) e
+/// não atrasa, mesmo com o foco num painel. Com `@` a entrega é `Fill`, aperta `Enter`, e a guarda adia.
+#[tokio::test]
+async fn the_focus_guard_runs_only_when_the_delivery_presses_keys() {
+    for (text,guarded) in [("Sem tecla",false),("Com @arquivo",true)] {
+        let f=Fixture::new().await; *f.io.mods_screen.lock().unwrap()=Some(pane_focus_screen());
+        f.unknown.store(true,std::sync::atomic::Ordering::Release);
+        let h=f.start();
+        let mods_reads=||f.io.calls.lock().unwrap().iter().filter(|r|r.args[0]=="capture-pane" && !r.args.contains(&"-S".into())).count();
+        let reply=h.command(f.command("entrada",text)).await.unwrap();
+        assert_eq!(reply.payload["code"]=="mods_focus",guarded,"{text}: {:?}",reply.payload);
+        assert_eq!(mods_reads()>0,guarded,"{text}: a tela dos mods só é lida quando a entrega aperta tecla");
+        h.stop().await.unwrap();
+    }
+}
+
+
+/// A limpeza de um clique desistiu com o teclado num painel e a reserva venceu sozinha: a mensagem guardada
+/// durante o clique não fica presa.
+#[tokio::test]
+async fn a_cleanup_that_gave_up_does_not_leave_the_message_stuck() {
+    let f=Fixture::new().await; *f.io.mods_screen.lock().unwrap()=Some(pane_focus_screen());
+    f.io.ring_returns.store(true,std::sync::atomic::Ordering::Release);
+    let h=f.start_returning(broadcast::channel(128).0,Duration::from_secs(30),Duration::from_millis(300));
+    assert_eq!(h.pane(PaneOp::Hold{millis:200},far()).await.unwrap(),PaneReply::Done);
+    let parked={let h=h.clone();let command=f.command("guardada","Guardada no clique");tokio::spawn(async move {h.command(command).await})};
+    f.wait_for("entrega depois da reserva e da devolução",||!typed_at(&f,"Guardada no clique").is_empty()).await;
+    parked.await.unwrap().unwrap();
+    assert!(f.io.ring_keys.load(std::sync::atomic::Ordering::SeqCst)>=1);
+    h.stop().await.unwrap();
+}
+
+
+/// A espera do foco é da linha: uma linha que saiu da fila com o foco num painel não deixa a seguinte
+/// devolver o foco na hora.
+#[tokio::test]
+async fn the_focus_wait_starts_over_for_the_next_row() {
+    let f=Fixture::new().await; *f.io.mods_screen.lock().unwrap()=Some(pane_focus_screen());
+    f.io.ring_returns.store(true,std::sync::atomic::Ordering::Release);
+    let h=f.start_returning(broadcast::channel(128).0,Duration::from_secs(30),Duration::from_millis(600));
+    assert_eq!(h.command(f.command("primeira","Primeira")).await.unwrap().payload["code"],"mods_focus");
+    h.queue("abandona".into(),Action::Abandon {entry_id:"primeira".into()}).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(f.io.ring_keys.load(std::sync::atomic::Ordering::SeqCst),0);
+    let started=std::time::Instant::now();
+    assert_eq!(h.command(f.command("segunda","Segunda")).await.unwrap().payload["code"],"mods_focus");
+    f.wait_for("entrega da segunda",||!typed_at(&f,"Segunda").is_empty()).await;
+    assert!(started.elapsed()>=Duration::from_millis(600),"a segunda esperou o prazo dela: {:?}",started.elapsed());
+    h.stop().await.unwrap();
+}
+
+
+/// Cada reserva confere o pane uma vez, também a renovação: a conferência não vale por todas.
+#[tokio::test]
+async fn each_mods_hold_checks_the_pane_again() {
+    let f=Fixture::new().await; let h=f.start();
+    let checks=||f.io.calls.lock().unwrap().iter().filter(|r|r.args.last().is_some_and(|a|a.starts_with("#{session_name}"))).count();
+    let before=checks();
+    for _ in 0..2 {
+        assert_eq!(h.pane(PaneOp::Hold{millis:5000},far()).await.unwrap(),PaneReply::Done);
+        assert!(matches!(h.pane(PaneOp::Screen,far()).await.unwrap(),PaneReply::Screen(_)));
+        assert!(matches!(h.pane(PaneOp::Screen,far()).await.unwrap(),PaneReply::Screen(_)));
+    }
+    assert_eq!(checks()-before,2,"uma conferência por reserva");
+    h.stop().await.unwrap();
+}

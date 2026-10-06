@@ -46,6 +46,17 @@ pub struct Fake {
     pub list_facts: Mutex<(Value, Duration)>,
     pub list_facts_calls: AtomicUsize,
     pub list_facts_last: Mutex<Value>,
+    /// Resposta da guarda da troca de agente (`/internal/sessions/{name}/transfer`): `None` = livre.
+    transfer: Mutex<Option<StatusCode>>,
+    /// Demora da guarda antes de responder, para o Rust ver o silêncio dela.
+    transfer_delay: Mutex<Duration>,
+    /// Demora do `info` antes de responder (Python lento).
+    info_delay: Mutex<Duration>,
+    /// Corpo cru que substitui o da guarda (o 409 do Python sem o `detail`).
+    transfer_body: Mutex<Option<String>>,
+    transfer_calls: AtomicUsize,
+    /// Corpos que chegaram em `/api/plugin/ui` (a cópia da faixa que o Rust manda).
+    plugin_ui: Mutex<Vec<Value>>,
 }
 
 impl Fake {
@@ -80,6 +91,30 @@ impl Fake {
     pub fn last_hit(&self) -> (String, HeaderMap) {
         self.hits.lock().unwrap().last().cloned().expect("algum pedido repassado")
     }
+    /// A guarda da troca de agente responde este status: 409 é a troca em curso, com o corpo que o Python
+    /// manda; outro status é o backend falhando. `None` volta a "livre".
+    pub fn set_transfer(&self, s: Option<StatusCode>) {
+        *self.transfer.lock().unwrap() = s;
+    }
+    /// A guarda demora isto antes de responder.
+    pub fn set_info_delay(&self, delay: Duration) {
+        *self.info_delay.lock().unwrap() = delay;
+    }
+    pub fn set_transfer_delay(&self, delay: Duration) {
+        *self.transfer_delay.lock().unwrap() = delay;
+    }
+    /// A guarda responde este corpo cru, com o status de `set_transfer`.
+    pub fn set_transfer_body(&self, body: Option<&str>) {
+        *self.transfer_body.lock().unwrap() = body.map(str::to_owned);
+    }
+    /// Quantas vezes o Rust perguntou à guarda.
+    pub fn transfer_calls(&self) -> usize {
+        self.transfer_calls.load(SeqCst)
+    }
+    /// Os corpos que chegaram em `/api/plugin/ui`, na ordem.
+    pub fn plugin_ui_bodies(&self) -> Vec<Value> {
+        self.plugin_ui.lock().unwrap().clone()
+    }
 }
 
 pub async fn spawn_fake() -> (Arc<Fake>, SocketAddr) {
@@ -99,12 +134,19 @@ pub async fn spawn_fake() -> (Arc<Fake>, SocketAddr) {
             Duration::ZERO)),
         list_facts_calls: AtomicUsize::new(0),
         list_facts_last: Mutex::new(Value::Null),
+        transfer: Mutex::default(),
+        transfer_delay: Mutex::default(),
+        info_delay: Mutex::default(),
+        transfer_body: Mutex::default(),
+        transfer_calls: AtomicUsize::new(0),
+        plugin_ui: Mutex::default(),
     });
     let app = Router::new()
         .route("/internal/sessions/{name}/info", get(fake_info))
         .route("/internal/sessions/{name}/side-events", get(fake_side))
         .route("/internal/diag", axum::routing::post(fake_diag))
         .route("/internal/list/facts", axum::routing::post(fake_list_facts))
+        .route("/internal/sessions/{name}/transfer", get(fake_transfer))
         .fallback(fake_python)
         .with_state(fake.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -123,6 +165,8 @@ fn status(s: StatusCode) -> Response {
 
 async fn fake_info(State(f): State<Arc<Fake>>, headers: HeaderMap) -> Response {
     f.info_calls.fetch_add(1, SeqCst);
+    let delay = *f.info_delay.lock().unwrap();
+    tokio::time::sleep(delay).await;
     if let Some(s) = *f.info_status.lock().unwrap() {
         return status(s);
     }
@@ -155,6 +199,27 @@ async fn fake_diag(State(f): State<Arc<Fake>>, headers: HeaderMap, body: Bytes) 
     status(StatusCode::OK)
 }
 
+async fn fake_transfer(State(f): State<Arc<Fake>>, headers: HeaderMap) -> Response {
+    if !internal_ok(&headers) {
+        return status(StatusCode::NOT_FOUND);
+    }
+    f.transfer_calls.fetch_add(1, SeqCst);
+    let delay = *f.transfer_delay.lock().unwrap();
+    tokio::time::sleep(delay).await;
+    let answer = *f.transfer.lock().unwrap();
+    if let Some(raw) = f.transfer_body.lock().unwrap().clone() {
+        return Response::builder().status(answer.unwrap_or(StatusCode::OK)).body(Body::from(raw)).unwrap();
+    }
+    let body = match answer {
+        None => json!({"ok": true}),
+        Some(StatusCode::CONFLICT) => json!({"detail": {"code": "session_transfer_busy",
+            "msg": "A sessão está trocando de agente; tente novamente quando terminar.", "params": {}}}),
+        Some(other) => return status(other),
+    };
+    Response::builder().status(answer.unwrap_or(StatusCode::OK)).header("content-type", "application/json")
+        .body(Body::from(body.to_string())).unwrap()
+}
+
 async fn fake_side(
     State(f): State<Arc<Fake>>,
     Query(q): Query<HashMap<String, String>>,
@@ -183,6 +248,10 @@ async fn fake_python(State(f): State<Arc<Fake>>, mut req: Request) -> Response {
     let full = req.uri().path_and_query().map(|p| p.to_string()).unwrap_or_default();
     f.hits.lock().unwrap().push((full, req.headers().clone()));
     let path = req.uri().path().to_owned();
+    if path == "/api/plugin/ui" {
+        let bytes = axum::body::to_bytes(std::mem::take(req.body_mut()), 1 << 20).await.unwrap_or_default();
+        f.plugin_ui.lock().unwrap().push(serde_json::from_slice(&bytes).unwrap_or(Value::Null));
+    }
     match path.as_str() {
         "/redirect" => Response::builder().status(302).header("location", "/outro").body(Body::empty()).unwrap(),
         "/probe" => status(StatusCode::UNAUTHORIZED),
@@ -235,6 +304,26 @@ pub async fn spawn_server(cfg: Config) -> SocketAddr {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(hangar_server::routes::serve(listener, cfg));
     addr
+}
+
+/// Servidor com um `AppState` montado pelo teste (para mexer no `Mods` dele por fora).
+pub async fn spawn_state(state: hangar_server::routes::AppState) -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(hangar_server::routes::serve_with_state(listener, state));
+    addr
+}
+
+/// Python falso e servidor com a sessão `name` atendida pelo `Mods` (vida 1) por `link`: o começo dos
+/// testes da interface dos mods.
+pub async fn serve_mods(name: &str, link: Arc<dyn hangar_server::mods::state::SurfaceLink>)
+    -> (Arc<Fake>, SocketAddr, hangar_server::mods::state::Mods) {
+    let (python, upstream) = spawn_fake().await;
+    let state = hangar_server::routes::AppState::new(config(upstream, "127.0.0.1"));
+    let mods = state.mods.clone();
+    let server = spawn_state(state).await;
+    mods.attach(name, 1, link);
+    (python, server, mods)
 }
 
 pub fn client() -> reqwest::Client {

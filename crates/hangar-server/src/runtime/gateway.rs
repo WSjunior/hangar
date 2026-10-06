@@ -23,7 +23,7 @@ impl EntryHandle {
     async fn confirm(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.confirm().await,Self::Terminal {handle,..}=>handle.confirm().await}}
     async fn ensure_projection(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.ensure_projection().await,Self::Terminal {handle,..}=>handle.ensure_projection().await}}
 }
-struct Entry { generation:u64,handle:EntryHandle,lease_path:std::path::PathBuf }
+struct Entry { generation:u64,handle:EntryHandle,lease_path:std::path::PathBuf,name:String,mods_life:u64 }
 pub struct RuntimeRegistry {
     entries:Mutex<BTreeMap<String,Entry>>,
     events:broadcast::Sender<RuntimeEvent>,
@@ -31,6 +31,7 @@ pub struct RuntimeRegistry {
     instance:String,
     lifecycle:Mutex<BTreeMap<String,Arc<Mutex<()>>>>,
     revisions:Mutex<BTreeMap<String,Arc<AtomicU64>>>,
+    mods:Option<crate::mods::state::Mods>,
 }
 
 /// A trava pode demorar a soltar: as tarefas de E/S de um ator que saiu, ou o `LockFileEx` de um
@@ -75,11 +76,35 @@ async fn open_store(state_path:&std::path::Path,projection_dir:&std::path::Path,
 
 fn failure(code:&str) -> RuntimeError { RuntimeError::new(code,"runtime indisponível para esta chave ou geração") }
 
+/// Prazo da devolução da janela esticada ao abrir a sessão com terminal (`unstretch`).
+const UNSTRETCH_MAX:Duration = Duration::from_secs(2);
+
+/// Interface dos mods da sessão com terminal (fase 3): o Rust é o dono do terminal aqui, então é dono do
+/// clique e da faixa dela. Liga a sessão ao `Mods` na vida `life` com um elo novo; o processo é a chave
+/// durável mais o pane e a criação dele, que o renomear mantém.
+async fn attach_terminal_mods(mods:&crate::mods::state::Mods,target:&super::terminal::TerminalTarget,
+    handle:&super::terminal::TerminalHandle,life:u64) {
+    // Antes de ligar: nenhum pedido de app pode estar esticando a janela enquanto ela é lida.
+    crate::mods::click::unstretch(handle,std::time::Instant::now()+UNSTRETCH_MAX).await;
+    let link = crate::mods::terminal::TerminalLink::anchored(target.name.clone(),life,Arc::new(handle.clone()),mods.clone(),
+        crate::mods::click::Limits::default(),handle.anchor());
+    let process = format!("{}:{}:{}",target.key,target.binding.pane,target.binding.created);
+    mods.attach_terminal(&target.name,&process,life,link.clone());
+    // O vigia sobe depois de ligar: o `attach_terminal` para o vigia do elo que estava no nome, e se fosse
+    // este mesmo elo o derrubaria. No psmux não há vigia (o `watch_notices` recusa no Windows): lá o mínimo
+    // volta na operação seguinte, no `prepare` do clique. O mínimo vale já na abertura: a janela pode ter
+    // ficado pequena com um terminal que se desligou.
+    if !target.binding.windows { link.watch(&target.binding.mux_argv); }
+    tokio::spawn(async move { link.floor().await; });
+}
+
 impl RuntimeRegistry {
     pub fn new(upstream:SocketAddr,secret:String,instance:String) -> Self {
         Self { entries:Mutex::new(BTreeMap::new()),events:broadcast::channel(1024).0,
-            policy:PolicyClient::new(upstream,secret,instance.clone()),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()) }
+            policy:PolicyClient::new(upstream,secret,instance.clone()),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()),mods:None }
     }
+    /// Interface dos mods: sessão Claude sem terminal aberta aqui vira superfície remota e publica no `Mods`.
+    pub fn with_mods(mut self,mods:crate::mods::state::Mods) -> Self { self.mods = Some(mods); self }
     pub fn subscribe(&self) -> broadcast::Receiver<RuntimeEvent> { self.events.subscribe() }
     pub async fn handle(&self,key:&str,generation:u64) -> Result<RuntimeHandle,RuntimeError> {
         match self.entry(key,generation).await? {EntryHandle::Headless(handle)=>Ok(handle),_=>Err(failure("runtime_provider"))}
@@ -119,10 +144,21 @@ impl RuntimeRegistry {
         };
         let epoch_s = SystemTime::now().duration_since(UNIX_EPOCH).map(|d|d.as_secs_f64()).unwrap_or(0.0);
         let revision = self.revisions.lock().await.entry(target.key.clone()).or_insert_with(||Arc::new(AtomicU64::new(0))).clone();
-        let engine = RuntimeEngine::new(&target.provider,metadata,target.generation,ClockSample { monotonic_s:0.0,epoch_s })?
+        let mut engine = RuntimeEngine::new(&target.provider,metadata,target.generation,ClockSample { monotonic_s:0.0,epoch_s })?
             .with_policy(self.policy.clone()).with_publisher(self.events.clone()).with_revision(revision);
-        let handle = RuntimeActor::spawn(target.clone(),queue,connection,engine);
-        self.entries.lock().await.insert(target.key.clone(),Entry { generation:target.generation,handle:EntryHandle::Headless(handle.clone()),lease_path:target.lease_path.clone() });
+        if let Some(mods) = &self.mods { engine = engine.with_mods(mods.clone()); }
+        // Dono único dos pedidos dos apps até o `close` (S9). Só o Claude tem superfície. Registrado antes
+        // de a tarefa do ator existir: a primeira faixa publicada já encontra a sessão no `Mods`.
+        // A vida no `Mods` é única no servidor; o processo é a chave durável mais o cano, que o renomear mantém.
+        let life = engine.mods_life();
+        let handle = RuntimeActor::spawn_with(target.clone(),queue,connection,engine,|handle| {
+            if target.provider == "claude" && let Some(mods) = &self.mods {
+                let process = format!("{}:{}:{}",target.key,target.binding.pid,target.binding.escuta);
+                mods.attach_process(&target.name,&process,life,Arc::new(handle.clone()));
+            }
+        });
+        self.entries.lock().await.insert(target.key.clone(),Entry { generation:target.generation,handle:EntryHandle::Headless(handle.clone()),
+            lease_path:target.lease_path.clone(),name:target.name.clone(),mods_life:life });
         handle
         };
         let snapshot = match handle.snapshot().await {
@@ -143,17 +179,36 @@ impl RuntimeRegistry {
     }
     pub async fn open_terminal(&self,target:super::terminal::TerminalTarget)->Result<Value,RuntimeError> {
         let barrier=self.barrier(&target.key).await; let _guard=barrier.lock().await;
-        let existing=self.entries.lock().await.get(&target.key).map(|e|(e.generation,e.handle.clone()));
+        let existing=self.entries.lock().await.get(&target.key).map(|e|(e.generation,e.handle.clone(),e.mods_life));
         let handle=match existing {
-            Some((generation,EntryHandle::Terminal {target:old,handle})) if generation==target.generation && old.binding==target.binding
-                && old.transcript==target.transcript && old.state_path==target.state_path && old.projection_dir==target.projection_dir && old.lease_path==target.lease_path=>handle,
+            Some((generation,EntryHandle::Terminal {target:old,handle},life)) if generation==target.generation && old.binding==target.binding
+                && old.transcript==target.transcript && old.state_path==target.state_path && old.projection_dir==target.projection_dir && old.lease_path==target.lease_path=>{
+                // Reabertura da mesma vida: se o nome saiu do `Mods`, a sessão volta a ser ligada, na vida da
+                // entrada, que é a que o `close` esquece. Nome com outra vida fica com ela: é uma sessão mais
+                // nova e viva, e tomá-lo a deixaria sem dono e sem o nome de nascimento.
+                if let Some(mods)=&self.mods && life!=0 && mods.life(&target.name).is_none() {
+                    attach_terminal_mods(mods,&target,&handle,life).await;
+                }
+                handle
+            },
             Some(_)=>return Err(failure("runtime_generation")),
             None=>{
                 let lease=wait_lease(&target.lease_path).await?;
                 let store=open_store(&target.state_path,&target.projection_dir,&target.key,target.generation,&target.name,lease.clone()).await?;
                 let revision=self.revisions.lock().await.entry(target.key.clone()).or_insert_with(||Arc::new(AtomicU64::new(0))).clone();
-                let handle=super::terminal::TerminalActor::spawn(target.clone(),QueueActor::start(store,lease),self.policy.clone(),super::terminal::TerminalOptions::default(),self.events.clone(),revision);
-                self.entries.lock().await.insert(target.key.clone(),Entry {generation:target.generation,handle:EntryHandle::Terminal {target:target.clone(),handle:handle.clone()},lease_path:target.lease_path.clone()});handle
+                // A âncora nasce com o executor, que a lê, e passa ao elo pelo `handle`, também na reabertura.
+                let options=super::terminal::TerminalOptions {anchor:super::terminal::ModsAnchor::default(),..Default::default()};
+                let handle=super::terminal::TerminalActor::spawn(target.clone(),QueueActor::start(store,lease),self.policy.clone(),options,self.events.clone(),revision);
+                // A vida no `Mods` é única no servidor (`new_life`).
+                let life=match &self.mods {
+                    Some(mods)=>{
+                        let life=mods.new_life();
+                        attach_terminal_mods(mods,&target,&handle,life).await;
+                        life
+                    },
+                    None=>0,
+                };
+                self.entries.lock().await.insert(target.key.clone(),Entry {generation:target.generation,handle:EntryHandle::Terminal {target:target.clone(),handle:handle.clone()},lease_path:target.lease_path.clone(),name:target.name.clone(),mods_life:life});handle
             }
         };
         let snapshot=handle.snapshot().await?;
@@ -166,9 +221,9 @@ impl RuntimeRegistry {
         self.close_locked(key,generation).await
     }
     async fn close_locked(&self,key:&str,generation:u64) -> Result<Value,RuntimeError> {
-        let (handle,lease_path) = match self.entries.lock().await.get(key) {
+        let (handle,lease_path,name,life) = match self.entries.lock().await.get(key) {
             None=>return Ok(json!({"closed":true})),
-            Some(entry) if entry.generation == generation=>(entry.handle.clone(),entry.lease_path.clone()),
+            Some(entry) if entry.generation == generation=>(entry.handle.clone(),entry.lease_path.clone(),entry.name.clone(),entry.mods_life),
             _=>return Err(failure("runtime_generation")),
         };
         if let Err(error) = handle.stop().await {
@@ -182,6 +237,9 @@ impl RuntimeRegistry {
             tracing::warn!(key,code=%error.code,"ator do runtime já tinha terminado; sessão liberada");
         }
         self.entries.lock().await.remove(key);
+        // A sessão saiu do Rust: os apps perdem a faixa e os pedidos voltam a não ter dono (S9). Com ou sem
+        // terminal, esquece só esta vida: outra sessão que tenha tomado o nome (outra vida) fica.
+        if let Some(mods) = &self.mods { mods.forget(&name,life); }
         Ok(json!({"closed":true}))
     }
     async fn barrier(&self,key:&str) -> Arc<Mutex<()>> {

@@ -20,12 +20,26 @@ function css(parts: Record<string, string | number | null | undefined | false>):
 
 type Props = Record<string, unknown>;
 
+/** `width` em colunas que alcança a largura do lugar ocupa o lugar inteiro: o mod desenhou para a coluna do
+ *  terminal, e o app pode ser mais largo. Menor continua teto. Sem a largura do lugar (servidor antigo), teto. */
+export function fillsPlace(width: unknown, place: number | null | undefined): boolean {
+  return typeof width === 'number' && typeof place === 'number' && place > 0 && width >= place;
+}
+
 /** `Box` do Ink em CSS de flexbox. O padrão do Ink é linha, não coluna. */
-export function boxStyle(p: Props): string {
+export function boxStyle(p: Props, place?: number | null): string {
   const pick = (...keys: string[]) => keys.map((k) => p[k]).find((v) => typeof v === 'number');
   const border = typeof p.borderStyle === 'string' && p.borderStyle;
+  // `absolute` sai do fluxo e pinta por cima, preso ao Box pai (que é `position: relative`) e recortado pelo lugar.
+  const absolute = p.position === 'absolute';
   return css({
     display: p.display === 'none' ? 'none' : 'flex',
+    position: absolute ? 'absolute' : null,
+    top: absolute ? lines(p.top) : null,
+    bottom: absolute ? lines(p.bottom) : null,
+    left: absolute ? cols(p.left) : null,
+    right: absolute ? cols(p.right) : null,
+    'z-index': absolute ? 1 : null,
     'flex-direction': typeof p.flexDirection === 'string' ? p.flexDirection : 'row',
     'flex-grow': typeof p.flexGrow === 'number' ? p.flexGrow : null,
     'flex-shrink': typeof p.flexShrink === 'number' ? p.flexShrink : null,
@@ -35,8 +49,9 @@ export function boxStyle(p: Props): string {
     'justify-content': typeof p.justifyContent === 'string' ? p.justifyContent : null,
     'column-gap': cols(pick('columnGap', 'gap')),
     'row-gap': lines(pick('rowGap', 'gap')),
-    // Largura fixa do terminal vira teto: no celular a coluna é mais estreita que a do pane.
-    'max-width': cols(p.width),
+    // Largura fixa do terminal vira teto (no celular a coluna é mais estreita que a do pane), salvo quando ela
+    // alcança a largura do lugar: aí o mod quis a linha inteira.
+    'max-width': fillsPlace(p.width, place) ? null : cols(p.width),
     width: typeof p.width === 'number' ? '100%' : cols(p.width),
     'min-width': cols(p.minWidth) ?? '0',
     'padding-top': lines(pick('paddingTop', 'paddingY', 'padding')),
@@ -47,31 +62,51 @@ export function boxStyle(p: Props): string {
     'margin-bottom': lines(pick('marginBottom', 'marginY', 'margin')),
     'margin-left': cols(pick('marginLeft', 'marginX', 'margin')),
     'margin-right': cols(pick('marginRight', 'marginX', 'margin')),
-    background: inkColor(p.backgroundColor),
-    border: border ? `1px solid ${inkColor(p.borderColor) ?? 'var(--border)'}` : null,
+    // No terminal as células do cartão substituem as de baixo: sem cor própria, ele leva o fundo opaco do lugar
+    // (`--plugin-place-bg`, da faixa e do painel), senão o texto dele se embaralha com o da linha.
+    background: inkColor(p.backgroundColor) ?? (absolute ? 'var(--plugin-place-bg)' : null),
+    border: border ? `1px solid ${inkColor(p.borderColor) ?? 'var(--border-default)'}` : null,
     'border-radius': border === 'round' ? '6px' : null,
     overflow: p.overflow === 'hidden' ? 'hidden' : null,
   });
 }
 
-/** `Text` do Ink: cor, ênfase e corte. `dimColor` é opacidade, como no terminal. */
-export function textStyle(p: Props): string {
+/** `Text` do Ink: cor, ênfase e corte. `dimColor` é opacidade, como no terminal.
+ *
+ *  `nested` é um `Text` dentro de outro. No motor ele vira trecho do texto de fora (`ink-virtual-text`, sem nó de
+ *  layout), e só o `wrap` do `Text` de fora vale para o texto inteiro: o de dentro não declara quebra nem corte e
+ *  herda o `white-space` do de fora, senão um `pre-wrap` próprio voltaria a quebrar a linha cortada. */
+export function textStyle(p: Props, nested = false): string {
   const fg = inkColor(p.color);
   const bg = inkColor(p.backgroundColor);
   const inverse = p.inverse === true;
   const wrap = typeof p.wrap === 'string' ? p.wrap : 'wrap';
-  const truncate = wrap.startsWith('truncate') || wrap === 'end' || wrap === 'middle';
+  const truncate = !nested && (wrap.startsWith('truncate') || wrap === 'end' || wrap === 'middle');
   const deco = [p.underline === true && 'underline', p.strikethrough === true && 'line-through'].filter(Boolean);
   return css({
-    color: inverse ? (bg ?? 'var(--bg)') : fg,
-    background: inverse ? (fg ?? 'var(--text)') : bg,
+    color: inverse ? (bg ?? 'var(--bg-base)') : fg,
+    background: inverse ? (fg ?? 'var(--text-primary)') : bg,
     'font-weight': p.bold === true ? 700 : null,
     'font-style': p.italic === true ? 'italic' : null,
     'text-decoration': deco.length ? deco.join(' ') : null,
     opacity: p.dimColor === true ? 0.6 : null,
-    'white-space': truncate ? 'pre' : 'pre-wrap',
+    'white-space': nested ? null : truncate ? 'pre' : 'pre-wrap',
     overflow: truncate ? 'hidden' : null,
     'text-overflow': truncate ? 'ellipsis' : null,
     'min-width': truncate ? '0' : null,
+  });
+}
+
+/** Rótulo de `Button` sob o hover do escopo: o conjunto de estilo de texto da API (cor, fundo, esmaecido,
+ *  negrito, itálico, sublinhado, riscado); a pílula continua a mesma. */
+export function buttonStyle(p: Props): string {
+  const deco = [p.underline === true && 'underline', p.strikethrough === true && 'line-through'].filter(Boolean);
+  return css({
+    color: inkColor(p.color),
+    background: inkColor(p.backgroundColor),
+    'font-weight': p.bold === true ? 700 : null,
+    'font-style': p.italic === true ? 'italic' : null,
+    'text-decoration': deco.length ? deco.join(' ') : null,
+    opacity: p.dimColor === true ? 0.6 : null,
   });
 }

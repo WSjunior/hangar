@@ -378,7 +378,9 @@ export function probeServerResponse(server: Server, path: string, init?: Request
 // de repositório grande. Teto ainda existe para máquina fora do ar atrás de VPN não prender a tela.
 const SESSION_FILE_TIMEOUT_MS = 60_000;
 
-async function apiFetchForServer<T>(s: Server, path: string, init?: RequestInit, prazoMs = 8000): Promise<T> {
+// `comCodigo`: o erro também leva o `code` e o `envelope` do servidor, como o do `apiFetch`. Opcional porque
+// quem já trata o erro destas chamadas pelo texto ou pelo status não muda de comportamento sem querer.
+async function apiFetchForServer<T>(s: Server, path: string, init?: RequestInit, prazoMs = 8000, comCodigo = false): Promise<T> {
   let res: Response;
   // Prazo por PADRAO. Esta funcao fala com OUTRO servidor, e servidor offline atras de VPN nao
   // recusa a conexao — o socket fica pendurado e a promessa nunca resolve (o comentario do
@@ -398,7 +400,11 @@ async function apiFetchForServer<T>(s: Server, path: string, init?: RequestInit,
     }
     throw e;
   }
-  if (!res.ok) throw Object.assign(new Error(`${res.status}: ${await errorDetail(res)}`), { status: res.status });
+  if (!res.ok) {
+    if (!comCodigo) throw Object.assign(new Error(`${res.status}: ${await errorDetail(res)}`), { status: res.status });
+    const { msg, code, envelope } = await lerErro(res);
+    throw Object.assign(new Error(`${res.status}: ${msg}`), { status: res.status, code, envelope });
+  }
   return res.json() as Promise<T>;
 }
 
@@ -2462,8 +2468,29 @@ export async function pressPluginButton(
 ): Promise<{ ok: boolean; copied?: string; opened?: string }> {
   const path = `/api/sessions/${encodeURIComponent(name)}/plugin/press`;
   const init = { method: 'POST', body: JSON.stringify({ site, key }) };
-  return server ? apiFetchForServer<{ ok: boolean; copied?: string; opened?: string }>(server, path, init)
+  return server ? apiFetchForServer<{ ok: boolean; copied?: string; opened?: string }>(server, path, init, 8000, true)
                 : apiFetch<{ ok: boolean; copied?: string; opened?: string }>(path, init);
+}
+
+/** Traz um painel de mod para a frente (`plugin/show`). Servidor sem a rota responde 404 ou 405 (`isMissingRoute`). */
+export async function showPluginPane(name: string, site: string, server?: Server): Promise<{ ok: boolean }> {
+  const path = `/api/sessions/${encodeURIComponent(name)}/plugin/show`;
+  const init = { method: 'POST', body: JSON.stringify({ site }) };
+  return server ? apiFetchForServer<{ ok: boolean }>(server, path, init, 8000, true) : apiFetch<{ ok: boolean }>(path, init);
+}
+
+export type PluginInputKind = 'change' | 'submit';
+
+/** Digitação num `Input` de mod (`plugin/input`): só a sessão sem terminal aceita; com terminal vem
+ *  `erro_mod_sem_digitacao`. Sempre com prazo de 8 s, o mesmo do `apiFetchForServer` (que o aplica quando há
+ *  servidor): o campo manda um pedido por vez, e um pedido pendurado prenderia toda a digitação nele. */
+export async function inputPluginField(
+  name: string, site: string, key: string, kind: PluginInputKind, value: string, server?: Server,
+): Promise<{ ok: boolean }> {
+  const path = `/api/sessions/${encodeURIComponent(name)}/plugin/input`;
+  const init = { method: 'POST', body: JSON.stringify({ site, key, kind, value }) };
+  return server ? apiFetchForServer<{ ok: boolean }>(server, path, init, 8000, true)
+                : apiFetch<{ ok: boolean }>(path, { ...init, signal: AbortSignal.timeout(8000) });
 }
 
 // Pergunta lateral (/btw do Claude Code): o backend dirige o overlay da TUI e devolve a resposta.
