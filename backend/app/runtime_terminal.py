@@ -331,7 +331,7 @@ def facts(payload, metadata):
             idle = plugin_state[0] == 'idle'
         elif hook_state is not None and hook_state[1] >= current.meta.get('legacy_import_after', current.meta.get('created', 0)):
             idle = hook_state[0] == 'idle'
-    question = bool(askquestion.pergunta_aberta(current.jsonl) or plugin.pergunta_pendente(current.name))
+    question = bool(askquestion.pergunta_aberta(Path(current.jsonl).stem) or plugin.pergunta_pendente(current.name))
     modes = plugin.declared_modes(current.name)
     live = plugin.aguardando(current.name) and _plugin_current(current)
     native = None
@@ -613,9 +613,15 @@ def _expire_clear(coordinator, descriptor, operation_id):
     from app import diag
     slot = coordinator.slots[descriptor['key']]
     barrier = slot.store.state['runtime_state'].get('clear_barrier') or {}
-    since = barrier.get('since', 0)
     agora = time.time()
-    if agora - since < CLEAR_APPLY_WAIT_S or agora < _CLEAR_NEXT.get(descriptor['key'], 0):
+    if 'raised' not in barrier:
+        # Trava gravada sem hora (de antes desta regra): o prazo conta de quando ela foi vista.
+        state = copy.deepcopy(slot.store.state)
+        state['runtime_state']['clear_barrier'] = {**barrier, 'since':barrier.get('since', agora), 'raised':agora}
+        slot.store._persist(state)
+        return False
+    since, raised = barrier.get('since', barrier['raised']), barrier['raised']
+    if agora - raised < CLEAR_APPLY_WAIT_S or agora < _CLEAR_NEXT.get(descriptor['key'], 0):
         return False
     _CLEAR_NEXT[descriptor['key']] = agora + CLEAR_APPLY_WAIT_S
     try:
@@ -626,17 +632,23 @@ def _expire_clear(coordinator, descriptor, operation_id):
     except Exception:
         _log.warning("trava do /clear de %s fica: fatos indisponíveis", descriptor['name'], exc_info=True)
         return False
-    if not current['idle'] or agora - since < CLEAR_DISK_TRUST_S and _clear_on_disk(descriptor['jsonl'], since):
+    if not current['idle'] or agora - raised < CLEAR_DISK_TRUST_S and _clear_on_disk(descriptor['jsonl'], since):
+        return False
+    # Primeiro a operação: falhando, a trava fica e o diário diz por quê.
+    op_id = barrier.get('operation_id')
+    try:
+        if op_id in slot.store.state['operations']:
+            _queue(coordinator, descriptor, {'kind':'finish','id':op_id,'status':'rejected',
+                'result':_reply(op_id, 'rejected', code='clear_not_applied', cleanup='not_needed')})
+        state = copy.deepcopy(slot.store.state)
+        state['runtime_state'].pop('clear_barrier', None)
+        state['runtime_state'].pop('preserve_binding', None)
+        slot.store._persist(state)
+    except Exception as exc:
+        from app.runtime_coordinator import failure_reason
+        diag.registrar('runtime.clear_release_failed', 'erro', sessao=descriptor['name'], **failure_reason(exc))
         return False
     _CLEAR_NEXT.pop(descriptor['key'], None)
-    state = copy.deepcopy(slot.store.state)
-    state['runtime_state'].pop('clear_barrier', None)
-    state['runtime_state'].pop('preserve_binding', None)
-    slot.store._persist(state)
-    op_id = barrier.get('operation_id')
-    if op_id in slot.store.state['operations']:
-        _queue(coordinator, descriptor, {'kind':'finish','id':op_id,'status':'rejected',
-            'result':_reply(op_id, 'rejected', code='clear_not_applied', cleanup='not_needed')})
     diag.registrar('runtime.clear_not_applied', 'aviso', sessao=descriptor['name'], codigo='clear_not_applied')
     return True
 
@@ -866,7 +878,7 @@ def _reserve_execute(coordinator, descriptor, command, operation_id, *, entry_id
         _CLEAR_NEXT.pop(descriptor['key'], None)
         state = copy.deepcopy(slot.store.state)
         state['runtime_state'].update(preserve_binding=True, clear_barrier={'generation':descriptor['generation'],
-            'conversation':binding['conversation'],'operation_id':operation_id,'since':dispatched_at})
+            'conversation':binding['conversation'],'operation_id':operation_id,'since':dispatched_at,'raised':time.time()})
         slot.store._persist(state)
         result['payload']['preserve_binding'] = True
     _queue(coordinator, descriptor, {'kind':'finish','id':operation_id,'status':result['disposition'],'result':result})

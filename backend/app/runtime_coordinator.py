@@ -1258,8 +1258,18 @@ class RuntimeCoordinator:
             async def clear():
                 async with self.freeze(name):
                     result = await self.op(name, command, operation_id)
-                    if result.get("disposition") in {"accepted", "unknown"}:
-                        await self.op(name, {"kind":"queue", "action":{"kind":"clear"}}, uuid.uuid4().hex)
+                    # Só o /clear cujo Enter pode ter saído (o que ergueu a trava): o que parou antes não
+                    # rodou e não leva a fila junto.
+                    if (result.get("disposition") in {"accepted", "unknown"}
+                            and (result.get("payload") or {}).get("preserve_binding") is True):
+                        from app.runtime_terminal import BindingChanged
+                        try:
+                            await self.op(name, {"kind":"queue", "action":{"kind":"clear"}}, uuid.uuid4().hex)
+                        except BindingChanged as exc:
+                            # Em geral a conversa já trocou e a troca do vínculo esvazia a fila; o resto
+                            # (sessão morta) fica no diário.
+                            from app import diag
+                            diag.registrar("runtime.clear_queue_skipped", "aviso", sessao=name, **failure_reason(exc))
                     return result
             task = asyncio.create_task(clear())
             try:

@@ -677,7 +677,8 @@ impl Executor {
             let misses=self.footer_misses.as_ref().filter(|(row,_)|row==root).map_or(0,|(_,n)|*n)+1;
             if misses==FOCUS_RETURN_TRIES {tracing::warn!(key=%self.target.key,session=%self.target.name,code="footer_focus_kept","o Esc não devolveu o foco do rodapé ao composer; a entrada espera a pessoa");}
             self.footer_misses=Some((root.to_string(),misses));
-        } else if self.footer_misses.as_ref().is_some_and(|(row,_)|row==root) {self.footer_misses=None;}
+        } else if self.footer_misses.as_ref().is_some_and(|(row,_)|row==root)
+            && !matches!(result.payload["stage"].as_str(),Some("validate"|"identity"|"ready")) {self.footer_misses=None;}
         let clear_raised=slash && is_clear(text) && clear_may_have_run(result.disposition,&result.payload);
         if clear_raised {
             let mut state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?.runtime_state;
@@ -834,7 +835,10 @@ impl Executor {
         // Fora do ator: a pasta pode ter milhares de transcripts.
         let transcript=self.target.transcript.clone();
         let scan=if sample().epoch_s-raised<CLEAR_DISK_TRUST_S {
-            tokio::task::spawn_blocking(move||clear_on_disk(&transcript,since)).await.unwrap_or_else(|_|Err(std::io::Error::other("clear_on_disk")))
+            tokio::task::spawn_blocking(move||clear_on_disk(&transcript,since)).await.unwrap_or_else(|failure|{
+                tracing::warn!(key=%self.target.key,code="clear_barrier_disk_panic",reason=%failure,"varredura do transcript caiu; a trava do /clear fica");
+                Err(std::io::Error::other("clear_on_disk"))
+            })
         } else {Ok(false)};
         let on_disk=scan.unwrap_or_else(|failure|{
             if crate::warn_limit::allow(Some(self.target.key.as_str()),"clear_barrier_disk") {

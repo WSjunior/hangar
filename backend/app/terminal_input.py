@@ -1846,12 +1846,14 @@ class TerminalInput:
                 # tempo do menu renderizar, o Enter corre com o redraw e e ENGOLIDO pelo menu (o comando
                 # fica digitado mas NAO executa -> "o slash nao chega no terminal"). Espera o menu
                 # acomodar, Enter pra executar; um 2o Enter cobre o caso do 1o so ter selecionado a
-                # sugestao (o comando ja rodou e o prompt esta vazio -> o 2o Enter e no-op inofensivo).
+                # sugestao. No Claude, só com um comando ainda no composer (ou a tela ilegível): o que já
+                # rodou pode ter trocado a conversa (/clear), e o Enter seguinte cairia na nova.
                 send_keys(name, text, literal=True)
                 time.sleep(_SLASH_SETTLE)
                 send_keys(name, "Enter")
                 time.sleep(_SLASH_SETTLE)
-                send_keys(name, "Enter")
+                if provider != "claude" or (parado := _texto_composer_claude(name)) is None or parado.startswith("/"):
+                    send_keys(name, "Enter")
             else:
                 # Foto dos placeholders de paste ANTES do nosso, igual ao ramo multi-linha (ver
                 # comentario la em cima e _composer_residuo). SEM ela a evidencia por placeholder fica
@@ -2058,6 +2060,10 @@ class TerminalInput:
         # o proximo envio digitava EM CIMA do residuo -> concatenava. clear=True manda um 2o Esc: com o
         # input nao-vazio (garantido pelo caller — so passa clear quando havia msg pendente) o Esc-Esc
         # limpa o draft. NUNCA mandar o 2o Esc as cegas: input vazio + Esc-Esc abre o menu de rewind.
+        # Com o foco no rodapé, o primeiro Esc só o devolve ao composer: o seguinte interrompe.
+        if foco_no_rodape(_capture(name)):
+            send_keys(name, "Escape")
+            time.sleep(_SETTLE)
         send_keys(name, "Escape")
         if clear:
             time.sleep(_SETTLE)  # deixa o interrupt assentar e o texto voltar pro input antes de limpar

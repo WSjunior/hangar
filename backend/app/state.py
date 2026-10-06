@@ -347,6 +347,8 @@ def menu_codex(pane_text: str) -> Optional[tuple[Optional[str], list[str]]]:
 _CURSOR_SEM_NUMERO_RE = re.compile(r"^(\s*❯\s+)\S")
 # Dicas que o Claude Code põe no rodapé quando o foco está nele, no lugar de "↓ to manage".
 _FOCO_NO_RODAPE_RE = re.compile(r"Enter to view|↑/↓ to select")
+# O cursor do painel de agentes: só na frente de um agente, para uma statusline com `❯` não contar.
+_CURSOR_DO_PAINEL_RE = re.compile(r"^\s*❯\s+[●◯]")
 
 
 def _fim_do_composer(lines: list[str], ate: Optional[int] = None) -> Optional[int]:
@@ -369,7 +371,7 @@ def foco_no_rodape(pane_text: str) -> bool:
     composer: o que se digita some, e o `x` do painel para um subagente."""
     lines = pane_text.splitlines()
     fim = _fim_do_composer(lines)
-    return fim is not None and any(_CURSOR_SEM_NUMERO_RE.match(ln) or _FOCO_NO_RODAPE_RE.search(ln)
+    return fim is not None and any(_CURSOR_DO_PAINEL_RE.match(ln) or _FOCO_NO_RODAPE_RE.search(ln)
                                    for ln in lines[fim + 1:])
 
 
