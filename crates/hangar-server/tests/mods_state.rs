@@ -141,23 +141,58 @@ fn attach_keeps_the_live_toasts() {
 }
 
 #[test]
-fn bridge_finds_a_renamed_session_by_its_old_names_and_the_current_name_wins() {
+fn renamed_session_keeps_the_birth_name_of_its_process() {
     let mods = Mods::default();
-    mods.attach_keyed("a", "k1", 1, Arc::new(NoLink));
+    mods.attach_process("a", "p1", 1, Arc::new(NoLink));
     assert_eq!(mods.bridge_session("a").as_deref(), Some("a"));
-    assert_eq!(mods.bridge_session("b"), None);
-    // Renomeada duas vezes sem relançar o processo: os dois nomes antigos levam à sessão.
+    // Renomeada duas vezes sem relançar o processo: ele segue mandando o nome com que nasceu.
     mods.forget("a", 1);
-    mods.attach_keyed("b", "k1", 1, Arc::new(NoLink));
-    mods.forget("b", 1);
-    mods.attach_keyed("c", "k1", 1, Arc::new(NoLink));
-    assert_eq!((mods.bridge_session("a").as_deref(), mods.bridge_session("b").as_deref()), (Some("c"), Some("c")));
-    // Outra sessão (outra chave) que nasce com um nome antigo fica com ele.
-    mods.attach_keyed("a", "k2", 1, Arc::new(NoLink));
-    assert_eq!((mods.bridge_session("a").as_deref(), mods.bridge_session("b").as_deref()), (Some("a"), Some("c")));
-    // Fechada de vez, a sessão não é achada por nome nenhum; reaberta com outra chave, não herda.
-    mods.forget("c", 1);
-    assert_eq!(mods.bridge_session("b"), None);
-    mods.attach_keyed("d", "k3", 1, Arc::new(NoLink));
-    assert_eq!(mods.bridge_session("b"), None);
+    mods.attach_process("b", "p1", 2, Arc::new(NoLink));
+    mods.forget("b", 2);
+    mods.attach_process("c", "p1", 3, Arc::new(NoLink));
+    assert_eq!(mods.bridge_session("a").as_deref(), Some("c"));
+    assert_eq!(mods.bridge_session("b"), None, "nenhum processo nasceu com o nome do meio");
+    // Relançada (processo novo), nasce com o nome atual e não herda o de antes.
+    mods.forget("c", 3);
+    mods.attach_process("c", "p2", 4, Arc::new(NoLink));
+    assert_eq!((mods.bridge_session("c").as_deref(), mods.bridge_session("a")), (Some("c"), None));
+}
+
+#[test]
+fn a_new_session_with_an_old_name_inherits_nothing_and_shares_no_bridge() {
+    let mods = Mods::default();
+    mods.attach_process("a", "p1", 1, Arc::new(NoLink));
+    mods.publish_ui("a", 1, with_button());
+    mods.toast("a", 1, "vitrine", "da antiga", 60_000);
+    mods.begin_click("a", "painel", "abrir");
+    // A sessão é renomeada para `b` (mesmo processo) e outra nasce com o nome `a`.
+    mods.forget("a", 1);
+    mods.attach_process("b", "p1", 2, Arc::new(NoLink));
+    mods.attach_process("a", "p2", 3, Arc::new(NoLink));
+    let replay = mods.replay("a");
+    assert!(replay.is_empty(), "nem faixa nem aviso da antiga: {replay:?}");
+    assert_eq!(mods.match_click("a", "painel", "abrir"), None, "nem o clique em aberto");
+    // A vida da antiga não publica na nova, mesmo com o mesmo nome.
+    assert!(!mods.publish_ui("a", 1, json!({"above": {"type": "Text"}})));
+    mods.toast("a", 1, "vitrine", "atrasado", 4000);
+    assert!(mods.replay("a").is_empty());
+    // Os dois processos vivos nasceram como `a` e têm o mesmo token: a ponte não atende nenhum.
+    assert_eq!(mods.bridge_session("a"), None);
+    mods.forget("b", 2);
+    assert_eq!(mods.bridge_session("a").as_deref(), Some("a"));
+}
+
+#[test]
+fn another_process_replacing_a_live_session_takes_nothing_from_it() {
+    // Um `close` preso deixa a sessão no `Mods`; outra sessão aberta com o mesmo nome a substitui.
+    let mods = Mods::default();
+    mods.attach_process("x", "p1", 1, Arc::new(NoLink));
+    mods.toast("x", 1, "vitrine", "da antiga", 60_000);
+    mods.attach_process("x", "p2", 2, Arc::new(NoLink));
+    assert!(mods.replay("x").is_empty(), "outro processo não herda os avisos");
+    assert!(!mods.publish_ui("x", 1, json!({"above": null})), "o ator velho não publica na sessão nova");
+    // Reaberta no mesmo processo, os avisos vivos ficam.
+    mods.toast("x", 2, "vitrine", "da nova", 60_000);
+    mods.attach_process("x", "p2", 3, Arc::new(NoLink));
+    assert_eq!(mods.replay("x").len(), 1);
 }

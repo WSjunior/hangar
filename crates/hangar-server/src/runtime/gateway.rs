@@ -23,7 +23,7 @@ impl EntryHandle {
     async fn confirm(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.confirm().await,Self::Terminal {handle,..}=>handle.confirm().await}}
     async fn ensure_projection(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.ensure_projection().await,Self::Terminal {handle,..}=>handle.ensure_projection().await}}
 }
-struct Entry { generation:u64,handle:EntryHandle,lease_path:std::path::PathBuf,name:String }
+struct Entry { generation:u64,handle:EntryHandle,lease_path:std::path::PathBuf,name:String,mods_life:u64 }
 pub struct RuntimeRegistry {
     entries:Mutex<BTreeMap<String,Entry>>,
     events:broadcast::Sender<RuntimeEvent>,
@@ -127,13 +127,16 @@ impl RuntimeRegistry {
         if let Some(mods) = &self.mods { engine = engine.with_mods(mods.clone()); }
         // Dono único dos pedidos dos apps até o `close` (S9). Só o Claude tem superfície. Registrado antes
         // de a tarefa do ator existir: a primeira faixa publicada já encontra a sessão no `Mods`.
+        // A vida no `Mods` é única no servidor; o processo é a chave durável mais o cano, que o renomear mantém.
+        let life = engine.mods_life();
         let handle = RuntimeActor::spawn_with(target.clone(),queue,connection,engine,|handle| {
             if target.provider == "claude" && let Some(mods) = &self.mods {
-                mods.attach_keyed(&target.name,&target.key,target.generation,Arc::new(handle.clone()));
+                let process = format!("{}:{}:{}",target.key,target.binding.pid,target.binding.escuta);
+                mods.attach_process(&target.name,&process,life,Arc::new(handle.clone()));
             }
         });
         self.entries.lock().await.insert(target.key.clone(),Entry { generation:target.generation,handle:EntryHandle::Headless(handle.clone()),
-            lease_path:target.lease_path.clone(),name:target.name.clone() });
+            lease_path:target.lease_path.clone(),name:target.name.clone(),mods_life:life });
         handle
         };
         let snapshot = match handle.snapshot().await {
@@ -164,7 +167,7 @@ impl RuntimeRegistry {
                 let store=open_store(&target.state_path,&target.projection_dir,&target.key,target.generation,&target.name,lease.clone()).await?;
                 let revision=self.revisions.lock().await.entry(target.key.clone()).or_insert_with(||Arc::new(AtomicU64::new(0))).clone();
                 let handle=super::terminal::TerminalActor::spawn(target.clone(),QueueActor::start(store,lease),self.policy.clone(),super::terminal::TerminalOptions::default(),self.events.clone(),revision);
-                self.entries.lock().await.insert(target.key.clone(),Entry {generation:target.generation,handle:EntryHandle::Terminal {target:target.clone(),handle:handle.clone()},lease_path:target.lease_path.clone(),name:target.name.clone()});handle
+                self.entries.lock().await.insert(target.key.clone(),Entry {generation:target.generation,handle:EntryHandle::Terminal {target:target.clone(),handle:handle.clone()},lease_path:target.lease_path.clone(),name:target.name.clone(),mods_life:0});handle
             }
         };
         let snapshot=handle.snapshot().await?;
@@ -177,9 +180,9 @@ impl RuntimeRegistry {
         self.close_locked(key,generation).await
     }
     async fn close_locked(&self,key:&str,generation:u64) -> Result<Value,RuntimeError> {
-        let (handle,lease_path,name) = match self.entries.lock().await.get(key) {
+        let (handle,lease_path,name,life) = match self.entries.lock().await.get(key) {
             None=>return Ok(json!({"closed":true})),
-            Some(entry) if entry.generation == generation=>(entry.handle.clone(),entry.lease_path.clone(),entry.name.clone()),
+            Some(entry) if entry.generation == generation=>(entry.handle.clone(),entry.lease_path.clone(),entry.name.clone(),entry.mods_life),
             _=>return Err(failure("runtime_generation")),
         };
         if let Err(error) = handle.stop().await {
@@ -195,7 +198,7 @@ impl RuntimeRegistry {
         self.entries.lock().await.remove(key);
         // A sessão saiu do Rust: os apps perdem a faixa e os pedidos voltam a não ter dono (S9). Sessão
         // com terminal nunca entrou no `Mods`; não pode apagar a sem terminal de mesmo nome.
-        if matches!(handle,EntryHandle::Headless(_)) && let Some(mods) = &self.mods { mods.forget(&name,generation); }
+        if matches!(handle,EntryHandle::Headless(_)) && let Some(mods) = &self.mods { mods.forget(&name,life); }
         Ok(json!({"closed":true}))
     }
     async fn barrier(&self,key:&str) -> Arc<Mutex<()>> {
