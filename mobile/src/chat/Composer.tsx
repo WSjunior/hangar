@@ -835,6 +835,8 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   const handleVersion = useCallback(async (version: string) => {
     const current = barRef.current;
     if (!current || revising !== null) return;
+    // A contagem levaria o texto da versão anterior.
+    cancelarAuto();
     if (textRef.current !== current.field) { setError(m.native_dictation_draft_changed()); return; }
     let next = current.versions[version];
     let applied = version;
@@ -866,7 +868,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     setSelection({ start: field.length, end: field.length });
     limparUndo();
     setBar({ ...current, field, shown: next, applied, versions: { ...current.versions, [applied]: next } });
-  }, [revising, origin, persistText, limparUndo, setBar]);
+  }, [revising, origin, persistText, limparUndo, setBar, cancelarAuto]);
 
   const handleRetry = useCallback(async () => {
     if (transcribingRef.current) return;
@@ -987,8 +989,11 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
 
   const originServer = useServers((s) => s.servers.find((x) => x.id === origin.serverId));
   const dictationPlayer = dictation ? dictationAudio(originServer, origin.name, dictation.audio, dictation.serverPath) : null;
-  const barPlayer = bar ? dictationAudio(originServer, origin.name, null, bar.serverPath) : null;
-  const barVersions = !!bar && !!bar.raw && (revising !== null || dictatedInField(bar, text));
+  // Como no PC: versões e player só enquanto o texto ditado está intacto no campo.
+  const barIntact = !!bar && (revising !== null || dictatedInField(bar, text));
+  // O aviso do ditado (limpeza do registro falhou) já traz o mesmo áudio: um player só.
+  const barPlayer = bar && barIntact && !gravando && !dictationPlayer ? dictationAudio(originServer, origin.name, null, bar.serverPath) : null;
+  const barVersions = barIntact && !!bar?.raw;
   // Gravando ou transcrevendo, o texto do campo ainda vai mudar: enviar agora mandaria a metade.
   // Transcrição desta tela ou de uma montagem anterior da mesma conversa ainda no ar.
   const busyVoice = transcribing || dictation?.status === 'pending';
@@ -1338,7 +1343,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
                 })}
               </>
             ) : null}
-            {barPlayer && !gravando ? <AudioChip uri={barPlayer.uri} headers={barPlayer.headers} name={barPlayer.name} /> : null}
+            {barPlayer ? <AudioChip uri={barPlayer.uri} headers={barPlayer.headers} name={barPlayer.name} /> : null}
           </View>
         ) : null}
 
@@ -1371,7 +1376,8 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           </Pressable>
         ) : null}
 
-        {undo ? (
+        {/* Com as versões à vista, o "Cru" já desfaz a limpeza. */}
+        {undo && !barVersions ? (
           <View style={styles.undoRow}>
             <Text style={[styles.hint, { color: theme.tokens.text.muted }]}>{m.composer_ditado_limpo()}</Text>
             <Pressable onPress={handleUndo} style={[styles.undoBtn, { borderColor: theme.tokens.border.subtle }]} accessibilityRole="button">

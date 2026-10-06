@@ -11,7 +11,7 @@ vi.mock('react-native', async (original) => ({
   AppState: { currentState: 'active', addEventListener: () => ({ remove: () => {} }) },
   AccessibilityInfo: { sendAccessibilityEvent: vi.fn() },
   Pressable: ({ accessibilityState, accessibilityRole, accessibilityLabel, accessibilityHint, onPress, children, disabled, ref, style }: {
-    accessibilityState?: { disabled?: boolean; busy?: boolean; expanded?: boolean }; accessibilityRole?: string;
+    accessibilityState?: { disabled?: boolean; busy?: boolean; expanded?: boolean; selected?: boolean }; accessibilityRole?: string;
     accessibilityLabel?: string; onPress?: () => void; children: ReactNode; disabled?: boolean;
     accessibilityHint?: string; ref?: import('react').Ref<HTMLButtonElement>; style?: unknown;
   }) => createElement('button', {
@@ -19,7 +19,7 @@ vi.mock('react-native', async (original) => ({
     style: [typeof style === 'function' ? style({ pressed: false }) : style].flat(Infinity)
       .reduce<Record<string, unknown>>((all, part) => (part && typeof part === 'object' ? { ...all, ...part } : all), {}),
     'aria-disabled': accessibilityState?.disabled, 'aria-busy': accessibilityState?.busy,
-    'aria-expanded': accessibilityState?.expanded,
+    'aria-expanded': accessibilityState?.expanded, 'aria-selected': accessibilityState?.selected,
   }, children),
 }));
 
@@ -205,7 +205,7 @@ vi.mock('./AssistantBubble', () => ({ AssistantBubble: ({ text }: { text: string
 vi.mock('./UserBubble', () => ({ UserBubble: () => null }));
 // Anexos da bolha puxam módulos nativos (gesture-handler, expo-audio, expo-file-system) que o node não carrega.
 vi.mock('./ImageThumb', () => ({ ImageThumb: () => null }));
-vi.mock('./AudioChip', () => ({ AudioChip: () => null }));
+vi.mock('./AudioChip', () => ({ AudioChip: ({ uri }: { uri: string }) => createElement('span', { 'data-audio': uri }) }));
 vi.mock('../features/attachments/DocumentViewer', () => ({ DocumentViewer: () => null }));
 vi.mock('../features/attachments/mediaCache', () => ({ canShareFile: false, shareFile: async () => {} }));
 vi.mock('../ui/Toast', () => ({ toast: { ok: () => {}, erro: () => {} } }));
@@ -1176,23 +1176,57 @@ describe('ditado entregue à conversa de origem', () => {
     await act(async () => mic(container).click());
     await act(async () => voiceInput.onFim!(new File(['a'], 'ditado.m4a', { type: 'audio/m4a' }), 'botao', 'file:///cache/ditado.m4a'));
     expect(container.querySelector('textarea')!.value).toBe('antes texto prosa');
-    expect(button(container, 'composer_ditado_fechar')).toBeUndefined();
+    // A barra é só as quatro versões (e o player): sem botão de fechar, como no PC.
+    const labels = ['composer_ditado_cru', ...estilosDitado().map((e) => e.rotulo)];
+    const row = button(container, 'composer_ditado_cru')!.parentElement!;
+    expect([...row.querySelectorAll('button')].map((b) => b.getAttribute('aria-label'))).toEqual(labels);
+    const selected = () => [...row.querySelectorAll('button[aria-selected="true"]')].map((b) => b.getAttribute('aria-label'));
+    const prosa = estilosDitado().find((e) => e.valor === 'prosa')!.rotulo;
+    expect(selected()).toEqual([prosa]);
+    expect(row.querySelector('[data-audio$="/uploads/ditado-1.m4a"]')).not.toBeNull();
+    // O "Cru" faz o papel do desfazer: os dois não aparecem juntos.
+    expect(button(container, 'composer_desfazer_limpeza')).toBeUndefined();
     await act(async () => button(container, 'composer_ditado_cru')!.click());
     expect(container.querySelector('textarea')!.value).toBe('antes texto cru');
     expect(realFirstInput.relimpar).not.toHaveBeenCalled();
+    expect(selected()).toEqual(['composer_ditado_cru']);
     const limpar = estilosDitado().find((e) => e.valor === 'limpar')!.rotulo;
     await act(async () => button(container, limpar)!.click());
     expect(realFirstInput.relimpar).toHaveBeenCalledExactlyOnceWith('texto cru', 'limpar', { id: 's1' });
     expect(container.querySelector('textarea')!.value).toBe('antes texto limpo');
+    expect(selected()).toEqual([limpar]);
     // Texto ditado intacto: as versões ficam, mas a troca recusa para não perder a edição.
     type(container, 'antes texto limpo e mais');
     await act(async () => button(container, 'composer_ditado_cru')!.click());
     expect(container.querySelector('textarea')!.value).toBe('antes texto limpo e mais');
     expect(container.textContent).toContain('native_dictation_draft_changed');
-    // Mexer no próprio texto ditado esconde as versões.
+    // Mexer no próprio texto ditado esconde as versões e o player juntos.
     type(container, 'antes outro texto');
     expect(button(container, 'composer_ditado_cru')).toBeUndefined();
+    expect(container.querySelector('[data-audio]')).toBeNull();
     act(() => root.unmount());
+  });
+
+  it('trocar de versão durante a contagem do envio automático cancela o envio', async () => {
+    vi.useFakeTimers();
+    try {
+      composerChat.send.mockClear();
+      realFirstInput.transcribe.mockClear().mockResolvedValueOnce({
+        path: '/up/sess/ditado-1.m4a', text: 'texto prosa', raw: 'texto cru', aviso: null, estilo_aplicado: 'prosa',
+      });
+      const { container, root } = await render(createElement(Composer, props));
+      await act(async () => mic(container).click());
+      await act(async () => voiceInput.onFim!(new File(['a'], 'ditado.m4a', { type: 'audio/m4a' }), 'silencio', 'file:///cache/ditado.m4a'));
+      expect(container.textContent).toContain('composer_enviando_cancelar');
+      await act(async () => button(container, 'composer_ditado_cru')!.click());
+      expect(container.querySelector('textarea')!.value).toBe('texto cru');
+      expect(container.textContent).not.toContain('composer_enviando_cancelar');
+      await act(async () => vi.advanceTimersByTimeAsync(3250));
+      expect(composerChat.send).not.toHaveBeenCalled();
+      act(() => root.unmount());
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('enviar fecha a barra do ditado', async () => {
