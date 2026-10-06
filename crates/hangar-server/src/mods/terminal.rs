@@ -11,6 +11,8 @@ use super::state::{CallFuture, Mods, ShownFuture, SurfaceLink, TerminalProbe};
 
 /// Prazo da reposição do mínimo pelo vigia: redimensionar e assentar (até 1 s) com o piso das ações.
 const FLOOR_BUDGET: Duration = Duration::from_secs(5);
+/// Quanto o vigia espera a vez do pane: um pedido do app inteiro, do orçamento da rota à limpeza.
+const FLOOR_WAIT: Duration = super::routes::REQUEST_BUDGET.saturating_add(click::UNDO_MAX);
 /// Prazo da leitura do painel na frente, que não é pedido de app.
 const SHOWN_READ_MAX: Duration = Duration::from_secs(2);
 
@@ -38,9 +40,13 @@ impl TerminalLink {
     }
 
     /// Repõe o tamanho mínimo quando nenhum terminal de verdade está ligado (T9). Com um pedido do app em
-    /// curso não faz nada: o `prepare` dele já repõe, e a limpeza dele devolve a altura.
+    /// curso espera a vez dele, até `FLOOR_WAIT`, e só então relê clientes e tamanho: o terminal que se
+    /// desliga no meio do clique não avisa de novo, e desistir deixaria a janela abaixo do mínimo.
     pub async fn floor(&self) {
-        let Ok(_busy) = self.parts.busy.try_lock() else { return };
+        let Ok(_busy) = tokio::time::timeout(FLOOR_WAIT, self.parts.busy.lock()).await else {
+            tracing::debug!(session = %self.parts.name, code = "mods_floor_wait", "tamanho mínimo do terminal não reposto");
+            return;
+        };
         let undo = Undo::default();
         if let Err(error) = click::floor(&self.ctx(Instant::now() + FLOOR_BUDGET, &undo)).await {
             tracing::debug!(session = %self.parts.name, code = %error.code, "tamanho mínimo do terminal não reposto");
