@@ -13,6 +13,10 @@ Achados médios e baixos das revisões por Task que entraram na `feat/parte4` se
   (Task 2).
 - Retrato de fatos que nunca chegou dá `RoundFacts` vazio; o `session.dead` do Python reconfere a
   troca (Task 2).
+- Prévia (Task 3): o hub chama `preview::committed_from_frame(&quadro)` a cada linha do
+  `FileTail` e zera o `committed` no `rebind`; acordar o `Monitor` no commit para a limpeza ser
+  imediata (hoje vem no toque seguinte, até 0,15 s trabalhando e 0,75 s parado);
+  `preview_files`/`preview_capture` com `spawn_blocking` e prazo.
 
 ## Médios e baixos
 
@@ -23,6 +27,10 @@ Achados médios e baixos das revisões por Task que entraram na `feat/parte4` se
   (pergunta com resumo enorme) é recusado pela ponte.
 - Task 2: cache do `permission.observe` pode ficar velho se o Python trocar o modo por outro
   caminho até o pane mudar; `None` do pane do agente fica 60 s em cache (igual ao Python).
+- Task 3: a captura rápida traz a análise completa do pool, refeita no caminho com corte; clone
+  do texto do hook por toque; `norm()` sem os separadores `\x1c-\x1f`; a época zera a prévia sem
+  publicar vazio (o reset do hub cobre); largura por `unicode-width` pode divergir do Python em
+  caracteres raros.
 - Task 8: fila de entrada limitada em quadros (64), não em bytes; `lock().unwrap()`; erro de
   leitura do PTY que não é EIO fecha como fim normal; resize do PTY que falha só aparece em debug;
   `restore_after_crash` na subida sem diário (só `warn`); troca de painel com desmontagem acima de
