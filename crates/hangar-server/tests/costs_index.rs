@@ -629,7 +629,8 @@ fn bounded_scan_inside_its_single_worker_pool_finishes_multiple_windows() {
         let rows = ix.read_costs(Some("t"), None, None).unwrap();
         done.send(rows.iter().map(|r| r.input).collect::<Vec<_>>()).unwrap();
     });
-    assert_eq!(result.recv_timeout(Duration::from_secs(4)).expect("a janela não deve bloquear o próprio worker"),
+    // Só flagra o worker travado: o disco do runner Windows numa rodada lenta não cabe em segundos.
+    assert_eq!(result.recv_timeout(Duration::from_secs(60)).expect("a janela não deve bloquear o próprio worker"),
         (1..=33).collect::<Vec<_>>());
     scan.join().unwrap();
 }
