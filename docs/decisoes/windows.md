@@ -708,3 +708,30 @@ statusline vêm em truecolor `0;38;2;r;g;b`. O `unstyle` já trata os dois forma
 Efeito em cadeia: o backend reiniciou (troca do canal de atualização) no meio de uma tentativa.
 A entrega ficou incerta, e a trava de escrita segurou as duas mensagens seguintes com
 `terminal_write_barrier`, como manda a regra da entrega incerta.
+
+## Clique de mod no psmux
+
+Medido no psmux 3.3.8 com o Claude Code 2.1.289 (fase 3 dos mods). Quem clica é o `hangar-server`,
+pelo mesmo executor do terminal do resto da sessão Claude no Windows. A geometria das abas e do `✕` e o
+clique SGR são os do tmux; o que muda:
+
+- `#{mouse_sgr_flag}` e os outros `mouse_*` voltam vazios: o sinal de mouse ligado é `#{alternate_on}`.
+  Valor vazio de formato nunca é lido como 0.
+- `capture-pane -e` escreve o SGR com o estado absoluto (`ESC[0;1;7;48;2;…m`): a aba ativa e a cor da
+  borda são lidas parâmetro a parâmetro.
+- A roda rola três linhas por evento espaçado e acelera muito em rajada: o clique acompanha o `offset` do
+  `ui.scroll`, nunca uma conta de linhas.
+- O controle do terminal pelo Rust (`terminal_control.rs`) é recusado no Windows, e com ele o observador
+  da prévia e o vigia de tamanho: o psmux não avisa a mudança de tamanho feita por um cliente, e um
+  cliente de controle do Hangar entraria no `#{session_attached}` com que o clique decide se há terminal
+  de verdade ligado. Por isso a contagem de clientes usa só o `#{session_attached}` do psmux (0 ou 1; a
+  tela do clique lê `display-message -p -t <pane> '#{session_attached}'`, e vazio nunca vale 0), e não
+  o `list-clients` sem `control-mode` do tmux. Quem fizer um desses recursos rodar no Windows precisa
+  trocar essa contagem. `detach-client` sem alvo derrubou outro cliente: nunca usar.
+- Sem vigia de tamanho: o mínimo (144 colunas por 40 linhas) volta no preparo da operação de mod
+  seguinte, não na hora em que o terminal se desliga.
+- Sem cliente ligado, `resize-window` funcionou (redesenho em 70 a 200 ms, aba mantida) e deixa a janela
+  em `window-size manual`; o Hangar repõe `latest` em seguida. A nota de 22/08 em `termsock.py` diz que
+  os dois não fazem nada: o clique do `hangar-server` confere o tamanho depois de redimensionar e, se ele
+  não mudou, segue pela roda.
+- A pesquisa de satisfação do fim do turno esconde a faixa e responde aos dígitos: conta como diálogo.
