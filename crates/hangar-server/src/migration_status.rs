@@ -321,14 +321,20 @@ mod tests {
         let source = include_str!("routes.rs");
         let body = &source[source.find("pub fn router(").unwrap()..];
         let body = &body[..body.find("\n}\n").unwrap()];
-        let mut seen = 0;
-        for line in body.lines().map(str::trim).filter(|l| l.starts_with(".route(\"/api/")) {
-            let path = line.split('"').nth(1).unwrap().replace("{name}", "x");
-            let method = if line.contains("routing::post(") { Method::POST } else { Method::GET };
-            assert!(rust_route(&method, &path), "rota do roteador fora da tabela: {method} {path}");
+        let (mut seen, mut api) = (0, 0);
+        for line in body.lines().map(str::trim).filter(|l| l.starts_with(".route(\"")) {
             seen += 1;
+            let path = line.split('"').nth(1).unwrap().replace("{name}", "x");
+            if !path.starts_with("/api/") { continue; }
+            let method = if line.contains("post(") { Method::POST } else if line.contains("get(") { Method::GET }
+                else { panic!("método que o leitor não conhece: {line}") };
+            assert!(!line.contains(").get(") && !line.contains(").post("), "dois métodos numa rota: {line}");
+            assert!(rust_route(&method, &path), "rota do roteador fora da tabela: {method} {path}");
+            api += 1;
         }
-        assert!(seen >= 10, "o leitor do roteador não achou as rotas ({seen})");
+        // Rota quebrada em várias linhas escaparia do filtro acima: a contagem bruta a denuncia.
+        assert_eq!(seen, body.matches(".route(").count(), "há `.route(` fora de uma linha `.route(\"…\"`");
+        assert!(api >= 10, "o leitor do roteador não achou as rotas ({api})");
     }
 
     #[test]
