@@ -12,7 +12,6 @@ pub mod runtime;
 pub mod side;
 pub mod state;
 pub mod tail;
-#[cfg(unix)]
 pub mod term;
 pub mod terminal_state;
 pub mod terminal_control;

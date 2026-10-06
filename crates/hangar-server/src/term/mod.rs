@@ -5,8 +5,11 @@
 mod origin;
 mod pty;
 mod resolve;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
+#[cfg(all(test, windows))]
+#[path = "conpty_tests.rs"]
+mod conpty;
 
 use std::collections::HashMap;
 use std::ffi::OsString;

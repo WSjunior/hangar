@@ -52,8 +52,7 @@ pub struct AppState {
     pub list: Arc<crate::list::bridge::ListBridge>,
     /// Produtor único da lista do dono; liga com a primeira lista aberta.
     pub hub: Arc<crate::list::hub::ListHub>,
-    /// Painéis de terminal real do dono; no Windows o painel ainda é do Python.
-    #[cfg(unix)]
+    /// Painéis de terminal real do dono.
     pub term: Arc<crate::term::Terms>,
 }
 
@@ -93,7 +92,6 @@ impl AppState {
             origins: std::sync::Mutex::new(indexmap::IndexMap::new()),
             list: Arc::new(crate::list::bridge::ListBridge::new(crate::list::bridge::ListEnv::from_env(), facts)),
             hub: Arc::default(),
-            #[cfg(unix)]
             term: Arc::default() }
     }
 
@@ -204,12 +202,9 @@ pub fn terminal_router(state: Arc<AppState>) -> Router {
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
-    let router = Router::new();
-    #[cfg(unix)]
-    let router = router
+    Router::new()
         .route("/api/sessions/{name}/term", get(crate::term::session_ws).fallback(pass_any))
-        .route("/api/hangar-terminals/{ident}/term", get(crate::term::hangar_ws).fallback(pass_any));
-    router
+        .route("/api/hangar-terminals/{ident}/term", get(crate::term::hangar_ws).fallback(pass_any))
         .route("/__hangar_server/health", get(health))
         .route("/__hangar_server/terminal", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/workspace", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
