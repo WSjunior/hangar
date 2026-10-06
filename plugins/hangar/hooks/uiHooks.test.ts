@@ -66,6 +66,28 @@ test("o painel colocado entra no ui.open; fechado o da frente, aparece o vizinho
   expect(lastUi(posts).shown).toBe("pm-b");
 });
 
+test("o desenho que cruza o fechamento dos três não devolve o painel, e o reaberto vai para o fim", PLUGINS, async ($, on) => {
+  on("ui.focus", () => ({}));
+  const { clock, posts } = await start($, on);
+  const botoes = await control($);
+  await botoes.press({ key: "abrir" });
+  await mount($, "pm-a");
+  await mount($, "pm-c");
+  // O desenho do painel do meio fica no relógio enquanto o mod fecha os três de uma vez.
+  const desenho = mount($, "pm-b");
+  await clock.settle();
+  await botoes.press({ key: "fechar-tres" });
+  await clock.advance(1000);
+  await desenho;
+  await clock.advance(600);
+  expect(lastUi(posts).ids).toEqual([]);
+  // Reabertos, seguem a ordem de abertura, como as abas do terminal. O reabrir pede desenho de novo, e o
+  // painel do meio, ainda montado e fechado, é redesenhado sem entrar na lista.
+  await botoes.press({ key: "reabrir" });
+  await clock.advance(600);
+  expect(lastUi(posts).ids).toEqual(["pm-c", "pm-a"]);
+});
+
 test("rolagem e foco com alvo armado vão ao backend, e a key armada entra no evento", PLUGINS, async ($, on) => {
   const focos: (string | undefined)[] = [];
   on("ui.focus", ($, e) => {

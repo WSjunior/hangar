@@ -1,10 +1,11 @@
 import type { On } from "claude-code";
 
 // Mod de apoio do uiHooks.test.ts, no molde do pm-mock: três painéis que o mod fecha de uma vez. O painel
-// do meio demora a desenhar (o relógio de um build andando), então o desenho dele pode cruzar o
+// do meio demora a desenhar uma vez (o relógio de um build andando), então o desenho dele pode cruzar o
 // fechamento. Os botões ficam num painel desenhado na superfície `desktop`, que o plugin do Hangar não
 // espelha: só os painéis do terminal entram na conta.
 export function registerCascata(on: On): void {
+  let atrasou = false;
   on("ui.render", { component: "Pane" }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e);
     if (e.requestId === "controle") {
@@ -24,7 +25,10 @@ export function registerCascata(on: On): void {
         </Box>
       );
     }
-    if (e.requestId === "pm-b") await $.clock.sleep(1000);
+    if (e.requestId === "pm-b" && !atrasou) {
+      atrasou = true;
+      await $.clock.sleep(1000);
+    }
     return (
       <Box>
         <Text>{e.requestId}</Text>
