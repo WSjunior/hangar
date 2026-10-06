@@ -20,9 +20,11 @@
   // Quando o valor desenhado entra, como no nativo: só conta como posto quando é posto. Com a pessoa no campo ele fica
   // pendente (um redesenho atrasado não apaga o que se digita) e entra quando o campo perde o foco. Logo depois do
   // envio do próprio campo, o desenho seguinte entra mesmo com foco: é como o mod limpa o campo depois do envio, e o
-  // valor pode ser igual ao de antes (vazio). Não são estado reativo: só o desenho novo e o blur as leem.
+  // valor pode ser igual ao de antes (vazio). Digitar depois que o pendente chegou o descarta: perder o foco nunca apaga
+  // texto digitado e não enviado. Não são estado reativo: só o desenho novo e o blur as leem.
   let pending: string | null = null;
   let submitted = false;
+  let sendButton: HTMLButtonElement | undefined = $state();
 
   function put(drawn: string) {
     if (field && field.value !== drawn) field.value = drawn;
@@ -42,13 +44,16 @@
     }
   });
 
-  function blur() {
-    if (pending !== null) put(pending);
+  function blur(e: FocusEvent) {
+    // O `mousedown` no rótulo de envio tira o foco do campo antes do `click`: aplicar o pendente aqui faria o envio
+    // mandar o valor do mod, e não o que está no campo. A resposta ao envio entra no desenho seguinte.
+    if (pending !== null && e.relatedTarget !== sendButton) put(pending);
     pending = null;
   }
 
   function change(text: string) {
-    // Voltar a digitar fecha a vez do desenho que responde ao envio.
+    // Voltar a digitar descarta o pendente e fecha a vez do desenho que responde ao envio.
+    pending = null;
     submitted = false;
     onInput?.('change', text);
   }
@@ -66,7 +71,7 @@
          oninput={(e) => change(e.currentTarget.value)} onblur={blur}
          onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } }} />
   {#if onInput}
-    <button type="button" class="submit" onclick={submit}>{submitLabel || m.plugin_input_enviar()}</button>
+    <button bind:this={sendButton} type="button" class="submit" onclick={submit}>{submitLabel || m.plugin_input_enviar()}</button>
   {:else}
     <span class="hint">{m.plugin_input_no_terminal()}</span>
   {/if}

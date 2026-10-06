@@ -41,8 +41,9 @@ pub struct FieldSpec { pub key: String, pub placeholder: String, pub value: Stri
 pub struct Field { pub state: Entity<InputState>, pub sync: FieldSync, pub seen: u64, pub _changes: Subscription }
 
 /// Quando o valor que o mod desenha entra no campo. Só conta como posto quando é posto: com a pessoa no campo ele fica
-/// pendente e entra quando o campo perde o foco. Logo depois do envio do próprio campo, o desenho seguinte entra mesmo
-/// com foco: é como o mod limpa o campo depois do envio, e o valor pode ser igual ao de antes (vazio).
+/// pendente e entra quando o campo perde o foco, salvo se a pessoa digitou depois que ele chegou. Logo depois do envio do
+/// próprio campo, o desenho seguinte entra mesmo com foco: é como o mod limpa o campo depois do envio, e o valor pode ser
+/// igual ao de antes (vazio).
 #[derive(Default)]
 pub struct FieldSync { pending: Option<String>, submitted: bool }
 
@@ -66,8 +67,12 @@ impl FieldSync {
     /// O campo mandou `submit` (Enter ou o rótulo de envio): o próximo desenho do mod entra mesmo com foco.
     pub fn submitted(&mut self) { self.submitted = true; }
 
-    /// A pessoa voltou a digitar: acabou a vez do desenho que responde ao envio.
-    pub fn typed(&mut self) { self.submitted = false; }
+    /// A pessoa voltou a digitar: o pendente é descartado (perder o foco nunca apaga texto digitado e não enviado) e
+    /// acaba a vez do desenho que responde ao envio.
+    pub fn typed(&mut self) {
+        self.pending = None;
+        self.submitted = false;
+    }
 }
 
 /// Os `Input` com `key` de uma árvore, na ordem dela.
@@ -482,11 +487,11 @@ fn element(v: &Value, c: &Ctx, at: &Spot) -> AnyElement {
     }
 }
 
-/// `Input` de mod: rótulo, campo e rótulo de envio. Sem `submit` (sessão com terminal, servidor que não diz a fonte ou só
-/// leitura) o campo fica desabilitado, com a dica de digitar no terminal.
 /// Largura mínima e base do campo, em pixels: as do web (`min-width: 12ch`, `flex: 1 1 16ch`) em células.
 fn field_width() -> (f32, f32) { (12. * CELL_W, 16. * CELL_W) }
 
+/// `Input` de mod: rótulo, campo e rótulo de envio. Sem `submit` (sessão com terminal, servidor que não diz a fonte ou só
+/// leitura) o campo fica desabilitado, com a dica de digitar no terminal.
 fn field(p: &Value, c: &Ctx) -> AnyElement {
     let label = text_of(&p["label"]);
     let key = p["key"].as_str().filter(|k| !k.is_empty());
@@ -511,6 +516,10 @@ fn field(p: &Value, c: &Ctx) -> AnyElement {
                 .unwrap_or_else(|| crate::i18n::tr_shared("plugin_input_enviar", &[]));
             row.child(div().id(SharedString::from(format!("plg-enviar-{site}-{key}"))).flex_shrink_0().cursor_pointer()
                 .px(px(CELL_W)).rounded(px(4.)).bg(theme::raised()).child(send)
+                // Sem isto, o `mousedown` passa o foco à raiz da janela, o campo perde o foco antes do clique, e o
+                // redesenho do blur poria o valor pendente do mod no campo: o envio mandaria esse valor, não o digitado.
+                // Com o foco no campo, o envio pelo rótulo segue o mesmo caminho do Enter.
+                .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                 .on_click(move |_, window, cx| submit(&site, &key, window, cx))).into_any_element()
         }
         None => div().flex().flex_col().child(row)
@@ -1083,6 +1092,18 @@ mod tests {
     }
 
     #[test]
+    fn typing_after_the_pending_value_arrived_discards_it_so_blur_keeps_the_typed_text() {
+        let mut sync = FieldSync::default();
+        assert_eq!(sync.draw(Some("ab"), "abc", true), None);
+        sync.typed();
+        // Fora de foco, o texto digitado e não enviado fica.
+        assert_eq!(sync.draw(None, "abcd", false), None);
+        // Um desenho novo depois disso volta a ficar pendente e entra ao perder o foco.
+        assert_eq!(sync.draw(Some("x"), "abcd", true), None);
+        assert_eq!(sync.draw(None, "abcd", false).as_deref(), Some("x"));
+    }
+
+    #[test]
     fn the_redraw_right_after_the_own_submit_applies_even_with_focus() {
         // É assim que o mod limpa o campo depois do envio: o valor desenhado é o mesmo de antes (vazio), mas entra.
         let mut sync = FieldSync::default();
@@ -1094,6 +1115,11 @@ mod tests {
         let mut sync = FieldSync::default();
         sync.submitted();
         assert_eq!(sync.draw(Some("abc"), "abc", true), None);
+        assert_eq!(sync.draw(Some(""), "abc", true).as_deref(), Some(""));
+        // Um eco atrasado que chega antes do Enter fica pendente e não atrapalha a resposta ao envio.
+        let mut sync = FieldSync::default();
+        assert_eq!(sync.draw(Some("ab"), "abc", true), None);
+        sync.submitted();
         assert_eq!(sync.draw(Some(""), "abc", true).as_deref(), Some(""));
         // Digitar de novo fecha a vez: o desenho seguinte não apaga o que se digita.
         let mut sync = FieldSync::default();
