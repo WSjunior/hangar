@@ -24,8 +24,8 @@ Achados médios e baixos das revisões por Task que entraram na `feat/parte4` se
 
 ## Antes da `hangar-server-parte1`
 
-- Task 10: prova na VM DELPHI-02 (Step 23) com web e nativo; os testes `term::conpty::*` e os
-  `cfg(windows)` da Task 7 só rodam no job Windows do CI (conferir pelo log). O nativo responde ao
+- Task 10: prova na VM DELPHI-02 (Step 23) com web e nativo. Os testes `term::conpty::*` e os
+  `cfg(windows)` da Task 7 passaram no job Windows do CI (run 37467170394). O nativo responde ao
   `ESC[6n` (`desktop-native/src/term_view.rs:56-58`, `Event::PtyWrite`); o xterm.js também.
 
 ## Médios e baixos
@@ -59,9 +59,9 @@ Achados médios e baixos das revisões por Task que entraram na `feat/parte4` se
 - Task 9: rota privada do terminal responde 400/404 sem linha de log própria no Rust (o Python
   registra o status); quadro do cliente sem teto próprio no Python (Rust e uvicorn limitam); em
   `pending` o `/api/config` publica a capacidade do Python; braço morto `TermActive` no
-  `execute`. Compilação Windows da rota privada e do `term.active` só no job Windows do CI.
+  `execute`.
 - Task 7: psmux pode escrever erro no stdout com código diferente de 0 e virar "quadro" (conferir
   na VM, Task 10/13); a linha da lista mostra só `list_capture_failed` e o código fino só vai ao
   log (já era assim); pior caso de 5 s + 5 s quando captura e `has-session` estouram; stderr e
   `io::Error` descartados (só o código); statusline e limite congelam sem `problema` na falha (já
-  era assim). Testes `cfg(windows)` ainda não rodaram: saem do job Windows do CI no próximo push.
+  era assim).
