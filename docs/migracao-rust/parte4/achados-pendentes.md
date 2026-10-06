@@ -35,6 +35,14 @@ Achados médios e baixos das revisões por Task que entraram na `feat/parte4` se
   `RuntimeView` não limpa quando o ator fecha sem evento; prévia do hook ilegível cai no pane só
   com log; linha acima de 1 MiB no canal privado derruba o stream do convidado (reconecta);
   `Drop` sem runtime não solta o consumidor do pool.
+- Task 6: depois do Esc o hook é cancelado sem `/ask-fim` e a pergunta segurada vale até 35 s:
+  chat e lista mostram o cartão e o clique cai na tecla do pane (aberto em `harnesses.md`;
+  conserto no `perm.ts` ou no `/interrupt`); mapa do estado publicado sem idade (`Monitor`
+  travado deixa a lista com o último estado); `held` da última resposta boa com o Python fora
+  (linha marcada `list_facts_unavailable`); session-id lido na hora de publicar, não o da rodada;
+  exceção em `_held` derrubaria todos os fatos; com `Monitor` vivo a lista não pede rebaixamento
+  do registro nativo. O Python de reserva (`registry.list_with_state`) tem o mesmo defeito do
+  cartão e não foi mexido.
 - Task 8: fila de entrada limitada em quadros (64), não em bytes; `lock().unwrap()`; erro de
   leitura do PTY que não é EIO fecha como fim normal; resize do PTY que falha só aparece em debug;
   `restore_after_crash` na subida sem diário (só `warn`); troca de painel com desmontagem acima de
