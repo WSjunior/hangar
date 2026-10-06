@@ -9,7 +9,7 @@ pub struct RuntimeView { pub error: Option<String>, pub message: Option<String>,
 
 /// `runtime_adapter.runtime_problem`: `(código, detalhe)` do runtime para o `problema` do estado.
 pub fn runtime_problem(view: &RuntimeView) -> Option<(String, String)> {
-    if let Some(code) = view.error.as_deref() {
+    if let Some(code) = view.error.as_deref().filter(|c| !c.is_empty()) {
         let text = match view.message.as_deref().filter(|m| !m.is_empty()) {
             Some(message) => format!("{code}: {message}"),
             None => code.to_owned(),
@@ -68,6 +68,7 @@ mod tests {
         assert_eq!(runtime_problem(&v(Some("queue_io"), Some("disco"), Some("composer_busy"))),
             Some(("runtime_falhou".into(), "queue_io: disco".into())), "erro vence a entrada parada");
         assert_eq!(runtime_problem(&v(Some("queue_io"), Some(""), None)), Some(("runtime_falhou".into(), "queue_io".into())));
+        assert_eq!(runtime_problem(&v(Some(""), None, Some("composer_busy"))).unwrap().0, "terminal_input_composer_busy", "código vazio é falso no Python");
         assert_eq!(runtime_problem(&v(None, None, Some("capture_utf8"))),
             Some(("terminal_input_capture_failed".into(), "capture_utf8".into())));
         assert_eq!(runtime_problem(&v(None, None, Some("x".repeat(80).as_str()))).unwrap(),

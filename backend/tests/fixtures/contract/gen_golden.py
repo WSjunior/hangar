@@ -7,8 +7,10 @@ Os testes do hangar-server comparam campo a campo com o que este script grava em
 Uso, de backend/:  uv run python tests/fixtures/contract/gen_golden.py
 """
 import json
+import logging
 import os
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -20,8 +22,6 @@ time.tzset()
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[2]))
-
-import tempfile  # noqa: E402
 
 from app import pqueue, registry, sse, state  # noqa: E402
 from app.adapters.codex.rollout import parse_rollout_line  # noqa: E402
@@ -406,7 +406,7 @@ def history(path: Path, provider: str, queue_name: str) -> dict:
 def _ask_q(header, question, labels, multi=False, previews=None):
     previews = previews or {}
     return {"header": header, "question": question, "multiSelect": multi,
-            "options": [{"label": l, "description": f"sobre {l}", "preview": previews.get(l, "")} for l in labels]}
+            "options": [{"label": lbl, "description": f"sobre {lbl}", "preview": previews.get(lbl, "")} for lbl in labels]}
 
 
 PANE_PREVIEW = (
@@ -443,18 +443,30 @@ ASK_CASES = [
     dict(name="empty_first", state="awaiting_input", options=["A"], questions=[_ask_q("Cor", "Escolha", [])]),
     dict(name="preview_truncated", state="awaiting_input", options=["System no topo (igual aos", "Alfabético (obedece", "Type something.", "Chat about this"], questions=[PREVIEW_Q]),
     dict(name="preview_count_differs", state="awaiting_input", options=["System no topo (igual aos"], questions=[PREVIEW_Q]),
-    dict(name="preview_short_label_no_cross", state="awaiting_input", options=["Yes", "No"], questions=[_ask_q("P", "Q", ["Yes, and bypass", "No"], previews={"No": "x"})]),
+    dict(name="preview_pane_prefix_ok", state="awaiting_input", options=["Yes", "No"], questions=[_ask_q("P", "Q", ["Yes, and bypass", "No"], previews={"No": "x"})]),
+    # O inverso é o cruzamento que o casamento proíbe: rótulo curto do sidecar contra o longo do pane.
+    dict(name="preview_sidecar_short_no_cross", state="awaiting_input", options=["Yes, and bypass", "No"], questions=[_ask_q("P", "Q", ["Yes", "No"], previews={"No": "x"})]),
+    dict(name="preview_same_count_not_prefix", state="awaiting_input", options=["Alfa", "Bravo"], questions=[_ask_q("P", "Q", ["Xis", "Bravo"], previews={"Xis": "x"})]),
+    dict(name="preview_only_second_question", state="awaiting_input", options=["A trunc", "B"], questions=[_ask_q("P", "Q", ["A truncado", "B"]), _ask_q("R", "S", ["C"], previews={"C": "x"})]),
+    dict(name="only_tui_extras", state="awaiting_input", options=["Type something.", "Chat about this"], questions=[_ask_q("Cor", "Escolha", ["A"])]),
+    dict(name="extra_box_and_period", state="awaiting_input", options=["[ ] A", "[ ] Type something."], questions=[_ask_q("Cor", "Escolha", ["A"], True)]),
+    dict(name="options_empty_list", state="awaiting_input", options=[], questions=[_ask_q("Cor", "Escolha", ["A"])]),
     dict(name="preview_empty_pane_label", state="awaiting_input", options=["", "B"], questions=[_ask_q("P", "Q", ["A", "B"], previews={"A": "x"})]),
     dict(name="pane_preview", pane=PANE_PREVIEW, questions=[PREVIEW_Q]),
     dict(name="pane_multi_box", pane=PANE_MULTI, questions=[_ask_q("Cores", "Quais cores?", ["Alfa", "Bravo"], True)]),
     dict(name="no_sidecar", state="awaiting_input", options=["A"], questions=None),
     dict(name="malformed_no_header", state="awaiting_input", options=["A"], sidecar={"tool_input": {"questions": [{"question": "Q", "options": [{"label": "A"}]}]}}),
     dict(name="malformed_not_json", state="awaiting_input", options=["A"], sidecar="{"),
+    dict(name="malformed_no_tool_input", state="awaiting_input", options=["A"], sidecar={"questions": []}),
+    dict(name="malformed_questions_not_list", state="awaiting_input", options=["A"], sidecar={"tool_input": {"questions": {"a": 1}}}),
+    dict(name="malformed_option_no_label", state="awaiting_input", options=["A"], sidecar={"tool_input": {"questions": [{"header": "H", "question": "Q", "options": [{"description": "d"}]}]}}),
     dict(name="minimal_fields", state="awaiting_input", options=["A"], sidecar={"tool_input": {"questions": [{"header": "H", "question": "Q", "options": [{"label": "A"}]}]}}),
 ]
 
 
 def ask_rows() -> list[dict]:
+    # Os casos malformados fariam o leitor imprimir o traceback a cada geração.
+    logging.getLogger("hangar.askquestion").disabled = True
     rows = []
     for case in ASK_CASES:
         if "pane" in case:
@@ -476,6 +488,8 @@ def ask_rows() -> list[dict]:
                    expected=None if ev is None else json.loads(ev["data"]))
         rows.append(row)
     return rows
+
+
 RULE = "─" * 60
 # Painel ancorado à direita da conversa, a partir da coluna 40: sem o corte, a borda │ dele e o ●
 # do mod entram na prévia.

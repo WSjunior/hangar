@@ -408,7 +408,7 @@
   "expected": null
  },
  {
-  "name": "preview_short_label_no_cross",
+  "name": "preview_pane_prefix_ok",
   "state": "awaiting_input",
   "options": [
    "Yes",
@@ -458,6 +458,239 @@
     }
    ]
   }
+ },
+ {
+  "name": "preview_sidecar_short_no_cross",
+  "state": "awaiting_input",
+  "options": [
+   "Yes, and bypass",
+   "No"
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "P",
+      "question": "Q",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "Yes",
+        "description": "sobre Yes",
+        "preview": ""
+       },
+       {
+        "label": "No",
+        "description": "sobre No",
+        "preview": "x"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": null
+ },
+ {
+  "name": "preview_same_count_not_prefix",
+  "state": "awaiting_input",
+  "options": [
+   "Alfa",
+   "Bravo"
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "P",
+      "question": "Q",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "Xis",
+        "description": "sobre Xis",
+        "preview": "x"
+       },
+       {
+        "label": "Bravo",
+        "description": "sobre Bravo",
+        "preview": ""
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": null
+ },
+ {
+  "name": "preview_only_second_question",
+  "state": "awaiting_input",
+  "options": [
+   "A trunc",
+   "B"
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "P",
+      "question": "Q",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "A truncado",
+        "description": "sobre A truncado",
+        "preview": ""
+       },
+       {
+        "label": "B",
+        "description": "sobre B",
+        "preview": ""
+       }
+      ]
+     },
+     {
+      "header": "R",
+      "question": "S",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "C",
+        "description": "sobre C",
+        "preview": "x"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": {
+   "questions": [
+    {
+     "header": "P",
+     "question": "Q",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "A truncado",
+       "description": "sobre A truncado",
+       "preview": ""
+      },
+      {
+       "label": "B",
+       "description": "sobre B",
+       "preview": ""
+      }
+     ]
+    },
+    {
+     "header": "R",
+     "question": "S",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "C",
+       "description": "sobre C",
+       "preview": "x"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "only_tui_extras",
+  "state": "awaiting_input",
+  "options": [
+   "Type something.",
+   "Chat about this"
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "Cor",
+      "question": "Escolha",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "A",
+        "description": "sobre A",
+        "preview": ""
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": null
+ },
+ {
+  "name": "extra_box_and_period",
+  "state": "awaiting_input",
+  "options": [
+   "[ ] A",
+   "[ ] Type something."
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "Cor",
+      "question": "Escolha",
+      "multiSelect": true,
+      "options": [
+       {
+        "label": "A",
+        "description": "sobre A",
+        "preview": ""
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": {
+   "questions": [
+    {
+     "header": "Cor",
+     "question": "Escolha",
+     "multiSelect": true,
+     "options": [
+      {
+       "label": "A",
+       "description": "sobre A",
+       "preview": ""
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "options_empty_list",
+  "state": "awaiting_input",
+  "options": [],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "Cor",
+      "question": "Escolha",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "A",
+        "description": "sobre A",
+        "preview": ""
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": null
  },
  {
   "name": "preview_empty_pane_label",
@@ -638,6 +871,55 @@
    "A"
   ],
   "sidecar": "{",
+  "expected": null
+ },
+ {
+  "name": "malformed_no_tool_input",
+  "state": "awaiting_input",
+  "options": [
+   "A"
+  ],
+  "sidecar": {
+   "questions": []
+  },
+  "expected": null
+ },
+ {
+  "name": "malformed_questions_not_list",
+  "state": "awaiting_input",
+  "options": [
+   "A"
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": {
+     "a": 1
+    }
+   }
+  },
+  "expected": null
+ },
+ {
+  "name": "malformed_option_no_label",
+  "state": "awaiting_input",
+  "options": [
+   "A"
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "H",
+      "question": "Q",
+      "options": [
+       {
+        "description": "d"
+       }
+      ]
+     }
+    ]
+   }
+  },
   "expected": null
  },
  {

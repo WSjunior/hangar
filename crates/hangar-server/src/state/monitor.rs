@@ -215,26 +215,37 @@ impl<S: Sources> Monitor<S> {
         }
     }
 
-    async fn publish(&mut self, event: StateEvent) -> Option<Step> {
-        // Como o laço do `sse.py`: a pergunta nativa sai antes do estado que a mostra.
+    /// `ask_question` uma vez por pergunta na tela. Enquanto ela não sai, o sidecar é relido a cada
+    /// rodada, como o Python a cada tique: o hook pode gravá-lo depois de o menu aparecer.
+    async fn ask(&mut self, event: &StateEvent) -> Option<Step> {
         if event.state != "awaiting_input" {
             self.mem.asked = false;
-        } else if !self.mem.asked {
-            match self.src.ask_payload().await {
-                Ok(Some(payload)) if ask::matches(&event, &payload) => {
+            return None;
+        }
+        if self.mem.asked {
+            return None;
+        }
+        let failed = match self.src.ask_payload().await {
+            Ok(Some(payload)) if ask::matches(event, &payload) => match serde_json::to_value(&payload) {
+                Ok(data) => {
                     self.mem.asked = true;
-                    let data = serde_json::to_value(&payload).unwrap_or_default();
-                    if !self.src.emit("ask_question", data).await {
-                        return Some(Step::Exit(Exit::Closed));
-                    }
+                    return (!self.src.emit("ask_question", data).await).then_some(Step::Exit(Exit::Closed));
                 }
-                Ok(_) => {}
-                Err(code) => {
-                    if crate::warn_limit::allow(Some(self.src.name()), &code) {
-                        tracing::warn!(session = self.src.name(), code = code.as_str(), "estado: sidecar da pergunta ilegível");
-                    }
-                }
-            }
+                Err(_) => "askq_serialize".to_owned(),
+            },
+            Ok(_) => return None,
+            Err(code) => code,
+        };
+        if crate::warn_limit::allow(Some(self.src.name()), &failed) {
+            tracing::warn!(session = self.src.name(), code = failed.as_str(), "estado: pergunta nativa sem sidecar legível");
+        }
+        None
+    }
+
+    async fn publish(&mut self, event: StateEvent) -> Option<Step> {
+        // Como o laço do `sse.py`: a pergunta nativa sai antes do estado que a mostra.
+        if let Some(step) = self.ask(&event).await {
+            return Some(step);
         }
         if self.edges.deliverable(&event) {
             self.src.deliverable();
@@ -246,16 +257,20 @@ impl<S: Sources> Monitor<S> {
     /// O ator de entrada publicou: o problema dele entra ou sai do último estado sem rodada nova
     /// (a memória temporal não anda). Problema da observação ou dos fatos fica até a rodada boa.
     async fn runtime_changed(&mut self) -> Option<Step> {
-        let last = self.mem.last.clone()?;
+        let last = self.mem.last.as_ref()?;
         if last.problema.as_deref().is_some_and(|p| !edges::is_runtime_problem(p)) {
             return None;
         }
         let now = self.src.runtime_problem();
-        if now == last.problema.clone().zip(last.problema_detalhe.clone()) {
+        let same = match &now {
+            Some((p, d)) => last.problema.as_deref() == Some(p.as_str()) && last.problema_detalhe.as_deref() == Some(d.as_str()),
+            None => last.problema.is_none(),
+        };
+        if same {
             return None;
         }
         let (problema, problema_detalhe) = now.unzip();
-        let event = StateEvent { problema, problema_detalhe, ..last };
+        let event = StateEvent { problema, problema_detalhe, ..last.clone() };
         self.mem.key = Some(key_of(&event));
         self.publish(event).await
     }
@@ -399,6 +414,8 @@ impl<S: Sources> Monitor<S> {
             if let Some(step) = self.publish(event).await {
                 return step;
             }
+        } else if let Some(step) = self.ask(&event).await {
+            return step;
         }
         Step::Wait { alive: facts.alive }
     }
@@ -599,16 +616,28 @@ mod tests {
         assert_eq!(asks.len(), 2, "{asks:?}");
         assert_eq!(asks[0].1, serde_json::to_value(payload(&["Azul", "Verde"])).unwrap());
         assert_eq!(fake.ask_reads.load(Ordering::SeqCst), 2, "o sidecar só é lido quando a pergunta aparece");
+        // O sidecar chega depois do menu: a rodada seguinte o relê, com a tela parada.
+        task.abort();
+        let _ = task.await;
+        let fake = Fake::new(vec![Ok(MENU)]);
+        let task = tokio::spawn(Monitor::new(fake.clone()).run());
+        tokio::time::sleep(POLL * 2 + Duration::from_millis(10)).await;
+        assert!(others(&fake, "ask_question").is_empty());
+        *fake.ask.lock().unwrap() = Some(payload(&["Azul", "Verde"]));
+        tokio::time::sleep(POLL).await;
+        assert_eq!(others(&fake, "ask_question").len(), 1);
+        assert_eq!(fake.events.lock().unwrap().len(), 1, "o estado não sai de novo");
         // Sidecar velho de outra pergunta: não abre o stepper.
         task.abort();
+        let _ = task.await;
         let fake = Fake::new(vec![Ok(MENU)]);
         *fake.ask.lock().unwrap() = Some(payload(&["Sim", "Nao"]));
         let task = tokio::spawn(Monitor::new(fake.clone()).run());
         tokio::time::sleep(POLL * 2).await;
         assert!(others(&fake, "ask_question").is_empty());
-        // `/clear` com a mesma pergunta na tela: a conversa nova emite de novo.
-        *fake.ask.lock().unwrap() = Some(payload(&["Azul", "Verde"]));
         task.abort();
+        let _ = task.await;
+        // `/clear` com a mesma pergunta na tela: a conversa nova emite de novo.
         let fake = Fake::new(vec![Ok(MENU)]);
         *fake.ask.lock().unwrap() = Some(payload(&["Azul", "Verde"]));
         let task = tokio::spawn(Monitor::new(fake.clone()).run());

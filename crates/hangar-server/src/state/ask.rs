@@ -74,16 +74,17 @@ struct ToolInput { questions: Vec<AskQuestionItem> }
 
 /// Pergunta pendente do sidecar. Ausente é o caso normal (`Ok(None)`); `Err` é o código de um
 /// arquivo que existe e não serve (contrato do hook quebrado), que vai ao diário.
-pub fn read_pending(jsonl: &Path) -> Result<Option<AskQuestion>, &'static str> {
+pub fn read_pending(jsonl: &Path) -> Result<Option<AskQuestion>, String> {
     let Some(path) = sidecar_path(jsonl) else { return Ok(None) };
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err("askq_unreadable"),
+        Err(e) => return Err(format!("askq_unreadable:{:?}", e.kind())),
     };
     // ponytail: `multiSelect` como texto ("true") o pydantic aceita e o serde recusa; o resultado
     // é o mesmo de um sidecar quebrado (fica o menu do pane), e o hook grava o booleano.
-    let sidecar: Sidecar = serde_json::from_slice(&bytes).map_err(|_| "askq_malformed")?;
+    // Só o código: a mensagem do serde pode citar o texto da pergunta.
+    let sidecar: Sidecar = serde_json::from_slice(&bytes).map_err(|_| "askq_malformed".to_owned())?;
     Ok(Some(AskQuestion { questions: sidecar.tool_input.questions }))
 }
 
@@ -143,6 +144,9 @@ mod tests {
         let askq = sidecar_path(&jsonl).unwrap();
         std::fs::create_dir_all(askq.parent().unwrap()).unwrap();
         std::fs::write(&askq, "{").unwrap();
-        assert_eq!(read_pending(&jsonl), Err("askq_malformed"));
+        assert_eq!(read_pending(&jsonl), Err("askq_malformed".to_owned()));
+        // `questions` vazio derruba o Python (`questions[0]`); aqui só não abre o stepper.
+        let empty = AskQuestion { questions: Vec::new() };
+        assert!(!matches(&StateEvent { state: "awaiting_input".into(), options: Some(vec!["A".into()]), ..Default::default() }, &empty));
     }
 }
