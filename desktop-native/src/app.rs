@@ -616,7 +616,12 @@ impl Drop for Hangar {
 
 /// Bloqueante: o daemon de notificação pode demorar. Chamar fora da thread da janela.
 fn show_system_notification(title: &str, body: &str) {
-    if let Err(error) = notify_rust::Notification::new().appname("Hangar").summary(title).body(body).show() {
+    let mut notification = notify_rust::Notification::new();
+    notification.appname("Hangar").icon("com.hangar.native").summary(title).body(body);
+    // O servidor de notificação acha o ícone e o app pela entrada .desktop; Windows e macOS não têm a dica.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    notification.hint(notify_rust::Hint::DesktopEntry("com.hangar.native".into()));
+    if let Err(error) = notification.show() {
         eprintln!("notification: {error}");
     }
 }

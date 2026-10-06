@@ -81,6 +81,10 @@ def test_cli_preserves_omission_and_explicit_mode(tmp_path, flags, expected):
 
     requests = []
     class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"claude": {"disponivel": true, "default": true}}')
         def do_POST(self):
             requests.append((self.path, json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
             self.send_response(200)

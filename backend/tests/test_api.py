@@ -996,7 +996,9 @@ def test_create_rejects_unknown_config_dir(api_client, monkeypatch):
 # hoje). Codex e async (create_codex, mocado -- nao spawna o app-server real); Claude continua
 # indo pro registry.create sincrono (agora via asyncio.to_thread, ver docstring do endpoint).
 # ---------------------------------------------------------------------------
-def test_create_default_provider_routes_to_claude_create(api_client):
+def test_create_default_provider_routes_to_claude_create(api_client, monkeypatch):
+    monkeypatch.setattr(api_mod, "_session_provider_catalog", AsyncMock(return_value={
+        "claude": {"disponivel": True, "default": True}, "codex": {"disponivel": True, "default": False}}))
     with patch("app.api.registry.create",
               return_value=SessionInfo(name="x", cwd="/tmp", provider="claude")) as cr:
         r = api_client.post("/api/sessions", headers=_h(), json={"name": "x", "cwd": "/tmp"})

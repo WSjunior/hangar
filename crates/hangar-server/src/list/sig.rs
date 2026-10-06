@@ -65,9 +65,9 @@ pub fn context_sig(ctx: Option<&ContextUse>) -> Option<u64> {
 
 /// `json.dumps` da tupla por linha do Python, byte a byte. Ignora `last_activity`: muda a cada
 /// escrita do transcript e reemitiria a lista sem nada visível mudar.
-pub fn list_sig(rows: &[SessionRow]) -> String {
+pub fn list_sig<'a>(rows: impl IntoIterator<Item = &'a SessionRow>) -> String {
     let items: Vec<Value> = rows
-        .iter()
+        .into_iter()
         .map(|i| {
             let label = if i.provider == "codex" && !i.tracked {
                 json!(i.label)

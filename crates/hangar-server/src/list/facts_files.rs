@@ -2,7 +2,7 @@
 //! (`.hangar-state/<sid>.json`), registro nativo do Claude Code (`<config>/sessions/<pid>.json`),
 //! pergunta aberta (`.hangar-askq/<sid>.json`) e statusline inteira (`.hangar-status/<sid>.json`).
 //! Porte de `hook_state.py`, `askquestion.py` e `statusline.py`.
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
@@ -28,7 +28,7 @@ pub struct Marker {
     pub ts: f64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct Native {
     state: &'static str,
     ts: f64,
@@ -45,9 +45,6 @@ fn native_state(status: &str) -> Option<&'static str> {
     }
 }
 
-/// Um aviso por status desconhecido, não por arquivo lido.
-static UNKNOWN_STATUSES: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
-
 /// Versão de um arquivo: muda a cada escrita.
 type FileKey = (SystemTime, u64);
 
@@ -56,7 +53,7 @@ const RACY_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn file_key(meta: &std::fs::Metadata) -> Option<FileKey> { Some((meta.modified().ok()?, meta.len())) }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 enum Parsed {
     Marker(Option<Marker>),
     Native(Option<(String, Native)>),
@@ -132,14 +129,37 @@ fn read_file(path: &Path, what: &'static str) -> Result<Option<Vec<u8>>, ()> {
     }
 }
 
+/// JSON torto fica `None` como no Python, mas avisa: a sessão perderia o estado sem rastro, e a
+/// versão do arquivo o guarda até a próxima escrita.
 fn read_json(path: &Path, what: &'static str) -> Result<Option<Value>, ()> {
-    Ok(read_file(path, what)?.and_then(|raw| serde_json::from_slice(&raw).ok()))
+    let Some(raw) = read_file(path, what)? else { return Ok(None) };
+    match serde_json::from_slice(&raw) {
+        Ok(v) => Ok(Some(v)),
+        Err(e) => {
+            warn_file(&stem(path), "list_state_file_invalid", &format!("{what}:{:?}", e.classify()));
+            Ok(None)
+        }
+    }
 }
+
+fn stem(path: &Path) -> String { path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default() }
 
 fn read_marker(path: &Path) -> Result<Option<Marker>, ()> {
     let Some(o) = read_json(path, MARKER_DIR)? else { return Ok(None) };
     // ponytail: o Python aceita `state` de qualquer tipo; só texto é estado que a lista conhece.
-    Ok((|| Some(Marker { state: o.get("state")?.as_str()?.to_owned(), ts: py_float(o.get("ts")?)? }))())
+    let state = o.get("state").and_then(Value::as_str);
+    let ts = o.get("ts").and_then(py_float);
+    match (state, ts) {
+        (Some(state), Some(ts)) => Ok(Some(Marker { state: state.to_owned(), ts })),
+        (None, _) => {
+            warn_file(&stem(path), "list_state_file_invalid", "state");
+            Ok(None)
+        }
+        (_, None) => {
+            warn_file(&stem(path), "list_state_file_invalid", "ts");
+            Ok(None)
+        }
+    }
 }
 
 /// (session id, entrada), ou o campo que impediu a leitura. Status desconhecido avisa uma vez.
@@ -156,9 +176,13 @@ fn read_native(path: &Path) -> Result<(String, Native), &'static str> {
     let ts_raw = o.get("statusUpdatedAt").filter(|v| py_truthy(v)).or_else(|| o.get("updatedAt"));
     let ts = ts_raw.and_then(py_float).ok_or("updatedAt")? / 1000.0;
     let Some(state) = native_state(&status) else {
-        if UNKNOWN_STATUSES.lock().unwrap_or_else(|e| e.into_inner()).insert(status.clone()) {
+        // Texto do disco: curto, e com o teto do `warn_limit` em vez de um conjunto sem fim.
+        let status: String = status.chars().take(32).collect();
+        if crate::warn_limit::allow(None, &format!("list_native_status:{status}")) {
             tracing::warn!(status, "registro nativo com status desconhecido; a sessão cai no marcador ou no pane");
         }
+        // Código fixo: o texto do disco fica só no log.
+        super::facts::note("rust.list_native_status_unknown", "", "list_native_status_unknown".into(), "registro nativo com status desconhecido");
         return Err("status");
     };
     Ok((sid, Native { state, ts, pid }))
@@ -171,10 +195,44 @@ fn entries(dir: &Path, what: &'static str) -> Vec<std::fs::DirEntry> {
         Ok(it) => it.flatten().collect(),
         Err(e) if e.kind() == ErrorKind::NotFound => Vec::new(),
         Err(e) => {
-            tracing::warn!(what, kind = ?e.kind(), "pasta de estado ilegível");
+            let code = format!("{what}:{:?}", e.kind());
+            if crate::warn_limit::allow(None, &format!("list_state_dir_unreadable:{code}")) {
+                tracing::warn!(what, kind = ?e.kind(), "pasta de estado ilegível");
+            }
+            super::facts::note("rust.list_state_dir_unreadable", "", code, "pasta de estado ilegível; a conta fica sem marcador");
             Vec::new()
         }
     }
+}
+
+/// `<conta>/<sub>` resolvido, sem repetir.
+fn unique(dirs: &[PathBuf], sub: &str) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::with_capacity(dirs.len());
+    for base in dirs {
+        let d = base.join(sub);
+        let d = std::fs::canonicalize(&d).unwrap_or(d);
+        if !out.contains(&d) {
+            out.push(d);
+        }
+    }
+    out
+}
+
+/// Pastas cuja escrita muda o estado de uma sessão Claude: marcadores, registro nativo e pergunta
+/// aberta de cada conta, resolvidas e sem repetir.
+pub fn state_dirs(dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = unique(dirs, MARKER_DIR);
+    for sub in [NATIVE_DIR, ASKQ_DIR] {
+        out.extend(unique(dirs, sub).into_iter().filter(|d| !out.contains(d)).collect::<Vec<_>>());
+    }
+    out
+}
+
+/// Session id de uma pergunta aberta (`.hangar-askq/<sid>.json`); os demais arquivos de estado
+/// dizem a sessão pelo `HookStates::refresh`.
+pub fn askq_sid(path: &Path) -> Option<String> {
+    let parent = path.parent()?.file_name()?;
+    (parent == ASKQ_DIR && path.extension().is_some_and(|x| x == "json")).then(|| stem(path))
 }
 
 fn is_native_name(name: &str) -> bool {
@@ -191,9 +249,11 @@ impl HookStates {
 
     /// Marcadores de cada `<config>/.hangar-state` e o registro nativo de cada `<config>/sessions`
     /// (resolvido: as contas são symlink para o principal, e um só basta). Arquivo ilegível fica de
-    /// fora; arquivo sumido sai.
-    pub fn refresh(&mut self, dirs: &[PathBuf]) {
+    /// fora; arquivo sumido sai. Devolve os session ids cujo marcador ou registro nativo mudou desde
+    /// a leitura anterior: a lista acordada por arquivo reclassifica só essas sessões.
+    pub fn refresh(&mut self, dirs: &[PathBuf]) -> Vec<String> {
         let mut previous = std::mem::take(&mut self.files);
+        let mut changed = Vec::new();
         let (mut markers, mut native) = (HashMap::new(), HashMap::new());
         // `parse` devolve `None` quando a leitura falhou: nada é guardado, e o próximo tique tenta de novo.
         let mut visit = |path: PathBuf, parse: &dyn Fn(&Path) -> Option<Parsed>, files: &mut HashMap<PathBuf, (FileKey, Parsed)>| {
@@ -203,10 +263,19 @@ impl HookStates {
             let settled = key.0.elapsed().is_ok_and(|age| age > RACY_WINDOW);
             let parsed = match previous.remove(&path) {
                 Some((k, parsed)) if k == key && settled => parsed,
-                _ => {
+                before => {
                     #[cfg(test)]
                     { self.reads += 1; }
-                    let Some(parsed) = parse(&path) else { return };
+                    let Some(parsed) = parse(&path) else {
+                        // O estado da sessão some com a leitura: é mudança, e o próximo tique tenta de novo.
+                        changed.extend(before.and_then(|(_, b)| parsed_sid(&path, &b)));
+                        return;
+                    };
+                    // Reler o mesmo conteúdo (escrita recente, dentro da janela do mtime) não é mudança.
+                    if before.as_ref().is_none_or(|(_, b)| *b != parsed) {
+                        changed.extend(before.and_then(|(_, b)| parsed_sid(&path, &b)));
+                        changed.extend(parsed_sid(&path, &parsed));
+                    }
                     parsed
                 }
             };
@@ -222,41 +291,43 @@ impl HookStates {
             files.insert(path, (key, parsed));
         };
         let mut files = HashMap::new();
-        for base in dirs {
-            for e in entries(&base.join(MARKER_DIR), MARKER_DIR) {
+        // Contas com link para a mesma pasta: um `stat` por marcador, não um por conta.
+        for d in unique(dirs, MARKER_DIR) {
+            for e in entries(&d, MARKER_DIR) {
                 let path = e.path();
                 if path.extension().is_some_and(|x| x == "json") {
                     visit(path, &|p| read_marker(p).ok().map(Parsed::Marker), &mut files);
                 }
             }
         }
-        let mut native_dirs: Vec<PathBuf> = Vec::new();
-        for base in dirs {
-            let d = base.join(NATIVE_DIR);
-            let d = std::fs::canonicalize(&d).unwrap_or(d);
-            if !native_dirs.contains(&d) {
-                native_dirs.push(d);
-            }
-        }
-        for d in native_dirs {
+        for d in unique(dirs, NATIVE_DIR) {
             for e in entries(&d, NATIVE_DIR) {
                 let name = e.file_name();
-                let Some(name) = name.to_str().filter(|n| is_native_name(n)) else { continue };
+                if !name.to_str().is_some_and(is_native_name) {
+                    continue;
+                }
                 visit(e.path(), &|p| Some(Parsed::Native(match read_native(p) {
                     Ok(v) => Some(v),
                     Err("io") => return None,
                     Err("status") => None,
-                    // O arquivo pode estar no meio da escrita; formato novo do Claude aparece aqui.
+                    // JSON torto o `read_json` já avisou.
+                    Err("json") => None,
+                    // Formato novo do Claude aparece aqui; escrita no meio é relida no tique seguinte.
                     Err(field) => {
-                        tracing::debug!(file = name, field, "registro nativo ilegível; usando marcador ou pane");
+                        warn_file(&stem(p), "list_native_file_invalid", field);
                         None
                     }
                 })), &mut files);
             }
         }
+        // Arquivo apagado também muda o estado da sessão dele.
+        changed.extend(previous.iter().filter_map(|(path, (_, p))| parsed_sid(path, p)));
         self.files = files;
         self.markers = markers;
         self.native = native;
+        changed.sort_unstable();
+        changed.dedup();
+        changed
     }
 
     /// Registro nativo enquanto o pid dele vive (é o estado que a TUI tem); senão o marcador.
@@ -269,11 +340,20 @@ impl HookStates {
     }
 }
 
-/// A lista roda a cada 1,5 s: um aviso por minuto por sessão e código.
-fn warn_file(session: &str, code: &'static str, field: &str) {
+/// Session id do arquivo lido: o nome do marcador, o `sessionId` do registro nativo.
+fn parsed_sid(path: &Path, parsed: &Parsed) -> Option<String> {
+    match parsed {
+        Parsed::Marker(_) => path.file_stem().and_then(|s| s.to_str()).map(str::to_owned),
+        Parsed::Native(n) => n.as_ref().map(|(sid, _)| sid.clone()),
+    }
+}
+
+/// A lista roda a cada 1,5 s: um aviso por minuto por sessão e código, no log e no diário.
+pub fn warn_file(session: &str, code: &'static str, field: &str) {
     if crate::warn_limit::allow(Some(session), code) {
         tracing::warn!(code, session, field, "list: arquivo da sessão recusado");
     }
+    super::facts::note("rust.list_file_rejected", session, format!("{code}:{field}"), "arquivo da sessão recusado pela lista");
 }
 
 /// Pergunta pendente que o pane pode não mostrar, e as opções dela (só a primeira pergunta).
@@ -369,12 +449,22 @@ fn answered_after(session: &str, jsonl: &str, since: f64) -> (bool, bool) {
     }
     // A janela é contada do fim e envelhece: quando a linha mais antiga lida já é posterior ao
     // sidecar, não vi a resposta porque não cheguei lá.
+    // Como o Python, conta como respondida (senão a sessão ficaria presa em `awaiting_input`), mas
+    // avisa: a sessão sai de `awaiting_input` sem prova.
     let out_of_reach = start > 0 && oldest.is_none_or(|o| o > since);
     if out_of_reach {
         tracing::debug!(session, "askq: janela do transcript não alcança a pergunta; trata como respondida");
+        // Uma vez por versão do sidecar: o transcript cresce a cada tique e a conta se refaz.
+        let mut noted = OUT_OF_REACH.lock().unwrap_or_else(|e| e.into_inner());
+        if noted.peek(session) != Some(&since) {
+            noted.insert(session.to_owned(), since);
+            warn_file(session, "list_askq_out_of_reach", "transcript_path");
+        }
     }
     (out_of_reach, true)
 }
+
+static OUT_OF_REACH: LazyLock<Mutex<Capped<String, f64>>> = LazyLock::new(Default::default);
 
 #[cfg(test)]
 thread_local! {
@@ -521,18 +611,21 @@ mod tests {
         }
         let mut hs = HookStates::load(&dirs);
         assert_eq!(hs.reads, 6);
-        hs.refresh(&dirs);
+        assert!(hs.refresh(&dirs).is_empty());
         assert_eq!(hs.reads, 6, "nada mudou, nada relido");
         let f = cfg.join(".hangar-state/s1.json");
         write(&f, r#"{"state": "idle", "ts": 22}"#);
         std::fs::File::options().write(true).open(&f).unwrap()
             .set_modified(SystemTime::now() - std::time::Duration::from_secs(30)).unwrap();
         std::fs::remove_file(cfg.join(".hangar-state/s2.json")).unwrap();
-        hs.refresh(&dirs);
+        assert_eq!(hs.refresh(&dirs), ["s1", "s2"], "o reescrito e o apagado, uma vez cada");
         assert_eq!(hs.reads, 7);
         assert_eq!(hs.get_state(Some("s1"), |_| false), Some(Marker { state: "idle".into(), ts: 22.0 }));
         assert_eq!(hs.get_state(Some("s2"), |_| false), None, "arquivo sumido sai do mapa");
         assert_eq!(hs.get_state(Some("s0"), |p| p == 7), Some(Marker { state: "working".into(), ts: 2.0 }));
+        write(&cfg.join(".hangar-state/s4.json"), r#"{"state": "idle", "ts": 3}"#);
+        assert_eq!(hs.refresh(&dirs), ["s4"]);
+        assert!(hs.refresh(&dirs).is_empty(), "escrita recente relida igual não é mudança");
         // Leitura que falhou não fica guardada: consertada a permissão, a mesma versão é lida.
         #[cfg(unix)]
         {
@@ -545,9 +638,39 @@ mod tests {
             hs.refresh(&dirs);
             let blocked = hs.get_state(Some("s3"), |_| false);
             std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
-            hs.refresh(&dirs);
+            assert_eq!(hs.refresh(&dirs), ["s3"]);
             assert_eq!((blocked, hs.get_state(Some("s3"), |_| false)), (None, Some(Marker { state: "idle".into(), ts: 5.0 })));
         }
+    }
+
+    #[test]
+    fn broken_marker_and_unreachable_question_reach_the_diary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join(".claude");
+        write(&cfg.join(".hangar-state/ff-torto.json"), "{");
+        write(&cfg.join(".hangar-state/ff-sem-estado.json"), r#"{"ts": 1}"#);
+        HookStates::load(std::slice::from_ref(&cfg));
+        let notes = |s| super::super::facts::notes_for(s);
+        assert_eq!(notes("ff-torto"), ["list_state_file_invalid:.hangar-state:Eof"]);
+        assert_eq!(notes("ff-sem-estado"), ["list_state_file_invalid:state"]);
+        // Rabo de 256 KB só com linhas posteriores ao sidecar: sem prova, vale como respondida, com aviso.
+        let jsonl = tmp.path().join("longo.jsonl");
+        let line = format!("{{\"timestamp\": \"2099-01-01T00:00:00Z\", \"pad\": \"{}\"}}\n", "x".repeat(1000));
+        write(&jsonl, &line.repeat(300));
+        assert_eq!(answered_after("ff-longe", jsonl.to_str().unwrap(), 10.0), (true, true));
+        assert_eq!(answered_after("ff-longe", jsonl.to_str().unwrap(), 10.0), (true, true));
+        assert_eq!(notes("ff-longe"), ["list_askq_out_of_reach:transcript_path"], "uma vez por versão do sidecar");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_accounts_read_each_marker_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main, other) = (tmp.path().join(".claude"), tmp.path().join(".claude-2"));
+        write(&main.join(".hangar-state/s.json"), r#"{"state": "idle", "ts": 1}"#);
+        std::fs::create_dir_all(&other).unwrap();
+        std::os::unix::fs::symlink(main.join(".hangar-state"), other.join(".hangar-state")).unwrap();
+        assert_eq!(HookStates::load(&[main, other]).reads, 1);
     }
 
     #[test]

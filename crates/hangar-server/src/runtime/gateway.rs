@@ -199,6 +199,20 @@ impl RuntimeRegistry {
         }
         Ok(output)
     }
+    /// Retrato de todas as sessões, por chave, para a lista. Diferente de `snapshots`, a sessão cujo
+    /// ator não respondeu fica com `{"error": código}`: fora do retrato ela pareceria parada.
+    pub async fn list_snapshots(&self) -> BTreeMap<String,Value> {
+        let entries:Vec<_> = self.entries.lock().await.iter().map(|(key,entry)|(key.clone(),entry.handle.clone())).collect();
+        let asks = entries.into_iter().map(|(key,handle)| async move {
+            let data = match tokio::time::timeout(Duration::from_secs(1),handle.snapshot()).await {
+                Ok(Ok(data))=>data,
+                Ok(Err(error))=>json!({"error":error.code}),
+                Err(_)=>json!({"error":"runtime_snapshot_timeout"}),
+            };
+            (key,data)
+        });
+        futures_util::future::join_all(asks).await.into_iter().collect()
+    }
     pub async fn shutdown(&self) -> Result<(),RuntimeError> {
         let entries:Vec<_> = self.entries.lock().await.iter().map(|(key,entry)|(key.clone(),entry.generation)).collect();
         for (key,generation) in entries { self.close(&key,generation).await?; }

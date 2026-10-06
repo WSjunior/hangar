@@ -5,7 +5,7 @@
   import FolderScanner from './FolderScanner.svelte';
   import ProviderGlyph from './icons/ProviderGlyph.svelte';
   import CodexContextControl from './CodexContextControl.svelte';
-  import { getCodexAccountsForServer, createSessionForServer, codexAccountMessage, patchConfig,
+  import { getCodexAccountsForServer, createSessionForServer, codexAccountMessage, defaultCodexAccount, patchConfig,
     getConfigForServer, patchConfigForServer, type CodexAccount } from '@hangar/core';
   import IconFolder from './icons/IconFolder.svelte';
   import { getSessions, listClaudeConfigs, getClaudeAccountSuggestion, getEngines, getProviders, criarConta, apagarConta,
@@ -54,12 +54,11 @@
   let { open, servers, onClose, onCreate, onOpenSession, bastao = null,
         offline = new Set<string>(), latencias = new Map<string, number>() }: Props = $props();
 
-  // Provider da sessao nova: Claude (padrao, tmux), Codex (app-server, sem tmux/config_dir), Pi,
-  // Kimi ou OMP (pane tmux como o Claude, mas sem config_dir e sem motor — o backend recusa motor
-  // fora do Claude com 400, entao os pickers abaixo seguem Claude-only).
+  // A escolha inicial vem do servidor; os campos específicos continuam seguindo o provedor.
   const PROVIDERS = SESSION_PROVIDERS;
   let provider = $state<Provider>('claude');
-  let providers = $state<Record<string, { disponivel: boolean; motivo: string | null }>>({});
+  let providers = $state<Record<string, { disponivel: boolean; motivo: string | null; default?: boolean }>>({});
+  let providerTouched = false;
   let providersCarregando = $state(true);
 
   // Servidor-alvo da nova sessão. Como o scanner/dedupe/criação leem o servidor ATIVO, escolher
@@ -90,7 +89,7 @@
       getCodexAccountsForServer(s, codexController.signal).then((accounts) => {
         if (g !== codexGeneration) return;
         codexAccounts = accounts;
-        codexAccount = (accounts.find((a) => a.is_default) ?? accounts[0])?.id ?? '';
+        codexAccount = defaultCodexAccount(accounts)?.id ?? '';
         void carregarModelos();
       }).catch((e) => { if (g === codexGeneration) codexError = e instanceof Error ? e.message : m.falha_conexao(); })
         .finally(() => { if (g === codexGeneration) codexLoading = false; });
@@ -291,12 +290,21 @@
     const srv = targetServer;
     const aberta = open;
     providersCarregando = true;
+    providerTouched = false;
     providers = {};
     erroProviders = '';
     try {
       const res = await getProviders();
       if (seq !== provSeq || !aberta || targetServer !== srv || !open) return;
       providers = res;
+      // Sem padrão marcado, volta ao Claude: o provedor do servidor anterior não vale aqui.
+      const preferred = PROVIDERS.find((p) => res[p]?.default && res[p]?.disponivel) ?? 'claude';
+      if (!providerTouched && !modelChoiceTouched && !contaEscolhidaAMao && !querRetomar && !conversaAlvo
+          && !retomando && !loading && preferred !== provider) {
+        provider = preferred;
+        permissao = preferred === 'codex' ? 'Full Access' : '';
+        carregarModelos();
+      }
     } catch (e) {
       if (seq !== provSeq || !aberta || targetServer !== srv || !open) return;
       // Sonda falhada deixa `providers` vazio, e vazio destrava TODO provider no markup: sem
@@ -926,7 +934,9 @@
     const baton = bastao;
     const requestedHeadless = headlessInherited ? undefined : semTerminal;
     const pararAcompanhamento = acompanharCriacao(name.trim(), provider === 'codex' ? server : null);
-    const body = { name: name.trim(), cwd: picked, provider, codex_account: account,
+    // Sonda falhada deixa o Claude por omissão, e isso não é escolha a lembrar.
+    const rememberProvider = providerTouched || Object.keys(providers).length > 0;
+    const body = { name: name.trim(), cwd: picked, provider, codex_account: account, remember_provider: rememberProvider,
       model: modelo || null, effort: esforco || null,
       // O Codex é criado por este corpo e retorna antes do `onCreate` lá embaixo: sem o `jev`
       // aqui, a caixa marcada nunca chegava ao backend e a sessão nascia no padrão do servidor.
@@ -965,6 +975,7 @@
           cwd: body.cwd,
           config_dir: body.provider === 'claude' ? selectedConfig : null,
           provider: body.provider,
+          remember_provider: rememberProvider,
           ...(body.provider === 'codex' ? { codex_account: account } : {}),
           engine: body.provider === 'claude' ? (engine || null) : null,
           model: body.model,
@@ -1193,6 +1204,7 @@
               aria-pressed={provider === p}
               disabled={providers[p] ? !providers[p].disponivel : false}
               onclick={() => {
+                providerTouched = true;
                 if (p !== provider) {
                   permissao = p === 'codex' ? 'Full Access' : '';
                 }

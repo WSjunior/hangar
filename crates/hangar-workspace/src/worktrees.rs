@@ -166,17 +166,22 @@ pub fn removed() -> HashMap<String, String> {
     removed_file().map(|f| removed_at(&f)).unwrap_or_default()
 }
 
-/// O mapa de remoções de um arquivo dado: a lista recebe a pasta de casa por parâmetro.
+/// O mapa de remoções de um arquivo dado; ilegível ou torto vale vazio.
 pub fn removed_at(file: &Path) -> HashMap<String, String> {
-    std::fs::read(file)
-        .ok()
-        .and_then(|b| serde_json::from_slice::<HashMap<String, Value>>(&b).ok())
-        .map(|m| {
-            m.into_iter()
-                .filter_map(|(k, v)| v.as_str().map(|v| (k, v.to_owned())))
-                .collect()
-        })
-        .unwrap_or_default()
+    try_removed_at(file).unwrap_or_default()
+}
+
+/// O mapa de remoções, com a falha à vista: ausente é vazio, ilegível ou torto é `Err` (a lista
+/// recebe a pasta de casa por parâmetro e avisa, senão a worktree apagada vira pasta comum calada).
+pub fn try_removed_at(file: &Path) -> std::io::Result<HashMap<String, String>> {
+    let raw = match std::fs::read(file) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(e) => return Err(e),
+    };
+    let map: HashMap<String, Value> = serde_json::from_slice(&raw)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    Ok(map.into_iter().filter_map(|(k, v)| v.as_str().map(|v| (k, v.to_owned()))).collect())
 }
 
 /// Pasta sumida: o repo que ainda a lista, pelo mapa de remoções, pela irmã ou subindo.

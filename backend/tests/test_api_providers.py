@@ -12,6 +12,10 @@ def api_client(monkeypatch):
     import app.api as api_mod
 
     monkeypatch.setattr(api_mod, "_session_exists", lambda name: True)
+    monkeypatch.setattr(api_mod, "_codex_service", lambda: None)
+    monkeypatch.setattr(api_mod.engines, "listar", lambda: {})
+    monkeypatch.setattr(api_mod.conta_estado, "logins", lambda configs: [])
+    monkeypatch.setattr(api_mod.runtime_config, "get", lambda field: None)
     from app.api import app
 
     return TestClient(app)
@@ -35,6 +39,8 @@ def test_get_providers_retorna_4_providers(api_client, monkeypatch):
     # os 4 providers presentes
     assert set(body.keys()) == {"claude", "codex", "pi", "kimi"}
     assert body["claude"]["disponivel"] is True
+    assert body["claude"]["default"] is True
+    assert body["codex"]["default"] is False
     assert body["pi"]["disponivel"] is False
     assert body["kimi"]["motivo"] == "sem_permissao"
     mock.assert_called_once()

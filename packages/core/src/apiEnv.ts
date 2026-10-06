@@ -10,6 +10,8 @@ export interface ApiEnv {
   getBaseUrl(): string;
   getToken(): string | null;
   onUnauthorized(): void;
+  /** Avisos de uma sessão já criada: exibir sem tratar a criação como falha. */
+  onSessionWarnings?(warnings: string[]): void;
   origin: string | null;
   createEventSource(url: string, opts: { withCredentials: boolean; headers?: Record<string, string> }): EventSourceLike;
   /** O servidor ATIVO é de convite (token de convidado). Ausente = nunca. */

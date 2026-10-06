@@ -27,6 +27,11 @@ const problemLabels: Record<string, () => string> = {
   terminal_input_composer_unreadable: m.problema_terminal_input_composer_unreadable,
   terminal_input_capture_failed: m.problema_terminal_input_capture_failed,
   terminal_input_stalled: m.problema_terminal_input_stalled,
+  list_capture_failed: m.problema_list_capture_failed,
+  list_runtime_unavailable: m.problema_list_runtime_unavailable,
+  list_runtime_absent: m.problema_list_runtime_absent,
+  list_facts_unavailable: m.problema_list_facts_unavailable,
+  list_orq_unavailable: m.problema_list_orq_unavailable,
 };
 
 export function SessionProblem({ problem, detail }: Props) {

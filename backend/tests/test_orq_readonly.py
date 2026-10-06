@@ -190,9 +190,13 @@ def test_cli_sends_read_only_and_does_not_claim_success_on_old_backend(tmp_path,
     curl = scripts / "curl"
     curl.write_text(f"#!{sys.executable}\n" + """import json,os,pathlib,sys
 args=sys.argv[1:]
-pathlib.Path(os.environ['TEST_PAYLOAD']).write_text(args[args.index('-d')+1])
-print('{}')
-print(os.environ['TEST_STATUS'])
+if '-d' in args:
+    pathlib.Path(os.environ['TEST_PAYLOAD']).write_text(args[args.index('-d')+1])
+    print('{}')
+    print(os.environ['TEST_STATUS'])
+else:
+    print('{"claude": {"disponivel": true, "default": true}}')
+    print('200')
 """)
     curl.chmod(0o700)
     result = subprocess.run(["bash", str(cli), "--new", "review", str(tmp_path), "--read-only"],
