@@ -13,8 +13,11 @@
     onInput?: (kind: PluginInputKind, value: string) => void;
     /** Identidade do desenho do mod (o nó da árvore): muda a cada evento novo, mesmo com o mesmo `value`. */
     frame?: unknown;
+    /** `Input` sem `key`: não há o que mandar ao mod em nenhuma sessão, e o campo fica desabilitado sem a dica do
+     *  terminal, como no nativo. */
+    keyless?: boolean;
   }
-  let { label, placeholder, value, submitLabel, onInput, frame }: Props = $props();
+  let { label, placeholder, value, submitLabel, onInput, frame, keyless = false }: Props = $props();
   let field: HTMLInputElement | undefined = $state();
 
   // Quando o valor desenhado entra no campo: a regra é o `FieldSync` do core, a mesma do nativo (pendente em foco, vez
@@ -64,7 +67,7 @@
          nativo: no Safari e no Firefox do macOS o botão não recebe o foco, e o blur do campo aplicaria o pendente antes
          do envio; com o campo em foco, um redesenho entre o mousedown e o click também fica pendente. O click continua. -->
     <button bind:this={sendButton} type="button" class="submit" onmousedown={(e) => e.preventDefault()} onclick={submit}>{submitLabel || m.plugin_input_enviar()}</button>
-  {:else}
+  {:else if !keyless}
     <span class="hint">{m.plugin_input_no_terminal()}</span>
   {/if}
 </span>

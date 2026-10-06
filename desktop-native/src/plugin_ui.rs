@@ -551,8 +551,15 @@ fn element(v: &Value, c: &Ctx, at: &Spot) -> AnyElement {
 /// Largura mínima e base do campo, em pixels: as do web (`min-width: 12ch`, `flex: 1 1 16ch`) em células.
 fn field_width() -> (f32, f32) { (12. * CELL_W, 16. * CELL_W) }
 
+/// O que o campo desabilitado de um `Input` sem `key` mostra: o valor desenhado, ou o texto de ajuda (`true`, em cor
+/// apagada) quando o valor é vazio.
+fn keyless_text(p: &Value) -> (String, bool) {
+    let value = text_of(&p["value"]);
+    if value.is_empty() { (text_of(&p["placeholder"]), true) } else { (value, false) }
+}
+
 /// `Input` de mod: rótulo, campo e rótulo de envio. Sem `submit` (sessão com terminal, servidor que não diz a fonte ou só
-/// leitura) o campo fica desabilitado, com a dica de digitar no terminal.
+/// leitura) o campo fica desabilitado, com a dica de digitar no terminal; sem `key`, desabilitado e sem a dica.
 fn field(p: &Value, c: &Ctx) -> AnyElement {
     let label = text_of(&p["label"]);
     let key = p["key"].as_str().filter(|k| !k.is_empty());
@@ -560,14 +567,19 @@ fn field(p: &Value, c: &Ctx) -> AnyElement {
     // dos vizinhos; assim, numa faixa estreita a linha passa da borda e o lugar a recorta.
     let row = div().flex().flex_row().items_center().gap_2()
         .when(!label.is_empty(), |el| el.child(div().flex_shrink_0().child(label)));
+    let (min, basis) = field_width();
     let Some(state) = key.and_then(|k| c.view.fields.get(&field_id(c.site, k))) else {
-        // Antes de o app criar o campo (o primeiro quadro), só o texto de ajuda.
-        return row.child(div().text_color(theme::muted()).child(text_of(&p["placeholder"]))).into_any_element();
+        // `Input` sem `key`: não há o que mandar ao mod em nenhuma sessão, e o campo fica desabilitado, sem a dica do
+        // terminal, como no web. (Com `key` o campo já existe aqui: o app o cria antes de desenhar a faixa e os painéis.)
+        let (text, hint) = keyless_text(p);
+        return row.child(div().flex_grow(1.).flex_shrink(1.).flex_basis(px(basis)).min_w(px(min)).px(px(CELL_W / 2.))
+            .rounded(px(4.)).border_1().border_color(theme::border()).bg(theme::raised()).opacity(0.6)
+            .overflow_hidden().whitespace_nowrap().when(hint, |el| el.text_color(theme::muted())).child(text))
+            .into_any_element();
     };
     let typing = c.view.submit.clone().zip(key.map(str::to_owned));
     // Sem largura mínima o campo ficava com 18 px (só o enfeite) numa linha com textos ao lado, e o clique caía no
     // enfeite, que tem foco próprio: o anel acendia, mas o texto não recebia a digitação.
-    let (min, basis) = field_width();
     let row = row.child(div().flex_grow(1.).flex_shrink(1.).flex_basis(px(basis)).min_w(px(min))
         .child(Input::new(&state.state).small().disabled(typing.is_none())));
     match typing {
@@ -886,7 +898,7 @@ fn unmark(text: &str) -> String {
 mod tests {
     // Importação explícita: `super::*` traz o `test` do gpui_kit, e o `#[test]` passaria a ser o dele.
     use super::{accepts_typing, active_pane, box_background, button_key, cell_color, color, field_id, fields, FieldSync, fills_place, follow_local, follows_server,
-        hover_props, input_kind, input_request, is_empty, keep_hovered, Outbox, pane_ids, plain_deep, raster_row, raster_runs, safe_href,
+        hover_props, input_kind, input_request, is_empty, keep_hovered, keyless_text, Outbox, pane_ids, plain_deep, raster_row, raster_runs, safe_href,
         scope_active, surfaces, text_row, toast, wants_hover, FieldSpec, Surfaces, Toast, UiSource};
     use gpui_kit::component::input::InputEvent;
     use gpui_kit::{rgb, Hsla};
@@ -1126,6 +1138,13 @@ mod tests {
         assert_eq!(input_request(Some(UiSource::Terminal), false, "s", "k", "change", "a"), None);
         assert_eq!(input_request(None, false, "s", "k", "submit", "a"), None);
         assert_eq!(input_request(Some(UiSource::Surface), true, "s", "k", "submit", "a"), None);
+    }
+
+    #[test]
+    fn keyless_input_shows_the_drawn_value_or_the_muted_placeholder() {
+        assert_eq!(keyless_text(&json!({"placeholder": "p", "value": "v"})), ("v".to_owned(), false));
+        assert_eq!(keyless_text(&json!({"placeholder": "p", "value": ""})), ("p".to_owned(), true));
+        assert_eq!(keyless_text(&json!({})), (String::new(), true));
     }
 
     #[test]
