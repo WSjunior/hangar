@@ -1196,12 +1196,15 @@ async fn a_cleanup_that_gave_up_does_not_leave_the_message_stuck() {
 #[tokio::test]
 async fn the_focus_wait_starts_over_for_the_next_row() {
     let f=Fixture::new().await; *f.io.mods_screen.lock().unwrap()=Some(pane_focus_screen());
-    f.io.ring_returns.store(true,std::sync::atomic::Ordering::Release);
     let h=f.start_returning(broadcast::channel(128).0,Duration::from_secs(30),Duration::from_millis(600));
     assert_eq!(h.command(f.command("primeira","Primeira")).await.unwrap().payload["code"],"mods_focus");
+    // Até o `Abandon` chegar, o relógio tenta a primeira de novo; no runner Windows as gravações do diário
+    // passam dos 600 ms e ela pode devolver o foco antes. Sem `ring_returns` o foco fica no painel.
     h.queue("abandona".into(),Action::Abandon {entry_id:"primeira".into()}).await.unwrap();
+    let rung=f.io.ring_keys.load(std::sync::atomic::Ordering::SeqCst);
     tokio::time::sleep(Duration::from_millis(700)).await;
-    assert_eq!(f.io.ring_keys.load(std::sync::atomic::Ordering::SeqCst),0);
+    assert_eq!(f.io.ring_keys.load(std::sync::atomic::Ordering::SeqCst),rung,"a linha abandonada não devolve o foco");
+    f.io.ring_returns.store(true,std::sync::atomic::Ordering::Release);
     let started=std::time::Instant::now();
     assert_eq!(h.command(f.command("segunda","Segunda")).await.unwrap().payload["code"],"mods_focus");
     f.wait_for("entrega da segunda",||!typed_at(&f,"Segunda").is_empty()).await;
