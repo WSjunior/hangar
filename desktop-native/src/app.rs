@@ -6363,6 +6363,20 @@ mod tests {
     }
 
     #[test]
+    fn mod_request_during_an_agent_switch_shows_the_translated_refusal() {
+        use super::{Failure, Hangar};
+        use std::collections::HashMap;
+        // O 409 `session_transfer_busy` do Python, repassado pelo Rust: o `failure_detail` já o traduziu, e os três
+        // pedidos de mod mostram a frase, não o texto cru do servidor.
+        let sentence = crate::i18n::tr_web("session_transfer_busy", &HashMap::new()).unwrap();
+        let busy = Failure { status: Some(409), detail: sentence.clone(), retry_after: None, uncertain: false,
+            code: Some("session_transfer_busy".into()) };
+        assert_eq!(Hangar::show_failure(&busy), Some(sentence.clone()));
+        assert_eq!(Hangar::input_failure(&busy), sentence);
+        assert_eq!(Hangar::press_failure(&busy), sentence);
+    }
+
+    #[test]
     fn mod_click_failure_is_not_a_message_delivery() {
         use super::{Failure, Hangar};
         let failure = |status| Failure { status, detail: "x".into(), retry_after: None, uncertain: true, code: None };

@@ -32,6 +32,7 @@ describe('recusas novas dos mods', () => {
     'erro_mod_painel_nao_alcancavel',
     'erro_mod_fechar_recusado',
     'erro_mod_guarda_indisponivel',
+    'session_transfer_busy',
     'erro_mod_painel_inexistente',
   ])('%s vira frase do app, não o texto do servidor', (code) => {
     const texto = formataErro({ code, params: {}, msg: 'texto-do-servidor' });
