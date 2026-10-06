@@ -76,7 +76,9 @@ pub struct Surface {
     flush_at: Option<f64>,
     closing: Vec<(u64, String, f64)>,
     working: bool,
-    published: Option<Value>,
+    /// A vista mudou desde a última publicação (árvore guardada, rol, ou tudo limpo). A comparação com a
+    /// anterior fica no `Mods`: aqui não se guarda cópia da vista para comparar.
+    changed: bool,
     /// Novas ligações já feitas depois de uma sem resposta, e quando sai a próxima.
     attach_retries: usize,
     attach_at: Option<f64>,
@@ -95,7 +97,7 @@ impl Surface {
     pub fn new(prefix: String) -> Self {
         Self { prefix, counter: 0, phase: Phase::Idle, waiting: BTreeMap::new(), panes: Vec::new(), shown: None,
             trees: BTreeMap::new(), dirty: BTreeSet::new(), flush_at: None,
-            closing: Vec::new(), working: false, published: None, attach_retries: 0, attach_at: None,
+            closing: Vec::new(), working: false, changed: false, attach_retries: 0, attach_at: None,
             panes_retries: 0, panes_at: None }
     }
 
@@ -386,6 +388,7 @@ impl Surface {
         // Desenho de painel que fechou no meio não volta ao evento.
         if !self.mounted(instance) { return; }
         self.trees.insert(instance.to_owned(), tree.clone());
+        self.changed = true;
         self.publish(out);
     }
 
@@ -396,6 +399,7 @@ impl Surface {
             .map(|pane| pane.id.clone()).collect();
         self.panes = panes;
         self.shown = body["shown_id"].as_str().map(str::to_owned);
+        self.changed = true;
         let ids: BTreeSet<String> = self.panes.iter().map(|pane| pane.id.clone()).collect();
         let keep = |id: &String| id == BAND_SITE || ids.contains(id);
         self.trees.retain(|id, _| keep(id));
@@ -416,10 +420,8 @@ impl Surface {
     }
 
     fn publish(&mut self, out: &mut Vec<SurfaceEffect>) {
-        let view = self.view();
-        if self.published.as_ref() != Some(&view) {
-            self.published = Some(view.clone());
-            out.push(SurfaceEffect::Publish { data: view });
+        if std::mem::take(&mut self.changed) {
+            out.push(SurfaceEffect::Publish { data: self.view() });
         }
     }
 
@@ -431,6 +433,7 @@ impl Surface {
         self.panes.clear();
         self.shown = None;
         self.trees.clear();
+        self.changed = true;
         self.dirty.clear();
         self.flush_at = None;
         self.attach_at = None;

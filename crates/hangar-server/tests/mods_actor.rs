@@ -164,7 +164,7 @@ async fn an_actor_that_dies_with_an_error_clears_the_band_and_keeps_the_owner() 
     let handle = RuntimeActor::spawn_with(target,queue,connection,engine,|handle| {
         mods.attach("session",1,Arc::new(handle.clone()));
         // A faixa de uma vida anterior, com botão: é ela que não pode ficar nos apps.
-        mods.publish_ui("session",1,&json!({"above":{"type":"Button","key":"k"},"panes":[],"shown_id":null,"columns":110,"source":"surface"}));
+        mods.publish_ui("session",1,json!({"above":{"type":"Button","key":"k"},"panes":[],"shown_id":null,"columns":110,"source":"surface"}));
     });
     let ui = wait_ui(&mods,|ui|ui["above"].is_null()).await;
     assert_eq!(ui["panes"],json!([]));
