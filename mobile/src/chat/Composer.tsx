@@ -1113,11 +1113,6 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     if (files.length > 1) setError(m.composer_colou_so_um());
   }, [handlePicked]);
 
-  // Só o que este app enviou deixa a marca do attachInsert no texto; basta para saber se há galeria.
-  const hasSentAttachments = useMemo(
-    () => events.some((e) => e.kind === 'user_msg' && !!e.text?.includes('📎')),
-    [events],
-  );
   const router = useRouter();
 
   const handleRemoveAttach = useCallback(() => {
@@ -1465,9 +1460,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           onClose={() => setAttachMenuOpen(false)}
           onPick={handlePicked}
           onError={setError}
-          onSessionAttachments={hasSentAttachments
-            ? () => router.push(`/s/${origin.serverId}/${origin.name}/attachments` as never)
-            : undefined}
+          onSessionAttachments={() => router.push(`/s/${origin.serverId}/${origin.name}/attachments` as never)}
           onCommands={() => setCommandSheetOpen(true)}
           dictationStyle={{ label: dictationStyle, onPress: () => setStyleMenuOpen(true) }}
           sendToGroup={pairPeers?.length

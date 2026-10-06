@@ -15,9 +15,11 @@ vi.mock('@hangar/core', async (original) => ({
   uploadFileForServer: core.upload,
 }));
 vi.mock('../../stores/chat', () => ({ chatStore: () => ({ use: { setState: () => {} } }) }));
+// expo-file-system não carrega no node; a galeria só apaga a cópia local do ditado substituído.
+vi.mock('../../chat/draftAttachments', () => ({ removeDraftAttachment: vi.fn() }));
 
-import { readDictation, writeDictation } from '../../stores/drafts';
-import { dictationAudio, runDictation } from './dictationRun';
+import { applyReadyDictation, readDictation, readDraft, setDictationInFlight, writeDictation, writeDraft } from '../../stores/drafts';
+import { dictateUpload, dictationAudio, runDictation } from './dictationRun';
 
 const server = { id: 's1', label: 'A', baseUrl: 'https://a.test', token: 't' };
 const voice = (patch: Partial<DictationDraft> = {}): DictationDraft => ({
@@ -59,6 +61,55 @@ describe('runDictation', () => {
     writeDictation('s1', 'sess', v);
     await runDictation(server, 's1', 'sess', v, { arquivo: 'd.m4a' }, { isActive: () => false });
     expect(readDictation('s1', 'sess')?.serverPath).toBe('/up/sess/d.m4a');
+  });
+});
+
+describe('dictateUpload', () => {
+  beforeEach(() => { memory.clear(); core.transcribe.mockReset(); core.upload.mockReset(); });
+
+  it('galeria transcreve pelo nome guardado, sem subir cópia, e o texto entra no rascunho intacto', async () => {
+    writeDraft('s1', 'sess', { version: 1, text: 'antes', revision: 2, transcript: '/t/a.jsonl', attachment: null, submission: null });
+    core.transcribe.mockResolvedValueOnce({ path: '/up/sess/ditado-9.m4a', text: ' depois ', raw: 'depois cru', aviso: null, estilo_aplicado: 'prosa' });
+    await dictateUpload(server, 's1', 'sess', '/t/a.jsonl', 'ditado-9.m4a', 'prosa');
+    expect(core.transcribe).toHaveBeenCalledExactlyOnceWith(server, 'sess', 'ditado-9.m4a', { limpar: true, estilo: 'prosa' });
+    expect(core.upload).not.toHaveBeenCalled();
+    expect(readDictation('s1', 'sess')).toMatchObject({
+      status: 'ready', text: 'depois', audio: null, serverPath: '/up/sess/ditado-9.m4a', draftRevision: 2, before: 'antes',
+    });
+    expect(applyReadyDictation('s1', 'sess', '/t/a.jsonl')?.draft?.text).toBe('antes depois');
+    expect(readDraft('s1', 'sess')?.text).toBe('antes depois');
+  });
+
+  it('durante o POST o ditado fica pendente para quem montar a conversa', async () => {
+    let finish!: (v: unknown) => void;
+    core.transcribe.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const run = dictateUpload(server, 's1', 'sess', null, 'a.m4a');
+    expect(readDictation('s1', 'sess')?.status).toBe('pending');
+    finish({ path: '/up/a.m4a', text: 'ok' });
+    await run;
+    expect(readDictation('s1', 'sess')?.status).toBe('ready');
+  });
+
+  it('recusa na hora quando há ditado pronto ainda não usado', () => {
+    writeDictation('s1', 'sess', voice({ status: 'ready', text: 'guardado' }));
+    expect(() => dictateUpload(server, 's1', 'sess', null, 'a.m4a')).toThrow();
+    expect(core.transcribe).not.toHaveBeenCalled();
+  });
+
+  it('recusa enquanto o ditado da conversa (gravado na tela por baixo) está no ar', () => {
+    writeDictation('s1', 'sess', voice());
+    setDictationInFlight('s1', 'sess', 'v1', true);
+    expect(() => dictateUpload(server, 's1', 'sess', null, 'a.m4a')).toThrow();
+    expect(readDictation('s1', 'sess')?.id).toBe('v1');
+    expect(core.transcribe).not.toHaveBeenCalled();
+    setDictationInFlight('s1', 'sess', 'v1', false);
+  });
+
+  it('ditado com falha é substituído pelo da galeria', async () => {
+    writeDictation('s1', 'sess', voice({ status: 'failed', issue: '502: groq' }));
+    core.transcribe.mockResolvedValueOnce({ path: '/up/sess/b.m4a', text: 'novo' });
+    await dictateUpload(server, 's1', 'sess', null, 'b.m4a');
+    expect(readDictation('s1', 'sess')).toMatchObject({ status: 'ready', text: 'novo', audio: null });
   });
 });
 

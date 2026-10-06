@@ -11,6 +11,12 @@ import { Lightbox } from '../../../../src/features/attachments/Lightbox';
 import { fileKind } from '@hangar/core';
 import { useServers } from '../../../../src/stores/servers';
 import { superficie } from '../../../../src/theme/superficie';
+import { AudioChip } from '../../../../src/chat/AudioChip';
+import { DocumentViewer, type DocumentItem } from '../../../../src/features/attachments/DocumentViewer';
+import { dictateUpload } from '../../../../src/features/ditado/dictationRun';
+import { useDitadoEstiloStore } from '../../../../src/features/ditado/ditadoEstiloStore';
+import { useSessions } from '../../../../src/stores/sessions';
+import { toast } from '../../../../src/ui/Toast';
 
 export default function AttachmentsSheet() {
   const { theme } = useUnistyles();
@@ -23,6 +29,7 @@ export default function AttachmentsSheet() {
   const [loading, setLoading] = useState(true);
   const [erro, setErro] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<UploadFile | null>(null);
+  const [doc, setDoc] = useState<DocumentItem | null>(null);
   const [docUrl, setDocUrl] = useState<{ url: string; headers?: Record<string, string>; title: string } | null>(null);
   const [webErro, setWebErro] = useState<string | null>(null);
   const [webCarregando, setWebCarregando] = useState(true);
@@ -70,10 +77,8 @@ export default function AttachmentsSheet() {
           return;
         }
       }
-      // video/audio/other: inline WebView — modo nativo com header
-      if (k === 'video' || k === 'audio') {
-        const url = fileUrlNative(sessionName, f.filename);
-        setDocUrl({ url, headers: fileAuthHeader(), title: f.filename });
+      if (k === 'video') {
+        setDoc({ uri: uploadUrlNative(sessionName, f.filename), headers: fileAuthHeader(), name: f.filename, kind: 'video' });
         return;
       }
       const url = uploadUrlNative(sessionName, f.filename);
@@ -81,6 +86,29 @@ export default function AttachmentsSheet() {
     },
     [sessionName, serverId, router],
   );
+
+  // Volta para a conversa: o Composer mostra "transcrevendo" e recebe o texto ou o motivo da falha.
+  const retranscribe = useCallback((f: UploadFile) => {
+    const target = useServers.getState().servers.find((s) => s.id === serverId);
+    if (!target) { toast.erro(m.chat_servidor_removido()); return; }
+    const sessions = useSessions.getState();
+    const transcript = (sessions.byServerRecord?.[serverId]?.find((x) => x.name === sessionName)?.jsonl
+      ?? sessions.rows.find((x) => x.serverId === serverId && x.name === sessionName)?.jsonl) || null;
+    const style = useDitadoEstiloStore.getState();
+    let run: Promise<unknown>;
+    try {
+      run = dictateUpload(target, serverId, sessionName, transcript, f.filename, style.pronto ? style.valor : undefined);
+    } catch (e) {
+      toast.erro(e instanceof Error ? e.message : m.composer_falha_transcricao());
+      return;
+    }
+    // A falha já fica no aviso do ditado da conversa; um toast aqui a mostraria duas vezes.
+    run.catch(() => {});
+    router.back();
+  }, [serverId, sessionName, router]);
+
+  const audios = files.filter((f) => fileKind(f.filename) === 'audio');
+  const others = files.filter((f) => fileKind(f.filename) !== 'audio');
 
   if (docUrl) {
     const semToken = !docUrl.headers || Object.keys(docUrl.headers).length === 0;
@@ -184,10 +212,21 @@ export default function AttachmentsSheet() {
       ) : files.length === 0 ? (
         <Text style={[styles.muted, { color: theme.tokens.text.muted }]}>{m.anexos_nenhum()}</Text>
       ) : (
-        <ScrollView contentContainerStyle={styles.grid}>
-          {files.map((f) => (
-            <AttachmentCard key={f.filename} file={f} sessionName={sessionName} onPress={() => handlePress(f)} />
+        <ScrollView contentContainerStyle={styles.list}>
+          {audios.map((f) => (
+            <View key={f.filename} style={styles.audioRow}>
+              <AudioChip uri={uploadUrlNative(sessionName, f.filename)} headers={fileAuthHeader()} name={f.filename} />
+              <Pressable onPress={() => retranscribe(f)} style={[styles.retryBtn, { borderColor: theme.tokens.border.subtle }]}
+                accessibilityRole="button" accessibilityLabel={`${m.composer_transcrever_de_novo()}: ${f.filename}`}>
+                <Text style={[styles.retryText, { color: theme.tokens.accent.base }]}>{m.composer_transcrever_de_novo()}</Text>
+              </Pressable>
+            </View>
           ))}
+          <View style={styles.grid}>
+            {others.map((f) => (
+              <AttachmentCard key={f.filename} file={f} sessionName={sessionName} onPress={() => handlePress(f)} />
+            ))}
+          </View>
         </ScrollView>
       )}
 
@@ -198,6 +237,7 @@ export default function AttachmentsSheet() {
         filename={lightbox?.filename ?? ''}
         onClose={() => setLightbox(null)}
       />
+      <DocumentViewer doc={doc} onClose={() => setDoc(null)} />
     </View>
   );
 }
@@ -245,11 +285,20 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.base.text.sm,
     fontWeight: '600',
   },
+  list: {
+    gap: theme.base.space[3],
+    paddingBottom: theme.base.space[4],
+  },
   grid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: theme.base.space[3],
-    paddingBottom: theme.base.space[4],
+  },
+  audioRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: theme.base.space[2],
   },
   bar: {
     flexDirection: 'row',
