@@ -209,3 +209,148 @@ fn invalid_tree_keeps_the_pane_listed() {
     let view = published(&ok(&mut surface, &request(&out, "ui_render"), json!({"tree": {"type": "engine", "ref": 0}}), 1.1)).unwrap();
     assert_eq!(view["panes"][0]["tree"], json!({"type": "engine", "ref": 0}), "S8: fica na lista, desenhado vazio pelo app");
 }
+
+fn button(key: &str, handle: i64) -> Value {
+    json!({"type": "Box", "children": [{"type": "Button", "props": {"key": key, "label": "OK"}, "press": {"plugin": "m", "handle": handle}}]})
+}
+fn press(site: &str, key: &str) -> ModsCall { ModsCall::Press { site: site.into(), key: key.into() } }
+fn code(result: Option<Result<Value, ModsError>>) -> String { result.unwrap().unwrap_err().code }
+
+#[test]
+fn recorded_vitrine_click_counts_on_its_pane() {
+    let mut drive = Drive::start("vitrine");
+    drive.call(1, press("above-prompt", "abrir-vitrine-botoes"));
+    assert_eq!(drive.reply(1), Some(Ok(json!({"element": "abrir-vitrine-botoes"}))));
+    assert_eq!(drive.view()["shown_id"], "vitrine-botoes");
+    drive.advance(0.2);
+    assert!(drive.pane_text("vitrine-botoes").contains("V15-comum: 0"));
+    drive.call(2, press("vitrine-botoes", "V15-comum"));
+    assert_eq!(drive.reply(2), Some(Ok(json!({"element": "V15-comum"}))));
+    drive.advance(0.2);
+    assert!(drive.pane_text("vitrine-botoes").contains("V15-comum: 1"), "o ui_invalidate com instances redesenhou o painel");
+}
+
+#[test]
+fn recorded_three_panes_follow_the_last_opened() {
+    let mut drive = Drive::start("vitrine");
+    drive.call(1, press("above-prompt", "abrir-abas"));
+    assert!(drive.reply(1).unwrap().is_ok());
+    let view = drive.view();
+    let ids: Vec<&str> = view["panes"].as_array().unwrap().iter().map(|pane| pane["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["vitrine-texto", "vitrine-botoes", "vitrine-hover"]);
+    assert_eq!(view["shown_id"], "vitrine-hover", "P11: o último aberto fica na frente");
+}
+
+#[test]
+fn recorded_invalid_and_big_trees_pass() {
+    let mut drive = Drive::start("vitrine");
+    drive.call(1, press("above-prompt", "abrir-invalida"));
+    assert!(drive.reply(1).unwrap().is_ok());
+    let quebrado = drive.view()["panes"].as_array().unwrap().iter().find(|pane| pane["id"] == "vitrine-quebrado").cloned().unwrap();
+    assert_eq!(quebrado["tree"], json!({"type": "engine", "ref": 0}));
+    drive.call(2, press("above-prompt", "abrir-grande"));
+    drive.advance(0.2);
+    assert!(drive.reply(2).unwrap().is_ok(), "o segundo clique também é respondido (A18)");
+    let grande = drive.view()["panes"].as_array().unwrap().iter().find(|pane| pane["id"] == "vitrine-quebrado").cloned().unwrap();
+    // Os ~398 KB de V55 contam os espaços do JSON gravado; em formato compacto são ~369 KB.
+    assert!(grande["tree"].to_string().len() > 360_000, "V55: a árvore grande passa inteira");
+}
+
+#[test]
+fn stale_handle_redraws_and_tries_once() {
+    let mut surface = ready(button("ok", 1));
+    let first = request(&surface.call(7, press("above-prompt", "ok"), 0.1), "ui_press");
+    assert_eq!((first["request"]["handle"].as_i64(), first["request"]["key"].as_str()), (Some(1), Some("ok")));
+    assert_eq!(first["request"]["surface"], "desktop");
+    let redraw = request(&ok(&mut surface, &first, json!({"handled": false}), 0.2), "ui_render");
+    assert_eq!(redraw["request"]["instance_id"], "above-prompt");
+    let again = request(&ok(&mut surface, &redraw, json!({"tree": button("ok", 2), "hooked": true}), 0.3), "ui_press");
+    assert_eq!(again["request"]["handle"], 2);
+    let done = ok(&mut surface, &again, json!({"handled": true, "element": "ok"}), 0.4);
+    assert_eq!(reply_of(&done, 7), Some(Ok(json!({"element": "ok"}))));
+}
+
+#[test]
+fn second_refusal_or_missing_key_is_desenho_vencido() {
+    let mut surface = ready(button("ok", 1));
+    let first = request(&surface.call(1, press("above-prompt", "ok"), 0.1), "ui_press");
+    let redraw = request(&ok(&mut surface, &first, json!({"handled": false}), 0.2), "ui_render");
+    let again = request(&ok(&mut surface, &redraw, json!({"tree": button("ok", 2)}), 0.3), "ui_press");
+    assert_eq!(code(reply_of(&ok(&mut surface, &again, json!({"handled": false}), 0.4), 1)), "erro_mod_desenho_vencido");
+
+    let mut surface = ready(button("ok", 1));
+    let redraw = request(&surface.call(2, press("above-prompt", "sumiu"), 0.1), "ui_render");
+    assert_eq!(code(reply_of(&ok(&mut surface, &redraw, json!({"tree": button("ok", 3)}), 0.2), 2)), "erro_mod_desenho_vencido");
+}
+
+#[test]
+fn unknown_site_or_band_close_is_botao_inexistente() {
+    let mut surface = ready(button("ok", 1));
+    assert_eq!(code(reply_of(&surface.call(1, press("painel-fechado", "ok"), 0.1), 1)), "erro_mod_botao_inexistente");
+    assert_eq!(code(reply_of(&surface.call(2, ModsCall::Close { site: "above-prompt".into() }, 0.1), 2)), "erro_mod_botao_inexistente");
+    let idle = &mut Surface::new("ui:t".into());
+    assert_eq!(code(reply_of(&idle.call(3, press("above-prompt", "ok"), 0.1), 3)), "erro_mod_botao_inexistente", "antes de ligar");
+}
+
+#[test]
+fn input_goes_with_key_component_and_instance() {
+    let mut surface = ready(json!({"type": "Text"}));
+    let out = surface.on_notice(&panes(json!([{"id": "campos", "title": "Campos", "plugin": "vitrine"}]), "campos"), 1.0);
+    let field = json!({"type": "Input", "props": {"key": "V18-campo", "value": ""}, "press": {"plugin": "vitrine", "handle": 9}});
+    ok(&mut surface, &request(&out, "ui_render"), json!({"tree": field}), 1.0);
+    let call = ModsCall::Input { site: "campos".into(), key: "V18-campo".into(), submit: true, value: "olá, mundo".into() };
+    let input = request(&surface.call(4, call, 1.1), "ui_input");
+    assert_eq!(input["request"], json!({"subtype": "ui_input", "plugin": "vitrine", "handle": 9, "kind": "submit", "value": "olá, mundo",
+        "key": "V18-campo", "component": "Pane", "instance_id": "campos", "surface": "desktop", "client_id": "hangar"}));
+    let done = ok(&mut surface, &input, json!({"handled": true, "element": "V18-campo", "value": "olá, mundo"}), 1.2);
+    assert_eq!(reply_of(&done, 4), Some(Ok(json!({"element": "V18-campo", "value": "olá, mundo"}))));
+}
+
+#[test]
+fn close_waits_for_the_roster_and_can_be_refused() {
+    let mut surface = ready(json!({"type": "Text"}));
+    surface.on_notice(&panes(json!([{"id": "p", "title": "P", "plugin": "m"}]), "p"), 0.5);
+    let close = request(&surface.call(3, ModsCall::Close { site: "p".into() }, 1.0), "ui_close");
+    assert_eq!(close["request"], json!({"subtype": "ui_close", "id": "p", "client_id": "hangar"}));
+    assert!(reply_of(&ok(&mut surface, &close, json!({"closed": true}), 1.1), 3).is_none(), "fechar espera o rol");
+    let out = surface.on_notice(&panes(json!([]), "p"), 1.2);
+    assert_eq!(reply_of(&out, 3), Some(Ok(json!({}))));
+
+    surface.on_notice(&panes(json!([{"id": "q", "title": "Q", "plugin": "m"}]), "q"), 2.0);
+    let refused = request(&surface.call(4, ModsCall::Close { site: "q".into() }, 2.0), "ui_close");
+    assert_eq!(code(reply_of(&ok(&mut surface, &refused, json!({"closed": false}), 2.1), 4)), "erro_mod_fechar_recusado");
+
+    let silent = request(&surface.call(5, ModsCall::Close { site: "q".into() }, 3.0), "ui_close");
+    ok(&mut surface, &silent, json!({"closed": true}), 3.1);
+    assert_eq!(code(reply_of(&surface.tick(5.2), 5)), "erro_mod_clique_sem_resposta", "sem o rol em 2 s");
+}
+
+#[test]
+fn show_is_confirmed_by_shown_id() {
+    let mut surface = ready(json!({"type": "Text"}));
+    surface.on_notice(&panes(json!([{"id": "a", "title": "A", "plugin": "m"}, {"id": "b", "title": "B", "plugin": "m"}]), "b"), 0.5);
+    let show = request(&surface.call(6, ModsCall::Show { site: "a".into() }, 1.0), "ui_pane_show");
+    assert_eq!(show["request"], json!({"subtype": "ui_pane_show", "id": "a", "surface": "desktop", "client_id": "hangar"}));
+    assert_eq!(reply_of(&ok(&mut surface, &show, json!({"shown_id": "a"}), 1.1), 6), Some(Ok(json!({"shown_id": "a"}))));
+    let show = request(&surface.call(7, ModsCall::Show { site: "a".into() }, 1.2), "ui_pane_show");
+    assert_eq!(code(reply_of(&ok(&mut surface, &show, json!({"shown_id": "b"}), 1.3), 7)), "erro_mod_botao_inexistente");
+}
+
+#[test]
+fn press_without_answer_times_out() {
+    let mut surface = ready(button("ok", 1));
+    surface.call(8, press("above-prompt", "ok"), 1.0);
+    assert!(reply_of(&surface.tick(5.9), 8).is_none());
+    assert_eq!(code(reply_of(&surface.tick(6.0), 8)), "erro_mod_clique_sem_resposta");
+}
+
+#[test]
+fn exit_fails_pending_calls() {
+    let mut surface = ready(button("ok", 1));
+    surface.call(9, press("above-prompt", "ok"), 1.0);
+    let out = surface.on_exit();
+    assert_eq!(code(reply_of(&out, 9)), "erro_mod_clique_sem_resposta");
+    let view = published(&out).unwrap();
+    assert!(view["above"].is_null() && view["panes"] == json!([]));
+    assert!(!surface.is_ready());
+}
