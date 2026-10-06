@@ -49,8 +49,9 @@ pub fn enabled() -> bool { enabled_from(std::env::var(ENV).ok().as_deref()) }
 
 fn enabled_from(v: Option<&str>) -> bool { v == Some("1") }
 
-/// Diferença que alguma Task fez de propósito, com o motivo ao lado.
-fn accepted(row: &SessionRow, field: &str) -> bool {
+/// Diferença que alguma Task fez de propósito, com o motivo ao lado. `py_state`: o estado da linha
+/// na lista do Python.
+fn accepted(row: &SessionRow, field: &str, py_state: Option<&str>) -> bool {
     match row.problema.as_deref() {
         // Captura que falhou (Task 12): o Rust fica no marcador sem rebaixar e mostra a falha.
         Some("list_capture_failed") if ["state", "problema", "label"].contains(&field) => return true,
@@ -58,7 +59,10 @@ fn accepted(row: &SessionRow, field: &str) -> bool {
         Some("list_runtime_unavailable") if ["state", "problema"].contains(&field) => return true,
         _ => {}
     }
-    (row.provider == "claude" && row.problema.as_deref() == Some(RUNTIME_ABSENT) && RUNTIME_FIELDS.contains(&field))
+    let absent = row.provider == "claude" && row.problema.as_deref() == Some(RUNTIME_ABSENT);
+    (absent && RUNTIME_FIELDS.contains(&field))
+        // A última resposta só existe na linha parada: sem retrato, ela diverge junto com o estado.
+        || (absent && ["last_reply", "last_reply_at"].contains(&field) && py_state != Some(row.state.as_str()))
         // A descoberta não sabe a credencial de Kimi/Pi/omp (Task 7); só o fato a preenche (Task 14).
         || (["kimi", "pi", "omp"].contains(&row.provider.as_str()) && field == "conta" && row.conta.is_none())
 }
@@ -122,8 +126,9 @@ pub fn compare(rust: &[SessionRow], py: &PySigs) -> HashSet<Diff> {
             out.insert((name.clone(), ROW_UNSERIALIZABLE.into()));
             continue;
         };
+        let py_state = sig.get("state").and_then(Value::as_str);
         for (field, want) in sig.iter().filter(|(f, _)| *f != "name") {
-            if !same(&field_value(row, &raw, field), want) && !accepted(row, field) {
+            if !same(&field_value(row, &raw, field), want) && !accepted(row, field, py_state) {
                 out.insert((name.clone(), field.clone()));
             }
         }
@@ -344,6 +349,18 @@ mod tests {
                             "problema": RUNTIME_ABSENT}));
         sigs = py(&[row(json!({"name": "hl", "headless": true, "state": "awaiting_input"}))]);
         assert!(compare(&[hl], &sigs).is_empty());
+        // A última resposta só existe na linha parada: com o estado divergindo por falta do retrato, ela
+        // diverge junto; com o mesmo estado, é comparada.
+        let hl = row(json!({"name": "hl", "headless": true, "state": "idle", "last_reply": "r", "last_reply_at": 1.0,
+                            "problema": RUNTIME_ABSENT}));
+        let reply = |state: &str| {
+            let mut s = py(&[row(json!({"name": "hl", "headless": true, "state": state}))]);
+            s.get_mut("hl").unwrap().extend([("last_reply".to_owned(), Value::Null), ("last_reply_at".to_owned(), Value::Null)]);
+            s
+        };
+        assert!(compare(&[hl.clone()], &reply("awaiting_input")).is_empty());
+        assert_eq!(compare(&[hl], &reply("idle")), HashSet::from([("hl".into(), "last_reply".into()), ("hl".into(), "last_reply_at".into())]));
+        sigs = py(&[row(json!({"name": "hl", "headless": true, "state": "awaiting_input"}))]);
         // Com o retrato, o estado do runtime é comparado como qualquer outro.
         let hl = row(json!({"name": "hl", "headless": true, "state": "idle", "question": "q"}));
         assert_eq!(compare(&[hl], &sigs), HashSet::from([("hl".into(), "state".into())]));

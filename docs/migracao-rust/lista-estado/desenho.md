@@ -126,8 +126,11 @@ nem lhe passa uma falha. Ela só faz sentido com o Python dono (antes da Task 16
 | Claude sem terminal com `problema = list_runtime_absent` | `state`, `label`, `question`, `status_line`, `pending_questions`, `problema` | ninguém forneceu o retrato do runtime (`ProduceFacts.headless = None`: a sombra, até o hub da Task 17); o estado sai do marcador e a linha diz. Com retrato fornecido, sessão fora dele está parada (como `hl.snapshot() = None`) e tudo é comparado |
 | nome com letra fora do português | a linha casa pelo transcript e pela pasta (os dois conhecidos) e pelo nome do Rust contido no do Python, mesma primeira letra | `sanitize_session_name` do Rust só desfaz os acentos do português; outra letra some (Task 7) |
 | `conta` de Kimi/Pi/omp vazia no Rust | `conta` | a descoberta não sabe a credencial; só o fato a preenche (Tasks 7 e 14); preenchida, é comparada |
+| `last_reply`/`last_reply_at` da Claude sem terminal com `list_runtime_absent` | só com o `state` do Python diferente | sem retrato o Rust fica no marcador; a resposta só existe na linha parada e diverge junto. Com o mesmo estado, é comparada |
+| Transição: 1 a 3 rodadas de M em qualquer campo | criação, `/clear`, mudança de estado, fim de sessão (`row_missing`) | a lista do Python comparada tem até 3 s (`_SHADOW_MAX_AGE`) e a do Rust é da rodada; regra igual pelo golden. Fica no diário com a contagem: N alto não é isto |
+| Cache de 20 s lido em instantes diferentes | `context` e o `label` da sessão `working` pelo marcador | cada lado relê o transcript e a captura da statusline no seu tempo (`STATUS_TTL`); diverge até a próxima leitura (até ~13 rodadas). Regra igual (`context_cases`, `state_sequences`) |
 
-Diferença nova que o canal de testes mostrar: corrigir, ou entrar aqui com o motivo (Step 34).
+Medido com sessões reais no backend isolado (Step 34): `sombra-isolada.md`. Diferença nova: corrigir, ou entrar aqui com o motivo.
 
 ## O que não muda
 

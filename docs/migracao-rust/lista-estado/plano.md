@@ -298,7 +298,7 @@ texto), `shadow::off_by_default`.
 
 - [x] **Step 32: Testes, vistos falhar**
 - [x] **Step 33: Sombra; testes focados; revisar**
-- [ ] **Step 34: Canal de testes na máquina do dono por 2 dias de uso normal; zerar as diferenças ou registrar cada uma aceita em `desenho.md` (verificação manual)**
+- [x] **Step 34: Sombra com sessões reais no backend isolado (no lugar dos 2 dias no canal de testes): 12 cenários, Claude Haiku e Codex gpt-6-luna com e sem terminal; 3 defeitos do instrumento corrigidos, o resto aceito com motivo em `desenho.md`; Python 16 ms e Rust 13 ms por atualização (mediana). Relatório: `sombra-isolada.md`**
 
 ### Task 16: Consumidores Python pela ponte
 
