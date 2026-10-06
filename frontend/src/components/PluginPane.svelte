@@ -2,7 +2,6 @@
   import { PANE_CLOSE_KEY, type PluginInputKind, type PluginPane } from '@hangar/core';
   import * as m from '../paraglide/messages';
   import PluginNode from './PluginNode.svelte';
-  import PluginHide from './PluginHide.svelte';
 
   interface Props {
     /** O painel desenhado: o da frente quando há vários. No celular sempre vira bloco acima do composer. */
@@ -14,10 +13,8 @@
     onShow?: (site: string) => void;
     /** Digitação num `Input` do painel; só sem terminal. */
     onInput?: (site: string, key: string, kind: PluginInputKind, value: string) => void;
-    /** Só no celular e sem faixa: o "Ocultar" fica no topo da área dos mods, que é este painel. */
-    onHide?: () => void;
   }
-  let { pane, tabs = [], onPress, onShow, onInput, onHide }: Props = $props();
+  let { pane, tabs = [], onPress, onShow, onInput }: Props = $props();
   const tabbed = $derived(tabs.length > 1);
 </script>
 
@@ -34,7 +31,6 @@
     {:else}
       <span class="title">{pane.title}</span>
     {/if}
-    {#if onHide}<PluginHide {onHide} />{/if}
     {#if onPress}
       <!-- Um ✕ só: fecha o painel da frente, como a marca do engine no terminal. -->
       <button type="button" class="close" aria-label={m.plugin_painel_fechar()}
@@ -69,8 +65,6 @@
   .tabs { display: flex; gap: 1ch; min-width: 0; overflow-x: auto; }
   .tab { font: inherit; color: var(--text-muted); background: transparent; border: 0; border-radius: var(--radius-sm); padding: 0 1ch; cursor: pointer; white-space: nowrap; min-height: 0; min-width: 0; }
   .tab.active { color: var(--text-primary); font-weight: 600; background: var(--surface-raised); cursor: default; }
-  /* O "Ocultar" vai para a direita, junto do ✕. */
-  header :global(.plugin-hide) { margin-left: auto; }
   .close { font: inherit; color: var(--text-muted); background: transparent; border: 0; cursor: pointer; padding: 0 0.5ch; min-height: 0; min-width: 0; }
   .body { position: relative; max-height: 40vh; overflow-y: auto; overflow-x: hidden; }
 </style>
