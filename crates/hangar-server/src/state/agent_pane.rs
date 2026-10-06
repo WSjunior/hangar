@@ -74,14 +74,16 @@ mod tests {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../backend/tests/fixtures/contract/golden/agent_pane.json");
         let rows: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         for row in rows.as_array().unwrap() {
-            let panes: Vec<Pane> = row["panes"].as_array().unwrap().iter().map(|p| Pane {
+            let panes: Vec<Pane> = row["panes"].as_array().unwrap().iter().enumerate().map(|(i, p)| Pane {
                 session: "fixture".into(), active: p["active"].as_bool().unwrap(), pid: p["pid"].as_u64().map(|v| v as u32),
-                pane_id: p["pane_id"].as_str().unwrap().into(), window_index: Some(0), pane_index: Some(0), ..Default::default()
+                pane_id: p["pane_id"].as_str().unwrap().into(), window_index: Some(0), pane_index: Some(i as u32), ..Default::default()
             }).collect();
             let children: ChildrenMap = row["children"].as_object().unwrap().iter()
                 .map(|(k, v)| (k.parse().unwrap(), serde_json::from_value(v.clone()).unwrap())).collect();
             let cmdline = |pid: i64| row["cmdline"][pid.to_string()].as_str().unwrap_or("").to_owned();
-            assert_eq!(resolve(&panes, &children, &cmdline).as_deref(), row["expected"].as_str(), "{}", row["name"]);
+            // O golden vem do Python no Linux (`%N`); no Windows o alvo do mesmo pane é `=s:w.p`.
+            let expected = row["expected"].as_str().and_then(|id| panes.iter().find(|p| p.pane_id == id).and_then(Pane::target));
+            assert_eq!(resolve(&panes, &children, &cmdline), expected, "{}", row["name"]);
         }
     }
 
