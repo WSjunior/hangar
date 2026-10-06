@@ -1451,7 +1451,7 @@ donos: captura, `permission.observe` e `session.dead` saem uma vez, de um lugar 
 
 ## Observação terminal Rust: erro visível, sem captura Python
 
-(Parte 4, Task 5, 06/10/2026.) Com o Rust de pé, quem lê a captura de Claude com terminal é o
+(Parte 4, Tasks 5 e 7, 06/10/2026.) Com o Rust de pé, quem lê a captura de Claude com terminal é o
 `Monitor` do Rust, em processo (`PoolCapture` em `state/monitor.rs`, cliente `-C` do
 `TerminalPool`; no Windows a captura avulsa do psmux em `state/capture.rs`), e a falha dele sai com o mesmo `problema=terminal_observacao_falhou` sobre o último
 evento ([estado ao vivo no `Monitor`](#estado-ao-vivo-de-claude-com-terminal-no-monitor-do-rust)).

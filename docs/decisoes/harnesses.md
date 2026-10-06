@@ -9,8 +9,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   tmux confere sessão/pane a cada leitura; a análise acompanha esse quadro. Em Claude com
   terminal e o Rust de pé, o estado temporal é do `Monitor` do Rust, que pega o quadro do pool em
   processo; nos provedores que o Python observa (Pi, omp, Kimi), permanece no Python, sem outro
-  HTTP. O cliente da ponte usa somente HTTP sem proxy/redirect
-  e não carrega certificados por pedido. Medição:
+  HTTP. O cliente da ponte do observador usa somente HTTP sem proxy/redirect
+  e não carrega certificados por pedido (a ponte ficou sem consumidor desde a parte 4; vale se
+  voltar a ser usada). Medição:
   [custo da observação terminal](#custo-da-observação-terminal).
 
 - **Deltas Claude/Codex acumulam antes de publicar.** Prévia, pensamento e input em voo têm

@@ -18,7 +18,8 @@ Only terminal sessions use the tmux pane for live **state** and input. Backend p
   headless sidecars and their JSONL/rollout history.
 - `transcript.py` — tails `~/.claude/projects/<cwd>/<uuid>.jsonl` (the chat content).
 - `state.py` — classifies live state from `tmux capture-pane`: `working` / `idle` / `awaiting_input` / `dead`
-  (Pi/omp/Kimi and the Python fallback; Claude with a terminal under the Rust server is the Rust `Monitor`).
+  (Pi/omp/Kimi and the Python fallback; under the Rust server the live state of Claude with a terminal is the
+  Rust `Monitor`, and `classify` remains for push and actions).
 - `terminal_input.py` + `tmux.py` — input via `tmux send-keys` (prompt / option select via `(n-1)×Down`+`Enter` / `Esc`).
 - `adapters/codex/` — um app-server WebSocket de loopback por sessão Codex; o backend
   consome eventos JSON-RPC enquanto a TUI `codex --remote` da mesma thread roda no tmux.
@@ -456,8 +457,9 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   Medidas em [plataforma.md](docs/decisoes/plataforma.md#lista-do-dono-no-hangar-server).
 - **A porta privada de loopback do Rust mora no mesmo filho**, anunciada na saúde somente como
   endereço; o segredo vem do Supervisor em memória após conferir o protocolo. Uma captura canônica
-  por rodada, sem grade auxiliar: com o Rust de pé, quem captura o pane de Claude com terminal é o
-  `Monitor` (abaixo), e a ponte Python do observador (`terminal_observer` →
+  por rodada, sem grade auxiliar: com o Rust de pé, quem captura o pane de Claude com terminal para o
+  estado ao vivo é o `Monitor` (abaixo; capturas avulsas de ação — push, modo de permissão, entrega —
+  seguem no Python), e a ponte Python do observador (`terminal_observer` →
   `/__hangar_server/terminal`) ficou sem consumidor, porque o `StateMonitor`/`PreviewBroker` de
   Claude só roda no modo `python`, com a ponte desligada. Pi, omp e Kimi capturam pelo Python e
   guardam lá o estado temporal; Codex conserva estado e prévia nativos. `/clear` ou troca do filho

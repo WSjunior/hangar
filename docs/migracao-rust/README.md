@@ -82,8 +82,9 @@ Com o Rust de pé (06/10/2026, depois da parte 4):
 - **Fatos e serviços que o `Monitor` e a lista pedem:** plugin (estado recente, pergunta segurada,
   sugestão, presença do app), `em_troca`, modo de permissão (`permission.observe`), `session.dead`,
   e a entrega (`session.deliverable` → `adapter.drain`).
-- **Portas 8766 e 8768:** porta de entrada do convidado e do Connect (chat pelo canal privado do
-  hub, terminal ligado a `/__hangar_server/term`), a Origin do terminal (`/internal/term/origin`) e
+- **Portas 8766 e 8768:** porta de entrada do convidado e do Connect (estado, prévia, pergunta e
+  sugestão pelo canal privado do hub; transcript e fila lidos pelo Python; terminal ligado a
+  `/__hangar_server/term`), a Origin do terminal (`/internal/term/origin`) e
   o 409 de painel aberto (pergunta `term.active` ao Rust).
 - **Parte 6:** contas, convidados, pareamento, MCP, push, atualização, uploads, ditado; cotas e
   stats; mutações de worktree.
