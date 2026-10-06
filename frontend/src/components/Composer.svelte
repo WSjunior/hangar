@@ -325,9 +325,9 @@ import { cachePrazo } from '../lib/cachePrazo';
   // de novo, mesmo com o audio ja gravado e o texto cru ja na mao.
   //
   // - `url`: objectURL do proprio File que foi gravado (o backend tambem salva em
-  //   .hangar-uploads, mas o blob ja esta na aba -> player sem round-trip). Numa barra RESTAURADA
+  //   ~/.hangar/uploads/<projeto>/<sessao>/, mas o blob ja esta na aba -> player sem round-trip). Numa barra RESTAURADA
   //   o blob nao existe mais e a url e a do upload no servidor (ver restaurarDitado).
-  // - `arquivo`: nome do audio em .hangar-uploads. E o que deixa a barra sobreviver a sair da
+  // - `arquivo`: nome do audio em ~/.hangar/uploads/<projeto>/<sessao>/. E o que deixa a barra sobreviver a sair da
   //   conversa e voltar: o objectURL morre com a aba, o arquivo do servidor nao.
   // - `before`/`after`: texto dos dois lados da insercao, pra trocar so a parte ditada.
   // - `cache`: estilo -> texto ja obtido. Reclicar num estilo por onde ja passou e instantaneo e de
@@ -344,7 +344,7 @@ import { cachePrazo } from '../lib/cachePrazo';
   // Persistida por sessao no localStorage, pelo MESMO motivo do rascunho do campo (Chat.svelte):
   // trocar de sessao remonta o Composer e o iOS mata o PWA em background — e a barra sumia junto,
   // levando o audio e as versoes ja pagas. Guarda so texto + nome do arquivo; o audio fica onde ja
-  // estava (.hangar-uploads no servidor), entao a chave e pequena e o player continua tocando.
+  // estava (~/.hangar/uploads no servidor), entao a chave e pequena e o player continua tocando.
   // svelte-ignore state_referenced_locally
   const ditadoKey = `cp-ditado:${sessionName}`;
   function restaurarDitado(): DitadoAtivo | null {
