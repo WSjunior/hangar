@@ -1105,6 +1105,15 @@ class ClaudeHeadlessAdapter:
         meta = sess.meta
         transcript = self.transcript_path_de(meta)
         resume = Path(transcript).exists()
+        service_tier = meta.get("service_tier")
+        if service_tier is not None:
+            from app import cliproxy
+            if service_tier not in ("default", "priority"):
+                raise ValueError("service_tier: use default ou priority")
+            if not cliproxy.supports_fast(meta.get("engine"), sess.model):
+                if service_tier == "priority":
+                    raise ValueError("service_tier exige Claude com motor GPT no CLIProxyAPI local")
+                service_tier = None
         # Modo de permissão TAMBÉM no --resume: sem a flag a CLI volta ao defaultMode da conta
         # (medido: sessão "manual" reaberta após restart rodou Bash sem perguntar).
         if meta.get("engine_account"):
@@ -1131,6 +1140,8 @@ class ClaudeHeadlessAdapter:
                 pre += ["--model", sess.model]
                 if sess.context_window:
                     pre += ["--context", str(sess.context_window)]
+            if service_tier is not None:
+                pre += ["--service-tier", service_tier]
             argv = pre + ["--"] + argv
         env = dict(os.environ)
         # Backend subido de dentro de um tmux (dev) passaria o pane do OPERADOR pro processo, e
@@ -1140,6 +1151,7 @@ class ClaudeHeadlessAdapter:
         env.pop("CP_ENGINE_ACCOUNT", None)
         env.pop("CP_ENGINE_CREDENTIAL_ID", None)
         env.pop("CP_ENGINE_ACCOUNT_BASE_URL", None)
+        env.pop("CP_ENGINE_SERVICE_TIER", None)
         env["CP_SESSION_NAME"] = sess.name
         if not meta.get("key"):
             meta = sess.meta = hl_sessions.update(sess.name, key=uuid.uuid4().hex) or meta

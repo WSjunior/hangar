@@ -35,14 +35,34 @@ impl Open {
     pub(super) fn anchor(&self) -> String { format!("ctl-{}", self.ctl.key()) }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ModelIdentity {
+    provider: String,
+    engine: Option<String>,
+    engine_account: Option<String>,
+    account: Option<String>,
+    lifecycle: Option<String>,
+}
+
+impl ModelIdentity {
+    fn of(session: &SessionInfo) -> Self {
+        Self { provider: session.provider.clone(), engine: session.engine.clone(), engine_account: session.engine_account.clone(),
+            account: session.conta.clone(), lifecycle: session.lifecycle_id.clone() }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Controls {
     open: Option<Open>,
     busy: HashMap<SessionKey, Ctl>,
     // Rótulo aplicado com sucesso e o valor da fonte ao vivo naquele momento: vale até a fonte mudar.
     applied: HashMap<(SessionKey, Ctl), (String, Option<String>)>,
-    // Ciclo do Claude com terminal (lido da rodapé do pane) e permissão do Codex, por sessão.
+    // Catálogos confirmados de modelo, ciclo do Claude e permissão do Codex, por sessão.
     known: HashMap<(SessionKey, Ctl), Value>,
+    // Cada abertura conserva só sua leitura; respostas antigas não alteram Fast confirmado.
+    model_reads: HashMap<SessionKey, (ModelIdentity, tokio::sync::oneshot::Receiver<Result<Value, Failure>>)>,
+    model_identities: HashMap<SessionKey, ModelIdentity>,
+    model_actions: HashMap<SessionKey, Option<ModelIdentity>>,
     // Plano do Claude com terminal: metadados achados e o conteúdo aberto pelo gesto.
     plan: Option<(SessionKey, Option<Result<Value, String>>, Option<Result<Value, String>>)>,
     plans_done: HashSet<String>,
@@ -63,9 +83,59 @@ pub(super) struct Controls {
 }
 
 impl Controls {
-    pub fn on_select(&mut self) { self.open = None; self.plan = None; self.prethread_since = Some(Instant::now()); }
+    pub fn on_select(&mut self) {
+        self.open = None;
+        for key in self.model_actions.keys().chain(self.model_reads.keys()) {
+            self.known.remove(&(key.clone(), Ctl::Model));
+            self.applied.remove(&(key.clone(), Ctl::Model));
+        }
+        self.model_reads.clear();
+        self.model_actions.values_mut().for_each(|identity| *identity = None);
+        self.plan = None;
+        self.prethread_since = Some(Instant::now());
+    }
+
+    pub(super) fn on_session_update(&mut self, key: &SessionKey, session: &SessionInfo) {
+        let identity = ModelIdentity::of(session);
+        if self.model_identities.get(key).is_some_and(|previous| previous != &identity) {
+            self.known.remove(&(key.clone(), Ctl::Model));
+            self.applied.remove(&(key.clone(), Ctl::Model));
+            self.model_reads.remove(key);
+            if let Some(action) = self.model_actions.get_mut(key) { *action = None; }
+            if self.open.as_ref().is_some_and(|o| &o.key == key && o.ctl == Ctl::Model) { self.open = None; }
+        }
+        self.model_identities.insert(key.clone(), identity);
+    }
+
+    fn model_catalog(&self, key: &SessionKey, session: &SessionInfo) -> Option<&Value> {
+        if self.model_identities.get(key) != Some(&ModelIdentity::of(session)) { return None; }
+        self.known.get(&(key.clone(), Ctl::Model)).filter(|catalog| catalog_engine_matches(catalog, session.engine.as_deref()))
+    }
+
     pub fn clear_plan_preview(&mut self) { self.plan = None; }
     pub fn picker_open(&self) -> bool { self.open.is_some() }
+
+    fn remember_model_catalog(&mut self, key: &SessionKey, catalog: Option<&Value>) {
+        self.known.remove(&(key.clone(), Ctl::Model));
+        if let Some(catalog) = catalog { self.known.insert((key.clone(), Ctl::Model), catalog.clone()); }
+    }
+
+    fn take_model_catalog(&mut self, key: &SessionKey, identity: &ModelIdentity) -> Option<Result<Value, Failure>> {
+        let (owner, receive) = self.model_reads.get_mut(key)?;
+        if owner != identity {
+            self.model_reads.remove(key);
+            return None;
+        }
+        let result = receive.try_recv().ok()?;
+        self.model_reads.remove(key);
+        Some(result)
+    }
+
+    fn confirm_claude_fast(&mut self, key: &SessionKey, tier: &str) {
+        if let Some(known) = self.known.get_mut(&(key.clone(), Ctl::Model)) { known["current"]["service_tier"] = json!(tier); }
+        if let Some(open) = self.open.as_mut().filter(|o| &o.key == key && o.ctl == Ctl::Model)
+            && let Some(Ok(catalog)) = open.catalog.as_mut() { catalog["current"]["service_tier"] = json!(tier); }
+    }
 }
 
 // Modo conhecido aparece traduzido; valor que o backend inventar depois aparece cru.
@@ -108,6 +178,28 @@ fn spaced(label: &str) -> String {
 }
 
 fn text(value: &Value, key: &str) -> String { value.get(key).and_then(Value::as_str).unwrap_or("").to_owned() }
+
+fn catalog_engine_matches(catalog: &Value, engine: Option<&str>) -> bool {
+    let engine = engine.filter(|engine| !engine.is_empty());
+    if text(catalog, "kind") == "engine" {
+        engine.is_some() && catalog.get("engine").and_then(Value::as_str) == engine
+    } else { engine.is_none() }
+}
+
+fn claude_fast_state(catalog: &Value) -> Option<(bool, bool)> {
+    if text(catalog, "kind") != "engine" || catalog.get("supports_fast").and_then(Value::as_bool) != Some(true) { return None; }
+    let tier = catalog.pointer("/current/service_tier").and_then(Value::as_str);
+    let model = catalog.pointer("/current/model").and_then(Value::as_str);
+    let supported = catalog.get("models").and_then(Value::as_array).is_some_and(|models| models.iter()
+        .any(|m| model.is_some() && m.get("id").and_then(Value::as_str) == model
+            && m.get("supports_fast").and_then(Value::as_bool) == Some(true)));
+    Some((tier == Some("priority"), supported && matches!(tier, Some("default" | "priority"))))
+}
+
+fn confirmed_fast_tier(response: &Value) -> Option<&str> {
+    response.get("service_tier").and_then(Value::as_str)
+        .filter(|tier| response.get("ok").and_then(Value::as_bool) == Some(true) && matches!(*tier, "default" | "priority"))
+}
 
 fn codex_fast_state(catalog: &Value, live: Option<&str>) -> (bool, bool) {
     let tier = live.or_else(|| catalog.pointer("/current/service_tier").and_then(Value::as_str));
@@ -228,8 +320,12 @@ impl Hangar {
         let from_status = match ctl {
             Ctl::Model => status.as_ref().and_then(|s| s.model.clone()),
             Ctl::Effort => status.as_ref().and_then(|s| s.effort.clone()),
-            Ctl::Fast => self.chat.state.codex_service_tier.clone()
+            Ctl::Fast if self.provider().0 == "codex" => self.chat.state.codex_service_tier.clone()
                 .or_else(|| self.selected.as_ref().and_then(|s| s.codex_service_tier.clone())),
+            Ctl::Fast => self.selected.as_ref().filter(|_| self.provider().0 == "claude")
+                .and_then(|session| self.controls.model_catalog(&key, session))
+                .filter(|v| claude_fast_state(v).is_some())
+                .and_then(|v| v.pointer("/current/service_tier")).and_then(Value::as_str).map(str::to_owned),
             Ctl::Mode if self.provider().0 == "codex" => self.chat.state.codex_mode.clone(),
             Ctl::Mode => self.chat.state.claude_permission_mode.clone()
                 .or_else(|| self.controls.known.get(&(key.clone(), ctl)).map(|v| text(v, "current")).filter(|s| !s.is_empty())),
@@ -243,11 +339,13 @@ impl Hangar {
     pub(super) fn open_ctl(&mut self, ctl: Ctl, probe: bool, cx: &mut Context<Self>) {
         if self.open_read_only() { return; }
         let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
+        if let Some(session) = self.selected.clone() { self.controls.on_session_update(&key, &session); }
         if !probe && self.controls.open.as_ref().is_some_and(|o| o.key == key && o.ctl == ctl) { self.controls.open = None; cx.notify(); return; }
         self.command_panel = false;
         self.recent = None;
         let (provider, headless) = self.provider();
         let provider = provider.to_owned();
+        if provider == "claude" && ctl == Ctl::Model && self.controls.busy.contains_key(&key) { return; }
         let read: Option<(Vec<&'static str>, Vec<(&'static str, &'static str)>)> = match (provider.as_str(), ctl) {
             ("claude", Ctl::Model) => Some((vec!["model", "options"], vec![])),
             ("claude", Ctl::Effort) => None,
@@ -267,15 +365,31 @@ impl Hangar {
         self.controls.scroll = ScrollHandle::new();
         self.controls.revealed.set(false);
         if let Some((path, query)) = read {
-            let (connection, tx) = (self.connection, self.tx.clone());
             // `sondar` passa por todos os modos no terminal: timeout maior que a volta completa.
             let seconds = if probe { 60 } else { 45 };
-            self.runtime.spawn(async move {
-                let result = api.read(&key.name, &path, &query, seconds).await;
-                let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Reply(key, Reply::Catalog(ctl), result) }).await;
-            });
+            if provider == "claude" && ctl == Ctl::Model { self.read_claude_model_catalog(api, key, seconds); }
+            else {
+                let (connection, tx) = (self.connection, self.tx.clone());
+                self.runtime.spawn(async move {
+                    let result = api.read(&key.name, &path, &query, seconds).await;
+                    let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Reply(key, Reply::Catalog(ctl), result) }).await;
+                });
+            }
         }
         cx.notify();
+    }
+
+    fn read_claude_model_catalog(&mut self, api: Api, key: SessionKey, seconds: u64) {
+        let Some(identity) = self.controls.model_identities.get(&key).cloned() else { return; };
+        let (send, receive) = tokio::sync::oneshot::channel();
+        self.controls.model_reads.insert(key.clone(), (identity, receive));
+        let (connection, tx) = (self.connection, self.tx.clone());
+        self.runtime.spawn(async move {
+            let result = api.read(&key.name, &["model", "options"], &[], seconds).await;
+            if send.send(result).is_err() { return; }
+            let _ = tx.send(Envelope { connection, selection: None,
+                payload: Payload::Reply(key, Reply::Catalog(Ctl::Model), Ok(Value::Null)) }).await;
+        });
     }
 
     /// Alt+Shift+P e Shift+Tab no campo do Claude, como o web: o próximo modo do ciclo que a sessão aceita. Ciclo ainda
@@ -342,7 +456,9 @@ impl Hangar {
                 let engine = text(catalog, "kind") == "engine";
                 let models = list(catalog, "models");
                 let ids: Vec<(String, bool)> = models.iter().map(|m| (text(m, "id"), m.get("active").and_then(Value::as_bool) == Some(true))).collect();
-                let on = claude_model_current(&ids, &current);
+                let confirmed = catalog.pointer("/current/model").and_then(Value::as_str).filter(|_| engine);
+                let on = confirmed.map(|model| ids.iter().position(|(id, _)| id == model))
+                    .unwrap_or_else(|| claude_model_current(&ids, &current));
                 models.iter().enumerate().map(|(n, m)| {
                     let id = text(m, "id");
                     let name = Some(text(m, "name")).filter(|n| !n.is_empty()).unwrap_or_else(|| id.clone());
@@ -435,6 +551,15 @@ impl Hangar {
     fn apply_ctl(&mut self, ctl: Ctl, path: Vec<&'static str>, body: Value, label: String, cx: &mut Context<Self>) {
         let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
         if self.controls.busy.contains_key(&key) || !self.chat_online { return; }
+        if self.provider().0 == "claude" && matches!(ctl, Ctl::Model | Ctl::Fast) {
+            let Some(session) = self.selected.clone() else { return; };
+            self.controls.on_session_update(&key, &session);
+            let catalog = self.controls.model_catalog(&key, &session);
+            if (path.first() == Some(&"engine") && catalog.is_none())
+                || (ctl == Ctl::Fast && !catalog.and_then(claude_fast_state).is_some_and(|(_, available)| available)) { return; }
+            self.controls.model_reads.remove(&key);
+            self.controls.model_actions.insert(key.clone(), Some(ModelIdentity::of(&session)));
+        }
         self.controls.busy.insert(key.clone(), ctl);
         self.action_feedback.remove(&key);
         let before = self.ctl_live(ctl);
@@ -448,8 +573,25 @@ impl Hangar {
     }
 
     pub(super) fn receive_control(&mut self, key: SessionKey, reply: Reply, result: Result<Value, Failure>, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.selected.clone().filter(|_| self.selected_key().as_ref() == Some(&key));
+        if let Some(session) = &current { self.controls.on_session_update(&key, session); }
         match reply {
             Reply::Catalog(ctl) => {
+                let claude_catalog = ctl == Ctl::Model && result.as_ref().is_ok_and(Value::is_null);
+                let result = if claude_catalog {
+                    let Some(session) = &current else { self.controls.model_reads.remove(&key); return; };
+                    let Some(result) = self.controls.take_model_catalog(&key, &ModelIdentity::of(session)) else { return; };
+                    result.and_then(|catalog| if catalog_engine_matches(&catalog, session.engine.as_deref()) { Ok(catalog) }
+                        else { Err(Failure::local(tr("request_changed"))) })
+                } else { result };
+                if ctl == Ctl::Model {
+                    // Uma nova leitura vence a confirmação anterior, inclusive quando o motor mudou.
+                    self.controls.remember_model_catalog(&key, result.as_ref().ok());
+                }
+                if claude_catalog && let Err(error) = &result {
+                    if self.chat_auth_lost(error) { self.open_connection(window, cx); }
+                    self.action_feedback.insert(key.clone(), (Self::failure(error), true));
+                }
                 if let Ok(value) = &result {
                     if matches!(ctl, Ctl::Mode | Ctl::Permission) && !value.is_null() {
                         // Lista vazia nunca apaga um ciclo já conhecido.
@@ -481,6 +623,16 @@ impl Hangar {
             }
             Reply::Applied(ctl, label, before) => {
                 if self.controls.busy.get(&key) == Some(&ctl) { self.controls.busy.remove(&key); }
+                let origin = self.controls.model_actions.remove(&key);
+                let claude_model_action = origin.is_some();
+                if let Some(identity) = origin {
+                    if identity.is_none() || identity != current.as_ref().map(ModelIdentity::of) { return; }
+                }
+                let claude_fast = claude_model_action && ctl == Ctl::Fast;
+                let result = result.and_then(|value| {
+                    if claude_fast && confirmed_fast_tier(&value).is_none() { Err(Failure::local(tr("invalid_response"))) }
+                    else { Ok(value) }
+                });
                 match result {
                     Ok(value) => {
                         // A resposta do backend é a verdade: Pi/Kimi devolvem o que ficou de fato.
@@ -493,7 +645,14 @@ impl Hangar {
                         };
                         let pending = value.get("pending_confirm").is_some_and(|v| !v.is_null());
                         let partial = value.get("effort_error").is_some_and(|v| !v.is_null());
-                        // Fast confirmado já chegou pelo estado ao vivo; guardar o rótulo deixaria um valor velho vencer o SSE.
+                        if claude_fast && !pending { self.controls.confirm_claude_fast(&key, &label); }
+                        if ctl == Ctl::Model && !pending {
+                            if claude_model_action {
+                                // O backend pode conservar Fast na troca de GPT; só a nova leitura diz o tier que ficou.
+                                if let Some(api) = self.session_api() { self.read_claude_model_catalog(api, key.clone(), 45); }
+                            } else { self.controls.known.remove(&(key.clone(), Ctl::Model)); }
+                        }
+                        // No Codex, guardar Fast no rótulo deixaria um valor velho vencer o SSE.
                         if !pending && !matches!(ctl, Ctl::Mode | Ctl::Fast) {
                             self.controls.applied.insert((key.clone(), ctl), (label.clone(), before));
                         }
@@ -561,7 +720,7 @@ impl Hangar {
             let value = self.ctl_label(ctl).map(|v| shown(ctl, v)).map(|v| if claude && ctl == Ctl::Model { spaced(&v) } else { v });
             if paired && ctl == Ctl::Model {
                 let effort = self.ctl_label(Ctl::Effort).map(|e| effort_label(&e));
-                let fast = self.provider().0 == "codex" && self.ctl_label(Ctl::Fast).as_deref() == Some("priority");
+                let fast = self.ctl_label(Ctl::Fast).as_deref() == Some("priority");
                 let applying = match busy { Some(Ctl::Model) => Some(name.clone()), Some(Ctl::Effort) => Some(tr("ctl_effort")), Some(Ctl::Fast) => Some(tr("ctl_fast")), _ => None };
                 let text = applying.map(|what| tr("ctl_applying").replace("{what}", &what)).or(value.clone()).unwrap_or_else(|| name.clone());
                 let aria = [Some(format!("{name}: {text}")), effort.clone().map(|e| format!("{}: {e}", tr("ctl_effort"))), fast.then(|| tr("ctl_fast"))]
@@ -718,9 +877,16 @@ impl Hangar {
     }
 
     fn render_fast_footer(&self, catalog: &Value, busy: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.provider().0 != "codex" { return None; }
-        let live = self.ctl_label(Ctl::Fast);
-        let (on, available) = codex_fast_state(catalog, live.as_deref());
+        let (on, available) = match self.provider().0 {
+            "codex" => codex_fast_state(catalog, self.ctl_label(Ctl::Fast).as_deref()),
+            "claude" => {
+                let (Some(key), Some(session)) = (self.selected_key(), self.selected.as_ref()) else { return None; };
+                self.controls.model_catalog(&key, session)?;
+                if !catalog_engine_matches(catalog, session.engine.as_deref()) { return None; }
+                claude_fast_state(catalog)?
+            },
+            _ => return None,
+        };
         Some(div().flex().items_center().gap_2().px_2().py_1()
             .child(div().flex_1().min_w_0().flex().flex_col().gap_1()
                 .child(div().text_sm().child(tr("ctl_fast")))
@@ -740,6 +906,13 @@ impl Hangar {
         let open = self.controls.open.as_ref().filter(|o| o.key == key)?;
         let ctl = open.ctl;
         let (provider, headless) = self.provider();
+        if provider == "claude" && ctl == Ctl::Model {
+            let session = self.selected.as_ref()?;
+            if self.controls.model_identities.get(&key) != Some(&ModelIdentity::of(session)) { return None; }
+            if let Some(Ok(catalog)) = &open.catalog {
+                if !catalog_engine_matches(catalog, session.engine.as_deref()) { return None; }
+            }
+        }
         let busy = self.controls.busy.contains_key(&key);
         let probe_note = match (provider, ctl) {
             ("claude", Ctl::Mode) if !headless => Some("mode_probe_hint"),
@@ -1096,6 +1269,191 @@ mod tests {
         assert_eq!(codex_fast_state(&serde_json::json!({}), Some("priority")), (true, true));
         let hidden = serde_json::json!({"current": {"model": "m"}, "models": [{"model": "m", "serviceTiers": [{"id": "priority", "hidden": true}]}]});
         assert_eq!(codex_fast_state(&hidden, Some("default")), (false, false));
+    }
+
+    #[test]
+    fn claude_fast_requires_local_engine_capability_and_confirmed_model_tier() {
+        let mut catalog = serde_json::json!({
+            "kind": "engine", "supports_fast": true,
+            "current": {"model": "gpt-supported", "service_tier": "default"},
+            "models": [{"id": "gpt-supported", "supports_fast": true}, {"id": "other", "supports_fast": false}]
+        });
+        assert_eq!(super::claude_fast_state(&catalog), Some((false, true)));
+        catalog["current"]["service_tier"] = serde_json::json!("priority");
+        assert_eq!(super::claude_fast_state(&catalog), Some((true, true)));
+        catalog["current"]["model"] = serde_json::json!("other");
+        assert_eq!(super::claude_fast_state(&catalog), Some((true, false)));
+        catalog["current"]["model"] = serde_json::json!("account/gpt-supported");
+        assert_eq!(super::claude_fast_state(&catalog), Some((true, false)));
+        catalog["current"]["model"] = serde_json::json!("gpt-supported");
+        catalog["current"]["service_tier"] = serde_json::Value::Null;
+        assert_eq!(super::claude_fast_state(&catalog), Some((false, false)));
+        catalog["supports_fast"] = serde_json::json!(false);
+        assert_eq!(super::claude_fast_state(&catalog), None);
+        catalog["supports_fast"] = serde_json::json!(true);
+        catalog["kind"] = serde_json::json!("claude");
+        assert_eq!(super::claude_fast_state(&catalog), None);
+    }
+
+    #[test]
+    fn claude_fast_confirmation_is_scoped_and_fresh_catalog_wins() {
+        let key = super::SessionKey { server: "machine".into(), name: "session".into(), jsonl: "conversation".into() };
+        let other = super::SessionKey { server: "another".into(), ..key.clone() };
+        let catalog = serde_json::json!({"kind":"engine", "supports_fast":true,
+            "current":{"model":"gpt", "service_tier":"default"}, "models":[{"id":"gpt", "supports_fast":true}]});
+        let mut controls = super::Controls::default();
+        controls.remember_model_catalog(&key, Some(&catalog));
+        controls.remember_model_catalog(&other, Some(&catalog));
+        controls.open = Some(super::Open { key: key.clone(), ctl: super::Ctl::Model, catalog: Some(Ok(catalog.clone())) });
+        let response = serde_json::json!({"ok":true, "service_tier":"priority"});
+        controls.confirm_claude_fast(&key, super::confirmed_fast_tier(&response).unwrap());
+        assert_eq!(super::claude_fast_state(&controls.known[&(key.clone(), super::Ctl::Model)]), Some((true, true)));
+        assert_eq!(super::claude_fast_state(controls.open.as_ref().unwrap().catalog.as_ref().unwrap().as_ref().unwrap()), Some((true, true)));
+        assert_eq!(controls.known[&(other, super::Ctl::Model)], catalog);
+        assert!(controls.applied.is_empty());
+        controls.remember_model_catalog(&key, Some(&catalog));
+        assert_eq!(super::claude_fast_state(&controls.known[&(key.clone(), super::Ctl::Model)]), Some((false, true)));
+        controls.remember_model_catalog(&key, None);
+        assert!(!controls.known.contains_key(&(key, super::Ctl::Model)));
+        for invalid in [serde_json::json!({"ok":true}), serde_json::json!({"service_tier":"priority"}),
+            serde_json::json!({"ok":false, "service_tier":"priority"}), serde_json::json!({"ok":true, "service_tier":"fast"})] {
+            assert_eq!(super::confirmed_fast_tier(&invalid), None);
+        }
+    }
+
+    #[test]
+    fn replaced_model_reads_and_reads_before_fast_change_cannot_overwrite_confirmation() {
+        let key = super::SessionKey { server: "machine".into(), name: "session".into(), jsonl: "conversation".into() };
+        let mut controls = super::Controls::default();
+        let identity = super::ModelIdentity::of(&super::SessionInfo { provider: "claude".into(), engine: Some("proxy".into()), ..Default::default() });
+        let (old_send, old_receive) = tokio::sync::oneshot::channel();
+        controls.model_reads.insert(key.clone(), (identity.clone(), old_receive));
+        old_send.send(Ok(serde_json::json!({"current":{"service_tier":"default"}}))).unwrap();
+        let (new_send, new_receive) = tokio::sync::oneshot::channel();
+        controls.model_reads.insert(key.clone(), (identity.clone(), new_receive));
+        // A notificação antiga já enfileirada não consome uma leitura nova ainda incompleta.
+        assert!(controls.take_model_catalog(&key, &identity).is_none());
+        let newest = serde_json::json!({"current":{"service_tier":"priority"}});
+        new_send.send(Ok(newest.clone())).unwrap();
+        assert_eq!(controls.take_model_catalog(&key, &identity).unwrap().unwrap(), newest);
+        assert!(controls.take_model_catalog(&key, &identity).is_none());
+        let (send, receive) = tokio::sync::oneshot::channel();
+        controls.model_reads.insert(key.clone(), (identity.clone(), receive));
+        controls.model_reads.remove(&key);
+        assert!(send.send(Ok(serde_json::Value::Null)).is_err());
+        assert!(controls.take_model_catalog(&key, &identity).is_none());
+    }
+
+    #[test]
+    fn claude_model_refresh_keeps_confirmed_priority_and_unknown_stays_unknown() {
+        let key = super::SessionKey { server: "machine".into(), name: "session".into(), jsonl: "conversation".into() };
+        let session = super::SessionInfo { provider: "claude".into(), engine: Some("proxy".into()), ..Default::default() };
+        let identity = super::ModelIdentity::of(&session);
+        let mut controls = super::Controls::default();
+        let mut catalog = serde_json::json!({"kind":"engine", "engine":"proxy", "supports_fast":true,
+            "current":{"model":"gpt-one", "service_tier":"priority"},
+            "models":[{"id":"gpt-one", "supports_fast":true}, {"id":"gpt-two", "supports_fast":true}]});
+        controls.on_session_update(&key, &session);
+        controls.remember_model_catalog(&key, Some(&catalog));
+        let (send, receive) = tokio::sync::oneshot::channel();
+        controls.model_reads.insert(key.clone(), (identity.clone(), receive));
+        controls.on_session_update(&key, &session);
+        assert_eq!(super::claude_fast_state(controls.model_catalog(&key, &session).unwrap()), Some((true, true)));
+        assert!(controls.take_model_catalog(&key, &identity).is_none());
+        catalog["current"]["model"] = serde_json::json!("gpt-two");
+        send.send(Ok(catalog)).unwrap();
+        let refreshed = controls.take_model_catalog(&key, &identity).unwrap().unwrap();
+        controls.remember_model_catalog(&key, Some(&refreshed));
+        assert_eq!(controls.model_catalog(&key, &session).unwrap().pointer("/current/model"), Some(&serde_json::json!("gpt-two")));
+        assert_eq!(super::claude_fast_state(controls.model_catalog(&key, &session).unwrap()), Some((true, true)));
+        let mut unknown = refreshed;
+        unknown["current"]["service_tier"] = serde_json::Value::Null;
+        controls.remember_model_catalog(&key, Some(&unknown));
+        assert_eq!(super::claude_fast_state(controls.model_catalog(&key, &session).unwrap()), Some((false, false)));
+        assert!(controls.model_catalog(&key, &session).unwrap().pointer("/current/service_tier").unwrap().is_null());
+    }
+
+    #[test]
+    fn model_identity_changes_invalidate_catalog_reads_and_actions_even_after_switching_back() {
+        let key = super::SessionKey { server: "machine".into(), name: "session".into(), jsonl: "conversation".into() };
+        let session = super::SessionInfo { provider: "claude".into(), engine: Some("proxy".into()),
+            engine_account: Some("account-one".into()), conta: Some("claude-one".into()), lifecycle_id: Some("first".into()), ..Default::default() };
+        let identity = super::ModelIdentity::of(&session);
+        let catalog = serde_json::json!({"kind":"engine", "engine":"proxy", "supports_fast":true,
+            "current":{"model":"gpt", "service_tier":"priority"}, "models":[{"id":"gpt", "supports_fast":true}]});
+        let mut changes = Vec::new();
+        let mut changed = session.clone(); changed.engine = None; changes.push(changed);
+        let mut changed = session.clone(); changed.engine = Some("another-proxy".into()); changes.push(changed);
+        let mut changed = session.clone(); changed.engine_account = Some("account-two".into()); changes.push(changed);
+        let mut changed = session.clone(); changed.conta = Some("claude-two".into()); changes.push(changed);
+        let mut changed = session.clone(); changed.lifecycle_id = Some("second".into()); changes.push(changed);
+        let mut changed = session.clone(); changed.provider = "codex".into(); changes.push(changed);
+        for changed in changes {
+            let mut controls = super::Controls::default();
+            controls.on_session_update(&key, &session);
+            controls.remember_model_catalog(&key, Some(&catalog));
+            controls.open = Some(super::Open { key: key.clone(), ctl: super::Ctl::Model, catalog: Some(Ok(catalog.clone())) });
+            controls.applied.insert((key.clone(), super::Ctl::Model), ("gpt".into(), None));
+            controls.busy.insert(key.clone(), super::Ctl::Fast);
+            controls.model_actions.insert(key.clone(), Some(identity.clone()));
+            let (send, receive) = tokio::sync::oneshot::channel();
+            controls.model_reads.insert(key.clone(), (identity.clone(), receive));
+            send.send(Ok(catalog.clone())).unwrap();
+            assert!(controls.model_catalog(&key, &changed).is_none());
+            controls.on_session_update(&key, &changed);
+            assert!(controls.model_catalog(&key, &changed).is_none());
+            assert!(!controls.known.contains_key(&(key.clone(), super::Ctl::Model)));
+            assert!(!controls.applied.contains_key(&(key.clone(), super::Ctl::Model)));
+            assert!(controls.open.is_none());
+            assert!(controls.take_model_catalog(&key, &identity).is_none());
+            assert_eq!(controls.model_actions.get(&key), Some(&None));
+            assert_eq!(controls.busy.get(&key), Some(&super::Ctl::Fast));
+            controls.on_session_update(&key, &session);
+            assert_eq!(controls.model_actions.remove(&key), Some(None));
+            assert!(controls.model_catalog(&key, &session).is_none());
+        }
+        assert!(!super::catalog_engine_matches(&catalog, None));
+        assert!(!super::catalog_engine_matches(&catalog, Some("another-proxy")));
+        let mut controls = super::Controls::default();
+        let (send, receive) = tokio::sync::oneshot::channel();
+        controls.model_reads.insert(key.clone(), (identity.clone(), receive));
+        send.send(Ok(catalog)).unwrap();
+        let mut different = identity.clone(); different.engine = None;
+        assert!(controls.take_model_catalog(&key, &different).is_none());
+        assert!(controls.take_model_catalog(&key, &identity).is_none());
+        controls.model_actions.insert(key.clone(), Some(identity));
+        controls.on_select();
+        assert_eq!(controls.model_actions.remove(&key), Some(None));
+    }
+
+    #[test]
+    fn leaving_before_fast_confirmation_or_model_refresh_drops_the_old_badge() {
+        let key = super::SessionKey { server: "machine".into(), name: "session".into(), jsonl: "conversation".into() };
+        let session = super::SessionInfo { provider: "claude".into(), engine: Some("proxy".into()), ..Default::default() };
+        let identity = super::ModelIdentity::of(&session);
+        for refreshing in [false, true] {
+            let mut controls = super::Controls::default();
+            let mut catalog = serde_json::json!({"kind":"engine", "engine":"proxy", "supports_fast":true,
+                "current":{"model":"gpt", "service_tier":"priority"}, "models":[{"id":"gpt", "supports_fast":true}]});
+            controls.on_session_update(&key, &session);
+            controls.remember_model_catalog(&key, Some(&catalog));
+            controls.applied.insert((key.clone(), super::Ctl::Model), ("gpt".into(), None));
+            if refreshing {
+                let (send, receive) = tokio::sync::oneshot::channel();
+                controls.model_reads.insert(key.clone(), (identity.clone(), receive));
+                send.send(Ok(catalog.clone())).unwrap();
+            } else { controls.model_actions.insert(key.clone(), Some(identity.clone())); }
+            controls.on_select();
+            controls.on_session_update(&key, &session);
+            assert!(controls.model_catalog(&key, &session).is_none());
+            assert!(!controls.applied.contains_key(&(key.clone(), super::Ctl::Model)));
+            assert!(controls.take_model_catalog(&key, &identity).is_none());
+            assert_eq!(controls.model_actions.remove(&key), if refreshing { None } else { Some(None) });
+            assert!(controls.model_catalog(&key, &session).is_none());
+            catalog["current"]["service_tier"] = serde_json::json!("default");
+            controls.remember_model_catalog(&key, Some(&catalog));
+            assert_eq!(super::claude_fast_state(controls.model_catalog(&key, &session).unwrap()), Some((false, true)));
+        }
     }
 
     #[test]

@@ -1549,12 +1549,17 @@ def test_processo_herda_chave_e_nao_o_pane_do_operador(sidecar, monkeypatch, lan
     assert visto["cano"]["escuta"].startswith(("unix:", "tcp:"))
 
 
-def test_sessao_com_motor_chama_o_hangar_engine_pelo_caminho_resolvido(sidecar, monkeypatch, lancador_cano):
+@pytest.mark.parametrize("tier,supported", [(None, False), ("default", True), ("priority", True), ("default", False)])
+def test_sessao_com_motor_chama_o_hangar_engine_pelo_caminho_resolvido(sidecar, monkeypatch, lancador_cano, tier, supported):
     # No Windows o `hangar-engine` é `.CMD`: o CreateProcess do cano não acha o nome sem extensão.
+    from app import cliproxy
+    monkeypatch.setattr(cliproxy, "supports_fast", lambda *a: supported)
+    monkeypatch.setenv("CP_ENGINE_SERVICE_TIER", "inherited")
     visto = {}
 
     async def exec_falso(*argv, env, **kw):
         visto["argv"] = argv
+        visto["env"] = env
 
         class _P:
             pid = 1
@@ -1570,7 +1575,7 @@ def test_sessao_com_motor_chama_o_hangar_engine_pelo_caminho_resolvido(sidecar, 
     exe = r"C:\Users\x\.local\bin\hangar-engine.CMD"
     monkeypatch.setattr(A.shutil, "which", lambda b: exe if b == "hangar-engine" else None)
     ad = ClaudeHeadlessAdapter()
-    sess = _Sessao("s1", S.update("s1", engine="kimi"))
+    sess = _Sessao("s1", S.update("s1", engine="kimi", service_tier=tier))
     ad._conectar = conectar_falso                 # type: ignore[method-assign]
     ad._ler = lambda s: asyncio.sleep(0)          # type: ignore[method-assign]
     ad._agendar_cota = lambda s: None             # type: ignore[method-assign]
@@ -1580,6 +1585,23 @@ def test_sessao_com_motor_chama_o_hangar_engine_pelo_caminho_resolvido(sidecar, 
     depois_do_cano = argv[argv.index("--", argv.index(lancador_cano[-1])) + 1:]
     assert depois_do_cano[:3] == [exe, "--exec", "kimi"]
     assert depois_do_cano[depois_do_cano.index("--") + 1] == "claude"
+    if tier is not None and supported:
+        assert depois_do_cano[depois_do_cano.index("--service-tier") + 1] == tier
+    else:
+        assert "--service-tier" not in depois_do_cano
+    assert "CP_ENGINE_SERVICE_TIER" not in visto["env"]
+
+
+def test_headless_priority_incompatible_refuses_before_spawn(sidecar, monkeypatch):
+    from unittest.mock import MagicMock
+    from app import cliproxy
+    monkeypatch.setattr(cliproxy, "supports_fast", lambda *a: False)
+    spawn = MagicMock()
+    monkeypatch.setattr(A, "subir_cano_processo", spawn)
+    sess = _Sessao("s1", S.update("s1", engine="kimi", service_tier="priority"))
+    with pytest.raises(ValueError, match="service_tier"):
+        _run(ClaudeHeadlessAdapter()._lancar_cano(sess))
+    spawn.assert_not_called()
 
 
 def test_religa_no_cano_vivo_e_recupera_permissao_pendente(sidecar, monkeypatch):

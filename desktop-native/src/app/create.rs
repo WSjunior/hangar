@@ -753,6 +753,7 @@ impl NewSession {
         self.engine_account_pick = None;
         // O catálogo da outra máquina não vale aqui; o novo vem depois das contas.
         self.models.reset();
+        self.service_tier = None;
         self.before = None;
         self.load_target(cx);
         // O arquivo da pasta volta vazio até a pasta nova.
@@ -1054,7 +1055,6 @@ impl NewSession {
     pub(super) fn can_create(&self, cx: &App) -> bool {
         !self.is_transfer() && !self.creating && !self.headless_saving && !self.jev.loading && self.picked.is_some() && !self.sessions.loading && (self.compact || !self.name.read(cx).value().trim().is_empty())
             && self.provider_ready() == Some(true) && self.codex_ready() && self.engine_ready() && !(self.provider == "codex" && self.context_busy)
-            && (self.provider != "codex" || self.service_tier.as_deref() != Some("priority") || self.fast_available())
             && (!self.compact || ((self.provider != "claude" || (!self.configs.loading && self.configs.ok().is_some_and(|list| !list.is_empty())))
                 && !self.models.loading && self.models.ok().is_some()
                 && !self.checkout.loading))
@@ -1089,13 +1089,12 @@ impl NewSession {
                 // O motor exporta o próprio modelo de subagente: com ele, o campo nem aparece.
                 if self.engine.is_empty() && !self.subagent.is_empty() { body["subagent_model"] = json!(self.subagent); }
             }
-            "codex" => {
-                body["codex_account"] = json!(self.codex_account);
-                if let Some(tier) = &self.service_tier { body["service_tier"] = json!(tier); }
-            },
+            "codex" => { body["codex_account"] = json!(self.codex_account); },
             "omp" => { let profile = self.omp.read(cx).value().trim().to_owned(); if !profile.is_empty() { body["omp_profile"] = json!(profile); } }
             _ => {}
         }
+        // Escolha incompatível não bloqueia a criação nem vai para outro harness.
+        if let Some(tier) = self.service_tier_for_creation() { body["service_tier"] = json!(tier); }
         if matches!(provider, "claude" | "codex") && !self.headless_inherited() {
             body["headless"] = json!(self.headless);
             if provider == "codex" && self.headless { body["permission_mode"] = text(&self.permission); }

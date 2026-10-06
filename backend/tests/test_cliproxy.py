@@ -209,10 +209,69 @@ def test_model_options_return_base_models_only_for_fixed_account(cli, tmp_path, 
     response = cli.get("/api/model-options", headers=AUTH,
                        params={"provider": "claude", "engine": "proxy", "engine_account": "default"})
     assert response.status_code == 200, response.text
-    assert response.json()["models"] == [{"id": "gpt-5.5", "context_length": 400000, "vision": None}]
+    assert response.json()["models"] == [{"id": "gpt-5.5", "context_length": 400000, "vision": None, "supports_fast": True}]
+    assert response.json()["supports_fast"] is True
     response = cli.get("/api/model-options", headers=AUTH,
                        params={"provider": "claude", "engine": "proxy", "engine_account": "missing"})
     assert response.status_code == 400
+
+
+@pytest.mark.parametrize("model,local_proxy,expected", [
+    ("gpt-5.5", True, True), ("fixed/gpt-6.1-sol", True, True),
+    ("gpt-image-2", True, False), ("k3", True, False),
+    ("gpt-5.5", False, False),
+])
+def test_fast_requires_gpt_on_local_proxy(tmp_path, monkeypatch, model, local_proxy, expected):
+    _fixed_engine(tmp_path, monkeypatch)
+    if not local_proxy:
+        cfg = eng.listar()["proxy"]
+        eng.salvar("proxy", {**cfg, "base_url": "https://example.test"})
+    assert cliproxy.supports_fast("proxy", model) is expected
+    assert cliproxy.supports_fast(None, model) is False
+
+
+@pytest.mark.parametrize("tier", ["default", "priority"])
+def test_session_model_catalog_exposes_confirmed_proxy_fast(cli, tmp_path, monkeypatch, tier):
+    from app import api
+    from app.models import SessionInfo
+    _fixed_engine(tmp_path, monkeypatch)
+    monkeypatch.setattr(api, "_cached_info", AsyncMock(return_value=SessionInfo(
+        name="fixed", provider="claude", engine="proxy", engine_account="default")))
+    monkeypatch.setattr(api, "_engine_fast_selection", lambda name: ("fixed/gpt-5.5", tier))
+    response = cli.get("/api/sessions/fixed/model/options", headers=AUTH)
+    assert response.status_code == 200, response.text
+    assert response.json()["supports_fast"] is True
+    assert response.json()["current"] == {"model": "gpt-5.5", "service_tier": tier}
+
+
+@pytest.mark.parametrize("tier", ["default", "priority"])
+def test_create_claude_proxy_forwards_fast(cli, tmp_path, monkeypatch, tier):
+    from app import api
+    from app.models import SessionInfo
+    _fixed_engine(tmp_path, monkeypatch)
+    create = MagicMock(return_value=SessionInfo(name="fixed", provider="claude", engine="proxy"))
+    monkeypatch.setattr(api.registry, "create", create)
+    response = cli.post("/api/sessions", headers=AUTH, json={
+        "name": "fixed", "cwd": str(tmp_path), "provider": "claude", "engine": "proxy",
+        "engine_account": "default", "model": "gpt-5.5", "service_tier": tier})
+    assert response.status_code == 200, response.text
+    assert create.call_args.kwargs["service_tier"] == tier
+
+
+def test_fast_blocks_incompatible_model_before_reopen(cli, tmp_path, monkeypatch):
+    from app import api
+    from app.models import SessionInfo
+    _fixed_engine(tmp_path, monkeypatch)
+    monkeypatch.setattr(api, "_cached_info", AsyncMock(return_value=SessionInfo(
+        name="fixed", provider="claude", engine="proxy")))
+    monkeypatch.setattr(api, "_engine_models", AsyncMock(return_value=[{"id": "k3"}]))
+    monkeypatch.setattr(api, "_engine_fast_selection", lambda name: ("gpt-5.5", "priority"))
+    apply = MagicMock()
+    monkeypatch.setattr(api.terminal, "set_engine_model", apply)
+    response = cli.post("/api/sessions/fixed/engine/model", headers=AUTH, json={"model": "k3"})
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "erro_fast_indisponivel"
+    apply.assert_not_called()
 
 
 def test_create_fixed_account_is_independent_of_claude_config(cli, tmp_path, monkeypatch):
@@ -288,6 +347,16 @@ def test_local_le_host_porta_e_primeira_chave(tmp_path):
 
 def test_local_sem_config_e_none(tmp_path):
     assert cliproxy.local() is None
+
+
+def test_remote_fast_catalog_survives_invalid_local_proxy(tmp_path, monkeypatch):
+    _config(tmp_path, "port: 8317\napi-keys: []\n")
+    eng.salvar("remote", {"base_url": "https://example.test", "api_key": "test", "model": "gpt-5.5"})
+    diagnostic = MagicMock()
+    monkeypatch.setattr("app.diag.registrar", diagnostic)
+    assert cliproxy.supports_fast("remote") is False
+    diagnostic.assert_called_once()
+    assert diagnostic.call_args.args == ("cliproxy.fast_unavailable", "erro")
 
 
 def test_local_sem_chave_levanta(tmp_path):

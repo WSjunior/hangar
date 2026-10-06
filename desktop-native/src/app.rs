@@ -1751,7 +1751,10 @@ impl Hangar {
                     self.open_session(self.open_api.clone(), new, window, cx);
                     if let Some(from) = moved { self.drafts.remove(&from); }
                 }
-                Some(new) => self.selected = Some(new),
+                Some(new) => {
+                    if let Some(key) = self.selected_key() { self.controls.on_session_update(&key, &new); }
+                    self.selected = Some(new);
+                }
                 None => {
                     self.close_terminal(false, window, cx);
                     self.selection += 1;
