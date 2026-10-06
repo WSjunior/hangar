@@ -211,7 +211,9 @@ pub fn terminal_router(state: Arc<AppState>) -> Router {
     let router = Router::new()
         .route("/__hangar_server/terminal", axum::routing::post(crate::terminal_routes::terminal))
         .route("/__hangar_server/workspace", axum::routing::post(crate::workspace_routes::private))
-        .route("/__hangar_server/list", axum::routing::post(crate::list::bridge::private));
+        .route("/__hangar_server/list", axum::routing::post(crate::list::bridge::private))
+        .layer(axum::middleware::from_fn(crate::migration_status::count_bridge));
+    // Painel e canal do estado ficam fora da contagem: conexões longas, não chamadas da ponte.
     router.route("/__hangar_server/term", get(crate::term::private_ws))
         .route("/__hangar_server/state/{name}/events", get(crate::side::private_events))
         .with_state(state)
@@ -251,7 +253,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/costs", get(crate::costs_routes::costs).fallback(pass_any))
         .route("/api/cotacao", get(crate::costs_routes::cotacao).fallback(pass_any))
         .route("/api/uso", get(crate::costs_routes::usage).fallback(pass_any))
+        .route("/api/migration/status", get(crate::migration_status::status).fallback(pass_any))
         .fallback(pass_any)
+        .layer(axum::middleware::from_fn(crate::migration_status::count_public))
         .with_state(state)
 }
 
@@ -276,7 +280,8 @@ pub(crate) fn gate(st: &AppState, peer: SocketAddr, req: &Request) -> (Forward, 
 
 pub(crate) async fn pass(st: &AppState, req: Request, fwd: &Forward) -> Response {
     let upgrade = req.headers().contains_key(header::UPGRADE);
-    let resp = proxy::forward(&st.http, st.cfg.upstream, req, fwd).await;
+    let mut resp = proxy::forward(&st.http, st.cfg.upstream, req, fwd).await;
+    resp.extensions_mut().insert(crate::migration_status::Forwarded);
     match resp.status() {
         StatusCode::UNAUTHORIZED => st.auth.record_fail(&fwd.client_ip),
         // WebSocket recusado antes do aceite chega como 403 e o Python já contou a falha.

@@ -22,6 +22,7 @@
     'shared-config': m.shared_config_title,
     computer: m.computer_control_title,
     jev: m.jev_title,
+    migration: m.migration_title,
   };
 
   export interface EntradaBusca {

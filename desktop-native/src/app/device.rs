@@ -126,6 +126,8 @@ pub(super) struct Device {
     /// Marca do estado lido antes do clique: "pronto" com a mesma marca é o desfecho de uma atualização anterior.
     baseline_ts: Option<String>,
     diary_scroll: ScrollHandle,
+    pub(super) migration: Remote<Option<super::migration::MigrationView>>,
+    pub(super) migration_poll: Option<Task<()>>,
 }
 
 impl Drop for Device {
@@ -163,6 +165,7 @@ pub(super) enum DeviceReply {
     Channel(u64, bool, Result<Value, Failure>),
     Started(u64, Result<Value, Failure>),
     Tick(u64, Result<Value, Failure>),
+    Migration(u64, Result<Value, Failure>),
 }
 
 /// Valor em dólar na moeda escolhida. Real sem cotação fica em dólar.
@@ -172,7 +175,7 @@ pub(super) fn money(usd: f64, currency: Currency, rate: Option<f64>) -> String {
     format!("{symbol} {}", format!("{value:.2}").replace('.', &tr("decimal")))
 }
 
-fn size_text(bytes: u64) -> String {
+pub(super) fn size_text(bytes: u64) -> String {
     let (value, unit) = match bytes { b if b >= 1 << 20 => (b as f64 / (1 << 20) as f64, "MB"), b if b >= 1 << 10 => (b as f64 / 1024., "KB"), b => (b as f64, "B") };
     let text = if unit == "B" { format!("{value:.0}") } else { format!("{value:.1}").replace('.', &tr("decimal")) };
     format!("{text} {unit}")
@@ -238,6 +241,8 @@ impl Hangar {
         self.device = Device::new(window, cx);
         self.sync_channel_update_guard(cx);
         self.load_rate(cx);
+        // A troca levou a leitura periódica junto; com a página aberta, ela recomeça no servidor novo.
+        if self.settings == Some(Page::Migration) { self.migration_opened(cx); }
     }
 
     /// Página aberta: pede o que ela mostra do servidor.
@@ -264,6 +269,7 @@ impl Hangar {
             Page::Sync => self.sync_opened(cx),
             Page::Connect => self.connect_opened(cx),
             Page::SharedConfig => self.shared_config_opened(cx),
+            Page::Migration => self.migration_opened(cx),
             _ => {}
         }
     }
@@ -337,7 +343,7 @@ impl Hangar {
     }
 
     /// Envio de resposta para depois, amarrado à conexão de agora.
-    fn device_send_later(&self) -> impl Fn(DeviceReply) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'static {
+    pub(super) fn device_send_later(&self) -> impl Fn(DeviceReply) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'static {
         let (tx, connection) = (self.tx.clone(), self.connection);
         move |reply| {
             let tx = tx.clone();
@@ -456,6 +462,9 @@ impl Hangar {
                         }
                     }
                 }
+            }
+            DeviceReply::Migration(seq, result) => {
+                self.device.migration.finish(seq, result.map(|v| super::migration::parse(&v)).map_err(|e| Self::failure(&e)));
             }
             DeviceReply::Rate(seq, result) => {
                 let parsed = result.map_err(|e| Self::failure(&e))
@@ -792,6 +801,9 @@ impl Hangar {
             .child(self.heading("settings_about_app_group")).child(settings_box().child(app_row))
             .child(self.heading("settings_about_server_group"))
             .child(settings_box().child(server_row).child(update_row).children(progress))
+            .when(!self.active_invite() && self.api.is_some(), |el| el.child(div().mt(px(12.)).child(Button::new("migration-open").outline().small()
+                .icon(IconName::Activity).label(tr_shared("migration_open", &[]))
+                .on_click(cx.listener(|this, _, window, cx| this.open_settings(Page::Migration, window, cx))))))
             .when(!self.active_invite() && !self.device.channel.unsupported, |el| el.child(self.heading("settings_channel_title")).child(self.render_channel(cx)))
             .into_any_element()
     }

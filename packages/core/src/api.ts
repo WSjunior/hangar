@@ -18,6 +18,7 @@ import type { UsoFiltros, UsoReport } from './uso';
 import type { ConfigSyncItem, ConfigSyncManifest, ConfigSyncProgress, ConfigSyncReport } from './configSync';
 import type {
   Atualizacao,
+  MigrationStatus,
   SessionInfo,
   Provider,
   ChatEvent,
@@ -1796,6 +1797,12 @@ export function getConfig(): Promise<ConfigServidor> {
 export function getAtualizacao(procurar = false): Promise<Atualizacao> {
   return apiFetch(`/api/atualizacao${procurar ? '?procurar=1' : ''}`,
                   { signal: AbortSignal.timeout(procurar ? 120000 : 20000) });
+}
+
+/** Tela temporária "Migração para Rust": quem atende cada área, versões e consumo. */
+export function getMigrationStatus(s: Server | null = null): Promise<MigrationStatus> {
+  return s ? apiFetchForServer(s, '/api/migration/status', {}, 10000)
+           : apiFetch('/api/migration/status', { signal: AbortSignal.timeout(10000) });
 }
 
 /** Lança a atualização. Devolve na hora — ela roda fora do processo do backend, que vai reiniciar. */

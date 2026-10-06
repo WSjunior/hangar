@@ -308,6 +308,12 @@ async def state_service(name: str, request: Request) -> dict:
         return {"ok": False, "error_type": type(exc).__name__}
 
 
+@router.get("/migration/status")
+async def migration_status() -> dict:
+    from app import migration_status
+    return await asyncio.to_thread(migration_status.facts)
+
+
 @router.get("/sessions/{name}/transfer")
 async def session_transfer(name: str) -> dict:
     """A troca de agente está em curso nesta sessão? O hangar-server pergunta antes de cada operação de

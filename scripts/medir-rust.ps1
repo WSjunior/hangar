@@ -6,24 +6,47 @@ $ErrorActionPreference = 'Stop'
 
 # O token vem do .env do checkout deste script. Achar o backend pelo processo falha quando ele roda
 # elevado ou em outra sessao: sem admin o Windows esconde a linha de comando dele.
-$envFile = Join-Path (Split-Path $PSScriptRoot) 'backend\.env'
-if (-not (Test-Path $envFile)) { Write-Host "nao achei $envFile"; exit 1 }
-$tokenLine = Get-Content $envFile | Where-Object { $_ -like 'CP_AUTH_TOKEN=*' } | Select-Object -First 1
-if (-not $tokenLine) { Write-Host "CP_AUTH_TOKEN ausente em $envFile"; exit 1 }
-$token = $tokenLine.Substring('CP_AUTH_TOKEN='.Length)
-$headers = @{ Authorization = "Bearer $token" }
-
-try {
-    Invoke-RestMethod -UseBasicParsing 'http://127.0.0.1:8765/__hangar_server/health' | Out-Null
-} catch {
-    Write-Host 'o Rust nao esta atendendo a porta 8765 (o Python esta sozinho)'; exit 1
+$token = $env:HANGAR_TOKEN
+if (-not $token) {
+    $envFile = Join-Path (Split-Path $PSScriptRoot) 'backend\.env'
+    if (-not (Test-Path $envFile)) { Write-Host "nao achei $envFile (ou defina HANGAR_TOKEN)"; exit 1 }
+    $tokenLine = Get-Content $envFile | Where-Object { $_ -like 'CP_AUTH_TOKEN=*' } | Select-Object -Last 1
+    if (-not $tokenLine) { Write-Host "CP_AUTH_TOKEN ausente em $envFile"; exit 1 }
+    $token = $tokenLine.Substring('CP_AUTH_TOKEN='.Length)
 }
-$logRoot = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $HOME 'AppData\Local' }
-$log = Join-Path $logRoot 'hangar\logs\privado\hangar-server.log'
-$match = Select-String -Path $log -Pattern 'upstream=(127\.0\.0\.1:\d+)' -ErrorAction SilentlyContinue | Select-Object -Last 1
-if (-not $match) { Write-Host "porta do Python nao encontrada em $log"; exit 1 }
-$rust = '127.0.0.1:8765'
-$py = $match.Matches[0].Groups[1].Value
+$headers = @{ Authorization = "Bearer $token" }
+$port = if ($env:HANGAR_PORT) { $env:HANGAR_PORT } else { '8765' }
+$rust = "127.0.0.1:$port"
+
+# A porta do Python, o modo e o motivo vem da tela de migracao: o log e o nome do processo mentem.
+$code = curl.exe -s -m 10 -o NUL -w '%{http_code}' -H "Authorization: Bearer $token" "http://$rust/api/migration/status"
+if ($LASTEXITCODE -eq 28) { Write-Host "o backend em $rust nao respondeu em 10 s"; exit 1 }
+if ($LASTEXITCODE -ne 0 -or $code -eq '000') { Write-Host "backend do Hangar fora: nada responde em $rust (curl $LASTEXITCODE)"; exit 1 }
+switch ($code) {
+    '200' { }
+    { $_ -in '401', '403' } { Write-Host "o backend recusou o token (HTTP $code): confira o CP_AUTH_TOKEN"; exit 1 }
+    '404' { Write-Host 'o backend nao tem /api/migration/status (versao anterior a tela de migracao): atualize'; exit 1 }
+    default { Write-Host "o estado da migracao respondeu HTTP $code"; exit 1 }
+}
+$status = Invoke-RestMethod -UseBasicParsing -Headers $headers "http://$rust/api/migration/status"
+$facts = $status.python
+if ($status.served_by -ne 'rust') {
+    $why = @{
+        sem_binario = 'binario hangar-server ausente (CP_RUST_SERVER_BIN, crates\target\release ou ~\.hangar\bin)'
+        desligado = 'CP_RUST_SERVER=0 no backend\.env'
+        reload = 'backend rodando com --reload'
+        protocolo = 'o binario fala outro contrato interno (atualize os binarios)'
+        sem_resposta = 'o binario nao respondeu em 10 s'
+        endereco_privado = 'o binario nao anunciou o endereco privado'
+        quedas = 'o Rust caiu 3 vezes em 60 s'
+        erro = 'a vigia do Rust falhou (veja o diario)'
+    }[[string]$facts.reason]
+    if (-not $why) { $why = $facts.reason }
+    Write-Host "o Rust nao esta atendendo a porta ${port}: o Python esta sozinho (modo $($facts.mode)) - $why"; exit 1
+}
+if (-not $facts -or -not $facts.port) { Write-Host "o Rust respondeu, mas o Python atras dele nao mandou os dados (erro: $($status.python_error))"; exit 1 }
+Write-Host "Rust na porta $port (modo $($facts.mode), binario $($facts.binary.path)); Python em 127.0.0.1:$($facts.port)"
+$py = "127.0.0.1:$($facts.port)"
 
 # curl.exe, nao Invoke-WebRequest: o custo fixo do iwr no 5.1 (~30 ms) esconde a diferenca.
 function Request-Ms([string]$hostPort, [string]$path) {

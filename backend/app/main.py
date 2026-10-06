@@ -248,6 +248,10 @@ def main():
         sys.exit(rust_server.run("app.api:app", kw, rust_bin, settings.auth_token,
                                  [_tcp_socket("127.0.0.1", 0)] + extras,
                                  lambda: _tcp_socket(bind, settings.port)))
+    from app import migration_status
+    if settings.rust_server:
+        migration_status.set_reason("sem_binario")
+    migration_status.set_listen_port(settings.port)
     # Um Server com dois sockets: um lifespan só (dois Server rodariam watchers e hooks em dobro).
     config = uvicorn.Config("app.api:app", **kw)
     server = rust_server.Server(config)
