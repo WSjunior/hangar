@@ -219,6 +219,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/sessions/{name}/plugin/press", axum::routing::post(crate::mods::routes::press).fallback(pass_any))
         .route("/api/sessions/{name}/plugin/show", axum::routing::post(crate::mods::routes::show).fallback(pass_any))
         .route("/api/sessions/{name}/plugin/input", axum::routing::post(crate::mods::routes::input).fallback(pass_any))
+        // Ponte do plugin do Hangar (S7): o clique do app numa sessão sem terminal do Rust.
+        .route("/api/plugin/press-start", axum::routing::post(crate::mods::bridge::press_start).fallback(pass_any))
+        .route("/api/plugin/opened", axum::routing::post(crate::mods::bridge::opened).fallback(pass_any))
         .route("/api/sessions/{name}/cost", get(crate::costs_routes::session_cost).fallback(pass_any))
         .route("/api/costs", get(crate::costs_routes::costs).fallback(pass_any))
         .route("/api/cotacao", get(crate::costs_routes::cotacao).fallback(pass_any))
