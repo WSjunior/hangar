@@ -45,6 +45,13 @@ describe('Input de mod', () => {
     expect(onInput.mock.calls).toEqual([['change', 'a']]);
   });
 
+  it('não usa a classe global `.field` do app, que empilha rótulo, campo e envio em coluna', () => {
+    const el = montar({ label: 'V18 campo', placeholder: '', value: '', submitLabel: '', onInput: vi.fn() });
+    expect(el.querySelector('.field')).toBeNull();
+    const linha = el.querySelector('.plugin-field')!;
+    expect([...linha.children].map((c) => c.tagName)).toEqual(['SPAN', 'INPUT', 'BUTTON']);
+  });
+
   it('sem submitLabel, o rótulo de envio é o do app', () => {
     const el = montar({ label: '', placeholder: '', value: '', submitLabel: '', onInput: vi.fn() });
     expect(el.querySelector('button.submit')!.textContent).toBe(m.plugin_input_enviar());

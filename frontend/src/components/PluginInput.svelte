@@ -26,7 +26,7 @@
   }
 </script>
 
-<span class="field">
+<span class="plugin-field">
   {#if label}<span class="label">{label}</span>{/if}
   <input bind:this={field} type="text" {placeholder} aria-label={label || placeholder} disabled={!onInput}
          oninput={(e) => onInput?.('change', e.currentTarget.value)}
@@ -39,7 +39,9 @@
 </span>
 
 <style>
-  .field { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 1ch; min-width: 0; }
+  /* Classe própria: a `.field` global do app.css é coluna com margem, e empilhava rótulo, campo e envio. Aqui é
+     uma linha, como no terminal; sem espaço, o envio quebra para baixo e o campo não fica menor que 12ch. */
+  .plugin-field { display: inline-flex; flex-direction: row; align-items: center; flex-wrap: wrap; gap: 1ch; min-width: 0; }
   .label { white-space: nowrap; }
   input { font: inherit; color: inherit; background: var(--surface-raised); border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: 0 0.5ch; min-width: 12ch; flex: 1 1 16ch; }
   input:disabled { opacity: 0.6; }
