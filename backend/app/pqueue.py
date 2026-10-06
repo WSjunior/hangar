@@ -490,7 +490,10 @@ class _CommittedIndex:
                         for event in parse(obj):
                             if event.kind == "user_msg" and event.text:
                                 self.lines.update(_chaves_de_commit(event.text))
-                    current = os.stat(path)
+                    # fstat dos dois lados: no Windows o st_ctime_ns do stat pelo caminho nunca
+                    # bate com o do handle, e a confirmação falhava sempre.
+                    with open(path, "rb") as again:
+                        current = os.fstat(again.fileno())
                     if ((current.st_dev, current.st_ino) != signature[:2]
                             or current.st_size < stat.st_size
                             or current.st_size == stat.st_size and (
