@@ -76,7 +76,13 @@ impl Hooks {
         match made {
             Ok(mut w) => {
                 for d in &self.watched {
-                    self.partial |= w.watch(d, RecursiveMode::NonRecursive).is_err();
+                    // Pasta que ainda não existe é o caso comum (conta sem hook); vale o prazo.
+                    if let Err(e) = w.watch(d, RecursiveMode::NonRecursive) {
+                        self.partial = true;
+                        if !matches!(e.kind, notify::ErrorKind::PathNotFound) && crate::warn_limit::allow(None, "state_hooks_watch") {
+                            tracing::warn!(code = "state_hooks_watch", kind = ?e.kind, "estado: pasta de estado sem observador; relê pelo prazo");
+                        }
+                    }
                 }
                 self.watcher = Some(w);
             }
@@ -119,10 +125,18 @@ impl StateEnv {
 pub fn spawner(env: Arc<StateEnv>) -> SpawnMonitor {
     Arc::new(move |hub: &Arc<Hub>| {
         let src = LiveSources::new(env.clone(), hub);
+        let diag = env.diag.clone();
         tokio::spawn(async move {
+            use futures_util::FutureExt;
             let name = src.name.clone();
-            let exit = Monitor::new(src).run().await;
-            tracing::info!(session = name.as_str(), exit = ?exit, "estado: Monitor terminou");
+            // Pânico sem isto sumiria com a tarefa: o hub a dá por acabada e o Python volta a falar.
+            match std::panic::AssertUnwindSafe(Monitor::new(src).run()).catch_unwind().await {
+                Ok(exit) => tracing::info!(session = name.as_str(), exit = ?exit, "estado: Monitor terminou"),
+                Err(_) => {
+                    tracing::error!(session = name.as_str(), code = "state_monitor_panic", "estado: Monitor caiu");
+                    diag.report("rust.state_monitor_failed", &name, "state_monitor_panic", "o Monitor de estado caiu; volta com o próximo assinante");
+                }
+            }
         })
     })
 }
@@ -276,15 +290,16 @@ impl Sources for LiveSources {
             Ok(Ok(Ok(files))) => files,
             Ok(Ok(Err(code))) => {
                 self.report("rust.state_files_failed", code, "estado: arquivos da sessão ilegíveis");
-                FileFacts::default()
+                FileFacts { unavailable: Some(code.to_owned()), ..FileFacts::default() }
             }
             Ok(Err(e)) => {
-                self.report("rust.state_files_failed", if e.is_panic() { "state_files_panic" } else { "state_files_cancelled" }, "estado: leitura dos arquivos da sessão caiu");
-                FileFacts::default()
+                let code = if e.is_panic() { "state_files_panic" } else { "state_files_cancelled" };
+                self.report("rust.state_files_failed", code, "estado: leitura dos arquivos da sessão caiu");
+                FileFacts { unavailable: Some(code.to_owned()), ..FileFacts::default() }
             }
             Err(_) => {
                 self.report("rust.state_files_failed", "state_files_timeout", "estado: leitura dos arquivos da sessão passou do prazo");
-                FileFacts::default()
+                FileFacts { unavailable: Some("state_files_timeout".to_owned()), ..FileFacts::default() }
             }
         }
     }
@@ -354,7 +369,10 @@ impl Sources for LiveSources {
     async fn publish_preview(&self, event: PreviewEvent) -> bool {
         match serde_json::to_string(&event) {
             Ok(data) => self.publish_raw("preview", &data),
-            Err(_) => true,
+            Err(_) => {
+                self.report("rust.state_publish_failed", "preview_serialize", "prévia: evento não serializou");
+                true
+            }
         }
     }
 
@@ -382,7 +400,7 @@ fn read_files(env: &StateEnv, name: &str, sid: Option<&str>) -> Result<FileFacts
     }
     let loop_info = row.loop_status.is_some().then(|| LoopInfo { status: row.loop_status, iter: row.loop_iter, max: row.loop_max });
     let shells = shell_pid.map(|pid| super::shells::shells_of(pid, &*procs)).unwrap_or_default();
-    Ok(FileFacts { marker: marker.as_ref().map(|m| m.state.clone()), marker_ts: marker.map(|m| m.ts), open_question, status_line, loop_info, shells })
+    Ok(FileFacts { marker: marker.as_ref().map(|m| m.state.clone()), marker_ts: marker.map(|m| m.ts), open_question, status_line, loop_info, shells, unavailable: None })
 }
 
 /// Segue o ator de entrada terminal da sessão: erro e escritor parado viram o problema do estado.
@@ -422,18 +440,25 @@ async fn watch_runtime(registry: Arc<RuntimeRegistry>, name: String, view: Arc<M
                 }
                 continue;
             }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                tracing::warn!(session = name.as_str(), code = "state_runtime_closed", "estado: eventos do runtime acabaram; o problema da entrada fica no último valor");
+                return;
+            }
         };
         let mine = match keys.get(&event.key) {
             Some(mine) => *mine,
-            None => {
-                let mine = registry.terminal_name(&event.key).await.as_deref() == Some(name.as_str());
-                if keys.len() > 256 {
-                    keys.clear();
+            // O ator publica antes de entrar no registro: chave ainda sem dono não é guardada.
+            None => match registry.terminal_name(&event.key).await {
+                None => false,
+                Some(owner) => {
+                    if keys.len() > 256 {
+                        keys.clear();
+                    }
+                    let mine = owner == name;
+                    keys.insert(event.key.clone(), mine);
+                    mine
                 }
-                keys.insert(event.key.clone(), mine);
-                mine
-            }
+            },
         };
         if !mine {
             continue;

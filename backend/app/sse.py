@@ -1060,10 +1060,11 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                            codigo=getattr(exc, "code", type(exc).__name__))
             await queue.put(("__error__", exc))
 
-    def _fontes_do_estado(prov):
+    def _fontes_do_estado(prov, rust):
         """Tarefas do estado ao vivo por chave: as do Python, o canal do hub, ou nada (conexão interna
-        de sessão do Rust, que é o próprio hub)."""
-        if _estado_do_rust(prov):
+        de sessão do Rust, que é o próprio hub). `rust` vem de quem montou o `broker`: reler o modo
+        aqui deixaria os dois discordarem se ele mudasse no meio."""
+        if rust:
             return {} if side else {"rust": asyncio.create_task(rust_state_pump())}
         return {"state": asyncio.create_task(pump("state", _monitor_de(prov))),
                 "preview": asyncio.create_task(preview_pump(broker))}
@@ -1145,7 +1146,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
     # uma carrega o adapter antigo dentro de si (parser do transcript, fold das estatisticas,
     # monitor de estado, fonte da previa) e trocar so uma deixaria o stream meio num provider e
     # meio no outro.
-    state_tasks = _fontes_do_estado(provider)
+    state_tasks = _fontes_do_estado(provider, rust_state)
     tasks = [
         *([tail_task] if tail_task else []),
         stats_task,
@@ -1217,13 +1218,16 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                 committed["text"] = ""
                 rust_state = _estado_do_rust(novo_prov)
                 broker = None if rust_state else _broker_de(novo_prov)
-                if broker is not None:
+                # A prévia do provider anterior sai; na conexão interna de sessão do Rust quem
+                # limpa é o hub, e uma prévia do Python ali seria descartada como vazamento.
+                if not (side and rust_state):
                     _enqueue_preview("")
+                if broker is not None:
                     broker.reset()
                 ask_q_emitted = False
                 tail_task = None if side and rust_state else asyncio.create_task(tail_pump(novo_jsonl))
                 stats_task = asyncio.create_task(stats_pump(novo_jsonl))
-                state_tasks = _fontes_do_estado(novo_prov)
+                state_tasks = _fontes_do_estado(novo_prov, rust_state)
                 tasks += [t for t in (tail_task, stats_task, *state_tasks.values()) if t is not None]
                 yield (_info_event(name, current_provider, current_jsonl) if side
                        else {"event": "reset", "data": "{}"})

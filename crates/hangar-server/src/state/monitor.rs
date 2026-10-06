@@ -83,6 +83,8 @@ pub struct FileFacts {
     pub status_line: Option<String>,
     pub loop_info: Option<LoopInfo>,
     pub shells: Vec<ShellVivo>,
+    /// Leitura que falhou (código): os campos acima ficaram vazios e o estado sai com o problema.
+    pub unavailable: Option<String>,
 }
 
 /// O que o `Monitor` lê e a quem publica. Quem implementa faz a E/S bloqueante fora do runtime.
@@ -383,7 +385,9 @@ impl<S: Sources> Monitor<S> {
         let name = self.src.name().to_owned();
         let sid = self.src.sid();
         let files = self.src.files(sid.as_deref()).await;
-        let mut problem = facts.unavailable.clone().map(|d| (UNAVAILABLE, d));
+        // Arquivo da sessão que não se leu também é fato que faltou: sem ele o estado viria sem
+        // marcador nem pergunta aberta, como se fosse verdade.
+        let mut problem = facts.unavailable.clone().or_else(|| files.unavailable.clone()).map(|d| (UNAVAILABLE, d));
         if let Some(observed) = permission::parse_permission_mode(&frame.text) {
             let key = sid.clone().unwrap_or_else(|| name.clone());
             if self.mem.permission.due(&key, observed, facts.permission_op) {
@@ -487,6 +491,7 @@ mod tests {
         ask: Mutex<Option<AskQuestion>>,
         ask_reads: AtomicU32,
         deliveries: Mutex<Vec<u32>>,
+        files_failed: Mutex<Option<String>>,
     }
 
     impl Fake {
@@ -494,7 +499,7 @@ mod tests {
             Arc::new(Self { frames, round: AtomicU32::new(0), has_session: AtomicU32::new(0), facts: Mutex::default(),
                 wake: Arc::default(), epoch: AtomicU64::new(0), events: Mutex::default(), others: Mutex::default(),
                 runtime: Mutex::default(), runtime_wake: Arc::default(), ask: Mutex::default(), ask_reads: AtomicU32::new(0),
-                deliveries: Mutex::default() })
+                deliveries: Mutex::default(), files_failed: Mutex::default() })
         }
         fn rounds(&self) -> u32 { self.round.load(Ordering::SeqCst) }
         fn states(&self) -> Vec<String> { self.events.lock().unwrap().iter().map(|(_, e)| e.state.clone()).collect() }
@@ -514,7 +519,9 @@ mod tests {
         async fn has_session(&self) -> Option<bool> { self.has_session.fetch_add(1, Ordering::SeqCst); Some(true) }
         async fn dead(&self) -> Result<Dead, String> { Ok(Dead::Ok) }
         async fn observe_permission(&self, _: &str, mode: &str) -> Result<(String, String), String> { Ok((mode.into(), "manual".into())) }
-        async fn files(&self, _: Option<&str>) -> FileFacts { FileFacts::default() }
+        async fn files(&self, _: Option<&str>) -> FileFacts {
+            FileFacts { unavailable: self.files_failed.lock().unwrap().clone(), ..FileFacts::default() }
+        }
         async fn publish(&self, event: StateEvent) -> bool {
             self.events.lock().unwrap().push((self.rounds(), event));
             true
@@ -612,6 +619,20 @@ mod tests {
         let events: Vec<_> = fake.events.lock().unwrap().iter().map(|(_, e)| (e.state.clone(), e.problema_detalhe.clone())).collect();
         assert_eq!(events, [("working".into(), Some("state_facts_status:503".into())), ("working".into(), None)]);
         assert_eq!(fake.events.lock().unwrap()[0].1.problema.as_deref(), Some(UNAVAILABLE));
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unreadable_session_files_become_the_problem() {
+        let fake = Fake::new(vec![Ok(SPINNER)]);
+        *fake.files_failed.lock().unwrap() = Some("state_files_timeout".into());
+        let task = tokio::spawn(Monitor::new(fake.clone()).run());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let first = fake.events.lock().unwrap()[0].1.clone();
+        assert_eq!((first.problema.as_deref(), first.problema_detalhe.as_deref()), (Some(UNAVAILABLE), Some("state_files_timeout")));
+        *fake.files_failed.lock().unwrap() = None;
+        tokio::time::sleep(POLL).await;
+        assert!(fake.events.lock().unwrap().last().unwrap().1.problema.is_none(), "leitura boa limpa o problema");
         task.abort();
     }
 

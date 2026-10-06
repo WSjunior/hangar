@@ -263,7 +263,8 @@ impl Hub {
         }
     }
 
-    fn has_monitor(&self) -> bool { self.monitor.lock().unwrap().is_some() }
+    /// `Monitor` vivo: o que acabou (sessão morta, pânico) não segura mais os eventos do Python.
+    fn has_monitor(&self) -> bool { self.monitor.lock().unwrap().as_ref().is_some_and(|(m, _)| !m.is_finished()) }
 
     /// Geração da ligação atual (a época do `Monitor`); `None` com o hub fechado.
     pub fn generation(&self) -> Option<u64> { self.bound.lock().unwrap().as_ref().map(|b| b.generation) }
@@ -342,6 +343,9 @@ impl Hub {
         if !same {
             self.rebind(binding.clone());
             self.restart_side();
+        } else {
+            // Sessão que voltou com a mesma conversa (resume): o `Monitor` que viu a morte renasce.
+            self.ensure_monitor();
         }
     }
 
@@ -584,7 +588,7 @@ fn state_frame(frame: &[u8]) -> bool {
 /// Mantém a última resposta gravada da ligação: o leitor do transcript manda cada linha ao canal, e
 /// a troca de ligação semeia de novo a partir do fim do arquivo.
 async fn watch_commits(hub: Weak<Hub>, mut rx: broadcast::Receiver<Out>) {
-    seed_committed(&hub).await;
+    seed_committed(&hub, true).await;
     loop {
         match rx.recv().await {
             Ok(Out::Tail(generation, frame)) => {
@@ -592,7 +596,9 @@ async fn watch_commits(hub: Weak<Hub>, mut rx: broadcast::Receiver<Out>) {
                 let Some(h) = hub.upgrade() else { return };
                 h.set_committed(generation, text, false);
             }
-            Ok(Out::Rebind) | Err(broadcast::error::RecvError::Lagged(_)) => seed_committed(&hub).await,
+            Ok(Out::Rebind) => seed_committed(&hub, true).await,
+            // A resposta gravada durante o atraso pode ter se perdido: o fim do arquivo vence.
+            Err(broadcast::error::RecvError::Lagged(_)) => seed_committed(&hub, false).await,
             Ok(Out::Side(_)) => {}
             Ok(Out::Close) | Err(broadcast::error::RecvError::Closed) => return,
         }
@@ -601,16 +607,24 @@ async fn watch_commits(hub: Weak<Hub>, mut rx: broadcast::Receiver<Out>) {
 
 /// O leitor do transcript começa no fim do arquivo: sem isto a resposta já gravada voltaria como
 /// prévia logo depois de abrir o chat. Só preenche o vazio; a resposta ao vivo vence.
-async fn seed_committed(hub: &Weak<Hub>) {
+async fn seed_committed(hub: &Weak<Hub>, only_if_empty: bool) {
     let Some((binding, generation)) = hub.upgrade().and_then(|h| h.bound.lock().unwrap().as_ref().map(|b| (b.binding.clone(), b.generation))) else { return };
     let last = tokio::task::spawn_blocking(move || {
-        let size = std::fs::metadata(&binding.jsonl).map(|m| m.len()).unwrap_or(0);
+        let size = match std::fs::metadata(&binding.jsonl) {
+            Ok(m) => m.len(),
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound && crate::warn_limit::allow(None, "state_committed_seed") {
+                    tracing::warn!(code = "state_committed_seed", kind = ?e.kind(), "estado: transcript ilegível; a prévia pode repetir a resposta gravada");
+                }
+                return None;
+            }
+        };
         let frames = tail::backfill(&binding.jsonl, &binding.key, binding.provider, None, size);
         frames.iter().rev().find_map(|f| crate::state::preview::committed_from_frame(f))
     })
     .await;
     match last {
-        Ok(Some(text)) => if let Some(h) = hub.upgrade() { h.set_committed(generation, text, true) },
+        Ok(Some(text)) => if let Some(h) = hub.upgrade() { h.set_committed(generation, text, only_if_empty) },
         Ok(None) => {}
         Err(e) => tracing::warn!(panic = e.is_panic(), code = "state_committed_seed", "estado: leitura da resposta gravada caiu"),
     }
@@ -1000,6 +1014,26 @@ mod tests {
         assert!(!late(&lease.hub), "respondida: quem chega depois não recebe");
         lease.hub.close();
         assert!(!lease.hub.publish_own("state", "{}"), "hub fechado: o Monitor acaba");
+    }
+
+    #[tokio::test]
+    async fn finished_monitor_releases_python_events_and_returns_with_next_subscriber() {
+        let dir = tempfile::tempdir().unwrap();
+        let binding = Binding { provider: Provider::Claude, jsonl: dir.path().join("a.jsonl"), key: "a".into() };
+        let count = Arc::new(AtomicU32::new(0));
+        let spawned = count.clone();
+        // `Monitor` que acaba na hora, como depois de ver a sessão morta.
+        let spawn: SpawnMonitor = Arc::new(move |_hub: &Arc<Hub>| {
+            spawned.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async {})
+        });
+        let ctx = SideCtx { monitors: Some(spawn), ..idle_ctx() };
+        let lease = ctx.hubs.acquire("s", binding.clone(), &ctx);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!lease.hub.has_monitor(), "acabou: não é mais dono");
+        assert!(on_side_event(&lease.hub, "state", r#"{"state":"idle"}"#), "e não descarta o que chegar");
+        let _again = ctx.hubs.acquire("s", binding, &ctx);
+        assert_eq!(count.load(Ordering::SeqCst), 2, "a sessão que voltou com a mesma conversa ganha outro");
     }
 
     #[test]
