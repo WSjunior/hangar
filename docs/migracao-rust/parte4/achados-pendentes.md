@@ -17,7 +17,11 @@ Achados médios e baixos das revisões por Task que entraram na `feat/parte4` se
   e nativo numa sessão Claude da VM. Decisão da coordenação: (a) só registrado (os dois clientes
   respondem); (b) corrigido em `f858952dd`: no Windows a entrada fica segurada até o psmux
   pintar (`ESC[?1049h`, ~80 ms), com prazo de 5 s e teto de 64 KiB; o Python tinha o mesmo
-  defeito (janela de ~10 ms) e o Linux não perde. Falta conferir na VM com o binário novo.
+  defeito (janela de ~10 ms) e o Linux não perde. Conferido na VM (06/10, `641838a3`, binário
+  compilado na VM, contrato 35): 20 aberturas digitando no instante da abertura, o comando chegou
+  inteiro ao pane em 19; em 1 (primeiro byte em 281 ms, partida lenta) sumiu uma letra no meio
+  (`PRVA` em vez de `PROVA`). Resíduo raro só para tecla mandada nos primeiros ~100 ms; causa não
+  provada (psmux/conhost trocando o modo de entrada na partida é a suspeita).
 - Task 5: no Windows a prévia pelo pane captura a 0,15 s com um processo psmux por toque
   (~25–50 ms cada) enquanto a sessão trabalha sem arquivo do hook; medir na VM e, se pesar,
   limitar o ritmo rápido no Windows. O Monitor no Windows (psmux) e o convidado de convite de
