@@ -6,6 +6,28 @@ from app import transcribe as mod_transcribe
 from app.transcribe import build_multipart, transcribe, vocabulario, TranscribeError
 
 
+@pytest.mark.parametrize("query,cleaned", [("", True), ("?limpar=0", False), ("?limpar=1", True)])
+def test_before_session_audio_can_skip_cleanup(monkeypatch, query, cleaned):
+    from fastapi.testclient import TestClient
+    from unittest.mock import AsyncMock, Mock
+    from app import api
+    monkeypatch.setattr(settings, "auth_token", "test-audio")
+    speech = Mock(return_value="texto original")
+    cleanup = AsyncMock(return_value={"text": "texto limpo"})
+    monkeypatch.setattr(api, "transcribe", speech)
+    monkeypatch.setattr(api, "_cleaned_dictation", cleanup)
+    response = TestClient(api.app).post("/api/dictation/transcribe" + query,
+        headers={"Authorization": "Bearer test-audio", "Content-Type": "audio/mp4", "X-Filename": "nota.m4a"},
+        content=b"audio-m4a")
+    assert response.status_code == 200
+    speech.assert_called_once_with(b"audio-m4a", "nota.m4a")
+    assert response.json() == {"text": "texto limpo" if cleaned else "texto original"}
+    if cleaned:
+        cleanup.assert_awaited_once_with("texto original", None)
+    else:
+        cleanup.assert_not_awaited()
+
+
 def _sem_chave(monkeypatch):
     """Chave ausente de verdade: a `transcribe()` lê do runtime_config (arquivo editável pela UI),
     não mais de `settings` — mockar só o settings deixava a chave REAL do usuário valendo, e o

@@ -237,15 +237,17 @@ impl Api {
     }
 
     /// Sem `name` (nova conversa, antes de a sessão existir) só transcreve, sem guardar o áudio numa sessão.
-    pub async fn transcribe(&self, name: Option<&str>, bytes: Vec<u8>, style: Option<&str>) -> Result<Value, Failure> {
+    pub async fn transcribe(&self, name: Option<&str>, filename: &str, bytes: Vec<u8>, clean: bool, style: Option<&str>) -> Result<Value, Failure> {
         if bytes.len() as u64 > MAX_BYTES { return Err(Failure::local("attach_too_big")); }
         let mut url = match name {
             Some(name) => self.endpoint(Some(name), Some("transcribe")),
             None => self.server_url(&["dictation", "transcribe"], &[]),
         };
-        url.query_pairs_mut().append_pair("limpar", "1");
-        if let Some(style) = style.filter(|style| !style.is_empty()) { url.query_pairs_mut().append_pair("estilo", style); }
-        let r = self.client.post(url).header(header::CONTENT_TYPE, "audio/wav").header("X-Filename", "ditado.wav")
+        url.query_pairs_mut().append_pair("limpar", if clean { "1" } else { "0" });
+        if let Some(style) = style.filter(|style| clean && !style.is_empty()) { url.query_pairs_mut().append_pair("estilo", style); }
+        let filename = if filename.is_empty() { "audio.wav" } else { filename };
+        let r = self.client.post(url).header(header::CONTENT_TYPE, crate::composer::mime_for(filename))
+            .header("X-Filename", crate::composer::encode_component(filename))
             .body(bytes).timeout(Duration::from_secs(300)).send().await.map_err(|_| Failure::transport(true))?;
         Self::checked(r, true).await?.json().await.map_err(|_| Failure::local("invalid_response"))
     }

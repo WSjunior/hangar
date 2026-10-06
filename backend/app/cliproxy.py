@@ -100,7 +100,7 @@ def account_for_engine(cfg: dict, account: str, home: str | None = None) -> dict
 
 
 def validate_models(cfg: dict, model: str, account: dict, models: list[dict] | None = None) -> list[dict]:
-    from app import engine_probe
+    from app import engine_probe, engines
     from app.cliproxy_accounts import base_model, models_for
     if models is None:
         try:
@@ -110,7 +110,7 @@ def validate_models(cfg: dict, model: str, account: dict, models: list[dict] | N
     catalog = models_for(models, account["prefix"])
     available = {item["id"] for item in catalog}
     for label, selected in (("principal", model), ("dos subagentes", cfg.get("subagent_model") or model)):
-        if base_model(selected, account["prefix"]) not in available:
+        if engines.catalog_model(base_model(selected, account["prefix"])) not in available:
             raise ValueError(f"CLIProxyAPI: modelo {label} indisponível nesta conta")
     return catalog
 

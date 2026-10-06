@@ -171,7 +171,7 @@ enum Payload {
     Sent(SessionKey, String, String, Result<Delivery, Failure>),
     Interrupted(SessionKey, Result<(), Failure>),
     Acted(SessionKey, Action, Result<serde_json::Value, Failure>),
-    Files(SessionKey, Vec<Result<Picked, String>>),
+    Files(SessionKey, Option<SessionOwner>, u64, Vec<Result<Picked, String>>),
     // `None` marca o início do envio daquele anexo.
     UploadStep(SessionKey, u64, Option<Result<Uploaded, Failure>>),
     UploadsDone(SessionKey, String, bool, HashSet<String>, Option<Vec<String>>),
@@ -1367,7 +1367,7 @@ impl Hangar {
                 cx.notify();
                 return;
             }
-            Payload::Files(key, files) => { let key = self.delivery.current(key); self.receive_files(key, files); cx.notify(); return; }
+            Payload::Files(key, owner, generation, files) => { self.receive_files(key, owner, generation, files, cx); cx.notify(); return; }
             Payload::UploadStep(key, id, result) => { let key = self.delivery.current(key); self.receive_upload(key, id, result); cx.notify(); return; }
             Payload::UploadsDone(key, draft, steer, known, group) => {
                 let key = self.delivery.current(key);
@@ -2370,22 +2370,39 @@ impl Hangar {
         Ok(())
     }
 
-    fn receive_files(&mut self, key: SessionKey, files: Vec<Result<Picked, String>>) {
+    fn receive_files(&mut self, key: SessionKey, owner: Option<SessionOwner>, generation: u64, files: Vec<Result<Picked, String>>, cx: &mut Context<Self>) {
+        let current_generation = self.check_dictation_owner(cx);
+        let attachment_key = self.delivery.current(key.clone());
         let mut problems = Vec::new();
+        let mut audio_problems = Vec::new();
         for file in files {
-            match file.and_then(|picked| self.add_attachment(&key, picked.name, picked.bytes)) {
-                Ok(()) => {}
-                Err(problem) => problems.push(problem),
+            match file {
+                Ok(picked) if composer::is_audio(&picked.name) => {
+                    let result = if generation != current_generation || owner.is_none() || owner != self.dictation_owner(cx)
+                        || self.composer_key().as_ref() != Some(&key) {
+                        Err(tr("attach_audio_session_changed"))
+                    } else { self.transcribe_file(&key, picked.name, picked.bytes, cx) };
+                    if let Err(problem) = result { audio_problems.push(problem); }
+                }
+                file => {
+                    if let Err(problem) = file.and_then(|picked| self.add_attachment(&attachment_key, picked.name, picked.bytes)) {
+                        problems.push(problem);
+                    }
+                }
             }
         }
-        if problems.is_empty() { self.action_feedback.remove(&key); }
-        else { self.action_feedback.insert(key, (problems.join(" "), true)); }
+        if key == attachment_key { problems.extend(audio_problems); }
+        else if !audio_problems.is_empty() { self.action_feedback.insert(key, (audio_problems.join(" "), true)); }
+        if problems.is_empty() { self.action_feedback.remove(&attachment_key); }
+        else { self.action_feedback.insert(attachment_key, (problems.join(" "), true)); }
     }
 
     // Leitura do disco fora da janela; tamanho conferido antes de ler.
     fn read_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         let Some(key) = self.composer_key() else { return; };
         if paths.is_empty() || self.uploading.contains_key(&key) { return; }
+        let generation = self.check_dictation_owner(cx);
+        let owner = self.dictation_owner(cx);
         let (connection, tx) = (self.connection, self.tx.clone());
         self.runtime.spawn(async move {
             let files = tokio::task::spawn_blocking(move || paths.into_iter().map(|path| {
@@ -2395,7 +2412,7 @@ impl Hangar {
                 if meta.len() > api::MAX_BYTES { return Err(tr("attach_too_big_named").replace("{name}", &name)); }
                 std::fs::read(&path).map(|bytes| Picked { name: name.clone(), bytes }).map_err(|_| tr("attach_read_failed").replace("{name}", &name))
             }).collect()).await.unwrap_or_default();
-            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Files(key, files) }).await;
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Files(key, owner, generation, files) }).await;
         });
         cx.notify();
     }
@@ -2466,13 +2483,15 @@ impl Hangar {
     // Baixa de volta um anexo do cofre e o põe no campo como qualquer outro, sem citar caminho por presunção.
     fn reattach(&mut self, filename: String, cx: &mut Context<Self>) {
         let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
+        let generation = self.check_dictation_owner(cx);
+        let owner = self.dictation_owner(cx);
         self.recent = None;
         let (connection, tx, uploads) = (self.connection, self.tx.clone(), self.uploads_for(&key));
         self.runtime.spawn(async move {
             let result = uploads.fetch(&api, &key.name, &Source::Upload(filename.clone())).await
                 .map(|bytes| Picked { name: filename.clone(), bytes })
                 .map_err(|error| format!("{}: {}", filename, Self::fetch_failure(&error)));
-            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Files(key, vec![result]) }).await;
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Files(key, owner, generation, vec![result]) }).await;
         });
         cx.notify();
     }

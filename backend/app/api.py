@@ -2473,11 +2473,12 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
     # context_length. Com motor mas sem modelo (ou vice-versa), nada a resolver: o env segue o motor.
     janela = None
     if body.engine and body.model:
+        catalog_id = await asyncio.to_thread(engines.catalog_model, body.model)
         try:
             for m in await (_fixed_engine_models(body.engine, body.engine_account)
                             if body.engine_account else _engine_models(body.engine)):
-                if m["id"] == body.model:
-                    janela = m.get("context_length")
+                if m["id"] == catalog_id:
+                    janela = 1_000_000 if catalog_id != body.model else m.get("context_length")
                     break
         except HTTPException:
             # _engine_models devolve 502 quando o cache expirou e o /v1/models não responde, e 409
@@ -2859,13 +2860,13 @@ async def _durante_troca(name: str, troca, *, transfer: bool = False):
     try:
         with session_operation(name):
             await asyncio.to_thread(require_available, name)
-            return await _during_transfer_life(name, troca)
+            return await _during_transfer_life(name, troca, require_idle=True)
     except TransferError as exc:
         troca.close()
         raise HTTPException(exc.status, detail=public_error(exc)) from None
 
 
-async def _during_transfer_life(name: str, troca):
+async def _during_transfer_life(name: str, troca, *, require_idle: bool = False):
     # A troca muda a identidade da sessão (sidecar <-> pane tmux); sem atualizar, a varredura
     # revogaria o convite de uma sessão que continua viva. `changing_mode` a segura no meio.
     if name in share_api.changing_mode:
@@ -2875,6 +2876,12 @@ async def _during_transfer_life(name: str, troca):
         from app import runtime_coordinator
         coordinator = runtime_coordinator.current()
         if coordinator is not None and coordinator.managed_queue(name):
+            async def check_idle():
+                motivo = await _motivo_ocupada(name, _headless(name))
+                if motivo:
+                    raise HTTPException(409, detail=erro(motivo, _OCUPADA[motivo]))
+            if require_idle:
+                return await coordinator.change(name, lambda: troca, preflight=check_idle)
             return await coordinator.change(name, lambda: troca)
         return await troca
     finally:
@@ -3115,12 +3122,7 @@ async def _trocar_conta(name: str, destino: str | None, *, engine_account: str |
             raise HTTPException(409, detail=erro(motivo, _OCUPADA[motivo]))
         chosen_model = None
         if engine_account is not None:
-            if headless:
-                source_model = (headless_sessions.load(name) or {}).get("model")
-            else:
-                pane = await asyncio.to_thread(registry._pane_of, name)
-                agent = registry_mod._pid_do_agente((pane or {}).get("pid"))
-                source_model = procinfo._model_of(agent)[0] if agent else None
+            source_model, _ = await asyncio.to_thread(_engine_fast_selection, name)
             source_model = model or source_model or engines.listar()[info.engine]["model"]
             base = source_model.split("/", 1)[-1]
             from app.cliproxy_accounts import prefix_model
@@ -7081,9 +7083,8 @@ async def transcribe_audio(name: str, request: Request, limpar: bool = False, es
 
 
 @app.post("/api/dictation/transcribe", dependencies=[Depends(require_auth)])
-async def transcribe_dictation(request: Request, estilo: str | None = None):
-    # Sem sessão: a tela de nova conversa dita antes de a sessão existir. Não há pasta onde guardar o
-    # áudio, então ele só é transcrito e limpo, como o microfone faz com `limpar=1`.
+async def transcribe_dictation(request: Request, estilo: str | None = None, limpar: bool = True):
+    # Antes de existir uma sessão, o áudio não tem uma pasta onde ser guardado.
     clen = request.headers.get("content-length")
     if clen and clen.isdigit() and int(clen) > 100 * 1024 * 1024:
         raise HTTPException(413, detail=erro("erro_arquivo_grande", "arquivo maior que 100 MiB"))
@@ -7093,6 +7094,8 @@ async def transcribe_dictation(request: Request, estilo: str | None = None):
         text = await asyncio.to_thread(transcribe, data, filename)
     except TranscribeError as e:
         raise HTTPException(e.status, e.detail)
+    if not limpar:
+        return {"text": text}
     return await _cleaned_dictation(text, estilo)
 
 
@@ -8520,7 +8523,8 @@ def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = Re
             raise HTTPException(400, detail=erro("erro_cliproxy_conta", str(exc))) from None
         except RuntimeError:
             raise HTTPException(502, detail=erro("erro_cliproxy_conta", "catálogo do CLIProxyAPI indisponível")) from None
-        if not any(m["id"] == fixed_model for m in models):
+        catalog_id = engines.catalog_model(fixed_model)
+        if not any(m["id"] == catalog_id for m in models):
             raise HTTPException(422, detail=erro("erro_modelo_fora_catalogo", "modelo indisponível nesta conta ChatGPT"))
     elif body.model is not None:
         try:
@@ -9845,7 +9849,8 @@ async def engine_model_set(name: str, body: EngineModelBody):
         from app.cliproxy_accounts import models_for
         account = await asyncio.to_thread(_fixed_engine_account, info.engine, info.engine_account)
         modelos = models_for(account_models, account["prefix"])
-    if not any(m["id"] == body.model for m in modelos):
+    catalog_id = await asyncio.to_thread(engines.catalog_model, body.model)
+    if not any(m["id"] == catalog_id for m in modelos):
         # Recusar aqui em vez de digitar: o CC aceitaria o id, a sessao passaria a mandar request
         # pra um modelo que o provedor nao tem, e a falha apareceria so no proximo turno.
         raise HTTPException(422, detail=erro("erro_modelo_fora_catalogo", f"modelo fora do catalogo do motor {info.engine!r}: {body.model}", motor=info.engine, modelo=body.model))
@@ -9855,10 +9860,11 @@ async def engine_model_set(name: str, body: EngineModelBody):
         raise HTTPException(409, detail=erro("erro_fast_indisponivel", "Desligue Fast antes de escolher um modelo que não o suporta"))
 
     if info.engine_account:
-        selected = next(m for m in modelos if m["id"] == body.model)
+        selected = next(m for m in modelos if m["id"] == catalog_id)
+        window = 1_000_000 if catalog_id != body.model else selected.get("context_length")
         await _durante_troca(name, _trocar_conta(name, None, engine_account=info.engine_account,
                                                model=body.model, effort=body.effort,
-                                               context_window=selected.get("context_length"), engine_models=account_models))
+                                               context_window=window, engine_models=account_models))
         return {"ok": True, "model": body.model}
     if _headless(name):
         # Sem pane: `set_model` por control_request, que (medido) NÃO grava o default global —

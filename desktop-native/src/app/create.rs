@@ -749,6 +749,8 @@ impl NewSession {
         self.configs.reset();
         self.engines.reset();
         self.engine.clear();
+        self.model.clear();
+        self.effort.clear();
         self.engine_account.clear();
         self.engine_pick = None;
         self.engine_account_pick = None;
@@ -938,6 +940,8 @@ impl NewSession {
         self.provider_touched = true;
         if provider == self.provider { return; }
         (self.provider, self.error) = (provider, None);
+        self.model.clear();
+        self.effort.clear();
         self.permission = match provider { "codex" => "Full Access".into(), "claude" => "bypassPermissions".into(), _ => String::new() };
         self.permission_touched = false;
         if provider == "codex" { self.load_codex(cx); self.load_context(cx); } else { self.drop_context(); self.drop_codex(); }
@@ -1874,6 +1878,7 @@ impl NewSession {
         let agent = [
             (fresh || self.proxy_accounts().is_some()).then(|| self.render_trio(!fresh)).flatten().map(IntoElement::into_any_element),
             fresh.then(|| self.render_fast_choice(cx)).flatten().map(IntoElement::into_any_element),
+            self.render_engine_context(cx).map(IntoElement::into_any_element),
             fresh.then(|| self.render_default_check(cx)).flatten().map(IntoElement::into_any_element),
             (fresh && self.provider == "codex").then(|| self.render_context(cx).into_any_element()),
             self.render_more(cx).map(IntoElement::into_any_element),
@@ -2557,7 +2562,10 @@ impl Hangar {
                 cx.defer_in(window, |view, window, cx| view.load(window, cx));
                 view
             }));
-            cx.observe(self.new_chat.as_ref().unwrap(), |this, _, cx| this.redraw(panes::Area::Bottom, cx)).detach();
+            cx.observe(self.new_chat.as_ref().unwrap(), |this, _, cx| {
+                this.check_dictation_owner(cx);
+                this.redraw(panes::Area::Bottom, cx);
+            }).detach();
         }
         self.new_chat.clone().unwrap()
     }

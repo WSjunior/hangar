@@ -44,10 +44,25 @@ impl ModelOption {
 
 pub(super) struct Catalog { models: Vec<ModelOption>, reduced: bool }
 
-fn remembered_choice(catalog: &[ModelOption], provider: &str, remembered: (String, String)) -> (String, String) {
-    let (model, effort) = remembered;
-    let model = catalog.iter().find(|m| m.value() == model);
-    let value = model.map(ModelOption::value).unwrap_or_default();
+fn matched_model<'a>(catalog: &'a [ModelOption], provider: &str, local_proxy: bool, model: &str) -> Option<&'a ModelOption> {
+    catalog.iter().find(|m| m.value() == model).or_else(|| {
+        let base = model.strip_suffix("[1m]")?;
+        catalog.iter().find(|m| provider == "claude" && local_proxy && m.fast && m.value() == base)
+    })
+}
+
+fn chosen_model(catalog: &[ModelOption], provider: &str, local_proxy: bool, current: &str, next: &str) -> String {
+    if provider == "claude" && current.ends_with("[1m]")
+        && fast_model_available(catalog, provider, local_proxy, current)
+        && fast_model_available(catalog, provider, local_proxy, next) {
+        controls::context_model(next, true)
+    } else { next.to_owned() }
+}
+
+fn remembered_choice(catalog: &[ModelOption], provider: &str, local_proxy: bool, remembered: (String, String)) -> (String, String) {
+    let (value, effort) = remembered;
+    let model = matched_model(catalog, provider, local_proxy, &value);
+    let value = if model.is_some() { value } else { String::new() };
     let levels = match provider {
         "codex" => model.map(|m| m.efforts.clone()).unwrap_or_default(),
         "claude" => CLAUDE_EFFORTS.map(String::from).to_vec(),
@@ -58,16 +73,28 @@ fn remembered_choice(catalog: &[ModelOption], provider: &str, remembered: (Strin
     (value, effort)
 }
 
-fn selected_model_valid(catalog: &[ModelOption], model: &str) -> bool {
-    !model.is_empty() && catalog.iter().any(|m| m.value() == model)
+fn selected_model_valid(catalog: &[ModelOption], provider: &str, local_proxy: bool, model: &str) -> bool {
+    !model.is_empty() && matched_model(catalog, provider, local_proxy, model).is_some()
 }
 
 fn fast_model_available(catalog: &[ModelOption], provider: &str, local_proxy: bool, model: &str) -> bool {
-    catalog.iter().find(|m| m.value() == model).is_some_and(|m| match provider {
+    matched_model(catalog, provider, local_proxy, model).is_some_and(|m| match provider {
         "codex" => m.supports_fast(),
         "claude" => local_proxy && m.fast,
         _ => false,
     })
+}
+
+fn reloaded_choice(catalog: &[ModelOption], provider: &str, local_proxy: bool,
+    current: (String, String), remembered: (String, String)) -> (String, String) {
+    let context = (provider == "claude" && local_proxy && !current.0.is_empty()).then_some(current.0.ends_with("[1m]"));
+    let choice = if provider == "claude" && fast_model_available(catalog, provider, local_proxy, &current.0) { current } else { remembered };
+    let (model, effort) = remembered_choice(catalog, provider, local_proxy, choice);
+    let model = match context {
+        Some(on) if fast_model_available(catalog, provider, local_proxy, &model) => controls::context_model(&model, on),
+        _ => model,
+    };
+    (model, effort)
 }
 
 fn creation_tier(tier: Option<&str>, available: bool, fresh: bool) -> Option<&str> {
@@ -246,7 +273,7 @@ impl NewSession {
     }
 
     pub(super) fn resume_ready(&self) -> bool {
-        self.engine_ready() && (self.proxy_accounts().is_none() || selected_model_valid(self.catalog(), &self.model))
+        self.engine_ready() && (self.proxy_accounts().is_none() || selected_model_valid(self.catalog(), self.provider, true, &self.model))
     }
 
     pub(super) fn proxy_note(&self) -> Option<String> {
@@ -286,10 +313,11 @@ impl NewSession {
         }, window, cx));
     }
 
-    /// O catálogo da conta escolhida. Pedir de novo zera modelo, esforço e subagente: o que valia para outra conta não vale aqui.
+    /// O catálogo da conta escolhida reconfirma a escolha do proxy antes de deixá-la criar.
     pub(super) fn load_models(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let seq = self.models.start();
-        (self.model, self.effort, self.subagent) = (String::new(), String::new(), String::new());
+        if self.proxy_accounts().is_none() { self.model.clear(); self.effort.clear(); }
+        self.subagent.clear();
         self.service_tier = None;
         self.build_model_picks(window, cx);
         if (self.provider == "codex" && self.codex_account.is_empty())
@@ -367,7 +395,8 @@ impl NewSession {
         self.saved_default = saved;
         // O lembrado só volta com a lista lida, se ainda estiver nela, e o esforço só se couber no modelo que ficou.
         if self.models.ok().is_some() {
-            (self.model, self.effort) = remembered_choice(self.catalog(), self.provider, remembered);
+            (self.model, self.effort) = reloaded_choice(self.catalog(), self.provider, self.proxy_accounts().is_some(),
+                (self.model.clone(), self.effort.clone()), remembered);
         }
         self.build_model_picks(window, cx);
     }
@@ -424,6 +453,23 @@ impl NewSession {
                 }))))
     }
 
+    pub(super) fn render_engine_context(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if self.provider != "claude" || !self.fast_available() { return None; }
+        Some(div().flex().items_center().gap_2().px_2().py_1()
+            .child(div().flex_1().min_w_0().flex().flex_col().gap_1()
+                .child(div().text_sm().child(tr("create_context_title")))
+                .child(div().text_xs().text_color(theme::muted()).whitespace_normal().child(tr("create_engine_context_help"))))
+            .child(Switch::new("new-chat-engine-context").small().checked(self.model.ends_with("[1m]"))
+                .accessibility_label(tr("create_context_title")).disabled(self.creating || !self.engine_ready())
+                .on_change(cx.listener(|this, on: &bool, window, cx| {
+                    if this.creating || !this.engine_ready() || this.provider != "claude" || !this.fast_available() { return; }
+                    this.model = controls::context_model(&this.model, *on);
+                    this.model_choice_touched = true;
+                    this.build_model_picks(window, cx);
+                    cx.notify();
+                }))))
+    }
+
     /// A permissão existe para o Claude e para o Codex sem terminal, cada um com a própria lista.
     pub(super) fn permissions(&self) -> Option<&'static [&'static str]> {
         if self.is_transfer() { return None; }
@@ -437,10 +483,12 @@ impl NewSession {
         let default = || ModelChoice { id: String::new(), label: tr("create_default"), hint: String::new() };
         let models: Vec<ModelChoice> = std::iter::once(default()).chain(self.catalog().iter().filter(|m| m.id != "default")
             .map(|m| ModelChoice { id: m.value(), label: m.label(), hint: m.hint() })).collect();
-        let at = Self::pick_at(&models, &self.model);
+        let selected = matched_model(self.catalog(), self.provider, self.proxy_accounts().is_some(), &self.model)
+            .map(ModelOption::value).unwrap_or_else(|| self.model.clone());
+        let at = Self::pick_at(&models, &selected);
         self.model_pick = Some(picker(models, at, true, |this, id, window, cx| {
             this.model_choice_touched = true;
-            this.model = id;
+            this.model = chosen_model(this.catalog(), this.provider, this.proxy_accounts().is_some(), &this.model, &id);
             if !this.fast_available() { this.service_tier = None; }
             // Trocar de modelo pode tirar o nível escolhido da lista (só o Codex tem níveis por modelo).
             if !this.levels().contains(&this.effort) { this.effort.clear(); }
@@ -479,7 +527,7 @@ impl NewSession {
     /// A pílula de modelo da tela sem sessão, dentro do compositor: o provider, o modelo e o esforço escolhidos.
     pub(super) fn render_model_pill(&self, cx: &mut Context<Self>) -> Div {
         let id = Menu::Model.anchor();
-        let model = self.catalog().iter().find(|m| m.value() == self.model).map(ModelOption::label)
+        let model = matched_model(self.catalog(), self.provider, self.proxy_accounts().is_some(), &self.model).map(ModelOption::label)
             .unwrap_or_else(|| provider_name(self.provider).to_owned());
         popup::anchor(div(), id).child(chrome::pill_button(id, cx).gap(px(6.)).selected(self.menu.get() == Some(Menu::Model)).disabled(self.creating)
             .accessibility_label(format!("{}: {model}", tr("create_model")))
@@ -493,7 +541,7 @@ impl NewSession {
 
     pub(super) fn render_transfer_model(&self, cx: &mut Context<Self>) -> Div {
         use gpui_kit::component::popover::Popover;
-        let title = self.catalog().iter().find(|m| m.value() == self.model).map(ModelOption::label).unwrap_or_else(|| tr("create_default"));
+        let title = matched_model(self.catalog(), self.provider, self.proxy_accounts().is_some(), &self.model).map(ModelOption::label).unwrap_or_else(|| tr("create_default"));
         let view = cx.entity().downgrade();
         let opening = view.clone();
         div().flex().flex_col().gap_2().child(label(tr("create_model")))
@@ -531,13 +579,14 @@ impl NewSession {
                     .chain(self.catalog().iter().filter(|m| m.id != "default").map(|m| (m.value(), m.label(), m.hint())))
                     .filter(|(_, label, hint)| wanted(&query, label, hint))
                     .map(|(id, label, hint)| {
-                        let on = self.model == id;
+                        let on = self.model == id || matched_model(self.catalog(), self.provider, self.proxy_accounts().is_some(), &self.model)
+                            .is_some_and(|m| m.value() == id);
                         menu_row(SharedString::from(format!("new-chat-model-{id}")), on, label, hint)
                             .disabled(self.creating || (self.proxy_accounts().is_some() && !self.engine_ready()))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 // O menu fica aberto: o esforço, logo abaixo, costuma ser a escolha seguinte.
                                 this.model_choice_touched = true;
-                                this.model = id.clone();
+                                this.model = chosen_model(this.catalog(), this.provider, this.proxy_accounts().is_some(), &this.model, &id);
                                 if !this.fast_available() { this.service_tier = None; }
                                 if !this.levels().contains(&this.effort) { this.effort.clear(); }
                                 this.build_effort_pick(window, cx);
@@ -575,7 +624,8 @@ impl NewSession {
                 .when(self.proxy_accounts().is_some(), |el| el.child(self.render_engine_account()))
         });
         div().p(px(popup::INSET)).flex().flex_col().gap(px(2.)).when(!self.is_transfer(), |el| el.child(tabs))
-            .children(engine).child(self.menu_search()).child(list).children(effort).children(self.render_fast_choice(cx)).children(default)
+            .children(engine).child(self.menu_search()).child(list).children(effort).children(self.render_fast_choice(cx))
+            .children(self.render_engine_context(cx)).children(default)
     }
 
     pub(super) fn build_config_pick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -607,6 +657,8 @@ impl NewSession {
         self.engine_pick = Some(picker(choices, at, false, |this, name, window, cx| {
             if this.creating || this.engine == name { return; }
             this.engine = name;
+            this.model.clear();
+            this.effort.clear();
             this.asking = false;
             this.confirming = false;
             this.build_engine_account_pick(window, cx);
@@ -1055,6 +1107,52 @@ mod tests {
     }
 
     #[test]
+    fn proxy_context_matches_base_and_preserves_memory_fast_and_model_changes() {
+        let models: Vec<ModelOption> = serde_json::from_value(serde_json::json!([
+            {"id":"gpt-one", "supports_fast":true}, {"id":"gpt-two", "supports_fast":true},
+            {"id":"other", "supports_fast":false}, {"id":"opus"}, {"id":"opus[1m]"}
+        ])).unwrap();
+        let model = "gpt-one[1m]";
+        assert!(super::selected_model_valid(&models, "claude", true, model));
+        assert!(super::fast_model_available(&models, "claude", true, model));
+        assert_eq!(super::matched_model(&models, "claude", true, model).unwrap().value(), "gpt-one");
+        assert_eq!(super::remembered_choice(&models, "claude", true, (model.into(), "high".into())), (model.into(), "high".into()));
+        for (provider, local) in [("claude", false), ("codex", true), ("pi", true)] {
+            assert!(!super::selected_model_valid(&models, provider, local, model));
+            assert!(!super::fast_model_available(&models, provider, local, model));
+        }
+        for invalid in ["other[1m]", "account/gpt-one[1m]", "gpt-one[1m][1m]"] {
+            assert!(!super::selected_model_valid(&models, "claude", true, invalid));
+        }
+        let choose = |provider, local, next| super::chosen_model(&models, provider, local, model, next);
+        assert_eq!(choose("claude", true, "gpt-two"), "gpt-two[1m]");
+        assert_eq!(choose("claude", true, "other"), "other");
+        assert_eq!(choose("claude", true, ""), "");
+        assert_eq!(choose("claude", false, "gpt-two"), "gpt-two");
+        assert_eq!(choose("codex", true, "gpt-two"), "gpt-two");
+        assert_eq!(super::matched_model(&models, "claude", false, "opus[1m]").unwrap().value(), "opus[1m]");
+        assert_eq!(super::chosen_model(&models, "claude", false, "opus[1m]", "opus"), "opus");
+        assert_eq!(super::matched_model(&models[..4], "claude", false, "opus[1m]").map(ModelOption::value), None);
+    }
+
+    #[test]
+    fn proxy_account_reload_reconfirms_context_and_preserves_explicit_off() {
+        let models: Vec<ModelOption> = serde_json::from_value(serde_json::json!([
+            {"id":"gpt-one", "supports_fast":true}, {"id":"gpt-two", "supports_fast":true}
+        ])).unwrap();
+        let reload = |provider, local, current: &str, remembered: &str| super::reloaded_choice(&models, provider, local,
+            (current.into(), "high".into()), (remembered.into(), "medium".into()));
+        assert_eq!(reload("claude", true, "gpt-one[1m]", "gpt-two"), ("gpt-one[1m]".into(), "high".into()));
+        assert_eq!(reload("claude", true, "gpt-one", "gpt-two[1m]"), ("gpt-one".into(), "high".into()));
+        assert_eq!(reload("claude", true, "removed[1m]", "gpt-two"), ("gpt-two[1m]".into(), "medium".into()));
+        assert_eq!(reload("claude", true, "removed", "gpt-two[1m]"), ("gpt-two".into(), "medium".into()));
+        assert_eq!(reload("claude", true, "", "gpt-two[1m]"), ("gpt-two[1m]".into(), "medium".into()));
+        assert_eq!(reload("claude", false, "gpt-one[1m]", "gpt-two"), ("gpt-two".into(), "medium".into()));
+        assert_eq!(reload("codex", true, "gpt-one[1m]", "gpt-two"), ("gpt-two".into(), String::new()));
+        assert_eq!(super::creation_tier(Some("priority"), super::fast_model_available(&models, "claude", true, "gpt-one[1m]"), true), Some("priority"));
+    }
+
+    #[test]
     fn proxy_account_fallback_skips_invalid_entries_and_preserves_valid_selection() {
         let accounts = serde_json::from_value::<Vec<crate::api::dto::CliProxyAccount>>(serde_json::json!([
             {"account":"", "credential_id":"codex:x", "email":"", "label":"empty"},
@@ -1096,10 +1194,10 @@ mod tests {
         assert_ne!(key, super::model_memory_key("another", "claude", "", "proxy", "default"));
         assert_ne!(key, super::model_memory_key("server", "claude", "", "proxy", ""));
         let catalog: Vec<ModelOption> = serde_json::from_value(serde_json::json!([{"id":"gpt-base"}])).unwrap();
-        assert!(super::selected_model_valid(&catalog, "gpt-base"));
-        assert!(!super::selected_model_valid(&catalog, ""));
-        assert!(!super::selected_model_valid(&catalog, "other-prefix/gpt-base"));
-        assert!(!super::selected_model_valid(&catalog, "removed-model"));
+        assert!(super::selected_model_valid(&catalog, "claude", true, "gpt-base"));
+        assert!(!super::selected_model_valid(&catalog, "claude", true, ""));
+        assert!(!super::selected_model_valid(&catalog, "claude", true, "other-prefix/gpt-base"));
+        assert!(!super::selected_model_valid(&catalog, "claude", true, "removed-model"));
     }
 
     #[test]
@@ -1107,7 +1205,7 @@ mod tests {
         let models: Vec<ModelOption> = serde_json::from_value(serde_json::json!([
             {"id":"model-a", "efforts":["low","high"]}, {"id":"model-b", "efforts":["medium"]}
         ])).unwrap();
-        let remembered = |model: &str, effort: &str| super::remembered_choice(&models, "codex", (model.into(), effort.into()));
+        let remembered = |model: &str, effort: &str| super::remembered_choice(&models, "codex", false, (model.into(), effort.into()));
         assert_eq!(remembered("model-a", "high"), ("model-a".into(), "high".into()));
         assert_eq!(remembered("model-b", "high"), ("model-b".into(), String::new()));
         assert_eq!(remembered("claude-model", "high"), (String::new(), String::new()));
