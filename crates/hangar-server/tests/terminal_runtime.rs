@@ -917,13 +917,14 @@ async fn focus_away_defers_until_it_returns(screen:String) {
     let reply=h.command(f.command("foco","Com o foco no mod")).await.unwrap();
     assert_eq!(reply.disposition,hangar_server::runtime::protocol::Disposition::Deferred);
     assert_eq!(reply.payload["code"],"mods_focus");
-    tokio::time::sleep(Duration::from_millis(150)).await;     // dez ciclos do relógio de 15 ms
+    // Espera as releituras em vez de um tempo fixo: no Windows o relógio anda de 15 em 15 ms e 150 ms
+    // às vezes davam um tique só.
+    let reads=||f.io.calls.lock().unwrap().iter().filter(|r|r.args[0]=="capture-pane" && !r.args.contains(&"-S".into())).count();
+    f.wait_for("a fila tenta de novo a cada tique",||reads()>=2).await;
     assert!(f.io.calls.lock().unwrap().iter().all(|r|r.args[0]!="send-keys"),"nada escrito com o foco fora do prompt");
     // A linha vira `delivered` no `Claim` de cada tique e volta no adiamento: o que vale é não desistir e
     // a tela ser relida a cada tentativa.
     assert_ne!(f.state()["rows"][0]["desistiu"],true,"a linha continua na fila");
-    let reads=f.io.calls.lock().unwrap().iter().filter(|r|r.args[0]=="capture-pane" && !r.args.contains(&"-S".into())).count();
-    assert!(reads>=2,"a fila tenta de novo a cada tique: {reads} leituras");
     *f.io.mods_screen.lock().unwrap()=None;
     f.wait_for("entrega com o foco de volta",||!typed_at(&f,"Com o foco no mod").is_empty()).await;
     h.stop().await.unwrap();
