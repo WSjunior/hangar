@@ -205,6 +205,26 @@ impl ReceiptIndex {
         }
         Ok(None)
     }
+
+    /// Entrada entregue antes de o Rust assumir a sessão não tem cursor: prova pela primeira
+    /// ocorrência livre com o texto dela e registrada depois do envio.
+    pub fn match_legacy(&self, row: &Value, used: &BTreeMap<String,Value>) -> Option<(Occurrence,String)> {
+        self.identity.as_ref()?;
+        let sent = row["ts"].as_f64()?;
+        let candidates = super::queue::entry_lines(row);
+        self.occurrences.iter().filter(|o|!used.contains_key(&o.id) && legacy_accepts(o,sent)).find_map(|occurrence| {
+            let committed = crate::transcript::history::chaves_de_commit(&occurrence.text);
+            candidates.iter().find(|c|committed.contains(*c)).map(|text|(occurrence.clone(),text.clone()))
+        })
+    }
+}
+
+/// Folga do relógio entre o carimbo da fila e o do transcript, a mesma do app.
+const LEGACY_CLOCK_SLACK_S: f64 = 2.0;
+
+pub(crate) fn legacy_accepts(occurrence: &Occurrence, sent: f64) -> bool {
+    matches!(occurrence.kind.as_str(),"user" | "dequeue" | "steer")
+        && occurrence.timestamp.is_some_and(|ts|ts + LEGACY_CLOCK_SLACK_S >= sent)
 }
 
 fn content_text(content: &Value) -> String {

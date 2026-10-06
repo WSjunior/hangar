@@ -189,6 +189,7 @@ pub enum Action {
     MarkWriting { id:String, wire_id:String },
     Finish { id:String, status:Status, result:Value },
     ConfirmOccurrence { id:String, proof:super::receipt::ReceiptProof },
+    ConfirmLegacy { entry_id:String, occurrence:super::receipt::Occurrence, normalized_text:String },
     LateRpcResolution { id:String, wire_id:String, request_id:RequestId, generation:u64, result:Value },
     Recover,
     EnsureProjection,
@@ -653,6 +654,23 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             release_terminal_write_barrier(state);
             json!(true)
         }
+        Action::ConfirmLegacy { entry_id, occurrence, normalized_text } => {
+            if state.used_occurrences.contains_key(&occurrence.id) { return Ok(json!(false)); }
+            if state.operations.values().any(|op|op.entry_id.as_deref() == Some(entry_id.as_str())) {
+                return Err(invalid("entrada com despacho próprio não é legada"));
+            }
+            let row = state.rows.iter_mut().find(|r|row_id(r) == entry_id).ok_or_else(||invalid("entrada legada não existe"))?;
+            if row["delivered"] != true || row["confirmed"] == true { return Ok(json!(false)); }
+            let proven = row["ts"].as_f64().is_some_and(|sent|super::receipt::legacy_accepts(&occurrence,sent))
+                && entry_lines(row).contains(&normalized_text)
+                && crate::transcript::history::chaves_de_commit(&occurrence.text).contains(&normalized_text);
+            if !proven { return Err(invalid("prova da entrada legada não corresponde")); }
+            row["confirmed"] = json!(true);
+            row.as_object_mut().unwrap().remove("desistiu");
+            // Texto, não objeto: a compactação só descarta recibo de operação, e este não tem.
+            state.used_occurrences.insert(occurrence.id, json!("legacy"));
+            json!(true)
+        }
         Action::Recover => {
             for op in state.operations.values_mut() {
                 // Nenhuma tentativa chegou a escrever: nada pode ter alcançado o terminal.
@@ -704,6 +722,13 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
         }
     };
     Ok(result)
+}
+
+/// Entregue antes de o Rust assumir a sessão: nenhuma operação a liga a um cursor de despacho.
+pub(crate) fn legacy_rows(state: &State) -> Vec<Value> {
+    let dispatched: BTreeSet<&str> = state.operations.values().filter_map(|op|op.entry_id.as_deref()).collect();
+    state.rows.iter().filter(|r|r["delivered"] == true && r["confirmed"] != true && r["papel"] != "assistant"
+        && !dispatched.contains(row_id(r))).cloned().collect()
 }
 
 pub(crate) fn entry_lines(row: &Value) -> BTreeSet<String> {

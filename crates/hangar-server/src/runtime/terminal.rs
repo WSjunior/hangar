@@ -231,7 +231,7 @@ impl Executor {
                     Some(Message::Queue {id,action,response})=>{
                         let result=match action {
                             Action::Finish {id,status,result}=>self.native_receipt(&id,status,result).await,
-                            Action::Claim {..}|Action::SetDelivered {value:false,..}|Action::BumpAttempts {..}|Action::Reconcile {..}|Action::ReplaceRows {..}|Action::Prepare {..}|Action::BeginDispatch {..}|Action::MarkWriting {..}|Action::BindDispatch {..}|Action::Recover|Action::Confirm {..}|Action::ConfirmOccurrence {..}|Action::SetRuntimeState {..}|Action::LateRpcResolution {..}=>Err(error("terminal_queue_action")),
+                            Action::Claim {..}|Action::SetDelivered {value:false,..}|Action::BumpAttempts {..}|Action::Reconcile {..}|Action::ReplaceRows {..}|Action::Prepare {..}|Action::BeginDispatch {..}|Action::MarkWriting {..}|Action::BindDispatch {..}|Action::Recover|Action::Confirm {..}|Action::ConfirmOccurrence {..}|Action::ConfirmLegacy {..}|Action::SetRuntimeState {..}|Action::LateRpcResolution {..}=>Err(error("terminal_queue_action")),
                             action=>self.queue.exec(self.target.generation,&id,sample(),action).await.map_err(|_|error("queue_io")),
                         };
                         if result.is_ok(){self.publish().await?;} let _=response.send(result);
@@ -440,6 +440,13 @@ impl Executor {
             if let Some(proof)=self.receipt.match_after(&self.target.transcript,&cursor,row,&current.used_occurrences).map_err(|_|error("receipt_scan"))? {
                 if self.action(Action::ConfirmOccurrence {id:operation.id.clone(),proof}).await?==true {count+=1;}
             }
+        }
+        // Depois das despachadas: uma linha que prova a entrega nova não pode ser gasta por uma legada.
+        let current=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
+        for row in super::queue::legacy_rows(&current) {
+            let used=self.queue.snapshot().await.map_err(|_|error("queue_io"))?.used_occurrences;
+            let (Some(entry_id),Some((occurrence,normalized_text)))=(row["id"].as_str().map(str::to_owned),self.receipt.match_legacy(&row,&used)) else {continue;};
+            if self.action(Action::ConfirmLegacy {entry_id,occurrence,normalized_text}).await?==true {count+=1;}
         }
         if count>0{self.publish().await?;}Ok(json!({"confirmed":count}))
     }

@@ -255,7 +255,7 @@ enum Job {
     View { version:u64,view:Value,result:Result<(),RuntimeError> },
     Drained(Result<Vec<RuntimeCommand>,RuntimeError>),
     DrainFinished(Result<RuntimeReply,RuntimeError>),
-    Confirmed { response:Option<oneshot::Sender<Result<Value,RuntimeError>>>,result:Result<Vec<String>,RuntimeError> },
+    Confirmed { response:Option<oneshot::Sender<Result<Value,RuntimeError>>>,result:Result<(Vec<String>,usize),RuntimeError> },
     Steered { id:String,result:Result<Vec<String>,RuntimeError> },
     NativeInput { id:String,result:Result<Value,RuntimeError> },
 }
@@ -897,9 +897,9 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                     Job::Confirmed { response,result } => {
                         if response.is_none() { confirming = false; }
                         match result {
-                            Ok(ids)=>{
+                            Ok((ids,legacy))=>{
                                 for id in &ids { effects.extend(engine.confirm_input(id)); }
-                                if let Some(response) = response { let _ = response.send(Ok(json!({"confirmed":ids.len()}))); }
+                                if let Some(response) = response { let _ = response.send(Ok(json!({"confirmed":ids.len() + legacy}))); }
                             }
                             Err(error)=>{
                                 if crate::warn_limit::allow(Some(&target.key),&error.code) {
@@ -961,8 +961,9 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
 
 /// Prova cada entrada despachada e ainda não confirmada contra o transcript, a partir do cursor do
 /// despacho. Uma leitura do transcript por rodada; o estado só é relido depois de uma confirmação.
+/// Devolve as operações confirmadas e quantas entradas legadas saíram junto.
 async fn confirm_inputs(queue:Arc<QueueActor>,receipt:Arc<std::sync::Mutex<ReceiptIndex>>,path:std::path::PathBuf,
-    generation:u64,sample:ClockSample) -> Result<Vec<String>,RuntimeError> {
+    generation:u64,sample:ClockSample) -> Result<(Vec<String>,usize),RuntimeError> {
     let mut state = queue.snapshot().await.map_err(io_failure)?;
     let confirmed_rows:std::collections::BTreeSet<&str> = state.rows.iter().filter(|r|r["confirmed"] == true).filter_map(|r|r["id"].as_str()).collect();
     let candidates:Vec<(String,String,super::receipt::DispatchCursor)> = state.operations.iter()
@@ -970,7 +971,7 @@ async fn confirm_inputs(queue:Arc<QueueActor>,receipt:Arc<std::sync::Mutex<Recei
         .filter_map(|(id,op)|Some((id.clone(),op.entry_id.clone()?,serde_json::from_value(op.dispatch_cursor.clone()).ok()?)))
         .filter(|(_,entry,_)|!confirmed_rows.contains(entry.as_str())).collect();
     let mut confirmed = Vec::new();
-    if candidates.is_empty() { return Ok(confirmed); }
+    if candidates.is_empty() && super::queue::legacy_rows(&state).is_empty() { return Ok((confirmed,0)); }
     let scanner = receipt.clone(); let transcript = path.clone();
     tokio::task::spawn_blocking(move || scanner.lock().map_err(|_|failure("receipt_panic"))?.scan(&transcript).map(|_|()).map_err(io_failure))
         .await.map_err(|_|failure("receipt_job"))??;
@@ -987,7 +988,20 @@ async fn confirm_inputs(queue:Arc<QueueActor>,receipt:Arc<std::sync::Mutex<Recei
             if accepted == true { confirmed.push(id); state = queue.snapshot().await.map_err(io_failure)?; }
         }
     }
-    Ok(confirmed)
+    // Depois das despachadas: uma linha que prova a entrega nova não pode ser gasta por uma legada.
+    let mut legacy = 0;
+    for row in super::queue::legacy_rows(&state) {
+        let Some(entry_id) = row["id"].as_str().map(str::to_owned) else { continue };
+        let receipt = receipt.clone(); let used = state.used_occurrences.clone();
+        let found = tokio::task::spawn_blocking(move || receipt.lock().map(|r|r.match_legacy(&row,&used)).map_err(|_|failure("receipt_panic")))
+            .await.map_err(|_|failure("receipt_job"))??;
+        if let Some((occurrence,normalized_text)) = found {
+            let accepted = queue.exec(generation,&format!("legacy-proof:{}",unique()),sample,
+                Action::ConfirmLegacy { entry_id,occurrence,normalized_text }).await.map_err(io_failure)?;
+            if accepted == true { legacy += 1; state = queue.snapshot().await.map_err(io_failure)?; }
+        }
+    }
+    Ok((confirmed,legacy))
 }
 
 async fn capture_cursor(target:&RuntimeTarget,view:&Value) -> Result<Value,RuntimeError> {
