@@ -15,8 +15,10 @@
     place?: number | null;
     /** O escopo de hover mais próximo (Box com `key`) está com o ponteiro em cima. */
     hoverOn?: boolean;
+    /** O nó está dentro de um `Text`: o `wrap` que vale é o do `Text` de fora. */
+    inText?: boolean;
   }
-  let { node, onPress, onInput, place = null, hoverOn = false }: Props = $props();
+  let { node, onPress, onInput, place = null, hoverOn = false, inText = false }: Props = $props();
 
   const el = $derived(node && typeof node === 'object' ? (node as PluginElement) : null);
   // Box com `key` é escopo: acende com o ponteiro nele, e os filhos herdam. Os outros nós seguem o escopo de cima.
@@ -46,8 +48,8 @@
     typeof props.source === 'string' ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(props.source)}` : '';
 </script>
 
-{#snippet kids(list: Node[] | undefined)}
-  {#each list ?? [] as child, i (i)}<PluginNode node={child} {onPress} {onInput} {place} hoverOn={lit} />{/each}
+{#snippet kids(list: Node[] | undefined, nested = false)}
+  {#each list ?? [] as child, i (i)}<PluginNode node={child} {onPress} {onInput} {place} hoverOn={lit} inText={nested} />{/each}
 {/snippet}
 
 {#if typeof node === 'string' || typeof node === 'number'}{node}{:else if el}
@@ -59,7 +61,7 @@
       {@render kids(el.children)}
     </div>
   {:else if el.type === 'Text'}
-    <span style={textStyle(p)}>{@render kids(el.children)}</span>
+    <span style={textStyle(p, inText)}>{@render kids(el.children, true)}</span>
   {:else if el.type === 'Raster'}
     {@const raster = rasterRows(p)}
     <!-- O Raster vem com a largura do pane do terminal: em coluna mais estreita cada trecho encolhe na
@@ -97,7 +99,7 @@
   {:else if el.type === 'Image'}
     <span class="alt">{str(p.alt)}</span>
   {:else}
-    {@render kids(el.children)}
+    {@render kids(el.children, inText)}
   {/if}
 {/if}
 
@@ -111,7 +113,10 @@
   .md :global(p) { margin: 0; }
   .md.dim { opacity: 0.6; }
   .code { margin: 0; white-space: pre-wrap; }
-  .button { font: inherit; color: inherit; border: 0; padding: 0 1ch; border-radius: var(--radius-sm); background: var(--surface-inset); }
+  /* No terminal o Button é um Box com `flexShrink: 0` e `alignSelf: flex-start`: não encolhe na linha nem
+     estica na coluna, e o rótulo só quebra quando é mais largo que a linha inteira. */
+  .button { font: inherit; color: inherit; border: 0; padding: 0 1ch; border-radius: var(--radius-sm); background: var(--surface-inset);
+            flex-shrink: 0; align-self: flex-start; max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; }
   /* O botão do app tem 44 px de área de toque e centraliza o texto; aqui ele é uma célula do
      terminal, na mesma linha dos textos ao lado. */
   button.button { cursor: pointer; min-height: 0; min-width: 0; display: inline-block; line-height: inherit; text-align: inherit; }
