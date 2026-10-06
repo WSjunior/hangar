@@ -168,11 +168,11 @@ fn run_case(doc: &Value, case: &Value) -> usize {
             assert_eq!(got.problema, want.problema, "{ctx} problema");
         }
         let mut got_effects: Vec<Value> = effects.iter()
-            .map(|e| match e { Effect::DemoteAwaiting { sid } => json!(["demote_awaiting", sid]) }).collect();
+            .map(|e| match e { Effect::DemoteAwaiting { sid, .. } => json!(["demote_awaiting", sid]) }).collect();
         got_effects.sort_by_key(|v| v.to_string());
         assert_eq!(Value::Array(got_effects), expected["effects"], "{ctx} effects");
         // Quem executa o efeito é o Python (`hook_state.demote_awaiting`): sidecar idle, ts mantido.
-        for Effect::DemoteAwaiting { sid } in &effects {
+        for Effect::DemoteAwaiting { sid, .. } in &effects {
             let mut rewritten = false;
             for dir in &dirs {
                 let f = dir.join(".hangar-state").join(format!("{sid}.json"));

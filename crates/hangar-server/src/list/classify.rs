@@ -51,10 +51,11 @@ pub trait CaptureSource: Sync {
 }
 
 /// O que a rodada pede a quem é dono do registro (o Python, a partir da Fase B).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     /// O pane contradisse um marcador `awaiting_input` vencido: rebaixar para idle no mapa e no sidecar.
-    DemoteAwaiting { sid: String },
+    /// `ts` é a versão do estado rebaixado (o `statusUpdatedAt` do registro nativo).
+    DemoteAwaiting { sid: String, ts: f64 },
 }
 
 /// Fatos lidos fora daqui para esta rodada. Os arquivos (transcript, pergunta aberta, sidecar da
@@ -259,7 +260,7 @@ impl Classifier {
                 }
                 if let (Some(m), Some(sid)) = (&marker, sid(row)) {
                     if m.state == "awaiting_input" && a.state != "awaiting_input" && wall - m.ts > AWAITING_DEMOTE_GRACE_S {
-                        effects.push(Effect::DemoteAwaiting { sid });
+                        effects.push(Effect::DemoteAwaiting { sid, ts: m.ts });
                     }
                 }
                 row.limit_reset = a.limit_reset.clone();
@@ -455,7 +456,7 @@ mod tests {
     #[tokio::test]
     async fn asks_demote_after_grace() {
         // Marcador awaiting com 5 s: pane sem menu ainda não rebaixa; com 60 s, rebaixa.
-        for (age, want) in [(5.0, vec![]), (60.0, vec![Effect::DemoteAwaiting { sid: "abc".into() }])] {
+        for (age, want) in [(5.0, vec![]), (60.0, vec![Effect::DemoteAwaiting { sid: "abc".into(), ts: 940.0 }])] {
             let (_d, dirs, mut row) = setup("awaiting_input", 1000.0 - age);
             let io = Fixed { frame: Ok(IDLE.into()), wall: 1000.0, calls: Mutex::new(0) };
             assert_eq!(run(&mut row, &dirs, &io, Some(&BTreeMap::new())).await, want, "idade {age}");

@@ -129,8 +129,8 @@ shells, loop), `monitor::rounds_counted_like_python`,
 `agent_pane::matches_python_fixture`, `permission::parse_matches_python`; medida em release de uma
 rodada (captura + `reduce`) com tmux `-L`, contra 1,26 ms do Python por captura.
 
-- [ ] **Step 3: Testes e sequências novas, vistos falhar**
-- [ ] **Step 4: `Monitor`, pane do agente, shells, permissão, rebaixamento; testes focados; medida de uma rodada; revisar**
+- [x] **Step 3: Testes e sequências novas, vistos falhar**
+- [x] **Step 4: `Monitor`, pane do agente, shells, permissão, rebaixamento; testes focados; medida de uma rodada; revisar**
 
 ### Task 3: Prévia no `Monitor` (sem produção)
 

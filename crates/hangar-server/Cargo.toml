@@ -47,6 +47,8 @@ sysinfo = { version = "=0.39.6", default-features = false, features = ["system"]
 
 [dev-dependencies]
 tempfile.workspace = true
+# Relógio pausado: as rodadas do `state::Monitor` contadas sem esperar o tempo real.
+tokio = { workspace = true, features = ["test-util"] }
 
 # O leitor `sysinfo` (`list/procs.rs`) também é testado no Linux.
 [target.'cfg(target_os = "linux")'.dev-dependencies]

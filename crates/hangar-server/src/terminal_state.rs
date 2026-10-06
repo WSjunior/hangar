@@ -1,6 +1,5 @@
-//! `analyze` fornece os fatos da captura usada em produção.
-//! O redutor temporal abaixo é só referência da Parte 2B para as fixtures;
-//! na Parte 2C, o Python mantém a memória e calcula o estado final.
+//! `analyze` fornece os fatos da captura usada em produção; `reduce` é o redutor temporal do
+//! `state::Monitor` (porte do `StateMonitor` do Python), com a memória que atravessa as rodadas.
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -41,7 +40,7 @@ impl Default for PaneAnalysis {
     }
 }
 
-/// Memória da referência da Parte 2B; não é mantida pelo observador em produção.
+/// Memória do redutor entre rodadas.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct ReducerMemory {
@@ -50,15 +49,18 @@ pub struct ReducerMemory {
     pub no_spinner: u32,
     pub held_state: String,
     pub held_label: Option<String>,
+    /// Última divergência (plugin, pane) já registrada: uma linha por divergência, não por rodada.
+    #[serde(skip)]
+    pub divergence: Option<(String, String)>,
 }
 
 impl Default for ReducerMemory {
     fn default() -> Self {
-        Self { prev_spinner: None, frozen: 0, no_spinner: 0, held_state: "idle".into(), held_label: None }
+        Self { prev_spinner: None, frozen: 0, no_spinner: 0, held_state: "idle".into(), held_label: None, divergence: None }
     }
 }
 
-/// Entradas da referência da Parte 2B; o contrato privado não as recebe.
+/// Fatos da rodada que não vêm do pane.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ReducerFacts {
@@ -77,7 +79,7 @@ impl Default for ReducerFacts {
     }
 }
 
-/// Resultado da referência da Parte 2B, comparado às fixtures Python.
+/// Resultado da rodada, comparado às fixtures Python.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct ReducedState {
@@ -176,7 +178,8 @@ fn decimal_number(s: &str) -> Option<usize> {
         number.checked_mul(10)?.checked_add(((c as u32 - start) % 10) as usize)
     })
 }
-fn lines(pane: &str) -> Vec<&str> {
+/// `str.splitlines()` do Python.
+pub(crate) fn lines(pane: &str) -> Vec<&str> {
     if pane.is_empty() { return Vec::new(); }
     let mut out: Vec<_> = P.lines.split(pane).collect();
     if out.last() == Some(&"") { out.pop(); }
@@ -362,21 +365,25 @@ fn set_question(analysis: &mut PaneAnalysis, question: TerminalQuestion) {
     analysis.question = question.question; analysis.options = Some(question.options);
 }
 
-/// Diagnóstico da referência da Parte 2B, sem uso no observador em produção.
+/// O que a rodada viu além do estado.
 #[derive(Serialize)]
 pub struct ReducerDiagnostic {
     pub before_plugin: String,
     pub plugin_applied: bool,
+    /// O plugin corrigiu o pane, e essa divergência (plugin, pane) é nova: vai ao log.
+    pub divergence: Option<(String, String)>,
 }
 
-/// Referência da Parte 2B para as fixtures; o estado final em produção é calculado no Python.
 pub fn reduce(pane: &str, memory: ReducerMemory, facts: ReducerFacts) -> ReducedState {
     reduce_with_diagnostics(pane, memory, facts).0
 }
 
-/// Referência da Parte 2B com diagnóstico; não participa do contrato privado de captura.
-pub fn reduce_with_diagnostics(pane: &str, mut memory: ReducerMemory, facts: ReducerFacts) -> (ReducedState, ReducerDiagnostic) {
-    let mut analysis = analyze(pane);
+pub fn reduce_with_diagnostics(pane: &str, memory: ReducerMemory, facts: ReducerFacts) -> (ReducedState, ReducerDiagnostic) {
+    reduce_analysis(analyze(pane), memory, facts)
+}
+
+/// `reduce` sobre a análise que o `TerminalPool` já fez da captura.
+pub fn reduce_analysis(mut analysis: PaneAnalysis, mut memory: ReducerMemory, facts: ReducerFacts) -> (ReducedState, ReducerDiagnostic) {
     if analysis.state != "awaiting_input" && analysis.options.as_ref().is_none_or(Vec::is_empty) {
         if let Some(q) = facts.open_question { set_question(&mut analysis, q); }
     }
@@ -411,11 +418,14 @@ pub fn reduce_with_diagnostics(pane: &str, mut memory: ReducerMemory, facts: Red
             analysis.state = "working".into(); analysis.label = memory.held_label.clone();
         }
     }
-    let mut diagnostic = ReducerDiagnostic { before_plugin: analysis.state.clone(), plugin_applied: false };
+    let mut diagnostic = ReducerDiagnostic { before_plugin: analysis.state.clone(), plugin_applied: false, divergence: None };
     if matches!(analysis.state.as_str(), "working" | "idle") {
         if let Some(plugin) = facts.plugin_state.filter(|s| matches!(s.as_str(), "working" | "idle")) {
             if !(plugin == "idle" && animating) {
                 diagnostic.plugin_applied = true;
+                let seen = (plugin != analysis.state).then(|| (plugin.clone(), analysis.state.clone()));
+                if seen.is_some() && seen != memory.divergence { diagnostic.divergence.clone_from(&seen); }
+                memory.divergence = seen;
                 analysis.state = plugin;
                 if analysis.state == "idle" { analysis.label = None; }
                 memory.prev_spinner = None; memory.frozen = 0; memory.no_spinner = 0;
