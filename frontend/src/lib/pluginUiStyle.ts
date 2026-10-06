@@ -62,7 +62,9 @@ export function boxStyle(p: Props, place?: number | null): string {
     'margin-bottom': lines(pick('marginBottom', 'marginY', 'margin')),
     'margin-left': cols(pick('marginLeft', 'marginX', 'margin')),
     'margin-right': cols(pick('marginRight', 'marginX', 'margin')),
-    background: inkColor(p.backgroundColor),
+    // No terminal as células do cartão substituem as de baixo: sem cor própria, ele leva o fundo opaco do lugar
+    // (`--plugin-place-bg`, da faixa e do painel), senão o texto dele se embaralha com o da linha.
+    background: inkColor(p.backgroundColor) ?? (absolute ? 'var(--plugin-place-bg)' : null),
     border: border ? `1px solid ${inkColor(p.borderColor) ?? 'var(--border-default)'}` : null,
     'border-radius': border === 'round' ? '6px' : null,
     overflow: p.overflow === 'hidden' ? 'hidden' : null,
