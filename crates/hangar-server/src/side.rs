@@ -265,13 +265,17 @@ impl Hub {
             close_on_tail_death(Arc::downgrade(self), generation),
         );
         *bound = Some(Bound { binding, generation, tail });
-        // Os avisos de mod ficam: são da sessão, não do transcript, e o Python não os reenvia.
-        self.cache.lock().unwrap().latest = Default::default();
-        // A faixa do Rust é da sessão, não do transcript: volta ao retrato antes do `reset`, senão quem
-        // religa depois de um `/clear` fica sem ela até o mod redesenhar.
-        for (event, data) in self.ctx.mods.replay(&self.name) {
-            let frame = sse_frame(event, &data, None);
-            self.cache.lock().unwrap().record(event, &data, &frame, false);
+        // Os avisos de mod ficam (o `cache.toasts` os guarda): são da sessão, não do transcript. A faixa
+        // do Rust também é da sessão: volta ao retrato antes do `reset`, senão quem religa depois de um
+        // `/clear` fica sem ela até o mod redesenhar. Limpeza e semeadura sob uma trava só.
+        let ui = self.ctx.mods.replay(&self.name).into_iter().find(|(event, _)| *event == "plugin_ui");
+        {
+            let mut cache = self.cache.lock().unwrap();
+            cache.latest = Default::default();
+            if let Some((event, data)) = ui {
+                let frame = sse_frame(event, &data, None);
+                cache.record(event, &data, &frame, false);
+            }
         }
         let _ = self.tx.send(Out::Rebind);
     }
@@ -290,6 +294,22 @@ impl Hub {
         // O envio fica sob a trava do retrato (o `send` do broadcast não bloqueia): com o Python e o Rust
         // escrevendo no mesmo hub, fora dela dois quadros poderiam sair em ordem diferente da do retrato.
         if !repeated {
+            let _ = self.tx.send(Out::Side(frame));
+        }
+    }
+
+    /// Semeia o hub recém-criado com o retrato que o `Mods` calculou fora das travas. A faixa só entra se
+    /// a vaga dela ainda estiver vazia: um `publish_ui` ou `forget` que chegou depois do cálculo já a
+    /// preencheu com o dado mais novo. Os avisos se resolvem pelo id (o app descarta o repetido).
+    pub(crate) fn seed(&self, frames: Vec<(&'static str, String)>) {
+        let ui_slot = LATEST.iter().position(|e| *e == "plugin_ui").expect("plugin_ui está em LATEST");
+        for (event, data) in frames {
+            let frame = sse_frame(event, &data, None);
+            let mut cache = self.cache.lock().unwrap();
+            if event == "plugin_ui" && cache.latest[ui_slot].is_some() {
+                continue;
+            }
+            cache.record(event, &data, &frame, false);
             let _ = self.tx.send(Out::Side(frame));
         }
     }
@@ -499,9 +519,7 @@ impl Hubs {
                 map.insert(name.to_string(), (hub.clone(), 1));
                 drop(map);
                 // Hub novo começa sem retrato: a faixa e os avisos que o Rust já publicou entram agora.
-                for (event, data) in ctx.mods.replay(name) {
-                    hub.deliver(event, &data);
-                }
+                hub.seed(ctx.mods.replay(name));
                 return Lease { hubs: self.clone(), hub };
             }
         };
@@ -636,6 +654,31 @@ mod tests {
             infos: InfoCache::default(),
             mods: Default::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn seed_does_not_overwrite_a_newer_band() {
+        use serde_json::json;
+        let dir = tempfile::tempdir().unwrap();
+        let binding = Binding { provider: Provider::Claude, jsonl: dir.path().join("t.jsonl"), key: "k".into() };
+        let ctx = idle_ctx();
+        ctx.mods.bind_hubs(ctx.hubs.downgrade());
+        struct Quiet;
+        impl crate::mods::state::SurfaceLink for Quiet {
+            fn call(&self, _: crate::mods::model::ModsCall) -> crate::mods::state::CallFuture {
+                Box::pin(async { Ok(json!(null)) })
+            }
+        }
+        ctx.mods.attach("s", 1, Arc::new(Quiet));
+        let lease = ctx.hubs.acquire("s", binding, &ctx);
+        let ui = |text: &str| json!({"above": {"type": "Text", "children": [text]}, "panes": []});
+        ctx.mods.publish_ui("s", 1, &ui("velha"));
+        let stale = ctx.mods.replay("s");
+        ctx.mods.publish_ui("s", 1, &ui("nova"));
+        lease.hub.seed(stale);
+        let slot = LATEST.iter().position(|e| *e == "plugin_ui").unwrap();
+        let kept = lease.hub.cache.lock().unwrap().latest[slot].clone().unwrap();
+        assert!(String::from_utf8_lossy(&kept).contains("nova"), "a faixa nova fica");
     }
 
     #[tokio::test]

@@ -47,6 +47,10 @@ async fn rust_toast_reaches_devices_with_time_left() {
     let toast: Value = serde_json::from_str(&next_named(&mut events, "plugin_toast").await.data).unwrap();
     assert_eq!((toast["text"].as_str(), toast["plugin"].as_str()), (Some("V40 aviso curto"), Some("vitrine")));
     assert!(toast["timeoutMs"].as_u64().unwrap() <= 4000);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let mut late = sse(open_events(server, "s", "", &[]).await);
+    let replayed: Value = serde_json::from_str(&next_named(&mut late, "plugin_toast").await.data).unwrap();
+    assert!(replayed["timeoutMs"].as_u64().unwrap() < 4000, "o aparelho tardio recebe só o tempo que resta");
 }
 
 #[tokio::test]
@@ -80,6 +84,12 @@ async fn rebind_keeps_the_rust_band() {
     python.push_side("info", &info.to_string());
     next_named(&mut events, "reset").await;
     assert_eq!(next_named(&mut events, "plugin_ui").await.data, band("rust").to_string(), "a faixa volta com o reset");
+    python.push_side("state", &json!({"session": "s", "state": "idle", "headless": true}).to_string());
+    loop {
+        let event = next_non_ping(&mut events).await;
+        assert!(event.event != "plugin_ui", "a faixa volta uma vez só");
+        if event.event == "state" { break; }
+    }
 }
 
 #[tokio::test]
@@ -91,4 +101,21 @@ async fn forget_clears_the_band() {
     mods.forget("s", 1);
     let cleared: Value = serde_json::from_str(&next_named(&mut events, "plugin_ui").await.data).unwrap();
     assert!(cleared["above"].is_null() && cleared["panes"] == json!([]));
+}
+
+#[tokio::test]
+async fn python_band_and_toast_pass_when_rust_does_not_own_the_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("conversation.jsonl");
+    append_lines(&path, 0..1);
+    let (python, upstream) = spawn_fake().await;
+    python.set_info(info_json("claude-headless", &path));
+    let server = spawn_state(AppState::new(config(upstream, "127.0.0.1"))).await;
+    let mut events = sse(open_events(server, "s", "", &[]).await);
+    wait_until(|| python.side_conns() == 1).await;
+    python.push_side("plugin_ui", &json!({"above": null, "panes": []}).to_string());
+    assert_eq!(next_named(&mut events, "plugin_ui").await.data, json!({"above": null, "panes": []}).to_string());
+    python.push_side("plugin_toast", &json!({"id": "py-1", "text": "do python", "plugin": "m", "timeoutMs": 4000}).to_string());
+    let toast: Value = serde_json::from_str(&next_named(&mut events, "plugin_toast").await.data).unwrap();
+    assert_eq!(toast["text"], "do python");
 }
