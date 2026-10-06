@@ -315,7 +315,12 @@ impl Hub {
         // Pergunta repetida é pergunta nova: o aparelho já fechou a anterior.
         let repeated = event != "ask_question"
             && LATEST.iter().position(|e| *e == event).is_some_and(|i| cache.latest[i].as_ref() == Some(&frame));
-        cache.record(event, data, &frame, pane_question);
+        // A mesma vista de novo (o Python a reenvia a cada religação; o Rust limpa duas vezes seguidas) não
+        // sobe a versão: sem marcador novo, a versão nova invalidaria o marcador que a fila de um aparelho
+        // lento ainda tem, e ele ficaria com a vista anterior.
+        if !(repeated && event == LATEST[PLUGIN_UI]) {
+            cache.record(event, data, &frame, pane_question);
+        }
         // O envio fica sob a trava do retrato (o `send` do broadcast não bloqueia): com o Python e o Rust
         // escrevendo no mesmo hub, fora dela dois quadros poderiam sair em ordem diferente da do retrato.
         if !repeated {
