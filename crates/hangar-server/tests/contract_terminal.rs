@@ -134,6 +134,17 @@ mod monitor {
             self.events.lock().unwrap().push((self.round.load(Ordering::SeqCst) - 1, event));
             true
         }
+        fn hub_wake(&self) -> Arc<Notify> { Arc::default() }
+        async fn emit(&self, _: &'static str, _: Value) -> bool { true }
+        fn runtime_wake(&self) -> Arc<Notify> { Arc::default() }
+        fn runtime_problem(&self) -> Option<(String, String)> { None }
+        async fn ask_payload(&self) -> Result<Option<hangar_api::ask::AskQuestion>, String> { Ok(None) }
+        fn deliverable(&self) {}
+        async fn preview_capture(&self) -> Option<Result<Frame, CaptureFailed>> { None }
+        async fn preview_files(&self, _: &str) -> Vec<hangar_server::state::preview::HookFile> { Vec::new() }
+        fn committed(&self) -> Option<Arc<str>> { None }
+        async fn publish_preview(&self, _: hangar_api::preview::PreviewEvent) -> bool { true }
+        fn wall(&self) -> f64 { hangar_server::state::monitor::wall_now() }
     }
 
     #[tokio::test(start_paused = true)]

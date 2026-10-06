@@ -3,25 +3,6 @@
 Achados médios e baixos das revisões por Task que entraram na `feat/parte4` sem conserto (ritmo
 "juntar primeiro, corrigir depois"). Cada item sai daqui quando for corrigido, com o hash.
 
-## Para a Task 5 (troca de dono)
-
-- `PoolCapture` não libera o consumidor sozinho no fim/abort e congela o vínculo: recriar no
-  `rebind` (Task 2).
-- `rebind` só publica no tique seguinte (até 0,75 s); o desenho pede publicar logo depois do
-  `rebind` (Task 2).
-- O `Sources` de produção (arquivos da sessão e `FactsStore` ligados ao `Monitor`) é da Task 5
-  (Task 2).
-- Retrato de fatos que nunca chegou dá `RoundFacts` vazio; o `session.dead` do Python reconfere a
-  troca (Task 2).
-- Prévia (Task 3): o hub chama `preview::committed_from_frame(&quadro)` a cada linha do
-  `FileTail` e zera o `committed` no `rebind`; acordar o `Monitor` no commit para a limpeza ser
-  imediata (hoje vem no toque seguinte, até 0,15 s trabalhando e 0,75 s parado);
-  `preview_files`/`preview_capture` com `spawn_blocking` e prazo.
-- Task 4: os métodos do `Sources` com implementação padrão escondem o que a produção esquecer
-  (a Task 5 implementa todos e prova num teste); `deliverable()` sem retorno: falha só o
-  implementador registra e a borda não repete (igual ao Python); `suggest` e `asked` são por
-  `Monitor`, quem conecta depois depende da reposição do `SideCache`.
-
 ## Antes da `hangar-server-parte1`
 
 - Task 10: prova na VM DELPHI-02 (Step 23) com web e nativo. Os testes `term::conpty::*` e os

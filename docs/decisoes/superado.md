@@ -4,6 +4,18 @@ Estes trechos descrevem como algo **funcionava antes**. Ficam registrados porque
 medição continua valendo como história, mas não descrevem o código de hoje: cada um
 aponta a decisão que o substituiu. Não leia daqui para decidir implementação.
 
+## `StateMonitor` e `PreviewBroker` de Claude com terminal com o Rust de pé
+
+(Até a Task 5 da parte 4 da migração para Rust, 06/10/2026 → [estado ao vivo no `Monitor` do
+Rust](plataforma.md#estado-ao-vivo-de-claude-com-terminal-no-monitor-do-rust).) Com o
+`hangar-server` de pé, o `state` de Claude com terminal saía do `StateMonitor` do Python: o hub
+assinava o `side-events`, o `merged_events(side=True)` rodava o monitor (captura alugada ao pool do
+Rust por HTTP privado a 0,75 s) e o `PreviewBroker` (0,15 s trabalhando), seguia o transcript só para
+suprimir a prévia já gravada, emitia `suggest` e `ask_question` no tique do estado e disparava o
+`drain` na primeira borda entregável de cada conexão. Convidado (8766) e dono pelo Connect (8768)
+subiam outro `merged_events` com o mesmo monitor compartilhado pelo `Difusor`. Hoje isso só roda no
+modo `python`.
+
 ## Passagem de sessão e de pedido entre Python e Rust com o Rust vivo
 
 (Partes 2B–2D, PR #30 e 2C da migração para Rust, até 04/10/2026 → dono único,

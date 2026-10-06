@@ -1418,6 +1418,37 @@ incerta forçada no terminal e a transferência Claude → Codex. Tabela e achad
 `reopen_failed` intermitente no restart, e o 500 com pilha da política com geração antiga) em
 [`prova-real.md`](../migracao-rust/dono-unico/prova-real.md).
 
+## Estado ao vivo de Claude com terminal no `Monitor` do Rust
+
+(06/10/2026, parte 4 da migração, Task 5.) Com o `hangar-server` de pé (`rust` ou `pending`), o
+estado ao vivo, a prévia, a pergunta nativa, a sugestão e o `problema` de Claude com terminal saem
+de um `Monitor` por hub (`side.rs`, fonte de produção em `state/live.rs`), criado com o primeiro
+assinante e parado com o último. Assinante é o `/events` do dono ou o canal privado
+`GET /__hangar_server/state/{name}/events` (segredo e loopback, HTTP/1.0), que o `merged_events`
+do Python lê para o convidado (8766) e o dono pelo Connect (8768). Assim a sessão nunca tem dois
+donos: captura, `permission.observe` e `session.dead` saem uma vez, de um lugar só.
+
+- O `Monitor` publica pelo retrato do hub (`publish_own`, mesma regra de repetido) e pede a entrega
+  por `session.deliverable` na borda; a conexão interna do Python deixa de rodar `StateMonitor`,
+  `PreviewBroker`, o `tail_pump` (que só servia à supressão da prévia), a sugestão, a pergunta e o
+  `drain`. Se o Python mandar um dos quatro eventos para sessão do Rust, o hub descarta e registra
+  `state_python_leak` uma vez por sessão.
+- `rebind` (`/clear`, troca do filho) acorda o `Monitor` na hora: o retrato perde o estado e o novo
+  sai sem esperar o tique. A captura é recriada na época nova (o pool solta o vínculo velho do
+  mesmo consumidor) e solta ao fim do `Monitor`.
+- A resposta gravada que suprime a prévia vem das linhas do leitor do transcript do hub, semeada
+  pelo fim do arquivo ao ligar (o leitor começa no fim); a gravação acorda o `Monitor` e a prévia
+  repetida sai sem rodada nova.
+- Arquivos da sessão e prévia do hook em `spawn_blocking` com prazo; falha vai ao diário. Retrato
+  dos fatos que falha ou nunca chegou é `problema=state_facts_unavailable`
+  (`state_facts_missing` no detalhe quando não houve resposta nenhuma).
+- O `Sources` não tem corpo padrão em método nenhum: a fonte de produção que esquecer um não
+  compila (a remoção já pegou duas fontes de teste incompletas).
+- Medida (`docs/migracao-rust/parte4/medicao.md`, Task 5): 20 chats trabalhando, Python de 176,5
+  para 29 ms de CPU por segundo e o total de 297,5 para 146; latência marcador → `state` igual à do
+  Python (mediana ~0,45 s), com a cópia dos marcadores relida só quando o observador das pastas vê
+  escrita.
+
 ## Observação terminal Rust: erro visível, sem captura Python
 
 (04/10/2026, dono único, decisão 3 do dono.) Com a ponte ligada, o Rust é o único dono da

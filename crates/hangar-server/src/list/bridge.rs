@@ -257,6 +257,24 @@ impl ListBridge {
         Ok(facts_files::state_dirs(&self.caches.config_dirs(&dirs)))
     }
 
+    pub fn env(&self) -> &Arc<ListEnv> { &self.env }
+
+    /// Pastas das contas e as da lista, para o `Monitor` de estado. Lê disco (as pastas das contas
+    /// ficam guardadas por 30 s): chamar fora do runtime.
+    pub fn state_dirs_blocking(&self) -> Result<(Arc<Vec<PathBuf>>, Dirs), ListError> {
+        let dirs = self.dirs()?;
+        Ok((self.caches.config_dirs(&dirs), dirs))
+    }
+
+    /// Pane do agente da sessão (`agent_pane::resolve`) pela descoberta compartilhada da lista.
+    pub async fn agent_target(&self, name: &str) -> Result<Option<String>, ListError> {
+        let (_, _, panes, children) = self.discovery(None).await?;
+        let mine: Vec<Pane> = panes.iter().filter(|p| p.session == name).cloned().collect();
+        let env = self.env.clone();
+        tokio::task::spawn_blocking(move || crate::state::agent_pane::resolve(&mine, &children, &|pid| env.procs.argv(pid).join(" ")))
+            .await.map_err(|e| joined(e, "pane do agente interrompido"))
+    }
+
     /// Mudança de membro ou de modo: a próxima pergunta não serve a lista de antes.
     pub fn invalidate(&self) { self.epoch.fetch_add(1, Ordering::SeqCst); }
 
@@ -649,7 +667,7 @@ fn descends(pid: i64, root: i64, children: &ChildrenMap) -> bool {
     false
 }
 
-fn pid_alive(procs: &dyn ProcessView, pid: i64) -> bool { pid > 0 && procs.start_time(pid).is_some() }
+pub(crate) fn pid_alive(procs: &dyn ProcessView, pid: i64) -> bool { pid > 0 && procs.start_time(pid).is_some() }
 
 fn git_dir(row: &SessionRow) -> &str { row.git_cwd.as_deref().or(row.cwd.as_deref()).unwrap_or("") }
 

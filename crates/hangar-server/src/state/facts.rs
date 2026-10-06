@@ -160,6 +160,16 @@ impl FactsStore {
     pub fn needs_snapshot(&self, name: &str) -> bool { self.lock().get(name).is_some_and(|e| e.gap) }
 
     pub fn forget(&self, name: &str) { self.lock().remove(name); }
+
+    /// `forget` de quem observava com `wake`, só se ninguém mais observa: o `Monitor` que acaba
+    /// depois de outro da mesma sessão nascer não apaga a entrada do novo.
+    pub fn forget_watcher(&self, name: &str, wake: &Arc<tokio::sync::Notify>) {
+        let mut entries = self.lock();
+        // Uma referência no mapa e a de quem chama.
+        if entries.get(name).is_some_and(|e| Arc::ptr_eq(&e.wake, wake) && Arc::strong_count(wake) == 2) {
+            entries.remove(name);
+        }
+    }
 }
 
 /// Resposta de `session.dead`.
@@ -292,6 +302,18 @@ mod tests {
         store.snapshot("s", facts(4), now);
         assert!(!store.needs_snapshot("s"));
         assert_eq!(store.push("s", facts(5), now), Push::Accepted { gap: false });
+    }
+
+    #[test]
+    fn late_forget_keeps_the_new_watcher() {
+        let store = FactsStore::default();
+        let old = store.watch("s");
+        let new = store.watch("s");
+        store.forget_watcher("s", &old);
+        assert_eq!(store.push("s", facts(1), Instant::now()), Push::Accepted { gap: false }, "o novo ainda observa");
+        drop(new);
+        store.forget_watcher("s", &old);
+        assert_eq!(store.push("s", facts(2), Instant::now()), Push::Unwatched);
     }
 
     #[tokio::test]

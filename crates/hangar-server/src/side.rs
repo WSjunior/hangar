@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -14,7 +15,7 @@ use eventsource_stream::{EventStreamError, Eventsource};
 use futures_util::StreamExt;
 use http_body_util::BodyDataStream;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
-use tokio::sync::broadcast;
+use tokio::sync::{Notify, broadcast};
 
 use crate::proxy::HttpClient;
 use crate::tail::{self, FileTail, Watchers, sse_frame};
@@ -77,6 +78,12 @@ const SIDE_CONNECT: Duration = Duration::from_secs(10);
 /// O Python manda `ping` a cada 10 s; três calados = conexão morta.
 const SIDE_IDLE: Duration = Duration::from_secs(30);
 
+/// Liga o `Monitor` de estado a um hub de Claude com terminal e devolve a tarefa dele.
+pub type SpawnMonitor = Arc<dyn Fn(&Arc<Hub>) -> tokio::task::JoinHandle<()> + Send + Sync>;
+
+/// Os quatro eventos que, com o `Monitor` vivo, só o Rust produz para a sessão.
+const STATE_EVENTS: [&str; 4] = ["state", "preview", "ask_question", "suggest"];
+
 #[derive(Clone)]
 pub struct SideCtx {
     pub upstream: SocketAddr,
@@ -85,6 +92,8 @@ pub struct SideCtx {
     pub watchers: Watchers,
     pub hubs: Hubs,
     pub infos: InfoCache,
+    /// `None`: sem estado no Rust (testes do hub); o Python segue produzindo os quatro eventos.
+    pub monitors: Option<SpawnMonitor>,
 }
 
 #[derive(Default)]
@@ -173,6 +182,14 @@ pub struct Hub {
     bound: Mutex<Option<Bound>>,
     cache: Mutex<SideCache>,
     side: Mutex<Option<tokio::task::AbortHandle>>,
+    /// `Monitor` de estado e o leitor das respostas gravadas, só em Claude com terminal.
+    pub(crate) monitor: Mutex<Option<(tokio::task::AbortHandle, tokio::task::AbortHandle)>>,
+    /// Última resposta gravada no transcript desta ligação, normalizada (`preview::norm`).
+    committed: Mutex<Option<Arc<str>>>,
+    /// Acorda o `Monitor`: `rebind` (rodada já) ou resposta gravada (prévia sai já).
+    wake: Arc<Notify>,
+    /// Vezes que a troca vazou (o Python mandou um dos quatro para sessão do Rust) e foi registrada.
+    pub(crate) python_leaks: AtomicU32,
 }
 
 /// O que um aparelho recebe ao entrar: cauda + retrato, e o canal para o resto.
@@ -202,10 +219,115 @@ impl Hub {
                 bound: Mutex::new(Some(Bound { binding, generation: 0, tail })),
                 cache: Mutex::default(),
                 side: Mutex::new(None),
+                monitor: Mutex::new(None),
+                committed: Mutex::new(None),
+                wake: Arc::new(Notify::new()),
+                python_leaks: AtomicU32::new(0),
             }
         });
+        hub.ensure_monitor();
         hub.restart_side();
         hub
+    }
+
+    /// Claude com terminal ganha o `Monitor` (um por hub); outro provider o perde. Morto (`dead`)
+    /// volta só quando a ligação troca: sessão recriada com o mesmo nome.
+    fn ensure_monitor(self: &Arc<Self>) {
+        let Some(spawn) = self.ctx.monitors.clone() else { return };
+        let wanted = self.bound.lock().unwrap().as_ref().is_some_and(|b| b.binding.provider == Provider::Claude);
+        let mut slot = self.monitor.lock().unwrap();
+        // Monitor que acabou (sessão morta) conta como ausente.
+        let alive = slot.as_ref().is_some_and(|(m, _)| !m.is_finished());
+        match (wanted, alive) {
+            (true, false) => {
+                if let Some((_, c)) = slot.take() {
+                    c.abort();
+                }
+                let commits = tokio::spawn(watch_commits(Arc::downgrade(self), self.tx.subscribe())).abort_handle();
+                *slot = Some((spawn(self).abort_handle(), commits));
+            }
+            (false, _) => {
+                if let Some((m, c)) = slot.take() {
+                    m.abort();
+                    c.abort();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn stop_monitor(&self) {
+        if let Some((m, c)) = self.monitor.lock().unwrap().take() {
+            m.abort();
+            c.abort();
+        }
+    }
+
+    /// `Monitor` vivo: o que acabou (sessão morta, pânico) não segura mais os eventos do Python.
+    fn has_monitor(&self) -> bool { self.monitor.lock().unwrap().as_ref().is_some_and(|(m, _)| !m.is_finished()) }
+
+    /// Geração da ligação atual (a época do `Monitor`); `None` com o hub fechado.
+    pub fn generation(&self) -> Option<u64> { self.bound.lock().unwrap().as_ref().map(|b| b.generation) }
+
+    /// Session id da conversa ligada (`/clear` troca).
+    pub fn session_key(&self) -> Option<String> {
+        self.bound.lock().unwrap().as_ref().map(|b| b.binding.key.clone()).filter(|k| !k.is_empty())
+    }
+
+    pub fn jsonl(&self) -> Option<PathBuf> { self.bound.lock().unwrap().as_ref().map(|b| b.binding.jsonl.clone()) }
+
+    pub fn wake(&self) -> Arc<Notify> { self.wake.clone() }
+
+    pub fn committed(&self) -> Option<Arc<str>> { self.committed.lock().unwrap().clone() }
+
+    /// Resposta gravada lida na geração `generation`; troca de ligação no meio descarta.
+    fn set_committed(&self, generation: u64, text: String, only_if_empty: bool) {
+        let bound = self.bound.lock().unwrap();
+        if bound.as_ref().map(|b| b.generation) != Some(generation) {
+            return;
+        }
+        let mut committed = self.committed.lock().unwrap();
+        if only_if_empty && committed.is_some() {
+            return;
+        }
+        *committed = Some(text.into());
+        drop((committed, bound));
+        self.wake.notify_one();
+    }
+
+    /// Evento do `Monitor`: mesmo retrato e mesma regra de repetido do que vem do Python.
+    /// `false`: hub fechado, ninguém mais ouve.
+    pub fn publish_own(&self, event: &str, data: &str) -> bool {
+        if self.bound.lock().unwrap().is_none() {
+            return false;
+        }
+        self.forward(event, data, true);
+        true
+    }
+
+    /// Retrato antes do envio: quem assina entre os dois recebe repetido, nunca nada.
+    fn forward(&self, event: &str, data: &str, pane_question: bool) {
+        let frame = sse_frame(event, data, None);
+        let repeated = {
+            let mut cache = self.cache.lock().unwrap();
+            // Igual ao último do mesmo tipo: o aparelho já o tem, reenviar só o faz redesenhar.
+            // Pergunta repetida é pergunta nova: o aparelho já fechou a anterior.
+            let repeated = event != "ask_question"
+                && LATEST.iter().position(|e| *e == event).is_some_and(|i| cache.latest[i].as_ref() == Some(&frame));
+            cache.record(event, data, &frame, pane_question);
+            repeated
+        };
+        if !repeated {
+            let _ = self.tx.send(Out::Side(frame));
+        }
+    }
+
+    /// Assina o canal e copia o retrato dos quatro eventos do estado (canal privado).
+    fn subscribe_state(&self) -> Option<(broadcast::Receiver<Out>, Vec<Bytes>)> {
+        self.bound.lock().unwrap().as_ref()?;
+        let rx = self.tx.subscribe();
+        let cached = self.cache.lock().unwrap().replay().into_iter().filter(|f| state_frame(f)).collect();
+        Some((rx, cached))
     }
 
     /// Aparelho novo com `info` diferente (sessão recriada com o mesmo nome): troca o leitor já,
@@ -221,6 +343,9 @@ impl Hub {
         if !same {
             self.rebind(binding.clone());
             self.restart_side();
+        } else {
+            // Sessão que voltou com a mesma conversa (resume): o `Monitor` que viu a morte renasce.
+            self.ensure_monitor();
         }
     }
 
@@ -242,6 +367,7 @@ impl Hub {
         if let Some(h) = self.side.lock().unwrap().take() {
             h.abort();
         }
+        self.stop_monitor();
         self.bound.lock().unwrap().take();
     }
 
@@ -259,9 +385,14 @@ impl Hub {
             close_on_tail_death(Arc::downgrade(self), generation),
         );
         *bound = Some(Bound { binding, generation, tail });
+        *self.committed.lock().unwrap() = None;
         // Os avisos de mod ficam: são da sessão, não do transcript, e o Python não os reenvia.
         self.cache.lock().unwrap().latest = Default::default();
         let _ = self.tx.send(Out::Rebind);
+        drop(bound);
+        self.ensure_monitor();
+        // O retrato acabou de perder o estado: o `Monitor` publica o da época nova sem esperar o tique.
+        self.wake.notify_one();
     }
 
     fn close(self: &Arc<Self>) {
@@ -271,6 +402,7 @@ impl Hub {
         if let Some(h) = self.side.lock().unwrap().take() {
             h.abort();
         }
+        self.stop_monitor();
         let _ = self.tx.send(Out::Close);
     }
 
@@ -426,22 +558,143 @@ async fn side_once(hub: &Arc<Hub>, attempt: &mut u32) -> SideEnd {
             }
             "ping" => {}
             event => {
-                let frame = sse_frame(event, &ev.data, None);
-                // Retrato antes do envio: quem assina entre os dois recebe repetido, nunca nada.
-                let pane_question =
-                    hub.bound.lock().unwrap().as_ref().is_some_and(|b| b.binding.provider == Provider::Claude);
-                let repeated = {
-                    let mut cache = hub.cache.lock().unwrap();
-                    // Igual ao último do mesmo tipo: o aparelho já o tem, reenviar só o faz redesenhar.
-                    // Pergunta repetida é pergunta nova: o aparelho já fechou a anterior.
-                    let repeated = event != "ask_question"
-                        && LATEST.iter().position(|e| *e == event).is_some_and(|i| cache.latest[i].as_ref() == Some(&frame));
-                    cache.record(event, &ev.data, &frame, pane_question);
-                    repeated
-                };
-                if !repeated {
-                    let _ = hub.tx.send(Out::Side(frame));
+                on_side_event(hub, event, &ev.data);
+            }
+        }
+    }
+}
+
+/// Evento da conexão interna (fora `info` e `ping`). Com o `Monitor` vivo, os quatro eventos do
+/// estado são dele: vindo do Python, a troca vazou; sai do canal e vai ao log uma vez por sessão.
+/// `true`: repassado aos aparelhos (ou igual ao último).
+fn on_side_event(hub: &Arc<Hub>, event: &str, data: &str) -> bool {
+    if STATE_EVENTS.contains(&event) && hub.has_monitor() {
+        if hub.python_leaks.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            tracing::warn!(session = %hub.name, code = "state_python_leak", event, "estado: o Python mandou evento de sessão do Rust; descartado");
+        }
+        return false;
+    }
+    let pane_question = hub.bound.lock().unwrap().as_ref().is_some_and(|b| b.binding.provider == Provider::Claude);
+    hub.forward(event, data, pane_question);
+    true
+}
+
+/// Quadro de um dos quatro eventos do estado.
+fn state_frame(frame: &[u8]) -> bool {
+    let Some(rest) = frame.strip_prefix(b"event: ") else { return false };
+    STATE_EVENTS.iter().any(|e| rest.strip_prefix(e.as_bytes()).is_some_and(|r| r.starts_with(b"\r\n")))
+}
+
+/// Mantém a última resposta gravada da ligação: o leitor do transcript manda cada linha ao canal, e
+/// a troca de ligação semeia de novo a partir do fim do arquivo.
+async fn watch_commits(hub: Weak<Hub>, mut rx: broadcast::Receiver<Out>) {
+    seed_committed(&hub, true).await;
+    loop {
+        match rx.recv().await {
+            Ok(Out::Tail(generation, frame)) => {
+                let Some(text) = crate::state::preview::committed_from_frame(&frame) else { continue };
+                let Some(h) = hub.upgrade() else { return };
+                h.set_committed(generation, text, false);
+            }
+            Ok(Out::Rebind) => seed_committed(&hub, true).await,
+            // A resposta gravada durante o atraso pode ter se perdido: o fim do arquivo vence.
+            Err(broadcast::error::RecvError::Lagged(_)) => seed_committed(&hub, false).await,
+            Ok(Out::Side(_)) => {}
+            Ok(Out::Close) | Err(broadcast::error::RecvError::Closed) => return,
+        }
+    }
+}
+
+/// O leitor do transcript começa no fim do arquivo: sem isto a resposta já gravada voltaria como
+/// prévia logo depois de abrir o chat. Só preenche o vazio; a resposta ao vivo vence.
+async fn seed_committed(hub: &Weak<Hub>, only_if_empty: bool) {
+    let Some((binding, generation)) = hub.upgrade().and_then(|h| h.bound.lock().unwrap().as_ref().map(|b| (b.binding.clone(), b.generation))) else { return };
+    let last = tokio::task::spawn_blocking(move || {
+        let size = match std::fs::metadata(&binding.jsonl) {
+            Ok(m) => m.len(),
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound && crate::warn_limit::allow(None, "state_committed_seed") {
+                    tracing::warn!(code = "state_committed_seed", kind = ?e.kind(), "estado: transcript ilegível; a prévia pode repetir a resposta gravada");
                 }
+                return None;
+            }
+        };
+        let frames = tail::backfill(&binding.jsonl, &binding.key, binding.provider, None, size);
+        frames.iter().rev().find_map(|f| crate::state::preview::committed_from_frame(f))
+    })
+    .await;
+    match last {
+        Ok(Some(text)) => if let Some(h) = hub.upgrade() { h.set_committed(generation, text, only_if_empty) },
+        Ok(None) => {}
+        Err(e) => tracing::warn!(panic = e.is_panic(), code = "state_committed_seed", "estado: leitura da resposta gravada caiu"),
+    }
+}
+
+/// `GET /__hangar_server/state/{name}/events` na porta privada: o Python lê daqui `state`,
+/// `preview`, `ask_question` e `suggest` de quem entrou pelas portas dele (convite, Connect). Conta
+/// como assinante do hub, então liga o `Monitor` igual a um aparelho do dono.
+pub async fn private_events(
+    axum::extract::State(st): axum::extract::State<Arc<crate::routes::AppState>>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !crate::workspace_routes::private_ok(&st, peer, req.headers()) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Ok(info) = st.info(&name).await else {
+        st.diag.report("rust.state_channel_failed", &name, "internal_info", "o backend não devolveu os dados da sessão");
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    // Só Claude com terminal tem o estado aqui; o resto o Python observa.
+    let Some(binding) = info.as_ref().and_then(Binding::from_info).filter(|b| b.provider == Provider::Claude) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let lease = st.side.hubs.acquire(&name, binding, &st.side);
+    let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(64);
+    tokio::spawn(private_loop(lease, tx));
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|b| (Ok::<Bytes, std::convert::Infallible>(b), rx))
+    });
+    let mut resp = axum::response::Response::new(Body::from_stream(stream));
+    let h = resp.headers_mut();
+    h.insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("text/event-stream; charset=utf-8"));
+    h.insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    resp
+}
+
+/// Ping a cada 10 s, como o `/events`: o leitor do Python dá a conexão por morta depois de 30 s calada.
+const PRIVATE_PING: Duration = Duration::from_secs(10);
+
+async fn private_loop(lease: Lease, out: tokio::sync::mpsc::Sender<Bytes>) {
+    let hub = lease.hub.clone();
+    let send = |f: Bytes| {
+        let out = out.clone();
+        async move { matches!(tokio::time::timeout(Duration::from_secs(30), out.send(f)).await, Ok(Ok(()))) }
+    };
+    if !send(tail::ping_frame()).await {
+        return;
+    }
+    let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + PRIVATE_PING, PRIVATE_PING);
+    loop {
+        let Some((mut rx, cached)) = hub.subscribe_state() else { return };
+        for f in cached {
+            if !send(f).await {
+                return;
+            }
+        }
+        loop {
+            tokio::select! {
+                _ = out.closed() => return,
+                _ = ping.tick() => if !send(tail::ping_frame()).await { return },
+                msg = rx.recv() => match msg {
+                    Ok(Out::Side(f)) if state_frame(&f) => if !send(f).await { return },
+                    Ok(Out::Side(_) | Out::Tail(..) | Out::Rebind) => {}
+                    Ok(Out::Close) | Err(broadcast::error::RecvError::Closed) => return,
+                    // Atrasado: o retrato de agora repõe o que se perdeu.
+                    Err(broadcast::error::RecvError::Lagged(_)) => break,
+                },
             }
         }
     }
@@ -498,6 +751,26 @@ impl Drop for Lease {
             h.stop();
         }
     }
+}
+
+/// Pane parado do Claude, usado pelos `Monitor`s de mentira dos testes.
+#[cfg(test)]
+pub(crate) const IDLE_PANE: &str = "────────────\n❯\n────────────";
+
+/// `Monitor` com fonte de mentira ligado ao hub de verdade: quadro fixo, sem Python nem tmux.
+/// Devolve a fábrica e quantos `Monitor`s ela criou.
+#[cfg(test)]
+pub(crate) fn fake_monitors(pane: &'static str) -> (SpawnMonitor, Arc<std::sync::atomic::AtomicU32>) {
+    use crate::state::monitor::Monitor;
+    use crate::state::testing::HubFake;
+    let count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let spawned = count.clone();
+    let spawn: SpawnMonitor = Arc::new(move |hub: &Arc<Hub>| {
+        spawned.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let src = HubFake::new(hub, pane);
+        tokio::spawn(async move { let _ = Monitor::new(src).run().await; })
+    });
+    (spawn, count)
 }
 
 #[cfg(test)]
@@ -586,6 +859,188 @@ mod tests {
             watchers: Watchers::default(),
             hubs: Hubs::default(),
             infos: InfoCache::default(),
+            monitors: None,
+        }
+    }
+
+    /// Quadros `event: <nome>` que chegam ao canal, até `limit` ou o prazo.
+    async fn side_events(rx: &mut broadcast::Receiver<Out>, limit: Duration) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let _ = tokio::time::timeout(limit, async {
+            loop {
+                match rx.recv().await {
+                    Ok(Out::Side(f)) => {
+                        let f = String::from_utf8_lossy(&f).into_owned();
+                        let event = f.lines().next().unwrap_or("").trim_start_matches("event: ").to_owned();
+                        let data = f.lines().nth(1).unwrap_or("").trim_start_matches("data: ").to_owned();
+                        out.push((event, data));
+                    }
+                    Ok(Out::Rebind) => out.push(("rebind".into(), String::new())),
+                    Ok(_) => {}
+                    Err(_) => return,
+                }
+            }
+        })
+        .await;
+        out
+    }
+
+    #[tokio::test]
+    async fn monitor_publishes_after_rebind() {
+        let dir = tempfile::tempdir().unwrap();
+        let binding = |n: &str| Binding { provider: Provider::Claude, jsonl: dir.path().join(format!("{n}.jsonl")), key: n.into() };
+        let (spawn, count) = fake_monitors(IDLE_PANE);
+        let ctx = SideCtx { monitors: Some(spawn), ..idle_ctx() };
+        let lease = ctx.hubs.acquire("s", binding("a"), &ctx);
+        let mut rx = lease.hub.tx.subscribe();
+        let first = side_events(&mut rx, Duration::from_millis(300)).await;
+        assert_eq!(first.iter().filter(|(e, _)| e == "state").count(), 1, "{first:?}");
+        // `/clear`: o retrato some no `rebind` e o estado novo sai logo, sem esperar o tique (0,75 s).
+        lease.hub.rebind(binding("b"));
+        let after = side_events(&mut rx, Duration::from_millis(300)).await;
+        assert_eq!(after.first().map(|(e, _)| e.as_str()), Some("rebind"), "{after:?}");
+        assert!(after.iter().any(|(e, _)| e == "state"), "estado novo logo depois do rebind: {after:?}");
+        assert!(lease.hub.cache.lock().unwrap().latest[0].is_some(), "o retrato volta a ter o estado");
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1, "o rebind não cria outro Monitor");
+    }
+
+    #[tokio::test]
+    async fn python_state_for_rust_session_dropped_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let binding = Binding { provider: Provider::Claude, jsonl: dir.path().join("a.jsonl"), key: "a".into() };
+        let (spawn, _) = fake_monitors(IDLE_PANE);
+        let ctx = SideCtx { monitors: Some(spawn), ..idle_ctx() };
+        let lease = ctx.hubs.acquire("s", binding, &ctx);
+        // Deixa o Monitor publicar o dele antes.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut rx = lease.hub.tx.subscribe();
+        for (event, data) in [("state", r#"{"state":"working"}"#), ("preview", r#"{"text":"x"}"#),
+                              ("ask_question", "{}"), ("suggest", r#"{"text":"y"}"#), ("state", r#"{"state":"idle"}"#)] {
+            assert!(!on_side_event(&lease.hub, event, data), "{event} do Python para sessão do Rust sai");
+        }
+        assert!(on_side_event(&lease.hub, "stats", r#"{"turns":1}"#), "o resto continua do Python");
+        assert!(on_side_event(&lease.hub, "message", r#"{"id":"queued-1"}"#));
+        assert_eq!(lease.hub.python_leaks.load(std::sync::atomic::Ordering::SeqCst), 1, "registra uma vez por sessão");
+        let got = side_events(&mut rx, Duration::from_millis(100)).await;
+        let names: Vec<_> = got.iter().map(|(e, _)| e.as_str()).collect();
+        assert_eq!(names, ["stats", "message"]);
+        let state = String::from_utf8_lossy(lease.hub.cache.lock().unwrap().latest[0].as_ref().unwrap()).into_owned();
+        assert!(!state.contains("working"), "o retrato fica com o estado do Rust");
+
+        // Sessão sem Monitor (Codex): o Python segue dono.
+        let codex = Binding { provider: Provider::Codex, jsonl: dir.path().join("c.jsonl"), key: "c".into() };
+        let other = ctx.hubs.acquire("c", codex, &ctx);
+        assert!(on_side_event(&other.hub, "state", r#"{"state":"idle"}"#));
+        assert_eq!(other.hub.python_leaks.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn private_channel_counts_as_subscriber() {
+        use axum::routing::get;
+        let dir = tempfile::tempdir().unwrap();
+        let jsonl = dir.path().join("k.jsonl");
+        std::fs::write(&jsonl, "").unwrap();
+        let info = serde_json::json!({"provider": "claude", "jsonl": jsonl, "session_key": "k", "history": {}}).to_string();
+        let python = axum::Router::new().route("/internal/sessions/{name}/info", get(move || {
+            let info = info.clone();
+            async move { ([(axum::http::header::CONTENT_TYPE, "application/json")], info) }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, python).await.unwrap() });
+        let cfg = crate::config::Config { listen: "127.0.0.1:0".parse().unwrap(), upstream, internal_secret: "s".into(),
+            auth_token: "dono".into(), log_path: None, trusted: crate::auth::TrustedHosts::parse("127.0.0.1") };
+        let mut st = crate::routes::AppState::new(cfg);
+        let (spawn, count) = fake_monitors(IDLE_PANE);
+        st.side.monitors = Some(spawn);
+        let st = Arc::new(st);
+        let private = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = private.local_addr().unwrap();
+        let app = crate::routes::terminal_router(st.clone()).into_make_service_with_connect_info::<SocketAddr>();
+        tokio::spawn(async move { axum::serve(private, app).await.unwrap() });
+
+        let get_events = |secret: &'static str| async move {
+            let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let req = format!("GET /__hangar_server/state/s1/events HTTP/1.0\r\nx-hangar-internal: {secret}\r\n\r\n");
+            tokio::io::AsyncWriteExt::write_all(&mut s, req.as_bytes()).await.unwrap();
+            s
+        };
+        let mut refused = get_events("errado").await;
+        let mut buf = vec![0u8; 256];
+        let n = tokio::io::AsyncReadExt::read(&mut refused, &mut buf).await.unwrap();
+        assert!(String::from_utf8_lossy(&buf[..n]).starts_with("HTTP/1.0 404"), "segredo errado é 404 mudo");
+
+        let mut s = get_events("s").await;
+        let mut got = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                let n = tokio::io::AsyncReadExt::read(&mut s, &mut buf).await.unwrap();
+                if n == 0 { return }
+                got.extend_from_slice(&buf[..n]);
+                if String::from_utf8_lossy(&got).contains("event: state") { return }
+            }
+        }).await;
+        let text = String::from_utf8_lossy(&got).into_owned();
+        assert!(text.starts_with("HTTP/1.0 200") && text.contains("event: state"), "{text}");
+        assert!(!text.contains("transfer-encoding: chunked"), "HTTP/1.0: corpo até o fim, sem chunk");
+        {
+            let hubs = st.side.hubs.0.lock().unwrap();
+            let (hub, n) = hubs.get("s1").expect("o canal abre o hub");
+            assert_eq!(*n, 1, "o canal é um assinante");
+            assert!(hub.monitor.lock().unwrap().is_some(), "e liga o Monitor");
+        }
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // Só os quatro eventos do estado passam: o Python segue dono do resto para quem entra por ele.
+        on_side_event(&st.side.hubs.0.lock().unwrap().get("s1").unwrap().0.clone(), "stats", "{}");
+        drop(s);
+        let gone = tokio::time::timeout(Duration::from_secs(2), async {
+            while st.side.hubs.0.lock().unwrap().contains_key("s1") { tokio::time::sleep(Duration::from_millis(20)).await }
+        }).await;
+        assert!(gone.is_ok(), "fechou o canal, o último assinante saiu e o hub para");
+    }
+
+    #[tokio::test]
+    async fn own_pane_question_not_replayed_after_answer() {
+        // A pergunta do `Monitor` sai uma vez por pergunta: quem chega depois da resposta não a recebe.
+        let dir = tempfile::tempdir().unwrap();
+        let binding = Binding { provider: Provider::Claude, jsonl: dir.path().join("a.jsonl"), key: "a".into() };
+        let ctx = idle_ctx();
+        let lease = ctx.hubs.acquire("s", binding, &ctx);
+        let late = |hub: &Hub| hub.subscribe_state().unwrap().1.iter().any(|f| f.starts_with(b"event: ask_question"));
+        assert!(lease.hub.publish_own("state", r#"{"state":"awaiting_input"}"#));
+        assert!(lease.hub.publish_own("ask_question", r#"{"questions":[]}"#));
+        assert!(late(&lease.hub), "chegou durante a pergunta: recebe");
+        assert!(lease.hub.publish_own("state", r#"{"state":"idle"}"#));
+        assert!(!late(&lease.hub), "respondida: quem chega depois não recebe");
+        lease.hub.close();
+        assert!(!lease.hub.publish_own("state", "{}"), "hub fechado: o Monitor acaba");
+    }
+
+    #[tokio::test]
+    async fn finished_monitor_releases_python_events_and_returns_with_next_subscriber() {
+        let dir = tempfile::tempdir().unwrap();
+        let binding = Binding { provider: Provider::Claude, jsonl: dir.path().join("a.jsonl"), key: "a".into() };
+        let count = Arc::new(AtomicU32::new(0));
+        let spawned = count.clone();
+        // `Monitor` que acaba na hora, como depois de ver a sessão morta.
+        let spawn: SpawnMonitor = Arc::new(move |_hub: &Arc<Hub>| {
+            spawned.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async {})
+        });
+        let ctx = SideCtx { monitors: Some(spawn), ..idle_ctx() };
+        let lease = ctx.hubs.acquire("s", binding.clone(), &ctx);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!lease.hub.has_monitor(), "acabou: não é mais dono");
+        assert!(on_side_event(&lease.hub, "state", r#"{"state":"idle"}"#), "e não descarta o que chegar");
+        let _again = ctx.hubs.acquire("s", binding, &ctx);
+        assert_eq!(count.load(Ordering::SeqCst), 2, "a sessão que voltou com a mesma conversa ganha outro");
+    }
+
+    #[test]
+    fn private_channel_forwards_only_state_events() {
+        for (event, pass) in [("state", true), ("preview", true), ("ask_question", true), ("suggest", true),
+                              ("stats", false), ("message", false), ("plugin_toast", false), ("nav", false)] {
+            assert_eq!(state_frame(&sse_frame(event, "{}", None)), pass, "{event}");
         }
     }
 
