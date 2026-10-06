@@ -4641,6 +4641,7 @@
   "native_attach_too_big_named": "{name} is over 100 MiB.",
   "native_attach_read_failed": "Could not read {name}.",
   "native_attach_audio": "{name}: audio is not accepted here yet; Hangar web turns it into a transcript.",
+  "native_attach_audio_not_ready": "The conversation has not finished loading; {name} was not transcribed. Select the audio again once it opens.",
   "native_attach_audio_session_changed": "The conversation changed; this file was not transcribed. Select the audio again.",
   "native_attach_not_sent": "The message was not sent: an attachment failed. Text and attachments stay in the box.",
   "native_attach_video_speech": "video speech: \"{texto}\"",

@@ -432,8 +432,9 @@ impl Hangar {
 
     pub(super) fn transcribe_file(&mut self, key: &SessionKey, filename: String, bytes: Vec<u8>, cx: &mut Context<Self>) -> Result<(), String> {
         if bytes.len() as u64 > api::MAX_BYTES { return Err(tr("attach_too_big_named").replace("{name}", &filename)); }
-        if !self.dictation_ready() || self.composer_key().as_ref() != Some(key) { return Err(tr("connection_failed")); }
-        let Some(owner) = self.dictation_owner(cx) else { return Err(tr("connection_failed")); };
+        if !self.dictation_ready() { return Err(tr("attach_audio_not_ready").replace("{name}", &filename)); }
+        if self.composer_key().as_ref() != Some(key) { return Err(tr("attach_audio_session_changed")); }
+        let Some(owner) = self.dictation_owner(cx) else { return Err(tr("attach_audio_session_changed")); };
         if self.dictation.recorder.is_some() || self.dictation.request.is_some() {
             return Err(tr_shared("composer_aguarde_transcricao", &[]));
         }

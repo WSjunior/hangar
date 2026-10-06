@@ -4641,6 +4641,7 @@
   "native_attach_too_big_named": "{name} passa de 100 MiB.",
   "native_attach_read_failed": "Não foi possível ler {name}.",
   "native_attach_audio": "{name}: áudio ainda não é aceito aqui; no Hangar web ele vira transcrição.",
+  "native_attach_audio_not_ready": "A conversa ainda não terminou de carregar; {name} não foi transcrito. Selecione o áudio de novo quando ela abrir.",
   "native_attach_audio_session_changed": "A conversa mudou; a transcrição deste arquivo não foi iniciada. Selecione o áudio novamente.",
   "native_attach_not_sent": "A mensagem não foi enviada: um anexo falhou. O texto e os anexos continuam no campo.",
   "native_attach_video_speech": "fala do vídeo: \"{texto}\"",
