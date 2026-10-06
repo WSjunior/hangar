@@ -210,3 +210,13 @@ fn a_new_process_inherits_nothing() {
     assert!(mods.terminal_view_in("t", 2).is_none());
     assert_eq!(mods.life("t"), Some(2));
 }
+
+/// O `/ui` do plugin entrega ao elo a âncora da faixa, que o executor usa para reconhecer a faixa inteira.
+#[test]
+fn the_ui_hands_the_band_anchor_to_the_link() {
+    let (mods, probe) = setup();
+    mods.terminal_ui("t", TerminalView { above: json!({"type": "Box", "children": ["Revisão do MR"]}), ..view(&[], None) });
+    assert_eq!(probe.anchor.lock().unwrap().as_deref(), Some("Revisão do MR"));
+    mods.terminal_ui("t", TerminalView { above: Value::Null, ..view(&[], None) });
+    assert_eq!(*probe.anchor.lock().unwrap(), None, "sem faixa, sem âncora");
+}

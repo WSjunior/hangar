@@ -11,10 +11,13 @@ pub struct TerminalTarget {
     pub key:String,pub generation:u64,pub name:String,pub binding:TerminalBinding,
     pub lease_path:PathBuf,pub state_path:PathBuf,pub projection_dir:PathBuf,pub transcript:PathBuf,pub created:f64,
 }
+/// A âncora da faixa dos mods (`mods::tree::anchor`, o começo do primeiro texto dela): o elo do `Mods` a
+/// escreve a cada `/ui` do plugin, e o executor a lê para reconhecer na tela a faixa inteira focada.
+pub type ModsAnchor=Arc<std::sync::Mutex<Option<String>>>;
 /// `stall_notice`: entrega adiada sem escrita por mais que isso aparece na vista e no log.
-pub struct TerminalOptions { pub io:Arc<dyn TerminalIo>,pub limits:InputLimits,pub tick:Duration,pub stall_notice:Duration }
+pub struct TerminalOptions { pub io:Arc<dyn TerminalIo>,pub limits:InputLimits,pub tick:Duration,pub stall_notice:Duration,pub anchor:ModsAnchor }
 impl Default for TerminalOptions {
-    fn default()->Self {Self {io:Arc::new(input::ProcessIo::default()),limits:InputLimits::default(),tick:Duration::from_secs(1),stall_notice:Duration::from_secs(30)}}
+    fn default()->Self {Self {io:Arc::new(input::ProcessIo::default()),limits:InputLimits::default(),tick:Duration::from_secs(1),stall_notice:Duration::from_secs(30),anchor:ModsAnchor::default()}}
 }
 fn error(code:&str)->RuntimeError {RuntimeError::new(code,"operação terminal conservada no diário")}
 fn sample()->ClockSample {ClockSample {monotonic_s:0.0,epoch_s:SystemTime::now().duration_since(UNIX_EPOCH).map(|d|d.as_secs_f64()).unwrap_or(0.0)}}
@@ -36,8 +39,10 @@ enum Message {
     Confirm(oneshot::Sender<Result<Value,RuntimeError>>),Stop(oneshot::Sender<Result<(),RuntimeError>>),
 }
 #[derive(Clone)]
-pub struct TerminalHandle {sender:mpsc::Sender<Message>,closed:Arc<AtomicBool>,task:Arc<Mutex<Option<tokio::task::JoinHandle<Result<(),RuntimeError>>>>>,stopped:Arc<Mutex<Option<Result<(),RuntimeError>>>>}
+pub struct TerminalHandle {sender:mpsc::Sender<Message>,closed:Arc<AtomicBool>,task:Arc<Mutex<Option<tokio::task::JoinHandle<Result<(),RuntimeError>>>>>,stopped:Arc<Mutex<Option<Result<(),RuntimeError>>>>,anchor:ModsAnchor}
 impl TerminalHandle {
+    /// A âncora que este executor lê (`TerminalOptions::anchor`): o elo do `Mods` escreve nela.
+    pub fn anchor(&self)->ModsAnchor {self.anchor.clone()}
     pub async fn command(&self,command:RuntimeCommand)->Result<RuntimeReply,RuntimeError> {
         let kind=serde_json::to_value(command.kind).unwrap().as_str().unwrap().to_string();
         self.control(command.operation_id,kind,command.payload).await
@@ -167,10 +172,10 @@ impl TerminalActor {
             .filter_map(|id|id.rsplit(':').next()?.parse::<u64>().ok()).max().unwrap_or(0);
         let sequence=Arc::new(AtomicU64::new(queue.initial_state().next_seq.max(previous.max(queue.initial_state().operations.len() as u64).saturating_add(1))));
         let receipt=ReceiptIndex::new("claude",&target.binding.conversation);
-        let (sender,receiver)=mpsc::channel(64); let closed=Arc::new(AtomicBool::new(false));
+        let (sender,receiver)=mpsc::channel(64); let closed=Arc::new(AtomicBool::new(false)); let anchor=options.anchor.clone();
         let executor=Executor {target,queue:Arc::new(queue),policy,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,loan:None,stall:None,hold:None,parked:VecDeque::new()};
         let task=tokio::spawn(executor.run(receiver,closed.clone()));
-        TerminalHandle {sender,closed,task:Arc::new(Mutex::new(Some(task))),stopped:Arc::new(Mutex::new(None))}
+        TerminalHandle {sender,closed,task:Arc::new(Mutex::new(Some(task))),stopped:Arc::new(Mutex::new(None)),anchor}
     }
 }
 impl Executor {
@@ -354,11 +359,12 @@ impl Executor {
         // A tela que não se lê também não seria escrita: a entrada espera, com o motivo.
         let ansi=match driver.mods_screen().await {Ok(ansi)=>ansi,Err(failure)=>return Some(failure.code)};
         let (columns,rows)=(usize::from(formats.columns),usize::from(formats.rows));
-        let screen=crate::mods::screen::read_screen(&ansi,columns,rows,&[],None);
+        let anchor=self.options.anchor.lock().unwrap().clone();
+        let screen=crate::mods::screen::read_screen(&ansi,columns,rows,&[],anchor.as_deref());
         // Só o que a leitura reconhece como mod conta: um realce do próprio Claude Code (seleção, menu)
         // acima do prompt não segura a mensagem da pessoa. Painel: com borda ou caixa e região. Faixa: o
-        // inverso dentro da região que a leitura achou; sem a âncora do mod aqui, só a faixa recolhida ou
-        // encolhida é reconhecida.
+        // inverso dentro da região que a leitura achou, a inteira pela âncora do mod, a recolhida e a
+        // encolhida pela própria linha.
         let away=match screen.focus {
             Some("pane")=>screen.placement.is_some() && screen.body.is_some(),
             Some("band")=>screen.band.as_ref().is_some_and(|band|{
