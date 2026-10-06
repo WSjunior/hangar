@@ -119,7 +119,8 @@ static P: LazyLock<Patterns> = LazyLock::new(|| {
         pi_cursor: r(r"^\s*>\s*\d+\.\s|^\s*│\s*\u{f054}\s+\u{f10c}\s"),
         omp_cursor: r(r"^\s*│\s*\u{f054}\s+\u{f10c}\s"),
         embedded: r(r"\s\d+\.\s"),
-        rule: r(r"^[\s─]*─{10,}[\s─]*$"),
+        // A régua de cima da caixa de digitar leva no fim o nome da sessão (`──── nome ─`) quando ela tem um.
+        rule: r(r"^[\s─]*─{10,}(?: [^─│]+ ─+)?[\s─]*$"),
         box_bottom: r(r"^\s*╰[─\s]*╯\s*$"),
         frame: r(r"^[\s│─╭╮╰╯┌┐└┘├┤┬┴┼]*$"),
         footer: r(r"to navigate|Esc to cancel|Enter to select|Enter select"),
@@ -236,6 +237,9 @@ fn question(lines: &[&str]) -> Option<String> {
     }
     found
 }
+
+/// Régua horizontal do Claude Code (bordas da caixa de digitar e dos diálogos).
+pub fn is_rule(line: &str) -> bool { P.rule.is_match(line) }
 
 /// A régua de baixo da última caixa do composer (régua, `❯`, régua) antes de `end`: abaixo dela mora o
 /// rodapé do Claude Code.
