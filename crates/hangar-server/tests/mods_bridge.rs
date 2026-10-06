@@ -131,3 +131,18 @@ async fn bridge_applies_the_python_limits_before_the_token() {
         "requestId": "é".repeat(64), "element": "é".repeat(256)}), false).await;
     assert_eq!(edge.status().as_u16(), 403);
 }
+
+#[tokio::test]
+async fn renamed_session_is_found_by_the_name_its_process_was_born_with() {
+    // M3: renomear fecha e reabre a sessão no Rust com o mesmo `claude -p`, que segue mandando à ponte o
+    // nome e o token de nascimento. A ponte acha a sessão pela chave durável, e a URL volta ao aparelho.
+    let (_python, server, mods, plugin) = setup().await;
+    mods.forget("mods-s", 1);
+    mods.attach_keyed("mods-s", "chave", 1, Arc::new(plugin.clone()));
+    mods.forget("mods-s", 1);
+    mods.attach_keyed("renomeada", "chave", 1, Arc::new(plugin));
+    assert_eq!(mods.bridge_session("mods-s").as_deref(), Some("renomeada"));
+    let response = post(format!("http://{server}/api/sessions/renomeada/plugin/press"),
+        json!({"site": "vitrine-botoes", "key": "V45-url"}), true).await;
+    assert_eq!(json_of(response).await, json!({"ok": true, "opened": "https://example.com/vitrine"}));
+}

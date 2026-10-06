@@ -129,7 +129,7 @@ impl RuntimeRegistry {
         // de a tarefa do ator existir: a primeira faixa publicada já encontra a sessão no `Mods`.
         let handle = RuntimeActor::spawn_with(target.clone(),queue,connection,engine,|handle| {
             if target.provider == "claude" && let Some(mods) = &self.mods {
-                mods.attach(&target.name,target.generation,Arc::new(handle.clone()));
+                mods.attach_keyed(&target.name,&target.key,target.generation,Arc::new(handle.clone()));
             }
         });
         self.entries.lock().await.insert(target.key.clone(),Entry { generation:target.generation,handle:EntryHandle::Headless(handle.clone()),

@@ -1,7 +1,7 @@
 //! Estado da interface dos mods por sessão sem terminal atendida pelo Rust: quem leva os pedidos dos
 //! apps (o ator), o último `plugin_ui`, os avisos vivos e o clique do app em aberto. Liga o ator do
 //! runtime, as rotas dos apps e o hub de eventos dos aparelhos, que vivem em lugares diferentes.
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -53,6 +53,11 @@ struct Ui {
 
 struct Session {
     generation: u64,
+    /// A chave durável da sessão, que não muda ao renomear.
+    key: String,
+    /// Nomes anteriores da sessão (renomeada sem relançar o `claude -p`): o processo continua mandando à
+    /// ponte o nome com que nasceu (`CP_SESSION_NAME`) e o token dele.
+    aliases: Vec<String>,
     link: Arc<dyn SurfaceLink>,
     lock: Arc<tokio::sync::Mutex<()>>,
     ui: Option<Ui>,
@@ -63,8 +68,14 @@ struct Session {
 #[derive(Default)]
 struct Inner {
     sessions: HashMap<String, Session>,
+    /// Nomes das sessões que saíram do Rust, por chave: o renomear fecha e reabre a sessão com o mesmo
+    /// processo, e a reabertura herda daqui os nomes antigos.
+    departed: VecDeque<(String, Vec<String>)>,
     toast_seq: u64,
 }
+
+/// Quantas sessões que saíram do Rust guardam os nomes para uma reabertura.
+const DEPARTED_KEPT: usize = 64;
 
 #[derive(Clone, Default)]
 pub struct Mods {
@@ -107,17 +118,43 @@ impl Mods {
     /// O ator abriu a sessão no Rust: daqui em diante os pedidos dos apps são dele (dono único). Os
     /// avisos vivos ficam; a faixa espera o primeiro desenho do processo novo.
     pub fn attach(&self, name: &str, generation: u64, link: Arc<dyn SurfaceLink>) {
+        self.attach_keyed(name, name, generation, link);
+    }
+
+    /// `attach` com a chave durável: reaberta com outro nome (renomear), a sessão herda os nomes de antes
+    /// para a ponte. O nome atual de uma sessão vence o nome antigo de outra.
+    pub fn attach_keyed(&self, name: &str, key: &str, generation: u64, link: Arc<dyn SurfaceLink>) {
         let mut inner = self.inner.lock().unwrap();
         let toasts = inner.sessions.remove(name).map(|old| old.toasts).unwrap_or_default();
-        inner.sessions.insert(name.to_owned(), Session { generation, link, lock: Arc::default(), ui: None, toasts, click: None });
+        let aliases = match inner.departed.iter().position(|(departed, _)| departed == key) {
+            Some(at) => inner.departed.remove(at).map(|(_, names)| names).unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let aliases: Vec<String> = aliases.into_iter().filter(|alias| alias != name).collect();
+        for session in inner.sessions.values_mut() {
+            session.aliases.retain(|alias| alias != name);
+        }
+        inner.sessions.insert(name.to_owned(), Session { generation, key: key.to_owned(), aliases, link,
+            lock: Arc::default(), ui: None, toasts, click: None });
     }
 
     /// A sessão saiu do Rust (S9): esquece o estado e limpa a faixa dos aparelhos.
     pub fn forget(&self, name: &str, generation: u64) {
         let removed = {
             let mut inner = self.inner.lock().unwrap();
-            inner.sessions.get(name).is_some_and(|session| session.generation == generation)
-                && inner.sessions.remove(name).is_some()
+            match inner.sessions.get(name).is_some_and(|session| session.generation == generation).then(|| inner.sessions.remove(name)).flatten() {
+                Some(session) => {
+                    let mut names = session.aliases;
+                    names.push(name.to_owned());
+                    inner.departed.retain(|(key, _)| *key != session.key);
+                    inner.departed.push_back((session.key, names));
+                    if inner.departed.len() > DEPARTED_KEPT {
+                        inner.departed.pop_front();
+                    }
+                    true
+                }
+                None => false,
+            }
         };
         if removed {
             self.deliver(name, "plugin_ui", &empty_ui().to_string());
@@ -126,6 +163,16 @@ impl Mods {
 
     pub fn owns(&self, name: &str) -> bool {
         self.inner.lock().unwrap().sessions.contains_key(name)
+    }
+
+    /// A sessão que a ponte do plugin quer dizer com `sessao`: o nome atual dela, ou o nome com que o
+    /// processo nasceu, se ela foi renomeada sem relançar o `claude -p`. Devolve o nome atual.
+    pub fn bridge_session(&self, sessao: &str) -> Option<String> {
+        let inner = self.inner.lock().unwrap();
+        if inner.sessions.contains_key(sessao) {
+            return Some(sessao.to_owned());
+        }
+        inner.sessions.iter().find(|(_, session)| session.aliases.iter().any(|alias| alias == sessao)).map(|(name, _)| name.clone())
     }
 
     pub fn link(&self, name: &str) -> Option<(Arc<dyn SurfaceLink>, Arc<tokio::sync::Mutex<()>>)> {
