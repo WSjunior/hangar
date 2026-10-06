@@ -530,6 +530,11 @@ impl Mods {
         self.inner.lock().unwrap().sessions.get(name)?.terminal.as_ref()?.view.clone()
     }
 
+    /// `terminal_view` só na vida `life`: o clique de uma sessão substituída não lê o espelho da nova.
+    pub fn terminal_view_in(&self, name: &str, life: u64) -> Option<Arc<TerminalView>> {
+        Self::terminal_in(&self.inner.lock().unwrap(), name, life)?.view.clone()
+    }
+
     /// O `/ui` do plugin numa sessão com terminal do Rust: guarda o espelho e publica o `plugin_ui`. A
     /// árvore (até ~400 KB) vira JSON fora da trava de todas as sessões.
     pub fn terminal_ui(&self, name: &str, view: TerminalView) -> bool {
@@ -548,9 +553,10 @@ impl Mods {
         self.publish_if(name, life, data, |session| session.terminal.as_ref().is_some_and(|terminal| terminal.version == version))
     }
 
-    /// O painel que a linha de abas mostra na frente; None quando ela não está na tela.
-    pub fn set_screen_shown(&self, name: &str, shown: Option<String>) {
-        self.screen_shown(name, None, shown);
+    /// O painel que a linha de abas mostra na frente; None quando ela não está na tela. Só na vida `life`: o
+    /// clique de uma sessão substituída não escreve na que reabriu com o mesmo nome.
+    pub fn set_screen_shown(&self, name: &str, life: u64, shown: Option<String>) {
+        self.screen_shown(name, Some(life), shown);
     }
 
     /// `set_screen_shown` só na vida `life` quando dada: a leitura agendada por uma sessão não cai na que
@@ -573,9 +579,19 @@ impl Mods {
 
     /// Lê o painel na frente pela tela, uma vez por janela: a cada `/ui` e depois de cada operação do app.
     pub fn schedule_shown(&self, name: &str) {
+        self.schedule(name, None);
+    }
+
+    /// `schedule_shown` pedido pelo clique da vida `life`: o de uma sessão substituída não agenda leitura na
+    /// que reabriu com o mesmo nome.
+    pub fn schedule_shown_in(&self, name: &str, life: u64) {
+        self.schedule(name, Some(life));
+    }
+
+    fn schedule(&self, name: &str, only: Option<u64>) {
         let (life, probe) = {
             let mut inner = self.inner.lock().unwrap();
-            let Some(session) = inner.sessions.get_mut(name) else { return };
+            let Some(session) = inner.sessions.get_mut(name).filter(|session| only.is_none_or(|life| session.life == life)) else { return };
             let life = session.life;
             let Some(terminal) = session.terminal.as_mut() else { return };
             if terminal.reading {
@@ -592,31 +608,44 @@ impl Mods {
         });
     }
 
-    /// Espera `check` dar algo, acordando a cada aviso do plugin, até `wait`.
-    async fn wait_for<T>(&self, wait: Duration, mut check: impl FnMut(&Inner) -> Option<T>) -> Option<T> {
+    /// O terminal da vida `life`; nenhum quando a sessão saiu ou reabriu com outra vida.
+    fn terminal_in<'a>(inner: &'a Inner, name: &str, life: u64) -> Option<&'a Terminal> {
+        inner.sessions.get(name).filter(|session| session.life == life)?.terminal.as_ref()
+    }
+
+    /// Espera `check` dar algo no terminal da vida `life`, acordando a cada aviso do plugin, até `wait`. A
+    /// sessão que sai (`forget`) ou reabre com outra vida encerra a espera na hora: o press, o fechar, o foco
+    /// e a rolagem da sessão nova não são do clique da antiga.
+    async fn wait_for<T>(&self, name: &str, life: u64, wait: Duration, mut check: impl FnMut(&Terminal) -> Option<T>) -> Option<T> {
         let deadline = tokio::time::Instant::now() + wait;
         loop {
             // Inscrito antes de olhar: o aviso que chega entre a conferência e a espera não se perde.
             let notified = self.notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            let found = check(&self.inner.lock().unwrap());
+            let found = {
+                let inner = self.inner.lock().unwrap();
+                check(Self::terminal_in(&inner, name, life)?)
+            };
             if found.is_some() {
                 return found;
             }
             if tokio::time::timeout_at(deadline, notified).await.is_err() {
-                let last = check(&self.inner.lock().unwrap());
-                return last;
+                let inner = self.inner.lock().unwrap();
+                return Self::terminal_in(&inner, name, life).and_then(check);
             }
         }
     }
 
-    fn with_terminal(&self, name: &str, change: impl FnOnce(&mut Terminal, u64)) {
+    /// Muda o terminal da sessão; com `only`, só na vida dada (o que o clique escreve). Os avisos da ponte
+    /// valem para quem tem o nome agora: a ponte acha a sessão pelo nome de nascimento (`bridge_session`).
+    fn with_terminal(&self, name: &str, only: Option<u64>, change: impl FnOnce(&mut Terminal, u64)) {
         {
             let mut inner = self.inner.lock().unwrap();
             inner.seq += 1;
             let seq = inner.seq;
-            if let Some(terminal) = inner.sessions.get_mut(name).and_then(|session| session.terminal.as_mut()) {
+            if let Some(terminal) = inner.sessions.get_mut(name).filter(|session| only.is_none_or(|life| session.life == life))
+                .and_then(|session| session.terminal.as_mut()) {
                 change(terminal, seq);
             }
         }
@@ -625,36 +654,35 @@ impl Mods {
 
     /// Um botão de mod foi pressionado no terminal (`/api/plugin/pressed`).
     pub fn pressed(&self, name: &str, site: &str, element: &str) {
-        self.with_terminal(name, |terminal, _| {
+        self.with_terminal(name, None, |terminal, _| {
             terminal.pressed.push((Instant::now(), site.to_owned(), element.to_owned()));
             let extra = terminal.pressed.len().saturating_sub(PRESSED_KEPT);
             terminal.pressed.drain(..extra);
         });
     }
 
-    pub async fn wait_pressed(&self, name: &str, site: &str, key: &str, since: Instant, wait: Duration) -> bool {
-        self.wait_for(wait, |inner| inner.sessions.get(name).and_then(|session| session.terminal.as_ref())
-            .filter(|terminal| terminal.pressed.iter().any(|(at, s, k)| *at >= since && s == site && k == key)).map(|_| ())).await.is_some()
+    pub async fn wait_pressed(&self, name: &str, life: u64, site: &str, key: &str, since: Instant, wait: Duration) -> bool {
+        self.wait_for(name, life, wait, |terminal| terminal.pressed.iter().any(|(at, s, k)| *at >= since && s == site && k == key)
+            .then_some(())).await.is_some()
     }
 
     /// O painel saiu do espelho: o plugin viu o `ui.close`. Outros que o mod fecha junto não importam ((e)).
-    pub async fn wait_pane_gone(&self, name: &str, site: &str, wait: Duration) -> bool {
-        self.wait_for(wait, |inner| inner.sessions.get(name).and_then(|session| session.terminal.as_ref())
-            .filter(|terminal| !terminal.view.as_ref().is_some_and(|view| view.panes.iter().any(|pane| pane.id == site)))
-            .map(|_| ())).await.is_some()
+    pub async fn wait_pane_gone(&self, name: &str, life: u64, site: &str, wait: Duration) -> bool {
+        self.wait_for(name, life, wait, |terminal| (!terminal.view.as_ref().is_some_and(|view| view.panes.iter().any(|pane| pane.id == site)))
+            .then_some(())).await.is_some()
     }
 
     /// Arma o alvo da reserva por teclado (T5): o hook de `ui.focus` do plugin pergunta por ele.
-    pub fn arm_focus(&self, name: &str, site: &str, plugin: Option<&str>, key: &str) -> String {
+    pub fn arm_focus(&self, name: &str, life: u64, site: &str, plugin: Option<&str>, key: &str) -> String {
         let attempt = random_hex(8);
         let focus = Focus { attempt: attempt.clone(), site: site.to_owned(), plugin: plugin.map(str::to_owned), key: key.to_owned(),
             rewritten: false };
-        self.with_terminal(name, move |terminal, _| terminal.focus = Some(focus));
+        self.with_terminal(name, Some(life), move |terminal, _| terminal.focus = Some(focus));
         attempt
     }
 
-    pub fn disarm_focus(&self, name: &str, attempt: &str) {
-        self.with_terminal(name, |terminal, _| {
+    pub fn disarm_focus(&self, name: &str, life: u64, attempt: &str) {
+        self.with_terminal(name, Some(life), |terminal, _| {
             if terminal.focus.as_ref().is_some_and(|focus| focus.attempt == attempt) {
                 terminal.focus = None;
             }
@@ -680,7 +708,7 @@ impl Mods {
     /// O plugin viu um foco com o alvo `attempt` armado. Recusado quando o alvo já não é esse.
     pub fn focused(&self, name: &str, attempt: &str, request_id: &str, element: Option<&str>, denied: bool) -> bool {
         let mut accepted = false;
-        self.with_terminal(name, |terminal, seq| {
+        self.with_terminal(name, None, |terminal, seq| {
             let Some(focus) = terminal.focus.as_mut().filter(|focus| focus.attempt == attempt) else { return };
             if request_id == focus.site && element == Some(focus.key.as_str()) && !denied {
                 focus.rewritten = true;
@@ -694,34 +722,32 @@ impl Mods {
         accepted
     }
 
-    pub fn focus_seq(&self, name: &str) -> u64 {
+    pub fn focus_seq(&self, name: &str, life: u64) -> u64 {
         let inner = self.inner.lock().unwrap();
-        inner.sessions.get(name).and_then(|session| session.terminal.as_ref()).and_then(|terminal| terminal.seen.last())
-            .map_or(0, |seen| seen.seq)
+        Self::terminal_in(&inner, name, life).and_then(|terminal| terminal.seen.last()).map_or(0, |seen| seen.seq)
     }
 
-    pub async fn wait_focus(&self, name: &str, attempt: &str, after: u64, wait: Duration, accept: impl Fn(&FocusSeen) -> bool)
-        -> Option<FocusSeen> {
-        self.wait_for(wait, |inner| inner.sessions.get(name).and_then(|session| session.terminal.as_ref())
-            .and_then(|terminal| terminal.seen.iter().find(|seen| seen.seq > after && seen.attempt == attempt && accept(seen)).cloned())).await
+    pub async fn wait_focus(&self, name: &str, life: u64, attempt: &str, after: u64, wait: Duration,
+        accept: impl Fn(&FocusSeen) -> bool) -> Option<FocusSeen> {
+        self.wait_for(name, life, wait, |terminal| terminal.seen.iter()
+            .find(|seen| seen.seq > after && seen.attempt == attempt && accept(seen)).cloned()).await
     }
 
     /// Um painel rolou (`/api/plugin/scroll`): o clique acompanha o `offset`, nunca conta eventos ((u)).
     pub fn scrolled(&self, name: &str, site: &str, offset: i64) {
-        self.with_terminal(name, |terminal, seq| {
+        self.with_terminal(name, None, |terminal, seq| {
             terminal.scrolls.insert(site.to_owned(), (seq, offset));
         });
     }
 
-    pub fn last_scroll(&self, name: &str, site: &str) -> (u64, Option<i64>) {
+    pub fn last_scroll(&self, name: &str, life: u64, site: &str) -> (u64, Option<i64>) {
         let inner = self.inner.lock().unwrap();
-        inner.sessions.get(name).and_then(|session| session.terminal.as_ref()).and_then(|terminal| terminal.scrolls.get(site))
+        Self::terminal_in(&inner, name, life).and_then(|terminal| terminal.scrolls.get(site))
             .map_or((0, None), |&(seq, offset)| (seq, Some(offset)))
     }
 
-    pub async fn wait_scroll(&self, name: &str, site: &str, after: u64, wait: Duration) -> Option<(u64, i64)> {
-        self.wait_for(wait, |inner| inner.sessions.get(name).and_then(|session| session.terminal.as_ref())
-            .and_then(|terminal| terminal.scrolls.get(site).copied()).filter(|(seq, _)| *seq > after)).await
+    pub async fn wait_scroll(&self, name: &str, life: u64, site: &str, after: u64, wait: Duration) -> Option<(u64, i64)> {
+        self.wait_for(name, life, wait, |terminal| terminal.scrolls.get(site).copied().filter(|(seq, _)| *seq > after)).await
     }
 
     /// O mod copiou um texto num clique do app com terminal (`/api/plugin/copied`); fora do clique, `false`
