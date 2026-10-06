@@ -80,6 +80,12 @@ t=$(par pedido_ms /api/fs/roots) && linha "fs/roots" arquivos "$t"
 echo "— Lista de worktrees (Rust desde feat/worktrees-rust; o Python ainda tem a rota antiga)"
 t=$(par pedido_ms /api/worktrees) && linha worktrees lista "$t" || echo "worktrees: não respondeu 200, pulado"
 
+# Rust serve a lista publicada pelo ListHub; o Python direto ainda varre /proc e tmux e classifica
+# cada pane, como fazia antes da troca. Com a lista do app aberta o Python reaproveita o snapshot do
+# refresher dele, que no modo rust não roda: a coluna Python é a varredura inteira.
+echo "— Lista de sessões do dono (Rust desde feat/session-list-state)"
+t=$(par pedido_ms /api/sessions) && linha "lista de sessões" lista "$t" || echo "lista de sessões: não respondeu 200, pulado"
+
 # A tela inicial pede ?view=summary; o Python ignora o parâmetro e manda o relatório inteiro, que
 # era o que a tela recebia antes. Por isso a coluna Python desta linha é o "antes".
 echo "— Custos e Uso (parte 3)"
