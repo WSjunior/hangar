@@ -50,6 +50,14 @@
     onInput('change', text);
   }
 
+  function enter(e: KeyboardEvent) {
+    // O Enter que confirma a composição do IME (japonês, chinês, coreano) não é envio. O Safari o manda com
+    // `isComposing` falso e `keyCode` 229.
+    if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229) return;
+    e.preventDefault();
+    submit();
+  }
+
   function submit() {
     if (!field || !onInput) return;
     sync.submitted();
@@ -61,7 +69,7 @@
   {#if label}<span class="label">{label}</span>{/if}
   <input bind:this={field} type="text" {placeholder} aria-label={label || placeholder} disabled={!onInput}
          oninput={(e) => change(e.currentTarget.value)} onblur={blur}
-         onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } }} />
+         onkeydown={enter} />
   {#if onInput}
     <!-- O `preventDefault` no `mousedown` (que o toque também gera, antes do click) deixa o foco no campo, como no
          nativo: no Safari e no Firefox do macOS o botão não recebe o foco, e o blur do campo aplicaria o pendente antes
