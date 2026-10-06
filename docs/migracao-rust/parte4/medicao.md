@@ -132,3 +132,20 @@ rodadas de cada lado; a tabela traz a média.
   ~140 MB, Rust ~34 MB).
 - Com marcador do hook nas sessões a lista quase não captura (só a statusline, 2 por tique, e o
   radar de limite); a economia aqui é o teto, não o caso comum.
+
+## Eco de tecla no Windows (VM DELPHI-02, 06/10/2026)
+
+Tecla mandada pelo WebSocket do terminal real até o eco voltar, 40 teclas por rodada, sessão
+psmux com PowerShell, backend da VM em `641838a3` (binário compilado na VM).
+
+| Caminho | Mediana | Máximo |
+|---|---|---|
+| Rust, dentro da VM | 20,0–20,3 ms | 27,8 ms |
+| Rust, daqui pela rede (Tailscale, ping 2 ms) | 22,8–22,9 ms | 39,9 ms |
+| Python (`CP_RUST_SERVER=0`), dentro da VM | 20,4–20,5 ms | 25,3 ms |
+| ConPTY puro com `cmd.exe`, sem psmux | 0,1 ms | 0,4 ms |
+| ConPTY com `tmux attach` do psmux, sem o Hangar | 19,1 ms | 24,8 ms |
+
+Os ~20 ms são do psmux (o cliente dele faz tecla → TCP → servidor → ConPTY interno → parse →
+JSON → TCP → render), não do Hangar: Rust e Python dão o mesmo, e o console do Windows sozinho
+custa 0,1 ms. No Linux o mesmo eco com tmux é ~0,55 ms (Task 8).
