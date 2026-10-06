@@ -54,11 +54,7 @@ impl SurfaceLink for FakeLink {
 }
 
 async fn setup(link: FakeLink) -> (Arc<Fake>, std::net::SocketAddr, Mods, FakeLink) {
-    let (python, upstream) = spawn_fake().await;
-    let state = AppState::new(config(upstream, "127.0.0.1"));
-    let mods = state.mods.clone();
-    let server = spawn_state(state).await;
-    mods.attach("s", 1, Arc::new(link.clone()));
+    let (python, server, mods) = serve_mods("s", Arc::new(link.clone())).await;
     (python, server, mods, link)
 }
 

@@ -295,6 +295,18 @@ pub async fn spawn_state(state: hangar_server::routes::AppState) -> SocketAddr {
     addr
 }
 
+/// Python falso e servidor com a sessão `name` atendida pelo `Mods` (vida 1) por `link`: o começo dos
+/// testes da interface dos mods.
+pub async fn serve_mods(name: &str, link: Arc<dyn hangar_server::mods::state::SurfaceLink>)
+    -> (Arc<Fake>, SocketAddr, hangar_server::mods::state::Mods) {
+    let (python, upstream) = spawn_fake().await;
+    let state = hangar_server::routes::AppState::new(config(upstream, "127.0.0.1"));
+    let mods = state.mods.clone();
+    let server = spawn_state(state).await;
+    mods.attach(name, 1, link);
+    (python, server, mods)
+}
+
 pub fn client() -> reqwest::Client {
     reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap()
 }

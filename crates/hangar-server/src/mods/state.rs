@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::model::{ModsCall, ModsError, BAND_SITE};
+use super::model::{ModsCall, ModsError, BAND_SITE, TOAST_DEFAULT_MS};
 use crate::side::{WeakHubs, TOASTS_KEPT};
 
 pub type CallFuture = Pin<Box<dyn Future<Output = Result<Value, ModsError>> + Send>>;
@@ -22,14 +22,12 @@ pub trait SurfaceLink: Send + Sync {
 
 /// Mesmos tetos do Python (`plugin_bridge`): o app trata o aviso igual nas duas fontes. O máximo e a
 /// quantidade guardada são os do `side.rs`, que já os aplica aos avisos que vêm do Python.
-const TOAST_DEFAULT_MS: u64 = 4000;
 const TOAST_MIN_MS: u64 = 1000;
 const TOAST_MAX_MS: u64 = crate::side::TOAST_MAX_MS as u64;
 const TOAST_MAX_CHARS: usize = 2000;
 const TOAST_PLUGIN_CHARS: usize = 64;
 /// Por quanto tempo o efeito (cópia, URL) ainda é do clique: a mesma janela do plugin (`APP_PRESS_MS`).
 const CLICK_WINDOW: Duration = Duration::from_millis(1500);
-const CLICK_POLL: Duration = Duration::from_millis(20);
 
 struct Click {
     site: String,
@@ -41,6 +39,8 @@ struct Click {
     matched: bool,
     copied: Option<String>,
     opened: Option<String>,
+    /// Acorda quem espera o efeito do clique (`finish_click`) quando a cópia ou a URL chega.
+    effect: Arc<tokio::sync::Notify>,
 }
 
 /// O último `plugin_ui`: a árvore, para achar o mod de um botão sem refazer o parse, e o texto, que é o
@@ -254,7 +254,11 @@ impl Mods {
             let mut inner = self.inner.lock().unwrap();
             let Some(session) = inner.sessions.get_mut(name).filter(|session| session.life == life) else { return };
             match session.click.as_mut().filter(|click| click.until > Instant::now() && click.plugin.as_deref() == Some(plugin)) {
-                Some(click) => { click.copied = Some(text.to_owned()); true }
+                Some(click) => {
+                    click.copied = Some(text.to_owned());
+                    click.effect.notify_one();
+                    true
+                }
                 None => false,
             }
         };
@@ -272,7 +276,7 @@ impl Mods {
         let plugin = tree.and_then(|tree| button_plugin(&tree, site, key));
         if let Some(session) = self.inner.lock().unwrap().sessions.get_mut(name) {
             session.click = Some(Click { site: site.to_owned(), key: key.to_owned(), plugin, attempt: attempt.clone(),
-                until: Instant::now() + CLICK_WINDOW, matched: false, copied: None, opened: None });
+                until: Instant::now() + CLICK_WINDOW, matched: false, copied: None, opened: None, effect: Arc::default() });
         }
         attempt
     }
@@ -297,25 +301,27 @@ impl Mods {
             return false;
         }
         click.opened = Some(url.to_owned());
+        click.effect.notify_one();
         true
     }
 
     /// Fecha o clique e devolve a cópia e a URL dele. O `onPress` do mod costuma copiar ou abrir sem
     /// `await`: com o press casado pelo plugin e nada ainda, espera o efeito até `wait`.
     pub async fn finish_click(&self, name: &str, attempt: &str, wait: Duration) -> (Option<String>, Option<String>) {
-        let deadline = Instant::now() + wait;
+        let deadline = tokio::time::Instant::now() + wait;
         loop {
-            let (done, matched) = {
+            // O `notify_one` guarda a vez quando ninguém espera ainda: o efeito que chega entre a leitura e
+            // a espera não se perde.
+            let effect = {
                 let inner = self.inner.lock().unwrap();
                 match inner.sessions.get(name).and_then(|session| session.click.as_ref()).filter(|click| click.attempt == attempt) {
-                    Some(click) => (click.copied.is_some() || click.opened.is_some(), click.matched),
-                    None => (true, false),
+                    Some(click) if click.matched && click.copied.is_none() && click.opened.is_none() => click.effect.clone(),
+                    _ => break,
                 }
             };
-            if done || !matched || Instant::now() >= deadline {
+            if tokio::time::timeout_at(deadline, effect.notified()).await.is_err() {
                 break;
             }
-            tokio::time::sleep(CLICK_POLL).await;
         }
         let mut inner = self.inner.lock().unwrap();
         let Some(session) = inner.sessions.get_mut(name) else { return (None, None) };

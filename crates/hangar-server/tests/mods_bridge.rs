@@ -6,7 +6,6 @@ use fake::*;
 use hangar_server::mods::bridge::mint;
 use hangar_server::mods::model::*;
 use hangar_server::mods::state::*;
-use hangar_server::routes::AppState;
 use serde_json::{Value, json};
 
 #[test]
@@ -31,7 +30,7 @@ async fn json_of(response: reqwest::Response) -> Value {
 /// (Task 12) e fará na sessão com terminal da fase 3. Implementado direto no tipo local (A2): o `call`
 /// só copia o endereço.
 #[derive(Clone)]
-struct PluginLike { server: std::sync::OnceLock<std::net::SocketAddr> }
+struct PluginLike { server: Arc<std::sync::OnceLock<std::net::SocketAddr>> }
 impl SurfaceLink for PluginLike {
     fn call(&self, _: ModsCall, _: std::time::Instant) -> CallFuture {
         let server = *self.server.get().unwrap();
@@ -53,13 +52,9 @@ impl SurfaceLink for PluginLike {
 }
 
 async fn setup() -> (Arc<Fake>, std::net::SocketAddr, Mods, PluginLike) {
-    let (python, upstream) = spawn_fake().await;
-    let state = AppState::new(config(upstream, "127.0.0.1"));
-    let mods = state.mods.clone();
-    let server = spawn_state(state).await;
-    let plugin = PluginLike { server: std::sync::OnceLock::new() };
+    let plugin = PluginLike { server: Arc::new(std::sync::OnceLock::new()) };
+    let (python, server, mods) = serve_mods("mods-s", Arc::new(plugin.clone())).await;
     plugin.server.set(server).unwrap();
-    mods.attach("mods-s", 1, Arc::new(plugin.clone()));
     (python, server, mods, plugin)
 }
 

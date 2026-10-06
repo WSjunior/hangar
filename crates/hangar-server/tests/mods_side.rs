@@ -17,12 +17,8 @@ async fn setup() -> (std::sync::Arc<Fake>, std::net::SocketAddr, Mods, tempfile:
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("conversation.jsonl");
     append_lines(&path, 0..1);
-    let (python, upstream) = spawn_fake().await;
+    let (python, server, mods) = serve_mods("s", Arc::new(NoLink)).await;
     python.set_info(info_json("claude-headless", &path));
-    let state = AppState::new(config(upstream, "127.0.0.1"));
-    let mods = state.mods.clone();
-    let server = spawn_state(state).await;
-    mods.attach("s", 1, Arc::new(NoLink));
     (python, server, mods, dir)
 }
 
