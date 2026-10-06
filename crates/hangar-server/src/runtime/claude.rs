@@ -681,7 +681,8 @@ impl ClaudeEngine {
                     "effort":self.effort,"usage":self.usage,"context_window":self.context_window,"cost":self.cost}),effects);
                 self.changed(effects,false);
             }
-            "conversation_reset" => { self.reset_conversation(effects); }
+            // O turno acabou junto: o estado e a faixa (`isWorking`) acompanham.
+            "conversation_reset" => { self.reset_conversation(effects); self.changed(effects,true); }
             "cano_saiu" => {
                 self.alive = false; self.in_progress = false; self.initializing = false;
                 self.turn_start = None; self.label_deadline = None; self.init_warning = None; self.effort_deadline = None;

@@ -139,6 +139,12 @@ impl Mods {
         true
     }
 
+    /// O ator morreu sem passar pelo `close`: a faixa e os painéis somem dos apps, e a sessão segue com o
+    /// mesmo dono até o `close` a esquecer.
+    pub fn clear_ui(&self, name: &str, generation: u64) {
+        self.publish_ui(name, generation, &empty_ui());
+    }
+
     /// Aviso de mod (`ui_toast`, S6): o Claude Code já descarta o que vem a menos de 2 s do anterior do
     /// mesmo mod, e o Hangar não limita de novo.
     pub fn toast(&self, name: &str, generation: u64, plugin: &str, text: &str, timeout_ms: u64) {

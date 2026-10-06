@@ -309,19 +309,39 @@ pub struct RuntimeActor;
 
 impl RuntimeActor {
     pub fn spawn(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,engine:RuntimeEngine) -> RuntimeHandle {
+        Self::spawn_with(target,queue,connection,engine,|_|{})
+    }
+
+    /// Como `spawn`, mas `before` recebe o handle antes de a tarefa do ator existir: o que ele registrar
+    /// (o dono no `Mods`) já está lá quando o ator dá o primeiro passo. Pedidos que chegarem nesse meio
+    /// esperam na caixa.
+    pub fn spawn_with(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,engine:RuntimeEngine,
+        before:impl FnOnce(&RuntimeHandle)) -> RuntimeHandle {
         let (sender,receiver) = mpsc::channel(64);
         let events = engine.publisher.clone().unwrap_or_else(||broadcast::channel(256).0);
         let closed = Arc::new(AtomicBool::new(false));
-        let (key,name) = (target.key.clone(),target.name.clone());
-        let run = run(target,queue,connection,engine,receiver,sender.clone(),closed.clone(),events.clone());
-        let log_key = key.clone();
-        let task = tokio::spawn(async move {
+        let (key,name,generation) = (target.key.clone(),target.name.clone(),target.generation);
+        let mods = engine.mods.clone();
+        let handle = RuntimeHandle { sender:sender.clone(),task:Arc::new(Mutex::new(None)),closed:closed.clone(),events:events.clone(),
+            stopped:Arc::new(Mutex::new(None)),key:key.clone() };
+        // O slot fica preso até receber a tarefa: um `stop` que chegue antes espera por ele e junta a tarefa.
+        let slot = handle.task.clone();
+        let mut slot = slot.try_lock().expect("slot da tarefa recém-criado");
+        before(&handle);
+        let run = run(target,queue,connection,engine,receiver,sender,closed,events);
+        *slot = Some(tokio::spawn(async move {
             let result = run.await;
             // Saída por `?` deixava o ator mudo: só sobrava o runtime_closed de quem chamasse depois.
-            if let Err(error) = &result { tracing::warn!(key=%log_key,session=%name,code=%error.code,reason=%error.message,"ator do runtime terminou com erro"); }
+            if let Err(error) = &result {
+                tracing::warn!(key=%key,session=%name,code=%error.code,reason=%error.message,"ator do runtime terminou com erro");
+                // Sem `cano_saiu` a superfície não limpou: os apps ficariam com botões mortos até o `close`.
+                // A posse fica; quem a solta é o `close`.
+                if let Some(mods) = &mods { mods.clear_ui(&name,generation); }
+            }
             result
-        });
-        RuntimeHandle { sender,task:Arc::new(Mutex::new(Some(task))),closed,events,stopped:Arc::new(Mutex::new(None)),key }
+        }));
+        drop(slot);
+        handle
     }
 }
 
