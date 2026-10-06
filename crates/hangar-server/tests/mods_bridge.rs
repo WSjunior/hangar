@@ -86,3 +86,48 @@ async fn bridge_checks_token_and_url_and_passes_other_sessions() {
     assert_eq!(other.text().await.unwrap(), "from-python");
     assert_eq!(python.hits_to("/api/plugin/press-start"), 1);
 }
+
+#[tokio::test]
+async fn opened_checks_token_case_size_and_passes_invalid_bodies() {
+    let (python, server, mods, _plugin) = setup().await;
+    let base = format!("http://{server}/api/plugin");
+    let token = mint(OWNER, "mods-s");
+    let attempt = mods.begin_click("mods-s", "a", "b");
+    let wrong = post(format!("{base}/opened"), json!({"sessao": "mods-s", "token": "x", "attempt": attempt, "url": "https://x"}), false).await;
+    assert_eq!(wrong.status().as_u16(), 403);
+    let over = format!("https://{}", "a".repeat(8192 - 8 + 1));
+    let too_long = post(format!("{base}/opened"), json!({"sessao": "mods-s", "token": token, "attempt": attempt, "url": over}), false).await;
+    assert_eq!(too_long.status().as_u16(), 400, "acima de 8192 caracteres");
+    // Mais de 8192 bytes, menos de 8192 caracteres: o teto conta caracteres, como o Pydantic do Python.
+    let wide = format!("https://{}", "á".repeat(4100));
+    let accepted = post(format!("{base}/opened"), json!({"sessao": "mods-s", "token": token, "attempt": attempt, "url": wide}), false).await;
+    assert_eq!(accepted.status().as_u16(), 200);
+    let upper = post(format!("{base}/opened"), json!({"sessao": "mods-s", "token": token, "attempt": attempt, "url": "HTTPS://Example.com/x"}), false).await;
+    assert_eq!(upper.status().as_u16(), 200, "o esquema não distingue caixa");
+    // Corpo que não é o de uma rota da ponte: o Rust não sabe de quem é, e o Python responde.
+    let broken = post(format!("{base}/opened"), json!({"sessao": "com-terminal"}), false).await;
+    assert_eq!(broken.text().await.unwrap(), "from-python");
+    assert_eq!(python.hits_to("/api/plugin/opened"), 1);
+}
+
+#[tokio::test]
+async fn bridge_applies_the_python_limits_before_the_token() {
+    let (_python, server, _mods, _plugin) = setup().await;
+    let base = format!("http://{server}/api/plugin");
+    let cases = [
+        ("press-start", json!({"sessao": "mods-s", "token": "x", "requestId": "", "element": "b"})),
+        ("press-start", json!({"sessao": "mods-s", "token": "x", "requestId": "é".repeat(65), "element": "b"})),
+        ("press-start", json!({"sessao": "mods-s", "token": "x", "requestId": "a", "element": ""})),
+        ("press-start", json!({"sessao": "mods-s", "token": "x", "requestId": "a", "element": "é".repeat(257)})),
+        ("opened", json!({"sessao": "mods-s", "token": "x", "attempt": "", "url": "https://x"})),
+        ("opened", json!({"sessao": "mods-s", "token": "x", "attempt": "é".repeat(65), "url": "https://x"})),
+    ];
+    for (route, body) in cases {
+        let response = post(format!("{base}/{route}"), body.clone(), false).await;
+        assert_eq!(response.status().as_u16(), 422, "{route} {body}");
+    }
+    // No limite exato, contado em caracteres e não em bytes, passa da validação e cai no token.
+    let edge = post(format!("{base}/press-start"), json!({"sessao": "mods-s", "token": "x",
+        "requestId": "é".repeat(64), "element": "é".repeat(256)}), false).await;
+    assert_eq!(edge.status().as_u16(), 403);
+}
