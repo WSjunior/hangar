@@ -619,15 +619,30 @@ def _protocol_at(rev: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def _binary_commit(release: tuple | None) -> str | None:
-    """Commit do binário deste sistema na release, ou `None` sem build dele."""
+def _binary(release: tuple | None) -> tuple[str, int | None] | None:
+    """(commit, contrato) do binário deste sistema na release; `None` sem build ou sem commit legível.
+
+    `platforms.<sistema>` diz o build de cada sistema, que pode ser de um commit anterior quando o
+    dele falhou; sem a chave (manifesto antigo), o `commit` do topo vale para todos.
+    """
     manifest = release[2] if release else None
     plat = rust_release.platform_key()
     if not isinstance(manifest, dict) or plat is None or not rust_release.has_build(manifest, plat):
         return None
-    commit = manifest.get("commit")
+    if "platforms" in manifest:
+        platforms = manifest["platforms"]
+        entry = platforms.get(plat) if isinstance(platforms, dict) else None
+        if not isinstance(entry, dict):
+            return None
+        commit, protocol = entry.get("commit"), entry.get("protocol")
+    else:
+        commit, protocol = manifest.get("commit"), None
     # Só sha completo: nome de ref ou texto com `-` viraria outra coisa no `git show`.
-    return commit if isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{40}", commit) else None
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        return None
+    if not isinstance(protocol, int) or isinstance(protocol, bool):
+        protocol = _protocol_at(commit)
+    return commit, protocol
 
 
 def _behind_top() -> bool:
@@ -671,10 +686,11 @@ def pinned_target(destino: str) -> tuple[str | None, tuple | None]:
     release = (url, tag, manifest)
     if not rust_release.has_build(manifest, plat):
         return topo, release
-    commit = _binary_commit(release)
-    want = _protocol_at(commit) if commit else None
+    want = binary[1] if (binary := _binary(release)) else None
     if want is None:
-        _log.warning("protocolo do binario publicado ilegivel (commit %r)", manifest.get("commit"))
+        entry = manifest.get("platforms", {}).get(plat) if isinstance(manifest.get("platforms"), dict) else None
+        _log.warning("contrato do binario %s ilegivel (entrada %r, commit do topo %r)",
+                     plat, entry, manifest.get("commit"))
         return None, release
     if _protocol_at(topo) == want:
         return topo, release
@@ -994,9 +1010,9 @@ def _executar(porta: int) -> dict:
         release = _puxar(pre)
         para = _git("rev-parse", "HEAD", timeout=30).stdout.strip()
         _escrever(commit_para=para, shell_mudou=_shell_mudou(de, para))
-        if binario := _binary_commit(release):
-            if _protocol_at(binario) != _protocol_at("HEAD"):
-                _avisar(f"o binário do Rust publicado para este sistema (commit {binario[:8]}) fala outro "
+        if (binary := _binary(release)) and binary[1] is not None:
+            if binary[1] != _protocol_at("HEAD"):
+                _avisar(f"o binário do Rust publicado para este sistema (commit {binary[0][:8]}) fala outro "
                         "contrato que este código; o Python atende sozinho até sair o binário novo")
             elif _behind_top():
                 _avisar(f"versão mais nova ainda sem binário do Rust para este sistema (compilando, ou o "

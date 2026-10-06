@@ -1417,6 +1417,24 @@ def test_topo_sem_binario_para_no_ultimo_commit_do_contrato_publicado(repo, rust
     assert atualizar._behind_top() is True
 
 
+def test_build_deste_sistema_atrasado_no_manifesto_por_sistema(repo, rust):
+    """O topo publicado para outro sistema não leva este: vale a entrada dele em `platforms`."""
+    rust["manifesto"]["commit"] = rust["topo"]
+    rust["manifesto"]["platforms"] = {
+        "linux-x86_64": {"commit": rust["binario_35"], "protocol": 35},
+        "windows-x86_64": {"commit": rust["topo"], "protocol": 36}}
+    final = atualizar.executar()
+    assert final["ok"] is True and _rev(repo, "HEAD") == rust["ultimo_35"]
+
+
+@pytest.mark.parametrize("platforms", [{"windows-x86_64": {"protocol": 36}}, None, []])
+def test_manifesto_por_sistema_sem_este_sistema_nao_confere(repo, rust, platforms):
+    rust["manifesto"]["platforms"] = platforms
+    final = atualizar.executar()
+    assert _rev(repo, "HEAD") == rust["topo"]
+    assert final["avisos"][0].startswith("não consegui conferir o binário do Rust")
+
+
 def test_topo_com_binario_avanca_ate_o_topo(repo, rust):
     rust["manifesto"]["commit"] = rust["topo"]
     final = atualizar.executar()

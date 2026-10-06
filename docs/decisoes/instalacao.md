@@ -29,8 +29,8 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   teste continua no registro ao voltar pra main; e, esvaziado o campo, o auto-update não tira o
   checkout da branch de teste: a volta é pelo botão.
 - **O Atualizar só avança até o commit cujo binário do Rust foi publicado para este sistema.**
-  O commit do binário é o `commit` do `server-latest.json` da release da branch; o contrato dele
-  é o `RUST_SERVER_PROTOCOL` daquele commit. O checkout vai ao commit mais novo de
+  O binário é o de `platforms.<sistema>` no `server-latest.json` da release da branch (sem a
+  chave, o `commit` do topo); o contrato é o `protocol` dele ou o `RUST_SERVER_PROTOCOL` do commit. O checkout vai ao commit mais novo de
   `origin/<branch>` (primeiro pai) com o mesmo número, nunca recua, e o download usa o manifesto
   lido na escolha. Atrás do topo, a tela avisa que a versão mais nova ainda não tem binário e é
   compilada aqui (também no Reiniciar); checkout já à frente com binário de outro contrato também
@@ -449,8 +449,8 @@ promete que o build vem: o mesmo estado aparece com o CI quebrado. Prova em clon
 `server-hangar-server-parte1` com o binário de `ce73e54f3` (34), topo `73727328e` (36): parou
 em `5b103eede`, o último commit no 34, e baixou os dois binários com o sha256 conferido.
 
-Limite: quando o build de UM sistema falha, o `server.yml` publica o manifesto sem a entrada
-dele e o asset antigo fica sem commit conhecido. Aí a escolha não tem como parar esse sistema
-no commit certo e ele vai ao topo, como antes. Resolver exige o manifesto manter, por sistema, a
-entrada anterior com o próprio `commit`.
+Build de UM sistema que falha: no manifesto antigo ele sai da lista e o asset velho fica sem
+commit conhecido, então esse sistema vai ao topo, como antes. O manifesto por sistema
+(`platforms.<sistema>` com `commit` e `protocol`) resolve: a escolha usa a entrada do próprio
+sistema, e o `commit` do topo só vale quando a chave `platforms` não existe.
 
