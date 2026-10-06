@@ -8,6 +8,10 @@ Achados médios e baixos das revisões por Task que entraram na `feat/parte4` se
 - Task 10: prova na VM DELPHI-02 (Step 23) com web e nativo. Os testes `term::conpty::*` e os
   `cfg(windows)` da Task 7 passaram no job Windows do CI (run 37467170394). O nativo responde ao
   `ESC[6n` (`desktop-native/src/term_view.rs:56-58`, `Event::PtyWrite`); o xterm.js também.
+- Task 5: no Windows a prévia pelo pane captura a 0,15 s com um processo psmux por toque
+  (~25–50 ms cada) enquanto a sessão trabalha sem arquivo do hook; medir na VM e, se pesar,
+  limitar o ritmo rápido no Windows. O Monitor no Windows (psmux) e o convidado de convite de
+  verdade não foram conferidos (só o Connect).
 
 ## Médios e baixos
 
@@ -27,6 +31,10 @@ Achados médios e baixos das revisões por Task que entraram na `feat/parte4` se
   gravar depois de o menu aparecer; problema do runtime perde para o dos fatos e da observação
   (igual ao Python); o celular não mostra o detalhe dos códigos novos; casamento degradado vai
   ao log em `info` (igual ao Python); nativo não compilado nesta Task (só o `messages`).
+- Task 5: pane do agente cai em `=nome:` quando a descoberta falha (igual ao Python, só log);
+  `RuntimeView` não limpa quando o ator fecha sem evento; prévia do hook ilegível cai no pane só
+  com log; linha acima de 1 MiB no canal privado derruba o stream do convidado (reconecta);
+  `Drop` sem runtime não solta o consumidor do pool.
 - Task 8: fila de entrada limitada em quadros (64), não em bytes; `lock().unwrap()`; erro de
   leitura do PTY que não é EIO fecha como fim normal; resize do PTY que falha só aparece em debug;
   `restore_after_crash` na subida sem diário (só `warn`); troca de painel com desmontagem acima de
