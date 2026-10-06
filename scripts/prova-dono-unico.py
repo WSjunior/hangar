@@ -198,6 +198,8 @@ class Vigia(threading.Thread):
 
 
 class Prova:
+    PERFIL = "debug"   # pasta do binário em crates/target
+
     def __init__(self, args):
         self.args = args
         self.raiz = Path(tempfile.mkdtemp(prefix="hangar-prova-"))
@@ -220,10 +222,11 @@ class Prova:
 
     # ---- ambiente ----------------------------------------------------------------------------
     def preparar(self):
-        server = REPO / "crates/target/debug/hangar-server"
-        cano = REPO / "crates/target/debug/hangar-cano"
+        server = REPO / f"crates/target/{self.PERFIL}/hangar-server"
+        cano = REPO / f"crates/target/{self.PERFIL}/hangar-cano"
         if not (server.exists() and cano.exists()):
-            subprocess.run(["cargo", "build", "--locked", "-p", "hangar-server", "-p", "hangar-cano"],
+            perfil = ["--release"] if self.PERFIL == "release" else []
+            subprocess.run(["cargo", "build", "--locked", *perfil, "-p", "hangar-server", "-p", "hangar-cano"],
                            cwd=REPO / "crates", check=True)
         if not Path(self.real_claude).is_file():
             raise SystemExit("claude não encontrado no PATH")
@@ -271,6 +274,7 @@ class Prova:
             "contas.e_conta = lambda p: False\n"
             "from app.adapters.claude_headless import adapter\n"
             "adapter.matar_orfaos = lambda: 0\n"
+            + self.lancador_extra() +
             "from app import main; main.main()\n")
         env = {
             "HOME": str(self.home), "USER": os.environ.get("USER", ""), "LANG": "C.UTF-8",
@@ -279,9 +283,10 @@ class Prova:
             "PATH": f"{self.bin}:{Path.home() / '.local/bin'}:/usr/local/bin:/usr/bin:/bin",
             "COLORTERM": "truecolor", "CLAUDE_CODE_TMUX_TRUECOLOR": "1", "PYTHONFAULTHANDLER": "1",
             "CP_AUTH_TOKEN": self.token, "CP_PORT": str(self.porta), "CP_LAN_BIND_IP": "127.0.0.1",
-            "CP_RUST_SERVER_BIN": str(REPO / "crates/target/debug/hangar-server"),
-            "CP_RUST_CANO_BIN": str(REPO / "crates/target/debug/hangar-cano"),
+            "CP_RUST_SERVER_BIN": str(REPO / f"crates/target/{self.PERFIL}/hangar-server"),
+            "CP_RUST_CANO_BIN": str(REPO / f"crates/target/{self.PERFIL}/hangar-cano"),
             "CP_AUTO_RESUME": "0", "CP_SYNC": "0", "HANGAR_SEM_PASSO": "1",
+            **self.ambiente_extra(),
         }
         subprocess.run(["systemd-run", "--user", "-q", f"--unit={self.unit}", "-p", "TimeoutStopSec=10",
                         "-p", f"WorkingDirectory={BACKEND}", "-p", f"StandardOutput=append:{self.log}",
@@ -289,6 +294,13 @@ class Prova:
                         *[f"{k}={v}" for k, v in env.items()],
                         str(BACKEND / ".venv/bin/python"), "-c", lancador], check=True)
         self.esperar_de_pe()
+
+    def lancador_extra(self):
+        """Código a mais no lançador, antes do `main` (instrumentação de outra prova)."""
+        return ""
+
+    def ambiente_extra(self):
+        return {}
 
     def esperar_de_pe(self):
         if not esperar(lambda: self.api("GET", "/api/sessions", timeout=5)[0] == 200, 120, 1):

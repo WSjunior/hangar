@@ -49,8 +49,9 @@ pub fn enabled() -> bool { enabled_from(std::env::var(ENV).ok().as_deref()) }
 
 fn enabled_from(v: Option<&str>) -> bool { v == Some("1") }
 
-/// Diferença que alguma Task fez de propósito, com o motivo ao lado.
-fn accepted(row: &SessionRow, field: &str) -> bool {
+/// Diferença que alguma Task fez de propósito, com o motivo ao lado. `py_state`: o estado da linha
+/// na lista do Python.
+fn accepted(row: &SessionRow, field: &str, py_state: Option<&str>) -> bool {
     match row.problema.as_deref() {
         // Captura que falhou (Task 12): o Rust fica no marcador sem rebaixar e mostra a falha.
         Some("list_capture_failed") if ["state", "problema", "label"].contains(&field) => return true,
@@ -58,7 +59,10 @@ fn accepted(row: &SessionRow, field: &str) -> bool {
         Some("list_runtime_unavailable") if ["state", "problema"].contains(&field) => return true,
         _ => {}
     }
-    (row.provider == "claude" && row.problema.as_deref() == Some(RUNTIME_ABSENT) && RUNTIME_FIELDS.contains(&field))
+    let absent = row.provider == "claude" && row.problema.as_deref() == Some(RUNTIME_ABSENT);
+    (absent && RUNTIME_FIELDS.contains(&field))
+        // A última resposta só existe na linha parada: sem retrato, ela diverge junto com o estado.
+        || (absent && ["last_reply", "last_reply_at"].contains(&field) && py_state != Some(row.state.as_str()))
         // A descoberta não sabe a credencial de Kimi/Pi/omp (Task 7); só o fato a preenche (Task 14).
         || (["kimi", "pi", "omp"].contains(&row.provider.as_str()) && field == "conta" && row.conta.is_none())
 }
@@ -122,8 +126,9 @@ pub fn compare(rust: &[SessionRow], py: &PySigs) -> HashSet<Diff> {
             out.insert((name.clone(), ROW_UNSERIALIZABLE.into()));
             continue;
         };
+        let py_state = sig.get("state").and_then(Value::as_str);
         for (field, want) in sig.iter().filter(|(f, _)| *f != "name") {
-            if !same(&field_value(row, &raw, field), want) && !accepted(row, field) {
+            if !same(&field_value(row, &raw, field), want) && !accepted(row, field, py_state) {
                 out.insert((name.clone(), field.clone()));
             }
         }
@@ -175,7 +180,10 @@ impl Reporter {
 }
 
 /// `codigo` do diário: o campo e quantas das rodadas da janela divergiram nele. Nunca o valor.
-pub fn diff_code(field: &str, count: u32, rounds: u32) -> String { format!("{field}:{count}/{rounds}") }
+/// No formato que o `/internal/diag` aceita (`[a-z0-9_]{1,64}`).
+pub fn diff_code(field: &str, count: u32, rounds: u32) -> String { format!("{field}_{count}_of_{rounds}") }
+
+fn dropped_code(dropped: usize) -> String { format!("{DIFFS_DROPPED}_{dropped}") }
 
 /// Rodada sem comparação, pelo motivo. `quiet`: esperado por um tempo (ninguém com a lista do Python
 /// aberta, multiplexador recusando); só vira registro se durar `BLIND_LIMIT`.
@@ -236,7 +244,7 @@ fn emit(diag: &DiagClient, rep: &Report) {
             "lista do Rust diverge da do Python neste campo");
     }
     if rep.dropped > 0 {
-        diag.report("rust.list_shadow_diff", "", &format!("{DIFFS_DROPPED}:{}", rep.dropped), "diferenças além do teto da janela");
+        diag.report("rust.list_shadow_diff", "", &dropped_code(rep.dropped), "diferenças além do teto da janela");
     }
 }
 
@@ -341,6 +349,18 @@ mod tests {
                             "problema": RUNTIME_ABSENT}));
         sigs = py(&[row(json!({"name": "hl", "headless": true, "state": "awaiting_input"}))]);
         assert!(compare(&[hl], &sigs).is_empty());
+        // A última resposta só existe na linha parada: com o estado divergindo por falta do retrato, ela
+        // diverge junto; com o mesmo estado, é comparada.
+        let hl = row(json!({"name": "hl", "headless": true, "state": "idle", "last_reply": "r", "last_reply_at": 1.0,
+                            "problema": RUNTIME_ABSENT}));
+        let reply = |state: &str| {
+            let mut s = py(&[row(json!({"name": "hl", "headless": true, "state": state}))]);
+            s.get_mut("hl").unwrap().extend([("last_reply".to_owned(), Value::Null), ("last_reply_at".to_owned(), Value::Null)]);
+            s
+        };
+        assert!(compare(&[hl.clone()], &reply("awaiting_input")).is_empty());
+        assert_eq!(compare(&[hl], &reply("idle")), HashSet::from([("hl".into(), "last_reply".into()), ("hl".into(), "last_reply_at".into())]));
+        sigs = py(&[row(json!({"name": "hl", "headless": true, "state": "awaiting_input"}))]);
         // Com o retrato, o estado do runtime é comparado como qualquer outro.
         let hl = row(json!({"name": "hl", "headless": true, "state": "idle", "question": "q"}));
         assert_eq!(compare(&[hl], &sigs), HashSet::from([("hl".into(), "state".into())]));
@@ -426,6 +446,15 @@ mod tests {
 
     #[test]
     fn diary_code_carries_field_and_count_only() {
-        assert_eq!(diff_code("label", 3, 20), "label:3/20");
+        assert_eq!(diff_code("label", 3, 20), "label_3_of_20");
+        // O `/internal/diag` do Python só aceita `[a-z0-9_]{1,64}` (internal_api.py, `_DIAG_CODE`): fora
+        // disso a diferença volta 400 e não chega ao diário.
+        let ok = |c: &str| (1..=64).contains(&c.len()) && c.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+        // Os campos de `list_facts.SIG_FIELDS`, o maior nome é o que importa.
+        let fields = ["name", "cwd", "branch", "git_cwd", "worktree_gone", "git_dirty", "state", "tracked", "headless", "jsonl", "question", "stalled", "limited", "lifecycle_id", "transfer_id", "transfer_phase", "last_reply", "last_reply_at", "pending_questions", "limit_reset", "then_target", "status_line", "context", "model", "label", "startup_steps", "loop_status", "loop_iter", "engine", "conta", "codex_service_tier", "plan_name", "plan_done", "plan_total", "plan_task", "plan_task_total", "plan_complete", "plan_tasks", "plan_hidden", "problema", "provider", "shared", "owner", "orq_arbiter"];
+        for field in fields.into_iter().chain([ROW_MISSING, ROW_EXTRA, ROW_UNSERIALIZABLE]) {
+            assert!(ok(&diff_code(field, 4_294_967_295, 4_294_967_295)), "{field}");
+        }
+        assert!(ok(&dropped_code(80)));
     }
 }
