@@ -215,18 +215,23 @@ fn areas_json(counts: &[[u64; 2]; AREAS.len()]) -> Value {
 
 const FACTS_TTL: Duration = Duration::from_secs(2);
 // Várias telas abertas (nativo, web, script) viram uma leitura do Python a cada 2 s, uma por vez.
-static FACTS: LazyLock<tokio::sync::Mutex<Option<(Instant, Value)>>> = LazyLock::new(Default::default);
+// O erro também fica guardado: com o Python travado, a fila de telas recebe o código em vez de
+// esperar o prazo uma atrás da outra.
+static FACTS: LazyLock<tokio::sync::Mutex<Option<(Instant, Result<Value, &'static str>)>>> = LazyLock::new(Default::default);
 
 async fn cached_python_facts(st: &AppState) -> Result<Value, &'static str> {
     let mut cache = FACTS.lock().await;
-    if let Some((at, value)) = cache.as_ref() {
+    if let Some((at, result)) = cache.as_ref() {
         if at.elapsed() < FACTS_TTL {
-            return Ok(value.clone());
+            return result.clone();
         }
     }
-    let value = python_facts(st).await?;
-    *cache = Some((Instant::now(), value.clone()));
-    Ok(value)
+    let result = python_facts(st).await;
+    if let Err(code) = result {
+        st.diag.report("migration_status.python", "", code, "o backend não devolveu os fatos da migração");
+    }
+    *cache = Some((Instant::now(), result.clone()));
+    result
 }
 
 async fn python_facts(st: &AppState) -> Result<Value, &'static str> {
@@ -256,10 +261,7 @@ pub async fn status(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     }
     let (python, python_error) = match cached_python_facts(&st).await {
         Ok(v) => (v, Value::Null),
-        Err(code) => {
-            st.diag.report("migration_status.python", "", code, "o backend não devolveu os fatos da migração");
-            (Value::Null, json!(code))
-        }
+        Err(code) => (Value::Null, json!(code)),
     };
     let (public, private) = totals();
     let body = json!({

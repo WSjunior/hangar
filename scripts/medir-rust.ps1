@@ -20,7 +20,7 @@ $rust = "127.0.0.1:$port"
 
 # A porta do Python, o modo e o motivo vem da tela de migracao: o log e o nome do processo mentem.
 $code = curl.exe -s -m 10 -o NUL -w '%{http_code}' -H "Authorization: Bearer $token" "http://$rust/api/migration/status"
-if ($LASTEXITCODE -eq 28) { Write-Host "o backend em $rust aceitou a conexao mas nao respondeu em 10 s"; exit 1 }
+if ($LASTEXITCODE -eq 28) { Write-Host "o backend em $rust nao respondeu em 10 s"; exit 1 }
 if ($LASTEXITCODE -ne 0 -or $code -eq '000') { Write-Host "backend do Hangar fora: nada responde em $rust (curl $LASTEXITCODE)"; exit 1 }
 switch ($code) {
     '200' { }

@@ -61,21 +61,25 @@ def _mode() -> str:
 
 
 _branch: str | None = None
+_branch_failed_at = 0.0
+_BRANCH_RETRY_S = 60.0
 
 
 def _checkout_branch() -> str | None:
     # Lida uma vez por processo, como a versão: a branch só muda no Atualizar, que reinicia o backend.
     # Falha não fica guardada: a próxima visita tenta de novo.
-    global _branch
-    if _branch is not None:
+    global _branch, _branch_failed_at
+    if _branch is not None or time.monotonic() - _branch_failed_at < _BRANCH_RETRY_S:
         return _branch
     from app import atualizar, git_ops
     try:
         result = git_ops._run(str(atualizar.REPO), "rev-parse", "--abbrev-ref", "HEAD", timeout=5)
     except git_ops.GitError as e:
+        _branch_failed_at = time.monotonic()
         diag.registrar("migration_status.branch", "aviso", **diag.erro_campos(e))
         return None
     if result.returncode != 0:
+        _branch_failed_at = time.monotonic()
         diag.registrar("migration_status.branch", "aviso", codigo=str(result.returncode))
         return None
     _branch = result.stdout.strip() or None

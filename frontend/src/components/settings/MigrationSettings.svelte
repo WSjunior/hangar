@@ -30,7 +30,8 @@
   $effect(() => {
     load();
     const id = setInterval(load, EVERY_MS);
-    return () => clearInterval(id);
+    document.addEventListener('visibilitychange', load);
+    return () => { clearInterval(id); document.removeEventListener('visibilitychange', load); };
   });
 
   const AREA: Record<string, () => string> = {
