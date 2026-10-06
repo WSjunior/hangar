@@ -21,6 +21,11 @@ export function textoProblema(codigo: string | null | undefined): string | null 
     case 'terminal_input_composer_unreadable': return m.problema_terminal_input_composer_unreadable();
     case 'terminal_input_capture_failed': return m.problema_terminal_input_capture_failed();
     case 'terminal_input_stalled': return m.problema_terminal_input_stalled();
+    case 'list_capture_failed': return m.problema_list_capture_failed();
+    case 'list_runtime_unavailable': return m.problema_list_runtime_unavailable();
+    case 'list_runtime_absent': return m.problema_list_runtime_absent();
+    case 'list_facts_unavailable': return m.problema_list_facts_unavailable();
+    case 'list_orq_unavailable': return m.problema_list_orq_unavailable();
     default: return null;
   }
 }

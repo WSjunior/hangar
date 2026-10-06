@@ -122,13 +122,13 @@ Com o modo `rust` (ou `pending`, que espera o desfecho até 30 s e falha com `li
 `registry.list()`, `list_with_state()` e `resolve_tracked()` vão à ponte; criar, trocar de modo,
 voltar de transferência e renomear semeiam, esquecem e renomeiam o cache de resolução do Rust
 (esquecer levanta e segura a criação; semear e renomear, já feitos, ficam no diário). O produtor da
-lista no Python relê o modo a cada tique e, no `rust`, só repassa `list.snapshot` (dono, até o hub
-da Task 17, e convidado); `GET /api/sessions`, vigia de travada e `prune` leem o mesmo retrato ou a
+lista no Python relê o modo a cada tique e, no `rust`, só repassa `list.snapshot` (convidado; a do
+dono é do hub, Task 17); `GET /api/sessions`, vigia de travada e `prune` leem o mesmo retrato ou a
 descoberta. `list.snapshot` com fatos que nunca responderam é erro (`list_facts_unknown`), nunca
 lista. Erro da ponte em rota é 503 `erro_lista_indisponivel`. `registry.PYTHON_DISCOVERY` conta cada
 descoberta Python (lista, resolução, decoração, produtor); no modo `rust` fica zerado. O pedido de
 retrato manda `owner_clients = 0`: sem o hub não há lista do dono aberta no Rust, e o Python soma a
-dele (`app_entrou`); a Task 17 tira essa contagem do retrato.
+dele (`app_entrou`); com o hub (Task 17) o retrato leva a contagem de listas do dono abertas nele.
 
 **Diferenças aceitas** (fora do diário, cada uma da Task que a criou):
 
@@ -137,7 +137,7 @@ dele (`app_entrou`); a Task 17 tira essa contagem do retrato.
 | `mux_refused`/`mux_unparsed` | a rodada inteira | o Python lia a recusa do multiplexador como zero sessões; o Rust levanta (Task 6) |
 | `problema = list_capture_failed` | `state`, `problema`, `label` da linha | captura falhou: o Rust fica no marcador sem rebaixar e mostra a falha (Task 12) |
 | `problema = list_runtime_unavailable` | `state`, `problema` | runtime sem terminal com erro aparece na linha em vez de sessão parada calada (Task 12) |
-| Claude sem terminal com `problema = list_runtime_absent` | `state`, `label`, `question`, `status_line`, `pending_questions`, `problema` | ninguém forneceu o retrato do runtime (`ProduceFacts.headless = None`: a sombra, até o hub da Task 17); o estado sai do marcador e a linha diz. Com retrato fornecido, sessão fora dele está parada (como `hl.snapshot() = None`) e tudo é comparado |
+| Claude sem terminal com `problema = list_runtime_absent` | `state`, `label`, `question`, `status_line`, `pending_questions`, `problema` | servidor sem runtime ligado (sem `HANGAR_RUNTIME_INSTANCE`, nenhum retrato); o estado sai do marcador e a linha diz. Com o runtime, toda produção (hub, `GET`, sombra) lê `RuntimeRegistry::list_snapshots` e acha a linha pela chave na vida (`k:<chave>`). Com retrato fornecido, sessão fora dele está parada (como `hl.snapshot() = None`) e tudo é comparado |
 | nome com letra fora do português | a linha casa pelo transcript e pela pasta (os dois conhecidos) e pelo nome do Rust contido no do Python, mesma primeira letra | `sanitize_session_name` do Rust só desfaz os acentos do português; outra letra some (Task 7) |
 | `conta` de Kimi/Pi/omp vazia no Rust | `conta` | a descoberta não sabe a credencial; só o fato a preenche (Tasks 7 e 14); preenchida, é comparada |
 | `last_reply`/`last_reply_at` da Claude sem terminal com `list_runtime_absent` | só com o `state` do Python diferente | sem retrato o Rust fica no marcador; a resposta só existe na linha parada e diverge junto. Com o mesmo estado, é comparada |

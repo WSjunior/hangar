@@ -1135,6 +1135,56 @@ Anotar valor e unidade, a sessão de cada `/history`, e o que não deu para medi
 | `/history` completo, Claude 300 MB / `limit=200` | |
 | Threads e inotify do Python com 4 chats abertos, contra 0 abertos | |
 
+## Lista do dono no hangar-server
+
+(05/10/2026, lista-estado Task 17; contrato interno 27, sem mudança.) `GET /api/sessions` e
+`GET /api/sessions/events` do dono saem do `ListHub` (`crates/hangar-server/src/list/hub.rs`);
+convidado, outros métodos e o Python em modo `python` continuam com o `sse.py`/`api.py`.
+
+- **Um produtor por servidor**, ligado pela primeira lista aberta e parado quando a última fecha
+  (como o `_ListRefresher`). Tique de 1,5 s contado do fim do trabalho: descoberta, fatos do Python
+  (`/internal/list/facts`, prazo de 1 s), classificação, decoração e rebaixamento. A assinatura é a
+  do `_list_sig`; o JSON só é montado quando ela muda, e cada conexão só lê o último publicado
+  (`watch`). Nenhum trabalho por conexão além de recortar quadros.
+- **Retrato compartilhado:** o tique grava o retrato da ponte (`ListBridge::refresh`); o `GET`, o
+  vigia de travada e a lista do convidado reaproveitam até 2 s, e invalidar (`list.invalidate`)
+  força produção nova. Sem lista aberta, o `GET` produz na hora.
+- **Contagem de listas do dono:** vai em todo pedido de fatos (o do tique e o do retrato), então a
+  chave do cache de fatos não alterna e o Python ajusta a presença do app por ela (`app_remoto`).
+- **Sessão sem terminal:** toda produção lê `RuntimeRegistry::list_snapshots` (por chave, prazo de
+  1 s por sessão) e acha a linha pela vida `k:<chave>`. Ator que não respondeu fica com o erro no
+  retrato e a linha mostra `list_runtime_unavailable`, nunca parada calada; sem runtime ligado, a
+  linha diz `list_runtime_absent`.
+- **Falha:** `GET` responde 503 no formato do `api.py` (`erro_mux_indisponivel` com o motivo do
+  multiplexador; demais, `erro_lista_indisponivel` com o código, `rust.list_route_failed` no
+  diário). O SSE manda `list_error` com `{"code"}` uma vez na transição (`rust.list_failed` no
+  diário) e a volta reemite a lista mesmo igual. Fatos que nunca responderam (`list_facts_unknown`)
+  são falha: acesso e escondidas seriam vazios. Fatos que caíram depois de uma resposta boa só marcam
+  as linhas (`list_facts_unavailable`). Linha escondida do dono não sai.
+- **Caches por sessão:** nome fora da lista por 10 s sai de resolução, contexto, resposta e
+  classificação (o `_forget` de quem morre sem o Python fechar). Os 10 s cobrem a linha que some numa
+  rodada só sem perder a resolução semeada.
+- **Telas:** os códigos `list_*` da linha têm frase em `messages/*.json` (`problema_list_*`), lida
+  pelo web (`lib/problema.ts`), pelo app (`SessionProblem.tsx`) e pelo nativo (`problema_<código>`).
+
+Medida (backend isolado, release, 20 sessões Claude de mentira paradas, uma lista do dono aberta):
+
+| | Antes (Python serve, Rust só retrato) | Depois (hub no Rust) |
+|---|---|---|
+| CPU do Python (ms por s) | 11,5 e 14,0 | 11,7 |
+| CPU do Rust com filhos (ms por s) | 5,5 e 5,7 | 7,3 |
+| Servidor tmux (ms por s) | 0,7 e 0,8 | 0,8 |
+| Marcador muda → `sessions` no SSE (mediana / máx, 10 vezes) | 1,36 / 2,28 s | 0,73 / 1,20 s |
+| Pico de RSS do Rust | 22,6 MB | 28,7 MB |
+
+Metodologia: CPU por `/proc/<pid>/stat` (`utime+stime+cutime+cstime`) em 60 s depois de 10 s de
+aquecimento; sessões são panes com `claude --session-id` de mentira, transcript de 50 linhas e
+marcador `idle` no `HOME` isolado; latência do `os.replace` do marcador até o `sessions` com o
+estado novo. O Python não caiu: antes ele produzia o refresher e respondia os fatos do retrato a
+cada 2 s; agora responde os fatos a cada tique (1,5 s). O Rust gasta mais porque produz a cada
+tique em vez de servir o retrato de 2 s, e é isso que corta a latência pela metade (antes o
+refresher de 1,5 s lia um retrato de até 2 s).
+
 ## Custos e uso no hangar-server
 
 (03/10/2026, Parte 3; contrato interno 20 na junção com o dono único e a lista de worktrees.) O Rust

@@ -42,7 +42,7 @@ pub type Diff = (String, String);
 /// produção com estes códigos não é diferença: o Python lia a mesma recusa como zero sessões.
 pub const ACCEPTED_ERRORS: [&str; 2] = ["mux_refused", "mux_unparsed"];
 /// Campos que o retrato do runtime preenche nas sessões Claude sem terminal. Só aceitos quando a
-/// linha diz que o retrato não a trouxe (`RUNTIME_ABSENT`): na sombra ele só chega com o hub (Task 17).
+/// linha diz que o retrato não a trouxe (`RUNTIME_ABSENT`: servidor sem runtime ligado).
 const RUNTIME_FIELDS: [&str; 6] = ["state", "label", "question", "status_line", "pending_questions", "problema"];
 
 pub fn enabled() -> bool { enabled_from(std::env::var(ENV).ok().as_deref()) }

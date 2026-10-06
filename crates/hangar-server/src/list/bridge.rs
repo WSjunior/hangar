@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -26,6 +26,7 @@ use super::discover_other::{self, Dirs};
 use super::capped;
 use super::facts::{self as list_facts, FactsClient, ListFacts};
 use super::facts_files::{self, HookStates};
+use super::hub::HeadlessSource;
 use super::mux::{Mux, Pane};
 use super::plan::PlanTracker;
 use super::procs::{self, ChildrenMap, ProcessView};
@@ -36,6 +37,8 @@ use crate::routes::AppState;
 pub const DISCOVER_TTL: Duration = Duration::from_secs(1);
 /// Retrato decorado servido sem produzir de novo (`list_sessions` do `api.py`).
 pub const SNAPSHOT_TTL: Duration = Duration::from_secs(2);
+/// Sessão fora da lista por este tempo perde os caches por nome.
+const FORGET_AFTER: Duration = Duration::from_secs(10);
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
 const CONFIG_DIRS_TTL: Duration = Duration::from_secs(30);
 const MAX_BODY: usize = 64 * 1024;
@@ -79,13 +82,9 @@ pub fn parse_dirs(raw: &str) -> Option<Dirs> {
         omp_config: p("omp_config")?, omp_agent: p("omp_agent")?, kimi_home: p("kimi_home")? })
 }
 
-/// O que quem produz sabe e o Python não: o runtime das sessões sem terminal (o hub completa,
-/// Task 17; vazio, elas ficam no marcador) e quantas listas do dono estão abertas no Rust.
+/// O que quem produz sabe e o Python não: quantas listas do dono estão abertas no Rust (o hub).
 #[derive(Clone, Default)]
 pub struct ProduceFacts {
-    /// Retrato do runtime das sessões sem terminal, por nome (`RuntimeRegistry::snapshots`).
-    /// `None`: ninguém forneceu o retrato; `Some` sem a sessão: ela está parada.
-    pub headless: Option<BTreeMap<String, Value>>,
     pub owner_clients: u32,
     /// Rodada em sombra: nada do que ela produz sai daqui, nem o rebaixamento de `awaiting`.
     pub shadow: bool,
@@ -168,9 +167,13 @@ pub struct ListBridge {
     facts: FactsClient,
     shadow_facts: FactsClient,
     caches: Arc<Caches>,
-    /// Os fatos do último `produce` de verdade: o retrato pedido de fora usa os mesmos, senão a
-    /// pergunta ao Python alternaria de chave e o runtime sem terminal sumiria da classificação.
-    last_input: Mutex<ProduceFacts>,
+    /// Retrato do runtime das sessões sem terminal; sem ele, a linha diz `list_runtime_absent`.
+    runtime: std::sync::OnceLock<Arc<dyn HeadlessSource>>,
+    /// Listas do dono abertas no hub: o retrato pedido de fora manda a mesma contagem, senão a
+    /// pergunta ao Python alternaria de chave e a presença do app mudaria a cada pedido.
+    owner_clients: AtomicU32,
+    /// Última rodada em que cada nome estava na lista: sumido há `FORGET_AFTER`, os caches dele saem.
+    seen: Mutex<HashMap<String, Instant>>,
     /// Trava assíncrona = um por vez: quem chega durante a varredura espera e reaproveita o resultado.
     discovery: tokio::sync::Mutex<Option<Discovery>>,
     snapshot: tokio::sync::Mutex<Option<Snapshot>>,
@@ -191,11 +194,23 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> { m.lock().unwrap_or_el
 
 impl ListBridge {
     pub fn new(env: ListEnv, facts: FactsClient) -> Self {
-        Self { env: Arc::new(env), shadow_facts: facts.sibling(), facts, caches: Arc::default(), last_input: Mutex::default(),
+        Self { env: Arc::new(env), shadow_facts: facts.sibling(), facts, caches: Arc::default(), runtime: std::sync::OnceLock::new(),
+            owner_clients: AtomicU32::new(0), seen: Mutex::default(),
             discovery: tokio::sync::Mutex::new(None),
             snapshot: tokio::sync::Mutex::new(None), git_running: Arc::default(),
             git_slots: Arc::new(tokio::sync::Semaphore::new(GIT_SLOTS)), epoch: AtomicU64::new(0) }
     }
+
+    /// Uma vez, na subida do servidor com o runtime de pé.
+    pub fn set_runtime(&self, runtime: Arc<dyn HeadlessSource>) {
+        if self.runtime.set(runtime).is_err() {
+            tracing::warn!(code = "list_runtime_twice", "lista: retrato do runtime já ligado; o segundo fica de fora");
+            self.facts.diag.report("rust.list_failed", "", "list_runtime_twice", "retrato do runtime ligado duas vezes; vale o primeiro");
+        }
+    }
+
+    /// Contagem do hub; o retrato pedido de fora vai com ela.
+    pub fn set_owner_clients(&self, n: u32) { self.owner_clients.store(n, Ordering::Relaxed); }
 
     fn dirs(&self) -> Result<Dirs, ListError> {
         self.env.dirs.clone().ok_or(fail("list_dirs_missing", "pastas da lista ausentes"))
@@ -243,18 +258,25 @@ impl ListBridge {
         Ok((rows, agent_pids, panes, children))
     }
 
-    /// Lista decorada para quem pergunta fora do hub (vigia de travada, lista do convidado e, até o
-    /// hub, a do dono): o retrato de até 2 s, senão produz na hora com os fatos do último `produce` de
-    /// verdade. Task 17: o hub chama `produce` com o retrato do runtime e a contagem de clientes dele;
-    /// até lá o retrato fica sem runtime (`None`) e com zero clientes.
+    /// Lista decorada para quem pergunta fora do tique do hub (`GET` do dono, vigia de travada,
+    /// lista do convidado): o retrato de até 2 s (o do tique, com o hub de pé), senão produz na hora.
     pub async fn snapshot(&self) -> Result<Produced, ListError> {
+        self.produce_kept(false).await
+    }
+
+    /// O tique do hub: produz sempre e deixa o retrato para quem pedir depois.
+    pub async fn refresh(&self) -> Result<Produced, ListError> {
+        self.produce_kept(true).await
+    }
+
+    async fn produce_kept(&self, fresh: bool) -> Result<Produced, ListError> {
         let mut slot = self.snapshot.lock().await;
         let epoch = self.epoch.load(Ordering::SeqCst);
-        if let Some(s) = slot.as_ref().filter(|s| s.epoch == epoch && s.at.elapsed() < SNAPSHOT_TTL) {
+        if let Some(s) = slot.as_ref().filter(|s| !fresh && s.epoch == epoch && s.at.elapsed() < SNAPSHOT_TTL) {
             return Ok(s.produced.clone());
         }
         let at = Instant::now();
-        let input = lock(&self.last_input).clone();
+        let input = ProduceFacts { owner_clients: self.owner_clients.load(Ordering::Relaxed), shadow: false };
         let produced = self.produce(&input).await?;
         // Sem fatos ainda não é retrato: guardado, o Python que acabou de responder esperaria 2 s.
         if !produced.facts.unknown {
@@ -264,23 +286,23 @@ impl ListBridge {
     }
 
     /// A produção da lista: descoberta + fatos do Python + classificação + contexto, resposta,
-    /// plano, loop e Git. É A função que o hub (Task 17) chama a cada tique; quem quer retrato pede
+    /// plano, loop e Git. É A função que o hub chama a cada tique; quem quer retrato pede
     /// `snapshot`, que segura a produção em um por vez.
     ///
     /// Linhas Codex, Pi, omp e Kimi levam o estado dos fatos; as de transferência em curso e as
     /// `orq` saem como o Python as deu, sem classificação nem decoração, no fim da lista.
     pub async fn produce(&self, input: &ProduceFacts) -> Result<Produced, ListError> {
         let dirs = self.dirs()?;
-        if !input.shadow {
-            *lock(&self.last_input) = input.clone();
-        }
         let (rows, agent_pids, panes, children) = self.discovery(None).await?;
         let client = if input.shadow { &self.shadow_facts } else { &self.facts };
-        let fetched = client.fetch(&rows, input.owner_clients, &pi_pane_pids(&rows, &panes), input.shadow).await;
+        // Um ator lento não soma o prazo dele ao dos fatos.
+        let runtime = async { match self.runtime.get() { Some(r) => Some(r.snapshots().await), None => None } };
+        let pane_pids = pi_pane_pids(&rows, &panes);
+        let (fetched, runtime) = tokio::join!(client.fetch(&rows, input.owner_clients, &pane_pids, input.shadow), runtime);
         let (mut rows, aside) = list_facts::apply((*rows).clone(), &fetched.facts, fetched.ok);
         let targets = pane_targets(&panes, &agent_pids, &children);
         let (env, caches) = (self.env.clone(), self.caches.clone());
-        let headless = input.headless.clone();
+        let headless = runtime.map(|by_key| headless_by_name(&rows, by_key));
         let py = fetched.facts.clone();
         let handle = tokio::runtime::Handle::current();
         // Teto dos caches por sessão acompanha as linhas vivas: acima dele cada tique relia do zero.
@@ -336,6 +358,9 @@ impl ListBridge {
         let mut rows = rows;
         rows.extend(aside);
         list_facts::mark_stale(&mut rows, &fetched.facts, fetched.ok);
+        if !input.shadow {
+            self.prune_gone(&rows, Instant::now());
+        }
         Ok(Produced { rows: Arc::new(rows), facts: fetched.facts, facts_ok: fetched.ok })
     }
 
@@ -398,6 +423,21 @@ impl ListBridge {
     fn flush_notes(&self) {
         for n in list_facts::take_notes() {
             self.facts.diag.report(n.event, &n.session, &n.code, n.reason);
+        }
+    }
+
+    /// Sessão fora da lista há `FORGET_AFTER` sai dos caches por nome, como o `_forget` do fechamento:
+    /// quem morreu sem o Python fechar (tmux morto por fora) não ocupa o cache até o teto. O prazo
+    /// cobre a linha que some numa rodada só (pane ilegível) sem perder a resolução semeada.
+    fn prune_gone(&self, rows: &[SessionRow], now: Instant) {
+        let mut seen = lock(&self.seen);
+        for row in rows {
+            seen.insert(row.name.clone(), now);
+        }
+        let expired: Vec<String> = seen.iter().filter(|(_, at)| now.duration_since(**at) >= FORGET_AFTER).map(|(n, _)| n.clone()).collect();
+        for name in expired {
+            seen.remove(&name);
+            self.forget(&name);
         }
     }
 
@@ -481,6 +521,16 @@ fn run_discovery(panes: &[Pane], procs: &dyn ProcessView, children: &ChildrenMap
     -> (Vec<SessionRow>, HashMap<String, u32>, Vec<discover::DiscoveryProblem>) {
     let found = discover_other::discover_rows(panes, procs, children, resolver, dirs);
     (found.rows, found.agent_pids, found.problems)
+}
+
+/// Retrato do runtime (por chave) no nome de cada linha Claude sem terminal: a linha leva a chave na
+/// vida (`k:<chave>`). Linha sem chave fica fora, como sessão parada.
+fn headless_by_name(rows: &[SessionRow], by_key: BTreeMap<String, Value>) -> BTreeMap<String, Value> {
+    let mut by_key = by_key;
+    rows.iter().filter(|r| r.headless && r.provider == "claude").filter_map(|r| {
+        let key = r.lifecycle_id.as_deref()?.strip_prefix("k:")?;
+        Some((r.name.clone(), by_key.remove(key)?))
+    }).collect()
 }
 
 /// Pid do pane das linhas Pi e omp: o sidecar do catálogo, de onde sai a conta, mora no
@@ -683,6 +733,22 @@ mod tests {
         assert_eq!(g.with(|v| v.clone()), ["rodada", "seed"]);
         g.apply(|v| v.push("livre"));
         assert_eq!(*lock(&g.value), ["rodada", "seed", "livre"], "valor livre: aplicado na hora");
+    }
+
+    #[test]
+    fn session_gone_for_a_while_leaves_the_caches() {
+        let bridge = ListBridge::new(ListEnv { mux: Mux::default(), capture_program: "tmux".into(),
+            procs: Arc::new(procs::SystemProcs::default()), dirs: None }, FactsClient::new("127.0.0.1:9".parse().unwrap(), "s".into()));
+        let row = |n: &str| serde_json::from_value::<SessionRow>(json!({"name": n})).unwrap();
+        let t0 = Instant::now();
+        bridge.prune_gone(&[row("a"), row("b")], t0);
+        bridge.seed("a", "/x/a.jsonl");
+        bridge.seed("b", "/x/b.jsonl");
+        let cached = || bridge.caches.resolver.with(|r| r.cached().keys().cloned().collect::<Vec<_>>());
+        bridge.prune_gone(&[row("b")], t0 + Duration::from_secs(5));
+        assert_eq!(cached(), ["a", "b"], "uma rodada fora não esquece");
+        bridge.prune_gone(&[row("b")], t0 + FORGET_AFTER + Duration::from_secs(1));
+        assert_eq!(cached(), ["b"]);
     }
 
     #[test]

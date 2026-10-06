@@ -64,7 +64,7 @@ pub struct Facts<'a> {
     pub alive: &'a (dyn Fn(i64) -> bool + Sync),
     pub config_dirs: &'a [PathBuf],
     /// Retrato do runtime das sessões sem terminal, por nome (`RuntimeRegistry::snapshots`). `None`:
-    /// ninguém forneceu o retrato (a sombra, até o hub); sessão fora de um retrato fornecido está parada.
+    /// servidor sem runtime ligado; sessão fora de um retrato fornecido está parada.
     pub headless: Option<&'a BTreeMap<String, Value>>,
     /// Código de problema do runtime, por nome.
     pub problems: &'a BTreeMap<String, String>,

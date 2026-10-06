@@ -8,6 +8,7 @@ pub mod discover;
 pub mod discover_other;
 pub mod facts;
 pub mod facts_files;
+pub mod hub;
 pub mod links;
 pub mod mux;
 pub mod plan;

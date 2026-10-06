@@ -344,9 +344,9 @@ Contrato público igual a `sse.py:578-671`: `sessions`, `list_error` uma vez na 
 `list_routes::guest_token_goes_to_python`, `list_routes::hidden_from_owner_not_listed`,
 `list_routes::facts_down_marks_rows_not_list`.
 
-- [ ] **Step 38: Testes, vistos falhar**
-- [ ] **Step 39: `ListHub` e rotas; diário `rust.list_failed` com código**
-- [ ] **Step 40: Regra no `CLAUDE.md` e em `plataforma.md`; testes focados; revisar**
+- [x] **Step 38: Testes, vistos falhar**
+- [x] **Step 39: `ListHub` e rotas; diário `rust.list_failed` com código**
+- [x] **Step 40: Regra no `CLAUDE.md` e em `plataforma.md`; testes focados; revisar**
 
 ### Task 18: Lista acordada por arquivo
 
