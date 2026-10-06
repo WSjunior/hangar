@@ -11,6 +11,7 @@ from app import pair, tmux
 from app import codex_contas
 from app import registry as registry_mod
 from app.registry import SessionRegistry
+from app.transcribe import Transcription, DICTATION_LIMITS, FILE_LIMITS
 import app.api as api_mod
 
 
@@ -1603,7 +1604,8 @@ def test_transcribe_route_salva_audio_e_transcreve(api_client, monkeypatch, tmp_
     # Wiring do /transcribe: acha a sessao, SALVA o audio no cwd e chama transcribe.
     info = SessionInfo(name="cc", cwd=str(tmp_path))
     monkeypatch.setattr(api_mod.registry, "list", lambda: [info])
-    monkeypatch.setattr(api_mod, "transcribe", lambda data, fn: "ola mundo")
+    monkeypatch.setattr(api_mod, "transcribe_with_provider",
+                        lambda data, fn, limits: Transcription("ola mundo", "p"))
     r = api_client.post(
         "/api/sessions/cc/transcribe",
         content=b"\x00audio-bytes",
@@ -1639,7 +1641,8 @@ def test_transcribe_sem_limpar_nao_chama_a_limpeza(api_client, monkeypatch, tmp_
     # sem `limpar=1` na query, `narrar.limpar_ditado` nem e chamada, e a resposta e a de sempre.
     info = SessionInfo(name="cc", cwd=str(tmp_path))
     monkeypatch.setattr(api_mod.registry, "list", lambda: [info])
-    monkeypatch.setattr(api_mod, "transcribe", lambda data, fn: "ola mundo")
+    monkeypatch.setattr(api_mod, "transcribe_with_provider",
+                        lambda data, fn, limits: Transcription("ola mundo", "p"))
     monkeypatch.setattr(
         api_mod.narrar, "limpar_ditado",
         lambda texto: (_ for _ in ()).throw(AssertionError("nao devia limpar")),
@@ -1650,14 +1653,15 @@ def test_transcribe_sem_limpar_nao_chama_a_limpeza(api_client, monkeypatch, tmp_
         headers={**_h(), "X-Filename": "a.webm"},
     )
     assert r.status_code == 200
-    assert r.json() == {"path": ANY, "text": "ola mundo"}
+    assert r.json() == {"path": ANY, "text": "ola mundo", "provider": "p"}
 
 
 def test_transcribe_com_limpar_devolve_o_cru_junto(api_client, monkeypatch, tmp_path):
     # `raw` volta pro botao de desfazer do front; `aviso` explica quando a limpeza nao valeu.
     info = SessionInfo(name="cc", cwd=str(tmp_path))
     monkeypatch.setattr(api_mod.registry, "list", lambda: [info])
-    monkeypatch.setattr(api_mod, "transcribe", lambda data, fn: "ola mundo cru")
+    monkeypatch.setattr(api_mod, "transcribe_with_provider",
+                        lambda data, fn, limits: Transcription("ola mundo cru", "p"))
     visto = {}
 
     def fake_limpar(texto, estilo_pedido=None):
@@ -1689,7 +1693,8 @@ def test_transcribe_marca_o_estilo_efetivo_e_nao_o_pedido(api_client, monkeypatc
     # estilo PEDIDO, e o botao "Briefing" ficaria aceso num texto que nunca foi briefing.
     info = SessionInfo(name="cc", cwd=str(tmp_path))
     monkeypatch.setattr(api_mod.registry, "list", lambda: [info])
-    monkeypatch.setattr(api_mod, "transcribe", lambda data, fn: "ola mundo cru curto demais")
+    monkeypatch.setattr(api_mod, "transcribe_with_provider",
+                        lambda data, fn, limits: Transcription("ola mundo cru curto demais", "p"))
     monkeypatch.setattr(api_mod.narrar, "limpar_ditado", lambda t, e=None: ("Olá, mundo.", None))
     r = api_client.post(
         "/api/sessions/cc/transcribe?limpar=1&estilo=briefing",
@@ -1698,6 +1703,142 @@ def test_transcribe_marca_o_estilo_efetivo_e_nao_o_pedido(api_client, monkeypatc
     )
     assert r.status_code == 200
     assert r.json()["estilo_aplicado"] == "prosa"
+
+
+def _sessao_com_uploads(monkeypatch, tmp_path):
+    """Sessão `cc` com HOME isolado: os uploads vão para ~/.hangar/uploads, e o teste não pode
+    escrever na pasta real de quem roda a suíte."""
+    monkeypatch.setenv("HOME", str(tmp_path / "casa ção"))
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    monkeypatch.setattr(api_mod.registry, "list", lambda: [SessionInfo(name="cc", cwd=str(cwd))])
+    return str(cwd)
+
+
+def test_ditado_envia_pelo_upload_e_transcreve_por_arquivo(api_client, monkeypatch, tmp_path):
+    _sessao_com_uploads(monkeypatch, tmp_path)
+    visto = {}
+
+    def fake(data, fn, limits):
+        visto.update(data=data, limits=limits)
+        return Transcription("de novo", "p")
+
+    monkeypatch.setattr(api_mod, "transcribe_with_provider", fake)
+    up = api_client.post("/api/sessions/cc/upload", params={"audio_only": "1"}, content=b"audio-do-ditado",
+                         headers={**_h(), "X-Filename": "ditado.webm"})
+    salvo = up.json()["path"]
+    r = api_client.post("/api/sessions/cc/transcribe",
+                        params={"arquivo": Path(salvo).name, "limpar": "1", "estilo": "limpar"},
+                        headers=_h())
+    assert r.status_code == 200
+    assert r.json()["path"] == salvo and r.json()["provider"] == "p"
+    assert visto == {"data": b"audio-do-ditado", "limits": DICTATION_LIMITS}
+    # Transcrever não grava outra cópia.
+    assert [p.name for p in Path(salvo).parent.iterdir()] == [Path(salvo).name]
+
+
+def test_anexo_com_corpo_usa_o_prazo_de_arquivo(api_client, monkeypatch, tmp_path):
+    _sessao_com_uploads(monkeypatch, tmp_path)
+    visto = {}
+    monkeypatch.setattr(api_mod, "transcribe_with_provider",
+                        lambda d, f, limits: visto.setdefault("limits", limits) and Transcription("ola", "p"))
+    r = api_client.post("/api/sessions/cc/transcribe", content=b"audio", headers={**_h(), "X-Filename": "a.m4a"})
+    assert r.status_code == 200 and visto["limits"] == FILE_LIMITS
+
+
+@pytest.mark.parametrize("nome", ["../segredo.webm", "a/b.webm", "..", "x\\y.webm"])
+def test_arquivo_recusa_nome_fora_da_pasta(api_client, monkeypatch, tmp_path, nome):
+    _sessao_com_uploads(monkeypatch, tmp_path)
+    monkeypatch.setattr(api_mod, "transcribe_with_provider",
+                        lambda *a: pytest.fail("caminho invalido nao pode chegar na transcricao"))
+    r = api_client.post("/api/sessions/cc/transcribe", params={"arquivo": nome}, headers=_h())
+    assert r.status_code == 400
+
+
+def test_arquivo_absoluto_de_outra_pasta_do_mesmo_projeto(api_client, monkeypatch, tmp_path):
+    from app import uploads
+    cwd = _sessao_com_uploads(monkeypatch, tmp_path)
+    antigo = uploads.save_upload(cwd, "transcript-anterior", b"audio-de-antes", "a.webm")
+    monkeypatch.setattr(api_mod, "transcribe_with_provider", lambda d, f, limits: Transcription(d.decode(), "p"))
+    r = api_client.post("/api/sessions/cc/transcribe", params={"arquivo": antigo}, headers=_h())
+    assert r.status_code == 200
+    assert r.json() == {"path": antigo, "text": "audio-de-antes", "provider": "p"}
+
+
+def test_convidado_nao_transcreve_por_caminho_absoluto(api_client, monkeypatch, tmp_path):
+    from app import uploads
+    cwd = _sessao_com_uploads(monkeypatch, tmp_path)
+    antigo = uploads.save_upload(cwd, "transcript-anterior", b"a", "a.webm")
+    monkeypatch.setattr(api_mod, "_convidado", lambda request: True)
+    monkeypatch.setattr(api_mod, "transcribe_with_provider",
+                        lambda *a: pytest.fail("convidado nao pode chegar na transcricao"))
+    r = api_client.post("/api/sessions/cc/transcribe", params={"arquivo": antigo}, headers=_h())
+    assert r.status_code == 403
+    assert r.json()["detail"]["code"] == "erro_arquivo_caminho_convidado"
+
+
+def test_arquivo_que_sumiu_e_404_traduzivel(api_client, monkeypatch, tmp_path):
+    _sessao_com_uploads(monkeypatch, tmp_path)
+    r = api_client.post("/api/sessions/cc/transcribe", params={"arquivo": "1-abc.webm"}, headers=_h())
+    assert r.status_code == 404
+    assert r.json()["detail"]["code"] == "erro_upload_inexistente"
+
+
+def test_aviso_da_reserva_e_o_da_limpeza_chegam_juntos(api_client, monkeypatch, tmp_path):
+    _sessao_com_uploads(monkeypatch, tmp_path)
+    monkeypatch.setattr(api_mod, "transcribe_with_provider", lambda d, f, limits: Transcription(
+        "ola mundo cru", "Groq", "Transcrito pelo Groq: ElevenLabs não respondeu"))
+    monkeypatch.setattr(api_mod.narrar, "limpar_ditado",
+                        lambda t, e=None: (t, "a limpeza devolveu texto vazio — ficou o original"))
+    r = api_client.post("/api/sessions/cc/transcribe?limpar=1&estilo=prosa", content=b"audio",
+                        headers={**_h(), "X-Filename": "a.webm"})
+    body = r.json()
+    assert body["provider"] == "Groq"
+    assert body["aviso"] == ("Transcrito pelo Groq: ElevenLabs não respondeu · "
+                             "a limpeza devolveu texto vazio — ficou o original")
+    assert body["estilo_aplicado"] == "cru"
+
+
+def test_aviso_da_reserva_nao_marca_o_texto_limpo_como_cru(api_client, monkeypatch, tmp_path):
+    _sessao_com_uploads(monkeypatch, tmp_path)
+    monkeypatch.setattr(api_mod, "transcribe_with_provider", lambda d, f, limits: Transcription(
+        "ola mundo cru", "Groq", "Transcrito pelo Groq: ElevenLabs não respondeu"))
+    monkeypatch.setattr(api_mod.narrar, "limpar_ditado", lambda t, e=None: ("Olá, mundo.", None))
+    r = api_client.post("/api/sessions/cc/transcribe?limpar=1&estilo=prosa", content=b"audio",
+                        headers={**_h(), "X-Filename": "a.webm"})
+    body = r.json()
+    assert body["aviso"] == "Transcrito pelo Groq: ElevenLabs não respondeu"
+    assert body["estilo_aplicado"] == "prosa"
+
+
+def test_anexo_sem_limpar_leva_o_aviso_da_reserva(api_client, monkeypatch, tmp_path):
+    _sessao_com_uploads(monkeypatch, tmp_path)
+    monkeypatch.setattr(api_mod, "transcribe_with_provider",
+                        lambda d, f, limits: Transcription("ola", "Groq", "Transcrito pelo Groq: ElevenLabs falhou (500)"))
+    r = api_client.post("/api/sessions/cc/transcribe", content=b"audio", headers={**_h(), "X-Filename": "a.webm"})
+    assert r.json() == {"path": ANY, "text": "ola", "provider": "Groq",
+                        "aviso": "Transcrito pelo Groq: ElevenLabs falhou (500)"}
+
+
+def test_upload_audio_only_nao_trata_webm_como_video(api_client, monkeypatch, tmp_path):
+    _sessao_com_uploads(monkeypatch, tmp_path)
+    monkeypatch.setattr(api_mod, "extract_frames", lambda *a: pytest.fail("ditado nao extrai quadros"))
+    monkeypatch.setattr(api_mod, "extract_audio", lambda *a: pytest.fail("ditado nao extrai audio"))
+    monkeypatch.setattr(api_mod, "transcribe", lambda *a: pytest.fail("ditado nao transcreve no upload"))
+    r = api_client.post("/api/sessions/cc/upload", params={"audio_only": "1"}, content=b"webm",
+                        headers={**_h(), "X-Filename": "ditado.webm"})
+    assert r.status_code == 200
+    assert r.json() == {"path": ANY, "frames": [], "transcript": ""}
+
+
+def test_upload_de_webm_sem_audio_only_continua_como_video(api_client, monkeypatch, tmp_path):
+    _sessao_com_uploads(monkeypatch, tmp_path)
+    monkeypatch.setattr(api_mod, "extract_frames", lambda path: ["/q1.jpg"])
+    monkeypatch.setattr(api_mod, "extract_audio", lambda path: path)
+    monkeypatch.setattr(api_mod, "transcribe", lambda data, fn: "fala do video")
+    r = api_client.post("/api/sessions/cc/upload", content=b"webm",
+                        headers={**_h(), "X-Filename": "clipe.webm"})
+    assert r.json() == {"path": ANY, "frames": ["/q1.jpg"], "transcript": "fala do video"}
 
 
 def test_relimpar_aplica_outro_estilo_sem_audio(api_client, monkeypatch):

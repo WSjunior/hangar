@@ -2944,6 +2944,8 @@
   "erro_cwd_indisponivel": "session cwd unavailable",
   "erro_cwd_inexistente": "the folder {cwd} does not exist",
   "erro_arquivo_grande": "file larger than 100 MiB",
+  "erro_upload_inexistente": "the audio is no longer in the session folder",
+  "erro_arquivo_caminho_convidado": "guests can only transcribe audio from this session's folder",
   "erro_sem_plano_ativo": "no active plan",
   "erro_sem_pasta_planos": "repo without a plans folder",
   "erro_nome_plano_invalido": "invalid plan name: {nome}",

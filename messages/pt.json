@@ -2944,6 +2944,8 @@
   "erro_cwd_indisponivel": "cwd da sessão indisponível",
   "erro_cwd_inexistente": "a pasta {cwd} não existe",
   "erro_arquivo_grande": "arquivo maior que 100 MiB",
+  "erro_upload_inexistente": "o áudio não está mais na pasta da sessão",
+  "erro_arquivo_caminho_convidado": "quem acompanha como convidado só transcreve áudio da pasta desta sessão",
   "erro_sem_plano_ativo": "sem plano ativo",
   "erro_sem_pasta_planos": "repo sem pasta de planos",
   "erro_nome_plano_invalido": "nome de plano inválido: {nome}",
