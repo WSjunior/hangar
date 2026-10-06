@@ -1185,6 +1185,43 @@ cada 2 s; agora responde os fatos a cada tique (1,5 s). O Rust gasta mais porque
 tique em vez de servir o retrato de 2 s, e é isso que corta a latência pela metade (antes o
 refresher de 1,5 s lia um retrato de até 2 s).
 
+### Lista acordada por arquivo
+
+(05/10/2026, lista-estado Task 18; contrato interno 27, sem mudança.) Entre os tiques, o produtor
+observa com `notify` as pastas `.hangar-state`, `sessions` (registro nativo) e `.hangar-askq` de
+cada conta: um observador só, pastas deduplicadas por `canonicalize` (conta com link para a mesma
+pasta conta uma vez), armado antes de cada rodada inteira para nenhuma escrita depois da leitura
+dos marcadores se perder. Abrir e fechar arquivo (`Access`) é ignorado: as leituras da própria
+lista o acordariam sem fim.
+
+- **Rodada parcial:** a escrita acorda o produtor; a rajada é juntada em 150 ms e
+  `ListBridge::reclassify` relê os marcadores (`HookStates::refresh` devolve as sessões cujo
+  arquivo mudou; a pergunta aberta sai do nome do arquivo) e reclassifica e decora só essas linhas
+  sobre a última rodada inteira guardada, sem descoberta, sem pergunta ao Python e sem `git`. A
+  assinatura decide se publica; o retrato do `GET` passa a levar o resultado.
+- **Só sobre a rodada inteira que deu certo:** rodada inteira com erro ou fatos desconhecidos
+  apaga a guardada, e a escrita espera o tique; senão a parcial republicaria a lista velha por
+  cima do `list_error`. Sessão nova (fora da rodada guardada) também espera o tique.
+- **Teto de frequência:** sem rodada guardada, com erro ou sem linha afetada, nada roda até o
+  tique. Fila de avisos com 256 lugares; cheia, ou `rescan` do sistema, a próxima rodada é a
+  inteira.
+- **Falha:** observador que não arma (limite do inotify, pasta ilegível) ou pasta observada que
+  some vai ao diário (`rust.list_watch`, `<conta>/<pasta>` e código) uma vez por troca de código;
+  pasta apagada e recriada entre dois tiques é rearmada pelo inode. O tique de 1,5 s continua
+  valendo. Conta sem a pasta é normal e não vai ao diário.
+
+Medida (mesma montagem acima, `scripts/medir-lista-hub.py`, duas rodadas de cada):
+
+| | Antes (só tique) | Depois (acordada por arquivo) |
+|---|---|---|
+| Marcador muda → `sessions` no SSE (mediana / máx, 10 vezes) | 0,74 / 1,20 s e 0,74 / 1,21 s | 0,16 / 0,16 s e 0,16 / 0,16 s |
+| CPU do Rust com filhos, parado (ms por s) | 7,3 e 7,7 | 7,8 e 7,8 |
+| CPU do Python, parado (ms por s) | 11,5 e 11,7 | 11,5 e 11,0 |
+| Pico de RSS do Rust | 27,7 e 27,8 MB | 23,3 e 22,2 MB |
+
+A latência que sobra é a janela de 150 ms. Parado, o custo a mais por tique é a cópia das linhas
+Claude da rodada (só com lista aberta) e o `stat` das pastas observadas: dentro do ruído.
+
 ## Custos e uso no hangar-server
 
 (03/10/2026, Parte 3; contrato interno 20 na junção com o dono único e a lista de worktrees.) O Rust

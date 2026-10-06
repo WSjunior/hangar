@@ -437,8 +437,10 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
 - **A lista do dono é do Rust; o Python só fornece fatos.** `GET /api/sessions` e
   `/api/sessions/events` do dono saem do `ListHub` (`list/hub.rs`): um produtor por servidor,
   ligado enquanto houver lista aberta, tique de 1,5 s, JSON só quando a assinatura muda; cada
-  conexão só lê o publicado. Estado de Codex/Pi/omp/Kimi, transferências, `orq`, acesso, navegador
-  e atalhos vêm de `POST /internal/list/facts`; sessão sem terminal, do `RuntimeRegistry`. Falha
+  conexão só lê o publicado. Escrita nas pastas de estado das contas (marcador, registro nativo,
+  pergunta aberta) reclassifica só a sessão afetada sobre a última rodada boa, juntada em 150 ms;
+  observador que falha vai ao diário e o tique continua valendo. Estado de Codex/Pi/omp/Kimi,
+  transferências, `orq`, acesso, navegador e atalhos vêm de `POST /internal/list/facts`; sessão sem terminal, do `RuntimeRegistry`. Falha
   nunca vira lista vazia nem a do Python: 503 com código no `GET`, `list_error` com código no SSE,
   `problema` na linha quando só os fatos caíram. Convidado e outros métodos seguem ao Python.
   Medidas em [plataforma.md](docs/decisoes/plataforma.md#lista-do-dono-no-hangar-server).
