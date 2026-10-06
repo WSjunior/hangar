@@ -15,7 +15,7 @@ use crate::transcript::ts_of_iso;
 
 const MARKER_DIR: &str = ".hangar-state";
 const NATIVE_DIR: &str = "sessions";
-const ASKQ_DIR: &str = ".hangar-askq";
+pub(crate) const ASKQ_DIR: &str = ".hangar-askq";
 const STATUS_DIR: &str = ".hangar-status";
 /// Teto para sidecar esquecido de uma sessão antiga cujo stem voltou a existir.
 const STATUS_MAX_AGE: f64 = 86_400.0;

@@ -21,9 +21,12 @@ time.tzset()
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[2]))
 
-from app import pqueue, registry  # noqa: E402
+import tempfile  # noqa: E402
+
+from app import pqueue, registry, state  # noqa: E402
 from app.adapters.codex.rollout import parse_rollout_line  # noqa: E402
-from app.models import scrub_surrogates  # noqa: E402
+from app.models import StateEvent, scrub_surrogates  # noqa: E402
+from app.sse import _ask_question_event  # noqa: E402
 from app.transcript import RewriteFilter, TranscriptTailer, _ts, parse_obj  # noqa: E402
 
 TRANSCRIPTS = HERE / "transcripts"
@@ -400,6 +403,81 @@ def history(path: Path, provider: str, queue_name: str) -> dict:
     return out
 
 
+def _ask_q(header, question, labels, multi=False, previews=None):
+    previews = previews or {}
+    return {"header": header, "question": question, "multiSelect": multi,
+            "options": [{"label": l, "description": f"sobre {l}", "preview": previews.get(l, "")} for l in labels]}
+
+
+PANE_PREVIEW = (
+    "   Como deixo o meu?\n"
+    "\n"
+    " ❯ 1. System no topo (igual aos     ╭──────────────────────────────╮\n"
+    "      irmãos)                        │ using System.Reflection;     │\n"
+    "   2. Alfabético (obedece           │ using Xunit;                 │\n"
+    "      .editorconfig)                 ╰──────────────────────────────╯\n"
+    "   3. Type something.\n"
+)
+PANE_MULTI = (
+    "   Quais cores?\n"
+    "\n"
+    " ❯ 1. [ ] Alfa\n"
+    "   2. [x] Bravo\n"
+    "   3. [ ] Type something\n"
+    "   4. Chat about this\n"
+)
+PREVIEW_Q = _ask_q("Ordem", "Como deixo?", ["System no topo (igual aos irmãos)", "Alfabético (obedece .editorconfig)"],
+                   previews={"System no topo (igual aos irmãos)": "using System.Reflection;"})
+
+# Casamento do sidecar do AskUserQuestion com o menu do pane (`_ask_question_event`). `pane`: o
+# estado e as opções saem do `classify` do Python (o Rust usa o `analyze` dele); sem `pane`, vêm
+# prontos. `sidecar`: o arquivo cru, para os casos malformados.
+ASK_CASES = [
+    dict(name="match", state="awaiting_input", options=["A", "B", "Type something."], questions=[_ask_q("Cor", "Escolha", ["A", "B"], True), _ask_q("Fruta", "Escolha fruta", ["X", "Y"])]),
+    dict(name="working", state="working", options=["A", "B"], questions=[_ask_q("Cor", "Escolha", ["A", "B"])]),
+    dict(name="mismatch", state="awaiting_input", options=["Sim", "Nao"], questions=[_ask_q("Cor", "Escolha", ["A", "B"])]),
+    dict(name="extra_real_option", state="awaiting_input", options=["Cancelar", "Sim", "Nao"], questions=[_ask_q("Confirma", "Vai?", ["Sim", "Nao"])]),
+    dict(name="tui_extras", state="awaiting_input", options=["A", "B", "Type something.", "Chat about this"], questions=[_ask_q("Cor", "Escolha", ["A", "B"])]),
+    dict(name="single", state="awaiting_input", options=["A"], questions=[_ask_q("Cor", "Escolha", ["A"])]),
+    dict(name="no_options", state="awaiting_input", options=None, questions=[_ask_q("Cor", "Escolha", ["A"])]),
+    dict(name="empty_first", state="awaiting_input", options=["A"], questions=[_ask_q("Cor", "Escolha", [])]),
+    dict(name="preview_truncated", state="awaiting_input", options=["System no topo (igual aos", "Alfabético (obedece", "Type something.", "Chat about this"], questions=[PREVIEW_Q]),
+    dict(name="preview_count_differs", state="awaiting_input", options=["System no topo (igual aos"], questions=[PREVIEW_Q]),
+    dict(name="preview_short_label_no_cross", state="awaiting_input", options=["Yes", "No"], questions=[_ask_q("P", "Q", ["Yes, and bypass", "No"], previews={"No": "x"})]),
+    dict(name="preview_empty_pane_label", state="awaiting_input", options=["", "B"], questions=[_ask_q("P", "Q", ["A", "B"], previews={"A": "x"})]),
+    dict(name="pane_preview", pane=PANE_PREVIEW, questions=[PREVIEW_Q]),
+    dict(name="pane_multi_box", pane=PANE_MULTI, questions=[_ask_q("Cores", "Quais cores?", ["Alfa", "Bravo"], True)]),
+    dict(name="no_sidecar", state="awaiting_input", options=["A"], questions=None),
+    dict(name="malformed_no_header", state="awaiting_input", options=["A"], sidecar={"tool_input": {"questions": [{"question": "Q", "options": [{"label": "A"}]}]}}),
+    dict(name="malformed_not_json", state="awaiting_input", options=["A"], sidecar="{"),
+    dict(name="minimal_fields", state="awaiting_input", options=["A"], sidecar={"tool_input": {"questions": [{"header": "H", "question": "Q", "options": [{"label": "A"}]}]}}),
+]
+
+
+def ask_rows() -> list[dict]:
+    rows = []
+    for case in ASK_CASES:
+        if "pane" in case:
+            status, _label, _question, options = state.classify(case["pane"])
+        else:
+            status, options = case["state"], case["options"]
+        sidecar = case.get("sidecar")
+        if sidecar is None and case.get("questions") is not None:
+            sidecar = {"tool_input": {"questions": case["questions"]}}
+        with tempfile.TemporaryDirectory() as tmp:
+            jsonl = Path(tmp) / "projects" / "p" / "sid.jsonl"
+            if sidecar is not None:
+                (Path(tmp) / ".hangar-askq").mkdir()
+                raw = sidecar if isinstance(sidecar, str) else json.dumps(sidecar, ensure_ascii=False)
+                (Path(tmp) / ".hangar-askq" / "sid.json").write_text(raw, encoding="utf-8")
+            ev = _ask_question_event(StateEvent(session="s", state=status, options=options).model_dump_json(), str(jsonl))
+        row = {k: v for k, v in case.items() if k != "questions"}
+        row.update(state=status, options=options, sidecar=sidecar,
+                   expected=None if ev is None else json.loads(ev["data"]))
+        rows.append(row)
+    return rows
+
+
 def main() -> None:
     claude = TRANSCRIPTS / "claude.jsonl"
     rewrite = TRANSCRIPTS / "claude_rewrite_surrogate.jsonl"
@@ -423,6 +501,7 @@ def main() -> None:
         "scrubbed": json.dumps(scrub_surrogates(json.loads(raw)), sort_keys=True),
     } for raw in PYJSON])
     write_golden("isotime.json", [[s, _ts({"timestamp": s})] for s in ISO])
+    write_golden("ask_question.json", ask_rows())
 
 
 if __name__ == "__main__":
