@@ -38,6 +38,16 @@ export function desenharFaixa(t: Tabela, v: GhView, colunas: number, abrir: (url
     COR[s] ? <Text color={COR[s]} bold={bold}>{texto}</Text> : <Text dimColor bold={bold}>{texto}</Text>
   const linhas: JSX.Element[] = []
 
+  if (v.aviso) {
+    linhas.push(
+      <Box key="aviso" flexDirection="row" width={colunas}>
+        <Text color="warning" bold>{'⚠ GitHub: '}</Text>
+        <Text color="warning" wrap="truncate-end">{v.aviso}</Text>
+        {v.workflows.length || v.pr ? <Text dimColor>{' · abaixo, a última leitura'}</Text> : null}
+      </Box>,
+    )
+  }
+
   if (v.pr) {
     const p = v.pr
     const rev = revisaoDe(p)
