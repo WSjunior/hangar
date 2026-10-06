@@ -10,6 +10,7 @@ use hangar_api::session::SessionRow;
 use serde_json::{Map, Value, json};
 
 use super::bridge::{ListBridge, ProduceFacts};
+use super::classify::RUNTIME_ABSENT;
 use super::sig;
 use crate::diag::DiagClient;
 
@@ -21,9 +22,13 @@ const IDLE: Duration = Duration::from_secs(10);
 /// Sombra cega por motivo esperado (ninguém com a lista aberta, multiplexador recusando) vai ao diário
 /// só depois deste tempo seguido; falha de verdade, na hora.
 const BLIND_LIMIT: Duration = Duration::from_secs(120);
-/// Teto de diferenças gravadas por rodada: um defeito em todas as linhas não inunda o diário; o resto
-/// sai nas rodadas seguintes.
+/// Janela da contagem: cada (sessão, campo) vai ao diário no máximo uma vez nela, com a contagem. Não
+/// menor que o limite de uma linha por minuto do diário, que derrubaria o relatório repetido.
+const WINDOW: Duration = crate::warn_limit::WARN_INTERVAL;
+/// Teto de diferenças gravadas por janela: um defeito em todas as linhas não inunda o diário; quantas
+/// ficaram de fora vai junto.
 const MAX_REPORTS: usize = 50;
+pub const DIFFS_DROPPED: &str = "diffs_dropped";
 pub const ROW_MISSING: &str = "row_missing";
 pub const ROW_EXTRA: &str = "row_extra";
 pub const ROW_UNSERIALIZABLE: &str = "row_unserializable";
@@ -36,8 +41,8 @@ pub type Diff = (String, String);
 /// Diferenças de propósito, registradas pelas Tasks que as criaram: não vão ao diário. Erro da
 /// produção com estes códigos não é diferença: o Python lia a mesma recusa como zero sessões.
 pub const ACCEPTED_ERRORS: [&str; 2] = ["mux_refused", "mux_unparsed"];
-/// Campos que o retrato do runtime preenche nas sessões Claude sem terminal: na sombra elas ficam no
-/// marcador, porque o retrato por nome só chega com o hub (Task 17).
+/// Campos que o retrato do runtime preenche nas sessões Claude sem terminal. Só aceitos quando a
+/// linha diz que o retrato não a trouxe (`RUNTIME_ABSENT`): na sombra ele só chega com o hub (Task 17).
 const RUNTIME_FIELDS: [&str; 6] = ["state", "label", "question", "status_line", "pending_questions", "problema"];
 
 pub fn enabled() -> bool { enabled_from(std::env::var(ENV).ok().as_deref()) }
@@ -53,7 +58,7 @@ fn accepted(row: &SessionRow, field: &str) -> bool {
         Some("list_runtime_unavailable") if ["state", "problema"].contains(&field) => return true,
         _ => {}
     }
-    (row.provider == "claude" && row.headless && RUNTIME_FIELDS.contains(&field))
+    (row.provider == "claude" && row.problema.as_deref() == Some(RUNTIME_ABSENT) && RUNTIME_FIELDS.contains(&field))
         // A descoberta não sabe a credencial de Kimi/Pi/omp (Task 7); só o fato a preenche (Task 14).
         || (["kimi", "pi", "omp"].contains(&row.provider.as_str()) && field == "conta" && row.conta.is_none())
 }
@@ -127,22 +132,50 @@ pub fn compare(rust: &[SessionRow], py: &PySigs) -> HashSet<Diff> {
     out
 }
 
-/// Grava cada (sessão, campo) uma vez enquanto a diferença durar. Só conta a diferença vista em duas
-/// rodadas seguidas: a lista do Python é de até um tique antes da do Rust.
+/// Conta cada (sessão, campo) divergente em toda rodada comparada e entrega a contagem uma vez por
+/// janela. Diferença intermitente também chega; a contagem sobre as rodadas separa o atraso de um tique
+/// da lista do Python (1 de N) do que diverge sempre. Rodada cega não conta nem zera.
 #[derive(Default)]
-pub struct Reporter { prev: HashSet<Diff>, reported: HashSet<Diff> }
+pub struct Reporter { counts: HashMap<Diff, u32>, rounds: u32, since: Option<Instant> }
+
+/// O que a janela viu: diferenças com quantas rodadas cada uma divergiu, as mais frequentes primeiro.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Report { pub diffs: Vec<(Diff, u32)>, pub rounds: u32, pub dropped: usize }
 
 impl Reporter {
-    pub fn update(&mut self, found: HashSet<Diff>) -> Vec<Diff> {
-        let mut new: Vec<Diff> = found.iter().filter(|d| self.prev.contains(*d) && !self.reported.contains(*d)).cloned().collect();
-        new.sort();
-        new.truncate(MAX_REPORTS);
-        self.reported.retain(|d| found.contains(d));
-        self.reported.extend(new.iter().cloned());
-        self.prev = found;
-        new
+    pub fn record(&mut self, found: HashSet<Diff>, now: Instant) {
+        self.since.get_or_insert(now);
+        self.rounds += 1;
+        for d in found {
+            *self.counts.entry(d).or_default() += 1;
+        }
+    }
+
+    /// Fecha a janela vencida: devolve o relatório se houve diferença.
+    pub fn tick(&mut self, now: Instant) -> Option<Report> {
+        if self.since.is_none_or(|s| now.duration_since(s) < WINDOW) {
+            return None;
+        }
+        self.flush()
+    }
+
+    /// Fecha a janela agora (o laço caiu): o que ela contou não se perde.
+    pub fn flush(&mut self) -> Option<Report> {
+        let rounds = std::mem::take(&mut self.rounds);
+        self.since = None;
+        let mut diffs: Vec<(Diff, u32)> = std::mem::take(&mut self.counts).into_iter().collect();
+        if diffs.is_empty() {
+            return None;
+        }
+        diffs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let dropped = diffs.len().saturating_sub(MAX_REPORTS);
+        diffs.truncate(MAX_REPORTS);
+        Some(Report { diffs, rounds, dropped })
     }
 }
+
+/// `codigo` do diário: o campo e quantas das rodadas da janela divergiram nele. Nunca o valor.
+pub fn diff_code(field: &str, count: u32, rounds: u32) -> String { format!("{field}:{count}/{rounds}") }
 
 /// Rodada sem comparação, pelo motivo. `quiet`: esperado por um tempo (ninguém com a lista do Python
 /// aberta, multiplexador recusando); só vira registro se durar `BLIND_LIMIT`.
@@ -177,13 +210,16 @@ pub fn spawn(list: Arc<ListBridge>, diag: DiagClient) -> Option<tokio::task::Joi
         return None;
     }
     tracing::info!("lista: rodada em sombra ligada");
+    // Fora do laço que pode cair: a janela em curso sobrevive ao pânico.
+    let reporter = Arc::new(std::sync::Mutex::new(Reporter::default()));
     Some(tokio::spawn(async move {
         loop {
             // Abortar a de fora derruba esta junto.
-            let mut inner = crate::AbortOnDrop(tokio::spawn(run(list.clone(), diag.clone())));
+            let mut inner = crate::AbortOnDrop(tokio::spawn(run(list.clone(), diag.clone(), reporter.clone())));
             match (&mut inner.0).await {
                 Err(e) if e.is_panic() => {
                     diag.report("rust.list_shadow_failed", "", "panic", "rodada em sombra caiu; recomeça");
+                    if let Some(rep) = lock(&reporter).flush() { emit(&diag, &rep); }
                     tokio::time::sleep(IDLE).await;
                 }
                 _ => return,
@@ -192,28 +228,37 @@ pub fn spawn(list: Arc<ListBridge>, diag: DiagClient) -> Option<tokio::task::Joi
     }))
 }
 
-async fn run(list: Arc<ListBridge>, diag: DiagClient) {
+fn lock(r: &std::sync::Mutex<Reporter>) -> std::sync::MutexGuard<'_, Reporter> { r.lock().unwrap_or_else(|e| e.into_inner()) }
+
+fn emit(diag: &DiagClient, rep: &Report) {
+    for ((name, field), count) in &rep.diffs {
+        diag.report("rust.list_shadow_diff", name, &diff_code(field, *count, rep.rounds),
+            "lista do Rust diverge da do Python neste campo");
+    }
+    if rep.dropped > 0 {
+        diag.report("rust.list_shadow_diff", "", &format!("{DIFFS_DROPPED}:{}", rep.dropped), "diferenças além do teto da janela");
+    }
+}
+
+async fn run(list: Arc<ListBridge>, diag: DiagClient, reporter: Arc<std::sync::Mutex<Reporter>>) {
     let input = ProduceFacts { shadow: true, ..Default::default() };
-    let (mut reporter, mut blind) = (Reporter::default(), Blind::default());
+    let mut blind = Blind::default();
     loop {
         // (motivo de não comparar, se é esperado por um tempo, espera)
         let (code, quiet, wait) = match list.produce(&input).await {
             Ok(p) if !p.facts_ok => (Some("facts_unavailable"), false, TICK),
             Ok(p) => match p.facts.shadow.as_ref() {
                 Some(py) => {
-                    for (name, field) in reporter.update(compare(&p.rows, py)) {
-                        diag.report("rust.list_shadow_diff", &name, &field, "lista do Rust diverge da do Python neste campo");
-                    }
+                    let found = compare(&p.rows, py);
+                    lock(&reporter).record(found, Instant::now());
                     (None, false, TICK)
                 }
                 None => (Some("python_list_absent"), true, IDLE),
             },
             Err(e) => (Some(e.code), ACCEPTED_ERRORS.contains(&e.code), TICK),
         };
-        if code.is_some() {
-            // Diferença de antes da pausa não conta como vista "na rodada anterior".
-            reporter.update(HashSet::new());
-        }
+        let rep = lock(&reporter).tick(Instant::now());
+        if let Some(rep) = rep { emit(&diag, &rep); }
         if let Some(c) = blind.round(code, quiet, Instant::now()) {
             let event = if quiet { "rust.list_shadow_blind" } else { "rust.list_shadow_failed" };
             diag.report(event, "", c, "rodada em sombra sem comparar");
@@ -291,10 +336,14 @@ mod tests {
         let hl = row(json!({"name": "hl", "headless": true, "state": "working", "problema": "list_runtime_unavailable"}));
         sigs = py(&[row(json!({"name": "hl", "headless": true, "state": "idle"}))]);
         assert!(compare(&[hl], &sigs).is_empty());
-        // Sem terminal, o retrato do runtime ainda não chega à sombra: estado e pergunta ficam no marcador.
-        let hl = row(json!({"name": "hl", "headless": true, "state": "idle", "question": "q"}));
+        // Sem terminal e sem retrato do runtime (a linha diz): estado e pergunta ficam no marcador.
+        let hl = row(json!({"name": "hl", "headless": true, "state": "idle", "question": "q",
+                            "problema": RUNTIME_ABSENT}));
         sigs = py(&[row(json!({"name": "hl", "headless": true, "state": "awaiting_input"}))]);
         assert!(compare(&[hl], &sigs).is_empty());
+        // Com o retrato, o estado do runtime é comparado como qualquer outro.
+        let hl = row(json!({"name": "hl", "headless": true, "state": "idle", "question": "q"}));
+        assert_eq!(compare(&[hl], &sigs), HashSet::from([("hl".into(), "state".into())]));
         // Conta de Kimi/Pi/omp, que só o fato preenche; a do Codex continua comparada.
         let k = row(json!({"name": "k", "provider": "kimi", "conta": null}));
         let cx = row(json!({"name": "cx", "provider": "codex", "conta": null}));
@@ -346,28 +395,37 @@ mod tests {
     }
 
     #[test]
-    fn reports_are_capped_per_round() {
+    fn intermittent_diff_is_reported_with_its_count() {
+        let d = |s: &str, f: &str| (s.to_owned(), f.to_owned());
+        let t0 = Instant::now();
         let mut r = Reporter::default();
-        let many: HashSet<Diff> = (0..80).map(|i| (format!("s{i:02}"), "state".to_owned())).collect();
-        r.update(many.clone());
-        assert_eq!(r.update(many.clone()).len(), MAX_REPORTS);
-        assert_eq!(r.update(many.clone()).len(), 80 - MAX_REPORTS, "o resto sai na rodada seguinte");
-        assert!(r.update(many).is_empty());
+        r.record(HashSet::from([d("a", "state")]), t0);
+        // Rodada cega no meio não zera nada.
+        assert!(r.tick(t0 + Duration::from_secs(5)).is_none());
+        r.record(HashSet::new(), t0 + Duration::from_secs(6));
+        r.record(HashSet::from([d("a", "state"), d("b", "label")]), t0 + Duration::from_secs(8));
+        assert!(r.tick(t0 + WINDOW - Duration::from_secs(1)).is_none(), "antes de fechar a janela");
+        let rep = r.tick(t0 + WINDOW).unwrap();
+        assert_eq!(rep.rounds, 3);
+        assert_eq!(rep.diffs, vec![(d("a", "state"), 2), (d("b", "label"), 1)]);
+        assert_eq!(rep.dropped, 0);
+        // A janela seguinte começa do zero; sem diferença, nada sai.
+        r.record(HashSet::new(), t0 + WINDOW * 2);
+        assert!(r.tick(t0 + WINDOW * 4).is_none());
     }
 
     #[test]
-    fn reports_once_per_field_while_it_lasts() {
-        let d = |s: &str, f: &str| (s.to_owned(), f.to_owned());
+    fn report_is_capped_and_tells_how_many_were_left() {
+        let t0 = Instant::now();
         let mut r = Reporter::default();
-        // Uma rodada só pode ser a lista do Python um tique atrás.
-        assert!(r.update(HashSet::from([d("a", "state")])).is_empty());
-        assert_eq!(r.update(HashSet::from([d("a", "state"), d("b", "label")])), vec![d("a", "state")]);
-        // Enquanto dura, não se repete.
-        assert_eq!(r.update(HashSet::from([d("a", "state"), d("b", "label")])), vec![d("b", "label")]);
-        assert!(r.update(HashSet::from([d("a", "state"), d("b", "label")])).is_empty());
-        // Sumiu e voltou: é outra ocorrência.
-        assert!(r.update(HashSet::new()).is_empty());
-        assert!(r.update(HashSet::from([d("a", "state")])).is_empty());
-        assert_eq!(r.update(HashSet::from([d("a", "state")])), vec![d("a", "state")]);
+        let many: HashSet<Diff> = (0..80).map(|i| (format!("s{i:02}"), "state".to_owned())).collect();
+        r.record(many, t0);
+        let rep = r.tick(t0 + WINDOW).unwrap();
+        assert_eq!((rep.diffs.len(), rep.dropped), (MAX_REPORTS, 80 - MAX_REPORTS));
+    }
+
+    #[test]
+    fn diary_code_carries_field_and_count_only() {
+        assert_eq!(diff_code("label", 3, 20), "label:3/20");
     }
 }

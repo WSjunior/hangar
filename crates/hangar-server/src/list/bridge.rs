@@ -284,13 +284,10 @@ impl ListBridge {
             let config_dirs = caches.config_dirs(&dirs);
             let alive = |pid: i64| pid_alive(&*env.procs, pid);
             let io = MuxCapture::new(env.capture_program.clone(), CAPTURE_TIMEOUT, targets);
-            // Junção com a lista-tsombra: `Facts.headless` vira `Option` e recebe `headless.as_ref()`;
-            // até lá `None` e `Some(vazio)` classificam igual.
-            let no_runtime = BTreeMap::new();
             let effects = caches.classify.with(|Classify { classifier, hooks }| {
                 hooks.refresh(&config_dirs);
                 let facts = Facts { hooks, alive: &alive, config_dirs: &config_dirs,
-                    headless: headless.as_ref().unwrap_or(&no_runtime), problems: &py.problems, stall_seconds: py.stall_seconds };
+                    headless: headless.as_ref(), problems: &py.problems, stall_seconds: py.stall_seconds };
                 handle.block_on(classifier.classify(&mut rows, &facts, &io))
             });
             let (wall, mono) = (io.wall(), io.mono());
