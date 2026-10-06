@@ -14,7 +14,18 @@ Rust por HTTP privado a 0,75 s) e o `PreviewBroker` (0,15 s trabalhando), seguia
 suprimir a prévia já gravada, emitia `suggest` e `ask_question` no tique do estado e disparava o
 `drain` na primeira borda entregável de cada conexão. Convidado (8766) e dono pelo Connect (8768)
 subiam outro `merged_events` com o mesmo monitor compartilhado pelo `Difusor`. Hoje isso só roda no
-modo `python`.
+modo `python`, e a ponte do observador que ele alugava (`terminal_observer` →
+`/__hangar_server/terminal`) ficou sem consumidor: no modo `python` ela está desligada.
+
+## Descoberta e lista do dono produzidas pelo Python com o Rust de pé
+
+(Até a lista-estado, Tasks 13–17, 05/10/2026 → [lista do dono no
+hangar-server](plataforma.md#lista-do-dono-no-hangar-server).) Com o `hangar-server` de pé, o
+`_ListRefresher` do `sse.py` descobria as sessões e montava a lista a cada 1,5 s, e o
+`registry.resolve_tracked` resolvia o transcript de cada uma no Python. Hoje a descoberta, a
+resolução e a lista do dono são do `ListHub`; o `resolve_tracked` pergunta à ponte
+(`list_bridge.resolve`), o `_ListRefresher` que sobra (lista do convidado) lê o retrato do Rust, e
+a produção Python só roda no modo `python` (contador `PYTHON_DISCOVERY`).
 
 ## Passagem de sessão e de pedido entre Python e Rust com o Rust vivo
 
