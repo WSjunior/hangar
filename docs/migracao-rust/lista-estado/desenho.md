@@ -106,10 +106,10 @@ mexe na presença do app, não reclassifica (o estado de Codex/Pi/omp/Kimi sai d
 serviu) e devolve a assinatura de cada linha dessa lista (`list_facts.SIG_FIELDS`, os campos do
 `_list_sig`). Sem lista do Python com até 3 s (ninguém com ela aberta), o Rust espera 10 s.
 Toda rodada comparada conta cada (sessão, campo) divergente; a cada janela de 60 s (o limite do diário) o que divergiu vai
-ao diário como `rust.list_shadow_diff`, `sessao` + `codigo` = `campo:N/M` (divergiu em N das M rodadas
+ao diário como `rust.list_shadow_diff`, `sessao` + `codigo` = `campo_N_of_M` (divergiu em N das M rodadas
 da janela; `row_missing`/`row_extra` para a linha inteira), nunca o valor. Diferença intermitente
 também chega: N baixo é o atraso de até um tique da lista do Python, N perto de M é regra diferente.
-No máximo 50 por janela, e `diffs_dropped:K` diz quantas ficaram de fora. Rodada sem comparar não
+No máximo 50 por janela, e `diffs_dropped_K` diz quantas ficaram de fora. Rodada sem comparar não
 conta nem zera a contagem, e vai ao diário uma vez por sequência: falha (fatos sem resposta = `facts_unavailable`, erro da produção,
 pânico do laço, que recomeça) na hora, como `rust.list_shadow_failed`; motivo esperado
 (`python_list_absent`, `mux_refused`/`mux_unparsed`) só depois de 2 min seguidos, como

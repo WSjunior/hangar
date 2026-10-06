@@ -175,7 +175,10 @@ impl Reporter {
 }
 
 /// `codigo` do diário: o campo e quantas das rodadas da janela divergiram nele. Nunca o valor.
-pub fn diff_code(field: &str, count: u32, rounds: u32) -> String { format!("{field}:{count}/{rounds}") }
+/// No formato que o `/internal/diag` aceita (`[a-z0-9_]{1,64}`).
+pub fn diff_code(field: &str, count: u32, rounds: u32) -> String { format!("{field}_{count}_of_{rounds}") }
+
+fn dropped_code(dropped: usize) -> String { format!("{DIFFS_DROPPED}_{dropped}") }
 
 /// Rodada sem comparação, pelo motivo. `quiet`: esperado por um tempo (ninguém com a lista do Python
 /// aberta, multiplexador recusando); só vira registro se durar `BLIND_LIMIT`.
@@ -236,7 +239,7 @@ fn emit(diag: &DiagClient, rep: &Report) {
             "lista do Rust diverge da do Python neste campo");
     }
     if rep.dropped > 0 {
-        diag.report("rust.list_shadow_diff", "", &format!("{DIFFS_DROPPED}:{}", rep.dropped), "diferenças além do teto da janela");
+        diag.report("rust.list_shadow_diff", "", &dropped_code(rep.dropped), "diferenças além do teto da janela");
     }
 }
 
@@ -426,6 +429,15 @@ mod tests {
 
     #[test]
     fn diary_code_carries_field_and_count_only() {
-        assert_eq!(diff_code("label", 3, 20), "label:3/20");
+        assert_eq!(diff_code("label", 3, 20), "label_3_of_20");
+        // O `/internal/diag` do Python só aceita `[a-z0-9_]{1,64}` (internal_api.py, `_DIAG_CODE`): fora
+        // disso a diferença volta 400 e não chega ao diário.
+        let ok = |c: &str| (1..=64).contains(&c.len()) && c.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+        // Os campos de `list_facts.SIG_FIELDS`, o maior nome é o que importa.
+        let fields = ["name", "cwd", "branch", "git_cwd", "worktree_gone", "git_dirty", "state", "tracked", "headless", "jsonl", "question", "stalled", "limited", "lifecycle_id", "transfer_id", "transfer_phase", "last_reply", "last_reply_at", "pending_questions", "limit_reset", "then_target", "status_line", "context", "model", "label", "startup_steps", "loop_status", "loop_iter", "engine", "conta", "codex_service_tier", "plan_name", "plan_done", "plan_total", "plan_task", "plan_task_total", "plan_complete", "plan_tasks", "plan_hidden", "problema", "provider", "shared", "owner", "orq_arbiter"];
+        for field in fields.into_iter().chain([ROW_MISSING, ROW_EXTRA, ROW_UNSERIALIZABLE]) {
+            assert!(ok(&diff_code(field, 4_294_967_295, 4_294_967_295)), "{field}");
+        }
+        assert!(ok(&dropped_code(80)));
     }
 }
