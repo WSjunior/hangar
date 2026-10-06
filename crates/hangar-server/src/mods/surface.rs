@@ -13,7 +13,12 @@ use crate::runtime::protocol::RequestId;
 const RENDER_S: f64 = 10.0;
 /// Prazo de clique, fechar, mostrar e digitar.
 const CALL_S: f64 = 5.0;
+/// O pedido de app mais longo: o desenho de novo antes do clique (S4) e o clique depois dele.
+pub const APP_CALL_MAX_S: f64 = RENDER_S + CALL_S;
 const ATTACH_S: f64 = 15.0;
+/// Esperas antes de cada nova ligação depois de uma sem resposta (o pedido pode ter se perdido com o
+/// cano travado); esgotadas, a superfície desliga até o processo religar.
+const ATTACH_RETRY_S: [f64; 3] = [1.0, 2.0, 4.0];
 /// Pedidos de desenho juntados depois de um `ui_invalidate` (S3).
 const BATCH_S: f64 = 0.1;
 /// O fechar só vale com o aviso `ui_panes` sem o painel.
@@ -66,6 +71,9 @@ pub struct Surface {
     closing: Vec<(u64, String, f64)>,
     working: bool,
     published: Option<Value>,
+    /// Novas ligações já feitas depois de uma sem resposta, e quando sai a próxima.
+    attach_retries: usize,
+    attach_at: Option<f64>,
 }
 
 fn reply(token: u64, result: Result<Value, ModsError>) -> SurfaceEffect {
@@ -78,7 +86,7 @@ impl Surface {
     pub fn new(prefix: String) -> Self {
         Self { prefix, counter: 0, phase: Phase::Idle, waiting: BTreeMap::new(), panes: Vec::new(), shown: None,
             trees: BTreeMap::new(), dirty: BTreeSet::new(), flush_at: None,
-            closing: Vec::new(), working: false, published: None }
+            closing: Vec::new(), working: false, published: None, attach_retries: 0, attach_at: None }
     }
 
     pub fn owns(&self, id: &RequestId) -> bool {
@@ -95,9 +103,15 @@ impl Surface {
         let mut out = Vec::new();
         self.reset(&mut out);
         self.phase = Phase::Attaching;
-        self.request("ui_attach", json!({"surface": SURFACE, "client_id": CLIENT_ID, "viewport": viewport(), "answers": ["ui_copy"]}),
-            Pending::Attach, now, &mut out);
+        self.attach_retries = 0;
+        self.attach(now, &mut out);
         out
+    }
+
+    fn attach(&mut self, now: f64, out: &mut Vec<SurfaceEffect>) {
+        self.attach_at = None;
+        self.request("ui_attach", json!({"surface": SURFACE, "client_id": CLIENT_ID, "viewport": viewport(), "answers": ["ui_copy"]}),
+            Pending::Attach, now, out);
     }
 
     pub fn on_response(&mut self, id: &RequestId, response: &Value, now: f64) -> Vec<SurfaceEffect> {
@@ -109,6 +123,7 @@ impl Surface {
         match waiting.pending {
             Pending::Attach if ok => {
                 self.phase = Phase::Ready;
+                self.attach_retries = 0;
                 self.render(BAND_SITE, now, &mut out);
                 self.request("ui_panes", json!({"client_id": CLIENT_ID}), Pending::Panes, now, &mut out);
             }
@@ -214,6 +229,9 @@ impl Surface {
 
     pub fn tick(&mut self, now: f64) -> Vec<SurfaceEffect> {
         let mut out = Vec::new();
+        if self.attach_at.is_some_and(|at| now + 1e-9 >= at) && self.phase == Phase::Attaching {
+            self.attach(now, &mut out);
+        }
         if self.flush_at.is_some_and(|at| now + 1e-9 >= at) {
             self.flush_at = None;
             for instance in std::mem::take(&mut self.dirty) {
@@ -225,8 +243,18 @@ impl Surface {
         for id in expired {
             let Some(waiting) = self.waiting.remove(&id) else { continue };
             match waiting.pending {
-                Pending::Attach => self.turn_off(&mut out),
-                Pending::Render { .. } | Pending::Panes => {}
+                Pending::Attach => match ATTACH_RETRY_S.get(self.attach_retries) {
+                    Some(wait) => { self.attach_retries += 1; self.attach_at = Some(now + wait); }
+                    None => self.turn_off(&mut out),
+                },
+                // Desenho sem resposta (pedido descartado com o canal do cano cheio, por exemplo) volta a
+                // ficar sujo e sai de novo na próxima janela; sem isso a tela do app ficava parada.
+                Pending::Render { instance } => { self.dirty.insert(instance); }
+                Pending::Refresh { token, call } => {
+                    self.dirty.insert(call.site().to_owned());
+                    out.push(reply(token, Err(no_answer())));
+                }
+                Pending::Panes => {}
                 pending => if let Some(token) = pending.token() { out.push(reply(token, Err(no_answer()))); },
             }
         }
@@ -239,7 +267,7 @@ impl Surface {
     }
 
     pub fn deadline(&self) -> Option<f64> {
-        self.flush_at.into_iter().chain(self.waiting.values().map(|waiting| waiting.deadline))
+        self.flush_at.into_iter().chain(self.attach_at).chain(self.waiting.values().map(|waiting| waiting.deadline))
             .chain(self.closing.iter().map(|(_, _, until)| *until)).min_by(f64::total_cmp)
     }
 
@@ -381,9 +409,10 @@ impl Surface {
         self.trees.clear();
         self.dirty.clear();
         self.flush_at = None;
+        self.attach_at = None;
     }
 
-    /// Ligação recusada ou sem resposta, ou processo encerrado: limpa o rol e os desenhos (em voo
+    /// Ligação recusada, sem resposta depois das novas tentativas, ou processo encerrado: limpa o rol e os desenhos (em voo
     /// também) e publica a interface vazia.
     fn turn_off(&mut self, out: &mut Vec<SurfaceEffect>) {
         self.reset(out);

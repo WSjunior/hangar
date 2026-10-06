@@ -23,9 +23,14 @@ pub struct WireFrame {
     pub operation_id: String,
     pub frame: Value,
     /// Pedido `ui_*` da interface dos mods: sai a cada desenho e não muda a conversa, então o escritor
-    /// não guarda o id para barrar repetição (a lista cresceria sem fim).
+    /// não guarda o id para barrar repetição (a lista cresceria sem fim), não espera a confirmação e não
+    /// avisa o ator de recusa: a superfície tem prazo próprio para cada pedido.
     pub ephemeral: bool,
 }
+
+/// Folga do canal dos pedidos `ui_*`. Pequena de propósito: com o cano travado, os desenhos que não
+/// cabem são descartados e a superfície os pede de novo no prazo, sem ocupar a fila da conversa.
+pub const UI_CAPACITY: usize = 16;
 
 pub struct CanoConnection {
     pub snapshot: CanoSnapshot,
@@ -34,6 +39,8 @@ pub struct CanoConnection {
 
 pub struct IoTasks {
     pub writer: mpsc::Sender<WireFrame>,
+    /// Canal próprio dos pedidos `ui_*`: o escritor sempre tira antes a conversa (`writer`).
+    pub ui_writer: mpsc::Sender<WireFrame>,
     pub events: mpsc::Receiver<IoEvent>,
     stop: watch::Sender<bool>,
     reader_task: JoinHandle<()>,
@@ -48,6 +55,13 @@ impl IoTasks {
         self.reader_task = tokio::spawn(async move { let _lease = reader_lease; let _ = reader.await; });
         self.writer_task = tokio::spawn(async move { let _lease = lease; let _ = writer.await; });
         self
+    }
+
+    /// Envia sem esperar, pelo canal do tipo do pedido. O que não cabe volta como erro: o ator recusa o
+    /// da conversa e descarta o `ui_*`, que a superfície pede de novo no prazo.
+    pub fn try_send(&self, frame: WireFrame) -> Result<(), WireFrame> {
+        let writer = if frame.ephemeral { &self.ui_writer } else { &self.writer };
+        writer.try_send(frame).map_err(|error| error.into_inner())
     }
 
     pub async fn stop(self) {
@@ -145,6 +159,7 @@ impl CanoConnection {
     pub fn start(self, _generation: u64, capacity: usize) -> IoTasks {
         let (read, mut write) = tokio::io::split(self.stream);
         let (writer, mut commands) = mpsc::channel::<WireFrame>(capacity.max(1));
+        let (ui_writer, mut ui_commands) = mpsc::channel::<WireFrame>(UI_CAPACITY);
         let (events_tx, events) = mpsc::channel(capacity.max(1));
         let (stop, stop_rx) = watch::channel(false);
         let pending = Arc::new(Mutex::new(HashMap::<String, Instant>::new()));
@@ -223,23 +238,37 @@ impl CanoConnection {
             let mut stop = stop_rx;
             let work = async {
                 let mut used = HashSet::new();
-                while let Some(command) = commands.recv().await {
-                    if !command.ephemeral && !used.insert(command.operation_id.clone()) { continue; }
+                loop {
+                    // A conversa sai sempre antes: uma rajada de desenhos não atrasa a mensagem da pessoa.
+                    let command = tokio::select! {
+                        biased;
+                        Some(command) = commands.recv() => command,
+                        Some(command) = ui_commands.recv() => command,
+                        else => break,
+                    };
+                    let ephemeral = command.ephemeral;
+                    if !ephemeral && !used.insert(command.operation_id.clone()) { continue; }
                     let frame = command.frame.to_string();
                     if !command.frame.is_object() || frame.len() > MAX_FRAME {
-                        let _ = events_tx.send(IoEvent::WriteAck { operation_id: command.operation_id, outcome: WriteOutcome::NotWritten }).await;
+                        if !ephemeral {
+                            let _ = events_tx.send(IoEvent::WriteAck { operation_id: command.operation_id, outcome: WriteOutcome::NotWritten }).await;
+                        }
                         continue;
                     }
                     let envelope = json!({"type":"cano_input","operation_id":command.operation_id,"frame":frame});
                     let raw = format!("{envelope}\n");
                     if raw.len() > MAX_ENVELOPE + 1 {
-                        let _ = events_tx.send(IoEvent::WriteAck { operation_id: command.operation_id, outcome: WriteOutcome::NotWritten }).await;
+                        if !ephemeral {
+                            let _ = events_tx.send(IoEvent::WriteAck { operation_id: command.operation_id, outcome: WriteOutcome::NotWritten }).await;
+                        }
                         continue;
                     }
-                    pending.lock().unwrap().insert(command.operation_id.clone(), Instant::now() + Duration::from_secs(30));
+                    if !ephemeral { pending.lock().unwrap().insert(command.operation_id.clone(), Instant::now() + Duration::from_secs(30)); }
                     if write.write_all(raw.as_bytes()).await.is_err() || write.flush().await.is_err() {
-                        pending.lock().unwrap().remove(&command.operation_id);
-                        let _ = events_tx.send(IoEvent::WriteAck { operation_id: command.operation_id, outcome: WriteOutcome::Unknown }).await;
+                        if !ephemeral {
+                            pending.lock().unwrap().remove(&command.operation_id);
+                            let _ = events_tx.send(IoEvent::WriteAck { operation_id: command.operation_id, outcome: WriteOutcome::Unknown }).await;
+                        }
                         return;
                     }
                 }
@@ -247,6 +276,6 @@ impl CanoConnection {
             tokio::select! { _ = work => {}, _ = stop.changed() => {} }
             let _ = write.shutdown().await;
         });
-        IoTasks { writer, events, stop, reader_task, writer_task }
+        IoTasks { writer, ui_writer, events, stop, reader_task, writer_task }
     }
 }
