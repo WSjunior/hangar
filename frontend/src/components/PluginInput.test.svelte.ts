@@ -98,7 +98,15 @@ describe('Input de mod', () => {
     const redesenho = (v: string) => { props.value = v; props.frame = {}; flushSync(); };
     const digitar = (texto: string) => { campo.value = texto; campo.dispatchEvent(new Event('input', { bubbles: true })); };
     const enter = () => campo.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-    return { campo, redesenho, digitar, enter, onInput };
+    const botao = alvo.querySelector<HTMLButtonElement>('button.submit')!;
+    // Como no Chrome e no Firefox: o `mousedown` no botão tira o foco do campo (blur com o botão no `relatedTarget`)
+    // antes do `click`.
+    const clicarEnviar = () => {
+      campo.dispatchEvent(new FocusEvent('blur', { relatedTarget: botao }));
+      flushSync();
+      botao.click();
+    };
+    return { campo, redesenho, digitar, enter, clicarEnviar, onInput };
   }
 
   it('redesenho em foco fica pendente e entra quando o campo perde o foco', () => {
@@ -110,6 +118,29 @@ describe('Input de mod', () => {
     campo.blur();
     flushSync();
     expect(campo.value).toBe('ab');
+  });
+
+  it('enviar pelo botão manda o que está no campo, mesmo com um eco atrasado pendente', () => {
+    const { campo, redesenho, digitar, clicarEnviar, onInput } = montarVivo('');
+    campo.focus();
+    digitar('ab');
+    digitar('abc');
+    // Chega o eco do `change` anterior, com a pessoa ainda no campo: fica pendente.
+    redesenho('ab');
+    clicarEnviar();
+    expect(onInput).toHaveBeenLastCalledWith('submit', 'abc');
+    expect(campo.value).toBe('abc');
+  });
+
+  it('digitar depois que o pendente chegou o descarta: perder o foco não apaga o que se digitou', () => {
+    const { campo, redesenho, digitar } = montarVivo('');
+    campo.focus();
+    digitar('abc');
+    redesenho('ab');
+    digitar('abcd');
+    campo.blur();
+    flushSync();
+    expect(campo.value).toBe('abcd');
   });
 
   it('o redesenho logo depois do próprio envio entra mesmo com foco, ainda que o valor seja o mesmo de antes', () => {
