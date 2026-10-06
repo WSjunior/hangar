@@ -89,6 +89,8 @@ pub enum Effect {
     /// A CLI consumiu um comando local (`/clear`, `/cost`…), que não vira linha `user` no transcript.
     ConfirmLocalCommands,
     StateChanged,
+    /// Interface dos mods (superfície remota): quadro fora do diário, publicação, aviso e resposta aos apps.
+    Surface { effect: crate::mods::model::SurfaceEffect },
     Stop { reason: String },
 }
 

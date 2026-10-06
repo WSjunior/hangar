@@ -53,6 +53,12 @@ pub fn texts(node: &Value) -> String {
     }
 }
 
+/// O primeiro quadro de um cano novo, sem processo saído nem pendência: o que os canos de teste mandam.
+pub fn cano_snapshot_json() -> Value {
+    serde_json::json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,
+        "pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}})
+}
+
 /// Superfície que nunca responde: para os testes que só mexem no registro.
 pub struct NoLink;
 impl hangar_server::mods::state::SurfaceLink for NoLink {
