@@ -5693,6 +5693,11 @@ impl Hangar {
                     let input = field.state.read(cx);
                     (input.value().to_string(), input.focus_handle(cx).is_focused(window))
                 };
+                // O texto de ajuda segue o mod; só é reposto quando mudou, porque o `set_placeholder` redesenha o campo.
+                if field.placeholder != spec.placeholder {
+                    field.placeholder = spec.placeholder.clone();
+                    field.state.update(cx, |input, cx| input.set_placeholder(spec.placeholder, window, cx));
+                }
                 if let Some(value) = field.sync.draw(fresh, &shown, focused) {
                     field.state.update(cx, |input, cx| input.set_value(value, window, cx));
                 }
@@ -5708,7 +5713,7 @@ impl Hangar {
                 this.input_plugin(&site, &key, kind, value);
             });
             let field = crate::plugin_ui::Field { state, sync: crate::plugin_ui::FieldSync::new(&spec.value), outbox: Default::default(),
-                seen: self.plugin_draws, _changes: changes };
+                placeholder: spec.placeholder, seen: self.plugin_draws, _changes: changes };
             self.plugin_fields.insert(id, field);
         }
     }
