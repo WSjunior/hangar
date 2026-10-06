@@ -464,6 +464,34 @@ def test_waiting_record_of_a_dead_life_never_holds_the_name(tmp_path, monkeypatc
     asyncio.run(flow())
 
 
+@pytest.mark.parametrize('born, claims', [(2.0, False), (1.0, True)])
+def test_waiting_record_only_claims_the_name_in_its_own_tmux_life(tmp_path, monkeypatch, born, claims):
+    # Outra vida tmux com o mesmo nome (aqui nascida em 2; o registro guarda 1) é de outra sessão,
+    # até de outro provedor: o registro morto não pode reservar o nome dela.
+    from app import diag, runtime_coordinator as rc, runtime_terminal as terminal, pqueue, tmux
+    from app.adapters.claude_headless import sessions as claude_sessions
+    from app.adapters.codex import sessions as codex_sessions
+    owner, slot, collected = live_owner(monkeypatch, tmp_path)
+    owner.close_python_leases()
+    monkeypatch.setattr(pqueue, '_queue_dir', lambda: tmp_path)
+    monkeypatch.setattr(claude_sessions, 'list_all', lambda: [])
+    monkeypatch.setattr(codex_sessions, 'list_all', lambda: [])
+    monkeypatch.setattr(terminal, '_collect', lambda name: None)
+    monkeypatch.setattr(tmux, 'sessao_existe', lambda name: True)
+    monkeypatch.setattr(tmux, 'session_created', lambda name: born)
+    events = []
+    monkeypatch.setattr(diag, 'registrar', lambda evento, *a, **k: events.append(evento))
+    restored = rc.RuntimeCoordinator()
+    monkeypatch.setattr(rc, '_current', restored)
+    async def flow():
+        restored.loop = asyncio.get_running_loop()
+        await restored.start_sessions({'claude': object(), 'codex': object()})
+    asyncio.run(flow())
+    assert restored.managed_queue('session') is claims
+    assert ('runtime.registration_failed' in events) is claims
+    assert ('runtime.stale_terminal_record' in events) is not claims
+
+
 def test_one_session_failing_to_recover_does_not_stop_the_takeover(monkeypatch):
     from types import SimpleNamespace
     from app import diag, runtime_coordinator as rc
