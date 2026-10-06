@@ -204,7 +204,7 @@ async def test_nav_lote_para_no_primeiro_erro(identidade, monkeypatch):
 
 async def test_grupo_parear_nova_sessao_chamam_as_rotas_como_eu(identidade, monkeypatch):
     from app import api
-    from app.models import SessionInfo
+    from app.models import CreatedSessionInfo
     chamadas = {}
 
     async def group_message(name, body):
@@ -220,8 +220,8 @@ async def test_grupo_parear_nova_sessao_chamam_as_rotas_como_eu(identidade, monk
         # `config_dir` entra na tupla porque a conta da sessão nova é o contrato da tool: sem ele
         # aqui, criar na conta padrão em vez da de quem chama voltaria a passar no teste.
         chamadas["nova"] = (body.name, body.cwd, body.provider, body.headless, body.config_dir, body.creator)
-        return SessionInfo(name=body.name, cwd=body.cwd, provider=body.provider, headless=body.headless,
-                           config_dir=body.config_dir)
+        return CreatedSessionInfo(name=body.name, cwd=body.cwd, provider=body.provider,
+                                  headless=body.headless, config_dir=body.config_dir)
 
     for n, f in (("group_message", group_message), ("pair_session", pair_session),
                  ("unpair_session", unpair_session), ("create_session", create_session)):
@@ -248,11 +248,11 @@ async def _coro(v):
 @pytest.mark.parametrize("mode", [None, False, True])
 async def test_new_session_preserves_mode_omission(identidade, monkeypatch, mode):
     from app import api
-    from app.registry import SessionInfo
+    from app.models import CreatedSessionInfo
     received = []
     async def create(body):
         received.append(body.headless)
-        return SessionInfo(name=body.name, cwd=body.cwd, headless=bool(body.headless))
+        return CreatedSessionInfo(name=body.name, cwd=body.cwd, headless=bool(body.headless))
     monkeypatch.setattr(api, "create_session", create)
     args = {"nome": "test-mode", "cwd": "/tmp", "conta": "/tmp/test-account"}
     if mode is not None:

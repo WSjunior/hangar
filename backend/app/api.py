@@ -54,7 +54,7 @@ from app.pi_inbox import INBOX
 from app import registry as registry_mod
 from app.registry import KillFailed, SessionRegistry, sanitize_cwd
 from app.names import sanitize_session_name
-from app.models import (SessionInfo, ChatEvent, CostReport, UsoReport, RunnersResponse, RunBody,
+from app.models import (SessionInfo, CreatedSessionInfo, ChatEvent, CostReport, UsoReport, RunnersResponse, RunBody,
                         RunInfo, Runner, CustomRunnersBody, ProjectStatus, ShortcutShellBody, RunCodeBody,
                         ProjectShortcutsBody, ShortcutAnswerBody, session_key)
 from app import uso_report
@@ -2274,8 +2274,8 @@ async def _inherit_from_creator(body: CreateBody) -> tuple[CreateBody, str | Non
     return (body.model_copy(update=update) if update else body), account_source, avisos
 
 
-@app.post("/api/sessions", dependencies=[Depends(require_auth)], response_model=SessionInfo)
-async def create_session(body: CreateBody):
+@app.post("/api/sessions", dependencies=[Depends(require_auth)], response_model=CreatedSessionInfo)
+async def create_session(body: CreateBody) -> CreatedSessionInfo:
     if "provider" not in body.model_fields_set:
         provider = await _default_session_provider(body.config_dir, body.engine, body.codex_account,
                                                    body.omp_profile, body.subagent_model)
@@ -2331,7 +2331,8 @@ async def create_session(body: CreateBody):
                 info = info.model_copy(update={"owner": guest.name})
             if avisos_extra:
                 info = info.model_copy(update={"avisos": [*info.avisos, *avisos_extra]})
-            info = info.model_copy(update={"config_dir": body.config_dir, "account_source": account_source})
+            info = CreatedSessionInfo(**info.model_dump(), config_dir=body.config_dir,
+                                      account_source=account_source)
             if (guest is None and body.remember_provider
                     and runtime_config.get("last_session_provider") != info.provider):
                 try:
