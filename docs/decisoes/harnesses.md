@@ -141,6 +141,11 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   Só `on-request` e `never` existem (`untrusted` morreu); o sandbox vai no `-c` da subida e trocar
   de modo reabre o servidor ocioso. Pedido do servidor sem tela recebe `-32601` + nota, nunca
   sucesso vazio. Um cliente por cano.
+- **A rota do terminal Claude só recebe sessão Claude.** `route_sync`, `run_admin` e
+  `answer_sync` abrem `prepare_session(name, "claude")`, que suspende a escrita sem vínculo
+  Claude nem pane. Rota que atende outros provedores filtra pelo provedor antes (`/answer`,
+  `/select`); erro que ainda escapar dela sai com código, nunca 500. Ver
+  [cartão do Codex sem terminal](#select-do-codex-sem-terminal-não-passa-pela-rota-do-terminal-claude).
 - **Nada no Hangar desvia a conversa da sessão para um proxy.** O `ANTHROPIC_BASE_URL` e o
   `model_provider` do Codex são do motor e do provedor, e o Hangar não os aponta para mais nada.
   Ligar o Jev numa sessão é só a chave no ambiente, para o `hangar-preview objetivo`. Por que o
@@ -2841,3 +2846,22 @@ leitura de `/providers`, além da confirmação do provedor já selecionado. Fal
 aparece no mobile e requer uma escolha explícita. Avisos da gravação seguem pela resposta
 de criação e do bastão até as interfaces; falha ao mostrar um aviso não torna a criação uma
 falha nem provoca repetição. No nativo, a abertura por worktree também conserva esses avisos.
+
+## /select do Codex sem terminal não passa pela rota do terminal Claude
+
+Achado pela prova da parte 4 da migração Rust (Step 27, 06/10/2026): o cartão de aprovação do
+Codex sem terminal (gpt-6-luna em "Ask for approval") aparecia na lista e no chat, e
+`POST /select` respondia 500. Desde `bead8a454` (03/10) o `/select` chamava `route_sync` antes
+de olhar o provedor; `route_sync` abre `prepare_session(name, "claude")`, que sem vínculo Claude
+e sem pane levanta `RuntimeError("vínculo gerenciado indisponível; escrita suspensa")`. O ramo
+do Codex sem terminal (`adapter.select`), que já respondia o cartão, nunca era alcançado.
+Reproduzido em `test_select_on_headless_codex_answers_the_approval_without_the_claude_terminal_route`
+com o coordenador real. O `/answer` já filtrava pelo provedor; nas outras rotas que passam por
+`wrap_driver`, o Codex sem terminal é desviado antes (`/interrupt`) ou a rota é só de Claude/pane.
+
+O erro que ainda escapar da rota no `/select` sai com código: `TerminalOutcomeUnknown` (a tecla
+pode ter chegado) é 409 `erro_sem_confirmacao_resposta`, para ninguém repetir; o resto, anterior à
+entrega, é 503 `erro_opcao_nao_convergiu`.
+
+Prova real depois do conserto (`scripts/prova-parte4.py --casos 27`, backend isolado): Codex sem
+terminal com cartão → `/select` 200 e a sessão sai do cartão; Claude sem terminal segue 200.
