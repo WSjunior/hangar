@@ -113,7 +113,7 @@ def test_list_matches_python(scene):
     assert got["result"] == json.loads(json.dumps(expected))
     by = {Path(w["path"]).name: w for w in got["result"][0]["worktrees"]}
     # O cenário cobre cada ramo da situação, para a igualdade acima valer alguma coisa.
-    assert by["repo-merged"]["merged"] and by["repo-squash"]["merged"]
+    assert by["repo-merged"]["merged"] and not by["repo-squash"]["merged"]
     assert not by["repo-fresh"]["merged"] and not by["repo-dirty"]["merged"]
     assert by["repo-dirty"]["dirty"] == 2 and by["repo-dirty"]["ignored"] == [".env"]
     assert by["repo-dirty"]["sessions"] == ["dentro"] and by["repo-dirty"]["closed"] == 1

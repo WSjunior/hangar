@@ -338,33 +338,89 @@ def _git(cwd: str, *args: str, failed: list) -> subprocess.CompletedProcess:
         return subprocess.CompletedProcess(args, 1, "", e.detail)
 
 
+def _published_base(cwd: str, base: str, refs: dict[str, str], remotes: list[str],
+                    failed: list) -> str:
+    matches = [ref for ref in (f"refs/heads/{base}", f"refs/remotes/{base}") if ref in refs]
+    if len(matches) > 1:
+        failed.append("base")
+        return base
+    ref = matches[0] if matches else base
+    if not matches and any(base.startswith(remote + "/") for remote in remotes):
+        ref = f"refs/remotes/{base}"
+    if ref.startswith("refs/heads/") and ref in refs:
+        upstream = refs[ref]
+        if upstream.startswith("refs/remotes/"):
+            ref = upstream
+        else:
+            name = ref.removeprefix("refs/heads/")
+            candidates = [f"refs/remotes/{remote}/{name}" for remote in remotes
+                          if f"refs/remotes/{remote}/{name}" in refs]
+            if len(candidates) == 1:
+                ref = candidates[0]
+            elif len(candidates) > 1:
+                failed.append("base")
+    if ref not in refs:
+        p = _git(cwd, "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}",
+                 failed=failed)
+        if p.returncode != 0:
+            failed.append("base")
+    short = next((ref[len(prefix):] for prefix in ("refs/heads/", "refs/remotes/")
+                  if ref.startswith(prefix)), ref)
+    # Tags têm precedência sobre branches; a abreviação não pode trocar a referência escolhida.
+    if f"refs/tags/{short}" in refs or (ref.startswith("refs/remotes/")
+                                      and f"refs/heads/{short}" in refs):
+        return ref
+    return short
+
+
 def _base_of(path: str, branch: str, main: str, failed: list) -> str | None:
-    p = _git(path if os.path.isdir(path) else main, "config", "--get", f"branch.{branch}.hangar-base",
-             failed=failed)
-    if p.returncode == 0 and p.stdout.strip():
-        return p.stdout.strip()
-    # Worktree criada fora do Hangar: compara com a branch da pasta principal.
-    return head_info(main)[0]
+    cwd = path if os.path.isdir(path) else main
+    p = _git(cwd, "config", "--get", f"branch.{branch}.hangar-base", failed=failed)
+    if p.returncode not in (0, 1):
+        failed.append("base")
+    base = p.stdout.strip() if p.returncode == 0 else ""
+    p = _git(cwd, "for-each-ref", "--format=%(refname)%00%(upstream)",
+             "refs/heads/", "refs/remotes/", "refs/tags/", failed=failed)
+    refs = dict(line.split("\0", 1) for line in p.stdout.splitlines() if "\0" in line)
+    if p.returncode != 0:
+        failed.append("base")
+    p = _git(cwd, "remote", failed=failed)
+    remotes = p.stdout.splitlines() if p.returncode == 0 else []
+    if p.returncode != 0:
+        failed.append("base")
+    if not base:
+        p = _git(cwd, "reflog", "show", "--format=%gs", f"refs/heads/{branch}", failed=failed)
+        if p.returncode != 0:
+            failed.append("base")
+        source = next((line.removeprefix("branch: Created from ")
+                       for line in reversed(p.stdout.splitlines())
+                       if line.startswith("branch: Created from ")), "")
+        own = {branch, f"refs/heads/{branch}"}
+        own.update(f"{remote}/{branch}" for remote in remotes)
+        own.update(f"refs/remotes/{remote}/{branch}" for remote in remotes)
+        named = (source.startswith(("refs/heads/", "refs/remotes/"))
+                 or f"refs/heads/{source}" in refs
+                 or any(source.startswith(remote + "/") for remote in remotes))
+        # HEAD e hashes não registram qual branch era o destino; o remoto homônimo é a própria
+        # branch publicada. O upstream não entra: `worktree add -b x ../w origin/release` rastreia a base.
+        if named and source not in own and f"refs/remotes/{source}" not in own:
+            base = source
+        else:
+            base = head_info(main)[0]
+    return _published_base(cwd, base, refs, remotes, failed) if base else None
 
 
 def is_merged(cwd: str, branch: str, base: str, failed: list | None = None) -> bool:
     failed = [] if failed is None else failed
     start = len(failed)
-    # Worktree recém-criada aponta pro mesmo commit da base: ancestral trivial, não mesclada.
-    # ponytail: branch sem uso cuja base andou lê como mesclada (apagar não perde nada), e merge
-    # local por fast-forward só lê como mesclada depois que a base anda.
+    # Pontas iguais também podem ser uma worktree recém-criada; upstream apagado não prova merge.
     tips = _git(cwd, "rev-parse", branch, base, failed=failed)
-    same = tips.returncode == 0 and len(set(tips.stdout.split())) == 1
-    if len(failed) == start and not same and _git(
-            cwd, "merge-base", "--is-ancestor", branch, base, failed=failed).returncode == 0:
-        return True
-    # Squash do GitLab não deixa ancestral; o sinal é a branch ter tido upstream e ele ter sumido
-    # do servidor (apagado no merge do MR), visto após `fetch --prune`.
-    if _git(cwd, "config", "--get", f"branch.{branch}.merge", failed=failed).returncode != 0:
+    if tips.returncode != 0:
+        failed.append("merged")
         return False
-    gone = _git(cwd, "rev-parse", "--abbrev-ref", f"{branch}@{{upstream}}", failed=failed).returncode != 0
-    # Timeout não é upstream sumido: na dúvida, não mesclada.
-    return gone and len(failed) == start
+    same = len(set(tips.stdout.split())) == 1
+    return (not same and _git(cwd, "merge-base", "--is-ancestor", branch, base,
+                             failed=failed).returncode == 0 and len(failed) == start)
 
 
 def _gitdir_branch(main: str, path: str) -> str | None:
@@ -428,24 +484,26 @@ def status(path: str, sessions=(), main: str | None = None, measure: bool = True
     failed: list = []   # por chamada: a listagem roda status em threads diferentes
     base = _base_of(path, branch, main, failed) if branch else None
     cwd = path if exists else main
+    # Nome curto perde para uma tag homônima, e o commit dela pareceria já mesclado.
+    ref = f"refs/heads/{branch}" if branch else "HEAD"
     ahead = 0
     if branch and base:
-        c = _git(cwd, "rev-list", "--count", f"{base}..{branch}", failed=failed)
+        c = _git(cwd, "rev-list", "--count", f"{base}..{ref}", failed=failed)
         ahead = int(c.stdout.strip() or 0) if c.returncode == 0 else 0
     behind = 0
     commits: list[dict] = []
     if branch and base and branch != base:
-        c = _git(cwd, "rev-list", "--count", f"{branch}..{base}", failed=failed)
+        c = _git(cwd, "rev-list", "--count", f"{ref}..{base}", failed=failed)
         behind = int(c.stdout.strip() or 0) if c.returncode == 0 else 0
-        commits = _log_commits(cwd, f"{base}..{branch}", 3, failed)
-    last = _log_commits(cwd, branch or "HEAD", 1, failed) if exists or branch else []
+        commits = _log_commits(cwd, f"{base}..{ref}", 3, failed)
+    last = _log_commits(cwd, ref, 1, failed) if exists or branch else []
     dirty_files: list[dict] = []
     if exists:
         s = _git(path, "status", "--porcelain", failed=failed)
         if s.returncode == 0:
             dirty_files = [{"code": line[:2].strip() or "?", "path": line[3:]}
                            for line in s.stdout.splitlines() if line.strip()]
-    merged = bool(branch and base and branch != base and is_merged(cwd, branch, base, failed))
+    merged = bool(branch and base and branch != base and is_merged(cwd, ref, base, failed))
     ignored = _ignored_lost(path, main, failed) if exists else []
     real = os.path.realpath(path)
     inside = [s for s in sessions if _inside(s, real)]

@@ -1,8 +1,8 @@
 //! Lista de worktrees e a situação de cada uma, no formato do `worktrees.py`.
 //!
-//! Por worktree são 4 ou 5 `git`, não os 9–11 do Python: base e upstream saem de um `config`
-//! por repositório, e `rev-list --left-right` dá ahead, behind e a ancestralidade de uma vez
-//! (branch é ancestral da base ⇔ nada nela falta na base). As worktrees rodam em paralelo.
+//! Configuração e referências são compartilhadas por repositório; o reflog recupera a base das
+//! branches criadas fora do app. `rev-list --left-right` dá ahead, behind e a ancestralidade de
+//! uma vez. As worktrees rodam em paralelo.
 use crate::{Result, error, git, real};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -209,40 +209,181 @@ pub struct Repo {
     main: String,
     main_branch: Option<String>,
     admins: Vec<(PathBuf, String)>,
-    /// `branch → (hangar-base, tem upstream)`; `None` quando o `config` não rodou (prazo).
-    config: Option<HashMap<String, (Option<String>, bool)>>,
+    /// `None` quando a leitura falhou; metadados ausentes nunca tornam a exclusão segura.
+    config: Option<HashMap<String, String>>,
+    references: Option<HashMap<String, String>>,
+    remotes: Option<Vec<String>>,
 }
 
 impl Repo {
     pub fn read(main: &str) -> Repo {
         let config = git::command(
             Path::new(main),
-            &["config", "-z", "--get-regexp", r"^branch\..*\.(hangar-base|merge)$"],
+            &["config", "-z", "--get-regexp", r"^branch\..*\.hangar-base$"],
         )
         .ok()
-        // Código diferente de 0 é "nenhuma chave", como o `config --get` do Python.
+        // Código 1 é ausência de chave; outros erros não podem tornar a exclusão segura.
+        .filter(|out| out.code == 0 || out.code == 1)
         .map(|out| {
-            let mut map: HashMap<String, (Option<String>, bool)> = HashMap::new();
-            let found = if out.code == 0 { out.stdout.as_str() } else { "" };
+            let mut map = HashMap::new();
+            let found = if out.code == 0 {
+                out.stdout.as_str()
+            } else {
+                ""
+            };
             for entry in found.split('\0') {
                 let (key, value) = entry.split_once('\n').unwrap_or((entry, ""));
-                let Some(rest) = key.strip_prefix("branch.") else { continue };
-                if let Some(name) = rest.strip_suffix(".hangar-base") {
-                    let value = value.trim();
-                    map.entry(name.into()).or_default().0 =
-                        (!value.is_empty()).then(|| value.to_owned());
-                } else if let Some(name) = rest.strip_suffix(".merge") {
-                    map.entry(name.into()).or_default().1 = true;
+                let Some(name) = key
+                    .strip_prefix("branch.")
+                    .and_then(|s| s.strip_suffix(".hangar-base"))
+                else {
+                    continue;
+                };
+                if !value.trim().is_empty() {
+                    map.insert(name.to_owned(), value.trim().to_owned());
                 }
             }
             map
         });
+        let references = git::command(
+            Path::new(main),
+            &[
+                "for-each-ref",
+                "--format=%(refname)%00%(upstream)",
+                "refs/heads/",
+                "refs/remotes/",
+                "refs/tags/",
+            ],
+        )
+        .ok()
+        .filter(|out| out.code == 0)
+        .map(|out| {
+            out.stdout
+                .lines()
+                .filter_map(|line| line.split_once('\0'))
+                .map(|(name, upstream)| (name.to_owned(), upstream.to_owned()))
+                .collect()
+        });
+        let remotes = git::command(Path::new(main), &["remote"])
+            .ok()
+            .filter(|out| out.code == 0)
+            .map(|out| out.stdout.lines().map(str::to_owned).collect());
         Repo {
             main: main.to_owned(),
             main_branch: git::head_info(Some(main)).0,
             admins: admin_entries(main),
             config,
+            references,
+            remotes,
         }
+    }
+
+    fn published_base(&self, cwd: &str, base: &str, probe: &mut Probe) -> String {
+        let Some(refs) = self.references.as_ref() else {
+            return base.to_owned();
+        };
+        let remotes = self.remotes.as_deref().unwrap_or_default();
+        let matches = [format!("refs/heads/{base}"), format!("refs/remotes/{base}")]
+            .into_iter()
+            .filter(|r| refs.contains_key(r))
+            .collect::<Vec<_>>();
+        if matches.len() > 1 {
+            probe.failed = true;
+            return base.to_owned();
+        }
+        let mut reference = matches.first().cloned().unwrap_or_else(|| base.to_owned());
+        if matches.is_empty() && remotes.iter().any(|r| base.starts_with(&format!("{r}/"))) {
+            reference = format!("refs/remotes/{base}");
+        }
+        if let Some(name) = reference.strip_prefix("refs/heads/")
+            && let Some(upstream) = refs.get(&reference)
+        {
+            if upstream.starts_with("refs/remotes/") {
+                reference = upstream.clone();
+            } else {
+                let candidates = remotes
+                    .iter()
+                    .map(|r| format!("refs/remotes/{r}/{name}"))
+                    .filter(|r| refs.contains_key(r))
+                    .collect::<Vec<_>>();
+                if candidates.len() == 1 {
+                    reference = candidates[0].clone();
+                } else if candidates.len() > 1 {
+                    probe.failed = true;
+                }
+            }
+        }
+        if !refs.contains_key(&reference)
+            && probe
+                .ok(
+                    cwd,
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        "--end-of-options",
+                        &format!("{reference}^{{commit}}"),
+                    ],
+                )
+                .is_none()
+        {
+            probe.failed = true;
+        }
+        let short = reference
+            .strip_prefix("refs/heads/")
+            .or_else(|| reference.strip_prefix("refs/remotes/"))
+            .unwrap_or(&reference);
+        // Tags têm precedência sobre branches; abreviar não pode trocar a referência escolhida.
+        if refs.contains_key(&format!("refs/tags/{short}"))
+            || (reference.starts_with("refs/remotes/")
+                && refs.contains_key(&format!("refs/heads/{short}")))
+        {
+            reference
+        } else {
+            short.to_owned()
+        }
+    }
+
+    fn base_of(&self, cwd: &str, branch: &str, probe: &mut Probe) -> Option<String> {
+        let configured = self.config.as_ref().and_then(|c| c.get(branch)).cloned();
+        let base = configured.or_else(|| {
+            let log = probe.ok(
+                cwd,
+                &[
+                    "reflog",
+                    "show",
+                    "--format=%gs",
+                    &format!("refs/heads/{branch}"),
+                ],
+            );
+            if log.is_none() {
+                probe.failed = true;
+            }
+            let log = log.unwrap_or_default();
+            let source = log
+                .lines()
+                .rev()
+                .find_map(|l| l.strip_prefix("branch: Created from "));
+            let refs = self.references.as_ref();
+            let remotes = self.remotes.as_deref().unwrap_or_default();
+            let source = source.filter(|s| {
+                let named = s.starts_with("refs/heads/")
+                    || s.starts_with("refs/remotes/")
+                    || refs.is_some_and(|r| r.contains_key(&format!("refs/heads/{s}")))
+                    || remotes.iter().any(|r| s.starts_with(&format!("{r}/")));
+                let own = *s == branch
+                    || *s == format!("refs/heads/{branch}")
+                    || remotes.iter().any(|r| {
+                        *s == format!("{r}/{branch}") || *s == format!("refs/remotes/{r}/{branch}")
+                    });
+                // HEAD e hashes não registram o destino; o remoto homônimo é a própria branch
+                // publicada. O upstream não entra: `worktree add -b x ../w origin/release` rastreia a base.
+                named && !own
+            });
+            source
+                .map(str::to_owned)
+                .or_else(|| self.main_branch.clone())
+        });
+        base.map(|b| self.published_base(cwd, &b, probe))
     }
 
     fn admin_of(&self, path: &str) -> Option<&PathBuf> {
@@ -417,42 +558,40 @@ pub fn status(
     } else {
         repo.gone_branch(path)
     };
-    // O Python só lê a config de quem tem branch.
     let mut probe = Probe {
-        failed: branch.is_some() && repo.config.is_none(),
+        failed: branch.is_some()
+            && (repo.config.is_none() || repo.references.is_none() || repo.remotes.is_none()),
     };
-    let base = branch.as_ref().map(|b| {
-        repo.config
-            .as_ref()
-            .and_then(|c| c.get(b))
-            .and_then(|(base, _)| base.clone())
-            // Worktree criada fora do Hangar: compara com a branch da pasta principal.
-            .or_else(|| repo.main_branch.clone())
-    });
-    let base = base.flatten();
     let cwd = if exists { path } else { main };
+    let base = branch
+        .as_deref()
+        .and_then(|b| repo.base_of(cwd, b, &mut probe));
     let (mut ahead, mut behind, mut ancestor) = (0u64, 0u64, false);
     let mut commits = Vec::new();
     let mut last = Vec::new();
     if let (Some(branch), Some(base)) = (&branch, &base)
         && branch != base
     {
-        let range = format!("{base}...{branch}");
+        // Nome curto perde para uma tag homônima, e o commit dela pareceria já mesclado.
+        let range = format!("{base}...refs/heads/{branch}");
         if let Some(out) = probe.ok(cwd, &["rev-list", "--left-right", "--count", &range]) {
-            let mut n = out.split_whitespace().map(|s| s.parse::<u64>().unwrap_or(0));
+            let mut n = out
+                .split_whitespace()
+                .map(|s| s.parse::<u64>().unwrap_or(0));
             behind = n.next().unwrap_or(0);
             ahead = n.next().unwrap_or(0);
             // Recém-criada aponta pro mesmo commit da base: ancestral trivial, não mesclada.
             ancestor = ahead == 0 && behind > 0;
         }
-        commits = probe.log(cwd, &format!("{base}..{branch}"), 3);
+        commits = probe.log(cwd, &format!("{base}..refs/heads/{branch}"), 3);
         if ahead > 0 && !commits.is_empty() {
             // O primeiro do `base..branch` é a ponta da branch.
             last = vec![commits[0].clone()];
         }
     }
     if last.is_empty() && (exists || branch.is_some()) {
-        last = probe.log(cwd, branch.as_deref().unwrap_or("HEAD"), 1);
+        let reference = branch.as_deref().map_or("HEAD".into(), |b| format!("refs/heads/{b}"));
+        last = probe.log(cwd, &reference, 1);
     }
     let mut dirty_files = Vec::new();
     if exists && let Some(out) = probe.ok(path, &["status", "--porcelain"]) {
@@ -465,25 +604,8 @@ pub fn status(
             })
             .collect();
     }
-    let merged = match (&branch, &base) {
-        (Some(branch), Some(base)) if branch != base => {
-            ancestor || {
-                // Squash do GitLab não deixa ancestral; o sinal é a branch ter tido upstream e
-                // ele ter sumido do servidor (apagado no merge do MR), visto após `fetch --prune`.
-                let tracked = repo
-                    .config
-                    .as_ref()
-                    .and_then(|c| c.get(branch))
-                    .is_some_and(|(_, merge)| *merge);
-                let upstream = format!("{branch}@{{upstream}}");
-                tracked
-                    && probe
-                        .git(cwd, &["rev-parse", "--abbrev-ref", &upstream])
-                        .is_some_and(|o| o.code != 0)
-            }
-        }
-        _ => false,
-    };
+    // Apagar o upstream também acontece sem merge: não autoriza excluir os commits locais.
+    let merged = ancestor;
     let ignored = if exists {
         ignored_lost(&mut probe, path, main)
     } else {

@@ -337,6 +337,11 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   (`orq_timeline.py`). O `ChatEvent` leva `orq` (texto cru mantido); o painel é um `GET` por
   execução em `/api/sessions/{name}/orq/panel`, fora do alcance do convidado e sem escrita, e o
   Time lê o estado da lista de sessões. O `orq.py` só grava o que não dá para derivar.
+- **Worktrees mescladas usam a origem e a base publicada.** Base explícita vence; sem ela,
+  referência nomeada de criação no reflog, com fallback para a branch principal. Base local usa
+  seu upstream ou o único remoto correspondente. Ambiguidade e falha de leitura impedem marcar
+  mesclada; upstream apagado nunca comprova merge. Pontas iguais continuam protegidas. Evidência
+  e limites em [plataforma.md](docs/decisoes/plataforma.md#worktrees-mescladas-usam-a-origem-e-a-base-publicada).
 - **Plan progress lê o `.md` do plano**, sem arquivo de estado: blocos cercados são removidos
   preservando offsets, e a decoração roda dentro do `to_thread` do git.
 - **Ditado: a transcrição não é o problema, o que vem depois é.** Vocabulário vai para a Whisper

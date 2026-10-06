@@ -1530,6 +1530,44 @@ para a principal.
 backend instalado; rodapé, título, card e painel de git das três sessões em worktree passaram a
 mostrar a worktree e a branch dela.
 
+## Worktrees mescladas usam a origem e a base publicada
+
+**Regra:** `branch.<branch>.hangar-base` tem prioridade. Sem ela, a base vem da referência
+nomeada de criação no reflog; `HEAD`, hashes e o upstream da própria branch não informam o
+destino. Sem origem recuperável, permanece o fallback para a branch do checkout principal.
+A base local usa seu upstream remoto ou, sem upstream, o único remoto correspondente. Mais
+de um candidato não autoriza escolher; referência ausente ou falha de leitura degrada a
+situação e impede classificá-la como mesclada. A abreviação da base não pode trocar a
+referência por uma tag ou branch homônima.
+
+**Por quê (05/10/2026):** a lista mostrava seis worktrees em andamento. Cinco já tinham PR
+mesclado e HEAD ancestral da base remota: uma na `main`, quatro na branch do servidor. A
+comparação usava `main` local para todas; ela estava atrasada, e `fetch --all --prune` não a
+avança. O pull resolveu apenas o caso da `main`. O reflog das seis branches guardava a origem
+remota correta, permitindo resolver o destino sem consulta a um provedor de PRs.
+
+**Exclusão conservadora:** só ancestralidade com pontas distintas comprova a integração.
+Apagar o upstream também ocorre sem merge; isso deixou de ser prova suficiente, inclusive
+para squash. Squash/rebase sem ancestralidade não são detectados automaticamente. Pontas
+iguais continuam protegidas, pois também representam uma worktree recém-criada. Commit
+posterior ao merge volta a impedir a classificação de mesclada.
+
+**Prova:** consulta das worktrees reais com o Python corrigido e o contrato Rust compilado:
+os dois reconheceram as cinco mescladas e mantiveram a sexta em andamento, contra suas bases
+remotas. A consulta Python ficou próxima de 0,66 s, ante 0,68 s antes da mudança. Casos de
+regressão escritos para prioridade de base explícita, reflog expirado, troca da branch
+principal, base remota ausente, commit posterior, remoto com outro nome, remotos ambíguos,
+upstream preferido, tag homônima e falha de leitura. Lista e detalhe do nativo conferidos numa
+janela isolada atrás de repassador somente leitura: as cinco aparecem mescladas e a sexta em
+andamento. A proteção de arquivos ignorados permanece independente da detecção de merge.
+Os 33 casos novos passaram no Linux e no Windows. O pytest completo do Linux teve 8.125
+aprovados, 66 ignorados e duas falhas de ambiente: autenticação herdada no teste de conta virgem
+e falta de espaço nos temporários; ambos passaram na repetição com isolamento. A suíte Rust
+teve duas falhas locais também reproduzidas na base pura (janela tmux fixada em zero e corrida
+nas vagas de escrita). No Windows, os três arquivos focados tiveram 92 aprovados e 11 falhas;
+as mesmas 11 se reproduziram na base pura, incluindo diferenças nos campos `sessions` e
+`closed` anteriores à correção.
+
 ## Passagem ao Rust no boot com a fila Python ocupada
 
 (05/10/2026, DELPHI-02.) Nos dois reinícios do dia, a sessão terminal abriu no Python e
