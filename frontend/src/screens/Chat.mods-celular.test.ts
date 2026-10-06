@@ -295,3 +295,62 @@ it('clique recusado: código conhecido mostra a frase dele sem o status; 5xx sem
     await unmount(t.comp);
   }
 });
+
+it('celular com os mods ligados: o "Ocultar" no canto da faixa esconde a interface e grava a preferência', async () => {
+  modsCelular.ligado = true;
+  const t = montar();
+  try {
+    await tick();
+    emitirPluginUi();
+    await tick();
+    const ocultar = t.el.querySelector('.plugin-band button.plugin-hide') as HTMLButtonElement;
+    expect(ocultar).toBeTruthy();
+    expect(ocultar.textContent).toBe(m.mods_celular_ocultar_curto());
+    expect(ocultar.getAttribute('aria-label')).toBe(m.mods_celular_ocultar());
+    // Um botão só: com faixa, o painel não leva outro.
+    expect(t.el.querySelectorAll('button.plugin-hide')).toHaveLength(1);
+    ocultar.click();
+    await tick();
+    expect(modsCelular.ligado).toBe(false);
+    expect(localStorage.getItem('cp_mods_celular')).toBe('0');
+    expect(t.el.querySelector('.plugin-band')).toBeNull();
+    expect(t.el.textContent).not.toContain('No painel');
+  } finally {
+    await unmount(t.comp);
+  }
+});
+
+it('celular sem faixa e só com painel: o "Ocultar" fica no topo do painel', async () => {
+  modsCelular.ligado = true;
+  const t = montar();
+  try {
+    await tick();
+    sseCtl.handlers.get('plugin_ui')?.({ data: JSON.stringify({ above: null, panes: [PAINEL], source: 'surface' }) } as MessageEvent);
+    await tick();
+    const ocultar = t.el.querySelector('.plugin-pane header button.plugin-hide') as HTMLButtonElement;
+    expect(ocultar).toBeTruthy();
+    ocultar.click();
+    await tick();
+    expect(modsCelular.ligado).toBe(false);
+    expect(t.el.querySelector('.plugin-pane')).toBeNull();
+  } finally {
+    await unmount(t.comp);
+  }
+});
+
+it('desktop: sem o "Ocultar", na faixa e no painel', async () => {
+  janelaCtl.desktop = true;
+  const t = montar();
+  try {
+    await tick();
+    emitirPluginUi();
+    await tick();
+    expect(t.el.textContent).toContain('Abrir mod');
+    expect(t.el.querySelector('button.plugin-hide')).toBeNull();
+    sseCtl.handlers.get('plugin_ui')?.({ data: JSON.stringify({ above: null, panes: [PAINEL], source: 'surface' }) } as MessageEvent);
+    await tick();
+    expect(t.el.querySelector('button.plugin-hide')).toBeNull();
+  } finally {
+    await unmount(t.comp);
+  }
+});

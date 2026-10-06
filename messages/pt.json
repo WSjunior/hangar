@@ -1132,6 +1132,7 @@
   "mods_celular_mostrar_um": "Mostrar interface dos mods (1 painel)",
   "mods_celular_mostrar_paineis": "Mostrar interface dos mods ({n} painéis)",
   "mods_celular_ocultar": "Ocultar interface dos mods",
+  "mods_celular_ocultar_curto": "Ocultar",
   "mods_celular_sub": "Só neste aparelho; os avisos dos mods continuam aparecendo.",
   "plugin_toque_para_copiar": "Toque para copiar",
   "servidores_aviso_persistencia": "Não consegui guardar a lista de servidores neste aparelho. Ela vale agora, mas pode não estar aqui quando você abrir o app de novo.",

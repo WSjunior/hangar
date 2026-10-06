@@ -8,6 +8,7 @@
   import { BAND_SITE, isEmptyBand, type PluginInputKind, type PluginNode as Node } from '@hangar/core';
   import * as m from '../paraglide/messages';
   import PluginNode from './PluginNode.svelte';
+  import PluginHide from './PluginHide.svelte';
 
   interface Props {
     /** Árvore do `AbovePrompt` como o Claude Code a desenhou, de todos os mods juntos. */
@@ -20,14 +21,25 @@
     onInput?: (site: string, key: string, kind: PluginInputKind, value: string) => void;
     /** Resultado do último clique; some sozinho. */
     notice?: PluginNotice | null;
+    /** Só no celular: o botão "Ocultar" no canto da faixa esconde a interface dos mods. */
+    onHide?: () => void;
   }
-  let { tree, columns = null, onPress, onInput, notice = null }: Props = $props();
+  let { tree, columns = null, onPress, onInput, notice = null, onHide }: Props = $props();
 </script>
 
 {#if !isEmptyBand(tree) || notice}
   <!-- Sem aria-live na faixa: mod com relógio muda a cada segundo, e o leitor de tela leria sem parar. -->
-  <section class="plugin-band" aria-label={m.plugin_band_label()}>
-    {#if !isEmptyBand(tree)}
+  <section class="plugin-band" class:hideable={onHide && !isEmptyBand(tree)} aria-label={m.plugin_band_label()}>
+    {#if !isEmptyBand(tree) && onHide}
+      <!-- Com o "Ocultar", a faixa rola dentro da coluna dela e o botão fica parado no canto, na mesma linha. -->
+      <div class="row">
+        <div class="content">
+          <PluginNode node={tree} place={columns} onPress={onPress ? (key) => onPress(BAND_SITE, key) : undefined}
+                      onInput={onInput ? (key, kind, value) => onInput(BAND_SITE, key, kind, value) : undefined} />
+        </div>
+        <PluginHide {onHide} />
+      </div>
+    {:else if !isEmptyBand(tree)}
       <PluginNode node={tree} place={columns} onPress={onPress ? (key) => onPress(BAND_SITE, key) : undefined}
                   onInput={onInput ? (key, kind, value) => onInput(BAND_SITE, key, kind, value) : undefined} />
     {/if}
@@ -62,6 +74,9 @@
     overflow-x: auto;
     overflow-y: hidden;
   }
+  .plugin-band.hideable { overflow: hidden; }
+  .row { display: flex; align-items: center; gap: var(--space-2); }
+  .content { flex: 1; min-width: 0; overflow-x: auto; overflow-y: hidden; }
   .notice { margin: var(--space-1) 0 0; font-family: var(--font-ui); color: var(--text-muted); }
   .notice.error { color: var(--error); }
   .notice a { color: var(--accent); }
