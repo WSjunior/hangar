@@ -500,6 +500,10 @@ pub struct Hangar {
     plugin_source: Option<crate::plugin_ui::UiSource>,
     /// Escolha local da aba: começa no último painel aberto e sobrevive aos redesenhos.
     plugin_local_tab: Option<String>,
+    /// Rolagem da fileira de abas dos mods e a aba ativa para a qual ela já rolou.
+    plugin_tabs_scroll: ScrollHandle,
+    plugin_tabs_seen: Option<String>,
+    plugin_tabs_waits: u8,
     /// Trechos dos mods (escopo de hover ou cartão absoluto) com o ponteiro em cima: lugar e caminho na árvore.
     plugin_hovered: HashSet<String>,
     /// Campos (`Input`) dos mods, por `plugin_ui::field_id`: nascem quando a árvore os traz e saem com ela.
@@ -817,7 +821,7 @@ impl Hangar {
             attachments: HashMap::new(), attach_seq: 0, uploading: HashMap::new(), commands: HashMap::new(),
             suggest_pick: 0, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None, confirm_no_ask: false,
             mention: Default::default(),
-            terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_shown: None, plugin_columns: None, plugin_source: None, plugin_local_tab: None, plugin_hovered: HashSet::new(), plugin_fields: HashMap::new(), plugin_draws: 0, plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
+            terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_shown: None, plugin_columns: None, plugin_source: None, plugin_local_tab: None, plugin_tabs_scroll: ScrollHandle::new(), plugin_tabs_seen: None, plugin_tabs_waits: 0, plugin_hovered: HashSet::new(), plugin_fields: HashMap::new(), plugin_draws: 0, plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
             settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(),
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
@@ -1237,6 +1241,7 @@ impl Hangar {
         self.plugin_columns = None;
         self.plugin_source = None;
         self.plugin_local_tab = None;
+        self.plugin_tabs_seen = None;
         self.plugin_hovered.clear();
         self.plugin_fields.clear();
         self.recent = None;
@@ -1993,6 +1998,7 @@ impl Hangar {
                 self.plugin_columns = None;
                 self.plugin_source = None;
                 self.plugin_local_tab = None;
+                self.plugin_tabs_seen = None;
                 self.plugin_hovered.clear();
                 self.plugin_fields.clear();
                 if let Some(task) = self.history_task.take() { task.abort(); }
@@ -4564,6 +4570,9 @@ fn ask_option<E: Styled + InteractiveElement + ParentElement + IntoElement>(cont
             .font_family(crate::theme::MONO).text_xs().whitespace_nowrap().overflow_x_hidden().child(preview)))
 }
 
+/// Quadros seguidos que a fileira de abas dos mods espera pela geometria antes de desistir.
+const TAB_SCROLL_WAITS: u8 = 3;
+
 fn scrolled(id: &'static str, handle: &ScrollHandle, max: f32, content: impl IntoElement) -> AnyElement {
     div().relative()
         .child(div().id(id).max_h(px(max)).overflow_y_scroll().track_scroll(handle).pr_4().child(content))
@@ -5769,8 +5778,28 @@ impl Hangar {
                 let _ = entity.update(cx, |this, cx| this.submit_plugin_field(&site, &key, cx));
             })
         });
-        crate::plugin_ui::View { press: self.plugin_press(cx), show, columns: self.plugin_columns,
+        crate::plugin_ui::View { press: self.plugin_press(cx), show, tabs_scroll: &self.plugin_tabs_scroll, columns: self.plugin_columns,
             hover: Some(self.plugin_hover(cx)), hovered: &self.plugin_hovered, fields: &self.plugin_fields, submit }
+    }
+
+    /// Rola a fileira de abas até a ativa quando ela mudou. No primeiro quadro o handle ainda não tem geometria (ela só
+    /// é gravada no prepaint): a aba fica pendente e o quadro seguinte tenta de novo, no máximo `TAB_SCROLL_WAITS` vezes.
+    fn follow_plugin_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ids = crate::plugin_ui::pane_ids(&self.plugin_panes);
+        let active = crate::plugin_ui::active_pane(&ids, &self.plugin_shown, self.plugin_local_tab.as_deref());
+        let laid_out = self.plugin_tabs_scroll.bounds().size.width > px(0.);
+        match crate::plugin_ui::tab_scroll_target(self.plugin_tabs_seen.as_deref(), &ids, active.as_deref(), laid_out) {
+            crate::plugin_ui::TabScroll::To(ix) => {
+                self.plugin_tabs_scroll.scroll_to_item(ix);
+                self.plugin_tabs_seen = active;
+                self.plugin_tabs_waits = 0;
+            }
+            crate::plugin_ui::TabScroll::Wait if self.plugin_tabs_waits < TAB_SCROLL_WAITS => {
+                self.plugin_tabs_waits += 1;
+                cx.on_next_frame(window, |_, _, cx| cx.notify());
+            }
+            _ => self.plugin_tabs_waits = 0,
+        }
     }
 
     /// Troca de aba: seguindo o `shown_id`, a aba só muda quando o novo chega; sem ele (servidor antigo), a troca é
@@ -5852,6 +5881,7 @@ impl Hangar {
         let busy = selected_key.as_ref().is_some_and(|key| self.flight.busy(key));
         let action_note = selected_key.as_ref().and_then(|key| self.action_feedback.get(key)).cloned();
         let readable = self.selected.as_ref().is_some_and(|s| s.readable());
+        if readable { self.follow_plugin_tab(window, cx); }
         let orq = self.selected.as_ref().filter(|s| s.orq()).map(|s| s.name.clone());
         // A sessão da outra pessoa não recebe resposta nem plano daqui: o servidor dela recusa.
         let read_only = self.selected.as_ref().is_some_and(|s| s.read_only());

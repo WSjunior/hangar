@@ -176,6 +176,8 @@ pub fn input_request(source: Option<UiSource>, read_only: bool, site: &str, key:
 pub struct View<'a> {
     pub press: Option<Press>,
     pub show: Show,
+    /// Rolagem da fileira de abas: o app manda rolar até a aba ativa quando ela muda.
+    pub tabs_scroll: &'a ScrollHandle,
     pub columns: Option<f64>,
     pub hover: Option<Hover>,
     pub hovered: &'a HashSet<String>,
@@ -416,6 +418,28 @@ pub fn follow_local(prev: &[String], next: &[String], local: Option<&str>) -> Op
     prev[..at].iter().rev().find(|id| next.contains(id)).or_else(|| next.first()).cloned()
 }
 
+/// O que fazer com a rolagem da fileira de abas num desenho.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabScroll {
+    /// Nada a rolar: sem fileira (menos de dois painéis), aba ativa já vista ou fora da lista.
+    Idle,
+    /// Há aba ativa nova, mas a fileira ainda não tem geometria (primeiro quadro): tentar no quadro seguinte.
+    Wait,
+    /// Rolar até o índice e marcar a aba como vista.
+    To(usize),
+}
+
+/// Decide a rolagem da fileira: a aba ativa mudou desde a última vista (abrir, troca pelo servidor, clique, aba ativa
+/// fechada) e a fileira já tem geometria. Sem troca não rola, para respeitar a roda do mouse.
+pub fn tab_scroll_target(seen: Option<&str>, ids: &[String], active: Option<&str>, laid_out: bool) -> TabScroll {
+    let Some(active) = active.filter(|a| ids.len() > 1 && seen != Some(*a)) else { return TabScroll::Idle };
+    match ids.iter().position(|id| id == active) {
+        Some(_) if !laid_out => TabScroll::Wait,
+        Some(ix) => TabScroll::To(ix),
+        None => TabScroll::Idle,
+    }
+}
+
 fn frame() -> Div {
     div().px(px(10.)).py(px(6.)).rounded(px(8.)).bg(theme::inset())
         .font_family(theme::MONO).text_size(px(TEXT_PX)).line_height(px(CELL_H)).text_color(theme::text())
@@ -443,7 +467,7 @@ const TAB_MAX_CELLS: f32 = 24.;
 /// com o título cortado, e a fileira rola de lado quando não cabe (como o `overflow-x: auto` do web): toda aba fica ao
 /// alcance, e o `✕` não sai da tela.
 fn tabs(panes: &[Value], active: &str, view: &View) -> AnyElement {
-    let row = div().id("plg-tabs").flex().flex_row().items_center().gap_1().flex_1().min_w_0().overflow_x_scroll()
+    let row = div().id("plg-tabs").flex().flex_row().items_center().gap_1().flex_1().min_w_0().overflow_x_scroll().track_scroll(view.tabs_scroll)
         .children(panes.iter().map(|p| {
             let id = p["id"].as_str().unwrap_or("").to_owned();
             let title = p["title"].as_str().filter(|t| !t.is_empty()).unwrap_or(&id).to_owned();
@@ -907,7 +931,7 @@ fn unmark(text: &str) -> String {
 mod tests {
     // Importação explícita: `super::*` traz o `test` do gpui_kit, e o `#[test]` passaria a ser o dele.
     use super::{accepts_typing, active_pane, box_background, button_key, cell_color, color, field_id, fields, FieldSync, fills_place, follow_local, follows_server,
-        hover_props, input_kind, input_request, is_empty, keep_hovered, keyless_text, Outbox, pane_ids, plain_deep, raster_row, raster_runs, safe_href,
+        hover_props, input_kind, input_request, is_empty, keep_hovered, keyless_text, Outbox, pane_ids, tab_scroll_target, TabScroll, plain_deep, raster_row, raster_runs, safe_href,
         scope_active, surfaces, text_row, toast, wants_hover, FieldSpec, Surfaces, Toast, UiSource};
     use gpui_kit::component::input::InputEvent;
     use gpui_kit::{rgb, Hsla};
@@ -1057,6 +1081,29 @@ mod tests {
         assert_eq!(follow_local(&v(&["a", "b", "c"]), &v(&["a", "c"]), Some("b")).as_deref(), Some("a"));
         assert_eq!(follow_local(&v(&["a", "b"]), &v(&["b"]), Some("a")).as_deref(), Some("b"));
         assert_eq!(follow_local(&v(&["a"]), &[], Some("a")), None);
+    }
+
+    #[test]
+    fn tab_row_scrolls_to_the_active_tab_only_when_it_changes_and_the_row_has_geometry() {
+        let v = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let ids = v(&["a", "b", "c"]);
+        // Abrir: nada visto ainda, a ativa é a última.
+        assert_eq!(tab_scroll_target(None, &ids, Some("c"), true), TabScroll::To(2));
+        // Troca pelo servidor e por clique: a ativa mudou.
+        assert_eq!(tab_scroll_target(Some("c"), &ids, Some("a"), true), TabScroll::To(0));
+        assert_eq!(tab_scroll_target(Some("a"), &ids, Some("b"), true), TabScroll::To(1));
+        // Redesenho sem troca: a rolagem da pessoa é respeitada.
+        assert_eq!(tab_scroll_target(Some("b"), &ids, Some("b"), true), TabScroll::Idle);
+        // Ativa removida: a vizinha assume e entra na vista.
+        assert_eq!(tab_scroll_target(Some("b"), &v(&["a", "c"]), Some("a"), true), TabScroll::To(0));
+        // Primeiro quadro, sem geometria: espera, sem rolar nem marcar.
+        assert_eq!(tab_scroll_target(None, &ids, Some("c"), false), TabScroll::Wait);
+        // Sem aba ativa, ativa fora da lista ou uma aba só: nada.
+        assert_eq!(tab_scroll_target(None, &ids, None, true), TabScroll::Idle);
+        assert_eq!(tab_scroll_target(Some("a"), &[], None, true), TabScroll::Idle);
+        assert_eq!(tab_scroll_target(None, &ids, Some("z"), true), TabScroll::Idle);
+        assert_eq!(tab_scroll_target(None, &v(&["a"]), Some("a"), true), TabScroll::Idle);
+        assert_eq!(tab_scroll_target(None, &v(&["a"]), Some("a"), false), TabScroll::Idle);
     }
 
     #[test]
