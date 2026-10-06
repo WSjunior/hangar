@@ -20,8 +20,9 @@ const CALL_S: f64 = 3.0;
 /// fechar, com a confirmação pelo rol, fica em 5 s.
 pub const APP_CALL_MAX_S: f64 = 2.0 * CALL_S;
 const ATTACH_S: f64 = 15.0;
-/// Esperas antes de cada nova ligação depois de uma sem resposta (o pedido pode ter se perdido com o
-/// cano travado); esgotadas, a superfície desliga até o processo religar.
+/// Esperas antes de cada nova ligação, ou novo pedido do rol, depois de um sem resposta (o pedido pode
+/// ter se perdido com o cano travado); esgotadas, a ligação desliga a superfície até o processo religar,
+/// e o rol fica à espera do próximo aviso `ui_panes`.
 const ATTACH_RETRY_S: [f64; 3] = [1.0, 2.0, 4.0];
 /// Pedidos de desenho juntados depois de um `ui_invalidate` (S3).
 const BATCH_S: f64 = 0.1;
@@ -79,6 +80,9 @@ pub struct Surface {
     /// Novas ligações já feitas depois de uma sem resposta, e quando sai a próxima.
     attach_retries: usize,
     attach_at: Option<f64>,
+    /// O mesmo para o pedido do rol.
+    panes_retries: usize,
+    panes_at: Option<f64>,
 }
 
 fn reply(token: u64, result: Result<Value, ModsError>) -> SurfaceEffect {
@@ -91,7 +95,8 @@ impl Surface {
     pub fn new(prefix: String) -> Self {
         Self { prefix, counter: 0, phase: Phase::Idle, waiting: BTreeMap::new(), panes: Vec::new(), shown: None,
             trees: BTreeMap::new(), dirty: BTreeSet::new(), flush_at: None,
-            closing: Vec::new(), working: false, published: None, attach_retries: 0, attach_at: None }
+            closing: Vec::new(), working: false, published: None, attach_retries: 0, attach_at: None,
+            panes_retries: 0, panes_at: None }
     }
 
     pub fn owns(&self, id: &RequestId) -> bool {
@@ -130,11 +135,15 @@ impl Surface {
                 self.phase = Phase::Ready;
                 self.attach_retries = 0;
                 self.render(BAND_SITE, now, &mut out);
-                self.request("ui_panes", json!({"client_id": CLIENT_ID}), Pending::Panes, now, &mut out);
+                self.panes_retries = 0;
+                self.ask_panes(now, &mut out);
             }
             // Recusada: o rol aceito durante a ligação e os desenhos em voo saem junto.
             Pending::Attach => self.turn_off(&mut out),
-            Pending::Panes => if ok { self.apply_panes(&body, now, &mut out) },
+            Pending::Panes => if ok {
+                self.panes_retries = 0;
+                self.apply_panes(&body, now, &mut out);
+            },
             Pending::Render { instance } => {
                 if ok { self.store(&instance, &body, &mut out); }
                 // O que ficou sujo enquanto este desenho estava em voo sai na próxima janela.
@@ -235,6 +244,9 @@ impl Surface {
         if self.attach_at.is_some_and(|at| now + 1e-9 >= at) && self.phase == Phase::Attaching {
             self.attach(now, &mut out);
         }
+        if self.panes_at.is_some_and(|at| now + 1e-9 >= at) && self.phase == Phase::Ready {
+            self.ask_panes(now, &mut out);
+        }
         if self.flush_at.is_some_and(|at| now + 1e-9 >= at) {
             self.flush_at = None;
             for instance in std::mem::take(&mut self.dirty) {
@@ -257,7 +269,12 @@ impl Surface {
                     self.dirty.insert(call.site().to_owned());
                     out.push(reply(token, Err(no_answer())));
                 }
-                Pending::Panes => {}
+                // Rol sem resposta: sem pedir de novo, um painel aberto nesse meio só aparecia no próximo
+                // aviso `ui_panes`, quando algum painel mudasse.
+                Pending::Panes => if let Some(wait) = ATTACH_RETRY_S.get(self.panes_retries) {
+                    self.panes_retries += 1;
+                    self.panes_at = Some(now + wait);
+                },
                 pending => if let Some(token) = pending.token() { out.push(reply(token, Err(no_answer()))); },
             }
         }
@@ -270,7 +287,7 @@ impl Surface {
     }
 
     pub fn deadline(&self) -> Option<f64> {
-        self.flush_at.into_iter().chain(self.attach_at).chain(self.waiting.values().map(|waiting| waiting.deadline))
+        self.flush_at.into_iter().chain(self.attach_at).chain(self.panes_at).chain(self.waiting.values().map(|waiting| waiting.deadline))
             .chain(self.closing.iter().map(|(_, _, until)| *until)).min_by(f64::total_cmp)
     }
 
@@ -299,6 +316,11 @@ impl Surface {
             call @ (ModsCall::Press { .. } | ModsCall::Input { .. }) => self.act(token, call, false, now, until, &mut out),
         }
         out
+    }
+
+    fn ask_panes(&mut self, now: f64, out: &mut Vec<SurfaceEffect>) {
+        self.panes_at = None;
+        self.request("ui_panes", json!({"client_id": CLIENT_ID}), Pending::Panes, now, out);
     }
 
     fn request(&mut self, subtype: &str, mut body: Value, pending: Pending, now: f64, out: &mut Vec<SurfaceEffect>) {
@@ -412,6 +434,7 @@ impl Surface {
         self.dirty.clear();
         self.flush_at = None;
         self.attach_at = None;
+        self.panes_at = None;
     }
 
     /// Ligação recusada, sem resposta depois das novas tentativas, ou processo encerrado: limpa o rol e os desenhos (em voo
