@@ -5923,20 +5923,38 @@ def _recusa_se_painel_aberto(name: str) -> None:
 
 @app.post("/api/sessions/{name}/select", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 def select(name: str, body: SelectBody):
-    from app.runtime_terminal import route_sync
-    pending = plugin_bridge.pergunta_pendente(name)
-    payload = {"option":body.option}
-    if pending is not None:
-        payload["request_id"] = pending["id"]
-        if str(pending["id"]).startswith("perm:") and body.option not in (1, 2):
-            raise HTTPException(409, detail=erro("erro_opcao_nao_convergiu", "opção fora do pedido de permissão"))
-    if pending is None or not str(pending["id"]).startswith("perm:"):
-        # Pergunta `ask:` pode acabar no teclado da TUI: aí vale a trava do painel e o cursor tem de ser lido.
-        _recusa_se_painel_aberto(name)
+    from app.runtime_terminal import TerminalOutcomeUnknown, route_sync
+    info = _cached_info_sync(name)
+    # A rota do terminal só conhece o vínculo Claude: para outro provedor (Codex sem terminal
+    # incluído) ela suspendia a escrita antes de chegar ao ramo dele.
+    if getattr(info, "provider", "claude") == "claude":
+        pending = plugin_bridge.pergunta_pendente(name)
+        payload = {"option":body.option}
         if pending is not None:
-            payload["require_cursor"] = True
-    if route_sync(name, {"kind":"control", "control":"select", "payload":payload}) is not None:
-        return {"ok": True}
+            payload["request_id"] = pending["id"]
+            if str(pending["id"]).startswith("perm:") and body.option not in (1, 2):
+                raise HTTPException(409, detail=erro("erro_opcao_nao_convergiu", "opção fora do pedido de permissão"))
+        if pending is None or not str(pending["id"]).startswith("perm:"):
+            # Pergunta `ask:` pode acabar no teclado da TUI: aí vale a trava do painel e o cursor tem de ser lido.
+            _recusa_se_painel_aberto(name)
+            if pending is not None:
+                payload["require_cursor"] = True
+        try:
+            routed = route_sync(name, {"kind":"control", "control":"select", "payload":payload})
+        except (TerminalControlError, TransferInProgress):
+            raise
+        except TerminalOutcomeUnknown as e:
+            _log.warning("SELECT name=%s resultado incerto no terminal: %s", name, e)
+            raise HTTPException(409, detail=erro("erro_sem_confirmacao_resposta",
+                "resposta enviada, mas nao deu pra confirmar a tempo — "
+                "confira na sessao antes de responder de novo")) from None
+        except RuntimeError as e:
+            # Antes da entrega (vínculo, posse, Rust subindo): nada chegou ao pane.
+            _log.warning("SELECT name=%s rota do terminal falhou: %s", name, e, exc_info=True)
+            raise HTTPException(503, detail=erro("erro_opcao_nao_convergiu",
+                "não consegui responder pelo terminal — opção NÃO enviada", detalhe=str(e))) from None
+        if routed is not None:
+            return {"ok": True}
     # Mesma guarda do /input — e aqui ela é a ÚNICA: a cadeia abaixo não sabe falhar. terminal.select
     # devolve None, send_keys descarta o returncode e tmux._run converte tmux morto/travado
     # (TimeoutExpired/OSError) num CompletedProcess(returncode=1) que ninguém lê. Sem isto, responder
@@ -5961,7 +5979,6 @@ def select(name: str, body: SelectBody):
     # Kimi: os botoes de aprovacao (plano/comando/arquivo) sao desenhados a partir do WIRE, entao a
     # escolha volta pelo wire tambem — tecla numerica + `interaction.resolved` como prova. O drive
     # generico abaixo NAO atende este provider em hipotese nenhuma (ver _select_aprovacao_kimi).
-    info = _cached_info_sync(name)
     if getattr(info, "provider", "claude") == "kimi":
         return _select_aprovacao_kimi(name, info, body.option)
     codex_sem_terminal = getattr(info, "provider", "claude") == "codex" and getattr(info, "headless", False)
