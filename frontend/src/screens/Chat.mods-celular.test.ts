@@ -290,7 +290,7 @@ it('clique recusado: código conhecido mostra a frase dele sem o status; 5xx sem
     await vi.waitFor(() => expect(aviso()).toBe(api.mensagemDeErro('erro_mod_guarda_indisponivel')));
     vi.mocked(api.pressPluginButton).mockRejectedValueOnce(Object.assign(new Error('500: Internal Server Error'), { status: 500 }));
     abrir().click();
-    await vi.waitFor(() => expect(aviso()).toBe(m.native_plugin_press_failed()));
+    await vi.waitFor(() => expect(aviso()).toBe(m.plugin_clique_falhou()));
   } finally {
     await unmount(t.comp);
   }
