@@ -244,7 +244,8 @@ def fetch(base_url: str | None = None, dest: Path | None = None,
     url = url.rstrip("/")
     dest = dest or bin_dir()
     ext = ".exe" if plat.startswith("windows") else ""
-    branch_tag = None   # preenchido quando a branch não tem release e caímos na da main
+    branch_tag = None   # preenchido quando a branch não serve e caímos na da main
+    missing = "ausente"
     try:
         try:
             manifest = manifest or read_manifest(url)
@@ -253,6 +254,13 @@ def fetch(base_url: str | None = None, dest: Path | None = None,
                 raise
             # O server.yml só publica a branch quando crates/ muda: sem release própria, vale a da main.
             diag.registrar(_EVENT, "aviso", codigo="sem_release_da_branch", tag=tag)
+            manifest = None
+        else:
+            # Branch nova: um sistema pode publicar antes do outro, e o que falta vem da main.
+            if tag not in (None, MAIN_TAG) and not has_build(manifest, plat):
+                diag.registrar(_EVENT, "aviso", codigo="sem_build_na_branch", tag=tag, detalhe=plat)
+                missing, manifest = f"sem build para {plat}", None
+        if manifest is None:
             branch_tag, tag, url = tag, MAIN_TAG, f"{RELEASES_URL}/{MAIN_TAG}"
             manifest = read_manifest(url)
         files = manifest["files"]
@@ -261,7 +269,8 @@ def fetch(base_url: str | None = None, dest: Path | None = None,
         dest.mkdir(parents=True, exist_ok=True)
     except (*_DOWNLOAD_ERRORS, KeyError, TypeError) as e:
         diag.registrar("hangar_server.baixar", "erro", etapa="manifesto", tag=tag, **diag.erro_campos(e))
-        return [f"binários Rust não baixados: não consegui ler o manifesto da release ({e})"]
+        via = f" da main (release {branch_tag} {missing})" if branch_tag else ""
+        return [f"binários Rust não baixados: não consegui ler o manifesto da release{via} ({e})"]
     avisos, kept, installed = [], [], []
     for name in NAMES:
         target = dest / f"{name}{ext}"
@@ -271,13 +280,13 @@ def fetch(base_url: str | None = None, dest: Path | None = None,
             kept.append(name)
             continue
         if aviso := _fetch_one(url, files, plat, name, target, commit, tag):
-            avisos.append(aviso)
+            avisos.append(f"release {branch_tag} {missing}; da main, {aviso}" if branch_tag else aviso)
         elif branch_tag:
             installed.append(name)
     if kept:
-        avisos.append(f"release {branch_tag} ausente; mantive os binários instalados ({', '.join(kept)})")
+        avisos.append(f"release {branch_tag} {missing}; mantive os binários instalados ({', '.join(kept)})")
     if installed:
-        avisos.append(f"release {branch_tag} ausente; instalei os da main ({', '.join(installed)})")
+        avisos.append(f"release {branch_tag} {missing}; instalei os da main ({', '.join(installed)})")
     for aviso in avisos:
         _log.warning(aviso)
     return avisos
