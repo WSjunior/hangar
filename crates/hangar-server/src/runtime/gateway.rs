@@ -92,6 +92,24 @@ pub async fn unstretch(pane:&dyn crate::mods::click::Pane,until:std::time::Insta
     matches!(op(PaneOp::Resize { columns:formats.columns.max(MIN_COLUMNS),rows:MIN_ROWS }).await,Ok(Ok(_)))
 }
 
+/// Interface dos mods da sessão com terminal (fase 3): o Rust é o dono do terminal aqui, então é dono do
+/// clique e da faixa dela. Liga a sessão ao `Mods` na vida `life` com um elo novo; o processo é a chave
+/// durável mais o pane e a criação dele, que o renomear mantém.
+async fn attach_terminal_mods(mods:&crate::mods::state::Mods,target:&super::terminal::TerminalTarget,
+    handle:&super::terminal::TerminalHandle,life:u64) {
+    // Antes de ligar: nenhum pedido de app pode estar esticando a janela enquanto ela é lida.
+    unstretch(handle,std::time::Instant::now()+UNSTRETCH_MAX).await;
+    let link = crate::mods::terminal::TerminalLink::new(target.name.clone(),life,Arc::new(handle.clone()),mods.clone(),crate::mods::click::Limits::default());
+    let process = format!("{}:{}:{}",target.key,target.binding.pane,target.binding.created);
+    mods.attach_terminal(&target.name,&process,life,link.clone());
+    // O vigia sobe depois de ligar: o `attach_terminal` para o vigia do elo que estava no nome, e se fosse
+    // este mesmo elo o derrubaria. No psmux não há vigia (o `watch_notices` recusa no Windows): lá o mínimo
+    // volta na operação seguinte, no `prepare` do clique. O mínimo vale já na abertura: a janela pode ter
+    // ficado pequena com um terminal que se desligou.
+    if !target.binding.windows { link.watch(&target.binding.mux_argv); }
+    tokio::spawn(async move { link.floor().await; });
+}
+
 impl RuntimeRegistry {
     pub fn new(upstream:SocketAddr,secret:String,instance:String) -> Self {
         Self { entries:Mutex::new(BTreeMap::new()),events:broadcast::channel(1024).0,
@@ -173,34 +191,28 @@ impl RuntimeRegistry {
     }
     pub async fn open_terminal(&self,target:super::terminal::TerminalTarget)->Result<Value,RuntimeError> {
         let barrier=self.barrier(&target.key).await; let _guard=barrier.lock().await;
-        let existing=self.entries.lock().await.get(&target.key).map(|e|(e.generation,e.handle.clone()));
+        let existing=self.entries.lock().await.get(&target.key).map(|e|(e.generation,e.handle.clone(),e.mods_life));
         let handle=match existing {
-            Some((generation,EntryHandle::Terminal {target:old,handle})) if generation==target.generation && old.binding==target.binding
-                && old.transcript==target.transcript && old.state_path==target.state_path && old.projection_dir==target.projection_dir && old.lease_path==target.lease_path=>handle,
+            Some((generation,EntryHandle::Terminal {target:old,handle},life)) if generation==target.generation && old.binding==target.binding
+                && old.transcript==target.transcript && old.state_path==target.state_path && old.projection_dir==target.projection_dir && old.lease_path==target.lease_path=>{
+                // Reabertura da mesma vida: se o nome saiu do `Mods` ou passou a outra vida, a sessão volta a
+                // ser ligada, na vida da entrada, que é a que o `close` esquece.
+                if let Some(mods)=&self.mods && life!=0 && mods.life(&target.name)!=Some(life) {
+                    attach_terminal_mods(mods,&target,&handle,life).await;
+                }
+                handle
+            },
             Some(_)=>return Err(failure("runtime_generation")),
             None=>{
                 let lease=wait_lease(&target.lease_path).await?;
                 let store=open_store(&target.state_path,&target.projection_dir,&target.key,target.generation,&target.name,lease.clone()).await?;
                 let revision=self.revisions.lock().await.entry(target.key.clone()).or_insert_with(||Arc::new(AtomicU64::new(0))).clone();
                 let handle=super::terminal::TerminalActor::spawn(target.clone(),QueueActor::start(store,lease),self.policy.clone(),super::terminal::TerminalOptions::default(),self.events.clone(),revision);
-                // Interface dos mods da sessão com terminal (fase 3): o Rust é o dono do terminal aqui, então é
-                // dono do clique e da faixa dela. A vida é única no servidor (`new_life`); o processo é a chave
-                // durável mais o pane e a criação dele, que o renomear mantém.
+                // A vida no `Mods` é única no servidor (`new_life`).
                 let life=match &self.mods {
                     Some(mods)=>{
-                        // Antes de ligar: nenhum pedido de app pode estar esticando a janela enquanto ela é lida.
-                        unstretch(&handle,std::time::Instant::now()+UNSTRETCH_MAX).await;
                         let life=mods.new_life();
-                        let link=crate::mods::terminal::TerminalLink::new(target.name.clone(),life,Arc::new(handle.clone()),mods.clone(),crate::mods::click::Limits::default());
-                        let process=format!("{}:{}:{}",target.key,target.binding.pane,target.binding.created);
-                        mods.attach_terminal(&target.name,&process,life,link.clone());
-                        // O vigia sobe depois de ligar: o `attach_terminal` para o vigia do elo que estava no
-                        // nome, e se fosse este mesmo elo o derrubaria. No psmux não há vigia (o `watch_notices`
-                        // recusa no Windows): lá o mínimo volta na operação seguinte, no `prepare` do clique. O
-                        // mínimo vale já na abertura: a janela pode ter ficado pequena com um terminal que se
-                        // desligou.
-                        if !target.binding.windows {link.watch(&target.binding.mux_argv);}
-                        tokio::spawn(async move {link.floor().await;});
+                        attach_terminal_mods(mods,&target,&handle,life).await;
                         life
                     },
                     None=>0,

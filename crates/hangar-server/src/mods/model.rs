@@ -110,11 +110,6 @@ pub fn close_refused() -> ModsError {
 pub fn no_typing() -> ModsError {
     ModsError::new("erro_mod_sem_digitacao", "Nesta sessão, o campo do mod só aceita digitação no terminal ou não está ligado ao app.")
 }
-/// Pedido de app sem token de dono, com token de convidado, numa sessão com terminal que o Rust atende: o
-/// pane é do executor do Rust, e o Python, que aceita convidado no `plugin_press`, o dirigiria por fora.
-pub fn guest_refused() -> ModsError {
-    ModsError::new("erro_mod_convidado", "Só o dono da sessão aciona os mods dela pelo app; quem acompanha como convidado vê, mas não clica.")
-}
 
 // Recusas do clique com terminal (fase 3). Os textos são os de `messages/pt.json` (fase 1); o painel que
 // fechou no meio do clique usa o `pane_missing` acima.
