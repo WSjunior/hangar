@@ -1239,6 +1239,9 @@ describe('ditado entregue à conversa de origem', () => {
     expect(button(container, 'composer_ditado_cru')).toBeDefined();
     await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="composer_enviar_mensagem"]')!.click());
     expect(button(container, 'composer_ditado_cru')).toBeUndefined();
+    // O campo vazio já esconde a barra; só o mesmo texto de volta prova que ela foi solta no envio.
+    type(container, 'texto prosa');
+    expect(button(container, 'composer_ditado_cru')).toBeUndefined();
     act(() => root.unmount());
   });
 });
