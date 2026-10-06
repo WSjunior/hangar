@@ -62,14 +62,18 @@ jobs:
             experimental: true
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.experimental }}
+    # Escreve porque cada sistema publica no fim do próprio build; sem o token do git no checkout, o cargo
+    # test e os build scripts não alcançam essa escrita.
     permissions:
-      contents: read
+      contents: write
     defaults:
       run:
         working-directory: crates
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
@@ -146,47 +150,14 @@ jobs:
             cp "${{ matrix.bindir }}/$bin${{ matrix.exe }}" "out/$bin-${{ matrix.platform }}${{ matrix.exe }}"
           done
           ls -l out
-      - uses: actions/upload-artifact@v4
-        with:
-          name: server-${{ matrix.platform }}
-          path: crates/out/*
-          retention-days: 1
-
-  # Só este job escreve.
-  publish:
-    needs: build
-    if: startsWith(github.ref, 'refs/heads/')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: server-*
-          path: out
-          merge-multiple: true
-      # Chave `<plataforma>/<bin>` sem `.exe`; o `name` é o asset exato a baixar.
-      - name: sha256 e manifesto
-        working-directory: out
-        run: |
-          for need in hangar-server-linux-x86_64 hangar-cano-linux-x86_64; do
-            test -f "$need" || { echo "sem $need, nada a publicar"; exit 1; }
-          done
-          files='{}'
-          for f in hangar-server-* hangar-cano-*; do
-            base=${f%.exe}
-            case "$base" in hangar-server-*) bin=hangar-server ;; *) bin=hangar-cano ;; esac
-            platform=${base#"$bin"-}
-            sha=$(sha256sum "$f" | cut -d' ' -f1)
-            files=$(jq --arg k "$platform/$bin" --arg n "$f" --arg s "$sha" '.[$k] = {name: $n, sha256: $s}' <<<"$files")
-          done
-          jq -n --arg commit "$GITHUB_SHA" --argjson files "$files" '{commit: $commit, files: $files}' > server-latest.json
-          cat server-latest.json
-      # O manifesto sobe por ÚLTIMO: até ele trocar, quem baixa ainda vê o sha antigo e recusa o binário novo em vez
-      # de usar um par trocado. Sistema que não compilou desta vez fica com o arquivo anterior e fora do manifesto.
-      - working-directory: out
+      # Cada sistema publica assim que o PRÓPRIO build passa: o Linux não espera Windows e macOS. Build que falha não
+      # publica nada, e a release segue com o binário e a entrada anteriores daquele sistema.
+      - name: Publicar na release
+        if: startsWith(github.ref, 'refs/heads/')
+        working-directory: crates/out
         env:
           GH_TOKEN: ${{ github.token }}
+          PLATFORM: ${{ matrix.platform }}
         run: |
           # Mesma limpeza do release_tag() do backend/app/rust_release.py: mudar uma exige mudar a outra.
           if [ "$GITHUB_REF_NAME" = main ]; then
@@ -202,8 +173,108 @@ jobs:
             criar=(--prerelease --title "hangar-server e hangar-cano (branch $GITHUB_REF_NAME)"
                    --notes "Reescrita a cada push na branch $GITHUB_REF_NAME. A atualização baixa daqui quando o checkout está nessa branch.")
           fi
+          # Dois sistemas podem achar a release ausente ao mesmo tempo: se o create falha, vale a que o outro criou.
           gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
-            || gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false "${criar[@]}"
+            || gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false "${criar[@]}" \
+            || gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null
+          protocol=$(sed -n 's/^pub const INTERNAL_PROTOCOL: u32 = \([0-9][0-9]*\);.*/\1/p' ../hangar-server/src/lib.rs)
+          test -n "$protocol" || { echo "::error::INTERNAL_PROTOCOL não encontrado em crates/hangar-server/src/lib.rs"; exit 1; }
           gh release upload "$tag" hangar-server-* hangar-cano-* --repo "$GITHUB_REPOSITORY" --clobber
-          gh release upload "$tag" server-latest.json --repo "$GITHUB_REPOSITORY" --clobber
+          python - "$tag" "$PLATFORM" "$protocol" <<'EOF'
+          import hashlib, json, os, pathlib, random, shutil, subprocess, sys, time
+
+          tag, plat, protocol = sys.argv[1:]
+          repo, sha = os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_SHA"]
+          LATEST = "server-latest.json"
+
+          def gh(*args):
+              subprocess.run(["gh", *args, "--repo", repo], check=True)
+
+          def put(path, data):
+              path.write_bytes(json.dumps(data, indent=2, sort_keys=True).encode())
+              gh("release", "upload", tag, str(path), "--clobber")
+
+          # A fonte de cada sistema é o server-<sistema>.json, que só o job dele grava; o server-latest.json é
+          # composto das fontes e continua no formato que o instalador e o rust_release.py leem.
+          files = {}
+          for f in sorted(pathlib.Path().glob("hangar-*")):
+              name = "hangar-server" if f.name.startswith("hangar-server-") else "hangar-cano"
+              files[f"{plat}/{name}"] = {"name": f.name, "sha256": hashlib.sha256(f.read_bytes()).hexdigest()}
+          put(pathlib.Path(f"server-{plat}.json"),
+              {"platform": plat, "commit": sha, "protocol": int(protocol), "files": files})
+
+          def read():
+              d = pathlib.Path("lido")
+              shutil.rmtree(d, ignore_errors=True)
+              gh("release", "download", tag, "--pattern", "server-*.json", "--dir", str(d))
+              latest = d / LATEST
+              old = json.loads(latest.read_bytes()) if latest.exists() else {}
+              return old, {p.name: p.read_bytes() for p in sorted(d.glob("server-*.json")) if p.name != LATEST}
+
+          out = pathlib.Path(LATEST)
+          for attempt in range(12):
+              if attempt:
+                  time.sleep(random.uniform(2, 8))
+              old, raw = read()
+              # Semente primeiro: a fonte do próprio sistema, quando existe, vale por cima dela.
+              by_plat = {}
+              for n, b in sorted(raw.items(), key=lambda kv: not kv[0].startswith("server-seed-")):
+                  s = json.loads(b)
+                  by_plat[s["platform"]] = s
+              sources = list(by_plat.values())
+              # Fonte nunca é apagada: sistema do manifesto sem fonte na leitura é outro job no meio do --clobber
+              # dela (apaga e sobe), e compor agora o tiraria da release.
+              if set(old.get("platforms", {})) - set(by_plat):
+                  continue
+              # Manifesto de antes das fontes (sem `platforms`): o sistema que ainda não publicou ganha uma semente
+              # com a entrada que ele já tinha, para não sair da release. Ela tem nome próprio para nunca sobrescrever
+              # a fonte que o job do sistema grava, e toda regravação do manifesto vem depois dela.
+              seeds = set() if "platforms" in old else {k.split("/")[0] for k in old.get("files", {})} - set(by_plat)
+              for p in sorted(seeds):
+                  try:
+                      put(pathlib.Path(f"server-seed-{p}.json"),
+                          {"platform": p, "commit": old.get("commit"), "protocol": None,
+                           "files": {k: v for k, v in old["files"].items() if k.startswith(p + "/")}})
+                  except subprocess.CalledProcessError:
+                      pass   # outro sistema gravando a mesma semente; a releitura confere
+              if seeds:
+                  continue
+              merged = {"commit": sha, "files": {}, "platforms": {}}
+              for s in sources:
+                  merged["files"].update(s["files"])
+                  entry = {"commit": s["commit"]}
+                  if s["protocol"] is not None:   # semente: quem lê busca o protocolo pelo commit
+                      entry["protocol"] = s["protocol"]
+                  merged["platforms"][s["platform"]] = entry
+              try:
+                  put(out, merged)
+              except subprocess.CalledProcessError:
+                  continue   # outro sistema regravando o manifesto no mesmo instante
+              # Se nenhuma fonte mudou entre a leitura e a gravação, quem chegar depois compõe por cima com a fonte
+              # dele; se mudou, esta gravação pode ter deixado outro sistema de fora e é refeita.
+              if read()[1] == raw:
+                  print(out.read_text())
+                  break
+          else:
+              sys.exit(f"{LATEST} não estabilizou")
+          EOF
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$tag" -f sha="$GITHUB_SHA" -F force=true >/dev/null
+
+  # Windows e macOS têm continue-on-error para a falha de build deles não segurar o Linux; publicação que falhou
+  # depois de começar (binário novo com manifesto velho) não pode passar calada por isso.
+  publish-check:
+    needs: build
+    if: always() && startsWith(github.ref, 'refs/heads/')
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          failed=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" --paginate \
+            --jq '.jobs[] | select(any(.steps[]?; .name == "Publicar na release" and .conclusion == "failure")) | .name')
+          if [ -n "$failed" ]; then
+            echo "::error::publicação falhou em: $failed"
+            exit 1
+          fi
