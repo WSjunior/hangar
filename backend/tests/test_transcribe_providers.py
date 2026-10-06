@@ -182,6 +182,7 @@ def test_espera_vencida_volta_a_tentar_o_primeiro(monkeypatch):
     (lambda: _http_error(429, b"", {"Retry-After": "120"}), 120),
     (lambda: _http_error(429, b"limite"), mod.QUOTA_WAIT_429),
     (lambda: _http_error(402, b"pague"), mod.QUOTA_WAIT_402),
+    (lambda: _http_error(429, b"", {"Retry-After": "²"}), mod.QUOTA_WAIT_429),
 ])
 def test_tempo_de_espera_usa_a_data_do_servico_ou_o_padrao(monkeypatch, erro, espera):
     _config(monkeypatch, [TURBO, LARGE])
@@ -233,12 +234,13 @@ def test_teto_do_conjunto_corta_a_fila(monkeypatch):
     assert ei.value.detail.startswith("ElevenLabs: falha ao contatar")
 
 
-def test_transcribe_continua_devolvendo_so_o_texto_com_prazo_de_arquivo(monkeypatch):
-    # Vídeo e anexo são mais longos e não passam por limpeza: prazo maior por serviço.
+def test_transcribe_do_video_devolve_so_o_texto_dentro_do_prazo_do_upload(monkeypatch):
+    # A fala do vídeo roda dentro do /upload: o teto cabe antes de o cliente desistir.
     _config(monkeypatch, [TURBO])
     chamadas = _servidores(monkeypatch, {"api.groq.com": b"so texto"})
     assert mod.transcribe(b"a", "a.webm") == "so texto"
-    assert chamadas[0]["timeout"] == mod.FILE_LIMITS[0]
+    assert chamadas[0]["timeout"] == mod.VIDEO_LIMITS[0]
+    assert mod.VIDEO_LIMITS[1] < 180
 
 
 def test_elevenlabs_sem_texto_tem_motivo_proprio(monkeypatch):

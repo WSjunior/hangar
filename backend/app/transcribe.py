@@ -35,6 +35,8 @@ ELEVENLABS_MODEL = "scribe_v2"
 # pode levar até 120 s depois; arquivo anexado e vídeo não passam por limpeza e são mais longos.
 DICTATION_LIMITS = (60, 150)
 FILE_LIMITS = (120, 240)
+# A fala do vídeo roda dentro do /upload, que o cliente abandona aos 180 s.
+VIDEO_LIMITS = (60, 120)
 # Abaixo disto não vale abrir outra tentativa: ela estouraria o teto de qualquer jeito.
 _MIN_ATTEMPT = 5
 QUOTA_WAIT_429 = 3600
@@ -331,7 +333,8 @@ def _retry_after(headers, now: float) -> float | None:
     valor = ((headers.get("retry-after") if headers is not None else None) or "").strip()
     if not valor:
         return None
-    if valor.isdigit():
+    # `isdigit` sozinho aceita "²", que o `int` recusa fora do try.
+    if valor.isascii() and valor.isdigit():
         return now + int(valor)
     try:
         return parsedate_to_datetime(valor).timestamp()
@@ -378,7 +381,7 @@ def _reason(name: str, verdict: str, f: _Failure) -> str:
 
 def transcribe(content: bytes, filename: str | None) -> str:
     """Transcreve áudio e devolve UMA linha (vídeo anexado só quer o texto)."""
-    return transcribe_with_provider(content, filename, FILE_LIMITS).text
+    return transcribe_with_provider(content, filename, VIDEO_LIMITS).text
 
 
 def transcribe_with_provider(content: bytes, filename: str | None,

@@ -68,6 +68,7 @@ def test_fora_do_projeto_e_recusado_antes_do_realpath(proj, tmp_path, monkeypatc
     assert _status(proj, str(fora)) == 400
 
 
+@pytest.mark.skipif(os.name == "nt", reason="symlink exige privilégio no Windows")
 def test_travessia_link_e_diretorio_sao_recusados(proj, tmp_path):
     proprio = Path(uploads.save_upload(proj, "cc", b"a", "a.webm"))
     fora = tmp_path / "segredo.txt"
@@ -80,6 +81,13 @@ def test_travessia_link_e_diretorio_sao_recusados(proj, tmp_path):
                 str(proprio.parent / "pasta.webm"),           # não é arquivo regular
                 str(proprio.parent.parent / "x.webm")):       # direto na pasta do projeto
         assert _status(proj, ref) == 400, ref
+
+
+@pytest.mark.parametrize("absoluto", [True, False])
+def test_nul_no_caminho_e_400(proj, absoluto):
+    pasta = Path(uploads.save_upload(proj, "cc", b"a", "a.webm")).parent
+    ref = f"{pasta}/a\x00.webm" if absoluto else "a\x00.webm"
+    assert _status(proj, ref) == 400
 
 
 def test_inexistente_na_pasta_do_projeto_e_404(proj):

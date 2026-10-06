@@ -164,6 +164,9 @@ def resolve_session_audio(cwd: str, sessao: str, ref: str, *, allow_absolute: bo
     """Áudio a transcrever. Nome solto = pasta da sessão atual (`resolve_upload`). Caminho absoluto
     = um `path` devolvido antes, aceito em qualquer pasta de sessão DESTE projeto: a pasta é chaveada
     pelo transcript, e depois de um `/clear` o áudio ficou na pasta do anterior."""
+    # NUL faz as funções de caminho levantarem ValueError, que viraria 500 em vez de 400.
+    if "\x00" in ref:
+        raise UploadError(400, "caminho invalido")
     # Caminho de rede antes de tudo: no Windows, resolver `\\host\share` já é uma conexão SMB.
     if ref.startswith(("\\\\", "//")):
         raise UploadError(400, "caminho de rede recusado")
