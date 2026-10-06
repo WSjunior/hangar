@@ -53,8 +53,9 @@ enum Message {
     Snapshot(oneshot::Sender<Result<Value,RuntimeError>>),Drain(oneshot::Sender<Result<Value,RuntimeError>>),
     Confirm(oneshot::Sender<Result<Value,RuntimeError>>),Stop(oneshot::Sender<Result<(),RuntimeError>>),
 }
+type ActorTask=Arc<Mutex<Option<tokio::task::JoinHandle<Result<(),RuntimeError>>>>>;
 #[derive(Clone)]
-pub struct TerminalHandle {sender:mpsc::Sender<Message>,closed:Arc<AtomicBool>,task:Arc<Mutex<Option<tokio::task::JoinHandle<Result<(),RuntimeError>>>>>,stopped:Arc<Mutex<Option<Result<(),RuntimeError>>>>,anchor:ModsAnchor}
+pub struct TerminalHandle {sender:mpsc::Sender<Message>,closed:Arc<AtomicBool>,task:ActorTask,stopped:Arc<Mutex<Option<Result<(),RuntimeError>>>>,anchor:ModsAnchor}
 impl TerminalHandle {
     /// A âncora que este executor lê (`TerminalOptions::anchor`): o elo do `Mods` escreve nela.
     pub fn anchor(&self)->ModsAnchor {self.anchor.clone()}
