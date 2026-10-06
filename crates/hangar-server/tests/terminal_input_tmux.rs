@@ -1,6 +1,6 @@
 #![cfg(unix)]
 use hangar_server::terminal_input::*;
-use std::{sync::Arc,time::{Duration,SystemTime,UNIX_EPOCH}};
+use std::{sync::{Arc,atomic::{AtomicU32,Ordering}},time::{Duration,SystemTime,UNIX_EPOCH}};
 use tokio::process::Command;
 struct Facts(TerminalBinding);
 impl TerminalServices for Facts {
@@ -43,7 +43,10 @@ struct FakeCli {_dir:tempfile::TempDir,receipt:std::path::PathBuf,err:std::path:
 async fn fake_cli() -> FakeCli {
  let dir=tempfile::tempdir().unwrap();let cli=dir.path().join("fake_cli.py");let receipt=dir.path().join("receipt.json");let err=dir.path().join("fake_cli.err");
  std::fs::write(&cli,FAKE_CLI).unwrap();
- let label=format!("hangar-input-test-{}-{}",std::process::id(),SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos());let guard=IsolatedMux(label.clone());
+ // Os testes rodam em paralelo no mesmo processo; o relógio do macOS tem passo de 1 µs e dois
+ // rótulos por horário colidiam, e o Drop de um derrubava o tmux do outro.
+ static NEXT:AtomicU32=AtomicU32::new(0);
+ let label=format!("hangar-input-test-{}-{}-{}",std::process::id(),SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos(),NEXT.fetch_add(1,Ordering::Relaxed));let guard=IsolatedMux(label.clone());
  // O stderr do CLI falso vai a um arquivo: quando o pane morre cedo, é a única pista do motivo.
  let cli_cmd=format!("python3 '{}' '{}' 2>'{}'",cli.display(),receipt.display(),err.display());
  let new=Command::new("tmux").args(["-L",&label,"new-session","-d","-s","test","-x","100","-y","40",&cli_cmd]).output().await.unwrap();assert!(new.status.success(),"new-session: {}; fake_cli stderr: {}",String::from_utf8_lossy(&new.stderr),std::fs::read_to_string(&err).unwrap_or_default());
