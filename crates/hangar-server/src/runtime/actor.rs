@@ -92,8 +92,8 @@ impl RuntimeEngine {
         }
         self
     }
-    fn mods_call(&mut self,token:u64,call:ModsCall,clock:ClockSample) -> Result<Vec<Effect>,ModsError> {
-        match &mut self.core { Core::Claude(core)=>core.mods_call(token,call,clock),Core::Codex(_)=>Err(crate::mods::model::missing()) }
+    fn mods_call(&mut self,token:u64,call:ModsCall,left_s:f64,clock:ClockSample) -> Result<Vec<Effect>,ModsError> {
+        match &mut self.core { Core::Claude(core)=>core.mods_call(token,call,left_s,clock),Core::Codex(_)=>Err(crate::mods::model::missing()) }
     }
     fn view(&self) -> Value {
         match &self.core { Core::Claude(core)=>core.view(),Core::Codex(core)=> {
@@ -173,7 +173,8 @@ enum Message {
     Snapshot(oneshot::Sender<Result<Value,RuntimeError>>),
     Drain(oneshot::Sender<Result<Value,RuntimeError>>),
     Confirm(oneshot::Sender<Result<Value,RuntimeError>>),
-    /// `deadline`: quando o app deixa de esperar. Pedido que chega à vez depois disso não roda.
+    /// `deadline`: quando quem pediu deixa de esperar (o prazo da rota, limitado ao teto do ator). Pedido
+    /// que chega à vez depois disso não roda, e a superfície recebe o que sobra dele.
     Mods { call:ModsCall,deadline:Instant,response:oneshot::Sender<Result<Value,ModsError>> },
     Stop(oneshot::Sender<Result<(),RuntimeError>>),
 }
@@ -213,14 +214,14 @@ impl RuntimeHandle {
         let (send,receive) = oneshot::channel(); self.sender.send(Message::Confirm(send)).await.map_err(|_|self.gone("runtime_closed"))?;
         receive.await.map_err(|_|self.gone("runtime_closed"))?
     }
-    /// Pedido de um app à interface dos mods desta sessão. Ator parado ou sumido responde com código,
-    /// nunca pendura o app.
-    pub async fn mods(&self,call:ModsCall) -> Result<Value,ModsError> { self.mods_within(call,MODS_CALL_LIMIT).await }
-    async fn mods_within(&self,call:ModsCall,limit:Duration) -> Result<Value,ModsError> {
+    /// Pedido de um app à interface dos mods desta sessão, com o prazo de quem pediu (a rota), limitado ao
+    /// teto do ator. O prazo vai até a superfície, que não leva ação ao mod sem tempo para a resposta
+    /// voltar. Ator parado ou sumido responde com código, nunca pendura o app.
+    pub async fn mods(&self,call:ModsCall,deadline:Instant) -> Result<Value,ModsError> {
         if self.closed.load(Ordering::Acquire) { return Err(crate::mods::model::no_answer()); }
         let (response,receive) = oneshot::channel();
-        let deadline = Instant::now() + limit;
-        tokio::time::timeout(limit,async {
+        let deadline = deadline.min(Instant::now() + MODS_CALL_LIMIT);
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline),async {
             self.sender.send(Message::Mods { call,deadline,response }).await.map_err(|_|crate::mods::model::no_answer())?;
             receive.await.map_err(|_|crate::mods::model::no_answer())?
         }).await.unwrap_or_else(|_|Err(crate::mods::model::no_answer()))
@@ -253,9 +254,9 @@ impl RuntimeHandle {
 }
 
 impl crate::mods::state::SurfaceLink for RuntimeHandle {
-    fn call(&self,call:ModsCall) -> crate::mods::state::CallFuture {
+    fn call(&self,call:ModsCall,deadline:Instant) -> crate::mods::state::CallFuture {
         let handle = self.clone();
-        Box::pin(async move { handle.mods(call).await })
+        Box::pin(async move { handle.mods(call,deadline).await })
     }
 }
 
@@ -1188,9 +1189,10 @@ type ModsWaiters = BTreeMap<u64,oneshot::Sender<Result<Value,ModsError>>>;
 fn take_mods(engine:&mut RuntimeEngine,waiters:&mut ModsWaiters,token:&mut u64,call:ModsCall,deadline:Instant,
     response:oneshot::Sender<Result<Value,ModsError>>,clock:ClockSample) -> Vec<Effect> {
     if response.is_closed() { return Vec::new(); }
-    if Instant::now() >= deadline { let _ = response.send(Err(crate::mods::model::no_answer())); return Vec::new(); }
+    let now = Instant::now();
+    if now >= deadline { let _ = response.send(Err(crate::mods::model::no_answer())); return Vec::new(); }
     *token += 1;
-    match engine.mods_call(*token,call,clock) {
+    match engine.mods_call(*token,call,deadline.duration_since(now).as_secs_f64(),clock) {
         Ok(next) => { waiters.insert(*token,response); next }
         Err(error) => { let _ = response.send(Err(error)); Vec::new() }
     }
@@ -1207,10 +1209,11 @@ mod tests {
         let handle = RuntimeHandle { sender,task:Arc::new(Mutex::new(None)),closed:Arc::new(AtomicBool::new(false)),
             events:broadcast::channel(1).0,stopped:Arc::new(Mutex::new(None)),key:"key".into() };
         let call = || ModsCall::Show { site:"p".into() };
-        let first = tokio::time::timeout(Duration::from_secs(2),handle.mods_within(call(),Duration::from_millis(50))).await.unwrap();
+        let soon = || Instant::now() + Duration::from_millis(50);
+        let first = tokio::time::timeout(Duration::from_secs(2),handle.mods(call(),soon())).await.unwrap();
         assert_eq!(first.unwrap_err().code,"erro_mod_clique_sem_resposta");
         // A caixa cheia (o primeiro pedido ficou nela) também cai no prazo, agora no envio.
-        let second = tokio::time::timeout(Duration::from_secs(2),handle.mods_within(call(),Duration::from_millis(50))).await.unwrap();
+        let second = tokio::time::timeout(Duration::from_secs(2),handle.mods(call(),soon())).await.unwrap();
         assert_eq!(second.unwrap_err().code,"erro_mod_clique_sem_resposta");
         assert_eq!(MODS_CALL_LIMIT,Duration::from_secs(7));
     }

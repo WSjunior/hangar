@@ -125,12 +125,13 @@ impl ClaudeEngine {
         if let Some(surface) = self.surface.as_mut() { let out = surface.start(now); Self::surface_out(effects,out); }
     }
 
-    /// Pedido de um app; a resposta sai depois, como `SurfaceEffect::Reply` com o mesmo `token`.
-    pub fn mods_call(&mut self,token:u64,call:ModsCall,clock:ClockSample) -> Result<Vec<Effect>,ModsError> {
+    /// Pedido de um app; a resposta sai depois, como `SurfaceEffect::Reply` com o mesmo `token`. `left_s`:
+    /// quanto falta para quem pediu deixar de esperar.
+    pub fn mods_call(&mut self,token:u64,call:ModsCall,left_s:f64,clock:ClockSample) -> Result<Vec<Effect>,ModsError> {
         self.clock = clock;
         let surface = self.surface.as_mut().ok_or_else(missing)?;
         let mut effects = Vec::new();
-        Self::surface_out(&mut effects,surface.call(token,call,clock.monotonic_s));
+        Self::surface_out(&mut effects,surface.call(token,call,clock.monotonic_s,clock.monotonic_s+left_s));
         Ok(effects)
     }
 

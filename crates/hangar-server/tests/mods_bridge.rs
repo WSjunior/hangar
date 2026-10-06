@@ -33,7 +33,7 @@ async fn json_of(response: reqwest::Response) -> Value {
 #[derive(Clone)]
 struct PluginLike { server: std::sync::OnceLock<std::net::SocketAddr> }
 impl SurfaceLink for PluginLike {
-    fn call(&self, _: ModsCall) -> CallFuture {
+    fn call(&self, _: ModsCall, _: std::time::Instant) -> CallFuture {
         let server = *self.server.get().unwrap();
         Box::pin(async move {
             let base = format!("http://{server}/api/plugin");

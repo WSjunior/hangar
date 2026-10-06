@@ -39,7 +39,7 @@ impl std::ops::Deref for FakeLink {
 }
 
 impl SurfaceLink for FakeLink {
-    fn call(&self, call: ModsCall) -> CallFuture {
+    fn call(&self, call: ModsCall, _: Instant) -> CallFuture {
         let link = self.0.clone();
         Box::pin(async move {
             let now = link.active.fetch_add(1, SeqCst) + 1;

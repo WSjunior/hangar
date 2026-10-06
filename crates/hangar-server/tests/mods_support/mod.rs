@@ -3,11 +3,15 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use hangar_server::mods::model::{ModsCall, ModsError, SurfaceEffect};
+use hangar_server::mods::state::Mods;
 use hangar_server::mods::surface::Surface;
-use hangar_server::runtime::protocol::RequestId;
+use hangar_server::runtime::gateway::RuntimeRegistry;
+use hangar_server::runtime::protocol::{CanoBinding, RequestId, RuntimeTarget};
 use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 pub fn fixtures() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mods")
@@ -62,7 +66,7 @@ pub fn cano_snapshot_json() -> Value {
 /// Superfície que nunca responde: para os testes que só mexem no registro.
 pub struct NoLink;
 impl hangar_server::mods::state::SurfaceLink for NoLink {
-    fn call(&self, _: hangar_server::mods::model::ModsCall) -> hangar_server::mods::state::CallFuture {
+    fn call(&self, _: hangar_server::mods::model::ModsCall, _: std::time::Instant) -> hangar_server::mods::state::CallFuture {
         Box::pin(async { Err(hangar_server::mods::model::missing()) })
     }
 }
@@ -223,7 +227,7 @@ impl Drive {
     }
 
     pub fn call(&mut self, token: u64, call: ModsCall) {
-        let out = self.surface.call(token, call, self.now);
+        let out = self.surface.call(token, call, self.now, self.now + 7.0);
         self.feed(out);
     }
 
@@ -239,4 +243,85 @@ impl Drive {
         let view = self.view();
         view["panes"].as_array().unwrap().iter().find(|pane| pane["id"] == id).map(|pane| texts(&pane["tree"])).unwrap_or_default()
     }
+}
+
+/// O prazo que a rota daria a um pedido que acabou de entrar.
+pub fn budget() -> std::time::Instant { std::time::Instant::now() + std::time::Duration::from_millis(7500) }
+
+/// Alvo de sessão Claude sem terminal. `initialized: false` deixa a superfície sem ligar: ela espera o
+/// `initialize` dizer se o processo a aceita (A13).
+pub fn claude_target(dir:&std::path::Path,escuta:String,initialized:bool) -> RuntimeTarget {
+    RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
+        metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":initialized}),
+        binding:CanoBinding { pid:42,escuta,token:"secret-test".into(),versao:2 },
+        lease_path:dir.join("key.lock"),state_path:dir.join("key.queue-state.json"),projection_dir:dir.join("projection"),
+        transcript:dir.join("chat.jsonl"),created:0.0 }
+}
+
+/// (subtipo, id) de cada pedido `ui_*` que chegou ao cano.
+pub type Seen = Arc<Mutex<Vec<(String,String)>>>;
+
+/// Cano que responde os `ui_*` pela vitrine gravada, aceita várias conexões (reabertura) e anota
+/// subtipo e id dos pedidos. `swallow` lista subtipos que ficam sem resposta.
+pub async fn vitrine_cano(swallow:&'static [&'static str]) -> (String,Seen,tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let ids = Arc::new(Mutex::new(Vec::new()));
+    let seen = ids.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((stream,_)) = listener.accept().await else { return };
+            let seen = seen.clone();
+            tokio::spawn(async move {
+                let (read,mut write) = tokio::io::split(stream);
+                let mut reader = BufReader::new(read);
+                let mut raw = String::new();
+                if reader.read_line(&mut raw).await.unwrap_or(0) == 0 || raw != "secret-test\n" { return; }
+                let snapshot = cano_snapshot_json();
+                write.write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
+                let mut fake = FakeClaude::new("vitrine");
+                loop {
+                    raw.clear();
+                    if reader.read_line(&mut raw).await.unwrap_or(0) == 0 { return; }
+                    let envelope:serde_json::Value = serde_json::from_str(&raw).unwrap();
+                    let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
+                    if write.write_all(format!("{ack}\n").as_bytes()).await.is_err() { return; }
+                    let frame:serde_json::Value = serde_json::from_str(envelope["frame"].as_str().unwrap()).unwrap();
+                    let subtype = frame["request"]["subtype"].as_str().unwrap_or("").to_owned();
+                    if frame["type"] != "control_request" || !subtype.starts_with("ui_") { continue; }
+                    seen.lock().unwrap().push((subtype.clone(),frame["request_id"].as_str().unwrap_or("").to_owned()));
+                    if swallow.contains(&subtype.as_str()) { continue; }
+                    for line in fake.answer(&frame) {
+                        let out = json!({"type":"cano_output","frame":line.to_string()});
+                        if write.write_all(format!("{out}\n").as_bytes()).await.is_err() { return; }
+                    }
+                }
+            });
+        }
+    });
+    (format!("tcp:{address}"),ids,task)
+}
+
+pub async fn wait_ui(mods:&Mods,check:impl Fn(&serde_json::Value)->bool) -> serde_json::Value {
+    tokio::time::timeout(std::time::Duration::from_secs(5),async {
+        loop {
+            if let Some(ui) = mods.replay("session").into_iter().find(|(event,_)|*event == "plugin_ui")
+                .map(|(_,data)|serde_json::from_str::<serde_json::Value>(&data).unwrap()).filter(|ui|check(ui)) { return ui; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await.expect("plugin_ui esperado")
+}
+
+/// Espera, com prazo, o cano receber um pedido do subtipo.
+pub async fn wait_request(seen:&Seen,subtype:&str) {
+    tokio::time::timeout(std::time::Duration::from_secs(5),async {
+        while !seen.lock().unwrap().iter().any(|(kind,_)|kind == subtype) {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await.unwrap_or_else(|_|panic!("{subtype} esperado no cano"))
+}
+
+pub fn registry(mods:&Mods) -> RuntimeRegistry {
+    // Política num endereço sem ninguém: só serviços cosméticos a usam aqui.
+    RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"secret-test".into(),"instance-test".into()).with_mods(mods.clone())
 }

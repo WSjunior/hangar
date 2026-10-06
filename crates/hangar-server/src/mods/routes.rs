@@ -138,9 +138,10 @@ async fn run(st: &AppState, headers: &HeaderMap, name: &str, call: ModsCall, dea
         return refused(headers, &no_answer());
     }
     let attempt = match &call { ModsCall::Press { site, key } => Some(st.mods.begin_click(name, site, key)), _ => None };
-    // O que sobra do orçamento limita a chamada. Cortada, a resposta que vier depois cai num canal fechado,
-    // e o ator não leva à superfície um pedido que ainda estava na caixa dele.
-    let result = tokio::time::timeout_at(deadline, link.call(call.clone())).await.unwrap_or_else(|_| Err(no_answer()));
+    // O que sobra do orçamento limita a chamada e vai junto até a superfície, que não leva ação ao mod sem
+    // tempo para a resposta voltar antes dele. Cortada, a resposta que vier depois cai num canal fechado, e
+    // o ator não leva à superfície um pedido que ainda estava na caixa dele.
+    let result = tokio::time::timeout_at(deadline, link.call(call.clone(), deadline.into_std())).await.unwrap_or_else(|_| Err(no_answer()));
     let (copied, opened) = match &attempt {
         Some(attempt) => st.mods.finish_click(name, attempt, EFFECT_WAIT.min(deadline.saturating_duration_since(Instant::now()))).await,
         None => (None, None),

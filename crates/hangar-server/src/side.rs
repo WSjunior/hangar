@@ -665,7 +665,7 @@ mod tests {
         ctx.mods.bind_hubs(ctx.hubs.downgrade());
         struct Quiet;
         impl crate::mods::state::SurfaceLink for Quiet {
-            fn call(&self, _: crate::mods::model::ModsCall) -> crate::mods::state::CallFuture {
+            fn call(&self, _: crate::mods::model::ModsCall, _: Instant) -> crate::mods::state::CallFuture {
                 Box::pin(async { Ok(json!(null)) })
             }
         }

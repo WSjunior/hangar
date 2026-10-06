@@ -1643,9 +1643,14 @@ a cópia só volta ao aparelho de quem clicou quando vem do mod do botão.
 
 Prazos: cada pedido de app (press, show, close, input e o redesenho que ele dispara) tem 3 s, o
 pior caminho soma 6 s e o teto no ator é 7 s; a rota do servidor mede desde a entrada e trabalha
-com 7,5 s, abaixo do corte de 8 s dos apps. O ator descarta, sem executar, o pedido que já
-venceu: assim o clique não roda depois de o app ter desistido (sem clique fantasma e sem fila
-atrás do pedido velho). Os desenhos de fundo continuam com 10 s.
+com 7,5 s, abaixo do corte de 8 s dos apps. O prazo da rota vai junto com o pedido até a
+superfície (o do ator é o menor entre ele e os 7 s): a espera pela vez da sessão e a guarda já
+gastaram parte dele. O ator descarta, sem executar, o pedido que venceu na caixa, e a superfície
+só manda `ui_press`, `ui_input`, `ui_pane_show` ou `ui_close`, inclusive na nova tentativa depois
+de um redesenho, quando ainda restam os 3 s do prazo do pedido; com menos, responde
+`erro_mod_clique_sem_resposta` sem chamar o mod. Assim a ação não sai depois de a rota ter
+desistido. O que fica é o mod lento: um `onPress` que leva mais que os 3 s responde sem resposta
+com o clique já rodando. Os desenhos de fundo continuam com 10 s.
 
 O `claude -p` sobe com o plugin do Hangar (`--plugin-dir`) e as variáveis da ponte
 (`HANGAR_PLUGIN_URL`, `HANGAR_PLUGIN_TOKEN`), exceção explícita à regra de não acrescentar nada ao

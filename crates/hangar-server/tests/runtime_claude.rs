@@ -170,10 +170,10 @@ fn late_ack_does_not_override_result() {
 #[test]
 fn mods_call_needs_a_surface_and_a_live_attach() {
     let mut engine = engine(json!({"name":"session","initialized":true}));
-    let refused = engine.mods_call(1,ModsCall::Show { site:"p".into() },clock(10.0)).err().unwrap();
+    let refused = engine.mods_call(1,ModsCall::Show { site:"p".into() },7.0,clock(10.0)).err().unwrap();
     assert_eq!(refused.code,"erro_mod_botao_inexistente","sem superfície ligada");
     engine.enable_surface("ui:t".into());
-    let effects = engine.mods_call(2,ModsCall::Show { site:"p".into() },clock(10.0)).unwrap();
+    let effects = engine.mods_call(2,ModsCall::Show { site:"p".into() },7.0,clock(10.0)).unwrap();
     assert!(effects.iter().any(|effect|matches!(effect,Effect::Surface { effect:SurfaceEffect::Reply { token:2,result:Err(error) } }
         if error.code == "erro_mod_painel_inexistente")),"superfície ainda não ligada responde na hora");
 }
@@ -260,7 +260,7 @@ fn without_surface_ui_copy_keeps_the_empty_answer() {
 fn process_exit_fails_pending_mods_calls() {
     let mut engine = attached();
     line(&mut engine,json!({"type":"system","subtype":"ui_panes","panes":[{"id":"p","title":"P","plugin":"m"}],"shown_id":"p","focused_id":null,"focus_requested_id":null}),12.0);
-    engine.mods_call(5,ModsCall::Show { site:"p".into() },clock(12.0)).unwrap();
+    engine.mods_call(5,ModsCall::Show { site:"p".into() },7.0,clock(12.0)).unwrap();
     let effects = line(&mut engine,json!({"type":"cano_saiu","rc":1}),13.0);
     assert!(effects.iter().any(|e|matches!(e,Effect::Surface { effect:SurfaceEffect::Reply { token:5,result:Err(error) } } if error.code == "erro_mod_clique_sem_resposta")));
     assert!(effects.iter().any(|e|matches!(e,Effect::Surface { effect:SurfaceEffect::Publish { data } } if data["panes"] == json!([]))));

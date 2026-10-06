@@ -13,7 +13,8 @@ use crate::runtime::protocol::RequestId;
 const RENDER_S: f64 = 10.0;
 /// Prazo de clique, fechar, mostrar e digitar, e do desenho de novo que um clique ou uma digitação pede
 /// (S4). Curto porque o app desiste em 8 s: a resposta tem que chegar antes, senão o app mostra erro
-/// com o clique ainda rodando no mod.
+/// com o clique ainda rodando no mod. Também é o mínimo que precisa sobrar do prazo de quem pediu para
+/// a ação sair: com menos, a rota responderia antes do mod e o clique rodaria depois do erro no app.
 const CALL_S: f64 = 3.0;
 /// O pedido de app mais longo: o desenho de novo antes do clique e o clique depois dele (6 s). O
 /// fechar, com a confirmação pelo rol, fica em 5 s.
@@ -35,9 +36,10 @@ enum Pending {
     Panes,
     Render { instance: String },
     /// Clique ou digitação levados ao mod pelo `handle` do desenho guardado.
-    Act { token: u64, call: ModsCall, retried: bool },
+    /// `until`: quando quem pediu deixa de esperar, no relógio da superfície.
+    Act { token: u64, call: ModsCall, retried: bool, until: f64 },
     /// Desenho pedido para tentar de novo um clique ou uma digitação (S4).
-    Refresh { token: u64, call: ModsCall },
+    Refresh { token: u64, call: ModsCall, until: f64 },
     Close { token: u64, site: String },
     Show { token: u64, site: String },
 }
@@ -138,7 +140,7 @@ impl Surface {
                 // O que ficou sujo enquanto este desenho estava em voo sai na próxima janela.
                 self.arm(now);
             }
-            Pending::Act { token, call, retried } => match (ok, body["handled"] == true) {
+            Pending::Act { token, call, retried, until } => match (ok, body["handled"] == true) {
                 (false, _) => out.push(reply(token, Err(no_answer()))),
                 (true, true) => {
                     let mut answer = json!({"element": body["element"]});
@@ -147,11 +149,11 @@ impl Surface {
                 }
                 (true, false) if retried => out.push(reply(token, Err(stale()))),
                 // Nada rodou no mod (P03): o desenho que o servidor tem está vencido.
-                (true, false) => self.refresh(token, call, now, &mut out),
+                (true, false) => self.refresh(token, call, now, until, &mut out),
             },
-            Pending::Refresh { token, call } => {
+            Pending::Refresh { token, call, until } => {
                 if ok { self.store(call.site(), &body, &mut out); }
-                self.act(token, call, true, now, &mut out);
+                self.act(token, call, true, now, until, &mut out);
                 self.arm(now);
             }
             Pending::Close { token, site } => {
@@ -251,7 +253,7 @@ impl Surface {
                 // Desenho sem resposta (pedido descartado com o canal do cano cheio, por exemplo) volta a
                 // ficar sujo e sai de novo na próxima janela; sem isso a tela do app ficava parada.
                 Pending::Render { instance } => { self.dirty.insert(instance); }
-                Pending::Refresh { token, call } => {
+                Pending::Refresh { token, call, .. } => {
                     self.dirty.insert(call.site().to_owned());
                     out.push(reply(token, Err(no_answer())));
                 }
@@ -273,13 +275,19 @@ impl Surface {
     }
 
     /// Pedido de um app. Clique e digitação vão pelo `handle` do último desenho, com a `key` junto;
-    /// sem o elemento no desenho guardado, pede o desenho de novo e procura uma vez (S4).
-    pub fn call(&mut self, token: u64, call: ModsCall, now: f64) -> Vec<SurfaceEffect> {
+    /// sem o elemento no desenho guardado, pede o desenho de novo e procura uma vez (S4). `until` é o
+    /// prazo de quem pediu (a rota), no relógio da superfície: com menos de `CALL_S` dele, nada sai ao
+    /// mod e a resposta é a de mod sem resposta.
+    pub fn call(&mut self, token: u64, call: ModsCall, now: f64, until: f64) -> Vec<SurfaceEffect> {
         let mut out = Vec::new();
         if self.phase != Phase::Ready || !self.mounted(call.site()) {
             // Show e Close falam de painel; só Press e Input falam de botão ou campo.
             let error = if matches!(call, ModsCall::Show { .. } | ModsCall::Close { .. }) { pane_missing() } else { missing() };
             out.push(reply(token, Err(error)));
+            return out;
+        }
+        if !Self::in_time(now, until) {
+            out.push(reply(token, Err(no_answer())));
             return out;
         }
         match call {
@@ -288,7 +296,7 @@ impl Surface {
             ModsCall::Close { site } if site != BAND_SITE => self.request("ui_close",
                 json!({"id": site, "client_id": CLIENT_ID}), Pending::Close { token, site }, now, &mut out),
             ModsCall::Show { .. } | ModsCall::Close { .. } => out.push(reply(token, Err(pane_missing()))),
-            call @ (ModsCall::Press { .. } | ModsCall::Input { .. }) => self.act(token, call, false, now, &mut out),
+            call @ (ModsCall::Press { .. } | ModsCall::Input { .. }) => self.act(token, call, false, now, until, &mut out),
         }
         out
     }
@@ -418,9 +426,14 @@ impl Surface {
         self.trees.get(site).and_then(|tree| tree::find(tree, key, &[kind]))
     }
 
-    fn refresh(&mut self, token: u64, call: ModsCall, now: f64, out: &mut Vec<SurfaceEffect>) {
+    /// A ação só sai com o prazo inteiro dela ainda dentro do de quem pediu.
+    fn in_time(now: f64, until: f64) -> bool {
+        until - now + 1e-9 >= CALL_S
+    }
+
+    fn refresh(&mut self, token: u64, call: ModsCall, now: f64, until: f64, out: &mut Vec<SurfaceEffect>) {
         match self.render_body(call.site()) {
-            Some(body) => self.request("ui_render", body, Pending::Refresh { token, call }, now, out),
+            Some(body) => self.request("ui_render", body, Pending::Refresh { token, call, until }, now, out),
             None => out.push(reply(token, Err(missing()))),
         }
     }
@@ -429,7 +442,12 @@ impl Surface {
     /// e procura uma vez (S4); na nova tentativa, a falta é desenho vencido. No `ui_input` vão `key`,
     /// `component` e `instance_id` juntos: o Claude Code acha o campo mesmo com o `handle` vencido, e a
     /// digitação não se perde num redesenho (P09).
-    fn act(&mut self, token: u64, call: ModsCall, retried: bool, now: f64, out: &mut Vec<SurfaceEffect>) {
+    /// Na nova tentativa, o prazo de quem pediu é conferido de novo: o desenho pode ter gastado o que sobrava.
+    fn act(&mut self, token: u64, call: ModsCall, retried: bool, now: f64, until: f64, out: &mut Vec<SurfaceEffect>) {
+        if !Self::in_time(now, until) {
+            out.push(reply(token, Err(no_answer())));
+            return;
+        }
         let found = match &call {
             ModsCall::Press { site, key } => self.control(site, key, "Button").map(|control| ("ui_press",
                 json!({"plugin": control.plugin, "handle": control.handle, "key": key, "surface": SURFACE, "client_id": CLIENT_ID}))),
@@ -440,9 +458,9 @@ impl Surface {
             ModsCall::Close { .. } | ModsCall::Show { .. } => None,
         };
         match found {
-            Some((subtype, body)) => self.request(subtype, body, Pending::Act { token, call, retried }, now, out),
+            Some((subtype, body)) => self.request(subtype, body, Pending::Act { token, call, retried, until }, now, out),
             None if retried => out.push(reply(token, Err(stale()))),
-            None => self.refresh(token, call, now, out),
+            None => self.refresh(token, call, now, until, out),
         }
     }
 }
