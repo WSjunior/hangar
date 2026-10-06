@@ -356,8 +356,8 @@ contas; mudança reclassifica a sessão e publica na hora, coalescida em 150 ms)
 **Falha sem ela:** `list_routes::marker_change_publishes_without_tick`,
 `list_routes::burst_of_writes_coalesces`.
 
-- [ ] **Step 41: Testes, vistos falhar**
-- [ ] **Step 42: Observador e coalescência; testes focados; revisar**
+- [x] **Step 41: Testes, vistos falhar**
+- [x] **Step 42: Observador e coalescência; testes focados; revisar**
 
 ---
 

@@ -28,7 +28,7 @@ pub struct Marker {
     pub ts: f64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct Native {
     state: &'static str,
     ts: f64,
@@ -53,7 +53,7 @@ const RACY_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn file_key(meta: &std::fs::Metadata) -> Option<FileKey> { Some((meta.modified().ok()?, meta.len())) }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 enum Parsed {
     Marker(Option<Marker>),
     Native(Option<(String, Native)>),
@@ -218,6 +218,23 @@ fn unique(dirs: &[PathBuf], sub: &str) -> Vec<PathBuf> {
     out
 }
 
+/// Pastas cuja escrita muda o estado de uma sessão Claude: marcadores, registro nativo e pergunta
+/// aberta de cada conta, resolvidas e sem repetir.
+pub fn state_dirs(dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = unique(dirs, MARKER_DIR);
+    for sub in [NATIVE_DIR, ASKQ_DIR] {
+        out.extend(unique(dirs, sub).into_iter().filter(|d| !out.contains(d)).collect::<Vec<_>>());
+    }
+    out
+}
+
+/// Session id de uma pergunta aberta (`.hangar-askq/<sid>.json`); os demais arquivos de estado
+/// dizem a sessão pelo `HookStates::refresh`.
+pub fn askq_sid(path: &Path) -> Option<String> {
+    let parent = path.parent()?.file_name()?;
+    (parent == ASKQ_DIR && path.extension().is_some_and(|x| x == "json")).then(|| stem(path))
+}
+
 fn is_native_name(name: &str) -> bool {
     name.strip_suffix(".json").is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
 }
@@ -232,9 +249,11 @@ impl HookStates {
 
     /// Marcadores de cada `<config>/.hangar-state` e o registro nativo de cada `<config>/sessions`
     /// (resolvido: as contas são symlink para o principal, e um só basta). Arquivo ilegível fica de
-    /// fora; arquivo sumido sai.
-    pub fn refresh(&mut self, dirs: &[PathBuf]) {
+    /// fora; arquivo sumido sai. Devolve os session ids cujo marcador ou registro nativo mudou desde
+    /// a leitura anterior: a lista acordada por arquivo reclassifica só essas sessões.
+    pub fn refresh(&mut self, dirs: &[PathBuf]) -> Vec<String> {
         let mut previous = std::mem::take(&mut self.files);
+        let mut changed = Vec::new();
         let (mut markers, mut native) = (HashMap::new(), HashMap::new());
         // `parse` devolve `None` quando a leitura falhou: nada é guardado, e o próximo tique tenta de novo.
         let mut visit = |path: PathBuf, parse: &dyn Fn(&Path) -> Option<Parsed>, files: &mut HashMap<PathBuf, (FileKey, Parsed)>| {
@@ -244,10 +263,19 @@ impl HookStates {
             let settled = key.0.elapsed().is_ok_and(|age| age > RACY_WINDOW);
             let parsed = match previous.remove(&path) {
                 Some((k, parsed)) if k == key && settled => parsed,
-                _ => {
+                before => {
                     #[cfg(test)]
                     { self.reads += 1; }
-                    let Some(parsed) = parse(&path) else { return };
+                    let Some(parsed) = parse(&path) else {
+                        // O estado da sessão some com a leitura: é mudança, e o próximo tique tenta de novo.
+                        changed.extend(before.and_then(|(_, b)| parsed_sid(&path, &b)));
+                        return;
+                    };
+                    // Reler o mesmo conteúdo (escrita recente, dentro da janela do mtime) não é mudança.
+                    if before.as_ref().is_none_or(|(_, b)| *b != parsed) {
+                        changed.extend(before.and_then(|(_, b)| parsed_sid(&path, &b)));
+                        changed.extend(parsed_sid(&path, &parsed));
+                    }
                     parsed
                 }
             };
@@ -292,9 +320,14 @@ impl HookStates {
                 })), &mut files);
             }
         }
+        // Arquivo apagado também muda o estado da sessão dele.
+        changed.extend(previous.iter().filter_map(|(path, (_, p))| parsed_sid(path, p)));
         self.files = files;
         self.markers = markers;
         self.native = native;
+        changed.sort_unstable();
+        changed.dedup();
+        changed
     }
 
     /// Registro nativo enquanto o pid dele vive (é o estado que a TUI tem); senão o marcador.
@@ -304,6 +337,14 @@ impl HookStates {
             return Some(Marker { state: n.state.to_owned(), ts: n.ts });
         }
         self.markers.get(sid).cloned()
+    }
+}
+
+/// Session id do arquivo lido: o nome do marcador, o `sessionId` do registro nativo.
+fn parsed_sid(path: &Path, parsed: &Parsed) -> Option<String> {
+    match parsed {
+        Parsed::Marker(_) => path.file_stem().and_then(|s| s.to_str()).map(str::to_owned),
+        Parsed::Native(n) => n.as_ref().map(|(sid, _)| sid.clone()),
     }
 }
 
@@ -570,18 +611,21 @@ mod tests {
         }
         let mut hs = HookStates::load(&dirs);
         assert_eq!(hs.reads, 6);
-        hs.refresh(&dirs);
+        assert!(hs.refresh(&dirs).is_empty());
         assert_eq!(hs.reads, 6, "nada mudou, nada relido");
         let f = cfg.join(".hangar-state/s1.json");
         write(&f, r#"{"state": "idle", "ts": 22}"#);
         std::fs::File::options().write(true).open(&f).unwrap()
             .set_modified(SystemTime::now() - std::time::Duration::from_secs(30)).unwrap();
         std::fs::remove_file(cfg.join(".hangar-state/s2.json")).unwrap();
-        hs.refresh(&dirs);
+        assert_eq!(hs.refresh(&dirs), ["s1", "s2"], "o reescrito e o apagado, uma vez cada");
         assert_eq!(hs.reads, 7);
         assert_eq!(hs.get_state(Some("s1"), |_| false), Some(Marker { state: "idle".into(), ts: 22.0 }));
         assert_eq!(hs.get_state(Some("s2"), |_| false), None, "arquivo sumido sai do mapa");
         assert_eq!(hs.get_state(Some("s0"), |p| p == 7), Some(Marker { state: "working".into(), ts: 2.0 }));
+        write(&cfg.join(".hangar-state/s4.json"), r#"{"state": "idle", "ts": 3}"#);
+        assert_eq!(hs.refresh(&dirs), ["s4"]);
+        assert!(hs.refresh(&dirs).is_empty(), "escrita recente relida igual não é mudança");
         // Leitura que falhou não fica guardada: consertada a permissão, a mesma versão é lida.
         #[cfg(unix)]
         {
@@ -594,7 +638,7 @@ mod tests {
             hs.refresh(&dirs);
             let blocked = hs.get_state(Some("s3"), |_| false);
             std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
-            hs.refresh(&dirs);
+            assert_eq!(hs.refresh(&dirs), ["s3"]);
             assert_eq!((blocked, hs.get_state(Some("s3"), |_| false)), (None, Some(Marker { state: "idle".into(), ts: 5.0 })));
         }
     }

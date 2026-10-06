@@ -102,7 +102,27 @@ struct Discovery { at: Instant, wall: f64, epoch: u64,
     fresh: bool, rows: Arc<Vec<SessionRow>>, agent_pids: Arc<HashMap<String, u32>>,
     panes: Arc<Vec<Pane>>, children: Arc<ChildrenMap> }
 
-struct Snapshot { at: Instant, epoch: u64, produced: Produced }
+struct Snapshot { at: Instant, epoch: u64, produced: Produced,
+    /// Entradas da produção, para a rodada parcial; `None` quando nenhuma lista do dono está aberta.
+    round: Option<Arc<Round>> }
+
+/// O que a classificação e a decoração de uma rodada usaram além das linhas.
+struct RoundInputs { agent_pids: Arc<HashMap<String, u32>>, targets: Arc<BTreeMap<String, String>>,
+    headless: Option<BTreeMap<String, Value>>, facts: Arc<ListFacts> }
+
+/// Uma produção inteira guardada: as linhas Claude como a descoberta e os fatos as deram, antes de
+/// classificar, e as entradas. A rodada parcial reclassifica uma delas sem descobrir de novo.
+struct Round { inputs: Arc<RoundInputs>, pre: Vec<SessionRow> }
+
+/// Resultado da rodada acordada por arquivo.
+pub enum Partial {
+    /// Linhas reclassificadas e a lista inteira com elas.
+    Done(Produced),
+    /// Nenhuma linha conhecida mudou.
+    Unchanged,
+    /// Sem produção inteira guardada (ou ela venceu): só o tique serve.
+    NeedsFull,
+}
 
 type Op<T> = Box<dyn FnOnce(&mut T) + Send>;
 
@@ -216,6 +236,12 @@ impl ListBridge {
         self.env.dirs.clone().ok_or(fail("list_dirs_missing", "pastas da lista ausentes"))
     }
 
+    /// Pastas que acordam a lista do dono (`facts_files::state_dirs` de cada conta). Lê disco.
+    pub fn watch_dirs(&self) -> Result<Vec<PathBuf>, ListError> {
+        let dirs = self.dirs()?;
+        Ok(facts_files::state_dirs(&self.caches.config_dirs(&dirs)))
+    }
+
     /// Mudança de membro ou de modo: a próxima pergunta não serve a lista de antes.
     pub fn invalidate(&self) { self.epoch.fetch_add(1, Ordering::SeqCst); }
 
@@ -277,12 +303,68 @@ impl ListBridge {
         }
         let at = Instant::now();
         let input = ProduceFacts { owner_clients: self.owner_clients.load(Ordering::Relaxed), shadow: false };
-        let produced = self.produce(&input).await?;
+        let done = self.produce_round(&input).await;
+        // A rodada parcial só parte da última produção que deu certo: sobre uma anterior, publicaria
+        // lista velha por cima do erro.
+        let failed = done.as_ref().map_or(true, |(p, _)| p.facts.unknown);
+        if let (true, Some(s)) = (failed, slot.as_mut()) { s.round = None; }
+        let (produced, round) = done?;
         // Sem fatos ainda não é retrato: guardado, o Python que acabou de responder esperaria 2 s.
         if !produced.facts.unknown {
-            *slot = Some(Snapshot { at, epoch, produced: produced.clone() });
+            *slot = Some(Snapshot { at, epoch, produced: produced.clone(), round });
         }
         Ok(produced)
+    }
+
+    /// Rodada acordada por arquivo: relê os marcadores e o registro nativo e reclassifica só as
+    /// sessões cujo arquivo mudou (e as de `asked`, com a pergunta aberta escrita), sobre a última
+    /// produção inteira, sem descoberta nem pergunta ao Python. O retrato passa a levar o resultado.
+    pub async fn reclassify(&self, asked: Vec<String>) -> Result<Partial, ListError> {
+        let mut slot = self.snapshot.lock().await;
+        let epoch = self.epoch.load(Ordering::SeqCst);
+        let Some((snap, round)) = slot.as_mut().filter(|s| s.epoch == epoch).and_then(|s| Some((s.produced.clone(), s.round.clone()?))) else {
+            return Ok(Partial::NeedsFull);
+        };
+        let dirs = self.dirs()?;
+        let (env, caches, handle) = (self.env.clone(), self.caches.clone(), tokio::runtime::Handle::current());
+        let done = tokio::task::spawn_blocking(move || {
+            let config_dirs = caches.config_dirs(&dirs);
+            let alive = |pid: i64| pid_alive(&*env.procs, pid);
+            let io = MuxCapture::new(env.capture_program.clone(), CAPTURE_TIMEOUT, round.inputs.targets.clone());
+            let inp = &round.inputs;
+            let classified = caches.classify.with(|Classify { classifier, hooks }| {
+                let mut sids = hooks.refresh(&config_dirs);
+                sids.extend(asked);
+                let mut rows: Vec<SessionRow> = round.pre.iter()
+                    .filter(|r| r.jsonl.as_deref().and_then(|j| Path::new(j).file_stem()).and_then(|s| s.to_str())
+                        .is_some_and(|sid| sids.iter().any(|s| s == sid)))
+                    .cloned().collect();
+                if rows.is_empty() {
+                    return None;
+                }
+                let facts = Facts { hooks, alive: &alive, config_dirs: &config_dirs, headless: inp.headless.as_ref(),
+                    problems: &inp.facts.problems, stall_seconds: inp.facts.stall_seconds };
+                let effects = handle.block_on(classifier.classify_some(&mut rows, &facts, &io));
+                Some((rows, effects))
+            });
+            let (mut rows, effects) = classified?;
+            decorate(&env, &caches, &dirs, &config_dirs, inp, &mut rows, io.wall(), io.mono(), false);
+            Some((rows, effects))
+        }).await.map_err(|e| joined(e, "rodada parcial interrompida"))?;
+        self.flush_notes();
+        let Some((mut changed, effects)) = done else { return Ok(Partial::Unchanged) };
+        list_facts::mark_stale(&mut changed, &snap.facts, snap.facts_ok);
+        let demote: Vec<String> = effects.into_iter().map(|Effect::DemoteAwaiting { sid }| sid).collect();
+        if !demote.is_empty() {
+            self.facts.demote(demote);
+        }
+        let mut rows = (*snap.rows).clone();
+        for new in changed {
+            if let Some(row) = rows.iter_mut().find(|r| r.name == new.name) { *row = new; }
+        }
+        let produced = Produced { rows: Arc::new(rows), facts: snap.facts, facts_ok: snap.facts_ok };
+        if let Some(s) = slot.as_mut() { s.produced = produced.clone(); }
+        Ok(Partial::Done(produced))
     }
 
     /// A produção da lista: descoberta + fatos do Python + classificação + contexto, resposta,
@@ -292,6 +374,10 @@ impl ListBridge {
     /// Linhas Codex, Pi, omp e Kimi levam o estado dos fatos; as de transferência em curso e as
     /// `orq` saem como o Python as deu, sem classificação nem decoração, no fim da lista.
     pub async fn produce(&self, input: &ProduceFacts) -> Result<Produced, ListError> {
+        Ok(self.produce_round(input).await?.0)
+    }
+
+    async fn produce_round(&self, input: &ProduceFacts) -> Result<(Produced, Option<Arc<Round>>), ListError> {
         let dirs = self.dirs()?;
         let (rows, agent_pids, panes, children) = self.discovery(None).await?;
         let client = if input.shadow { &self.shadow_facts } else { &self.facts };
@@ -300,54 +386,30 @@ impl ListBridge {
         let pane_pids = pi_pane_pids(&rows, &panes);
         let (fetched, runtime) = tokio::join!(client.fetch(&rows, input.owner_clients, &pane_pids, input.shadow), runtime);
         let (mut rows, aside) = list_facts::apply((*rows).clone(), &fetched.facts, fetched.ok);
-        let targets = pane_targets(&panes, &agent_pids, &children);
         let (env, caches) = (self.env.clone(), self.caches.clone());
-        let headless = runtime.map(|by_key| headless_by_name(&rows, by_key));
-        let py = fetched.facts.clone();
+        let inputs = Arc::new(RoundInputs { targets: Arc::new(pane_targets(&panes, &agent_pids, &children)),
+            headless: runtime.map(|by_key| headless_by_name(&rows, by_key)), facts: fetched.facts.clone(), agent_pids });
+        // Só o hub acorda por arquivo: sem lista do dono aberta, ninguém usaria a cópia.
+        let keep = input.owner_clients > 0 && !input.shadow;
         let handle = tokio::runtime::Handle::current();
         // Teto dos caches por sessão acompanha as linhas vivas: acima dele cada tique relia do zero.
         capped::set_live(rows.len() + aside.len());
         // Classificação e decoração leem arquivo (marcador, transcript, plano) e esperam captura:
         // fora da thread do runtime, que atende todas as conexões.
-        let (rows, effects, git_dirs) = tokio::task::spawn_blocking(move || {
+        let inp = inputs.clone();
+        let (rows, effects, git_dirs, pre) = tokio::task::spawn_blocking(move || {
             let config_dirs = caches.config_dirs(&dirs);
             let alive = |pid: i64| pid_alive(&*env.procs, pid);
-            let io = MuxCapture::new(env.capture_program.clone(), CAPTURE_TIMEOUT, targets);
+            let io = MuxCapture::new(env.capture_program.clone(), CAPTURE_TIMEOUT, inp.targets.clone());
+            let pre: Vec<SessionRow> = if keep { rows.iter().filter(|r| r.provider == "claude").cloned().collect() } else { Vec::new() };
             let effects = caches.classify.with(|Classify { classifier, hooks }| {
                 hooks.refresh(&config_dirs);
                 let facts = Facts { hooks, alive: &alive, config_dirs: &config_dirs,
-                    headless: headless.as_ref(), problems: &py.problems, stall_seconds: py.stall_seconds };
+                    headless: inp.headless.as_ref(), problems: &inp.facts.problems, stall_seconds: inp.facts.stall_seconds };
                 handle.block_on(classifier.classify(&mut rows, &facts, &io))
             });
-            let (wall, mono) = (io.wall(), io.mono());
-            caches.decor.with(|d| {
-                for row in rows.iter_mut().filter(|r| r.provider == "claude") {
-                    let pid = agent_pids.get(&row.name).map(|p| i64::from(*p));
-                    decorate_context(&mut d.context, row, pid, &*env.procs, &dirs, &config_dirs, wall, mono);
-                }
-                for (name, error) in d.replies.decorate(&mut rows, |_| None) {
-                    if crate::warn_limit::allow(Some(&name), "list_reply_unreadable") {
-                        tracing::warn!(session = %name, kind = ?error.kind(), "lista: última resposta ilegível");
-                    }
-                    list_facts::note("rust.list_reply_unreadable", &name, format!("{:?}", error.kind()), "última resposta ilegível");
-                }
-                for row in rows.iter_mut() {
-                    d.plans.decorate(row, wall, mono);
-                    if let Some(p) = super::links::fill_loop(row, &dirs) {
-                        list_facts::note("rust.list_discovery", &p.key, p.code.to_owned(), p.reason);
-                    }
-                }
-            });
-            let git_dirs: Vec<String> = rows.iter().map(|r| git_dir(r).to_owned()).filter(|d| !d.is_empty()).collect();
-            let mut git = lock(&caches.git);
-            for row in rows.iter_mut() {
-                let (summary, diff) = git.get(git_dir(row)).cloned().unwrap_or_default();
-                apply_git(row, &summary, &diff);
-            }
-            // Pasta sem sessão sai: o cache não cresce com cada repositório que já passou pela lista.
-            git.retain(|d, _| git_dirs.contains(d));
-            drop(git);
-            (rows, effects, git_dirs)
+            let git_dirs = decorate(&env, &caches, &dirs, &config_dirs, &inp, &mut rows, io.wall(), io.mono(), true);
+            (rows, effects, git_dirs, pre)
         }).await.map_err(|e| joined(e, "produção interrompida"))?;
         self.flush_notes();
         self.refresh_git(git_dirs);
@@ -361,7 +423,8 @@ impl ListBridge {
         if !input.shadow {
             self.prune_gone(&rows, Instant::now());
         }
-        Ok(Produced { rows: Arc::new(rows), facts: fetched.facts, facts_ok: fetched.ok })
+        let round = keep.then(|| Arc::new(Round { inputs, pre }));
+        Ok((Produced { rows: Arc::new(rows), facts: fetched.facts, facts_ok: fetched.ok }, round))
     }
 
     /// Git em segundo plano, um por pasta: um repositório lento não atrasa o card de ninguém. Não
@@ -581,6 +644,43 @@ fn apply_git(row: &mut SessionRow, summary: &Value, diff: &Value) {
     if !diff.is_null() {
         (row.git_added, row.git_removed) = (n(diff, "added"), n(diff, "removed"));
     }
+}
+
+/// Contexto, resposta, plano, loop e Git das linhas classificadas; devolve as pastas com Git.
+/// `whole`: a rodada inteira, que também tira do cache de Git as pastas sem sessão (a parcial só
+/// tem as linhas que reclassificou).
+#[allow(clippy::too_many_arguments)]
+fn decorate(env: &ListEnv, caches: &Caches, dirs: &Dirs, config_dirs: &[PathBuf], inp: &RoundInputs,
+            rows: &mut [SessionRow], wall: f64, mono: f64, whole: bool) -> Vec<String> {
+    caches.decor.with(|d| {
+        for row in rows.iter_mut().filter(|r| r.provider == "claude") {
+            let pid = inp.agent_pids.get(&row.name).map(|p| i64::from(*p));
+            decorate_context(&mut d.context, row, pid, &*env.procs, dirs, config_dirs, wall, mono);
+        }
+        for (name, error) in d.replies.decorate(rows, |_| None) {
+            if crate::warn_limit::allow(Some(&name), "list_reply_unreadable") {
+                tracing::warn!(session = %name, kind = ?error.kind(), "lista: última resposta ilegível");
+            }
+            list_facts::note("rust.list_reply_unreadable", &name, format!("{:?}", error.kind()), "última resposta ilegível");
+        }
+        for row in rows.iter_mut() {
+            d.plans.decorate(row, wall, mono);
+            if let Some(p) = super::links::fill_loop(row, dirs) {
+                list_facts::note("rust.list_discovery", &p.key, p.code.to_owned(), p.reason);
+            }
+        }
+    });
+    let git_dirs: Vec<String> = rows.iter().map(|r| git_dir(r).to_owned()).filter(|d| !d.is_empty()).collect();
+    let mut git = lock(&caches.git);
+    for row in rows.iter_mut() {
+        let (summary, diff) = git.get(git_dir(row)).cloned().unwrap_or_default();
+        apply_git(row, &summary, &diff);
+    }
+    // Pasta sem sessão sai: o cache não cresce com cada repositório que já passou pela lista.
+    if whole {
+        git.retain(|d, _| git_dirs.contains(d));
+    }
+    git_dirs
 }
 
 /// `_claude_reading` com o cache de 20 s por (nome, transcript).

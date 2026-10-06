@@ -176,6 +176,14 @@ impl Classifier {
 
     /// Decide estado, rótulo, pergunta, statusline, travada e limite das linhas Claude.
     pub async fn classify<C: CaptureSource>(&mut self, rows: &mut [SessionRow], facts: &Facts<'_>, io: &C) -> Vec<Effect> {
+        let effects = self.classify_some(rows, facts, io).await;
+        self.cap(rows);
+        effects
+    }
+
+    /// `classify` de parte das linhas (a sessão cujo arquivo mudou): sem o teto dos caches, que
+    /// tiraria as demais por não estarem na rodada.
+    pub async fn classify_some<C: CaptureSource>(&mut self, rows: &mut [SessionRow], facts: &Facts<'_>, io: &C) -> Vec<Effect> {
         let mut effects = Vec::new();
         let mut pending = Vec::new();
         for (i, row) in rows.iter_mut().enumerate() {
@@ -324,7 +332,6 @@ impl Classifier {
             row.stalled = row.state == "working" && row.last_activity.is_some_and(|t| wall - t > facts.stall_seconds);
         }
         self.limit_radar(rows, &scraped, io).await;
-        self.cap(rows);
         effects
     }
 
@@ -370,7 +377,7 @@ pub struct MuxCapture {
     program: OsString,
     timeout: Duration,
     /// Pane do agente por nome, da descoberta; sem ele vale o ativo da sessão (`=nome:`).
-    pub targets: BTreeMap<String, String>,
+    pub targets: std::sync::Arc<BTreeMap<String, String>>,
 }
 
 /// Uma origem por processo: os caches do `Classifier` atravessam rodadas e instâncias de captura.
@@ -380,7 +387,7 @@ fn process_start() -> std::time::Instant {
 }
 
 impl MuxCapture {
-    pub fn new(program: impl Into<OsString>, timeout: Duration, targets: BTreeMap<String, String>) -> Self {
+    pub fn new(program: impl Into<OsString>, timeout: Duration, targets: std::sync::Arc<BTreeMap<String, String>>) -> Self {
         Self { program: program.into(), timeout, targets }
     }
 }
@@ -537,7 +544,7 @@ mod tests {
         let (headless, problems) = (BTreeMap::new(), BTreeMap::new());
         let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: Some(&headless),
                             problems: &problems, stall_seconds: 300.0 };
-        let io = MuxCapture::new("tmux", Duration::from_secs(1), BTreeMap::new());
+        let io = MuxCapture::new("tmux", Duration::from_secs(1), Default::default());
         send(Classifier::default().classify(&mut [], &facts, &io));
     }
 
