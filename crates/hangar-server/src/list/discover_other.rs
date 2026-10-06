@@ -820,8 +820,9 @@ mod tests {
         assert_eq!(found.rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["ok"]);
         let mut seen: Vec<(&str, String)> = found.problems.iter().map(|p| (p.code, p.key.clone())).collect();
         seen.sort();
-        assert_eq!(seen, [("list_sidecar_unreadable", tmp.path().join(".hangar/claude-headless/lista.json").to_string_lossy().into_owned()),
-            ("list_sidecar_unreadable", codex.join("torto.json").to_string_lossy().into_owned())]);
+        let hangar = tmp.path().join(".hangar");
+        assert_eq!(seen, [("list_sidecar_unreadable", hangar.join("claude-headless").join("lista.json").to_string_lossy().into_owned()),
+            ("list_sidecar_unreadable", hangar.join("codex-sessions").join("torto.json").to_string_lossy().into_owned())]);
     }
 
     #[cfg(unix)]
@@ -874,7 +875,7 @@ mod tests {
         let mut f = std::fs::OpenOptions::new().append(true).open(&index).unwrap();
         writeln!(f, "{{\"sessionId\":\"s2\",\"sessionDir\":\"/k/s2\"}}").unwrap();
         assert_eq!(kimi_transcript_of_id("/w", "s2", &dirs, &mut problems).as_deref(),
-            Some(Path::new("/k/s2/agents/main/wire.jsonl").to_str().unwrap()));
+            Some(Path::new("/k/s2").join("agents").join("main").join("wire.jsonl").to_str().unwrap()));
         assert!(problems.into_vec().is_empty());
     }
 
