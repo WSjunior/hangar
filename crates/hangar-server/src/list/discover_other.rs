@@ -1,7 +1,8 @@
 //! Descoberta dos provedores fora do Claude com terminal: bilhetes de Pi, omp e Kimi
 //! (`registry.py:739-888`) e as linhas dos sidecars Codex e Claude sem terminal (`:1438-1480`).
 //! A conta das linhas Pi, omp e Kimi casa credenciais (`cotas.py`) e chega pelos fatos do Python.
-use super::discover::{Resolver, discover_panes};
+use super::capped::{Capped, SESSION_CAP};
+use super::discover::{DiscoveryProblem, Problems, Resolver, discover_panes};
 use super::links;
 use super::mux::Pane;
 use super::procs::{ChildrenMap, ProcessView};
@@ -11,7 +12,7 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::SystemTime;
 
 /// Pastas que o Python tira do ambiente do backend. Em parâmetro, para o teste rodar sem tocar no
@@ -72,11 +73,13 @@ pub fn ticket_key(pane_id: &str, pid: Option<i64>, procs: &dyn ProcessView) -> S
     pane_id.trim_start_matches('%').to_owned()
 }
 
-/// As linhas da rodada e o pid do agente de cada linha com terminal que tem agente reconhecido.
+/// As linhas da rodada, o pid do agente de cada linha com terminal que tem agente reconhecido e
+/// as falhas contornadas, para o diário (no máximo `PROBLEMS_CAP`).
 #[derive(Debug, Default)]
 pub struct Discovered {
     pub rows: Vec<SessionRow>,
     pub agent_pids: HashMap<String, u32>,
+    pub problems: Vec<DiscoveryProblem>,
 }
 
 /// `registry.list()` sem as linhas `orq` e de transferência (vêm dos fatos): sessões do
@@ -87,7 +90,10 @@ pub fn discover_rows(panes: &[Pane], procs: &dyn ProcessView, children: &Childre
     let mut rows = Vec::new();
     let mut sids = HashMap::new();
     let mut agent_pids = HashMap::new();
-    for s in discover_panes(panes, procs, children, &projects, resolver, &skip) {
+    let sessions = discover_panes(panes, procs, children, &projects, resolver, &skip);
+    // Os da resolução fora da lista (`resolve_one`) também saem nesta rodada.
+    let problems = &mut std::mem::take(&mut resolver.problems);
+    for s in sessions {
         if let Some(pid) = s.agent_pid.and_then(|p| u32::try_from(p).ok()) {
             agent_pids.insert(s.name.clone(), pid);
         }
@@ -98,14 +104,14 @@ pub fn discover_rows(panes: &[Pane], procs: &dyn ProcessView, children: &Childre
             // Pane Codex sem sidecar: a TUI ainda não abriu a thread, não há rollout.
             ("codex", None) => (None, false),
             (provider, None) => {
-                let t = ticket_transcript(provider, &s.pane_id, s.pane_pid, &s.cwd, procs, dirs);
+                let t = ticket_transcript(provider, &s.pane_id, s.pane_pid, &s.cwd, procs, dirs, problems);
                 let tracked = t.is_some();
                 (t, tracked)
             }
         };
         row.jsonl = jsonl;
         row.tracked = tracked;
-        links::fill_pane_row(&mut row, s.provider, s.agent_pid.or(s.pane_pid), s.session_created, procs, dirs);
+        links::fill_pane_row(&mut row, s.provider, s.agent_pid.or(s.pane_pid), s.session_created, procs, dirs, problems);
         sids.insert(s.name, s.repl_sid);
         rows.push(row);
     }
@@ -117,27 +123,43 @@ pub fn discover_rows(panes: &[Pane], procs: &dyn ProcessView, children: &Childre
             births.entry(pane.session.clone()).or_insert(b);
         }
     }
-    rows.extend(codex_rows(dirs, &births, procs));
-    rows.extend(headless_rows(dirs, procs));
-    Discovered { rows, agent_pids }
+    rows.extend(codex_rows(dirs, &births, procs, problems));
+    rows.extend(headless_rows(dirs, procs, problems));
+    Discovered { rows, agent_pids, problems: std::mem::take(problems).into_vec() }
 }
 
 /// Transcript de um pane Pi, omp ou Kimi pelo bilhete (e, no Pi, pelo `CP_PI_SESSION`). `None` =
 /// sem vínculo, e a linha sai `tracked=false`. Lido do processo do pane, como faz a extensão.
-pub fn ticket_transcript(provider: &str, pane_id: &str, pane_pid: Option<i64>, cwd: &str, procs: &dyn ProcessView, dirs: &Dirs) -> Option<String> {
+pub fn ticket_transcript(provider: &str, pane_id: &str, pane_pid: Option<i64>, cwd: &str, procs: &dyn ProcessView, dirs: &Dirs,
+                         problems: &mut Problems) -> Option<String> {
     match provider {
-        "pi" | "omp" => pi_transcript(pane_id, pane_pid, cwd, provider, procs, dirs),
-        "kimi" => kimi_transcript(pane_id, pane_pid, cwd, procs, dirs),
+        "pi" | "omp" => pi_transcript(pane_id, pane_pid, cwd, provider, procs, dirs, problems),
+        "kimi" => kimi_transcript(pane_id, pane_pid, cwd, procs, dirs, problems),
         _ => None,
     }
 }
 
+enum TicketError { Missing, Invalid }
+
 /// Bilhete lido e já decodificado; o resto (`Err`) cai no reserva, como o `except (OSError,
-/// ValueError)` do Python.
-fn read_ticket(path: &Path) -> Result<Value, ()> {
-    let raw = std::fs::read(path).map_err(|_| ())?;
-    let text = std::str::from_utf8(&raw).map_err(|_| ())?;
-    serde_json::from_str(text).map_err(|_| ())
+/// ValueError)` do Python. `Missing` separa o arquivo ausente do ilegível ou torto.
+fn read_ticket(path: &Path) -> Result<Value, TicketError> {
+    let raw = std::fs::read(path).map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { TicketError::Missing } else { TicketError::Invalid })?;
+    let text = std::str::from_utf8(&raw).map_err(|_| TicketError::Invalid)?;
+    serde_json::from_str(text).map_err(|_| TicketError::Invalid)
+}
+
+/// O bilhete como objeto; ausente é o normal, ilegível ou torto vale ausente (o reserva do
+/// Python) mas vai ao diário: a sessão sairia sem conversa calada.
+fn ticket_object(path: &Path, problems: &mut Problems) -> Option<Map<String, Value>> {
+    match read_ticket(path) {
+        Ok(Value::Object(data)) => Some(data),
+        Err(TicketError::Missing) => None,
+        _ => {
+            problems.note("list_ticket_invalid", &path.to_string_lossy(), "bilhete do Kimi ilegível ou torto; sessão sem transcript");
+            None
+        }
+    }
 }
 
 /// `isinstance(ts, (int, float))`: `bool` também conta no Python.
@@ -159,12 +181,18 @@ fn warn_limited(key: &str, code: &'static str, field: &str) {
 /// Folga entre o `Date.now()` da extensão e o nascimento do processo pelo kernel.
 const TICKET_SLACK: f64 = 2.0;
 
-fn pi_transcript(pane_id: &str, pid: Option<i64>, cwd: &str, provider: &str, procs: &dyn ProcessView, dirs: &Dirs) -> Option<String> {
+fn pi_transcript(pane_id: &str, pid: Option<i64>, cwd: &str, provider: &str, procs: &dyn ProcessView, dirs: &Dirs,
+                 problems: &mut Problems) -> Option<String> {
     let base = pid.and_then(|p| config_dir_of(procs, p)).unwrap_or_else(|| dirs.default_claude());
     let ticket = base.join(".hangar-pi").join(format!("{}.json", ticket_key(pane_id, pid, procs)));
     let sid = pid.and_then(|p| env(procs, p, "CP_PI_SESSION"));
     let profile = || if provider == "omp" { pid.and_then(|p| env(procs, p, "OMP_PROFILE")) } else { None };
-    if let Ok(data) = read_ticket(&ticket) {
+    // O Python: bilhete que não é objeto encerra; ilegível ou torto cai no `CP_PI_SESSION`.
+    let read = read_ticket(&ticket);
+    if !matches!(read, Ok(Value::Object(_)) | Err(TicketError::Missing)) {
+        problems.note("list_ticket_invalid", &ticket.to_string_lossy(), "bilhete de Pi ou omp ilegível ou torto; transcript pelo CP_PI_SESSION");
+    }
+    if let Ok(data) = read {
         let Value::Object(data) = data else { return None };
         let mut file = data.get("file").and_then(Value::as_str).filter(|f| !f.is_empty()).map(str::to_owned);
         let born = pid.and_then(|p| procs.start_time(p));
@@ -184,7 +212,8 @@ fn pi_transcript(pane_id: &str, pid: Option<i64>, cwd: &str, provider: &str, pro
             // O omp grava o principal em `sessions/-/<nome>`, não no caminho do `--session`.
             if provider == "omp" && !Path::new(&f).exists() {
                 let name = Path::new(&f).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                return Some(find_in_root(&sessions_root(provider, profile().as_deref(), dirs), |n| n == name).unwrap_or(f));
+                let root = sessions_root(provider, profile().as_deref(), dirs);
+                return Some(find_in_root_cached(&root, format!("name:{name}"), |n| n == name).unwrap_or(f));
             }
             return Some(f);
         }
@@ -242,7 +271,7 @@ fn pi_transcript_of_id(cwd: &str, sid: &str, provider: &str, profile: Option<&st
     if let Some(found) = newest(&dir, &matches) {
         return found;
     }
-    if provider == "omp" { find_in_root(&root, matches).unwrap_or_default() } else { String::new() }
+    if provider == "omp" { find_in_root_cached(&root, format!("suffix:{suffix}"), matches).unwrap_or_default() } else { String::new() }
 }
 
 fn newest(dir: &Path, matches: &dyn Fn(&str) -> bool) -> Option<String> {
@@ -252,6 +281,36 @@ fn newest(dir: &Path, matches: &dyn Fn(&str) -> bool) -> Option<String> {
         .map(|e| e.path())
         .max_by_key(|p| mtime(p))
         .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Achado de uma varredura de pastas por (raiz, nome): o positivo vale enquanto o arquivo existe
+/// (o nome não muda de lugar); o negativo, `MISS_TTL`, para o arquivo que ainda vai nascer.
+type Found = LazyLock<std::sync::Mutex<Capped<(PathBuf, String), (std::time::Instant, Option<String>)>>>;
+const MISS_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn found_or_scan(cache: &Found, key: (PathBuf, String), scan: impl FnOnce() -> Option<String>) -> Option<String> {
+    let lock = || cache.lock().unwrap_or_else(|e| e.into_inner());
+    // O `stat` fora da trava: ela é de todas as sessões da rodada.
+    let cached = lock().get(&key).cloned();
+    match cached {
+        Some((_, Some(path))) if Path::new(&path).exists() => return Some(path),
+        Some((at, None)) if at.elapsed() < MISS_TTL => return None,
+        _ => {}
+    }
+    let hit = scan();
+    lock().insert(key, (std::time::Instant::now(), hit.clone()));
+    hit
+}
+
+static OMP_FOUND: Found = LazyLock::new(|| std::sync::Mutex::new(Capped::new(SESSION_CAP)));
+static HEADLESS_FOUND: Found = LazyLock::new(|| std::sync::Mutex::new(Capped::new(SESSION_CAP)));
+
+/// `find_in_root` lembrado por (raiz, chave do que casa): sem ele cada sessão omp varria a raiz
+/// inteira a cada rodada.
+// ponytail: o positivo segura o primeiro achado; um arquivo mais novo de mesmo nome em outra
+// pasta só é visto quando o guardado some.
+fn find_in_root_cached(root: &Path, key: String, matches: impl Fn(&str) -> bool) -> Option<String> {
+    found_or_scan(&OMP_FOUND, (root.to_path_buf(), key), || find_in_root(root, matches))
 }
 
 /// `localizar_na_raiz`: o arquivo mais novo que casa em qualquer pasta de cwd da raiz.
@@ -285,10 +344,10 @@ fn pi_root_transcript(path: &str) -> Option<String> {
         .map(|cand| cand.to_string_lossy().into_owned())
 }
 
-fn kimi_transcript(pane_id: &str, pid: Option<i64>, cwd: &str, procs: &dyn ProcessView, dirs: &Dirs) -> Option<String> {
+fn kimi_transcript(pane_id: &str, pid: Option<i64>, cwd: &str, procs: &dyn ProcessView, dirs: &Dirs, problems: &mut Problems) -> Option<String> {
     let base = pid.and_then(|p| config_dir_of(procs, p)).unwrap_or_else(|| dirs.default_claude());
     let ticket = base.join(".hangar-kimi").join(format!("{}.json", ticket_key(pane_id, pid, procs)));
-    let Ok(Value::Object(data)) = read_ticket(&ticket) else { return None };
+    let data = ticket_object(&ticket, problems)?;
     let sid = data.get("session_id").and_then(Value::as_str).filter(|s| !s.is_empty())?;
     let born = pid.and_then(|p| procs.start_time(p));
     match (born, number(data.get("ts"))) {
@@ -298,7 +357,7 @@ fn kimi_transcript(pane_id: &str, pid: Option<i64>, cwd: &str, procs: &dyn Proce
         _ => {}
     }
     let wd = data.get("cwd").and_then(Value::as_str).filter(|c| !c.is_empty()).unwrap_or(cwd);
-    kimi_transcript_of_id(wd, sid, dirs)
+    kimi_transcript_of_id(wd, sid, dirs, problems)
 }
 
 fn kimi_wire(session_dir: &Path) -> String {
@@ -307,31 +366,73 @@ fn kimi_wire(session_dir: &Path) -> String {
 
 /// `kimi_sessions.transcript_path`: o índice primeiro; a pasta calculada cobre o índice atrasado.
 /// `None`: índice com byte inválido, que no Python levanta e deixa a sessão sem transcript.
-fn kimi_transcript_of_id(cwd: &str, sid: &str, dirs: &Dirs) -> Option<String> {
+fn kimi_transcript_of_id(cwd: &str, sid: &str, dirs: &Dirs, problems: &mut Problems) -> Option<String> {
     let index = dirs.kimi_home.join("session_index.jsonl");
+    let version = file_version(&index);
     let key = (index, sid.to_owned());
-    if let Some(wire) = KIMI_WIRES.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
-        return Some(wire.clone());
-    }
-    if let Ok(raw) = std::fs::read(&key.0) {
-        for line in std::str::from_utf8(&raw).ok()?.lines() {
-            let Ok(Value::Object(o)) = serde_json::from_str::<Value>(line) else { continue };
-            if o.get("sessionId").and_then(Value::as_str) == Some(sid)
-                && let Some(dir) = o.get("sessionDir").and_then(Value::as_str).filter(|d| !d.is_empty())
-            {
-                let wire = kimi_wire(Path::new(dir));
-                KIMI_WIRES.lock().unwrap_or_else(|e| e.into_inner()).insert(key, wire.clone());
-                return Some(wire);
+    let lock = || KIMI_WIRES.lock().unwrap_or_else(|e| e.into_inner());
+    let cached = lock().get(&key).cloned();
+    let hit = match &cached {
+        Some(KimiIndex::Found(wire)) => return Some(wire.clone()),
+        // O índice não mudou desde que não tinha a sessão: só a pasta calculada é conferida.
+        Some(KimiIndex::Missing(seen)) if version.is_some() && *seen == version => Some(None),
+        Some(KimiIndex::Invalid(seen)) if version.is_some() && *seen == version => None,
+        _ => match std::fs::read(&key.0) {
+            Ok(raw) => match std::str::from_utf8(&raw) {
+                Ok(text) => Some(kimi_index_find(text, sid)),
+                Err(_) => {
+                    lock().insert(key.clone(), KimiIndex::Invalid(version));
+                    None
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(None),
+            // Ilegível não é "fora do índice": não fica guardado e vai ao diário.
+            Err(_) => {
+                problems.note("list_kimi_index_unreadable", &key.0.to_string_lossy(), "session_index.jsonl do Kimi ilegível; transcript pela pasta calculada");
+                let dir = dirs.kimi_home.join("sessions").join(kimi_workdir_key(cwd)).join(sid);
+                return dir.is_dir().then(|| kimi_wire(&dir));
             }
-        }
+        },
+    };
+    let Some(found) = hit else {
+        // No Python o índice com byte inválido levanta e a sessão fica sem transcript.
+        problems.note("list_kimi_index_invalid", &key.0.to_string_lossy(), "session_index.jsonl do Kimi com UTF-8 inválido; sessão sem transcript");
+        return None;
+    };
+    if let Some(wire) = found {
+        lock().insert(key, KimiIndex::Found(wire.clone()));
+        return Some(wire);
+    }
+    if version.is_some() {
+        lock().insert(key, KimiIndex::Missing(version));
     }
     let dir = dirs.kimi_home.join("sessions").join(kimi_workdir_key(cwd)).join(sid);
     dir.is_dir().then(|| kimi_wire(&dir))
 }
 
-/// Achado no índice, o `sessionDir` de uma sessão Kimi não muda: o índice inteiro não é relido
-/// a cada tique. Só o positivo fica; a pasta calculada segue conferida.
-static KIMI_WIRES: LazyLock<std::sync::Mutex<super::capped::Capped<(PathBuf, String), String>>> = LazyLock::new(Default::default);
+fn kimi_index_find(text: &str, sid: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let Ok(Value::Object(o)) = serde_json::from_str::<Value>(line) else { return None };
+        if o.get("sessionId").and_then(Value::as_str) != Some(sid) {
+            return None;
+        }
+        o.get("sessionDir").and_then(Value::as_str).filter(|d| !d.is_empty()).map(|d| kimi_wire(Path::new(d)))
+    })
+}
+
+/// (mtime em ns, tamanho): o índice do Kimi só cresce, e qualquer escrita muda os dois.
+fn file_version(path: &Path) -> Option<(u128, u64)> {
+    let meta = path.metadata().ok()?;
+    let mtime = meta.modified().ok()?.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_nanos();
+    Some((mtime, meta.len()))
+}
+
+/// O que o índice disse de uma sessão. Achado, o `sessionDir` não muda; ausente ou torto vale até o
+/// índice mudar. Sem isso uma sessão fora do índice relia e analisava o índice inteiro por rodada.
+#[derive(Clone)]
+enum KimiIndex { Found(String), Missing(Option<(u128, u64)>), Invalid(Option<(u128, u64)>) }
+
+static KIMI_WIRES: LazyLock<std::sync::Mutex<Capped<(PathBuf, String), KimiIndex>>> = LazyLock::new(Default::default);
 
 static KIMI_SLUG_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^a-z0-9._-]+").unwrap());
 
@@ -375,24 +476,62 @@ pub fn has_codex_sidecar(name: &str, dirs: &Dirs) -> bool {
     dirs.home.join(".hangar").join("codex-sessions").join(format!("{}.json", sanitize_session_name(name))).exists()
 }
 
+type Sidecars = Arc<Vec<(String, Map<String, Value>)>>;
+
+/// Uma leitura por versão da pasta: o Python grava sidecar por `rename`, então pasta igual é
+/// sidecar igual. Os tortos ficam junto, para voltarem ao diário a cada rodada.
+static SIDECARS: LazyLock<std::sync::Mutex<Capped<PathBuf, (SystemTime, Sidecars, Arc<Vec<String>>)>>> =
+    LazyLock::new(|| std::sync::Mutex::new(Capped::new(16)));
+
 /// Sidecars de uma pasta em ordem de nome, com o nome do arquivo; ilegível ou não-objeto fica de
-/// fora, como no Python. Pasta que existe e não se lê avisa: as sessões dela sumiriam caladas.
-fn sidecars(dir: &Path) -> Vec<(String, Map<String, Value>)> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
+/// fora, como no Python, mas vai ao diário: a sessão viva dele sumiria da lista calada.
+fn sidecars(dir: &Path, kind: &'static str, problems: &mut Problems) -> Sidecars {
+    let stamp = match dir.metadata().and_then(|m| m.modified()) {
+        Ok(stamp) => stamp,
         Err(error) => {
             if error.kind() != std::io::ErrorKind::NotFound {
-                warn_limited(&dir.to_string_lossy(), "list_sidecar_dir_unreadable", "dir");
+                problems.note("list_sidecar_dir_unreadable", &dir.to_string_lossy(), kind);
             }
-            return Vec::new();
+            return Sidecars::default();
         }
     };
+    let cached = SIDECARS.lock().unwrap_or_else(|e| e.into_inner()).get(dir)
+        .filter(|(s, _, _)| *s == stamp && super::discover::settled(stamp)).map(|(_, v, bad)| (v.clone(), bad.clone()));
+    let (found, bad) = match cached {
+        Some(hit) => hit,
+        None => match read_sidecars(dir) {
+            Ok((found, bad)) => {
+                let entry = (Arc::new(found), Arc::new(bad));
+                SIDECARS.lock().unwrap_or_else(|e| e.into_inner()).insert(dir.to_path_buf(), (stamp, entry.0.clone(), entry.1.clone()));
+                entry
+            }
+            // Fora do cache: a próxima rodada tenta de novo e avisa de novo.
+            Err(_) => {
+                problems.note("list_sidecar_dir_unreadable", &dir.to_string_lossy(), kind);
+                return Sidecars::default();
+            }
+        },
+    };
+    for file in bad.iter() {
+        problems.note("list_sidecar_unreadable", file, kind);
+    }
+    found
+}
+
+fn read_sidecars(dir: &Path) -> std::io::Result<(Vec<(String, Map<String, Value>)>, Vec<String>)> {
+    let entries = std::fs::read_dir(dir)?;
     let mut files: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
     files.sort();
-    files.into_iter().filter_map(|f| match read_ticket(&f) {
-        Ok(Value::Object(m)) => Some((f.file_name().unwrap_or_default().to_string_lossy().into_owned(), m)),
-        _ => None,
-    }).collect()
+    let (mut found, mut bad) = (Vec::with_capacity(files.len()), Vec::new());
+    for f in files {
+        match read_ticket(&f) {
+            Ok(Value::Object(m)) => found.push((f.file_name().unwrap_or_default().to_string_lossy().into_owned(), m)),
+            // Apagado entre a listagem e a leitura: a sessão fechou.
+            Err(TicketError::Missing) => {}
+            _ => bad.push(f.to_string_lossy().into_owned()),
+        }
+    }
+    Ok((found, bad))
 }
 
 fn text(meta: &Map<String, Value>, key: &str) -> Option<String> {
@@ -422,18 +561,20 @@ fn current_cwd(meta: &Map<String, Value>, procs: &dyn ProcessView) -> Option<Str
 fn expand_user(path: &str, dirs: &Dirs) -> PathBuf {
     match path.strip_prefix('~') {
         Some("") => dirs.home.clone(),
-        Some(rest) if rest.starts_with('/') => dirs.home.join(&rest[1..]),
+        // No Windows o `~` também vem com `\\`.
+        Some(rest) if rest.starts_with('/') || (cfg!(windows) && rest.starts_with('\\')) => dirs.home.join(&rest[1..]),
         _ => PathBuf::from(path),
     }
 }
 
 /// Uma linha por sidecar Codex (`include_incomplete=True`). `births` é o nascimento do terminal de
 /// mesmo nome; a vida de uma transferência em curso vem dos fatos.
-pub fn codex_rows(dirs: &Dirs, births: &HashMap<String, u64>, procs: &dyn ProcessView) -> Vec<SessionRow> {
+pub fn codex_rows(dirs: &Dirs, births: &HashMap<String, u64>, procs: &dyn ProcessView, problems: &mut Problems) -> Vec<SessionRow> {
     let mut out = Vec::new();
-    for (file, meta) in sidecars(&dirs.home.join(".hangar").join("codex-sessions")) {
+    let found = sidecars(&dirs.home.join(".hangar").join("codex-sessions"), "sidecar Codex ilegível ou torto; sessão fora da lista", problems);
+    for (file, meta) in found.iter() {
         let Some(name) = text(&meta, "name") else {
-            warn_limited(&file, "list_codex_sidecar_skipped", "name");
+            problems.note("list_codex_sidecar_skipped", file, "sidecar Codex sem nome; sessão fora da lista");
             continue;
         };
         let home = text(&meta, "codex_home").map(|h| expand_user(&h, dirs)).unwrap_or_else(|| dirs.codex_home.clone());
@@ -450,8 +591,8 @@ pub fn codex_rows(dirs: &Dirs, births: &HashMap<String, u64>, procs: &dyn Proces
         // Cru, como o `meta.get` do Python: vazio continua vazio.
         row.codex_service_tier = meta.get("service_tier").and_then(Value::as_str).map(str::to_owned);
         row.headless = meta.get("headless").is_some_and(truthy);
-        links::fill_location(&mut row, "codex", dirs);
-        links::fill_links(&mut row, dirs);
+        links::fill_location(&mut row, "codex", dirs, problems);
+        links::fill_links(&mut row, dirs, problems);
         out.push(row);
     }
     out
@@ -469,28 +610,41 @@ pub(super) fn truthy(v: &Value) -> bool {
 }
 
 /// `transcript_path` do Claude sem terminal: `<conta>/projects/<cwd>/<sid>.jsonl`, ou onde o
-/// `EnterWorktree` o levou (o sid não repete entre pastas).
-fn headless_transcript(cwd: &str, sid: &str, config_dir: Option<&str>, dirs: &Dirs) -> String {
+/// `EnterWorktree` o levou (o sid não repete entre pastas). A busca nas pastas de `projects/` é
+/// lembrada: sem isso, cada sessão ainda sem transcript varria todos os projetos por rodada.
+fn headless_transcript(cwd: &str, sid: &str, config_dir: Option<&str>, dirs: &Dirs, problems: &mut Problems) -> String {
     let base = config_dir.map(|c| Path::new(c).join("projects")).unwrap_or_else(|| dirs.claude.join("projects"));
     let file = format!("{sid}.jsonl");
     let expected = base.join(hangar_workspace::worktrees::sanitize_cwd(cwd)).join(&file);
     if expected.exists() {
         return expected.to_string_lossy().into_owned();
     }
-    let mut moved: Vec<PathBuf> = std::fs::read_dir(&base).into_iter().flatten().flatten()
-        .map(|d| d.path().join(&file)).filter(|p| p.exists()).collect();
-    moved.sort();
-    moved.into_iter().next().unwrap_or(expected).to_string_lossy().into_owned()
+    let moved = found_or_scan(&HEADLESS_FOUND, (base.clone(), file.clone()), || {
+        let entries = match std::fs::read_dir(&base) {
+            Ok(entries) => entries,
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    problems.note("list_projects_unreadable", &base.to_string_lossy(), "pasta projects ilegível; transcript da sessão sem terminal pelo caminho esperado");
+                }
+                return None;
+            }
+        };
+        let mut moved: Vec<PathBuf> = entries.flatten().map(|d| d.path().join(&file)).filter(|p| p.exists()).collect();
+        moved.sort();
+        moved.into_iter().next().map(|p| p.to_string_lossy().into_owned())
+    });
+    moved.unwrap_or_else(|| expected.to_string_lossy().into_owned())
 }
 
 /// Uma linha por sessão Claude sem terminal: a identidade vem do sidecar.
-pub fn headless_rows(dirs: &Dirs, procs: &dyn ProcessView) -> Vec<SessionRow> {
+pub fn headless_rows(dirs: &Dirs, procs: &dyn ProcessView, problems: &mut Problems) -> Vec<SessionRow> {
     let mut out = Vec::new();
-    for (file, meta) in sidecars(&dirs.home.join(".hangar").join("claude-headless")) {
+    let found = sidecars(&dirs.home.join(".hangar").join("claude-headless"), "sidecar Claude sem terminal ilegível ou torto; sessão fora da lista", problems);
+    for (file, meta) in found.iter() {
         // Sem nome ou sid o Python também filtra calado: é o sidecar ainda sendo escrito.
-        let (Some(name), Some(sid)) = (text(&meta, "name"), text(&meta, "session_id")) else { continue };
-        let Some(saved_cwd) = text(&meta, "cwd") else {
-            warn_limited(&file, "list_headless_sidecar_skipped", "cwd");
+        let (Some(name), Some(sid)) = (text(meta, "name"), text(meta, "session_id")) else { continue };
+        let Some(saved_cwd) = text(meta, "cwd") else {
+            problems.note("list_headless_sidecar_skipped", file, "sidecar Claude sem terminal sem cwd; sessão fora da lista");
             continue;
         };
         let config_dir = text(&meta, "config_dir");
@@ -499,7 +653,7 @@ pub fn headless_rows(dirs: &Dirs, procs: &dyn ProcessView) -> Vec<SessionRow> {
         let mut row = links::blank_row(&name);
         row.lifecycle_id = links::session_life(text(&meta, "key").as_deref(), None);
         row.cwd = current_cwd(&meta, procs);
-        row.jsonl = Some(headless_transcript(&saved_cwd, &sid, config_dir.as_deref(), dirs));
+        row.jsonl = Some(headless_transcript(&saved_cwd, &sid, config_dir.as_deref(), dirs, problems));
         row.headless = true;
         row.conta = if account.is_some() {
             text(&meta, "engine_credential_id")
@@ -511,8 +665,8 @@ pub fn headless_rows(dirs: &Dirs, procs: &dyn ProcessView) -> Vec<SessionRow> {
         };
         row.engine = engine;
         row.engine_account = account;
-        links::fill_location(&mut row, "claude", dirs);
-        links::fill_links(&mut row, dirs);
+        links::fill_location(&mut row, "claude", dirs, problems);
+        links::fill_links(&mut row, dirs, problems);
         out.push(row);
     }
     out
@@ -644,5 +798,150 @@ mod tests {
         // Passado o teto de 10 s, cada transcript que cresceu é relido.
         std::thread::sleep(std::time::Duration::from_millis(10_500));
         phase("tique depois de 10 s", 51..52);
+    }
+
+    fn dirs_at(home: &Path) -> Dirs {
+        Dirs { home: home.to_path_buf(), claude: home.join(".claude"), codex_home: home.join(".codex"),
+            pi_sessions: home.join(".pi"), omp_config: home.join(".omp"), omp_agent: home.join(".omp/agent"),
+            kimi_home: home.join(".kimi-code") }
+    }
+
+    #[test]
+    fn broken_sidecar_reaches_the_diary_every_round() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_at(tmp.path());
+        let codex = tmp.path().join(".hangar/codex-sessions");
+        write(&codex.join("ok.json"), r#"{"name":"ok","cwd":"/w"}"#);
+        write(&codex.join("torto.json"), r#"{"name":"#);
+        write(&tmp.path().join(".hangar/claude-headless/lista.json"), "[]");
+        let procs = RealTree { sids: Vec::new(), config: String::new() };
+        let round = |resolver: &mut Resolver| discover_rows(&[], &procs, &ChildrenMap::new(), resolver, &dirs);
+        let found = round(&mut Resolver::default());
+        assert_eq!(found.rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["ok"]);
+        let mut seen: Vec<(&str, String)> = found.problems.iter().map(|p| (p.code, p.key.clone())).collect();
+        seen.sort();
+        assert_eq!(seen, [("list_sidecar_unreadable", tmp.path().join(".hangar/claude-headless/lista.json").to_string_lossy().into_owned()),
+            ("list_sidecar_unreadable", codex.join("torto.json").to_string_lossy().into_owned())]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_sidecar_dir_is_reported_and_not_kept() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let codex = tmp.path().join(".hangar/codex-sessions");
+        write(&codex.join("ok.json"), r#"{"name":"ok","cwd":"/w"}"#);
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+        std::fs::File::open(&codex).unwrap().set_modified(old).unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o300)).unwrap();
+        let mut problems = Problems::default();
+        let found = sidecars(&codex, "codex", &mut problems);
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(found.is_empty());
+        assert_eq!(problems.into_vec().iter().map(|p| p.code).collect::<Vec<_>>(), ["list_sidecar_dir_unreadable"]);
+        assert_eq!(sidecars(&codex, "codex", &mut Problems::default()).len(), 1, "a falha não ficou guardada como pasta vazia");
+    }
+
+    #[test]
+    fn broken_ticket_reaches_the_diary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_at(tmp.path());
+        write(&dirs.default_claude().join(".hangar-kimi/7.json"), "{");
+        write(&dirs.default_claude().join(".hangar-pi/8.json"), "[]");
+        let procs = RealTree { sids: Vec::new(), config: String::new() };
+        let mut problems = Problems::default();
+        assert_eq!(ticket_transcript("kimi", "%7", None, "/w", &procs, &dirs, &mut problems), None);
+        assert_eq!(ticket_transcript("pi", "%8", None, "/w", &procs, &dirs, &mut problems), None);
+        assert_eq!(ticket_transcript("kimi", "%9", None, "/w", &procs, &dirs, &mut problems), None, "ausente é calado");
+        assert_eq!(problems.into_vec().iter().map(|p| p.code).collect::<Vec<_>>(), ["list_ticket_invalid", "list_ticket_invalid"]);
+    }
+
+    #[test]
+    fn kimi_index_with_invalid_utf8_is_reported_and_missing_is_remembered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_at(tmp.path());
+        let index = dirs.kimi_home.join("session_index.jsonl");
+        write(&index, "");
+        std::fs::write(&index, b"{\"sessionId\":\"\xff\"}\n").unwrap();
+        let mut problems = Problems::default();
+        assert_eq!(kimi_transcript_of_id("/w", "s1", &dirs, &mut problems), None);
+        assert_eq!(problems.into_vec().iter().map(|p| p.code).collect::<Vec<_>>(), ["list_kimi_index_invalid"]);
+        // Fora do índice: guardado até o índice mudar; quando cresce com a sessão, ela aparece.
+        std::fs::write(&index, "{\"sessionId\":\"x\",\"sessionDir\":\"/k/x\"}\n").unwrap();
+        let mut problems = Problems::default();
+        assert_eq!(kimi_transcript_of_id("/w", "s2", &dirs, &mut problems), None);
+        assert!(matches!(KIMI_WIRES.lock().unwrap().get(&(index.clone(), "s2".to_owned())), Some(KimiIndex::Missing(Some(_)))));
+        let mut f = std::fs::OpenOptions::new().append(true).open(&index).unwrap();
+        writeln!(f, "{{\"sessionId\":\"s2\",\"sessionDir\":\"/k/s2\"}}").unwrap();
+        assert_eq!(kimi_transcript_of_id("/w", "s2", &dirs, &mut problems).as_deref(),
+            Some(Path::new("/k/s2/agents/main/wire.jsonl").to_str().unwrap()));
+        assert!(problems.into_vec().is_empty());
+    }
+
+    /// Árvore com sid opcional por sessão: sem sid a resolução cai no marcador por pid.
+    struct RealTree { sids: Vec<Option<String>>, config: String }
+
+    impl ProcessView for RealTree {
+        fn children(&self, _: Duration) -> std::io::Result<Arc<ChildrenMap>> { unreachable!() }
+        fn argv(&self, pid: i64) -> Vec<String> {
+            match pid {
+                2000.. => match &self.sids[(pid - 2000) as usize] {
+                    Some(sid) => vec!["claude".into(), "--session-id".into(), sid.clone()],
+                    None => vec!["claude".into()],
+                },
+                _ => vec!["fish".into()],
+            }
+        }
+        fn cwd(&self, _: i64) -> Option<PathBuf> { None }
+        fn env_var(&self, _: i64, name: &str) -> std::io::Result<Option<OsString>> {
+            Ok((name == "CLAUDE_CONFIG_DIR").then(|| OsString::from(&self.config)))
+        }
+        fn start_time(&self, _: i64) -> Option<f64> { Some(1.0) }
+        fn fds(&self, _: i64) -> Vec<PathBuf> { Vec::new() }
+    }
+
+    /// Descoberta de 20 sessões sobre as pastas REAIS desta máquina (só leitura): os 20 projetos
+    /// com mais transcripts, metade com `--session-id` (o mais novo do projeto), metade sem (cai
+    /// nos marcadores), e os sidecars reais de `~/.hangar`.
+    /// `cargo test --release -p hangar-server --lib list::discover_other::tests::tick_cost_real -- --ignored --nocapture`
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore]
+    fn tick_cost_real() {
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let claude = home.join(".claude");
+        let dirs = Dirs { home: home.clone(), claude: claude.clone(), codex_home: home.join(".codex"),
+            pi_sessions: home.join(".pi/agent/sessions"), omp_config: home.join(".omp"),
+            omp_agent: home.join(".omp/agent"), kimi_home: home.join(".kimi-code") };
+        let mut projects: Vec<(usize, PathBuf)> = std::fs::read_dir(claude.join("projects")).unwrap().flatten()
+            .map(|d| (std::fs::read_dir(d.path()).map(|r| r.count()).unwrap_or(0), d.path())).collect();
+        projects.sort_by(|a, b| b.0.cmp(&a.0));
+        let mut sessions: Vec<(String, Option<String>)> = Vec::new();
+        for (_, dir) in &projects {
+            let Some(newest) = newest(dir, &|n| n.ends_with(".jsonl")) else { continue };
+            // O cwd de verdade sai do transcript: o nome da pasta é o sanitizado.
+            let head = std::fs::read(&newest).unwrap_or_default();
+            let Some(cwd) = head.split(|b| *b == b'\n').filter_map(|l| serde_json::from_slice::<Value>(l).ok())
+                .find_map(|v| v.get("cwd").and_then(Value::as_str).map(str::to_owned)) else { continue };
+            if sessions.iter().any(|(c, _)| *c == cwd) { continue; }
+            let sid = Path::new(&newest).file_stem().unwrap().to_string_lossy().into_owned();
+            let with_sid = sessions.len() % 2 == 0;
+            sessions.push((cwd, with_sid.then_some(sid)));
+            if sessions.len() == 20 { break; }
+        }
+        let panes: Vec<Pane> = sessions.iter().enumerate().map(|(i, (cwd, _))| Pane { session: format!("s{i}"),
+            active: true, pid: Some(1000 + i as u32), cwd: cwd.clone(), pane_id: format!("%{i}"), ..Pane::default() }).collect();
+        let children: ChildrenMap = (0..sessions.len() as i64).map(|i| (1000 + i, vec![2000 + i])).collect();
+        let procs = RealTree { sids: sessions.iter().map(|(_, s)| s.clone()).collect(), config: claude.to_string_lossy().into_owned() };
+        let mut resolver = Resolver::default();
+        let cpu = || std::fs::read_to_string("/proc/thread-self/schedstat").unwrap().split_whitespace().next().unwrap().parse::<u64>().unwrap();
+        let mut phase = |label: &str, n: usize| {
+            let (c, t) = (cpu(), std::time::Instant::now());
+            for _ in 0..n { std::hint::black_box(discover_rows(&panes, &procs, &children, &mut resolver, &dirs)); }
+            println!("{label} ({} sessões): {:.0} µs/tique, CPU {:.0} µs/tique", panes.len(),
+                t.elapsed().as_micros() as f64 / n as f64, (cpu() - c) as f64 / 1000.0 / n as f64);
+        };
+        phase("pasta real, tique frio", 1);
+        phase("pasta real, tiques seguintes", 50);
     }
 }
