@@ -17,77 +17,114 @@ type Timer = { cancel: () => void }
 
 let timer: Timer | null = null
 let consultando = false
+let refazer = false
 let ultima = 0
 let cabeca = ''
 // Commit empurrado cujo run ainda não apareceu: segue consultando até ele surgir ou o prazo vencer.
 let aguardando: { sha: string; ate: number } | null = null
-// Run terminado não muda mais: os jobs dele ficam guardados.
+// Run terminado não muda mais: os jobs dele ficam guardados (re-run volta a in_progress e limpa).
 const jobsFinais = new Map<number, Job[]>()
 
-async function sh($: EngineInterface, argv: string[]): Promise<string | null> {
+type Saida = { ok: boolean; out: string; err: string }
+
+// null: o comando nem existe aqui (sem git ou sem gh), o que esconde a faixa sem ser erro.
+async function sh($: EngineInterface, argv: string[]): Promise<Saida | null> {
   try {
     const r = await $.process.run(argv, { timeoutMs: 20_000 })
-    return r.exitCode === 0 ? r.stdout.trim() : null
+    return { ok: r.exitCode === 0, out: r.stdout.trim(), err: r.stderr.trim() }
   } catch {
     return null
   }
 }
 
-async function json<T>($: EngineInterface, argv: string[]): Promise<T | null> {
-  const out = await sh($, argv)
-  if (out === null) return null
-  try {
-    return JSON.parse(out) as T
-  } catch {
-    return null
-  }
+async function texto($: EngineInterface, argv: string[]): Promise<string | null> {
+  const r = await sh($, argv)
+  return r?.ok ? r.out : null
 }
 
-async function workflowDe($: EngineInterface, r: RunGh): Promise<Workflow> {
+// Falha do gh vira exceção com o motivo: quem chama mantém a última leitura em vez de apagá-la.
+function lerJson<T>(r: Saida | null, argv: string[]): T {
+  if (!r) throw new Error(`${argv[0]} indisponível`)
+  if (!r.ok) throw new Error(`${argv.slice(0, 3).join(' ')}: ${r.err || 'falhou'}`)
+  return JSON.parse(r.out) as T
+}
+
+async function workflowDe($: EngineInterface, r: RunGh, antes: Workflow | undefined): Promise<Workflow> {
   const base = { id: r.databaseId, nome: r.workflowName, url: r.url }
   const fim = r.status === 'completed' ? situacao(r.status, r.conclusion) : null
+  if (!fim) jobsFinais.delete(r.databaseId)
   const guardados = jobsFinais.get(r.databaseId)
   if (fim && guardados) return { ...base, situacao: fim, jobs: guardados }
-  const v = await json<{ jobs: JobGh[] }>($, ['gh', 'run', 'view', String(r.databaseId), '--json', 'jobs'])
-  const js = jobs(v?.jobs ?? [])
-  if (fim && v) jobsFinais.set(r.databaseId, js)
+  const argv = ['gh', 'run', 'view', String(r.databaseId), '--json', 'jobs']
+  let js: Job[]
+  try {
+    js = jobs(lerJson<{ jobs: JobGh[] }>(await sh($, argv), argv).jobs)
+    if (fim) jobsFinais.set(r.databaseId, js)
+  } catch (err) {
+    $.ui.log(`github-actions: ${String(err)}`, { to: 'debug' })
+    js = antes?.id === r.databaseId ? antes.jobs : []
+  }
   return { ...base, situacao: fim ?? (js.some(j => j.situacao === 'rodando') ? 'rodando' : 'esperando'), jobs: js }
 }
 
-async function consultar($: EngineInterface): Promise<GhView | null> {
-  const remoto = await sh($, ['git', 'remote', 'get-url', 'origin'])
-  const branch = await sh($, ['git', 'branch', '--show-current'])
+async function consultar($: EngineInterface, antes: GhView | null): Promise<GhView | null> {
+  const remoto = await texto($, ['git', 'remote', 'get-url', 'origin'])
+  const branch = await texto($, ['git', 'branch', '--show-current'])
   if (!remoto || !branch || !ehGithub(remoto)) return null
-  const [runs, prGh] = await Promise.all([
-    json<RunGh[]>($, ['gh', 'run', 'list', '--branch', branch, '--limit', '30',
-      '--json', 'databaseId,workflowName,status,conclusion,headSha,url']),
-    json<PrGh>($, ['gh', 'pr', 'view', branch,
-      '--json', 'number,title,url,state,isDraft,reviewDecision,statusCheckRollup']),
-  ])
-  if (runs === null) return null
-  const atuais = runsAtuais(runs)
-  if (aguardando && (atuais[0]?.headSha === aguardando.sha || (await $.clock.now()) > aguardando.ate)) aguardando = null
-  const workflows = await Promise.all(atuais.map(r => workflowDe($, r)))
-  return { branch, workflows, pr: prGh ? pr(prGh) : null }
+  const runArgv = ['gh', 'run', 'list', '--branch', branch, '--limit', '30',
+    '--json', 'databaseId,workflowName,status,conclusion,headSha,url']
+  const prArgv = ['gh', 'pr', 'view', branch,
+    '--json', 'number,title,url,state,isDraft,reviewDecision,statusCheckRollup']
+  const [runSaida, prSaida] = await Promise.all([sh($, runArgv), sh($, prArgv)])
+  if (!runSaida) return null
+  const atuais = runsAtuais(lerJson<RunGh[]>(runSaida, runArgv))
+  if (aguardando && atuais[0]?.headSha === aguardando.sha) aguardando = null
+  const mesma = antes?.branch === branch ? antes : null
+  const workflows = await Promise.all(atuais.map(r => workflowDe($, r, mesma?.workflows.find(w => w.nome === r.workflowName))))
+  let p = mesma?.pr ?? null
+  if (prSaida?.ok) p = pr(JSON.parse(prSaida.out) as PrGh)
+  else if (!prSaida || /no pull requests found/i.test(prSaida.err)) p = null
+  else $.ui.log(`github-actions: gh pr view: ${prSaida.err}`, { to: 'debug' })
+  return { branch, workflows, pr: p }
+}
+
+function agendar($: EngineInterface, ms: number): void {
+  timer?.cancel()
+  timer = $.clock.after(ms, () => void atualizar($))
 }
 
 async function atualizar($: EngineInterface): Promise<void> {
-  if (consultando) return
-  consultando = true
   timer?.cancel()
   timer = null
+  // Pedido que chega com outra consulta em curso não se perde: ela refaz ao terminar.
+  if (consultando) {
+    refazer = true
+    return
+  }
+  consultando = true
+  let v: GhView | null = null
   try {
-    const v = await consultar($)
-    ultima = await $.clock.now()
+    v = await read($, view)
+    v = await consultar($, v)
     await update($, view, () => v)
-    if (v && (precisaConsultar(v) || aguardando)) timer = $.clock.after(INTERVALO_MS, () => void atualizar($))
+  } catch (err) {
+    // gh fora do ar, sem login ou com limite: a faixa fica como estava e tenta de novo.
+    $.ui.log(`github-actions: ${String(err)}`, { to: 'debug' })
   } finally {
     consultando = false
+    ultima = await $.clock.now().catch(() => ultima)
+    if (aguardando && ultima > aguardando.ate) aguardando = null
+    if (refazer) {
+      refazer = false
+      agendar($, 0)
+    } else if (aguardando || precisaConsultar(v)) {
+      agendar($, INTERVALO_MS)
+    }
   }
 }
 
 async function headAtual($: EngineInterface): Promise<string> {
-  return `${await sh($, ['git', 'branch', '--show-current'])}@${await sh($, ['git', 'rev-parse', 'HEAD'])}`
+  return `${await texto($, ['git', 'branch', '--show-current'])}@${await texto($, ['git', 'rev-parse', 'HEAD'])}`
 }
 
 async function abrir($: EngineInterface, url: string): Promise<void> {
@@ -113,10 +150,9 @@ export const register: Register = on => {
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const r = await next(e)
     if (disparaRun(e.command)) {
-      const sha = await sh($, ['git', 'rev-parse', 'HEAD'])
+      const sha = await texto($, ['git', 'rev-parse', 'HEAD'])
       if (sha) aguardando = { sha, ate: (await $.clock.now()) + PRAZO_PUSH_MS }
-      timer?.cancel()
-      timer = $.clock.after(ESPERA_PUSH_MS, () => void atualizar($))
+      agendar($, ESPERA_PUSH_MS)
     }
     return r
     // Só observa: falha aqui nunca segura o comando.
