@@ -974,9 +974,11 @@ impl Hangar {
         if error.status.is_none_or(|status| status >= 500) { tr_shared("plugin_input_falhou", &[]) } else { Self::failure(error) }
     }
 
-    /// Troca de aba recusada. Servidor sem a rota (404 ou 405) é servidor antigo, não erro: a troca local já valeu.
+    /// Troca de aba recusada. Servidor sem a rota (404 ou 405) é servidor antigo, não erro: a troca local já valeu. Sem
+    /// resposta ou 5xx, a frase da troca de aba (a mesma do web); a recusa (4xx) diz o motivo dela.
     fn show_failure(error: &Failure) -> Option<String> {
-        (!matches!(error.status, Some(404 | 405))).then(|| Self::press_failure(error))
+        if matches!(error.status, Some(404 | 405)) { return None; }
+        Some(if error.status.is_none_or(|status| status >= 500) { tr_shared("plugin_aba_falhou", &[]) } else { Self::failure(error) })
     }
 
     fn selected_key(&self) -> Option<SessionKey> {
@@ -6284,7 +6286,10 @@ mod tests {
         assert_eq!(Hangar::show_failure(&failure(Some(404))), None);
         assert_eq!(Hangar::show_failure(&failure(Some(405))), None);
         assert_eq!(Hangar::show_failure(&failure(Some(409))), Some(Hangar::failure(&failure(Some(409)))));
-        assert_eq!(Hangar::show_failure(&failure(None)), Some(tr("plugin_press_failed")));
+        // Sem resposta ou 5xx, a frase da troca de aba (a mesma do web), não a do clique.
+        assert_eq!(Hangar::show_failure(&failure(None)), Some(crate::i18n::tr_shared("plugin_aba_falhou", &[])));
+        assert_eq!(Hangar::show_failure(&failure(Some(503))), Some(crate::i18n::tr_shared("plugin_aba_falhou", &[])));
+        assert_ne!(crate::i18n::tr_shared("plugin_aba_falhou", &[]), "plugin_aba_falhou");
     }
 
     #[test]
