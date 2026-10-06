@@ -572,6 +572,17 @@ fn notices_only_with_the_watch_parser() {
         .map(|kind| ControlEvent::Notice(kind.into())).to_vec());
 }
 
+/// Só `%begin ` com espaço é marcador de quadro: um aviso que só começa com `%begin` segue ignorado nos dois
+/// parsers, como era antes do vigia.
+#[test]
+fn a_notice_that_only_starts_with_begin_is_not_a_frame() {
+    for mut parser in [ControlParser::default(), ControlParser::with_notices()] {
+        assert_eq!(parser.push(b"%beginning-of-something x\n%begin 5 9 0\nok\n%end 5 9 0\n").unwrap(), vec![
+            ControlEvent::Frame { identity: FrameIdentity { timestamp: 5, command: 9, flags: 0 }, text: "ok\n".into(), error: false },
+        ]);
+    }
+}
+
 /// No psmux o Hangar não liga cliente de controle: a contagem de terminais por `#{session_attached}` da
 /// Task 9 depende disso.
 #[cfg(windows)]
