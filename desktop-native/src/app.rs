@@ -3593,9 +3593,8 @@ impl Hangar {
         let state = &self.chat.state;
         if self.chat.ask.is_some() || state.state != "awaiting_input" { return None; }
         let (question, options) = (state.question.clone()?, state.options.clone().filter(|o| !o.is_empty())?);
-        // Menu do AskUserQuestion no pane: quem responde é o card nativo, que chega pelo `ask_question` (antes dele e
-        // depois de enviar, este seletor piscava por cima).
-        if interaction::ask_picker(&options) { return None; }
+        // Menu do AskUserQuestion no pane: quem responde é o card nativo (depois de enviar, este seletor piscava por cima).
+        if self.chat.ask_pane() { return None; }
         let snapshot = select_snapshot(state);
         let plan = plan_pending(state).filter(|p| !p.plan.trim().is_empty());
         let multi = options.iter().any(|o| interaction::checkbox(o).is_some());
@@ -5925,8 +5924,8 @@ impl Hangar {
         // Pergunta do transcript já respondida espera só o `tool_result`: não é pedido sem resposta.
         let answered = interaction::ask_from_events(&self.chat.events, self.provider().0)
             .and_then(|ask| ask.tool_use_id).is_some_and(|id| self.tool_answered(&id));
-        // Menu do AskUserQuestion sem o card ainda (ou já respondido): o card nativo é quem responde, sem aviso de terminal.
-        let ask_pane = self.chat.state.options.as_deref().is_some_and(interaction::ask_picker);
+        // Menu de uma pergunta nativa aberta ou recém-respondida: o card é quem responde, sem aviso de terminal.
+        let ask_pane = self.chat.ask_pane();
         let pending = card.is_none() && !answered && !ask_pane && !prethread_open && (self.chat.state.state == "awaiting_input" || self.chat.state.login);
         // Faixas e avisos entre a conversa e o compositor ficam na mesma coluna das mensagens.
         content = content

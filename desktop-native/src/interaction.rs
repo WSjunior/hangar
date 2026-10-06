@@ -88,7 +88,8 @@ pub fn answer(ask: &Ask, item: &AskItem, pick: &Pick) -> Option<Value> {
     Some(answer)
 }
 
-/// As linhas "Type something." e "Chat about this" só existem no seletor do AskUserQuestion: esse menu é do card nativo.
+/// Seletor com as linhas "Type something." e "Chat about this": o do AskUserQuestion, mas também menus do próprio
+/// Claude Code (mods). Quem decide se o card nativo responde é `Chat::ask_pane`.
 pub fn ask_picker(options: &[String]) -> bool {
     // Prefixo, não igualdade: o pane pode trazer a coluna da direita (prévia, diff) grudada na mesma linha.
     options.iter().any(|option| {
