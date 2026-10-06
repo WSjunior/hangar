@@ -61,7 +61,6 @@ pub struct Surface {
     panes: Vec<PaneItem>,
     shown: Option<String>,
     trees: BTreeMap<String, Value>,
-    rendering: BTreeSet<String>,
     dirty: BTreeSet<String>,
     flush_at: Option<f64>,
     closing: Vec<(u64, String, f64)>,
@@ -78,7 +77,7 @@ impl Surface {
     /// Code: a resposta atrasada de um pedido velho não pode ser tomada como de um pedido novo.
     pub fn new(prefix: String) -> Self {
         Self { prefix, counter: 0, phase: Phase::Idle, waiting: BTreeMap::new(), panes: Vec::new(), shown: None,
-            trees: BTreeMap::new(), rendering: BTreeSet::new(), dirty: BTreeSet::new(), flush_at: None,
+            trees: BTreeMap::new(), dirty: BTreeSet::new(), flush_at: None,
             closing: Vec::new(), working: false, published: None }
     }
 
@@ -113,11 +112,13 @@ impl Surface {
                 self.render(BAND_SITE, now, &mut out);
                 self.request("ui_panes", json!({"client_id": CLIENT_ID}), Pending::Panes, now, &mut out);
             }
-            Pending::Attach => { self.phase = Phase::Off; self.publish(&mut out); }
+            // Recusada: o rol aceito durante a ligação e os desenhos em voo saem junto.
+            Pending::Attach => self.turn_off(&mut out),
             Pending::Panes => if ok { self.apply_panes(&body, now, &mut out) },
             Pending::Render { instance } => {
-                self.rendering.remove(&instance);
                 if ok { self.store(&instance, &body, &mut out); }
+                // O que ficou sujo enquanto este desenho estava em voo sai na próxima janela.
+                self.arm(now);
             }
             Pending::Press { token, site, key, retried } => match (ok, body["handled"] == true) {
                 (false, _) => out.push(reply(token, Err(no_answer()))),
@@ -135,6 +136,7 @@ impl Surface {
             Pending::Refresh { token, call } => {
                 if ok { self.store(call.site(), &body, &mut out); }
                 self.retry(token, call, now, &mut out);
+                self.arm(now);
             }
             Pending::Close { token, site } => {
                 if !ok { out.push(reply(token, Err(no_answer()))); }
@@ -172,7 +174,7 @@ impl Surface {
                         self.dirty.extend(self.panes.iter().map(|pane| pane.id.clone()));
                     }
                 }
-                if !self.dirty.is_empty() { self.flush_at.get_or_insert(now + BATCH_S); }
+                self.arm(now);
             }
             Some("ui_toast") => if let (Some(plugin), Some(text)) = (event["plugin"].as_str(), event["text"].as_str()) {
                 out.push(SurfaceEffect::Toast { plugin: plugin.to_owned(), text: text.to_owned(),
@@ -199,9 +201,7 @@ impl Surface {
     /// O processo do Claude Code saiu: pedidos em aberto respondem com código e a faixa some.
     pub fn on_exit(&mut self) -> Vec<SurfaceEffect> {
         let mut out = Vec::new();
-        self.reset(&mut out);
-        self.phase = Phase::Off;
-        self.publish(&mut out);
+        self.turn_off(&mut out);
         out
     }
 
@@ -225,12 +225,13 @@ impl Surface {
         for id in expired {
             let Some(waiting) = self.waiting.remove(&id) else { continue };
             match waiting.pending {
-                Pending::Attach => { self.phase = Phase::Off; self.publish(&mut out); }
-                Pending::Render { instance } => { self.rendering.remove(&instance); }
-                Pending::Panes => {}
+                Pending::Attach => self.turn_off(&mut out),
+                Pending::Render { .. } | Pending::Panes => {}
                 pending => if let Some(token) = pending.token() { out.push(reply(token, Err(no_answer()))); },
             }
         }
+        // Desenho vencido deixa de estar em voo: o que ficou sujo atrás dele sai na próxima janela.
+        self.arm(now);
         let (late, open): (Vec<_>, Vec<_>) = std::mem::take(&mut self.closing).into_iter().partition(|(_, _, until)| now + 1e-9 >= *until);
         self.closing = open;
         for (token, ..) in late { out.push(reply(token, Err(no_answer()))); }
@@ -296,16 +297,34 @@ impl Surface {
             "props": props, "viewport": viewport()}))
     }
 
+    /// Com um desenho da instância em voo, só a marca como suja: a resposta arma a janela (`arm`), e o
+    /// ator não acorda a cada 100 ms enquanto espera.
     fn render(&mut self, instance: &str, now: f64, out: &mut Vec<SurfaceEffect>) {
-        if self.rendering.contains(instance) { self.mark(instance, now); return; }
+        if self.in_flight(instance) { self.dirty.insert(instance.to_owned()); return; }
         let Some(body) = self.render_body(instance) else { return };
-        self.rendering.insert(instance.to_owned());
         self.request("ui_render", body, Pending::Render { instance: instance.to_owned() }, now, out);
+    }
+
+    /// Há desenho da instância esperando resposta, pedido pela faixa, pelo painel ou pela nova tentativa
+    /// de um clique. Sai dos pedidos em aberto, então não se perde quando um deles vence ou é descartado.
+    fn in_flight(&self, instance: &str) -> bool {
+        self.waiting.values().any(|waiting| match &waiting.pending {
+            Pending::Render { instance: id } => id == instance,
+            Pending::Refresh { call, .. } => call.site() == instance,
+            _ => false,
+        })
     }
 
     fn mark(&mut self, instance: &str, now: f64) {
         self.dirty.insert(instance.to_owned());
-        self.flush_at.get_or_insert(now + BATCH_S);
+        self.arm(now);
+    }
+
+    /// Abre a janela de 100 ms quando há instância suja sem desenho em voo.
+    fn arm(&mut self, now: f64) {
+        if self.flush_at.is_none() && self.dirty.iter().any(|id| !self.in_flight(id)) {
+            self.flush_at = Some(now + BATCH_S);
+        }
     }
 
     fn store(&mut self, instance: &str, body: &Value, out: &mut Vec<SurfaceEffect>) {
@@ -327,7 +346,6 @@ impl Surface {
         let keep = |id: &String| id == BAND_SITE || ids.contains(id);
         self.trees.retain(|id, _| keep(id));
         self.dirty.retain(|id| keep(id));
-        self.rendering.retain(|id| keep(id));
         for id in changed { self.render(&id, now, out); }
         let (gone, open): (Vec<_>, Vec<_>) = std::mem::take(&mut self.closing).into_iter().partition(|(_, site, _)| !ids.contains(site));
         self.closing = open;
@@ -359,9 +377,16 @@ impl Surface {
         self.panes.clear();
         self.shown = None;
         self.trees.clear();
-        self.rendering.clear();
         self.dirty.clear();
         self.flush_at = None;
+    }
+
+    /// Ligação recusada ou sem resposta, ou processo encerrado: limpa o rol e os desenhos (em voo
+    /// também) e publica a interface vazia.
+    fn turn_off(&mut self, out: &mut Vec<SurfaceEffect>) {
+        self.reset(out);
+        self.phase = Phase::Off;
+        self.publish(out);
     }
 
     fn control(&self, site: &str, key: &str, kind: &str) -> Option<tree::Control> {

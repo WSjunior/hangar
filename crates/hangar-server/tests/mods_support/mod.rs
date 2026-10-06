@@ -89,7 +89,8 @@ impl FakeClaude {
         if recorded["subtype"] != wanted["subtype"] { return false; }
         match wanted["subtype"].as_str().unwrap_or("") {
             "ui_render" => recorded["component"] == wanted["component"] && recorded["instance_id"] == wanted["instance_id"],
-            "ui_press" | "ui_select" => recorded["key"] == wanted["key"],
+            "ui_press" => recorded["key"] == wanted["key"],
+            "ui_select" => recorded["key"] == wanted["key"] && recorded["value"] == wanted["value"],
             "ui_input" => recorded["key"] == wanted["key"] && recorded["kind"] == wanted["kind"] && recorded["value"] == wanted["value"],
             "ui_close" | "ui_pane_show" | "ui_pane_focus" => recorded["id"] == wanted["id"],
             _ => true,
@@ -158,6 +159,16 @@ impl FakeClaude {
     }
 }
 
+/// O último `plugin_ui` publicado entre os efeitos.
+pub fn published(out: &[SurfaceEffect]) -> Option<Value> {
+    out.iter().rev().find_map(|effect| match effect { SurfaceEffect::Publish { data } => Some(data.clone()), _ => None })
+}
+
+/// A resposta ao pedido `token` de um app, se já saiu.
+pub fn reply_of(out: &[SurfaceEffect], token: u64) -> Option<Result<Value, ModsError>> {
+    out.iter().find_map(|effect| match effect { SurfaceEffect::Reply { token: t, result } if *t == token => Some(result.clone()), _ => None })
+}
+
 /// Liga uma `Surface` ao Claude Code falso e guarda tudo o que ela emitiu.
 pub struct Drive {
     pub surface: Surface,
@@ -211,12 +222,11 @@ impl Drive {
     }
 
     pub fn view(&self) -> Value {
-        self.out.iter().rev().find_map(|effect| match effect { SurfaceEffect::Publish { data } => Some(data.clone()), _ => None })
-            .expect("a superfície publicou algo")
+        published(&self.out).expect("a superfície publicou algo")
     }
 
     pub fn reply(&self, token: u64) -> Option<Result<Value, ModsError>> {
-        self.out.iter().find_map(|effect| match effect { SurfaceEffect::Reply { token: t, result } if *t == token => Some(result.clone()), _ => None })
+        reply_of(&self.out, token)
     }
 
     pub fn pane_text(&self, id: &str) -> String {

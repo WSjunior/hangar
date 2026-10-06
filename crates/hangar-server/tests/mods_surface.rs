@@ -16,12 +16,6 @@ pub fn ok(surface: &mut Surface, frame: &Value, body: Value, now: f64) -> Vec<Su
     let id = RequestId::String(frame["request_id"].as_str().unwrap().into());
     surface.on_response(&id, &json!({"subtype": "success", "request_id": frame["request_id"], "response": body}), now)
 }
-pub fn reply_of(out: &[SurfaceEffect], token: u64) -> Option<Result<Value, ModsError>> {
-    out.iter().find_map(|effect| match effect { SurfaceEffect::Reply { token: t, result } if *t == token => Some(result.clone()), _ => None })
-}
-pub fn published(out: &[SurfaceEffect]) -> Option<Value> {
-    out.iter().rev().find_map(|effect| match effect { SurfaceEffect::Publish { data } => Some(data.clone()), _ => None })
-}
 pub fn panes(list: Value, shown: &str) -> Value {
     json!({"type": "system", "subtype": "ui_panes", "panes": list, "shown_id": shown, "focused_id": null, "focus_requested_id": null})
 }
@@ -100,7 +94,7 @@ fn invalidate_batches_in_100ms_and_ignores_closed_instances() {
     let renders: Vec<Value> = writes(&out).into_iter().filter(|frame| frame["request"]["subtype"] == "ui_render").collect();
     assert_eq!(renders.len(), 1, "um pedido por instância montada");
     assert_eq!(renders[0]["request"]["instance_id"], "p");
-    // Desenho em voo não é pedido de novo: responde antes da próxima rodada.
+    // Responde antes da próxima rodada; o invalidate com o desenho em voo tem teste próprio.
     ok(&mut surface, &renders[0], json!({"tree": {"type": "Text"}}), 2.2);
     let all = json!({"type": "system", "subtype": "ui_invalidate", "event": "ui.render"});
     surface.on_notice(&all, 3.0);
@@ -145,13 +139,67 @@ fn refused_attach_turns_off_and_clears() {
     let mut surface = Surface::new("ui:t".into());
     let attach = request(&surface.start(0.0), "ui_attach");
     let id = RequestId::String(attach["request_id"].as_str().unwrap().into());
+    // O rol chega durante a ligação e já pede o desenho do painel.
+    let out = surface.on_notice(&panes(json!([{"id": "p", "title": "P", "plugin": "m"}]), "p"), 0.05);
+    let render = request(&out, "ui_render");
+    assert_eq!(published(&out).unwrap()["panes"][0]["id"], "p");
     let out = surface.on_response(&id, &json!({"subtype": "error", "request_id": attach["request_id"], "error": "desconhecido"}), 0.1);
     assert!(!surface.is_ready());
-    assert_eq!(published(&out).unwrap()["panes"], json!([]));
-    let silent = &mut Surface::new("ui:u".into());
-    silent.start(0.0);
-    assert_eq!(silent.deadline(), Some(15.0));
-    assert!(published(&silent.tick(15.0)).is_some(), "sem resposta em 15 s também desliga");
+    let view = published(&out).unwrap();
+    assert_eq!((view["panes"].clone(), view["shown_id"].clone()), (json!([]), Value::Null));
+    assert!(ok(&mut surface, &render, json!({"tree": {"type": "Text"}}), 0.2).is_empty(), "desenho em voo não volta depois de desligar");
+    assert_eq!(surface.deadline(), None);
+}
+
+#[test]
+fn silent_attach_turns_off_and_clears() {
+    let mut surface = Surface::new("ui:u".into());
+    surface.start(0.0);
+    assert_eq!(surface.deadline(), Some(15.0));
+    let out = surface.on_notice(&panes(json!([{"id": "p", "title": "P", "plugin": "m"}]), "p"), 6.0);
+    let render = request(&out, "ui_render");
+    assert_eq!(published(&out).unwrap()["panes"][0]["id"], "p");
+    let view = published(&surface.tick(15.0)).expect("sem resposta em 15 s também desliga");
+    assert!(!surface.is_ready());
+    assert_eq!((view["panes"].clone(), view["shown_id"].clone()), (json!([]), Value::Null));
+    assert!(ok(&mut surface, &render, json!({"tree": {"type": "Text"}}), 15.1).is_empty(), "desenho em voo não volta depois de desligar");
+    assert_eq!(surface.deadline(), None);
+}
+
+#[test]
+fn invalidate_during_render_waits_for_the_answer() {
+    let mut surface = ready(json!({"type": "Text"}));
+    let out = surface.on_notice(&panes(json!([{"id": "p", "title": "P", "plugin": "m"}]), "p"), 1.0);
+    let first = request(&out, "ui_render");
+    let changed = json!({"type": "system", "subtype": "ui_invalidate", "event": "ui.render", "instances": [
+        {"surface": "desktop", "component": "Pane", "instance_id": "p"}]});
+    assert!(writes(&surface.on_notice(&changed, 2.0)).is_empty());
+    // Sem janela de 100 ms enquanto o desenho está em voo: o próximo prazo é o do rol (10 s), não 2,1.
+    assert_eq!(surface.deadline(), Some(10.0));
+    assert!(writes(&surface.tick(2.1)).is_empty(), "nada sai com o desenho em voo");
+    assert!(writes(&surface.tick(3.0)).is_empty());
+    let out = ok(&mut surface, &first, json!({"tree": {"type": "Text"}}), 3.5);
+    assert!(writes(&out).is_empty(), "a resposta só arma a janela");
+    assert_eq!(surface.deadline(), Some(3.6));
+    let renders: Vec<Value> = writes(&surface.tick(3.6)).into_iter().filter(|frame| frame["request"]["subtype"] == "ui_render").collect();
+    assert_eq!(renders.len(), 1, "um pedido só depois da resposta");
+    assert_eq!(renders[0]["request"]["instance_id"], "p");
+}
+
+#[test]
+fn invalidate_during_click_refresh_waits_for_it() {
+    let mut surface = ready(json!({"type": "Text"}));
+    // Botão fora do desenho guardado: pede o desenho de novo antes de tentar (S4).
+    let refresh = request(&surface.call(1, ModsCall::Press { site: BAND_SITE.into(), key: "x".into() }, 1.0), "ui_render");
+    let all = json!({"type": "system", "subtype": "ui_invalidate", "event": "ui.render"});
+    assert!(writes(&surface.on_notice(&all, 1.5)).is_empty());
+    assert!(writes(&surface.tick(1.6)).is_empty(), "a nova tentativa conta como desenho em voo");
+    let out = ok(&mut surface, &refresh, json!({"tree": {"type": "Text"}}), 2.0);
+    assert_eq!(reply_of(&out, 1), Some(Err(stale())));
+    assert!(writes(&out).is_empty());
+    let renders: Vec<Value> = writes(&surface.tick(2.1)).into_iter().filter(|frame| frame["request"]["subtype"] == "ui_render").collect();
+    assert_eq!(renders.len(), 1);
+    assert_eq!(renders[0]["request"]["instance_id"], "above-prompt");
 }
 
 #[test]
