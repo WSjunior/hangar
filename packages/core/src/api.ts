@@ -2474,13 +2474,15 @@ export async function showPluginPane(name: string, site: string, server?: Server
 export type PluginInputKind = 'change' | 'submit';
 
 /** Digitação num `Input` de mod (`plugin/input`): só a sessão sem terminal aceita; com terminal vem
- *  `erro_mod_sem_digitacao`. */
+ *  `erro_mod_sem_digitacao`. Sempre com prazo de 8 s, o mesmo do `apiFetchForServer` (que o aplica quando há
+ *  servidor): o campo manda um pedido por vez, e um pedido pendurado prenderia toda a digitação nele. */
 export async function inputPluginField(
   name: string, site: string, key: string, kind: PluginInputKind, value: string, server?: Server,
 ): Promise<{ ok: boolean }> {
   const path = `/api/sessions/${encodeURIComponent(name)}/plugin/input`;
   const init = { method: 'POST', body: JSON.stringify({ site, key, kind, value }) };
-  return server ? apiFetchForServer<{ ok: boolean }>(server, path, init) : apiFetch<{ ok: boolean }>(path, init);
+  return server ? apiFetchForServer<{ ok: boolean }>(server, path, init)
+                : apiFetch<{ ok: boolean }>(path, { ...init, signal: AbortSignal.timeout(8000) });
 }
 
 // Pergunta lateral (/btw do Claude Code): o backend dirige o overlay da TUI e devolve a resposta.

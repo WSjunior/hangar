@@ -1026,3 +1026,34 @@ it.each([404, 405])('plugin/show num servidor sem a rota rejeita com status %i, 
   const erro = await showPluginPane('sessao', 'pm-mock-mr', server).catch((e: unknown) => e);
   expect(isMissingRoute(erro)).toBe(true);
 });
+
+it('plugin/input sem resposta e sem servidor explícito é cortado em 8 s, e a fila do campo segue', async () => {
+  const { fieldSender } = await import('./pluginField');
+  vi.useFakeTimers();
+  // O `AbortSignal.timeout` do Node não anda com o relógio falso: o mesmo prazo, pelo `setTimeout` falso.
+  const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
+    const c = new AbortController();
+    setTimeout(() => c.abort(new DOMException('signal timed out', 'TimeoutError')), ms);
+    return c.signal;
+  });
+  try {
+    // Servidor que aceita a conexão e nunca responde: o pedido só termina pelo sinal.
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation((_url, init) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal!.reason));
+    }));
+    const errors: unknown[] = [];
+    const input = fieldSender((kind, value) => inputPluginField('sessao', 'vitrine-campos', 'V18-campo', kind, value),
+      (err) => errors.push(err));
+    input('change', 'a');
+    input('submit', 'a');
+    await vi.advanceTimersByTimeAsync(7999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(errors).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(fetchMock.mock.calls[1][1]?.body as string)).toMatchObject({ kind: 'submit', value: 'a' });
+    expect(timeout).toHaveBeenCalledWith(8000);
+  } finally {
+    vi.useRealTimers();
+  }
+});
