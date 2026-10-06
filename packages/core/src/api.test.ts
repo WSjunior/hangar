@@ -21,6 +21,7 @@ import { discardFile, fileAuthHeader, fileUrlNative, getPairContract, getPlans, 
 import type { Server } from './servers';
 import { exportShortcuts } from './api';
 import { fileUrl, uploadUrl } from './api';
+import { editTranscriptionProviderKey, moveTranscriptionProvider, parseTranscriptionProviders, transcriptionProviderLabel, transcriptionProvidersMissingKey } from './api';
 const server = { id: 'a', label: 'Servidor A', baseUrl: 'https://a.test', token: 'token-a' };
 
 it('exportação leva IDs selecionados ao servidor escolhido e distingue seleção vazia', async () => {
@@ -1122,4 +1123,42 @@ it('plugin/input sem resposta e sem servidor explícito é cortado em 8 s, e a f
   } finally {
     vi.useRealTimers();
   }
+});
+
+describe('lista de serviços de transcrição', () => {
+  const ELEVEN = { id: 'a', kind: 'elevenlabs' as const, name: '', base_url: '', api_key: 'xi_••••', model: '' };
+
+  it('lê só itens válidos e completa campos ausentes', () => {
+    expect(parseTranscriptionProviders('x')).toEqual([]);
+    expect(parseTranscriptionProviders([{ id: 'a', kind: 'elevenlabs', api_key: 'xi_••••' }, { id: 'b', kind: 'outro' }, null]))
+      .toEqual([ELEVEN]);
+  });
+
+  it('rótulo: nome dado, ElevenLabs, ou host · modelo', () => {
+    expect(transcriptionProviderLabel({ kind: 'openai', name: ' Meu ', base_url: '', model: '' })).toBe('Meu');
+    expect(transcriptionProviderLabel({ kind: 'elevenlabs', name: '', base_url: 'https://x', model: '' })).toBe('ElevenLabs');
+    expect(transcriptionProviderLabel({ kind: 'openai', name: '', base_url: 'https://api.groq.com/openai/v1', model: 'whisper-large-v3-turbo' }))
+      .toBe('api.groq.com · whisper-large-v3-turbo');
+    expect(transcriptionProviderLabel({ kind: 'openai', name: '', base_url: 'htt', model: '' })).toBe('whisper-large-v3');
+  });
+
+  it('mover troca com o vizinho e não sai da lista na ponta', () => {
+    expect(moveTranscriptionProvider(['a', 'b', 'c'], 0, 1)).toEqual(['b', 'a', 'c']);
+    expect(moveTranscriptionProvider(['a', 'b', 'c'], 2, -1)).toEqual(['a', 'c', 'b']);
+    expect(moveTranscriptionProvider(['a', 'b'], 0, -1)).toEqual(['a', 'b']);
+    expect(moveTranscriptionProvider(['a', 'b'], 1, 1)).toEqual(['a', 'b']);
+    expect(moveTranscriptionProvider(['a', 'b'], 5, -1)).toEqual(['a', 'b']);
+  });
+
+  it('chave apagada volta à máscara; digitada troca', () => {
+    expect(editTranscriptionProviderKey(ELEVEN, 'nova', 'xi_••••').api_key).toBe('nova');
+    expect(editTranscriptionProviderKey({ ...ELEVEN, api_key: 'nova' }, '', 'xi_••••')).toEqual(ELEVEN);
+    expect(editTranscriptionProviderKey({ ...ELEVEN, api_key: 'x' }, '', undefined).api_key).toBe('');
+  });
+
+  it('falta chave quando algum item está sem chave', () => {
+    expect(transcriptionProvidersMissingKey([])).toBe(false);
+    expect(transcriptionProvidersMissingKey([ELEVEN])).toBe(false);
+    expect(transcriptionProvidersMissingKey([ELEVEN, { ...ELEVEN, id: 'b', api_key: '' }])).toBe(true);
+  });
 });

@@ -366,3 +366,35 @@ describe('criarConfigServidor — recarrega segredos após salvar (item 2)', () 
     }
   });
 });
+
+describe('criarConfigServidor — lista de serviços', () => {
+  const ITEM = { id: 'a', kind: 'elevenlabs', name: '', base_url: '', api_key: 'xi_••••', model: '' };
+
+  it('a lista vai inteira no Salvar e não aparece como valor de linha', async () => {
+    const config = criarConfigServidor(() => A);
+    apiMock.getConfigForServer.mockResolvedValueOnce(payload({
+      transcription_providers: { valor: [ITEM], definido: true, origem: 'app' },
+    }) as never);
+    await config.carregar();
+    expect(config.valorAtual('transcription_providers')).toBe('');
+    expect(config.valorBruto('transcription_providers')).toEqual([ITEM]);
+    const nova = [ITEM, { id: 'b', kind: 'openai', name: '', base_url: 'https://x/v1', api_key: 'k', model: '' }];
+    config.setRascunho('transcription_providers', nova);
+    expect(config.salvarBloqueado).toBe(false);
+    apiMock.patchConfigForServer.mockResolvedValueOnce(payload({}) as never);
+    await config.salvar();
+    expect(apiMock.patchConfigForServer).toHaveBeenCalledWith(A, { transcription_providers: nova });
+  });
+
+  it('serviço sem chave segura o Salvar de todas as telas', async () => {
+    const config = criarConfigServidor(() => A);
+    apiMock.getConfigForServer.mockResolvedValueOnce(payload({}) as never);
+    await config.carregar();
+    config.setRascunho('groq_api_key', 'gsk_nova');
+    config.setRascunho('transcription_providers', [{ ...ITEM, api_key: '' }]);
+    expect(config.salvarBloqueado).toBe(true);
+    await config.salvar();
+    expect(apiMock.patchConfigForServer).not.toHaveBeenCalled();
+    expect(config.temMudanca).toBe(true);
+  });
+});

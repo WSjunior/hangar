@@ -3878,6 +3878,8 @@
   "voz_transcrever_sem_chave": "Off. Configure a key to turn audio into text.",
   "voz_criar_chave": "How to create a free key",
   "voz_transcricao_outro_servico": "Use another transcription service",
+  "voz_servicos_em_uso": "The service list is in use: transcription only uses it. The key above still serves to organize the text.",
+  "voz_servico_tipo": "Service type",
   "voz_preferencias_transcricao": "After transcribing",
   "voz_limpar": "Text organization (optional)",
   "voz_limpar_ajuda": "After transcription, a model can add punctuation, reorganize as prose, or build a briefing. The default service reuses the key when transcription also uses the default. Another transcription service needs an LLM configured here.",

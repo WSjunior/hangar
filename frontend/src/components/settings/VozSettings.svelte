@@ -6,7 +6,8 @@
   import SegmentedPicker from '../SegmentedPicker.svelte';
   import { lerMaosLivres, setMaosLivres } from '../../lib/maosLivres';
   import { ditadoEstilo } from '../../lib/ditadoEstilo.svelte';
-  import { estilosDitado, type EstiloDitado } from '@hangar/core';
+  import { estilosDitado, parseTranscriptionProviders, type EstiloDitado } from '@hangar/core';
+  import TranscriptionProviders from './TranscriptionProviders.svelte';
   import { listarVozesTts, saldoTts, type TtsVoz } from '@hangar/core';
   import { ttsPlayer } from '../../lib/ttsPlayer.svelte';
   import { ouvirAmostra } from '../../lib/ouvir';
@@ -48,12 +49,17 @@
   };
 
   // --- Transcrever -----------------------------------------------------------------------------
-  const transcreverOk = $derived(
+  // A chave da Groq também serve à organização do texto; a transcrição usa a lista quando há uma.
+  const groqChaveOk = $derived(
     store.campos['groq_api_key']?.definido === true && !store.remocaoPendente('groq_api_key'),
   );
+  const servicos = $derived(parseTranscriptionProviders(store.valorBruto('transcription_providers')));
+  const transcreverOk = $derived(servicos.length ? servicos.some((p) => p.api_key) : groqChaveOk);
   const transcricaoPersonalizada = $derived(
-    String(store.valorAtual('transcription_base_url') ?? '').trim().length > 0,
+    servicos.length > 0 || String(store.valorAtual('transcription_base_url') ?? '').trim().length > 0,
   );
+  let servicosAbertos = $state(false);
+  let servicosDecidido = $state(false);
   const CAMPO_TRANSCRICAO_CHAVE = {
     chave: 'groq_api_key', tipo: 'segredo' as const,
     rotulo: m.config_server_groq(), ajuda: m.config_server_groq_ajuda(),
@@ -103,7 +109,7 @@
   const organizacaoOk = $derived(
     organizacaoPersonalizada
       ? store.campos['llm_api_key']?.definido === true && !store.remocaoPendente('llm_api_key')
-      : transcreverOk && !transcricaoPersonalizada,
+      : groqChaveOk && !String(store.valorAtual('transcription_base_url') ?? '').trim(),
   );
 
   // Nasce ABERTO quando quem já configurou um provedor próprio chega na tela — fechado por padrão
@@ -126,6 +132,13 @@
       || String(store.valorAtual('transcription_model') ?? '').trim()) {
       transcricaoAvancadaAberta = true;
     }
+  });
+
+  // Nasce aberto para quem já tem lista; decide uma vez só, como os outros acordeões.
+  $effect(() => {
+    if (servicosDecidido || store.carregando || !Object.keys(store.campos).length) return;
+    servicosDecidido = true;
+    if (servicos.length) servicosAbertos = true;
   });
 
   // --- Ler em voz alta -----------------------------------------------------------------------
@@ -265,6 +278,14 @@
             <LinhaConfig campo={CAMPO_TRANSCRICAO_ENDPOINT} {store} removivel />
             <LinhaConfig campo={CAMPO_TRANSCRICAO_MODELO} {store} removivel />
           </div>
+        {/if}
+      </details>
+
+      {#if servicos.length}<p class="aviso">{m.voz_servicos_em_uso()}</p>{/if}
+      <details class="detalhes transcription-services" bind:open={servicosAbertos}>
+        <summary>{m.native_voice_providers()}</summary>
+        {#if servicosAbertos}
+          <TranscriptionProviders {store} />
         {/if}
       </details>
 
@@ -449,8 +470,9 @@
 {#if rodapeVisivel}
   <div class="rodape">
     {#if store.salvo}<span class="ok">{m.config_server_salvo()}</span>{/if}
+    {#if store.salvarBloqueado}<span class="bloqueio" role="status">{m.native_server_save_blocked_provider_key()}</span>{/if}
     {#if store.temMudanca || store.salvando}
-      <button class="btn primario" onclick={store.salvar} disabled={store.salvando}>
+      <button class="btn primario" onclick={store.salvar} disabled={store.salvando || store.salvarBloqueado}>
         {store.salvando ? m.config_motores_salvando() : m.ctx_salvar()}
       </button>
     {/if}
@@ -570,6 +592,7 @@
     margin: 0 calc(-1 * var(--space-4)) calc(-1 * var(--space-4));
   }
   .ok { font-size: var(--text-xs); color: var(--success); }
+  .bloqueio { flex: 1 1 auto; min-width: 0; text-align: right; font-size: var(--text-xs); color: var(--warning); }
   .btn {
     height: 40px; padding: 0 var(--space-4);
     border-radius: var(--radius-md);

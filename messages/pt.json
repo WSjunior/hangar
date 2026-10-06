@@ -3878,6 +3878,8 @@
   "voz_transcrever_sem_chave": "Desativada. Configure uma chave para transformar áudio em texto.",
   "voz_criar_chave": "Como criar uma chave gratuita",
   "voz_transcricao_outro_servico": "Usar outro serviço de transcrição",
+  "voz_servicos_em_uso": "A lista de serviços está em uso: a transcrição usa só ela. A chave acima continua servindo para organizar o texto.",
+  "voz_servico_tipo": "Tipo do serviço",
   "voz_preferencias_transcricao": "Depois de transcrever",
   "voz_limpar": "Organização do texto (opcional)",
   "voz_limpar_ajuda": "Depois da transcrição, um modelo pode só pontuar, reorganizar em prosa ou montar um briefing. O serviço padrão reutiliza a chave quando a transcrição também usa o padrão. Outro serviço de transcrição precisa de um LLM configurado aqui.",
