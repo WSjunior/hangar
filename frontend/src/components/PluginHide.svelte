@@ -9,7 +9,7 @@
 <button type="button" class="plugin-hide" aria-label={m.mods_celular_ocultar()} onclick={onHide}>{m.mods_celular_ocultar_curto()}</button>
 
 <style>
-  /* Pequeno no desenho, com 32 px de alvo de toque: o mínimo global de 44 px dobraria a altura da faixa. */
+  /* Pequeno no desenho, com 32 px de alvo de toque: o mínimo global de 44 px engordaria a linha fina dele. */
   .plugin-hide {
     flex: none;
     min-height: 32px;

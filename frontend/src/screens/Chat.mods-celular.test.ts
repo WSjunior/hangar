@@ -296,19 +296,25 @@ it('clique recusado: código conhecido mostra a frase dele sem o status; 5xx sem
   }
 });
 
-it('celular com os mods ligados: o "Ocultar" no canto da faixa esconde a interface e grava a preferência', async () => {
+it('celular com os mods ligados: o "Ocultar", numa linha própria acima dos mods, esconde a interface e grava a preferência', async () => {
   modsCelular.ligado = true;
   const t = montar();
   try {
     await tick();
     emitirPluginUi();
     await tick();
-    const ocultar = t.el.querySelector('.plugin-band button.plugin-hide') as HTMLButtonElement;
+    const ocultar = t.el.querySelector('.mods-ocultar > button.plugin-hide') as HTMLButtonElement;
     expect(ocultar).toBeTruthy();
     expect(ocultar.textContent).toBe(m.mods_celular_ocultar_curto());
     expect(ocultar.getAttribute('aria-label')).toBe(m.mods_celular_ocultar());
-    // Um botão só: com faixa, o painel não leva outro.
+    // Um botão só, fora da faixa e do painel (ao lado da faixa ele a estreitava e quebrava os textos dos mods), e
+    // antes deles na página.
     expect(t.el.querySelectorAll('button.plugin-hide')).toHaveLength(1);
+    expect(ocultar.closest('.plugin-band, .plugin-pane')).toBeNull();
+    for (const area of [t.el.querySelector('.plugin-pane'), t.el.querySelector('.plugin-band')]) {
+      expect(area).toBeTruthy();
+      expect(ocultar.compareDocumentPosition(area!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
     ocultar.click();
     await tick();
     expect(modsCelular.ligado).toBe(false);
@@ -320,15 +326,16 @@ it('celular com os mods ligados: o "Ocultar" no canto da faixa esconde a interfa
   }
 });
 
-it('celular sem faixa e só com painel: o "Ocultar" fica no topo do painel', async () => {
+it('celular sem faixa e só com painel: o "Ocultar" fica na linha acima do painel', async () => {
   modsCelular.ligado = true;
   const t = montar();
   try {
     await tick();
     sseCtl.handlers.get('plugin_ui')?.({ data: JSON.stringify({ above: null, panes: [PAINEL], source: 'surface' }) } as MessageEvent);
     await tick();
-    const ocultar = t.el.querySelector('.plugin-pane header button.plugin-hide') as HTMLButtonElement;
+    const ocultar = t.el.querySelector('.mods-ocultar > button.plugin-hide') as HTMLButtonElement;
     expect(ocultar).toBeTruthy();
+    expect(ocultar.compareDocumentPosition(t.el.querySelector('.plugin-pane')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     ocultar.click();
     await tick();
     expect(modsCelular.ligado).toBe(false);
