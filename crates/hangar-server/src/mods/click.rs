@@ -64,6 +64,11 @@ pub const ACTION_MARGIN: Duration = Duration::from_millis(300);
 pub const UNDO_MAX: Duration = Duration::from_secs(2);
 /// Folga da reserva renovada na limpeza além do tempo que ela cobre: a operação ainda na caixa do executor.
 pub const HOLD_MARGIN: Duration = Duration::from_millis(500);
+/// Teto de uma volta ao prompt na limpeza: abaixo dos 10 s de cada reserva no executor, com a folga.
+pub const BACK_MAX: Duration = Duration::from_secs(9);
+/// O mais longo que a limpeza segura o pane: a primeira volta ao prompt, as novas tentativas até
+/// `keep_held` (a última pode começar no fim dele) e as devoluções da altura e do pane.
+pub const CLEANUP_MAX: Duration = Duration::from_secs(9 + 10 + 9 + 2 * 2);
 
 /// Tempos medidos (`medicoes-terminal.md`, `medicoes-psmux.md`), cortados para caber nos 7,5 s do pedido
 /// (fase 2); `quick` para os testes.
@@ -81,7 +86,8 @@ pub struct Limits {
     pub settle_poll: Duration,
     pub settle_max: Duration,
     /// Teto para manter o pane reservado depois de uma volta ao prompt que falhou, tentando de novo: a
-    /// fila não entrega mensagem com o teclado ainda num painel. O executor corta a reserva em 10 s.
+    /// fila não entrega mensagem com o teclado ainda num painel. Cada tentativa renova a reserva no executor,
+    /// que corta cada uma em 10 s.
     pub keep_held: Duration,
     pub retry_gap: Duration,
     /// Intervalo mínimo entre dois cliques de mouse no pane: mais perto que isso o Claude Code os toma por
@@ -101,7 +107,7 @@ impl Default for Limits {
         Self { confirm: Duration::from_secs(2), activate_poll: Duration::from_millis(50), activate_max: Duration::from_millis(300),
             wheel_gap: Duration::from_millis(150), wheel_events: 80, wheel_max: Duration::from_secs(4), scroll_wait: Duration::from_millis(600),
             key_gap: Duration::from_millis(20), focus_wait: Duration::from_millis(500), settle_poll: Duration::from_millis(100),
-            settle_max: Duration::from_secs(1), keep_held: Duration::from_secs(5), retry_gap: Duration::from_millis(500),
+            settle_max: Duration::from_secs(1), keep_held: Duration::from_secs(10), retry_gap: Duration::from_millis(500),
             click_gap: Duration::from_millis(350), key_settle: Duration::from_millis(300), ring_step: Duration::from_millis(450) }
     }
 }
@@ -196,7 +202,9 @@ enum Found { Cell((usize, usize)), Keyboard, Clicked }
 impl<'a> Ctx<'a> {
     fn left(&self) -> Duration { self.until.saturating_duration_since(Instant::now()) }
     /// O mesmo pedido com o prazo da limpeza (`UNDO_MAX`) contado de agora, fora do de quem pediu.
-    fn fresh(&self) -> Ctx<'a> { Ctx { until: Instant::now() + UNDO_MAX, ..*self } }
+    fn fresh(&self) -> Ctx<'a> { self.within(UNDO_MAX) }
+    /// O mesmo pedido com o prazo `budget` contado de agora.
+    fn within(&self, budget: Duration) -> Ctx<'a> { Ctx { until: Instant::now() + budget, ..*self } }
     /// A sessão ainda é a que pediu: com o nome reaberto por outro processo (ou a sessão fora), o pane é de
     /// outra vida e nada do clique chega a ele.
     fn alive(&self) -> bool { self.mods.life(self.name) == Some(self.life) }
@@ -761,6 +769,14 @@ async fn back_to_prompt(ctx: &Ctx<'_>, back: &Back) -> bool {
     s.focus == Some("prompt") && !s.dialog && !s.survey
 }
 
+/// Prazo de uma volta ao prompt: um passo do anel (`ring_step`) por parada dele e mais um, entre `UNDO_MAX`
+/// e `BACK_MAX`. Com doze botões na faixa e dez painéis o anel tem 23 paradas, e no psmux os 2 s de antes
+/// cobriam cinco passos: a limpeza desistia com o teclado num painel (prova na VM, 06/10/2026).
+fn back_budget(limits: &Limits, back: &Back) -> Duration {
+    let steps = u32::try_from(back.cap + 2).unwrap_or(u32::MAX);
+    limits.ring_step.saturating_mul(steps).clamp(UNDO_MAX, BACK_MAX)
+}
+
 /// Renova a reserva do pane por `cover` mais a folga. O executor troca a reserva anterior por esta.
 async fn renew(ctx: &Ctx<'_>, cover: Duration) {
     let millis = u64::try_from((cover + HOLD_MARGIN).as_millis()).unwrap_or(u64::MAX);
@@ -772,15 +788,17 @@ async fn renew(ctx: &Ctx<'_>, cover: Duration) {
 /// reserva antes de cada tentativa; `false` quando o teto passou sem voltar.
 async fn keep_trying(ctx: &Ctx<'_>, back: &Back) -> bool {
     let keep_until = Instant::now() + ctx.limits.keep_held;
+    let budget = back_budget(ctx.limits, back);
     while Instant::now() < keep_until {
-        renew(&ctx.fresh(), ctx.limits.retry_gap + UNDO_MAX).await;
+        renew(&ctx.fresh(), ctx.limits.retry_gap + budget).await;
         tokio::time::sleep(ctx.limits.retry_gap).await;
-        if back_to_prompt(&ctx.fresh(), back).await { return true; }
+        if back_to_prompt(&ctx.within(budget), back).await { return true; }
     }
     false
 }
 
-/// Desfaz o que o pedido deixou, com prazo próprio (`UNDO_MAX`), fora do de quem pediu: renova a reserva do
+/// Desfaz o que o pedido deixou, com prazo próprio (`UNDO_MAX`, e a volta ao prompt com o dela), fora do de
+/// quem pediu: renova a reserva do
 /// pane para cobrir a limpeza, desarma o alvo do foco, volta o teclado ao prompt, devolve a altura (só sem
 /// terminal ligado) e solta o pane. Roda depois da resposta, também com o pedido cortado. Cada item sai do
 /// `Undo` depois da sua volta: se a tarefa sumir no meio da limpeza, a guarda refaz só o que faltou (todas
@@ -789,16 +807,17 @@ async fn keep_trying(ctx: &Ctx<'_>, back: &Back) -> bool {
 pub async fn finish(ctx: &Ctx<'_>) {
     let undo = ctx.undo;
     let held = undo.with(|p| p.hold);
-    let clean = ctx.fresh();
+    let back = undo.with(|p| p.keyboard.clone());
+    let budget = back.as_ref().map_or(UNDO_MAX, |back| back_budget(ctx.limits, back));
     // A reserva do pedido conta do começo dele e pode vencer no meio da limpeza.
-    if held { renew(&clean, UNDO_MAX).await; }
+    if held { renew(&ctx.fresh(), budget).await; }
     if let Some(attempt) = undo.with(|p| p.focus.clone()) {
         ctx.mods.disarm_focus(ctx.name, ctx.life, &attempt);
         undo.with(|p| p.focus = None);
     }
     let mut back_ok = true;
-    if let Some(back) = undo.with(|p| p.keyboard.clone()) {
-        back_ok = back_to_prompt(&clean, &back).await || (held && keep_trying(ctx, &back).await);
+    if let Some(back) = back {
+        back_ok = back_to_prompt(&ctx.within(budget), &back).await || (held && keep_trying(ctx, &back).await);
         if !back_ok {
             tracing::warn!(session = ctx.name, code = "mods_keyboard_return", held,
                 "o teclado não voltou ao prompt depois da reserva; reservado, o pane fica assim até a reserva vencer");
