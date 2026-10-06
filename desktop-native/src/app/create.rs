@@ -56,6 +56,9 @@ fn global_folder_search(compact: bool, search_all: bool, query: &str) -> bool {
     !compact && search_all && !query.trim().is_empty()
 }
 
+// No modal a busca atravessa raízes e sobrevive à troca; no seletor compacto ela é da pasta navegada.
+fn clears_query_on_root_change(compact: bool) -> bool { compact }
+
 fn next_root(current: usize, count: usize, reverse: bool) -> Option<usize> {
     if count == 0 { return None; }
     Some(if reverse { (current + count - 1) % count } else { (current + 1) % count })
@@ -848,6 +851,7 @@ impl NewSession {
         if self.compact { self.picked = Some(path.clone()); self.reset_git(); self.load_branches(window, cx); }
         let remember = path.clone();
         self.link.runtime.spawn_blocking(move || crate::appearance::remember_root(&remember));
+        if clears_query_on_root_change(self.compact) { self.query.update(cx, |input, cx| input.set_value("", window, cx)); }
         self.scan_dir(path, cx);
     }
 
@@ -2633,6 +2637,12 @@ mod tests {
         assert!(super::global_folder_search(false, true, "src"));
         assert!(!super::global_folder_search(false, false, "src"));
         assert!(!super::global_folder_search(false, true, "  "));
+    }
+
+    #[test]
+    fn compact_picker_clears_search_when_the_root_changes() {
+        assert!(super::clears_query_on_root_change(true));
+        assert!(!super::clears_query_on_root_change(false));
     }
 
     #[test]
