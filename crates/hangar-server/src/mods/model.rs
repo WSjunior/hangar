@@ -143,8 +143,10 @@ pub fn ambiguous(label: &str) -> ModsError {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SurfaceEffect {
-    /// Quadro para o Claude Code fora do diário da fila: `ui_*` não muda a conversa.
-    Write { frame: Value },
+    /// Quadro para o Claude Code fora do diário da fila: `ui_*` não muda a conversa. `until`, no relógio da
+    /// superfície: a ação no mod (clique, digitação, fechar) não pode chegar depois dele, quando o app já
+    /// ouviu que o pedido falhou; o desenho e as leituras vão sem prazo.
+    Write { frame: Value, until: Option<f64> },
     /// O `plugin_ui` inteiro, como os apps recebem.
     Publish { data: Value },
     Toast { plugin: String, text: String, timeout_ms: u64 },

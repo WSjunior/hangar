@@ -218,7 +218,7 @@ impl Drive {
     pub fn feed(&mut self, effects: Vec<SurfaceEffect>) {
         let mut queue: VecDeque<SurfaceEffect> = effects.into();
         while let Some(effect) = queue.pop_front() {
-            if let SurfaceEffect::Write { frame } = &effect && frame["type"] == "control_request" {
+            if let SurfaceEffect::Write { frame, .. } = &effect && frame["type"] == "control_request" {
                 for line in self.fake.answer(frame) {
                     let next = self.line(&line);
                     queue.extend(next);

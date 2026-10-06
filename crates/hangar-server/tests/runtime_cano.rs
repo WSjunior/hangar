@@ -57,7 +57,7 @@ async fn malformed_cli_message_keeps_following_ack_and_event() {
     });
     let binding = CanoBinding { pid:42,escuta:format!("tcp:{address}"),token:"secret-test".into(),versao:2 };
     let mut io = cano::connect(&binding).await.unwrap().start(1,16);
-    io.writer.send(cano::WireFrame { operation_id:"wire:1".into(),frame:json!({"type":"user"}),ephemeral:false }).await.unwrap();
+    io.writer.send(cano::WireFrame { operation_id:"wire:1".into(),frame:json!({"type":"user"}),ephemeral:false,until:None }).await.unwrap();
     let next = tokio::time::timeout(std::time::Duration::from_secs(2),io.events.recv()).await.unwrap().unwrap();
     assert!(matches!(next,cano::IoEvent::WriteAck { outcome:WriteOutcome::Written,.. }));
     assert!(matches!(io.events.recv().await.unwrap(),cano::IoEvent::Line(value) if value["type"] == "result"));
@@ -111,7 +111,7 @@ async fn counting_cano(count:usize) -> (String,tokio::task::JoinHandle<Vec<Strin
 }
 
 fn frame(id:&str,ephemeral:bool) -> cano::WireFrame {
-    cano::WireFrame { operation_id:id.into(),frame:json!({"type":"control_request"}),ephemeral }
+    cano::WireFrame { operation_id:id.into(),frame:json!({"type":"control_request"}),ephemeral,until:None }
 }
 
 #[tokio::test]
@@ -128,6 +128,23 @@ async fn ephemeral_frames_are_not_remembered_by_the_writer() {
     }
     let ids = tokio::time::timeout(std::time::Duration::from_secs(2),server).await.unwrap().unwrap();
     assert_eq!(ids,["ui:1:1","ui:1:1","wire:1","wire:2"]);
+    io.stop().await;
+}
+
+#[tokio::test]
+async fn an_ui_action_that_waited_past_its_deadline_is_never_written() {
+    // O escritor ficou preso (stdin do filho travado) além do prazo do clique: a superfície já respondeu que
+    // falhou, e o quadro retido não pode agir no mod depois. O que ainda está no prazo e a conversa saem.
+    let (escuta,server) = counting_cano(2).await;
+    let binding = CanoBinding { pid:42,escuta,token:"secret-test".into(),versao:2 };
+    let io = cano::connect(&binding).await.unwrap().start(1,16);
+    let now = tokio::time::Instant::now();
+    let with = |id:&str,until| cano::WireFrame { until:Some(until),..frame(id,true) };
+    io.writer.send(with("ui:1:1",now - std::time::Duration::from_millis(1))).await.unwrap();
+    io.writer.send(with("ui:1:2",now + std::time::Duration::from_secs(30))).await.unwrap();
+    io.writer.send(frame("wire:1",false)).await.unwrap();
+    let ids = tokio::time::timeout(std::time::Duration::from_secs(2),server).await.unwrap().unwrap();
+    assert_eq!(ids,["ui:1:2","wire:1"]);
     io.stop().await;
 }
 

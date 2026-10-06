@@ -180,7 +180,7 @@ fn mods_call_needs_a_surface_and_a_live_attach() {
 
 fn surface_engine(metadata:Value) -> ClaudeEngine { let mut engine = engine(metadata); engine.enable_surface("ui:t".into()); engine }
 fn surface_writes(effects:&[Effect]) -> Vec<Value> {
-    effects.iter().filter_map(|e|match e { Effect::Surface { effect:SurfaceEffect::Write { frame } }=>Some(frame.clone()),_=>None }).collect()
+    effects.iter().filter_map(|e|match e { Effect::Surface { effect:SurfaceEffect::Write { frame, .. } }=>Some(frame.clone()),_=>None }).collect()
 }
 fn snapshot() -> CanoSnapshot { CanoSnapshot::parse(mods_support::cano_snapshot_json()).unwrap() }
 /// Motor com a superfície ligada e a faixa já desenhada (nenhum desenho em voo).

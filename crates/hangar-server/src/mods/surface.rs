@@ -218,7 +218,7 @@ impl Surface {
     /// Pedido `ui_copy` do Claude Code: sempre `copied: true` e na hora. Erro ou silêncio deixam o mod
     /// esperando 5 s (P07). O pedido chega antes da resposta do clique que o causou.
     pub fn on_copy(&mut self, request_id: &Value, request: &Value) -> Vec<SurfaceEffect> {
-        let mut out = vec![SurfaceEffect::Write { frame: json!({"type": "control_response", "response": {
+        let mut out = vec![SurfaceEffect::Write { until: None, frame: json!({"type": "control_response", "response": {
             "subtype": "success", "request_id": request_id, "response": {"copied": true}}}) }];
         // Antes de ligar só chega pedido velho, do snapshot do cano: responde e não entrega.
         if self.phase == Phase::Ready && let Some(text) = request["text"].as_str() {
@@ -330,8 +330,10 @@ impl Surface {
         let id = format!("{}:{}", self.prefix, self.counter);
         body["subtype"] = json!(subtype);
         let deadline = now + pending.limit();
+        // Só o que age no mod leva o prazo: depois dele a superfície já respondeu que falhou.
+        let until = matches!(subtype, "ui_press" | "ui_input" | "ui_close").then_some(deadline);
         self.waiting.insert(id.clone(), Waiting { pending, deadline });
-        out.push(SurfaceEffect::Write { frame: json!({"type": "control_request", "request_id": id, "request": body}) });
+        out.push(SurfaceEffect::Write { until, frame: json!({"type": "control_request", "request_id": id, "request": body}) });
     }
 
     fn mounted(&self, instance: &str) -> bool {
