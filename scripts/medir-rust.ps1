@@ -81,9 +81,51 @@ foreach ($s in $sessions) { Row $s.name $s.provider (Pair ${function:Request-Ms}
 foreach ($s in $sessions) {
     try { Row $s.name $s.provider (Pair ${function:FirstMessage-Ms} $s.name) } catch { Write-Host "$($s.name): $_" }
 }
-'- Telas de Custos e Uso (parte 3)'
-Row 'custos' '-' (Pair ${function:Request-Ms} '/api/costs')
+# Com o Rust de pe o Python nao roda Git/arquivos: a rota dele chama o nucleo Rust pela ponte,
+# entao a diferenca aqui e o custo da ponte, nao Python contra Rust.
+$first = $sessions[0].name
+"- Git e arquivos do painel da sessao (PR #30), na sessao $first"
+foreach ($rota in @('branches', 'git/files', 'git/log?n=50', 'files/list?so_modificados=false',
+                    'files/read?path=README.md', 'files/search?q=import&mode=names')) {
+    $label = ($rota -split '\?')[0]
+    try { Row $label 'git' (Pair ${function:Request-Ms} "/api/sessions/$first/$rota") } catch { Write-Host "${label}: nao respondeu 200, pulado" }
+}
+Row 'fs/roots' 'arquivos' (Pair ${function:Request-Ms} '/api/fs/roots')
+
+'- Lista de worktrees (Rust desde feat/worktrees-rust; o Python ainda tem a rota antiga)'
+try { Row 'worktrees' 'lista' (Pair ${function:Request-Ms} '/api/worktrees') } catch { Write-Host 'worktrees: nao respondeu 200, pulado' }
+
+# Rust serve a lista publicada pelo ListHub; o Python direto ainda varre processos e psmux e
+# classifica cada pane, como fazia antes da troca.
+'- Lista de sessoes do dono (Rust desde feat/session-list-state)'
+try { Row 'lista de sessoes' 'lista' (Pair ${function:Request-Ms} '/api/sessions') } catch { Write-Host 'lista de sessoes: nao respondeu 200, pulado' }
+
+# O lado que nao e dono responde 202 ate montar o proprio indice.
+function Warm([string]$path) {
+    foreach ($h in @($rust, $py)) {
+        $code = ''
+        foreach ($i in 1..120) {
+            $code = curl.exe -s -o NUL -w '%{http_code}' -H "Authorization: Bearer $token" "http://$h$path"
+            if ($code -eq '200') { break }
+            Start-Sleep -Seconds 1
+        }
+        if ($code -ne '200') { Write-Host "$path em $h ainda respondia $code depois de 120 s" }
+    }
+}
+# A tela inicial pede ?view=summary; o Python ignora o parametro e manda o relatorio inteiro, que
+# era o que a tela recebia antes. Por isso a coluna Python desta linha e o "antes".
+'- Custos e Uso (parte 3)'
+Warm '/api/costs?period=all'; Warm '/api/uso'
+Row 'custos: tela inicial' 'resumo' (Pair ${function:Request-Ms} '/api/costs?period=all&view=summary')
+Row 'custos: tela Custos' 'inteiro' (Pair ${function:Request-Ms} '/api/costs?period=all')
 Row 'uso' '-' (Pair ${function:Request-Ms} '/api/uso')
+foreach ($alvo in @('/api/costs?period=all&view=summary', '/api/costs?period=all')) {
+    $r = curl.exe -s -H "Authorization: Bearer $token" -H 'Accept-Encoding: gzip' -o NUL -w '%{size_download}' "http://$rust$alvo"
+    $p = curl.exe -s -H "Authorization: Bearer $token" -H 'Accept-Encoding: gzip' -o NUL -w '%{size_download}' "http://$py$alvo"
+    '{0,-34} {1,-16} {2,6} KB {3,6} KB  (baixado, comprimido)' -f $alvo.Substring(5), 'tamanho', [math]::Floor([double]$r / 1024), [math]::Floor([double]$p / 1024)
+}
 ''
 'Media de 5 medidas depois de 1 de aquecimento, Rust e Python alternados. Menos e melhor.'
 'Ganho perto de 1x = o Rust ainda repassa essa parte ao Python.'
+'Fora da medicao: envio de mensagem, fila e controle das sessoes, as acoes de Git e de worktree'
+'que escrevem e a reconstrucao do indice de custos.'
