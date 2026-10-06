@@ -2497,6 +2497,26 @@ impl Hangar {
         cx.notify();
     }
 
+    /// Áudio da lista de recentes volta ao ditado lido do arquivo que o servidor já tem.
+    fn dictate_recent(&mut self, filename: String, cx: &mut Context<Self>) {
+        let Some(key) = self.selected_key() else { return; };
+        self.recent = None;
+        match self.dictate_upload(filename, cx) {
+            Ok(()) => { self.action_feedback.remove(&key); }
+            Err(problem) => { self.action_feedback.insert(key, (problem, true)); }
+        }
+        cx.notify();
+    }
+
+    /// Toca um áudio da lista de recentes, lido de onde estão os anexos da sessão (disco desta máquina ou backend).
+    fn play_recent(&mut self, filename: String, cx: &mut Context<Self>) {
+        let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
+        let (uploads, source) = (self.uploads_for(&key), Source::Upload(filename.clone()));
+        self.toggle_audio(format!("recent:{filename}"), &filename, async move {
+            uploads.fetch(&api, &key.name, &source).await.map_err(|error| Self::saved_audio_failure(&error))
+        }, cx);
+    }
+
     fn ensure_media(&mut self, source: &Source) {
         let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
         let slot = (key.clone(), source.clone());
@@ -3840,10 +3860,25 @@ impl Hangar {
             Some(Ok(files)) if files.is_empty() => div().px(px(8.)).text_sm().text_color(theme::muted()).child(tr("recent_empty")).into_any_element(),
             Some(Ok(files)) => div().flex().flex_col().children(files.iter().enumerate().map(|(n, file)| {
                 let name = file.filename.clone();
+                if composer::is_audio(&name) {
+                    // Áudio não volta ao campo como anexo: toca aqui ou volta ao ditado, lido do que o servidor já tem.
+                    // O player fica fora do `popup::row`: a linha é um botão e o play também a dispararia.
+                    let (play, dictate) = (name.clone(), name.clone());
+                    return div().id(SharedString::from(format!("recent-{n}"))).px(px(8.)).py(px(4.)).flex().flex_col().gap_1()
+                        .child(div().flex().items_center().gap_2()
+                            .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+                            .child(div().flex_shrink_0().text_xs().text_color(theme::muted()).child(human_size(file.size)))
+                            .child(Button::new(SharedString::from(format!("recent-dictate-{n}"))).ghost().xsmall()
+                                .label(tr("dictation_again")).accessibility_label(format!("{}: {name}", tr("dictation_again")))
+                                .on_click(cx.listener(move |this, _, _, cx| this.dictate_recent(dictate.clone(), cx)))))
+                        .child(self.audio_controls(&format!("recent:{name}"), move |this, cx| this.play_recent(play.clone(), cx), cx))
+                        .into_any_element();
+                }
                 popup::row(SharedString::from(format!("recent-{n}")), false)
                     .child(div().flex_1().min_w_0().truncate().child(file.filename.clone()))
                     .child(div().flex_shrink_0().text_xs().text_color(theme::muted()).child(human_size(file.size)))
                     .on_click(cx.listener(move |this, _, _, cx| this.reattach(name.clone(), cx)))
+                    .into_any_element()
             })).into_any_element(),
         };
         Some(div().p(px(popup::INSET)).rounded_md().bg(theme::popup_content_fill()).flex().flex_col().gap(px(2.))

@@ -336,6 +336,14 @@ impl Dictation {
         if same_transcript { self.server_file().map(str::to_owned) } else { self.server_path.clone() }
     }
 
+    /// Destino de um áudio dos anexos que volta ao ditado, ou a frase da recusa: conversa ainda carregando, outro
+    /// ditado em curso, nenhuma sessão aberta.
+    fn saved_audio_target(&self, ready: bool, target: Option<DictationTarget>, filename: &str) -> Result<DictationTarget, String> {
+        if !ready { return Err(tr("attach_audio_not_ready").replace("{name}", filename)); }
+        if self.recorder.is_some() || self.request.is_some() { return Err(tr_shared("composer_aguarde_transcricao", &[])); }
+        target.ok_or_else(|| tr("attach_audio_session_changed"))
+    }
+
     fn cancel(&mut self) {
         self.seq += 1;
         self.owner = None;
@@ -606,6 +614,25 @@ impl Hangar {
         let (tx, connection, seq) = (self.tx.clone(), self.connection, self.dictation.seq);
         self.dictation.request = Some(self.runtime.spawn(async move {
             let result = api.transcribe(session.as_deref(), &filename, bytes, false, None).await;
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Dictation(seq, None, result) }).await;
+        }));
+        cx.notify();
+        Ok(())
+    }
+
+    /// Áudio dos anexos da sessão aberta de volta ao ditado: o servidor transcreve o arquivo que já tem (`?arquivo=`),
+    /// nada desce nem sobe de novo.
+    pub(super) fn dictate_upload(&mut self, filename: String, cx: &mut Context<Self>) -> Result<(), String> {
+        let target = self.dictation.saved_audio_target(self.dictation_ready(), self.open_dictation_target(), &filename)?;
+        self.cancel_dictation();
+        self.dictation.owner = self.dictation_owner(cx);
+        self.dictation.file_name = Some(filename.clone());
+        self.dictation.server_path = Some(filename.clone());
+        let (api, name) = (target.api.clone(), target.key.name.clone());
+        self.dictation.target = Some(target);
+        let (tx, connection, seq) = (self.tx.clone(), self.connection, self.dictation.seq);
+        self.dictation.request = Some(self.runtime.spawn(async move {
+            let result = api.transcribe_saved(&name, &filename, false, None).await;
             let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Dictation(seq, None, result) }).await;
         }));
         cx.notify();
@@ -1216,5 +1243,20 @@ mod tests {
             "depois de /clear a pasta é outra: vai o caminho inteiro");
         state.server_path = None;
         assert_eq!(state.saved_for_retry(true), None, "upload que falhou: o de novo sobe a cópia em memória");
+    }
+
+    #[test]
+    fn saved_audio_back_to_dictation_refuses_loading_busy_or_without_session() {
+        use crate::i18n::{tr, tr_shared};
+        let mut state = Dictation::default();
+        let ok = state.saved_audio_target(true, Some(target("x", "k:1")), "ditado-3.wav");
+        assert_eq!(ok.map(|t| t.key.name).as_deref(), Ok("x"));
+        assert_eq!(state.saved_audio_target(true, None, "ditado-3.wav").err(), Some(tr("attach_audio_session_changed")));
+        state.recorder = Some(Recorder { stream: None, failed: Default::default(), pcm: Default::default(), playback: None,
+            sampled: 0, last_signal: (0., 0.), last_pcm_at: None });
+        assert_eq!(state.saved_audio_target(true, Some(target("x", "k:1")), "ditado-3.wav").err(),
+            Some(tr_shared("composer_aguarde_transcricao", &[])), "gravando: o ditado em curso não é trocado");
+        assert_eq!(state.saved_audio_target(false, Some(target("x", "k:1")), "ditado-3.wav").err(),
+            Some(tr("attach_audio_not_ready").replace("{name}", "ditado-3.wav")), "conversa carregando vem primeiro");
     }
 }
