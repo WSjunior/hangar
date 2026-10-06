@@ -45,8 +45,9 @@
   });
 
   function blur(e: FocusEvent) {
-    // O `mousedown` no rótulo de envio tira o foco do campo antes do `click`: aplicar o pendente aqui faria o envio
-    // mandar o valor do mod, e não o que está no campo. A resposta ao envio entra no desenho seguinte.
+    // Tab até o rótulo de envio e Enter: o foco sai do campo antes do envio, e aplicar o pendente aqui faria o envio
+    // mandar o valor do mod, e não o que está no campo. A resposta ao envio entra no desenho seguinte. (O clique no
+    // rótulo não chega aqui: o `mousedown` dele não tira o foco do campo.)
     if (pending !== null && e.relatedTarget !== sendButton) put(pending);
     pending = null;
   }
@@ -60,6 +61,8 @@
 
   function submit() {
     if (!field || !onInput) return;
+    // O que foi enviado é o que está no campo: um eco de antes do envio não volta ao perder o foco.
+    pending = null;
     submitted = true;
     onInput('submit', field.value);
   }
@@ -71,7 +74,10 @@
          oninput={(e) => change(e.currentTarget.value)} onblur={blur}
          onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } }} />
   {#if onInput}
-    <button bind:this={sendButton} type="button" class="submit" onclick={submit}>{submitLabel || m.plugin_input_enviar()}</button>
+    <!-- O `preventDefault` no `mousedown` (que o toque também gera, antes do click) deixa o foco no campo, como no
+         nativo: no Safari e no Firefox do macOS o botão não recebe o foco, e o blur do campo aplicaria o pendente antes
+         do envio; com o campo em foco, um redesenho entre o mousedown e o click também fica pendente. O click continua. -->
+    <button bind:this={sendButton} type="button" class="submit" onmousedown={(e) => e.preventDefault()} onclick={submit}>{submitLabel || m.plugin_input_enviar()}</button>
   {:else}
     <span class="hint">{m.plugin_input_no_terminal()}</span>
   {/if}

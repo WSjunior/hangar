@@ -99,14 +99,23 @@ describe('Input de mod', () => {
     const digitar = (texto: string) => { campo.value = texto; campo.dispatchEvent(new Event('input', { bubbles: true })); };
     const enter = () => campo.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     const botao = alvo.querySelector<HTMLButtonElement>('button.submit')!;
-    // Como no Chrome e no Firefox: o `mousedown` no botão tira o foco do campo (blur com o botão no `relatedTarget`)
-    // antes do `click`.
-    const clicarEnviar = () => {
+    // Clique no rótulo de envio. O happy-dom não move o foco no `mousedown`; aqui se faz o que o navegador faria sem o
+    // `preventDefault`, no pior caso: no Safari e no Firefox do macOS o botão não recebe o foco, e o campo perde o foco
+    // com `relatedTarget` nulo. `entre` roda entre o `mousedown` e o `click`.
+    const clicarEnviar = (entre?: () => void) => {
+      const pressao = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+      botao.dispatchEvent(pressao);
+      if (!pressao.defaultPrevented) { campo.blur(); flushSync(); }
+      entre?.();
+      botao.click();
+    };
+    // Tab até o botão e Enter: o foco vai ao botão (blur com ele no `relatedTarget`), e o Enter dispara o `click`.
+    const tabEnter = () => {
       campo.dispatchEvent(new FocusEvent('blur', { relatedTarget: botao }));
       flushSync();
       botao.click();
     };
-    return { campo, redesenho, digitar, enter, clicarEnviar, onInput };
+    return { campo, redesenho, digitar, enter, clicarEnviar, tabEnter, onInput };
   }
 
   it('redesenho em foco fica pendente e entra quando o campo perde o foco', () => {
@@ -120,7 +129,7 @@ describe('Input de mod', () => {
     expect(campo.value).toBe('ab');
   });
 
-  it('enviar pelo botão manda o que está no campo, mesmo com um eco atrasado pendente', () => {
+  it('clicar no botão de envio deixa o foco no campo e manda o que está nele, mesmo com um eco atrasado pendente', () => {
     const { campo, redesenho, digitar, clicarEnviar, onInput } = montarVivo('');
     campo.focus();
     digitar('ab');
@@ -128,6 +137,31 @@ describe('Input de mod', () => {
     // Chega o eco do `change` anterior, com a pessoa ainda no campo: fica pendente.
     redesenho('ab');
     clicarEnviar();
+    expect(document.activeElement).toBe(campo);
+    expect(onInput).toHaveBeenLastCalledWith('submit', 'abc');
+    expect(campo.value).toBe('abc');
+  });
+
+  it('um redesenho entre o mousedown e o click não troca o texto enviado', () => {
+    const { campo, redesenho, digitar, clicarEnviar, onInput } = montarVivo('');
+    campo.focus();
+    digitar('abc');
+    clicarEnviar(() => redesenho('ab'));
+    expect(onInput).toHaveBeenLastCalledWith('submit', 'abc');
+    expect(campo.value).toBe('abc');
+    // O eco de antes do envio não volta ao perder o foco: o texto enviado fica até a resposta do mod.
+    campo.blur();
+    flushSync();
+    expect(campo.value).toBe('abc');
+  });
+
+  it('Tab até o botão e Enter mandam o que está no campo, mesmo com um eco atrasado pendente', () => {
+    const { campo, redesenho, digitar, tabEnter, onInput } = montarVivo('');
+    campo.focus();
+    digitar('ab');
+    digitar('abc');
+    redesenho('ab');
+    tabEnter();
     expect(onInput).toHaveBeenLastCalledWith('submit', 'abc');
     expect(campo.value).toBe('abc');
   });
