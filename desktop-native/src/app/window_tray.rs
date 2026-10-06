@@ -87,7 +87,7 @@ impl Hangar {
         let handle = window.window_handle();
         cx.spawn(async move |this, cx| {
             let outcome = task.await.unwrap_or_else(|error| Err(format!("tarefa do reinício: {error}")));
-            let _ = handle.update(cx, |_, window, cx| { let _ = this.update(cx, |this, cx| {
+            let reached = handle.update(cx, |_, window, cx| this.update(cx, |this, cx| {
                 match &outcome {
                     Ok(()) => {
                         this.window_tray.icon = None;
@@ -99,7 +99,18 @@ impl Hangar {
                         window.push_notification(Notification::error(format!("{} ({reason})", tr("app_restart_failed"))), cx);
                     }
                 }
-            }); });
+            }).is_ok()).unwrap_or(false);
+            // Sem a janela, o desfecho ainda vale: preso em DesktopRestart, o app recusaria atualizar até reabrir.
+            if !reached {
+                crate::log_line(&format!("reinício pela bandeja concluído sem a janela: {}", outcome.as_ref().err().map_or("app novo de pé", String::as_str)));
+                match outcome {
+                    Ok(()) => {
+                        let _ = this.update(cx, |this, _| this.window_tray.icon = None);
+                        cx.update(|cx| cx.quit());
+                    }
+                    Err(_) => { updater.update(cx, |updater, cx| updater.finish_desktop_restart(cx)); }
+                }
+            }
         }).detach();
     }
 
