@@ -15,7 +15,9 @@ Achados médios e baixos das revisões por Task que entraram na `feat/parte4` se
   responda fica mudo; (b) tecla enviada logo depois do primeiro byte (antes de ~3 s) se perde
   durante a partida do `tmux attach`; falta comparar com o Python. Falta a prova manual com web
   e nativo numa sessão Claude da VM. Decisão da coordenação: (a) só registrado (os dois clientes
-  respondem); (b) é corrigido antes da prova manual (sessão `parte4-t10b`).
+  respondem); (b) corrigido em `f858952dd`: no Windows a entrada fica segurada até o psmux
+  pintar (`ESC[?1049h`, ~80 ms), com prazo de 5 s e teto de 64 KiB; o Python tinha o mesmo
+  defeito (janela de ~10 ms) e o Linux não perde. Falta conferir na VM com o binário novo.
 - Task 5: no Windows a prévia pelo pane captura a 0,15 s com um processo psmux por toque
   (~25–50 ms cada) enquanto a sessão trabalha sem arquivo do hook; medir na VM e, se pesar,
   limitar o ritmo rápido no Windows. O Monitor no Windows (psmux) e o convidado de convite de
