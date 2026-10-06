@@ -111,6 +111,34 @@ pub fn no_typing() -> ModsError {
     ModsError::new("erro_mod_sem_digitacao", "Nesta sessão, o campo do mod só aceita digitação no terminal ou não está ligado ao app.")
 }
 
+// Recusas do clique com terminal (fase 3). Os textos são os de `messages/pt.json` (fase 1); o painel que
+// fechou no meio do clique usa o `pane_missing` acima.
+pub fn dialog_open() -> ModsError {
+    ModsError::new("erro_mod_dialogo_aberto", "Há uma pergunta aberta no terminal da sessão; responda a ela antes.")
+}
+pub fn draft_in_prompt() -> ModsError {
+    ModsError::new("erro_mod_rascunho_no_prompt", "Há texto digitado no prompt do terminal; envie ou apague antes de usar este botão pelo app.")
+}
+pub fn unreachable_pane() -> ModsError {
+    ModsError::new("erro_mod_painel_nao_alcancavel", "O terminal da sessão está estreito ou baixo demais para alcançar esse painel; aumente a janela ou use o terminal.")
+}
+pub fn terminal_in_mode() -> ModsError {
+    ModsError::new("erro_mod_terminal_em_modo", "O terminal da sessão está em modo de rolagem; saia dele e tente de novo.")
+}
+pub fn mouse_off() -> ModsError {
+    ModsError::new("erro_mod_mouse_desligado", "O Claude Code da sessão não está em tela cheia, e só nela ele liga o mouse; clique pelo terminal.")
+}
+pub fn not_found(label: &str) -> ModsError {
+    let mut error = ModsError::new("erro_mod_botao_nao_achado", &format!("Não achei “{label}” na tela do terminal."));
+    error.params = json!({"rotulo": label});
+    error
+}
+pub fn ambiguous(label: &str) -> ModsError {
+    let mut error = ModsError::new("erro_mod_botao_ambiguo", &format!("“{label}” aparece mais de uma vez na tela; clique pelo terminal."));
+    error.params = json!({"rotulo": label});
+    error
+}
+
 /// O que a superfície pede ao ator.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

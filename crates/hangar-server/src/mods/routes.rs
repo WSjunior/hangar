@@ -36,7 +36,7 @@ use crate::routes::{AppState, gate, pass, route_failed};
 const BODY_LIMIT: usize = 64 * 1024;
 /// Orçamento do pedido inteiro, desde a entrada: abaixo dos 8 s em que o app desiste, com folga para a
 /// volta da resposta.
-const REQUEST_BUDGET: Duration = Duration::from_millis(7500);
+pub(crate) const REQUEST_BUDGET: Duration = Duration::from_millis(7500);
 /// Prazo da guarda da troca de agente. Curto: é uma consulta local ao Python, e o silêncio dele não pode
 /// comer o tempo do mod.
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(2);
