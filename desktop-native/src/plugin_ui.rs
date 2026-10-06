@@ -64,8 +64,12 @@ impl FieldSync {
         None
     }
 
-    /// O campo mandou `submit` (Enter ou o rótulo de envio): o próximo desenho do mod entra mesmo com foco.
-    pub fn submitted(&mut self) { self.submitted = true; }
+    /// O campo mandou `submit` (Enter ou o rótulo de envio): o próximo desenho do mod entra mesmo com foco. O pendente
+    /// sai: o que foi enviado é o que está no campo, e um eco de antes do envio não volta ao perder o foco.
+    pub fn submitted(&mut self) {
+        self.pending = None;
+        self.submitted = true;
+    }
 
     /// A pessoa voltou a digitar: o pendente é descartado (perder o foco nunca apaga texto digitado e não enviado) e
     /// acaba a vez do desenho que responde ao envio.
@@ -1120,6 +1124,8 @@ mod tests {
         let mut sync = FieldSync::default();
         assert_eq!(sync.draw(Some("ab"), "abc", true), None);
         sync.submitted();
+        // Esse eco não volta ao perder o foco antes da resposta: o texto enviado fica.
+        assert_eq!(sync.draw(None, "abc", false), None);
         assert_eq!(sync.draw(Some(""), "abc", true).as_deref(), Some(""));
         // Digitar de novo fecha a vez: o desenho seguinte não apaga o que se digita.
         let mut sync = FieldSync::default();
