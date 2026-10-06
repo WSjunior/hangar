@@ -333,7 +333,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   do composer, o `❯` na frente de `●`/`◯` é o foco no painel de agentes; com o foco no rodapé
   (painel ou pílula "Enter to view tasks") o texto digitado some e o `x` para um subagente. Antes
   de digitar, Rust e Python dão um Esc, que só devolve o foco ao composer, e adiam se ele não
-  voltar. Ver [o /clear e o rodapé do Claude Code](#o-clear-e-o-rodapé-do-claude-code).
+  voltar (no Rust, no máximo dois por linha da fila). O foco conta só com `❯` na frente de `●`/`◯`
+  ou as dicas do próprio rodapé. Interromper com o foco lá manda esse Esc antes do que interrompe.
+  Ver [o /clear e o rodapé do Claude Code](#o-clear-e-o-rodapé-do-claude-code).
 
 - **A trava do `/clear` só sobe se o Enter pode ter saído e sempre tem saída.** Aceito, ou incerto
   nas etapas do Enter (`submit`, `submit_proof`; no Python, `*.submeter`). Incerto antes do Enter
@@ -346,6 +348,12 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 
 - **Comando de barra adiado é erro na tela, nunca 200.** Ele não tem linha na fila e não roda
   depois sozinho (`erro_comando_nao_executado`).
+
+- **Depois do Enter de um comando de barra, só o mesmo comando parado no composer ganha outro
+  Enter.** O comando que rodou pode ter trocado a conversa (`/clear`): no Python o Enter às cegas
+  caía na conversa nova e a reserva acusava vínculo mudado. A limpeza da fila que segue o `/clear`
+  só acontece com a trava erguida (Enter pode ter saído); vínculo já trocado nela é o esperado, e a
+  troca do vínculo esvazia a fila.
 
 - **Pergunta do plugin interrompida pelo app sai na hora.** O Esc fecha o diálogo e o hook morre
   sem `/ask-fim`, deixando o long-poll aberto até a janela fechar. Só a pergunta lida antes do Esc

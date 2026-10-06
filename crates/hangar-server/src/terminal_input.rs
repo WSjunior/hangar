@@ -736,7 +736,11 @@ impl TerminalDriver {
     pub async fn interrupt(&self, clear: bool) -> DeliveryResult {
         let _serial = self.serial.lock().await;
         // Com o foco no rodapé o primeiro Esc só o devolve ao composer: o segundo interrompe.
-        if self.composer_capture().await.is_ok_and(|(screen, _)| crate::terminal_state::footer_focus(&screen)) {
+        let focused = match self.composer_capture().await {
+            Ok((screen, _)) => crate::terminal_state::footer_focus(&screen),
+            Err(e) => { tracing::warn!(pane=%self.binding.pane, code=e.code, "tela ilegível antes da interrupção; o foco do rodapé não foi conferido"); false }
+        };
+        if focused {
             if let Err(e) = self.key_inner("Escape").await { return Self::failed(e, DeliveryStage::Control); }
             self.settle().await;
         }

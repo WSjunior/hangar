@@ -44,7 +44,7 @@ plugin_router = APIRouter(prefix="/api/plugin")
 ESPERA_S = 25.0
 # Entre dois long-polls o hook volta em milissegundos (2 s se o backend falhar). Sem long-poll aberto
 # por mais que isto, o hook morreu: o Esc no terminal interrompe a ferramenta sem o `/ask-fim`.
-SEM_POLL_S = 3.0
+SEM_POLL_S = 5.0
 # O hook que ainda faz long-poll depois disso sobreviveu ao Esc do app (o diálogo ficou).
 HOOK_VIVO_S = 2.0
 
