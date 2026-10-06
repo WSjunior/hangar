@@ -14,7 +14,7 @@ use tokio::sync::oneshot;
 
 use super::model::*;
 use super::screen::{self, COLLAPSED_TEXT, Screen};
-use super::state::{Mods, TerminalView};
+use super::state::{FocusSeen, Mods, TerminalView};
 use super::tree;
 use crate::terminal_input::PaneFormats;
 
@@ -354,9 +354,9 @@ async fn give_back_now(ctx: &Ctx<'_>) {
 }
 
 /// Com um terminal ligado no meio, o `window-size latest` já lhe entregou o tamanho: a altura não volta.
-/// `true` quando a altura voltou ou não precisa voltar; numa sessão que reabriu, o tamanho é da vida nova.
+/// `true` quando a altura voltou ou não precisa voltar. Não confere a vida pelo nome: a sessão renomeada no
+/// meio do clique é o mesmo pane, e numa vida que acabou o executor dela morre junto e recusa (Task 15).
 async fn give_back(ctx: &Ctx<'_>, columns: u16, rows: u16, start_by: Instant) -> bool {
-    if !ctx.alive() { return true; }
     match ctx.clients().await {
         Ok(0) => ctx.op(PaneOp::Resize { columns, rows }, start_by).await.is_ok(),
         Ok(_) => true,
@@ -442,18 +442,35 @@ fn locks(s: &Screen) -> Result<(), ModsError> {
 /// Tamanho do anel do `ctrl+x tab`: os botões das faixas, os painéis e o prompt.
 fn cap(t: &Target) -> usize { t.band_buttons + t.ids.len() + 1 }
 
+/// O foco visto é o elemento pedido, no lugar pedido, sem recusa.
+fn is_target(seen: &FocusSeen, site: &str, key: &str) -> bool {
+    seen.request_id == site && !seen.denied && seen.element.as_deref() == Some(key)
+}
+
+/// O último foco do alvo depois de `after`: espera até `wait` pelo primeiro e pega também os que chegaram
+/// depois dele. Um evento atrasado de uma tecla anterior não passa pelo da tecla mais nova.
+async fn last_focus(ctx: &Ctx<'_>, attempt: &str, after: u64, wait: Duration) -> Option<FocusSeen> {
+    let mut last = ctx.mods.wait_focus(ctx.name, ctx.life, attempt, after, wait, |_| true).await?;
+    while let Some(next) = ctx.mods.wait_focus(ctx.name, ctx.life, attempt, last.seq, Duration::ZERO, |_| true).await {
+        last = next;
+    }
+    Some(last)
+}
+
 /// `ctrl+x tab` até o painel pedido estar na frente e com o teclado. O anel passa antes pelos botões das
 /// faixas ((t)); se a borda apagar depois de ter passado por painéis, ele não está no ciclo. Cada tecla
-/// só sai com tempo para a espera do foco e o `Enter` confirmado.
-async fn reach_pane(ctx: &Ctx<'_>, t: &Target) -> Result<(), ModsError> {
+/// só sai com tempo para a espera do foco e o `Enter` confirmado. Devolve o `focus_seq` de logo antes do
+/// `ctrl+x tab` que deu o teclado ao painel.
+async fn reach_pane(ctx: &Ctx<'_>, t: &Target) -> Result<u64, ModsError> {
     let index = t.ids.iter().position(|id| *id == t.site).ok_or_else(pane_missing)?;
     let mut passed = false;
     for _ in 0..cap(t) {
+        let seq = ctx.mods.focus_seq(ctx.name, ctx.life);
         ctx.keys(&["C-x", "Tab"], ctx.limits.focus_wait).await?;
         let (s, _) = ctx.read(t).await?;
         if s.dialog || s.survey { return Err(dialog_open()); }
         match s.focus {
-            Some("pane") => { passed = true; if s.active == Some(index) { return Ok(()); } }
+            Some("pane") => { passed = true; if s.active == Some(index) { return Ok(seq); } }
             Some("prompt") if passed => break,
             _ => {}
         }
@@ -462,29 +479,39 @@ async fn reach_pane(ctx: &Ctx<'_>, t: &Target) -> Result<(), ModsError> {
 }
 
 /// `ctrl+x tab` até o `ui.focus` da faixa trazer a `key` pedida: o hook do plugin reescreve no primeiro
-/// evento do mod do alvo, e a reescrita não atravessa de um mod para outro ((t)).
-async fn reach_band_key(ctx: &Ctx<'_>, t: &Target, attempt: &str) -> Result<(), ModsError> {
-    let mut seq = ctx.mods.focus_seq(ctx.name, ctx.life);
+/// evento do mod do alvo, e a reescrita não atravessa de um mod para outro ((t)). Cada botão da faixa dá
+/// um `ui.focus`: sem ele no prazo, recusa, porque o evento atrasado seria achado na tecla seguinte, com o
+/// foco já adiante. Devolve o `seq` do foco confirmado.
+async fn reach_band_key(ctx: &Ctx<'_>, t: &Target, attempt: &str) -> Result<u64, ModsError> {
     for _ in 0..cap(t) {
+        let seq = ctx.mods.focus_seq(ctx.name, ctx.life);
         ctx.keys(&["C-x", "Tab"], ctx.limits.focus_wait).await?;
-        let seen = ctx.mods.wait_focus(ctx.name, ctx.life, attempt, seq, ctx.limits.focus_wait.min(ctx.left()), |_| true).await;
+        let seen = last_focus(ctx, attempt, seq, ctx.limits.focus_wait.min(ctx.left())).await;
         let (s, _) = ctx.read(t).await?;
         if s.dialog || s.survey { return Err(dialog_open()); }
-        if let Some(seen) = seen {
-            seq = seen.seq;
-            if seen.request_id == BAND_SITE && !seen.denied && seen.element.as_deref() == Some(t.key.as_str()) { return Ok(()); }
+        match seen {
+            Some(seen) if is_target(&seen, BAND_SITE, &t.key) => return Ok(seen.seq),
+            None if s.focus == Some("band") => return Err(no_answer()),
+            _ => {}
         }
-        if s.focus == Some("pane") { break; }   // passou da faixa sem o botão
+        if s.focus != Some("band") { break; }   // passou da faixa sem o botão
     }
     Err(unreachable_pane())
 }
 
 /// Lê a tela imediatamente antes do `Enter`: um diálogo que chegou tomaria o `Enter` como aprovação, e uma
-/// letra no meio teria devolvido o teclado ao prompt ((y), (aa)).
-async fn enter_confirmed(ctx: &Ctx<'_>, t: &Target) -> Result<(), ModsError> {
+/// letra no meio teria devolvido o teclado ao prompt ((y), (aa)). O teclado tem de estar na faixa, para
+/// botão da faixa, ou no painel pedido e na frente; e nenhum foco mais novo que o confirmado (`seq`) pode
+/// ter levado o teclado a outro elemento.
+async fn enter_confirmed(ctx: &Ctx<'_>, t: &Target, attempt: &str, seq: u64) -> Result<(), ModsError> {
     let (s, _) = ctx.read(t).await?;
     if s.dialog || s.survey { return Err(dialog_open()); }
-    if !matches!(s.focus, Some("pane" | "band")) { return Err(no_answer()); }
+    let placed = if t.site == BAND_SITE { s.focus == Some("band") }
+        else { s.focus == Some("pane") && s.active.is_some() && s.active == t.ids.iter().position(|id| *id == t.site) };
+    if !placed { return Err(no_answer()); }
+    if last_focus(ctx, attempt, seq, Duration::ZERO).await.is_some_and(|newer| !is_target(&newer, &t.site, &t.key)) {
+        return Err(no_answer());
+    }
     let since = Instant::now();
     ctx.keys(&["Enter"], Duration::ZERO).await?;
     if ctx.mods.wait_pressed(ctx.name, ctx.life, &t.site, &t.key, since, ctx.confirm()).await { Ok(()) } else { Err(no_answer()) }
@@ -498,17 +525,21 @@ async fn reserve_press(ctx: &Ctx<'_>, t: &Target) -> Result<Value, ModsError> {
     let attempt = ctx.mods.arm_focus(ctx.name, ctx.life, &t.site, t.plugin.as_deref(), &t.key);
     ctx.undo.focus(&attempt);
     ctx.undo.keyboard(t.titles.clone(), t.anchor.clone(), cap(t));
-    if t.site == BAND_SITE {
-        reach_band_key(ctx, t, &attempt).await?;
+    let seq = if t.site == BAND_SITE {
+        reach_band_key(ctx, t, &attempt).await?
     } else {
-        reach_pane(ctx, t).await?;
-        let seq = ctx.mods.focus_seq(ctx.name, ctx.life);
-        ctx.keys(&["Tab"], ctx.limits.focus_wait).await?;
-        let seen = ctx.mods.wait_focus(ctx.name, ctx.life, &attempt, seq, ctx.limits.focus_wait.min(ctx.left()),
-            |s| s.request_id == t.site).await;
-        if !seen.is_some_and(|s| !s.denied && s.element.as_deref() == Some(t.key.as_str())) { return Err(no_answer()); }
-    }
-    enter_confirmed(ctx, t).await?;
+        let entry = reach_pane(ctx, t).await?;
+        // O hook pode reescrever já no `ctrl+x tab` que deu o teclado ao painel: com o alvo focado, o `Tab`
+        // o tiraria de lá, e o evento atrasado desse `ctrl+x tab` ainda passaria na conferência.
+        let mut seen = last_focus(ctx, &attempt, entry, ctx.limits.focus_wait.min(ctx.left())).await;
+        if !seen.as_ref().is_some_and(|s| is_target(s, &t.site, &t.key)) {
+            let seq = ctx.mods.focus_seq(ctx.name, ctx.life);
+            ctx.keys(&["Tab"], ctx.limits.focus_wait).await?;
+            seen = last_focus(ctx, &attempt, seq, ctx.limits.focus_wait.min(ctx.left())).await;
+        }
+        seen.filter(|s| is_target(s, &t.site, &t.key)).ok_or_else(no_answer)?.seq
+    };
+    enter_confirmed(ctx, t, &attempt, seq).await?;
     Ok(json!({}))
 }
 
@@ -610,11 +641,11 @@ pub async fn read_shown(ctx: &Ctx<'_>) -> Option<String> {
 }
 
 /// Volta por `ctrl+x tab` até a borda apagar e nada ficar em inverso na faixa; nunca por `Escape`. Com um
-/// diálogo na tela qualquer tecla mexe nele: para ali. `true` com o teclado no prompt, ou com a sessão
-/// reaberta por outro processo (o terminal da vida nova não é do clique e não recebe tecla).
+/// diálogo na tela qualquer tecla mexe nele: para ali. `true` com o teclado no prompt. Como o `give_back`,
+/// não confere a vida pelo nome: quem garante que a tecla não chega à vida nova é o executor, que morre com
+/// a vida dele.
 async fn back_to_prompt(ctx: &Ctx<'_>, back: &Back) -> bool {
     for _ in 0..=back.cap {
-        if !ctx.alive() { return true; }
         let Ok((s, _)) = ctx.read_view(&back.titles, back.anchor.as_deref()).await else { return false };
         if s.focus == Some("prompt") && !s.dialog && !s.survey { return true; }
         if s.dialog || s.survey { return false; }

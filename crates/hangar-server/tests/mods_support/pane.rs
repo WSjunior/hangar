@@ -52,8 +52,11 @@ pub enum Effect {
     CloseAll,
     Focus(&'static str, &'static str, bool),
     Scroll(&'static str, i64),
-    /// A sessão reabre com outro processo e a vida dada, no meio do clique.
+    /// A sessão reabre com outro processo e a vida dada, no meio do clique. O executor da vida antiga morre
+    /// com ela: daí em diante este pane recusa toda operação, como o executor encerrado.
     NewLife(u64),
+    /// A sessão é renomeada no meio do clique: o nome antigo sai do registro, e o processo e o pane continuam.
+    Rename,
 }
 
 #[derive(Default)]
@@ -67,6 +70,8 @@ struct State {
     /// Tudo o que mexe no pane, inclusive reservar (`hold <ms>`), soltar (`release`) e a reserva que venceu
     /// antes de ser solta (`hold vencida`).
     log: Vec<String>,
+    /// O executor morreu com a vida da sessão (`NewLife`).
+    dead: bool,
     /// A próxima ação que começar com isto fica sem resposta (o pane travado no meio do clique).
     stall: Option<String>,
     actions: Vec<String>,
@@ -110,7 +115,13 @@ impl FakePane {
                     self.mods.focused(&self.name, &attempt, site, Some(element), *denied);
                 }
                 Effect::Scroll(site, offset) => self.mods.scrolled(&self.name, site, *offset),
-                Effect::NewLife(life) => self.mods.attach_terminal(&self.name, "proc-novo", *life, Arc::new(super::Probe::default())),
+                Effect::NewLife(life) => {
+                    self.mods.attach_terminal(&self.name, "proc-novo", *life, Arc::new(super::Probe::default()));
+                    state.dead = true;
+                }
+                Effect::Rename => {
+                    if let Some(life) = self.mods.life(&self.name) { self.mods.forget(&self.name, life); }
+                }
             }
         }
     }
@@ -184,6 +195,9 @@ impl Pane for FakePane {
         // Como o executor: a operação que chega à vez dela depois do ponto de partida não age.
         if Instant::now() >= start_by {
             return Box::pin(async { Err(pane_failed("mods_deadline")) });
+        }
+        if self.state.lock().unwrap().dead {
+            return Box::pin(async { Err(pane_failed("terminal_gone")) });
         }
         let (result, stalled) = self.handle(op);
         Box::pin(async move {
