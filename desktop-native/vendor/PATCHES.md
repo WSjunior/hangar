@@ -57,4 +57,4 @@ Não compilados aqui: gpui-pre-windows e gpui-pre-apple/-macos (revisados só po
 
 | Ajuste | Onde | Por quê |
 |---|---|---|
-| `read()` do CLIPBOARD devolve `ExternalPaths` + texto quando a oferta tem `text/uri-list` | gpui-pre-linux `platform.rs`, `wayland/clipboard.rs` | o upstream no Linux só lê texto e imagem; arquivo copiado no gerenciador não chegava ao composer. Terminal e navegador seguem pelo texto (`ClipboardItem::text` ignora os caminhos quando há texto) |
+| `read()` do CLIPBOARD devolve `ExternalPaths` + texto quando a oferta tem `text/uri-list` | gpui-pre-linux `platform.rs`, `wayland/clipboard.rs`, `x11/clipboard.rs` (`Inner::read` dividido em `targets` + `read_from`) | o upstream no Linux só lê texto e imagem; arquivo copiado no gerenciador não chegava ao composer. Terminal e navegador seguem pelo texto (`ClipboardItem::text` ignora os caminhos quando há texto) |

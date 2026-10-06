@@ -17,6 +17,8 @@ seguinte. No X11
 (`src/linux/x11/window.rs`) é `UnmapWindow`/`MapWindow`.
 
 Colar arquivo: com `text/uri-list` na oferta, o `read()` do CLIPBOARD no Wayland (`src/linux/wayland/clipboard.rs`)
-devolve `ExternalPaths` mais o texto que o dono ofereceu, como o macOS e o Windows já fazem; sem texto do dono, os
-caminhos um por linha. A seleção primária continua só texto e o arrastar não muda. Leitura das linhas e montagem do
-item em `parse_uri_list` e `file_list_item` (`src/linux/platform.rs`).
+e o `get_any` do X11 (`src/linux/x11/clipboard.rs`) devolvem `ExternalPaths` mais o texto que o dono ofereceu, como o
+macOS e o Windows já fazem; sem texto do dono, os caminhos um por linha. A seleção primária continua só texto e o
+arrastar não muda. Leitura das linhas e montagem do item em `parse_uri_list` e `file_list_item`
+(`src/linux/platform.rs`). No X11 o `Inner::read` foi dividido em `targets` + `read_from` para o colar consultar o
+TARGETS uma vez só e escolher dele o uri-list e o texto.
