@@ -128,3 +128,23 @@ def test_revoked_invite_never_reaches_the_refusal(env, tmp_path, monkeypatch):
     monkeypatch.setattr(share_store, "lookup_token", lambda token: share_store.Guest([revoked]) if token == INVITE else None)
     assert _press(INVITE, invite_port=True).status_code == 410
     assert pressed == []
+
+
+def test_refusal_under_the_barrier_reaches_the_app_as_the_guest_code(env, monkeypatch):
+    # Sem slot, a recusa rápida não vê o Rust; a do empréstimo do teclado (`GuestRefused`) vira o mesmo
+    # 403. A marca de convidado chega ao clique; a do dono não.
+    from app import runtime_terminal
+    _, guest_token, _ = env
+    marks = []
+
+    async def press(name, site, key):
+        marks.append(runtime_terminal.guest_admin.get())
+        if runtime_terminal.guest_admin.get():
+            raise runtime_terminal.GuestRefused("convidado")
+        return {"ok": True}
+
+    monkeypatch.setattr(plugin_click, "press", press)
+    assert _refused(_press(guest_token))
+    assert _refused(_press(INVITE, invite_port=True))
+    assert _press(OWNER).status_code == 200
+    assert marks == [True, True, False]
