@@ -476,6 +476,13 @@ impl Surface {
             out.push(reply(token, Err(no_answer())));
             return;
         }
+        // Dois mods com a mesma `key` no mesmo lugar: o app não diz de qual é, e nenhum é acionado.
+        let kind = if matches!(call, ModsCall::Input { .. }) { "Input" } else { "Button" };
+        if let ModsCall::Press { site, key } | ModsCall::Input { site, key, .. } = &call
+            && self.trees.get(site.as_str()).is_some_and(|tree| tree::ambiguous(tree, key, &[kind])) {
+            out.push(reply(token, Err(missing())));
+            return;
+        }
         let found = match &call {
             ModsCall::Press { site, key } => self.control(site, key, "Button").map(|control| ("ui_press",
                 json!({"plugin": control.plugin, "handle": control.handle, "key": key, "surface": SURFACE, "client_id": CLIENT_ID}))),

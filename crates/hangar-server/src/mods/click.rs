@@ -714,6 +714,8 @@ async fn reserve_close(ctx: &Ctx<'_>, t: &Target) -> Result<Value, ModsError> {
 
 async fn press_inner(ctx: &Ctx<'_>, site: &str, key: &str) -> Result<Value, ModsError> {
     let t = target(ctx, site, key)?;
+    // Dois mods com a mesma `key` no mesmo lugar: o app não diz de qual é, e nenhum é acionado.
+    if tree::ambiguous(&t.tree, key, &["Button"]) { return Err(missing()); }
     let label = tree::label(&t.tree, key).ok_or_else(missing)?;
     let f = prepare(ctx).await?;
     // Sem tela cheia o clique enviado é ignorado (achado 8): vai pelo teclado.
