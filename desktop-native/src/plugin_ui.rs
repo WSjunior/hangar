@@ -491,6 +491,12 @@ fn lines(v: &Value) -> Option<f32> { v.as_f64().map(|n| n as f32 * CELL_H) }
 /// O primeiro número entre as chaves, na ordem: a mais específica vence (`paddingLeft` > `paddingX` > `padding`).
 fn first(p: &Value, keys: &[&str]) -> Value { keys.iter().map(|k| p[*k].clone()).find(Value::is_number).unwrap_or(Value::Null) }
 
+/// Fundo do `Box`: a cor do mod, ou, no cartão `absolute` sem cor, o fundo opaco do lugar (`place`). No terminal as
+/// células do cartão substituem as de baixo; sem fundo, o texto dele e o da linha se embaralham.
+fn box_background(p: &Value, place: Hsla) -> Option<Hsla> {
+    color(&p["backgroundColor"]).or_else(|| (p["position"] == "absolute").then_some(place))
+}
+
 /// `Box` do Ink em flexbox do gpui. O padrão do Ink é linha, não coluna.
 fn boxed(v: &Value, p: &Value, c: &Ctx, at: &Spot, lit: bool) -> AnyElement {
     if p["display"] == "none" { return div().into_any_element(); }
@@ -534,7 +540,8 @@ fn boxed(v: &Value, p: &Value, c: &Ctx, at: &Spot, lit: bool) -> AnyElement {
     if let Some(v) = lines(&first(p, &["marginBottom", "marginY", "margin"])) { el = el.mb(px(v)); }
     if let Some(v) = cols(&first(p, &["marginLeft", "marginX", "margin"])) { el = el.ml(px(v)); }
     if let Some(v) = cols(&first(p, &["marginRight", "marginX", "margin"])) { el = el.mr(px(v)); }
-    if let Some(c) = color(&p["backgroundColor"]) { el = el.bg(c); }
+    // O fundo do lugar, opaco: com o vidro o `inset` fica translúcido, e a linha de baixo atravessaria o cartão.
+    if let Some(c) = box_background(p, theme::inset().alpha(1.)) { el = el.bg(c); }
     if p["borderStyle"].is_string() {
         el = el.border_1().rounded(px(4.)).border_color(color(&p["borderColor"]).unwrap_or_else(theme::border));
     }
@@ -768,10 +775,11 @@ fn unmark(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     // Importação explícita: `super::*` traz o `test` do gpui_kit, e o `#[test]` passaria a ser o dele.
-    use super::{accepts_typing, active_pane, button_key, cell_color, color, field_id, fields, fills_place, follow_local, follows_server,
+    use super::{accepts_typing, active_pane, box_background, button_key, cell_color, color, field_id, fields, fills_place, follow_local, follows_server,
         hover_props, input_kind, input_request, is_empty, keep_hovered, pane_ids, plain_deep, raster_row, raster_runs, safe_href,
         scope_active, surfaces, text_row, toast, wants_hover, FieldSpec, Surfaces, Toast, UiSource};
     use gpui_kit::component::input::InputEvent;
+    use gpui_kit::{rgb, Hsla};
     use serde_json::{json, Value};
     use std::borrow::Cow;
     use std::collections::HashSet;
@@ -918,6 +926,16 @@ mod tests {
         assert_eq!(follow_local(&v(&["a", "b", "c"]), &v(&["a", "c"]), Some("b")).as_deref(), Some("a"));
         assert_eq!(follow_local(&v(&["a", "b"]), &v(&["b"]), Some("a")).as_deref(), Some("b"));
         assert_eq!(follow_local(&v(&["a"]), &[], Some("a")), None);
+    }
+
+    #[test]
+    fn absolute_card_without_a_color_takes_the_opaque_background_of_the_place() {
+        let place: Hsla = rgb(0x101010).into();
+        // No terminal as células do cartão substituem as de baixo: sem fundo, o texto dele e o da linha se misturam.
+        assert_eq!(box_background(&json!({"position": "absolute", "top": 1}), place), Some(place));
+        assert_eq!(box_background(&json!({"position": "absolute", "backgroundColor": "#30363d"}), place), color(&json!("#30363d")));
+        assert_eq!(box_background(&json!({"flexDirection": "row"}), place), None);
+        assert_eq!(box_background(&json!({"backgroundColor": "red"}), place), color(&json!("red")));
     }
 
     #[test]

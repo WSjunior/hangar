@@ -4,18 +4,17 @@ import { boxStyle, buttonStyle, fillsPlace } from './pluginUiStyle';
 
 describe('tokens do tema nos estilos dos mods', () => {
   // `var()` de um token que o tema não define vira o valor inicial: a borda some (`border-style: none`), a cor
-  // volta à herdada. Por isso os estilos dos mods só usam token declarado no app.css ou no próprio arquivo.
+  // volta à herdada. Por isso os estilos dos mods só usam token declarado no app.css ou nos próprios lugares dos
+  // mods (o `--plugin-place-bg` da faixa e do painel).
   const ler = (caminho: string) => readFileSync(new URL(caminho, import.meta.url), 'utf8');
-  const declarados = (texto: string) => new Set([...texto.matchAll(/(--[\w-]+)\s*:/g)].map((m) => m[1]));
+  const declarados = (texto: string) => [...texto.matchAll(/(--[\w-]+)\s*:/g)].map((m) => m[1]);
   const usados = (texto: string) => [...texto.matchAll(/var\(\s*(--[\w-]+)/g)].map((m) => m[1]);
-  const tema = declarados(ler('../app.css'));
   const arquivos = ['./pluginUiStyle.ts', '../components/PluginNode.svelte', '../components/PluginInput.svelte',
     '../components/PluginBand.svelte', '../components/PluginPane.svelte'];
+  const definidos = new Set([...declarados(ler('../app.css')), ...arquivos.flatMap((a) => declarados(ler(a)))]);
 
   it.each(arquivos)('%s só usa tokens definidos', (arquivo) => {
-    const texto = ler(arquivo);
-    const proprios = declarados(texto);
-    expect(usados(texto).filter((t) => !tema.has(t) && !proprios.has(t))).toEqual([]);
+    expect(usados(ler(arquivo)).filter((t) => !definidos.has(t))).toEqual([]);
   });
 
   it('Box com borda e sem borderColor usa a borda do tema', () => {
@@ -53,6 +52,12 @@ describe('posição absoluta', () => {
     expect(s).toContain('left:2ch');
     expect(s).toContain('z-index:1');
     expect(s).toContain('display:none');
+  });
+
+  it('sem backgroundColor, o cartão ganha o fundo opaco do lugar e tapa a linha de baixo', () => {
+    expect(boxStyle({ position: 'absolute', top: 1 })).toContain('background:var(--plugin-place-bg)');
+    expect(boxStyle({ position: 'absolute', backgroundColor: '#30363d' })).toContain('background:#30363d');
+    expect(boxStyle({ flexDirection: 'row' })).not.toContain('background');
   });
 
   it('deslocamento negativo passa; sem position, top e left são ignorados', () => {

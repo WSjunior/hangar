@@ -54,6 +54,9 @@
     font-size: var(--text-xs);
     line-height: 1.45;
     color: var(--text-primary);
+    /* Fundo do cartão `absolute` sem cor própria: a mesma cor da faixa, opaca (com papel de parede o
+       `--surface-inset` fica translúcido, e a linha de baixo atravessaria o cartão). */
+    --plugin-place-bg: var(--bg-base);
     background: var(--surface-inset);
     border-radius: var(--radius-md);
     overflow-x: auto;

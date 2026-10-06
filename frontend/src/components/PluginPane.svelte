@@ -55,6 +55,8 @@
     font-size: var(--text-xs);
     line-height: 1.45;
     color: var(--text-primary);
+    /* Fundo do cartão `absolute` sem cor própria: a mesma cor do painel, opaca (ver a faixa). */
+    --plugin-place-bg: var(--bg-base);
     background: var(--surface-inset);
     border-radius: var(--radius-md);
   }
