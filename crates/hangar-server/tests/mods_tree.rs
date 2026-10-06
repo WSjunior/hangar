@@ -36,12 +36,15 @@ fn key_without_press_or_unknown_is_none() {
 }
 
 #[test]
-fn first_in_document_order_wins() {
+fn the_same_key_twice_finds_none() {
+    // Dois controles com a mesma `key` (dois mods no mesmo lugar): nenhum é o do pedido.
     let tree = json!({"type": "Box", "children": [
         {"type": "Box", "children": [{"type": "Button", "props": {"key": "k"}, "press": {"plugin": "m", "handle": 1}}]},
-        {"type": "Button", "props": {"key": "k"}, "press": {"plugin": "m", "handle": 2}},
+        {"type": "Button", "props": {"key": "k"}, "press": {"plugin": "outro", "handle": 2}},
     ]});
-    assert_eq!(tree::find(&tree, "k", &["Button"]).unwrap().handle, 1);
+    assert_eq!(tree::find(&tree, "k", &["Button"]), None);
+    assert!(tree::ambiguous(&tree, "k", &["Button"]));
+    assert!(!tree::ambiguous(&tree, "k", &["Input"]));
 }
 
 #[test]
