@@ -109,3 +109,21 @@ def test_reflog_error_degrades_even_when_fallback_is_merged(tmp_path, monkeypatc
     assert st["base"] == "origin/main"
     assert st["merged"] is False
     assert st["degraded"] is True
+
+
+@pytest.mark.parametrize("backend", ["python", "rust"])
+def test_tag_named_like_branch_does_not_hide_pending_commits(tmp_path, backend):
+    repo, feature = _remote_merge_scene(tmp_path, "remote-server")
+    git(repo, "tag", "feature", "feature")
+    (feature / "pending.txt").write_text("Não integrada\n", encoding="utf-8")
+    git(feature, "add", "pending.txt")
+    git(feature, "commit", "-m", "Ainda em andamento")
+    if backend == "python":
+        st = worktrees.status(str(feature), main=str(repo), measure=False)
+    else:
+        result = rust("worktree_status", path=str(feature), sessions=[], measure=False)
+        assert result["ok"], result
+        st = result["result"]
+    assert st["merged"] is False
+    assert st["ahead"] == 1
+    assert st["last_commit"]["subject"] == "Ainda em andamento"

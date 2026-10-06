@@ -484,24 +484,26 @@ def status(path: str, sessions=(), main: str | None = None, measure: bool = True
     failed: list = []   # por chamada: a listagem roda status em threads diferentes
     base = _base_of(path, branch, main, failed) if branch else None
     cwd = path if exists else main
+    # Nome curto perde para uma tag homônima, e o commit dela pareceria já mesclado.
+    ref = f"refs/heads/{branch}" if branch else "HEAD"
     ahead = 0
     if branch and base:
-        c = _git(cwd, "rev-list", "--count", f"{base}..{branch}", failed=failed)
+        c = _git(cwd, "rev-list", "--count", f"{base}..{ref}", failed=failed)
         ahead = int(c.stdout.strip() or 0) if c.returncode == 0 else 0
     behind = 0
     commits: list[dict] = []
     if branch and base and branch != base:
-        c = _git(cwd, "rev-list", "--count", f"{branch}..{base}", failed=failed)
+        c = _git(cwd, "rev-list", "--count", f"{ref}..{base}", failed=failed)
         behind = int(c.stdout.strip() or 0) if c.returncode == 0 else 0
-        commits = _log_commits(cwd, f"{base}..{branch}", 3, failed)
-    last = _log_commits(cwd, branch or "HEAD", 1, failed) if exists or branch else []
+        commits = _log_commits(cwd, f"{base}..{ref}", 3, failed)
+    last = _log_commits(cwd, ref, 1, failed) if exists or branch else []
     dirty_files: list[dict] = []
     if exists:
         s = _git(path, "status", "--porcelain", failed=failed)
         if s.returncode == 0:
             dirty_files = [{"code": line[:2].strip() or "?", "path": line[3:]}
                            for line in s.stdout.splitlines() if line.strip()]
-    merged = bool(branch and base and branch != base and is_merged(cwd, branch, base, failed))
+    merged = bool(branch and base and branch != base and is_merged(cwd, ref, base, failed))
     ignored = _ignored_lost(path, main, failed) if exists else []
     real = os.path.realpath(path)
     inside = [s for s in sessions if _inside(s, real)]

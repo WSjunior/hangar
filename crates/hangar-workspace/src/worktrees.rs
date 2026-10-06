@@ -572,7 +572,8 @@ pub fn status(
     if let (Some(branch), Some(base)) = (&branch, &base)
         && branch != base
     {
-        let range = format!("{base}...{branch}");
+        // Nome curto perde para uma tag homônima, e o commit dela pareceria já mesclado.
+        let range = format!("{base}...refs/heads/{branch}");
         if let Some(out) = probe.ok(cwd, &["rev-list", "--left-right", "--count", &range]) {
             let mut n = out
                 .split_whitespace()
@@ -582,14 +583,15 @@ pub fn status(
             // Recém-criada aponta pro mesmo commit da base: ancestral trivial, não mesclada.
             ancestor = ahead == 0 && behind > 0;
         }
-        commits = probe.log(cwd, &format!("{base}..{branch}"), 3);
+        commits = probe.log(cwd, &format!("{base}..refs/heads/{branch}"), 3);
         if ahead > 0 && !commits.is_empty() {
             // O primeiro do `base..branch` é a ponta da branch.
             last = vec![commits[0].clone()];
         }
     }
     if last.is_empty() && (exists || branch.is_some()) {
-        last = probe.log(cwd, branch.as_deref().unwrap_or("HEAD"), 1);
+        let reference = branch.as_deref().map_or("HEAD".into(), |b| format!("refs/heads/{b}"));
+        last = probe.log(cwd, &reference, 1);
     }
     let mut dirty_files = Vec::new();
     if exists && let Some(out) = probe.ok(path, &["status", "--porcelain"]) {
