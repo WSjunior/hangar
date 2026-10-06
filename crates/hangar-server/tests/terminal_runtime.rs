@@ -6,8 +6,8 @@ use std::sync::{Arc,Mutex,atomic::AtomicU64};
 use std::time::Duration;
 use tokio::sync::{broadcast,Notify};
 
-struct Io { calls:Mutex<Vec<CommandRequest>>, text:Mutex<String>, gate:Notify, blocked:std::sync::atomic::AtomicBool, fail_write:std::sync::atomic::AtomicBool, fail_enter:std::sync::atomic::AtomicBool, rotate_enter:std::sync::atomic::AtomicBool, conversation:Arc<Mutex<String>>, socket_calls:Mutex<Vec<Vec<u8>>>, ghost:Mutex<String>, hold_capture:std::sync::atomic::AtomicBool, mods_screen:Mutex<Option<String>>, ring_keys:std::sync::atomic::AtomicUsize, ring_returns:std::sync::atomic::AtomicBool }
-impl Io { fn new()->Self { Self { calls:Mutex::new(vec![]),text:Mutex::new(String::new()),gate:Notify::new(),blocked:std::sync::atomic::AtomicBool::new(false),fail_write:std::sync::atomic::AtomicBool::new(false),fail_enter:std::sync::atomic::AtomicBool::new(false),rotate_enter:std::sync::atomic::AtomicBool::new(false),conversation:Arc::new(Mutex::new("sid".into())),socket_calls:Mutex::new(vec![]),ghost:Mutex::new(String::new()),hold_capture:std::sync::atomic::AtomicBool::new(false),mods_screen:Mutex::new(None),ring_keys:Default::default(),ring_returns:Default::default() } } }
+struct Io { calls:Mutex<Vec<CommandRequest>>, text:Mutex<String>, gate:Notify, blocked:std::sync::atomic::AtomicBool, fail_write:std::sync::atomic::AtomicBool, fail_enter:std::sync::atomic::AtomicBool, rotate_enter:std::sync::atomic::AtomicBool, conversation:Arc<Mutex<String>>, socket_calls:Mutex<Vec<Vec<u8>>>, ghost:Mutex<String>, hold_capture:std::sync::atomic::AtomicBool, mods_screen:Mutex<Option<String>>, ring_keys:std::sync::atomic::AtomicUsize, ring_returns:std::sync::atomic::AtomicBool, drop_on_enter:std::sync::atomic::AtomicBool, notice:Mutex<String> }
+impl Io { fn new()->Self { Self { calls:Mutex::new(vec![]),text:Mutex::new(String::new()),gate:Notify::new(),blocked:std::sync::atomic::AtomicBool::new(false),fail_write:std::sync::atomic::AtomicBool::new(false),fail_enter:std::sync::atomic::AtomicBool::new(false),rotate_enter:std::sync::atomic::AtomicBool::new(false),conversation:Arc::new(Mutex::new("sid".into())),socket_calls:Mutex::new(vec![]),ghost:Mutex::new(String::new()),hold_capture:std::sync::atomic::AtomicBool::new(false),mods_screen:Mutex::new(None),ring_keys:Default::default(),ring_returns:Default::default(),drop_on_enter:Default::default(),notice:Mutex::new(String::new()) } } }
 impl TerminalIo for Io {
     fn command<'a>(&'a self,r:CommandRequest)->IoFuture<'a,CommandOutput> { Box::pin(async move {
         let cmd=r.args[0].clone();
@@ -20,7 +20,8 @@ impl TerminalIo for Io {
             "capture-pane" if !r.args.contains(&"-S".into()) && self.mods_screen.lock().unwrap().is_some()=>self.mods_screen.lock().unwrap().clone().unwrap().into_bytes(),
             "capture-pane"=>{let text=self.text.lock().unwrap().clone();let ghost=self.ghost.lock().unwrap().clone();
                 // O fantasma é rascunho que o Ctrl+S não guarda: o composer fica ocupado.
-                format!("────────────────────────────────\n❯ {}\n────────────────────────────────\n",if text.is_empty(){ghost}else{text}).into_bytes()},
+                let notice=self.notice.lock().unwrap().clone();
+                format!("{notice}────────────────────────────────\n❯ {}\n────────────────────────────────\n",if text.is_empty(){ghost}else{text}).into_bytes()},
             // O `ctrl+x tab` da devolução do foco: com `ring_returns`, o foco volta ao prompt.
             "send-keys" if r.args.iter().any(|a|a=="C-x")=>{
                 self.ring_keys.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
@@ -30,6 +31,8 @@ impl TerminalIo for Io {
             "send-keys"=>{
                 if self.blocked.load(std::sync::atomic::Ordering::Acquire) { self.gate.notified().await; }
                 let text=r.args.last().unwrap();
+                // O plugin do Hangar derruba o envio: o composer esvazia e o aviso aparece acima dele.
+                if text=="\r" && self.drop_on_enter.load(std::sync::atomic::Ordering::Acquire) {*self.notice.lock().unwrap()=format!("{} durante um clique do app\n",PLUGIN_HELD_NOTICE);}
                 if text=="\r" || text=="C-u" { self.text.lock().unwrap().clear(); if text=="\r" && self.rotate_enter.load(std::sync::atomic::Ordering::Acquire){*self.conversation.lock().unwrap()="new-sid".into();} if text=="\r" && self.fail_enter.load(std::sync::atomic::Ordering::Acquire){return Err(IoFailure {code:"enter_uncertain",may_have_written:true});} }
                 else if r.args.contains(&"-l".into()) {
                     *self.text.lock().unwrap()=text.clone();
@@ -1092,4 +1095,36 @@ async fn each_mods_hold_checks_the_pane_again() {
     }
     assert_eq!(checks()-before,2,"uma conferência por reserva");
     h.stop().await.unwrap();
+}
+
+/// O plugin derrubou o envio (o aviso dele apareceu com o `Enter`): a mensagem volta à fila em vez de contar
+/// como enviada, e sai na tentativa seguinte.
+#[tokio::test]
+async fn a_send_dropped_by_the_plugin_is_deferred_not_submitted() {
+    let f=Fixture::new().await; f.io.drop_on_enter.store(true,std::sync::atomic::Ordering::Release);
+    let h=f.start();
+    let reply=h.command(f.command("segurada","Mensagem segurada")).await.unwrap();
+    assert_eq!(reply.disposition,hangar_server::runtime::protocol::Disposition::Deferred,"{:?}",reply.payload);
+    assert_eq!(reply.payload["code"],"plugin_held");
+    f.io.drop_on_enter.store(false,std::sync::atomic::Ordering::Release);
+    f.wait_for("a segunda tentativa",||typed_at(&f,"Mensagem segurada").len()>=2).await;
+    h.stop().await.unwrap();
+}
+
+/// O aviso que já estava na tela antes do `Enter` é de outro envio: este conta como enviado, sem repetir.
+#[tokio::test]
+async fn an_old_held_notice_does_not_defer_a_new_send() {
+    let f=Fixture::new().await; *f.io.notice.lock().unwrap()=format!("{PLUGIN_HELD_NOTICE} antigo\n");
+    let h=f.start();
+    let reply=h.command(f.command("nova","Mensagem nova")).await.unwrap();
+    assert_eq!(reply.payload["code"],"submitted","{:?}",reply.payload);
+    h.stop().await.unwrap();
+    assert_eq!(typed_at(&f,"Mensagem nova").len(),1);
+}
+
+/// O aviso do plugin e a constante do Rust são o mesmo texto.
+#[test]
+fn the_held_notice_matches_the_plugin() {
+    let ui=std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/hangar/hooks/ui.ts")).unwrap();
+    assert!(ui.contains(&format!("drop: \"{PLUGIN_HELD_NOTICE}")),"o aviso do ui.ts mudou");
 }
