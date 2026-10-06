@@ -16,6 +16,8 @@ pub const SURFACE: &str = "desktop";
 pub const BAND_COLUMNS: u64 = 110;
 /// Largura de painel quando o mod não pediu uma.
 pub const PANE_COLUMNS: u64 = 60;
+/// Duração do aviso de mod que não traz uma, a mesma do Python (`plugin_bridge`).
+pub const TOAST_DEFAULT_MS: u64 = 4000;
 
 /// Sem `isFullscreen`, um viewport com `columns` e `rows` segura todos os painéis (seção Viewport).
 pub fn viewport() -> Value {

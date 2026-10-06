@@ -207,7 +207,7 @@ impl Surface {
             }
             Some("ui_toast") => if let (Some(plugin), Some(text)) = (event["plugin"].as_str(), event["text"].as_str()) {
                 out.push(SurfaceEffect::Toast { plugin: plugin.to_owned(), text: text.to_owned(),
-                    timeout_ms: event["timeout_ms"].as_u64().unwrap_or(4000) });
+                    timeout_ms: event["timeout_ms"].as_u64().unwrap_or(TOAST_DEFAULT_MS) });
             },
             // `ui_status` fica fora desta entrega (spec, "Fonte superfície", passo 5).
             _ => {}

@@ -8,28 +8,28 @@ use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::{StatusCode, header};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
+use serde_json::json;
 use subtle::ConstantTimeEq;
 
+use super::http::{fits, invalid, reply};
 use crate::routes::{AppState, gate, pass};
 
 const BODY_LIMIT: usize = 16 * 1024;
 const URL_MAX: usize = 8192;
 
-trait Named { fn session(&self) -> &str; }
+/// O que toda chamada da ponte traz: a sessão (o nome com que o processo nasceu) e o token dela.
+#[derive(Deserialize)]
+struct Envelope<T> { sessao: String, token: String, #[serde(flatten)] body: T }
 
 #[derive(Deserialize)]
-struct PressStart { sessao: String, token: String, #[serde(rename = "requestId")] request_id: String, element: String }
+struct PressStart { #[serde(rename = "requestId")] request_id: String, element: String }
 
 #[derive(Deserialize)]
-struct Opened { sessao: String, token: String, attempt: String, url: String }
-
-impl Named for PressStart { fn session(&self) -> &str { &self.sessao } }
-impl Named for Opened { fn session(&self) -> &str { &self.sessao } }
+struct Opened { attempt: String, url: String }
 
 /// O token da ponte de uma sessão, igual ao `plugin_bridge.mint` do Python: HMAC-SHA256 do token do
 /// dono (ou "hangar", sem token) sobre `plugin:<nome>`, em 32 dígitos hexadecimais.
@@ -39,31 +39,19 @@ pub fn mint(secret: &str, name: &str) -> String {
     ring::hmac::sign(&key, format!("plugin:{name}").as_bytes()).as_ref()[..16].iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn answer(status: StatusCode, body: Value) -> Response {
-    (status, [(header::CONTENT_TYPE, "application/json")], body.to_string()).into_response()
-}
-
 /// Corpo lido uma vez: sessão que não é superfície do Rust volta ao Python com o mesmo corpo. Devolve o
 /// corpo e o nome atual da sessão, que pode não ser o `sessao` do plugin (sessão renomeada sem relançar
 /// o processo: o plugin manda o nome com que nasceu, e o token é o desse nome).
-async fn owned<T: DeserializeOwned + Named>(st: &Arc<AppState>, peer: SocketAddr, req: Request) -> Result<(T, String), Response> {
+async fn owned<T: DeserializeOwned>(st: &Arc<AppState>, peer: SocketAddr, req: Request) -> Result<(Envelope<T>, String), Response> {
     let (fwd, _) = gate(st, peer, &req);
     let (parts, raw) = req.into_parts();
     let Ok(bytes) = to_bytes(raw, BODY_LIMIT).await else { return Err(StatusCode::PAYLOAD_TOO_LARGE.into_response()) };
-    let parsed = serde_json::from_slice::<T>(&bytes).ok().and_then(|body| st.mods.bridge_session(body.session()).map(|name| (body, name)));
+    let parsed = serde_json::from_slice::<Envelope<T>>(&bytes).ok()
+        .and_then(|envelope| st.mods.bridge_session(&envelope.sessao).map(|name| (envelope, name)));
     match parsed {
         Some(found) => Ok(found),
         None => Err(pass(st, Request::from_parts(parts, Body::from(bytes)), &fwd).await),
     }
-}
-
-/// Os limites do Pydantic do Python (`PressBody`, `OpenedBody`), contados em caracteres.
-fn fits(text: &str, max: usize) -> bool {
-    !text.is_empty() && text.chars().count() <= max
-}
-
-fn invalid() -> Response {
-    answer(StatusCode::UNPROCESSABLE_ENTITY, json!({"detail": "corpo inválido"}))
 }
 
 /// Comparação em tempo constante, como o `secrets.compare_digest` do Python.
@@ -72,34 +60,37 @@ fn token_ok(st: &AppState, name: &str, token: &str) -> bool {
 }
 
 pub async fn press_start(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let (body, name): (PressStart, String) = match owned(&st, peer, req).await { Ok(found) => found, Err(response) => return response };
+    let (envelope, name) = match owned::<PressStart>(&st, peer, req).await { Ok(found) => found, Err(response) => return response };
+    let body = &envelope.body;
+    // Os limites do Pydantic do Python (`PressBody`) vêm antes do token, como lá.
     if !fits(&body.request_id, 64) || !fits(&body.element, 256) {
-        return invalid();
+        return invalid(None);
     }
-    if !token_ok(&st, &body.sessao, &body.token) {
-        return answer(StatusCode::FORBIDDEN, json!({"detail": "token do plugin inválido"}));
+    if !token_ok(&st, &envelope.sessao, &envelope.token) {
+        return reply(None, StatusCode::FORBIDDEN, json!({"detail": "token do plugin inválido"}));
     }
     let attempt = st.mods.match_click(&name, &body.request_id, &body.element);
-    answer(StatusCode::OK, json!({"fromApp": attempt.is_some(), "attempt": attempt}))
+    reply(None, StatusCode::OK, json!({"fromApp": attempt.is_some(), "attempt": attempt}))
 }
 
 pub async fn opened(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let (body, name): (Opened, String) = match owned(&st, peer, req).await { Ok(found) => found, Err(response) => return response };
-    // A URL não tem mínimo no Pydantic: vazia passa daqui e cai no 400 do esquema.
+    let (envelope, name) = match owned::<Opened>(&st, peer, req).await { Ok(found) => found, Err(response) => return response };
+    let body = &envelope.body;
+    // Os limites do `OpenedBody`. A URL não tem mínimo no Pydantic: vazia passa daqui e cai no 400 do esquema.
     if !fits(&body.attempt, 64) || body.url.chars().count() > URL_MAX {
-        return invalid();
+        return invalid(None);
     }
-    if !token_ok(&st, &body.sessao, &body.token) {
-        return answer(StatusCode::FORBIDDEN, json!({"detail": "token do plugin inválido"}));
+    if !token_ok(&st, &envelope.sessao, &envelope.token) {
+        return reply(None, StatusCode::FORBIDDEN, json!({"detail": "token do plugin inválido"}));
     }
     let lower = body.url.to_ascii_lowercase();
     if !(lower.starts_with("http://") || lower.starts_with("https://")) {
-        return answer(StatusCode::BAD_REQUEST, json!({"detail": "só http(s)"}));
+        return reply(None, StatusCode::BAD_REQUEST, json!({"detail": "só http(s)"}));
     }
     if st.mods.opened(&name, &body.attempt, &body.url) {
-        answer(StatusCode::OK, json!({"ok": true}))
+        reply(None, StatusCode::OK, json!({"ok": true}))
     } else {
         // 409: o plugin segue com o `next` e o mod abre a URL na máquina do servidor, como no Python.
-        answer(StatusCode::CONFLICT, json!({"detail": "clique do app já respondido"}))
+        reply(None, StatusCode::CONFLICT, json!({"detail": "clique do app já respondido"}))
     }
 }

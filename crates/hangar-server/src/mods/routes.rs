@@ -19,8 +19,8 @@ use std::time::Duration;
 use axum::body::{Body, to_bytes};
 use axum::extract::rejection::PathRejection;
 use axum::extract::{ConnectInfo, Path, Request, State};
-use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::Response;
 use http_body_util::BodyExt;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Deserialize;
@@ -28,8 +28,9 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::time::Instant;
 
+use super::http::{fits, invalid, reply};
 use super::model::*;
-use crate::routes::{AppState, cors, gate, pass, route_failed};
+use crate::routes::{AppState, gate, pass, route_failed};
 
 const BODY_LIMIT: usize = 64 * 1024;
 /// Orçamento do pedido inteiro, desde a entrada: abaixo dos 8 s em que o app desiste, com folga para a
@@ -56,22 +57,8 @@ struct ShowBody { site: String }
 #[serde(deny_unknown_fields)]
 struct InputBody { site: String, key: String, kind: String, value: String }
 
-fn fits(text: &str, max: usize) -> bool {
-    !text.is_empty() && text.chars().count() <= max
-}
-
-fn reply(headers: &HeaderMap, status: StatusCode, body: Value) -> Response {
-    let mut response = (status, [(header::CONTENT_TYPE, "application/json")], body.to_string()).into_response();
-    cors(headers, response.headers_mut());
-    response
-}
-
 fn refused(headers: &HeaderMap, error: &ModsError) -> Response {
-    reply(headers, StatusCode::CONFLICT, json!({"detail": error.detail()}))
-}
-
-fn invalid(headers: &HeaderMap) -> Response {
-    reply(headers, StatusCode::UNPROCESSABLE_ENTITY, json!({"detail": "corpo inválido"}))
+    reply(Some(headers), StatusCode::CONFLICT, json!({"detail": error.detail()}))
 }
 
 /// O Rust atende quando o pedido é do dono e a sessão é superfície dele; senão, o Python. `outside`: a
@@ -90,8 +77,8 @@ async fn owned(st: &Arc<AppState>, peer: SocketAddr, path: Result<Path<String>, 
 }
 
 async fn body<T: DeserializeOwned>(headers: &HeaderMap, raw: Body) -> Result<T, Response> {
-    let bytes = to_bytes(raw, BODY_LIMIT).await.map_err(|_| invalid(headers))?;
-    serde_json::from_slice(&bytes).map_err(|_| invalid(headers))
+    let bytes = to_bytes(raw, BODY_LIMIT).await.map_err(|_| invalid(Some(headers)))?;
+    serde_json::from_slice(&bytes).map_err(|_| invalid(Some(headers)))
 }
 
 /// A guarda da troca de agente das rotas do Python (`_transfer_check`), perguntada a ele, que coordena
@@ -121,7 +108,7 @@ async fn transfer(st: &AppState, headers: &HeaderMap, name: &str, deadline: Inst
     if !answer["detail"].is_object() {
         return failed();
     }
-    Some(reply(headers, StatusCode::CONFLICT, json!({"detail": answer["detail"]})))
+    Some(reply(Some(headers), StatusCode::CONFLICT, json!({"detail": answer["detail"]})))
 }
 
 async fn run(st: &AppState, headers: &HeaderMap, name: &str, call: ModsCall, deadline: Instant) -> Response {
@@ -156,7 +143,7 @@ async fn run(st: &AppState, headers: &HeaderMap, name: &str, call: ModsCall, dea
             }
             if let Some(text) = copied { answer["copied"] = json!(text); }
             if let Some(url) = opened { answer["opened"] = json!(url); }
-            reply(headers, StatusCode::OK, answer)
+            reply(Some(headers), StatusCode::OK, answer)
         }
         Err(error) => refused(headers, &error),
     }
@@ -169,7 +156,7 @@ pub async fn press(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
     let (name, headers, raw) = match owned(&st, peer, path, req, None).await { Ok(parts) => parts, Err(response) => return response };
     let request: PressBody = match body(&headers, raw).await { Ok(request) => request, Err(response) => return response };
     if !fits(&request.site, 64) || !fits(&request.key, 256) {
-        return invalid(&headers);
+        return invalid(Some(&headers));
     }
     let call = if request.key == CLOSE_KEY { ModsCall::Close { site: request.site } }
         else { ModsCall::Press { site: request.site, key: request.key } };
@@ -183,7 +170,7 @@ pub async fn show(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
     let (name, headers, raw) = match owned(&st, peer, path, req, None).await { Ok(parts) => parts, Err(response) => return response };
     let request: ShowBody = match body(&headers, raw).await { Ok(request) => request, Err(response) => return response };
     if !fits(&request.site, 64) {
-        return invalid(&headers);
+        return invalid(Some(&headers));
     }
     run(&st, &headers, &name, ModsCall::Show { site: request.site }, deadline).await
 }
@@ -196,7 +183,7 @@ pub async fn input(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
     let request: InputBody = match body(&headers, raw).await { Ok(request) => request, Err(response) => return response };
     if !fits(&request.site, 64) || !fits(&request.key, 256) || !matches!(request.kind.as_str(), "change" | "submit")
         || request.value.chars().count() > VALUE_MAX {
-        return invalid(&headers);
+        return invalid(Some(&headers));
     }
     let call = ModsCall::Input { site: request.site, key: request.key, submit: request.kind == "submit", value: request.value };
     run(&st, &headers, &name, call, deadline).await
