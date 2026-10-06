@@ -475,13 +475,10 @@ async fn a_new_life_in_the_middle_of_the_click_stops_the_actions_and_cleans_up()
     pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-5-faixa")]);
     pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-6-painel-1"), NewLife(2)]);
     let (task, answer) = click::spawn(parts(&mods, &pane), ModsCall::Press { site: "pm-mock-mr".into(), key: "mr-a".into() }, far());
-    assert_eq!(code(answer.await.unwrap()), "erro_mod_painel_inexistente");
+    assert!(answer.await.unwrap().is_err());
     task.await.unwrap();
-    // Nenhuma tecla depois da troca, nem a volta ao prompt (o terminal da vida nova não é do clique); o pane
-    // é solto.
+    // O executor da vida antiga morreu com ela: nenhuma tecla depois da troca, nem a da volta ao prompt.
     assert_eq!(keys(&pane), ["C-x Tab", "C-x Tab"]);
-    assert!(!pane.held());
-    assert_eq!(pane.log().last().map(String::as_str), Some("release"));
 }
 
 /// Pressiona o MR pelo teclado numa tarefa, sem a volta ao prompt preparada.
@@ -531,7 +528,7 @@ async fn a_return_that_fails_once_is_retried_before_releasing() {
 
 #[tokio::test]
 async fn a_hold_that_would_expire_in_the_cleanup_is_renewed() {
-    // A reserva do pedido cobre o prazo (800 ms) e mais `UNDO_MAX`. O `Tab` fica sem resposta até o prazo,
+    // A reserva do pedido cobre o prazo (1 s) e mais `UNDO_MAX`. O `Tab` fica sem resposta até o prazo,
     // e a primeira tecla da volta, até o fim do prazo da limpeza: a nova tentativa cairia depois da reserva
     // do pedido. Renovada, a reserva não vence antes de o teclado voltar ao prompt e o pane ser solto.
     let (mods, pane) = setup("tmux-14-ciclo-4-prompt", pm());
@@ -542,7 +539,7 @@ async fn a_hold_that_would_expire_in_the_cleanup_is_renewed() {
     back_from_mr(&pane);
     pane.stall_on("keys Tab");
     let (task, answer) = click::spawn(parts(&mods, &pane), ModsCall::Press { site: "pm-mock-mr".into(), key: "mr-a".into() },
-        Instant::now() + Duration::from_millis(800));
+        Instant::now() + Duration::from_millis(1000));
     until(|| keys(&pane).contains(&"Tab".to_string())).await;
     pane.stall_on("keys C-x Tab");
     assert_eq!(code(answer.await.unwrap()), "erro_mod_clique_sem_resposta");
@@ -551,4 +548,84 @@ async fn a_hold_that_would_expire_in_the_cleanup_is_renewed() {
     assert!(!pane.log().contains(&"hold vencida".to_string()), "{:?}", pane.log());
     assert_eq!(pane.log().last().map(String::as_str), Some("release"));
     assert!(!pane.held());
+}
+
+#[tokio::test]
+async fn a_rename_in_the_middle_stops_the_actions_but_the_cleanup_still_goes_back() {
+    // Mesmo processo e mesmo pane, nome novo: o pedido para na ação seguinte (a vida já não é a do nome), e a
+    // limpeza volta o teclado ao prompt pelo executor, sem conferir pelo nome.
+    let (mods, pane) = setup("tmux-14-ciclo-4-prompt", pm());
+    let pane = Arc::new(pane);
+    pane.mouse(false);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-5-faixa")]);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-6-painel-1"), Rename]);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-7-painel-2")]);
+    back_from_mr(&pane);
+    let (task, answer) = click::spawn(parts(&mods, &pane), ModsCall::Press { site: "pm-mock-mr".into(), key: "mr-a".into() }, far());
+    assert_eq!(code(answer.await.unwrap()), "erro_mod_painel_inexistente");
+    task.await.unwrap();
+    assert_eq!(keys(&pane), ["C-x Tab", "C-x Tab", "C-x Tab", "C-x Tab", "C-x Tab"]);
+    assert!(!pane.held());
+    assert_eq!(pane.log().last().map(String::as_str), Some("release"));
+}
+
+#[tokio::test]
+async fn a_late_band_focus_refuses_instead_of_pressing_with_the_focus_ahead() {
+    // O `ui.focus` do primeiro botão chega depois do `focus_wait`: sem evento no prazo, recusa. Antes, ele era
+    // achado na tecla seguinte, com o teclado já no painel, e o `Enter` saía.
+    let (mods, pane) = setup("tmux-14-ciclo-4-prompt", pm());
+    pane.mouse(false);
+    // O caminho inteiro da faixa ao prompt: a recusa sai na faixa, e a limpeza volta por ele.
+    to_mr(&pane);
+    back_from_mr(&pane);
+    let late = {
+        let mods = mods.clone();
+        tokio::spawn(async move {
+            until(|| mods.armed_focus(S).is_some()).await;
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            if let Some(attempt) = mods.armed_focus(S) { mods.focused(S, &attempt, "above-prompt", Some("pm-abrir"), false); }
+        })
+    };
+    assert_eq!(code(press(&mods, &pane, "above-prompt", "pm-abrir").await), "erro_mod_clique_sem_resposta");
+    late.await.unwrap();
+    assert!(!keys(&pane).contains(&"Enter".to_string()), "{:?}", keys(&pane));
+}
+
+#[tokio::test]
+async fn the_last_focus_after_the_tab_decides_not_the_first() {
+    // O `Tab` dá dois focos: o alvo e logo outro elemento. O teclado está no segundo: nenhum `Enter`.
+    let (mods, pane) = setup("tmux-14-ciclo-4-prompt", pm());
+    pane.mouse(false);
+    to_mr(&pane);
+    pane.on_keys("Tab", vec![Focus("pm-mock-mr", "mr-a", false), Focus("pm-mock-mr", "outro", false)]);
+    back_from_mr(&pane);
+    assert_eq!(code(press(&mods, &pane, "pm-mock-mr", "mr-a").await), "erro_mod_clique_sem_resposta");
+    assert!(!keys(&pane).contains(&"Enter".to_string()), "{:?}", keys(&pane));
+}
+
+#[tokio::test]
+async fn a_rewrite_on_the_ctrl_x_tab_into_the_pane_skips_the_tab() {
+    // O hook reescreve já no `ctrl+x tab` que dá o teclado ao painel: o alvo tem o foco, e o `Tab` o tiraria.
+    let (mods, pane) = setup("tmux-14-ciclo-4-prompt", pm());
+    pane.mouse(false);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-5-faixa")]);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-6-painel-1")]);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-7-painel-2"), Focus("pm-mock-mr", "mr-a", false)]);
+    pane.on_keys("Enter", vec![Pressed("pm-mock-mr", "mr-a")]);
+    back_from_mr(&pane);
+    press(&mods, &pane, "pm-mock-mr", "mr-a").await.unwrap();
+    assert_eq!(keys(&pane), ["C-x Tab", "C-x Tab", "C-x Tab", "Enter", "C-x Tab", "C-x Tab"]);
+}
+
+#[tokio::test]
+async fn the_last_focus_wins_when_the_target_comes_after_another() {
+    // Um foco atrasado em outro elemento e logo o do alvo: o teclado está no alvo, e o `Enter` sai.
+    let (mods, pane) = setup("tmux-14-ciclo-4-prompt", pm());
+    pane.mouse(false);
+    to_mr(&pane);
+    pane.on_keys("Tab", vec![Focus("pm-mock-mr", "outro", false), Focus("pm-mock-mr", "mr-a", false)]);
+    pane.on_keys("Enter", vec![Pressed("pm-mock-mr", "mr-a")]);
+    back_from_mr(&pane);
+    press(&mods, &pane, "pm-mock-mr", "mr-a").await.unwrap();
+    assert_eq!(keys(&pane), ["C-x Tab", "C-x Tab", "C-x Tab", "Tab", "Enter", "C-x Tab", "C-x Tab"]);
 }
