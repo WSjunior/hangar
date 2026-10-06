@@ -46,7 +46,7 @@ impl Source {
             Source::Local(cwd) => {
                 let cwd = cwd.clone();
                 return tokio::task::spawn_blocking(move || local::call(&cwd, &op)).await.map_err(|_| Failure::local("invalid_response"))?
-                    .map_err(|(status, detail)| Failure { status: Some(status), detail, retry_after: None, uncertain: false });
+                    .map_err(|(status, detail)| Failure { status: Some(status), detail, retry_after: None, uncertain: false, code: None });
             }
             Source::Remote(api, name) => (api, name.as_str()),
         };

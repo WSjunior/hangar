@@ -9,7 +9,7 @@ import { dropWorktreeStatus } from './worktreeStatus';
 export type WorktreeBatch = { repo: string; deletable: WorktreeStatus[]; blocked: WorktreeStatus[] };
 type Props = { server: Server | null; batch: WorktreeBatch | null; onClose: () => void; onDeleted: (leftOut: string[]) => void };
 
-/** Confirmação do lote de mescladas: as prontas entram sempre; as que perdem arquivos só se a pessoa marcar. */
+/** Confirmação do lote de mescladas: as prontas entram sempre; as com alteração não commitada só se a pessoa marcar. */
 export function WorktreeBatchSheet({ server, batch: aberto, onClose, onDeleted }: Props) {
   const [apagando, setApagando] = useState(false);
   const [erro, setErro] = useState('');

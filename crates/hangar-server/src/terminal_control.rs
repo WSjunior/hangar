@@ -50,6 +50,8 @@ fn io_failure(code: &'static str, error: std::io::Error) -> TerminalError {
 pub enum ControlEvent {
     Frame { identity: FrameIdentity, text: String, error: bool },
     Exit,
+    /// Aviso de cliente ou de janela, sem o `%` (só com `ControlParser::with_notices`).
+    Notice(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +65,17 @@ pub struct FrameIdentity {
 pub struct ControlParser {
     pending: Vec<u8>,
     frame: Option<(FrameIdentity, Vec<u8>)>,
+    notices: bool,
+}
+
+/// Os avisos que mudam quem manda no tamanho da janela (medidos no tmux 3.7c em 05/10/2026: terminal que
+/// liga, `%client-session-changed` e `%layout-change`; que redimensiona, `%layout-change`; que desliga,
+/// `%client-detached`).
+const NOTICES: [&[u8]; 4] = [b"%layout-change", b"%client-detached", b"%client-session-changed", b"%session-changed"];
+
+fn notice(line: &[u8]) -> Option<String> {
+    NOTICES.iter().find(|n| line.starts_with(n) && line.get(n.len()).is_none_or(|b| *b == b' '))
+        .map(|n| String::from_utf8_lossy(&n[1..]).into_owned())
 }
 fn marker(line: &[u8], prefix: &[u8]) -> Option<FrameIdentity> {
     let suffix = line.strip_prefix(prefix)?;
@@ -72,6 +85,9 @@ fn marker(line: &[u8], prefix: &[u8]) -> Option<FrameIdentity> {
     Some(FrameIdentity { timestamp: parts[0].parse().ok()?, command: parts[1].parse().ok()?, flags: parts[2].parse().ok()? })
 }
 impl ControlParser {
+    /// Parser que também devolve os avisos de cliente e de janela, para o vigia de tamanho (T10). O do
+    /// observador da prévia continua ignorando-os.
+    pub fn with_notices() -> Self { Self { notices: true, ..Default::default() } }
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<ControlEvent>> {
         if bytes.len() > MAX_FRAME { return Err(TerminalError("control payload too large")); }
         self.pending.extend_from_slice(bytes);
@@ -100,6 +116,7 @@ impl ControlParser {
             else if !line.starts_with(b"%") {}
             else if std::str::from_utf8(&line).is_err() { return Err(TerminalError("invalid notification UTF-8")); }
             else if line.starts_with(b"%exit") { events.push(ControlEvent::Exit); }
+            else if self.notices && let Some(kind) = notice(&line) { events.push(ControlEvent::Notice(kind)); }
             else if line.starts_with(b"%begin ") || line.starts_with(b"%end ") || line.starts_with(b"%error ") {
                 return Err(TerminalError("invalid control frame"));
             }
@@ -317,7 +334,7 @@ impl Observer {
             ControlEvent::Frame { identity, text, error: false } => Ok(Some((identity, text))),
             ControlEvent::Frame { error: true, .. } => Err(TerminalError("tmux command failed")),
             ControlEvent::Exit => Err(TerminalError("terminal observer exited")),
-
+            ControlEvent::Notice(_) => Ok(None),
         }
     }
     async fn read(&mut self) -> Result<()> {
@@ -444,4 +461,59 @@ fn reject(request: Request, error: TerminalError) {
         Request::Capture(_, reply) => { let _ = reply.send(Err(error)); },
         Request::Acquire(_, reply) | Request::Release(_, reply) => { let _ = reply.send(Err(error)); },
     }
+}
+
+/// Vigia de uma sessão (T10): um cliente de controle próprio, sem saída e sem mandar no tamanho
+/// (`ignore-size,no-output`), que repassa os avisos de cliente e de janela. Não digita nem lê o pane. Sai
+/// quando a tarefa é abortada (o `kill_on_drop` encerra o cliente) ou quando o tmux encerra o cliente.
+///
+/// No Windows recusa, como o observador da prévia (`enqueue`): o psmux não avisa a mudança de tamanho
+/// feita por um cliente, e um cliente de controle do Hangar entraria no `#{session_attached}` com que o
+/// `TerminalDriver::mods_clients` conta os terminais ligados lá.
+pub fn watch_notices(mux_argv: &[String], name: &str) -> Result<(mpsc::Receiver<String>, tokio::task::JoinHandle<()>)> {
+    if cfg!(windows) { return Err(TerminalError("terminal control unavailable")); }
+    let (program, prefix) = mux_argv.split_first().ok_or(TerminalError("terminal mux missing"))?;
+    // Sem a autoridade privada do servidor, como os outros comandos do multiplexador.
+    let mut command = crate::terminal_input::child_command(program);
+    command.args(prefix).args(["-u", "-C", "-N", "attach-session", "-E", "-f", "ignore-size,no-output", "-t"]).arg(format!("={name}"))
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).kill_on_drop(true);
+    let mut child = command.spawn().map_err(|e| io_failure("cannot start terminal watch", e))?;
+    let stdin = child.stdin.take();
+    let mut stdout = child.stdout.take().ok_or(TerminalError("terminal watch without output"))?;
+    let (tx, rx) = mpsc::channel(16);
+    let task = tokio::spawn(async move {
+        // Vivos enquanto a tarefa vive: o stdin aberto segura o cliente, e o `kill_on_drop` o encerra no fim.
+        let (_stdin, _child) = (stdin, child);
+        let mut parser = ControlParser::with_notices();
+        let mut buffer = [0u8; 8192];
+        loop {
+            let n = match stdout.read(&mut buffer).await {
+                Ok(n) => n,
+                Err(error) => {
+                    tracing::warn!(code = "terminal watch read failed", io_kind = ?error.kind(), "vigia de tamanho do terminal encerrado");
+                    return;
+                }
+            };
+            if n == 0 {
+                tracing::warn!(code = "terminal watch EOF", "vigia de tamanho do terminal encerrado");
+                return;
+            }
+            let events = match parser.push(&buffer[..n]) {
+                Ok(events) => events,
+                Err(error) => {
+                    tracing::warn!(code = error.0, "vigia de tamanho do terminal encerrado");
+                    return;
+                }
+            };
+            for event in events {
+                match event {
+                    // Fila cheia: já há uma reposição pendente, e a próxima lê o estado atual.
+                    ControlEvent::Notice(kind) => if tx.try_send(kind).is_err() && tx.is_closed() { return },
+                    ControlEvent::Exit => return,
+                    ControlEvent::Frame { .. } => {}
+                }
+            }
+        }
+    });
+    Ok((rx, task))
 }

@@ -16,6 +16,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::serve::ListenerExt;
 use bytes::Bytes;
+use futures_util::StreamExt;
 use http_body_util::BodyExt;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use tokio::net::TcpListener;
@@ -24,7 +25,7 @@ use tokio::sync::{broadcast, mpsc};
 use crate::auth::{self, Auth};
 use crate::config::Config;
 use crate::proxy::{self, Forward, HttpClient};
-use crate::side::{Binding, Hubs, INFO_TTL, Lease, Out, SideCtx, remember_info};
+use crate::side::{Binding, Hub, Hubs, INFO_TTL, Lease, Out, Queued, SideCtx, remember_info};
 use crate::tail::{self, Watchers};
 use crate::transcript::{InternalInfo, SKIPPED_LINES, history_etag, merged_history};
 
@@ -52,6 +53,8 @@ pub struct AppState {
     pub list: Arc<crate::list::bridge::ListBridge>,
     /// Produtor único da lista do dono; liga com a primeira lista aberta.
     pub hub: Arc<crate::list::hub::ListHub>,
+    /// Interface dos mods das sessões sem terminal do Rust: o ator publica, as rotas consultam.
+    pub mods: crate::mods::state::Mods,
 }
 
 impl AppState {
@@ -71,6 +74,7 @@ impl AppState {
     pub fn with_parts(cfg: Config, terminal: crate::terminal_control::TerminalPool,
                       costs: Arc<crate::costs::collect::Collector>, fx: Arc<crate::costs::fx::Fx>) -> AppState {
         let http = proxy::client();
+        let mods = crate::mods::state::Mods::default();
         let side = SideCtx {
             upstream: cfg.upstream,
             secret: cfg.internal_secret.clone(),
@@ -78,7 +82,9 @@ impl AppState {
             watchers: Watchers::default(),
             hubs: Hubs::default(),
             infos: Default::default(),
+            mods: mods.clone(),
         };
+        mods.bind_hubs(side.hubs.downgrade());
         let diag = crate::diag::DiagClient::new(cfg.upstream, cfg.internal_secret.clone());
         let facts = crate::list::facts::FactsClient::new(cfg.upstream, cfg.internal_secret.clone());
         AppState { auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None, diag,
@@ -89,7 +95,8 @@ impl AppState {
             origins_home: std::path::PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default()),
             origins: std::sync::Mutex::new(indexmap::IndexMap::new()),
             list: Arc::new(crate::list::bridge::ListBridge::new(crate::list::bridge::ListEnv::from_env(), facts)),
-            hub: Arc::default() }
+            hub: Arc::default(),
+            mods }
     }
 
     pub(crate) fn skill_origins(&self, repo: &std::path::Path) -> crate::costs::origins::Origins {
@@ -210,6 +217,21 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/sessions/events", get(crate::list::hub::events).fallback(pass_any))
         .route("/api/sessions/{name}/history", get(history).fallback(pass_any))
         .route("/api/sessions/{name}/events", get(events).fallback(pass_any))
+        // Interface dos mods: o Rust atende a sessão sem terminal dele; o resto segue ao Python.
+        .route("/api/sessions/{name}/plugin/press", axum::routing::post(crate::mods::routes::press).fallback(pass_any))
+        .route("/api/sessions/{name}/plugin/show", axum::routing::post(crate::mods::routes::show).fallback(pass_any))
+        .route("/api/sessions/{name}/plugin/input", axum::routing::post(crate::mods::routes::input).fallback(pass_any))
+        // Ponte do plugin do Hangar (S7): o clique do app numa sessão sem terminal do Rust.
+        .route("/api/plugin/press-start", axum::routing::post(crate::mods::bridge::press_start).fallback(pass_any))
+        .route("/api/plugin/opened", axum::routing::post(crate::mods::bridge::opened).fallback(pass_any))
+        // Ponte do plugin da sessão com terminal que o Rust atende; as outras seguem ao Python.
+        .route("/api/plugin/ui", axum::routing::post(crate::mods::bridge::ui).fallback(pass_any))
+        .route("/api/plugin/toast", axum::routing::post(crate::mods::bridge::toast).fallback(pass_any))
+        .route("/api/plugin/pressed", axum::routing::post(crate::mods::bridge::pressed).fallback(pass_any))
+        .route("/api/plugin/copied", axum::routing::post(crate::mods::bridge::copied).fallback(pass_any))
+        .route("/api/plugin/focus-target", axum::routing::post(crate::mods::bridge::focus_target).fallback(pass_any))
+        .route("/api/plugin/focused", axum::routing::post(crate::mods::bridge::focused).fallback(pass_any))
+        .route("/api/plugin/scroll", axum::routing::post(crate::mods::bridge::scroll).fallback(pass_any))
         .route("/api/sessions/{name}/cost", get(crate::costs_routes::session_cost).fallback(pass_any))
         .route("/api/costs", get(crate::costs_routes::costs).fallback(pass_any))
         .route("/api/cotacao", get(crate::costs_routes::cotacao).fallback(pass_any))
@@ -397,12 +419,10 @@ async fn events(
         .or_else(|| req.headers().get("last-event-id").and_then(|v| v.to_str().ok()).map(str::to_owned));
     tracing::debug!(session = %name, req = %diag_req(&req), retomada = resume.is_some(), "events: abriu");
     let lease = st.side.hubs.acquire(&name, binding, &st.side);
-    let (tx, rx) = mpsc::channel::<Bytes>(64);
+    let hub = lease.hub.clone();
+    let (tx, rx) = mpsc::channel::<Queued>(64);
     tokio::spawn(client_loop(lease, resume, tx));
-    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
-        rx.recv().await.map(|b| (Ok::<Bytes, Infallible>(b), rx))
-    });
-    let mut resp = Response::new(Body::from_stream(stream));
+    let mut resp = Response::new(Body::from_stream(device_stream(rx, hub).map(Ok::<Bytes, Infallible>)));
     let h = resp.headers_mut();
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/event-stream; charset=utf-8"));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -412,7 +432,21 @@ async fn events(
     resp
 }
 
-async fn client_loop(lease: Lease, resume: Option<String>, out: mpsc::Sender<Bytes>) {
+/// O que a conexão de um aparelho escreve, na ordem da fila. O marcador do `plugin_ui` só vira quadro
+/// aqui, quando o corpo da resposta pede o próximo: o aparelho lento recebe a vista mais nova, e a fila
+/// guarda marcadores, não cópias de até ~400 KB.
+fn device_stream(rx: mpsc::Receiver<Queued>, hub: Arc<Hub>) -> impl futures_util::Stream<Item = Bytes> {
+    futures_util::stream::unfold((rx, hub), |(mut rx, hub)| async move {
+        loop {
+            let item = rx.recv().await?;
+            if let Some(frame) = hub.resolve(item) {
+                return Some((frame, (rx, hub)));
+            }
+        }
+    })
+}
+
+async fn client_loop(lease: Lease, resume: Option<String>, out: mpsc::Sender<Queued>) {
     let hub = lease.hub.clone();
     // O front dá 10 s para o primeiro quadro: o ping sai antes de qualquer leitura.
     if !push(&out, tail::ping_frame()).await {
@@ -432,7 +466,7 @@ async fn client_loop(lease: Lease, resume: Option<String>, out: mpsc::Sender<Byt
                 return;
             }
         }
-        let (generation, mut rx) = (att.generation, att.rx);
+        let (generation, mut rx, mut ui) = (att.generation, att.rx, att.ui);
         let rebind = loop {
             tokio::select! {
                 _ = out.closed() => return,
@@ -442,6 +476,12 @@ async fn client_loop(lease: Lease, resume: Option<String>, out: mpsc::Sender<Byt
                     Ok(Out::Tail(g, f)) if g == generation => if !push(&out, f).await { return },
                     Ok(Out::Tail(..)) => {}
                     Ok(Out::Side(f)) => if !push(&out, f).await { return },
+                    // A versão que já foi no retrato da entrada não sai de novo.
+                    Ok(Out::Ui(version)) if version > ui => {
+                        ui = version;
+                        if !push(&out, Queued::Ui(version)).await { return }
+                    }
+                    Ok(Out::Ui(_)) => {}
                     Ok(Out::Rebind) => break true,
                     Ok(Out::Close) | Err(broadcast::error::RecvError::Closed) => break false,
                     // Atrasado demais para o canal: fecha, e o aparelho retoma pelo último id.
@@ -459,8 +499,8 @@ async fn client_loop(lease: Lease, resume: Option<String>, out: mpsc::Sender<Byt
 }
 
 /// Envio preso por 30 s fecha a conexão, como o send_timeout do Python.
-async fn push(out: &mpsc::Sender<Bytes>, frame: Bytes) -> bool {
-    matches!(tokio::time::timeout(SEND_TIMEOUT, out.send(frame)).await, Ok(Ok(())))
+async fn push(out: &mpsc::Sender<Queued>, item: impl Into<Queued>) -> bool {
+    matches!(tokio::time::timeout(SEND_TIMEOUT, out.send(item.into())).await, Ok(Ok(())))
 }
 
 /// CORS das respostas do próprio Rust, como o CORSMiddleware do Python: `*`, sem credenciais,
@@ -563,6 +603,92 @@ mod tests {
         let r = pass(&st, request("/limited", "127.0.0.1", false, "x"), &fwd("127.0.0.1")).await;
         assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
         assert!(is_owner(&st, "127.0.0.1"));
+    }
+
+    /// Aparelho ligado a um hub sem conexão interna (porta sem ninguém): só o que o teste entrega chega.
+    async fn device(dir: &std::path::Path) -> (SideCtx, std::pin::Pin<Box<dyn futures_util::Stream<Item = Bytes> + Send>>) {
+        let ctx = SideCtx {
+            upstream: "127.0.0.1:9".parse().unwrap(),
+            secret: "s".into(),
+            http: proxy::client(),
+            watchers: Watchers::default(),
+            hubs: Hubs::default(),
+            infos: Default::default(),
+            mods: Default::default(),
+        };
+        let jsonl = dir.join("t.jsonl");
+        std::fs::write(&jsonl, "").unwrap();
+        let lease = ctx.hubs.acquire("s", Binding { provider: crate::transcript::Provider::Claude, jsonl, key: "k".into() }, &ctx);
+        let hub = lease.hub.clone();
+        let (tx, rx) = mpsc::channel::<Queued>(64);
+        tokio::spawn(client_loop(lease, None, tx));
+        // O aparelho já assinou o canal: o que for entregue daqui em diante vai pela fila dele.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while hub.tx.receiver_count() == 0 { tokio::time::sleep(Duration::from_millis(5)).await; }
+        }).await.unwrap();
+        (ctx, Box::pin(device_stream(rx, hub)))
+    }
+
+    /// Os próximos quadros sem `ping`, como (evento, dado), até o evento `until` inclusive.
+    async fn read_until(stream: &mut (impl futures_util::Stream<Item = Bytes> + Unpin), until: (&str, &str)) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        loop {
+            let frame = tokio::time::timeout(Duration::from_secs(5), stream.next()).await.unwrap().unwrap();
+            let text = String::from_utf8_lossy(&frame).into_owned();
+            let event = text.lines().find_map(|line| line.strip_prefix("event: ")).unwrap_or("").to_owned();
+            let data = text.lines().find_map(|line| line.strip_prefix("data: ")).unwrap_or("").to_owned();
+            if event == "ping" || event.is_empty() { continue; }
+            let done = (event.as_str(), data.as_str()) == until;
+            out.push((event, data));
+            if done { return out; }
+        }
+    }
+
+    fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        list.iter().map(|(event, data)| (event.to_string(), data.to_string())).collect()
+    }
+
+    #[tokio::test]
+    async fn slow_device_gets_only_the_newest_band_and_every_other_event_in_order() {
+        // I2: o aparelho que não lê enquanto a faixa muda não acumula as vistas intermediárias; os outros
+        // eventos chegam todos, na ordem, e a faixa sai no lugar do último marcador dela.
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, mut stream) = device(dir.path()).await;
+        for (event, data) in [("state", "1"), ("plugin_ui", "u1"), ("state", "2"), ("plugin_ui", "u2"),
+                              ("message", "{\"id\":\"m1\"}"), ("plugin_ui", "u3"), ("state", "3")] {
+            ctx.hubs.deliver("s", event, data);
+        }
+        // A fila do aparelho já tem tudo (marcadores, não quadros) antes de ele ler.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(read_until(&mut stream, ("state", "3")).await,
+            pairs(&[("state", "1"), ("state", "2"), ("message", "{\"id\":\"m1\"}"), ("plugin_ui", "u3"), ("state", "3")]));
+    }
+
+    #[tokio::test]
+    async fn repeated_band_does_not_drop_the_view_a_slow_device_still_has_to_send() {
+        // N1: a mesma vista de novo (o Python reenvia a faixa a cada religação; o Rust limpa duas vezes) não
+        // pode invalidar o marcador que a fila do aparelho lento ainda tem.
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, mut stream) = device(dir.path()).await;
+        ctx.hubs.deliver("s", "plugin_ui", "u1");
+        ctx.hubs.deliver("s", "plugin_ui", "u1");
+        ctx.hubs.deliver("s", "state", "1");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(read_until(&mut stream, ("state", "1")).await, pairs(&[("plugin_ui", "u1"), ("state", "1")]));
+    }
+
+    #[tokio::test]
+    async fn device_that_keeps_up_gets_every_band_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, mut stream) = device(dir.path()).await;
+        for (event, data) in [("plugin_ui", "u1"), ("state", "1"), ("plugin_ui", "u2"), ("plugin_ui", "u3")] {
+            ctx.hubs.deliver("s", event, data);
+            assert_eq!(read_until(&mut stream, (event, data)).await, pairs(&[(event, data)]));
+        }
+        // A mesma vista de novo não sai.
+        ctx.hubs.deliver("s", "plugin_ui", "u3");
+        ctx.hubs.deliver("s", "state", "2");
+        assert_eq!(read_until(&mut stream, ("state", "2")).await, pairs(&[("state", "2")]));
     }
 
     #[test]

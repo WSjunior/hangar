@@ -20,10 +20,10 @@ use crate::routes::{AppState, cors, gate, pass};
 #[derive(Clone, Copy)]
 pub(crate) struct Forwarded;
 
-pub const AREAS: [&str; 21] = [
+pub const AREAS: [&str; 22] = [
     "history", "list", "send", "session", "terminal", "workspace", "worktrees", "costs", "quotas",
     "codex", "providers", "accounts", "guests", "pairing", "mcp", "push", "update", "uploads",
-    "dictation", "static", "other",
+    "dictation", "mods", "static", "other",
 ];
 
 /// Trabalho que o Python pede ao Rust por trás (porta privada e canal do runtime).
@@ -65,11 +65,12 @@ pub fn area_of(path: &str) -> usize {
             "share" => "guests",
             "upload" | "uploads" | "transcript-image" => "uploads",
             "transcribe" => "dictation",
+            "plugin" => "mods",
             "conta" => "accounts",
             _ => "session",
         });
     }
-    let table: [(&[&str], &str); 16] = [
+    let table: [(&[&str], &str); 17] = [
         (&["/api/sessions"], "list"),
         (&["/mcp"], "mcp"),
         (&["/api/fs"], "workspace"),
@@ -85,6 +86,7 @@ pub fn area_of(path: &str) -> usize {
         (&["/api/push"], "push"),
         (&["/api/atualizacao", "/api/update-channel", "/api/deploy"], "update"),
         (&["/api/dictation", "/api/ditado", "/api/tts"], "dictation"),
+        (&["/api/plugin"], "mods"),
         (&["/api/migration"], "other"),
     ];
     let fallback = if under(path, "/api") { "other" } else { "static" };
@@ -100,6 +102,14 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
         }
         let tail = path.strip_prefix("/api/sessions/").and_then(|r| r.split_once('/')).map(|(_, t)| t);
         if matches!(tail, Some("history" | "events" | "cost")) {
+            return true;
+        }
+    }
+    // Interface dos mods: o Rust atende as sessões dele e repassa as outras (os contadores mostram).
+    if *method == Method::POST {
+        let tail = path.strip_prefix("/api/sessions/").and_then(|r| r.split_once('/')).map(|(_, t)| t);
+        if matches!(tail, Some("plugin/press" | "plugin/show" | "plugin/input")) || matches!(path.strip_prefix("/api/plugin/"),
+            Some("press-start" | "opened" | "ui" | "toast" | "pressed" | "copied" | "focus-target" | "focused" | "scroll")) {
             return true;
         }
     }
@@ -128,6 +138,7 @@ const PROBES: &[(&str, &str)] = &[
     ("GET", "/api/atualizacao"), ("GET", "/api/update-channel"),
     ("POST", "/api/sessions/x/upload"),
     ("POST", "/api/dictation/transcribe"),
+    ("POST", "/api/sessions/x/plugin/press"), ("POST", "/api/plugin/ui"), ("POST", "/api/plugin/ask"),
     ("GET", "/"), ("GET", "/assets/index.js"),
     ("GET", "/api/config"),
 ];
@@ -301,6 +312,23 @@ mod tests {
         assert_eq!(AREAS[area_of("/api/sessions-x")], "other", "prefixo só casa por segmento inteiro");
         assert_eq!(AREAS[area_of("/assets/index.js")], "static");
         assert_eq!(AREAS[area_of("/api/sessions/a")], "session");
+    }
+
+    /// Rota nova no `routes::router` sem entrar em `rust_route` faria a tabela dizer "Python" para o
+    /// que o Rust atende. O roteador não se deixa listar; o texto dele, sim.
+    #[test]
+    fn every_route_registered_in_the_router_is_known_to_the_table() {
+        let source = include_str!("routes.rs");
+        let body = &source[source.find("pub fn router(").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        let mut seen = 0;
+        for line in body.lines().map(str::trim).filter(|l| l.starts_with(".route(\"/api/")) {
+            let path = line.split('"').nth(1).unwrap().replace("{name}", "x");
+            let method = if line.contains("routing::post(") { Method::POST } else { Method::GET };
+            assert!(rust_route(&method, &path), "rota do roteador fora da tabela: {method} {path}");
+            seen += 1;
+        }
+        assert!(seen >= 10, "o leitor do roteador não achou as rotas ({seen})");
     }
 
     #[test]

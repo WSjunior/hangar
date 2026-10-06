@@ -56,6 +56,16 @@ def adapter(sidecar):
     return ad
 
 
+@pytest.fixture(autouse=True)
+def _plugin_do_hangar_fora(monkeypatch):
+    """O `_argv` e o `_spawn` perguntam ao `plugin_bridge` se o plugin do Hangar entra no `claude -p`
+    (S7). A resposta real depende do CLI e da config da máquina; aqui é sempre "não entra", e só os
+    testes do plugin trocam."""
+    from app import plugin_bridge
+    monkeypatch.setattr(plugin_bridge, "raizes_dos_plugins", lambda: [])
+    monkeypatch.setattr(plugin_bridge, "env_da_sessao", lambda name: {})
+
+
 def _run(coro):
     return asyncio.run(coro)
 
@@ -511,6 +521,18 @@ def test_plano_com_base_bypass_sobe_podendo_voltar_ao_bypass(adapter):
     # Já em bypass a própria --permission-mode basta; base que não é bypass não ganha a flag.
     assert flag not in adapter._argv("sid", resume=False, permission_mode="bypassPermissions", permitir_bypass=True)
     assert flag not in adapter._argv("sid", resume=False, permission_mode="plan")
+
+
+def test_sem_terminal_carrega_o_plugin_do_hangar(adapter, monkeypatch):
+    """S7: sem terminal o Hangar é a superfície `desktop` dos mods, e o plugin dele entra para levar ao
+    aparelho de quem clicou a URL que um mod abriria na máquina do servidor. Mods desligados
+    (`raizes_dos_plugins` vazia): o argv fica como era."""
+    from app import plugin_bridge
+    monkeypatch.setattr(plugin_bridge, "raizes_dos_plugins", lambda: ["/repo/plugins/hangar"])
+    argv = adapter._argv("sid", resume=False)
+    assert argv[argv.index("--plugin-dir") + 1] == "/repo/plugins/hangar"
+    monkeypatch.setattr(plugin_bridge, "raizes_dos_plugins", lambda: [])
+    assert "--plugin-dir" not in adapter._argv("sid", resume=False)
 
 
 def test_sessao_parada_aceita_na_hora_e_sobe_em_segundo_plano(sidecar, monkeypatch):
@@ -1498,6 +1520,10 @@ def lancador_cano(request, monkeypatch) -> list[str]:
 
 
 def test_processo_herda_chave_e_nao_o_pane_do_operador(sidecar, monkeypatch, lancador_cano):
+    from app import plugin_bridge
+    monkeypatch.setattr(plugin_bridge, "raizes_dos_plugins", lambda: ["/repo/plugins/hangar"])
+    monkeypatch.setattr(plugin_bridge, "env_da_sessao",
+                        lambda name: {"HANGAR_PLUGIN_URL": "http://127.0.0.1:1/api/plugin", "HANGAR_PLUGIN_TOKEN": f"tok-{name}"})
     monkeypatch.setenv("TMUX_PANE", "%9")
     monkeypatch.setenv("TMUX", "/tmp/x")
     visto = {}
@@ -1536,6 +1562,8 @@ def test_processo_herda_chave_e_nao_o_pane_do_operador(sidecar, monkeypatch, lan
     assert env["HANGAR_CANO_KEY"] == S.load("s1")["key"]
     assert env["HANGAR_CANO_OWNER"] == str(Path.home())
     assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "claude-opus-5"
+    # S7: a ponte do plugin do Hangar desta sessão, para o clique do app pela superfície `desktop`.
+    assert (env["HANGAR_PLUGIN_URL"], env["HANGAR_PLUGIN_TOKEN"]) == ("http://127.0.0.1:1/api/plugin", "tok-s1")
     # O processo que nasce é o cano, com o comando do claude depois do `--`; o sidecar guarda
     # onde ele escuta, pra o próximo backend religar.
     argv = list(visto["argv"])
@@ -1547,6 +1575,49 @@ def test_processo_herda_chave_e_nao_o_pane_do_operador(sidecar, monkeypatch, lan
     assert S.load("s1")["key"][:16] in " ".join(argv)
     assert S.load("s1")["cano"] == visto["cano"] and visto["cano"]["pid"] == 1
     assert visto["cano"]["escuta"].startswith(("unix:", "tcp:"))
+    # O `--plugin-dir` vai no comando do claude, depois do `--` do cano.
+    assert argv[argv.index("--plugin-dir", ultimo) + 1] == "/repo/plugins/hangar"
+    # O token da ponte vai só no ambiente, nunca no comando (o cmdline é legível por outros processos).
+    assert "tok-s1" not in " ".join(argv)
+
+
+def test_processo_nao_herda_a_ponte_de_outra_sessao(sidecar, monkeypatch, lancador_cano):
+    """Backend subido de dentro de uma sessão do Hangar tem a ponte DELA no ambiente. Com os mods
+    desligados (`env_da_sessao` vazio, fixture), o filho sai sem ponte nenhuma: nem a herdada, nem a
+    desta sessão; e sem `--plugin-dir`, como era."""
+    monkeypatch.setenv("HANGAR_PLUGIN_URL", "http://127.0.0.1:9/api/plugin")
+    monkeypatch.setenv("HANGAR_PLUGIN_TOKEN", "tok-de-outra")
+    visto = {}
+
+    async def exec_falso(*argv, env, **kw):
+        visto["env"] = env
+        visto["argv"] = argv
+
+        class _P:
+            pid = 1
+            returncode = None
+
+            async def wait(self):
+                return 0
+        return _P()
+
+    async def conectar_falso(cano, **kw):
+        return _ligacao_com([]), {"type": "cano_snapshot", "versao": A.cano_mod.VERSAO, "pid": 2,
+                                  "init": None, "aberto": False, "pendentes": [], "stderr_tail": []}
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", exec_falso)
+    monkeypatch.setattr(A.shutil, "which", lambda b: "/usr/bin/claude")
+    ad = ClaudeHeadlessAdapter()
+    sess = _Sessao("s1", S.load("s1"))
+
+    async def ctrl(s, sub, **kw):
+        return {}
+    ad._conectar = conectar_falso                 # type: ignore[method-assign]
+    ad._ler = lambda s: asyncio.sleep(0)          # type: ignore[method-assign]
+    ad._ctrl = ctrl                               # type: ignore[method-assign]
+    ad._agendar_cota = lambda s: None             # type: ignore[method-assign]
+    _run(ad._spawn(sess))
+    assert "HANGAR_PLUGIN_URL" not in visto["env"] and "HANGAR_PLUGIN_TOKEN" not in visto["env"]
+    assert "--plugin-dir" not in visto["argv"] and "tok-de-outra" not in " ".join(visto["argv"])
 
 
 @pytest.mark.parametrize("tier,supported", [(None, False), ("default", True), ("priority", True), ("default", False)])

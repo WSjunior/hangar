@@ -116,8 +116,8 @@ pub(super) fn age_days(w: &WorktreeStatus, now: f64) -> Option<i64> {
 
 pub(super) fn stale_days(w: &WorktreeStatus, now: f64) -> Option<i64> { age_days(w, now).filter(|d| *d > STALE_DAYS) }
 
-/// Pronta para apagar sem perder nada.
-pub(super) fn ready(w: &WorktreeStatus) -> bool { w.merged && w.dirty == 0 && w.ignored.is_empty() && w.sessions.is_empty() && !w.degraded }
+/// Pronta para apagar: mesclada, sem alteração e sem sessão. Arquivo ignorado não segura; a confirmação o lista.
+pub(super) fn ready(w: &WorktreeStatus) -> bool { w.merged && w.dirty == 0 && w.sessions.is_empty() && !w.degraded }
 
 /// Worktree que o Claude cria para um subagente: nome gerado, agrupada à parte.
 pub(super) fn is_agent(w: &WorktreeStatus) -> bool {
@@ -134,6 +134,15 @@ pub(super) fn title(w: &WorktreeStatus) -> String {
 }
 
 fn loses(w: &WorktreeStatus) -> bool { w.dirty > 0 || !w.ignored.is_empty() }
+
+/// O que apagar perde, para a confirmação: o aviso e a lista, ou "nada se perde".
+fn loss_lines(w: &WorktreeStatus) -> Div {
+    let lost = lost_files(w);
+    if lost.is_empty() { return muted(tr_shared("worktree_lote_nada_perde", &[])); }
+    div().flex().flex_col().gap(px(2.))
+        .child(div().pl(px(24.)).text_color(theme::warning_text()).child(tr_shared("worktree_apagar_perde", &[])))
+        .children(lost.into_iter().map(|f| div().pl(px(34.)).font_family(theme::MONO).text_size(px(12.)).text_color(theme::muted()).child(f)))
+}
 
 /// O lote de mescladas: as que entram na confirmação e as que ficam de fora (sessão aberta ou leitura falha).
 pub(super) fn merged_batch(list: &[WorktreeStatus]) -> (Vec<WorktreeStatus>, Vec<WorktreeStatus>) {
@@ -245,12 +254,12 @@ impl Filter {
 pub(super) enum WtDialog { Delete(String), Batch, Create }
 
 /// A confirmação do lote congela o que a pessoa viu: o lote apaga essas e só essas.
-/// `clean` sai sempre; de `with_files` (perdem arquivos) só as marcadas em `picked`.
-pub(super) struct Batch { repo: String, clean: Vec<WorktreeStatus>, with_files: Vec<WorktreeStatus>, picked: HashSet<String>, blocked: Vec<WorktreeStatus> }
+/// `ready` sai sempre; de `with_changes` (alteração não commitada) só as marcadas em `picked`.
+pub(super) struct Batch { repo: String, ready: Vec<WorktreeStatus>, with_changes: Vec<WorktreeStatus>, picked: HashSet<String>, blocked: Vec<WorktreeStatus> }
 
 impl Batch {
     fn chosen(&self) -> Vec<&WorktreeStatus> {
-        self.clean.iter().chain(self.with_files.iter().filter(|w| self.picked.contains(&w.path))).collect()
+        self.ready.iter().chain(self.with_changes.iter().filter(|w| self.picked.contains(&w.path))).collect()
     }
 }
 
@@ -566,8 +575,8 @@ impl Hangar {
     fn open_batch(&mut self, repo: &WorktreeRepo, window: &mut Window, cx: &mut Context<Self>) {
         let (deletable, blocked) = merged_batch(&repo.worktrees);
         if deletable.is_empty() { return; }
-        let (with_files, clean) = deletable.into_iter().partition(loses);
-        self.worktrees.batch = Some(Batch { repo: repo.repo.clone(), clean, with_files, picked: HashSet::new(), blocked });
+        let (ready_ones, with_changes) = deletable.into_iter().partition(ready);
+        self.worktrees.batch = Some(Batch { repo: repo.repo.clone(), ready: ready_ones, with_changes, picked: HashSet::new(), blocked });
         self.worktrees.batch_dialog_error = None;
         self.open_wt_dialog(WtDialog::Batch, 520., Hangar::render_batch_dialog, window, cx);
     }
@@ -861,10 +870,10 @@ impl Hangar {
 
     fn render_worktree_repo(&self, repo: &WorktreeRepo, visible: Vec<&WorktreeStatus>, narrowed: bool, now: f64, cx: &mut Context<Self>) -> Div {
         let (deletable, _) = merged_batch(&repo.worktrees);
-        // O botão conta as prontas, como o contador; sem prontas, o lote (mescladas com arquivos) ainda abre por ele.
+        // O botão conta as prontas, como o contador; sem prontas, o lote (mescladas com alteração) ainda abre por ele.
         let ready_list: Vec<&WorktreeStatus> = repo.worktrees.iter().filter(|w| ready(w)).collect();
-        let (clean_n, clean_size) = if ready_list.is_empty() { (deletable.len(), sum_label(&deletable)) }
-            else { (ready_list.len(), sum_label(ready_list.iter().copied())) };
+        let (clean_key, clean_n, clean_size) = if ready_list.is_empty() { ("worktree_clean_merged_with_changes", deletable.len(), sum_label(&deletable)) }
+            else { ("worktree_limpar_mescladas", ready_list.len(), sum_label(ready_list.iter().copied())) };
         let deleting = self.worktrees.deleting;
         let main = repo.worktrees.iter().find_map(|w| w.main_branch.clone());
         let path_line = match &main {
@@ -884,7 +893,7 @@ impl Hangar {
                 .label(tr_shared("worktree_nova", &[]))
                 .on_click(cx.listener(move |this, _, window, cx| this.open_create(repo_new.clone(), window, cx))))
             .when(!deletable.is_empty(), |el| el.child(Button::new(SharedString::from(format!("worktrees-clean-{}", repo.repo))).outline().small()
-                .label(tr_shared("worktree_limpar_mescladas", &[("n", &clean_n.to_string()), ("tamanho", &clean_size)]))
+                .label(tr_shared(clean_key, &[("n", &clean_n.to_string()), ("tamanho", &clean_size)]))
                 .loading(deleting).disabled(deleting)
                 .on_click(cx.listener(move |this, _, window, cx| this.open_batch(&repo_batch, window, cx)))));
         let (agents, mains): (Vec<&WorktreeStatus>, Vec<&WorktreeStatus>) = visible.into_iter().partition(|w| is_agent(w));
@@ -1153,10 +1162,11 @@ impl Hangar {
         let Some(batch) = self.worktrees.batch.as_ref() else { return div() };
         let deleting = self.worktrees.deleting;
         let n = batch.chosen().len().to_string();
-        let clean = batch.clean.iter().map(|w| div().flex().flex_col().gap(px(2.))
-            .child(div().font_weight(FontWeight::MEDIUM).child(title(w))).child(muted(tr_shared("worktree_lote_nada_perde", &[]))));
-        // Perdem arquivos: só saem marcadas, e começam desmarcadas.
-        let with_files: Vec<Div> = batch.with_files.iter().map(|w| {
+        // Prontas entram sempre; a que tem arquivo ignorado mostra o que ele perde.
+        let ready_rows = batch.ready.iter().map(|w| div().flex().flex_col().gap(px(2.))
+            .child(div().font_weight(FontWeight::MEDIUM).child(title(w))).child(loss_lines(w)));
+        // Com alteração não commitada: só saem marcadas, e começam desmarcadas.
+        let change_rows: Vec<Div> = batch.with_changes.iter().map(|w| {
             let path = w.path.clone();
             div().flex().flex_col().gap(px(2.))
                 .child(Checkbox::new(SharedString::from(format!("worktree-batch-pick-{}", w.path))).label(title(w))
@@ -1165,15 +1175,14 @@ impl Hangar {
                         if let Some(b) = this.worktrees.batch.as_mut() { if *checked { b.picked.insert(path.clone()); } else { b.picked.remove(&path); } }
                         cx.notify();
                     })))
-                .child(div().pl(px(24.)).text_color(theme::warning_text()).child(tr_shared("worktree_apagar_perde", &[])))
-                .children(lost_files(w).into_iter().map(|f| div().pl(px(34.)).font_family(theme::MONO).text_size(px(12.)).text_color(theme::muted()).child(f)))
+                .child(loss_lines(w))
         }).collect();
         div().flex().flex_col().gap(px(12.)).text_size(px(13.)).whitespace_normal()
             .child(div().text_size(px(17.)).font_weight(FontWeight::SEMIBOLD).child(tr_shared("worktree_lote_titulo", &[("n", &n)])))
             .child(div().id("worktree-batch-list").max_h(px(360.)).overflow_y_scroll().flex().flex_col().gap(px(10.))
-                .children(clean)
-                .when(!with_files.is_empty(), |el| el.child(div().text_color(theme::warning_text()).child(tr_shared("worktree_lote_com_arquivos", &[])))
-                    .children(with_files))
+                .children(ready_rows)
+                .when(!change_rows.is_empty(), |el| el.child(div().text_color(theme::warning_text()).child(tr_shared("worktree_lote_com_arquivos", &[])))
+                    .children(change_rows))
                 .when(!batch.blocked.is_empty(), |el| el.child(div().text_color(theme::warning_text()).child(tr_shared("worktree_lote_ficam", &[])))
                     .children(batch.blocked.iter().map(|w| div().flex().flex_col().gap(px(2.))
                         .child(div().font_weight(FontWeight::MEDIUM).child(title(w)))
@@ -1367,6 +1376,14 @@ mod tests {
         assert_eq!(deletable.iter().map(|w| w.path.as_str()).collect::<Vec<_>>(), ["/r/a"]);
         assert_eq!(blocked.len(), 2);
         assert!(!ready(&deletable[0]));
+    }
+
+    #[test]
+    fn merged_with_only_ignored_files_is_ready() {
+        let mut w = base("/r/a"); w["merged"] = json!(true); w["ignored"] = json!(["CLAUDE.local.md"]);
+        assert!(ready(&st(w.clone())));
+        w["dirty"] = json!(1);
+        assert!(!ready(&st(w)));
     }
 
     #[test]

@@ -11,7 +11,7 @@ use super::accounts::ModelChoice;
 use super::device::Remote;
 use super::machines::{FocusOnClick, enter_to_focused};
 use super::settings::Disclosure;
-use super::sidebar::Target;
+use super::sidebar::{Target, wrap_step};
 use gpui_kit::component::{IndexPath, WindowExt, select::{Select, SelectEvent, SelectState}, searchable_list::{SearchableListItem, SearchableVec}};
 use super::chrome::Skeleton;
 use serde::Deserialize;
@@ -51,13 +51,6 @@ pub(super) struct Scan { pub(super) entries: Vec<Entry>, pub(super) error: Optio
 
 struct RootScan { root: Root, scan: Remote<Scan> }
 enum FolderIndex { Current(usize), Root(usize, usize) }
-
-fn global_folder_search(compact: bool, search_all: bool, query: &str) -> bool {
-    !compact && search_all && !query.trim().is_empty()
-}
-
-// No modal a busca atravessa raízes e sobrevive à troca; no seletor compacto ela é da pasta navegada.
-fn clears_query_on_root_change(compact: bool) -> bool { compact }
 
 fn next_root(current: usize, count: usize, reverse: bool) -> Option<usize> {
     if count == 0 { return None; }
@@ -413,6 +406,9 @@ pub(in crate::app) struct NewSession {
     scan: Remote<Scan>,
     /// Pastas da leitura que casam com a busca, na ordem da lista: refeito quando a busca ou a leitura mudam, não a cada quadro.
     folders: Vec<FolderIndex>,
+    /// A pasta realçada pelas setas, guardada pelo caminho: a lista refeita (leitura que chega, busca) não a troca de linha.
+    folder_active: Option<String>,
+    folder_scroll: UniformListScrollHandle,
     root_scans: Vec<RootScan>,
     search_all: bool,
     search_error: Option<String>,
@@ -541,7 +537,11 @@ impl NewSession {
         let new_branch_name = cx.new(|cx| InputState::new(window, cx).placeholder(tr_shared("worktree_nome_branch", &[])));
         // O Enter no Nome não cria: no web o campo não está num formulário.
         let subscriptions = vec![
-            cx.subscribe(&query, |this: &mut Self, _, event: &InputEvent, cx| if matches!(event, InputEvent::Change) { this.refilter(cx); cx.notify() }),
+            cx.subscribe_in(&query, window, |this: &mut Self, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => { this.refilter(cx); cx.notify() }
+                InputEvent::PressEnter { .. } => this.pick_active_folder(window, cx),
+                _ => {}
+            }),
             cx.subscribe(&name, |_, _, event: &InputEvent, cx| if matches!(event, InputEvent::Change) { cx.notify() }),
             // Digitar depois de escolher uma branch existente volta a ser branch nova com o nome digitado.
             cx.subscribe(&new_branch_name, |this: &mut Self, input, event: &InputEvent, cx| if matches!(event, InputEvent::Change) {
@@ -572,7 +572,7 @@ impl NewSession {
         Self {
             link, purpose: SessionDialogPurpose::Create, transfer_blocked: false, compact: false, menu: Default::default(), menu_query, servers: Remote::default(),
             roots: Remote::default(), root: None, dir: String::new(), scan: Remote::default(), folders: Vec::new(),
-            root_scans: Vec::new(), search_all, search_error, query, picked: None,
+            folder_active: None, folder_scroll: UniformListScrollHandle::new(), root_scans: Vec::new(), search_all, search_error, query, picked: None,
             checkout: Remote::default(), branch: String::new(), worktrees: Remote::default(), existing: None, switching: false, base_open: false,
             preset: None, new_branch: false, base: String::new(), new_branch_name,
             git: Default::default(), git_name,
@@ -733,6 +733,7 @@ impl NewSession {
         self.headless_saving = false;
         self.dir.clear();
         self.folders.clear();
+        self.folder_active = None;
         self.branch.clear();
         (self.new_branch, self.base) = (false, String::new());
         (self.existing, self.switching, self.preset) = (None, false, None);
@@ -855,7 +856,6 @@ impl NewSession {
         if self.compact { self.picked = Some(path.clone()); self.reset_git(); self.load_branches(window, cx); }
         let remember = path.clone();
         self.link.runtime.spawn_blocking(move || crate::appearance::remember_root(&remember));
-        if clears_query_on_root_change(self.compact) { self.query.update(cx, |input, cx| input.set_value("", window, cx)); }
         self.scan_dir(path, cx);
     }
 
@@ -1550,10 +1550,68 @@ impl NewSession {
         // Só as linhas visíveis são montadas; todas têm a mesma altura, e o espaço entre elas vai dentro de cada uma.
         uniform_list("create-folder-list", self.folders.len(), cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
             range.filter_map(|ix| this.folder_row(ix, cx)).collect::<Vec<_>>()
-        })).size_full().into_any_element()
+        })).track_scroll(&self.folder_scroll).size_full().into_any_element()
     }
 
-    fn global_search(&self, cx: &App) -> bool { global_folder_search(self.compact, self.search_all, &self.query.read(cx).value()) }
+    fn folder_at(&self, ix: usize) -> Option<(&Root, &Entry)> {
+        match self.folders.get(ix)? {
+            FolderIndex::Current(ei) => Some((self.root.as_ref()?, self.scan.ok()?.entries.get(*ei)?)),
+            FolderIndex::Root(ri, ei) => { let s = self.root_scans.get(*ri)?; Some((&s.root, s.scan.ok()?.entries.get(*ei)?)) }
+        }
+    }
+
+    fn active_folder_index(&self) -> Option<usize> {
+        let path = self.folder_active.as_deref()?;
+        (0..self.folders.len()).find(|ix| self.folder_at(*ix).is_some_and(|(_, e)| e.path == path))
+    }
+
+    /// ↑/↓ no campo de busca andam o realce pela lista, dando a volta nas pontas como a busca de conversas.
+    fn move_folder(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.creating { return; }
+        let Some(next) = wrap_step(self.active_folder_index(), self.folders.len(), delta) else { return };
+        self.folder_active = self.folder_at(next).map(|(_, e)| e.path.clone());
+        self.folder_scroll.scroll_to_item(next, ScrollStrategy::Nearest);
+        cx.notify();
+    }
+
+    /// Enter no campo de busca escolhe a realçada; sem realce, com algo digitado, a primeira que casou.
+    fn pick_active_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let typed = !self.query.read(cx).value().trim().is_empty();
+        let Some(ix) = self.active_folder_index().or_else(|| typed.then_some(0)) else { return };
+        let Some((root, entry)) = self.folder_at(ix).map(|(r, e)| (r.clone(), e.path.clone())) else { return };
+        self.pick_folder(root, entry, window, cx);
+    }
+
+    /// A linha de uma busca em todas as raízes pode ser de outra raiz: ela passa a ser a navegada.
+    fn enter_root(&mut self, root: Root, window: &mut Window, cx: &mut Context<Self>) {
+        if self.root.as_ref().is_none_or(|r| r.path != root.path) { self.select_root(root, window, cx); }
+    }
+
+    fn pick_folder(&mut self, root: Root, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.enter_root(root, window, cx);
+        self.folder_active = Some(path.clone());
+        self.pick(path, window, cx);
+    }
+
+    /// Busca, "em todas as pastas" e o aviso dela, iguais no diálogo e no menu de pasta da tela sem sessão; as setas do
+    /// campo andam pela lista.
+    fn folder_search(&self, input: Input, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        vec![
+            div().w_full()
+                .capture_action(cx.listener(|this, _: &MoveUp, _, cx| { this.move_folder(-1, cx); cx.stop_propagation(); }))
+                .capture_action(cx.listener(|this, _: &MoveDown, _, cx| { this.move_folder(1, cx); cx.stop_propagation(); }))
+                .child(input.disabled(self.creating).aria_label(tr("create_search")))
+                .into_any_element(),
+            Checkbox::new(if self.compact { "new-chat-search-all" } else { "create-search-all" }).label(tr("create_search_all"))
+                .checked(self.search_all).disabled(self.creating)
+                .on_click(cx.listener(|this, checked: &bool, _, cx| this.set_search_all(*checked, cx)))
+                .into_any_element(),
+            self.search_feedback(cx),
+        ]
+    }
+
+    // A busca atravessa as raízes e sobrevive à troca de raiz, no diálogo e no menu da tela sem sessão.
+    fn global_search(&self, cx: &App) -> bool { self.search_all && !self.query.read(cx).value().trim().is_empty() }
 
     fn refilter(&mut self, cx: &mut Context<Self>) {
         let query = self.query.read(cx).value().to_string();
@@ -1619,13 +1677,12 @@ impl NewSession {
     }
 
     fn folder_row(&self, ix: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (root, entry) = match self.folders.get(ix)? {
-            FolderIndex::Current(ei) => (self.root.as_ref()?, self.scan.ok()?.entries.get(*ei)?),
-            FolderIndex::Root(ri, ei) => { let s = self.root_scans.get(*ri)?; (&s.root, s.scan.ok()?.entries.get(*ei)?) }
-        };
+        let (root, entry) = self.folder_at(ix)?;
         let pick_root = root.clone();
         let open_root = root.clone();
         let on = self.picked.as_deref() == Some(entry.path.as_str());
+        let active = !on && self.folder_active.as_deref() == Some(entry.path.as_str());
+        let hover_path = entry.path.clone();
         let (pick, open) = (entry.path.clone(), entry.path.clone());
         let relative_path = rel_path(&root.path, &entry.path);
         let display_path = if self.global_search(cx) { format!("{} · {relative_path}", root.name) } else { relative_path };
@@ -1637,8 +1694,12 @@ impl NewSession {
         let id = SharedString::from(format!("create-folder-{}", entry.path));
         let row = if soft { soft_choice(id, on, theme::text(), cx).py(px(8.)).rounded(px(10.)) } else { choice(id, on, cx).py(px(6.)).rounded(px(8.)) };
         // A linha da lista virtual não estica sozinha como o filho da coluna esticava.
+        // O ponteiro que passa leva o realce: teclado e mouse nunca acendem duas linhas.
         Some(div().w_full().flex().items_center().gap(px(4.)).pb(px(2.))
-            .child(row.disabled(self.creating).flex_1().min_w_0().h_auto().px(px(10.)).accessibility_label(entry.name.clone()).selected(on)
+            .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
+                if this.folder_active.as_deref() != Some(hover_path.as_str()) { this.folder_active = Some(hover_path.clone()); cx.notify(); }
+            }))
+            .child(row.when(active, |el| el.bg(theme::hover())).disabled(self.creating).flex_1().min_w_0().h_auto().px(px(10.)).accessibility_label(entry.name.clone()).selected(on)
                 .child(div().w_full().min_w_0().flex().items_center().gap(px(12.))
                 .when(soft, |el| el.child(div().size(px(32.)).flex_shrink_0().rounded(px(8.)).bg(if on { theme::accent_dim() } else { theme::hover() })
                     .flex().items_center().justify_center()
@@ -1651,14 +1712,11 @@ impl NewSession {
                         .when(entry.is_git, |el| el.child(badge("git")))
                         .when(entry.has_claude_md, |el| el.child(badge("CLAUDE.md")))
                         .when_some(entry.mtime, |el, t| el.child(div().flex_shrink_0().text_size(px(11.)).text_color(theme::faint()).child(folder_time(t)))))))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    if this.root.as_ref().is_none_or(|root| root.path != pick_root.path) { this.select_root(pick_root.clone(), window, cx); }
-                    this.pick(pick.clone(), window, cx);
-                })))
+                .on_click(cx.listener(move |this, _, window, cx| this.pick_folder(pick_root.clone(), pick.clone(), window, cx))))
             .child(Button::new(SharedString::from(format!("create-open-{}", entry.path))).ghost().small().flex_shrink_0().disabled(self.creating)
                 .icon(IconName::ChevronRight).accessibility_label(tr("create_open").replace("{nome}", &entry.name))
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    if this.root.as_ref().is_none_or(|root| root.path != open_root.path) { this.select_root(open_root.clone(), window, cx); }
+                    this.enter_root(open_root.clone(), window, cx);
                     this.drill(open.clone(), window, cx);
                 })))
             .into_any_element())
@@ -1702,11 +1760,8 @@ impl NewSession {
         column
             .children(self.render_machines(cx))
             .child(self.render_roots(cx))
-            .child(Input::new(&self.query).rounded(px(10.)).cleanable(true).disabled(self.creating)
-                .prefix(chrome::small_icon(IconName::Search, 14., theme::muted())).aria_label(tr("create_search")))
-            .child(Checkbox::new("create-search-all").label(tr("create_search_all")).checked(self.search_all).disabled(self.creating)
-                .on_click(cx.listener(|this, checked: &bool, _, cx| this.set_search_all(*checked, cx))))
-            .child(self.search_feedback(cx))
+            .children(self.folder_search(Input::new(&self.query).rounded(px(10.)).cleanable(true)
+                .prefix(chrome::small_icon(IconName::Search, 14., theme::muted())), cx))
             .children(path_row)
             // A lista de pastas rola sozinha; carregando, vazia ou com erro, a caixa é que rola.
             .child(div().id("create-folders").flex_1().min_h_0().flex().flex_col()
@@ -2281,9 +2336,10 @@ impl NewSession {
     pub(super) fn render_compact_folders(&self, cx: &mut Context<Self>) -> Div {
         div().w(rems(28.)).max_w_full().flex().flex_col().gap_3()
             .child(self.render_roots(cx))
-            .child(Input::new(&self.query).small().cleanable(true).aria_label(tr("create_search"))
-                .prefix(chrome::small_icon(IconName::Search, 14., theme::faint())))
-            .children(self.root.as_ref().map(|root| div().flex().flex_wrap().gap_1()
+            .children(self.folder_search(Input::new(&self.query).small().cleanable(true)
+                .prefix(chrome::small_icon(IconName::Search, 14., theme::faint())), cx))
+            // Buscando em todas as raízes, o caminho navegado não diz de onde vêm as linhas.
+            .children(self.root.as_ref().filter(|_| !self.global_search(cx)).map(|root| div().flex().flex_wrap().gap_1()
                 .children(crumbs(root, &self.dir).into_iter().map(|(text, path)|
                     Button::new(SharedString::from(format!("new-chat-crumb-{path}"))).ghost().small().label(text)
                         .on_click(cx.listener(move |this, _, window, cx| this.drill(path.clone(), window, cx)))))))
@@ -2664,20 +2720,6 @@ mod tests {
     }
 
     #[test]
-    fn compact_folder_picker_keeps_search_local_to_the_navigated_folder() {
-        assert!(!super::global_folder_search(true, true, "src"));
-        assert!(super::global_folder_search(false, true, "src"));
-        assert!(!super::global_folder_search(false, false, "src"));
-        assert!(!super::global_folder_search(false, true, "  "));
-    }
-
-    #[test]
-    fn compact_picker_clears_search_when_the_root_changes() {
-        assert!(super::clears_query_on_root_change(true));
-        assert!(!super::clears_query_on_root_change(false));
-    }
-
-    #[test]
     fn root_shortcut_wraps_in_both_directions() {
         assert_eq!(super::next_root(0, 0, false), None);
         assert_eq!(super::next_root(0, 1, true), Some(0));
@@ -2728,7 +2770,7 @@ mod tests {
     #[test]
     fn transfer_errors_keep_recovery_code_and_backend_reason() {
         for code in ["session_transfer_restore_failed", "session_transfer_source_changed"] {
-            let error = Failure { status: Some(409), detail: format!("{code}: backend reason"), retry_after: None, uncertain: false };
+            let error = Failure { status: Some(409), detail: format!("{code}: backend reason"), retry_after: None, uncertain: false, code: None };
             let text = super::transfer_failure(&error);
             assert!(text.starts_with(&tr(code)));
             assert!(text.ends_with("backend reason"));
@@ -2820,7 +2862,7 @@ mod tests {
 
     #[test]
     fn checkout_hides_only_unsupported_or_non_git_and_rejects_old_folders() {
-        let failure = |status, detail: &str| Err(Failure { status: Some(status), detail: detail.into(), retry_after: None, uncertain: false });
+        let failure = |status, detail: &str| Err(Failure { status: Some(status), detail: detail.into(), retry_after: None, uncertain: false, code: None });
         assert!(super::checkout_of(failure(404, "Not Found")).unwrap().is_none());
         assert!(super::checkout_of(failure(409, "fatal: not a git repository (or any of the parent directories): .git")).unwrap().is_none());
         assert_eq!(super::checkout_of(failure(409, "fatal: bad config")).unwrap_err(), "fatal: bad config");
@@ -2879,7 +2921,7 @@ mod tests {
 
     #[test]
     fn scan_refusals_become_the_reason_and_not_a_list() {
-        let refused = |status| Err(Failure { status: Some(status), detail: "x".into(), retry_after: None, uncertain: false });
+        let refused = |status| Err(Failure { status: Some(status), detail: "x".into(), retry_after: None, uncertain: false, code: None });
         for (status, key) in [(400, "create_scan_invalid"), (403, "create_scan_root"), (404, "create_scan_missing"), (500, "create_scan_failed")] {
             let scan = scan_of(refused(status)).ok().unwrap();
             assert!(scan.entries.is_empty());

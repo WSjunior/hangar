@@ -41,7 +41,7 @@
     codex: m.migration_area_codex, providers: m.migration_area_providers, accounts: m.migration_area_accounts,
     guests: m.migration_area_guests, pairing: m.migration_area_pairing, mcp: m.migration_area_mcp,
     push: m.migration_area_push, update: m.migration_area_update, uploads: m.migration_area_uploads,
-    dictation: m.migration_area_dictation, static: m.migration_area_static, other: m.migration_area_other,
+    dictation: m.migration_area_dictation, mods: m.migration_area_mods, static: m.migration_area_static, other: m.migration_area_other,
   };
   const PRIVATE: Record<string, () => string> = {
     send_headless: m.migration_private_send_headless, send_terminal: m.migration_private_send_terminal,

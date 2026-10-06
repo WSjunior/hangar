@@ -58,7 +58,7 @@
       "[hl] pedaco do realce nao carregou": "highlightLazy.ts — mensagem de console.warn de quando o pedaco do Shiki nao baixa (rede caiu, ou deploy trocou o hash). Nao e texto de tela: o usuario ve o codigo sem cor, e quem le isto e quem abre o devtools. Mesmo caso de 'visor: falhou ao abrir'.",
       "[hl] realce do diff falhou": "EditDiff.svelte — mensagem de console.warn irma da de cima, no diff. Nao e texto de tela pelo mesmo motivo.",
       "pedaco do app segue faltando depois de recarregar — deploy incompleto?": "main.ts — console.error do segundo `vite:preloadError` na mesma aba (o primeiro recarrega). Nao e texto de tela: quem le e quem abre o devtools pra entender por que a pagina nao se resolveu sozinha.",
-      "Button": "Tipo de elemento da árvore que os mods do Claude Code desenham (packages/core/src/pluginUi.ts compara el.type). É o protocolo do engine, não texto de tela."
+      "Button": "Tipo de elemento da árvore que os mods do Claude Code desenham (packages/core/src/pluginUi.ts compara el.type). É o protocolo do engine, não texto de tela. Vale para 'Box' (isHoverScope) e 'Input' (inputKey)."
     }
   },
   "não reescreva a tabela",
@@ -356,5 +356,7 @@
   "Background: papel de parede não abriu",
   "ToolDetailSheet: saída ao vivo falhou",
   "Button",
+  "Box",
+  "Input",
   "Update"
 ]
