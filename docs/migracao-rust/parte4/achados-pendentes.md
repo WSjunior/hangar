@@ -47,6 +47,10 @@ Achados médios e baixos das revisões por Task que entraram na `feat/parte4` se
   o caminho `forget` vaza a vaga do teto de painéis; `fail()` no Windows usa `child.wait()` sem
   prazo se o `TerminateProcess` falhar; erro do `try_wait` vira `client_not_reaped` sem log;
   `dropping_writer_writes_nothing` não separa "nada escrito" de "conhost morreu no EOF".
+- Task 9: rota privada do terminal responde 400/404 sem linha de log própria no Rust (o Python
+  registra o status); quadro do cliente sem teto próprio no Python (Rust e uvicorn limitam); em
+  `pending` o `/api/config` publica a capacidade do Python; braço morto `TermActive` no
+  `execute`. Compilação Windows da rota privada e do `term.active` só no job Windows do CI.
 - Task 7: psmux pode escrever erro no stdout com código diferente de 0 e virar "quadro" (conferir
   na VM, Task 10/13); a linha da lista mostra só `list_capture_failed` e o código fino só vai ao
   log (já era assim); pior caso de 5 s + 5 s quando captura e `has-session` estouram; stderr e
