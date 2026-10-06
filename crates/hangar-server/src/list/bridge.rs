@@ -378,7 +378,10 @@ impl ListBridge {
 
     pub async fn resolve(&self, name: &str, cwd: &str, pid: Option<i64>) -> Result<discover::Transcript, ListError> {
         let dirs = self.dirs()?;
-        let panes = self.env.mux.list_panes().await.map_err(|e| fail("mux_unavailable", e.code))?;
+        let (panes, dropped) = self.env.mux.list_panes_checked().await.map_err(|e| fail("mux_unavailable", e.code))?;
+        if let Some(p) = dropped {
+            self.facts.diag.report("rust.list_discovery", &p.key, p.code, p.reason);
+        }
         let (env, caches, name, cwd) = (self.env.clone(), self.caches.clone(), name.to_owned(), cwd.to_owned());
         let out = tokio::task::spawn_blocking(move || {
             let children = env.procs.children(procs::CHILDREN_TTL).map_err(|_| fail("list_procs_unreadable", "mapa de processos ilegível"))?;
