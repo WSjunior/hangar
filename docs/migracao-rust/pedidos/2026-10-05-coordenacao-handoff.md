@@ -109,6 +109,11 @@ Supervisor que sobe o Rust (sai na parte 7).
     chega ao agente: `POST /input` 200, pane sem o `/clear`, a mensagem seguinte fica
     `delivered:false`. 3 de 3 nos modos rust e python (anterior à troca da lista), caminho
     `terminal_input`/`_send_managed`. Achado pela prova da troca da lista (`lista-org`, 06/10).
+17. Fora da migração, na `main` (provedor lembrado, revisão da junção de 06/10): `runtime_config.aplicar`
+    com `runtime-config.json` corrompido lê `{}` e a gravação do `last_session_provider` apaga os
+    outros ajustes (`groq_api_key`, `jev_*`, `scan_roots`, `shortcuts`) calada; `mcp_server.py`
+    `new_session` não devolve `avisos` (conta Codex trocada sem aviso); sonda de provedores sem
+    proteção faz `POST /api/sessions` dar 500 sem `provider`. Vai num PR na `main`.
 
 ## Regras e decisões que valem
 
