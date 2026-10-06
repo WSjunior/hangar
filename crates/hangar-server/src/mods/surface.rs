@@ -248,7 +248,9 @@ impl Surface {
     pub fn call(&mut self, token: u64, call: ModsCall, now: f64) -> Vec<SurfaceEffect> {
         let mut out = Vec::new();
         if self.phase != Phase::Ready || !self.mounted(call.site()) {
-            out.push(reply(token, Err(missing())));
+            // Show e Close falam de painel; só Press e Input falam de botão ou campo.
+            let error = if matches!(call, ModsCall::Show { .. } | ModsCall::Close { .. }) { pane_missing() } else { missing() };
+            out.push(reply(token, Err(error)));
             return out;
         }
         match call {
@@ -256,7 +258,7 @@ impl Surface {
                 json!({"id": site, "surface": SURFACE, "client_id": CLIENT_ID}), Pending::Show { token, site }, now, &mut out),
             ModsCall::Close { site } if site != BAND_SITE => self.request("ui_close",
                 json!({"id": site, "client_id": CLIENT_ID}), Pending::Close { token, site }, now, &mut out),
-            ModsCall::Show { .. } | ModsCall::Close { .. } => out.push(reply(token, Err(missing()))),
+            ModsCall::Show { .. } | ModsCall::Close { .. } => out.push(reply(token, Err(pane_missing()))),
             ModsCall::Press { site, key } => match self.control(&site, &key, "Button") {
                 Some(control) => self.press_with(token, site, key, control, false, now, &mut out),
                 None => self.refresh(token, ModsCall::Press { site, key }, now, &mut out),
