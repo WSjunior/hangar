@@ -178,8 +178,10 @@ def observar_pane(name: str, pane: str, sessao: str | None = None) -> str | None
 @contextmanager
 def operacao_controlada(sessao: str):
     """Impede que o monitor registre os modos intermediários de uma sequência de BTab."""
+    from app import state_facts
     with _mem_lock:
         _operacoes_controladas[sessao] = _operacoes_controladas.get(sessao, 0) + 1
+    state_facts.notify(sessao)
     try:
         yield
     finally:
@@ -189,6 +191,12 @@ def operacao_controlada(sessao: str):
                 _operacoes_controladas[sessao] = restantes
             else:
                 _operacoes_controladas.pop(sessao, None)
+        state_facts.notify(sessao)
+
+
+def operacao_em_curso(sessao: str) -> bool:
+    with _mem_lock:
+        return sessao in _operacoes_controladas
 
 
 def executar_controlado(sessao: str, func: Callable[..., _T], *args) -> _T:

@@ -200,6 +200,8 @@ pub struct ListBridge {
     git_running: Arc<Mutex<std::collections::HashSet<String>>>,
     git_slots: Arc<tokio::sync::Semaphore>,
     epoch: AtomicU64,
+    /// Fatos do estado empurrados pelo Python (`state.facts`), lidos pelo `Monitor`.
+    pub state_facts: Arc<crate::state::facts::FactsStore>,
 }
 
 /// Tarefa bloqueante que entrou em pânico: o hook já registrou onde; aqui fica qual operação.
@@ -218,7 +220,8 @@ impl ListBridge {
             owner_clients: AtomicU32::new(0), seen: Mutex::default(),
             discovery: tokio::sync::Mutex::new(None),
             snapshot: tokio::sync::Mutex::new(None), git_running: Arc::default(),
-            git_slots: Arc::new(tokio::sync::Semaphore::new(GIT_SLOTS)), epoch: AtomicU64::new(0) }
+            git_slots: Arc::new(tokio::sync::Semaphore::new(GIT_SLOTS)), epoch: AtomicU64::new(0),
+            state_facts: Arc::default() }
     }
 
     /// Uma vez, na subida do servidor com o runtime de pé.
@@ -743,6 +746,8 @@ enum Operation {
     Forget { name: String },
     #[serde(rename = "list.rename")]
     Rename { old: String, new: String },
+    #[serde(rename = "state.facts")]
+    StateFacts { name: String, facts: crate::state::facts::StateFacts },
 }
 
 async fn execute(bridge: &Arc<ListBridge>, op: Operation) -> Result<Value, ListError> {
@@ -773,6 +778,14 @@ async fn execute(bridge: &Arc<ListBridge>, op: Operation) -> Result<Value, ListE
         Operation::Seed { name, jsonl } => cache(Box::new(move |b| b.seed(&name, &jsonl))).await,
         Operation::Forget { name } => cache(Box::new(move |b| b.forget(&name))).await,
         Operation::Rename { old, new } => cache(Box::new(move |b| b.rename(&old, &new))).await,
+        Operation::StateFacts { name, facts } => {
+            use crate::state::facts::Push;
+            Ok(match bridge.state_facts.push(&name, facts, Instant::now()) {
+                Push::Accepted { gap } => json!({"accepted": true, "watched": true, "gap": gap}),
+                Push::Dropped => json!({"accepted": false, "watched": true, "gap": false}),
+                Push::Unwatched => json!({"accepted": false, "watched": false, "gap": false}),
+            })
+        }
     }
 }
 
@@ -849,6 +862,25 @@ mod tests {
         assert_eq!(cached(), ["a", "b"], "uma rodada fora não esquece");
         bridge.prune_gone(&[row("b")], t0 + FORGET_AFTER + Duration::from_secs(1));
         assert_eq!(cached(), ["b"]);
+    }
+
+    #[tokio::test]
+    async fn state_facts_op_reaches_the_store_and_drops_old_sequences() {
+        let bridge = Arc::new(ListBridge::new(ListEnv { mux: Mux::default(), capture_program: "tmux".into(),
+            procs: Arc::new(procs::SystemProcs::default()), dirs: None }, FactsClient::new("127.0.0.1:9".parse().unwrap(), "s".into())));
+        let op = |seq: u64| serde_json::from_value::<Operation>(json!({"op": "state.facts", "args": {"name": "s1", "facts": {
+            "seq": seq, "plugin_state": {"state": "idle", "reason": null, "age_ms": 0}, "waiter_open": true,
+            "heartbeat_age_ms": 0, "question": null, "suggestion": "", "body_columns": null, "band_anchor": null,
+            "in_transfer_ms": 0, "transfer_active": false, "permission_op": false}}})).unwrap();
+        assert_eq!(execute(&bridge, op(1)).await.unwrap()["watched"], false, "sem Monitor não guarda nada");
+        assert!(bridge.state_facts.get("s1").is_none());
+        bridge.state_facts.watch("s1");
+        assert_eq!(execute(&bridge, op(2)).await.unwrap(), json!({"accepted": true, "watched": true, "gap": false}));
+        assert_eq!(execute(&bridge, op(1)).await.unwrap(), json!({"accepted": false, "watched": true, "gap": false}));
+        assert_eq!(execute(&bridge, op(4)).await.unwrap()["gap"], true);
+        assert_eq!(bridge.state_facts.get("s1").unwrap().facts.seq, 4);
+        assert!(serde_json::from_value::<Operation>(json!({"op": "state.facts", "args": {"name": "s1", "facts": {"seq": 3}}})).is_err(),
+            "fato incompleto é recusado, nunca vazio");
     }
 
     #[test]

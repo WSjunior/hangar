@@ -60,7 +60,7 @@ def dirs_env() -> str:
     }, ensure_ascii=False)
 
 
-def _request(operation: str, arguments: dict):
+def _request(operation: str, arguments: dict, timeout: float = _TIMEOUT, report: bool = True):
     config = _config
     if config is None:
         raise ListBridgeError("list_bridge_off")
@@ -72,7 +72,7 @@ def _request(operation: str, arguments: dict):
     req = urllib.request.Request(f"http://{config[0]}/__hangar_server/list", data=data,
         headers={"content-type": "application/json", "x-hangar-internal": config[1]}, method="POST")
     try:
-        with _opener.open(req, timeout=_TIMEOUT) as response:
+        with _opener.open(req, timeout=timeout) as response:
             body = response.read(_MAX_RESPONSE + 1)
         if len(body) > _MAX_RESPONSE:
             raise ValueError("resposta grande demais")
@@ -80,13 +80,15 @@ def _request(operation: str, arguments: dict):
         if not isinstance(value, dict) or type(value.get("ok")) is not bool:
             raise ValueError("resposta sem ok")
     except (OSError, ValueError, urllib.error.URLError, http.client.HTTPException) as e:
-        _failed(operation, type(e).__name__)
+        if report:
+            _failed(operation, type(e).__name__)
         raise ListBridgeError("list_bridge_unavailable", type(e).__name__) from e
     if not value["ok"]:
         error = value.get("error") if isinstance(value.get("error"), dict) else {}
         code = str(error.get("code") or "list_bridge_invalid")
         detail = str(error.get("detail") or "")
-        _failed(operation, code)
+        if report:
+            _failed(operation, code)
         if code == "mux_unavailable":
             raise tmux.MuxIndisponivel(detail or code)
         raise ListBridgeError(code, detail)
@@ -142,3 +144,13 @@ def forget(name: str) -> None:
 
 def rename(old: str, new: str) -> None:
     _request("list.rename", {"old": old, "new": new})
+
+
+def push_state_facts(name: str, facts: dict) -> None:
+    """Empurrão de `state_facts`: prazo curto e sem diário aqui, porque quem envia registra uma vez
+    por queda, não uma por envio."""
+    result = _request("state.facts", {"name": name, "facts": facts}, timeout=2, report=False)
+    # Ninguém observando lá é normal (o `Monitor` acabou antes de o interesse vencer); observando e
+    # recusado é sequência que andou para trás.
+    if not isinstance(result, dict) or result.get("watched") and not result.get("accepted"):
+        raise ListBridgeError("state_facts_rejected")

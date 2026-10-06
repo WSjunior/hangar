@@ -103,8 +103,8 @@ contrato nos dois lados, testes.
 `test_deliverable_service_runs_prepare_session`; Rust `state_facts::validity_with_own_clock`,
 `state_facts::older_sequence_dropped`, `state_facts::snapshot_failure_is_error`.
 
-- [ ] **Step 1: Ler "Regras vigentes" de `harnesses.md`; testes, vistos falhar**
-- [ ] **Step 2: Fatos, interesse, serviços e op `state.facts`; contrato no próximo número livre; testes focados; revisar**
+- [x] **Step 1: Ler "Regras vigentes" de `harnesses.md`; testes, vistos falhar**
+- [x] **Step 2: Fatos, interesse, serviços e op `state.facts`; contrato no próximo número livre; testes focados; revisar**
 
 ### Task 2: `Monitor` de estado no Rust (sem produção)
 
