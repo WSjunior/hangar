@@ -3648,6 +3648,7 @@
   "composer_ditado_sessao_recriada": "The session was closed and recreated before the transcription came back. The text was not added here; the audio stays in the previous session's attachments.",
   "composer_ditado_dispensar": "Dismiss the dictation notice",
   "composer_ditado_audio_indisponivel": "This dictation's audio is no longer available on the server.",
+  "composer_ditado_so_no_aparelho": "This conversation's recording hasn't reached the server yet. Transcribe it again or discard it in the conversation first.",
   "config_server_endpoint_llm_briefing": "Briefing LLM endpoint",
   "config_server_endpoint_llm_briefing_ajuda": "Service used ONLY by the dictation Briefing style. Empty = the same endpoint above. E.g. https://opencode.ai/zen/v1.",
   "config_server_chave_llm_briefing": "Briefing LLM key",

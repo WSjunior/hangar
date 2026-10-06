@@ -106,6 +106,8 @@ export function dictateUpload(server: Server, serverId: string, name: string, tr
   if (current?.status === 'pending') throw new Error(m.composer_aguarde_transcricao());
   if (current?.status === 'applied') throw new Error(m.composer_ditado_aplicado());
   if (current?.status === 'ready') throw new Error(m.composer_ditado_recuperavel({ text: current.text.slice(0, 80) }));
+  // Falha antes de subir: a cópia local é a única gravação, e substituir o ditado a apagaria.
+  if (current?.audio && !current.serverPath) throw new Error(m.composer_ditado_so_no_aparelho());
   const draft = readDraft(serverId, name);
   const voice: DictationDraft = {
     version: 1, id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, audio: null, serverPath: filename,
@@ -113,7 +115,7 @@ export function dictateUpload(server: Server, serverId: string, name: string, tr
     status: 'pending', text: '', raw: '', issue: '',
   };
   writeDictation(serverId, name, voice);
-  // O ditado com falha que este substitui tinha a cópia local; o servidor guarda o original.
+  // O ditado com falha que este substitui já subiu (`serverPath`): a cópia local sobra.
   if (current?.audio) {
     try { removeDraftAttachment(current.audio.uri); } catch { /* só um arquivo órfão na pasta do app */ }
   }

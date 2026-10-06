@@ -20,6 +20,7 @@ vi.mock('../../chat/draftAttachments', () => ({ removeDraftAttachment: vi.fn() }
 
 import { applyReadyDictation, readDictation, readDraft, setDictationInFlight, writeDictation, writeDraft } from '../../stores/drafts';
 import { dictateUpload, dictationAudio, runDictation } from './dictationRun';
+import { removeDraftAttachment } from '../../chat/draftAttachments';
 
 const server = { id: 's1', label: 'A', baseUrl: 'https://a.test', token: 't' };
 const voice = (patch: Partial<DictationDraft> = {}): DictationDraft => ({
@@ -65,7 +66,7 @@ describe('runDictation', () => {
 });
 
 describe('dictateUpload', () => {
-  beforeEach(() => { memory.clear(); core.transcribe.mockReset(); core.upload.mockReset(); });
+  beforeEach(() => { memory.clear(); core.transcribe.mockReset(); core.upload.mockReset(); vi.mocked(removeDraftAttachment).mockClear(); });
 
   it('galeria transcreve pelo nome guardado, sem subir cópia, e o texto entra no rascunho intacto', async () => {
     writeDraft('s1', 'sess', { version: 1, text: 'antes', revision: 2, transcript: '/t/a.jsonl', attachment: null, submission: null });
@@ -105,11 +106,20 @@ describe('dictateUpload', () => {
     setDictationInFlight('s1', 'sess', 'v1', false);
   });
 
-  it('ditado com falha é substituído pelo da galeria', async () => {
-    writeDictation('s1', 'sess', voice({ status: 'failed', issue: '502: groq' }));
+  it('ditado com falha que já subiu é substituído pelo da galeria e a cópia local sai', async () => {
+    writeDictation('s1', 'sess', voice({ status: 'failed', issue: '502: groq', serverPath: '/up/sess/d.m4a' }));
     core.transcribe.mockResolvedValueOnce({ path: '/up/sess/b.m4a', text: 'novo' });
     await dictateUpload(server, 's1', 'sess', null, 'b.m4a');
     expect(readDictation('s1', 'sess')).toMatchObject({ status: 'ready', text: 'novo', audio: null });
+    expect(removeDraftAttachment).toHaveBeenCalledWith('file:///doc/draft-attachments/1-1.m4a');
+  });
+
+  it('recusa quando a gravação com falha só existe no aparelho (não subiu)', () => {
+    writeDictation('s1', 'sess', voice({ status: 'failed', issue: 'rede caiu' }));
+    expect(() => dictateUpload(server, 's1', 'sess', null, 'b.m4a')).toThrow();
+    expect(readDictation('s1', 'sess')).toMatchObject({ id: 'v1', audio: { uri: 'file:///doc/draft-attachments/1-1.m4a' } });
+    expect(removeDraftAttachment).not.toHaveBeenCalled();
+    expect(core.transcribe).not.toHaveBeenCalled();
   });
 });
 

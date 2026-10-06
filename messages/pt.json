@@ -3648,6 +3648,7 @@
   "composer_ditado_sessao_recriada": "A sessão foi fechada e recriada antes de a transcrição voltar. O texto não entrou aqui; o áudio ficou nos anexos da sessão anterior.",
   "composer_ditado_dispensar": "Dispensar o aviso do ditado",
   "composer_ditado_audio_indisponivel": "O áudio deste ditado não está mais disponível no servidor.",
+  "composer_ditado_so_no_aparelho": "A gravação desta conversa ainda não chegou ao servidor. Transcreva-a de novo ou descarte-a na conversa antes.",
   "config_server_endpoint_llm_briefing": "Endpoint do LLM do briefing",
   "config_server_endpoint_llm_briefing_ajuda": "Serviço usado SÓ pelo estilo Briefing do ditado. Vazio = o mesmo endpoint acima. Ex.: https://opencode.ai/zen/v1.",
   "config_server_chave_llm_briefing": "Chave do LLM do briefing",
