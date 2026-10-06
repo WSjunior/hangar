@@ -295,8 +295,10 @@ impl Executor {
                     if result.is_ok(){self.publish().await?;} let _=response.send(result);
                 },
                 Some(Message::Pane {op,start_by,response})=>{
-                    // Esperou na caixa além do ponto de partida: não age (C1).
-                    let result=if std::time::Instant::now()>=start_by {Err(error("mods_deadline"))} else {self.pane_op(op).await};
+                    // Esperou na caixa além do ponto de partida: não age (C1). O soltar é a exceção: uma limpeza
+                    // atrasada ainda solta a fila, senão ela ficaria guardada até o fim da reserva.
+                    let late=op!=PaneOp::Release && std::time::Instant::now()>=start_by;
+                    let result=if late {Err(error("mods_deadline"))} else {self.pane_op(op).await};
                     let _=response.send(result);},
                 Some(Message::Snapshot(response))=>{let _=response.send(self.snapshot().await);},
                 Some(Message::Drain(response))=>{let result=self.drain_once(None).await;

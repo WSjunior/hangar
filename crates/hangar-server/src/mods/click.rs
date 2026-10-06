@@ -42,6 +42,7 @@ pub type PaneFuture = Pin<Box<dyn Future<Output = Result<PaneReply, ModsError>> 
 pub trait Pane: Send + Sync {
     /// `start_by`: a operação que chega à vez dela depois disso não age e volta recusada. É o prazo de
     /// quem pediu menos o que a ação ainda precisa (C1): uma tecla que ficou na caixa do executor não
-    /// chega ao terminal depois de o app ouvir que o clique falhou.
+    /// chega ao terminal depois de o app ouvir que o clique falhou. O `Release` é a exceção e solta sempre,
+    /// mesmo atrasado: é a limpeza do clique, e recusado deixaria a fila guardada até o fim da reserva.
     fn op(&self, op: PaneOp, start_by: Instant) -> PaneFuture;
 }
