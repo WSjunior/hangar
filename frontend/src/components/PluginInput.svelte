@@ -21,12 +21,17 @@
   // pendente (um redesenho atrasado não apaga o que se digita) e entra quando o campo perde o foco. Logo depois do
   // envio do próprio campo, o desenho seguinte entra mesmo com foco: é como o mod limpa o campo depois do envio, e o
   // valor pode ser igual ao de antes (vazio). Digitar depois que o pendente chegou o descarta: perder o foco nunca apaga
-  // texto digitado e não enviado. Não são estado reativo: só o desenho novo e o blur as leem.
+  // texto digitado e não enviado. `sent` guarda o que o campo mandou como `change` desde o último valor aplicado: os ecos
+  // atrasados desses valores não tomam a vez da resposta ao envio. Não são estado reativo: só o desenho novo, o blur e
+  // os handlers as leem.
   let pending: string | null = null;
   let submitted = false;
+  const sent = new Set<string>();
   let sendButton: HTMLButtonElement | undefined = $state();
 
+  /** O valor do mod entra: o que se mandou antes dele deixa de contar como eco. */
   function put(drawn: string) {
+    sent.clear();
     if (field && field.value !== drawn) field.value = drawn;
   }
 
@@ -34,8 +39,11 @@
     const drawn = value;
     void frame;
     if (!field) return;
-    // Depois do envio, um desenho igual ao que se vê (o eco da última tecla) não é a resposta ao envio: a vez fica.
-    if (document.activeElement !== field || (submitted && drawn !== field.value)) {
+    // Depois do envio, um desenho igual ao que se vê ou a um `change` mandado (eco atrasado de antes do envio) não é a
+    // resposta: a vez fica, e ele espera como pendente. Limite: uma resposta igual a um valor digitado antes (o vazio
+    // depois de a pessoa apagar tudo) só entra quando o campo perde o foco.
+    const answer = submitted && drawn !== field.value && !sent.has(drawn);
+    if (document.activeElement !== field || answer) {
       pending = null;
       submitted = false;
       put(drawn);
@@ -53,7 +61,9 @@
   }
 
   function change(text: string) {
-    // Voltar a digitar descarta o pendente e fecha a vez do desenho que responde ao envio.
+    // Voltar a digitar descarta o pendente e fecha a vez do desenho que responde ao envio; o valor mandado passa a
+    // contar como eco.
+    if (onInput) sent.add(text);
     pending = null;
     submitted = false;
     onInput?.('change', text);

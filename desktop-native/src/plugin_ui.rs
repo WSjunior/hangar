@@ -43,25 +43,37 @@ pub struct Field { pub state: Entity<InputState>, pub sync: FieldSync, pub seen:
 /// Quando o valor que o mod desenha entra no campo. Só conta como posto quando é posto: com a pessoa no campo ele fica
 /// pendente e entra quando o campo perde o foco, salvo se a pessoa digitou depois que ele chegou. Logo depois do envio do
 /// próprio campo, o desenho seguinte entra mesmo com foco: é como o mod limpa o campo depois do envio, e o valor pode ser
-/// igual ao de antes (vazio).
+/// igual ao de antes (vazio). Os ecos atrasados dos `change` de antes do envio não tomam a vez da resposta: `sent` guarda
+/// o que o campo mandou como `change` desde o último valor aplicado, e um desenho com um desses valores é eco velho.
 #[derive(Default)]
-pub struct FieldSync { pending: Option<String>, submitted: bool }
+pub struct FieldSync { pending: Option<String>, submitted: bool, sent: Vec<String> }
 
 impl FieldSync {
     /// Um desenho do app. `drawn` é o valor de um desenho novo do mod (`None` num redesenho do app sem evento novo),
     /// `shown` o que o campo mostra e `focused` se a pessoa está nele. Devolve o valor a pôr no campo agora.
     pub fn draw(&mut self, drawn: Option<&str>, shown: &str, focused: bool) -> Option<String> {
         let Some(drawn) = drawn else {
-            return if focused { None } else { self.pending.take().filter(|v| v != shown) };
+            if focused { return None; }
+            let pending = self.pending.take()?;
+            return self.apply(pending, shown);
         };
-        // Depois do envio, um desenho igual ao que se vê (o eco da última tecla) não é a resposta ao envio: a vez fica.
-        if !focused || (self.submitted && drawn != shown) {
+        // Depois do envio, um desenho igual ao que se vê ou a um `change` mandado (eco atrasado de antes do envio) não é
+        // a resposta: a vez fica, e ele espera como pendente. Limite: uma resposta igual a um valor digitado antes (o
+        // vazio depois de a pessoa apagar tudo) só entra quando o campo perde o foco.
+        let answer = self.submitted && drawn != shown && !self.sent.iter().any(|v| v == drawn);
+        if !focused || answer {
             self.pending = None;
             self.submitted = false;
-            return (drawn != shown).then(|| drawn.to_owned());
+            return self.apply(drawn.to_owned(), shown);
         }
         self.pending = Some(drawn.to_owned());
         None
+    }
+
+    /// O valor do mod entra: o que se mandou antes dele deixa de contar como eco.
+    fn apply(&mut self, value: String, shown: &str) -> Option<String> {
+        self.sent.clear();
+        (value != shown).then_some(value)
     }
 
     /// O campo mandou `submit` (Enter ou o rótulo de envio): o próximo desenho do mod entra mesmo com foco. O pendente
@@ -71,9 +83,10 @@ impl FieldSync {
         self.submitted = true;
     }
 
-    /// A pessoa voltou a digitar: o pendente é descartado (perder o foco nunca apaga texto digitado e não enviado) e
-    /// acaba a vez do desenho que responde ao envio.
-    pub fn typed(&mut self) {
+    /// A pessoa digitou, e o campo mandou `sent` como `change`: o pendente é descartado (perder o foco nunca apaga texto
+    /// digitado e não enviado), acaba a vez do desenho que responde ao envio, e um desenho com `sent` passa a ser eco.
+    pub fn typed(&mut self, sent: &str) {
+        if !self.sent.iter().any(|v| v == sent) { self.sent.push(sent.to_owned()); }
         self.pending = None;
         self.submitted = false;
     }
@@ -1099,7 +1112,7 @@ mod tests {
     fn typing_after_the_pending_value_arrived_discards_it_so_blur_keeps_the_typed_text() {
         let mut sync = FieldSync::default();
         assert_eq!(sync.draw(Some("ab"), "abc", true), None);
-        sync.typed();
+        sync.typed("abcd");
         // Fora de foco, o texto digitado e não enviado fica.
         assert_eq!(sync.draw(None, "abcd", false), None);
         // Um desenho novo depois disso volta a ficar pendente e entra ao perder o foco.
@@ -1130,8 +1143,42 @@ mod tests {
         // Digitar de novo fecha a vez: o desenho seguinte não apaga o que se digita.
         let mut sync = FieldSync::default();
         sync.submitted();
-        sync.typed();
+        sync.typed("abcd");
         assert_eq!(sync.draw(Some(""), "abcd", true), None);
+    }
+
+    #[test]
+    fn after_the_submit_late_echoes_of_the_changes_sent_do_not_take_the_turn_of_the_answer() {
+        // `a`, `ab` e `abc` vão como `change` com o eco atrasado, e o Enter sai antes de qualquer eco.
+        let typed = |sync: &mut FieldSync| for v in ["a", "ab", "abc"] { sync.typed(v); };
+        let mut sync = FieldSync::default();
+        typed(&mut sync);
+        sync.submitted();
+        // Os ecos de antes do envio chegam um a um: o campo segue com o texto enviado.
+        assert_eq!(sync.draw(Some("a"), "abc", true), None);
+        assert_eq!(sync.draw(Some("ab"), "abc", true), None);
+        // A resposta, fora do que foi mandado, entra mesmo com foco.
+        assert_eq!(sync.draw(Some(""), "abc", true).as_deref(), Some(""));
+        // Ecos e resposta no mesmo desenho: vale o último valor, que é a resposta.
+        let mut sync = FieldSync::default();
+        typed(&mut sync);
+        sync.submitted();
+        assert_eq!(sync.draw(Some(""), "abc", true).as_deref(), Some(""));
+        // O histórico zera quando um valor entra: depois da resposta, `a` volta a ser um valor como outro qualquer.
+        sync.submitted();
+        assert_eq!(sync.draw(Some("a"), "", true).as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn an_answer_equal_to_a_value_typed_before_waits_for_the_blur() {
+        // Limite conhecido: a pessoa apagou tudo (`change ""`) antes de digitar `x`. A resposta `""` ao envio é igual a
+        // um valor mandado, então passa por eco velho, fica pendente em foco e só entra quando o campo perde o foco.
+        let mut sync = FieldSync::default();
+        for v in ["a", "", "x"] { sync.typed(v); }
+        sync.submitted();
+        assert_eq!(sync.draw(Some(""), "x", true), None);
+        assert_eq!(sync.draw(None, "x", true), None);
+        assert_eq!(sync.draw(None, "x", false).as_deref(), Some(""));
     }
 
     #[test]
