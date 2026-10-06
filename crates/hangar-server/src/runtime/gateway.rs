@@ -195,9 +195,10 @@ impl RuntimeRegistry {
         let handle=match existing {
             Some((generation,EntryHandle::Terminal {target:old,handle},life)) if generation==target.generation && old.binding==target.binding
                 && old.transcript==target.transcript && old.state_path==target.state_path && old.projection_dir==target.projection_dir && old.lease_path==target.lease_path=>{
-                // Reabertura da mesma vida: se o nome saiu do `Mods` ou passou a outra vida, a sessão volta a
-                // ser ligada, na vida da entrada, que é a que o `close` esquece.
-                if let Some(mods)=&self.mods && life!=0 && mods.life(&target.name)!=Some(life) {
+                // Reabertura da mesma vida: se o nome saiu do `Mods`, a sessão volta a ser ligada, na vida da
+                // entrada, que é a que o `close` esquece. Nome com outra vida fica com ela: é uma sessão mais
+                // nova e viva, e tomá-lo a deixaria sem dono e sem o nome de nascimento.
+                if let Some(mods)=&self.mods && life!=0 && mods.life(&target.name).is_none() {
                     attach_terminal_mods(mods,&target,&handle,life).await;
                 }
                 handle

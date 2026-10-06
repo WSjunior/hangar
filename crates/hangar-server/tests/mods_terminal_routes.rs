@@ -245,12 +245,24 @@ async fn reopening_the_same_life_attaches_the_terminal_again() {
     registry.open_terminal(target.clone()).await.unwrap();
     assert!(mods.is_terminal("t") && mods.life("t") == Some(life));
 
-    // Outra vida tomou o nome: a reabertura também liga de novo a da entrada.
-    let other = mods.new_life();
-    mods.attach("t", other, Arc::new(NoLink));
-    registry.open_terminal(target).await.unwrap();
-    assert!(mods.is_terminal("t") && mods.life("t") == Some(life));
-
     registry.close("key-t", 1).await.unwrap();
     assert!(!mods.owns("t"), "o fechar esquece a vida religada");
+}
+
+#[tokio::test]
+async fn reopening_does_not_take_the_name_from_a_newer_live_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let mods = Mods::default();
+    let registry = registry(&mods);
+    let target = target(dir.path(), "/does-not-exist/hangar-test-tmux");
+    registry.open_terminal(target.clone()).await.unwrap();
+    // Outra sessão, viva e mais nova, tomou o nome (com o nome de nascimento dela).
+    let other = mods.new_life();
+    mods.attach_process("t", "outro-processo", other, Arc::new(NoLink));
+    registry.open_terminal(target).await.unwrap();
+    assert_eq!(mods.life("t"), Some(other), "a reabertura não toma o nome da outra vida");
+    assert!(!mods.is_terminal("t"));
+    assert_eq!(mods.bridge_session("t").as_deref(), Some("t"), "a outra sessão segue com o nome de nascimento");
+    registry.close("key-t", 1).await.unwrap();
+    assert_eq!(mods.life("t"), Some(other), "o fechar da entrada também não a apaga");
 }
