@@ -11,6 +11,8 @@ indexmap.workspace = true
 hangar-api.workspace = true
 hangar-workspace = { path = "../hangar-workspace" }
 regex.workspace = true
+# Largura em células para cortar o pane na coluna da conversa (`plugin_screen.cell_width`).
+unicode-width = "=0.2.2"
 # Busca de bytes nos transcripts da lista; já vem pelo regex, sem crate novo.
 memchr = "=2.8.3"
 md-5.workspace = true

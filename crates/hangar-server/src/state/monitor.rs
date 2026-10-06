@@ -7,12 +7,14 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use hangar_api::preview::PreviewEvent;
 use hangar_api::state::{ShellVivo, StateEvent};
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 
 use super::facts::{Dead, Received, UNAVAILABLE};
 use super::permission;
+use super::preview::{self, HookFile};
 use crate::terminal_control::{CaptureRequest, TerminalPool};
 use crate::terminal_state::{self, PaneAnalysis, ReducerFacts, ReducerMemory, TerminalQuestion};
 
@@ -42,6 +44,9 @@ pub struct RoundFacts {
     pub permission_op: bool,
     /// O retrato não veio: código, e o último valor fica.
     pub unavailable: Option<String>,
+    /// Largura da conversa com painel ancorado e começo da faixa dos mods: cortes da prévia.
+    pub body_columns: Option<u32>,
+    pub band_anchor: Option<String>,
 }
 
 impl RoundFacts {
@@ -54,6 +59,8 @@ impl RoundFacts {
             in_transfer: r.in_transfer(now),
             permission_op: r.facts.permission_op,
             unavailable,
+            body_columns: r.facts.body_columns,
+            band_anchor: r.facts.band_anchor.clone(),
         }
     }
 }
@@ -65,6 +72,8 @@ pub struct LoopInfo { pub status: Option<String>, pub iter: Option<u32>, pub max
 #[derive(Clone, Debug, Default)]
 pub struct FileFacts {
     pub marker: Option<String>,
+    /// `ts` do marcador, no relógio de parede.
+    pub marker_ts: Option<f64>,
     pub open_question: Option<TerminalQuestion>,
     pub status_line: Option<String>,
     pub loop_info: Option<LoopInfo>,
@@ -88,6 +97,17 @@ pub trait Sources: Send + Sync {
     fn files(&self, sid: Option<&str>) -> impl Future<Output = FileFacts> + Send;
     /// `false`: ninguém mais ouve, e o `Monitor` acaba.
     fn publish(&self, event: StateEvent) -> impl Future<Output = bool> + Send;
+    /// Captura só para a prévia, entre as rodadas de estado; `None`: a fonte não as faz.
+    fn preview_capture(&self) -> impl Future<Output = Option<Result<Frame, CaptureFailed>>> + Send { async { None } }
+    /// `.hangar-preview/<stem>.json` legíveis, na ordem das pastas de config.
+    fn preview_files(&self, _stem: &str) -> impl Future<Output = Vec<HookFile>> + Send { async { Vec::new() } }
+    /// Última resposta já gravada no transcript, normalizada (`preview::norm`).
+    fn committed(&self) -> Option<Arc<str>> { None }
+    fn publish_preview(&self, _event: PreviewEvent) -> impl Future<Output = bool> + Send { async { true } }
+    /// Relógio de parede em segundos, o do `ts` do arquivo do hook e do marcador.
+    fn wall(&self) -> f64 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -104,6 +124,7 @@ struct Memory {
     permission: permission::Watch,
     /// Em falha da observação: a tentativa do pool já conferida com `has-session`.
     failure: Option<Option<u32>>,
+    preview: preview::Slot,
 }
 
 pub struct Monitor<S> { src: S, poll: Duration, mem: Memory, epoch: u64 }
@@ -130,14 +151,39 @@ impl<S: Sources> Monitor<S> {
             let notified = wake.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            match self.round().await {
-                Step::Exit(exit) => return exit,
-                Step::Again => {}
-                Step::Sleep | Step::Wait { alive: false } => tokio::time::sleep(self.poll).await,
-                Step::Wait { alive: true } => tokio::select! {
-                    () = tokio::time::sleep(self.poll) => {}
-                    () = notified => {}
-                },
+            let exit = match self.round().await {
+                Step::Exit(exit) => Some(exit),
+                Step::Again => None,
+                Step::Sleep | Step::Wait { alive: false } => self.idle(None).await,
+                Step::Wait { alive: true } => self.idle(Some(notified.as_mut())).await,
+            };
+            if let Some(exit) = exit {
+                return exit;
+            }
+        }
+    }
+
+    /// Espera a próxima rodada de estado (o relógio, ou o empurrão quando `woken` vem). Enquanto
+    /// a prévia corre, toques de `preview::FAST` só para ela, fora da contagem das rodadas.
+    async fn idle(&mut self, mut woken: Option<std::pin::Pin<&mut tokio::sync::futures::Notified<'_>>>) -> Option<Exit> {
+        let deadline = tokio::time::Instant::now() + self.poll;
+        loop {
+            let until = if self.mem.preview.fast { (tokio::time::Instant::now() + preview::FAST).min(deadline) } else { deadline };
+            let wake = async {
+                match woken.as_mut() {
+                    Some(n) => n.as_mut().await,
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                () = tokio::time::sleep_until(until) => {}
+                () = wake => return None,
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            if !preview::tick(&self.src, &mut self.mem.preview, None, self.epoch).await {
+                return Some(Exit::Closed);
             }
         }
     }
@@ -196,6 +242,8 @@ impl<S: Sources> Monitor<S> {
 
     /// O estado fica no último evento, com o problema; um evento por código.
     async fn fail(&mut self, problem: &str, detail: String, facts: &RoundFacts) -> Step {
+        // A prévia fica com o texto que tinha e espera a próxima rodada boa.
+        self.mem.preview.fast = false;
         if self.mem.last.as_ref().is_some_and(|l| l.problema_detalhe.as_deref() == Some(detail.as_str())) {
             return Step::Sleep;
         }
@@ -243,6 +291,11 @@ impl<S: Sources> Monitor<S> {
         }
         if self.src.epoch() != epoch {
             return Step::Again;
+        }
+        let marker = files.marker.clone().zip(files.marker_ts);
+        self.mem.preview.set_view(facts.body_columns, facts.band_anchor.clone(), marker);
+        if !preview::tick(&self.src, &mut self.mem.preview, Some(&frame), epoch).await {
+            return Step::Exit(Exit::Closed);
         }
         let reducer_facts = ReducerFacts {
             open_question: files.open_question, plugin_question: facts.question, plugin_state: facts.plugin_state,
