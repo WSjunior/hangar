@@ -170,30 +170,44 @@ fn rollback(exe: &Path, old: &Path) -> std::io::Result<()> {
 }
 
 /// O novo processo prova que subiu gravando o próprio pid; pid e não "arquivo existe", para um resto antigo não enganar.
-async fn alive(child: &mut std::process::Child, path: &Path) -> bool {
-    let deadline = tokio::time::Instant::now() + ALIVE_WAIT;
+async fn alive(child: &mut std::process::Child, path: &Path, wait: Duration) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + wait;
     while tokio::time::Instant::now() < deadline {
-        if std::fs::read_to_string(path).is_ok_and(|pid| pid.trim() == child.id().to_string()) { return true; }
-        if !matches!(child.try_wait(), Ok(None)) { return false; }
+        if std::fs::read_to_string(path).is_ok_and(|pid| pid.trim() == child.id().to_string()) { return Ok(()); }
+        match child.try_wait() {
+            Ok(None) => {}
+            Ok(Some(status)) => return Err(format!("o processo novo saiu sem prova de vida ({status})")),
+            Err(error) => return Err(format!("o processo novo não pôde ser acompanhado: {error}")),
+        }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     let _ = child.kill();
     let _ = child.wait();
-    false
+    Err(format!("o processo novo não deu prova de vida em {} s", wait.as_secs()))
+}
+
+fn spawn_child(exe: &Path, signal: &Path) -> Result<std::process::Child, String> {
+    std::process::Command::new(exe).args(std::env::args_os().skip(1)).env(ALIVE_ENV, signal).spawn()
+        .map_err(|error| format!("não abriu {}: {error}", exe.display()))
 }
 
 /// Sobe o binário que está no caminho do app e espera a prova de vida. Sem ela, a janela única volta para este processo.
-async fn relaunch(exe: &Path) -> bool {
+async fn relaunch(exe: &Path) -> Result<(), String> {
     let signal = sibling(exe, ".alive");
     let _ = std::fs::remove_file(&signal);
     // A versão nova assume o arquivo da janela única antes de provar que subiu.
     let own_address = crate::single_instance::snapshot();
-    let started = std::process::Command::new(exe).args(std::env::args_os().skip(1)).env(ALIVE_ENV, &signal).spawn();
-    let up = match started { Ok(mut child) => alive(&mut child, &signal).await, Err(_) => false };
+    let up = match spawn_child(exe, &signal) { Ok(mut child) => alive(&mut child, &signal, ALIVE_WAIT).await, Err(error) => Err(error) };
     let _ = std::fs::remove_file(&signal);
-    if !up { if let Some(address) = own_address { crate::single_instance::restore(address); } }
+    if let Err(reason) = &up {
+        crate::log_line(&format!("relançar o app falhou: {reason}"));
+        if let Some(address) = own_address { crate::single_instance::restore(address); }
+    }
     up
 }
+
+/// O motivo técnico vai junto da frase da tela: sem ele, quem lê o erro não tem o que procurar no log.
+fn with_reason(text: String, reason: &str) -> String { format!("{text} ({reason})") }
 
 async fn install(client: reqwest::Client, exe: Option<PathBuf>, offer: Offer) -> Result<(), String> {
     // A oferta pode ter horas e a release é republicada a cada push: o sha que vale é o do manifesto de agora.
@@ -203,7 +217,7 @@ async fn install(client: reqwest::Client, exe: Option<PathBuf>, offer: Offer) ->
     let (disk, wanted) = (exe.clone(), offer.sha256.clone());
     let placed = tokio::task::spawn_blocking(move || std::fs::read(&disk).is_ok_and(|bytes| sha256_hex(&bytes) == wanted));
     if placed.await.unwrap_or(false) {
-        return if relaunch(&exe).await { Ok(()) } else { Err(tr("app_update_relaunch_failed")) };
+        return relaunch(&exe).await.map_err(|reason| with_reason(tr("app_update_relaunch_failed"), &reason));
     }
     let bytes = client.get(&offer.url).send().await.and_then(reqwest::Response::error_for_status).map_err(|e| e.to_string())?
         .bytes().await.map_err(|e| e.to_string())?;
@@ -213,9 +227,9 @@ async fn install(client: reqwest::Client, exe: Option<PathBuf>, offer: Offer) ->
     // Dezenas de MB conferidos, gravados e copiados: fora das duas threads do runtime.
     let target = exe.clone();
     let old = tokio::task::spawn_blocking(move || swap(&target, &bytes, &sha256)).await.map_err(|e| e.to_string())??;
-    if relaunch(&exe).await { return Ok(()); }
+    let Err(reason) = relaunch(&exe).await else { return Ok(()) };
     rollback(&exe, &old).map_err(|e| tr("app_update_rollback_failed").replace("{reason}", &e.to_string()))?;
-    Err(tr("app_update_rolled_back"))
+    Err(with_reason(tr("app_update_rolled_back"), &reason))
 }
 
 pub fn relaunched() -> bool { std::env::var_os(ALIVE_ENV).is_some() }
@@ -508,7 +522,7 @@ impl Updater {
 
     pub fn is_busy(&self) -> bool { self.busy() }
 
-    pub fn restart_desktop(&mut self, cx: &mut Context<Self>) -> Result<tokio::task::JoinHandle<bool>, String> {
+    pub fn restart_desktop(&mut self, cx: &mut Context<Self>) -> Result<tokio::task::JoinHandle<Result<(), String>>, String> {
         if self.busy() { return Err(tr("app_restart_busy")); }
         let exe = self.exe.clone().ok_or_else(|| tr("app_restart_failed"))?;
         self.run = Run::DesktopRestart;
@@ -796,6 +810,27 @@ mod tests {
     use super::*;
     // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
     use core::prelude::v1::test;
+
+    #[test]
+    fn relaunch_spawn_failure_keeps_the_reason() {
+        let missing = std::env::temp_dir().join(format!("hangar-missing-exe-{}", std::process::id()));
+        let error = spawn_child(&missing, &missing.with_extension("alive")).unwrap_err();
+        assert!(error.contains(&missing.display().to_string()), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relaunch_names_why_the_child_gave_no_sign_of_life() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let signal = std::env::temp_dir().join(format!("hangar-alive-test-{}", std::process::id()));
+        let mut exited = std::process::Command::new("sh").args(["-c", "exit 3"]).spawn().unwrap();
+        let error = runtime.block_on(alive(&mut exited, &signal, Duration::from_secs(5))).unwrap_err();
+        assert!(error.contains("saiu") && error.contains('3'), "{error}");
+        let mut silent = std::process::Command::new("sleep").arg("5").spawn().unwrap();
+        let error = runtime.block_on(alive(&mut silent, &signal, Duration::from_millis(300))).unwrap_err();
+        assert!(error.contains("prova de vida"), "{error}");
+        assert!(silent.try_wait().unwrap().is_some(), "o filho sem sinal é encerrado");
+    }
 
     #[test]
     fn restart_and_installation_share_the_same_busy_gate() {

@@ -100,6 +100,17 @@ fn log_dir() -> std::path::PathBuf {
     }
 }
 
+/// Falha sem pânico também precisa de rastro: aberto pelo lançador, o stderr vai pro nada.
+pub fn log_line(text: &str) {
+    use std::io::Write;
+    let dir = log_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let when = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("native.log")) {
+        let _ = writeln!(file, "[{when}] {text} (v{})", env!("CARGO_PKG_VERSION"));
+    }
+}
+
 fn home_dir() -> std::path::PathBuf {
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(std::path::PathBuf::from).unwrap_or_default()
 }

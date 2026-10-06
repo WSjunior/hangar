@@ -86,15 +86,18 @@ impl Hangar {
         };
         let handle = window.window_handle();
         cx.spawn(async move |this, cx| {
-            let ready = task.await.unwrap_or(false);
+            let outcome = task.await.unwrap_or_else(|error| Err(format!("tarefa do reinício: {error}")));
             let _ = handle.update(cx, |_, window, cx| { let _ = this.update(cx, |this, cx| {
-                if ready {
-                    this.window_tray.icon = None;
-                    cx.quit();
-                } else {
-                    updater.update(cx, |updater, cx| updater.finish_desktop_restart(cx));
-                    this.show_from_tray(window, cx);
-                    window.push_notification(Notification::error(tr("app_restart_failed")), cx);
+                match &outcome {
+                    Ok(()) => {
+                        this.window_tray.icon = None;
+                        cx.quit();
+                    }
+                    Err(reason) => {
+                        updater.update(cx, |updater, cx| updater.finish_desktop_restart(cx));
+                        this.show_from_tray(window, cx);
+                        window.push_notification(Notification::error(format!("{} ({reason})", tr("app_restart_failed"))), cx);
+                    }
                 }
             }); });
         }).detach();
