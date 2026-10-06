@@ -152,18 +152,53 @@ fn refused_attach_turns_off_and_clears() {
 }
 
 #[test]
-fn silent_attach_turns_off_and_clears() {
+fn silent_attach_retries_then_turns_off_and_clears() {
     let mut surface = Surface::new("ui:u".into());
     surface.start(0.0);
     assert_eq!(surface.deadline(), Some(15.0));
     let out = surface.on_notice(&panes(json!([{"id": "p", "title": "P", "plugin": "m"}]), "p"), 6.0);
     let render = request(&out, "ui_render");
     assert_eq!(published(&out).unwrap()["panes"][0]["id"], "p");
-    let view = published(&surface.tick(15.0)).expect("sem resposta em 15 s também desliga");
+    // Sem resposta em 15 s: liga de novo depois de 1, 2 e 4 s, e só então desliga.
+    let (mut attaches, mut off) = (Vec::new(), None);
+    while let Some(at) = surface.deadline() {
+        let out = surface.tick(at);
+        if writes(&out).iter().any(|frame| frame["request"]["subtype"] == "ui_attach") { attaches.push(at); }
+        if let Some(view) = published(&out) { off = Some((at, view)); break; }
+    }
+    assert_eq!(attaches, vec![16.0, 33.0, 52.0]);
+    let (at, view) = off.expect("esgotadas as tentativas, desliga");
+    assert_eq!(at, 67.0);
     assert!(!surface.is_ready());
     assert_eq!((view["panes"].clone(), view["shown_id"].clone()), (json!([]), Value::Null));
-    assert!(ok(&mut surface, &render, json!({"tree": {"type": "Text"}}), 15.1).is_empty(), "desenho em voo não volta depois de desligar");
+    assert!(ok(&mut surface, &render, json!({"tree": {"type": "Text"}}), 67.1).is_empty(), "desenho em voo não volta depois de desligar");
     assert_eq!(surface.deadline(), None);
+}
+
+#[test]
+fn attach_retry_that_answers_turns_on() {
+    let mut surface = Surface::new("ui:u".into());
+    let first = request(&surface.start(0.0), "ui_attach");
+    assert!(writes(&surface.tick(15.0)).is_empty(), "espera 1 s antes de ligar de novo");
+    assert!(surface.deadline() == Some(16.0) && !surface.is_ready());
+    let again = request(&surface.tick(16.0), "ui_attach");
+    assert_ne!(again["request_id"], first["request_id"]);
+    let out = ok(&mut surface, &again, json!({"surfaces": ["desktop"]}), 16.5);
+    assert!(surface.is_ready());
+    assert_eq!(request(&out, "ui_render")["request"]["instance_id"], BAND_SITE);
+}
+
+#[test]
+fn silent_render_is_asked_again() {
+    let mut surface = ready(json!({"type": "Text"}));
+    let first = request(&surface.on_notice(&panes(json!([{"id": "p", "title": "P", "plugin": "m"}]), "p"), 1.0), "ui_render");
+    // O rol pedido na ligação (prazo 10 s) também vence sem resposta, sem efeito.
+    assert!(writes(&surface.tick(10.0)).is_empty());
+    assert!(writes(&surface.tick(11.0)).is_empty(), "o desenho vencido só volta a ficar sujo");
+    assert_eq!(surface.deadline(), Some(11.1));
+    let again = request(&surface.tick(11.1), "ui_render");
+    assert_eq!(again["request"]["instance_id"], "p");
+    assert_ne!(again["request_id"], first["request_id"]);
 }
 
 #[test]

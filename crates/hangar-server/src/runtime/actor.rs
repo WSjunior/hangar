@@ -14,6 +14,10 @@ enum Core { Claude(ClaudeEngine),Codex(CodexEngine) }
 /// dos hooks do UserPromptSubmit: o teto dela fica acima da espera do Python (`PUBLICA_S`).
 const POLICY_TIMEOUT:Duration=Duration::from_secs(15);
 const PUBLISH_POLICY_TIMEOUT:Duration=Duration::from_secs(40);
+/// Teto de um pedido de app aos mods: o mais longo da superfície (desenho de novo e clique, 15 s) mais
+/// 5 s de folga para o relógio do ator. O registro serializa os pedidos da sessão, então um pedido sem
+/// teto prenderia os seguintes.
+const MODS_CALL_LIMIT:Duration=Duration::from_secs(crate::mods::surface::APP_CALL_MAX_S as u64 + 5);
 
 #[derive(Clone)]
 pub struct PolicyClient {
@@ -210,11 +214,14 @@ impl RuntimeHandle {
     }
     /// Pedido de um app à interface dos mods desta sessão. Ator parado ou sumido responde com código,
     /// nunca pendura o app.
-    pub async fn mods(&self,call:ModsCall) -> Result<Value,ModsError> {
+    pub async fn mods(&self,call:ModsCall) -> Result<Value,ModsError> { self.mods_within(call,MODS_CALL_LIMIT).await }
+    async fn mods_within(&self,call:ModsCall,limit:Duration) -> Result<Value,ModsError> {
         if self.closed.load(Ordering::Acquire) { return Err(crate::mods::model::no_answer()); }
         let (response,receive) = oneshot::channel();
-        self.sender.send(Message::Mods { call,response }).await.map_err(|_|crate::mods::model::no_answer())?;
-        receive.await.map_err(|_|crate::mods::model::no_answer())?
+        tokio::time::timeout(limit,async {
+            self.sender.send(Message::Mods { call,response }).await.map_err(|_|crate::mods::model::no_answer())?;
+            receive.await.map_err(|_|crate::mods::model::no_answer())?
+        }).await.unwrap_or_else(|_|Err(crate::mods::model::no_answer()))
     }
     pub async fn ensure_projection(&self) -> Result<Value,RuntimeError> {
         self.queue(format!("projection:{}",unique()),Action::EnsureProjection).await
@@ -552,9 +559,10 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                         // `ui_*` não muda a conversa nem precisa sobreviver a uma queda: sai direto, fora do
                         // diário, que gravaria no disco a cada desenho.
                         ui_writes += 1;
+                        // Canal próprio e pequeno: o que não cabe é descartado e a superfície pede de novo no prazo.
                         let frame = WireFrame { operation_id:format!("ui:{}:{ui_writes}",target.generation),frame,ephemeral:true };
-                        if io.writer.try_send(frame).is_err() && crate::warn_limit::allow(Some(&target.key),"ui_write") {
-                            tracing::warn!(key=%target.key,session=%target.name,"pedido da interface dos mods não coube no canal do cano");
+                        if io.try_send(frame).is_err() && crate::warn_limit::allow(Some(&target.key),"ui_write") {
+                            tracing::warn!(key=%target.key,session=%target.name,"pedido da interface dos mods descartado com o canal do cano cheio");
                         }
                     }
                     SurfaceEffect::Publish { data } => { if let Some(mods) = &engine.mods { mods.publish_ui(&target.name,target.generation,&data); } }
@@ -573,7 +581,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
             if result.is_err() || ended || !engine.write_is_current(&attempt.logical_id) {
                 effects.extend(engine.apply(EngineInput::WriteAck { operation_id:attempt.logical_id.clone(),outcome:WriteOutcome::NotWritten },clock(start))?);
                 if let Err(failure) = result { enter_error(&mut error,&target,failure); }
-            } else if io.writer.try_send(WireFrame { operation_id:wire,frame:attempt.frame.clone(),ephemeral:false }).is_err() {
+            } else if io.try_send(WireFrame { operation_id:wire,frame:attempt.frame.clone(),ephemeral:false }).is_err() {
                 effects.extend(engine.apply(EngineInput::WriteAck { operation_id:attempt.logical_id.clone(),outcome:WriteOutcome::NotWritten },clock(start))?);
             }
         }
@@ -1160,6 +1168,21 @@ fn publish(events:&broadcast::Sender<RuntimeEvent>,target:&RuntimeTarget,revisio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn mods_call_to_an_actor_that_never_answers_gives_up_with_a_code() {
+        // Ator vivo que não lê a caixa: o pedido do app não pode pendurar o registro da sessão.
+        let (sender,_inbox) = mpsc::channel(1);
+        let handle = RuntimeHandle { sender,task:Arc::new(Mutex::new(None)),closed:Arc::new(AtomicBool::new(false)),
+            events:broadcast::channel(1).0,stopped:Arc::new(Mutex::new(None)),key:"key".into() };
+        let call = || ModsCall::Show { site:"p".into() };
+        let first = tokio::time::timeout(Duration::from_secs(2),handle.mods_within(call(),Duration::from_millis(50))).await.unwrap();
+        assert_eq!(first.unwrap_err().code,"erro_mod_clique_sem_resposta");
+        // A caixa cheia (o primeiro pedido ficou nela) também cai no prazo, agora no envio.
+        let second = tokio::time::timeout(Duration::from_secs(2),handle.mods_within(call(),Duration::from_millis(50))).await.unwrap();
+        assert_eq!(second.unwrap_err().code,"erro_mod_clique_sem_resposta");
+        assert_eq!(MODS_CALL_LIMIT,Duration::from_secs(20));
+    }
 
     #[tokio::test]
     async fn a_forced_save_after_a_skipped_newer_change_still_saves_the_counter() {
