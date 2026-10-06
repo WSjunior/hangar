@@ -541,7 +541,9 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     try {
       await showPluginPane(sessionName, site, sessionServer());
     } catch (err) {
-      if (!isMissingRoute(err)) showPluginNotice(err instanceof Error ? err.message : String(err), true);
+      // Sem resposta ou 5xx, a frase do app; com a recusa (4xx), o motivo que o servidor mandou.
+      if (!isMissingRoute(err)) showPluginNotice(isPluginServerFailure(err) ? m.plugin_aba_falhou()
+        : err instanceof Error ? err.message : String(err), true);
     }
   }
   // Digitação num `Input` de mod: só a sessão sem terminal aceita (o campo nem fica habilitado nas outras). Cada campo
