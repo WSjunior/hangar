@@ -7,7 +7,7 @@ use mods_support::*;
 use serde_json::{Value, json};
 
 pub fn writes(out: &[SurfaceEffect]) -> Vec<Value> {
-    out.iter().filter_map(|effect| match effect { SurfaceEffect::Write { frame } => Some(frame.clone()), _ => None }).collect()
+    out.iter().filter_map(|effect| match effect { SurfaceEffect::Write { frame, .. } => Some(frame.clone()), _ => None }).collect()
 }
 pub fn request(out: &[SurfaceEffect], subtype: &str) -> Value {
     writes(out).into_iter().find(|frame| frame["request"]["subtype"] == subtype).unwrap_or_else(|| panic!("sem {subtype}"))
@@ -473,4 +473,19 @@ fn silent_roster_is_asked_again_with_the_attach_waits() {
     let out = ok(&mut surface, &again, json!({"panes": [{"id": "p", "title": "P", "plugin": "m"}], "shown_id": "p"}), 11.5);
     assert_eq!(published(&out).unwrap()["panes"][0]["id"], "p");
     assert_eq!(request(&out, "ui_render")["request"]["instance_id"], "p");
+}
+
+/// Só o que age no mod (clique, digitação, fechar) leva o prazo ao escritor, o mesmo em que a superfície
+/// desiste; o desenho e as leituras, não.
+#[test]
+fn only_actions_carry_a_deadline_to_the_writer() {
+    let mut surface = ready(button("ok", 1));
+    let until = |out: &[SurfaceEffect], subtype: &str| out.iter().find_map(|effect| match effect {
+        SurfaceEffect::Write { frame, until } if frame["request"]["subtype"] == subtype => Some(*until), _ => None }).unwrap();
+    let out = app(&mut surface, 1, press("above-prompt", "ok"), 0.1);
+    let deadline = until(&out, "ui_press").expect("o clique leva prazo");
+    assert!(deadline > 0.1 && deadline <= 0.1 + 7.0, "{deadline}");
+    let first = request(&out, "ui_press");
+    let redraw = ok(&mut surface, &first, json!({"handled": false}), 0.2);
+    assert_eq!(until(&redraw, "ui_render"), None, "o desenho vai sem prazo");
 }

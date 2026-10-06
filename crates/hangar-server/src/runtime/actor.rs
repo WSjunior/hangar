@@ -594,12 +594,13 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                     }.await) });
                 },
                 Effect::Surface { effect } => match effect {
-                    SurfaceEffect::Write { frame } => {
+                    SurfaceEffect::Write { frame,until } => {
                         // `ui_*` não muda a conversa nem precisa sobreviver a uma queda: sai direto, fora do
                         // diário, que gravaria no disco a cada desenho.
                         ui_writes += 1;
                         // Canal próprio e pequeno: o que não cabe é descartado e a superfície pede de novo no prazo.
-                        let frame = WireFrame { operation_id:format!("ui:{}:{ui_writes}",target.generation),frame,ephemeral:true };
+                        let until = until.map(|until|tokio::time::Instant::from_std(start + Duration::from_secs_f64(until.max(0.0))));
+                        let frame = WireFrame { operation_id:format!("ui:{}:{ui_writes}",target.generation),frame,ephemeral:true,until };
                         if io.try_send(frame).is_err() && crate::warn_limit::allow(Some(&target.key),"ui_write") {
                             tracing::warn!(key=%target.key,session=%target.name,"pedido da interface dos mods descartado com o canal do cano cheio");
                         }
@@ -620,7 +621,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
             if result.is_err() || ended || !engine.write_is_current(&attempt.logical_id) {
                 effects.extend(engine.apply(EngineInput::WriteAck { operation_id:attempt.logical_id.clone(),outcome:WriteOutcome::NotWritten },clock(start))?);
                 if let Err(failure) = result { enter_error(&mut error,&target,failure); }
-            } else if io.try_send(WireFrame { operation_id:wire,frame:attempt.frame.clone(),ephemeral:false }).is_err() {
+            } else if io.try_send(WireFrame { operation_id:wire,frame:attempt.frame.clone(),ephemeral:false,until:None }).is_err() {
                 effects.extend(engine.apply(EngineInput::WriteAck { operation_id:attempt.logical_id.clone(),outcome:WriteOutcome::NotWritten },clock(start))?);
             }
         }

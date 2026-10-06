@@ -26,6 +26,9 @@ pub struct WireFrame {
     /// não guarda o id para barrar repetição (a lista cresceria sem fim), não espera a confirmação e não
     /// avisa o ator de recusa: a superfície tem prazo próprio para cada pedido.
     pub ephemeral: bool,
+    /// Pedido `ui_*` que age no mod: depois deste instante o escritor o descarta sem escrever, porque o app
+    /// já ouviu que falhou. Quadro da conversa e desenho vão sem prazo.
+    pub until: Option<Instant>,
 }
 
 /// Folga do canal dos pedidos `ui_*`. Pequena de propósito: com o cano travado, os desenhos que não
@@ -247,6 +250,7 @@ impl CanoConnection {
                         else => break,
                     };
                     let ephemeral = command.ephemeral;
+                    if command.until.is_some_and(|until| Instant::now() >= until) { continue; }
                     if !ephemeral && !used.insert(command.operation_id.clone()) { continue; }
                     let frame = command.frame.to_string();
                     if !command.frame.is_object() || frame.len() > MAX_FRAME {
