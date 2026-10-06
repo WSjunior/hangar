@@ -237,6 +237,14 @@ pub async fn spawn_server(cfg: Config) -> SocketAddr {
     addr
 }
 
+/// Servidor com um `AppState` montado pelo teste (para mexer no `Mods` dele por fora).
+pub async fn spawn_state(state: hangar_server::routes::AppState) -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(hangar_server::routes::serve_with_state(listener, state));
+    addr
+}
+
 pub fn client() -> reqwest::Client {
     reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap()
 }
