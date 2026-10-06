@@ -68,6 +68,19 @@ describe('Input de mod', () => {
     expect(el.textContent).toContain(m.plugin_input_no_terminal());
   });
 
+  it('Input sem key: campo desabilitado, sem a dica de digitar no terminal (nem com a sessão sem terminal)', () => {
+    alvo = document.createElement('div');
+    document.body.append(alvo);
+    const tree: Node = { type: 'Input', props: { placeholder: 'sem key', value: 'v' } };
+    comp = mount(PluginBand, { target: alvo, props: { tree, onInput: vi.fn() } as never });
+    flushSync();
+    const campo = alvo.querySelector('input')!;
+    expect(campo.disabled).toBe(true);
+    expect(campo.value).toBe('v');
+    expect(alvo.querySelector('button.submit')).toBeNull();
+    expect(alvo.textContent).not.toContain(m.plugin_input_no_terminal());
+  });
+
   it('redesenho com valor novo não apaga o que a pessoa está digitando', () => {
     const props = $state({ label: '', placeholder: '', value: 'a', submitLabel: '', onInput: vi.fn() });
     alvo = document.createElement('div');

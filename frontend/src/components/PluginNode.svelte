@@ -92,7 +92,7 @@
     {@const key = inputKey(el)}
     <!-- `frame` é o nó: cada evento traz uma árvore nova, e o campo sabe que o mod desenhou de novo. -->
     <PluginInput label={str(p.label)} placeholder={str(p.placeholder)} value={str(p.value)} submitLabel={str(p.submitLabel)}
-                 frame={el}
+                 frame={el} keyless={!key}
                  onInput={onInput && key ? (kind, value) => onInput(key, kind, value) : undefined} />
   {:else if el.type === 'Image'}
     <span class="alt">{str(p.alt)}</span>
