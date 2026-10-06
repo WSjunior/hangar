@@ -72,6 +72,11 @@ const ASK_QUESTION: usize = 2;
 /// Mesmos tetos do Python (`plugin_bridge.TOASTS_KEPT`, `TOAST_MAX_MS`).
 pub(crate) const TOASTS_KEPT: usize = 20;
 pub(crate) const TOAST_MAX_MS: f64 = 5.0 * 60.0 * 1000.0;
+/// Tempo que resta a um aviso: o 0 seria "sem prazo" para o app, então quem está no último
+/// milissegundo ainda leva 1.
+pub(crate) fn remaining_ms(until: Instant, now: Instant) -> u64 {
+    (until.saturating_duration_since(now).as_millis() as u64).max(1)
+}
 const CHANNEL: usize = 1024;
 const SIDE_CONNECT: Duration = Duration::from_secs(10);
 /// O Python manda `ping` a cada 10 s; três calados = conexão morta.
@@ -149,10 +154,9 @@ impl SideCache {
     }
 
     fn replay_at(&self, now: Instant) -> Vec<Bytes> {
-        // O 0 seria "sem prazo" para o app: quem está no último milissegundo ainda leva 1.
         let toasts = self.toasts.iter().filter(|(_, at, _)| *at > now).map(|(_, at, toast)| {
             let mut toast = toast.clone();
-            toast.insert("timeoutMs".into(), ((*at - now).as_millis() as u64).max(1).into());
+            toast.insert("timeoutMs".into(), remaining_ms(*at, now).into());
             sse_frame("plugin_toast", &serde_json::Value::Object(toast).to_string(), None)
         });
         self.latest.iter().flatten().cloned().chain(self.queue.iter().map(|(_, f)| f.clone())).chain(toasts).collect()
@@ -270,14 +274,13 @@ impl Hub {
         let frame = sse_frame(event, data, None);
         // Retrato antes do envio: quem assina entre os dois recebe repetido, nunca nada.
         let pane_question = self.bound.lock().unwrap().as_ref().is_some_and(|b| b.binding.provider == Provider::Claude);
-        let repeated = {
-            let mut cache = self.cache.lock().unwrap();
-            // Pergunta repetida é pergunta nova: o aparelho já fechou a anterior.
-            let repeated = event != "ask_question"
-                && LATEST.iter().position(|e| *e == event).is_some_and(|i| cache.latest[i].as_ref() == Some(&frame));
-            cache.record(event, data, &frame, pane_question);
-            repeated
-        };
+        let mut cache = self.cache.lock().unwrap();
+        // Pergunta repetida é pergunta nova: o aparelho já fechou a anterior.
+        let repeated = event != "ask_question"
+            && LATEST.iter().position(|e| *e == event).is_some_and(|i| cache.latest[i].as_ref() == Some(&frame));
+        cache.record(event, data, &frame, pane_question);
+        // O envio fica sob a trava do retrato (o `send` do broadcast não bloqueia): com o Python e o Rust
+        // escrevendo no mesmo hub, fora dela dois quadros poderiam sair em ordem diferente da do retrato.
         if !repeated {
             let _ = self.tx.send(Out::Side(frame));
         }

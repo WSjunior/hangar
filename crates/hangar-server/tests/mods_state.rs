@@ -56,7 +56,8 @@ fn toasts_follow_the_python_limits() {
     assert_eq!(toasts.len(), 3, "texto vazio não vira aviso");
     assert_eq!(toasts[0]["text"].as_str().unwrap().chars().count(), 2000);
     assert_eq!(toasts[0]["plugin"].as_str().unwrap().chars().count(), 64);
-    assert!(toasts[0]["timeoutMs"].as_u64().unwrap() <= 1000);
+    assert!(toasts[0]["timeoutMs"].as_u64().unwrap() <= 1000 && toasts[0]["timeoutMs"].as_u64().unwrap() > 900,
+        "10 ms sobe ao piso de 1000");
     assert!(toasts[1]["timeoutMs"].as_u64().unwrap() <= 4000 && toasts[1]["timeoutMs"].as_u64().unwrap() > 3000);
     assert!(toasts[2]["timeoutMs"].as_u64().unwrap() <= 300_000 && toasts[2]["timeoutMs"].as_u64().unwrap() > 299_000);
     assert!(toasts.iter().all(|toast| toast["id"].as_str().unwrap().starts_with("rs-")));
@@ -117,4 +118,24 @@ async fn finish_waits_for_a_late_effect_only_when_the_plugin_matched() {
         tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(100)).await; mods.opened("s", &attempt, "https://example.com") }) };
     assert_eq!(mods.finish_click("s", &attempt, Duration::from_millis(300)).await.1.as_deref(), Some("https://example.com"));
     assert!(late.await.unwrap());
+}
+
+#[tokio::test]
+async fn finish_gives_up_when_the_matched_press_never_produces_an_effect() {
+    let mods = mods();
+    let attempt = mods.begin_click("s", "painel", "abrir");
+    mods.match_click("s", "painel", "abrir").unwrap();
+    let started = Instant::now();
+    assert_eq!(mods.finish_click("s", &attempt, Duration::from_millis(100)).await, (None, None));
+    assert!(started.elapsed() >= Duration::from_millis(100), "com o press casado espera até o prazo");
+}
+
+#[test]
+fn attach_keeps_the_live_toasts() {
+    let mods = mods();
+    mods.toast("s", 1, "vitrine", "fica", 9000);
+    mods.attach("s", 2, Arc::new(NoLink));
+    let toasts = replayed(&mods, "plugin_toast");
+    assert_eq!(toasts.len(), 1);
+    assert_eq!(toasts[0]["text"], "fica");
 }

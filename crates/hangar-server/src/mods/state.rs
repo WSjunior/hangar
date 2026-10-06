@@ -251,8 +251,7 @@ impl Mods {
         let mut frames: Vec<(&'static str, String)> = session.ui.iter().map(|ui| ("plugin_ui", ui.clone())).collect();
         for (until, toast) in session.toasts.iter().filter(|(until, _)| *until > now) {
             let mut toast = toast.clone();
-            // O 0 seria "sem prazo" para o app: quem está no último milissegundo ainda leva 1.
-            toast["timeoutMs"] = json!(((*until - now).as_millis() as u64).max(1));
+            toast["timeoutMs"] = json!(crate::side::remaining_ms(*until, now));
             frames.push(("plugin_toast", toast.to_string()));
         }
         frames
