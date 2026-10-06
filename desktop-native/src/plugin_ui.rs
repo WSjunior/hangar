@@ -38,8 +38,11 @@ pub struct FieldSpec { pub key: String, pub placeholder: String, pub value: Stri
 
 /// O campo de texto que o app mantém para um `Input`, pela `key`. `seen` é o desenho do mod (contador de eventos
 /// `plugin_ui`) que o campo já conferiu; `sync` decide quando o valor desenhado entra; `outbox` põe em ordem o que o
-/// campo manda à rota.
-pub struct Field { pub state: Entity<InputState>, pub sync: FieldSync, pub outbox: Outbox, pub seen: u64, pub _changes: Subscription }
+/// campo manda à rota; `placeholder` é o texto de ajuda posto no campo, para repô-lo só quando o mod o muda.
+pub struct Field {
+    pub state: Entity<InputState>, pub sync: FieldSync, pub outbox: Outbox, pub placeholder: String, pub seen: u64,
+    pub _changes: Subscription,
+}
 
 /// Quando o valor que o mod desenha entra no campo. Só conta como posto quando é posto: com a pessoa no campo ele fica
 /// pendente (se mudou em relação ao desenho anterior) e entra quando o campo perde o foco, salvo se a pessoa digitou
