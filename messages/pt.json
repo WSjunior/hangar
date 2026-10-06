@@ -1122,6 +1122,7 @@
   "erro_mod_painel_nao_alcancavel": "O terminal da sessão está estreito ou baixo demais para alcançar esse painel; aumente a janela ou use o terminal.",
   "plugin_abas_label": "Painéis dos plugins",
   "plugin_input_enviar": "Enviar",
+  "plugin_input_falhou": "Não foi possível mandar ao mod o que foi digitado no campo.",
   "plugin_input_no_terminal": "Digite no terminal da sessão: com terminal, o campo do mod só aceita digitação lá.",
   "mods_celular_mostrar": "Mostrar interface dos mods",
   "mods_celular_mostrar_um": "Mostrar interface dos mods (1 painel)",

@@ -1122,6 +1122,7 @@
   "erro_mod_painel_nao_alcancavel": "The session terminal is too narrow or too short to reach that pane; widen the window or use the terminal.",
   "plugin_abas_label": "Plugin panes",
   "plugin_input_enviar": "Send",
+  "plugin_input_falhou": "Couldn't send what was typed in the field to the mod.",
   "plugin_input_no_terminal": "Type in the session terminal: with a terminal, the mod's field only takes typing there.",
   "mods_celular_mostrar": "Show mods interface",
   "mods_celular_mostrar_um": "Show mods interface (1 pane)",
