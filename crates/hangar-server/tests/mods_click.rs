@@ -758,6 +758,25 @@ async fn the_wheel_stops_in_time_for_the_keyboard() {
 }
 
 #[tokio::test]
+async fn the_wheel_stops_in_time_for_a_short_ring_on_psmux() {
+    // Anel curto (um botão na faixa, o MR no segundo painel) com o custo de uma operação no psmux e os tempos
+    // de verdade: a roda para com tempo para a última volta dela, a leitura do anel e a espera ao entrar no
+    // painel, e o `Enter` ainda sai.
+    let (mods, pane) = setup("tmux-02-apos-clicar-mr-150", pm_with_far_button());
+    pane.cost(Duration::from_millis(70));
+    for offset in 1..=200 { pane.on_wheel(vec![Scroll("pm-mock-mr", offset)]); }
+    keyboard_to_mr(&pane);
+    let (limits, undo, clicked) = (Limits::default(), Undo::default(), Mutex::default());
+    let ctx = Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: Instant::now() + Duration::from_millis(7500), undo: &undo,
+        life: 1, clicked: &clicked };
+    let result = click::dispatch(&ctx, ModsCall::Press { site: "pm-mock-mr".into(), key: "mr-a".into() }).await;
+    click::finish(&ctx).await;
+    result.unwrap();
+    assert!(pane.actions().iter().any(|a| a.starts_with("wheel ")), "a roda tentou antes");
+    assert!(keys(&pane).contains(&"Enter".to_string()), "{:?}", keys(&pane));
+}
+
+#[tokio::test]
 async fn the_cleanup_covers_a_long_ring_back_to_the_prompt() {
     // Doze botões na faixa e dez painéis: depois do botão da faixa, a volta ao prompt passa por 22 paradas
     // do anel. Com o custo do psmux, os 2 s de antes cobriam poucos passos e a limpeza desistia com o teclado
