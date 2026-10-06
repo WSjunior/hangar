@@ -310,10 +310,10 @@ apontando para esta pasta).
 
 **Arquivos:** `scripts/prova-parte4.py` (sobre a `Prova`), `prova-real.md` (desta pasta).
 
-- [ ] **Step 26: Claude Haiku com terminal: trabalhando/parada/esperando, pergunta nativa, cartão de permissão, prévia (arquivo e pane), sugestão, `/clear`, sessão morta, troca de conta (`em_troca`), convidado olhando o chat; nenhum `StateMonitor`/`PreviewBroker` Python (contador) e uma captura por rodada**
-- [ ] **Step 27: Codex `gpt-6-luna` com e sem terminal fora do YOLO: cartão de aprovação no sem terminal, menu na TUI com terminal, lista em `awaiting_input` nos dois; Claude sem terminal com cartão**
-- [ ] **Step 28: Terminal: dono, convidado e Connect; atalho e `term-<nome>`; 409 com painel aberto; duas conexões; queda de rede (ping); queda do Rust com painel aberto (tamanho reposto)**
-- [ ] **Step 29: Isolado com 1, 10 e 20 sessões (método de `../lista-estado/medicao.md`): CPU de Python e Rust em repouso e ativo; reserva `CP_RUST_SERVER=0` e Rust derrubado 3 vezes, o estado e o terminal voltam pelo Python igual**
+- [x] **Step 26: Claude Haiku com terminal: trabalhando/parada/esperando, pergunta nativa, cartão de permissão, prévia (arquivo e pane), sugestão, `/clear`, sessão morta, troca de conta (`em_troca`), convidado olhando o chat; nenhum `StateMonitor`/`PreviewBroker` Python (contador) e uma captura por rodada**
+- [x] **Step 27: Codex `gpt-6-luna` com e sem terminal fora do YOLO: cartão de aprovação no sem terminal, menu na TUI com terminal, lista em `awaiting_input` nos dois; Claude sem terminal com cartão**
+- [x] **Step 28: Terminal: dono, convidado e Connect; atalho e `term-<nome>`; 409 com painel aberto; duas conexões; queda de rede (ping); queda do Rust com painel aberto (tamanho reposto)**
+- [x] **Step 29: Isolado com 1, 10 e 20 sessões (método de `../lista-estado/medicao.md`): CPU de Python e Rust em repouso e ativo; reserva `CP_RUST_SERVER=0` e Rust derrubado 3 vezes, o estado e o terminal voltam pelo Python igual**
 
 ### Task 13: Uso real com o dono e VM Windows
 
