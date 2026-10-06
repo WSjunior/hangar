@@ -22,6 +22,10 @@ Achados médios e baixos das revisões por Task que entraram na `feat/parte4` se
   inteiro ao pane em 19; em 1 (primeiro byte em 281 ms, partida lenta) sumiu uma letra no meio
   (`PRVA` em vez de `PROVA`). Resíduo raro só para tecla mandada nos primeiros ~100 ms; causa não
   provada (psmux/conhost trocando o modo de entrada na partida é a suspeita).
+  Prova manual do dono (06/10, app nativo pela VM por RDP): terminal abre, digita e mostra o
+  Claude; achou lento. Medido: eco de tecla ~20 ms no painel e ~19 ms no `tmux attach` direto
+  (é o psmux), saída grande igual com e sem o Hangar (`medicao.md`); o dono atribuiu ao RDP.
+  O botão de terminal externo não existe no Windows (só emuladores do Linux; não é da parte 4).
 - Task 5: no Windows a prévia pelo pane captura a 0,15 s com um processo psmux por toque
   (~25–50 ms cada) enquanto a sessão trabalha sem arquivo do hook; medir na VM e, se pesar,
   limitar o ritmo rápido no Windows. O Monitor no Windows (psmux) e o convidado de convite de
