@@ -384,17 +384,37 @@ pub fn image_urls(text: &str) -> Vec<String> {
 /// Nome do arquivo de uma URL, sem consulta nem âncora.
 pub fn url_name(url: &str) -> &str { basename(url.split(['?', '#']).next().unwrap_or(url)) }
 
-/// Nome do comando digitado enquanto ainda não há argumento (`/nom` → `nom`).
-pub fn slash_query(text: &str) -> Option<&str> {
-    let rest = text.trim_start().strip_prefix('/')?;
-    (!rest.chars().any(char::is_whitespace)).then_some(rest)
+/// Onde começa a palavra que termina no fim de `before`.
+fn word_start(before: &str) -> usize { before.trim_end_matches(|c: char| !c.is_whitespace()).len() }
+
+/// `/nome` sob o cursor, em qualquer ponto do texto (gêmea do `slashTokenAt` do core). `query` vai da barra até o
+/// cursor e `range` é a palavra inteira; `whole` diz se a palavra é a mensagem toda, o único caso em que escolher
+/// roteia o comando. Segunda barra (caminho, URL) não é nome de comando.
+pub struct SlashToken<'a> { pub range: std::ops::Range<usize>, pub query: &'a str, pub whole: bool }
+
+pub fn slash_token(text: &str, cursor: usize) -> Option<SlashToken<'_>> {
+    let start = word_start(text.get(..cursor)?);
+    if start >= cursor || !text[start..].starts_with('/') { return None; }
+    let end = text[cursor..].find(char::is_whitespace).map_or(text.len(), |at| cursor + at);
+    if !text[start + 1..end].chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '.' | '-')) { return None; }
+    let whole = text[..start].trim().is_empty() && text[end..].trim().is_empty();
+    Some(SlashToken { range: start..end, query: &text[start + 1..cursor], whole })
 }
 
-/// Menção sob o cursor; e-mail e comandos não abrem a busca de arquivos.
+/// O campo é só um `/nome` sendo digitado (nem argumento nem outro texto).
+pub fn only_command(text: &str) -> bool { slash_token(text, text.len()).is_some_and(|token| token.whole) }
+
+/// Trecho a trocar e texto que entra para completar o token com `name` (gêmea do `replaceSlashToken` do core): o espaço
+/// que já vinha depois é reaproveitado, para o cursor sair da palavra e a lista não reabrir com o nome pronto.
+pub fn slash_replacement(text: &str, token: &SlashToken, name: &str) -> (std::ops::Range<usize>, String) {
+    let end = token.range.end + usize::from(text[token.range.end..].starts_with(' '));
+    (token.range.start..end, format!("/{name} "))
+}
+
+/// Menção sob o cursor; e-mail não abre a busca de arquivos.
 pub fn mention_query(text: &str, cursor: usize) -> Option<(std::ops::Range<usize>, &str)> {
-    if slash_query(text).is_some() { return None; }
     let before = text.get(..cursor)?;
-    let start = before.rfind(char::is_whitespace).map_or(0, |at| at + before[at..].chars().next().unwrap().len_utf8());
+    let start = word_start(before);
     let query = before.get(start..)?.strip_prefix('@')?;
     if query.contains('@') { return None; }
     Some((start..cursor, query))
@@ -531,11 +551,29 @@ mod tests {
     #[test]
     fn slash_suggestions_rank_prefix_first_and_stop_at_arguments() {
         let list = vec![command("review"), command("clear"), command("compact")];
-        assert_eq!(slash_query("  /co"), Some("co"));
-        assert_eq!(slash_query("/compact agora"), None);
+        assert!(only_command("  /co"));
+        assert!(!only_command("/compact agora") && !only_command("/home/x/y.py") && !only_command("oi /co"));
         let names: Vec<_> = suggestions(&list, "c").iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["clear", "compact"]);
         assert_eq!(typed_command(&list, "/clear já").map(|c| c.name.as_str()), Some("clear"));
+    }
+
+    #[test]
+    fn slash_token_finds_the_command_under_the_cursor_anywhere() {
+        let at = |text: &str, cursor: usize| slash_token(text, cursor).map(|t| (t.range, t.query.to_owned(), t.whole));
+        assert_eq!(at("/co", 3), Some((0..3, "co".into(), true)));
+        assert_eq!(at("  /co", 5), Some((2..5, "co".into(), true)));
+        assert_eq!(at("revise com /sim", 15), Some((11..15, "sim".into(), false)));
+        assert_eq!(at("ação\n/", "ação\n/".len()), Some((7..8, "".into(), false)));
+        assert_eq!(at("/pmedico:help", 13), Some((0..13, "pmedico:help".into(), true)));
+        assert_eq!(at("/compact agora", 3), Some((0..8, "co".into(), false)));
+        for (text, cursor) in [("abre /home/user/x", 17), ("veja https://a/b", 16), ("src/app", 7), ("/compact agora", 14),
+            ("/compact ", 9), ("a /co", 2), ("", 0)] {
+            assert!(slash_token(text, cursor).is_none(), "{text:?} em {cursor}");
+        }
+        let replace = |text: &str, cursor: usize| slash_replacement(text, &slash_token(text, cursor).unwrap(), "compact");
+        assert_eq!(replace("use /co e depois", 7), (4..8, "/compact ".into()));
+        assert_eq!(replace("use /co\nfim", 7), (4..7, "/compact ".into()));
     }
 
     #[test]
