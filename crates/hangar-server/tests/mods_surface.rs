@@ -196,9 +196,10 @@ fn attach_retry_that_answers_turns_on() {
 fn silent_render_is_asked_again() {
     let mut surface = ready(json!({"type": "Text"}));
     let first = request(&surface.on_notice(&panes(json!([{"id": "p", "title": "P", "plugin": "m"}]), "p"), 1.0), "ui_render");
-    // O rol pedido na ligação (prazo 10 s) também vence sem resposta, sem efeito.
+    // O rol pedido na ligação (prazo 10 s) também vence sem resposta; ele é pedido de novo 1 s depois.
     assert!(writes(&surface.tick(10.0)).is_empty());
-    assert!(writes(&surface.tick(11.0)).is_empty(), "o desenho vencido só volta a ficar sujo");
+    assert!(writes(&surface.tick(11.0)).iter().all(|frame| frame["request"]["subtype"] == "ui_panes"),
+        "o desenho vencido só volta a ficar sujo");
     assert_eq!(surface.deadline(), Some(11.1));
     let again = request(&surface.tick(11.1), "ui_render");
     assert_eq!(again["request"]["instance_id"], "p");
@@ -451,4 +452,25 @@ fn retry_after_a_slow_redraw_does_not_press_without_time_left() {
     let out = ok(&mut surface, &redraw, json!({"tree": button("ok", 3)}), 5.1);
     assert!(writes(&out).iter().all(|frame| frame["request"]["subtype"] != "ui_press"));
     assert_eq!(code(reply_of(&out, 2)), "erro_mod_clique_sem_resposta");
+}
+
+#[test]
+fn silent_roster_is_asked_again_with_the_attach_waits() {
+    // M1: o rol pedido na ligação sem resposta é pedido de novo depois de 1, 2 e 4 s, e para aí.
+    let mut surface = ready(json!({"type": "Text"}));
+    let mut asked = Vec::new();
+    let mut now = 0.0;
+    while let Some(at) = surface.deadline().filter(|at| *at < 100.0) {
+        now = at;
+        if writes(&surface.tick(at)).iter().any(|frame| frame["request"]["subtype"] == "ui_panes") { asked.push(at); }
+    }
+    assert_eq!(asked, vec![11.0, 23.0, 37.0]);
+    assert_eq!((now, surface.deadline()), (47.0, None), "esgotadas as tentativas, espera o próximo aviso");
+    // Respondido, o rol entra e a contagem recomeça.
+    let mut surface = ready(json!({"type": "Text"}));
+    surface.tick(10.0);
+    let again = request(&surface.tick(11.0), "ui_panes");
+    let out = ok(&mut surface, &again, json!({"panes": [{"id": "p", "title": "P", "plugin": "m"}], "shown_id": "p"}), 11.5);
+    assert_eq!(published(&out).unwrap()["panes"][0]["id"], "p");
+    assert_eq!(request(&out, "ui_render")["request"]["instance_id"], "p");
 }
