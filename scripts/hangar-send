@@ -29,7 +29,10 @@
 #                                  nunca responda um [grupo:] com --group (evita loop); responda 1:1.
 #                                  O backend entrega a cada membro pelo mesmo caminho do 1:1.
 #   hangar-send --new <nome> [cwd]     cria sessão nova, com terminal gerenciado ou headless.
-#                                  cwd default = home.
+#                                  cwd default = home. O que for omitido HERDA desta sessão: a
+#                                  conta (com 95% ou mais de uso, vai para a de mais folga, como
+#                                  --conta auto), o modo de permissão (claude; plan herda o modo
+#                                  de base) e o sem terminal (claude/codex). Flag explícita vence.
 #   hangar-send --new <servidor>::<nome> [cwd]  idem, NOUTRO servidor (peers.json), com as mesmas
 #                                  flags. cwd, --conta e --conta auto são resolvidos LÁ (cwd default
 #                                  = home de lá; --conta pelo nome da conta de lá).
@@ -38,7 +41,8 @@
 #                                  --remember-provider grava o provedor desta criação como padrão.
 #                                  Sem o flag, abrir auxiliares não muda a preferência do app.
 #                                  --read-only bloqueia escrita no código e metadados Git (Linux/bwrap).
-#                                  Sem modo explícito, herda o padrão escolhido no Hangar.
+#                                  Sem --headless/--terminal, herda desta sessão; chamado de fora
+#                                  de uma sessão, vale o padrão escolhido no Hangar.
 #                                  --terminal abre com terminal; não combina com --headless.
 #                                  --headless (claude ou codex) abre a sessão SEM terminal: o agente
 #                                  roda fora do tmux e conversa só pelo app. Combina com --model,
@@ -575,6 +579,16 @@ s = json.load(sys.stdin); print(s["path"] + "\t" + s["label"])' <<<"$sugestao")
     # conta padrão, e mandar null por um campo que ele valida contra list_config_dirs é pedir 400.
     # model/effort/permissao vazios -> as chaves SOMEM do payload (None é o default do CreateBody;
     # mandar "" seria validado e recusado).
+    # A sessão que roda este script é a criadora: conta, modo de permissão e sem terminal omitidos
+    # herdam dela no backend. Noutra máquina ela não existe, e "cli" é não saber quem chama.
+    criadora=""
+    if [[ -z "$remoto" ]]; then
+        criadora=$(me)
+        [[ "$criadora" == "cli" ]] && criadora=""
+        if [[ -z "$criadora" && -n "${TMUX:-}${CP_SESSION_KEY:-}${HANGAR_CANO_KEY:-}" ]]; then
+            echo "aviso: não identifiquei esta sessão; conta, modo de permissão e sem terminal não serão herdados" >&2
+        fi
+    fi
     body=$(python3 -c 'import json,sys
 d = {"name": sys.argv[1], "cwd": sys.argv[2],
      "engine": sys.argv[3] or None,
@@ -603,17 +617,28 @@ if sys.argv[14]:
     d["codex_account"] = sys.argv[14]
 if sys.argv[15] == "true":
     d["remember_provider"] = True
+if sys.argv[16]:
+    d["creator"] = sys.argv[16]
 print(json.dumps(d))' \
-           "$name" "$cwd" "$engine" "$provider" "$config_dir" "$model" "$effort" "$permissao" "$perfil" "$read_only" "$headless" "$jev" "$subagente" "$codex_conta" "$remember_provider")
+           "$name" "$cwd" "$engine" "$provider" "$config_dir" "$model" "$effort" "$permissao" "$perfil" "$read_only" "$headless" "$jev" "$subagente" "$codex_conta" "$remember_provider" "$criadora")
     creation_result=$(api POST /api/sessions "$body") || exit 1
-    if ! python3 -c 'import json,sys
+    if ! herdado=$(python3 -c 'import json,sys
 result = json.load(sys.stdin)
 for warning in result.get("avisos", []):
-    print("aviso: " + warning, file=sys.stderr)' <<<"$creation_result"; then
+    print("aviso: " + warning, file=sys.stderr)
+partes = []
+if result.get("headless") and not sys.argv[1]:
+    partes.append("sem terminal")
+if result.get("account_source") == "inherited":
+    partes.append("conta herdada: " + (result.get("config_dir") or "a padrão"))
+elif result.get("account_source") == "quota":
+    partes.append("conta trocada pela cota: " + (result.get("config_dir") or "a padrão"))
+print("".join(" [%s]" % p for p in partes))' "$headless" <<<"$creation_result"); then
         echo "aviso: a criação foi confirmada, mas não consegui ler os avisos da resposta" >&2
     fi
     [[ -n "$remoto" ]] && name="$remoto::$name"
-    echo "sessão criada: $name ($cwd)${headless:+ [sem terminal]}${provider:+ [$provider]}${engine:+ [motor: $engine]}${conta:+ [conta: $conta]}${codex_conta:+ [conta codex: $codex_conta]}${model:+ [modelo: $model]}${effort:+ [esforço: $effort]}${permissao:+ [permissão: $permissao]}${subagente:+ [subagentes: $subagente]}${perfil:+ [perfil: $perfil]}${jev:+ [jev: $jev]} — fala com ela via: hangar-send $name \"msg\""
+    [[ "$headless" == "false" ]] && headless=""
+    echo "sessão criada: $name ($cwd)${headless:+ [sem terminal]}$herdado${provider:+ [$provider]}${engine:+ [motor: $engine]}${conta:+ [conta: $conta]}${codex_conta:+ [conta codex: $codex_conta]}${model:+ [modelo: $model]}${effort:+ [esforço: $effort]}${permissao:+ [permissão: $permissao]}${subagente:+ [subagentes: $subagente]}${perfil:+ [perfil: $perfil]}${jev:+ [jev: $jev]} — fala com ela via: hangar-send $name \"msg\""
     exit 0
 fi
 

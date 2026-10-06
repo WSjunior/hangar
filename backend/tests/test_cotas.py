@@ -461,3 +461,20 @@ def test_401_depois_de_renovar_e_login_necessario(tmp_path, monkeypatch):
                         lambda p: bool(_cred(p, refresh="rt-2")))
     monkeypatch.setattr(cotas, "_get_json", lambda url, headers: (401, None))
     assert cotas._ler_claude(dir_conta) == ("expirada", [], "login-necessario")
+
+
+def test_conta_herdada_acabando_vai_para_a_de_mais_folga():
+    """Criadora a 95% numa janela: a sessão nova nasce na de mais folga, como o --conta auto."""
+    contas = [_conta("claude:/mae", 40, 95), _conta("claude:/folga", 10, 20)]
+    cfg, aviso = cotas.conta_com_cota("/mae", contas)
+    assert cfg == "/folga" and "95%" in aviso
+
+
+def test_conta_herdada_com_folga_fica():
+    contas = [_conta("claude:/mae", 50, 30), _conta("claude:/folga", 10, 20)]
+    assert cotas.conta_com_cota("/mae", contas) == ("/mae", None)
+
+
+def test_conta_acabando_fica_se_nenhuma_outra_tem_mais_folga():
+    contas = [_conta("claude:/mae", 96), _conta("claude:/outra", 97)]
+    assert cotas.conta_com_cota("/mae", contas) == ("/mae", None)

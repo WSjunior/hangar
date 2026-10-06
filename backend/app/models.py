@@ -131,6 +131,11 @@ class SessionInfo(BaseModel):
     # instalação, /model desfeito pelo principal). Antes iam só pro log do backend e quem abria
     # sessão pelo app nunca via.
     avisos: list[str] = []
+    # Também só no POST: a conta em que a sessão nasceu (None = a padrão) e de onde ela veio,
+    # "inherited" (conta da sessão criadora) ou "quota" (a herdada ou a padrão
+    # estava acabando e a sessão nasceu na de mais folga). None = conta pedida ou a padrão.
+    config_dir: Optional[str] = None
+    account_source: Optional[str] = None
     # Estado vivo detalhado, pra a linha da lista ser acionável sem abrir a sessão (feature #1):
     label: Optional[str] = None          # working: texto do spinner ("Elucidating…")
     startup_steps: list[str] = Field(default_factory=list)
