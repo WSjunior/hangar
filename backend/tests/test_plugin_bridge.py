@@ -15,11 +15,18 @@ from app import plugin_bridge as pb
 # Conversa que o Hangar acompanha em toda sessão dos testes; o plugin certo manda este id.
 UUID = "0b6e5c1a-1111-4222-8333-444455556666"
 _REAL_TRACKED = pb.tracked_session_id
+_REAL_MODO_SEM_DIALOGO = pb.modo_sem_dialogo
+
+
+async def _com_dialogo(name: str) -> bool:
+    return False
 
 
 @pytest.fixture(autouse=True)
 def _limpa(monkeypatch):
     monkeypatch.setattr(pb, "tracked_session_id", lambda name: UUID)
+    # Sem isto, cada pedido de permissão dos testes capturaria um pane de verdade.
+    monkeypatch.setattr(pb, "modo_sem_dialogo", _com_dialogo)
     yield
     for d in (pb._perguntas, pb._waiters, pb._estados, pb._batidas, pb._eventos, pb._fechadas,
               pb._donos, pb._recusas):
@@ -49,6 +56,28 @@ def test_permissao_com_terminal_preso_volta_pro_terminal(monkeypatch):
     monkeypatch.setattr(pb, "terminal_preso", lambda name: True)
     pb.app_entrou()
     assert asyncio.run(pb.ask(_corpo("perm:t1", tool="Bash"))) == {"soltar": True}
+
+
+@pytest.mark.parametrize("rodape,segura", [
+    ("⏵⏵ auto mode on (shift+tab to cycle) · ← for agents", False),
+    ("⏵⏵ don't ask on (shift+tab to cycle)", False),
+    ("⏸ manual mode on · ← for agents", True),
+    ("⏵⏵ accept edits on (shift+tab to cycle)", True),
+    ("", True),
+])
+def test_permissao_so_vai_ao_app_quando_o_modo_pergunta(monkeypatch, rodape, segura):
+    from app import state
+
+    async def quadro(name, max_age):
+        return f"❯ \n{rodape}\n"
+
+    monkeypatch.setattr(pb, "modo_sem_dialogo", _REAL_MODO_SEM_DIALOGO)
+    monkeypatch.setattr(state, "shared_capture", quadro)
+    monkeypatch.setattr(pb, "terminal_preso", lambda name: False)
+    pb.app_entrou()
+    resposta = asyncio.run(pb.ask(_corpo("perm:t1", tool="Bash", janela_ms=50)))
+    assert resposta == ({"answers": None} if segura else {"soltar": True})
+    assert (pb.pergunta_pendente("s1") is not None) is segura
 
 
 def test_resposta_do_app_chega_ao_hook_e_so_vale_com_o_aviso_dele(monkeypatch):

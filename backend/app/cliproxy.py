@@ -73,6 +73,22 @@ def is_local_engine(cfg: dict) -> bool:
     return bool(inst and normalize_base(str(cfg.get("base_url") or "")) == inst["base_url"])
 
 
+def supports_fast(engine: str | None, model: str | None = None) -> bool:
+    from app import engines
+    cfg = engines.listar().get(engine) if engine else None
+    if cfg is None:
+        return False
+    base = (model or cfg.get("model") or "").rsplit("/", 1)[-1]
+    if not re.fullmatch(r"gpt-\d[^/]*", base):
+        return False
+    try:
+        return is_local_engine(cfg)
+    except ValueError as exc:
+        from app import diag
+        diag.registrar("cliproxy.fast_unavailable", "erro", detalhe=str(exc))
+        return False
+
+
 def account_for_engine(cfg: dict, account: str, home: str | None = None) -> dict:
     from app.cliproxy_accounts import resolve
     inst = local()

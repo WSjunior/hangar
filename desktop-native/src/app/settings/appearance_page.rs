@@ -75,8 +75,14 @@ fn art_navigation(navigation: Navigation) -> Div {
     match navigation {
         Navigation::Sidebar => base.child(div().w(px(14.)).h_full().bg(strip).flex().flex_col().items_center().gap(px(5.)).pt(px(7.))
             .children((0..3).map(|_| div().size(px(5.)).rounded(px(2.)).bg(theme::faint())))),
-        Navigation::Tabs => base.flex_col().child(div().h(px(14.)).w_full().bg(strip).flex().items_end().gap(px(3.)).px(px(5.))
-            .children([true, false, false].map(|on| div().w(px(22.)).h(px(9.)).rounded_t(px(3.)).bg(theme::faint().alpha(if on { 1. } else { 0.4 }))))),
+        Navigation::Tabs | Navigation::BottomTabs => {
+            let bottom = navigation == Navigation::BottomTabs;
+            base.flex_col().when(bottom, |el| el.justify_end()).child(div().h(px(14.)).w_full().bg(strip).flex()
+                .map(|el| if bottom { el.items_start() } else { el.items_end() }).gap(px(3.)).px(px(5.))
+                .children([true, false, false].map(|on| div().w(px(22.)).h(px(9.))
+                    .map(|el| if bottom { el.rounded_b(px(3.)) } else { el.rounded_t(px(3.)) })
+                    .bg(theme::faint().alpha(if on { 1. } else { 0.4 })))))
+        }
         Navigation::Conversations => base.child(div().w(relative(0.38)).h_full().bg(strip).p(px(6.)).child(bars(theme::faint(), &[1.0, 0.8, 0.65, 0.75]))),
     }
 }
@@ -594,8 +600,9 @@ impl Hangar {
                     }, cx),
                 false));
 
-        const NAVIGATION: [Navigation; 3] = [Navigation::Sidebar, Navigation::Tabs, Navigation::Conversations];
-        let navigation = tiles("collapsed-nav", &[tr("settings_collapsed_sidebar"), tr("settings_collapsed_tabs"), tr("settings_nav_conversations")],
+        const NAVIGATION: [Navigation; 4] = [Navigation::Sidebar, Navigation::Tabs, Navigation::BottomTabs, Navigation::Conversations];
+        let navigation = tiles("collapsed-nav", &[tr("settings_collapsed_sidebar"), tr("settings_collapsed_tabs"), tr("settings_collapsed_bottom_tabs"),
+            tr("settings_nav_conversations")],
             Vec::from(NAVIGATION.map(art_navigation)), NAVIGATION.iter().position(|n| *n == a.navigation).unwrap_or(0), NAVIGATION.len(), false,
             tr("settings_next_version"), live,
             |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.navigation = NAVIGATION[index]; this.apply_appearance(next, true, cx); this.recents_sessions_changed(false, cx); }, cx);

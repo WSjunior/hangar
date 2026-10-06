@@ -294,7 +294,8 @@ def test_motor_serve_o_catalogo_do_provedor(cli):
     assert r.status_code == 200
     assert r.json()["kind"] == "engine"
     assert r.json()["reduced"] is False
-    assert r.json()["models"] == [{"id": "k3", "context_length": 262144, "vision": True}]
+    assert r.json()["models"] == [{"id": "k3", "context_length": 262144, "vision": True,
+                                   "supports_fast": False}]
 
 
 def test_put_e_delete_de_motor_esvaziam_o_cache_do_catalogo(cli):

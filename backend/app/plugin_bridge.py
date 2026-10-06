@@ -811,6 +811,21 @@ def terminal_preso(name: str) -> bool:
     return False
 
 
+# Modos em que o `ask` do `tool.check` não vira diálogo: o classificador (auto) aprova ou recusa,
+# e o dontAsk recusa. Segurar ali trocaria essa decisão por uma aprovação manual no app.
+_MODOS_SEM_DIALOGO = frozenset({"auto", "dontAsk"})
+
+
+async def modo_sem_dialogo(name: str) -> bool:
+    """O modo de permissão que o rodapé da sessão mostra decide o `ask` sem perguntar a ninguém?"""
+    from app import permission_mode, state
+    try:
+        pane = await state.shared_capture(name, 1.0)
+    except Exception:
+        return False
+    return permission_mode.parse_permission_mode(pane) in _MODOS_SEM_DIALOGO
+
+
 # Última batida do long-poll de entrada, por sessão: é o pulso que diz que o plugin está vivo.
 _batidas: dict[str, float] = {}
 # Um por sessão, criado por quem espera (o monitor de estado). Aviso do plugin acorda o monitor na
@@ -1388,9 +1403,10 @@ async def ask(body: AskBody):
     global _loop
     # Permissão só fica com o plugin enquanto há alguém no app E ninguém no terminal: segurar
     # esconde o diálogo do terminal. Reavaliado a cada poll do hook, então prender um terminal no
-    # meio da espera devolve o diálogo a ele em poucos segundos.
+    # meio da espera devolve o diálogo a ele em poucos segundos. Em modo sem diálogo, nunca segura.
     if body.id.startswith("perm:") and (
-            not app_presente() or await asyncio.to_thread(terminal_preso, body.sessao)):
+            not app_presente() or await modo_sem_dialogo(body.sessao)
+            or await asyncio.to_thread(terminal_preso, body.sessao)):
         with _lock:
             p = _perguntas.get(body.sessao)
             if p is not None and p["id"] == body.id:

@@ -2242,6 +2242,17 @@ async def create_session(body: CreateBody):
         if aviso:
             _log.warning("create_session %s: %s", body.name, aviso)
             body = body.model_copy(update={"config_dir": config_dir})
+    if body.provider == "claude" and not body.engine and (
+            body.config_dir is None or body.config_dir in {c.path for c in list_config_dirs()}):
+        cfg = Path(body.config_dir) if body.config_dir else None
+        removidos, falhas = await asyncio.to_thread(default_model.drop_foreign, cfg)
+        for valor in removidos:
+            _log.warning("create_session %s: modelo padrão %r não é da Anthropic; removido do settings.json",
+                         body.name, valor)
+            avisos_extra.append(f"O modelo padrão '{valor}' do settings.json não é da Anthropic "
+                                "(provavelmente veio de um /model numa sessão de motor) e foi removido.")
+        avisos_extra += [f"Não consegui tirar do settings.json um modelo que não é da Anthropic: {f}"
+                         for f in falhas]
     with _acompanhar_criacao(body.name):
         worktree: dict = {}
         try:
@@ -2321,7 +2332,8 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
     if body.provider not in ("claude", "codex", "pi", "kimi", "omp"):
         raise HTTPException(400, detail=erro("erro_provider_sessao_invalido", "provider invalido"))
     if body.service_tier is not None and body.provider != "codex":
-        raise HTTPException(400, detail=erro("erro_criacao_sessao", "service_tier só vale para provider codex"))
+        if body.provider != "claude" or not await asyncio.to_thread(cliproxy.supports_fast, body.engine, body.model):
+            raise HTTPException(400, detail=erro("erro_criacao_sessao", "Fast exige Codex ou Claude com GPT no CLIProxyAPI local"))
     # Antes de qualquer efeito (worktree, registry.create): convidado só abre dentro da pasta dele.
     guest = guest_users.current.get()
     if guest is not None and not guest_users.inside_root(guest, body.cwd):
@@ -2669,16 +2681,27 @@ async def _motivo_ocupada(name: str, headless: bool) -> str | None:
     """Código de `_OCUPADA` dizendo por que a sessão não pode trocar de modo (None = ociosa)."""
     if headless:
         from app.runtime_adapter import runtime_data
-        if (view := runtime_data(name)) is not None:
-            state = view["public_state"]
-            if not view.get("initialized"):
+        from app import runtime_coordinator
+        coordinator = runtime_coordinator.current()
+        try:
+            view = coordinator.source_view(name) if coordinator is not None else None
+        except RuntimeError:
+            return "erro_sessao_iniciando"
+        view = view if view is not None else runtime_data(name)
+        if view is not None:
+            state = view.get("public_state") or {}
+            if not view.get("initialized") or view.get("iniciando"):
                 return "erro_sessao_iniciando"
-            if state.get("state") == "awaiting_input":
+            if state.get("state") == "awaiting_input" or view.get("pending") or view.get("question"):
                 return "erro_sessao_esperando_resposta"
-            if state.get("state") == "working":
+            if state.get("state") == "working" or view.get("in_progress"):
                 return "erro_sessao_trabalhando"
+            if state.get("state") not in ("idle", "dead"):
+                return "erro_sessao_iniciando"
             fila = await asyncio.to_thread(PromptQueue(name).load)
-            return "erro_fila_pendente" if any(not row.get("confirmed") and not row.get("saida_local") for row in fila) else None
+            return "erro_fila_pendente" if any(
+                (not row.get("delivered") or not row.get("confirmed")) and not row.get("saida_local")
+                for row in fila) else None
         sess = get_adapter(CLAUDE_HEADLESS)._sessions.get(name)
         if sess is not None and sess.vivo:
             if sess.iniciando:
@@ -3021,9 +3044,35 @@ async def trocar_conta(name: str, body: AccountMoveBody):
     return await _durante_troca(name, _trocar_conta(name, body.config_dir))
 
 
+def _engine_fast_selection(name: str) -> tuple[str | None, str]:
+    meta = headless_sessions.load(name)
+    if meta is not None:
+        from app import runtime_coordinator
+        coordinator = runtime_coordinator.current()
+        try:
+            view = coordinator.source_view(name) if coordinator is not None else None
+        except RuntimeError:
+            raise HTTPException(409, detail=erro("erro_sessao_iniciando", "estado da sessão indisponível; aguarde a reposição")) from None
+        model = (view or {}).get("model")
+        if model is None:
+            model = get_adapter(CLAUDE_HEADLESS).escolhas(name)[0]
+        return model or meta.get("model"), meta.get("service_tier") or "default"
+    pane = registry._pane_of(name)
+    agent = registry_mod._pid_do_agente((pane or {}).get("pid"))
+    if not agent or pane is None:
+        return None, "default"
+    model = procinfo._model_of(agent)[0]
+    jsonl, tracked = registry.resolve_tracked(name, pane["cwd"])
+    if jsonl and tracked:
+        current = registry_mod._escolhas_status(Path(jsonl).stem)[0]
+        model = current or model
+    return model, procinfo._env_var_of(agent, "CP_ENGINE_SERVICE_TIER") or "default"
+
+
 async def _trocar_conta(name: str, destino: str | None, *, engine_account: str | None = None,
                        model: str | None = None, effort: str | None = None,
-                       context_window: int | None = None, engine_models: list[dict] | None = None):
+                       context_window: int | None = None, engine_models: list[dict] | None = None,
+                       service_tier: str | None = None):
     hl = get_adapter(CLAUDE_HEADLESS)
     async with hl.delivery_lock(name):
         # A troca anterior pode ter mudado motor, conta e transporte enquanto este pedido esperava.
@@ -3039,7 +3088,11 @@ async def _trocar_conta(name: str, destino: str | None, *, engine_account: str |
             info = info.model_copy(update={"engine": current_meta.get("engine"),
                                            "engine_account": current_meta.get("engine_account"),
                                            "headless": True})
-        if engine_account is not None:
+        if service_tier is not None:
+            current_model, _ = await asyncio.to_thread(_engine_fast_selection, name)
+            if not await asyncio.to_thread(cliproxy.supports_fast, info.engine, current_model):
+                raise HTTPException(400, detail=erro("erro_fast_indisponivel", "Fast exige GPT no CLIProxyAPI local"))
+        elif engine_account is not None:
             if not info.engine:
                 raise HTTPException(400, detail=erro("erro_cliproxy_conta", "esta sessão não usa o CLIProxyAPI local"))
             if (model is not None or effort is not None) and info.engine_account != engine_account:
@@ -3155,7 +3208,12 @@ async def _trocar_conta(name: str, destino: str | None, *, engine_account: str |
                 raise RuntimeError("sessão sem o arquivo de estado")
             original_meta = dict(meta)
             jsonl = Path(hl.transcript_path_de(meta))
-            if engine_account is not None:
+            if service_tier is not None:
+                if current_model is not None:
+                    original_meta["model"] = current_model
+                changes = {"service_tier": service_tier, "problema": None,
+                           **({"model": current_model} if current_model is not None else {})}
+            elif engine_account is not None:
                 changes = {"engine_account": engine_account, "engine_credential_id": account["credential_id"],
                            "engine_account_base_url": account["base_url"],
                            "model": chosen_model, "problema": None}
@@ -3171,7 +3229,7 @@ async def _trocar_conta(name: str, destino: str | None, *, engine_account: str |
                 changes = {"config_dir": destino, "problema": None}
                 if info.engine:
                     changes.update(engine=None, engine_account=None, engine_credential_id=None,
-                                   engine_account_base_url=None, model=None, context_window=None)
+                                   engine_account_base_url=None, model=None, context_window=None, service_tier=None)
                 # Confiança na pasta é por conta: sem isto o terminal (agora ou na troca de modo) abre no aviso, em "No, exit".
                 await asyncio.to_thread(registry_mod._pretrust_cwd, meta["cwd"], destino)
             # O aviso da conta anterior (limite batido, sem login) não vale na nova.
@@ -3222,6 +3280,8 @@ async def _trocar_conta(name: str, destino: str | None, *, engine_account: str |
     if motivo_terminal:
         raise HTTPException(409, detail=erro("erro_troca_conta", f"a conversa foi para a conta nova, mas o terminal não voltou ({motivo_terminal}); ela segue sem terminal",
                                              erro=motivo_terminal))
+    if service_tier is not None:
+        return {"ok": True, "service_tier": service_tier}
     return {"ok": True, "engine_account": engine_account} if engine_account is not None else {"ok": True, "config_dir": destino}
 
 
@@ -5893,14 +5953,47 @@ class PluginPressBody(_StrictBody):
     key: str = Field(min_length=1, max_length=256)
 
 
-@app.post("/api/sessions/{name}/plugin/press", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
-async def plugin_press(name: str, body: PluginPressBody):
+_MOD_CONVIDADO = erro("erro_mod_convidado",
+    "Só o dono da sessão aciona os mods dela pelo app; quem acompanha como convidado vê, mas não clica.")
+
+
+def _convidado(request: Request) -> bool:
+    from app import guest_users
+    return guest_of(request) is not None or guest_users.current.get() is not None
+
+
+def _recusa_convidado_no_terminal_do_rust(name: str, request: Request) -> None:
+    """Convidado (com login ou de convite) não clica em mod de sessão cujo terminal é do Rust.
+
+    O pane é do executor do Rust: o `plugin_click` daqui o dirigiria por fora dele. O Rust repassa ao
+    Python todo pedido que não é do dono, e o convite chega pela porta 8766 sem passar pelo Rust, por
+    isso a recusa mora aqui, depois da autenticação. Esta é só a recusa rápida, por uma fotografia da
+    posse; a que vale é a do empréstimo do teclado (`runtime_terminal._borrow_keyboard`), sob a
+    barreira da sessão, que alcança também a sessão aberta no Rust pelo próprio clique.
+    """
+    from app import runtime_coordinator
+    if not _convidado(request):
+        return
+    coordinator = runtime_coordinator.current()
+    if coordinator is not None and coordinator.terminal_in_rust(name):
+        raise HTTPException(403, detail=_MOD_CONVIDADO)
+
+
+@app.post("/api/sessions/{name}/plugin/press", dependencies=[Depends(require_auth),
+    Depends(_recusa_convidado_no_terminal_do_rust), Depends(_transfer_guard)])
+async def plugin_press(name: str, body: PluginPressBody, request: Request):
     """Clique num botão que um mod desenhou na faixa ou num painel, pedido pelo app."""
     from app import plugin_click
+    from app.runtime_terminal import GuestRefused, guest_admin
+    marca = guest_admin.set(_convidado(request))
     try:
         return await plugin_click.press(name, body.site, body.key)
     except plugin_click.PressRefused as e:
         raise HTTPException(409, detail=e.detail)
+    except GuestRefused:
+        raise HTTPException(403, detail=_MOD_CONVIDADO) from None
+    finally:
+        guest_admin.reset(marca)
 
 
 @app.post("/api/sessions/{name}/interrupt", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
@@ -6082,8 +6175,20 @@ class CodexServiceTierBody(_StrictBody):
 
 @app.post("/api/sessions/{name}/service-tier", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 async def set_codex_service_tier(name: str, body: CodexServiceTierBody):
+    if _provider_of(name) == "claude":
+        info = await _cached_info(name)
+        model, _ = await asyncio.to_thread(_engine_fast_selection, name)
+        if not info or not await asyncio.to_thread(cliproxy.supports_fast, info.engine, model):
+            raise HTTPException(400, detail=erro("erro_fast_indisponivel", "Fast exige GPT no CLIProxyAPI local"))
+        _recusa_se_painel_aberto(name)
+        operation = asyncio.create_task(_durante_troca(name, _trocar_conta(name, None, service_tier=body.service_tier)))
+        try:
+            return await asyncio.shield(operation)
+        except asyncio.CancelledError:
+            await operation
+            raise
     if _provider_of(name) != "codex":
-        raise HTTPException(400, detail=erro("erro_models_so_codex", "Somente sessões Codex."))
+        raise HTTPException(400, detail=erro("erro_fast_indisponivel", "Fast exige Codex ou Claude com GPT no CLIProxyAPI local"))
     try:
         tier = await get_adapter("codex").set_service_tier(name, body.service_tier)
     except (RuntimeError, ValueError, TimeoutError):
@@ -9572,6 +9677,12 @@ async def _engine_models(nome: str, fresco: bool = False) -> list[dict]:
     return modelos
 
 
+def _engine_picker_models(engine: str, models: list[dict]) -> list[dict]:
+    return [{"id": model["id"], "context_length": model.get("context_length"),
+             "vision": model.get("vision"), "supports_fast": cliproxy.supports_fast(engine, model["id"])}
+            for model in models]
+
+
 @app.get("/api/sessions/{name}/model/options", dependencies=[Depends(require_auth)])
 async def model_options(name: str):
     """Modelos que ESTA sessao pode escolher. `kind` diz de onde vieram e como aplicar."""
@@ -9585,9 +9696,14 @@ async def model_options(name: str):
         # nao depende do tamanho da janela. A guarda so vale pro ramo abaixo (le o picker).
         modelos = await (_fixed_engine_models(info.engine, info.engine_account)
                          if info.engine_account else _engine_models(info.engine))
-        return {"kind": "engine", "engine": info.engine,
-                "models": [{"id": m["id"], "context_length": m.get("context_length"),
-                            "vision": m.get("vision")} for m in modelos]}
+        models = await asyncio.to_thread(_engine_picker_models, info.engine, modelos)
+        result = {"kind": "engine", "engine": info.engine, "models": models}
+        if any(model["supports_fast"] for model in models):
+            model, tier = await asyncio.to_thread(_engine_fast_selection, name)
+            model = model or engines.listar()[info.engine].get("model")
+            result.update(supports_fast=True,
+                          current={"model": model.rsplit("/", 1)[-1] if model else None, "service_tier": tier})
+        return result
     if _headless(name):
         # Sem terminal: a lista vem do `control_request list_models` do próprio processo — sem
         # picker, sem rastro no scrollback e sem cache de 1h.
@@ -9688,9 +9804,9 @@ async def model_options_sem_sessao(provider: str = "claude", engine: str = "",
     if engine:
         modelos = await (_fixed_engine_models(engine, engine_account)
                          if engine_account is not None else _engine_models(engine))
-        return {"kind": "engine", "reduced": False,
-                "models": [{"id": m["id"], "context_length": m.get("context_length"),
-                            "vision": m.get("vision")} for m in modelos]}
+        models = await asyncio.to_thread(_engine_picker_models, engine, modelos)
+        return {"kind": "engine", "reduced": False, "models": models,
+                "supports_fast": any(model["supports_fast"] for model in models)}
     chave = _chave_config(config_dir)
     cacheado = _models_cache_get(chave)
     if cacheado is not None:
@@ -9739,6 +9855,10 @@ async def engine_model_set(name: str, body: EngineModelBody):
         # Recusar aqui em vez de digitar: o CC aceitaria o id, a sessao passaria a mandar request
         # pra um modelo que o provedor nao tem, e a falha apareceria so no proximo turno.
         raise HTTPException(422, detail=erro("erro_modelo_fora_catalogo", f"modelo fora do catalogo do motor {info.engine!r}: {body.model}", motor=info.engine, modelo=body.model))
+
+    _, tier = await asyncio.to_thread(_engine_fast_selection, name)
+    if tier == "priority" and not await asyncio.to_thread(cliproxy.supports_fast, info.engine, body.model):
+        raise HTTPException(409, detail=erro("erro_fast_indisponivel", "Desligue Fast antes de escolher um modelo que não o suporta"))
 
     if info.engine_account:
         selected = next(m for m in modelos if m["id"] == body.model)

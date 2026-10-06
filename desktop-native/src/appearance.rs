@@ -65,12 +65,15 @@ pub enum SidebarHeight { Full, Content }
 /// Onde ficam as sessões e como as linhas da barra lateral são apresentadas.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Navigation { Tabs, Conversations, #[serde(other)] Sidebar }
+pub enum Navigation { Tabs, BottomTabs, Conversations, #[serde(other)] Sidebar }
 
 impl Navigation {
     pub fn sidebar_width(self) -> f32 {
-        match self { Self::Sidebar => 284., Self::Tabs => 0., Self::Conversations => 256. }
+        match self { Self::Sidebar => 284., Self::Tabs | Self::BottomTabs => 0., Self::Conversations => 256. }
     }
+
+    /// As sessões numa faixa de abas, em cima ou embaixo da janela, sem barra lateral.
+    pub fn tabs(self) -> bool { matches!(self, Self::Tabs | Self::BottomTabs) }
 }
 
 /// Limites do arrasto da borda da barra, os mesmos do web.
@@ -307,10 +310,10 @@ impl Appearance {
         }
     }
 
-    /// Largura da barra cheia em vigor: com abas no topo não há barra; valor torto no arquivo volta para a escala.
+    /// Largura da barra cheia em vigor: com abas não há barra; valor torto no arquivo volta para a escala.
     pub fn full_sidebar_width(&self) -> f32 {
         match (self.navigation, self.sidebar_width) {
-            (Navigation::Tabs, _) => 0.,
+            (navigation, _) if navigation.tabs() => 0.,
             (_, Some(width)) if width.is_finite() => width.clamp(SIDEBAR_MIN, SIDEBAR_MAX),
             (navigation, _) => navigation.sidebar_width(),
         }
@@ -546,7 +549,7 @@ mod tests {
 
     #[test]
     fn sidebar_navigation_keeps_old_files_and_round_trips_both_densities() {
-        for (value, expected) in [("sidebar", Navigation::Sidebar), ("tabs", Navigation::Tabs), ("unknown", Navigation::Sidebar)] {
+        for (value, expected) in [("sidebar", Navigation::Sidebar), ("tabs", Navigation::Tabs), ("bottom_tabs", Navigation::BottomTabs), ("unknown", Navigation::Sidebar)] {
             let old: Appearance = serde_json::from_value(serde_json::json!({"navigation": value})).unwrap();
             assert_eq!((old.navigation, old.sidebar_compact), (expected, false));
         }
@@ -674,7 +677,7 @@ mod tests {
         assert_eq!(width(Navigation::Conversations, Some(330.)), 330.);
         assert_eq!((width(Navigation::Sidebar, Some(90.)), width(Navigation::Sidebar, Some(900.))), (SIDEBAR_MIN, SIDEBAR_MAX));
         assert_eq!(width(Navigation::Sidebar, Some(f32::NAN)), 284.);
-        assert_eq!(width(Navigation::Tabs, Some(330.)), 0.);
+        assert_eq!((width(Navigation::Tabs, Some(330.)), width(Navigation::BottomTabs, Some(330.))), (0., 0.));
         let custom = Appearance { sidebar_width: Some(330.), ..Appearance::default() };
         assert_eq!(custom.reset_keeping_choices().sidebar_width, Some(330.));
         // Arquivo de antes do campo continua abrindo.

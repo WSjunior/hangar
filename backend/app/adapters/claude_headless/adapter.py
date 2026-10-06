@@ -38,7 +38,7 @@ import uuid
 from pathlib import Path
 from typing import AsyncIterator, Callable, Optional
 
-from app import atomico, cotas, diag, log_paths, model_args, pensamento, runtime_config, rust_bins
+from app import atomico, cotas, diag, log_paths, model_args, pensamento, plugin_bridge, runtime_config, rust_bins
 from app.adapters.claude_headless import cano as cano_mod
 from app.adapters.claude_headless import sessions as hl_sessions
 from app.adapters.codex.adapter import _fmt_tok, _format_reset
@@ -979,6 +979,12 @@ class ClaudeHeadlessAdapter:
                 "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio",
                 "--setting-sources", "user,project,local"]
         base += ["--resume", sid] if resume else ["--session-id", sid]
+        # S7: sem terminal o Hangar é a superfície `desktop` dos mods, e o plugin dele entra para levar ao
+        # aparelho de quem clicou a URL que um mod abriria na máquina do servidor. Mesma regra da sessão
+        # com terminal (`claude.py`, `spawn_command`): volta vazia com os mods desligados ou num CLI que
+        # não aceita a flag, e aí o argv fica como era.
+        for raiz in plugin_bridge.raizes_dos_plugins():
+            base += ["--plugin-dir", raiz]
         if pensamento.ler():
             # Com `-p` a CLI ignora `showThinkingSummaries` e o bloco vem cifrado; só a flag
             # explícita traz o texto, no stream e no .jsonl.
@@ -1105,6 +1111,15 @@ class ClaudeHeadlessAdapter:
         meta = sess.meta
         transcript = self.transcript_path_de(meta)
         resume = Path(transcript).exists()
+        service_tier = meta.get("service_tier")
+        if service_tier is not None:
+            from app import cliproxy
+            if service_tier not in ("default", "priority"):
+                raise ValueError("service_tier: use default ou priority")
+            if not cliproxy.supports_fast(meta.get("engine"), sess.model):
+                if service_tier == "priority":
+                    raise ValueError("service_tier exige Claude com motor GPT no CLIProxyAPI local")
+                service_tier = None
         # Modo de permissão TAMBÉM no --resume: sem a flag a CLI volta ao defaultMode da conta
         # (medido: sessão "manual" reaberta após restart rodou Bash sem perguntar).
         if meta.get("engine_account"):
@@ -1131,6 +1146,8 @@ class ClaudeHeadlessAdapter:
                 pre += ["--model", sess.model]
                 if sess.context_window:
                     pre += ["--context", str(sess.context_window)]
+            if service_tier is not None:
+                pre += ["--service-tier", service_tier]
             argv = pre + ["--"] + argv
         env = dict(os.environ)
         # Backend subido de dentro de um tmux (dev) passaria o pane do OPERADOR pro processo, e
@@ -1140,7 +1157,15 @@ class ClaudeHeadlessAdapter:
         env.pop("CP_ENGINE_ACCOUNT", None)
         env.pop("CP_ENGINE_CREDENTIAL_ID", None)
         env.pop("CP_ENGINE_ACCOUNT_BASE_URL", None)
+        env.pop("CP_ENGINE_SERVICE_TIER", None)
         env["CP_SESSION_NAME"] = sess.name
+        # A ponte do plugin do Hangar desta sessão (S7). No `claude -p` ela serve só ao clique do app pela
+        # superfície `desktop` (`press-start` e `opened`, atendidos pelo hangar-server): o aviso e a cópia
+        # já chegam ao Hangar pelo canal da superfície. Com os mods desligados, volta vazio. A ponte que o
+        # backend herdou (subido de dentro de outra sessão) sai antes: o filho nunca leva a de outra sessão.
+        env.pop("HANGAR_PLUGIN_URL", None)
+        env.pop("HANGAR_PLUGIN_TOKEN", None)
+        env.update(plugin_bridge.env_da_sessao(sess.name))
         if not meta.get("key"):
             meta = sess.meta = hl_sessions.update(sess.name, key=uuid.uuid4().hex) or meta
         if meta.get("key"):

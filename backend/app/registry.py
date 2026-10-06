@@ -295,6 +295,19 @@ def _chave_trust(cwd: str, windows: bool = os.name == "nt") -> str:
     return cwd.replace("\\", "/") if windows else cwd
 
 
+def _claude_service_tier(engine: str | None, model: str | None, tier: str | None) -> str | None:
+    if tier is None:
+        return None
+    if tier not in ("default", "priority"):
+        raise ValueError("service_tier: use default ou priority")
+    from app import cliproxy
+    if cliproxy.supports_fast(engine, model):
+        return tier
+    if tier == "priority":
+        raise ValueError("service_tier exige Claude com motor GPT no CLIProxyAPI local")
+    return None
+
+
 def _env_sessao(modelo: str | None, jev: bool, provider: str = "claude",
                 nome: str | None = None) -> dict:
     env = runtime_config.env_jev(jev)
@@ -2107,7 +2120,9 @@ class SessionRegistry:
             if service_tier not in ("default", "priority"):
                 raise ValueError("service_tier: use default ou priority")
             if provider != "codex":
-                raise ValueError("service_tier só vale para provider codex")
+                from app import cliproxy
+                if provider != "claude" or not cliproxy.supports_fast(engine, model):
+                    raise ValueError("service_tier exige Codex ou Claude com motor GPT no CLIProxyAPI local")
         # Nome tmux nao aceita "."/":"/espaco -> sanitiza igual ao rename. Varias sessoes na MESMA
         # pasta sao permitidas: cada uma tem nome unico + --session-id proprio -> jsonl proprio.
         name = sanitize_session_name(name)
@@ -2169,7 +2184,8 @@ class SessionRegistry:
                                          effort, context_window, permission_mode, subagent_model,
                                          jev, engine_account,
                                          fixed_account["credential_id"] if fixed_account else None,
-                                         fixed_account["base_url"] if fixed_account else None)
+                                         fixed_account["base_url"] if fixed_account else None,
+                                         service_tier=service_tier)
         codex_home = None
         if provider == "codex":
             try:
@@ -2345,6 +2361,8 @@ class SessionRegistry:
                 pre += ["--model", model]
                 if context_window:
                     pre += ["--context", str(context_window)]
+            if service_tier is not None:
+                pre += ["--service-tier", service_tier]
             cmd = tmux.join_cmd(pre + ["--"]) + " " + cmd
         base = (Path(config_dir) / "projects") if config_dir else self.projects_dir
         # Pi tem layout PROPRIO (~/.pi/agent/sessions/<slug>/<ts>_<uuid>.jsonl) e o arquivo so nasce
@@ -2430,7 +2448,8 @@ class SessionRegistry:
                          permission_mode: str | None, subagent_model: str | None = None,
                          jev: bool = False, engine_account: str | None = None,
                          engine_credential_id: str | None = None,
-                         engine_account_base_url: str | None = None) -> SessionInfo:
+                         engine_account_base_url: str | None = None,
+                         service_tier: str | None = None) -> SessionInfo:
         """Sessão Claude SEM terminal: criar é gravar o sidecar. O processo `claude` sobe no
         primeiro prompt (e de novo, com --resume, depois de um restart do backend) — abrir a
         sessão não custa um processo, e nada aqui depende de tmux."""
@@ -2468,7 +2487,8 @@ class SessionRegistry:
                                       subagent_model=subagent_model, jev=jev,
                                       engine_account=engine_account,
                                       engine_credential_id=engine_credential_id,
-                                      engine_account_base_url=engine_account_base_url)
+                                      engine_account_base_url=engine_account_base_url,
+                                      service_tier=service_tier)
         ThenLink(name).clear()
         # Nome reusado não herda o par externo da sessão antiga.
         _encerrar_pares_externos(name)
@@ -2572,16 +2592,18 @@ class SessionRegistry:
 
     def wait_for_claude(self, name: str, meta: dict, timeout: float = 20.0) -> None:
         from app.terminal_input import _wait_input_ready
+        service_tier = _claude_service_tier(meta.get("engine"), meta.get("model"), meta.get("service_tier"))
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             procinfo._invalidar_children_map()
             pane = self._pane_of(name)
-            agent = _pid_do_agente((pane or {}).get("pid"))
-            if agent and procinfo.pid_vivo(agent):
+            provider, agent = agente_do_pane((pane or {}).get("pid"))
+            if provider == "claude" and agent and procinfo.pid_vivo(agent):
                 if _session_id_from_cmdline(_cmdline(agent)) == meta["session_id"]:
                     expected_config = Path(meta.get("config_dir") or Path.home() / ".claude").resolve()
                     actual_config = Path(_config_dir_of(agent) or Path.home() / ".claude").resolve()
                     if (_engine_of(agent) != meta.get("engine") or actual_config != expected_config
+                            or procinfo._env_var_of(agent, "CP_ENGINE_SERVICE_TIER") != service_tier
                             or procinfo._env_var_of(agent, "CP_ENGINE_ACCOUNT") != meta.get("engine_account")
                             or (meta.get("engine_account") and procinfo._env_var_of(agent, "CP_ENGINE_CREDENTIAL_ID")
                                 != meta.get("engine_credential_id"))
@@ -2604,15 +2626,23 @@ class SessionRegistry:
         uuid.UUID(sid)
         # Modo de permissão vai junto: sem a flag a TUI nasce no defaultMode da conta.
         model = meta.get("model")
+        if model and not meta.get("engine"):
+            from app import default_model
+            # Na conta Anthropic, id de motor herdado do processo antigo derruba cada turno.
+            if not default_model.anthropic(model):
+                model_args.validar("claude", model, None)  # valor malformado continua recusado
+                _log.warning("modelo %r não é da Anthropic; sessão relançada no padrão da conta", model)
+                model = None
         if meta.get("engine_account"):
             from app import cliproxy, engines
             binding = cliproxy.engine_env(meta["engine"], model, meta.get("context_window"), meta["engine_account"],
                                           home=(meta.get("engine_credential_id") or "").removeprefix("codex:"),
                                           expected_base=meta.get("engine_account_base_url"), models=engine_models)
             model = binding["ANTHROPIC_MODEL"]
-        cmd = tmux.join_cmd(["claude", "--resume" if resume else "--session-id", sid]
-                            + model_args.args_de("claude", model, meta.get("effort"),
-                                                 meta.get("permission_mode")))
+        service_tier = _claude_service_tier(meta.get("engine"), model, meta.get("service_tier"))
+        argv = ["claude", "--resume" if resume else "--session-id", sid] + model_args.args_de(
+            "claude", model, meta.get("effort"), meta.get("permission_mode"))
+        cmd = tmux.join_cmd(argv)
         if meta.get("engine"):
             from app import engines
             if meta["engine"] not in engines.listar():
@@ -2627,6 +2657,11 @@ class SessionRegistry:
                 pre += ["--model", model]
                 if meta.get("context_window"):
                     pre += ["--context", str(meta["context_window"])]
+            if service_tier is not None:
+                # O lançador e o pré-voo leem as mesmas fontes antes de encerrar a origem.
+                env = {**os.environ, "CLAUDE_CONFIG_DIR": meta.get("config_dir") or str(Path.home() / ".claude")}
+                engines.service_tier_settings(argv, env, service_tier, cwd=meta["cwd"])
+                pre += ["--service-tier", service_tier]
             cmd = tmux.join_cmd(pre + ["--"]) + " " + cmd
         return cmd
 
@@ -2653,6 +2688,7 @@ class SessionRegistry:
         engine_account = procinfo._env_var_of(ag, "CP_ENGINE_ACCOUNT") if ag and motor else None
         engine_credential_id = procinfo._env_var_of(ag, "CP_ENGINE_CREDENTIAL_ID") if engine_account else None
         engine_account_base_url = procinfo._env_var_of(ag, "CP_ENGINE_ACCOUNT_BASE_URL") if engine_account else None
+        service_tier = procinfo._env_var_of(ag, "CP_ENGINE_SERVICE_TIER") if ag and motor else None
         modelo, esforco = procinfo._model_of(ag) if ag else (None, None)
         janela = procinfo._env_var_of(ag, "CLAUDE_CODE_MAX_CONTEXT_TOKENS") if ag else None
         # Com motor a variável é do motor (engines.env_de); sem motor veio do `-e` da criação.
@@ -2664,7 +2700,12 @@ class SessionRegistry:
                 if engine_account:
                     raise ValueError("motor da conta ChatGPT fixa indisponível")
                 # Mesmo fallback do resume(): escolha de motor apagado não vale na conta Anthropic.
-                motor = modelo = esforco = janela = None
+                motor = modelo = esforco = janela = service_tier = None
+            else:
+                # /model não altera argv; retomar o modelo do boot desfaria a escolha em uso.
+                live_model, live_effort = _escolhas_status(sid)
+                modelo = live_model or modelo
+                esforco = _esforco_de_abertura(live_effort) or esforco
         else:
             # O cmdline só sabe o modelo do boot; `/model` na TUI, ou sessão aberta sem `--model`,
             # só aparecem no que a statusline recebeu. Com `[1m]` no id, a janela vai junto.
@@ -2676,6 +2717,10 @@ class SessionRegistry:
                                           home=(engine_credential_id or "").removeprefix("codex:"),
                                           expected_base=engine_account_base_url)
             modelo = binding["ANTHROPIC_MODEL"]
+        if not for_account_move:
+            service_tier = _claude_service_tier(motor, modelo, service_tier)
+        elif service_tier not in (None, "default", "priority"):
+            raise ValueError("service_tier: use default ou priority")
         model_args.validar("claude", modelo, esforco, permission_mode)
         if transfer_meta and (sid != transfer_meta["session_id"] or cwd != transfer_meta["cwd"]
                               or pid != transfer_meta.get("pane_pid")):
@@ -2697,6 +2742,7 @@ class SessionRegistry:
                                           engine_account=engine_account,
                                           engine_credential_id=engine_credential_id,
                                           engine_account_base_url=engine_account_base_url,
+                                          service_tier=service_tier,
                                           context_window=int(janela) if janela and janela.isdigit() else None,
                                           permission_mode=permission_mode, subagent_model=subagente,
                                           jev=jev,
@@ -2709,7 +2755,7 @@ class SessionRegistry:
             meta = {"name": name, "cwd": cwd, "session_id": sid, "config_dir": str(cdir) if cdir else None,
                     "engine": motor, "model": modelo, "effort": esforco, "permission_mode": permission_mode,
                     "engine_account": engine_account, "engine_credential_id": engine_credential_id,
-                    "engine_account_base_url": engine_account_base_url}
+                    "engine_account_base_url": engine_account_base_url, "service_tier": service_tier}
             if not tmux.new_session(name, cwd, self._comando_terminal(meta, resume=Path(jsonl).exists()),
                                     meta["config_dir"], provider="claude",
                                     **_env_sessao(subagente, jev)):
@@ -3219,6 +3265,7 @@ class SessionRegistry:
         engine_account = procinfo._env_var_of(ag, "CP_ENGINE_ACCOUNT") if ag and motor else None
         engine_credential_id = procinfo._env_var_of(ag, "CP_ENGINE_CREDENTIAL_ID") if engine_account else None
         engine_account_base_url = procinfo._env_var_of(ag, "CP_ENGINE_ACCOUNT_BASE_URL") if engine_account else None
+        service_tier = procinfo._env_var_of(ag, "CP_ENGINE_SERVICE_TIER") if ag and motor else None
         motor_sumiu = False
         if motor:
             from app import engines
@@ -3247,7 +3294,14 @@ class SessionRegistry:
                                           expected_base=engine_account_base_url)
             modelo = binding["ANTHROPIC_MODEL"]
         if motor_sumiu:
-            modelo = esforco = janela = None
+            modelo = esforco = janela = service_tier = None
+        if modelo and not motor:
+            from app import default_model
+            if not default_model.anthropic(modelo):
+                model_args.validar("claude", modelo, None)  # malformado: recusa antes do kill
+                _log.warning("resume %s: modelo %r não é da Anthropic; volta no padrão da conta", name, modelo)
+                modelo = None
+        service_tier = _claude_service_tier(motor, modelo, service_tier)
         # Sem motor, a variável veio do `-e` da criação e sumiria no relançamento; com motor, é dele.
         subagente = (procinfo._env_var_of(ag, "CLAUDE_CODE_SUBAGENT_MODEL")
                      if ag and not motor and not motor_sumiu else None)
@@ -3264,8 +3318,8 @@ class SessionRegistry:
         # anexa ao nome. Nada aqui toca o tmux.
         # "claude" literal: esta funcao ja recusa provider nao-Claude acima
         # (_refuse_non_claude_resume), e nao ha variavel `provider` neste escopo.
-        cmd = tmux.join_cmd(["claude", "--resume", session_id]
-                         + model_args.args_de("claude", modelo, esforco))
+        argv = ["claude", "--resume", session_id] + model_args.args_de("claude", modelo, esforco)
+        cmd = tmux.join_cmd(argv)
         if motor:
             # Prefixo remontado JUNTO com a escolha: preservar so a flag deixaria a sessao
             # ressuscitada com a flag num modelo e o AMBIENTE noutro (as cinco chaves ANTHROPIC_*,
@@ -3283,12 +3337,23 @@ class SessionRegistry:
                 pre += ["--model", modelo]
                 if janela:
                     pre += ["--context", janela]
+            if service_tier is not None:
+                env = {**os.environ, "CLAUDE_CONFIG_DIR": str(cdir or Path.home() / ".claude")}
+                engines.service_tier_settings(argv, env, service_tier, cwd=cwd)
+                pre += ["--service-tier", service_tier]
             cmd = tmux.join_cmd(pre + ["--"]) + " " + cmd
         tmux.kill_session(name)
         self._forget(name)
         env_pane = _env_sessao(subagente, jev)
         if not tmux.new_session(name, cwd, cmd, str(cdir) if cdir else None, **env_pane):
             raise ValueError("falha ao relançar a sessao")
+        if service_tier is not None:
+            self.wait_for_claude(name, {
+                "session_id": session_id, "config_dir": str(cdir) if cdir else None,
+                "engine": motor, "model": modelo, "service_tier": service_tier,
+                "engine_account": engine_account, "engine_credential_id": engine_credential_id,
+                "engine_account_base_url": engine_account_base_url,
+            })
         # Fixa o transcript resumido no cache: resolve() ja o devolveria (o --resume esta no cmdline),
         # mas semear evita a janela onde o pane ainda esta subindo e cairia no fallback por mtime.
         self._jsonl_cache[name] = str(jsonl)
