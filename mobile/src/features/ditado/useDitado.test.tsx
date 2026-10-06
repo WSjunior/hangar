@@ -526,6 +526,17 @@ describe('useDitado — interrupção e origem da gravação', () => {
     expect(onErroParada).toHaveBeenCalledWith(erro);
     expect(removeStatusListener).toHaveBeenCalledTimes(1);
   });
+
+  it('desmontar gravando (troca de conversa) para e entrega o áudio ao onFim de quem gravou', async () => {
+    const onFim = vi.fn();
+    const h = mountHook({ onFim });
+    await h.mount({ onFim });
+    await act(async () => { await h.getHook().iniciar(); });
+    await h.unmount();
+    await act(async () => { await vi.runAllTimersAsync(); });
+    expect(onFim).toHaveBeenCalledTimes(1);
+    expect(onFim.mock.calls[0][1]).toBe('escondeu');
+  });
 });
 
 describe('useDitado — VAD e teto', () => {

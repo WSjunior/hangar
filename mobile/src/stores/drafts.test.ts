@@ -4,6 +4,7 @@ import {
   clearDraft, clearRecoverableDraft, readDraft, readRecoverableDraft, resolveDraftTranscript, reusableUploadPath, withoutUpload,
   writeDraft, writeRecoverableDraft,
   readDictation, writeDictation, clearDictation, finishDictation, recoverDictation, associateDictationTranscript,
+  setDictationInFlight, applyReadyDictation,
 } from './drafts';
 import type { ConversationDraft, DraftAttachment, DictationDraft } from './drafts';
 
@@ -266,6 +267,47 @@ describe('ditado conservado na origem', () => {
     expect(reopened.readDictation('linux', 'sessao')).toMatchObject({ audio, status: 'failed' });
     expect(reopened.readDictation('windows', 'sessao')).toBeNull();
     expect(reopened.readDictation('linux', 'outra')).toBeNull();
+  });
+
+  it('POST vivo neste processo continua pendente; sem ele, reabrir oferece repetir', () => {
+    writeDictation('linux', 'sessao', voice());
+    setDictationInFlight('linux', 'sessao', 'recording-1', true);
+    expect(readDictation('linux', 'sessao')?.status).toBe('pending');
+    setDictationInFlight('linux', 'sessao', 'recording-1', false);
+    expect(readDictation('linux', 'sessao')?.status).toBe('failed');
+  });
+
+  it('ditado pronto com rascunho intacto entra no fim, separado por espaço, e sai do armazenamento', () => {
+    writeDraft('linux', 'sessao', draft());
+    writeDictation('linux', 'sessao', voice({ status: 'ready', text: 'Ditado limpo', raw: 'cru' }));
+    const result = applyReadyDictation('linux', 'sessao', '/sessions/original.jsonl');
+    expect(result?.draft).toMatchObject({ text: 'Mensagem atual Ditado limpo', revision: 4, dictationId: 'recording-1' });
+    expect(readDictation('linux', 'sessao')).toBeNull();
+  });
+
+  it.each([
+    ['rascunho editado', draft({ text: 'Outro', revision: 4 }), '/sessions/original.jsonl'],
+    ['sessão recriada', draft(), '/sessions/new.jsonl'],
+    ['jsonl ainda desconhecido', draft(), null],
+  ])('%s não insere sozinho e mantém o ditado pronto', (_reason, current, transcript) => {
+    writeDraft('linux', 'sessao', current);
+    writeDictation('linux', 'sessao', voice({ status: 'ready', text: 'Ditado' }));
+    expect(applyReadyDictation('linux', 'sessao', transcript)).toBeNull();
+    expect(readDraft('linux', 'sessao')).toEqual(current);
+    expect(readDictation('linux', 'sessao')?.status).toBe('ready');
+  });
+
+  it('ditado novo não grava por cima de um POST vivo da mesma conversa', () => {
+    writeDictation('linux', 'sessao', voice());
+    setDictationInFlight('linux', 'sessao', 'recording-1', true);
+    expect(() => writeDictation('linux', 'sessao', voice({ id: 'recording-2' }))).toThrow();
+    expect(readDictation('linux', 'sessao')?.id).toBe('recording-1');
+    // O próprio POST continua podendo atualizar o seu registro.
+    writeDictation('linux', 'sessao', voice({ serverPath: '/up/sess/ditado-1.m4a' }));
+    expect(readDictation('linux', 'sessao')?.serverPath).toBe('/up/sess/ditado-1.m4a');
+    setDictationInFlight('linux', 'sessao', 'recording-1', false);
+    writeDictation('linux', 'sessao', voice({ id: 'recording-2' }));
+    expect(readDictation('linux', 'sessao')?.id).toBe('recording-2');
   });
 
   it('resposta no contexto original insere texto preservando anexo e snapshot', () => {
