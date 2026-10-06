@@ -41,8 +41,8 @@
 <style>
   .field { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 1ch; min-width: 0; }
   .label { white-space: nowrap; }
-  input { font: inherit; color: inherit; background: var(--surface-raised); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0 0.5ch; min-width: 12ch; flex: 1 1 16ch; }
+  input { font: inherit; color: inherit; background: var(--surface-raised); border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: 0 0.5ch; min-width: 12ch; flex: 1 1 16ch; }
   input:disabled { opacity: 0.6; }
   .submit { font: inherit; color: var(--accent); background: transparent; border: 0; padding: 0; cursor: pointer; min-height: 0; min-width: 0; }
-  .hint { color: var(--text-muted); font-family: var(--font-sans); }
+  .hint { color: var(--text-muted); font-family: var(--font-ui); }
 </style>

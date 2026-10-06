@@ -1,5 +1,28 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { boxStyle, buttonStyle, fillsPlace } from './pluginUiStyle';
+
+describe('tokens do tema nos estilos dos mods', () => {
+  // `var()` de um token que o tema não define vira o valor inicial: a borda some (`border-style: none`), a cor
+  // volta à herdada. Por isso os estilos dos mods só usam token declarado no app.css ou no próprio arquivo.
+  const ler = (caminho: string) => readFileSync(new URL(caminho, import.meta.url), 'utf8');
+  const declarados = (texto: string) => new Set([...texto.matchAll(/(--[\w-]+)\s*:/g)].map((m) => m[1]));
+  const usados = (texto: string) => [...texto.matchAll(/var\(\s*(--[\w-]+)/g)].map((m) => m[1]);
+  const tema = declarados(ler('../app.css'));
+  const arquivos = ['./pluginUiStyle.ts', '../components/PluginNode.svelte', '../components/PluginInput.svelte',
+    '../components/PluginBand.svelte', '../components/PluginPane.svelte'];
+
+  it.each(arquivos)('%s só usa tokens definidos', (arquivo) => {
+    const texto = ler(arquivo);
+    const proprios = declarados(texto);
+    expect(usados(texto).filter((t) => !tema.has(t) && !proprios.has(t))).toEqual([]);
+  });
+
+  it('Box com borda e sem borderColor usa a borda do tema', () => {
+    expect(boxStyle({ borderStyle: 'round' })).toContain('border:1px solid var(--border-default)');
+    expect(boxStyle({ borderStyle: 'single', borderColor: '#5aa6ff' })).toContain('border:1px solid #5aa6ff');
+  });
+});
 
 describe('largura em colunas', () => {
   it('width que alcança a largura do lugar ocupa o lugar inteiro', () => {
