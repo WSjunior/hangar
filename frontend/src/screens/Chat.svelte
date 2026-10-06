@@ -12,7 +12,7 @@
   import { openInNewTab } from '../lib/openTab';
   import { desktop as janela } from '../lib/desktop.svelte';
   import { itemModsCelular, modsCelular, modsNaTela } from '../lib/modsCelular.svelte';
-  import { activePaneId, fieldSender, followLocalTab, inputPluginField, isMissingRoute, parsePluginToast, parsePluginUi, pressPluginButton, safeHref, showPluginPane, tabFollowsServer, type PluginInputKind, type PluginSource, type PluginNode as PluginTree, type PluginPane as PluginPaneData, type PluginToast } from '@hangar/core';
+  import { activePaneId, fieldSender, followLocalTab, inputPluginField, isMissingRoute, isPluginServerFailure, parsePluginToast, parsePluginUi, pressPluginButton, safeHref, showPluginPane, tabFollowsServer, type PluginInputKind, type PluginSource, type PluginNode as PluginTree, type PluginPane as PluginPaneData, type PluginToast } from '@hangar/core';
   import SessionSwitcherSheet from '../components/SessionSwitcherSheet.svelte';
   import CreateSessionSheet from '../components/CreateSessionSheet.svelte';
   import UsageSheet from '../components/UsageSheet.svelte';
@@ -554,7 +554,9 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     if (!sender) {
       sender = fieldSender(
         (k, v) => inputPluginField(sessionName, site, key, k, v, sessionServer()),
-        (err) => showPluginNotice(err instanceof Error ? err.message : String(err), true),
+        // Sem resposta ou 5xx, a frase do app; com a recusa (4xx), o motivo que o servidor mandou.
+        (err) => showPluginNotice(isPluginServerFailure(err) ? m.plugin_input_falhou()
+          : err instanceof Error ? err.message : String(err), true),
       );
       pluginFieldSenders.set(id, sender);
     }

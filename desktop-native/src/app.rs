@@ -355,6 +355,10 @@ enum Changed { Nothing, Screen, Rows, Tail, Bottom }
 /// Tipo das notificações que espelham aviso de mod; a chave de cada uma é o id do aviso.
 struct PluginToast;
 
+/// Tipo fixo do aviso de falha na digitação ou na troca de aba de um mod: um aviso novo substitui o anterior, e uma
+/// sequência de teclas que falham não empilha um aviso por tecla.
+struct PluginFailure;
+
 // Formulário da pergunta atual; refeito quando a pergunta (identidade + conteúdo) muda.
 #[derive(Default)]
 struct AskForm { fingerprint: String, picks: Vec<Pick>, typing: Vec<bool>, inputs: Vec<Entity<InputState>>, _changes: Vec<Subscription>, tab: usize }
@@ -962,6 +966,12 @@ impl Hangar {
     /// e a frase de reenviar enganaria.
     fn press_failure(error: &Failure) -> String {
         if error.status.is_none_or(|status| status >= 500) { tr("plugin_press_failed") } else { Self::failure(error) }
+    }
+
+    /// Digitação num campo de mod que não chegou: sem resposta ou 5xx, a frase do app (a mesma do web); a recusa (4xx)
+    /// diz o motivo dela.
+    fn input_failure(error: &Failure) -> String {
+        if error.status.is_none_or(|status| status >= 500) { tr_shared("plugin_input_falhou", &[]) } else { Self::failure(error) }
     }
 
     /// Troca de aba recusada. Servidor sem a rota (404 ou 405) é servidor antigo, não erro: a troca local já valeu.
@@ -1627,12 +1637,14 @@ impl Hangar {
             Payload::PluginPressed(result) => { self.receive_plugin_press(result, window, cx); return; }
             Payload::PluginShown(result) => {
                 if let Some(text) = result.err().and_then(|error| Self::show_failure(&error)) {
-                    window.push_notification(Notification::warning(text), cx);
+                    window.push_notification(Notification::warning(text).id::<PluginFailure>(), cx);
                 }
                 return;
             }
             Payload::PluginInput(site, key, field, result) => {
-                if let Err(error) = result { window.push_notification(Notification::warning(Self::press_failure(&error)), cx); }
+                if let Err(error) = result {
+                    window.push_notification(Notification::warning(Self::input_failure(&error)).id::<PluginFailure>(), cx);
+                }
                 // O próximo da fila só sai pelo mesmo campo: um campo recriado com a mesma `key` tem fila própria.
                 let next = self.plugin_fields.get_mut(&crate::plugin_ui::field_id(&site, &key))
                     .filter(|f| f.state.entity_id() == field).and_then(|f| f.outbox.done());
@@ -6268,6 +6280,18 @@ mod tests {
         assert_eq!(Hangar::show_failure(&failure(Some(405))), None);
         assert_eq!(Hangar::show_failure(&failure(Some(409))), Some(Hangar::failure(&failure(Some(409)))));
         assert_eq!(Hangar::show_failure(&failure(None)), Some(tr("plugin_press_failed")));
+    }
+
+    #[test]
+    fn mod_field_failure_without_an_answer_or_with_5xx_is_the_app_phrase() {
+        use super::{Failure, Hangar};
+        use crate::i18n::tr_shared;
+        let failure = |status| Failure { status, detail: "x".into(), retry_after: None, uncertain: true };
+        assert_eq!(Hangar::input_failure(&failure(None)), tr_shared("plugin_input_falhou", &[]));
+        assert_eq!(Hangar::input_failure(&failure(Some(502))), tr_shared("plugin_input_falhou", &[]));
+        // A recusa traz o motivo, como no clique.
+        assert_eq!(Hangar::input_failure(&failure(Some(409))), Hangar::failure(&failure(Some(409))));
+        assert_ne!(tr_shared("plugin_input_falhou", &[]), "plugin_input_falhou");
     }
 
     #[test]

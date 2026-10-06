@@ -198,6 +198,13 @@ export function isMissingRoute(err: unknown): boolean {
   return status === 404 || status === 405;
 }
 
+/** Falha numa rota de mod sem resposta (rede, tempo esgotado) ou com 5xx: o texto cru do erro não diz nada a quem
+ *  digitou, e o app mostra a frase dele. Com 4xx (o 409 da recusa) o servidor manda o motivo, que é o que se mostra. */
+export function isPluginServerFailure(err: unknown): boolean {
+  const status = err && typeof err === 'object' ? (err as { status?: unknown }).status : undefined;
+  return typeof status !== 'number' || status >= 500;
+}
+
 /** Aviso (`$.ui.toast`) que um mod mostrou no terminal; `plugin` é o mod que o emitiu. */
 export interface PluginToast {
   id: string;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { activePaneId, buttonKey, followLocalTab, hoverProps, inputKey, isHoverScope, isMissingRoute, tabFollowsServer, decodeRaster, inkColor, isEmptyBand, parsePluginToast, parsePluginUi, textOf, type PluginElement } from './pluginUi';
+import { activePaneId, buttonKey, followLocalTab, hoverProps, inputKey, isHoverScope, isMissingRoute, isPluginServerFailure, tabFollowsServer, decodeRaster, inkColor, isEmptyBand, parsePluginToast, parsePluginUi, textOf, type PluginElement } from './pluginUi';
 import amostras from './__fixtures__/plugin-ui-arvores.json';
 
 function cells(words: number[]): string {
@@ -178,6 +178,16 @@ describe('rota ausente', () => {
     expect(isMissingRoute(Object.assign(new Error('x'), { status: 409, code: 'erro_mod_dialogo_aberto' }))).toBe(false);
     expect(isMissingRoute(new Error('rede'))).toBe(false);
     expect(isMissingRoute(null)).toBe(false);
+  });
+});
+
+describe('falha de servidor numa rota de mod', () => {
+  it('sem status ou 5xx é falha do servidor ou da rede; 4xx traz o motivo da recusa', () => {
+    expect(isPluginServerFailure(new Error('rede'))).toBe(true);
+    expect(isPluginServerFailure(Object.assign(new Error('x'), { status: 500 }))).toBe(true);
+    expect(isPluginServerFailure(Object.assign(new Error('x'), { status: 503 }))).toBe(true);
+    expect(isPluginServerFailure(Object.assign(new Error('409: frase'), { status: 409 }))).toBe(false);
+    expect(isPluginServerFailure(Object.assign(new Error('x'), { status: 404 }))).toBe(false);
   });
 });
 
