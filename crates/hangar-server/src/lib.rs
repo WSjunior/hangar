@@ -67,6 +67,7 @@ pub async fn serve_until_with_state(
         let port = private.local_addr()?.port();
         let registry = std::sync::Arc::new(runtime::gateway::RuntimeRegistry::new(cfg.upstream,
             cfg.internal_secret.clone(),instance.clone()));
+        state.list.set_runtime(registry.clone());
         println!("{}",runtime::gateway::startup_line(INTERNAL_PROTOCOL,&instance,port));
         let gateway = runtime::gateway::serve(private,registry.clone(),cfg.internal_secret.clone(),instance,INTERNAL_PROTOCOL);
         let result = tokio::select! {
