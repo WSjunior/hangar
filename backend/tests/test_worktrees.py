@@ -323,7 +323,7 @@ def test_status_merged_by_ancestor(tmp_path):
     assert worktrees.status(wt)["merged"] is True
 
 
-def test_merged_when_upstream_gone(tmp_path):
+def test_deleted_upstream_does_not_prove_merge(tmp_path):
     remote = _repo(tmp_path / "remote")
     git_ops._run(remote, "branch", "x")
     main = str(tmp_path / "clone")
@@ -331,12 +331,12 @@ def test_merged_when_upstream_gone(tmp_path):
     git_ops._run(main, "config", "user.email", "t@t")
     git_ops._run(main, "config", "user.name", "t")
     git_ops._run(main, "switch", "-q", "x")
-    _commit(tmp_path / "clone", "a.txt")            # squash do servidor: não é ancestral
+    _commit(tmp_path / "clone", "a.txt")            # A alteração nunca entrou na base.
     git_ops._run(main, "switch", "-q", "main")
     assert worktrees.is_merged(main, "x", "main") is False
     git_ops._run(remote, "branch", "-D", "x")
     git_ops._run(main, "fetch", "-q", "--prune")
-    assert worktrees.is_merged(main, "x", "main") is True
+    assert worktrees.is_merged(main, "x", "main") is False
 
 
 def test_status_missing_folder(tmp_path):
@@ -470,19 +470,17 @@ def test_status_survives_git_timeout(tmp_path, monkeypatch):
     assert st["dirty"] == 0 and st["degraded"] is True and st["merged"] is False
 
 
-def test_upstream_timeout_is_not_merged(tmp_path, monkeypatch):
+def test_merge_check_timeout_is_not_merged(tmp_path, monkeypatch):
     main = _repo(tmp_path / "repo")
     wt = _wt(main, tmp_path / "repo-x", "x")
     _commit(tmp_path / "repo-x", "a.txt")
-    # Branch que já teve upstream e ele não existe mais: a regra do squash lê como mesclada.
-    git_ops._run(wt, "config", "branch.x.remote", "origin")
-    git_ops._run(wt, "config", "branch.x.merge", "refs/heads/x")
+    git_ops._run(main, "merge", "--no-ff", "-m", "Integração", "x")
     st = worktrees.status(wt)
     assert st["merged"] is True and st["degraded"] is False
     real_run = worktrees._run
 
     def slow(cwd, *args, **kw):
-        if args[:2] == ("rev-parse", "--abbrev-ref"):
+        if args[:2] == ("merge-base", "--is-ancestor"):
             raise git_ops.GitError(504, "git timeout")
         return real_run(cwd, *args, **kw)
     monkeypatch.setattr(worktrees, "_run", slow)
