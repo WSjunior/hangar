@@ -6,8 +6,8 @@ use std::sync::{Arc,Mutex,atomic::AtomicU64};
 use std::time::Duration;
 use tokio::sync::{broadcast,Notify};
 
-struct Io { calls:Mutex<Vec<CommandRequest>>, text:Mutex<String>, gate:Notify, blocked:std::sync::atomic::AtomicBool, fail_write:std::sync::atomic::AtomicBool, fail_enter:std::sync::atomic::AtomicBool, rotate_enter:std::sync::atomic::AtomicBool, conversation:Arc<Mutex<String>>, socket_calls:Mutex<Vec<Vec<u8>>>, ghost:Mutex<String>, hold_capture:std::sync::atomic::AtomicBool, mods_screen:Mutex<Option<String>> }
-impl Io { fn new()->Self { Self { calls:Mutex::new(vec![]),text:Mutex::new(String::new()),gate:Notify::new(),blocked:std::sync::atomic::AtomicBool::new(false),fail_write:std::sync::atomic::AtomicBool::new(false),fail_enter:std::sync::atomic::AtomicBool::new(false),rotate_enter:std::sync::atomic::AtomicBool::new(false),conversation:Arc::new(Mutex::new("sid".into())),socket_calls:Mutex::new(vec![]),ghost:Mutex::new(String::new()),hold_capture:std::sync::atomic::AtomicBool::new(false),mods_screen:Mutex::new(None) } } }
+struct Io { calls:Mutex<Vec<CommandRequest>>, text:Mutex<String>, gate:Notify, blocked:std::sync::atomic::AtomicBool, fail_write:std::sync::atomic::AtomicBool, fail_enter:std::sync::atomic::AtomicBool, rotate_enter:std::sync::atomic::AtomicBool, conversation:Arc<Mutex<String>>, socket_calls:Mutex<Vec<Vec<u8>>>, ghost:Mutex<String>, hold_capture:std::sync::atomic::AtomicBool, mods_screen:Mutex<Option<String>>, ring_keys:std::sync::atomic::AtomicUsize, ring_returns:std::sync::atomic::AtomicBool }
+impl Io { fn new()->Self { Self { calls:Mutex::new(vec![]),text:Mutex::new(String::new()),gate:Notify::new(),blocked:std::sync::atomic::AtomicBool::new(false),fail_write:std::sync::atomic::AtomicBool::new(false),fail_enter:std::sync::atomic::AtomicBool::new(false),rotate_enter:std::sync::atomic::AtomicBool::new(false),conversation:Arc::new(Mutex::new("sid".into())),socket_calls:Mutex::new(vec![]),ghost:Mutex::new(String::new()),hold_capture:std::sync::atomic::AtomicBool::new(false),mods_screen:Mutex::new(None),ring_keys:Default::default(),ring_returns:Default::default() } } }
 impl TerminalIo for Io {
     fn command<'a>(&'a self,r:CommandRequest)->IoFuture<'a,CommandOutput> { Box::pin(async move {
         let cmd=r.args[0].clone();
@@ -21,6 +21,12 @@ impl TerminalIo for Io {
             "capture-pane"=>{let text=self.text.lock().unwrap().clone();let ghost=self.ghost.lock().unwrap().clone();
                 // O fantasma é rascunho que o Ctrl+S não guarda: o composer fica ocupado.
                 format!("────────────────────────────────\n❯ {}\n────────────────────────────────\n",if text.is_empty(){ghost}else{text}).into_bytes()},
+            // O `ctrl+x tab` da devolução do foco: com `ring_returns`, o foco volta ao prompt.
+            "send-keys" if r.args.iter().any(|a|a=="C-x")=>{
+                self.ring_keys.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+                if self.ring_returns.load(std::sync::atomic::Ordering::Acquire) {*self.mods_screen.lock().unwrap()=None;}
+                vec![]
+            },
             "send-keys"=>{
                 if self.blocked.load(std::sync::atomic::Ordering::Acquire) { self.gate.notified().await; }
                 let text=r.args.last().unwrap();
@@ -81,9 +87,12 @@ impl Fixture {
         self.start_full(events,Duration::from_secs(30))
     }
     fn start_full(&self,events:broadcast::Sender<hangar_server::runtime::protocol::RuntimeEvent>,stall_notice:Duration)->hangar_server::runtime::terminal::TerminalHandle {
+        self.start_returning(events,stall_notice,TerminalOptions::default().focus_return)
+    }
+    fn start_returning(&self,events:broadcast::Sender<hangar_server::runtime::protocol::RuntimeEvent>,stall_notice:Duration,focus_return:Duration)->hangar_server::runtime::terminal::TerminalHandle {
         let lease=queue::acquire_lease(&self.target.lease_path).unwrap();
         let store=Store::open(&self.target.state_path,&self.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
-        let options=TerminalOptions {io:self.io.clone(),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_millis(15),stall_notice,..TerminalOptions::default()};
+        let options=TerminalOptions {io:self.io.clone(),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_millis(15),stall_notice,focus_return,..TerminalOptions::default()};
         TerminalActor::spawn(self.target.clone(),QueueActor::start(store,lease),self.policy.clone(),options,events,Arc::new(AtomicU64::new(0)))
     }
     fn command(&self,id:&str,text:&str)->RuntimeCommand { RuntimeCommand {operation_id:id.into(),kind:OperationKind::Input,payload:json!({"text":text,"pre_transcript":false})} }
@@ -966,5 +975,62 @@ async fn within_a_mods_hold_the_pane_is_checked_once() {
     assert!(matches!(h.pane(PaneOp::Screen,far()).await.unwrap(),PaneReply::Screen(_)));
     assert!(matches!(h.pane(PaneOp::Screen,far()).await.unwrap(),PaneReply::Screen(_)));
     assert_eq!(checks()-before,3,"fora da reserva, cada operação confere");
+    h.stop().await.unwrap();
+}
+
+/// Com o foco devolvido pelo `ctrl+x tab`, a entrada parada pelo foco num mod sai depois de `focus_return`.
+async fn focus_left_on_a_mod_is_returned(screen:String,anchor:Option<&str>) {
+    let f=Fixture::new().await; *f.io.mods_screen.lock().unwrap()=Some(screen);
+    f.io.ring_returns.store(true,std::sync::atomic::Ordering::Release);
+    let h=f.start_returning(broadcast::channel(128).0,Duration::from_secs(30),Duration::from_millis(300));
+    *h.anchor().lock().unwrap()=anchor.map(str::to_owned);
+    let started=std::time::Instant::now();
+    let reply=h.command(f.command("preso","Foco esquecido no mod")).await.unwrap();
+    assert_eq!(reply.payload["code"],"mods_focus");
+    f.wait_for("entrega depois da devolução do foco",||!typed_at(&f,"Foco esquecido no mod").is_empty()).await;
+    assert!(started.elapsed()>=Duration::from_millis(300),"a entrada esperou o prazo antes de mexer no foco");
+    assert!(f.io.ring_keys.load(std::sync::atomic::Ordering::SeqCst)>=1,"o foco voltou pelo ctrl+x tab");
+    h.stop().await.unwrap();
+    assert_eq!(typed_at(&f,"Foco esquecido no mod").len(),1);
+}
+
+/// A pessoa levou o foco à faixa no terminal e saiu: a mensagem do app não fica parada para sempre.
+#[tokio::test]
+async fn the_users_own_focus_on_the_band_does_not_hold_the_queue_forever() {
+    focus_left_on_a_mod_is_returned(full_band_focus_screen(),Some("Revisão do MR")).await;
+}
+
+/// A limpeza de um clique desistiu com o teclado num painel e a reserva venceu sozinha: a mensagem guardada
+/// durante o clique não fica presa.
+#[tokio::test]
+async fn a_cleanup_that_gave_up_does_not_leave_the_message_stuck() {
+    let f=Fixture::new().await; *f.io.mods_screen.lock().unwrap()=Some(pane_focus_screen());
+    f.io.ring_returns.store(true,std::sync::atomic::Ordering::Release);
+    let h=f.start_returning(broadcast::channel(128).0,Duration::from_secs(30),Duration::from_millis(300));
+    assert_eq!(h.pane(PaneOp::Hold{millis:200},far()).await.unwrap(),PaneReply::Done);
+    let parked={let h=h.clone();let command=f.command("guardada","Guardada no clique");tokio::spawn(async move {h.command(command).await})};
+    f.wait_for("entrega depois da reserva e da devolução",||!typed_at(&f,"Guardada no clique").is_empty()).await;
+    parked.await.unwrap().unwrap();
+    assert!(f.io.ring_keys.load(std::sync::atomic::Ordering::SeqCst)>=1);
+    h.stop().await.unwrap();
+}
+
+/// Sem voltar ao prompt, a devolução não vira um laço de teclas: a próxima tentativa espera o dobro, e a
+/// entrada continua na fila até o foco sair do mod.
+#[tokio::test]
+async fn a_failed_return_backs_off_and_keeps_the_entry() {
+    let f=Fixture::new().await; *f.io.mods_screen.lock().unwrap()=Some(pane_focus_screen());
+    let h=f.start_returning(broadcast::channel(128).0,Duration::from_secs(30),Duration::from_millis(100));
+    let reply=h.command(f.command("preso","Sem volta")).await.unwrap();
+    assert_eq!(reply.payload["code"],"mods_focus");
+    let rings=||f.io.ring_keys.load(std::sync::atomic::Ordering::SeqCst);
+    f.wait_for("a primeira devolução",||rings()>=32).await;
+    // A próxima só depois de 200 ms (o dobro dos 100 ms do prazo): até lá, nenhuma tecla a mais.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(rings(),32,"uma devolução inteira e a espera antes da próxima");
+    assert!(typed_at(&f,"Sem volta").is_empty());
+    f.wait_for("a segunda devolução",||rings()>=64).await;
+    *f.io.mods_screen.lock().unwrap()=None;
+    f.wait_for("entrega com o foco de volta",||!typed_at(&f,"Sem volta").is_empty()).await;
     h.stop().await.unwrap();
 }
