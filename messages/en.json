@@ -2903,6 +2903,7 @@
   "erro_sessao_sem_grupo": "session is not in a group",
   "erro_sessao_nao_pareada": "session is not paired",
   "erro_terminal_aberto": "Terminal open in this session. Close the panel to reply here.",
+  "erro_terminal_indisponivel": "Couldn't check whether this session's terminal is open ({detalhe}). Try again.",
   "erro_btw_so_claude": "side questions only exist in Claude sessions",
   "erro_btw_sem_conversa": "this session has no conversation to ask about yet",
   "erro_btw_fork_falhou": "could not open the side question in this session",

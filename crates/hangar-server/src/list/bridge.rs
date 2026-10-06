@@ -762,6 +762,9 @@ enum Operation {
     Rename { old: String, new: String },
     #[serde(rename = "state.facts")]
     StateFacts { name: String, facts: crate::state::facts::StateFacts },
+    /// Painel de terminal real aberto na sessão: o 409 de quem conta linha do pane.
+    #[serde(rename = "term.active")]
+    TermActive { name: String },
 }
 
 async fn execute(bridge: &Arc<ListBridge>, op: Operation) -> Result<Value, ListError> {
@@ -792,6 +795,8 @@ async fn execute(bridge: &Arc<ListBridge>, op: Operation) -> Result<Value, ListE
         Operation::Seed { name, jsonl } => cache(Box::new(move |b| b.seed(&name, &jsonl))).await,
         Operation::Forget { name } => cache(Box::new(move |b| b.forget(&name))).await,
         Operation::Rename { old, new } => cache(Box::new(move |b| b.rename(&old, &new))).await,
+        // Respondido pelo `private`, que tem os painéis.
+        Operation::TermActive { .. } => Err(fail("list_bridge_invalid_request", "term.active fora do private")),
         Operation::StateFacts { name, facts } => {
             use crate::state::facts::Push;
             Ok(match bridge.state_facts.push(&name, facts, Instant::now()) {
@@ -801,6 +806,10 @@ async fn execute(bridge: &Arc<ListBridge>, op: Operation) -> Result<Value, ListE
             })
         }
     }
+}
+
+fn term_active(st: &AppState, name: &str) -> Result<Value, ListError> {
+    Ok(json!({"active": st.term.is_active(name)}))
 }
 
 fn reply(value: Value) -> Response {
@@ -824,7 +833,11 @@ pub async fn private(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connect
     let Ok(op) = serde_json::from_slice::<Operation>(&bytes) else {
         return refused("list_bridge_invalid_request");
     };
-    match execute(&st.list, op).await {
+    let result = match op {
+        Operation::TermActive { name } => term_active(&st, &name),
+        op => execute(&st.list, op).await,
+    };
+    match result {
         Ok(result) => reply(json!({"ok": true, "result": result})),
         Err(e) => {
             if crate::warn_limit::allow(None, e.code) {

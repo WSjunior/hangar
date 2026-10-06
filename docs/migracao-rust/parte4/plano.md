@@ -277,8 +277,8 @@ motores e capacidade), `docs/decisoes/superado.md`.
 `term::private_route_requires_secret`, `term::one_panel_across_owner_and_guest`,
 `bridge::term_active`.
 
-- [ ] **Step 20: Testes, vistos falhar**
-- [ ] **Step 21: Porteiro, 409, capacidade; contrato; regras corrigidas; testes focados; revisar**
+- [x] **Step 20: Testes, vistos falhar**
+- [x] **Step 21: Porteiro, 409, capacidade; contrato; regras corrigidas; testes focados; revisar**
 
 ### Task 10: Windows — ConPTY
 

@@ -46,6 +46,14 @@ Python só atende o que migrou quando é dono da porta inteira. Regras em
 [plataforma.md](plataforma.md#hangar-server-a-porta-pública-em-rust-o-python-atrás) e o desenho em
 `docs/migracao-rust/dono-unico/desenho.md`.
 
+## `termsock` como dono do PTY com o Rust de pé
+
+(Até a parte 4, Task 9, 06/10/2026 → `plataforma.md`, "Porteiro do terminal".) Com o
+`hangar-server` de pé, o `termsock` abria o PTY do convidado e do dono pelo Connect no Python
+(`_motor_posix`), enquanto o dono na 8765 já tinha o PTY no Rust: dois donos do "um painel por
+sessão" (`termsock._ativos` e o `Terms` do Rust), e o 409 e o `terminal_panel` do `/api/config`
+só enxergavam o do Python. Os motores do Python ficaram só para o modo `python`.
+
 ## Aviso de reinício do atualizador às sessões
 
 (`atualizar._avisar_sessoes`, 25/08/2026 → removido em 24/09/2026). Antes de reiniciar, o botão

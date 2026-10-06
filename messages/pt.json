@@ -2903,6 +2903,7 @@
   "erro_sessao_sem_grupo": "sessão não está num grupo",
   "erro_sessao_nao_pareada": "sessão não está pareada",
   "erro_terminal_aberto": "Terminal aberto nesta sessão. Feche o painel pra responder por aqui.",
+  "erro_terminal_indisponivel": "Não consegui conferir se o terminal desta sessão está aberto ({detalhe}). Tente de novo.",
   "erro_btw_so_claude": "pergunta lateral só existe em sessão Claude",
   "erro_btw_sem_conversa": "esta sessão ainda não tem conversa pra perguntar",
   "erro_btw_fork_falhou": "não consegui abrir a pergunta lateral nesta sessão",

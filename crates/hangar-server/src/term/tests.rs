@@ -404,3 +404,90 @@ async fn panel_cap_refuses_1013() {
     let mut c = connect(down.addr, "/api/sessions/sa/term?token=dono").await.expect("aceita para fechar");
     assert_eq!(close_of(&mut c).await, (1013, "multiplexador indisponivel".to_string()));
 }
+
+/// Porta privada do servidor, lida da saúde como o Python lê.
+async fn private_addr(addr: SocketAddr) -> SocketAddr {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    s.write_all(b"GET /__hangar_server/health HTTP/1.0\r\nHost: x\r\n\r\n").await.unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(out.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(v["terminal_panel"], true, "a saúde diz que o painel é do Rust");
+    v["terminal_address"].as_str().unwrap().parse().unwrap()
+}
+
+#[tokio::test]
+async fn private_route_requires_secret() {
+    let tmux = Tmux::new();
+    tmux.session("p1");
+    let srv = server(&tmux, |_| {}).await;
+    let private = private_addr(srv.addr).await;
+    let path = "/__hangar_server/term?target=p1&cols=9999&rows=30";
+    assert_eq!(connect(private, path).await.err(), Some(404), "sem segredo");
+    assert_eq!(connect_with(private, path, &[("x-hangar-internal", "outro")]).await.err(), Some(404));
+    assert_eq!(connect_with(private, path, &[("x-hangar-internal", "s"), ("x-forwarded-for", "203.0.113.9")]).await.err(), Some(404),
+               "repasse de fora não é o Python");
+    assert_eq!(connect_with(srv.addr, path, &[("x-hangar-internal", "s")]).await.err(), Some(404), "nunca na porta pública");
+    assert_eq!(connect_with(private, "/__hangar_server/term?cols=90", &[("x-hangar-internal", "s")]).await.err(), Some(400));
+    assert_eq!(connect_with(private, "/__hangar_server/term?target=p1&cols=abc", &[("x-hangar-internal", "s")]).await.err(), Some(400));
+    assert_eq!(connect_with(private, "/__hangar_server/term?target=morta", &[("x-hangar-internal", "s")]).await.err(), Some(403),
+               "sessão que morreu depois da porta do Python não vira painel");
+    assert!(srv.terms.active().is_empty());
+    assert!(tmux.clients("p1").is_empty());
+    let mut ws = connect_with(private, path, &[("x-hangar-internal", "s")]).await.expect("o Python liga com o segredo");
+    until("anexado em 500x30, com o clamp", || tmux.clients("p1").iter().any(|c| c.ends_with(" 500x30"))).await;
+    ws.send(Ws::Binary("priv-4410\r".into())).await.unwrap();
+    read_until(&mut ws, b"priv-4410").await;
+    assert_eq!(srv.py.term_hits.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn one_panel_across_owner_and_guest() {
+    let tmux = Tmux::new();
+    tmux.session("p2");
+    let srv = server(&tmux, |_| {}).await;
+    let private = private_addr(srv.addr).await;
+    let guest_path = "/__hangar_server/term?target=p2";
+    let mut owner = connect(srv.addr, "/api/sessions/p2/term?token=dono").await.expect("dono");
+    until("dono anexado", || tmux.clients("p2").len() == 1).await;
+    let mut guest = connect_with(private, guest_path, &[("x-hangar-internal", "s")]).await.expect("convidado");
+    assert_eq!(close_of(&mut owner).await, (1000, TAKEN_OVER.to_string()));
+    until("só o convidado", || tmux.clients("p2").len() == 1).await;
+    assert_eq!(srv.terms.active(), vec!["p2".to_string()]);
+    let _owner = connect(srv.addr, "/api/sessions/p2/term?token=dono").await.expect("dono de volta");
+    assert_eq!(close_of(&mut guest).await, (1000, TAKEN_OVER.to_string()));
+    until("só o dono", || tmux.clients("p2").len() == 1).await;
+}
+
+/// `term.active` da ponte: o 409 do Python pergunta por aqui.
+mod bridge {
+    use super::*;
+
+    async fn ask(private: SocketAddr, name: &str) -> serde_json::Value {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let body = serde_json::json!({"op": "term.active", "args": {"name": name}}).to_string();
+        let mut s = tokio::net::TcpStream::connect(private).await.unwrap();
+        s.write_all(format!("POST /__hangar_server/list HTTP/1.0\r\nHost: x\r\nx-hangar-internal: s\r\n\
+            content-type: application/json\r\ncontent-length: {}\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).await.unwrap();
+        serde_json::from_str(out.split("\r\n\r\n").nth(1).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn term_active() {
+        let tmux = Tmux::new();
+        tmux.session("p3");
+        let srv = server(&tmux, |_| {}).await;
+        let private = private_addr(srv.addr).await;
+        assert_eq!(ask(private, "p3").await, serde_json::json!({"ok": true, "result": {"active": false}}));
+        let ws = connect(srv.addr, "/api/sessions/p3/term?token=dono").await.expect("abre");
+        until("anexado", || tmux.clients("p3").len() == 1).await;
+        assert_eq!(ask(private, "p3").await, serde_json::json!({"ok": true, "result": {"active": true}}));
+        assert_eq!(ask(private, "outra").await["result"]["active"], false);
+        drop(ws);
+        until("painel fechado", || srv.terms.active().is_empty()).await;
+        assert_eq!(ask(private, "p3").await["result"]["active"], false);
+    }
+}

@@ -249,8 +249,11 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   não podem ser só o nome — sem a época de recriação, a conversa da morta fica montada; sem o
   `jsonl` na marca, a nova nasce escondida para sempre.
 - **Terminal real no rodapé e no celular**: um PTY por WebSocket, backend não interpreta nada.
-  Um painel por sessão; xterm com fundo `rgba(0,0,0,0)`, nunca `'transparent'`. Com o painel
-  aberto, quem conta linha de pane responde 409 — e o app tem que MOSTRAR esse texto.
+  Um painel por sessão em todas as portas; xterm com fundo `rgba(0,0,0,0)`, nunca `'transparent'`.
+  Com o painel aberto, quem conta linha de pane responde 409 — e o app tem que MOSTRAR esse texto.
+  Com o Rust de pé, o PTY é só dele (Windows incluído): o `termsock` faz a porta de entrada de quem
+  chega ao Python (convidado, Connect) e liga os bytes a `/__hangar_server/term`; o 409 pergunta
+  `term.active` e erro da ponte é 503 (fechamento 1013 no socket), nunca PTY no Python.
 - **Aba ativa do navegador embutido é UMA só, compartilhada entre painel e CLI**; `--aba` age em
   outra sem trocar o que está na tela. O sidecar do navegador é ADITIVO: `url`/`targetId` no topo
   são os da aba ativa, e é só isso que o backend lê.
