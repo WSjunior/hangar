@@ -149,7 +149,7 @@ impl Surface {
                 if !ok { out.push(reply(token, Err(no_answer()))); }
                 // Id desconhecido devolve o `shown_id` de antes, sem erro (E1).
                 else if body["shown_id"] == site.as_str() { out.push(reply(token, Ok(json!({"shown_id": site})))); }
-                else { out.push(reply(token, Err(missing()))); }
+                else { out.push(reply(token, Err(pane_missing()))); }
             }
         }
         out

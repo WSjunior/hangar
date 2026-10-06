@@ -88,6 +88,9 @@ pub fn missing() -> ModsError {
 pub fn no_answer() -> ModsError {
     ModsError::new("erro_mod_clique_sem_resposta", "O mod não respondeu ao clique.")
 }
+pub fn pane_missing() -> ModsError {
+    ModsError::new("erro_mod_painel_inexistente", "Esse painel não está mais aberto no mod.")
+}
 pub fn close_refused() -> ModsError {
     ModsError::new("erro_mod_fechar_recusado", "O mod não deixou fechar o painel.")
 }
