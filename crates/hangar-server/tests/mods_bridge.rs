@@ -192,6 +192,22 @@ async fn old_name_of_a_renamed_session_that_now_names_a_session_outside_rust_goe
     assert_eq!(unsure.text().await.unwrap(), "from-python");
 }
 
+#[tokio::test]
+async fn slow_python_on_the_old_name_check_answers_within_the_plugin_limit() {
+    // O plugin desiste do `press-start` em 3 s: a pergunta sobre o nome antigo tem prazo de 1 s, e o pedido
+    // vai ao Python na dúvida, sem esperar a resposta lenta do `info`.
+    let (python, server, mods, plugin) = setup().await;
+    mods.forget("mods-s", 1);
+    mods.attach_process("renomeada", "mods-s", 2, Arc::new(plugin));
+    python.set_info_delay(std::time::Duration::from_secs(20));
+    let started = std::time::Instant::now();
+    let start = post(format!("http://{server}/api/plugin/press-start"),
+        json!({"sessao": "mods-s", "token": mint(OWNER, "mods-s"), "requestId": "a", "element": "b"}), false).await;
+    assert_eq!(start.text().await.unwrap(), "from-python");
+    let took = started.elapsed();
+    assert!(took >= std::time::Duration::from_millis(900) && took < std::time::Duration::from_secs(2), "{took:?}");
+}
+
 /// Superfície que não é chamada nos testes da ponte.
 mod mods_support_free {
     pub struct Quiet;

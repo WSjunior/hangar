@@ -13,13 +13,17 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::json;
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use subtle::ConstantTimeEq;
 
 use super::http::{fits, invalid, reply};
-use crate::routes::{AppState, fetch_info, gate, pass};
+use crate::routes::{AppState, gate, pass};
 
 const BODY_LIMIT: usize = 16 * 1024;
 const URL_MAX: usize = 8192;
+/// Prazo da pergunta ao Python sobre o nome antigo: o plugin desiste do `press-start` em 3 s, e a resposta,
+/// com o repasse ao Python incluído, tem de chegar antes; senão o clique roda depois de ele desistir.
+const NAME_CHECK: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// O que toda chamada da ponte traz: a sessão (o nome com que o processo nasceu) e o token dela.
 #[derive(Deserialize)]
@@ -55,11 +59,15 @@ async fn owned<T: DeserializeOwned>(st: &Arc<AppState>, peer: SocketAddr, req: R
 }
 
 /// O nome antigo de uma sessão renomeada pode ser o nome atual de outra, fora do Rust (com terminal, ou
-/// criada depois no Python), cujo plugin manda o mesmo `sessao` com um token que vale. Pergunta ao Python,
-/// sem o cache do `/events` (a resposta de um segundo atrás pode ser de antes do renomear): existindo a
-/// sessão, ou sem resposta, o pedido é dela e vai ao Python.
+/// criada depois no Python), cujo plugin manda o mesmo `sessao` com um token que vale. Pergunta ao Python
+/// pelo status do `info`, sem o cache do `/events` (a resposta de um segundo atrás pode ser de antes do
+/// renomear) e sem ler o corpo: 404 é sessão inexistente. Existindo a sessão, ou sem resposta em
+/// `NAME_CHECK`, o pedido é dela e vai ao Python.
 async fn named_elsewhere(st: &AppState, sessao: &str) -> bool {
-    !matches!(fetch_info(&st.http, st.cfg.upstream, &st.cfg.internal_secret, sessao).await, Ok(None))
+    let url = format!("http://{}/internal/sessions/{}/info", st.cfg.upstream, utf8_percent_encode(sessao, NON_ALPHANUMERIC));
+    let Ok(request) = axum::http::Request::get(url).header("x-hangar-internal", &st.cfg.internal_secret).body(Body::empty()) else { return true };
+    !matches!(tokio::time::timeout(NAME_CHECK, st.http.request(request)).await,
+        Ok(Ok(response)) if response.status() == StatusCode::NOT_FOUND)
 }
 
 /// Comparação em tempo constante, como o `secrets.compare_digest` do Python.
