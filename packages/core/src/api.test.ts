@@ -20,7 +20,7 @@ import { answerQuestions, inputPluginField, interrupt, openEventStreamForServer,
 import { discardFile, fileAuthHeader, fileUrlNative, getPairContract, getPlans, listFiles, pathDiff, readFile, searchFiles, setPlanPin, unpairSession, writeFile } from './api';
 import type { Server } from './servers';
 import { exportShortcuts } from './api';
-import { fileUrl, uploadUrl } from './api';
+import { fileUrl, uploadUrl, uploadUrlNative } from './api';
 import { editTranscriptionProviderKey, moveTranscriptionProvider, parseTranscriptionProviders, transcriptionProviderLabel, transcriptionProvidersMissingKey } from './api';
 const server = { id: 'a', label: 'Servidor A', baseUrl: 'https://a.test', token: 'token-a' };
 
@@ -1161,4 +1161,8 @@ describe('lista de serviços de transcrição', () => {
     expect(transcriptionProvidersMissingKey([ELEVEN])).toBe(false);
     expect(transcriptionProvidersMissingKey([ELEVEN, { ...ELEVEN, id: 'b', api_key: '' }])).toBe(true);
   });
+});
+
+it('uploadUrlNative usa o servidor da conversa quando recebe um', () => {
+  expect(uploadUrlNative('sessao', 'ditado 1.m4a', server)).toBe('https://a.test/api/sessions/sessao/uploads/ditado%201.m4a');
 });

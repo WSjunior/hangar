@@ -20,7 +20,8 @@ import { useNavigation, useRouter } from 'expo-router';
 import { DictationStyleMenu, useDictationStyleLabel } from '../features/ditado/EstiloPill';
 import { useDitado } from '../features/ditado/useDitado';
 import { useDitadoEstiloStore } from '../features/ditado/ditadoEstiloStore';
-import { DictationError, runDictation } from '../features/ditado/dictationRun';
+import { DictationError, dictationAudio, runDictation, uploadName, type DictationSource } from '../features/ditado/dictationRun';
+import { AudioChip } from './AudioChip';
 import { CommandSheet, useSessionCommands } from './CommandSheet';
 import { SessionSettingsButton } from './SessionSettings';
 import { SideQuestionSheet } from './SideQuestionSheet';
@@ -635,7 +636,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     undoTimerRef.current = setTimeout(limparUndo, 10_000);
   }, [limparUndo]);
 
-  const runTranscription = useCallback(async (voice: DictationDraft, file: File, server: Server, generation: number, allowAuto: boolean) => {
+  const runTranscription = useCallback(async (voice: DictationDraft, source: DictationSource, server: Server, generation: number, allowAuto: boolean) => {
     if (transcribingRef.current) return;
     transcribingRef.current = true;
     if (mountedRef.current) {
@@ -648,7 +649,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     } catch (e) {
       // Sem o áudio guardado, a repetição fica só nesta tela.
       if (mountedRef.current) {
-        setFailed({ file, motivo: voice.motivo, uri: voice.audio.uri });
+        if ('file' in source && voice.audio) setFailed({ file: source.file, motivo: voice.motivo, uri: voice.audio.uri });
         setError(e instanceof Error ? e.message : m.draft_write_error());
         setTranscribing(false);
       }
@@ -657,13 +658,16 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     }
     if (mountedRef.current) setDictation(voice);
     try {
-      const { completed, text: trimmed, raw, aviso } = await runDictation(server, origin.serverId, origin.name, voice, { file }, {
+      const { completed, text: trimmed, raw, aviso } = await runDictation(server, origin.serverId, origin.name, voice, source, {
         check: () => {
           const sessions = useSessions.getState();
           const live = sessions.byServerRecord?.[origin.serverId]?.find((s) => s.name === origin.name)
             ?? sessions.rows.find((s) => s.serverId === origin.serverId && s.name === origin.name);
           const currentTranscript = live ? live.jsonl || null : transcriptRef.current;
-          if (voice.transcript !== null && currentTranscript !== voice.transcript) throw new Error(m.composer_ditado_anterior());
+          // Pelo caminho guardado o servidor acha o áudio mesmo depois de um /clear; o resultado fica `ready`.
+          if ('file' in source && voice.transcript !== null && currentTranscript !== voice.transcript) {
+            throw new Error(m.composer_ditado_anterior());
+          }
           // Só o app em segundo plano adia o POST (o sistema pode matá-lo); trocar de conversa não.
           if (AppState.currentState !== 'active' || generation !== activityGenerationRef.current) {
             throw new Error(m.composer_ditado_interrompido());
@@ -689,11 +693,11 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           })) iniciarAuto(completed.draft.text);
         }
       }
-      if (completed.draft && !completed.dictation) dropCopy(voice.audio.uri);
+      if (completed.draft && !completed.dictation && voice.audio) dropCopy(voice.audio.uri);
     } catch (e) {
       if (mountedRef.current) {
         if (e instanceof DictationError) {
-          if (e.lost) setFailed({ file, motivo: voice.motivo, uri: voice.audio.uri });
+          if (e.lost && 'file' in source && voice.audio) setFailed({ file: source.file, motivo: voice.motivo, uri: voice.audio.uri });
           if (e.storageIssue) setDraftIssue(e.storageIssue);
         }
         try {
@@ -735,7 +739,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
         before: target.snapshot.text.trim(), motivo, estilo: target.estilo,
         status: 'pending', text: '', raw: '', issue: '',
       };
-      await runTranscription(voice, file, target.server, target.generation, allowAuto);
+      await runTranscription(voice, { file }, target.server, target.generation, allowAuto);
     },
     [runTranscription],
   );
@@ -816,16 +820,25 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     try {
       const server = useServers.getState().servers.find((s) => s.id === origin.serverId);
       if (!server) throw new Error(m.chat_servidor_removido());
-      if (dictation.transcript !== null && dictation.transcript !== transcriptRef.current) {
-        setError(m.composer_ditado_anterior());
-        return;
-      }
-      const blob = await (await fetch(dictation.audio.uri)).blob();
-      const file = new File([blob], dictation.audio.name, { type: dictation.audio.mime });
+      const sameTranscript = dictation.transcript === transcriptRef.current;
+      let source: DictationSource;
+      // O arquivo já enviado não sobe de novo. Nome solto enquanto a pasta da conversa é a mesma
+      // (convidado só pode esse); o caminho absoluto só depois de um /clear, e aí o `isActive` dá
+      // falso pelo jsonl e o resultado volta `ready`, com "Recuperar".
+      if (dictation.serverPath) {
+        source = { arquivo: sameTranscript ? uploadName(dictation.serverPath) : dictation.serverPath };
+      } else if (dictation.audio) {
+        if (dictation.transcript !== null && !sameTranscript) {
+          setError(m.composer_ditado_anterior());
+          return;
+        }
+        const blob = await (await fetch(dictation.audio.uri)).blob();
+        source = { file: new File([blob], dictation.audio.name, { type: dictation.audio.mime }) };
+      } else return;
       transcribingRef.current = false;
       // Repetir é explícito, mas nunca rearma o autoenvio cancelado.
       await runTranscription({ ...dictation, id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-        status: 'pending', issue: '' }, file, { ...server }, generation, false);
+        status: 'pending', issue: '' }, source, { ...server }, generation, false);
     } catch (e) {
       if (mountedRef.current) setError(e instanceof Error ? e.message : m.composer_falha_transcricao());
     } finally {
@@ -844,7 +857,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     setText(result.draft.text);
     setSelection({ start: result.draft.text.length, end: result.draft.text.length });
     offerUndo(before, voice.raw, voice.text, result.draft.revision);
-    if (!result.dictation) dropCopy(voice.audio.uri);
+    if (!result.dictation && voice.audio) dropCopy(voice.audio.uri);
     setError(voice.issue);
   }, [offerUndo]);
 
@@ -862,7 +875,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     if (!dictation || transcribingRef.current) return;
     try {
       clearDictation(origin.serverId, origin.name);
-      dropCopy(dictation.audio.uri);
+      if (dictation.audio) dropCopy(dictation.audio.uri);
       setDictation(null);
       setError('');
     } catch (e) { setDraftIssue(e instanceof Error ? e.message : m.draft_clear_error()); }
@@ -912,6 +925,8 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     if (state !== 'working') setSteerFeedback('');
   }, [state]);
 
+  const originServer = useServers((s) => s.servers.find((x) => x.id === origin.serverId));
+  const dictationPlayer = dictation ? dictationAudio(originServer, origin.name, dictation.audio, dictation.serverPath) : null;
   // Gravando ou transcrevendo, o texto do campo ainda vai mudar: enviar agora mandaria a metade.
   // Transcrição desta tela ou de uma montagem anterior da mesma conversa ainda no ar.
   const busyVoice = transcribing || dictation?.status === 'pending';
@@ -1248,6 +1263,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
                 : dictation.text ? m.composer_ditado_recuperavel({ text: dictation.text.slice(0, 80) })
                 : dictation.issue || m.composer_ditado_interrompido()}
             </Text>
+            {dictationPlayer ? <AudioChip uri={dictationPlayer.uri} headers={dictationPlayer.headers} name={dictationPlayer.name} /> : null}
             {dictation.status === 'applied' ? null : dictation.text ? (
               <Pressable onPress={handleRecoverDictation} style={[styles.undoBtn, { borderColor: theme.tokens.border.subtle }]} accessibilityRole="button">
                 <Text style={[styles.undoText, { color: theme.tokens.accent.base }]}>{m.composer_draft_recover()}</Text>

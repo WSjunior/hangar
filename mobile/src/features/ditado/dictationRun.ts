@@ -1,9 +1,11 @@
-import { transcribeUploadedForServer, uploadFileForServer, type Server } from '@hangar/core';
+import { fileAuthHeader, transcribeUploadedForServer, uploadFileForServer, uploadUrlNative, type Server } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 import { chatStore } from '../../stores/chat';
-import { finishDictation, readDictation, setDictationInFlight, writeDictation, type DictationDraft } from '../../stores/drafts';
+import { finishDictation, readDictation, setDictationInFlight, writeDictation, type DictationDraft, type DraftAttachment } from '../../stores/drafts';
 
-export type DictationSource = { file: File };
+// `file`: gravação nova, sobe antes de transcrever. `arquivo`: nome solto na pasta da conversa, ou o
+// `path` absoluto guardado (alcança o áudio de antes de um /clear; o convidado não pode usá-lo).
+export type DictationSource = { file: File } | { arquivo: string };
 
 export interface DictationOutcome {
   completed: ReturnType<typeof finishDictation>;
@@ -11,7 +13,7 @@ export interface DictationOutcome {
   raw: string;
   aviso: string;
   path: string;
-  applied: string;
+  applied?: string;
 }
 
 // `lost`: o ditado sumiu do armazenamento e a repetição fica só na tela; `storageIssue`: guardar a falha falhou.
@@ -23,6 +25,16 @@ export class DictationError extends Error {
 
 // O nome que o servidor deu ao áudio na pasta da conversa: `?arquivo=` e a rota de anexos pedem só ele.
 export const uploadName = (path: string) => path.split(/[\\/]/).pop() || path;
+
+// Cópia local enquanto existe; depois, o arquivo na pasta atual da conversa (áudio de antes de um
+// /clear não está lá: o player mostra o erro de carregar).
+export function dictationAudio(server: Server | undefined, name: string, audio: DraftAttachment | null,
+  serverPath?: string | null): { uri: string; headers?: Record<string, string>; name: string } | null {
+  if (audio) return { uri: audio.uri, name: audio.name };
+  if (!server || !serverPath) return null;
+  const file = uploadName(serverPath);
+  return { uri: uploadUrlNative(name, file, server), headers: fileAuthHeader(server), name: file };
+}
 
 // Outra montagem da conversa relê o ditado guardado quando o draftUpdate muda.
 function notify(serverId: string, name: string): void {
@@ -40,17 +52,25 @@ export async function runDictation(server: Server, serverId: string, name: strin
   notify(serverId, name);
   try {
     opts.check?.();
-    // Sobe e guarda o caminho antes de transcrever: transcrição que cai não custa outra cópia.
-    const { path: uploaded } = await uploadFileForServer(server, name, source.file, { audioOnly: true });
-    const pending = readDictation(serverId, name);
-    if (pending?.id === voice.id) writeDictation(serverId, name, { ...pending, serverPath: uploaded });
-    const res = await transcribeUploadedForServer(server, name, uploadName(uploaded), { limpar: true, estilo: voice.estilo });
+    let arquivo: string;
+    let uploaded = '';
+    if ('file' in source) {
+      // Sobe e guarda o caminho antes de transcrever: transcrição que cai não custa outra cópia.
+      ({ path: uploaded } = await uploadFileForServer(server, name, source.file, { audioOnly: true }));
+      const pending = readDictation(serverId, name);
+      if (pending?.id === voice.id) writeDictation(serverId, name, { ...pending, serverPath: uploaded });
+      arquivo = uploadName(uploaded);
+    } else {
+      arquivo = source.arquivo;
+    }
+    const res = await transcribeUploadedForServer(server, name, arquivo, { limpar: true, estilo: voice.estilo });
     const text = res.text.trim();
     if (!text) throw new Error(m.composer_transcricao_vazia());
     const raw = res.raw?.trim() ?? '';
     const aviso = res.aviso ?? '';
-    const path = res.path || uploaded;
-    const applied = res.estilo_aplicado ?? voice.estilo ?? 'cru';
+    // O nome solto do "de novo" não é caminho: sem `path` na resposta, fica o guardado.
+    const path = res.path || uploaded || voice.serverPath || arquivo;
+    const applied = res.estilo_aplicado ?? voice.estilo;
     const completed = finishDictation(serverId, name, voice.id,
       { text, raw, issue: aviso, serverPath: path, applied }, opts.isActive());
     return { completed, text, raw, aviso, path, applied };

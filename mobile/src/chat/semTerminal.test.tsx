@@ -1115,4 +1115,52 @@ describe('ditado entregue à conversa de origem', () => {
     await act(async () => finish({ path: '/up/sess/a.m4a', text: 'a', raw: 'a', aviso: null }));
     act(() => { first.root.unmount(); second.root.unmount(); });
   });
+
+  it('"Transcrever de novo" usa o arquivo já enviado pelo nome, sem subir outra cópia', async () => {
+    realFirstInput.upload.mockClear();
+    realFirstInput.transcribe.mockClear().mockResolvedValueOnce({ path: '/up/sess/ditado-1.m4a', text: 'de novo', raw: 'de novo', aviso: null });
+    storeDraft({ text: '', revision: 1 });
+    storage.memory.set('draft.v1.dictation:s1::sess', JSON.stringify(voiceRecord({
+      status: 'failed', text: '', raw: '', issue: '502: groq', draftRevision: 1, before: '', serverPath: '/up/sess/ditado-1.m4a',
+    })));
+    const { container, root } = await render(createElement(Composer, props));
+    await act(async () => button(container, 'composer_transcrever_de_novo')!.click());
+    // Mesma conversa: nome solto, que o convidado também pode usar.
+    expect(realFirstInput.transcribe).toHaveBeenCalledExactlyOnceWith({ id: 's1' }, 'sess', 'ditado-1.m4a', { limpar: true, estilo: undefined });
+    expect(realFirstInput.upload).not.toHaveBeenCalled();
+    expect(container.querySelector('textarea')!.value).toBe('de novo');
+    act(() => root.unmount());
+  });
+
+  it('falha da transcrição deixa o "de novo" apontando para o arquivo já enviado', async () => {
+    realFirstInput.upload.mockClear();
+    realFirstInput.transcribe.mockClear().mockRejectedValueOnce(Object.assign(new Error('502: groq'), { status: 502 }));
+    const { container, root } = await render(createElement(Composer, props));
+    await act(async () => mic(container).click());
+    await act(async () => voiceInput.onFim!(new File(['a'], 'ditado.m4a', { type: 'audio/m4a' }), 'botao', 'file:///cache/ditado.m4a'));
+    expect(realFirstInput.upload).toHaveBeenCalledExactlyOnceWith({ id: 's1' }, 'sess', expect.any(File), { audioOnly: true });
+    expect(JSON.parse(storage.memory.get('draft.v1.dictation:s1::sess')!)).toMatchObject({
+      status: 'failed', serverPath: '/up/sess/ditado-1.m4a', issue: '502: groq',
+    });
+    expect(button(container, 'composer_transcrever_de_novo')).toBeDefined();
+    act(() => root.unmount());
+  });
+
+  it('depois de /clear, o "de novo" pelo caminho absoluto guardado volta com "Recuperar", sem entrar sozinho', async () => {
+    sessionsState.rows = [{ serverId: 's1', name: 'sess', jsonl: '/t/clear.jsonl' }];
+    realFirstInput.upload.mockClear();
+    realFirstInput.transcribe.mockClear().mockResolvedValueOnce({ path: '/up/sess/ditado-1.m4a', text: 'antigo', raw: 'antigo', aviso: null });
+    storeDraft({ text: '', revision: 1, transcript: '/t/clear.jsonl' });
+    storage.memory.set('draft.v1.dictation:s1::sess', JSON.stringify(voiceRecord({
+      status: 'failed', text: '', raw: '', issue: '502: groq', draftRevision: 1, before: '', serverPath: '/up/sess/ditado-1.m4a',
+    })));
+    const { container, root } = await render(createElement(Composer, props));
+    await act(async () => button(container, 'composer_transcrever_de_novo')!.click());
+    expect(realFirstInput.transcribe).toHaveBeenCalledExactlyOnceWith({ id: 's1' }, 'sess', '/up/sess/ditado-1.m4a', { limpar: true, estilo: undefined });
+    expect(realFirstInput.upload).not.toHaveBeenCalled();
+    expect(container.querySelector('textarea')!.value).toBe('');
+    expect(container.textContent).toContain('composer_ditado_recuperavel');
+    expect(button(container, 'composer_draft_recover')).toBeDefined();
+    act(() => root.unmount());
+  });
 });

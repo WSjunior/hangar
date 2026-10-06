@@ -132,8 +132,9 @@ export function uploadUrl(name: string, filename: string, download = false, serv
   return `${server ? baseOf(server) : apiEnv().getBaseUrl()}/api/sessions/${encodeURIComponent(name)}/uploads/${encodeURIComponent(filename)}?token=${encodeURIComponent(t)}${download ? '&download=1' : ''}`;
 }
 
-export function uploadUrlNative(name: string, filename: string): string {
-  return `${apiEnv().getBaseUrl()}/api/sessions/${encodeURIComponent(name)}/uploads/${encodeURIComponent(filename)}`;
+export function uploadUrlNative(name: string, filename: string, server?: Server): string {
+  const base = server ? baseOf(server) : apiEnv().getBaseUrl();
+  return `${base}/api/sessions/${encodeURIComponent(name)}/uploads/${encodeURIComponent(filename)}`;
 }
 
 // Par nativo do transcriptImageUrl: o token vai no header (fileAuthHeader), nunca na URL.

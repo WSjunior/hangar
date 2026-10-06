@@ -403,4 +403,13 @@ describe('ditado conservado na origem', () => {
     expect(readDictation('windows', 'sessao')?.id).toBe('windows');
     expect(readDraft('linux', 'sessao')?.text).toBe('Mensagem atual');
   });
+
+  it('aceita ditado sem cópia local, só com o caminho do servidor', () => {
+    writeDictation('linux', 'sessao', voice({ audio: null, serverPath: 'ditado-1.m4a' }));
+    finishDictation('linux', 'sessao', 'recording-1',
+      { text: 'Pronto', raw: 'cru', issue: '', serverPath: '/up/sess/ditado-1.m4a', applied: 'prosa' }, false);
+    expect(readDictation('linux', 'sessao')).toMatchObject({
+      audio: null, serverPath: '/up/sess/ditado-1.m4a', applied: 'prosa', status: 'ready', text: 'Pronto',
+    });
+  });
 });

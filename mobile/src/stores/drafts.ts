@@ -33,7 +33,8 @@ const draftSchema = z.object({
 const dictationSchema = z.object({
   version: z.literal(1),
   id: z.string().min(1),
-  audio: attachmentSchema,
+  // null: ditado pedido pela galeria, sem cópia local; o áudio está só no servidor.
+  audio: attachmentSchema.nullable(),
   // Caminho do áudio no servidor, gravado antes da transcrição: o "de novo" não sobe outra cópia.
   serverPath: z.string().min(1).optional(),
   // Estilo que o servidor aplicou (`estilo_aplicado`), para a barra marcar a versão certa.
