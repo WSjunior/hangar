@@ -95,7 +95,7 @@ struct Patterns {
     unnumbered: Regex, user: Regex, banner: Regex, warning: Regex,
     tool: Regex, finished: Regex, activity: Regex, mcp: Regex,
     pi_box: Regex, overlay_rule: Regex, todo: Regex, ascii_spinner: Regex,
-    subagent: Regex, subagent_body: Regex, digit: Regex, word: Regex,
+    subagent: Regex, subagent_body: Regex, digit: Regex, word: Regex, agent_cursor: Regex,
 }
 
 static P: LazyLock<Patterns> = LazyLock::new(|| {
@@ -140,6 +140,7 @@ static P: LazyLock<Patterns> = LazyLock::new(|| {
         todo: r(r"^\s*[●○]?\s*Todos \(\d+/\d+\)\s*$"),
         ascii_spinner: r(r"^\*\s+\S[^\n]*(…|\))\s*$"),
         subagent: r(r"^Subagent\s+\S"),
+        agent_cursor: r(r"^\s*❯\s+[●◯]"),
         subagent_body: r(r"^\s*└"),
         digit: r(r"^\d$"),
         word: r(r"^\w$"),
@@ -249,7 +250,7 @@ fn composer_end(lines: &[&str], end: usize) -> Option<usize> {
 pub fn footer_focus(pane: &str) -> bool {
     let lines = lines(pane);
     composer_end(&lines, lines.len()).is_some_and(|end| lines[end + 1..].iter()
-        .any(|l| P.unnumbered.is_match(l) || l.contains("Enter to view") || l.contains("↑/↓ to select")))
+        .any(|l| P.agent_cursor.is_match(l) || l.contains("Enter to view") || l.contains("↑/↓ to select")))
 }
 
 fn unnumbered_menu(lines: &[&str]) -> Option<TerminalQuestion> {
