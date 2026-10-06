@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { FieldSync } from './pluginField';
+import { describe, expect, it, vi } from 'vitest';
+import { FieldSync, InputOutbox, fieldSender } from './pluginField';
 
 // Os mesmos casos dos testes do `FieldSync` em `desktop-native/src/plugin_ui.rs`: a regra é uma só nos dois apps.
 describe('FieldSync', () => {
@@ -125,5 +125,97 @@ describe('FieldSync', () => {
     expect(sync.draw('ab', 'abc', true)).toBeNull();
     sync.leftToSend();
     expect(sync.draw(null, 'abc', false)).toBeNull();
+  });
+});
+
+// Os mesmos casos do `Outbox` em `desktop-native/src/plugin_ui.rs`.
+describe('InputOutbox', () => {
+  it('um pedido em voo por vez; enquanto ele voa, só o change mais recente fica guardado', () => {
+    const box = new InputOutbox();
+    expect(box.push('change', 'a')).toEqual({ kind: 'change', value: 'a' });
+    expect(box.push('change', 'ab')).toBeNull();
+    expect(box.push('change', 'abc')).toBeNull();
+    expect(box.done()).toEqual({ kind: 'change', value: 'abc' });
+    expect(box.done()).toBeNull();
+    // Livre de novo: o próximo sai na hora.
+    expect(box.push('change', 'abcd')).toEqual({ kind: 'change', value: 'abcd' });
+  });
+
+  it('o submit sai depois dos change pendentes, e o que se digita depois dele sai depois', () => {
+    const box = new InputOutbox();
+    expect(box.push('change', 'a')).toEqual({ kind: 'change', value: 'a' });
+    box.push('change', 'ab');
+    box.push('submit', 'ab');
+    box.push('change', 'abc');
+    box.push('change', 'abcd');
+    expect(box.done()).toEqual({ kind: 'change', value: 'ab' });
+    expect(box.done()).toEqual({ kind: 'submit', value: 'ab' });
+    expect(box.done()).toEqual({ kind: 'change', value: 'abcd' });
+    expect(box.done()).toBeNull();
+  });
+
+  it('dois submit seguidos saem os dois, na ordem', () => {
+    const box = new InputOutbox();
+    box.push('submit', 'a');
+    box.push('submit', 'b');
+    box.push('submit', 'c');
+    expect(box.done()).toEqual({ kind: 'submit', value: 'b' });
+    expect(box.done()).toEqual({ kind: 'submit', value: 'c' });
+    expect(box.done()).toBeNull();
+  });
+});
+
+describe('fieldSender', () => {
+  // Transporte falso: cada pedido demora o que `delays` disser, e os de depois respondem mais rápido que os de antes.
+  function transport(delays: number[]) {
+    const calls: string[] = [];
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let n = 0;
+    const send = (kind: string, value: string) => {
+      calls.push(`${kind}:${value}`);
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      const ms = delays[n++] ?? 0;
+      return new Promise<void>((resolve, reject) => setTimeout(() => {
+        inFlight--;
+        if (value === 'falha') reject(new Error('falha')); else resolve();
+      }, ms));
+    };
+    return { send, calls, maxInFlight: () => maxInFlight };
+  }
+
+  it('as teclas chegam ao mod na ordem, com um pedido em voo por vez, mesmo com respostas fora de ordem', async () => {
+    vi.useFakeTimers();
+    try {
+      const t = transport([50, 10, 5, 1]);
+      const input = fieldSender(t.send, () => {});
+      input('change', 'a');
+      input('change', 'ab');
+      input('change', 'abc');
+      input('submit', 'abc');
+      input('change', 'abcd');
+      await vi.runAllTimersAsync();
+      expect(t.calls).toEqual(['change:a', 'change:abc', 'submit:abc', 'change:abcd']);
+      expect(t.maxInFlight()).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('uma falha avisa e não trava a fila', async () => {
+    vi.useFakeTimers();
+    try {
+      const t = transport([10, 10]);
+      const errors: unknown[] = [];
+      const input = fieldSender(t.send, (err) => errors.push(err));
+      input('change', 'falha');
+      input('submit', 'ok');
+      await vi.runAllTimersAsync();
+      expect(t.calls).toEqual(['change:falha', 'submit:ok']);
+      expect(errors).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

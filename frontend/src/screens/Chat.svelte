@@ -12,7 +12,7 @@
   import { openInNewTab } from '../lib/openTab';
   import { desktop as janela } from '../lib/desktop.svelte';
   import { itemModsCelular, modsCelular, modsNaTela } from '../lib/modsCelular.svelte';
-  import { activePaneId, followLocalTab, inputPluginField, isMissingRoute, parsePluginToast, parsePluginUi, pressPluginButton, safeHref, showPluginPane, tabFollowsServer, type PluginInputKind, type PluginSource, type PluginNode as PluginTree, type PluginPane as PluginPaneData, type PluginToast } from '@hangar/core';
+  import { activePaneId, fieldSender, followLocalTab, inputPluginField, isMissingRoute, parsePluginToast, parsePluginUi, pressPluginButton, safeHref, showPluginPane, tabFollowsServer, type PluginInputKind, type PluginSource, type PluginNode as PluginTree, type PluginPane as PluginPaneData, type PluginToast } from '@hangar/core';
   import SessionSwitcherSheet from '../components/SessionSwitcherSheet.svelte';
   import CreateSessionSheet from '../components/CreateSessionSheet.svelte';
   import UsageSheet from '../components/UsageSheet.svelte';
@@ -544,14 +544,21 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       if (!isMissingRoute(err)) showPluginNotice(err instanceof Error ? err.message : String(err), true);
     }
   }
-  // Digitação num `Input` de mod: só a sessão sem terminal aceita (o campo nem fica habilitado nas outras).
-  async function inputPlugin(site: string, key: string, kind: PluginInputKind, value: string) {
+  // Digitação num `Input` de mod: só a sessão sem terminal aceita (o campo nem fica habilitado nas outras). Cada campo
+  // tem a sua fila (`fieldSender`): um pedido em voo por vez, para as teclas chegarem ao mod na ordem.
+  const pluginFieldSenders = new Map<string, (kind: PluginInputKind, value: string) => void>();
+  function inputPlugin(site: string, key: string, kind: PluginInputKind, value: string) {
     if (!modsVisiveis) return;
-    try {
-      await inputPluginField(sessionName, site, key, kind, value, sessionServer());
-    } catch (err) {
-      showPluginNotice(err instanceof Error ? err.message : String(err), true);
+    const id = `${site}\u001f${key}`;
+    let sender = pluginFieldSenders.get(id);
+    if (!sender) {
+      sender = fieldSender(
+        (k, v) => inputPluginField(sessionName, site, key, k, v, sessionServer()),
+        (err) => showPluginNotice(err instanceof Error ? err.message : String(err), true),
+      );
+      pluginFieldSenders.set(id, sender);
     }
+    sender(kind, value);
   }
   let pensamentoTimer: ReturnType<typeof setTimeout> | undefined;
   function limparPensamento() {
