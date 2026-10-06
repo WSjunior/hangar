@@ -93,3 +93,26 @@ def test_restore_quando_aterrissar_pega_a_escrita_atrasada_apos_repor(tmp_path, 
     monkeypatch.setattr(default_model.time, "sleep", sleep_que_reescreve)
     assert default_model.restore_quando_aterrissar(tmp_path, antes) is True
     assert json.loads((tmp_path / "settings.json").read_text())["model"] == "claude-opus-5"
+
+
+def test_drop_foreign_tira_modelo_de_motor_da_conta_e_do_principal(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setattr(default_model.Path, "home", lambda: home)
+    principal = home / ".claude"
+    principal.mkdir(parents=True)
+    _settings(principal, {"model": "claude-200-2/gpt-6.1-sol[1m]", "outputStyle": "x"})
+    conta = tmp_path / "conta"
+    conta.mkdir()
+    _settings(conta, {"model": "kimi-for-coding"})
+
+    assert default_model.drop_foreign(conta) == ["kimi-for-coding", "claude-200-2/gpt-6.1-sol[1m]"]
+    assert json.loads((principal / "settings.json").read_text()) == {"outputStyle": "x"}
+    assert json.loads((conta / "settings.json").read_text()) == {}
+
+
+def test_drop_foreign_mantem_modelo_anthropic(tmp_path, monkeypatch):
+    monkeypatch.setattr(default_model.Path, "home", lambda: tmp_path / "home")
+    for valor in ("opus[1m]", "sonnet", "claude-opus-5-5", "claude-opus-5-5[1m]", "fable"):
+        _settings(tmp_path, {"model": valor})
+        assert default_model.drop_foreign(tmp_path) == []
+        assert json.loads((tmp_path / "settings.json").read_text()) == {"model": valor}

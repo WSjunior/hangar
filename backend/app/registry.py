@@ -2626,6 +2626,10 @@ class SessionRegistry:
         uuid.UUID(sid)
         # Modo de permissão vai junto: sem a flag a TUI nasce no defaultMode da conta.
         model = meta.get("model")
+        if model and not meta.get("engine"):
+            from app import default_model
+            # Na conta Anthropic, id de motor herdado do processo antigo derruba cada turno.
+            model = model if default_model.anthropic(model) else None
         if meta.get("engine_account"):
             from app import cliproxy, engines
             binding = cliproxy.engine_env(meta["engine"], model, meta.get("context_window"), meta["engine_account"],
@@ -3288,6 +3292,9 @@ class SessionRegistry:
             modelo = binding["ANTHROPIC_MODEL"]
         if motor_sumiu:
             modelo = esforco = janela = service_tier = None
+        if modelo and not motor:
+            from app import default_model
+            modelo = modelo if default_model.anthropic(modelo) else None
         service_tier = _claude_service_tier(motor, modelo, service_tier)
         # Sem motor, a variável veio do `-e` da criação e sumiria no relançamento; com motor, é dele.
         subagente = (procinfo._env_var_of(ag, "CLAUDE_CODE_SUBAGENT_MODEL")

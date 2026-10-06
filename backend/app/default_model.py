@@ -20,6 +20,7 @@ do usuario e pior que deixar o default trocado (que ele ve na tela e conserta).
 import json
 import logging
 import os
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -99,6 +100,38 @@ def restore(config_dir: Path | None, antes: Any) -> bool:
         d.pop("model", None)
     else:
         d["model"] = antes
+    _gravar(path, d)
+    return True
+
+
+# Ids que a API da Anthropic aceita: aliases do Claude Code e ids `claude-*`. Id de motor tem
+# outro nome ou leva o prefixo da conta (`claude-200-2/gpt-6.1-sol`), por isso fullmatch.
+_ANTHROPIC = re.compile(r"(claude-[\w.-]+|default|best|opus|opusplan|sonnet|haiku|fable)(\[1m\])?",
+                        re.IGNORECASE)
+
+
+def anthropic(model: str) -> bool:
+    return bool(_ANTHROPIC.fullmatch(model))
+
+
+def drop_foreign(config_dir: Path | None) -> list[str]:
+    """Tira do settings.json da conta e do principal um `"model"` que não é da Anthropic.
+
+    Cobre o `/model` digitado direto no terminal de uma sessão de motor, que não passa pelo
+    restore. Os dois arquivos: o espelho das contas não apaga na cópia o que sumiu do principal.
+    Devolve os valores removidos."""
+    removidos = []
+    for path in dict.fromkeys((_arquivo(config_dir), _arquivo(None))):
+        d = _ler(path)
+        valor = d.get("model") if d is not None else None
+        if d is not None and isinstance(valor, str) and not anthropic(valor):
+            del d["model"]
+            _gravar(path, d)
+            removidos.append(valor)
+    return removidos
+
+
+def _gravar(path: Path, d: dict) -> None:
     # tmp + replace: um corte no meio nao pode deixar o settings.json pela metade — seria a config
     # inteira do usuario perdida por causa de um undo.
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -111,7 +144,6 @@ def restore(config_dir: Path | None, antes: Any) -> bool:
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
-    return True
 
 
 def restore_quando_aterrissar(config_dir: Path | None, antes: Any) -> bool:
