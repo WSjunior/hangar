@@ -75,6 +75,8 @@ struct State {
     /// A próxima ação que começar com isto fica sem resposta (o pane travado no meio do clique).
     stall: Option<String>,
     actions: Vec<String>,
+    /// Quando cada ação saiu, para medir o intervalo entre elas.
+    stamps: Vec<(Instant, String)>,
     on_click: HashMap<(u16, u16), Vec<Effect>>,
     on_keys: VecDeque<(String, Vec<Effect>)>,
     on_wheel: VecDeque<Vec<Effect>>,
@@ -100,6 +102,8 @@ impl FakePane {
     pub fn actions(&self) -> Vec<String> { self.state.lock().unwrap().actions.clone() }
     pub fn held(&self) -> bool { self.state.lock().unwrap().held_until.is_some_and(|until| Instant::now() < until) }
     pub fn log(&self) -> Vec<String> { self.state.lock().unwrap().log.clone() }
+    /// As ações com o instante em que cada uma chegou ao pane.
+    pub fn stamps(&self) -> Vec<(Instant, String)> { self.state.lock().unwrap().stamps.clone() }
 
     fn apply(&self, state: &mut State, effects: &[Effect]) {
         for effect in effects {
@@ -132,6 +136,7 @@ impl FakePane {
         let stalled = state.stall.as_deref().is_some_and(|prefix| action.starts_with(prefix));
         if stalled { state.stall = None; }
         state.log.push(action.clone());
+        state.stamps.push((Instant::now(), action.clone()));
         state.actions.push(action);
         stalled
     }

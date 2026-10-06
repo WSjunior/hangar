@@ -1,6 +1,6 @@
 mod mods_support;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use hangar_server::mods::click::{self, Ctx, Limits, Parts, Undo};
@@ -40,8 +40,8 @@ fn far() -> Instant { Instant::now() + Duration::from_secs(30) }
 
 /// Um pedido do app como o `spawn` o atende, sem a tarefa: o pedido e depois a limpeza.
 async fn run(mods: &Mods, pane: &FakePane, until: Instant, call: ModsCall) -> Result<Value, ModsError> {
-    let (limits, undo) = (Limits::quick(), Undo::default());
-    let ctx = Ctx { name: S, pane, mods, limits: &limits, until, undo: &undo, life: 1 };
+    let (limits, undo, clicked) = (Limits::quick(), Undo::default(), Mutex::default());
+    let ctx = Ctx { name: S, pane, mods, limits: &limits, until, undo: &undo, life: 1, clicked: &clicked };
     let result = click::dispatch(&ctx, call).await;
     click::finish(&ctx).await;
     result
@@ -62,7 +62,8 @@ async fn until(check: impl Fn() -> bool) {
         .await.expect("condição esperada");
 }
 fn parts(mods: &Mods, pane: &Arc<FakePane>) -> Parts {
-    Parts { name: S.into(), pane: pane.clone(), mods: mods.clone(), limits: Limits::quick(), busy: Arc::default(), life: 1 }
+    Parts { name: S.into(), pane: pane.clone(), mods: mods.clone(), limits: Limits::quick(), busy: Arc::default(), life: 1,
+        clicked: Arc::default() }
 }
 
 #[tokio::test]
@@ -144,7 +145,7 @@ async fn without_a_terminal_the_floor_is_restored() {
     let (mods, pane) = setup("tmux-240-caixa-104", vitrine());
     pane.clients(0);
     let (limits, undo) = (Limits::quick(), Undo::default());
-    click::floor(&Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: far(), undo: &undo, life: 1 }).await.unwrap();
+    click::floor(&Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: far(), undo: &undo, life: 1, clicked: &Mutex::default() }).await.unwrap();
     assert_eq!(pane.actions()[0], "resize 144 45");
 }
 
@@ -210,9 +211,9 @@ async fn show_refuses_without_fullscreen_and_with_the_title_off_the_row() {
 async fn read_shown_reads_the_active_tab() {
     let (limits, undo) = (Limits::quick(), Undo::default());
     let (mods, pane) = setup("tmux-02-apos-clicar-mr-150", pm());
-    assert_eq!(click::read_shown(&Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: far(), undo: &undo, life: 1 }).await.as_deref(), Some("pm-mock-mr"));
+    assert_eq!(click::read_shown(&Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: far(), undo: &undo, life: 1, clicked: &Mutex::default() }).await.as_deref(), Some("pm-mock-mr"));
     let (mods, pane) = setup("psmux-700-dialogo-com-caixa-100", pm());
-    assert_eq!(click::read_shown(&Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: far(), undo: &undo, life: 1 }).await, None);
+    assert_eq!(click::read_shown(&Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: far(), undo: &undo, life: 1, clicked: &Mutex::default() }).await, None);
 }
 
 #[tokio::test]
@@ -628,4 +629,46 @@ async fn the_last_focus_wins_when_the_target_comes_after_another() {
     back_from_mr(&pane);
     press(&mods, &pane, "pm-mock-mr", "mr-a").await.unwrap();
     assert_eq!(keys(&pane), ["C-x Tab", "C-x Tab", "C-x Tab", "Tab", "Enter", "C-x Tab", "C-x Tab"]);
+}
+
+/// Os intervalos entre os cliques de mouse, na ordem.
+fn click_gaps(pane: &FakePane) -> Vec<Duration> {
+    let clicks: Vec<Instant> = pane.stamps().into_iter().filter(|(_, a)| a.starts_with("click ")).map(|(at, _)| at).collect();
+    clicks.windows(2).map(|w| w[1] - w[0]).collect()
+}
+
+#[tokio::test]
+async fn a_click_after_another_waits_the_gap_also_in_the_next_request() {
+    // A aba e o botão são dois cliques seguidos: mais perto que o intervalo, o Claude Code os toma por duplo
+    // clique e engole o segundo. O pedido seguinte no mesmo pane (fechar) também espera o intervalo.
+    let (mods, pane) = setup("tmux-400-vitrine-abas-150", vitrine());
+    pane.on_click((0, 87), vec![Show("tmux-402-vitrine-texto-150")]);
+    pane.on_click((1, 88), vec![Pressed("vitrine-texto", "V04-vitrine-texto")]);
+    pane.on_click((0, 148), vec![CloseAll]);
+    let gap = Duration::from_millis(250);
+    let (limits, clicked) = (Limits { click_gap: gap, ..Limits::quick() }, Mutex::default());
+    for call in [ModsCall::Press { site: "vitrine-texto".into(), key: "V04-vitrine-texto".into() }, ModsCall::Close { site: "vitrine-texto".into() }] {
+        let undo = Undo::default();
+        let ctx = Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: far(), undo: &undo, life: 1, clicked: &clicked };
+        click::dispatch(&ctx, call).await.unwrap();
+        click::finish(&ctx).await;
+    }
+    assert_eq!(pane.actions(), ["click 0 87", "click 1 88", "click 0 148"]);
+    assert!(click_gaps(&pane).iter().all(|g| *g >= gap), "{:?}", click_gaps(&pane));
+}
+
+#[tokio::test]
+async fn the_click_gap_counts_against_the_deadline() {
+    // Depois do clique na aba sobra menos que o intervalo, a confirmação (300 ms) e a folga (300 ms): o
+    // clique no botão não sai, em vez de sair colado no primeiro.
+    let (mods, pane) = setup("tmux-400-vitrine-abas-150", vitrine());
+    pane.on_click((0, 87), vec![Show("tmux-402-vitrine-texto-150")]);
+    pane.on_click((1, 88), vec![Pressed("vitrine-texto", "V04-vitrine-texto")]);
+    let (limits, undo, clicked) = (Limits { click_gap: Duration::from_millis(500), ..Limits::quick() }, Undo::default(), Mutex::default());
+    let ctx = Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: Instant::now() + Duration::from_millis(900), undo: &undo,
+        life: 1, clicked: &clicked };
+    let result = click::dispatch(&ctx, ModsCall::Press { site: "vitrine-texto".into(), key: "V04-vitrine-texto".into() }).await;
+    click::finish(&ctx).await;
+    assert_eq!(code(result), "erro_mod_clique_sem_resposta");
+    assert_eq!(pane.actions(), ["click 0 87"]);
 }

@@ -39,7 +39,7 @@ impl TerminalLink {
 
     /// `new` com a âncora do executor do terminal (`TerminalHandle::anchor`), que o elo mantém em dia.
     pub fn anchored(name: String, life: u64, pane: Arc<dyn Pane>, mods: Mods, limits: Limits, anchor: ModsAnchor) -> Arc<Self> {
-        Arc::new(Self { parts: Parts { name, pane, mods, limits, busy: Arc::default(), life }, watch: Mutex::new(None), anchor })
+        Arc::new(Self { parts: Parts { name, pane, mods, limits, busy: Arc::default(), life, clicked: Arc::default() }, watch: Mutex::new(None), anchor })
     }
 
     /// Repõe o tamanho mínimo quando nenhum terminal de verdade está ligado (T9). Com um pedido do app em
