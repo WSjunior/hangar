@@ -391,7 +391,7 @@ fn press_without_answer_times_out() {
 fn refresh_then_press_answers_within_the_app_limit() {
     // Pior caminho de um clique: o botão não está no desenho guardado, o desenho de novo chega no fim
     // do prazo e o clique fica sem resposta. A recusa sai antes dos 7 s do ator (e dos 8 s do app).
-    assert!(hangar_server::mods::surface::APP_CALL_MAX_S < 7.0);
+    const { assert!(hangar_server::mods::surface::APP_CALL_MAX_S < 7.0) };
     let mut surface = ready(json!({"type": "Text"}));
     let refresh = request(&app(&mut surface, 8, press("above-prompt", "ok"), 1.0), "ui_render");
     assert_eq!(surface.deadline(), Some(4.0), "o desenho de novo do clique vale 3 s, não os 10 s do desenho de fundo");

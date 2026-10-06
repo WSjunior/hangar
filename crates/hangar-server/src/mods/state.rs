@@ -14,6 +14,13 @@ use crate::side::{WeakHubs, TOASTS_KEPT};
 
 pub type CallFuture = Pin<Box<dyn Future<Output = Result<Value, ModsError>> + Send>>;
 
+/// O caminho de um pedido de app à sessão: quem o leva à superfície e a vez da sessão, que faz os
+/// pedidos de aparelhos diferentes correrem um por vez.
+pub struct Turn {
+    pub link: Arc<dyn SurfaceLink>,
+    pub lock: Arc<tokio::sync::Mutex<()>>,
+}
+
 /// Quem leva o pedido do app à superfície da sessão: o ator do runtime (`RuntimeHandle`). `deadline` é o
 /// prazo de quem pediu: depois dele a resposta não serve, e a ação não pode rodar no mod.
 pub trait SurfaceLink: Send + Sync {
@@ -194,8 +201,8 @@ impl Mods {
         }
     }
 
-    pub fn link(&self, name: &str) -> Option<(Arc<dyn SurfaceLink>, Arc<tokio::sync::Mutex<()>>)> {
-        self.inner.lock().unwrap().sessions.get(name).map(|session| (session.link.clone(), session.lock.clone()))
+    pub fn link(&self, name: &str) -> Option<Turn> {
+        self.inner.lock().unwrap().sessions.get(name).map(|session| Turn { link: session.link.clone(), lock: session.lock.clone() })
     }
 
     /// Guarda e entrega o `plugin_ui`; devolve se mudou. É o único ponto que compara a vista nova com a

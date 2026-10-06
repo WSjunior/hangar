@@ -173,7 +173,7 @@ async fn busy_turn_answers_before_the_app_gives_up_without_the_mod() {
     // Um pedido preso segura a vez da sessão: o seguinte não passa do prazo do app, não pergunta à guarda e
     // não chega ao mod.
     let (python, server, mods, link) = setup(FakeLink::default()).await;
-    let (_, turn) = mods.link("s").unwrap();
+    let turn = mods.link("s").unwrap().lock;
     let held = turn.lock().await;
     let start = Instant::now();
     let (status, body) = post(server, "s", "press", json!({"site": "above-prompt", "key": "abrir"}), Some(OWNER)).await;
@@ -195,7 +195,7 @@ async fn stuck_mod_is_cut_before_the_app_gives_up_and_frees_the_turn() {
     assert_eq!((status, body["detail"]["code"].as_str()), (409, Some("erro_mod_clique_sem_resposta")));
     assert!(start.elapsed() < APP_GIVES_UP, "{:?}", start.elapsed());
     assert_eq!(link.calls.lock().unwrap().len(), 1);
-    let (_, turn) = mods.link("s").unwrap();
+    let turn = mods.link("s").unwrap().lock;
     assert!(turn.try_lock().is_ok(), "a vez da sessão ficou livre");
 }
 

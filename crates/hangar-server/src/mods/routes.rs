@@ -30,6 +30,7 @@ use tokio::time::Instant;
 
 use super::http::{fits, invalid, reply};
 use super::model::*;
+use super::state::Turn;
 use crate::routes::{AppState, gate, pass, route_failed};
 
 const BODY_LIMIT: usize = 64 * 1024;
@@ -61,24 +62,28 @@ fn refused(headers: &HeaderMap, error: &ModsError) -> Response {
     reply(Some(headers), StatusCode::CONFLICT, json!({"detail": error.detail()}))
 }
 
+/// Resposta pronta que encerra a rota (repasse ao Python ou recusa), em caixa: a `Response` é grande para
+/// viajar no `Err`.
+type Done = Box<Response>;
+
 /// O Rust atende quando o pedido é do dono e a sessão é superfície dele; senão, o Python. `outside`: a
 /// recusa do dono numa sessão sem superfície no Rust, para a rota que o Python não tem (`input`).
 async fn owned(st: &Arc<AppState>, peer: SocketAddr, path: Result<Path<String>, PathRejection>, req: Request,
-    outside: Option<fn() -> ModsError>) -> Result<(String, HeaderMap, Body), Response> {
+    outside: Option<fn() -> ModsError>) -> Result<(String, HeaderMap, Body), Done> {
     let (fwd, owner) = gate(st, peer, &req);
     match (path, outside) {
         (Ok(Path(name)), _) if owner && st.mods.owns(&name) => {
             let headers = req.headers().clone();
             Ok((name, headers, req.into_body()))
         }
-        (Ok(Path(_)), Some(refusal)) if owner => Err(refused(req.headers(), &refusal())),
-        _ => Err(pass(st, req, &fwd).await),
+        (Ok(Path(_)), Some(refusal)) if owner => Err(Box::new(refused(req.headers(), &refusal()))),
+        _ => Err(Box::new(pass(st, req, &fwd).await)),
     }
 }
 
-async fn body<T: DeserializeOwned>(headers: &HeaderMap, raw: Body) -> Result<T, Response> {
-    let bytes = to_bytes(raw, BODY_LIMIT).await.map_err(|_| invalid(Some(headers)))?;
-    serde_json::from_slice(&bytes).map_err(|_| invalid(Some(headers)))
+async fn body<T: DeserializeOwned>(headers: &HeaderMap, raw: Body) -> Result<T, Done> {
+    let bytes = to_bytes(raw, BODY_LIMIT).await.map_err(|_| Box::new(invalid(Some(headers))))?;
+    serde_json::from_slice(&bytes).map_err(|_| Box::new(invalid(Some(headers))))
 }
 
 /// A guarda da troca de agente das rotas do Python (`_transfer_check`), perguntada a ele, que coordena
@@ -112,7 +117,7 @@ async fn transfer(st: &AppState, headers: &HeaderMap, name: &str, deadline: Inst
 }
 
 async fn run(st: &AppState, headers: &HeaderMap, name: &str, call: ModsCall, deadline: Instant) -> Response {
-    let Some((link, lock)) = st.mods.link(name) else { return refused(headers, &missing()) };
+    let Some(Turn { link, lock }) = st.mods.link(name) else { return refused(headers, &missing()) };
     // Um pedido por vez por sessão, como a trava do `plugin_click.press`: dois aparelhos não se cruzam. A
     // vez que não sai no orçamento é recusa, sem chamar o mod: o app já teria desistido.
     let Ok(_turn) = tokio::time::timeout_at(deadline, lock.lock()).await else { return refused(headers, &no_answer()) };
@@ -153,8 +158,8 @@ async fn run(st: &AppState, headers: &HeaderMap, name: &str, call: ModsCall, dea
 pub async fn press(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>,
     path: Result<Path<String>, PathRejection>, req: Request) -> Response {
     let deadline = Instant::now() + REQUEST_BUDGET;
-    let (name, headers, raw) = match owned(&st, peer, path, req, None).await { Ok(parts) => parts, Err(response) => return response };
-    let request: PressBody = match body(&headers, raw).await { Ok(request) => request, Err(response) => return response };
+    let (name, headers, raw) = match owned(&st, peer, path, req, None).await { Ok(parts) => parts, Err(response) => return *response };
+    let request: PressBody = match body(&headers, raw).await { Ok(request) => request, Err(response) => return *response };
     if !fits(&request.site, 64) || !fits(&request.key, 256) {
         return invalid(Some(&headers));
     }
@@ -167,8 +172,8 @@ pub async fn press(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
 pub async fn show(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>,
     path: Result<Path<String>, PathRejection>, req: Request) -> Response {
     let deadline = Instant::now() + REQUEST_BUDGET;
-    let (name, headers, raw) = match owned(&st, peer, path, req, None).await { Ok(parts) => parts, Err(response) => return response };
-    let request: ShowBody = match body(&headers, raw).await { Ok(request) => request, Err(response) => return response };
+    let (name, headers, raw) = match owned(&st, peer, path, req, None).await { Ok(parts) => parts, Err(response) => return *response };
+    let request: ShowBody = match body(&headers, raw).await { Ok(request) => request, Err(response) => return *response };
     if !fits(&request.site, 64) {
         return invalid(Some(&headers));
     }
@@ -179,8 +184,8 @@ pub async fn show(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
 pub async fn input(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>,
     path: Result<Path<String>, PathRejection>, req: Request) -> Response {
     let deadline = Instant::now() + REQUEST_BUDGET;
-    let (name, headers, raw) = match owned(&st, peer, path, req, Some(no_typing)).await { Ok(parts) => parts, Err(response) => return response };
-    let request: InputBody = match body(&headers, raw).await { Ok(request) => request, Err(response) => return response };
+    let (name, headers, raw) = match owned(&st, peer, path, req, Some(no_typing)).await { Ok(parts) => parts, Err(response) => return *response };
+    let request: InputBody = match body(&headers, raw).await { Ok(request) => request, Err(response) => return *response };
     if !fits(&request.site, 64) || !fits(&request.key, 256) || !matches!(request.kind.as_str(), "change" | "submit")
         || request.value.chars().count() > VALUE_MAX {
         return invalid(Some(&headers));
