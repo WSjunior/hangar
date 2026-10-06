@@ -53,13 +53,13 @@
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     line-height: 1.45;
-    color: var(--text);
+    color: var(--text-primary);
     background: var(--surface-inset);
     border-radius: var(--radius-md);
     overflow-x: auto;
     overflow-y: hidden;
   }
-  .notice { margin: var(--space-1) 0 0; font-family: var(--font-sans); color: var(--text-muted); }
+  .notice { margin: var(--space-1) 0 0; font-family: var(--font-ui); color: var(--text-muted); }
   .notice.error { color: var(--error); }
   .notice a { color: var(--accent); }
   .notice-action { font: inherit; color: var(--accent); background: transparent; border: 0; padding: 0; cursor: pointer; text-decoration: underline; }

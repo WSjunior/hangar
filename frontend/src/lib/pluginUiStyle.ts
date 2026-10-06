@@ -63,7 +63,7 @@ export function boxStyle(p: Props, place?: number | null): string {
     'margin-left': cols(pick('marginLeft', 'marginX', 'margin')),
     'margin-right': cols(pick('marginRight', 'marginX', 'margin')),
     background: inkColor(p.backgroundColor),
-    border: border ? `1px solid ${inkColor(p.borderColor) ?? 'var(--border)'}` : null,
+    border: border ? `1px solid ${inkColor(p.borderColor) ?? 'var(--border-default)'}` : null,
     'border-radius': border === 'round' ? '6px' : null,
     overflow: p.overflow === 'hidden' ? 'hidden' : null,
   });
@@ -78,8 +78,8 @@ export function textStyle(p: Props): string {
   const truncate = wrap.startsWith('truncate') || wrap === 'end' || wrap === 'middle';
   const deco = [p.underline === true && 'underline', p.strikethrough === true && 'line-through'].filter(Boolean);
   return css({
-    color: inverse ? (bg ?? 'var(--bg)') : fg,
-    background: inverse ? (fg ?? 'var(--text)') : bg,
+    color: inverse ? (bg ?? 'var(--bg-base)') : fg,
+    background: inverse ? (fg ?? 'var(--text-primary)') : bg,
     'font-weight': p.bold === true ? 700 : null,
     'font-style': p.italic === true ? 'italic' : null,
     'text-decoration': deco.length ? deco.join(' ') : null,

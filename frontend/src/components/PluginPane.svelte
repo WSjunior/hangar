@@ -54,7 +54,7 @@
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     line-height: 1.45;
-    color: var(--text);
+    color: var(--text-primary);
     background: var(--surface-inset);
     border-radius: var(--radius-md);
   }
@@ -62,7 +62,7 @@
   .title { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tabs { display: flex; gap: 1ch; min-width: 0; overflow-x: auto; }
   .tab { font: inherit; color: var(--text-muted); background: transparent; border: 0; border-radius: var(--radius-sm); padding: 0 1ch; cursor: pointer; white-space: nowrap; min-height: 0; min-width: 0; }
-  .tab.active { color: var(--text); font-weight: 600; background: var(--surface-raised); cursor: default; }
+  .tab.active { color: var(--text-primary); font-weight: 600; background: var(--surface-raised); cursor: default; }
   .close { font: inherit; color: var(--text-muted); background: transparent; border: 0; cursor: pointer; padding: 0 0.5ch; min-height: 0; min-width: 0; }
   .body { position: relative; max-height: 40vh; overflow-y: auto; overflow-x: hidden; }
 </style>
