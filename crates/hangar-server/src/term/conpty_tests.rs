@@ -15,7 +15,7 @@ const DSR: &str = "\x1b[6n";
 fn open(cols: u16, rows: u16) -> pty::Opened {
     let mut cmd = CommandBuilder::new("cmd.exe");
     cmd.args(["/d", "/k", "prompt HGP$G"]);
-    pty::spawn(cmd, cols, rows, Arc::new(Slot(Arc::default()))).expect("o ConPTY abre")
+    pty::spawn(cmd, cols, rows, Arc::new(Slot(Arc::default())), false).expect("o ConPTY abre")
 }
 
 /// Lê até `done` valer ou o prazo acabar. Responde ao pedido de posição do cursor que o
@@ -53,7 +53,7 @@ fn text(seen: &[u8]) -> String {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn spawn_echo_and_resize() {
-    let pty::Opened { pty, mut output, input } = open(80, 24);
+    let pty::Opened { pty, mut output, input, .. } = open(80, 24);
     let mut seen = Vec::new();
     assert!(read_until(&mut output, Some(&input), &mut seen, Duration::from_secs(15), |s| count(s, PROMPT) >= 1).await,
             "sem prompt: {}", text(&seen));
@@ -74,7 +74,7 @@ async fn spawn_echo_and_resize() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn child_killed_before_close() {
-    let pty::Opened { pty, mut output, input } = open(80, 24);
+    let pty::Opened { pty, mut output, input, .. } = open(80, 24);
     let mut seen = Vec::new();
     assert!(read_until(&mut output, Some(&input), &mut seen, Duration::from_secs(15), |s| count(s, PROMPT) >= 1).await,
             "sem prompt: {}", text(&seen));
@@ -86,7 +86,7 @@ async fn child_killed_before_close() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn dropping_writer_writes_nothing() {
-    let pty::Opened { pty, mut output, input } = open(80, 24);
+    let pty::Opened { pty, mut output, input, .. } = open(80, 24);
     let mut seen = Vec::new();
     assert!(read_until(&mut output, Some(&input), &mut seen, Duration::from_secs(15), |s| count(s, PROMPT) >= 1).await,
             "sem prompt: {}", text(&seen));
@@ -99,5 +99,24 @@ async fn dropping_writer_writes_nothing() {
     drop(input);
     read_until(&mut output, None, &mut seen, Duration::from_secs(2), |_| false).await;
     assert_eq!(count(&seen, PROMPT), prompts, "soltar o escritor entregou tecla: {}", text(&seen));
+    pty::close(pty).await.expect("o filho sai e o pseudoconsole fecha");
+}
+
+/// O prompt entra na tela alternativa como o `tmux attach` do psmux: é o sinal de pronto. A tecla
+/// vai antes de qualquer saída, e a resposta ao pedido de cursor tem que passar pela entrada
+/// segurada, senão o conhost não sobe o filho e só o prazo abriria.
+#[tokio::test(flavor = "multi_thread")]
+async fn held_input_reaches_the_child_after_ready() {
+    let mut cmd = CommandBuilder::new("cmd.exe");
+    cmd.args(["/d", "/k", "prompt $E[?1049hHGP$G"]);
+    let pty::Opened { pty, mut output, input, held_failure } =
+        pty::spawn(cmd, 80, 24, Arc::new(Slot(Arc::default())), true).expect("o ConPTY abre");
+    input.send(Bytes::from_static(b"echo hangar-^cedo\r")).await.unwrap();
+    let mut seen = Vec::new();
+    assert!(read_until(&mut output, Some(&input), &mut seen, Duration::from_secs(4), |s| count(s, "hangar-cedo") >= 1).await,
+            "a tecla segurada não chegou antes do prazo: {}", text(&seen));
+    let mut held_failure = held_failure.expect("portão ligado");
+    assert!(held_failure.try_recv().is_err(), "a porta abriu sem o sinal");
+    drop(input);
     pty::close(pty).await.expect("o filho sai e o pseudoconsole fecha");
 }

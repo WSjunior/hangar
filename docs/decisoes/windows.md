@@ -95,7 +95,11 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **Terminal real do dono no Windows é do Rust, pelo ConPTY do `portable-pty`.** O filho
   (`tmux attach`) morre ANTES de o pseudoconsole fechar, e com filho vivo o pseudoconsole vaza em
   vez de fechar; não há reposição de tamanho; o escritor é o `take_writer` (pipe puro, soltar só
-  fecha). Medição em [Terminal real do dono no Windows](#terminal-real-do-dono-no-windows).
+  fecha). A entrada do cliente fica segurada até o `tmux attach` emitir `ESC[?1049h` (o psmux
+  joga fora tecla escrita antes dele subir), menos a resposta de posição do cursor, que é do
+  conhost e passa na hora; prazo de 5 s ou 64 KiB segurados entregam e vão ao diário
+  (`ready_timeout`, `input_held_overflow`; escrita que falha ali, `input_write_failed`). Medição em
+  [Terminal real do dono no Windows](#terminal-real-do-dono-no-windows).
 - **App nativo: botão de janela dentro de área `Drag` leva `.occlude()`, e a área `Drag` suprime a
   seleção de texto no apertar.** O `WM_NCHITTEST` do GPUI devolve a PRIMEIRA área de controle sob o
   ponteiro na ordem de pintura (`gpui-pre/src/window.rs`, `on_hit_test_window_control`); a barra pinta
@@ -750,4 +754,16 @@ Windows. Diferenças conferidas na fonte do crate e no `conpty.py`:
 - O crate cria o ConPTY com `INHERIT_CURSOR | RESIZE_QUIRK | WIN32_INPUT_MODE` (o Python usa 0).
   Com `INHERIT_CURSOR` o console pede a posição do cursor (`ESC[6n`) e espera a resposta do
   cliente; a prova com web e nativo na DELPHI-02 é o Step 23 do plano da parte 4.
+- Tecla escrita antes de o cliente psmux subir se perde (06/10/2026, DELPHI-02, psmux da VM,
+  sessão de teste com PowerShell). Pelo Rust (WS na 8765, cliente respondendo o `ESC[6n`), os
+  bytes chegam assim: `ESC[6n` em 70 ms, `ESC[?9001h ESC[?1004h` e o título do conhost logo
+  depois, e só então o próprio psmux (`OSC 4;n;?`, `ESC[?996n`, `ESC[?1049h`, pintura) entre 75 e
+  80 ms. `echo` mandado em 0, 40 ou 60 ms, junto com a resposta do cursor, ou ao ver o
+  `ESC[?9001h` ou o título: perdido em todas as tentativas. Mandado ao ver o primeiro `OSC 4` ou o
+  `ESC[?1049h`, ou a partir de 100 ms: chegou em todas. O ConPTY do `conpty.py` (flags 0, sem
+  backend) tem o mesmo defeito, só que a janela é de ~10 ms porque não há pedido de cursor: perdeu
+  em 0 ms e chegou de 50 ms em diante. No Linux (tmux 3.7b, `-L` próprio) o `echo` escrito antes
+  até do `exec` chega: o tty guarda; por isso a porta só liga no Windows. macOS não conferido.
+  O `ESC[?1049h` atravessa o ConPTY também vindo de um `prompt $E[?1049h` do `cmd.exe`, que é o
+  teste `term::conpty::held_input_reaches_the_child_after_ready`.
 

@@ -288,7 +288,7 @@ async fn run(st: Arc<AppState>, socket: WebSocket, target: String, cols: u16, ro
     let open_target = target.clone();
     let opened = tokio::task::spawn_blocking(move || pty::open(&open_cfg, &open_target, cols, rows, slot)).await
         .unwrap_or(Err("pty_panic"));
-    let pty::Opened { pty, mut output, input } = match opened {
+    let pty::Opened { pty, mut output, input, held_failure } = match opened {
         Ok(o) => o,
         Err(code) => {
             st.diag.report("rust.term_failed", &target, code, "o terminal não abriu");
@@ -304,6 +304,14 @@ async fn run(st: Arc<AppState>, socket: WebSocket, target: String, cols: u16, ro
         }
     };
     tracing::info!(session = %target, cols, rows, "terminal: anexado");
+    if let Some(failed) = held_failure {
+        let (diag, target) = (st.diag.clone(), target.clone());
+        tokio::spawn(async move {
+            if let Ok(code) = failed.await {
+                diag.report("rust.term_failed", &target, code, "a entrada do terminal não esperou o sinal de que o attach lê o teclado, ou não foi escrita");
+            }
+        });
+    }
     let (mut sink, mut stream) = socket.split();
     let (ctl, mut ctl_rx) = mpsc::channel::<Message>(4);
     let mut sender = tokio::spawn(async move {
