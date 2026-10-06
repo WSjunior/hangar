@@ -4,19 +4,57 @@
 # atende ele repassa ao Python, e aí os dois tempos ficam parecidos.
 set -euo pipefail
 
-pid=$(pgrep -f "python3 -m app.main" | head -1 || true)
-[ -n "$pid" ] || { echo "backend do Hangar não está rodando"; exit 1; }
-backend=$(readlink "/proc/$pid/cwd")
-token=$(grep '^CP_AUTH_TOKEN=' "$backend/.env" | cut -d= -f2-)
-log=~/.hangar/logs/privado/hangar-server.log
+porta=${HANGAR_PORT:-8765}
+RUST=127.0.0.1:$porta
 
-if ! curl -sf http://127.0.0.1:8765/__hangar_server/health >/dev/null; then
-  echo "o Rust não está atendendo a porta 8765 (o Python está sozinho)"; exit 1
+# Token: HANGAR_TOKEN, o .env deste checkout, ou o do processo que escuta a porta. Achar o backend
+# pelo nome do processo falha quando o venv chama o executável de `python`.
+token=${HANGAR_TOKEN:-}
+[ -n "$token" ] || token=$(grep -s '^CP_AUTH_TOKEN=' "$(dirname "$0")/../backend/.env" | tail -1 | cut -d= -f2- || true)
+if [ -z "$token" ]; then
+  pid=$(ss -Hltnp "sport = :$porta" 2>/dev/null | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2 || true)
+  [ -n "$pid" ] || { echo "backend do Hangar fora: nada escuta em $RUST"; exit 1; }
+  # Com o Rust na porta, o Python é o pai dele; os dois recebem o token no ambiente.
+  for p in "$pid" "$(ps -o ppid= -p "$pid" | tr -d ' ')"; do
+    token=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | grep '^CP_AUTH_TOKEN=' | cut -d= -f2- || true)
+    [ -n "$token" ] || token=$(grep -s '^CP_AUTH_TOKEN=' "$(readlink "/proc/$p/cwd")/.env" | tail -1 | cut -d= -f2- || true)
+    [ -n "$token" ] && break
+  done
 fi
-python_port=$(grep -o 'upstream=127.0.0.1:[0-9]*' "$log" 2>/dev/null | tail -1 | cut -d= -f2 || true)
-[ -n "$python_port" ] || { echo "porta do Python não encontrada em $log"; exit 1; }
-RUST=127.0.0.1:8765
-PY="$python_port"
+[ -n "$token" ] || { echo "token não encontrado: defina HANGAR_TOKEN ou rode o script do checkout do backend"; exit 1; }
+
+resposta=$(curl -s -m 10 -w '\n%{http_code}' -H "Authorization: Bearer $token" "http://$RUST/api/migration/status") ||
+  { echo "backend do Hangar fora: nada responde em $RUST"; exit 1; }
+codigo=${resposta##*$'\n'}
+case $codigo in
+  200) ;;
+  401|403) echo "o backend recusou o token (HTTP $codigo): confira o CP_AUTH_TOKEN"; exit 1 ;;
+  404) echo "o backend não tem /api/migration/status (versão anterior à tela de migração): atualize"; exit 1 ;;
+  *) echo "o estado da migração respondeu HTTP $codigo"; exit 1 ;;
+esac
+leitura=$(python3 -c '
+import json, sys
+s = json.load(sys.stdin); p = s.get("python") or {}
+print(s.get("served_by") or "-", p.get("mode") or "-", p.get("reason") or "-", p.get("port") or "-",
+      (p.get("binary") or {}).get("path") or "-")' <<< "${resposta%$'\n'*}") ||
+  { echo "resposta do estado da migração ilegível"; exit 1; }
+read -r atende modo motivo python_port binario <<< "$leitura"
+if [ "$atende" != rust ]; then
+  case $motivo in
+    sem_binario) motivo="binário hangar-server ausente (CP_RUST_SERVER_BIN, crates/target/release ou ~/.hangar/bin)" ;;
+    desligado) motivo="CP_RUST_SERVER=0 no backend/.env" ;;
+    reload) motivo="backend rodando com --reload" ;;
+    protocolo) motivo="o binário fala outro contrato interno (atualize os binários)" ;;
+    sem_resposta) motivo="o binário não respondeu em 10 s" ;;
+    endereco_privado) motivo="o binário não anunciou o endereço privado" ;;
+    quedas) motivo="o Rust caiu 3 vezes em 60 s" ;;
+    erro) motivo="a vigia do Rust falhou (veja o diário)" ;;
+  esac
+  echo "o Rust não está atendendo a porta $porta: o Python está sozinho (modo $modo) — $motivo"; exit 1
+fi
+[ "$python_port" != - ] || { echo "o Rust respondeu, mas o Python atrás dele não mandou a porta interna"; exit 1; }
+echo "Rust na porta $porta (modo $modo, binário $binario); Python em 127.0.0.1:$python_port"
+PY="127.0.0.1:$python_port"
 
 # Tempos internos em microssegundos: rota que responde abaixo de 1 ms não pode virar 0.
 pedido_us() {  # $1 = host:porta, $2 = caminho

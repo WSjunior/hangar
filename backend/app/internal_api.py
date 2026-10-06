@@ -264,6 +264,12 @@ async def session_info(name: str) -> dict:
     return info_payload(name, info.provider, info.jsonl)
 
 
+@router.get("/migration/status")
+async def migration_status() -> dict:
+    from app import migration_status
+    return await asyncio.to_thread(migration_status.facts)
+
+
 @router.get("/costs/scopes")
 async def costs_scopes() -> dict:
     from app import costs_sources

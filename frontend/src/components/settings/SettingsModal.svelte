@@ -7,6 +7,7 @@
   import ServerSettings from './ServerSettings.svelte';
   import ShortcutsSettings from './ShortcutsSettings.svelte';
   import SobreSettings from './SobreSettings.svelte';
+  import MigrationSettings from './MigrationSettings.svelte';
   import DiarioSettings from './DiarioSettings.svelte';
   import MaquinasSettings from './MaquinasSettings.svelte';
   import ContasSettings from './ContasSettings.svelte';
@@ -387,7 +388,9 @@
   {:else if telaAtual === 'diario'}
     <DiarioSettings />
   {:else if telaAtual === 'sobre'}
-    <SobreSettings />
+    <SobreSettings onMigration={() => onIrPara('migration')} />
+  {:else if telaAtual === 'migration'}
+    <MigrationSettings />
   {:else if telaAtual === 'maquinas'}
     <MaquinasSettings resolvedServer={resolvedServer} apiTarget={alvo}
       fallbackFocus={fecharEl} {store}

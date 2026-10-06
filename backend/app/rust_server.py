@@ -25,14 +25,14 @@ from pathlib import Path
 
 import uvicorn
 
-from app import diag, diag_logging, log_paths, rust_bins, terminal_observer
+from app import diag, diag_logging, log_paths, migration_status, rust_bins, terminal_observer
 
 _log = logging.getLogger("hangar.rust_server")
 
 HEALTH_PATH = "/__hangar_server/health"
 # Versão do contrato interno (rotas /internal, side-events, ambiente). Tem de casar com o
 # `protocol` da saúde (hangar_server::INTERNAL_PROTOCOL); outro número = o Python atende sozinho.
-RUST_SERVER_PROTOCOL = 27
+RUST_SERVER_PROTOCOL = 33
 START_TIMEOUT = 10.0
 OP_TIMEOUT_S = 75
 CRASH_WINDOW = 60.0
@@ -117,6 +117,10 @@ def _spawn(binary: Path, env: dict[str, str]) -> subprocess.Popen:
     return spawn_contained([str(binary)], env=env, record_path=record_path())
 
 
+class ProtocolMismatch(ValueError):
+    """O binário fala outro contrato: religar não adianta, e o motivo tem de dizer isso."""
+
+
 def _runtime_ready(proc, instance: str) -> dict:
     if proc.stdout is None:
         raise ValueError("partida sem cano de resposta")
@@ -129,7 +133,7 @@ def _runtime_ready(proc, instance: str) -> dict:
     if ready["type"] != "runtime_ready" or ready["instance"] != instance:
         raise ValueError("resposta de outra instância")
     if type(ready["protocol"]) is not int or ready["protocol"] != RUST_SERVER_PROTOCOL:
-        raise ValueError("protocolo de partida incompatível")
+        raise ProtocolMismatch(ready["protocol"])
     if type(ready["port"]) is not int or not 1 <= ready["port"] <= 65535:
         raise ValueError("porta privada inválida")
     return ready
@@ -262,6 +266,18 @@ def _close_stdin(proc: subprocess.Popen) -> None:
         proc.stdin.close()
 
 
+# O da execução atual, para a tela de migração ler pid e binário sem guardar outra cópia.
+_supervisor: "Supervisor | None" = None
+
+
+def child() -> subprocess.Popen | None:
+    return _supervisor.proc if _supervisor is not None else None
+
+
+def current_binary() -> Path | None:
+    return _supervisor.binary if _supervisor is not None else None
+
+
 class Supervisor:
     """Um filho por vez; religa a cada queda até desistir."""
 
@@ -324,6 +340,10 @@ class Supervisor:
         try:
             ready = await asyncio.wait_for(asyncio.to_thread(_runtime_ready, self.proc,
                                             env["HANGAR_RUNTIME_INSTANCE"]), START_TIMEOUT)
+        except ProtocolMismatch as e:
+            _log.error("hangar-server fala o protocolo %r; este backend fala %d", e.args[0], RUST_SERVER_PROTOCOL)
+            diag.registrar("hangar_server.protocolo", "erro", esperado=RUST_SERVER_PROTOCOL, recebido=e.args[0])
+            return "protocol"
         except (OSError, ValueError, asyncio.TimeoutError):
             diag.registrar("hangar_server.partida", "erro", codigo="runtime_invalido")
             return "silent" if self.proc.poll() is None else "died"
@@ -499,6 +519,9 @@ async def serve(server: uvicorn.Server, sockets: list[socket.socket], binary: Pa
         return True
     supervisor = Supervisor(binary, kw["host"], kw["port"], sockets[0].getsockname()[1], token,
                             kw["forwarded_allow_ips"], lambda: server.should_exit)
+    global _supervisor
+    _supervisor = supervisor
+    migration_status.set_listen_port(supervisor.upstream_port)
     watch = asyncio.create_task(supervisor.run())
     await asyncio.wait({serving, watch}, return_when=asyncio.FIRST_COMPLETED)
     if serving.done():
@@ -524,6 +547,7 @@ async def _take_over(server: uvicorn.Server, serving: asyncio.Task, reason: str,
     """O Python passa a atender a porta pública até o fim do processo."""
     _log.error("hangar-server desligado (%s); o Python assume a porta %s", reason, kw["port"])
     diag.registrar("hangar_server.reserva", "erro", codigo=reason)
+    migration_status.set_reason(reason)
     from app import costs_sources
 
     costs_sources.set_served_by_rust(False)
@@ -540,6 +564,7 @@ async def _take_over(server: uvicorn.Server, serving: asyncio.Task, reason: str,
     public = Server(uvicorn.Config(server.config.app, **{**kw, "lifespan": "off"}))
     # O Config novo refaz o logging do uvicorn e tira dele os handlers do diário.
     diag_logging.instalar()
+    migration_status.set_listen_port(kw["port"])
     public_task = asyncio.create_task(public.serve(sockets=[sock]))
     await asyncio.wait({serving, public_task}, return_when=asyncio.FIRST_COMPLETED)
     server.should_exit = True

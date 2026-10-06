@@ -302,10 +302,12 @@ async fn dispatch(registry:&RuntimeRegistry,envelope:&Envelope) -> Result<Value,
     if kind == "open" {
         return match descriptor(&command["descriptor"])? {
             Target::Headless(target)=>{
+                crate::migration_status::count_private("send_headless");
                 if target.key!=envelope.key || target.generation!=envelope.generation{return Err(failure("runtime_binding"));}
                 registry.open(target).await
             },
             Target::Terminal(target)=>{
+                crate::migration_status::count_private("send_terminal");
                 if target.key!=envelope.key || target.generation!=envelope.generation{return Err(failure("runtime_binding"));}
                 registry.open_terminal(target).await
             }
@@ -313,6 +315,7 @@ async fn dispatch(registry:&RuntimeRegistry,envelope:&Envelope) -> Result<Value,
     }
     if kind == "close" { return registry.close(&envelope.key,envelope.generation).await; }
     let handle = registry.entry(&envelope.key,envelope.generation).await?;
+    crate::migration_status::count_private(if matches!(&handle,EntryHandle::Terminal {..}) {"send_terminal"} else {"send_headless"});
     match kind {
         "submit"=> {
             if matches!(&handle,EntryHandle::Terminal {..}) && (command.get("steer").is_some_and(|value|!value.is_boolean())

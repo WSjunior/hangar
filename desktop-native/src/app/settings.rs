@@ -13,7 +13,7 @@ mod appearance_page;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Page {
-    General, Appearance, Diary, About,
+    General, Appearance, Diary, About, Migration,
     Servers, Sync, Connect, SharedConfig, Accounts, Orchestration, Harnesses, Voice, Jev, Windows, Notifications, Shortcuts, Attachments, Advanced,
 }
 
@@ -24,7 +24,7 @@ impl Page {
 
     fn key(self) -> &'static str {
         match self {
-            Page::General => "general", Page::Appearance => "appearance", Page::Diary => "diary", Page::About => "about",
+            Page::General => "general", Page::Appearance => "appearance", Page::Diary => "diary", Page::About => "about", Page::Migration => "migration",
             Page::Servers => "servers", Page::Sync => "sync", Page::Connect => "connect", Page::SharedConfig => "shared_config", Page::Accounts => "accounts", Page::Orchestration => "orchestration",
             Page::Harnesses => "harnesses", Page::Voice => "voice", Page::Jev => "jev", Page::Windows => "windows", Page::Notifications => "notifications",
             Page::Shortcuts => "shortcuts", Page::Attachments => "attachments", Page::Advanced => "advanced",
@@ -34,7 +34,7 @@ impl Page {
     fn icon(self) -> IconName {
         match self {
             Page::General => IconName::Globe, Page::Appearance => IconName::Palette, Page::Diary => IconName::FileText,
-            Page::About => IconName::Info, Page::Servers => IconName::Server, Page::Sync => IconName::RefreshCw, Page::Connect => IconName::Globe, Page::SharedConfig => IconName::Layers,
+            Page::About => IconName::Info, Page::Migration => IconName::Activity, Page::Servers => IconName::Server, Page::Sync => IconName::RefreshCw, Page::Connect => IconName::Globe, Page::SharedConfig => IconName::Layers,
             Page::Accounts => IconName::User, Page::Orchestration => IconName::Users, Page::Harnesses => IconName::Activity,
             Page::Voice => IconName::Mic, Page::Jev => IconName::Zap, Page::Windows => IconName::Monitor, Page::Notifications => IconName::Bell,
             Page::Shortcuts => IconName::Keyboard, Page::Attachments => IconName::Paperclip, Page::Advanced => IconName::SlidersHorizontal,
@@ -45,6 +45,7 @@ impl Page {
         // O nome é o do web: uma frase, um dicionário.
         if self == Page::Jev { return tr_shared("jev_title", &[]); }
         if self == Page::SharedConfig { return tr_shared("shared_config_title", &[]); }
+        if self == Page::Migration { return tr_shared("migration_title", &[]); }
         tr(&format!("settings_page_{}", self.key()))
     }
 }
@@ -797,6 +798,7 @@ impl Hangar {
             Page::General => self.render_general(cx),
             Page::Diary => self.render_diary(cx),
             Page::About => self.render_about(cx),
+            Page::Migration => self.render_migration(cx),
             Page::Accounts => self.render_accounts(accounts_wide, window, cx),
             Page::Orchestration => self.render_orchestration(cx),
             Page::Shortcuts => self.render_shortcuts_page(cx),

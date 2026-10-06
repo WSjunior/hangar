@@ -4,6 +4,7 @@
   import { getAtualizacao } from '@hangar/core';
   import { atualizarUI } from '../../lib/atualizarUI.svelte';
   const REPO = 'https://github.com/jeffer1312/hangar';
+  let { onMigration }: { onMigration?: () => void } = $props();
 
   /**
    * Versão legível: `2026.09.14-ae8a7bf` (data do commit + hash), com o `-dirty` separado num
@@ -68,6 +69,9 @@
       <span class="version">{m.sobre_versao_maquina()}: {doServidor.versao}</span>
     {/if}
   </div>
+  {#if onMigration}
+    <button class="bt" onclick={onMigration}>{m.migration_open()}</button>
+  {/if}
 </div>
 
 <style>
