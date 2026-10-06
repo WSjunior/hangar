@@ -322,7 +322,8 @@ mod tests {
     /// que o Rust atende. O roteador não se deixa listar; o texto dele, sim.
     #[test]
     fn every_route_registered_in_the_router_is_known_to_the_table() {
-        let source = include_str!("routes.rs");
+        // No Windows o checkout pode trazer CRLF, e o fim da função é procurado por "\n}\n".
+        let source = include_str!("routes.rs").replace("\r\n", "\n");
         let body = &source[source.find("pub fn router(").unwrap()..];
         let body = &body[..body.find("\n}\n").unwrap()];
         let (mut seen, mut api) = (0, 0);
