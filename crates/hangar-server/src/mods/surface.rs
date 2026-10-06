@@ -11,10 +11,13 @@ use crate::runtime::protocol::RequestId;
 
 /// Prazo do desenho: a árvore de 398 KB veio em 0,35 s; a folga cobre máquina ocupada.
 const RENDER_S: f64 = 10.0;
-/// Prazo de clique, fechar, mostrar e digitar.
-const CALL_S: f64 = 5.0;
-/// O pedido de app mais longo: o desenho de novo antes do clique (S4) e o clique depois dele.
-pub const APP_CALL_MAX_S: f64 = RENDER_S + CALL_S;
+/// Prazo de clique, fechar, mostrar e digitar, e do desenho de novo que um clique ou uma digitação pede
+/// (S4). Curto porque o app desiste em 8 s: a resposta tem que chegar antes, senão o app mostra erro
+/// com o clique ainda rodando no mod.
+const CALL_S: f64 = 3.0;
+/// O pedido de app mais longo: o desenho de novo antes do clique e o clique depois dele (6 s). O
+/// fechar, com a confirmação pelo rol, fica em 5 s.
+pub const APP_CALL_MAX_S: f64 = 2.0 * CALL_S;
 const ATTACH_S: f64 = 15.0;
 /// Esperas antes de cada nova ligação depois de uma sem resposta (o pedido pode ter se perdido com o
 /// cano travado); esgotadas, a superfície desliga até o processo religar.
@@ -50,7 +53,7 @@ impl Pending {
     fn limit(&self) -> f64 {
         match self {
             Pending::Attach => ATTACH_S,
-            Pending::Panes | Pending::Render { .. } | Pending::Refresh { .. } => RENDER_S,
+            Pending::Panes | Pending::Render { .. } => RENDER_S,
             _ => CALL_S,
         }
     }

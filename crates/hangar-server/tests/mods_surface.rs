@@ -378,8 +378,31 @@ fn show_is_confirmed_by_shown_id() {
 fn press_without_answer_times_out() {
     let mut surface = ready(button("ok", 1));
     surface.call(8, press("above-prompt", "ok"), 1.0);
-    assert!(reply_of(&surface.tick(5.9), 8).is_none());
-    assert_eq!(code(reply_of(&surface.tick(6.0), 8)), "erro_mod_clique_sem_resposta");
+    assert!(reply_of(&surface.tick(3.9), 8).is_none());
+    assert_eq!(code(reply_of(&surface.tick(4.0), 8)), "erro_mod_clique_sem_resposta", "3 s sem resposta");
+}
+
+#[test]
+fn refresh_then_press_answers_within_the_app_limit() {
+    // Pior caminho de um clique: o botão não está no desenho guardado, o desenho de novo chega no fim
+    // do prazo e o clique fica sem resposta. A recusa sai antes dos 7 s do ator (e dos 8 s do app).
+    assert!(hangar_server::mods::surface::APP_CALL_MAX_S < 7.0);
+    let mut surface = ready(json!({"type": "Text"}));
+    let refresh = request(&surface.call(8, press("above-prompt", "ok"), 1.0), "ui_render");
+    assert_eq!(surface.deadline(), Some(4.0), "o desenho de novo do clique vale 3 s, não os 10 s do desenho de fundo");
+    let out = ok(&mut surface, &refresh, json!({"tree": button("ok", 1)}), 3.9);
+    assert_eq!(request(&out, "ui_press")["request"]["handle"], 1);
+    assert!(reply_of(&surface.tick(6.8), 8).is_none());
+    let out = surface.tick(6.9);
+    assert_eq!(code(reply_of(&out, 8)), "erro_mod_clique_sem_resposta");
+}
+
+#[test]
+fn refresh_without_answer_gives_up_in_three_seconds() {
+    let mut surface = ready(json!({"type": "Text"}));
+    surface.call(8, press("above-prompt", "ok"), 1.0);
+    assert!(reply_of(&surface.tick(3.9), 8).is_none());
+    assert_eq!(code(reply_of(&surface.tick(4.0), 8)), "erro_mod_clique_sem_resposta");
 }
 
 #[test]

@@ -14,10 +14,10 @@ enum Core { Claude(ClaudeEngine),Codex(CodexEngine) }
 /// dos hooks do UserPromptSubmit: o teto dela fica acima da espera do Python (`PUBLICA_S`).
 const POLICY_TIMEOUT:Duration=Duration::from_secs(15);
 const PUBLISH_POLICY_TIMEOUT:Duration=Duration::from_secs(40);
-/// Teto de um pedido de app aos mods: o mais longo da superfície (desenho de novo e clique, 15 s) mais
-/// 5 s de folga para o relógio do ator. O registro serializa os pedidos da sessão, então um pedido sem
-/// teto prenderia os seguintes.
-const MODS_CALL_LIMIT:Duration=Duration::from_secs(crate::mods::surface::APP_CALL_MAX_S as u64 + 5);
+/// Teto de um pedido de app aos mods: o mais longo da superfície (desenho de novo e clique, 6 s) mais
+/// 1 s de folga para o relógio do ator, abaixo dos 8 s em que o app desiste. O registro serializa os
+/// pedidos da sessão, então um pedido sem teto prenderia os seguintes.
+const MODS_CALL_LIMIT:Duration=Duration::from_secs(crate::mods::surface::APP_CALL_MAX_S as u64 + 1);
 
 #[derive(Clone)]
 pub struct PolicyClient {
@@ -173,7 +173,8 @@ enum Message {
     Snapshot(oneshot::Sender<Result<Value,RuntimeError>>),
     Drain(oneshot::Sender<Result<Value,RuntimeError>>),
     Confirm(oneshot::Sender<Result<Value,RuntimeError>>),
-    Mods { call:ModsCall,response:oneshot::Sender<Result<Value,ModsError>> },
+    /// `deadline`: quando o app deixa de esperar. Pedido que chega à vez depois disso não roda.
+    Mods { call:ModsCall,deadline:Instant,response:oneshot::Sender<Result<Value,ModsError>> },
     Stop(oneshot::Sender<Result<(),RuntimeError>>),
 }
 
@@ -218,8 +219,9 @@ impl RuntimeHandle {
     async fn mods_within(&self,call:ModsCall,limit:Duration) -> Result<Value,ModsError> {
         if self.closed.load(Ordering::Acquire) { return Err(crate::mods::model::no_answer()); }
         let (response,receive) = oneshot::channel();
+        let deadline = Instant::now() + limit;
         tokio::time::timeout(limit,async {
-            self.sender.send(Message::Mods { call,response }).await.map_err(|_|crate::mods::model::no_answer())?;
+            self.sender.send(Message::Mods { call,deadline,response }).await.map_err(|_|crate::mods::model::no_answer())?;
             receive.await.map_err(|_|crate::mods::model::no_answer())?
         }).await.unwrap_or_else(|_|Err(crate::mods::model::no_answer()))
     }
@@ -359,7 +361,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
     let mut drain_requested = true;
     let mut drain_active = false;
     let mut drain_waiters = Vec::new();
-    let mut mods_waiters:BTreeMap<u64,oneshot::Sender<Result<Value,ModsError>>> = BTreeMap::new();
+    let mut mods_waiters:ModsWaiters = BTreeMap::new();
     let mut mods_token = 0u64;
     let mut ui_writes = 0u64;
     effects.extend(engine.hydrate(snapshot)?);
@@ -674,12 +676,8 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                             Job::Root { id,result }
                         });
                     }
-                    Message::Mods { call,response } => {
-                        mods_token += 1;
-                        match engine.mods_call(mods_token,call,clock(start)) {
-                            Ok(next) => { mods_waiters.insert(mods_token,response); effects.extend(next); }
-                            Err(error) => { let _ = response.send(Err(error)); }
-                        }
+                    Message::Mods { call,deadline,response } => {
+                        effects.extend(take_mods(&mut engine,&mut mods_waiters,&mut mods_token,call,deadline,response,clock(start)));
                     }
                     Message::Queue { call_id,action,response } => {
                         let queue = queue.clone(); let generation = target.generation; let sample = clock(start);
@@ -1150,6 +1148,20 @@ fn publish(events:&broadcast::Sender<RuntimeEvent>,target:&RuntimeTarget,revisio
     let _ = events.send(RuntimeEvent { key:target.key.clone(),generation:target.generation,revision:revision.value,channel:channel.into(),data });
 }
 
+type ModsWaiters = BTreeMap<u64,oneshot::Sender<Result<Value,ModsError>>>;
+
+/// Pedido de app que chegou à vez. Já vencido (o `timeout` do app venceu com a mensagem na caixa), não
+/// roda: virar clique depois que o app mostrou erro seria um clique fantasma.
+fn take_mods(engine:&mut RuntimeEngine,waiters:&mut ModsWaiters,token:&mut u64,call:ModsCall,deadline:Instant,
+    response:oneshot::Sender<Result<Value,ModsError>>,clock:ClockSample) -> Vec<Effect> {
+    if Instant::now() >= deadline { let _ = response.send(Err(crate::mods::model::no_answer())); return Vec::new(); }
+    *token += 1;
+    match engine.mods_call(*token,call,clock) {
+        Ok(next) => { waiters.insert(*token,response); next }
+        Err(error) => { let _ = response.send(Err(error)); Vec::new() }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1166,7 +1178,27 @@ mod tests {
         // A caixa cheia (o primeiro pedido ficou nela) também cai no prazo, agora no envio.
         let second = tokio::time::timeout(Duration::from_secs(2),handle.mods_within(call(),Duration::from_millis(50))).await.unwrap();
         assert_eq!(second.unwrap_err().code,"erro_mod_clique_sem_resposta");
-        assert_eq!(MODS_CALL_LIMIT,Duration::from_secs(20));
+        assert_eq!(MODS_CALL_LIMIT,Duration::from_secs(7));
+    }
+
+    #[test]
+    fn mods_call_that_waited_past_its_deadline_in_the_inbox_does_not_run() {
+        let mut engine = RuntimeEngine::new("claude",json!({"name":"session","initialized":true}),1,ClockSample { monotonic_s:0.0,epoch_s:0.0 })
+            .unwrap().with_mods(crate::mods::state::Mods::default());
+        let (mut waiters,mut token) = (ModsWaiters::new(),0u64);
+        let press = || ModsCall::Press { site:"above-prompt".into(),key:"k".into() };
+        let sample = ClockSample { monotonic_s:1.0,epoch_s:1.0 };
+        // Vencido: responde sem levar o pedido à superfície (nenhum efeito, nenhum token gasto).
+        let (response,mut receive) = oneshot::channel();
+        let effects = take_mods(&mut engine,&mut waiters,&mut token,press(),Instant::now() - Duration::from_millis(1),response,sample);
+        assert!(effects.is_empty() && waiters.is_empty() && token == 0);
+        assert_eq!(receive.try_recv().unwrap().unwrap_err().code,"erro_mod_clique_sem_resposta");
+        // No prazo: vai à superfície, que ainda não ligou e responde que o botão não está lá.
+        let (response,_receive) = oneshot::channel();
+        let effects = take_mods(&mut engine,&mut waiters,&mut token,press(),Instant::now() + Duration::from_secs(5),response,sample);
+        assert!(effects.iter().any(|effect|matches!(effect,Effect::Surface { effect:SurfaceEffect::Reply { token:1,result:Err(error) } }
+            if error.code == "erro_mod_botao_inexistente")));
+        assert!(waiters.contains_key(&1));
     }
 
     #[tokio::test]
