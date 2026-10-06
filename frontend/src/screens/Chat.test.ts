@@ -167,6 +167,9 @@ beforeEach(() => {
   ctxPanel.aba = 'contexto';
   sessionsStoreCtl.rows = [];
   sessionsStoreCtl.byServer = [];
+  // rascunho que um teste anterior deixou na chave nova faz a migração ignorar a antiga
+  localStorage.removeItem('cp-draft:sess');
+  localStorage.removeItem('cp-draft:srv-test::sess');
   document.body.innerHTML = '';
   // o registry do FilesStore vive no modulo e persiste entre testes: zera a selecao da chave
   // usada (o GitTabs e o Chat compartilham serverId::sessionName nos testes integrados)
