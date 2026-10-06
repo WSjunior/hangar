@@ -74,6 +74,17 @@ describe('TranscriptionProviders', () => {
     unmount(app);
   });
 
+  it('trocar o tipo de item salvo pede a chave de novo; tocar no tipo atual não mexe no rascunho', () => {
+    const { alvo, app, setRascunho } = montar([GROQ]);
+    const opcao = (rotulo: string) => [...alvo.querySelectorAll<HTMLButtonElement>('button')]
+      .find((b) => b.textContent?.trim() === rotulo)!;
+    opcao(m.native_voice_provider_kind_openai()).click();
+    expect(setRascunho).not.toHaveBeenCalled();
+    opcao(m.native_voice_provider_kind_elevenlabs()).click();
+    expect(setRascunho).toHaveBeenLastCalledWith('transcription_providers', [{ ...GROQ, kind: 'elevenlabs', api_key: '' }]);
+    unmount(app);
+  });
+
   it('item sem chave avisa que falta a chave', () => {
     const { alvo, app } = montar([ELEVEN, { ...GROQ, api_key: '' }]);
     expect(alvo.querySelectorAll('.falta')).toHaveLength(1);

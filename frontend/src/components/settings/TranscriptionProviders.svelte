@@ -2,8 +2,8 @@
   import type { ConfigServidorStore } from '../../lib/serverConfig.svelte';
   import SegmentedPicker from '../SegmentedPicker.svelte';
   import {
-    editTranscriptionProviderKey, getTranscriptionProvidersStatus, moveTranscriptionProvider,
-    parseTranscriptionProviders, transcriptionProviderLabel,
+    editTranscriptionProviderKey, editTranscriptionProviderTarget, getTranscriptionProvidersStatus,
+    moveTranscriptionProvider, parseTranscriptionProviders, transcriptionProviderKeepsKey, transcriptionProviderLabel,
     type TranscriptionProviderConfig, type TranscriptionProviderKind, type TranscriptionProviderStatus,
   } from '@hangar/core';
   import { intlLocale } from '../../lib/locale';
@@ -16,8 +16,8 @@
   const CHAVE = 'transcription_providers';
 
   const lista = $derived(parseTranscriptionProviders(store.valorBruto(CHAVE)));
-  // Máscara da chave guardada, por id: devolvida intacta, o backend mantém a chave antiga.
-  const mascaras = $derived(new Map(parseTranscriptionProviders(store.campos[CHAVE]?.valor).map((p) => [p.id, p.api_key])));
+  // Item salvo, por id: a máscara da chave devolvida intacta faz o backend manter a chave antiga.
+  const salvos = $derived(new Map(parseTranscriptionProviders(store.campos[CHAVE]?.valor).map((p) => [p.id, p])));
 
   function gravar(nova: TranscriptionProviderConfig[]) { store.setRascunho(CHAVE, nova); }
   function atualizar(i: number, novo: TranscriptionProviderConfig) {
@@ -71,7 +71,9 @@
       {#each lista as p, i (p.id)}
         {@const nome = transcriptionProviderLabel(p)}
         {@const espera = emEspera(p.id)}
-        {@const mascara = mascaras.get(p.id)}
+        {@const salvo = salvos.get(p.id)}
+        {@const mascara = salvo?.api_key || undefined}
+        {@const mantem = transcriptionProviderKeepsKey(p, salvo)}
         <li class="item">
           <div class="item-cabeca">
             <span class="nome">{nome}</span>
@@ -90,13 +92,13 @@
             </p>
           {/if}
           <SegmentedPicker value={p.kind} options={opcoesTipo} ariaLabel={m.voz_servico_tipo()}
-            onPick={(v) => atualizar(i, { ...p, kind: v })} />
+            onPick={(v) => { if (v !== p.kind) atualizar(i, editTranscriptionProviderTarget(p, { kind: v }, salvo)); }} />
           <div class="campos">
             {#if p.kind === 'openai'}
               <label class="campo">
                 <span class="rot">{m.native_voice_provider_endpoint()}</span>
                 <input type="url" autocomplete="off" value={p.base_url} placeholder="https://api.groq.com/openai/v1"
-                  oninput={(e) => atualizar(i, { ...p, base_url: e.currentTarget.value })} />
+                  oninput={(e) => atualizar(i, editTranscriptionProviderTarget(p, { base_url: e.currentTarget.value }, salvo))} />
               </label>
             {/if}
             <div class="campo">
@@ -108,7 +110,7 @@
               <input id={`tp-key-${p.id}`} type="text" autocomplete="off" autocapitalize="off" spellcheck={false}
                 value={p.api_key === mascara ? '' : p.api_key}
                 placeholder={mascara ? m.config_motores_colar_nova() : m.config_motores_colar()}
-                oninput={(e) => atualizar(i, editTranscriptionProviderKey(p, e.currentTarget.value, mascara))} />
+                oninput={(e) => atualizar(i, editTranscriptionProviderKey(p, e.currentTarget.value, mantem ? mascara : undefined))} />
               {#if !p.api_key}<span class="falta" role="alert">{m.native_voice_provider_missing_key()}</span>{/if}
             </div>
             <label class="campo">

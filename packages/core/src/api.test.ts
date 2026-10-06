@@ -21,7 +21,7 @@ import { discardFile, fileAuthHeader, fileUrlNative, getPairContract, getPlans, 
 import type { Server } from './servers';
 import { exportShortcuts } from './api';
 import { fileUrl, uploadUrl, uploadUrlNative } from './api';
-import { editTranscriptionProviderKey, moveTranscriptionProvider, parseTranscriptionProviders, transcriptionProviderLabel, transcriptionProvidersMissingKey } from './api';
+import { editTranscriptionProviderKey, editTranscriptionProviderTarget, moveTranscriptionProvider, parseTranscriptionProviders, transcriptionProviderKeepsKey, transcriptionProviderLabel, transcriptionProvidersMissingKey } from './api';
 const server = { id: 'a', label: 'Servidor A', baseUrl: 'https://a.test', token: 'token-a' };
 
 it('exportação leva IDs selecionados ao servidor escolhido e distingue seleção vazia', async () => {
@@ -1139,7 +1139,9 @@ describe('lista de serviços de transcrição', () => {
     expect(transcriptionProviderLabel({ kind: 'elevenlabs', name: '', base_url: 'https://x', model: '' })).toBe('ElevenLabs');
     expect(transcriptionProviderLabel({ kind: 'openai', name: '', base_url: 'https://api.groq.com/openai/v1', model: 'whisper-large-v3-turbo' }))
       .toBe('api.groq.com · whisper-large-v3-turbo');
-    expect(transcriptionProviderLabel({ kind: 'openai', name: '', base_url: 'htt', model: '' })).toBe('whisper-large-v3');
+    expect(transcriptionProviderLabel({ kind: 'openai', name: '', base_url: 'htt', model: '' })).toBe('htt · whisper-large-v3');
+    expect(transcriptionProviderLabel({ kind: 'openai', name: '', base_url: ' ', model: '' })).toBe('api.groq.com · whisper-large-v3');
+    expect(transcriptionProviderLabel({ kind: 'openai', name: '', base_url: 'http://LocalHost:8000/v1', model: 'm' })).toBe('localhost · m');
   });
 
   it('mover troca com o vizinho e não sai da lista na ponta', () => {
@@ -1154,6 +1156,22 @@ describe('lista de serviços de transcrição', () => {
     expect(editTranscriptionProviderKey(ELEVEN, 'nova', 'xi_••••').api_key).toBe('nova');
     expect(editTranscriptionProviderKey({ ...ELEVEN, api_key: 'nova' }, '', 'xi_••••')).toEqual(ELEVEN);
     expect(editTranscriptionProviderKey({ ...ELEVEN, api_key: 'x' }, '', undefined).api_key).toBe('');
+  });
+
+  it('trocar tipo ou endpoint de item salvo pede a chave de novo; voltar devolve a máscara', () => {
+    const SALVO = { ...ELEVEN, kind: 'openai' as const, base_url: 'https://a/v1' };
+    const outroTipo = editTranscriptionProviderTarget(SALVO, { kind: 'elevenlabs' }, SALVO);
+    expect(outroTipo.api_key).toBe('');
+    expect(transcriptionProvidersMissingKey([outroTipo])).toBe(true);
+    expect(editTranscriptionProviderTarget(outroTipo, { kind: 'openai' }, SALVO)).toEqual(SALVO);
+    expect(editTranscriptionProviderTarget(SALVO, { base_url: 'https://b/v1' }, SALVO).api_key).toBe('');
+    expect(editTranscriptionProviderTarget(SALVO, { base_url: ' https://a/v1 ' }, SALVO).api_key).toBe(SALVO.api_key);
+    // Chave digitada é do serviço novo: fica.
+    expect(editTranscriptionProviderTarget({ ...SALVO, api_key: 'nova' }, { kind: 'elevenlabs' }, SALVO).api_key).toBe('nova');
+    // ElevenLabs não tem endpoint: o texto que sobrou nele não conta.
+    expect(transcriptionProviderKeepsKey({ kind: 'elevenlabs', base_url: 'x' }, { kind: 'elevenlabs', base_url: '' })).toBe(true);
+    // Item novo não tem máscara a perder.
+    expect(editTranscriptionProviderTarget({ ...SALVO, api_key: '' }, { kind: 'elevenlabs' }, undefined).api_key).toBe('');
   });
 
   it('falta chave quando algum item está sem chave', () => {

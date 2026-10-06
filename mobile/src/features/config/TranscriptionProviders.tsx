@@ -2,7 +2,8 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Pressable, Text, TextInput, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import {
-  editTranscriptionProviderKey, fmtWhen, getTranscriptionProvidersStatus, moveTranscriptionProvider, parseTranscriptionProviders,
+  editTranscriptionProviderKey, editTranscriptionProviderTarget, fmtWhen, getTranscriptionProvidersStatus, moveTranscriptionProvider,
+  parseTranscriptionProviders, transcriptionProviderKeepsKey,
   type TranscriptionProviderConfig, type TranscriptionProviderStatus,
 } from '@hangar/core';
 import { BlockHead, Box, useInputStyle } from './ServerConfigParts';
@@ -79,7 +80,9 @@ export function TranscriptionProviders({ cfg }: { cfg: ServerConfig }) {
           const title = `${i + 1}. ${name}`;
           const until = state?.waiting_until && state.waiting_until > now ? state.waiting_until : null;
           const waiting = until ? m.native_voice_provider_waiting({ until: fmtWhen(until) }) : null;
-          const mask = stored.find((s) => s.id === p.id)?.api_key || undefined;
+          const saved = stored.find((s) => s.id === p.id);
+          const mask = saved?.api_key || undefined;
+          const keeps = transcriptionProviderKeepsKey(p, saved);
           const keptMask = mask && p.api_key === mask ? mask : null;
           return (
             <View key={p.id} style={[styles.line, styles.item, { borderTopColor: c.border }]}>
@@ -99,12 +102,12 @@ export function TranscriptionProviders({ cfg }: { cfg: ServerConfig }) {
                 </Text>
               ) : null}
               <Segmented options={kinds} value={p.kind} label={title}
-                onChange={(v) => edit(i, { ...p, kind: v })} />
+                onChange={(v) => edit(i, editTranscriptionProviderTarget(p, { kind: v }, saved))} />
               {p.kind === 'openai' ? (
                 <Labeled label={m.native_voice_provider_endpoint()}>
                   <TextInput {...input} accessibilityLabel={`${m.native_voice_provider_endpoint()}, ${title}`}
                     placeholder="https://api.groq.com/openai/v1" autoCapitalize="none" autoCorrect={false} keyboardType="url"
-                    value={p.base_url} onChangeText={(t) => edit(i, { ...p, base_url: t })} />
+                    value={p.base_url} onChangeText={(t) => edit(i, editTranscriptionProviderTarget(p, { base_url: t }, saved))} />
                 </Labeled>
               ) : null}
               <Labeled label={m.native_voice_provider_key()}>
@@ -112,7 +115,7 @@ export function TranscriptionProviders({ cfg }: { cfg: ServerConfig }) {
                 <TextInput {...input} accessibilityLabel={`${m.native_voice_provider_key()}, ${title}`} secureTextEntry
                   autoCapitalize="none" autoCorrect={false} textContentType="password" autoComplete="off"
                   placeholder={mask ? m.native_server_secret_paste_new() : m.native_server_secret_paste()}
-                  value={p.api_key === mask ? '' : p.api_key} onChangeText={(t) => edit(i, editTranscriptionProviderKey(p, t, mask))} />
+                  value={p.api_key === mask ? '' : p.api_key} onChangeText={(t) => edit(i, editTranscriptionProviderKey(p, t, keeps ? mask : undefined))} />
               </Labeled>
               {keptMask ? (
                 <Text style={[styles.small, { color: c.muted }]}>

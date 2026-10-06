@@ -1820,10 +1820,11 @@ export function transcriptionProviderLabel(
 ): string {
   if (p.name.trim()) return p.name.trim();
   if (p.kind === 'elevenlabs') return 'ElevenLabs';
-  let host = '';
-  try { host = new URL(p.base_url.trim()).host; } catch { /* endpoint vazio ou sendo digitado */ }
-  const model = p.model.trim() || 'whisper-large-v3';
-  return host ? `${host} · ${model}` : model;
+  // Como o `urlparse(...).hostname or base` do backend: sem porta, e o texto cru se não for URL.
+  const base = p.base_url.trim() || 'https://api.groq.com/openai/v1';
+  let host = base;
+  try { host = new URL(base).hostname || base; } catch { /* endpoint sendo digitado */ }
+  return `${host} · ${p.model.trim() || 'whisper-large-v3'}`;
 }
 
 // Ordem da lista = ordem de tentativa. Troca com o vizinho; na ponta, a lista volta igual.
@@ -1840,6 +1841,32 @@ export function editTranscriptionProviderKey(
   item: TranscriptionProviderConfig, typed: string, mask: string | undefined,
 ): TranscriptionProviderConfig {
   return { ...item, api_key: typed || mask || '' };
+}
+
+// O servidor só troca a máscara pela chave guardada com o mesmo tipo e endpoint do item salvo:
+// a chave nunca vai para outro serviço.
+export function transcriptionProviderKeepsKey(
+  item: Pick<TranscriptionProviderConfig, 'kind' | 'base_url'>,
+  saved: Pick<TranscriptionProviderConfig, 'kind' | 'base_url'> | undefined,
+): boolean {
+  return !!saved && item.kind === saved.kind
+    && (item.kind === 'elevenlabs' || item.base_url.trim() === saved.base_url);
+}
+
+// Tipo ou endpoint trocado num item salvo: a máscara sai, e o "falta a chave" segura o Salvar em
+// vez do 400 do servidor. De volta ao tipo e endpoint salvos, a máscara volta a valer.
+export function editTranscriptionProviderTarget(
+  item: TranscriptionProviderConfig,
+  change: Partial<Pick<TranscriptionProviderConfig, 'kind' | 'base_url'>>,
+  saved: TranscriptionProviderConfig | undefined,
+): TranscriptionProviderConfig {
+  const next = { ...item, ...change };
+  const mask = saved?.api_key;
+  if (!mask) return next;
+  const keeps = transcriptionProviderKeepsKey(next, saved);
+  if (!keeps && next.api_key === mask) return { ...next, api_key: '' };
+  if (keeps && !next.api_key) return { ...next, api_key: mask };
+  return next;
 }
 
 // Item sem chave faz o servidor recusar o Salvar inteiro (o rascunho é um só): o Salvar espera.

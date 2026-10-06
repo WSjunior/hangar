@@ -117,6 +117,13 @@ describe('VozSettings', () => {
     unmount(app);
   });
 
+  it('servidor sem a lista de serviços não mostra a seção (salvar a perderia calado)', async () => {
+    const { alvo, app } = montar({ groq_api_key: { definido: true } });
+    await tick();
+    expect(alvo.querySelector('.transcription-services')).toBeNull();
+    unmount(app);
+  });
+
   it('serviço sem chave: Salvar desligado com o motivo à vista', async () => {
     const { alvo, app } = montar({ groq_api_key: { definido: true } }, { salvarBloqueado: true });
     await tick();
