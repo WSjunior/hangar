@@ -6,7 +6,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use hangar_server::mods::click::{Pane, PaneFuture, PaneOp, PaneReply};
 use hangar_server::mods::model::*;
@@ -51,6 +52,8 @@ pub enum Effect {
     CloseAll,
     Focus(&'static str, &'static str, bool),
     Scroll(&'static str, i64),
+    /// A sessão reabre com outro processo e a vida dada, no meio do clique.
+    NewLife(u64),
 }
 
 #[derive(Default)]
@@ -59,7 +62,11 @@ struct State {
     forced: Option<(u16, u16)>,
     clients: usize,
     mouse: bool,
-    held: bool,
+    /// Até quando o pane está reservado: a reserva vence sozinha, como no executor.
+    held_until: Option<Instant>,
+    /// Tudo o que mexe no pane, inclusive reservar (`hold <ms>`), soltar (`release`) e a reserva que venceu
+    /// antes de ser solta (`hold vencida`).
+    log: Vec<String>,
     /// A próxima ação que começar com isto fica sem resposta (o pane travado no meio do clique).
     stall: Option<String>,
     actions: Vec<String>,
@@ -86,7 +93,8 @@ impl FakePane {
     pub fn stall_on(&self, prefix: &str) { self.state.lock().unwrap().stall = Some(prefix.into()); }
     /// Ações que mexem no mod (clique, roda, tecla, tamanho), na ordem; leituras e reserva ficam de fora.
     pub fn actions(&self) -> Vec<String> { self.state.lock().unwrap().actions.clone() }
-    pub fn held(&self) -> bool { self.state.lock().unwrap().held }
+    pub fn held(&self) -> bool { self.state.lock().unwrap().held_until.is_some_and(|until| Instant::now() < until) }
+    pub fn log(&self) -> Vec<String> { self.state.lock().unwrap().log.clone() }
 
     fn apply(&self, state: &mut State, effects: &[Effect]) {
         for effect in effects {
@@ -102,6 +110,7 @@ impl FakePane {
                     self.mods.focused(&self.name, &attempt, site, Some(element), *denied);
                 }
                 Effect::Scroll(site, offset) => self.mods.scrolled(&self.name, site, *offset),
+                Effect::NewLife(life) => self.mods.attach_terminal(&self.name, "proc-novo", *life, Arc::new(super::Probe::default())),
             }
         }
     }
@@ -110,6 +119,7 @@ impl FakePane {
     fn act(state: &mut State, action: String) -> bool {
         let stalled = state.stall.as_deref().is_some_and(|prefix| action.starts_with(prefix));
         if stalled { state.stall = None; }
+        state.log.push(action.clone());
         state.actions.push(action);
         stalled
     }
@@ -117,6 +127,10 @@ impl FakePane {
     fn handle(&self, op: PaneOp) -> (Result<PaneReply, ModsError>, bool) {
         let mut state = self.state.lock().unwrap();
         let mut stalled = false;
+        if state.held_until.is_some_and(|until| Instant::now() >= until) {
+            state.held_until = None;
+            state.log.push("hold vencida".into());
+        }
         let reply = match op {
             PaneOp::Formats => {
                 let (columns, rows) = state.forced.unwrap_or_else(|| size_of(&state.queue[0]));
@@ -127,8 +141,12 @@ impl FakePane {
                 let name = if state.queue.len() > 1 { state.queue.pop_front().unwrap() } else { state.queue[0].clone() };
                 PaneReply::Screen(capture(&name))
             }
-            PaneOp::Hold { .. } => { state.held = true; PaneReply::Done }
-            PaneOp::Release => { state.held = false; PaneReply::Done }
+            PaneOp::Hold { millis } => {
+                state.held_until = Some(Instant::now() + Duration::from_millis(millis));
+                state.log.push(format!("hold {millis}"));
+                PaneReply::Done
+            }
+            PaneOp::Release => { state.held_until = None; state.log.push("release".into()); PaneReply::Done }
             PaneOp::Mouse { row, col } => {
                 stalled = Self::act(&mut state, format!("click {row} {col}"));
                 let effects = state.on_click.get(&(row, col)).cloned().unwrap_or_default();

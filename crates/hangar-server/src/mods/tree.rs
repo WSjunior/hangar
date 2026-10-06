@@ -55,6 +55,36 @@ pub fn label(tree: &Value, key: &str) -> Option<String> {
     None
 }
 
+/// Quantas vezes `label` aparece no texto que a árvore desenha, também fora da área visível: rótulos de
+/// botão, link e campo, opções, valores, códigos e o texto dos filhos de cada nó (juntos, como o terminal
+/// os desenha). Conta o texto que só contém o rótulo, porque a busca na tela casa trecho (`find_label`):
+/// com mais de uma, o clique pelo mouse pode cair no elemento errado.
+pub fn label_count(tree: &Value, label: &str) -> usize {
+    let target = label.trim();
+    if target.is_empty() { return 0; }
+    let hits = |text: Option<&str>| text.map_or(0, |text| text.matches(target).count());
+    let mut total = 0;
+    let mut stack = vec![tree];
+    while let Some(node) = stack.pop() {
+        match node {
+            Value::String(text) => total += hits(Some(text)),
+            Value::Object(object) => {
+                let props = &node["props"];
+                total += ["label", "placeholder", "value", "submitLabel", "source"].iter().map(|name| hits(props[*name].as_str())).sum::<usize>();
+                total += props["options"].as_array().map_or(0, |options| options.iter().map(|o| hits(o["label"].as_str())).sum());
+                if let Some(children) = object.get("children").and_then(Value::as_array) {
+                    // Os textos soltos de um nó saem juntos na tela: um rótulo partido entre eles conta uma vez.
+                    let text: String = children.iter().filter_map(Value::as_str).collect();
+                    total += hits(Some(&text));
+                    stack.extend(children.iter().filter(|child| child.is_object()));
+                }
+            }
+            _ => {}
+        }
+    }
+    total
+}
+
 /// Botões de todas as faixas: o anel do `ctrl+x tab` passa por cada um antes dos painéis ((t)).
 pub fn count_buttons(tree: &Value) -> usize {
     let mut stack = vec![tree];

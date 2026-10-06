@@ -81,3 +81,30 @@ fn terminal_refusals_use_the_phase_one_texts() {
     assert_eq!(unreachable_pane().msg, "O terminal da sessão está estreito ou baixo demais para alcançar esse painel; aumente a janela ou use o terminal.");
     assert_eq!(not_found("x").params, json!({"rotulo": "x"}));
 }
+
+#[test]
+fn label_count_sees_homonyms_and_texts_that_contain_the_label() {
+    let one = json!({"type": "Box", "children": [
+        {"type": "Text", "children": ["Nada aqui"]},
+        {"type": "Button", "props": {"key": "a", "label": "Excluir"}, "press": {"plugin": "m", "handle": 1}},
+    ]});
+    assert_eq!(tree::label_count(&one, "Excluir"), 1);
+    // Um homônimo em qualquer ponto da árvore, visível ou não, e o texto que só contém o rótulo.
+    let twin = json!({"type": "Box", "children": [
+        {"type": "Button", "props": {"key": "a", "label": "Excluir"}, "press": {"plugin": "m", "handle": 1}},
+        {"type": "Box", "children": [{"type": "Button", "props": {"key": "b"}, "children": ["Exc", "luir"], "press": {"plugin": "m", "handle": 2}}]},
+    ]});
+    assert_eq!(tree::label_count(&twin, "Excluir"), 2);
+    let text = json!({"type": "Box", "children": [
+        {"type": "Text", "children": ["Excluir tudo"]},
+        {"type": "Button", "props": {"key": "a", "label": "Excluir"}, "press": {"plugin": "m", "handle": 1}},
+    ]});
+    assert_eq!(tree::label_count(&text, "Excluir"), 2);
+    let field = json!({"type": "Box", "children": [
+        {"type": "Input", "props": {"key": "c", "placeholder": "Excluir o quê?"}},
+        {"type": "Select", "props": {"key": "s", "options": [{"value": "x", "label": "Excluir"}]}},
+        {"type": "Button", "props": {"key": "a", "label": "Excluir"}, "press": {"plugin": "m", "handle": 1}},
+    ]});
+    assert_eq!(tree::label_count(&field, "Excluir"), 3);
+    assert_eq!(tree::label_count(&one, "  "), 0);
+}
