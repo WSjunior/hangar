@@ -10,6 +10,7 @@ use super::Slot;
 use super::pty;
 
 const PROMPT: &str = "HGP>";
+const DSR: &str = "\x1b[6n";
 
 fn open(cols: u16, rows: u16) -> pty::Opened {
     let mut cmd = CommandBuilder::new("cmd.exe");
@@ -22,13 +23,19 @@ fn open(cols: u16, rows: u16) -> pty::Opened {
 async fn read_until(output: &mut mpsc::Receiver<Bytes>, input: Option<&mpsc::Sender<Bytes>>, seen: &mut Vec<u8>,
                     within: Duration, done: impl Fn(&[u8]) -> bool) -> bool {
     let until = tokio::time::Instant::now() + within;
+    // Contado sobre tudo que chegou: o pedido pode vir partido entre dois blocos.
+    let mut answered = count(seen, DSR);
     while !done(seen) {
         match tokio::time::timeout_at(until, output.recv()).await {
             Ok(Some(b)) => {
-                if let Some(input) = input.filter(|_| b.windows(4).any(|w| w == b"\x1b[6n")) {
-                    let _ = input.send(Bytes::from_static(b"\x1b[1;1R")).await;
-                }
                 seen.extend_from_slice(&b);
+                let asked = count(seen, DSR);
+                if let Some(input) = input {
+                    for _ in answered..asked {
+                        input.send(Bytes::from_static(b"\x1b[1;1R")).await.expect("a entrada do ConPTY aceita a resposta");
+                    }
+                }
+                answered = asked;
             }
             Ok(None) | Err(_) => break,
         }
@@ -50,14 +57,15 @@ async fn spawn_echo_and_resize() {
     let mut seen = Vec::new();
     assert!(read_until(&mut output, Some(&input), &mut seen, Duration::from_secs(15), |s| count(s, PROMPT) >= 1).await,
             "sem prompt: {}", text(&seen));
-    // A variável vazia some só na saída: o eco da tecla não casa com o texto esperado.
-    input.send(Bytes::from_static(b"echo hangar-%COMSPEC:~0,0%ok\r")).await.unwrap();
+    // O `^` some só na saída: o eco da tecla não casa com o texto esperado.
+    input.send(Bytes::from_static(b"echo hangar-^ok\r")).await.unwrap();
     assert!(read_until(&mut output, Some(&input), &mut seen, Duration::from_secs(15), |s| count(s, "hangar-ok") >= 1).await,
             "sem eco: {}", text(&seen));
     pty.resize(100, 30);
     let mark = seen.len();
     input.send(Bytes::from_static(b"mode con\r")).await.unwrap();
-    let resized = |s: &[u8]| { let t = String::from_utf8_lossy(&s[mark..]).into_owned(); t.contains("100") && t.contains("30") };
+    // Com espaço antes: nas sequências de cursor do repaint o número vem depois de `[` ou `;`.
+    let resized = |s: &[u8]| { let t = String::from_utf8_lossy(&s[mark..]).into_owned(); t.contains(" 100") && t.contains(" 30") };
     assert!(read_until(&mut output, Some(&input), &mut seen, Duration::from_secs(15), resized).await,
             "tamanho não chegou ao console: {}", text(&seen[mark..]));
     drop(input);
@@ -70,7 +78,7 @@ async fn child_killed_before_close() {
     let mut seen = Vec::new();
     assert!(read_until(&mut output, Some(&input), &mut seen, Duration::from_secs(15), |s| count(s, PROMPT) >= 1).await,
             "sem prompt: {}", text(&seen));
-    // Fechado antes, o pseudoconsole derrubaria o filho com CTRL_CLOSE (0xC000013A), ou travaria.
+    // Não travar é a prova da ordem; o código 1 diz que quem saiu foi o `TerminateProcess`.
     let status = tokio::time::timeout(Duration::from_secs(10), pty::close(pty)).await
         .expect("a desmontagem não trava").expect("o filho sai");
     assert_eq!(status.exit_code(), 1, "o filho saiu por outro motivo que o TerminateProcess");

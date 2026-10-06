@@ -723,9 +723,10 @@ Windows. Diferenças conferidas na fonte do crate e no `conpty.py`:
   `CloseHandle`. Teste: `term::conpty::dropping_writer_writes_nothing`.
 - O `Drop` do mestre chama `ClosePseudoConsole`, que pode travar com o cliente vivo
   (microsoft/terminal#17716). O `close` mata o filho (`TerminateProcess`, código 1), espera até
-  3 s e só então solta o mestre numa thread de bloqueio; filho que não saiu vaza o conhost com
-  `client_not_reaped`, como o `conpty.py`. Teste: `term::conpty::child_killed_before_close`
-  (código 1, não o 0xC000013A do CTRL_CLOSE).
+  3 s e só então solta o mestre numa thread de bloqueio, com prazo de 5 s (`pty_close_timeout`);
+  filho que não saiu vaza o conhost com `client_not_reaped`, como o `conpty.py`. Teste:
+  `term::conpty::child_killed_before_close` exige código 1, não o 0xC000013A do CTRL_CLOSE.
+  Os testes `term::conpty::*` só rodam no job Windows do CI.
 - Sem `detach-client` e sem `@hangar_term_size`: o psmux não tem identidade de cliente e
   `resize-window`/`setw` voltam 0 sem efeito (medido em 22/08/2026 para o `termsock`).
 - O crate cria o ConPTY com `INHERIT_CURSOR | RESIZE_QUIRK | WIN32_INPUT_MODE` (o Python usa 0).

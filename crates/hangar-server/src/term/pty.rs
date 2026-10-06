@@ -104,13 +104,17 @@ pub(crate) fn spawn(cmd: CommandBuilder, cols: u16, rows: u16, slot: Arc<Slot>) 
     Ok(Opened { pty, output, input })
 }
 
-/// Lê até o fim do PTY ou até ninguém mais ouvir. Canal cheio segura a leitura.
+/// Lê até o fim do PTY. Canal cheio segura a leitura; sem ninguém ouvindo, segue lendo e
+/// descarta: no Windows o `ClosePseudoConsole` espera o conhost esvaziar a saída.
 pub(crate) fn pump(mut reader: impl Read, tx: mpsc::Sender<Bytes>) {
     let mut buf = vec![0u8; CHUNK];
+    let mut tx = Some(tx);
     loop {
         match reader.read(&mut buf) {
             Ok(0) => return,
-            Ok(n) => if tx.blocking_send(Bytes::copy_from_slice(&buf[..n])).is_err() { return },
+            Ok(n) => if tx.as_ref().is_some_and(|t| t.blocking_send(Bytes::copy_from_slice(&buf[..n])).is_err()) {
+                tx = None;
+            },
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
             // O fim do mestre no Linux chega como EIO, não como 0.
             Err(_) => return,
@@ -314,7 +318,11 @@ pub(crate) async fn close(mut pty: Pty) -> Result<portable_pty::ExitStatus, &'st
         std::mem::forget(pty.master);
         return Err("client_not_reaped");
     };
-    // Fechar pode esperar o conhost esvaziar a saída: fora das threads do runtime.
-    let _ = tokio::task::spawn_blocking(move || drop(pty)).await;
-    Ok(status)
+    // Fechar pode esperar o conhost esvaziar a saída, e o mestre ainda segura a ponta de leitura:
+    // fora das threads do runtime e com prazo, para o painel não ficar preso sem código.
+    match tokio::time::timeout(Duration::from_secs(5), tokio::task::spawn_blocking(move || drop(pty))).await {
+        Ok(Ok(())) => Ok(status),
+        Ok(Err(_)) => Err("pty_close_panic"),
+        Err(_) => Err("pty_close_timeout"),
+    }
 }
