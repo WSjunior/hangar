@@ -109,6 +109,41 @@ def demote_awaiting(sids: list[str]) -> None:
         hook_state.hook_state.demote_awaiting(sid)
 
 
+def state_service_sync(kind: str, name: str, payload: dict) -> dict:
+    """Serviços que o `Monitor` do Rust pede por nome de sessão (não por posse de ator)."""
+    if kind == "permission.observe":
+        from app import permission_mode
+        sid, mode = payload.get("sid"), payload.get("mode")
+        if not isinstance(sid, str) or not sid or mode not in permission_mode.ORDEM_CANONICA:
+            raise ValueError("observação de permissão inválida")
+        # A memória é por session-id; a operação controlada, pelo nome da sessão.
+        mode, previous = permission_mode.observar_ou_confirmado(sid, mode, sessao=name)
+        return {"mode": mode, "previous_non_plan": previous}
+    if kind == "session.dead":
+        from app import plugin_bridge
+        from app.adapters.claude_headless.sessions import em_troca
+        from app.state import forget_frame
+        # Conferido na hora: a troca de conta mata o tmux antes de o fato chegar ao Rust.
+        if em_troca(name):
+            return {"result": "em_troca"}
+        plugin_bridge.esquecer(name)
+        forget_frame(name)
+        return {"result": "ok"}
+    raise ValueError("serviço não permitido")
+
+
+async def state_service(kind: str, name: str, payload: dict) -> dict:
+    if kind == "session.deliverable":
+        # O drain do adapter passa pelo `prepare_session`, que abre o executor se ele não existe.
+        from app import api
+        from app.adapters import get_adapter
+        info = await api._cached_info(name)
+        if info is None or info.provider != "claude" or info.headless or not info.jsonl:
+            raise ValueError("sessão Claude com terminal não encontrada")
+        return {"sent": await get_adapter("claude").drain(name, info.jsonl)}
+    return await asyncio.to_thread(state_service_sync, kind, name, payload)
+
+
 def run(kind: str, payload: dict, metadata: dict) -> dict:
     if not isinstance(payload, dict) or not isinstance(metadata, dict):
         raise ValueError("serviço com dados inválidos")
