@@ -249,8 +249,13 @@ def raizes_dos_plugins() -> list[str]:
     Hangar abre a lista. Com o mesmo nome nos dois lugares, o CLI carrega só o de `--plugin-dir`."""
     if not ligado():
         return []
-    outros = sorted(p for p in PLUGINS_ROOT.iterdir()
-                    if p != PLUGIN_SRC and (p / ".claude-plugin" / "plugin.json").is_file())
+    try:
+        outros = sorted(p for p in PLUGINS_ROOT.iterdir()
+                        if p != PLUGIN_SRC and (p / ".claude-plugin" / "plugin.json").is_file())
+    except OSError as e:
+        # Mod que não deu para listar fica de fora; a sessão nasce com o do Hangar.
+        _log.warning("plugin: não deu para listar %s: %r", PLUGINS_ROOT, e)
+        outros = []
     return [str(PLUGIN_SRC), *map(str, outros)]
 
 
