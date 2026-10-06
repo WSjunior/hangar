@@ -243,6 +243,21 @@ impl Slot {
     }
 }
 
+/// O hub avisou que uma resposta entrou no transcript: a prévia que a repete sai já, sem esperar o
+/// toque seguinte nem reler a fonte. `false`: ninguém mais ouve.
+pub async fn committed_changed<S: Sources>(src: &S, slot: &mut Slot, epoch: u64) -> bool {
+    let committed = src.committed();
+    if src.epoch() != epoch || committed == slot.committed {
+        return true;
+    }
+    slot.committed = committed;
+    if slot.sent.text.is_empty() || !is_committed(&slot.sent.text, slot.committed.as_deref().unwrap_or("")) {
+        return true;
+    }
+    slot.sent = Text { md: slot.sent.md, full: slot.sent.full, text: String::new() };
+    src.publish_preview(PreviewEvent { session: src.name().to_owned(), text: String::new(), md: slot.sent.md, full: slot.sent.full, vivo: false }).await
+}
+
 /// Uma leitura da prévia. `frame`: o quadro da rodada de estado; `None` no toque rápido, que
 /// captura só para a prévia quando o arquivo do hook não decide. `false`: ninguém mais ouve.
 pub async fn tick<S: Sources>(src: &S, slot: &mut Slot, frame: Option<&Frame>, epoch: u64) -> bool {
@@ -327,13 +342,14 @@ mod tests {
         hook_reads: AtomicU32,
         previews: Mutex<Vec<PreviewEvent>>,
         wake: Arc<Notify>,
+        hub: Arc<Notify>,
     }
 
     impl Fake {
         fn new(pane: String) -> Arc<Self> {
             Arc::new(Self { pane: Mutex::new(pane), hook: Mutex::default(), committed: Mutex::default(),
                 captures: AtomicU32::new(0), fast_captures: AtomicU32::new(0), hook_reads: AtomicU32::new(0),
-                previews: Mutex::default(), wake: Arc::default() })
+                previews: Mutex::default(), wake: Arc::default(), hub: Arc::default() })
         }
         fn texts(&self) -> Vec<(String, bool, bool)> {
             self.previews.lock().unwrap().iter().map(|p| (p.text.clone(), p.md, p.full)).collect()
@@ -369,6 +385,29 @@ mod tests {
             true
         }
         fn wall(&self) -> f64 { 1_000_000.0 }
+        fn hub_wake(&self) -> Arc<Notify> { self.hub.clone() }
+        async fn emit(&self, _: &'static str, _: Value) -> bool { true }
+        fn runtime_wake(&self) -> Arc<Notify> { Arc::default() }
+        fn runtime_problem(&self) -> Option<(String, String)> { None }
+        async fn ask_payload(&self) -> Result<Option<hangar_api::ask::AskQuestion>, String> { Ok(None) }
+        fn deliverable(&self) {}
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn commit_clears_without_waiting_the_tick() {
+        // Parado: o próximo toque seria só daqui a 0,75 s. O hub avisa e a prévia sai na hora.
+        let voo = "Resposta inteira que ficou na tela";
+        let fake = Fake::new(pane(voo, false));
+        let task = tokio::spawn(Monitor::new(fake.clone()).run());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(fake.texts().last().map(|t| t.0.clone()).as_deref(), Some(voo));
+        let captures = fake.captures.load(Ordering::SeqCst);
+        *fake.committed.lock().unwrap() = Some(norm(voo).into());
+        fake.hub.notify_one();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(fake.texts().last().map(|t| t.0.clone()).as_deref(), Some(""));
+        assert_eq!(fake.captures.load(Ordering::SeqCst), captures, "sem captura nem rodada a mais");
+        task.abort();
     }
 
     #[tokio::test(start_paused = true)]

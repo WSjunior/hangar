@@ -5,7 +5,10 @@ pub mod capture;
 pub mod demote;
 pub mod edges;
 pub mod facts;
+pub mod live;
 pub mod monitor;
 pub mod permission;
 pub mod preview;
 pub mod shells;
+#[cfg(test)]
+pub mod testing;

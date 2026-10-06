@@ -65,3 +65,44 @@ binário.
 
 Não medido aqui: celular e nativo de verdade (Task 12), Windows (Task 10), Origin (a medida
 conecta sem `Origin`).
+
+## Task 5: estado ao vivo no `Monitor` do Rust, 06/10/2026
+
+**Com o `Monitor` dono do estado, o Python sai do custo por chat aberto: com 20 chats trabalhando
+ele cai de 176,5 para 29 ms de CPU por segundo, e Python + Rust + tmux de 297,5 para 146.** O Rust
+fica parecido (a captura já era dele; agora a análise e a memória também), e a latência
+marcador → `state` fica igual à do Python.
+
+Como: `scripts/medir-estado.py`, backend isolado (classe `Prova`), binários release. "Antes" =
+`git archive` de `4a46110b2` (a base desta Task, com o roteiro copiado para dentro); "depois" = esta
+Task. 20 sessões `claude --session-id <sid>` de mentira (um Python que desenha a tela do Claude a
+80×24), sem Claude real. Chats = `/api/sessions/<nome>/events` do dono abertos por threads. Modo
+`parado` = tela sem spinner; `trabalhando` = spinner girando e resposta crescendo a cada 0,1 s.
+CPU = `utime+stime` (com filhos) de `/proc/<pid>/stat` em 20 s, depois de 8 s assentando, em ms por
+segundo. Latência = escrita do marcador `.hangar-state/<sid>.json` até o `state` novo chegar ao
+chat, com o pane de spinner parado (o marcador decide), 10 amostras.
+
+| Chats | Modo | Python | Rust | tmux | Total |
+|---:|---|---:|---:|---:|---:|
+| 1 | parado | 12,5 → 11,0 | 5,0 → 5,5 | 3,5 → 4,0 | 21,0 → 20,5 |
+| 1 | trabalhando | 19,5 → 9,5 | 8,5 → 7,0 | 6,0 → 7,0 | 34,0 → 23,5 |
+| 5 | parado | 34,5 → 14,0 | 10,5 → 9,5 | 7,0 → 6,5 | 52,0 → 30,0 |
+| 5 | trabalhando | 55,5 → 14,0 | 19,0 → 18,5 | 18,5 → 19,0 | 93,0 → 51,5 |
+| 20 | parado | 96,5 → 29,0 | 25,5 → 27,5 | 14,5 → 16,0 | 136,5 → 72,5 |
+| 20 | trabalhando | 176,5 → 29,0 | 60,0 → 55,5 | 61,0 → 61,5 | 297,5 → 146,0 |
+
+| Medida | Antes | Depois |
+|---|---:|---:|
+| `state` por s, 20 trabalhando | 20,65 | 20,2 |
+| `preview` por s, 20 trabalhando | 125,6 | 133,0 |
+| Latência marcador → `state`, 1 chat (mediana / máx.) | 0,459 / 0,678 s | 0,457 / 0,708 s |
+| Latência marcador → `state`, 20 chats (mediana / máx.) | 0,472 / 0,841 s | 0,446 / 0,491 s |
+| RSS com 20 chats, Python / Rust | 151,2 / 32,5 MB | 144,5 / 40,2 MB |
+
+- O que sobra no Python com 20 chats (29 ms/s) é o resto da conexão interna de cada sessão
+  (estatísticas a 1 s, fila, faixa, avisos), o mesmo parado e trabalhando.
+- Os marcadores e o registro nativo vêm de uma cópia compartilhada pelos `Monitor`s que só é relida
+  quando o observador das pastas de estado vê uma escrita. A primeira versão relia por prazo
+  (250 ms): com 20 chats, metade das amostras de latência foi a 0,84–0,87 s (a rodada lia a cópia
+  velha e esperava a seguinte).
+- Não medido aqui: Windows (psmux avulso por rodada), convidado de verdade e celular.

@@ -86,6 +86,7 @@ pub struct FileFacts {
 }
 
 /// O que o `Monitor` lê e a quem publica. Quem implementa faz a E/S bloqueante fora do runtime.
+/// Nenhum método tem corpo padrão: a fonte de produção que esquecer um não compila.
 pub trait Sources: Send + Sync {
     fn name(&self) -> &str;
     fn sid(&self) -> Option<String>;
@@ -93,6 +94,9 @@ pub trait Sources: Send + Sync {
     fn epoch(&self) -> u64;
     /// Avisado quando o Python empurra fatos novos desta sessão.
     fn wake(&self) -> Arc<Notify>;
+    /// Avisado (`notify_one`) pelo hub no `rebind` (rodada já) e quando uma resposta entra no
+    /// transcript (a prévia que a repetia sai já); lido uma vez no `run`.
+    fn hub_wake(&self) -> Arc<Notify>;
     fn facts(&self) -> impl Future<Output = RoundFacts> + Send;
     fn capture(&self) -> impl Future<Output = Result<Frame, CaptureFailed>> + Send;
     /// `None` = o multiplexador não respondeu, que não é sessão morta.
@@ -103,27 +107,29 @@ pub trait Sources: Send + Sync {
     /// `false`: ninguém mais ouve, e o `Monitor` acaba.
     fn publish(&self, event: StateEvent) -> impl Future<Output = bool> + Send;
     /// Os outros eventos da sessão (`suggest`, `ask_question`), mesma regra do `publish`.
-    fn emit(&self, _event: &'static str, _data: Value) -> impl Future<Output = bool> + Send { async { true } }
+    fn emit(&self, event: &'static str, data: Value) -> impl Future<Output = bool> + Send;
     /// Avisado (`notify_one`) quando o ator de entrada da sessão publica; lido uma vez no `run`.
-    fn runtime_wake(&self) -> Arc<Notify> { Arc::default() }
+    fn runtime_wake(&self) -> Arc<Notify>;
     /// `edges::runtime_problem` do que o ator publicou por último; `None` fora do Rust.
-    fn runtime_problem(&self) -> Option<(String, String)> { None }
+    fn runtime_problem(&self) -> Option<(String, String)>;
     /// O sidecar do AskUserQuestion (`ask::read_pending`, fora do runtime).
-    fn ask_payload(&self) -> impl Future<Output = Result<Option<AskQuestion>, String>> + Send { async { Ok(None) } }
+    fn ask_payload(&self) -> impl Future<Output = Result<Option<AskQuestion>, String>> + Send;
     /// `session.deliverable`: só dispara; quem implementa não segura a rodada e registra a falha.
-    fn deliverable(&self) {}
+    fn deliverable(&self);
     /// Captura só para a prévia, entre as rodadas de estado; `None`: a fonte não as faz.
-    fn preview_capture(&self) -> impl Future<Output = Option<Result<Frame, CaptureFailed>>> + Send { async { None } }
+    fn preview_capture(&self) -> impl Future<Output = Option<Result<Frame, CaptureFailed>>> + Send;
     /// `.hangar-preview/<stem>.json` legíveis, na ordem das pastas de config. Chamado a cada toque
     /// rápido: quem implementa lê o disco fora do runtime (`HookFiles` em `spawn_blocking`).
-    fn preview_files(&self, _stem: &str) -> impl Future<Output = Vec<HookFile>> + Send { async { Vec::new() } }
+    fn preview_files(&self, stem: &str) -> impl Future<Output = Vec<HookFile>> + Send;
     /// Última resposta já gravada no transcript, normalizada (`preview::norm`).
-    fn committed(&self) -> Option<Arc<str>> { None }
-    fn publish_preview(&self, _event: PreviewEvent) -> impl Future<Output = bool> + Send { async { true } }
+    fn committed(&self) -> Option<Arc<str>>;
+    fn publish_preview(&self, event: PreviewEvent) -> impl Future<Output = bool> + Send;
     /// Relógio de parede em segundos, o do `ts` do arquivo do hook e do marcador.
-    fn wall(&self) -> f64 {
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
-    }
+    fn wall(&self) -> f64;
+}
+
+pub fn wall_now() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -165,6 +171,7 @@ impl<S: Sources> Monitor<S> {
     pub async fn run(mut self) -> Exit {
         let wake = self.src.wake();
         let runtime = self.src.runtime_wake();
+        let hub = self.src.hub_wake();
         loop {
             // Armado antes da rodada: empurrão que chega durante ela acorda a espera seguinte.
             let notified = wake.notified();
@@ -173,8 +180,8 @@ impl<S: Sources> Monitor<S> {
             let exit = match self.round().await {
                 Step::Exit(exit) => Some(exit),
                 Step::Again => None,
-                Step::Sleep | Step::Wait { alive: false } => self.idle(None, &runtime).await,
-                Step::Wait { alive: true } => self.idle(Some(notified.as_mut()), &runtime).await,
+                Step::Sleep | Step::Wait { alive: false } => self.idle(None, &runtime, &hub).await,
+                Step::Wait { alive: true } => self.idle(Some(notified.as_mut()), &runtime, &hub).await,
             };
             if let Some(exit) = exit {
                 return exit;
@@ -184,8 +191,9 @@ impl<S: Sources> Monitor<S> {
 
     /// Espera a próxima rodada de estado (o relógio, ou o empurrão quando `woken` vem). Enquanto
     /// a prévia corre, toques de `preview::FAST` só para ela, fora da contagem das rodadas. O ator
-    /// de entrada acorda só para o problema dele, também fora da contagem.
-    async fn idle(&mut self, mut woken: Option<std::pin::Pin<&mut tokio::sync::futures::Notified<'_>>>, runtime: &Notify) -> Option<Exit> {
+    /// de entrada acorda só para o problema dele, também fora da contagem. O hub acorda para a
+    /// rodada da época nova (`rebind`) ou para tirar a prévia que acabou de ser gravada.
+    async fn idle(&mut self, mut woken: Option<std::pin::Pin<&mut tokio::sync::futures::Notified<'_>>>, runtime: &Notify, hub: &Notify) -> Option<Exit> {
         let deadline = tokio::time::Instant::now() + self.poll;
         loop {
             let until = if self.mem.preview.fast { (tokio::time::Instant::now() + preview::FAST).min(deadline) } else { deadline };
@@ -195,16 +203,28 @@ impl<S: Sources> Monitor<S> {
                     None => std::future::pending().await,
                 }
             };
-            let actor = tokio::select! {
-                () = tokio::time::sleep_until(until) => false,
+            enum Woke { Clock, Actor, Hub }
+            let woke = tokio::select! {
+                () = tokio::time::sleep_until(until) => Woke::Clock,
                 () = wake => return None,
-                () = runtime.notified() => true,
+                () = runtime.notified() => Woke::Actor,
+                () = hub.notified() => Woke::Hub,
             };
-            if actor {
-                if let Some(Step::Exit(exit)) = self.runtime_changed().await {
-                    return Some(exit);
+            match woke {
+                Woke::Clock => {}
+                Woke::Actor => {
+                    if let Some(Step::Exit(exit)) = self.runtime_changed().await {
+                        return Some(exit);
+                    }
+                    continue;
                 }
-                continue;
+                Woke::Hub if self.src.epoch() != self.epoch => return None,
+                Woke::Hub => {
+                    if !preview::committed_changed(&self.src, &mut self.mem.preview, self.epoch).await {
+                        return Some(Exit::Closed);
+                    }
+                    continue;
+                }
             }
             if tokio::time::Instant::now() >= deadline {
                 return None;
@@ -510,6 +530,12 @@ mod tests {
             Ok(self.ask.lock().unwrap().clone())
         }
         fn deliverable(&self) { self.deliveries.lock().unwrap().push(self.rounds()); }
+        fn hub_wake(&self) -> Arc<Notify> { Arc::default() }
+        async fn preview_capture(&self) -> Option<Result<Frame, CaptureFailed>> { None }
+        async fn preview_files(&self, _: &str) -> Vec<HookFile> { Vec::new() }
+        fn committed(&self) -> Option<Arc<str>> { None }
+        async fn publish_preview(&self, _: PreviewEvent) -> bool { true }
+        fn wall(&self) -> f64 { wall_now() }
     }
 
     const SPINNER: &str = "✻ Thinking…\n────────────\n❯\n────────────";
@@ -697,6 +723,30 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
         assert_eq!(fake.events.lock().unwrap().last().unwrap().1.problema.as_deref(), Some(UNAVAILABLE), "o ator não apaga o problema dos fatos");
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn one_monitor_per_session() {
+        use crate::side::{Binding, Hubs, SideCtx, fake_monitors, IDLE_PANE};
+        use crate::transcript::Provider;
+        let dir = tempfile::tempdir().unwrap();
+        let (spawn, count) = fake_monitors(IDLE_PANE);
+        let ctx = SideCtx { upstream: "127.0.0.1:9".parse().unwrap(), secret: "s".into(), http: crate::proxy::client(),
+            watchers: Default::default(), hubs: Hubs::default(), infos: Default::default(), monitors: Some(spawn) };
+        let binding = |p| Binding { provider: p, jsonl: dir.path().join("a.jsonl"), key: "a".into() };
+        // Dono no celular, dono no desktop e o canal do convidado: um hub, um Monitor.
+        let leases: Vec<_> = (0..3).map(|_| ctx.hubs.acquire("s", binding(Provider::Claude), &ctx)).collect();
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        let first = leases[0].hub.clone();
+        drop(leases);
+        assert!(first.monitor.lock().unwrap().is_none(),"o último assinante saiu: o Monitor para com o hub");
+        let again = ctx.hubs.acquire("s", binding(Provider::Claude), &ctx);
+        assert_eq!(count.load(Ordering::SeqCst), 2, "volta com o próximo assinante");
+        // Codex e Claude sem terminal não são do Monitor.
+        let _codex = ctx.hubs.acquire("c", binding(Provider::Codex), &ctx);
+        let _headless = ctx.hubs.acquire("h", binding(Provider::ClaudeHeadless), &ctx);
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+        drop(again);
     }
 
     #[tokio::test(start_paused = true)]

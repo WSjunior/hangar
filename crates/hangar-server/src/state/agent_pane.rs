@@ -61,6 +61,13 @@ impl AgentPanes {
         target
     }
 
+    /// Resposta guardada há menos de `TTL`, sem calcular: quem calcula precisa da descoberta, que
+    /// é assíncrona (`target` com o resultado dela).
+    pub fn cached(&self, name: &str, now: Instant) -> Option<Option<String>> {
+        let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.peek(name).filter(|(_, at)| now.saturating_duration_since(*at) < TTL).map(|(t, _)| t.clone())
+    }
+
     pub fn forget(&self, name: &str) { self.cache.lock().unwrap_or_else(|e| e.into_inner()).remove(name); }
 }
 

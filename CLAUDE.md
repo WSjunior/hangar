@@ -455,14 +455,25 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   Medidas em [plataforma.md](docs/decisoes/plataforma.md#lista-do-dono-no-hangar-server).
 - **Observação terminal Rust usa porta privada de loopback no mesmo filho**, anunciada na saúde
   somente como endereço; o segredo vem do Supervisor em memória após conferir o protocolo.
-  Lease pertence ao produtor Claude que consome a captura, não ao aparelho. Codex nativo não
-  abre observador sem consumidor. Uma captura canônica por rodada, sem grade auxiliar; o estado
-  temporal fica no Python, sem segundo HTTP. Captura/análise conservam provider,
+  Lease pertence ao produtor que consome a captura, não ao aparelho. Codex nativo não
+  abre observador sem consumidor. Uma captura canônica por rodada, sem grade auxiliar; nos
+  provedores que o Python observa (Pi, omp, Kimi) o estado temporal fica nele, sem segundo HTTP.
+  Captura/análise conservam provider,
   vínculo, época e geração; `/clear` ou troca do filho descartam leituras antigas. Erro vira
   problema visível e a rodada seguinte pergunta ao Rust; Windows e ponte desligada usam a
   captura Python.
   Codex conserva estado e prévia nativos; sidecar Claude vazio continua sendo uma resposta.
   Evidência isolada em [plataforma.md](docs/decisoes/plataforma.md#observação-terminal-rust-erro-visível-sem-captura-python).
+- **Estado ao vivo de Claude com terminal é do `Monitor` do Rust no modo `rust`/`pending`, em
+  qualquer porta.** Um por hub (`side.rs`), nascido com o primeiro assinante: o `/events` do dono
+  ou o canal privado `/__hangar_server/state/{name}/events`, que o Python lê para quem entrou pela
+  8766/8768. Ele publica `state`, `preview`, `ask_question` e `suggest` pelo retrato do hub e pede
+  a entrega por `session.deliverable`; o Python não sobe `StateMonitor` nem `PreviewBroker` dessas
+  sessões e o hub descarta, registrando uma vez, os quatro que vierem dele. Captura em processo
+  (`-C`; psmux avulso no Windows), fatos por empurrão e retrato com prazo; retrato que não vem é
+  `problema=state_facts_unavailable`, nunca estado inventado. O `Sources` não tem método com corpo
+  padrão: fonte que esquece um não compila. No modo `python` tudo roda como antes. Evidência em
+  [plataforma.md](docs/decisoes/plataforma.md#estado-ao-vivo-de-claude-com-terminal-no-monitor-do-rust).
 
 ## tmux + Claude Code truecolor
 

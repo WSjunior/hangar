@@ -189,8 +189,8 @@ Connect), `test_guest_chat_reads_rust_channel`, `test_side_events_keeps_info_que
 Rust `side::monitor_publishes_after_rebind`, `side::python_state_for_rust_session_dropped_once`,
 `side::private_channel_counts_as_subscriber`, `monitor::one_monitor_per_session`.
 
-- [ ] **Step 9: Testes, vistos falhar; medida "antes" (`medir-estado.py`, release, 1/5/20 chats, parado e trabalhando: CPU do Python e do Rust, latência marcador → `state`, RSS)**
-- [ ] **Step 10: Hub com fonte própria, canal privado, Python calado para essas sessões; contrato; regras corrigidas; testes focados**
+- [x] **Step 9: Testes, vistos falhar; medida "antes" (`medir-estado.py`, release, 1/5/20 chats, parado e trabalhando: CPU do Python e do Rust, latência marcador → `state`, RSS)**
+- [x] **Step 10: Hub com fonte própria, canal privado, Python calado para essas sessões; contrato; regras corrigidas; testes focados**
 - [ ] **Step 11: Medida "depois" no mesmo método; `medicao.md`; revisar**
 
 ### Task 6: Lista lê o `Monitor` e o cartão de permissão do Claude com terminal

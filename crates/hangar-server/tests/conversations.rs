@@ -102,16 +102,17 @@ async fn devices_share_one_internal_connection_and_late_one_gets_snapshot() {
     messages(&mut a, 1).await;
     wait_until(|| fake.side_conns() == 1).await;
 
-    let state = r#"{"session":"s","state":"idle"}"#;
+    // `stats` segue do Python; `state` de Claude com terminal é do `Monitor` do Rust.
+    let state = r#"{"turns":3}"#;
     let queued = r#"{"kind":"user_msg","id":"queued-7","text":"na fila"}"#;
-    fake.push_side("state", state);
+    fake.push_side("stats", state);
     fake.push_side("message", queued);
-    assert_eq!(next_named(&mut a, "state").await.data, state);
+    assert_eq!(next_named(&mut a, "stats").await.data, state);
     assert_eq!(id_of(&next_named(&mut a, "message").await), "queued-7");
 
     let mut b = sse(open_events(srv, "s", "", &[]).await);
     assert_eq!(id_of(&messages(&mut b, 1).await[0]), "u0");
-    assert_eq!(next_named(&mut b, "state").await.data, state);
+    assert_eq!(next_named(&mut b, "stats").await.data, state);
     assert_eq!(id_of(&next_named(&mut b, "message").await), "queued-7");
 
     assert_eq!(fake.side_conns(), 1);
@@ -147,15 +148,15 @@ async fn new_info_resets_every_device_and_follows_new_file() {
     fake.set_info(novo.clone());
     fake.push_side("info", &novo.to_string());
     for es in &mut devices {
-        assert_eq!(next_non_ping(es).await.event, "reset");
+        next_named(es, "reset").await;
         let m = messages(es, 2).await;
         assert_eq!(id_of(&m[0]), "u100");
         assert!(m[0].id.starts_with("sess-e2:"));
     }
-    let marker = r#"{"session":"s","state":"marcador"}"#;
-    fake.push_side("state", marker);
+    let marker = r#"{"turns":42}"#;
+    fake.push_side("stats", marker);
     for es in &mut devices {
-        no_reset_until(es, "state", marker).await;
+        no_reset_until(es, "stats", marker).await;
     }
     assert_eq!(fake.side_conns(), 1, "a troca vem pela conexão que já existe");
 }
@@ -170,7 +171,7 @@ async fn provider_outside_rust_resets_and_next_connection_goes_to_python() {
     let pi = json!({"provider": "pi", "jsonl": jsonl, "session_key": "sess-f", "history": {}});
     fake.set_info(pi.clone());
     fake.push_side("info", &pi.to_string());
-    assert_eq!(next_non_ping(&mut a).await.event, "reset");
+    next_named(&mut a, "reset").await;
     assert!(stream_ends(&mut a).await);
 
     let r = open_events(srv, "s", "", &[]).await;
@@ -184,7 +185,7 @@ async fn truncated_transcript_resets_and_rereads_from_start() {
     messages(&mut a, 3).await;
 
     std::fs::write(&jsonl, claude_line(9)).unwrap();
-    assert_eq!(next_non_ping(&mut a).await.event, "reset");
+    next_named(&mut a, "reset").await;
     let m = messages(&mut a, 1).await;
     assert_eq!(id_of(&m[0]), "u9");
     assert_eq!(m[0].id, "sess-g:0");
@@ -209,16 +210,16 @@ async fn same_name_with_new_transcript_never_serves_the_dead_one() {
     assert_eq!(id_of(&first), "u100");
     assert!(first.id.starts_with("sess-nova:"));
 
-    assert_eq!(next_non_ping(&mut a).await.event, "reset");
+    next_named(&mut a, "reset").await;
     assert_eq!(id_of(&messages(&mut a, 1).await[0]), "u100");
     wait_until(|| fake.side_conns() == 2).await;
 
     // O primeiro `info` da conexão religada confirma a troca: nenhum reset a mais, nenhuma
     // religação a mais.
-    let marker = r#"{"session":"s","state":"marcador"}"#;
-    fake.push_side("state", marker);
-    no_reset_until(&mut a, "state", marker).await;
-    no_reset_until(&mut b, "state", marker).await;
+    let marker = r#"{"turns":42}"#;
+    fake.push_side("stats", marker);
+    no_reset_until(&mut a, "stats", marker).await;
+    no_reset_until(&mut b, "stats", marker).await;
     assert_eq!(fake.side_conns(), 2);
 }
 
@@ -306,34 +307,23 @@ async fn history_without_owner_or_supported_provider_goes_to_python() {
 }
 
 #[tokio::test]
-async fn answered_pane_question_is_not_replayed_to_late_devices() {
+async fn python_state_events_never_reach_devices_of_a_claude_terminal_session() {
+    // A troca de dono: com o `Monitor` do Rust, o que o Python mandar dos quatro eventos do estado
+    // não chega ao aparelho; o resto da conexão interna segue igual.
     let (_dir, _jsonl, _offs, fake, srv) = setup(0..1, "sess-q").await;
     let mut a = sse(open_events(srv, "s", "", &[]).await);
     messages(&mut a, 1).await;
     wait_until(|| fake.side_conns() == 1).await;
-
-    let awaiting = r#"{"session":"s","state":"awaiting_input"}"#;
-    let question = r#"{"questions":[{"question":"qual?"}]}"#;
-    fake.push_side("state", awaiting);
-    fake.push_side("ask_question", question);
-    assert_eq!(next_named(&mut a, "ask_question").await.data, question);
-
-    // Chegou durante a pergunta: recebe.
-    let mut b = sse(open_events(srv, "s", "", &[]).await);
-    assert_eq!(next_named(&mut b, "ask_question").await.data, question);
-
-    let idle = r#"{"session":"s","state":"idle"}"#;
-    fake.push_side("state", idle);
-    assert_eq!(next_named(&mut a, "state").await.data, idle);
-
-    // Chegou depois da resposta: estado atual, sem a pergunta velha.
-    let mut c = sse(open_events(srv, "s", "", &[]).await);
-    let marker = r#"{"session":"s","state":"marcador"}"#;
-    fake.push_side("state", marker);
+    for (event, data) in [("state", r#"{"session":"s","state":"python"}"#), ("ask_question", r#"{"questions":[]}"#),
+                          ("preview", r#"{"session":"s","text":"do python"}"#), ("suggest", r#"{"text":"do python"}"#)] {
+        fake.push_side(event, data);
+    }
+    let marker = r#"{"turns":7}"#;
+    fake.push_side("stats", marker);
     loop {
-        let ev = next_any(&mut c).await;
-        assert_ne!(ev.event, "ask_question", "pergunta já respondida");
-        if ev.event == "state" && ev.data == marker {
+        let ev = next_any(&mut a).await;
+        assert!(!ev.data.contains("python"), "evento do estado vindo do Python: {} {}", ev.event, ev.data);
+        if ev.event == "stats" && ev.data == marker {
             break;
         }
     }
