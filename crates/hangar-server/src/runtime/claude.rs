@@ -119,8 +119,7 @@ impl ClaudeEngine {
         effects.extend(out.into_iter().map(|effect|Effect::Surface { effect }));
     }
 
-    // Sem chamador até a ligação ao processo (ligação inicial e reconexão); o `allow` sai junto.
-    #[allow(dead_code)]
+    /// Liga a superfície ao processo: no `initialize` que a oferece e ao religar a um processo já iniciado.
     fn start_surface(&mut self,effects:&mut Vec<Effect>) {
         let now = self.clock.monotonic_s;
         if let Some(surface) = self.surface.as_mut() { let out = surface.start(now); Self::surface_out(effects,out); }
@@ -222,6 +221,9 @@ impl ClaudeEngine {
     }
 
     fn changed(&mut self,effects:&mut Vec<Effect>,format:bool) {
+        // A faixa recebe `isWorking`: começo e fim de turno pedem um desenho novo dela.
+        let (now,working) = (self.clock.monotonic_s,self.in_progress);
+        if let Some(surface) = self.surface.as_mut() { surface.set_working(working,now); }
         effects.push(Effect::StateChanged);
         if !format { return; }
         let payload = json!({"model":self.model,"effort":self.effort,"usage":self.usage,
@@ -324,6 +326,12 @@ impl ClaudeEngine {
         self.changed(&mut effects,true);
         if self.usage.is_null() { self.policy("last_usage",json!({}),&mut effects); }
         self.policy("reload_stamp",json!({}),&mut effects);
+        // Religado a um processo já iniciado (Rust reiniciado ou reconexão ao cano): liga de novo; o
+        // `ui_attach` repetido é aceito e reenvia o rol (E3). Processo velho sem a capacidade recusa,
+        // e a superfície desliga sem mais pedidos.
+        // Só com o processo vivo (A15): com `saiu` no retrato, o `ui_attach` iria a um processo morto e
+        // venceria em 15 s.
+        if self.initialized && self.alive { self.start_surface(&mut effects); }
         Ok(effects)
     }
 
@@ -507,6 +515,13 @@ impl ClaudeEngine {
             "control_response" => {
                 let response = &event["response"];
                 let id:RequestId = serde_json::from_value(response["request_id"].clone()).map_err(|_|error("ID de controle inválido"))?;
+                // Resposta a um pedido `ui_*`: é da superfície e não fecha operação da fila.
+                let now = self.clock.monotonic_s;
+                if let Some(surface) = self.surface.as_mut().filter(|surface|surface.owns(&id)) {
+                    let out = surface.on_response(&id,response,now);
+                    Self::surface_out(effects,out);
+                    return Ok(());
+                }
                 if let Some(waiter) = self.waiters.remove(&id) {
                     let rejected = response["subtype"] == "error";
                     if let Some(wire) = self.wires.get_mut(&waiter.operation_id) { wire.final_result = true; }
@@ -519,6 +534,10 @@ impl ClaudeEngine {
                                 if self.state.problema.as_deref() == Some("headless_sem_resposta") { self.state.problema = None; self.state.problema_detalhe = None; }
                                 if self.effort_intent.as_ref().is_some_and(|intent|intent["status"] == "prepared") { self.dispatch_effort(effects); }
                                 else { effects.push(Effect::WakeQueue); }
+                                // `ui_surface_v1`: o processo aceita o Hangar como superfície remota dos mods.
+                                if result["capabilities"].as_array().is_some_and(|list|list.iter().any(|item|item == "ui_surface_v1")) {
+                                    self.start_surface(effects);
+                                }
                             }
                             "set_permission_mode" => {
                                 let selected = result["mode"].as_str().or_else(||waiter.payload["mode"].as_str());
@@ -603,6 +622,12 @@ impl ClaudeEngine {
             "control_request" | "sdk_control_request" => {
                 let request_id:RequestId = serde_json::from_value(event["request_id"].clone()).map_err(|_|error("ID de pedido inválido"))?;
                 let request = event.get("request").cloned().unwrap_or_else(||json!({}));
+                // Cópia pedida por um mod: a superfície responde na hora, fora do diário.
+                if request["subtype"] == "ui_copy" && let Some(surface) = self.surface.as_mut() {
+                    let out = surface.on_copy(&event["request_id"],&request);
+                    Self::surface_out(effects,out);
+                    return Ok(());
+                }
                 let tool = request["tool_name"].as_str().unwrap_or("");
                 if request["subtype"] != "can_use_tool" {
                     self.answer(format!("server:{}:{}",self.generation,self.counter),request_id,json!({}),effects);
@@ -661,6 +686,8 @@ impl ClaudeEngine {
                 self.alive = false; self.in_progress = false; self.initializing = false;
                 self.turn_start = None; self.label_deadline = None; self.init_warning = None; self.effort_deadline = None;
                 self.pending.clear(); self.question = None; self.clear_streams(effects);
+                // Pedidos dos apps em aberto respondem com código e a interface dos mods some.
+                if let Some(surface) = self.surface.as_mut() { let out = surface.on_exit(); Self::surface_out(effects,out); }
                 self.state.problema = Some("headless_caiu".into());
                 for (operation_id,wire) in &mut self.wires {
                     if !wire.final_result {
@@ -688,6 +715,12 @@ impl ClaudeEngine {
 
     fn on_system(&mut self,event:&Value,effects:&mut Vec<Effect>) {
         let subtype = event["subtype"].as_str().unwrap_or("");
+        // Avisos da interface dos mods (`ui_panes`, `ui_invalidate`, `ui_toast`, `ui_status`): da superfície.
+        if subtype.starts_with("ui_") {
+            let now = self.clock.monotonic_s;
+            if let Some(surface) = self.surface.as_mut() { let out = surface.on_notice(event,now); Self::surface_out(effects,out); }
+            return;
+        }
         if let Some(selected) = event["permissionMode"].as_str() {
             let restore = self.restore_plan.clone();
             self.set_mode(selected,effects);
@@ -851,10 +884,14 @@ impl ClaudeEngine {
         if self.label_deadline.is_some_and(|deadline|now >= deadline) {
             self.label_deadline = self.turn_start.map(|_|now+1.0); self.changed(effects,false);
         }
+        // Prazos da superfície: janela dos desenhos, nova ligação e pedidos vencidos.
+        let out = self.surface.as_mut().map(|surface|surface.tick(now)).unwrap_or_default();
+        Self::surface_out(effects,out);
     }
 
     pub fn next_deadline(&self) -> Option<f64> {
-        [self.preview.deadline(),self.thinking.deadline(),self.tool_input.deadline(),self.init_warning,self.label_deadline,self.effort_deadline,Some(self.reload_deadline)]
+        [self.preview.deadline(),self.thinking.deadline(),self.tool_input.deadline(),self.init_warning,self.label_deadline,self.effort_deadline,Some(self.reload_deadline),
+            self.surface.as_ref().and_then(Surface::deadline)]
             .into_iter().flatten().chain(self.waiters.values().filter(|w|!w.timed_out).map(|w|w.deadline))
             .min_by(f64::total_cmp)
     }

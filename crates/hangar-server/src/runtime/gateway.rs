@@ -23,7 +23,7 @@ impl EntryHandle {
     async fn confirm(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.confirm().await,Self::Terminal {handle,..}=>handle.confirm().await}}
     async fn ensure_projection(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.ensure_projection().await,Self::Terminal {handle,..}=>handle.ensure_projection().await}}
 }
-struct Entry { generation:u64,handle:EntryHandle,lease_path:std::path::PathBuf }
+struct Entry { generation:u64,handle:EntryHandle,lease_path:std::path::PathBuf,name:String }
 pub struct RuntimeRegistry {
     entries:Mutex<BTreeMap<String,Entry>>,
     events:broadcast::Sender<RuntimeEvent>,
@@ -31,6 +31,7 @@ pub struct RuntimeRegistry {
     instance:String,
     lifecycle:Mutex<BTreeMap<String,Arc<Mutex<()>>>>,
     revisions:Mutex<BTreeMap<String,Arc<AtomicU64>>>,
+    mods:Option<crate::mods::state::Mods>,
 }
 
 /// A trava pode demorar a soltar: as tarefas de E/S de um ator que saiu, ou o `LockFileEx` de um
@@ -78,8 +79,10 @@ fn failure(code:&str) -> RuntimeError { RuntimeError::new(code,"runtime indispon
 impl RuntimeRegistry {
     pub fn new(upstream:SocketAddr,secret:String,instance:String) -> Self {
         Self { entries:Mutex::new(BTreeMap::new()),events:broadcast::channel(1024).0,
-            policy:PolicyClient::new(upstream,secret,instance.clone()),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()) }
+            policy:PolicyClient::new(upstream,secret,instance.clone()),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()),mods:None }
     }
+    /// Interface dos mods: sessão Claude sem terminal aberta aqui vira superfície remota e publica no `Mods`.
+    pub fn with_mods(mut self,mods:crate::mods::state::Mods) -> Self { self.mods = Some(mods); self }
     pub fn subscribe(&self) -> broadcast::Receiver<RuntimeEvent> { self.events.subscribe() }
     pub async fn handle(&self,key:&str,generation:u64) -> Result<RuntimeHandle,RuntimeError> {
         match self.entry(key,generation).await? {EntryHandle::Headless(handle)=>Ok(handle),_=>Err(failure("runtime_provider"))}
@@ -119,10 +122,16 @@ impl RuntimeRegistry {
         };
         let epoch_s = SystemTime::now().duration_since(UNIX_EPOCH).map(|d|d.as_secs_f64()).unwrap_or(0.0);
         let revision = self.revisions.lock().await.entry(target.key.clone()).or_insert_with(||Arc::new(AtomicU64::new(0))).clone();
-        let engine = RuntimeEngine::new(&target.provider,metadata,target.generation,ClockSample { monotonic_s:0.0,epoch_s })?
+        let mut engine = RuntimeEngine::new(&target.provider,metadata,target.generation,ClockSample { monotonic_s:0.0,epoch_s })?
             .with_policy(self.policy.clone()).with_publisher(self.events.clone()).with_revision(revision);
+        if let Some(mods) = &self.mods { engine = engine.with_mods(mods.clone()); }
         let handle = RuntimeActor::spawn(target.clone(),queue,connection,engine);
-        self.entries.lock().await.insert(target.key.clone(),Entry { generation:target.generation,handle:EntryHandle::Headless(handle.clone()),lease_path:target.lease_path.clone() });
+        // Dono único dos pedidos dos apps até o `close` (S9). Só o Claude tem superfície.
+        if target.provider == "claude" && let Some(mods) = &self.mods {
+            mods.attach(&target.name,target.generation,Arc::new(handle.clone()));
+        }
+        self.entries.lock().await.insert(target.key.clone(),Entry { generation:target.generation,handle:EntryHandle::Headless(handle.clone()),
+            lease_path:target.lease_path.clone(),name:target.name.clone() });
         handle
         };
         let snapshot = match handle.snapshot().await {
@@ -153,7 +162,7 @@ impl RuntimeRegistry {
                 let store=open_store(&target.state_path,&target.projection_dir,&target.key,target.generation,&target.name,lease.clone()).await?;
                 let revision=self.revisions.lock().await.entry(target.key.clone()).or_insert_with(||Arc::new(AtomicU64::new(0))).clone();
                 let handle=super::terminal::TerminalActor::spawn(target.clone(),QueueActor::start(store,lease),self.policy.clone(),super::terminal::TerminalOptions::default(),self.events.clone(),revision);
-                self.entries.lock().await.insert(target.key.clone(),Entry {generation:target.generation,handle:EntryHandle::Terminal {target:target.clone(),handle:handle.clone()},lease_path:target.lease_path.clone()});handle
+                self.entries.lock().await.insert(target.key.clone(),Entry {generation:target.generation,handle:EntryHandle::Terminal {target:target.clone(),handle:handle.clone()},lease_path:target.lease_path.clone(),name:target.name.clone()});handle
             }
         };
         let snapshot=handle.snapshot().await?;
@@ -166,9 +175,9 @@ impl RuntimeRegistry {
         self.close_locked(key,generation).await
     }
     async fn close_locked(&self,key:&str,generation:u64) -> Result<Value,RuntimeError> {
-        let (handle,lease_path) = match self.entries.lock().await.get(key) {
+        let (handle,lease_path,name) = match self.entries.lock().await.get(key) {
             None=>return Ok(json!({"closed":true})),
-            Some(entry) if entry.generation == generation=>(entry.handle.clone(),entry.lease_path.clone()),
+            Some(entry) if entry.generation == generation=>(entry.handle.clone(),entry.lease_path.clone(),entry.name.clone()),
             _=>return Err(failure("runtime_generation")),
         };
         if let Err(error) = handle.stop().await {
@@ -182,6 +191,9 @@ impl RuntimeRegistry {
             tracing::warn!(key,code=%error.code,"ator do runtime já tinha terminado; sessão liberada");
         }
         self.entries.lock().await.remove(key);
+        // A sessão saiu do Rust: os apps perdem a faixa e os pedidos voltam a não ter dono (S9). Sessão
+        // com terminal nunca entrou no `Mods`; não pode apagar a sem terminal de mesmo nome.
+        if matches!(handle,EntryHandle::Headless(_)) && let Some(mods) = &self.mods { mods.forget(&name,generation); }
         Ok(json!({"closed":true}))
     }
     async fn barrier(&self,key:&str) -> Arc<Mutex<()>> {
