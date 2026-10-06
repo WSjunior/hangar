@@ -324,6 +324,7 @@ class _FoldCodex(_Fold):
     def __init__(self) -> None:
         super().__init__()
         self._total: tuple[int, int, int] | None = None   # último total_token_usage visto
+        self._call_llm_ms = 0.0
 
     def _usage(self, info: dict) -> None:
         tot = info.get("total_token_usage")
@@ -344,6 +345,10 @@ class _FoldCodex(_Fold):
         self.in_tok += d[0]
         self.cache_read_tok += d[1]
         self.out_tok += d[2]
+        seconds = (self.llm_ms - self._call_llm_ms) / 1000.0
+        self._call_llm_ms = self.llm_ms
+        if d[2] > 0 and seconds >= MIN_GEN_S:
+            self._calls.append((d[2], seconds))
 
     def feed(self, obj: dict) -> None:
         t = obj.get("type")

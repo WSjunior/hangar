@@ -79,6 +79,24 @@ fn turn_end_idle_before_drain() {
 }
 
 #[test]
+fn first_response_times_only_the_first_nonempty_delta_of_the_current_turn() {
+    let mut engine = engine();
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),10.0);
+    for (thread,turn,text) in [("other","turn-1","text"),("thread-1","old","text"),("thread-1","turn-1","")] {
+        let effects = line(&mut engine,json!({"method":"item/agentMessage/delta",
+            "params":{"threadId":thread,"turnId":turn,"delta":text}}),11.0);
+        assert!(!effects.iter().any(|effect|matches!(effect,Effect::Publish { channel,.. } if channel == "rate")));
+    }
+    let effects = line(&mut engine,json!({"method":"item/agentMessage/delta",
+        "params":{"threadId":"thread-1","turnId":"turn-1","delta":"text"}}),12.0);
+    assert!(effects.iter().any(|effect|matches!(effect,Effect::Publish { channel,data }
+        if channel == "rate" && data == &json!({"first_response":true,"seconds":2.0,"conversation":"thread-1"}))));
+    let effects = line(&mut engine,json!({"method":"item/agentMessage/delta",
+        "params":{"threadId":"thread-1","turnId":"turn-1","delta":"more"}}),13.0);
+    assert!(!effects.iter().any(|effect|matches!(effect,Effect::Publish { channel,.. } if channel == "rate")));
+}
+
+#[test]
 fn thread_switch_clears_old_preview_and_foreign_deltas_are_ignored() {
     let mut engine = engine();
     let effects = line(&mut engine,json!({"method":"item/agentMessage/delta","params":{"threadId":"other","delta":"filho"}}),10.0);
