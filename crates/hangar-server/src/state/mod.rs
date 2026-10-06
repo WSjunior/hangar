@@ -5,4 +5,5 @@ pub mod demote;
 pub mod facts;
 pub mod monitor;
 pub mod permission;
+pub mod preview;
 pub mod shells;

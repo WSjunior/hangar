@@ -48,12 +48,12 @@ fn native_state(status: &str) -> Option<&'static str> {
 }
 
 /// Versão de um arquivo: muda a cada escrita.
-type FileKey = (SystemTime, u64);
+pub(crate) type FileKey = (SystemTime, u64);
 
 /// Mais novo que isto, a versão não prova que o conteúdo é o mesmo (granularidade do mtime).
-const RACY_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+pub(crate) const RACY_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 
-fn file_key(meta: &std::fs::Metadata) -> Option<FileKey> { Some((meta.modified().ok()?, meta.len())) }
+pub(crate) fn file_key(meta: &std::fs::Metadata) -> Option<FileKey> { Some((meta.modified().ok()?, meta.len())) }
 
 #[derive(Clone, PartialEq)]
 enum Parsed {

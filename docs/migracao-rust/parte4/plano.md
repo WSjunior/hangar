@@ -147,8 +147,8 @@ quando o bloco entra nele, porte de `sse.py:54-72, 852-855`; vaga única; `text,
 `preview::suppressed_when_in_transcript`, `preview::cleared_on_commit`,
 `preview::fast_captures_only_for_pane_preview`.
 
-- [ ] **Step 5: Testes e golden, vistos falhar**
-- [ ] **Step 6: Prévia; testes focados; revisar**
+- [x] **Step 5: Testes e golden, vistos falhar**
+- [x] **Step 6: Prévia; testes focados; revisar**
 
 ### Task 4: Pergunta nativa, sugestão, `problema` e entrega no `Monitor` (sem produção)
 
