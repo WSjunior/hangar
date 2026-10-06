@@ -3,3 +3,4 @@
 //! entra como superfície remota `desktop` do `claude -p`.
 pub mod model;
 pub mod tree;
+pub mod state;
