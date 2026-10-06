@@ -54,6 +54,33 @@ async fn typing_is_refused_without_holding_the_pane() {
     assert!(!pane.held() && pane.actions().is_empty());
 }
 
+/// O terminal que se desliga no meio de um clique não avisa de novo: a reposição do mínimo espera a vez do
+/// clique, em vez de desistir, e roda depois da limpeza dele.
+#[tokio::test]
+async fn a_terminal_leaving_during_a_click_gets_the_floor_after_it() {
+    let mods = Mods::default();
+    let pane = Arc::new(FakePane::new(&mods, "t", "tmux-01-tres-paineis-150"));
+    let link = TerminalLink::new("t".into(), 1, pane.clone(), mods.clone(), Limits::quick());
+    mods.attach_terminal("t", "proc-t", 1, link.clone());
+    mods.terminal_ui("t", view(&[("pm-mock-pm", "xx-00000", "pm-a", "xxxxx"), ("pm-mock-mr", "MR ●2", "mr-a", "xxxxx"),
+        ("pm-mock-jenkins", "Jenkins", "jenkins-a", "xxxxx")]));
+    pane.stall_on("click 0 104");
+    let call = tokio::spawn(link.call(ModsCall::Show { site: "pm-mock-mr".into() }, Instant::now() + Duration::from_secs(1)));
+    tokio::time::timeout(Duration::from_secs(5), async { while pane.actions().is_empty() { tokio::time::sleep(Duration::from_millis(5)).await; } })
+        .await.expect("o clique chegou ao pane");
+    // O terminal sai com o clique em curso e deixa a janela abaixo do mínimo; o aviso chega ao vigia.
+    pane.clients(0);
+    pane.queue(&["tmux-100-caixa-100"]);
+    let floor = tokio::spawn({ let link = link.clone(); async move { link.floor().await } });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!floor.is_finished(), "a reposição espera a vez do clique");
+    assert_eq!(pane.actions(), ["click 0 104"]);
+    assert_eq!(call.await.unwrap().unwrap_err().code, "erro_mod_clique_sem_resposta");
+    tokio::time::timeout(Duration::from_secs(5), floor).await.expect("a reposição terminou").unwrap();
+    assert_eq!(pane.actions(), ["click 0 104", "resize 144 45"]);
+    assert!(!pane.held());
+}
+
 /// O elo de uma vida substituída não lê o espelho da sessão que reabriu com o mesmo nome.
 #[tokio::test]
 async fn the_link_of_a_replaced_life_reads_nothing() {
