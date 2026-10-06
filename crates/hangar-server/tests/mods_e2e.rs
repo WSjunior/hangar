@@ -85,3 +85,46 @@ async fn turn_and_guard_that_eat_the_budget_keep_the_press_off_the_mod() {
     assert_eq!(pressed(&world.seen), 1);
     world.registry.close("key", 1).await.unwrap();
 }
+
+#[tokio::test]
+async fn app_press_goes_through_the_actor_and_the_pane_reaches_the_devices() {
+    // I3 (a): rota → guarda → ator → superfície → cano → resposta HTTP, e o painel aberto pelo clique
+    // chega aos aparelhos pelo `/events`.
+    let world = world(&[]).await;
+    let mut events = sse(open_events(world.server, "session", "", &[]).await);
+    let band: Value = serde_json::from_str(&next_named(&mut events, "plugin_ui").await.data).unwrap();
+    assert!(band["above"].to_string().contains("superfície desktop"), "o aparelho nasce com a faixa");
+    assert_eq!(press(world.server, "abrir-vitrine-botoes").await, (200, serde_json::json!({"ok": true})));
+    assert_eq!(world.python.transfer_calls(), 1);
+    assert_eq!(pressed(&world.seen), 1);
+    loop {
+        let ui: Value = serde_json::from_str(&next_named(&mut events, "plugin_ui").await.data).unwrap();
+        if ui["panes"][0]["id"] == "vitrine-botoes" {
+            assert_eq!((ui["shown_id"].as_str(), ui["source"].as_str()), (Some("vitrine-botoes"), Some("surface")));
+            break;
+        }
+    }
+    world.registry.close("key", 1).await.unwrap();
+}
+
+#[tokio::test]
+async fn session_leaving_rust_mid_press_answers_and_the_next_press_goes_to_python() {
+    // I3 (b): o mod engole o press; a sessão sai do Rust no meio. A rota responde com código, sem
+    // pendurar o app, e o pedido seguinte já não tem dono no Rust: vai ao Python.
+    let world = world(&["ui_press"]).await;
+    let mut events = sse(open_events(world.server, "session", "", &[]).await);
+    next_named(&mut events, "plugin_ui").await;
+    let start = Instant::now();
+    let request = tokio::spawn(press(world.server, "abrir-vitrine-botoes"));
+    wait_request(&world.seen, "ui_press").await;
+    world.registry.close("key", 1).await.unwrap();
+    let (status, body) = request.await.unwrap();
+    assert_eq!((status, body["detail"]["code"].as_str()), (409, Some("erro_mod_clique_sem_resposta")));
+    assert!(start.elapsed() < Duration::from_secs(8), "{:?}", start.elapsed());
+    assert!(!world.mods.owns("session"));
+    let cleared: Value = serde_json::from_str(&next_named(&mut events, "plugin_ui").await.data).unwrap();
+    assert!(cleared["above"].is_null() && cleared["panes"] == serde_json::json!([]), "a faixa sai dos aparelhos");
+    assert_eq!(press(world.server, "abrir-vitrine-botoes").await, (200, Value::String("from-python".into())));
+    assert_eq!(world.python.hits_to("/api/sessions/session/plugin/press"), 1);
+    assert_eq!(pressed(&world.seen), 1, "o segundo pedido não chegou ao cano pelo Rust");
+}
