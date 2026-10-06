@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { checks, disparaRun, ehGithub, jobs, lembrarCommit, precisaConsultar, runsVisiveis, situacao } from './gh'
+import { checks, disparaRun, ehGithub, ehPush, jobs, lembrarCommit, rotulosAbrir, precisaConsultar, runsVisiveis, situacao } from './gh'
 import type { GhView, RunGh } from './gh'
 import { rotuloJob } from './faixa'
 
@@ -26,8 +26,22 @@ describe('gh', () => {
   })
 
   test('commits lembrados: mais novo primeiro, sem repetir, com teto', () => {
-    expect(lembrarCommit(['b', 'a'], 'c', 2)).toEqual(['c', 'b'])
-    expect(lembrarCommit(['b', 'a'], 'a', 5)).toEqual(['a', 'b'])
+    const c = (sha: string) => ({ sha, branch: 'x' })
+    expect(lembrarCommit([c('b'), c('a')], c('c'), 2)).toEqual([c('c'), c('b')])
+    expect(lembrarCommit([c('b'), c('a')], c('a'), 5)).toEqual([c('a'), c('b')])
+  })
+
+  test('só git push registra commit', () => {
+    expect(ehPush('git push -u origin x')).toBe(true)
+    expect(ehPush('gh pr view 3')).toBe(false)
+  })
+
+  test('rótulo do botão nunca se repete', () => {
+    const w = (id: number, nome: string, sha: string) => ({ id, nome, sha })
+    expect(rotulosAbrir([w(1, 'CI', 'aaaaaaaa'), w(2, 'Server', 'aaaaaaaa')])).toEqual(['abrir CI', 'abrir Server'])
+    expect(rotulosAbrir([w(1, 'CI', 'aaaaaaaa'), w(2, 'CI', 'bbbbbbbb')])).toEqual(['abrir CI aaaaaaa', 'abrir CI bbbbbbb'])
+    // push e pull_request do mesmo commit: o id do run desempata
+    expect(rotulosAbrir([w(1, 'CI', 'aaaaaaaa'), w(2, 'CI', 'aaaaaaaa')])).toEqual(['abrir CI #1', 'abrir CI #2'])
   })
 
   test('job rodando mostra a etapa atual; job que falhou guarda o passo', () => {

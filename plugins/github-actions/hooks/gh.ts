@@ -60,9 +60,21 @@ export function runsVisiveis(porCommit: readonly (readonly RunGh[])[]): RunGh[] 
   return out
 }
 
+export type Empurrado = { sha: string; branch: string }
+
 /** Commits empurrados pela sessão, o mais novo primeiro, sem repetir e com teto. */
-export function lembrarCommit(lista: readonly string[], sha: string, max: number): string[] {
-  return [sha, ...lista.filter(s => s !== sha)].slice(0, max)
+export function lembrarCommit(lista: readonly Empurrado[], novo: Empurrado, max: number): Empurrado[] {
+  return [novo, ...lista.filter(c => c.sha !== novo.sha)].slice(0, max)
+}
+
+/** Só `git push` registra commit; `gh pr|run|workflow` só pede consulta. */
+export const ehPush = (cmd: string) => /\bgit\s+push\b/.test(cmd)
+
+/** Rótulo do botão de cada linha, único na faixa: o Hangar acha o botão pelo texto. */
+export function rotulosAbrir(ws: readonly { id: number; nome: string; sha: string }[]): string[] {
+  const comSha = new Set(ws.map(w => w.sha)).size > 1
+  const base = ws.map(w => `abrir ${w.nome}${comSha ? ` ${w.sha.slice(0, 7)}` : ''}`)
+  return base.map((r, i) => (base.indexOf(r) !== base.lastIndexOf(r) ? `${r} #${ws[i]?.id ?? i}` : r))
 }
 
 type CheckGh = { __typename?: string; status?: string; conclusion?: string | null; state?: string }
