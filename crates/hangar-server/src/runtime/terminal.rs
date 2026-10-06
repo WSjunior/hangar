@@ -257,28 +257,32 @@ impl Executor {
         let mut timer=tokio::time::interval(self.options.tick.max(Duration::from_millis(1))); timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             // Guardadas durante um clique de mod: saem na ordem em que chegaram, assim que ele solta o pane.
-            let message=if !self.parked.is_empty() && !self.held() {self.parked.pop_front()} else {
+            // `unparked`: a mensagem saiu da fila local e não volta para ela (sem laço).
+            let (message,unparked)=if !self.parked.is_empty() && !self.held() {(self.parked.pop_front(),true)} else {
                 // A reserva que vence sem `Release` solta o que estava guardado na hora, mesmo com o relógio
                 // desligado pelo erro de manutenção.
                 let release_at=self.hold.filter(|_|!self.parked.is_empty());
-                tokio::select! {biased;
+                let message=tokio::select! {biased;
                     message=receiver.recv()=>message,
                     _=tokio::time::sleep_until(release_at.unwrap_or_else(tokio::time::Instant::now)),if release_at.is_some()=>continue,
                     _=timer.tick(),if !closed.load(Ordering::Acquire) && (self.last_error.is_none() || self.reconciling())=>{
-                        // Clique de mod em curso: a fila não entrega nem reconcilia no pane até ele soltar (C6).
-                        if self.held() {continue;}
+                        // Clique de mod em curso, ou o que ele guardou ainda por sair: a fila não entrega nem
+                        // reconcilia no pane antes disso (C6).
+                        if self.held() || !self.parked.is_empty() {continue;}
                         if self.last_error.is_some() {self.reconcile_uncertain().await?;continue;}
                         let result=async {self.confirm_rows().await?;self.drain_once(None).await?;Ok::<_,RuntimeError>(())}.await;
                         if let Err(failure)=result {self.enter_error(failure).await?;}
                         continue;
                     }
-                }
+                };
+                (message,false)
             };
-            // O que escreve no pane (comando e drenagem pedida) espera o clique de mod soltar; operação de mod,
-            // fila, retrato, confirmação e parada seguem.
-            let held=self.held();
+            // O que escreve no pane (comando e drenagem pedida) espera o clique de mod soltar, e o que chega
+            // com algo ainda guardado entra atrás dele (ordem da caixa); operação de mod, fila, retrato,
+            // confirmação e parada seguem.
+            let wait=!unparked && (self.held() || !self.parked.is_empty());
             let message=match message {
-                Some(message@(Message::Command {..}|Message::Drain(_))) if held=>{self.parked.push_back(message);continue;},
+                Some(message@(Message::Command {..}|Message::Drain(_))) if wait=>{self.parked.push_back(message);continue;},
                 other=>other,
             };
             match message {
@@ -311,12 +315,46 @@ impl Executor {
                     let _=response.send(result);},
                 Some(Message::Stop(response))=>{
                     closed.store(true,Ordering::Release);
+                    self.refuse_parked();
                     let queue=Arc::try_unwrap(self.queue).map_err(|_|error("terminal_lease_inflight"))?;
                     let result=queue.shutdown().await.map_err(|_|error("queue_stop")); let _=response.send(result.clone()); return result;
                 },
-                None=>{let queue=Arc::try_unwrap(self.queue).map_err(|_|error("terminal_lease_inflight"))?;return queue.shutdown().await.map_err(|_|error("queue_stop"));}
+                None=>{self.refuse_parked(); let queue=Arc::try_unwrap(self.queue).map_err(|_|error("terminal_lease_inflight"))?;return queue.shutdown().await.map_err(|_|error("queue_stop"));}
             }
         }
+    }
+    /// Parada com algo guardado pelo clique de mod: quem esperava ouve `runtime_stopping`, como quem chama
+    /// um ator que já está parando, e não a caixa fechada.
+    fn refuse_parked(&mut self) {
+        for message in self.parked.drain(..) {
+            match message {
+                Message::Command {response,..}=>{let _=response.send(Err(error("runtime_stopping")));},
+                Message::Drain(response)=>{let _=response.send(Err(error("runtime_stopping")));},
+                _=>{},
+            }
+        }
+    }
+    /// Quem tem o teclado do pane, pela tela dos mods, logo antes de digitar uma entrada: com o foco num
+    /// painel ou na faixa de um mod (a limpeza de um clique que não o devolveu ao prompt), o `Enter` da
+    /// entrada apertaria um botão do mod, e o `Escape` que o tiraria de lá age no Claude. `None` libera a
+    /// escrita; um diálogo sem prompt também, porque a escrita já o adia como `overlay`.
+    async fn focus_away(&self)->Option<&'static str> {
+        let driver=TerminalDriver::new(self.target.binding.clone(),Arc::new(NoFacts),self.options.io.clone(),self.options.limits.clone());
+        // O tamanho só delimita a leitura: sem ele (formato ilegível no multiplexador) a guarda não trava
+        // toda entrega por um detalhe de leitura, e a escrita segue como antes.
+        let formats=match driver.mods_formats().await {
+            Ok(formats)=>formats,
+            Err(failure)=>{
+                if crate::warn_limit::allow(Some(self.target.key.as_str()),"terminal_focus_formats") {
+                    tracing::warn!(key=%self.target.key,session=%self.target.name,code=%failure.code,"tamanho do pane ilegível; a entrada segue sem conferir o foco dos mods");
+                }
+                return None;
+            }
+        };
+        // A tela que não se lê também não seria escrita: a entrada espera, com o motivo.
+        let ansi=match driver.mods_screen().await {Ok(ansi)=>ansi,Err(failure)=>return Some(failure.code)};
+        let screen=crate::mods::screen::read_screen(&ansi,usize::from(formats.columns),usize::from(formats.rows),&[],None);
+        matches!(screen.focus,Some("pane"|"band")).then_some("mods_focus")
     }
     /// Clique, roda, tecla da reserva, leitura, tamanho e reserva do pane para os mods. Com o teclado
     /// emprestado ao Python (administração digitando no pane), recusa: duas mãos no mesmo pane erram o alvo.
@@ -415,7 +453,13 @@ impl Executor {
                     },
                     Some(Err(_))=>reply(id,Disposition::Unknown,json!({"code":"plugin_control_uncertain"})),
                     _=>delivery(id,match kind {
-                        "input"=>driver.prompt(text,&publication).await,
+                        // Foco fora do prompt: adia sem escrever, como o `overlay`; a linha volta à fila e
+                        // o próximo tique tenta de novo.
+                        "input"=>match self.focus_away().await {
+                            Some(code)=>DeliveryResult {disposition:input::Disposition::Deferred,stage:input::DeliveryStage::Composer,cleanup:input::Cleanup::NotNeeded,
+                                native:false,message_id:None,code:code.into(),draft:None},
+                            None=>driver.prompt(text,&publication).await,
+                        },
                         "steer"|"steer_queue"=>driver.steer().await,
                         "key"|"navigation_key"=>driver.key(payload["key"].as_str().unwrap(),false).await,
                         "interactive_key"=>driver.key(payload["key"].as_str().unwrap(),true).await,
