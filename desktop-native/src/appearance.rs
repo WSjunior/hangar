@@ -392,6 +392,31 @@ pub fn remember_root(path: &str) {
     if let Some(dir) = dir() { let _ = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join("last-root"), path)); }
 }
 
+pub fn search_all_folders() -> Result<bool, String> {
+    let file = dir().ok_or_else(|| "sem pasta de configuração".to_owned())?.join("create-search-all.json");
+    read_search_all(&file)
+}
+
+fn read_search_all(file: &std::path::Path) -> Result<bool, String> {
+    match std::fs::read(file) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| format!("{}: {error}", file.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(format!("{}: {error}", file.display())),
+    }
+}
+
+pub fn set_search_all_folders(value: bool) -> Result<(), String> {
+    let dir = dir().ok_or_else(|| "sem pasta de configuração".to_owned())?;
+    write_search_all(&dir.join("create-search-all.json"), value)
+}
+
+fn write_search_all(file: &std::path::Path, value: bool) -> Result<(), String> {
+    let dir = file.parent().ok_or_else(|| "sem pasta de configuração".to_owned())?;
+    let tmp = file.with_extension("json.tmp");
+    std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&tmp, if value { "true\n" } else { "false\n" }))
+        .and_then(|_| std::fs::rename(&tmp, &file)).map_err(|error| format!("{}: {error}", file.display()))
+}
+
 /// Último modelo e esforço escolhidos na criação, pela chave servidor:provider:conta/motor (`cp_last_model` do web).
 pub fn last_model(key: &str) -> (String, String) {
     let saved: HashMap<String, (String, String)> = dir().and_then(|d| std::fs::read(d.join("last-models.json")).ok())
@@ -466,6 +491,24 @@ mod tests {
     use super::*;
     // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
     use core::prelude::v1::test;
+
+    #[test]
+    fn search_all_defaults_on_and_persists_without_creating_a_session() {
+        let dir = std::env::temp_dir().join(format!("hangar-search-all-{}", std::process::id()));
+        let file = dir.join("preference.json");
+        assert!(!dir.exists());
+        assert_eq!(read_search_all(&file), Ok(true));
+        write_search_all(&file, false).unwrap();
+        assert_eq!(read_search_all(&file), Ok(false));
+        write_search_all(&file, true).unwrap();
+        assert_eq!(read_search_all(&file), Ok(true));
+        std::fs::write(&file, "invalid").unwrap();
+        assert!(read_search_all(&file).is_err());
+        std::fs::create_dir(file.with_extension("json.tmp")).unwrap();
+        assert!(write_search_all(&file, false).is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "invalid");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn file_from_before_the_tray_option_opens_with_it_off() {

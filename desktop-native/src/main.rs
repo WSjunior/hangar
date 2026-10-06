@@ -29,6 +29,9 @@ mod theme;
 mod tray;
 mod ui_map;
 mod update;
+#[cfg(test)]
+#[path = "../vendor/gpui-pre-0.3.7/src/elements/list_tail.rs"]
+mod list_tail_tests;
 use gpui_kit::{component::{Root, Theme, ThemeMode}, *};
 use std::{borrow::Cow, sync::Arc};
 
@@ -94,6 +97,17 @@ fn log_dir() -> std::path::PathBuf {
         root.join("hangar/logs/privado")
     } else {
         home_dir().join(".hangar/logs/privado")
+    }
+}
+
+/// Falha sem pânico também precisa de rastro: aberto pelo lançador, o stderr vai pro nada.
+pub fn log_line(text: &str) {
+    use std::io::Write;
+    let dir = log_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let when = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("native.log")) {
+        let _ = writeln!(file, "[{when}] {text} (v{})", env!("CARGO_PKG_VERSION"));
     }
 }
 

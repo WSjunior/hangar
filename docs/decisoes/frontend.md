@@ -3,6 +3,67 @@
 Decisões medidas, com data e número. O `CLAUDE.md` carrega a regra;
 a medição que a sustenta mora aqui. Conteúdo movido sem alteração.
 
+## Resize não é encolhimento de conteúdo na lista nativa (05/10/2026)
+
+A compensação do fim (`ListState::hold_tail`, teto de 160 px) compara alturas antes e depois de
+uma mudança de conteúdo. A régua e a folga só valem na geometria em que foram medidas. Quando a
+largura ou a altura muda, `List::prepaint` invalida `tail_ref`, `tail_slack` e `tail_visible`
+antes da remedição; a âncora e os handles permanecem. Não se resolve com `reset` da lista nem
+com a retirada dos caches de desenho. A próxima medição reconstrói a referência; sem resize,
+encolher conteúdo continua criando folga limitada e crescer continua consumindo-a.
+
+Medição em compositor Wayland isolado, pele Terminal e conversa longa sintética: na base,
+1200×800 → 820×600 acrescentava 160 px de vão além dos 67 px do aviso de plano. Após uma nova
+mensagem e a restauração, sobravam 54 px artificiais. Com a invalidação, fim do conteúdo/composer
+ficaram em 594/661 na janela grande, 394/461 na pequena, 394/461 após mensagem enquanto pequena
+e 594/661 ao restaurar sem outro evento: só os 67 px do aviso, sem folga artificial. As decisões
+puras de geometria e compensação ficam em `elements/list_tail.rs`, fonte usada pela lista e
+incluída na suíte do app; isso não equivale a executar a suíte completa do GPUI vendorizado.
+
+## Nova sessão: busca entre raízes e seleção de conta (05/10/2026)
+
+Com texto e “Pesquisar em todas as pastas” marcado, o modal nativo procura nos filhos das
+raízes autorizadas do servidor escolhido. Não varre todo o disco nem outros servidores. Sem
+texto, permanece a navegação normal; desmarcado, a busca é local. A preferência nasce marcada
+e é salva ao alternar, mesmo fechando sem criar. O seletor compacto da tela sem sessão mantém
+sua busca local na pasta navegada: não oferece os controles globais do modal. Cada raiz tem
+cache e geração: digitar refiltra
+sem novo scan; trocar servidor invalida respostas anteriores. Resultados deduplicam por caminho,
+mostram a origem, mantêm homônimos e usam sua própria raiz ao selecionar ou abrir. Falhas por
+raiz aparecem junto dos resultados válidos; tentar novamente repete só as leituras com erro.
+
+O foco na busca é dado uma vez ao abrir, não a cada resposta. Ctrl+Tab e Ctrl+Shift+Tab percorrem
+as raízes circularmente e preservam a busca, somente no modal. Ao trocar o provedor, a conta
+ChatGPT compatível é mantida ou a primeira elegível é selecionada; conta sem identificador ou
+credencial válida não entra no seletor. O catálogo e o payload usam a conta exibida. No Codex,
+a criação nova prefere conta conectada, sem substituir uma conta pedida em transferência.
+
+Medição com fixture sintética: digitação imediata encontrou pasta de outra aba; preferência
+falsa sobreviveu ao fechamento sem criar e ao reinício; dois projetos homônimos mostraram suas
+origens. Conta ChatGPT 1 foi escolhida sem clique adicional, trocar para a 2 refez o catálogo e
+mudar para provedor compatível preservou a 2. O POST de criação levou a conta 2 e o caminho do
+resultado de outra raiz. Duas leituras do contador antes/depois de mudar a busca deram 17 scans
+em ambas: a digitação não consultou o disco novamente. A fixture não cria sessões reais.
+
+## Reiniciar pela bandeja não é instalar atualização (05/10/2026)
+
+“Reiniciar Hangar” relança somente o app desktop pelo caminho do executável capturado no
+startup, preservando argumentos. A confirmação de atualização revalida a exclusão mútua ao
+iniciar a procura: um diálogo aberto antes não pode atropelar o reinício. Usa o handshake de
+single-instance: o processo antigo só sai depois da prova de vida do filho; falha restaura a
+instância anterior, mostra a janela e um erro próprio. Reinício manual não entra no estado de
+falha de instalação nem oferece download ao tentar novamente. Backend, terminais e sessões
+não são encerrados. Disponível nos menus Linux e Windows; o macOS continua sem bandeja.
+
+Medição no Linux com hospedeiro de bandeja em barramento D-Bus isolado: o menu real expôs
+Abrir/Reiniciar/Sair, e dois pedidos de reinício seguidos deixaram um único processo e ícone
+novos, com a configuração preservada. No Windows 11 em VM, clique real no item do menu trocou
+o processo antigo por um único filho na mesma sessão gráfica, falando com a fixture sintética.
+Renomear o executável em execução para `.old` e pôr a cópia no caminho normal também relançou
+pelo caminho normal. Remover o caminho de relançamento preservou o processo anterior nos dois
+sistemas; no Linux, um filho que saiu sem o handshake também manteve a instância anterior e
+mostrou o erro próprio. Os binários da prova eram isolados dos instalados.
+
 ## Voltar fecha a imagem ampliada antes de navegar
 
 (04/10/2026.) O visor compartilhado (`frontend/src/lib/visor.ts`) tratava Escape e arrasto,
