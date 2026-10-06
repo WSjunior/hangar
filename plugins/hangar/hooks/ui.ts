@@ -102,14 +102,30 @@ async function fromApp($: EngineInterface, requestId: string, element: string, p
   return typeof attempt === "string" && attempt ? attempt : null;
 }
 
-// O alvo de foco armado pelo backend, ou null (nada armado, sem ponte, ou o backend não respondeu; a
-// ponte Python da reserva sem Rust não tem a rota e responde 404).
-async function focusTarget($: EngineInterface, requestId: string, plugin: string | null, element: string | null): Promise<FocusTarget | null> {
+// O alvo de foco armado pelo backend; null sem alvo armado; undefined sem resposta que sirva (sem ponte,
+// recusa, corpo ilegível, ou a ponte Python da reserva sem Rust, que não tem a rota e responde 404).
+async function askFocus($: EngineInterface, requestId: string, plugin: string | null, element: string | null): Promise<FocusTarget | null | undefined> {
   const r = await post($, "focus-target", fields({ requestId, plugin, element }));
-  if (r?.status !== 200) return null;
-  const v = JSON.parse(r.text) as { armed?: boolean; attempt?: unknown; rewrite?: unknown };
-  if (!v.armed || typeof v.attempt !== "string") return null;
+  if (r?.status !== 200) return undefined;
+  let v: { armed?: boolean; attempt?: unknown; rewrite?: unknown } | null;
+  try {
+    v = JSON.parse(r.text) as typeof v;
+  } catch {
+    return undefined;
+  }
+  if (!v?.armed || typeof v.attempt !== "string") return null;
   return { attempt: v.attempt, rewrite: typeof v.rewrite === "string" ? v.rewrite : null };
+}
+
+// Prazo da pergunta do envio segurado: a rota da ponte responde em ~1 s no pior caso (sessão renomeada).
+const ARMED_ASK_MS = 2000;
+
+/** O backend ainda tem um alvo de foco armado? `null` sem resposta no prazo: aí vale a janela. */
+async function armedNow($: EngineInterface): Promise<boolean | null> {
+  // `requestId` que não é de painel, sem mod nem elemento: a rota só lê, sem reescrita nem registro.
+  const ask = askFocus($, "prompt", null, null).then((alvo) => (alvo === undefined ? null : alvo !== null), () => null);
+  const late = $.clock.sleep(ARMED_ASK_MS).then(() => null, () => null);
+  return Promise.race([ask, late]);
 }
 
 /** Espelha no Hangar a faixa acima do prompt, os painéis e os avisos, os de TODOS os mods.
@@ -232,7 +248,7 @@ export function registerUi(on: On) {
   // backend fica sabendo onde o anel pousou; sem alvo, o foco segue como veio.
   on("ui.focus", async ($, e, next) => {
     if (!bridge()) return next(e);
-    const alvo = await focusTarget($, e.requestId, e.plugin ?? null, e.element ?? null);
+    const alvo = await askFocus($, e.requestId, e.plugin ?? null, e.element ?? null);
     if (!alvo) return next(e);
     holdUntil = (await $.clock.now()) + HOLD_MS;
     const element = focusElement(e, alvo);
@@ -242,9 +258,15 @@ export function registerUi(on: On) {
   });
 
   // Enquanto a reserva por teclado corre, o envio do composer fica segurado: uma letra digitada no meio
-  // devolveria o teclado ao prompt e o `Enter` do backend mandaria o rascunho ao modelo ((aa)).
+  // devolveria o teclado ao prompt e o `Enter` do backend mandaria o rascunho ao modelo ((aa)). Dentro da
+  // janela, só segura com o alvo ainda armado no backend: ele desarma antes de soltar a fila, e a mensagem
+  // que a fila entrega logo depois (o `Enter` do executor também é um envio do composer) passa.
   on("prompt.submit", { origin: { kind: "composer" } }, async ($, e, next) => {
     if (!holding(await $.clock.now(), holdUntil)) return next(e);
+    if ((await armedNow($)) === false) {
+      holdUntil = null;
+      return next(e);
+    }
     return { drop: "Hangar: envio segurado durante um clique do app pelo teclado; a seta para cima traz o texto de volta. / Hangar: send held during an app click by keyboard; the Up arrow brings the text back." };
   });
 }
