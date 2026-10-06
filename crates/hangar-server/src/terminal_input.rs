@@ -342,6 +342,14 @@ impl TerminalDriver {
         Ok((unstyle(&styled, true), unstyle(&styled, false)))
     }
     pub async fn capture(&self) -> Result<String, IoFailure> { let _serial = self.serial.lock().await; self.capture_inner().await }
+    /// Só leitura: composer legível e vazio, então uma entrega adiada pode tentar já. Quem chama
+    /// acabou de conferir a conversa pelos fatos; aqui basta o mesmo pane.
+    pub async fn composer_free(&self) -> bool {
+        let _serial = self.serial.lock().await;
+        if self.verify_pane().await.is_err() { return false; }
+        let Ok((screen, typed)) = self.composer_capture_unverified().await else { return false };
+        Self::composer(&screen, &typed).is_ok_and(|draft| draft.is_empty())
+    }
     async fn settle(&self) { tokio::time::sleep(self.limits.settle).await; }
     async fn key_inner(&self, key: &str) -> Result<(), IoFailure> {
         let mut args = vec!["send-keys".into(), "-t".into(), self.binding.pane.clone()];

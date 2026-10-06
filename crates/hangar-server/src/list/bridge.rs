@@ -23,6 +23,7 @@ use super::classify::{CaptureSource, Classifier, Effect, Facts, MuxCapture};
 use super::context::{self, ContextCache, ReadingInputs};
 use super::discover::{self, Resolver};
 use super::discover_other::{self, Dirs};
+use super::capped;
 use super::facts::{self as list_facts, FactsClient, ListFacts};
 use super::facts_files::{self, HookStates};
 use super::mux::{Mux, Pane};
@@ -80,9 +81,10 @@ pub fn parse_dirs(raw: &str) -> Option<Dirs> {
 
 /// O que quem produz sabe e o Python não: o runtime das sessões sem terminal (o hub completa,
 /// Task 17; vazio, elas ficam no marcador) e quantas listas do dono estão abertas no Rust.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ProduceFacts {
     /// Retrato do runtime das sessões sem terminal, por nome (`RuntimeRegistry::snapshots`).
+    /// `None`: ninguém forneceu o retrato; `Some` sem a sessão: ela está parada.
     pub headless: Option<BTreeMap<String, Value>>,
     pub owner_clients: u32,
     /// Rodada em sombra: nada do que ela produz sai daqui, nem o rebaixamento de `awaiting`.
@@ -103,28 +105,72 @@ struct Discovery { at: Instant, wall: f64, epoch: u64,
 
 struct Snapshot { at: Instant, epoch: u64, produced: Produced }
 
-/// Caches que atravessam rodadas, por nome de sessão. Uma trava só: semear e esquecer não podem
-/// cair no meio de uma resolução.
+type Op<T> = Box<dyn FnOnce(&mut T) + Send>;
+
+/// Valor que a produção segura durante I/O longa (captura de até 5 s, rabo de transcript) e que
+/// criar, fechar e renomear sessão mudam sem esperar: a mudança entra numa fila curta e quem segura
+/// o valor a aplica antes de soltar; com o valor livre, quem pediu aplica na hora.
+struct Guarded<T> { value: Mutex<T>, ops: Mutex<Vec<Op<T>>> }
+
+impl<T: Default> Default for Guarded<T> {
+    fn default() -> Self { Self { value: Mutex::default(), ops: Mutex::default() } }
+}
+
+impl<T> Guarded<T> {
+    /// Para quem lê e grava o valor; produções juntas esperam uma à outra aqui.
+    fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+        let mut v = lock(&self.value);
+        self.drain(&mut v);
+        let out = f(&mut v);
+        // O que chegou durante a I/O não espera a próxima rodada.
+        self.drain(&mut v);
+        out
+    }
+
+    fn drain(&self, v: &mut T) {
+        let ops = std::mem::take(&mut *lock(&self.ops));
+        for op in ops { op(v) }
+    }
+
+    /// Nunca espera a produção. A ordem dos pedidos é mantida.
+    fn apply(&self, op: impl FnOnce(&mut T) + Send + 'static) {
+        lock(&self.ops).push(Box::new(op));
+        let held = match self.value.try_lock() {
+            Ok(v) => Some(v),
+            Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        };
+        if let Some(mut v) = held { self.drain(&mut v); }
+    }
+}
+
+/// O que a decoração das linhas Claude e de todas guarda entre rodadas.
+#[derive(Default)]
+struct Decor { context: ContextCache, replies: ReplyCache, plans: PlanTracker }
+
+/// Marcadores junto da classificação: duas produções seguidas não releem tudo do zero.
+#[derive(Default)]
+struct Classify { classifier: Classifier, hooks: HookStates }
+
+/// Caches que atravessam rodadas, por nome de sessão, cada um com a própria trava.
 #[derive(Default)]
 struct Caches {
-    resolver: Resolver,
-    context: ContextCache,
-    replies: ReplyCache,
-    plans: PlanTracker,
+    resolver: Guarded<Resolver>,
+    decor: Guarded<Decor>,
+    classify: Guarded<Classify>,
     /// Último resumo de Git por pasta: a lista não espera o `git status` (`_git_ultimo`).
-    git: HashMap<String, (Value, Value)>,
-    config_dirs: Option<(Instant, Arc<Vec<PathBuf>>)>,
-    /// Marcadores e registro nativo entre rodadas: só o arquivo que mudou é relido.
-    hooks: HookStates,
+    git: Mutex<HashMap<String, (Value, Value)>>,
+    config_dirs: Mutex<Option<(Instant, Arc<Vec<PathBuf>>)>>,
 }
 
 pub struct ListBridge {
     env: Arc<ListEnv>,
     facts: FactsClient,
     shadow_facts: FactsClient,
-    caches: Arc<Mutex<Caches>>,
-    /// À parte dos outros caches: a classificação segura a dela durante as capturas.
-    classifier: Arc<Mutex<Classifier>>,
+    caches: Arc<Caches>,
+    /// Os fatos do último `produce` de verdade: o retrato pedido de fora usa os mesmos, senão a
+    /// pergunta ao Python alternaria de chave e o runtime sem terminal sumiria da classificação.
+    last_input: Mutex<ProduceFacts>,
     /// Trava assíncrona = um por vez: quem chega durante a varredura espera e reaproveita o resultado.
     discovery: tokio::sync::Mutex<Option<Discovery>>,
     snapshot: tokio::sync::Mutex<Option<Snapshot>>,
@@ -145,7 +191,8 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> { m.lock().unwrap_or_el
 
 impl ListBridge {
     pub fn new(env: ListEnv, facts: FactsClient) -> Self {
-        Self { env: Arc::new(env), shadow_facts: facts.sibling(), facts, caches: Arc::default(), classifier: Arc::default(), discovery: tokio::sync::Mutex::new(None),
+        Self { env: Arc::new(env), shadow_facts: facts.sibling(), facts, caches: Arc::default(), last_input: Mutex::default(),
+            discovery: tokio::sync::Mutex::new(None),
             snapshot: tokio::sync::Mutex::new(None), git_running: Arc::default(),
             git_slots: Arc::new(tokio::sync::Semaphore::new(GIT_SLOTS)), epoch: AtomicU64::new(0) }
     }
@@ -175,30 +222,40 @@ impl ListBridge {
         }
         let dirs = self.dirs()?;
         let (at, wall) = (Instant::now(), wall_now());
-        let panes = Arc::new(self.env.mux.list_panes().await.map_err(|e| fail("mux_unavailable", e.code))?);
+        let (panes, dropped) = self.env.mux.list_panes_checked().await.map_err(|e| fail("mux_unavailable", e.code))?;
+        if let Some(p) = dropped {
+            self.facts.diag.report("rust.list_discovery", &p.key, p.code, p.reason);
+        }
+        let panes = Arc::new(panes);
         let (env, caches, p) = (self.env.clone(), self.caches.clone(), panes.clone());
         let max_age = if newer_than.is_some() { Duration::ZERO } else { procs::CHILDREN_TTL };
-        let (rows, agent_pids, children) = tokio::task::spawn_blocking(move || {
+        let (rows, agent_pids, children, problems) = tokio::task::spawn_blocking(move || {
             let children = env.procs.children(max_age).map_err(|_| fail("list_procs_unreadable", "mapa de processos ilegível"))?;
-            let mut c = lock(&caches);
-            let (rows, pids) = run_discovery(&p, &*env.procs, &children, &mut c.resolver, &dirs);
-            Ok::<_, ListError>((Arc::new(rows), Arc::new(pids), children))
+            let (rows, pids, problems) = caches.resolver.with(|r| run_discovery(&p, &*env.procs, &children, r, &dirs));
+            Ok::<_, ListError>((Arc::new(rows), Arc::new(pids), children, problems))
         }).await.map_err(|e| joined(e, "descoberta interrompida"))??;
+        for p in problems {
+            self.facts.diag.report("rust.list_discovery", &p.key, p.code, p.reason);
+        }
+        self.flush_notes();
         *slot = Some(Discovery { at, wall, epoch, fresh: newer_than.is_some(), rows: rows.clone(), agent_pids: agent_pids.clone(),
             panes: panes.clone(), children: children.clone() });
         Ok((rows, agent_pids, panes, children))
     }
 
     /// Lista decorada para quem pergunta fora do hub (vigia de travada, `prune`, convidado): o retrato
-    /// de até 2 s, senão produz na hora. Antes da Task 16 nenhum consumidor lê isto.
-    pub async fn snapshot(&self, facts: &ProduceFacts) -> Result<Produced, ListError> {
+    /// de até 2 s, senão produz na hora com os fatos do último `produce` de verdade. Antes da Task 16
+    /// nenhum consumidor lê isto. Task 17: o hub chama `produce` com o retrato do runtime e a contagem
+    /// de clientes dele; até lá o retrato fica sem runtime (`None`) e com zero clientes.
+    pub async fn snapshot(&self) -> Result<Produced, ListError> {
         let mut slot = self.snapshot.lock().await;
         let epoch = self.epoch.load(Ordering::SeqCst);
         if let Some(s) = slot.as_ref().filter(|s| s.epoch == epoch && s.at.elapsed() < SNAPSHOT_TTL) {
             return Ok(s.produced.clone());
         }
         let at = Instant::now();
-        let produced = self.produce(facts).await?;
+        let input = lock(&self.last_input).clone();
+        let produced = self.produce(&input).await?;
         *slot = Some(Snapshot { at, epoch, produced: produced.clone() });
         Ok(produced)
     }
@@ -211,52 +268,63 @@ impl ListBridge {
     /// `orq` saem como o Python as deu, sem classificação nem decoração, no fim da lista.
     pub async fn produce(&self, input: &ProduceFacts) -> Result<Produced, ListError> {
         let dirs = self.dirs()?;
+        if !input.shadow {
+            *lock(&self.last_input) = input.clone();
+        }
         let (rows, agent_pids, panes, children) = self.discovery(None).await?;
         let client = if input.shadow { &self.shadow_facts } else { &self.facts };
         let fetched = client.fetch(&rows, input.owner_clients, &pi_pane_pids(&rows, &panes), input.shadow).await;
         let (mut rows, aside) = list_facts::apply((*rows).clone(), &fetched.facts, fetched.ok);
         let targets = pane_targets(&panes, &agent_pids, &children);
-        let (env, caches, classifier) = (self.env.clone(), self.caches.clone(), self.classifier.clone());
+        let (env, caches) = (self.env.clone(), self.caches.clone());
         let headless = input.headless.clone();
         let py = fetched.facts.clone();
         let handle = tokio::runtime::Handle::current();
+        // Teto dos caches por sessão acompanha as linhas vivas: acima dele cada tique relia do zero.
+        capped::set_live(rows.len() + aside.len());
         // Classificação e decoração leem arquivo (marcador, transcript, plano) e esperam captura:
         // fora da thread do runtime, que atende todas as conexões.
         let (rows, effects, git_dirs) = tokio::task::spawn_blocking(move || {
-            // Tirado da trava durante a classificação; duas produções juntas só pagam uma releitura a mais.
-            let (config_dirs, mut hooks) = {
-                let mut c = lock(&caches);
-                (c.config_dirs(&dirs), std::mem::take(&mut c.hooks))
-            };
-            hooks.refresh(&config_dirs);
+            let config_dirs = caches.config_dirs(&dirs);
             let alive = |pid: i64| pid_alive(&*env.procs, pid);
-            let facts = Facts { hooks: &hooks, alive: &alive, config_dirs: &config_dirs, headless: headless.as_ref(),
-                problems: &py.problems, stall_seconds: py.stall_seconds };
             let io = MuxCapture::new(env.capture_program.clone(), CAPTURE_TIMEOUT, targets);
-            let effects = handle.block_on(lock(&classifier).classify(&mut rows, &facts, &io));
+            let effects = caches.classify.with(|Classify { classifier, hooks }| {
+                hooks.refresh(&config_dirs);
+                let facts = Facts { hooks, alive: &alive, config_dirs: &config_dirs,
+                    headless: headless.as_ref(), problems: &py.problems, stall_seconds: py.stall_seconds };
+                handle.block_on(classifier.classify(&mut rows, &facts, &io))
+            });
             let (wall, mono) = (io.wall(), io.mono());
-            let mut c = lock(&caches);
-            c.hooks = hooks;
-            for row in rows.iter_mut().filter(|r| r.provider == "claude") {
-                let pid = agent_pids.get(&row.name).map(|p| i64::from(*p));
-                decorate_context(&mut c.context, row, pid, &*env.procs, &dirs, &config_dirs, wall, mono);
-            }
-            for (name, error) in c.replies.decorate(&mut rows, |_| None) {
-                if crate::warn_limit::allow(Some(&name), "list_reply_unreadable") {
-                    tracing::warn!(session = %name, kind = ?error.kind(), "lista: última resposta ilegível");
+            caches.decor.with(|d| {
+                for row in rows.iter_mut().filter(|r| r.provider == "claude") {
+                    let pid = agent_pids.get(&row.name).map(|p| i64::from(*p));
+                    decorate_context(&mut d.context, row, pid, &*env.procs, &dirs, &config_dirs, wall, mono);
                 }
-            }
+                for (name, error) in d.replies.decorate(&mut rows, |_| None) {
+                    if crate::warn_limit::allow(Some(&name), "list_reply_unreadable") {
+                        tracing::warn!(session = %name, kind = ?error.kind(), "lista: última resposta ilegível");
+                    }
+                    list_facts::note("rust.list_reply_unreadable", &name, format!("{:?}", error.kind()), "última resposta ilegível");
+                }
+                for row in rows.iter_mut() {
+                    d.plans.decorate(row, wall, mono);
+                    if let Some(p) = super::links::fill_loop(row, &dirs) {
+                        list_facts::note("rust.list_discovery", &p.key, p.code.to_owned(), p.reason);
+                    }
+                }
+            });
+            let git_dirs: Vec<String> = rows.iter().map(|r| git_dir(r).to_owned()).filter(|d| !d.is_empty()).collect();
+            let mut git = lock(&caches.git);
             for row in rows.iter_mut() {
-                c.plans.decorate(row, wall, mono);
-                super::links::fill_loop(row, &dirs);
-                let (summary, diff) = c.git.get(git_dir(row)).cloned().unwrap_or_default();
+                let (summary, diff) = git.get(git_dir(row)).cloned().unwrap_or_default();
                 apply_git(row, &summary, &diff);
             }
-            let git_dirs: Vec<String> = rows.iter().map(|r| git_dir(r).to_owned()).filter(|d| !d.is_empty()).collect();
             // Pasta sem sessão sai: o cache não cresce com cada repositório que já passou pela lista.
-            c.git.retain(|d, _| git_dirs.contains(d));
+            git.retain(|d, _| git_dirs.contains(d));
+            drop(git);
             (rows, effects, git_dirs)
         }).await.map_err(|e| joined(e, "produção interrompida"))?;
+        self.flush_notes();
         self.refresh_git(git_dirs);
         let demote: Vec<String> = effects.into_iter().map(|Effect::DemoteAwaiting { sid }| sid).collect();
         if !demote.is_empty() && !input.shadow {
@@ -264,6 +332,7 @@ impl ListBridge {
         }
         let mut rows = rows;
         rows.extend(aside);
+        list_facts::mark_stale(&mut rows, &fetched.facts, fetched.ok);
         Ok(Produced { rows: Arc::new(rows), facts: fetched.facts, facts_ok: fetched.ok })
     }
 
@@ -275,6 +344,7 @@ impl ListBridge {
                 continue;
             }
             let (caches, running, slots) = (self.caches.clone(), self.git_running.clone(), self.git_slots.clone());
+            let diag = self.facts.diag.clone();
             tokio::spawn(async move {
                 let Ok(_permit) = slots.acquire_owned().await else {
                     lock(&running).remove(&dir);
@@ -284,14 +354,21 @@ impl ListBridge {
                 let done = tokio::task::spawn_blocking(move || {
                     let summary = hangar_workspace::git::summary(Some(&dir), false);
                     let diff = hangar_workspace::git::summary(Some(&dir), true);
-                    let mut c = lock(&caches);
-                    let before = c.git.remove(&dir).unwrap_or_default();
-                    // Consulta que falhou fica com o último número bom.
+                    // Sem `.git` o nulo é "não é repositório"; com ele, a consulta falhou.
+                    let failed = (summary.is_null() || diff.is_null()) && Path::new(&dir).join(".git").exists();
+                    let mut git = lock(&caches.git);
+                    let before = git.remove(&dir).unwrap_or_default();
+                    // Consulta que falhou fica com o último número bom, que segue o melhor valor.
                     let keep = |new: Value, old: Value| if new.is_null() { old } else { new };
-                    c.git.insert(dir, (keep(summary, before.0), keep(diff, before.1)));
+                    git.insert(dir, (keep(summary, before.0), keep(diff, before.1)));
+                    failed
                 }).await;
-                if done.is_err() && crate::warn_limit::allow(None, "list_git_failed") {
-                    tracing::warn!(code = "list_git_failed", "lista: resumo de Git interrompido; fica o último");
+                // A pasta no diário pelo nome, sem o caminho inteiro.
+                let repo = Path::new(&key).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                match done {
+                    Ok(false) => {}
+                    Ok(true) => diag.report("rust.list_git_stale", &repo, "list_git_stale", "git da pasta falhou; fica o último número"),
+                    Err(_) => diag.report("rust.list_git_stale", &repo, "list_git_failed", "resumo de Git interrompido; fica o último número"),
                 }
                 // Mesmo depois de um pânico: senão a pasta nunca mais teria Git.
                 lock(&running).remove(&key);
@@ -303,44 +380,51 @@ impl ListBridge {
         let dirs = self.dirs()?;
         let panes = self.env.mux.list_panes().await.map_err(|e| fail("mux_unavailable", e.code))?;
         let (env, caches, name, cwd) = (self.env.clone(), self.caches.clone(), name.to_owned(), cwd.to_owned());
-        tokio::task::spawn_blocking(move || {
+        let out = tokio::task::spawn_blocking(move || {
             let children = env.procs.children(procs::CHILDREN_TTL).map_err(|_| fail("list_procs_unreadable", "mapa de processos ilegível"))?;
-            let mut c = lock(&caches);
-            Ok(discover::resolve_one(&panes, &*env.procs, &children, &dirs.claude.join("projects"), &mut c.resolver, &name, &cwd, pid))
-        }).await.map_err(|e| joined(e, "resolução interrompida"))?
+            Ok(caches.resolver.with(|r| discover::resolve_one(&panes, &*env.procs, &children, &dirs.claude.join("projects"), r, &name, &cwd, pid)))
+        }).await.map_err(|e| joined(e, "resolução interrompida"))?;
+        self.flush_notes();
+        out
     }
 
-    /// Bloqueia até a rodada em curso soltar os caches: chamar fora da thread do runtime.
-    pub fn seed(&self, name: &str, jsonl: &str) { lock(&self.caches).resolver.seed(name, jsonl); }
+    /// Falhas vistas pela leitura síncrona da rodada, ao diário.
+    fn flush_notes(&self) {
+        for n in list_facts::take_notes() {
+            self.facts.diag.report(n.event, &n.session, &n.code, n.reason);
+        }
+    }
 
-    /// `_forget`: nome reusado por outra sessão não herda nada da morta. Bloqueia como `seed`.
+    /// Não espera a rodada em curso: entra na fila e vale antes da próxima leitura do cache.
+    pub fn seed(&self, name: &str, jsonl: &str) {
+        let (name, jsonl) = (name.to_owned(), jsonl.to_owned());
+        self.caches.resolver.apply(move |r| r.seed(&name, &jsonl));
+    }
+
+    /// `_forget`: nome reusado por outra sessão não herda nada da morta. Não espera, como `seed`.
     pub fn forget(&self, name: &str) {
-        {
-            let mut c = lock(&self.caches);
-            c.resolver.forget(name);
-            c.context.forget(name);
-            c.replies.forget(name);
-        }
-        lock(&self.classifier).forget(name);
+        let c = &self.caches;
+        let n = name.to_owned();
+        c.resolver.apply({ let n = n.clone(); move |r| r.forget(&n) });
+        c.decor.apply({ let n = n.clone(); move |d| { d.context.forget(&n); d.replies.forget(&n); } });
+        c.classify.apply(move |k| k.classifier.forget(&n));
     }
 
-    /// Bloqueia como `seed`.
+    /// Não espera, como `seed`.
     pub fn rename(&self, old: &str, new: &str) {
-        {
-            let mut c = lock(&self.caches);
-            c.resolver.rename(old, new);
-            c.context.forget(old);
-            c.replies.rename(old, new);
-        }
-        lock(&self.classifier).rename(old, new);
+        let c = &self.caches;
+        let (o, n) = (old.to_owned(), new.to_owned());
+        c.resolver.apply({ let (o, n) = (o.clone(), n.clone()); move |r| r.rename(&o, &n) });
+        c.decor.apply({ let (o, n) = (o.clone(), n.clone()); move |d| { d.context.forget(&o); d.replies.rename(&o, &n); } });
+        c.classify.apply(move |k| k.classifier.rename(&o, &n));
     }
 }
 
 impl Caches {
     /// Pastas de conta (`list_config_dirs` + a base do backend): `CP_CLAUDE_CONFIG_DIRS` ou
     /// `~/.claude*`. Sobrar pasta só custa um `read_dir` vazio; faltar some com o marcador.
-    fn config_dirs(&mut self, dirs: &Dirs) -> Arc<Vec<PathBuf>> {
-        if let Some((at, v)) = &self.config_dirs && at.elapsed() < CONFIG_DIRS_TTL {
+    fn config_dirs(&self, dirs: &Dirs) -> Arc<Vec<PathBuf>> {
+        if let Some((at, v)) = &*lock(&self.config_dirs) && at.elapsed() < CONFIG_DIRS_TTL {
             return v.clone();
         }
         let mut found: Vec<PathBuf> = match std::env::var("CP_CLAUDE_CONFIG_DIRS").ok().filter(|s| !s.trim().is_empty()) {
@@ -363,7 +447,7 @@ impl Caches {
         let mut seen = std::collections::HashSet::new();
         found.retain(|p| seen.insert(std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())));
         let v = Arc::new(found);
-        self.config_dirs = Some((Instant::now(), v.clone()));
+        *lock(&self.config_dirs) = Some((Instant::now(), v.clone()));
         v
     }
 }
@@ -384,11 +468,13 @@ fn labelled_path(item: &str) -> String {
     }
 }
 
-/// Linhas descobertas e o pid do agente de cada uma (contexto de abertura e alvo da captura).
+/// (código, chave, motivo) de um arquivo ou processo que a descoberta não leu: vai ao diário.
+/// Linhas descobertas, o pid do agente de cada uma (contexto de abertura e alvo da captura) e o que
+/// a descoberta não conseguiu ler.
 fn run_discovery(panes: &[Pane], procs: &dyn ProcessView, children: &ChildrenMap, resolver: &mut Resolver, dirs: &Dirs)
-    -> (Vec<SessionRow>, HashMap<String, u32>) {
+    -> (Vec<SessionRow>, HashMap<String, u32>, Vec<discover::DiscoveryProblem>) {
     let found = discover_other::discover_rows(panes, procs, children, resolver, dirs);
-    (found.rows, found.agent_pids)
+    (found.rows, found.agent_pids, found.problems)
 }
 
 /// Pid do pane das linhas Pi e omp: o sidecar do catálogo, de onde sai a conta, mora no
@@ -450,8 +536,7 @@ fn decorate_context(cache: &mut ContextCache, row: &mut SessionRow, pid: Option<
         let stem = Path::new(&jsonl).file_stem().and_then(|s| s.to_str()).map(str::to_owned);
         let chosen = facts_files::published_status(stem.as_deref(), config_dirs, wall).and_then(|p| p.model);
         let (opened, declared) = if row.headless {
-            let meta = std::fs::read(dirs.home.join(".hangar/claude-headless").join(format!("{}.json", row.name)))
-                .ok().and_then(|raw| serde_json::from_slice::<Value>(&raw).ok()).unwrap_or(Value::Null);
+            let meta = headless_meta(&dirs.home.join(".hangar/claude-headless").join(format!("{}.json", row.name)), &row.name);
             (meta["model"].as_str().map(str::to_owned), context::declared_window_value(&meta["context_window"]))
         } else if let Some(pid) = pid {
             let declared = procs.env_var(pid, "CLAUDE_CODE_MAX_CONTEXT_TOKENS").ok().flatten()
@@ -468,6 +553,21 @@ fn decorate_context(cache: &mut ContextCache, row: &mut SessionRow, pid: Option<
         cache.cached(&row.name, &jsonl)
     };
     (row.context, row.model) = (ctx, model);
+}
+
+/// Sidecar da sessão sem terminal: ilegível ou torto avisa, senão o modelo e a janela caem calados
+/// nos da conta.
+fn headless_meta(path: &Path, session: &str) -> Value {
+    let code = match std::fs::read(path) {
+        Ok(raw) => match serde_json::from_slice::<Value>(&raw) {
+            Ok(v) => return v,
+            Err(e) => format!("list_headless_meta_invalid:{:?}", e.classify()),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Value::Null,
+        Err(e) => format!("list_headless_meta_unreadable:{:?}", e.kind()),
+    };
+    list_facts::note("rust.list_file_rejected", session, code, "sidecar da sessão sem terminal ilegível");
+    Value::Null
 }
 
 #[derive(Deserialize)]
@@ -500,7 +600,7 @@ async fn execute(bridge: &Arc<ListBridge>, op: Operation) -> Result<Value, ListE
     };
     match op {
         Operation::Discover { newer_than } => rows(&bridge.discover(newer_than).await?),
-        Operation::Snapshot {} => rows(&bridge.snapshot(&ProduceFacts::default()).await?.rows),
+        Operation::Snapshot {} => rows(&bridge.snapshot().await?.rows),
         Operation::Invalidate {} => { bridge.invalidate(); Ok(Value::Null) }
         Operation::Resolve { name, cwd, pid } => {
             let t = bridge.resolve(&name, &cwd, pid).await?;
@@ -541,5 +641,44 @@ pub async fn private(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connect
             }
             reply(json!({"ok": false, "error": {"code": e.code, "detail": e.detail}}))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guarded_change_never_waits_for_the_holder_and_lands_before_the_next_read() {
+        let g: Arc<Guarded<Vec<&'static str>>> = Arc::default();
+        let (held, release) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
+        let holder = {
+            let g = g.clone();
+            std::thread::spawn(move || g.with(|v| {
+                v.push("rodada");
+                held.0.send(()).unwrap();
+                release.1.recv().unwrap();
+            }))
+        };
+        held.1.recv().unwrap();
+        let start = Instant::now();
+        g.apply(|v| v.push("seed"));
+        assert!(start.elapsed() < Duration::from_millis(100), "esperou a rodada");
+        release.0.send(()).unwrap();
+        holder.join().unwrap();
+        assert_eq!(g.with(|v| v.clone()), ["rodada", "seed"]);
+        g.apply(|v| v.push("livre"));
+        assert_eq!(*lock(&g.value), ["rodada", "seed", "livre"], "valor livre: aplicado na hora");
+    }
+
+    #[test]
+    fn unreadable_headless_sidecar_reaches_the_diary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("hl-bridge-test.json");
+        assert_eq!(headless_meta(&path, "hl-bridge-test"), Value::Null, "ausente é normal");
+        assert!(list_facts::notes_for("hl-bridge-test").is_empty());
+        std::fs::write(&path, "{").unwrap();
+        assert_eq!(headless_meta(&path, "hl-bridge-test"), Value::Null);
+        assert_eq!(list_facts::notes_for("hl-bridge-test"), ["list_headless_meta_invalid:Eof"]);
     }
 }

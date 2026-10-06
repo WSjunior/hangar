@@ -22,12 +22,12 @@ fn sanitize(path: &str) -> String {
 }
 
 fn real(s: &str, root: &Path) -> String {
-    let r = root.to_str().unwrap();
+    let r = &root.to_str().unwrap().replace('\\', "/");
     s.replace(ROOT_SAN, &sanitize(r)).replace(ROOT, r)
 }
 
 fn ph(s: &str, root: &Path) -> String {
-    let r = root.to_str().unwrap();
+    let r = &root.to_str().unwrap().replace('\\', "/");
     s.replace(r, ROOT).replace(&sanitize(r), ROOT_SAN)
 }
 

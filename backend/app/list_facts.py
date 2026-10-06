@@ -87,7 +87,7 @@ def _files(infos: list[SessionInfo], others: list[SessionInfo], pane_pids: dict[
         if info.name in accounts:
             states[info.name]["conta"] = accounts[info.name]
     overrides, frozen = _transfers(infos)
-    orq = _orq_rows()
+    orq, orq_error = _orq_rows()
     names = {i.name for i in infos} | {r["name"] for r in overrides} | {r["name"] for r in orq}
     shared, owners, hidden = _access(names)
     return {
@@ -95,6 +95,7 @@ def _files(infos: list[SessionInfo], others: list[SessionInfo], pane_pids: dict[
         "overrides": overrides,
         "frozen": frozen,
         "orq": orq,
+        "orq_error": orq_error,
         "shared": shared,
         "owners": owners,
         "hidden": hidden,
@@ -132,20 +133,21 @@ def _transfers(infos: list[SessionInfo]) -> tuple[list[dict], list[str]]:
             [i.name for i in touched if i.transfer_phase and i.transfer_phase not in terminal])
 
 
-def _orq_rows() -> list[dict]:
+def _orq_rows() -> tuple[list[dict], str | None]:
+    """Linhas `orq` e o código da falha: com ele, o Rust fica com as da última resposta boa, marcadas,
+    em vez de servir a lista sem as orquestrações calado."""
     try:
         runs = registry.orq_runs.active()
     except Exception:
-        # Como na descoberta de hoje: a lista segue sem as orquestrações.
-        _log.warning("orq: leitura das orquestrações falhou (lista segue)", exc_info=True)
-        return []
+        _log.warning("orq: leitura das orquestrações falhou (vale a última)", exc_info=True)
+        return [], "orq_unreadable"
     out = []
     for run in runs:
         state, last = registry.orq_runs.activity(run["timeline"])
         out.append(SessionInfo(name=run["name"], cwd=run["repo"], jsonl=run["timeline"], provider="orq",
                                tracked=True, pair_gid=run["gid"], orq_arbiter=run["arbiter"],
                                state=state, last_activity=last).model_dump(mode="json"))
-    return out
+    return out, None
 
 
 def _access(names: set[str]) -> tuple[list[str], dict[str, str], list[str]]:

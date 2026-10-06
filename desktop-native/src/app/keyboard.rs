@@ -38,6 +38,17 @@ impl Command {
         }
     }
 
+    /// Onde a tecla dispara; `context` continua sendo o grupo da tela e a chave de conflito.
+    fn predicate(&self) -> &'static str {
+        match self {
+            // Ctrl+W num campo de texto apaga a palavra, e na página do navegador é da página. No macOS a tecla é Cmd+W,
+            // que não edita texto: fecha a sessão de qualquer lugar fora do terminal.
+            Self::CloseSession if cfg!(target_os = "macos") => "!Terminal",
+            Self::CloseSession => "!Terminal && !Input && !BrowserPage",
+            _ => self.context(),
+        }
+    }
+
     fn default_key(&self) -> &'static str {
         match self {
             Self::FocusComposer => "secondary-l", Self::OpenSettings => "secondary-,", Self::CopyLastReply => "secondary-shift-c",
@@ -235,7 +246,7 @@ impl Config {
         self.validate()?;
         let mut bindings = Vec::new();
         for command in Command::ALL {
-            for key in self.keys(&command) { bindings.push(load_binding(key, command.action(), command.context(), mapper)?); }
+            for key in self.keys(&command) { bindings.push(load_binding(key, command.action(), command.predicate(), mapper)?); }
         }
         for shortcut in &self.shortcuts { bindings.push(load_binding(&shortcut.key, Box::new(shortcut.action()), "!Terminal", mapper)?); }
         Ok(bindings)
@@ -837,6 +848,18 @@ mod tests {
         assert!(validate_effective_bindings(&config, &editing, &DummyKeyboardMapper).is_err());
         config.overrides.insert(Command::FocusComposer, "ctrl-alt-l".into());
         assert!(validate_effective_bindings(&config, &editing, &DummyKeyboardMapper).is_ok());
+    }
+
+    #[test]
+    fn close_session_key_stays_out_of_text_fields_and_the_browser_page() {
+        let bindings = Config::default().bindings(&DummyKeyboardMapper).unwrap();
+        let close = bindings.iter().find(|b| b.action().as_any().is::<CloseSession>()).unwrap();
+        let root = KeyContext::new_with_defaults();
+        let inside = |name: &str| { let mut context = KeyContext::default(); context.add(name); vec![root.clone(), context] };
+        assert!(binding_applies(close, std::slice::from_ref(&root)));
+        assert!(binding_applies(close, &inside("FileViewer")));
+        for name in ["Input", "BrowserPage", "Terminal"] { assert!(!binding_applies(close, &inside(name)), "{name}"); }
+        assert_eq!(Command::CloseSession.context(), "!Terminal");
     }
 
     #[test]

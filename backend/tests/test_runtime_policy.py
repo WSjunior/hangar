@@ -61,3 +61,29 @@ def test_skill_catalog_is_data_only():
     catalog = {"data":[{"skills":[{"name":"skill", "path":"/fake/skill", "enabled":True}]}]}
     data = runtime_policy.run("skill_catalog", {"catalog":catalog, "name":"skill"}, {"provider":"codex"})
     assert data["skill"]["native_name"] == "skill"
+
+
+def _codex_patch(tmp_path, monkeypatch, sidecar_thread):
+    import json
+    from app.adapters.codex import sessions
+    writes = []
+    state = tmp_path / "state.json"
+    # Vista que o Rust grava antes de chamar o serviço (control_view com service_tier no topo).
+    state.write_text(json.dumps({"runtime_state":{"view":{"thread_id":"t1", "service_tier":"priority"}}}))
+    monkeypatch.setattr(sessions, "load", lambda name: {"key":"k", "thread_id":sidecar_thread})
+    monkeypatch.setattr(sessions, "update", lambda name, **fields: writes.append(fields) or fields)
+    result = runtime_policy.run("session.patch_meta", {"service_tier":"priority"},
+        {"provider":"codex", "name":"session", "key":"k", "validate":lambda: None, "state_path":str(state)})
+    return result, writes
+
+
+def test_codex_patch_accepts_service_tier_from_rust(tmp_path, monkeypatch):
+    result, writes = _codex_patch(tmp_path, monkeypatch, "t1")
+    assert result == {"updated": True}
+    assert writes == [{"service_tier":"priority"}]
+
+
+def test_codex_service_tier_skips_sidecar_of_another_thread(tmp_path, monkeypatch):
+    result, writes = _codex_patch(tmp_path, monkeypatch, "t2")
+    assert result == {"updated": False, "stale": True}
+    assert writes == []

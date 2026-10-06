@@ -125,6 +125,22 @@ def test_transcript_non_plan_mode_pula_plan(tmp_path):
     assert pm.transcript_non_plan_mode(str(tmp_path / "sumiu.jsonl")) is None
 
 
+def test_transcript_non_plan_mode_nao_rele_o_mesmo_transcript(tmp_path, monkeypatch):
+    import app.worktrees as wt
+
+    leituras = []
+    original = wt.reversed_lines
+    monkeypatch.setattr(wt, "reversed_lines", lambda path: leituras.append(path) or original(path))
+    caminho = _transcript(tmp_path, "c", ["default", "acceptEdits"])
+    assert pm.transcript_non_plan_mode(caminho) == "acceptEdits"
+    assert pm.transcript_non_plan_mode(caminho) == "acceptEdits"
+    assert len(leituras) == 1
+    with open(caminho, "a") as f:
+        f.write(json.dumps({"type": "user", "permissionMode": "bypassPermissions"}) + "\n")
+    assert pm.transcript_non_plan_mode(caminho) == "bypassPermissions"
+    assert len(leituras) == 2
+
+
 def test_session_non_plan_mode_le_a_memoria_pelo_session_id(tmp_path, monkeypatch):
     # O monitor grava a memória pelo session-id (stem do jsonl); pelo nome da sessão ela não vale.
     monkeypatch.setattr(pm, "_ultimos_nao_plan", OrderedDict({"sess": "acceptEdits"}))

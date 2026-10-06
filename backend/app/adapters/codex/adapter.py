@@ -76,6 +76,13 @@ def _effort_da_thread(result: dict) -> str | None:
     return result.get("reasoningEffort") or result.get("effort")
 
 
+def _service_tier_of(result: dict, meta: dict) -> str | None:
+    # null do Codex é o padrão; sem o -c explícito a TUI cairia no service_tier global.
+    if "serviceTier" in result:
+        return result["serviceTier"] or "default"
+    return meta.get("service_tier")
+
+
 def ensure_tmux_tui(name: str, cwd: str, thread_id: str | None, endpoint: str,
                     *, replace: bool = False, initial_prompt: str | None = None,
                     model: str | None = None, effort: str | None = None,
@@ -786,7 +793,7 @@ class CodexAdapter:
                 ensure_tmux_tui(
                     name, meta.get("cwd") or ".", thread_id, endpoint, replace=True,
                     model=meta.get("model"), effort=meta.get("effort"),
-                    service_tier=result.get("serviceTier", meta.get("service_tier")),
+                    service_tier=_service_tier_of(result, meta),
                     **home_kw,
                 )
             except Exception:
@@ -802,7 +809,7 @@ class CodexAdapter:
             self.attach(name, client, thread_id, model=meta.get("model"), effort=meta.get("effort"),
                         default_model=result.get("model"), default_effort=_effort_da_thread(result),
                         watch_tmux=True, subscribed=True,
-                        service_tier=result.get("serviceTier", meta.get("service_tier")))
+                        service_tier=_service_tier_of(result, meta))
             self._restore_service_tier(name, self._sessions[name], result, 0)
             self._sessions[name]["async_questions"].hydrate(result.get("thread") or {})
             self._restore_turn(self._sessions[name], result.get("thread") or {})
@@ -997,7 +1004,7 @@ class CodexAdapter:
         meta = codex_sessions.update(name, thread_id=thread_id, rollout_path=rollout) or meta
         self.attach(name, client, thread_id, model=meta.get("model"), effort=meta.get("effort"),
                     default_model=result.get("model"), default_effort=_effort_da_thread(result),
-                    service_tier=result.get("serviceTier", meta.get("service_tier")), subscribed=True)
+                    service_tier=_service_tier_of(result, meta), subscribed=True)
         self._restore_service_tier(name, self._sessions[name], result, 0)
         self._sessions[name].update(headless=True, cano=meta.get("cano"))
         if meta.get("transfer_id"):
@@ -1953,11 +1960,12 @@ class CodexAdapter:
                     if params.get("threadId") != sess["thread_id"]:
                         continue
                     settings = params.get("threadSettings") or {}
+                    tier = None
                     if "serviceTier" in settings:
-                        tier = "default" if settings["serviceTier"] is None else settings["serviceTier"]
-                        if not codex_sessions.update_service_tier(name, sess["thread_id"], tier):
-                            continue
-                        sess["service_tier"] = tier
+                        candidate = "default" if settings["serviceTier"] is None else settings["serviceTier"]
+                        # Sidecar de outra conversa recusa só o Fast; modelo, esforço e modo ainda valem.
+                        if codex_sessions.update_service_tier(name, sess["thread_id"], candidate):
+                            tier = sess["service_tier"] = candidate
                     if "model" in settings:
                         sess["model"] = settings["model"]
                     if "effort" in settings:
@@ -1966,7 +1974,7 @@ class CodexAdapter:
                         sess["mode"] = (settings["collaborationMode"] or {}).get("mode", "default")
                     sess["settings_revision"] = sess.get("settings_revision", 0) + 1
                     waiter = sess.get("service_tier_waiter")
-                    if ("serviceTier" in settings and tier == sess.get("service_tier_requested")
+                    if (tier is not None and tier == sess.get("service_tier_requested")
                             and waiter is not None and not waiter.done()):
                         waiter.set_result(tier)
                     if "collaborationMode" in settings and sess["mode"] in {"plan", "default"}:
@@ -2338,6 +2346,10 @@ class CodexAdapter:
         async with self._locks.setdefault(name, asyncio.Lock()):
             if not still_current():
                 raise RuntimeError("A sessão mudou antes de alterar Fast")
+            # Sem mudança o Codex não avisa nada, e esperar o aviso só daria prazo estourado.
+            # None é "ainda não lido" (o -c global pode ser priority), então segue o fluxo inteiro.
+            if sess.get("service_tier") == service_tier:
+                return service_tier
             try:
                 async with asyncio.timeout(self.SERVICE_TIER_TIMEOUT):
                     subscriber = self._subscribers.get(name)

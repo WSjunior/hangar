@@ -674,6 +674,37 @@ async fn terminal_runtime_deferred_without_write_backs_off_and_surfaces_the_reas
     while !h.snapshot().await.unwrap()["view"]["input_stalled"].is_null() {assert!(start.elapsed()<WAIT,"o motivo não saiu da vista"); tokio::time::sleep(Duration::from_millis(5)).await;}
     h.stop().await.unwrap();
 }
+// Tique de 15 ms dobrando: aos 2,5 s a próxima tentativa só viria perto de 3,8 s.
+#[tokio::test]
+async fn terminal_runtime_stall_retries_as_soon_as_the_composer_empties() {
+    let f=Fixture::new().await; *f.io.ghost.lock().unwrap()="rascunho".into();
+    let h=f.start_full(broadcast::channel(128).0,Duration::from_secs(30));
+    assert_eq!(h.command(f.command("busy","Olá")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Deferred);
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    f.io.ghost.lock().unwrap().clear();
+    let start=std::time::Instant::now();
+    f.wait_for("entregue depois do rascunho sair",||f.state()["rows"][0]["delivered"]==true).await;
+    assert!(start.elapsed()<Duration::from_millis(800),"o composer vazio esperou a série: {:?}",start.elapsed());
+    h.stop().await.unwrap();
+}
+#[tokio::test]
+async fn terminal_runtime_stall_belongs_to_the_line_not_the_session() {
+    let f=Fixture::new().await; *f.io.ghost.lock().unwrap()="rascunho".into();
+    let h=f.start_full(broadcast::channel(128).0,Duration::from_secs(30));
+    assert_eq!(h.command(f.command("busy","Olá")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Deferred);
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    // B entra atrás de A: a fila não esvazia entre um e outro.
+    h.queue("append-B".into(),Action::Append {text:"B".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("B".into())}).await.unwrap();
+    let first=f.state()["rows"][0]["id"].as_str().unwrap().to_string();
+    let stashes=||f.io.calls.lock().unwrap().iter().filter(|r|r.args.last().is_some_and(|a|a=="C-s")).count();
+    let before=stashes();
+    h.queue("abandon-A".into(),Action::Abandon {entry_id:first.clone()}).await.unwrap();
+    h.queue("remove-A".into(),Action::Remove {entry_id:first}).await.unwrap();
+    let start=std::time::Instant::now();
+    f.wait_for("a linha nova tenta sem herdar a espera",||stashes()>before).await;
+    assert!(start.elapsed()<Duration::from_millis(800),"a linha nova herdou a espera da apagada: {:?}",start.elapsed());
+    h.stop().await.unwrap();
+}
 #[tokio::test(flavor="multi_thread")]
 async fn terminal_runtime_restart_during_a_deferral_without_write_requeues_and_delivers_once() {
     let f=Fixture::new().await; *f.io.ghost.lock().unwrap()="rascunho".into();

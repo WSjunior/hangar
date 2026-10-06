@@ -114,11 +114,14 @@ struct Executor {
     uncertain:Vec<String>,unprovable:bool,
     /// Teclado emprestado ao Python (administração que digita no pane): id, prazo e o pedido que o abriu.
     loan:Option<(String,tokio::time::Instant,String)>,
-    /// Entrada que o terminal recusa sem escrever (composer ocupado, tela ilegível): espera crescente
-    /// entre as tentativas e, passado o `stall_notice`, o motivo na vista.
+    /// Linha da fila que o terminal recusa sem escrever (composer ocupado, tela ilegível): espera
+    /// crescente entre as tentativas e, passado o `stall_notice`, o motivo na vista.
     stall:Option<Stall>,
 }
-struct Stall {code:String,since:tokio::time::Instant,wait:Duration,next:tokio::time::Instant,surfaced:bool}
+struct Stall {row:String,code:String,since:tokio::time::Instant,wait:Duration,next:tokio::time::Instant,surfaced:bool}
+/// Teto da espera entre tentativas: o composer que esvazia é visto na hora, e o resto (tela
+/// ilegível) não deve atrasar a mensagem muito além disso.
+const MAX_STALL_WAIT:Duration=Duration::from_secs(8);
 /// Esperas normais (o Claude ocupado, uma pergunta na tela) não contam como entrega parada, nem a
 /// escrita desfeita (`input_unproved`), que já tem o teto de tentativas da fila, nem falha do
 /// diário (`write_journal`), que tem aviso próprio.
@@ -358,7 +361,7 @@ impl Executor {
             result.payload["preserve_binding"]=json!(true);
         }
         self.action(Action::Finish {id:id.into(),status:status(result.disposition),result:serde_json::to_value(&result).unwrap()}).await?;
-        let repeated=row_id.is_some() && self.track_stall(&result);
+        let repeated=row_id.as_deref().is_some_and(|row|self.track_stall(row,&result));
         if matches!(result.disposition,Disposition::Deferred|Disposition::Rejected) && !repeated {
             tracing::info!(key=%self.target.key,session=%self.target.name,code=%result.payload["code"].as_str().unwrap_or("terminal_not_executed"),
                 reason="operação adiada ou recusada; resultado conservado no diário",stage=%result.payload["stage"].as_str().unwrap_or("plugin"),"resultado da entrada terminal");
@@ -372,13 +375,15 @@ impl Executor {
         Ok(result)
     }
     /// Conta a série de recusas sem escrita; devolve se esta repete o código anterior (sem log novo).
-    fn track_stall(&mut self,result:&RuntimeReply)->bool {
+    fn track_stall(&mut self,row:&str,result:&RuntimeReply)->bool {
         let Some(code)=stalled_code(result) else {self.stall=None; return false;};
         let now=tokio::time::Instant::now();
-        let stall=match self.stall.take() {
+        // A série é da linha: outra linha começa do zero, sem herdar a espera de quem saiu da fila.
+        let stall=match self.stall.take().filter(|stall|stall.row==row) {
             // Outro código na mesma série não zera o relógio: alternar entre dois nunca apareceria.
-            Some(mut stall)=>{let repeated=stall.code==code; stall.code=code.into(); stall.wait=(stall.wait*2).min(self.options.stall_notice); (stall,repeated)}
-            None=>(Stall {code:code.into(),since:now,wait:self.options.tick,next:now,surfaced:false},false),
+            // `wait` zerado é o composer que esvaziou: a espera recomeça do tique.
+            Some(mut stall)=>{let repeated=stall.code==code; stall.code=code.into(); stall.wait=(stall.wait*2).max(self.options.tick).min(MAX_STALL_WAIT); (stall,repeated)}
+            None=>(Stall {row:row.into(),code:code.into(),since:now,wait:self.options.tick,next:now,surfaced:false},false),
         };
         let (stall,repeated)=stall;
         let stall=self.stall.insert(Stall {next:now+stall.wait,..stall});
@@ -398,6 +403,9 @@ impl Executor {
             if self.stall.take().is_some_and(|s|s.surfaced) {self.publish().await?;}
             return Ok(json!({"drained":0}));
         }
+        // A linha parada saiu da fila (apagada ou entregue): a próxima não espera por ela.
+        if self.stall.as_ref().is_some_and(|s|!state.rows.iter().any(|r|r["delivered"]==false && r["id"]==s.row.as_str()))
+            && self.stall.take().is_some_and(|s|s.surfaced) {self.publish().await?;}
         let services=self.services("maintenance","maintenance","");
         let facts=services.facts(&self.target.binding).await.map_err(|_|error("terminal_facts"))?;
         self.deliverable=facts.binding==self.target.binding && facts.ready && facts.idle && !facts.open_question;
@@ -406,8 +414,13 @@ impl Executor {
             if self.stall.take().is_some_and(|s|s.surfaced) {self.publish().await?;}
             return Ok(json!({"drained":0}));
         }
-        // A espera crescente só segura a escrita: os fatos (e o `deliverable`) seguem frescos.
-        if self.stall.as_ref().is_some_and(|s|tokio::time::Instant::now()<s.next) {return Ok(json!({"drained":0,"stalled":true}));}
+        // A espera crescente só segura a escrita: os fatos (e o `deliverable`) seguem frescos, e o
+        // composer que esvaziou (o dono enviou o rascunho) libera a tentativa na hora.
+        if self.stall.as_ref().is_some_and(|s|tokio::time::Instant::now()<s.next) {
+            let driver=TerminalDriver::new(self.target.binding.clone(),services.clone(),self.options.io.clone(),self.options.limits.clone());
+            if !driver.composer_free().await {return Ok(json!({"drained":0,"stalled":true}));}
+            if let Some(stall)=self.stall.as_mut() {stall.wait=Duration::ZERO;}
+        }
         let rows=self.action(Action::Claim {min_ts:self.target.created,limit:Some(1),entry_id:entry}).await?;
         let Some(row)=rows.as_array().and_then(|r|r.first())else{return Ok(json!({"drained":0}));};
         let row_id=row["id"].as_str().ok_or_else(||error("queue_row"))?.to_string();

@@ -2,6 +2,8 @@
 use std::ffi::OsString;
 use std::time::Duration;
 
+use super::discover::DiscoveryProblem;
+
 /// Os 8 campos de `list_panes_all` e o endereço do pane no psmux, numa chamada só.
 pub const LIST_PANES_FORMAT: &str = "#{session_name}\t#{pane_active}\t#{pane_pid}\t#{pane_current_path}\t#{pane_id}\t#{@cp_hidden}\t#{CP_PROVIDER}\t#{session_created}\t#{window_index}\t#{pane_index}";
 const PROVIDERS: [&str; 5] = ["claude", "codex", "pi", "omp", "kimi"];
@@ -41,13 +43,16 @@ impl std::fmt::Display for MuxUnavailable {
 }
 impl std::error::Error for MuxUnavailable {}
 
-/// Uma linha por pane; linha com menos de 5 campos é ignorada. Os demais podem faltar (opção
-/// de usuário que o multiplexador não interpola): faltando, a sessão aparece como sempre.
-pub fn parse_list_panes(output: &str) -> Vec<Pane> {
+/// Uma linha por pane, e quantas linhas não vazias ficaram de fora por terem menos de 5 campos
+/// (cwd com `\n` parte o pane em dois). Os demais campos podem faltar (opção de usuário que o
+/// multiplexador não interpola): faltando, a sessão aparece como sempre.
+pub fn parse_list_panes(output: &str) -> (Vec<Pane>, usize) {
     let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
-    output.lines().filter_map(|line| {
+    let mut dropped = 0;
+    let panes = output.lines().filter_map(|line| {
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() < 5 {
+            dropped += usize::from(!line.trim().is_empty());
             return None;
         }
         let field = |i: usize| parts.get(i).copied().unwrap_or("");
@@ -63,7 +68,8 @@ pub fn parse_list_panes(output: &str) -> Vec<Pane> {
             window_index: if digits(field(8)) { field(8).parse().ok() } else { None },
             pane_index: if digits(field(9)) { field(9).parse().ok() } else { None },
         })
-    }).collect()
+    }).collect();
+    (panes, dropped)
 }
 
 /// Recusa que quer dizer "não há sessão", não "não sei" (`tmux.py:_run`, `absent`). Fica de fora o
@@ -86,6 +92,12 @@ impl Mux {
     }
 
     pub async fn list_panes(&self) -> Result<Vec<Pane>, MuxUnavailable> {
+        self.list_panes_checked().await.map(|(panes, _)| panes)
+    }
+
+    /// Os panes e, se linhas do `list-panes` ficaram de fora, o problema para o diário: a sessão
+    /// delas some da lista enquanto a lista em si responde.
+    pub async fn list_panes_checked(&self) -> Result<(Vec<Pane>, Option<DiscoveryProblem>), MuxUnavailable> {
         let mut command = crate::terminal_input::child_command(&self.program);
         command.args(["list-panes", "-a", "-F", LIST_PANES_FORMAT])
             .stdin(std::process::Stdio::null()).kill_on_drop(true);
@@ -96,15 +108,19 @@ impl Mux {
         };
         if out.status.success() {
             let stdout = String::from_utf8_lossy(&out.stdout);
-            let panes = parse_list_panes(&stdout);
+            let (panes, dropped) = parse_list_panes(&stdout);
             if panes.is_empty() && !stdout.trim().is_empty() {
                 return Err(unavailable("mux_unparsed", None, None));
             }
-            return Ok(panes);
+            let mut problems = super::discover::Problems::default();
+            if dropped > 0 {
+                problems.note("mux_unparsed", "list-panes", "linha do list-panes com menos de 5 campos; sessão fora da lista");
+            }
+            return Ok((panes, problems.into_vec().pop()));
         }
         // O Python lia qualquer recusa como "zero sessões"; só a ausência conhecida vira vazio.
         if out.status.code() == Some(1) && is_absence(&String::from_utf8_lossy(&out.stderr)) {
-            Ok(Vec::new())
+            Ok((Vec::new(), None))
         } else {
             Err(unavailable("mux_refused", None, out.status.code()))
         }
@@ -132,8 +148,9 @@ mod tests {
                    old\t1\tx\t/o\t%3\n\
                    raw\t1\t300\t/r\t%4\t#{@cp_hidden}\tbash\t\n\
                    short\t1\t5\n\n";
-        let panes = parse_list_panes(out);
+        let (panes, dropped) = parse_list_panes(out);
         assert_eq!(panes.len(), 5);
+        assert_eq!(dropped, 1, "a linha curta conta; a vazia não");
         assert_eq!(panes[0], Pane { session: "main".into(), active: true, pid: Some(100), cwd: "/home/a b".into(),
             pane_id: "%0".into(), hidden: false, provider: Some("claude".into()), session_created: Some(1700000000),
             ..Pane::default() });
@@ -153,7 +170,7 @@ mod tests {
         let out = b"zzX\t1\t40\tC:\\w\t%1\t\tclaude\t1700000000\t0\t0\n\
                     zzY\t1\t41\tC:\\S\xe3o\t%1\t\tpi\t1700000001\t2\t1\n\
                     zzZ\t1\t42\tC:\\z\t%1\n";
-        let panes = parse_list_panes(&String::from_utf8_lossy(out));
+        let (panes, _) = parse_list_panes(&String::from_utf8_lossy(out));
         assert_eq!(panes.len(), 3);
         assert_eq!(panes[0].psmux_target().as_deref(), Some("=zzX:0.0"));
         assert_eq!(panes[1].psmux_target().as_deref(), Some("=zzY:2.1"));
@@ -200,7 +217,13 @@ mod tests {
         assert_eq!(Mux::with_program(&garbage, Duration::from_secs(2)).list_panes().await,
             Err(MuxUnavailable { code: "mux_unparsed" }));
         let (_d3, ok) = script("printf 'a\\t1\\t7\\t/w\\t%%0\\t\\tcodex\\t5\\n'");
-        let panes = Mux::with_program(&ok, Duration::from_secs(2)).list_panes().await.unwrap();
+        let (panes, problem) = Mux::with_program(&ok, Duration::from_secs(2)).list_panes_checked().await.unwrap();
         assert_eq!(panes[0].provider.as_deref(), Some("codex"));
+        assert_eq!(problem, None);
+        // cwd com `\n`: o pane parte em dois, a cabeça cai e o resto não parece pane.
+        let (_d7, split) = script("printf 'b\\t1\\t8\\t/w/a\\nb\\t%%1\\n' ; printf 'c\\t1\\t9\\t/c\\t%%2\\n'");
+        let (panes, problem) = Mux::with_program(&split, Duration::from_secs(2)).list_panes_checked().await.unwrap();
+        assert_eq!(panes.len(), 1);
+        assert_eq!(problem.map(|p| p.code), Some("mux_unparsed"), "descarte parcial vai ao diário");
     }
 }

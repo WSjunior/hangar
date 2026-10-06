@@ -4,7 +4,7 @@ use super::discover_other::{Dirs, config_dir_of, env, truthy};
 use super::procs::ProcessView;
 use hangar_api::session::SessionRow;
 use hangar_workspace::git::head_info;
-use hangar_workspace::worktrees::{main_repo_of, normpath, removed_at, repo_root_of, worktree_paths};
+use hangar_workspace::worktrees::{main_repo_of, normpath, repo_root_of, try_removed_at, worktree_paths};
 use regex::Regex;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use super::capped::Capped;
+use super::discover::{DiscoveryProblem, Problems};
 
 /// Linha com os padrões do `SessionInfo`.
 pub fn blank_row(name: &str) -> SessionRow {
@@ -50,11 +51,23 @@ fn link_file(dir: &Path, name: &str) -> PathBuf {
     dir.join(format!("{safe}.json"))
 }
 
-/// JSON-objeto do sidecar; ausente, torto ou de outro tipo é "sem vínculo".
-fn read_object(path: &Path) -> Option<Map<String, Value>> {
-    match serde_json::from_slice(&std::fs::read(path).ok()?) {
+/// JSON-objeto do sidecar; ausente, torto ou de outro tipo é "sem vínculo", como no Python. Só o
+/// ausente é calado: torto ou ilegível vai ao diário, senão par, grupo ou loop somem sem motivo.
+fn read_object(path: &Path, problems: &mut Problems) -> Option<Map<String, Value>> {
+    let raw = match std::fs::read(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => {
+            problems.note("list_link_unreadable", &path.to_string_lossy(), "vínculo (par, encadeamento ou loop) ilegível; tratado como ausente");
+            return None;
+        }
+    };
+    match serde_json::from_slice(&raw) {
         Ok(Value::Object(m)) => Some(m),
-        _ => None,
+        _ => {
+            problems.note("list_link_invalid", &path.to_string_lossy(), "vínculo (par, encadeamento ou loop) torto; tratado como ausente");
+            None
+        }
     }
 }
 
@@ -67,8 +80,8 @@ struct Pair {
 
 /// `PairLink.get`: legado `{"peer": x}` vira `peers`; sem membros só vale o grupo `orq`; sem `gid`
 /// deriva um do conjunto, igual em todos os membros.
-fn pair_of(name: &str, dirs: &Dirs) -> Option<Pair> {
-    let data = read_object(&link_file(&dirs.claude.join(".hangar-pair"), name))?;
+fn pair_of(name: &str, dirs: &Dirs, problems: &mut Problems) -> Option<Pair> {
+    let data = read_object(&link_file(&dirs.claude.join(".hangar-pair"), name), problems)?;
     let raw = match data.get("peers") {
         Some(p) => p.clone(),
         None => data.get("peer").filter(|p| truthy(p)).map(|p| Value::Array(vec![p.clone()])).unwrap_or(Value::Null),
@@ -146,10 +159,10 @@ fn pair_external(name: &str, peers: &[String], dirs: &Dirs) -> Option<Map<String
 }
 
 /// Encadeamento e par (`ThenLink`, `PairLink`, `_pair_external`).
-pub fn fill_links(row: &mut SessionRow, dirs: &Dirs) {
-    row.then_target = read_object(&link_file(&dirs.claude.join(".hangar-chain"), &row.name))
+pub fn fill_links(row: &mut SessionRow, dirs: &Dirs, problems: &mut Problems) {
+    row.then_target = read_object(&link_file(&dirs.claude.join(".hangar-chain"), &row.name), problems)
         .and_then(|l| l.get("target").and_then(Value::as_str).map(str::to_owned));
-    match pair_of(&row.name, dirs) {
+    match pair_of(&row.name, dirs, problems) {
         Some(pair) => {
             row.pair_external = pair_external(&row.name, &pair.peers, dirs);
             row.pair_peers = Some(pair.peers);
@@ -160,12 +173,16 @@ pub fn fill_links(row: &mut SessionRow, dirs: &Dirs) {
     }
 }
 
-/// `_decorate_loop`: sem sidecar, nenhum badge.
-pub fn fill_loop(row: &mut SessionRow, dirs: &Dirs) {
-    let Some(d) = read_object(&link_file(&dirs.claude.join(".hangar-loop"), &row.name)) else { return };
-    row.loop_status = d.get("status").and_then(Value::as_str).map(str::to_owned);
-    row.loop_iter = count(d.get("iter"));
-    row.loop_max = count(d.get("max_iters"));
+/// `_decorate_loop`: sem sidecar, nenhum badge. Devolve a falha contornada (sidecar torto), para
+/// quem chama mandar ao diário.
+pub fn fill_loop(row: &mut SessionRow, dirs: &Dirs) -> Option<DiscoveryProblem> {
+    let mut problems = Problems::default();
+    if let Some(d) = read_object(&link_file(&dirs.claude.join(".hangar-loop"), &row.name), &mut problems) {
+        row.loop_status = d.get("status").and_then(Value::as_str).map(str::to_owned);
+        row.loop_iter = count(d.get("iter"));
+        row.loop_max = count(d.get("max_iters"));
+    }
+    problems.into_vec().pop()
 }
 
 /// Inteiro não negativo, ou float de valor inteiro (o pydantic aceita `3.0` num `int`).
@@ -177,12 +194,13 @@ fn count(v: Option<&Value>) -> Option<u32> {
 /// Campos de uma linha de pane depois do transcript resolvido: vida, worktree, vínculos, motor e
 /// conta. `provider` é o detectado no pane (`claude` quando não se reconhece); `pid_env` é o do
 /// processo do agente, senão o do pane: quem declara conta e motor é o agente.
-pub fn fill_pane_row(row: &mut SessionRow, provider: &str, pid_env: Option<i64>, birth: Option<u64>, procs: &dyn ProcessView, dirs: &Dirs) {
+pub fn fill_pane_row(row: &mut SessionRow, provider: &str, pid_env: Option<i64>, birth: Option<u64>, procs: &dyn ProcessView, dirs: &Dirs,
+                     problems: &mut Problems) {
     row.lifecycle_id = session_life(None, birth);
     // Transcript de chute (untracked) pode ser de outra sessão: não decide onde esta está.
     let jsonl = row.jsonl.clone().filter(|_| row.tracked);
-    apply_location(row, locate(provider, row.cwd.as_deref(), jsonl.as_deref(), dirs));
-    fill_links(row, dirs);
+    apply_location(row, locate(provider, row.cwd.as_deref(), jsonl.as_deref(), dirs, problems));
+    fill_links(row, dirs, problems);
     if matches!(provider, "pi" | "omp" | "kimi" | "codex") {
         row.provider = provider.to_owned();
     }
@@ -211,8 +229,8 @@ pub fn fill_pane_row(row: &mut SessionRow, provider: &str, pid_env: Option<i64>,
 }
 
 /// Linha de sidecar: o transcript é sempre dela, então decide a worktree.
-pub fn fill_location(row: &mut SessionRow, provider: &str, dirs: &Dirs) {
-    let loc = locate(provider, row.cwd.as_deref(), row.jsonl.as_deref(), dirs);
+pub fn fill_location(row: &mut SessionRow, provider: &str, dirs: &Dirs, problems: &mut Problems) {
+    let loc = locate(provider, row.cwd.as_deref(), row.jsonl.as_deref(), dirs, problems);
     apply_location(row, loc);
 }
 
@@ -280,15 +298,15 @@ fn is_dir(path: &str) -> bool { !path.is_empty() && Path::new(path).is_dir() }
 
 /// Sessão que nasceu numa worktree fica nela; senão os sinais do transcript (Claude) ou dos
 /// comandos (Codex) dizem para qual pasta do mesmo repositório o agente foi.
-pub fn locate(provider: &str, cwd: Option<&str>, jsonl: Option<&str>, dirs: &Dirs) -> Location {
+pub fn locate(provider: &str, cwd: Option<&str>, jsonl: Option<&str>, dirs: &Dirs, problems: &mut Problems) -> Location {
     let cwd = cwd.filter(|c| !c.is_empty());
     let born_in_worktree = head_info(cwd.and_then(repo_root_of).as_deref()).1;
     let mut real = None;
     if !born_in_worktree {
         // Transcript ilegível nunca derruba a lista: a sessão fica no cwd.
         real = match (provider, jsonl, cwd) {
-            ("claude", Some(j), _) => claude_worktree(cwd, j, dirs),
-            ("codex", Some(j), Some(c)) => codex_cwd(c, j, dirs),
+            ("claude", Some(j), _) => claude_worktree(cwd, j, dirs, problems),
+            ("codex", Some(j), Some(c)) => codex_cwd(c, j, dirs, problems),
             _ => None,
         };
     }
@@ -296,7 +314,7 @@ pub fn locate(provider: &str, cwd: Option<&str>, jsonl: Option<&str>, dirs: &Dir
     if !is_dir(&real) {
         // ponytail: pasta sumida que não é a de abertura vira "worktree apagada"; uma subpasta
         // comum apagada também cairia aqui, como no Python.
-        let gone = Some(real.as_str()) != cwd || removed(dirs).contains_key(&real);
+        let gone = Some(real.as_str()) != cwd || removed(dirs, problems).contains_key(&real);
         return Location { worktree_path: gone.then_some(real), worktree_gone: gone, ..Location::default() };
     }
     let root = repo_root_of(&real);
@@ -313,10 +331,17 @@ pub fn locate(provider: &str, cwd: Option<&str>, jsonl: Option<&str>, dirs: &Dir
 
 static REMOVED: TailCache<HashMap<String, String>> = LazyLock::new(Default::default);
 
-/// `worktrees-removidas.json`, relido só quando o arquivo muda; ausente é mapa vazio.
-fn removed(dirs: &Dirs) -> Arc<HashMap<String, String>> {
+/// `worktrees-removidas.json`, relido só quando o arquivo muda; ausente é mapa vazio. Torto vale
+/// vazio, como no Python, e não fica guardado: volta ao diário enquanto estiver torto.
+fn removed(dirs: &Dirs, problems: &mut Problems) -> Arc<HashMap<String, String>> {
     let file = dirs.home.join(".hangar").join("worktrees-removidas.json");
-    cached(&REMOVED, &file, || Some(removed_at(&file))).unwrap_or_default()
+    cached(&REMOVED, &file, || match try_removed_at(&file) {
+        Ok(map) => Some(map),
+        Err(_) => {
+            problems.note("list_removed_worktrees_invalid", &file.to_string_lossy(), "worktrees-removidas.json ilegível ou torto; worktree apagada sai como pasta comum");
+            None
+        }
+    }).unwrap_or_default()
 }
 
 /// Uma leitura por versão do arquivo: a lista roda a cada segundo e o transcript pode ter megas.
@@ -431,9 +456,9 @@ static CLAUDE_TAILS: LazyLock<Mutex<Capped<PathBuf, TailScan>>> = LazyLock::new(
 /// Uma linha do transcript na leitura de trás para a frente: guarda o último `cwd` e as pastas das
 /// chamadas; `Break` quando já há chamadas bastantes.
 fn scan_line(raw: &[u8], last: &mut Option<String>, lines: &mut Vec<Vec<Hit>>, count: &mut usize) -> ControlFlow<()> {
-    let has_tool = contains(raw, b"\"tool_use\"");
+    let has_tool = TOOL_USE.find(raw).is_some();
     // Achado o último `cwd`, só interessa linha com chamada: o resto pode ser imagem de megas.
-    if !has_tool && (last.is_some() || !contains(raw, b"\"cwd\"")) {
+    if !has_tool && (last.is_some() || CWD_KEY.find(raw).is_none()) {
         return ControlFlow::Continue(());
     }
     let Ok(Value::Object(line)) = serde_json::from_slice::<Value>(raw) else { return ControlFlow::Continue(()) };
@@ -507,9 +532,9 @@ fn scan_growth(jsonl: &Path, old: &TailScan, from: u64, key: (i128, u64), now: s
 
 /// (último `cwd`, caminhos citados pelas ferramentas com o `cwd` da linha), do mais recente para o
 /// mais antigo.
-fn claude_tail(jsonl: &Path) -> Option<Arc<ClaudeTail>> { claude_tail_at(jsonl, std::time::Instant::now()) }
+fn claude_tail(jsonl: &Path, problems: &mut Problems) -> Option<Arc<ClaudeTail>> { claude_tail_at(jsonl, std::time::Instant::now(), problems) }
 
-fn claude_tail_at(jsonl: &Path, now: std::time::Instant) -> Option<Arc<ClaudeTail>> {
+fn claude_tail_at(jsonl: &Path, now: std::time::Instant, problems: &mut Problems) -> Option<Arc<ClaudeTail>> {
     {
         let mut tails = CLAUDE_TAILS.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(old) = tails.get(jsonl)
@@ -537,11 +562,11 @@ fn claude_tail_at(jsonl: &Path, now: std::time::Instant) -> Option<Arc<ClaudeTai
     };
     let scan = match scan {
         Ok(scan) => scan,
-        Err(error) => {
+        // Apagado ou trocado entre o `stat` e a leitura: corrida, a próxima rodada vê.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return old.map(|o| o.value),
+        Err(_) => {
             // Transcript ilegível nunca derruba a lista: fica a última leitura boa, ou o cwd.
-            if crate::warn_limit::allow(None, "list_transcript_unreadable") {
-                tracing::warn!(code = "list_transcript_unreadable", io_kind = ?error.kind(), "list: transcript sem leitura para a worktree");
-            }
+            problems.note("list_transcript_unreadable", &jsonl.to_string_lossy(), "transcript ilegível; worktree pela última leitura boa ou pelo cwd");
             return old.map(|o| o.value);
         }
     };
@@ -550,7 +575,10 @@ fn claude_tail_at(jsonl: &Path, now: std::time::Instant) -> Option<Arc<ClaudeTai
     Some(value)
 }
 
-fn contains(hay: &[u8], needle: &[u8]) -> bool { hay.windows(needle.len()).any(|w| w == needle) }
+// Duas buscas por linha em até 8 MB de transcript: o `windows().any()` comparava byte a byte.
+static TOOL_USE: LazyLock<memchr::memmem::Finder<'static>> = LazyLock::new(|| memchr::memmem::Finder::new(b"\"tool_use\""));
+static CWD_KEY: LazyLock<memchr::memmem::Finder<'static>> = LazyLock::new(|| memchr::memmem::Finder::new(b"\"cwd\""));
+static CALL: LazyLock<memchr::memmem::Finder<'static>> = LazyLock::new(|| memchr::memmem::Finder::new(b"_call"));
 
 /// Criar ou remover worktree muda o mtime de `.git/worktrees`; o `git worktree move` só reescreve o
 /// `gitdir` lá dentro, e o teto cobre esse caso.
@@ -575,18 +603,26 @@ fn worktrees_of(main: &str) -> Arc<Vec<String>> {
 }
 
 /// (principal, worktrees removidas, todas as pastas) do repositório que contém `path`.
-fn repo_candidates(path: &str, dirs: &Dirs) -> Option<(String, Vec<String>, Vec<String>)> {
+fn repo_candidates(path: &str, dirs: &Dirs, problems: &mut Problems) -> Option<(String, Vec<String>, Vec<String>)> {
     let main = main_repo_of(&repo_root_of(path)?);
-    let gone: Vec<String> = removed(dirs).iter().filter(|(_, v)| **v == main).map(|(k, _)| k.clone()).collect();
+    let gone: Vec<String> = removed(dirs, problems).iter().filter(|(_, v)| **v == main).map(|(k, _)| k.clone()).collect();
     let mut all = vec![main.clone()];
     all.extend(worktrees_of(&main).iter().cloned());
     all.extend(gone.iter().cloned());
     Some((main, gone, all))
 }
 
+/// Separadores do caminho: no Windows o transcript e o rollout trazem `\\` e `/` misturados.
+const SEPS: &[char] = if cfg!(windows) { &['/', '\\'] } else { &['/'] };
+
+/// `rest` começa num separador: `path` está dentro de `base`.
+fn below(path: &str, base: &str) -> bool {
+    path.strip_prefix(base.trim_end_matches(SEPS)).is_some_and(|rest| rest.starts_with(SEPS))
+}
+
 fn owner(path: &str, candidates: &[String]) -> Option<String> {
     candidates.iter()
-        .filter(|c| path == c.as_str() || path.starts_with(&format!("{}/", c.trim_end_matches('/'))))
+        .filter(|c| path == c.as_str() || below(path, c))
         .fold(None::<&String>, |best, c| if best.is_none_or(|b| c.len() > b.len()) { Some(c) } else { best })
         .cloned()
 }
@@ -599,16 +635,16 @@ fn of_this_repo(path: &str, main: &str, gone: &[String]) -> bool {
     if owner(path, &own).is_some() {
         return true;
     }
-    let trimmed = main.trim_end_matches('/');
-    let (parent, name) = trimmed.rsplit_once('/').unwrap_or(("", trimmed));
-    let prefix = format!("{}/", parent.trim_end_matches('/'));
-    path.strip_prefix(&prefix).is_some_and(|rest| rest.split('/').next().unwrap_or("").starts_with(&format!("{name}-")))
+    let trimmed = main.trim_end_matches(SEPS);
+    let (parent, name) = trimmed.rsplit_once(SEPS).unwrap_or(("", trimmed));
+    path.strip_prefix(parent.trim_end_matches(SEPS)).and_then(|rest| rest.strip_prefix(SEPS))
+        .is_some_and(|rest| rest.split(SEPS).next().unwrap_or("").starts_with(&format!("{name}-")))
 }
 
 fn expand_user(path: &str, dirs: &Dirs) -> String {
     match path.strip_prefix('~') {
         Some("") => dirs.home.to_string_lossy().into_owned(),
-        Some(rest) if rest.starts_with('/') => format!("{}{rest}", dirs.home.to_string_lossy()),
+        Some(rest) if rest.starts_with(SEPS) => format!("{}{rest}", dirs.home.to_string_lossy()),
         _ => path.to_owned(),
     }
 }
@@ -620,12 +656,12 @@ fn join_norm(base: &str, p: &str) -> String {
 
 /// A pasta do mesmo repositório onde o Claude trabalha: `cd X`/`git -C X` e o arquivo editado.
 /// Nada na principal tira a sessão da worktree.
-fn claude_worktree(cwd: Option<&str>, jsonl: &str, dirs: &Dirs) -> Option<String> {
-    let tail = claude_tail(Path::new(jsonl))?;
+fn claude_worktree(cwd: Option<&str>, jsonl: &str, dirs: &Dirs, problems: &mut Problems) -> Option<String> {
+    let tail = claude_tail(Path::new(jsonl), problems)?;
     let (last, hits) = &*tail;
     let last = last.clone();
     let Some(base) = last.clone().or_else(|| cwd.map(str::to_owned)) else { return last };
-    let Some((main, gone, candidates)) = repo_candidates(&base, dirs) else { return last };
+    let Some((main, gone, candidates)) = repo_candidates(&base, dirs, problems) else { return last };
     let home = owner(&base, &candidates);
     for (raw, is_cd, line_cwd) in hits {
         let is_cd = *is_cd;
@@ -639,7 +675,7 @@ fn claude_worktree(cwd: Option<&str>, jsonl: &str, dirs: &Dirs) -> Option<String
             if let Some(o) = owner(&p, &candidates).filter(|o| *o != main) {
                 return Some(o);
             }
-        } else if is_cd && (raw.starts_with('/') || raw.starts_with('~')) && of_this_repo(&p, &main, &gone) {
+        } else if is_cd && (Path::new(raw).has_root() || raw.starts_with('~')) && of_this_repo(&p, &main, &gone) {
             // Pasta absoluta que sumiu: a worktree foi removida. `cd -` e `cd $W` não dizem nada.
             return Some(owner(&p, &gone).unwrap_or(p));
         }
@@ -647,38 +683,46 @@ fn claude_worktree(cwd: Option<&str>, jsonl: &str, dirs: &Dirs) -> Option<String
     last
 }
 
-static WORKDIR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""?workdir"?\s*:\s*"(/[^"]+)""#).unwrap());
-static CD_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""?cmd"?\s*:\s*"\s*cd\s+(/[^\s&;"]+)"#).unwrap());
+/// Início de caminho absoluto no texto JSON dos argumentos; no Windows também `C:\\` (a barra
+/// vem escapada, e o achado é desescapado) e `C:/`. O patch segue só com `/`, como no Python.
+const ABS: &str = if cfg!(windows) { r"(?:/|[A-Za-z]:(?:\\\\|/))" } else { "/" };
+static WORKDIR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(&format!(r#""?workdir"?\s*:\s*"({ABS}[^"]+)""#)).unwrap());
+static CD_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(&format!(r#""?cmd"?\s*:\s*"\s*cd\s+({ABS}[^\s&;"]+)"#)).unwrap());
 static PATCH_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"\*\*\* (?:Add|Update|Delete) File: (/[^\s\\"]+)"#).unwrap());
 static CODEX_PATHS: TailCache<Vec<(String, bool)>> = LazyLock::new(Default::default);
 
-/// Últimos `TAIL` bytes em linhas; a primeira vem cortada quando o arquivo é maior.
-fn tail_lines(path: &Path) -> std::io::Result<Vec<Vec<u8>>> {
+/// Últimos `TAIL` bytes e se a primeira linha deles vem cortada (arquivo maior que isso). Quem lê
+/// percorre as linhas no próprio buffer: copiar cada uma custava o arquivo inteiro por leitura.
+fn tail_bytes(path: &Path) -> std::io::Result<(Vec<u8>, bool)> {
     let mut fh = std::fs::File::open(path)?;
     let size = fh.seek(SeekFrom::End(0))?;
     fh.seek(SeekFrom::Start(size.saturating_sub(TAIL)))?;
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(size.min(TAIL) as usize);
     fh.read_to_end(&mut buf)?;
-    let mut lines: Vec<Vec<u8>> = buf.split(|b| *b == b'\n').map(<[u8]>::to_vec).collect();
-    if size > TAIL {
-        lines.remove(0);
-    }
-    Ok(lines)
+    Ok((buf, size > TAIL))
 }
 
 /// (caminho, é pasta?) dos comandos do Codex, da chamada mais recente para a mais antiga: `cd`
 /// vence `workdir`, e os dois vencem o arquivo do patch.
-fn codex_paths(rollout: &Path) -> Option<Arc<Vec<(String, bool)>>> {
+fn codex_paths(rollout: &Path, problems: &mut Problems) -> Option<Arc<Vec<(String, bool)>>> {
     cached(&CODEX_PATHS, rollout, || {
         let mut out = Vec::new();
-        let lines = tail_lines(rollout).inspect_err(|error| {
-            tracing::debug!(io_kind = ?error.kind(), "list: rollout sem leitura para a worktree");
-        }).ok()?;
-        for raw in lines.into_iter().rev() {
-            if !contains(&raw, b"_call") {
+        let (buf, cut) = match tail_bytes(rollout) {
+            Ok(read) => read,
+            Err(_) => {
+                problems.note("list_rollout_unreadable", &rollout.to_string_lossy(), "rollout do Codex ilegível; worktree fica no cwd");
+                return None;
+            }
+        };
+        let mut lines = buf.split(|b| *b == b'\n');
+        if cut {
+            lines.next();
+        }
+        for raw in lines.rev() {
+            if CALL.find(raw).is_none() {
                 continue;
             }
-            let Ok(Value::Object(line)) = serde_json::from_slice::<Value>(&raw) else { continue };
+            let Ok(Value::Object(line)) = serde_json::from_slice::<Value>(raw) else { continue };
             let Some(Value::Object(payload)) = line.get("payload") else { continue };
             if !matches!(payload.get("type").and_then(Value::as_str), Some("function_call" | "custom_tool_call")) {
                 continue;
@@ -687,7 +731,8 @@ fn codex_paths(rollout: &Path) -> Option<Arc<Vec<(String, bool)>>> {
                 .find(|v| truthy(v));
             let Some(Value::String(text)) = text else { continue };
             for (rx, is_dir) in [(&*CD_RE, true), (&*WORKDIR_RE, true), (&*PATCH_RE, false)] {
-                let found: Vec<String> = rx.captures_iter(text).map(|c| c[1].to_owned()).collect();
+                let found: Vec<String> = rx.captures_iter(text)
+                    .map(|c| if cfg!(windows) && is_dir { c[1].replace(r"\\", r"\") } else { c[1].to_owned() }).collect();
                 out.extend(found.into_iter().rev().map(|p| (p, is_dir)));
             }
             if out.len() >= 50 {
@@ -699,9 +744,9 @@ fn codex_paths(rollout: &Path) -> Option<Arc<Vec<(String, bool)>>> {
 }
 
 /// A worktree (ou a principal) do MESMO repositório onde o último comando do Codex rodou.
-fn codex_cwd(cwd: &str, rollout: &str, dirs: &Dirs) -> Option<String> {
-    let (main, gone, candidates) = repo_candidates(cwd, dirs)?;
-    for (p, is_dir) in codex_paths(Path::new(rollout))?.iter() {
+fn codex_cwd(cwd: &str, rollout: &str, dirs: &Dirs, problems: &mut Problems) -> Option<String> {
+    let (main, gone, candidates) = repo_candidates(cwd, dirs, problems)?;
+    for (p, is_dir) in codex_paths(Path::new(rollout), problems)?.iter() {
         if Path::new(p).exists() {
             if let Some(o) = owner(p, &candidates) {
                 return Some(o);
@@ -730,6 +775,56 @@ mod tests {
         // Aspa sem par não casa, como o `\1` do Python.
         assert_eq!(paths("cd \"/x y\""), Vec::<String>::new());
         assert_eq!(paths("echo cd /nao"), Vec::<String>::new());
+    }
+
+    fn dirs_at(home: &Path) -> Dirs {
+        Dirs { home: home.to_path_buf(), claude: home.join(".claude"), codex_home: home.join(".codex"),
+            pi_sessions: home.join(".pi"), omp_config: home.join(".omp"), omp_agent: home.join(".omp/agent"),
+            kimi_home: home.join(".kimi-code") }
+    }
+
+    #[test]
+    fn broken_links_reach_the_diary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_at(tmp.path());
+        for (sub, body) in [(".hangar-pair", "{"), (".hangar-chain", "[1]"), (".hangar-loop", "{")] {
+            std::fs::create_dir_all(dirs.claude.join(sub)).unwrap();
+            std::fs::write(dirs.claude.join(sub).join("s.json"), body).unwrap();
+        }
+        let mut row = blank_row("s");
+        let mut problems = Problems::default();
+        fill_links(&mut row, &dirs, &mut problems);
+        assert_eq!((&row.pair_peers, &row.then_target), (&None, &None),"torto continua valendo ausente, como no Python");
+        assert_eq!(problems.into_vec().iter().map(|p| p.code).collect::<Vec<_>>(), ["list_link_invalid", "list_link_invalid"]);
+        assert_eq!(fill_loop(&mut row, &dirs).map(|p| p.code), Some("list_link_invalid"));
+        // Ausente é o normal: nada vai ao diário.
+        let mut problems = Problems::default();
+        fill_links(&mut blank_row("outra"), &dirs, &mut problems);
+        assert!(problems.into_vec().is_empty());
+    }
+
+    #[test]
+    fn broken_removed_worktrees_is_reported_and_not_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_at(tmp.path());
+        let file = tmp.path().join(".hangar/worktrees-removidas.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "{").unwrap();
+        let mut problems = Problems::default();
+        assert!(removed(&dirs, &mut problems).is_empty());
+        assert_eq!(problems.into_vec().iter().map(|p| p.code).collect::<Vec<_>>(), ["list_removed_worktrees_invalid"]);
+        std::fs::write(&file, r#"{"/r-wt": "/r"}"#).unwrap();
+        assert_eq!(removed(&dirs, &mut Problems::default()).get("/r-wt").map(String::as_str), Some("/r"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn owner_accepts_backslash_on_windows() {
+        let c = vec![r"C:\r".to_owned(), r"C:\r\wt".to_owned()];
+        assert_eq!(owner(r"C:\r\wt\x", &c).as_deref(), Some(r"C:\r\wt"));
+        assert!(of_this_repo(r"C:\r-novo\x", r"C:\r", &[]));
+        let text = r#"{"workdir":"C:\\r\\wt"}"#;
+        assert_eq!(WORKDIR_RE.captures(text).map(|c| c[1].replace(r"\\", r"\")).as_deref(), Some(r"C:\r\wt"));
     }
 
     #[test]
@@ -779,22 +874,22 @@ mod tests {
         std::fs::write(&path, &first).unwrap();
         let t0 = std::time::Instant::now();
         let paths = |v: Arc<ClaudeTail>| (v.0.clone(), v.1.iter().map(|h| h.0.clone()).collect::<Vec<_>>());
-        assert_eq!(paths(claude_tail_at(&path, t0).unwrap()), (Some("/a".into()), vec!["/x1".into()]));
+        assert_eq!(paths(claude_tail_at(&path, t0, &mut Problems::default()).unwrap()), (Some("/a".into()), vec!["/x1".into()]));
         // O começo muda sem mudar de tamanho (prova de que não é relido) e uma linha nova chega.
         std::fs::write(&path, first.replace("/x1", "/y1") + &line("/b", "/x2")).unwrap();
         let soon = t0 + std::time::Duration::from_secs(1);
-        assert_eq!(paths(claude_tail_at(&path, soon).unwrap()), (Some("/a".into()), vec!["/x1".into()]), "dentro do teto reusa");
+        assert_eq!(paths(claude_tail_at(&path, soon, &mut Problems::default()).unwrap()), (Some("/a".into()), vec!["/x1".into()]), "dentro do teto reusa");
         let later = t0 + TAIL_RECHECK + std::time::Duration::from_secs(1);
-        assert_eq!(paths(claude_tail_at(&path, later).unwrap()), (Some("/b".into()), vec!["/x2".into(), "/x1".into()]),
+        assert_eq!(paths(claude_tail_at(&path, later, &mut Problems::default()).unwrap()), (Some("/b".into()), vec!["/x2".into(), "/x1".into()]),
             "só o que cresceu é lido");
         // Encolheu: lido do zero.
         std::fs::write(&path, line("/c", "/x3")).unwrap();
         let again = later + TAIL_RECHECK + std::time::Duration::from_secs(1);
-        assert_eq!(paths(claude_tail_at(&path, again).unwrap()), (Some("/c".into()), vec!["/x3".into()]));
+        assert_eq!(paths(claude_tail_at(&path, again, &mut Problems::default()).unwrap()), (Some("/c".into()), vec!["/x3".into()]));
         // Trocado por outro maior cujo byte no ponto lido não é fim de linha: lido do zero.
         std::fs::write(&path, line("/dddd", "/x4") + &line("/e", "/x5")).unwrap();
         let last = again + TAIL_RECHECK + std::time::Duration::from_secs(1);
-        assert_eq!(paths(claude_tail_at(&path, last).unwrap()), (Some("/e".into()), vec!["/x5".into(), "/x4".into()]));
+        assert_eq!(paths(claude_tail_at(&path, last, &mut Problems::default()).unwrap()), (Some("/e".into()), vec!["/x5".into(), "/x4".into()]));
     }
 
     #[test]

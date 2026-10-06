@@ -109,6 +109,24 @@ def test_background_producers_reach_owner(monkeypatch, source):
     assert [call[0]["kind"] for call in owner.calls] == (["confirm", "drain"] if source == "turn_end" else ["confirm"] if source == "codex_confirm" else ["drain"])
 
 
+def test_ownership_moving_never_breaks_stream_worker_or_route(monkeypatch):
+    # Sessão recém-criada passando ao Rust: o SSE e o drain de fundo seguem, a rota responde 409.
+    import json
+    owner = Owner()
+    async def moving(name, command, operation_id):
+        raise runtime_coordinator.TransferInProgress("sessão em transferência; aguarde a posse ser confirmada")
+    owner.op = moving
+    monkeypatch.setattr(runtime_coordinator, "_current", owner)
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        assert await asyncio.to_thread(sse._confirm_codex_queue, "session", "chat") is None
+        assert await asyncio.to_thread(api._drenar, "session", "chat", "codex") == 0
+    asyncio.run(scenario())
+    response = asyncio.run(api._ownership_moving(None, runtime_coordinator.TransferInProgress("x")))
+    assert response.status_code == 409
+    assert json.loads(response.body)["detail"]["code"] == "session_transfer_busy"
+
+
 def test_terminal_and_other_providers_keep_legacy_route(monkeypatch):
     monkeypatch.setattr(runtime_coordinator, "_current", Owner())
     monkeypatch.setattr(api, "_headless", lambda name: False)

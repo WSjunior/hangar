@@ -35,6 +35,9 @@ pub(super) struct BrowserPanel {
     /// Status da importação do login do Chrome, mostrado embaixo da barra.
     #[cfg(not(target_os = "macos"))]
     cookies_status: Option<String>,
+    /// A pessoa já viu o aviso de que o login importado vale para todas as sessões.
+    #[cfg(not(target_os = "macos"))]
+    cookies_confirmed: bool,
     /// URL cujo login já foi preenchido com as senhas salvas do Chrome, para não repetir a cada evento da mesma página.
     #[cfg(target_os = "linux")]
     last_fill: Option<String>,
@@ -67,7 +70,7 @@ impl BrowserPanel {
             cx.on_blur(&focus, window, |this, _, _| if let Some(engine) = this.engine() { engine.focus(false) }),
         ];
         Self { key, #[cfg(not(target_os = "macos"))] controller: None, #[cfg(not(target_os = "macos"))] cdp: None,
-            #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(target_os = "linux")] last_fill: None, focus,
+            #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] cookies_confirmed: false, #[cfg(target_os = "linux")] last_fill: None, focus,
             origin: Rc::default(), shown: false, _drain: drain, _subscriptions: subscriptions }
     }
 
@@ -89,12 +92,12 @@ impl BrowserPanel {
         cx.notify();
     }
 
-    /// Ao terminar de carregar uma página cujo domínio tem senha salva no Chrome, preenche o login. Uma vez por URL (o
-    /// evento de estado repete em SPA). A leitura e a decifração rodam em thread de fundo; a senha em claro só vive aqui
-    /// e no campo da página.
+    /// Ao terminar de carregar uma página https cuja origem tem senha salva no Chrome, preenche o login — só com a opção
+    /// ligada nas Configurações. Uma vez por URL (o evento de estado repete em SPA). A leitura e a decifração rodam em
+    /// thread de fundo; a senha em claro só vive aqui e no campo da página.
     #[cfg(target_os = "linux")]
     fn maybe_autofill(&mut self, cx: &mut Context<Self>) {
-        if self.page.loading {
+        if self.page.loading || !crate::appearance::get().chrome_autofill {
             return;
         }
         let Some(url) = self.page.url.clone() else { return };
@@ -102,24 +105,35 @@ impl BrowserPanel {
             return;
         }
         let Ok(parsed) = url::Url::parse(&url) else { return };
-        let Some(host) = parsed.host_str().map(str::to_owned) else { return };
+        if parsed.scheme() != "https" {
+            return;
+        }
+        let origin = parsed.origin().ascii_serialization();
         let Some(cdp) = self.cdp.clone() else { return };
-        self.last_fill = Some(url);
-        let fetch = cx.background_executor().spawn(async move { crate::browser::chrome_import::credentials_for(&host) });
-        cx.spawn(async move |_, cx| {
+        self.last_fill = Some(url.clone());
+        let page = url.clone();
+        let fetch = cx.background_executor().spawn(async move { crate::browser::chrome_import::credentials_for(&page) });
+        cx.spawn(async move |this, cx| {
             let Some((user, pass)) = fetch.await.into_iter().next() else { return };
-            let js = crate::browser::chrome_import::inject_login_js(&user, &pass);
+            let js = crate::browser::chrome_import::inject_login_js(&origin, &user, &pass);
             let params = serde_json::json!({"expression": js, "returnByValue": true});
             // SPA desenha o formulário depois do carregamento: tenta algumas vezes, para na que achou o campo de senha.
             for wait in [0u64, 1500, 4000] {
                 if wait > 0 {
                     cx.background_executor().timer(std::time::Duration::from_millis(wait)).await;
                 }
+                // Redirect ou navegação desde a leitura: a senha era da página anterior, não desta.
+                if !this.read_with(cx, |this, _| this.page.url.as_deref() == Some(url.as_str())).unwrap_or(false) {
+                    break;
+                }
                 match cdp.call("Runtime.evaluate", params.clone()).await {
                     Ok(v) => {
-                        // Exceção no script (ou página morta) não é "sem campo de senha": loga e para de tentar.
+                        // Exceção no script (ou página morta) não é "sem campo de senha": loga e para de tentar. Só a
+                        // classe e o texto: o resto do detalhe pode trazer a expressão, que tem a senha.
                         if let Some(detail) = v.get("exceptionDetails") {
-                            eprintln!("[nav] autofill: exceção no script da página: {detail}");
+                            let class = detail["exception"]["className"].as_str().unwrap_or("?");
+                            let text = detail["text"].as_str().unwrap_or("");
+                            eprintln!("[nav] autofill: exceção no script da página: {class}: {text}");
                             break;
                         }
                         if v["result"]["value"].as_bool() == Some(true) {
@@ -304,6 +318,13 @@ impl BrowserPanel {
             cx.notify();
             return;
         };
+        // O perfil do navegador embutido é um só para todas as sessões e agentes: o 1º clique só avisa, o 2º traz.
+        if !self.cookies_confirmed {
+            self.cookies_confirmed = true;
+            self.cookies_status = Some(tr("browser_cookies_confirm"));
+            cx.notify();
+            return;
+        }
         self.cookies_status = Some(tr("browser_cookies_fetching"));
         cx.notify();
         // Plano B pra Chromium/Brave antigos: porta fixa por variável de ambiente.

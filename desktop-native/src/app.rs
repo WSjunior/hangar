@@ -706,7 +706,9 @@ impl Hangar {
             KeyBinding::new("ctrl-c", NoAction, Some("Terminal")),
             // Tab dentro da página navega os campos dela, não o foco do app.
             KeyBinding::new("tab", NoAction, Some("BrowserPage")),
-            KeyBinding::new("shift-tab", NoAction, Some("BrowserPage"))]);
+            KeyBinding::new("shift-tab", NoAction, Some("BrowserPage")),
+            // Num campo de texto o Ctrl+W apaga a palavra, como no readline; fechar sessão fica fora dele.
+            KeyBinding::new("ctrl-w", gpui_kit::base::input::DeleteToPreviousWordStart, Some("Input"))]);
         let settings_ui = settings::SettingsUi::new(window, cx);
         let root_focus = cx.focus_handle();
         cx.on_focus_lost(window, |this: &mut Self, window, cx| this.machines_focus_lost(window, cx)).detach();
