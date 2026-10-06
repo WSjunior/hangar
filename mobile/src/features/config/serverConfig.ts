@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { getConfigForServer, patchConfigForServer, type CampoConfig, type Server, type VariavelEnv } from '@hangar/core';
+import {
+  getConfigForServer, parseTranscriptionProviders, patchConfigForServer, transcriptionProvidersMissingKey,
+  type CampoConfig, type Server, type VariavelEnv,
+} from '@hangar/core';
 import type { IconName } from '../../ui/Icon';
 import { useServers } from '../../stores/servers';
 import * as m from '../../paraglide/messages';
@@ -72,6 +75,8 @@ export const textOf = (v: unknown): string => (v === null || v === undefined ? '
 type Load = { status: 'loading' } | { status: 'error'; error: string } | { status: 'ready' };
 type Draft = Record<string, unknown>;
 
+export const PROVIDERS = 'transcription_providers';
+
 const message = (e: unknown) => (e instanceof Error && e.message ? e.message : m.erro_desconhecido());
 
 /**
@@ -136,9 +141,11 @@ export function useServerConfig() {
   };
   const unstage = (key: string) => setDraft((d) => { const { [key]: _, ...rest } = d; return rest; });
   const discard = () => { setDraft({}); setSaveError(''); };
+  // Serviço de transcrição sem chave faz o servidor recusar o Salvar inteiro: o Salvar espera a chave.
+  const saveBlocked = PROVIDERS in draft && transcriptionProvidersMissingKey(parseTranscriptionProviders(draft[PROVIDERS]));
 
   const save = () => {
-    if (!server || saving || Object.keys(draft).length === 0) return;
+    if (!server || saving || saveBlocked || Object.keys(draft).length === 0) return;
     const sent = { ...draft };
     const g = gen.current;
     setSaving(true);
@@ -162,7 +169,7 @@ export function useServerConfig() {
   };
 
   return {
-    server, load, fields, read, env, draft, saving, saveError, saved,
+    server, load, fields, read, env, draft, saving, saveError, saved, saveBlocked,
     dirty: Object.keys(draft).length > 0,
     reload: () => reload(server),
     current, removing, editedInApp, filled, secretMask, keySet, stage, unstage, discard, save,

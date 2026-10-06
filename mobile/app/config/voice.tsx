@@ -2,12 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import { Linking, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { MenuView } from '@react-native-menu/menu';
-import { listarVozesTts, saldoTts, type TtsVoz } from '@hangar/core';
+import { listarVozesTts, parseTranscriptionProviders, saldoTts, type TtsVoz } from '@hangar/core';
 import { BlockHead, Box, Chip, ConfigRow, Disclosure, Muted, RowShell, ScopeChips, ServerConfigPage } from '../../src/features/config/ServerConfigParts';
 import { Pill } from '../../src/features/config/PageHeader';
 import { Segmented } from '../../src/features/config/Segmented';
 import { Slider } from '../../src/features/config/Slider';
-import { textOf, useServerConfig, type ServerConfig } from '../../src/features/config/serverConfig';
+import { PROVIDERS, textOf, useServerConfig, type ServerConfig } from '../../src/features/config/serverConfig';
+import { TranscriptionProviders } from '../../src/features/config/TranscriptionProviders';
 import { useSettingsColors } from '../../src/features/config/colors';
 import { Icon } from '../../src/ui/Icon';
 import * as m from '../../src/paraglide/messages';
@@ -64,7 +65,8 @@ export default function Voice() {
   useEffect(() => { if (elevenKey) toggle(3)(true); }, [elevenKey]);
   useEffect(() => { if (localCmd) toggle(5)(true); }, [localCmd]);
 
-  const transcribe = cfg.keySet('groq_api_key') ? (cfg.filled('transcription_base_url') ? m.native_voice_status_custom() : m.native_voice_status_on()) : null;
+  const transcribe = parseTranscriptionProviders(cfg.current(PROVIDERS)).length ? m.native_voice_status_custom()
+    : cfg.keySet('groq_api_key') ? (cfg.filled('transcription_base_url') ? m.native_voice_status_custom() : m.native_voice_status_on()) : null;
   const cleanup = cfg.filled('llm_base_url')
     ? (cfg.keySet('llm_api_key') ? m.native_voice_status_custom() : null)
     : (cfg.keySet('groq_api_key') && !cfg.filled('transcription_base_url') ? m.native_voice_status_default() : null);
@@ -81,6 +83,7 @@ export default function Voice() {
         <Disclosure open={open[0]} label={m.native_voice_transcribe_other()} onChange={toggle(0)} />
       </View>
       {open[0] ? rows(SECTIONS[0]) : null}
+      <TranscriptionProviders cfg={cfg} />
 
       <BlockHead title={m.native_voice_after()} />
       <Box>
