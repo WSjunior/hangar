@@ -2630,6 +2630,7 @@ class SessionRegistry:
             from app import default_model
             # Na conta Anthropic, id de motor herdado do processo antigo derruba cada turno.
             if not default_model.anthropic(model):
+                model_args.validar("claude", model, None)  # valor malformado continua recusado
                 _log.warning("modelo %r não é da Anthropic; sessão relançada no padrão da conta", model)
                 model = None
         if meta.get("engine_account"):
@@ -3297,6 +3298,7 @@ class SessionRegistry:
         if modelo and not motor:
             from app import default_model
             if not default_model.anthropic(modelo):
+                model_args.validar("claude", modelo, None)  # malformado: recusa antes do kill
                 _log.warning("resume %s: modelo %r não é da Anthropic; volta no padrão da conta", name, modelo)
                 modelo = None
         service_tier = _claude_service_tier(motor, modelo, service_tier)
