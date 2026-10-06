@@ -104,15 +104,20 @@ def test_interrupcao_pelo_app_solta_a_pergunta_na_hora_e_acorda_o_long_poll(monk
         espera = asyncio.create_task(pb.ask(_corpo("ask:t1", questions=[{"question": "A ou B?"}])))
         while pb.pergunta_pendente("s1") is None:
             await asyncio.sleep(0.01)
-        pb.interrompeu("s1")
+        pb.interrompeu("s1", "ask:t1")
         assert pb.pergunta_pendente("s1") is None
         return await asyncio.wait_for(espera, 2)
 
     assert asyncio.run(cena()) == {"answers": None}
-    # Mesma pergunta re-perguntada pelo hook não volta; uma pergunta nova conta.
+    # O hook que refaz o poll logo depois do Esc ainda pode estar morrendo: não volta.
     asyncio.run(pb.ask(_corpo("ask:t1", questions=[{"question": "A ou B?"}], janela_ms=20)))
     assert pb.pergunta_pendente("s1") is None
-    asyncio.run(pb.ask(_corpo("ask:t2", questions=[{"question": "C ou D?"}], janela_ms=20)))
+    # Ainda perguntando depois de HOOK_VIVO_S, ele sobreviveu ao Esc: a pergunta volta a contar.
+    pb._perguntas["s1"]["interrompida"] -= pb.HOOK_VIVO_S + 1
+    asyncio.run(pb.ask(_corpo("ask:t1", questions=[{"question": "A ou B?"}], janela_ms=20)))
+    assert pb.pergunta_pendente("s1") is not None
+    # Interrupção de outra pergunta (lida antes do Esc) não marca a que abriu depois.
+    pb.interrompeu("s1", "ask:t0")
     assert pb.pergunta_pendente("s1") is not None
 
 

@@ -6,6 +6,7 @@ import contextvars
 import copy
 import hashlib
 import json
+import logging
 import os
 import socket
 import time
@@ -14,6 +15,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from app.runtime_coordinator import Binding, Phase, WriterLease, _clock
+
+_log = logging.getLogger("hangar.runtime_terminal")
 
 _writer = contextvars.ContextVar('runtime_terminal_writer', default=None)
 # Pedido de convidado (clique de mod pelo app): não recebe o teclado de uma sessão do Rust. A marca
@@ -570,23 +573,28 @@ def _reply(operation_id, disposition, **payload):
 
 # Quanto a trava do /clear espera a conversa nova antes de conferir se ele foi aplicado (a regra do Rust).
 CLEAR_APPLY_WAIT_S = 10.0
+# Até quando um transcript novo começado por /clear segura a trava; depois só o vínculo vale (o
+# arquivo pode ser de outra sessão na mesma pasta).
+CLEAR_DISK_TRUST_S = 60.0
+# Próxima conferência por sessão: com o Claude ocupado, cada uma custaria três gravações do diário.
+_CLEAR_NEXT: dict[str, float] = {}
 
 
 def _clear_on_disk(jsonl, since):
-    """Prova no disco de que o /clear rodou: transcript novo na pasta da conversa, gravado depois da
-    trava, que começa pelo registro do comando."""
+    """Prova no disco de que o /clear rodou: transcript nascido depois do despacho, na pasta da
+    conversa, que começa pelo registro do comando. Leitura que falha conta como prova."""
     atual = Path(jsonl)
     try:
-        candidatos = [p for p in atual.parent.glob('*.jsonl') if p != atual and p.stat().st_mtime >= since - 1]
-    except OSError:
-        return False
-    for p in candidatos:
-        try:
+        for p in atual.parent.glob('*.jsonl'):
+            info = p.stat()
+            if p == atual or getattr(info, 'st_birthtime', info.st_mtime) < since - 1:
+                continue
             with p.open('rb') as f:
                 if b'<command-name>/clear</command-name>' in f.read(16 * 1024):
                     return True
-        except OSError:
-            continue
+    except OSError:
+        _log.warning("trava do /clear: transcript ilegível em %s; a trava fica", atual.parent, exc_info=True)
+        return True
     return False
 
 
@@ -598,15 +606,20 @@ def _expire_clear(coordinator, descriptor, operation_id):
     slot = coordinator.slots[descriptor['key']]
     barrier = slot.store.state['runtime_state'].get('clear_barrier') or {}
     since = barrier.get('since', 0)
-    if time.time() - since < CLEAR_APPLY_WAIT_S:
+    agora = time.time()
+    if agora - since < CLEAR_APPLY_WAIT_S or agora < _CLEAR_NEXT.get(descriptor['key'], 0):
         return False
+    _CLEAR_NEXT[descriptor['key']] = agora + CLEAR_APPLY_WAIT_S
     try:
         current = _service(coordinator, descriptor, operation_id, operation_id, 'terminal_facts',
             {'binding':descriptor['meta']['terminal'],'operation_id':operation_id,'text':''})
-    except Exception:
-        return False        # o vínculo mudou (a conversa nova existe, falta reabrir) ou os fatos falharam
-    if not current['idle'] or _clear_on_disk(descriptor['jsonl'], since):
+    except Exception as exc:
+        # O vínculo mudou (a conversa nova existe, falta reabrir) ou os fatos falharam: a trava fica.
+        _log.info("trava do /clear de %s fica: %s", descriptor['name'], type(exc).__name__)
         return False
+    if not current['idle'] or agora - since < CLEAR_DISK_TRUST_S and _clear_on_disk(descriptor['jsonl'], since):
+        return False
+    _CLEAR_NEXT.pop(descriptor['key'], None)
     state = copy.deepcopy(slot.store.state)
     state['runtime_state'].pop('clear_barrier', None)
     state['runtime_state'].pop('preserve_binding', None)
@@ -751,6 +764,7 @@ def _reserve_execute(coordinator, descriptor, command, operation_id, *, entry_id
         _queue(coordinator, descriptor, {'kind':'finish','id':operation_id,'status':'deferred','result':result})
         return result
     dispatched = False
+    dispatched_at = time.time()     # antes da escrita: o transcript novo do /clear nasce logo depois do Enter
     def begin():
         nonlocal dispatched
         if dispatched:
@@ -842,7 +856,7 @@ def _reserve_execute(coordinator, descriptor, command, operation_id, *, entry_id
             or result['disposition'] == 'unknown' and (not stage or stage.endswith('submeter'))):
         state = copy.deepcopy(slot.store.state)
         state['runtime_state'].update(preserve_binding=True, clear_barrier={'generation':descriptor['generation'],
-            'conversation':binding['conversation'],'operation_id':operation_id,'since':time.time()})
+            'conversation':binding['conversation'],'operation_id':operation_id,'since':dispatched_at})
         slot.store._persist(state)
         result['payload']['preserve_binding'] = True
     _queue(coordinator, descriptor, {'kind':'finish','id':operation_id,'status':result['disposition'],'result':result})

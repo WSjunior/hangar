@@ -338,7 +338,8 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **A trava do `/clear` só sobe se o Enter pode ter saído e sempre tem saída.** Aceito, ou incerto
   nas etapas do Enter (`submit`, `submit_proof`; no Python, `*.submeter`). Incerto antes do Enter
   é entrega incerta comum. Passado o prazo com a sessão parada e sem conversa nova (nem no vínculo
-  nem transcript novo começando por `<command-name>/clear`), a trava sai, a operação fica
+  nem transcript nascido depois do despacho começando por `<command-name>/clear`, prova que vale
+  60 s e que, ilegível, segura a trava), a trava sai, a operação fica
   recusada (`clear_not_applied`, a reabertura não a ergue de novo), a fila segue e a vista avisa.
   O `/clear` nunca é reenviado sozinho. Com o Claude trabalhando ele espera na fila do Claude
   Code, e a trava espera o turno.
@@ -347,8 +348,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   depois sozinho (`erro_comando_nao_executado`).
 
 - **Pergunta do plugin interrompida pelo app sai na hora.** O Esc fecha o diálogo e o hook morre
-  sem `/ask-fim`, deixando o long-poll aberto até a janela fechar; sem long-poll por mais de 3 s
-  (Esc digitado no terminal), a pergunta também deixa de contar.
+  sem `/ask-fim`, deixando o long-poll aberto até a janela fechar. Só a pergunta lida antes do Esc
+  é marcada; hook que ainda pergunta 2 s depois sobreviveu e ela volta a contar. Sem long-poll por
+  mais de 3 s (Esc digitado no terminal), a pergunta também deixa de contar.
 
 ## O /clear e o rodapé do Claude Code
 

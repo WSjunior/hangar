@@ -232,6 +232,9 @@ _OCUPADO_DEFER_COUNT: dict[str, int] = {}
 # vira todo envio em adiamento silencioso pra sempre, e o usuario so descobre olhando o terminal.
 _INDISPONIVEL_WARNED: set[str] = set()
 _INDISPONIVEL_DEFER_COUNT: dict[str, int] = {}
+# Idem pro foco no rodapé do Claude Code que o Esc não devolveu ao composer.
+_FOCO_WARNED: set[str] = set()
+_FOCO_DEFER_COUNT: dict[str, int] = {}
 # Quantas vezes SEGUIDAS uma sessao pode ficar deferred (por composer ocupado OU por indisponivel)
 # antes do log virar ERRO, em vez do WARNING unico de praxe (_OCUPADO_WARNED/_INDISPONIVEL_WARNED),
 # que cala depois da primeira vez. Medido 02/08/2026: com o aviso de subagente do Pi contando como
@@ -1724,6 +1727,7 @@ class TerminalInput:
                     # review 02/08/2026.
                     _limpa_deferred(name, _OCUPADO_WARNED, _OCUPADO_DEFER_COUNT)
                     _limpa_deferred(name, _INDISPONIVEL_WARNED, _INDISPONIVEL_DEFER_COUNT)
+                    _limpa_deferred(name, _FOCO_WARNED, _FOCO_DEFER_COUNT)
                     return "deferred"
                 # Sessao viva mas indisponivel AGORA (overlay/menu aberto, ou awaiting_input — ver
                 # `deliverable`). Ate a review 02/08/2026 este era o UNICO deferred do arquivo sem
@@ -1754,8 +1758,9 @@ class TerminalInput:
             if provider == "claude":
                 if not _devolver_foco_ao_composer(name):
                     _avisa_deferred(name, "foco no rodapé do Claude Code (painel de agentes)",
-                                    _INDISPONIVEL_WARNED, _INDISPONIVEL_DEFER_COUNT, None)
+                                    _FOCO_WARNED, _FOCO_DEFER_COUNT, _diag_composer(_capture(name), text, name, None))
                     return "deferred"
+                _limpa_deferred(name, _FOCO_WARNED, _FOCO_DEFER_COUNT)
                 _esvaziar_composer_claude(name)
             if "\n" in text or _exige_clipboard(text, provider):
                 # Foto dos placeholders de paste ANTES do nosso: so um numero NOVO conta como

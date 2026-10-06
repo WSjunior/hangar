@@ -45,6 +45,8 @@ ESPERA_S = 25.0
 # Entre dois long-polls o hook volta em milissegundos (2 s se o backend falhar). Sem long-poll aberto
 # por mais que isto, o hook morreu: o Esc no terminal interrompe a ferramenta sem o `/ask-fim`.
 SEM_POLL_S = 3.0
+# O hook que ainda faz long-poll depois disso sobreviveu ao Esc do app (o diálogo ficou).
+HOOK_VIVO_S = 2.0
 
 _lock = threading.Lock()
 _waiters: dict[str, asyncio.Queue] = {}
@@ -1299,15 +1301,16 @@ async def opened(body: OpenedBody):
 _perguntas: dict[str, dict] = {}
 
 
-def interrompeu(name: str) -> None:
-    """O Esc do app fecha o diálogo no terminal, e o hook morre sem `/ask-fim` deixando o long-poll
-    aberto até a janela fechar. A pergunta interrompida deixa de contar na hora (a tela ainda mostra
-    um diálogo que tenha ficado), e o long-poll é acordado para terminar."""
+def interrompeu(name: str, id: str | None) -> None:
+    """O Esc do app fecha o diálogo `id` (lido antes do Esc) no terminal, e o hook morre sem
+    `/ask-fim` deixando o long-poll aberto até a janela fechar. A pergunta interrompida deixa de
+    contar na hora e o long-poll é acordado para terminar; hook que ainda pergunta depois de
+    `HOOK_VIVO_S` sobreviveu ao Esc e a pergunta volta a contar."""
     with _lock:
         p = _perguntas.get(name)
-        if p is None:
+        if p is None or id is None or p["id"] != id:
             return
-        p["interrompida"] = True
+        p["interrompida"] = time.monotonic()
         fila = p.get("fila")
     if fila is not None:
         fila.put_nowait({"answers": None})
@@ -1408,6 +1411,8 @@ async def ask(body: AskBody):
             p = _perguntas[body.sessao] = {"id": body.id, "questions": body.questions or [],
                                            "tool": body.tool, "resumo": body.resumo}
         p["visto"] = time.monotonic()
+        if p.get("interrompida") and p["visto"] - p["interrompida"] > HOOK_VIVO_S:
+            p.pop("interrompida")
         guardada = p.pop("resposta", None)
         if guardada is None:
             p["fila"] = fila

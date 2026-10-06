@@ -361,7 +361,7 @@ def _fim_do_composer(lines: list[str], ate: Optional[int] = None) -> Optional[in
 def _painel_de_agentes(lines: list[str], top: int, options: list[str]) -> bool:
     # O painel de agentes ("← for agents": ● principal, ◯ subagente) com foco põe o `❯` num agente e
     # parece um menu sem número; responder ao cartão dele navegava no painel.
-    return all(o[:1] in "●◯" for o in options) and _fim_do_composer(lines, top) is not None
+    return all(o[:1] and o[0] in "●◯" for o in options) and _fim_do_composer(lines, top) is not None
 
 
 def foco_no_rodape(pane_text: str) -> bool:

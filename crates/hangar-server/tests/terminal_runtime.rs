@@ -544,6 +544,9 @@ async fn terminal_runtime_clear_unproved_before_enter_raises_no_barrier() {
 async fn terminal_runtime_clear_without_new_conversation_releases_barrier_without_resending() {
     // O Enter saiu e o composer esvaziou, mas a conversa nunca mudou: o /clear caiu em outro lugar.
     let f=Fixture::new().await; let h=f.start_clear(Duration::from_millis(200));
+    // Transcript de antes do despacho (outra sessão, ou conversa antiga nascida de /clear): não prova nada.
+    std::fs::write(f.target.transcript.with_file_name("older.jsonl"),"{\"message\":{\"content\":\"<command-name>/clear</command-name>\"}}\n").unwrap();
+    tokio::time::sleep(Duration::from_millis(1100)).await;
     assert_eq!(h.command(f.command("clear-stuck","/clear")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
     assert!(f.state()["runtime_state"]["clear_barrier"].is_object());
     assert!(h.command(f.command("during-barrier","Olá")).await.is_err());

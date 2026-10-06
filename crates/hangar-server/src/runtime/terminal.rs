@@ -193,6 +193,9 @@ const MAX_LOAN_S:u64=120;
 const CLEAR_APPLY_WAIT:Duration=Duration::from_secs(10);
 /// Quanto o aviso de `/clear` não aplicado fica na vista.
 const CLEAR_NOTICE:Duration=Duration::from_secs(60);
+/// Até quando um transcript novo começado por `/clear` segura a trava esperando o Python trocar o
+/// vínculo; depois disso só os fatos dele valem (o arquivo pode ser de outra sessão na mesma pasta).
+const CLEAR_DISK_TRUST_S:f64=60.0;
 /// O `/clear` só pode ter trocado a conversa se o Enter saiu: aceito, ou incerto nas etapas do Enter
 /// (sem etapa é a queda no meio, que não se sabe). Incerto antes dele segue como entrega incerta comum.
 fn clear_may_have_run(disposition:Disposition,payload:&Value)->bool {
@@ -202,21 +205,24 @@ fn clear_may_have_run(disposition:Disposition,payload:&Value)->bool {
         _=>false,
     }
 }
-/// A prova no disco de que o `/clear` rodou: um transcript novo na pasta da conversa, gravado depois da
-/// trava, que começa pelo registro do comando.
-fn clear_on_disk(transcript:&std::path::Path,since:f64)->bool {
+/// A prova no disco de que o `/clear` rodou: um transcript nascido depois do despacho, na pasta da
+/// conversa, que começa pelo registro do comando. Leitura que falha conta como prova: na dúvida a
+/// trava fica.
+fn clear_on_disk(transcript:&std::path::Path,since:f64)->Result<bool,std::io::Error> {
     use std::io::Read;
     const MARK:&[u8]=b"<command-name>/clear</command-name>";
-    let Some(entries)=transcript.parent().and_then(|dir|std::fs::read_dir(dir).ok()) else {return false};
-    entries.flatten().any(|entry|{
-        let path=entry.path();
-        let fresh=entry.metadata().ok().and_then(|m|m.modified().ok()).and_then(|t|t.duration_since(UNIX_EPOCH).ok())
-            .is_some_and(|t|t.as_secs_f64()>=since-1.0);
+    let Some(dir)=transcript.parent() else {return Ok(false)};
+    for entry in std::fs::read_dir(dir)? {
+        let path=entry?.path();
+        if path==transcript || path.extension().is_none_or(|e|e!="jsonl") {continue;}
+        let meta=std::fs::metadata(&path)?;
+        let born=meta.created().or_else(|_|meta.modified())?.duration_since(UNIX_EPOCH).map_or(0.0,|t|t.as_secs_f64());
+        if born<since-1.0 {continue;}
         let mut head=Vec::new();
-        path!=transcript && path.extension().is_some_and(|e|e=="jsonl") && fresh
-            && std::fs::File::open(&path).and_then(|f|f.take(16*1024).read_to_end(&mut head)).is_ok()
-            && head.windows(MARK.len()).any(|w|w==MARK)
-    })
+        std::fs::File::open(&path)?.take(16*1024).read_to_end(&mut head)?;
+        if head.windows(MARK.len()).any(|w|w==MARK) {return Ok(true);}
+    }
+    Ok(false)
 }
 /// Teto de cada reserva do pane a um clique de mod: os 7,5 s do pedido mais os 2 s da limpeza, com folga; a
 /// limpeza renova a sua a cada volta ao prompt, também abaixo disto. Vence sozinha: uma tarefa de clique que
@@ -315,7 +321,8 @@ impl Executor {
             && match op.status {Status::Accepted|Status::Confirmed=>true,Status::Unknown=>clear_may_have_run(Disposition::Unknown,&op.result["payload"]),_=>false}
             && op.wire_attempts.keys().any(|wire|wire.starts_with(&format!("terminal:{}:",self.target.generation)))) {
             let mut state=recovered.runtime_state.clone(); state["preserve_binding"]=json!(true);
-            state["clear_barrier"]=json!({"generation":self.target.generation,"conversation":self.target.binding.conversation,"operation_id":clear.id,"since":sample().epoch_s});
+            let since=Some(&state["clear_barrier"]).filter(|b|b["operation_id"]==clear.id.as_str()).and_then(|b|b["since"].as_f64()).unwrap_or_else(||sample().epoch_s);
+            state["clear_barrier"]=json!({"generation":self.target.generation,"conversation":self.target.binding.conversation,"operation_id":clear.id,"since":since});
             self.action(Action::SetRuntimeState {state}).await?;
         }
         if self.cleared(&self.queue.snapshot().await.map_err(|_|error("queue_io"))?) {self.clear_watch=Some(tokio::time::Instant::now()+self.options.clear_wait);}
@@ -599,6 +606,8 @@ impl Executor {
             return Ok(result);
         }
         let root=row_id.as_deref().unwrap_or(id);
+        // Antes da escrita: o transcript novo do `/clear` nasce logo depois do Enter.
+        let dispatched_at=sample().epoch_s;
         let services=self.services(root,id,text);
         let driver=TerminalDriver::new(self.target.binding.clone(),services.clone(),self.options.io.clone(),self.options.limits.clone());
         let facts=if prompt {Some(services.facts(&self.target.binding).await)}else{None};
@@ -653,10 +662,11 @@ impl Executor {
             tracing::warn!(key=%self.target.key,session=%self.target.name,draft,code=%result.payload["code"].as_str().unwrap_or(""),
                 reason="o rascunho do dono não voltou igual ao composer; se o terminal marca › stashed, ele volta com Ctrl+S","rascunho do terminal");
         }
-        if slash && is_clear(text) && clear_may_have_run(result.disposition,&result.payload) {
+        let clear_raised=slash && is_clear(text) && clear_may_have_run(result.disposition,&result.payload);
+        if clear_raised {
             let mut state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?.runtime_state;
             state["preserve_binding"]=json!(true);
-            state["clear_barrier"]=json!({"generation":self.target.generation,"conversation":self.target.binding.conversation,"operation_id":id,"since":sample().epoch_s});
+            state["clear_barrier"]=json!({"generation":self.target.generation,"conversation":self.target.binding.conversation,"operation_id":id,"since":dispatched_at});
             self.action(Action::SetRuntimeState {state}).await?;
             result.payload["preserve_binding"]=json!(true);
             self.clear_watch=Some(tokio::time::Instant::now()+self.options.clear_wait); self.clear_notice=None;
@@ -670,7 +680,7 @@ impl Executor {
         if result.disposition==Disposition::Unknown {
             tracing::warn!(key=%self.target.key,session=%self.target.name,code=%result.payload["code"].as_str().unwrap_or("plugin_control_uncertain"),
                 reason="a entrega não foi comprovada",stage=%result.payload["stage"].as_str().unwrap_or("plugin"),"entrega terminal incerta");
-            if row_id.is_some() {self.uncertain.push(id.into());} else {self.unprovable=true;}
+            if row_id.is_some() {self.uncertain.push(id.into());} else if !clear_raised {self.unprovable=true;}
             self.enter_error(error("terminal_delivery_unknown")).await?;
         }else{self.last_error=None; self.uncertain.clear(); self.unprovable=false; self.publish().await?;}
         Ok(result)
@@ -790,13 +800,26 @@ impl Executor {
         if self.clear_watch.is_none_or(|at|now<at) {return false;}
         let state=match self.queue.snapshot().await {Ok(state)=>state,Err(_)=>return false};
         if !self.cleared(&state) {self.clear_watch=None; return false;}
-        let barrier=state.runtime_state["clear_barrier"].clone();
         let changed=match self.services("maintenance","maintenance","").facts(&self.target.binding).await {
             Ok(facts)=>facts.binding!=self.target.binding || !facts.idle,
-            Err(_)=>{self.clear_watch=Some(now+self.options.clear_wait); return false;}
+            Err(failure)=>{
+                if crate::warn_limit::allow(Some(self.target.key.as_str()),"clear_barrier_facts") {
+                    tracing::warn!(key=%self.target.key,session=%self.target.name,code=%failure.0,"fatos indisponíveis; a trava do /clear fica e confere de novo");
+                }
+                self.clear_watch=Some(now+self.options.clear_wait); return false;
+            }
         };
+        // Relido depois dos fatos: a liberação grava o estado inteiro.
+        let state=match self.queue.snapshot().await {Ok(state)=>state,Err(_)=>return false};
+        if !self.cleared(&state) {self.clear_watch=None; return false;}
+        let barrier=state.runtime_state["clear_barrier"].clone();
+        let since=barrier["since"].as_f64().unwrap_or(0.0);
+        let on_disk=sample().epoch_s-since<CLEAR_DISK_TRUST_S && clear_on_disk(&self.target.transcript,since).unwrap_or_else(|failure|{
+            tracing::warn!(key=%self.target.key,session=%self.target.name,code="clear_barrier_disk",kind=?failure.kind(),"transcript ilegível; a trava do /clear fica");
+            true
+        });
         // Ocupada, ou a conversa nova existe e só falta o Python reabrir: a troca do vínculo solta a trava.
-        if changed || clear_on_disk(&self.target.transcript,barrier["since"].as_f64().unwrap_or(0.0)) {
+        if changed || on_disk {
             self.clear_watch=Some(now+self.options.clear_wait); return false;
         }
         let mut runtime=state.runtime_state.clone();
@@ -816,7 +839,7 @@ impl Executor {
             "o /clear não virou conversa nova no prazo; a trava saiu e a fila segue, sem reenviar o /clear");
         self.clear_watch=None; self.clear_notice=Some(now+CLEAR_NOTICE);
         // A incerteza era a do `/clear`, que agora se sabe não aplicado: a fila volta a drenar.
-        if self.last_error.as_deref()==Some("terminal_delivery_unknown") && self.uncertain.is_empty() {self.unprovable=false; self.last_error=None;}
+        if self.last_error.as_deref()==Some("terminal_delivery_unknown") && self.uncertain.is_empty() && !self.unprovable {self.last_error=None;}
         if let Err(failure)=self.publish().await {tracing::warn!(key=%self.target.key,code=%failure.code,"vista do /clear não aplicado não publicou");}
         true
     }
