@@ -8,14 +8,17 @@ impl TerminalServices for Services {
  fn facts<'a>(&'a self, _: &'a TerminalBinding) -> ServiceFuture<'a, InputFacts> { Box::pin(async { Ok(self.facts.lock().unwrap().clone()) }) }
  fn publish<'a>(&'a self, _: &'a TerminalBinding, r: PluginRequest) -> ServiceFuture<'a, PluginReply> { Box::pin(async move { self.published.lock().unwrap().push(r); Ok(self.reply.lock().unwrap().clone()) }) }
 }
-struct FakeIo { screens: Mutex<VecDeque<String>>, calls: Mutex<Vec<CommandRequest>>, socket: Mutex<WriteOutcome>, envelope: Mutex<Vec<u8>>, fail: Mutex<Option<String>> }
+struct FakeIo { screens: Mutex<VecDeque<String>>, calls: Mutex<Vec<CommandRequest>>, socket: Mutex<WriteOutcome>, envelope: Mutex<Vec<u8>>, fail: Mutex<Option<String>>, formats: Mutex<String>, clients: Mutex<String>, attached: Mutex<String> }
 impl FakeIo {
- fn new(s: Vec<String>) -> Self { Self { screens: Mutex::new(s.into()), calls: Mutex::new(vec![]), socket: Mutex::new(WriteOutcome::NotWritten), envelope: Mutex::new(vec![]), fail: Mutex::new(None) } }
+ fn new(s: Vec<String>) -> Self { Self { screens: Mutex::new(s.into()), calls: Mutex::new(vec![]), socket: Mutex::new(WriteOutcome::NotWritten), envelope: Mutex::new(vec![]), fail: Mutex::new(None), formats: Mutex::new("1|1|0|150|45\n".into()), clients: Mutex::new(String::new()), attached: Mutex::new("0\n".into()) } }
  fn writes(&self) -> Vec<CommandRequest> { self.calls.lock().unwrap().iter().filter(|r| r.args.iter().any(|a| a == "send-keys" || a == "paste-buffer")).cloned().collect() }
 }
 impl TerminalIo for FakeIo {
  fn command<'a>(&'a self, r: CommandRequest) -> IoFuture<'a, CommandOutput> { Box::pin(async move {
  self.calls.lock().unwrap().push(r.clone());
+ if r.args.iter().any(|a| a == "display-message") && r.args.last().is_some_and(|a| a.contains("mouse_sgr_flag")) { return Ok(CommandOutput { success: true, stdout: self.formats.lock().unwrap().clone().into_bytes() }); }
+ if r.args.iter().any(|a| a == "display-message") && r.args.last().is_some_and(|a| a == "#{session_attached}") { return Ok(CommandOutput { success: true, stdout: self.attached.lock().unwrap().clone().into_bytes() }); }
+ if r.args.iter().any(|a| a == "list-clients") { return Ok(CommandOutput { success: true, stdout: self.clients.lock().unwrap().clone().into_bytes() }); }
  if r.args.iter().any(|a| a == "display-message") { return Ok(CommandOutput { success: true, stdout: b"test\t%7\t17\n".to_vec() }); }
  if r.args.iter().any(|a| a == "capture-pane") { let mut s = self.screens.lock().unwrap(); let t = if s.len()>1 {s.pop_front().unwrap()} else {s.front().cloned().unwrap_or_default()}; return Ok(CommandOutput {success: true, stdout:t.into_bytes()}); }
  if self.fail.lock().unwrap().as_ref().is_some_and(|k| r.args.last()==Some(k)) {return Err(IoFailure {code:"partial",may_have_written:true});}
@@ -435,4 +438,66 @@ async fn terminal_input_stash_hint_gone_with_our_paste_left_is_not_a_submit() {
  let io=Arc::new(FakeIo::new(vec![screen("rascunho"),stashed(""),stashed("[Pasted text #1 +2 lines]"),screen("[Pasted text #1 +2 lines]")]));
  let r=driver(io.clone(),Arc::new(Services::new())).prompt("first\nsecond","id").await;
  assert_eq!(r.disposition,Disposition::Unknown);assert_eq!(r.draft,Some(DraftOutcome::Unverified));
+}
+#[test]
+fn pane_formats_never_read_empty_as_zero() {
+ assert_eq!(PaneFormats::parse("1|1|0|150|45\n"), Some(PaneFormats { mouse: true, in_mode: false, columns: 150, rows: 45 }));
+ assert_eq!(PaneFormats::parse("|1|0|150|45"), Some(PaneFormats { mouse: true, in_mode: false, columns: 150, rows: 45 }), "psmux: sem mouse_sgr_flag vale a tela alternativa");
+ assert!(!PaneFormats::parse("0|1|0|150|45").unwrap().mouse);
+ assert_eq!(PaneFormats::parse("1|1||150|45"), None, "pane_in_mode vazio não é fora de modo");
+ assert_eq!(PaneFormats::parse("1|1|0|x|45"), None);
+}
+#[tokio::test]
+async fn mouse_wheel_keys_and_resize_go_as_measured() {
+ let io = Arc::new(FakeIo::new(vec![screen("")]));
+ let d = driver(io.clone(), Arc::new(Services::new()));
+ d.mouse(0, 104).await.unwrap();
+ d.wheel(19, 114, true).await.unwrap();
+ d.mods_keys(&["C-x", "Tab"]).await.unwrap();
+ d.mods_keys(&["Enter"]).await.unwrap();
+ assert_eq!(d.mods_keys(&["Escape"]).await.unwrap_err().code, "key_not_allowed");
+ d.resize(144, 45).await.unwrap();
+ let writes: Vec<Vec<String>> = io.calls.lock().unwrap().iter().filter(|r| !r.args.iter().any(|a| a == "display-message")).map(|r| r.args[2..].to_vec()).collect();
+ let expected: Vec<Vec<String>> = [
+  vec!["send-keys", "-t", "%7", "-l", "--", "\u{1b}[<0;105;1M\u{1b}[<0;105;1m"],
+  vec!["send-keys", "-t", "%7", "-l", "--", "\u{1b}[<65;115;20M"],
+  vec!["send-keys", "-t", "%7", "C-x", "Tab"],
+  vec!["send-keys", "-t", "%7", "-l", "--", "\r"],
+  vec!["resize-window", "-t", "=test:", "-x", "144", "-y", "45"],
+  vec!["set-window-option", "-t", "=test:", "window-size", "latest"],
+ ].into_iter().map(|v| v.into_iter().map(String::from).collect()).collect();
+ assert_eq!(writes, expected);
+ assert!(io.calls.lock().unwrap().iter().filter(|r| r.args.iter().any(|a| a == "display-message")).count() >= 5, "cada efeito confere o pane antes");
+}
+#[tokio::test]
+async fn windows_counts_terminals_by_session_attached() {
+ // No psmux o Hangar não abre cliente de controle: o observador da prévia recusa no Windows
+ // (`terminal_control.rs:173`) e o vigia de tamanho também (`watch_notices`, Task 15, com o teste
+ // `the_watch_refuses_on_windows`). Só por isso `#{session_attached}` conta terminais de verdade lá; o
+ // `list-clients -F` do psmux é medido na Task 20.
+ let io = Arc::new(FakeIo::new(vec![screen("")]));
+ let mut b = binding(); b.windows = true; b.pane = "=test:0.0".into();
+ let s = Arc::new(Services::new()); s.facts.lock().unwrap().binding = b.clone();
+ let d = TerminalDriver::new(b, s, io.clone(), InputLimits::default());
+ *io.attached.lock().unwrap() = "1\n".into();
+ assert_eq!(d.mods_clients().await.unwrap(), 1);
+ *io.attached.lock().unwrap() = "0\n".into();
+ assert_eq!(d.mods_clients().await.unwrap(), 0);
+ *io.attached.lock().unwrap() = "\n".into();
+ assert_eq!(d.mods_clients().await.unwrap_err().code, "clients_unreadable", "vazio nunca vale 0");
+ assert!(!io.calls.lock().unwrap().iter().any(|r| r.args.iter().any(|a| a == "list-clients")));
+ *io.formats.lock().unwrap() = "|1|0|150|45\n".into();
+ assert!(d.mods_formats().await.unwrap().mouse, "psmux: sem mouse_sgr_flag vale a tela alternativa");
+}
+#[tokio::test]
+async fn clients_skip_control_mode() {
+ let io = Arc::new(FakeIo::new(vec![screen("")]));
+ *io.clients.lock().unwrap() = "attached,focused,control-mode,ignore-size,no-output,UTF-8\nattached,focused,UTF-8\n".into();
+ let d = driver(io.clone(), Arc::new(Services::new()));
+ assert_eq!(d.mods_clients().await.unwrap(), 1);
+ *io.clients.lock().unwrap() = "attached,focused,control-mode,ignore-size,no-output,UTF-8\n".into();
+ assert_eq!(d.mods_clients().await.unwrap(), 0, "o observador e o vigia do Hangar não são terminal ligado");
+ assert_eq!(d.mods_formats().await.unwrap(), PaneFormats { mouse: true, in_mode: false, columns: 150, rows: 45 });
+ let capture = { d.mods_screen().await.unwrap(); io.calls.lock().unwrap().iter().rev().find(|r| r.args.iter().any(|a| a == "capture-pane")).unwrap().args.clone() };
+ assert!(capture.contains(&"-e".to_string()) && !capture.contains(&"-S".to_string()), "só a parte visível, com atributos");
 }

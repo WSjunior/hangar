@@ -80,3 +80,38 @@ async fn terminal_input_tmux_owner_draft_is_stashed_and_comes_back_identical() {
  for _ in 0..200 {received=std::fs::read(&f.receipt).ok().and_then(|b|serde_json::from_slice(&b).ok()).unwrap_or_default();if received.len()==2{break;}tokio::time::sleep(Duration::from_millis(10)).await;}
  assert_eq!(received,vec!["mensagem do app".to_string(),draft.to_string()]);
 }
+const MOUSE_CLI:&str=r#"import os, sys, tty
+fd=sys.stdin.fileno(); tty.setraw(fd)
+sys.stdout.write('\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[2J\x1b[Hmouse\r\n'); sys.stdout.flush()
+out=open(sys.argv[1],'ab',buffering=0)
+while True:
+ data=os.read(fd,4096)
+ if not data: break
+ out.write(data)
+"#;
+#[tokio::test]
+async fn terminal_input_tmux_mouse_and_size_reach_the_program() {
+ let dir=tempfile::tempdir().unwrap();let cli=dir.path().join("mouse_cli.py");let received=dir.path().join("received.bin");
+ std::fs::write(&cli,MOUSE_CLI).unwrap();
+ let label=format!("hangar-mods-test-{}-{}",std::process::id(),SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos());let _guard=IsolatedMux(label.clone());
+ let new=Command::new("tmux").args(["-L",&label,"-f","/dev/null","new-session","-d","-s","test","-x","100","-y","40",&format!("python3 '{}' '{}'",cli.display(),received.display())]).output().await.unwrap();assert!(new.status.success());
+ let meta=Command::new("tmux").args(["-L",&label,"display-message","-p","-t","=test:","#{pane_id}\t#{session_created}"]).output().await.unwrap();let meta=String::from_utf8(meta.stdout).unwrap();let mut fields=meta.trim().split('\t');
+ let binding=TerminalBinding{name:"test".into(),pane:fields.next().unwrap().into(),conversation:"c".into(),generation:1,created:fields.next().unwrap().parse().unwrap(),mux_argv:vec!["tmux".into(),"-L".into(),label.clone()],windows:false,clipboard_lock_path:None};
+ let d=TerminalDriver::new(binding.clone(),Arc::new(Facts(binding)),Arc::new(ProcessIo::default()),InputLimits::default());
+ for _ in 0..100 {if d.mods_formats().await.is_ok_and(|f|f.mouse){break;}tokio::time::sleep(Duration::from_millis(20)).await;}
+ assert_eq!(d.mods_formats().await.unwrap(),PaneFormats{mouse:true,in_mode:false,columns:100,rows:40});
+ d.mouse(2,9).await.unwrap();
+ let want=b"\x1b[<0;10;3M\x1b[<0;10;3m";
+ for _ in 0..100 {if std::fs::read(&received).is_ok_and(|b|b.windows(want.len()).any(|w|w==want)){break;}tokio::time::sleep(Duration::from_millis(20)).await;}
+ assert!(std::fs::read(&received).unwrap().windows(want.len()).any(|w|w==want),"o programa recebeu o clique SGR na célula pedida");
+ d.resize(144,45).await.unwrap();
+ let size=Command::new("tmux").args(["-L",&label,"display-message","-p","-t","=test:","#{window_width}x#{window_height}"]).output().await.unwrap();
+ assert_eq!(String::from_utf8(size.stdout).unwrap().trim(),"144x45");
+ let option=Command::new("tmux").args(["-L",&label,"show-options","-w","-t","=test:","window-size"]).output().await.unwrap();
+ assert_eq!(String::from_utf8(option.stdout).unwrap().trim(),"window-size latest","o tamanho volta a ser de quem se ligar");
+ // Um cliente de controle (como o observador da prévia) entra no session_attached, mas não é terminal ligado.
+ let mut control=std::process::Command::new("tmux").args(["-L",&label,"-C","attach-session","-f","ignore-size,no-output","-t","=test"]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).spawn().unwrap();
+ for _ in 0..100 {let a=Command::new("tmux").args(["-L",&label,"display-message","-p","-t","=test:","#{session_attached}"]).output().await.unwrap();if String::from_utf8(a.stdout).unwrap().trim()=="1"{break;}tokio::time::sleep(Duration::from_millis(20)).await;}
+ assert_eq!(d.mods_clients().await.unwrap(),0);
+ let _=control.kill();let _=control.wait();
+}
