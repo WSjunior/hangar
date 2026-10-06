@@ -653,6 +653,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repeated_band_does_not_drop_the_view_a_slow_device_still_has_to_send() {
+        // N1: a mesma vista de novo (o Python reenvia a faixa a cada religação; o Rust limpa duas vezes) não
+        // pode invalidar o marcador que a fila do aparelho lento ainda tem.
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, mut stream) = device(dir.path()).await;
+        ctx.hubs.deliver("s", "plugin_ui", "u1");
+        ctx.hubs.deliver("s", "plugin_ui", "u1");
+        ctx.hubs.deliver("s", "state", "1");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(read_until(&mut stream, ("state", "1")).await, pairs(&[("plugin_ui", "u1"), ("state", "1")]));
+    }
+
+    #[tokio::test]
     async fn device_that_keeps_up_gets_every_band_in_order() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, mut stream) = device(dir.path()).await;
