@@ -956,6 +956,8 @@
   "problema_runtime_falhou": "The session runtime failed",
   "problema_headless_sem_login": "This account is not logged in to Claude — open a terminal and run `claude /login` once (same account); then just send the prompt again",
   "problema_terminal_observacao_falhou": "Terminal observation unavailable",
+  "problema_state_facts_unavailable": "State may be stale: the server didn't answer what the session's plugin reported",
+  "problema_permission_observe_failed": "Couldn't confirm this session's permission mode",
   "problema_terminal_input_composer_busy": "The message is waiting: the terminal input box has text in it",
   "problema_terminal_input_composer_unreadable": "The message is waiting: the terminal input box could not be read",
   "problema_terminal_input_capture_failed": "The message is waiting: reading the terminal screen failed",

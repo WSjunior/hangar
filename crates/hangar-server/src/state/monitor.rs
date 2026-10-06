@@ -7,13 +7,15 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use hangar_api::ask::AskQuestion;
 use hangar_api::preview::PreviewEvent;
 use hangar_api::state::{ShellVivo, StateEvent};
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 
+use super::edges::{self, Edges};
 use super::facts::{Dead, Received, UNAVAILABLE};
-use super::permission;
+use super::{ask, permission};
 use super::preview::{self, HookFile};
 use crate::terminal_control::{CaptureRequest, TerminalPool};
 use crate::terminal_state::{self, PaneAnalysis, ReducerFacts, ReducerMemory, TerminalQuestion};
@@ -42,6 +44,8 @@ pub struct RoundFacts {
     pub question: Option<Value>,
     pub in_transfer: bool,
     pub permission_op: bool,
+    /// A sugestão do plugin; `None` sem fato nenhum (nada muda).
+    pub suggestion: Option<String>,
     /// O retrato não veio: código, e o último valor fica.
     pub unavailable: Option<String>,
     /// Largura da conversa com painel ancorado e começo da faixa dos mods: cortes da prévia.
@@ -58,6 +62,7 @@ impl RoundFacts {
             question: r.question(now).map(|q| json!({"id": q.id, "questions": q.questions, "tool": q.tool, "resumo": q.resumo})),
             in_transfer: r.in_transfer(now),
             permission_op: r.facts.permission_op,
+            suggestion: Some(r.facts.suggestion.clone()),
             unavailable,
             body_columns: r.facts.body_columns,
             band_anchor: r.facts.band_anchor.clone(),
@@ -97,6 +102,16 @@ pub trait Sources: Send + Sync {
     fn files(&self, sid: Option<&str>) -> impl Future<Output = FileFacts> + Send;
     /// `false`: ninguém mais ouve, e o `Monitor` acaba.
     fn publish(&self, event: StateEvent) -> impl Future<Output = bool> + Send;
+    /// Os outros eventos da sessão (`suggest`, `ask_question`), mesma regra do `publish`.
+    fn emit(&self, _event: &'static str, _data: Value) -> impl Future<Output = bool> + Send { async { true } }
+    /// Avisado (`notify_one`) quando o ator de entrada da sessão publica; lido uma vez no `run`.
+    fn runtime_wake(&self) -> Arc<Notify> { Arc::default() }
+    /// `edges::runtime_problem` do que o ator publicou por último; `None` fora do Rust.
+    fn runtime_problem(&self) -> Option<(String, String)> { None }
+    /// O sidecar do AskUserQuestion (`ask::read_pending`, fora do runtime).
+    fn ask_payload(&self) -> impl Future<Output = Result<Option<AskQuestion>, String>> + Send { async { Ok(None) } }
+    /// `session.deliverable`: só dispara; quem implementa não segura a rodada e registra a falha.
+    fn deliverable(&self) {}
     /// Captura só para a prévia, entre as rodadas de estado; `None`: a fonte não as faz.
     fn preview_capture(&self) -> impl Future<Output = Option<Result<Frame, CaptureFailed>>> + Send { async { None } }
     /// `.hangar-preview/<stem>.json` legíveis, na ordem das pastas de config. Chamado a cada toque
@@ -126,9 +141,11 @@ struct Memory {
     /// Em falha da observação: a tentativa do pool já conferida com `has-session`.
     failure: Option<Option<u32>>,
     preview: preview::Slot,
+    /// `ask_question` já saiu para a pergunta na tela; zera quando ela sai e no `/clear`.
+    asked: bool,
 }
 
-pub struct Monitor<S> { src: S, poll: Duration, mem: Memory, epoch: u64 }
+pub struct Monitor<S> { src: S, poll: Duration, mem: Memory, epoch: u64, edges: Edges }
 
 fn key_of(event: &StateEvent) -> StateEvent {
     let shells = event.shells.iter().map(|s| ShellVivo { pid: s.pid, ..ShellVivo::default() }).collect();
@@ -142,11 +159,12 @@ impl<S: Sources> Monitor<S> {
 
     pub fn with_poll(src: S, poll: Duration) -> Self {
         let epoch = src.epoch();
-        Self { src, poll, mem: Memory::default(), epoch }
+        Self { src, poll, mem: Memory::default(), epoch, edges: Edges::default() }
     }
 
     pub async fn run(mut self) -> Exit {
         let wake = self.src.wake();
+        let runtime = self.src.runtime_wake();
         loop {
             // Armado antes da rodada: empurrão que chega durante ela acorda a espera seguinte.
             let notified = wake.notified();
@@ -155,8 +173,8 @@ impl<S: Sources> Monitor<S> {
             let exit = match self.round().await {
                 Step::Exit(exit) => Some(exit),
                 Step::Again => None,
-                Step::Sleep | Step::Wait { alive: false } => self.idle(None).await,
-                Step::Wait { alive: true } => self.idle(Some(notified.as_mut())).await,
+                Step::Sleep | Step::Wait { alive: false } => self.idle(None, &runtime).await,
+                Step::Wait { alive: true } => self.idle(Some(notified.as_mut()), &runtime).await,
             };
             if let Some(exit) = exit {
                 return exit;
@@ -165,8 +183,9 @@ impl<S: Sources> Monitor<S> {
     }
 
     /// Espera a próxima rodada de estado (o relógio, ou o empurrão quando `woken` vem). Enquanto
-    /// a prévia corre, toques de `preview::FAST` só para ela, fora da contagem das rodadas.
-    async fn idle(&mut self, mut woken: Option<std::pin::Pin<&mut tokio::sync::futures::Notified<'_>>>) -> Option<Exit> {
+    /// a prévia corre, toques de `preview::FAST` só para ela, fora da contagem das rodadas. O ator
+    /// de entrada acorda só para o problema dele, também fora da contagem.
+    async fn idle(&mut self, mut woken: Option<std::pin::Pin<&mut tokio::sync::futures::Notified<'_>>>, runtime: &Notify) -> Option<Exit> {
         let deadline = tokio::time::Instant::now() + self.poll;
         loop {
             let until = if self.mem.preview.fast { (tokio::time::Instant::now() + preview::FAST).min(deadline) } else { deadline };
@@ -176,9 +195,16 @@ impl<S: Sources> Monitor<S> {
                     None => std::future::pending().await,
                 }
             };
-            tokio::select! {
-                () = tokio::time::sleep_until(until) => {}
+            let actor = tokio::select! {
+                () = tokio::time::sleep_until(until) => false,
                 () = wake => return None,
+                () = runtime.notified() => true,
+            };
+            if actor {
+                if let Some(Step::Exit(exit)) = self.runtime_changed().await {
+                    return Some(exit);
+                }
+                continue;
             }
             if tokio::time::Instant::now() >= deadline {
                 return None;
@@ -189,9 +215,64 @@ impl<S: Sources> Monitor<S> {
         }
     }
 
+    /// `ask_question` uma vez por pergunta na tela. Enquanto ela não sai, o sidecar é relido a cada
+    /// rodada, como o Python a cada tique: o hook pode gravá-lo depois de o menu aparecer.
+    async fn ask(&mut self, event: &StateEvent) -> Option<Step> {
+        if event.state != "awaiting_input" {
+            self.mem.asked = false;
+            return None;
+        }
+        if self.mem.asked {
+            return None;
+        }
+        let failed = match self.src.ask_payload().await {
+            Ok(Some(payload)) if ask::matches(event, &payload) => match serde_json::to_value(&payload) {
+                Ok(data) => {
+                    self.mem.asked = true;
+                    return (!self.src.emit("ask_question", data).await).then_some(Step::Exit(Exit::Closed));
+                }
+                Err(_) => "askq_serialize".to_owned(),
+            },
+            Ok(_) => return None,
+            Err(code) => code,
+        };
+        if crate::warn_limit::allow(Some(self.src.name()), &failed) {
+            tracing::warn!(session = self.src.name(), code = failed.as_str(), "estado: pergunta nativa sem sidecar legível");
+        }
+        None
+    }
+
     async fn publish(&mut self, event: StateEvent) -> Option<Step> {
+        // Como o laço do `sse.py`: a pergunta nativa sai antes do estado que a mostra.
+        if let Some(step) = self.ask(&event).await {
+            return Some(step);
+        }
+        if self.edges.deliverable(&event) {
+            self.src.deliverable();
+        }
         self.mem.last = Some(event.clone());
         (!self.src.publish(event).await).then_some(Step::Exit(Exit::Closed))
+    }
+
+    /// O ator de entrada publicou: o problema dele entra ou sai do último estado sem rodada nova
+    /// (a memória temporal não anda). Problema da observação ou dos fatos fica até a rodada boa.
+    async fn runtime_changed(&mut self) -> Option<Step> {
+        let last = self.mem.last.as_ref()?;
+        if last.problema.as_deref().is_some_and(|p| !edges::is_runtime_problem(p)) {
+            return None;
+        }
+        let now = self.src.runtime_problem();
+        let same = match &now {
+            Some((p, d)) => last.problema.as_deref() == Some(p.as_str()) && last.problema_detalhe.as_deref() == Some(d.as_str()),
+            None => last.problema.is_none(),
+        };
+        if same {
+            return None;
+        }
+        let (problema, problema_detalhe) = now.unzip();
+        let event = StateEvent { problema, problema_detalhe, ..last.clone() };
+        self.mem.key = Some(key_of(&event));
+        self.publish(event).await
     }
 
     async fn round(&mut self) -> Step {
@@ -205,6 +286,12 @@ impl<S: Sources> Monitor<S> {
         let facts = self.src.facts().await;
         if self.src.epoch() != epoch {
             return Step::Again;
+        }
+        // A sugestão sai quando muda, mesmo com o estado parado.
+        if let Some(text) = self.edges.suggestion(facts.suggestion.as_deref())
+            && !self.src.emit("suggest", json!({"text": text})).await
+        {
+            return Step::Exit(Exit::Closed);
         }
         // `has-session` só separa "morreu" de "pane em branco": no quadro vazio, e na falha ao
         // entrar nela e a cada nova tentativa do pool (até lá ele repete a mesma falha sem tentar).
@@ -311,7 +398,9 @@ impl<S: Sources> Monitor<S> {
         let a = reduced.analysis;
         let (mode, previous) = self.mem.permission.current.clone().unzip();
         let loop_info = files.loop_info.unwrap_or_default();
-        let (problema, problema_detalhe) = problem.map(|(p, d)| (p.to_owned(), d)).unzip();
+        // O problema do runtime entra na chave: muda o evento mesmo com a tela parada.
+        let problem = problem.map(|(p, d)| (p.to_owned(), d)).or_else(|| self.src.runtime_problem());
+        let (problema, problema_detalhe) = problem.unzip();
         let event = StateEvent {
             session: name, state: a.state, label: a.label, question: a.question, options: a.options,
             status_line: a.status_line, overlay: a.overlay, login: a.login, limited: a.limit_reset.is_some(),
@@ -325,6 +414,8 @@ impl<S: Sources> Monitor<S> {
             if let Some(step) = self.publish(event).await {
                 return step;
             }
+        } else if let Some(step) = self.ask(&event).await {
+            return step;
         }
         Step::Wait { alive: facts.alive }
     }
@@ -370,12 +461,20 @@ mod tests {
         wake: Arc<Notify>,
         epoch: AtomicU64,
         events: Mutex<Vec<(u32, StateEvent)>>,
+        others: Mutex<Vec<(u32, &'static str, Value)>>,
+        runtime: Mutex<Option<(String, String)>>,
+        runtime_wake: Arc<Notify>,
+        ask: Mutex<Option<AskQuestion>>,
+        ask_reads: AtomicU32,
+        deliveries: Mutex<Vec<u32>>,
     }
 
     impl Fake {
         fn new(frames: Vec<Result<&'static str, CaptureFailed>>) -> Arc<Self> {
             Arc::new(Self { frames, round: AtomicU32::new(0), has_session: AtomicU32::new(0), facts: Mutex::default(),
-                wake: Arc::default(), epoch: AtomicU64::new(0), events: Mutex::default() })
+                wake: Arc::default(), epoch: AtomicU64::new(0), events: Mutex::default(), others: Mutex::default(),
+                runtime: Mutex::default(), runtime_wake: Arc::default(), ask: Mutex::default(), ask_reads: AtomicU32::new(0),
+                deliveries: Mutex::default() })
         }
         fn rounds(&self) -> u32 { self.round.load(Ordering::SeqCst) }
         fn states(&self) -> Vec<String> { self.events.lock().unwrap().iter().map(|(_, e)| e.state.clone()).collect() }
@@ -400,6 +499,17 @@ mod tests {
             self.events.lock().unwrap().push((self.rounds(), event));
             true
         }
+        async fn emit(&self, event: &'static str, data: Value) -> bool {
+            self.others.lock().unwrap().push((self.rounds(), event, data));
+            true
+        }
+        fn runtime_wake(&self) -> Arc<Notify> { self.runtime_wake.clone() }
+        fn runtime_problem(&self) -> Option<(String, String)> { self.runtime.lock().unwrap().clone() }
+        async fn ask_payload(&self) -> Result<Option<AskQuestion>, String> {
+            self.ask_reads.fetch_add(1, Ordering::SeqCst);
+            Ok(self.ask.lock().unwrap().clone())
+        }
+        fn deliverable(&self) { self.deliveries.lock().unwrap().push(self.rounds()); }
     }
 
     const SPINNER: &str = "✻ Thinking…\n────────────\n❯\n────────────";
@@ -476,6 +586,137 @@ mod tests {
         let events: Vec<_> = fake.events.lock().unwrap().iter().map(|(_, e)| (e.state.clone(), e.problema_detalhe.clone())).collect();
         assert_eq!(events, [("working".into(), Some("state_facts_status:503".into())), ("working".into(), None)]);
         assert_eq!(fake.events.lock().unwrap()[0].1.problema.as_deref(), Some(UNAVAILABLE));
+        task.abort();
+    }
+
+    const IDLE: &str = "────────────\n❯\n────────────";
+    const MENU: &str = "   Qual cor?\n\n ❯ 1. Azul\n   2. Verde\n   3. Type something.\n";
+
+    fn payload(labels: &[&str]) -> AskQuestion {
+        AskQuestion { questions: vec![hangar_api::ask::AskQuestionItem { header: "Cor".into(), question: "Qual cor?".into(),
+            multi_select: false, options: labels.iter().map(|l| hangar_api::ask::AskOption { label: (*l).into(), ..Default::default() }).collect() }] }
+    }
+
+    fn others(fake: &Fake, kind: &str) -> Vec<(u32, Value)> {
+        fake.others.lock().unwrap().iter().filter(|(_, k, _)| *k == kind).map(|(r, _, d)| (*r, d.clone())).collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ask_question_once_per_prompt() {
+        // Pergunta na tela por várias rodadas, sai (resposta), volta outra: uma emissão por pergunta.
+        let mut frames = vec![Ok(SPINNER)];
+        frames.extend(std::iter::repeat_n(Ok(MENU), 4));
+        frames.push(Ok(SPINNER));
+        frames.extend(std::iter::repeat_n(Ok(MENU), 3));
+        let fake = Fake::new(frames);
+        *fake.ask.lock().unwrap() = Some(payload(&["Azul", "Verde"]));
+        let task = tokio::spawn(Monitor::new(fake.clone()).run());
+        tokio::time::sleep(POLL * 9 + Duration::from_millis(10)).await;
+        let asks = others(&fake, "ask_question");
+        assert_eq!(asks.len(), 2, "{asks:?}");
+        assert_eq!(asks[0].1, serde_json::to_value(payload(&["Azul", "Verde"])).unwrap());
+        assert_eq!(fake.ask_reads.load(Ordering::SeqCst), 2, "o sidecar só é lido quando a pergunta aparece");
+        // O sidecar chega depois do menu: a rodada seguinte o relê, com a tela parada.
+        task.abort();
+        let _ = task.await;
+        let fake = Fake::new(vec![Ok(MENU)]);
+        let task = tokio::spawn(Monitor::new(fake.clone()).run());
+        tokio::time::sleep(POLL * 2 + Duration::from_millis(10)).await;
+        assert!(others(&fake, "ask_question").is_empty());
+        *fake.ask.lock().unwrap() = Some(payload(&["Azul", "Verde"]));
+        tokio::time::sleep(POLL).await;
+        assert_eq!(others(&fake, "ask_question").len(), 1);
+        assert_eq!(fake.events.lock().unwrap().len(), 1, "o estado não sai de novo");
+        // Sidecar velho de outra pergunta: não abre o stepper.
+        task.abort();
+        let _ = task.await;
+        let fake = Fake::new(vec![Ok(MENU)]);
+        *fake.ask.lock().unwrap() = Some(payload(&["Sim", "Nao"]));
+        let task = tokio::spawn(Monitor::new(fake.clone()).run());
+        tokio::time::sleep(POLL * 2).await;
+        assert!(others(&fake, "ask_question").is_empty());
+        task.abort();
+        let _ = task.await;
+        // `/clear` com a mesma pergunta na tela: a conversa nova emite de novo.
+        let fake = Fake::new(vec![Ok(MENU)]);
+        *fake.ask.lock().unwrap() = Some(payload(&["Azul", "Verde"]));
+        let task = tokio::spawn(Monitor::new(fake.clone()).run());
+        tokio::time::sleep(POLL * 2).await;
+        fake.epoch.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(POLL * 2).await;
+        assert_eq!(others(&fake, "ask_question").len(), 2, "uma antes e uma depois do /clear");
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deliverable_edge_calls_service_once() {
+        // Nasce entregável (uma), pergunta (não), volta (uma), segue entregável (nenhuma).
+        let mut frames = vec![Ok(IDLE), Ok(IDLE), Ok(MENU), Ok(MENU), Ok(SPINNER)];
+        frames.extend(std::iter::repeat_n(Ok(IDLE), 6));
+        let fake = Fake::new(frames);
+        let task = tokio::spawn(Monitor::new(fake.clone()).run());
+        tokio::time::sleep(POLL * 11).await;
+        let deliveries = fake.deliveries.lock().unwrap().clone();
+        assert_eq!(deliveries.len(), 2, "{deliveries:?} {:?}", fake.states());
+        // O `/clear` não é borda: a fila não muda de dono.
+        fake.epoch.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(POLL * 2).await;
+        assert_eq!(fake.deliveries.lock().unwrap().len(), 2);
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn runtime_problem_in_key_and_wakes() {
+        let fake = Fake::new(vec![Ok(IDLE)]);
+        let task = tokio::spawn(Monitor::new(fake.clone()).run());
+        tokio::time::sleep(POLL * 2 + Duration::from_millis(10)).await;
+        assert_eq!(fake.events.lock().unwrap().len(), 1);
+        let rounds = fake.rounds();
+        // O ator publica: sai na hora, sem rodada a mais (a memória temporal não anda).
+        *fake.runtime.lock().unwrap() = Some(("terminal_input_composer_busy".into(), "composer_busy".into()));
+        fake.runtime_wake.notify_one();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(fake.rounds(), rounds, "acordar pelo ator não captura");
+        let last = fake.events.lock().unwrap().last().unwrap().1.clone();
+        assert_eq!((last.problema.as_deref(), last.problema_detalhe.as_deref()), (Some("terminal_input_composer_busy"), Some("composer_busy")));
+        assert_eq!(last.state, "idle");
+        // Igual nas rodadas seguintes: a chave já tem o problema, nada sai de novo.
+        tokio::time::sleep(POLL * 3).await;
+        assert_eq!(fake.events.lock().unwrap().len(), 2);
+        // Resolvido: limpa.
+        *fake.runtime.lock().unwrap() = None;
+        tokio::time::sleep(POLL).await;
+        assert_eq!(fake.events.lock().unwrap().len(), 3);
+        assert!(fake.events.lock().unwrap()[2].1.problema.is_none());
+        // Problema da observação vence o do runtime.
+        *fake.runtime.lock().unwrap() = Some(("runtime_falhou".into(), "queue_io".into()));
+        fake.facts.lock().unwrap().unavailable = Some("state_facts_timeout".into());
+        tokio::time::sleep(POLL).await;
+        assert_eq!(fake.events.lock().unwrap().last().unwrap().1.problema.as_deref(), Some(UNAVAILABLE));
+        fake.runtime_wake.notify_one();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(fake.events.lock().unwrap().last().unwrap().1.problema.as_deref(), Some(UNAVAILABLE), "o ator não apaga o problema dos fatos");
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn suggest_on_change() {
+        let fake = Fake::new(vec![Ok(IDLE)]);
+        let task = tokio::spawn(Monitor::new(fake.clone()).run());
+        tokio::time::sleep(POLL).await;
+        assert!(others(&fake, "suggest").is_empty(), "sem fato e sem sugestão, nada sai");
+        fake.facts.lock().unwrap().suggestion = Some(String::new());
+        tokio::time::sleep(POLL).await;
+        assert!(others(&fake, "suggest").is_empty(), "vazia desde o início não é mudança");
+        fake.facts.lock().unwrap().suggestion = Some("roda os testes".into());
+        tokio::time::sleep(POLL * 3).await;
+        fake.facts.lock().unwrap().suggestion = None;
+        tokio::time::sleep(POLL * 2).await;
+        fake.facts.lock().unwrap().suggestion = Some(String::new());
+        tokio::time::sleep(POLL).await;
+        let texts: Vec<_> = others(&fake, "suggest").into_iter().map(|(_, d)| d).collect();
+        assert_eq!(texts, [json!({"text": "roda os testes"}), json!({"text": ""})], "uma por mudança, mesmo sem o estado mudar");
+        assert_eq!(fake.events.lock().unwrap().len(), 1);
         task.abort();
     }
 }
