@@ -304,7 +304,7 @@ duplex), testes `cfg(windows)`, `docs/decisoes/windows.md`.
 `docs/decisoes/superado.md`, `inventario.md`, `../lista-estado/plano.md` (Fase C e Task 24
 apontando para esta pasta).
 
-- [ ] **Step 25: Varrer `CLAUDE.md` e `docs/decisoes/` por regra que ficou falsa; corrigir; revisar**
+- [x] **Step 25: Varrer `CLAUDE.md` e `docs/decisoes/` por regra que ficou falsa; corrigir; revisar**
 
 ### Task 12: Prova de uso real isolada
 

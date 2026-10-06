@@ -1451,6 +1451,16 @@ donos: captura, `permission.observe` e `session.dead` saem uma vez, de um lugar 
 
 ## Observação terminal Rust: erro visível, sem captura Python
 
+(Parte 4, Tasks 5 e 7, 06/10/2026.) Com o Rust de pé, quem lê a captura de Claude com terminal é o
+`Monitor` do Rust, em processo (`PoolCapture` em `state/monitor.rs`, cliente `-C` do
+`TerminalPool`; no Windows a captura avulsa do psmux em `state/capture.rs`), e a falha dele sai com o mesmo `problema=terminal_observacao_falhou` sobre o último
+evento ([estado ao vivo no `Monitor`](#estado-ao-vivo-de-claude-com-terminal-no-monitor-do-rust)).
+A ponte Python descrita abaixo (`terminal_observer` → `POST /__hangar_server/terminal`) ficou sem
+consumidor: só o `StateMonitor` e o `PreviewBroker` de Claude a alugam, e eles só rodam no modo
+`python`, em que a ponte está desligada; Pi, omp e Kimi nunca a usaram. A porta privada continua,
+com o painel (`/__hangar_server/term`), o canal do estado, a lista e Git/arquivos. O texto abaixo
+vale como história da ponte.
+
 (04/10/2026, dono único, decisão 3 do dono.) Com a ponte ligada, o Rust é o único dono da
 captura de quem tem lease: erro de transporte, resposta torta, quadro inválido, alvo do pane ou
 vínculo que não se lê sobem como `ObservationFailed(<código>)`, nunca como `None`. O monitor de

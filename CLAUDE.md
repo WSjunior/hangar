@@ -17,7 +17,9 @@ Only terminal sessions use the tmux pane for live **state** and input. Backend p
 - `registry.py` — SessionRegistry: joins terminal sessions from tmux with durable Claude/Codex
   headless sidecars and their JSONL/rollout history.
 - `transcript.py` — tails `~/.claude/projects/<cwd>/<uuid>.jsonl` (the chat content).
-- `state.py` — classifies live state from `tmux capture-pane`: `working` / `idle` / `awaiting_input` / `dead`.
+- `state.py` — classifies live state from `tmux capture-pane`: `working` / `idle` / `awaiting_input` / `dead`
+  (Pi/omp/Kimi and the Python fallback; under the Rust server the live state of Claude with a terminal is the
+  Rust `Monitor`, and `classify` remains for push and actions).
 - `terminal_input.py` + `tmux.py` — input via `tmux send-keys` (prompt / option select via `(n-1)×Down`+`Enter` / `Esc`).
 - `adapters/codex/` — um app-server WebSocket de loopback por sessão Codex; o backend
   consome eventos JSON-RPC enquanto a TUI `codex --remote` da mesma thread roda no tmux.
@@ -453,17 +455,17 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   nunca vira lista vazia nem a do Python: 503 com código no `GET`, `list_error` com código no SSE,
   `problema` na linha quando só os fatos caíram. Convidado e outros métodos seguem ao Python.
   Medidas em [plataforma.md](docs/decisoes/plataforma.md#lista-do-dono-no-hangar-server).
-- **Observação terminal Rust usa porta privada de loopback no mesmo filho**, anunciada na saúde
-  somente como endereço; o segredo vem do Supervisor em memória após conferir o protocolo.
-  Lease pertence ao produtor que consome a captura, não ao aparelho. Codex nativo não
-  abre observador sem consumidor. Uma captura canônica por rodada, sem grade auxiliar; nos
-  provedores que o Python observa (Pi, omp, Kimi) o estado temporal fica nele, sem segundo HTTP.
-  Captura/análise conservam provider,
-  vínculo, época e geração; `/clear` ou troca do filho descartam leituras antigas. Erro vira
-  problema visível e a rodada seguinte pergunta ao Rust; Windows e ponte desligada usam a
-  captura Python.
-  Codex conserva estado e prévia nativos; sidecar Claude vazio continua sendo uma resposta.
-  Evidência isolada em [plataforma.md](docs/decisoes/plataforma.md#observação-terminal-rust-erro-visível-sem-captura-python).
+- **A porta privada de loopback do Rust mora no mesmo filho**, anunciada na saúde somente como
+  endereço; o segredo vem do Supervisor em memória após conferir o protocolo. Uma captura canônica
+  por rodada, sem grade auxiliar: com o Rust de pé, quem captura o pane de Claude com terminal para o
+  estado ao vivo é o `Monitor` (abaixo; capturas avulsas de ação — push, modo de permissão, entrega —
+  seguem no Python), e a ponte Python do observador (`terminal_observer` →
+  `/__hangar_server/terminal`) ficou sem consumidor, porque o `StateMonitor`/`PreviewBroker` de
+  Claude só roda no modo `python`, com a ponte desligada. Pi, omp e Kimi capturam pelo Python e
+  guardam lá o estado temporal; Codex conserva estado e prévia nativos. `/clear` ou troca do filho
+  descartam leituras antigas; sidecar Claude vazio continua sendo uma resposta; erro de captura
+  vira `problema` visível, nunca leitura Python.
+  Evidência em [plataforma.md](docs/decisoes/plataforma.md#observação-terminal-rust-erro-visível-sem-captura-python).
 - **Estado ao vivo de Claude com terminal é do `Monitor` do Rust no modo `rust`/`pending`, em
   qualquer porta.** Um por hub (`side.rs`), nascido com o primeiro assinante: o `/events` do dono
   ou o canal privado `/__hangar_server/state/{name}/events`, que o Python lê para quem entrou pela
