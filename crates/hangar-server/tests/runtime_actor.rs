@@ -119,27 +119,35 @@ async fn confirmed_prompt_does_not_consume_next_echo() {
 
 #[tokio::test]
 async fn row_delivered_before_the_runtime_is_confirmed_once_by_a_later_echo() {
-    let (handle,server,dir) = setup(true).await;
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("chat.jsonl");
     let echo = |text:&str| json!({"timestamp":"2026-10-06T12:00:00.000Z","type":"response_item","payload":{"type":"message",
         "role":"user","content":[{"type":"input_text","text":text}]}}).to_string();
     std::fs::write(&path, format!("{}\n{}\n{}\n",echo("sim"),echo("velha"),echo("continua"))).unwrap();
-    // Entregues pelo Python antes da troca: sem operação nem cursor de despacho.
-    for (id,text,ts) in [("a","sim",1791287980.0),("b","sim",1791287995.0),("c","velha",1791290000.0),("d","continua",1791287990.0)] {
-        handle.queue(format!("{id}:append"),Action::Append { text:text.into(),delivered:true,ts:Some(ts),
-            pre_transcript:false,entry_id:Some(id.into()) }).await.unwrap();
-    }
+    // Entregues pelo Python antes da troca: sem operação nem cursor de despacho, já no estado quando
+    // o ator sobe. Inseridas com ele vivo, a rodada do primeiro ocioso confirmaria "a" sem ver "b".
     // Desistida não chegou: um "continua" digitado depois não a dá por entregue.
-    handle.queue("d:abandon".into(),Action::Abandon { entry_id:"d".into() }).await.unwrap();
-    assert_eq!(handle.confirm().await.unwrap()["confirmed"],1);
+    let rows = [("a","sim",1791287980.0,false),("b","sim",1791287995.0,false),("c","velha",1791290000.0,false),("d","continua",1791287990.0,true)]
+        .map(|(id,text,ts,abandoned)|{
+            let mut row = json!({"id":id,"text":text,"ts":ts,"delivered":true});
+            if abandoned { row["desistiu"] = json!(true); }
+            row
+        });
+    std::fs::write(dir.path().join("key.queue-state.json"),serde_json::to_vec(&State::new("key",1,"session",rows.to_vec())).unwrap()).unwrap();
+    let (handle,server,dir) = setup_recovered(true,false,false,Some(dir),false).await;
+    let confirmed = || {
+        let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
+        state.rows.iter().filter(|row|row["confirmed"] == true).filter_map(|row|row["id"].as_str().map(str::to_owned)).collect::<Vec<_>>()
+    };
+    // A rodada do primeiro ocioso corre junto desta: a contagem é de quem gravou primeiro, o estado não.
+    handle.confirm().await.unwrap();
+    // A única linha "sim" é do envio mais recente (b), não do perdido (a). A linha "velha" foi
+    // gravada antes do envio de "c": não prova a entrega dele.
+    assert_eq!(confirmed(),["b"]);
     for index in 0..300 { handle.queue(format!("fill:{index}"),Action::SetRuntimeState { state:json!({}) }).await.unwrap(); }
     // Compactada a fila, a linha usada continua gasta: o outro "sim" não a reaproveita.
     assert_eq!(handle.confirm().await.unwrap()["confirmed"],0);
-    let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
-    let confirmed:Vec<_> = state.rows.iter().filter(|row|row["confirmed"] == true).filter_map(|row|row["id"].as_str()).collect();
-    // A única linha "sim" é do envio mais recente (b), não do perdido (a). A linha "velha" foi
-    // gravada antes do envio de "c": não prova a entrega dele.
-    assert_eq!(confirmed,["b"]);
+    assert_eq!(confirmed(),["b"]);
     handle.stop().await.unwrap();
     assert_eq!(server.await.unwrap(),0);
 }
