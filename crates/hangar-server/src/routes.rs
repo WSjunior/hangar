@@ -52,6 +52,8 @@ pub struct AppState {
     pub list: Arc<crate::list::bridge::ListBridge>,
     /// Produtor único da lista do dono; liga com a primeira lista aberta.
     pub hub: Arc<crate::list::hub::ListHub>,
+    /// Interface dos mods das sessões sem terminal do Rust: o ator publica, as rotas consultam.
+    pub mods: crate::mods::state::Mods,
 }
 
 impl AppState {
@@ -71,6 +73,7 @@ impl AppState {
     pub fn with_parts(cfg: Config, terminal: crate::terminal_control::TerminalPool,
                       costs: Arc<crate::costs::collect::Collector>, fx: Arc<crate::costs::fx::Fx>) -> AppState {
         let http = proxy::client();
+        let mods = crate::mods::state::Mods::default();
         let side = SideCtx {
             upstream: cfg.upstream,
             secret: cfg.internal_secret.clone(),
@@ -78,7 +81,9 @@ impl AppState {
             watchers: Watchers::default(),
             hubs: Hubs::default(),
             infos: Default::default(),
+            mods: mods.clone(),
         };
+        mods.bind_hubs(side.hubs.downgrade());
         let diag = crate::diag::DiagClient::new(cfg.upstream, cfg.internal_secret.clone());
         let facts = crate::list::facts::FactsClient::new(cfg.upstream, cfg.internal_secret.clone());
         AppState { auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None, diag,
@@ -89,7 +94,8 @@ impl AppState {
             origins_home: std::path::PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default()),
             origins: std::sync::Mutex::new(indexmap::IndexMap::new()),
             list: Arc::new(crate::list::bridge::ListBridge::new(crate::list::bridge::ListEnv::from_env(), facts)),
-            hub: Arc::default() }
+            hub: Arc::default(),
+            mods }
     }
 
     pub(crate) fn skill_origins(&self, repo: &std::path::Path) -> crate::costs::origins::Origins {

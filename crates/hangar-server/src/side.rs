@@ -90,6 +90,8 @@ pub struct SideCtx {
     pub watchers: Watchers,
     pub hubs: Hubs,
     pub infos: InfoCache,
+    /// Faixa e avisos que o Rust publica nas sessões sem terminal dele (interface dos mods).
+    pub mods: crate::mods::state::Mods,
 }
 
 #[derive(Default)]
@@ -265,6 +267,12 @@ impl Hub {
         *bound = Some(Bound { binding, generation, tail });
         // Os avisos de mod ficam: são da sessão, não do transcript, e o Python não os reenvia.
         self.cache.lock().unwrap().latest = Default::default();
+        // A faixa do Rust é da sessão, não do transcript: volta ao retrato antes do `reset`, senão quem
+        // religa depois de um `/clear` fica sem ela até o mod redesenhar.
+        for (event, data) in self.ctx.mods.replay(&self.name) {
+            let frame = sse_frame(event, &data, None);
+            self.cache.lock().unwrap().record(event, &data, &frame, false);
+        }
         let _ = self.tx.send(Out::Rebind);
     }
 
@@ -447,7 +455,14 @@ async fn side_once(hub: &Arc<Hub>, attempt: &mut u32) -> SideEnd {
                 }
             }
             "ping" => {}
-            event => hub.deliver(event, &ev.data),
+            event => {
+                // Sessão sem terminal atendida pelo Rust: faixa e avisos vêm dele (dono único). Um
+                // `plugin_ui` velho do Python (sessão que mudou de modo) não pode sobrescrevê-los.
+                if matches!(event, "plugin_ui" | "plugin_toast") && hub.ctx.mods.owns(&hub.name) {
+                    continue;
+                }
+                hub.deliver(event, &ev.data);
+            }
         }
     }
 }
@@ -482,6 +497,11 @@ impl Hubs {
             None => {
                 let hub = Hub::start(name, binding, ctx.clone());
                 map.insert(name.to_string(), (hub.clone(), 1));
+                drop(map);
+                // Hub novo começa sem retrato: a faixa e os avisos que o Rust já publicou entram agora.
+                for (event, data) in ctx.mods.replay(name) {
+                    hub.deliver(event, &data);
+                }
                 return Lease { hubs: self.clone(), hub };
             }
         };
@@ -614,6 +634,7 @@ mod tests {
             watchers: Watchers::default(),
             hubs: Hubs::default(),
             infos: InfoCache::default(),
+            mods: Default::default(),
         }
     }
 
