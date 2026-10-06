@@ -389,9 +389,9 @@
     <DiarioSettings />
   {:else if telaAtual === 'sobre'}
     <SobreSettings onMigration={convidado ? undefined : () => onIrPara('migration')} />
-  {:else if telaAtual === 'migration' && !convidado}
+  {:else if telaAtual === 'migration'}
     <!-- Outro servidor = outra tela: resposta em voo do anterior não cai nesta. -->
-    {#key resolvedServer?.id}<MigrationSettings server={resolvedServer} />{/key}
+    {#if !convidado}{#key resolvedServer?.id}<MigrationSettings server={resolvedServer} />{/key}{/if}
   {:else if telaAtual === 'maquinas'}
     <MaquinasSettings resolvedServer={resolvedServer} apiTarget={alvo}
       fallbackFocus={fecharEl} {store}
