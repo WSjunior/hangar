@@ -353,8 +353,21 @@ impl Executor {
         };
         // A tela que não se lê também não seria escrita: a entrada espera, com o motivo.
         let ansi=match driver.mods_screen().await {Ok(ansi)=>ansi,Err(failure)=>return Some(failure.code)};
-        let screen=crate::mods::screen::read_screen(&ansi,usize::from(formats.columns),usize::from(formats.rows),&[],None);
-        matches!(screen.focus,Some("pane"|"band")).then_some("mods_focus")
+        let (columns,rows)=(usize::from(formats.columns),usize::from(formats.rows));
+        let screen=crate::mods::screen::read_screen(&ansi,columns,rows,&[],None);
+        // Só o que a leitura reconhece como mod conta: um realce do próprio Claude Code (seleção, menu)
+        // acima do prompt não segura a mensagem da pessoa. Painel: com borda ou caixa e região. Faixa: o
+        // inverso dentro da região que a leitura achou; sem a âncora do mod aqui, só a faixa recolhida ou
+        // encolhida é reconhecida.
+        let away=match screen.focus {
+            Some("pane")=>screen.placement.is_some() && screen.body.is_some(),
+            Some("band")=>screen.band.as_ref().is_some_and(|band|{
+                let grid=crate::mods::screen::parse_ansi(&ansi,columns,rows);
+                (band.rows.0..band.rows.1).any(|r|grid.get(r).is_some_and(|line|line[band.lo.min(line.len())..band.hi.min(line.len())].iter().any(|c|c.inverse)))
+            }),
+            _=>false,
+        };
+        away.then_some("mods_focus")
     }
     /// Clique, roda, tecla da reserva, leitura, tamanho e reserva do pane para os mods. Com o teclado
     /// emprestado ao Python (administração digitando no pane), recusa: duas mãos no mesmo pane erram o alvo.
