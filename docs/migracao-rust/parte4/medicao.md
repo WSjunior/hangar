@@ -149,3 +149,8 @@ psmux com PowerShell, backend da VM em `641838a3` (binário compilado na VM).
 Os ~20 ms são do psmux (o cliente dele faz tecla → TCP → servidor → ConPTY interno → parse →
 JSON → TCP → render), não do Hangar: Rust e Python dão o mesmo, e o console do Windows sozinho
 custa 0,1 ms. No Linux o mesmo eco com tmux é ~0,55 ms (Task 8).
+
+Saída grande (PowerShell imprimindo 3000 linhas de ~90 caracteres) até a marca do fim chegar,
+mesma VM e sessão psmux: `tmux attach` direto num ConPTY sem o Hangar 0,92–0,94 s; painel do
+Hangar (Rust) dentro da VM 0,91–0,94 s; painel daqui pela rede 0,92–0,93 s. O psmux manda só o
+que mudou na tela (~15 KB no total), e o caminho do servidor não soma tempo.
