@@ -995,10 +995,11 @@ async fn confirm_inputs(queue:Arc<QueueActor>,receipt:Arc<std::sync::Mutex<Recei
         let receipt = receipt.clone(); let used = state.used_occurrences.clone();
         let found = tokio::task::spawn_blocking(move || receipt.lock().map(|r|r.match_legacy(&row,&used)).map_err(|_|failure("receipt_panic")))
             .await.map_err(|_|failure("receipt_job"))??;
-        if let Some((occurrence,normalized_text)) = found {
-            let accepted = queue.exec(generation,&format!("legacy-proof:{}",unique()),sample,
-                Action::ConfirmLegacy { entry_id,occurrence,normalized_text }).await.map_err(io_failure)?;
-            if accepted == true { legacy += 1; state = queue.snapshot().await.map_err(io_failure)?; }
+        let Some((occurrence,normalized_text)) = found else { continue };
+        // Falha numa legada não desfaz as despachadas já confirmadas acima: fica para a próxima rodada.
+        match queue.exec(generation,&format!("legacy-proof:{}",unique()),sample,Action::ConfirmLegacy { entry_id,occurrence,normalized_text }).await {
+            Ok(accepted) => if accepted == true { legacy += 1; state = queue.snapshot().await.map_err(io_failure)?; },
+            Err(error) => { let _ = io_failure(error); }  // io_failure já registra no log
         }
     }
     Ok((confirmed,legacy))

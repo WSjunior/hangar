@@ -207,7 +207,7 @@ impl ReceiptIndex {
     }
 
     /// Entrada entregue antes de o Rust assumir a sessão não tem cursor: prova pela primeira
-    /// ocorrência livre com o texto dela e registrada depois do envio.
+    /// ocorrência livre com o texto dela, da mesma conversa e registrada depois do envio.
     pub fn match_legacy(&self, row: &Value, used: &BTreeMap<String,Value>) -> Option<(Occurrence,String)> {
         self.identity.as_ref()?;
         let sent = row["ts"].as_f64()?;
@@ -225,6 +225,7 @@ const LEGACY_CLOCK_SLACK_S: f64 = 2.0;
 pub(crate) fn legacy_accepts(occurrence: &Occurrence, sent: f64) -> bool {
     matches!(occurrence.kind.as_str(),"user" | "dequeue" | "steer")
         && occurrence.timestamp.is_some_and(|ts|ts + LEGACY_CLOCK_SLACK_S >= sent)
+        && (occurrence.identity_unprovable || occurrence.recorded_conversation.as_deref() == Some(occurrence.conversation.as_str()))
 }
 
 fn content_text(content: &Value) -> String {

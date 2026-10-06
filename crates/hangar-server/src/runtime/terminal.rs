@@ -443,10 +443,15 @@ impl Executor {
         }
         // Depois das despachadas: uma linha que prova a entrega nova não pode ser gasta por uma legada.
         let current=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
-        for row in super::queue::legacy_rows(&current) {
+        let legacy=if self.cleared(&current) {Vec::new()} else {super::queue::legacy_rows(&current)};
+        for row in legacy {
             let used=self.queue.snapshot().await.map_err(|_|error("queue_io"))?.used_occurrences;
             let (Some(entry_id),Some((occurrence,normalized_text)))=(row["id"].as_str().map(str::to_owned),self.receipt.match_legacy(&row,&used)) else {continue;};
-            if self.action(Action::ConfirmLegacy {entry_id,occurrence,normalized_text}).await?==true {count+=1;}
+            // Falha numa legada não desfaz as despachadas já confirmadas: fica para a próxima rodada.
+            match self.action(Action::ConfirmLegacy {entry_id,occurrence,normalized_text}).await {
+                Ok(accepted)=>if accepted==true {count+=1;},
+                Err(failure)=>tracing::warn!(key=%self.target.key,code=%failure.code,"confirmação de entrada legada falhou; segue na próxima rodada"),
+            }
         }
         if count>0{self.publish().await?;}Ok(json!({"confirmed":count}))
     }
