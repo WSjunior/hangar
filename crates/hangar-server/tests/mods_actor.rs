@@ -58,9 +58,12 @@ async fn mods_call_before_attach_answers_at_once() {
     server.abort();
 }
 
-/// Cano que responde os `ui_*` pela vitrine gravada, aceita várias conexões (reabertura) e anota os
-/// ids dos pedidos. `swallow` lista subtipos que ficam sem resposta.
-async fn vitrine_cano(swallow:&'static [&'static str]) -> (String,Arc<Mutex<Vec<String>>>,tokio::task::JoinHandle<()>) {
+/// (subtipo, id) de cada pedido `ui_*` que chegou ao cano.
+type Seen = Arc<Mutex<Vec<(String,String)>>>;
+
+/// Cano que responde os `ui_*` pela vitrine gravada, aceita várias conexões (reabertura) e anota
+/// subtipo e id dos pedidos. `swallow` lista subtipos que ficam sem resposta.
+async fn vitrine_cano(swallow:&'static [&'static str]) -> (String,Seen,tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let ids = Arc::new(Mutex::new(Vec::new()));
@@ -86,7 +89,7 @@ async fn vitrine_cano(swallow:&'static [&'static str]) -> (String,Arc<Mutex<Vec<
                     let frame:serde_json::Value = serde_json::from_str(envelope["frame"].as_str().unwrap()).unwrap();
                     let subtype = frame["request"]["subtype"].as_str().unwrap_or("").to_owned();
                     if frame["type"] != "control_request" || !subtype.starts_with("ui_") { continue; }
-                    seen.lock().unwrap().push(frame["request_id"].as_str().unwrap_or("").to_owned());
+                    seen.lock().unwrap().push((subtype.clone(),frame["request_id"].as_str().unwrap_or("").to_owned()));
                     if swallow.contains(&subtype.as_str()) { continue; }
                     for line in fake.answer(&frame) {
                         let out = json!({"type":"cano_output","frame":line.to_string()});
@@ -107,6 +110,22 @@ async fn wait_ui(mods:&Mods,check:impl Fn(&serde_json::Value)->bool) -> serde_js
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }).await.expect("plugin_ui esperado")
+}
+
+/// Espera, com prazo, o cano receber um pedido do subtipo.
+async fn wait_request(seen:&Seen,subtype:&str) {
+    tokio::time::timeout(std::time::Duration::from_secs(5),async {
+        while !seen.lock().unwrap().iter().any(|(kind,_)|kind == subtype) {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await.unwrap_or_else(|_|panic!("{subtype} esperado no cano"))
+}
+
+/// Fila, trava e conexão de um ator montado à mão, sem o registro.
+async fn actor_parts(target:&RuntimeTarget) -> (QueueActor,cano::CanoConnection) {
+    let lease = acquire_lease(&target.lease_path).unwrap();
+    let store = Store::open(&target.state_path,&target.projection_dir,State::new("key",1,"session",vec![])).unwrap();
+    (QueueActor::start(store,lease),cano::connect(&target.binding).await.unwrap())
 }
 
 fn registry(mods:&Mods) -> RuntimeRegistry {
@@ -138,14 +157,15 @@ async fn surface_session_publishes_the_band_and_answers_a_press() {
 #[tokio::test]
 async fn closing_the_session_answers_pending_calls() {
     let dir = tempfile::tempdir().unwrap();
-    let (escuta,_,server) = vitrine_cano(&["ui_press"]).await;
+    let (escuta,seen,server) = vitrine_cano(&["ui_press"]).await;
     let mods = Mods::default();
     let registry = registry(&mods);
     registry.open(claude_target(dir.path(),escuta,true)).await.unwrap();
     wait_ui(&mods,|ui|!ui["above"].is_null()).await;
     let (link,_) = mods.link("session").unwrap();
     let pending = tokio::spawn(async move { link.call(ModsCall::Press { site:"above-prompt".into(),key:"abrir-vitrine-botoes".into() }).await });
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // O clique tem que estar em aberto no ator, já no fio, quando a sessão fecha.
+    wait_request(&seen,"ui_press").await;
     registry.close("key",1).await.unwrap();
     let result = tokio::time::timeout(std::time::Duration::from_secs(2),pending).await.unwrap().unwrap();
     assert_eq!(result.unwrap_err().code,"erro_mod_clique_sem_resposta");
@@ -164,8 +184,68 @@ async fn reopening_attaches_again_with_a_new_prefix() {
     registry.close("key",1).await.unwrap();
     registry.open(target).await.unwrap();
     wait_ui(&mods,|ui|!ui["above"].is_null()).await;
-    let prefixes:std::collections::BTreeSet<String> = ids.lock().unwrap().iter().map(|id|id.rsplit_once(':').unwrap().0.to_owned()).collect();
+    let prefixes:std::collections::BTreeSet<String> = ids.lock().unwrap().iter().map(|(_,id)|id.rsplit_once(':').unwrap().0.to_owned()).collect();
     assert_eq!(prefixes.len(),2,"cada vida do ator tem prefixo próprio: {prefixes:?}");
     registry.close("key",1).await.unwrap();
+    server.abort();
+}
+
+/// Com o runtime multithread, a tarefa do ator rodaria em outra thread durante o `before` se já
+/// existisse: o `ui_attach` chegaria ao cano e a primeira faixa iria para um `Mods` sem a sessão.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_owner_is_registered_before_the_actor_takes_its_first_step() {
+    let dir = tempfile::tempdir().unwrap();
+    let (escuta,seen,server) = vitrine_cano(&[]).await;
+    let target = claude_target(dir.path(),escuta,true);
+    let (queue,connection) = actor_parts(&target).await;
+    let mods = Mods::default();
+    let engine = RuntimeEngine::new("claude",target.metadata.clone(),1,ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 }).unwrap()
+        .with_mods(mods.clone());
+    let mut quiet_before = None;
+    let handle = RuntimeActor::spawn_with(target,queue,connection,engine,|handle| {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        quiet_before = Some(seen.lock().unwrap().is_empty());
+        mods.attach("session",1,Arc::new(handle.clone()));
+    });
+    assert_eq!(quiet_before,Some(true),"o ator não pode dar o primeiro passo antes do registro");
+    wait_ui(&mods,|ui|ui["above"].to_string().contains("superfície desktop")).await;
+    handle.stop().await.unwrap();
+    server.abort();
+}
+
+/// Cano cujo retrato traz um pedido pendente com id inválido: o `hydrate` falha e o ator termina com erro.
+async fn broken_cano() -> (String,tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let (stream,_) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut raw = String::new(); reader.read_line(&mut raw).await.unwrap();
+        let mut snapshot = mods_support::cano_snapshot_json();
+        snapshot["pendentes"] = json!([json!({"type":"control_request","request_id":[1]}).to_string()]);
+        reader.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
+        while reader.read_line(&mut raw).await.unwrap_or(0) > 0 { raw.clear(); }
+    });
+    (format!("tcp:{address}"),task)
+}
+
+#[tokio::test]
+async fn an_actor_that_dies_with_an_error_clears_the_band_and_keeps_the_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let (escuta,server) = broken_cano().await;
+    let target = claude_target(dir.path(),escuta,true);
+    let (queue,connection) = actor_parts(&target).await;
+    let mods = Mods::default();
+    let engine = RuntimeEngine::new("claude",target.metadata.clone(),1,ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 }).unwrap()
+        .with_mods(mods.clone());
+    let handle = RuntimeActor::spawn_with(target,queue,connection,engine,|handle| {
+        mods.attach("session",1,Arc::new(handle.clone()));
+        // A faixa de uma vida anterior, com botão: é ela que não pode ficar nos apps.
+        mods.publish_ui("session",1,&json!({"above":{"type":"Button","key":"k"},"panes":[],"shown_id":null,"columns":110,"source":"surface"}));
+    });
+    let ui = wait_ui(&mods,|ui|ui["above"].is_null()).await;
+    assert_eq!(ui["panes"],json!([]));
+    assert!(mods.owns("session"),"a posse só sai no close");
+    assert!(handle.stop().await.is_err(),"o ator terminou com erro");
     server.abort();
 }

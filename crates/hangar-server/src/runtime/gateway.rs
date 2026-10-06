@@ -125,11 +125,13 @@ impl RuntimeRegistry {
         let mut engine = RuntimeEngine::new(&target.provider,metadata,target.generation,ClockSample { monotonic_s:0.0,epoch_s })?
             .with_policy(self.policy.clone()).with_publisher(self.events.clone()).with_revision(revision);
         if let Some(mods) = &self.mods { engine = engine.with_mods(mods.clone()); }
-        let handle = RuntimeActor::spawn(target.clone(),queue,connection,engine);
-        // Dono único dos pedidos dos apps até o `close` (S9). Só o Claude tem superfície.
-        if target.provider == "claude" && let Some(mods) = &self.mods {
-            mods.attach(&target.name,target.generation,Arc::new(handle.clone()));
-        }
+        // Dono único dos pedidos dos apps até o `close` (S9). Só o Claude tem superfície. Registrado antes
+        // de a tarefa do ator existir: a primeira faixa publicada já encontra a sessão no `Mods`.
+        let handle = RuntimeActor::spawn_with(target.clone(),queue,connection,engine,|handle| {
+            if target.provider == "claude" && let Some(mods) = &self.mods {
+                mods.attach(&target.name,target.generation,Arc::new(handle.clone()));
+            }
+        });
         self.entries.lock().await.insert(target.key.clone(),Entry { generation:target.generation,handle:EntryHandle::Headless(handle.clone()),
             lease_path:target.lease_path.clone(),name:target.name.clone() });
         handle

@@ -276,11 +276,29 @@ fn turn_start_redraws_the_band_with_is_working() {
 }
 
 #[test]
+fn conversation_reset_redraws_the_band_without_is_working() {
+    let mut engine = attached();
+    line(&mut engine,json!({"type":"command_lifecycle","state":"started"}),12.0);
+    let effects = engine.apply(EngineInput::Tick,clock(12.2)).unwrap();
+    let working = surface_writes(&effects).into_iter().find(|frame|frame["request"]["component"] == "AbovePrompt").unwrap();
+    line(&mut engine,json!({"type":"control_response","response":{"subtype":"success","request_id":working["request_id"],
+        "response":{"tree":{"type":"Text"},"hooked":true}}}),12.3);
+    line(&mut engine,json!({"type":"conversation_reset"}),12.4);
+    assert_eq!(engine.view()["in_progress"],false);
+    let effects = engine.apply(EngineInput::Tick,clock(12.6)).unwrap();
+    let band = surface_writes(&effects).into_iter().find(|frame|frame["request"]["component"] == "AbovePrompt").expect("faixa pedida de novo");
+    assert_eq!(band["request"]["props"]["isWorking"],false);
+}
+
+#[test]
 fn surface_deadline_enters_the_engine_clock() {
-    // O prazo da ligação (15 s) é o mais próximo: sem ele o ator não acordaria para tentar de novo.
+    // Sem o prazo da superfície no relógio, o ator não acordaria para ligar de novo.
     let mut engine = surface_engine(json!({"name":"session","initialized":true}));
     engine.hydrate(snapshot()).unwrap();
-    assert_eq!(engine.next_deadline(),Some(10.0 + 10.0),"o carimbo de recarga (10 s) ainda vem antes");
+    // Primeiro vence o carimbo de recarga (20); passado ele, o próximo é o prazo da ligação (10 + 15).
+    assert_eq!(engine.next_deadline(),Some(20.0));
+    engine.apply(EngineInput::Tick,clock(20.0)).unwrap();
+    assert_eq!(engine.next_deadline(),Some(25.0),"prazo da ligação no relógio do motor");
     let effects = engine.apply(EngineInput::Tick,clock(25.0)).unwrap();
     assert!(surface_writes(&effects).is_empty(),"ligação vencida espera 1 s antes de tentar de novo");
     assert!(engine.next_deadline().is_some_and(|deadline|deadline <= 26.0 + 1e-9),"a nova tentativa entra no relógio");
