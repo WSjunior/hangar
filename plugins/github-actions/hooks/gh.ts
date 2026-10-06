@@ -1,8 +1,8 @@
 // Tradução do JSON do `gh` para o que a faixa desenha. Sem `$`: tudo aqui é puro e testável.
 
-import type { Checks, GhView, Job, Pr, Situacao } from '../types'
+import type { Checks, Falha, GhView, Job, Pr, Situacao } from '../types'
 
-export type { GhView, Job, Pr, Situacao, Workflow } from '../types'
+export type { Falha, GhView, Job, Pr, Situacao, Workflow } from '../types'
 
 export type RunGh = {
   databaseId: number
@@ -123,13 +123,18 @@ export function precisaConsultar(v: GhView | null): boolean {
     || (v.pr?.estado === 'OPEN' && v.pr.checks.rodando > 0)
 }
 
-export type Falha = 'login' | 'limite' | 'outra'
-
 /** O que o stderr do gh diz sobre a falha: sem login, limite da API ou outra coisa. */
 export function classificarFalha(msg: string): Falha {
   if (/gh auth login|HTTP 401|Bad credentials|authentication required|not logged in/i.test(msg)) return 'login'
   if (/rate limit/i.test(msg)) return 'limite'
   return 'outra'
+}
+
+const GRAVIDADE: Record<Falha, number> = { outra: 0, login: 1, limite: 2 }
+
+/** De vários erros de uma consulta, o que mais pesa: limite > login > outra. */
+export function piorErro(a: string | null, b: string): string {
+  return a !== null && GRAVIDADE[classificarFalha(a)] >= GRAVIDADE[classificarFalha(b)] ? a : b
 }
 
 /** A linha de aviso da faixa: a falha nunca fica calada. */
