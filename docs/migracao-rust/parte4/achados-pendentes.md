@@ -27,3 +27,8 @@ Achados médios e baixos das revisões por Task que entraram na `feat/parte4` se
   leitura do PTY que não é EIO fecha como fim normal; resize do PTY que falha só aparece em debug;
   `restore_after_crash` na subida sem diário (só `warn`); troca de painel com desmontagem acima de
   10 s fica com dois painéis (vai ao diário).
+- Task 7: psmux pode escrever erro no stdout com código diferente de 0 e virar "quadro" (conferir
+  na VM, Task 10/13); a linha da lista mostra só `list_capture_failed` e o código fino só vai ao
+  log (já era assim); pior caso de 5 s + 5 s quando captura e `has-session` estouram; stderr e
+  `io::Error` descartados (só o código); statusline e limite congelam sem `problema` na falha (já
+  era assim). Testes `cfg(windows)` ainda não rodaram: saem do job Windows do CI no próximo push.
