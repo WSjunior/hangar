@@ -1,0 +1,407 @@
+//! Cliente da superfície remota de um `claude -p` (pedidos `ui_*` no stream-json): o Hangar entra
+//! como `desktop`, pede a faixa e os painéis, segue os avisos e leva os pedidos dos apps ao mod.
+//! Máquina de estados pura, como o `ClaudeEngine`: entra linha e relógio, sai efeito.
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde_json::{Value, json};
+
+use super::model::*;
+use super::tree;
+use crate::runtime::protocol::RequestId;
+
+/// Prazo do desenho: a árvore de 398 KB veio em 0,35 s; a folga cobre máquina ocupada.
+const RENDER_S: f64 = 10.0;
+/// Prazo de clique, fechar, mostrar e digitar.
+const CALL_S: f64 = 5.0;
+const ATTACH_S: f64 = 15.0;
+/// Pedidos de desenho juntados depois de um `ui_invalidate` (S3).
+const BATCH_S: f64 = 0.1;
+/// O fechar só vale com o aviso `ui_panes` sem o painel.
+const CLOSE_CONFIRM_S: f64 = 2.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase { Idle, Attaching, Ready, Off }
+
+enum Pending {
+    Attach,
+    Panes,
+    Render { instance: String },
+    Press { token: u64, site: String, key: String, retried: bool },
+    Input { token: u64, site: String, key: String, submit: bool, value: String, retried: bool },
+    /// Desenho pedido para tentar de novo um clique ou uma digitação (S4).
+    Refresh { token: u64, call: ModsCall },
+    Close { token: u64, site: String },
+    Show { token: u64, site: String },
+}
+
+impl Pending {
+    fn token(&self) -> Option<u64> {
+        match self {
+            Pending::Press { token, .. } | Pending::Input { token, .. } | Pending::Refresh { token, .. }
+            | Pending::Close { token, .. } | Pending::Show { token, .. } => Some(*token),
+            Pending::Attach | Pending::Panes | Pending::Render { .. } => None,
+        }
+    }
+    fn limit(&self) -> f64 {
+        match self {
+            Pending::Attach => ATTACH_S,
+            Pending::Panes | Pending::Render { .. } | Pending::Refresh { .. } => RENDER_S,
+            _ => CALL_S,
+        }
+    }
+}
+
+struct Waiting { pending: Pending, deadline: f64 }
+
+pub struct Surface {
+    prefix: String,
+    counter: u64,
+    phase: Phase,
+    waiting: BTreeMap<String, Waiting>,
+    panes: Vec<PaneItem>,
+    shown: Option<String>,
+    trees: BTreeMap<String, Value>,
+    rendering: BTreeSet<String>,
+    dirty: BTreeSet<String>,
+    flush_at: Option<f64>,
+    closing: Vec<(u64, String, f64)>,
+    working: bool,
+    published: Option<Value>,
+}
+
+fn reply(token: u64, result: Result<Value, ModsError>) -> SurfaceEffect {
+    SurfaceEffect::Reply { token, result }
+}
+
+impl Surface {
+    /// `prefix` separa os pedidos desta vida dos de um ator anterior ligado ao mesmo processo do Claude
+    /// Code: a resposta atrasada de um pedido velho não pode ser tomada como de um pedido novo.
+    pub fn new(prefix: String) -> Self {
+        Self { prefix, counter: 0, phase: Phase::Idle, waiting: BTreeMap::new(), panes: Vec::new(), shown: None,
+            trees: BTreeMap::new(), rendering: BTreeSet::new(), dirty: BTreeSet::new(), flush_at: None,
+            closing: Vec::new(), working: false, published: None }
+    }
+
+    pub fn owns(&self, id: &RequestId) -> bool {
+        matches!(id, RequestId::String(id) if id.strip_prefix(self.prefix.as_str()).is_some_and(|rest| rest.starts_with(':')))
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.phase == Phase::Ready
+    }
+
+    /// Processo novo, ou o mesmo depois de uma reconexão: liga de novo. `ui_attach` repetido é aceito
+    /// e reenvia o rol (E3), então o estado anterior não precisa ser guardado.
+    pub fn start(&mut self, now: f64) -> Vec<SurfaceEffect> {
+        let mut out = Vec::new();
+        self.reset(&mut out);
+        self.phase = Phase::Attaching;
+        self.request("ui_attach", json!({"surface": SURFACE, "client_id": CLIENT_ID, "viewport": viewport(), "answers": ["ui_copy"]}),
+            Pending::Attach, now, &mut out);
+        out
+    }
+
+    pub fn on_response(&mut self, id: &RequestId, response: &Value, now: f64) -> Vec<SurfaceEffect> {
+        let mut out = Vec::new();
+        let RequestId::String(id) = id else { return out };
+        let Some(waiting) = self.waiting.remove(id) else { return out };
+        let ok = response["subtype"] == "success";
+        let body = response.get("response").cloned().unwrap_or(Value::Null);
+        match waiting.pending {
+            Pending::Attach if ok => {
+                self.phase = Phase::Ready;
+                self.render(BAND_SITE, now, &mut out);
+                self.request("ui_panes", json!({"client_id": CLIENT_ID}), Pending::Panes, now, &mut out);
+            }
+            Pending::Attach => { self.phase = Phase::Off; self.publish(&mut out); }
+            Pending::Panes => if ok { self.apply_panes(&body, now, &mut out) },
+            Pending::Render { instance } => {
+                self.rendering.remove(&instance);
+                if ok { self.store(&instance, &body, &mut out); }
+            }
+            Pending::Press { token, site, key, retried } => match (ok, body["handled"] == true) {
+                (false, _) => out.push(reply(token, Err(no_answer()))),
+                (true, true) => out.push(reply(token, Ok(json!({"element": body["element"]})))),
+                (true, false) if retried => out.push(reply(token, Err(stale()))),
+                // Nada rodou no mod (P03): o desenho que o servidor tem está vencido.
+                (true, false) => self.refresh(token, ModsCall::Press { site, key }, now, &mut out),
+            },
+            Pending::Input { token, site, key, submit, value, retried } => match (ok, body["handled"] == true) {
+                (false, _) => out.push(reply(token, Err(no_answer()))),
+                (true, true) => out.push(reply(token, Ok(json!({"element": body["element"], "value": body["value"]})))),
+                (true, false) if retried => out.push(reply(token, Err(stale()))),
+                (true, false) => self.refresh(token, ModsCall::Input { site, key, submit, value }, now, &mut out),
+            },
+            Pending::Refresh { token, call } => {
+                if ok { self.store(call.site(), &body, &mut out); }
+                self.retry(token, call, now, &mut out);
+            }
+            Pending::Close { token, site } => {
+                if !ok { out.push(reply(token, Err(no_answer()))); }
+                else if body["closed"] == false { out.push(reply(token, Err(close_refused()))); }
+                else if !self.panes.iter().any(|pane| pane.id == site) { out.push(reply(token, Ok(json!({})))); }
+                // `closed: true` vale também para id desconhecido (E1): a prova é o rol sem o painel.
+                else { self.closing.push((token, site, now + CLOSE_CONFIRM_S)); }
+            }
+            Pending::Show { token, site } => {
+                if !ok { out.push(reply(token, Err(no_answer()))); }
+                // Id desconhecido devolve o `shown_id` de antes, sem erro (E1).
+                else if body["shown_id"] == site.as_str() { out.push(reply(token, Ok(json!({"shown_id": site})))); }
+                else { out.push(reply(token, Err(missing()))); }
+            }
+        }
+        out
+    }
+
+    /// Avisos sem pedido. São do processo, não do cliente, e nenhum traz `client_id`.
+    pub fn on_notice(&mut self, event: &Value, now: f64) -> Vec<SurfaceEffect> {
+        let mut out = Vec::new();
+        match event["subtype"].as_str() {
+            Some("ui_panes") if matches!(self.phase, Phase::Attaching | Phase::Ready) => self.apply_panes(event, now, &mut out),
+            Some("ui_invalidate") if self.phase == Phase::Ready => {
+                match event["instances"].as_array() {
+                    // A lista traz também instâncias já fechadas (P11): só as montadas são pedidas.
+                    Some(instances) => for instance in instances {
+                        if instance["surface"] != SURFACE { continue; }
+                        if let Some(id) = instance["instance_id"].as_str().filter(|id| self.mounted(id)) {
+                            self.dirty.insert(id.to_owned());
+                        }
+                    },
+                    None => {
+                        self.dirty.insert(BAND_SITE.to_owned());
+                        self.dirty.extend(self.panes.iter().map(|pane| pane.id.clone()));
+                    }
+                }
+                if !self.dirty.is_empty() { self.flush_at.get_or_insert(now + BATCH_S); }
+            }
+            Some("ui_toast") => if let (Some(plugin), Some(text)) = (event["plugin"].as_str(), event["text"].as_str()) {
+                out.push(SurfaceEffect::Toast { plugin: plugin.to_owned(), text: text.to_owned(),
+                    timeout_ms: event["timeout_ms"].as_u64().unwrap_or(4000) });
+            },
+            // `ui_status` fica fora desta entrega (spec, "Fonte superfície", passo 5).
+            _ => {}
+        }
+        out
+    }
+
+    /// Pedido `ui_copy` do Claude Code: sempre `copied: true` e na hora. Erro ou silêncio deixam o mod
+    /// esperando 5 s (P07). O pedido chega antes da resposta do clique que o causou.
+    pub fn on_copy(&mut self, request_id: &Value, request: &Value) -> Vec<SurfaceEffect> {
+        let mut out = vec![SurfaceEffect::Write { frame: json!({"type": "control_response", "response": {
+            "subtype": "success", "request_id": request_id, "response": {"copied": true}}}) }];
+        // Antes de ligar só chega pedido velho, do snapshot do cano: responde e não entrega.
+        if self.phase == Phase::Ready && let Some(text) = request["text"].as_str() {
+            out.push(SurfaceEffect::Copied { plugin: request["plugin"].as_str().unwrap_or("").to_owned(), text: text.to_owned() });
+        }
+        out
+    }
+
+    /// O processo do Claude Code saiu: pedidos em aberto respondem com código e a faixa some.
+    pub fn on_exit(&mut self) -> Vec<SurfaceEffect> {
+        let mut out = Vec::new();
+        self.reset(&mut out);
+        self.phase = Phase::Off;
+        self.publish(&mut out);
+        out
+    }
+
+    /// A faixa recebe `isWorking`: a troca pede um desenho novo dela.
+    pub fn set_working(&mut self, working: bool, now: f64) {
+        if self.working == working { return; }
+        self.working = working;
+        if self.phase == Phase::Ready { self.mark(BAND_SITE, now); }
+    }
+
+    pub fn tick(&mut self, now: f64) -> Vec<SurfaceEffect> {
+        let mut out = Vec::new();
+        if self.flush_at.is_some_and(|at| now + 1e-9 >= at) {
+            self.flush_at = None;
+            for instance in std::mem::take(&mut self.dirty) {
+                if self.mounted(&instance) { self.render(&instance, now, &mut out); }
+            }
+        }
+        let expired: Vec<String> = self.waiting.iter().filter(|(_, waiting)| now + 1e-9 >= waiting.deadline)
+            .map(|(id, _)| id.clone()).collect();
+        for id in expired {
+            let Some(waiting) = self.waiting.remove(&id) else { continue };
+            match waiting.pending {
+                Pending::Attach => { self.phase = Phase::Off; self.publish(&mut out); }
+                Pending::Render { instance } => { self.rendering.remove(&instance); }
+                Pending::Panes => {}
+                pending => if let Some(token) = pending.token() { out.push(reply(token, Err(no_answer()))); },
+            }
+        }
+        let (late, open): (Vec<_>, Vec<_>) = std::mem::take(&mut self.closing).into_iter().partition(|(_, _, until)| now + 1e-9 >= *until);
+        self.closing = open;
+        for (token, ..) in late { out.push(reply(token, Err(no_answer()))); }
+        out
+    }
+
+    pub fn deadline(&self) -> Option<f64> {
+        self.flush_at.into_iter().chain(self.waiting.values().map(|waiting| waiting.deadline))
+            .chain(self.closing.iter().map(|(_, _, until)| *until)).min_by(f64::total_cmp)
+    }
+
+    /// Pedido de um app. Clique e digitação vão pelo `handle` do último desenho, com a `key` junto;
+    /// sem o elemento no desenho guardado, pede o desenho de novo e procura uma vez (S4).
+    pub fn call(&mut self, token: u64, call: ModsCall, now: f64) -> Vec<SurfaceEffect> {
+        let mut out = Vec::new();
+        if self.phase != Phase::Ready || !self.mounted(call.site()) {
+            out.push(reply(token, Err(missing())));
+            return out;
+        }
+        match call {
+            ModsCall::Show { site } if site != BAND_SITE => self.request("ui_pane_show",
+                json!({"id": site, "surface": SURFACE, "client_id": CLIENT_ID}), Pending::Show { token, site }, now, &mut out),
+            ModsCall::Close { site } if site != BAND_SITE => self.request("ui_close",
+                json!({"id": site, "client_id": CLIENT_ID}), Pending::Close { token, site }, now, &mut out),
+            ModsCall::Show { .. } | ModsCall::Close { .. } => out.push(reply(token, Err(missing()))),
+            ModsCall::Press { site, key } => match self.control(&site, &key, "Button") {
+                Some(control) => self.press_with(token, site, key, control, false, now, &mut out),
+                None => self.refresh(token, ModsCall::Press { site, key }, now, &mut out),
+            },
+            ModsCall::Input { site, key, submit, value } => match self.control(&site, &key, "Input") {
+                Some(control) => self.input_with(token, (site, key, submit, value), control, false, now, &mut out),
+                None => self.refresh(token, ModsCall::Input { site, key, submit, value }, now, &mut out),
+            },
+        }
+        out
+    }
+
+    fn request(&mut self, subtype: &str, mut body: Value, pending: Pending, now: f64, out: &mut Vec<SurfaceEffect>) {
+        self.counter += 1;
+        let id = format!("{}:{}", self.prefix, self.counter);
+        body["subtype"] = json!(subtype);
+        let deadline = now + pending.limit();
+        self.waiting.insert(id.clone(), Waiting { pending, deadline });
+        out.push(SurfaceEffect::Write { frame: json!({"type": "control_request", "request_id": id, "request": body}) });
+    }
+
+    fn mounted(&self, instance: &str) -> bool {
+        instance == BAND_SITE || self.panes.iter().any(|pane| pane.id == instance)
+    }
+
+    /// O pedido de desenho com as props completas que uma tela de verdade manda (S2): sem `scroll`, um
+    /// mod que o lê some do desenho sem aviso.
+    fn render_body(&self, instance: &str) -> Option<Value> {
+        let (component, props) = if instance == BAND_SITE {
+            ("AbovePrompt", json!({"hasSurvey": false, "isWorking": self.working, "bodyColumns": BAND_COLUMNS, "maxRows": 30,
+                "scroll": {"offset": 0, "bodyRows": 30}, "view": {}}))
+        } else {
+            let pane = self.panes.iter().find(|pane| pane.id == instance)?;
+            ("Pane", json!({"title": pane.title, "isFocused": false, "bodyColumns": pane.columns() - 2, "placement": "dock",
+                "scroll": {"offset": 0, "bodyRows": 40}, "view": {}}))
+        };
+        Some(json!({"surface": SURFACE, "client_id": CLIENT_ID, "component": component, "instance_id": instance,
+            "props": props, "viewport": viewport()}))
+    }
+
+    fn render(&mut self, instance: &str, now: f64, out: &mut Vec<SurfaceEffect>) {
+        if self.rendering.contains(instance) { self.mark(instance, now); return; }
+        let Some(body) = self.render_body(instance) else { return };
+        self.rendering.insert(instance.to_owned());
+        self.request("ui_render", body, Pending::Render { instance: instance.to_owned() }, now, out);
+    }
+
+    fn mark(&mut self, instance: &str, now: f64) {
+        self.dirty.insert(instance.to_owned());
+        self.flush_at.get_or_insert(now + BATCH_S);
+    }
+
+    fn store(&mut self, instance: &str, body: &Value, out: &mut Vec<SurfaceEffect>) {
+        let Some(tree) = body.get("tree").filter(|tree| tree.is_object()) else { return };
+        // Desenho de painel que fechou no meio não volta ao evento.
+        if !self.mounted(instance) { return; }
+        self.trees.insert(instance.to_owned(), tree.clone());
+        self.publish(out);
+    }
+
+    fn apply_panes(&mut self, body: &Value, now: f64, out: &mut Vec<SurfaceEffect>) {
+        let Ok(panes) = serde_json::from_value::<Vec<PaneItem>>(body["panes"].clone()) else { return };
+        // Painel novo, ou com título ou tamanho trocado: as props mudaram, o desenho também.
+        let changed: Vec<String> = panes.iter().filter(|pane| self.panes.iter().find(|old| old.id == pane.id) != Some(*pane))
+            .map(|pane| pane.id.clone()).collect();
+        self.panes = panes;
+        self.shown = body["shown_id"].as_str().map(str::to_owned);
+        let ids: BTreeSet<String> = self.panes.iter().map(|pane| pane.id.clone()).collect();
+        let keep = |id: &String| id == BAND_SITE || ids.contains(id);
+        self.trees.retain(|id, _| keep(id));
+        self.dirty.retain(|id| keep(id));
+        self.rendering.retain(|id| keep(id));
+        for id in changed { self.render(&id, now, out); }
+        let (gone, open): (Vec<_>, Vec<_>) = std::mem::take(&mut self.closing).into_iter().partition(|(_, site, _)| !ids.contains(site));
+        self.closing = open;
+        for (token, ..) in gone { out.push(reply(token, Ok(json!({})))); }
+        self.publish(out);
+    }
+
+    fn view(&self) -> Value {
+        let above = self.trees.get(BAND_SITE).filter(|tree| !tree::is_engine_only(tree)).cloned().unwrap_or(Value::Null);
+        // `columns` do painel é o `bodyColumns` que o mod recebeu, a largura do lugar nos apps (contrato).
+        let panes: Vec<Value> = self.panes.iter().map(|pane| json!({"id": pane.id, "title": pane.title, "placement": "dock",
+            "columns": pane.columns() - 2, "tree": self.trees.get(&pane.id).cloned().unwrap_or(Value::Null)})).collect();
+        json!({"above": above, "panes": panes, "shown_id": self.shown, "columns": BAND_COLUMNS, "source": "surface"})
+    }
+
+    fn publish(&mut self, out: &mut Vec<SurfaceEffect>) {
+        let view = self.view();
+        if self.published.as_ref() != Some(&view) {
+            self.published = Some(view.clone());
+            out.push(SurfaceEffect::Publish { data: view });
+        }
+    }
+
+    fn reset(&mut self, out: &mut Vec<SurfaceEffect>) {
+        for (_, waiting) in std::mem::take(&mut self.waiting) {
+            if let Some(token) = waiting.pending.token() { out.push(reply(token, Err(no_answer()))); }
+        }
+        for (token, ..) in std::mem::take(&mut self.closing) { out.push(reply(token, Err(no_answer()))); }
+        self.panes.clear();
+        self.shown = None;
+        self.trees.clear();
+        self.rendering.clear();
+        self.dirty.clear();
+        self.flush_at = None;
+    }
+
+    fn control(&self, site: &str, key: &str, kind: &str) -> Option<tree::Control> {
+        self.trees.get(site).and_then(|tree| tree::find(tree, key, &[kind]))
+    }
+
+    fn refresh(&mut self, token: u64, call: ModsCall, now: f64, out: &mut Vec<SurfaceEffect>) {
+        match self.render_body(call.site()) {
+            Some(body) => self.request("ui_render", body, Pending::Refresh { token, call }, now, out),
+            None => out.push(reply(token, Err(missing()))),
+        }
+    }
+
+    fn retry(&mut self, token: u64, call: ModsCall, now: f64, out: &mut Vec<SurfaceEffect>) {
+        match call {
+            ModsCall::Press { site, key } => match self.control(&site, &key, "Button") {
+                Some(control) => self.press_with(token, site, key, control, true, now, out),
+                None => out.push(reply(token, Err(stale()))),
+            },
+            ModsCall::Input { site, key, submit, value } => match self.control(&site, &key, "Input") {
+                Some(control) => self.input_with(token, (site, key, submit, value), control, true, now, out),
+                None => out.push(reply(token, Err(stale()))),
+            },
+            ModsCall::Close { .. } | ModsCall::Show { .. } => out.push(reply(token, Err(stale()))),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn press_with(&mut self, token: u64, site: String, key: String, control: tree::Control, retried: bool, now: f64, out: &mut Vec<SurfaceEffect>) {
+        self.request("ui_press", json!({"plugin": control.plugin, "handle": control.handle, "key": key,
+            "surface": SURFACE, "client_id": CLIENT_ID}), Pending::Press { token, site, key, retried }, now, out);
+    }
+
+    /// `key`, `component` e `instance_id` juntos: o Claude Code acha o campo mesmo com o `handle`
+    /// vencido, e a digitação não se perde num redesenho (P09).
+    fn input_with(&mut self, token: u64, field: (String, String, bool, String), control: tree::Control, retried: bool, now: f64, out: &mut Vec<SurfaceEffect>) {
+        let (site, key, submit, value) = field;
+        let component = if site == BAND_SITE { "AbovePrompt" } else { "Pane" };
+        self.request("ui_input", json!({"plugin": control.plugin, "handle": control.handle, "kind": if submit { "submit" } else { "change" },
+            "value": value, "key": key, "component": component, "instance_id": site, "surface": SURFACE, "client_id": CLIENT_ID}),
+            Pending::Input { token, site, key, submit, value, retried }, now, out);
+    }
+}
