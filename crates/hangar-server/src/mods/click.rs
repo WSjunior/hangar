@@ -5,11 +5,17 @@
 //! fila.
 use std::future::Future;
 use std::pin::Pin;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use tokio::sync::oneshot;
 
-use super::model::ModsError;
+use super::model::*;
+use super::screen::{self, COLLAPSED_TEXT, Screen};
+use super::state::{Mods, TerminalView};
+use super::tree;
 use crate::terminal_input::PaneFormats;
 
 /// O que o clique pede ao pane. Linha e coluna a partir de 0.
@@ -45,4 +51,540 @@ pub trait Pane: Send + Sync {
     /// chega ao terminal depois de o app ouvir que o clique falhou. O `Release` é a exceção e solta sempre,
     /// mesmo atrasado: é a limpeza do clique, e recusado deixaria a fila guardada até o fim da reserva.
     fn op(&self, op: PaneOp, start_by: Instant) -> PaneFuture;
+}
+
+/// Sem terminal ligado o Hangar é dono do tamanho (T9): 144 colunas colocam o painel aberto sem pedido e o
+/// deixam ao lado da conversa; 40 linhas mantêm a faixa desenhada (achado 12).
+pub const MIN_COLUMNS: u16 = 144;
+pub const MIN_ROWS: u16 = 40;
+/// Altura temporária para alcançar um botão fora da área visível; medida no psmux com 120 e 250 linhas.
+pub const TALL_ROWS: u16 = 250;
+/// Folga depois da confirmação do clique final: a operação no pane e a volta da resposta à rota.
+pub const ACTION_MARGIN: Duration = Duration::from_millis(300);
+/// Prazo da limpeza (`finish`), que roda depois da resposta e fora do prazo de quem pediu.
+pub const UNDO_MAX: Duration = Duration::from_secs(2);
+
+/// Tempos medidos (`medicoes-terminal.md`, `medicoes-psmux.md`), cortados para caber nos 7,5 s do pedido
+/// (fase 2); `quick` para os testes.
+#[derive(Clone, Debug)]
+pub struct Limits {
+    pub confirm: Duration,
+    pub activate_poll: Duration,
+    pub activate_max: Duration,
+    pub wheel_gap: Duration,
+    pub wheel_events: usize,
+    pub wheel_max: Duration,
+    pub scroll_wait: Duration,
+    pub key_gap: Duration,
+    pub focus_wait: Duration,
+    pub settle_poll: Duration,
+    pub settle_max: Duration,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        // Roda até 4 s: a medição pedia 10 s, que não cabem no orçamento; o piso de cada evento corta antes.
+        Self { confirm: Duration::from_secs(2), activate_poll: Duration::from_millis(50), activate_max: Duration::from_millis(300),
+            wheel_gap: Duration::from_millis(150), wheel_events: 80, wheel_max: Duration::from_secs(4), scroll_wait: Duration::from_millis(600),
+            key_gap: Duration::from_millis(20), focus_wait: Duration::from_millis(500), settle_poll: Duration::from_millis(100),
+            settle_max: Duration::from_secs(1) }
+    }
+}
+
+impl Limits {
+    pub fn quick() -> Self {
+        Self { confirm: Duration::from_millis(300), activate_poll: Duration::from_millis(1), activate_max: Duration::from_millis(50),
+            wheel_gap: Duration::ZERO, wheel_events: 80, wheel_max: Duration::from_secs(2), scroll_wait: Duration::from_millis(50),
+            key_gap: Duration::ZERO, focus_wait: Duration::from_millis(100), settle_poll: Duration::from_millis(1),
+            settle_max: Duration::from_millis(10) }
+    }
+}
+
+/// Como voltar o teclado ao prompt: a leitura da tela precisa dos títulos e da âncora, e o laço, do tamanho
+/// do anel do `ctrl+x tab`.
+#[derive(Clone)]
+struct Back { titles: Vec<String>, anchor: Option<String>, cap: usize }
+
+#[derive(Default)]
+struct Pending { hold: bool, height: Option<(u16, u16)>, focus: Option<String>, keyboard: Option<Back> }
+
+/// O que o pedido deixou para desfazer. Cada item entra antes da ação que o pede, para valer também com o
+/// pedido cortado no meio; `finish` desfaz.
+#[derive(Default)]
+pub struct Undo(Mutex<Pending>);
+
+impl Undo {
+    pub fn set_hold(&self) { self.0.lock().unwrap().hold = true; }
+    /// A altura de antes; a primeira registrada vale.
+    pub fn height(&self, columns: u16, rows: u16) { self.0.lock().unwrap().height.get_or_insert((columns, rows)); }
+    pub fn focus(&self, attempt: &str) { self.0.lock().unwrap().focus = Some(attempt.to_owned()); }
+    pub fn keyboard(&self, titles: Vec<String>, anchor: Option<String>, cap: usize) {
+        self.0.lock().unwrap().keyboard = Some(Back { titles, anchor, cap });
+    }
+    pub fn is_empty(&self) -> bool {
+        let pending = self.0.lock().unwrap();
+        !pending.hold && pending.height.is_none() && pending.focus.is_none() && pending.keyboard.is_none()
+    }
+    /// Lê ou muda o pendente sob a trava. Um item só sai depois de desfeito: cortado no meio da volta, ele
+    /// continua aqui para a guarda refazer.
+    fn with<T>(&self, change: impl FnOnce(&mut Pending) -> T) -> T { change(&mut self.0.lock().unwrap()) }
+}
+
+pub struct Ctx<'a> {
+    pub name: &'a str,
+    pub pane: &'a dyn Pane,
+    pub mods: &'a Mods,
+    pub limits: &'a Limits,
+    /// Prazo de quem pediu (a rota: 7,5 s desde a entrada). Ação no mod só começa com tempo para a
+    /// confirmação dentro dele.
+    pub until: Instant,
+    pub undo: &'a Undo,
+}
+
+/// O que o app pediu, resolvido no espelho que o plugin mandou.
+struct Target {
+    site: String,
+    key: String,
+    tree: Value,
+    ids: Vec<String>,
+    titles: Vec<String>,
+    anchor: Option<String>,
+    #[expect(dead_code, reason = "a reserva por teclado (Task 14) conta o anel do `ctrl+x tab` por aqui")]
+    band_buttons: usize,
+    #[expect(dead_code, reason = "a reserva por teclado (Task 14) arma o foco com o mod do botão")]
+    plugin: Option<String>,
+}
+
+fn target_of(view: &TerminalView, site: &str, key: &str, tree: Value) -> Target {
+    let plugin = tree::find(&tree, key, &["Button"]).map(|control| control.plugin);
+    Target { site: site.into(), key: key.into(), ids: view.ids(), titles: view.titles(), anchor: tree::anchor(&view.above),
+        band_buttons: tree::count_buttons(&view.above), plugin, tree }
+}
+
+fn target(ctx: &Ctx<'_>, site: &str, key: &str) -> Result<Target, ModsError> {
+    let view = ctx.mods.terminal_view(ctx.name).ok_or_else(pane_missing)?;
+    let tree = if site == BAND_SITE { view.above.clone() }
+        else { view.panes.iter().find(|p| p.id == site).map(|p| p.tree.clone()).ok_or_else(pane_missing)? };
+    Ok(target_of(&view, site, key, tree))
+}
+
+enum Found { Cell((usize, usize)), Keyboard, Clicked }
+
+impl Ctx<'_> {
+    fn left(&self) -> Duration { self.until.saturating_duration_since(Instant::now()) }
+    /// Até quando uma ação que espera `after` antes do clique final ainda pode começar: precisa sobrar
+    /// `after`, a confirmação do clique final e a folga. Sem isso, recusa sem mandar nada (C1).
+    fn start_by(&self, after: Duration) -> Result<Instant, ModsError> {
+        let need = after + self.limits.confirm + ACTION_MARGIN;
+        if self.left() < need { return Err(no_answer()); }
+        Ok(self.until - need)
+    }
+    /// Uma operação no pane, cortada no prazo: a resposta que não vier a tempo é a do mod sem resposta.
+    async fn op(&self, op: PaneOp, start_by: Instant) -> Result<PaneReply, ModsError> {
+        tokio::time::timeout_at(self.until.into(), self.pane.op(op, start_by)).await.unwrap_or_else(|_| Err(no_answer()))
+    }
+    /// Ação no mod que espera `after` antes do clique final.
+    async fn act(&self, op: PaneOp, after: Duration) -> Result<(), ModsError> {
+        let start_by = self.start_by(after)?;
+        self.op(op, start_by).await.map(|_| ())
+    }
+    async fn formats(&self) -> Result<PaneFormats, ModsError> {
+        match self.op(PaneOp::Formats, self.until).await? { PaneReply::Formats(f) => Ok(f), _ => Err(pane_failed("formats_shape")) }
+    }
+    async fn clients(&self) -> Result<usize, ModsError> {
+        match self.op(PaneOp::Clients, self.until).await? { PaneReply::Clients(n) => Ok(n), _ => Err(pane_failed("clients_shape")) }
+    }
+    async fn raw_screen(&self) -> Result<String, ModsError> {
+        match self.op(PaneOp::Screen, self.until).await? { PaneReply::Screen(s) => Ok(s), _ => Err(pane_failed("screen_shape")) }
+    }
+    /// Uma leitura nova: nenhuma coordenada vale de uma operação para outra (T10).
+    async fn read_view(&self, titles: &[String], anchor: Option<&str>) -> Result<(Screen, PaneFormats), ModsError> {
+        let f = self.formats().await?;
+        let ansi = self.raw_screen().await?;
+        Ok((screen::read_screen(&ansi, usize::from(f.columns), usize::from(f.rows), titles, anchor), f))
+    }
+    async fn read(&self, t: &Target) -> Result<(Screen, PaneFormats), ModsError> {
+        self.read_view(&t.titles, t.anchor.as_deref()).await
+    }
+    async fn click(&self, (row, col): (usize, usize), after: Duration) -> Result<(), ModsError> {
+        self.act(PaneOp::Mouse { row: row as u16, col: col as u16 }, after).await
+    }
+    async fn wheel(&self, (row, col): (usize, usize), down: bool) -> Result<(), ModsError> {
+        self.act(PaneOp::Wheel { row: row as u16, col: col as u16, down }, self.limits.scroll_wait).await
+    }
+    #[expect(dead_code, reason = "a reserva por teclado (Task 14) manda as teclas por aqui")]
+    async fn keys(&self, keys: &[&str], after: Duration) -> Result<(), ModsError> {
+        self.act(PaneOp::Keys(keys.iter().map(|k| (*k).to_owned()).collect()), after).await?;
+        tokio::time::sleep(self.limits.key_gap).await;
+        Ok(())
+    }
+    /// Espera a tela parar de mudar depois de um redimensionamento (70 a 200 ms no psmux), sem passar do
+    /// piso do clique final.
+    async fn settle(&self) {
+        let budget = self.limits.settle_max.min(self.left().saturating_sub(self.limits.confirm + ACTION_MARGIN));
+        let deadline = Instant::now() + budget;
+        let mut last = None;
+        while Instant::now() < deadline {
+            tokio::time::sleep(self.limits.settle_poll).await;
+            let Ok(screen) = self.raw_screen().await else { return };
+            if last.as_ref() == Some(&screen) { return; }
+            last = Some(screen);
+        }
+    }
+    /// A confirmação de um clique ou tecla final, sem passar do prazo.
+    fn confirm(&self) -> Duration { self.limits.confirm.min(self.left()) }
+}
+
+/// Sem terminal de verdade ligado, garante o tamanho mínimo (T9).
+pub async fn floor(ctx: &Ctx<'_>) -> Result<(), ModsError> {
+    let f = ctx.formats().await?;
+    if (f.columns < MIN_COLUMNS || f.rows < MIN_ROWS) && ctx.clients().await? == 0 {
+        ctx.act(PaneOp::Resize { columns: f.columns.max(MIN_COLUMNS), rows: f.rows.max(MIN_ROWS) }, ctx.limits.settle_max).await?;
+        ctx.settle().await;
+    }
+    Ok(())
+}
+
+async fn prepare(ctx: &Ctx<'_>) -> Result<PaneFormats, ModsError> {
+    floor(ctx).await?;
+    let f = ctx.formats().await?;
+    // Em modo de rolagem o ESC do clique cancela o modo e o resto da sequência vira texto no prompt.
+    if f.in_mode { return Err(terminal_in_mode()); }
+    Ok(f)
+}
+
+async fn wait_screen(ctx: &Ctx<'_>, t: &Target, ok: impl Fn(&Screen) -> bool) -> Result<Option<Screen>, ModsError> {
+    let deadline = Instant::now() + ctx.limits.activate_max;
+    loop {
+        tokio::time::sleep(ctx.limits.activate_poll).await;
+        let (s, _) = ctx.read(t).await?;
+        if ok(&s) { return Ok(Some(s)); }
+        if Instant::now() >= deadline { return Ok(None); }
+    }
+}
+
+/// Com um diálogo (ou a pesquisa) na tela, só o painel já mostrado e ao lado da conversa: o título de
+/// outra aba não troca, e em caixa o painel nem é desenhado (T6; psmux, captura 700).
+fn refuse_dialog_in_pane(t: &Target, s: &Screen) -> Result<(), ModsError> {
+    let index = t.ids.iter().position(|id| *id == t.site);
+    if (s.dialog || s.survey) && (s.placement != Some("dock") || s.active != index) { return Err(dialog_open()); }
+    Ok(())
+}
+
+/// Traz a aba para a frente clicando no meio do texto do título (o vão entre abas dá o teclado ao painel,
+/// (c)). `None` quando o título não está na linha das abas ((x)).
+async fn activate(ctx: &Ctx<'_>, t: &Target, s: Screen) -> Result<Option<Screen>, ModsError> {
+    let index = t.ids.iter().position(|id| *id == t.site).ok_or_else(pane_missing)?;
+    if s.active == Some(index) { return Ok(Some(s)); }
+    let (Some(tab), Some(row)) = (s.tabs.iter().find(|tab| tab.index == index), s.tab_row) else { return Ok(None) };
+    ctx.click((row, (tab.start + tab.end) / 2), ctx.limits.activate_max).await?;
+    wait_screen(ctx, t, |s| s.active == Some(index)).await?.map(Some).ok_or_else(no_answer)
+}
+
+async fn in_band(ctx: &Ctx<'_>, t: &Target, label: &str) -> Result<(usize, usize), ModsError> {
+    let (mut s, _) = ctx.read(t).await?;
+    if s.dialog || s.survey { return Err(dialog_open()); }
+    if s.band_state == "collapsed" {
+        // Um clique em qualquer ponto da linha expande ((ad)): no meio do texto, longe do fim.
+        let row = s.collapsed_row.unwrap_or(0);
+        let col = screen::find_label(&s.text, COLLAPSED_TEXT, row..row + 1, 0, None).first().map_or(2, |hit| hit.1);
+        ctx.click((row, col), ctx.limits.activate_max).await?;
+        s = wait_screen(ctx, t, |s| s.band_state != "collapsed").await?.ok_or_else(no_answer)?;
+    }
+    // Faixa encolhida (`↓ N more`) ou não desenhada: o mouse não tem onde clicar e o caso não está na reserva.
+    let band = match (&s.band, s.band_state) { (Some(band), "full") => band.clone(), _ => return Err(unreachable_pane()) };
+    match screen::find_in(&s, label, &band).as_slice() {
+        [one] => Ok(*one),
+        [] => Err(not_found(label)),
+        _ => Err(ambiguous(label)),
+    }
+}
+
+/// Relê a tela, confere que o rótulo continua na mesma célula e clica no meio dele; confirma pelo press do
+/// plugin, sem repetir às cegas. Se o rótulo andou e continua único, confere a célula nova: coordenada
+/// velha cai em célula vazia, no `[-]` ou numa opção de diálogo (achados 1 e 9).
+async fn click_confirmed(ctx: &Ctx<'_>, t: &Target, label: &str, mut cell: (usize, usize)) -> Result<(), ModsError> {
+    for _ in 0..2 {
+        let (s, _) = ctx.read(t).await?;
+        let region = if t.site == BAND_SITE { s.band.clone() } else { s.body.clone() };
+        let hits = region.map(|r| screen::find_in(&s, label, &r)).unwrap_or_default();
+        match hits.as_slice() {
+            [one] if *one == cell => {
+                let since = Instant::now();
+                ctx.click(cell, Duration::ZERO).await?;
+                return if ctx.mods.wait_pressed(ctx.name, &t.site, &t.key, since, ctx.confirm()).await { Ok(()) } else { Err(no_answer()) };
+            }
+            [one] => cell = *one,
+            [] => return Err(not_found(label)),
+            _ => return Err(ambiguous(label)),
+        }
+    }
+    Err(not_found(label))
+}
+
+/// Devolve já a altura de antes de esticar (sem terminal ligado). Só sai da limpeza quando voltou: a volta
+/// que falhar (pane sem resposta, prazo) fica para o `finish`.
+async fn give_back_now(ctx: &Ctx<'_>) {
+    if let Some((columns, rows)) = ctx.undo.with(|p| p.height)
+        && give_back(ctx, columns, rows, ctx.until).await {
+        ctx.undo.with(|p| p.height = None);
+    }
+}
+
+/// Com um terminal ligado no meio, o `window-size latest` já lhe entregou o tamanho: a altura não volta.
+/// `true` quando a altura voltou ou não precisa voltar.
+async fn give_back(ctx: &Ctx<'_>, columns: u16, rows: u16, start_by: Instant) -> bool {
+    match ctx.clients().await {
+        Ok(0) => ctx.op(PaneOp::Resize { columns, rows }, start_by).await.is_ok(),
+        Ok(_) => true,
+        Err(_) => false,
+    }
+}
+
+/// Sem terminal ligado o corpo do painel acompanha a altura da janela ((u), (q)): estica, clica e deixa a
+/// altura de antes para a limpeza. Sem tempo para esticar, assentar e ainda clicar, nem estica. `None`: não
+/// alcançou, segue para a roda com a altura já devolvida.
+async fn stretched(ctx: &Ctx<'_>, t: &Target, label: &str, f: PaneFormats) -> Result<Option<Found>, ModsError> {
+    if ctx.start_by(ctx.limits.settle_max).is_err() { return Ok(None); }
+    // Antes de mandar: a altura volta mesmo se o pedido for cortado logo depois.
+    ctx.undo.height(f.columns, f.rows);
+    ctx.act(PaneOp::Resize { columns: f.columns, rows: TALL_ROWS }, ctx.limits.settle_max).await?;
+    ctx.settle().await;
+    let (s, g) = ctx.read(t).await?;
+    let hits = if g.rows == f.rows { Vec::new() } else { s.body.as_ref().map(|b| screen::find_in(&s, label, b)).unwrap_or_default() };
+    match hits.as_slice() {
+        [one] => click_confirmed(ctx, t, label, *one).await.map(|()| Some(Found::Clicked)),
+        found => {
+            // Nada a clicar na janela esticada: devolve antes da roda ou do teclado.
+            give_back_now(ctx).await;
+            Ok(if found.is_empty() { None } else { Some(Found::Keyboard) })
+        }
+    }
+}
+
+/// Roda com o ponteiro sobre o corpo, lendo o `offset` do `ui.scroll` depois de cada evento: contar eventos
+/// não serve, em rajada a rolagem acelera ((u); três linhas por evento no psmux). Cada evento só sai com
+/// tempo para a espera do `ui.scroll` e o clique final; sem isso, `erro_mod_clique_sem_resposta`.
+async fn roll_until(ctx: &Ctx<'_>, t: &Target, label: &str) -> Result<Found, ModsError> {
+    let (s, _) = ctx.read(t).await?;
+    let body = s.body.clone().ok_or_else(unreachable_pane)?;
+    let pointer = ((body.rows.0 + body.rows.1) / 2, (body.lo + body.hi) / 2);
+    let (mut seq, mut last) = ctx.mods.last_scroll(ctx.name, &t.site);
+    let mut down = true;
+    let started = Instant::now();
+    for _ in 0..ctx.limits.wheel_events {
+        if started.elapsed() >= ctx.limits.wheel_max { break; }
+        ctx.wheel(pointer, down).await?;
+        match ctx.mods.wait_scroll(ctx.name, &t.site, seq, ctx.limits.scroll_wait.min(ctx.left())).await {
+            Some((next, offset)) if Some(offset) != last => { seq = next; last = Some(offset); }
+            other => {
+                if let Some((next, _)) = other { seq = next; }
+                if !down { break; }
+                down = false;   // chegou ao fim: tenta para cima
+                continue;
+            }
+        }
+        let (s, _) = ctx.read(t).await?;
+        let hits = s.body.as_ref().map(|b| screen::find_in(&s, label, b)).unwrap_or_default();
+        match hits.len() { 0 => {}, 1 => return Ok(Found::Cell(hits[0])), _ => return Ok(Found::Keyboard) }
+        tokio::time::sleep(ctx.limits.wheel_gap).await;
+    }
+    Err(unreachable_pane())
+}
+
+async fn in_pane(ctx: &Ctx<'_>, t: &Target, label: &str) -> Result<Found, ModsError> {
+    let (s, f) = ctx.read(t).await?;
+    refuse_dialog_in_pane(t, &s)?;
+    if s.placement.is_none() { return Err(unreachable_pane()); }
+    let Some(s) = activate(ctx, t, s).await? else { return Ok(Found::Keyboard) };
+    let hits = s.body.as_ref().map(|b| screen::find_in(&s, label, b)).unwrap_or_default();
+    match hits.len() { 0 => {}, 1 => return Ok(Found::Cell(hits[0])), _ => return Ok(Found::Keyboard) }   // repetido no painel: teclado
+    if ctx.clients().await? == 0
+        && let Some(found) = stretched(ctx, t, label, f).await? {
+        return Ok(found);
+    }
+    roll_until(ctx, t, label).await
+}
+
+async fn reserve_press(_ctx: &Ctx<'_>, _t: &Target) -> Result<Value, ModsError> { Err(unreachable_pane()) }
+async fn reserve_close(_ctx: &Ctx<'_>, _t: &Target) -> Result<Value, ModsError> { Err(unreachable_pane()) }
+
+async fn press_inner(ctx: &Ctx<'_>, site: &str, key: &str) -> Result<Value, ModsError> {
+    let t = target(ctx, site, key)?;
+    let label = tree::label(&t.tree, key).ok_or_else(missing)?;
+    let f = prepare(ctx).await?;
+    // Sem tela cheia o clique enviado é ignorado (achado 8): vai pelo teclado.
+    if !f.mouse { return reserve_press(ctx, &t).await; }
+    if site == BAND_SITE {
+        let cell = in_band(ctx, &t, &label).await?;
+        click_confirmed(ctx, &t, &label, cell).await?;
+        return Ok(json!({}));
+    }
+    match in_pane(ctx, &t, &label).await? {
+        Found::Cell(cell) => click_confirmed(ctx, &t, &label, cell).await?,
+        Found::Keyboard => return reserve_press(ctx, &t).await,
+        Found::Clicked => {}
+    }
+    Ok(json!({}))
+}
+
+/// Clique num botão de mod pedido pelo app (T4).
+pub async fn press(ctx: &Ctx<'_>, site: &str, key: &str) -> Result<Value, ModsError> {
+    let result = press_inner(ctx, site, key).await;
+    // A aba da frente pode ter mudado sem redesenho (troca para painel já desenhado, (s)).
+    ctx.mods.schedule_shown(ctx.name);
+    result
+}
+
+/// Fechar: ativa a aba e clica na célula exata do `✕`, nunca por busca do glifo ((b)). Os outros
+/// fechamentos que o mod faz em seguida não são erro ((e)).
+pub async fn close(ctx: &Ctx<'_>, site: &str) -> Result<Value, ModsError> {
+    let result: Result<Value, ModsError> = async {
+        let t = target(ctx, site, CLOSE_KEY)?;
+        let f = prepare(ctx).await?;
+        if !f.mouse { return reserve_close(ctx, &t).await; }
+        let (s, _) = ctx.read(&t).await?;
+        refuse_dialog_in_pane(&t, &s)?;
+        if s.placement.is_none() { return Err(unreachable_pane()); }
+        let Some(s) = activate(ctx, &t, s).await? else { return reserve_close(ctx, &t).await };
+        let cell = s.close.ok_or_else(|| not_found("✕"))?;
+        ctx.click(cell, Duration::ZERO).await?;
+        if ctx.mods.wait_pane_gone(ctx.name, site, ctx.confirm()).await { Ok(json!({})) } else { Err(no_answer()) }
+    }.await;
+    ctx.mods.schedule_shown(ctx.name);
+    result
+}
+
+/// Troca de aba pedida pelo app (T2): o clique no título, sozinho. A reserva por teclado não deixa o painel
+/// pedido na frente (a volta por `ctrl+x tab` passa pelos seguintes, (z)): título fora da linha é recusa.
+pub async fn show(ctx: &Ctx<'_>, site: &str) -> Result<Value, ModsError> {
+    let t = target(ctx, site, "")?;
+    let f = prepare(ctx).await?;
+    if !f.mouse { return Err(mouse_off()); }
+    let (s, _) = ctx.read(&t).await?;
+    if s.dialog || s.survey { return Err(dialog_open()); }
+    activate(ctx, &t, s).await?.ok_or_else(unreachable_pane)?;
+    ctx.mods.set_screen_shown(ctx.name, Some(site.to_owned()));
+    Ok(json!({"shown_id": site}))
+}
+
+/// O pedido do app ao clique com terminal.
+pub async fn dispatch(ctx: &Ctx<'_>, call: ModsCall) -> Result<Value, ModsError> {
+    match call {
+        ModsCall::Press { site, key } => press(ctx, &site, &key).await,
+        ModsCall::Close { site } => close(ctx, &site).await,
+        ModsCall::Show { site } => show(ctx, &site).await,
+        // Com terminal não há por onde digitar no campo do mod (fora do escopo desta entrega).
+        ModsCall::Input { .. } => Err(no_typing()),
+    }
+}
+
+/// O painel que a linha de abas mostra na frente; `None` sem linha de abas na tela.
+pub async fn read_shown(ctx: &Ctx<'_>) -> Option<String> {
+    let view = ctx.mods.terminal_view(ctx.name)?;
+    if view.panes.is_empty() { return None; }
+    let t = target_of(&view, "", "", Value::Null);
+    let (s, _) = ctx.read(&t).await.ok()?;
+    s.active.and_then(|index| view.panes.get(index)).map(|p| p.id.clone())
+}
+
+/// Volta por `ctrl+x tab` até a borda apagar e nada ficar em inverso na faixa; nunca por `Escape`. Com um
+/// diálogo na tela qualquer tecla mexe nele: para ali.
+async fn back_to_prompt(ctx: &Ctx<'_>, back: &Back) {
+    for _ in 0..=back.cap {
+        let Ok((s, _)) = ctx.read_view(&back.titles, back.anchor.as_deref()).await else { return };
+        if s.dialog || s.survey || s.focus == Some("prompt") { return; }
+        if ctx.op(PaneOp::Keys(vec!["C-x".into(), "Tab".into()]), ctx.until).await.is_err() { return; }
+        tokio::time::sleep(ctx.limits.key_gap).await;
+    }
+    tracing::warn!(session = ctx.name, code = "mods_keyboard_return", "o teclado não voltou ao prompt depois da reserva");
+}
+
+/// Desfaz o que o pedido deixou, com prazo próprio (`UNDO_MAX`), fora do de quem pediu: desarma o alvo do
+/// foco, volta o teclado ao prompt, devolve a altura (só sem terminal ligado) e solta o pane. Roda depois
+/// da resposta, também com o pedido cortado. Cada item sai do `Undo` depois da sua volta, tenha dado certo
+/// ou não: se a tarefa sumir no meio da limpeza, a guarda refaz só o que faltou (todas as voltas podem
+/// repetir sem efeito novo).
+pub async fn finish(ctx: &Ctx<'_>) {
+    let undo = ctx.undo;
+    let clean = Ctx { until: Instant::now() + UNDO_MAX, ..*ctx };
+    if let Some(attempt) = undo.with(|p| p.focus.clone()) {
+        ctx.mods.disarm_focus(ctx.name, &attempt);
+        undo.with(|p| p.focus = None);
+    }
+    if let Some(back) = undo.with(|p| p.keyboard.clone()) {
+        back_to_prompt(&clean, &back).await;
+        undo.with(|p| p.keyboard = None);
+    }
+    if let Some((columns, rows)) = undo.with(|p| p.height) {
+        give_back(&clean, columns, rows, clean.until).await;
+        undo.with(|p| p.height = None);
+    }
+    if undo.with(|p| p.hold) {
+        let _ = clean.op(PaneOp::Release, clean.until).await;
+        undo.with(|p| p.hold = false);
+    }
+}
+
+/// O que o clique precisa possuir para rodar numa tarefa própria.
+#[derive(Clone)]
+pub struct Parts {
+    pub name: String,
+    pub pane: Arc<dyn Pane>,
+    pub mods: Mods,
+    pub limits: Limits,
+    /// Um pedido por vez no pane, contando a limpeza do anterior: a vez da rota solta antes dela.
+    pub busy: Arc<tokio::sync::Mutex<()>>,
+}
+
+/// Desfaz o que ficou quando a tarefa do clique some sem chegar ao fim (pânico, servidor encerrando,
+/// `abort`): o `Drop` passa o pendente e a vez do pane a uma tarefa nova, que fala com o executor.
+struct UndoOnDrop { parts: Parts, undo: Arc<Undo>, busy: Option<tokio::sync::OwnedMutexGuard<()>> }
+
+impl Drop for UndoOnDrop {
+    fn drop(&mut self) {
+        let busy = self.busy.take();
+        if self.undo.is_empty() { return; }
+        let (parts, undo) = (self.parts.clone(), self.undo.clone());
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _busy = busy;
+                let ctx = Ctx { name: &parts.name, pane: parts.pane.as_ref(), mods: &parts.mods, limits: &parts.limits,
+                    until: Instant::now(), undo: &undo };
+                finish(&ctx).await;
+            });
+        }
+    }
+}
+
+/// Reserva o pane no executor pelo resto do prazo mais a limpeza: a fila não entrega mensagem no meio do
+/// clique (o `Enter` dela apertaria um botão com o teclado num painel) nem muda a tela entre a leitura e o
+/// clique (C6).
+async fn hold(ctx: &Ctx<'_>) -> Result<(), ModsError> {
+    ctx.undo.set_hold();
+    let millis = u64::try_from((ctx.left() + UNDO_MAX).as_millis()).unwrap_or(u64::MAX);
+    ctx.op(PaneOp::Hold { millis }, ctx.until).await.map(|_| ())
+}
+
+/// Atende o pedido do app numa tarefa própria. A resposta sai pelo canal assim que se sabe o resultado; a
+/// limpeza vem depois, ainda com a vez do pane. Quem pediu pode desistir (a rota corta no fim do orçamento):
+/// a tarefa não começa ação nova sem tempo para ela, e a limpeza roda mesmo assim.
+pub fn spawn(parts: Parts, call: ModsCall, until: Instant) -> (tokio::task::JoinHandle<()>, oneshot::Receiver<Result<Value, ModsError>>) {
+    let (answer, reply) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        let Ok(busy) = tokio::time::timeout_at(until.into(), parts.busy.clone().lock_owned()).await else {
+            let _ = answer.send(Err(no_answer()));
+            return;
+        };
+        let undo = Arc::new(Undo::default());
+        let _guard = UndoOnDrop { parts: parts.clone(), undo: undo.clone(), busy: Some(busy) };
+        let ctx = Ctx { name: &parts.name, pane: parts.pane.as_ref(), mods: &parts.mods, limits: &parts.limits, until, undo: &undo };
+        let result = match hold(&ctx).await {
+            Ok(()) => dispatch(&ctx, call).await,
+            Err(error) => Err(error),
+        };
+        let _ = answer.send(result);
+        finish(&ctx).await;
+    });
+    (task, reply)
 }

@@ -1,6 +1,8 @@
 //! Apoio dos testes da interface dos mods: as conversas gravadas pela sonda, já limpas.
 #![allow(dead_code)]
 
+pub mod pane;
+
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
