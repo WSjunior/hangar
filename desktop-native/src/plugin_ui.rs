@@ -433,17 +433,23 @@ fn close_mark(site: &str, view: &View) -> Option<AnyElement> {
         .on_click(move |_, window, cx| press(&site, PANE_CLOSE_KEY, window, cx)).into_any_element())
 }
 
-/// Fileira das abas: um título por painel, o ativo em destaque, e um `✕` só à direita.
+/// Largura máxima de uma aba, em células: título maior que isso sai cortado com reticências.
+const TAB_MAX_CELLS: f32 = 24.;
+
+/// Fileira das abas: um título por painel, o ativo em destaque, e um `✕` só à direita. Cada aba tem largura máxima,
+/// com o título cortado, e a fileira rola de lado quando não cabe (como o `overflow-x: auto` do web): toda aba fica ao
+/// alcance, e o `✕` não sai da tela.
 fn tabs(panes: &[Value], active: &str, view: &View) -> AnyElement {
-    let row = div().flex().flex_row().items_center().gap_1().min_w_0().overflow_hidden()
+    let row = div().id("plg-tabs").flex().flex_row().items_center().gap_1().flex_1().min_w_0().overflow_x_scroll()
         .children(panes.iter().map(|p| {
             let id = p["id"].as_str().unwrap_or("").to_owned();
             let title = p["title"].as_str().filter(|t| !t.is_empty()).unwrap_or(&id).to_owned();
             let on = id == active;
-            let tab = div().id(SharedString::from(format!("plg-tab-{id}"))).flex_shrink_0().px(px(CELL_W)).rounded(px(4.))
+            let tab = div().id(SharedString::from(format!("plg-tab-{id}"))).flex_shrink_0().max_w(px(TAB_MAX_CELLS * CELL_W))
+                .px(px(CELL_W)).rounded(px(4.))
                 .when(on, |el| el.bg(theme::raised()).font_weight(FontWeight::SEMIBOLD))
                 .when(!on, |el| el.text_color(theme::muted()).cursor_pointer())
-                .child(title);
+                .child(div().min_w_0().truncate().child(title));
             match view.show.clone().filter(|_| !on) {
                 Some(show) => tab.on_click(move |_, window, cx| show(&id, window, cx)).into_any_element(),
                 None => tab.into_any_element(),
