@@ -175,6 +175,9 @@ struct Executor {
     clear_watch:Option<tokio::time::Instant>,
     /// Até quando a vista mostra que o último `/clear` não foi aplicado.
     clear_notice:Option<tokio::time::Instant>,
+    /// Linha cujo foco no rodapé o Esc não devolveu, e quantas vezes: como a devolução dos mods, o Esc
+    /// tem teto e não vira laço de teclas.
+    footer_misses:Option<(String,u32)>,
 }
 struct Stall {row:String,code:String,since:tokio::time::Instant,wait:Duration,next:tokio::time::Instant,surfaced:bool}
 /// Teto da espera entre tentativas: o composer que esvazia é visto na hora, e o resto (tela
@@ -201,7 +204,7 @@ const CLEAR_DISK_TRUST_S:f64=60.0;
 fn clear_may_have_run(disposition:Disposition,payload:&Value)->bool {
     match disposition {
         Disposition::Accepted=>true,
-        Disposition::Unknown=>payload["stage"].as_str().is_none_or(|stage|matches!(stage,"submit"|"submit_proof")),
+        Disposition::Unknown=>payload["code"]!="submission_blocked" && payload["stage"].as_str().is_none_or(|stage|matches!(stage,"submit"|"submit_proof")),
         _=>false,
     }
 }
@@ -241,7 +244,7 @@ impl TerminalActor {
         let sequence=Arc::new(AtomicU64::new(queue.initial_state().next_seq.max(previous.max(queue.initial_state().operations.len() as u64).saturating_add(1))));
         let receipt=ReceiptIndex::new("claude",&target.binding.conversation);
         let (sender,receiver)=mpsc::channel(64); let closed=Arc::new(AtomicBool::new(false)); let anchor=options.anchor.clone();
-        let executor=Executor {target,queue:Arc::new(queue),policy,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,loan:None,stall:None,hold:None,hold_checked:false,parked:VecDeque::new(),away:None,clear_watch:None,clear_notice:None};
+        let executor=Executor {target,queue:Arc::new(queue),policy,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,loan:None,stall:None,hold:None,hold_checked:false,parked:VecDeque::new(),away:None,clear_watch:None,clear_notice:None,footer_misses:None};
         let task=tokio::spawn(executor.run(receiver,closed.clone()));
         TerminalHandle {sender,closed,task:Arc::new(Mutex::new(Some(task))),stopped:Arc::new(Mutex::new(None)),anchor}
     }
@@ -326,8 +329,10 @@ impl Executor {
             && match op.status {Status::Accepted|Status::Confirmed=>true,Status::Unknown=>clear_may_have_run(Disposition::Unknown,&op.result["payload"]),_=>false}
             && op.wire_attempts.keys().any(|wire|wire.starts_with(&format!("terminal:{}:",self.target.generation)))) {
             let mut state=recovered.runtime_state.clone(); state["preserve_binding"]=json!(true);
-            let since=Some(&state["clear_barrier"]).filter(|b|b["operation_id"]==clear.id.as_str()).and_then(|b|b["since"].as_f64()).unwrap_or_else(||sample().epoch_s);
-            state["clear_barrier"]=json!({"generation":self.target.generation,"conversation":self.target.binding.conversation,"operation_id":clear.id,"since":since});
+            let old=Some(state["clear_barrier"].clone()).filter(|b|b["operation_id"]==clear.id.as_str());
+            let since=old.as_ref().and_then(|b|b["since"].as_f64()).unwrap_or_else(||sample().epoch_s);
+            let raised=old.as_ref().and_then(|b|b["raised"].as_f64()).unwrap_or(since);
+            state["clear_barrier"]=json!({"generation":self.target.generation,"conversation":self.target.binding.conversation,"operation_id":clear.id,"since":since,"raised":raised});
             self.action(Action::SetRuntimeState {state}).await?;
         }
         if self.cleared(&self.queue.snapshot().await.map_err(|_|error("queue_io"))?) {self.clear_watch=Some(tokio::time::Instant::now()+self.options.clear_wait);}
@@ -614,7 +619,8 @@ impl Executor {
         // Antes da escrita: o transcript novo do `/clear` nasce logo depois do Enter.
         let dispatched_at=sample().epoch_s;
         let services=self.services(root,id,text);
-        let driver=TerminalDriver::new(self.target.binding.clone(),services.clone(),self.options.io.clone(),self.options.limits.clone());
+        let mut driver=TerminalDriver::new(self.target.binding.clone(),services.clone(),self.options.io.clone(),self.options.limits.clone());
+        if self.footer_misses.as_ref().is_some_and(|(row,misses)|row==root && *misses>=FOCUS_RETURN_TRIES) {driver=driver.footer_kept();}
         let facts=if prompt {Some(services.facts(&self.target.binding).await)}else{None};
         let current=facts.as_ref().is_none_or(|result|result.as_ref().is_ok_and(|facts|facts.binding==self.target.binding));
         if let Some(facts)=&facts {self.deliverable=facts.as_ref().is_ok_and(|facts|current && facts.ready && facts.idle && !facts.open_question);}
@@ -667,11 +673,16 @@ impl Executor {
             tracing::warn!(key=%self.target.key,session=%self.target.name,draft,code=%result.payload["code"].as_str().unwrap_or(""),
                 reason="o rascunho do dono não voltou igual ao composer; se o terminal marca › stashed, ele volta com Ctrl+S","rascunho do terminal");
         }
+        if result.payload["code"]=="footer_focus" {
+            let misses=self.footer_misses.as_ref().filter(|(row,_)|row==root).map_or(0,|(_,n)|*n)+1;
+            if misses==FOCUS_RETURN_TRIES {tracing::warn!(key=%self.target.key,session=%self.target.name,code="footer_focus_kept","o Esc não devolveu o foco do rodapé ao composer; a entrada espera a pessoa");}
+            self.footer_misses=Some((root.to_string(),misses));
+        } else if self.footer_misses.as_ref().is_some_and(|(row,_)|row==root) {self.footer_misses=None;}
         let clear_raised=slash && is_clear(text) && clear_may_have_run(result.disposition,&result.payload);
         if clear_raised {
             let mut state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?.runtime_state;
             state["preserve_binding"]=json!(true);
-            state["clear_barrier"]=json!({"generation":self.target.generation,"conversation":self.target.binding.conversation,"operation_id":id,"since":dispatched_at});
+            state["clear_barrier"]=json!({"generation":self.target.generation,"conversation":self.target.binding.conversation,"operation_id":id,"since":dispatched_at,"raised":sample().epoch_s});
             self.action(Action::SetRuntimeState {state}).await?;
             result.payload["preserve_binding"]=json!(true);
             self.clear_watch=Some(tokio::time::Instant::now()+self.options.clear_wait); self.clear_notice=None;
@@ -819,7 +830,13 @@ impl Executor {
         if !self.cleared(&state) {self.clear_watch=None; return false;}
         let barrier=state.runtime_state["clear_barrier"].clone();
         let since=barrier["since"].as_f64().unwrap_or(0.0);
-        let on_disk=sample().epoch_s-since<CLEAR_DISK_TRUST_S && clear_on_disk(&self.target.transcript,since).unwrap_or_else(|failure|{
+        let raised=barrier["raised"].as_f64().unwrap_or(since);
+        // Fora do ator: a pasta pode ter milhares de transcripts.
+        let transcript=self.target.transcript.clone();
+        let scan=if sample().epoch_s-raised<CLEAR_DISK_TRUST_S {
+            tokio::task::spawn_blocking(move||clear_on_disk(&transcript,since)).await.unwrap_or_else(|_|Err(std::io::Error::other("clear_on_disk")))
+        } else {Ok(false)};
+        let on_disk=scan.unwrap_or_else(|failure|{
             if crate::warn_limit::allow(Some(self.target.key.as_str()),"clear_barrier_disk") {
                 tracing::warn!(key=%self.target.key,session=%self.target.name,code="clear_barrier_disk",kind=?failure.kind(),"transcript ilegível; a trava do /clear fica");
             }
@@ -829,18 +846,20 @@ impl Executor {
         if changed || on_disk {
             self.clear_watch=Some(now+self.options.clear_wait); return false;
         }
-        let mut runtime=state.runtime_state.clone();
-        if let Some(fields)=runtime.as_object_mut() {fields.remove("clear_barrier"); fields.remove("preserve_binding");}
-        if let Err(failure)=self.action(Action::SetRuntimeState {state:runtime}).await {
-            tracing::warn!(key=%self.target.key,session=%self.target.name,code=%failure.code,"trava do /clear não saiu do diário; tenta de novo");
-            self.clear_watch=Some(now+self.options.clear_wait); return false;
-        }
+        // Primeiro a operação: se a trava não sair do diário, a reabertura não a ergue de novo por ela.
         let id=barrier["operation_id"].as_str().unwrap_or_default().to_string();
         if let Some(op)=state.operations.get(&id) {
             let result=reply(&id,Disposition::Rejected,json!({"code":"clear_not_applied","stage":op.result["payload"]["stage"],"cleanup":"not_needed"}));
             if let Err(failure)=self.action(Action::Finish {id:id.clone(),status:Status::Rejected,result:serde_json::to_value(result).unwrap()}).await {
-                tracing::warn!(key=%self.target.key,session=%self.target.name,code=%failure.code,"/clear não aplicado não foi marcado; a reabertura confere de novo");
+                tracing::warn!(key=%self.target.key,session=%self.target.name,code=%failure.code,"/clear não aplicado não foi marcado; a trava fica e confere de novo");
+                self.clear_watch=Some(now+self.options.clear_wait); return false;
             }
+        }
+        let mut runtime=match self.queue.snapshot().await {Ok(state)=>state.runtime_state,Err(_)=>{self.clear_watch=Some(now+self.options.clear_wait); return false;}};
+        if let Some(fields)=runtime.as_object_mut() {fields.remove("clear_barrier"); fields.remove("preserve_binding");}
+        if let Err(failure)=self.action(Action::SetRuntimeState {state:runtime}).await {
+            tracing::warn!(key=%self.target.key,session=%self.target.name,code=%failure.code,"trava do /clear não saiu do diário; tenta de novo");
+            self.clear_watch=Some(now+self.options.clear_wait); return false;
         }
         tracing::warn!(key=%self.target.key,session=%self.target.name,code="clear_not_applied",operation=%id,
             "o /clear não virou conversa nova no prazo; a trava saiu e a fila segue, sem reenviar o /clear");

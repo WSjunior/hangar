@@ -23,6 +23,8 @@ const problemLabels: Record<string, () => string> = {
   headless_sem_login: m.problema_headless_sem_login,
   runtime_falhou: m.problema_runtime_falhou,
   terminal_observacao_falhou: m.problema_terminal_observacao_falhou,
+  state_facts_unavailable: m.problema_state_facts_unavailable,
+  permission_observe_failed: m.problema_permission_observe_failed,
   terminal_input_composer_busy: m.problema_terminal_input_composer_busy,
   terminal_input_composer_unreadable: m.problema_terminal_input_composer_unreadable,
   terminal_input_capture_failed: m.problema_terminal_input_capture_failed,

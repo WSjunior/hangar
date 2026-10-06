@@ -31,7 +31,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app import atomico
+from app import atomico, state_facts
 from app.auth import require_loopback
 from app.live_rate import live_rate
 
@@ -410,6 +410,7 @@ def esquecer(name: str) -> None:
     _press_wakers.pop(name, None)
     for chave in [c for c in list(_recusas) if c[0] == name]:
         _recusas.pop(chave, None)
+    state_facts.notify(name)
 
 
 def _confere(name: str, token: str) -> None:
@@ -572,6 +573,8 @@ def _guardar_faixa(name: str, above: dict | None, columns: int | None, panes: li
         _band_seq += 1
         _bands[name] = (_band_seq, dados, json.dumps({"above": above, "panes": panes}, ensure_ascii=False))
     _acordar_todos(_band_wakers, name)
+    # Largura e âncora da prévia saem da faixa.
+    state_facts.notify(name)
 
 
 def band(name: str) -> tuple[int, dict]:
@@ -860,6 +863,31 @@ def _acordar(name: str) -> None:
         ev.set()
 
 
+def plugin_facts(name: str) -> dict:
+    """O que o plugin disse desta sessão, para o `Monitor` do Rust, sem as validades: elas vão como
+    idade em ms e o Rust as aplica com o relógio dele (`state_facts`)."""
+    agora = time.monotonic()
+
+    def idade(quando: float) -> int:
+        return max(0, round((agora - quando) * 1000))
+
+    with _lock:
+        hit = _estados.get(name)
+        batida = _batidas.get(name)
+        p = _perguntas.get(name)
+        out = {
+            "plugin_state": None if hit is None else {"state": hit[1], "reason": hit[2], "age_ms": idade(hit[0])},
+            "waiter_open": name in _waiters,
+            "heartbeat_age_ms": None if batida is None else idade(batida),
+            "question": None if p is None else {"id": p["id"], "questions": p["questions"], "tool": p.get("tool"),
+                                                "resumo": p.get("resumo"), "seen_age_ms": idade(p["visto"])},
+            "suggestion": _sugestoes.get(name, ""),
+        }
+    out["body_columns"] = transcript_columns(name)
+    out["band_anchor"] = band_anchor(name)
+    return out
+
+
 def estado_recente(name: str) -> tuple[str, str | None] | None:
     """O estado anunciado pelo plugin, se ainda válido. None = o pane que decida."""
     with _lock:
@@ -1124,6 +1152,7 @@ async def pull(body: PullBody, request: Request = None):
         _loop = asyncio.get_running_loop()
         _waiters[body.sessao] = fila
         _batidas[body.sessao] = time.monotonic()
+    state_facts.notify(body.sessao)
     # `faixa`: o backend tem a faixa dos mods desta sessão? Reiniciado, não tem, e o plugin reenvia.
     gone = False
     try:
@@ -1159,6 +1188,7 @@ async def pull(body: PullBody, request: Request = None):
             _batidas[body.sessao] = time.monotonic()
             if _waiters.get(body.sessao) is fila:
                 del _waiters[body.sessao]
+        state_facts.notify(body.sessao)
     if entrega is _STOP:
         return {"text": None, "faixa": body.sessao in _bands}
     return {**entrega, "faixa": body.sessao in _bands}
@@ -1182,6 +1212,7 @@ async def suggest(body: SuggestBody):
         # `mostrada=False` é proposta que a TUI não pôs na caixa (diálogo aberto, headless): mostrar
         # no app o que nem o terminal mostrou seria inventar estado.
         _sugestoes[body.sessao] = body.texto if body.mostrada else ""
+    state_facts.notify(body.sessao)
     return {"ok": True}
 
 
@@ -1402,6 +1433,7 @@ async def ask(body: AskBody):
             if p is not None and p["id"] == body.id:
                 del _perguntas[body.sessao]
         _acordar(body.sessao)
+        state_facts.notify(body.sessao)
         return {"soltar": True}
     fila: asyncio.Queue = asyncio.Queue()
     with _lock:
@@ -1417,6 +1449,8 @@ async def ask(body: AskBody):
         if guardada is None:
             p["fila"] = fila
     _acordar(body.sessao)
+    # Cada poll do hook renova o `visto`: pergunta nova sai na hora, a renovação no máximo a cada 25 s.
+    state_facts.notify(body.sessao, state_facts.REFRESH)
     if guardada is not None:
         return guardada
     espera = min(ESPERA_S, body.janela_ms / 1000) if body.janela_ms else ESPERA_S
@@ -1464,6 +1498,7 @@ async def ask_fim(body: AskFimBody):
     if aviso is not None and body.vencedor == "app":
         aviso.set()
     _acordar(body.sessao)
+    state_facts.notify(body.sessao)
     _log.info("plugin pergunta sessao=%s fechou por %s", body.sessao, body.vencedor)
     return {"ok": True}
 
@@ -1532,6 +1567,7 @@ async def state(body: StateBody, request: Request):
             # que o engine não dá.
             _sugestoes.pop(body.sessao, None)
     _acordar(body.sessao)
+    state_facts.notify(body.sessao, state_facts.FORCE)
     _log.debug("plugin estado sessao=%s estado=%s motivo=%s", body.sessao, body.estado, body.motivo)
     return {"ok": True}
 

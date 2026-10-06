@@ -529,3 +529,13 @@ fn terminal_state_agents_panel_is_not_a_menu() {
  assert!(!hangar_server::terminal_state::footer_focus(&screen("")));
  assert!(!hangar_server::terminal_state::footer_focus(include_str!("../../../backend/tests/fixtures/pane_trust_dialog.txt")));
 }
+#[tokio::test]
+async fn terminal_input_interrupt_with_footer_focus_returns_focus_first() {
+ // O primeiro Esc só devolve o foco do painel de agentes ao composer: o segundo interrompe.
+ let io=Arc::new(FakeIo::new(vec![AGENTS_FOCUSED.into(),screen("")]));
+ assert_eq!(driver(io.clone(),Arc::new(Services::new())).interrupt(false).await.disposition,Disposition::Accepted);
+ let escapes=io.writes().iter().filter(|r|r.args.last().unwrap()=="Escape").count(); assert_eq!(escapes,2);
+ let io=Arc::new(FakeIo::new(vec![screen("")]));
+ driver(io.clone(),Arc::new(Services::new())).interrupt(false).await;
+ assert_eq!(io.writes().iter().filter(|r|r.args.last().unwrap()=="Escape").count(),1);
+}

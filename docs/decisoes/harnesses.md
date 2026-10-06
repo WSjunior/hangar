@@ -6,9 +6,12 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 ## Regras vigentes
 
 - **Observação terminal tem uma captura canônica por rodada, sem grade auxiliar.** O controle
-  tmux confere sessão/pane a cada leitura; a análise acompanha esse quadro e o estado temporal
-  permanece no Python, sem outro HTTP. O cliente da ponte usa somente HTTP sem proxy/redirect
-  e não carrega certificados por pedido. Medição:
+  tmux confere sessão/pane a cada leitura; a análise acompanha esse quadro. Em Claude com
+  terminal e o Rust de pé, o estado temporal é do `Monitor` do Rust, que pega o quadro do pool em
+  processo; nos provedores que o Python observa (Pi, omp, Kimi), permanece no Python, sem outro
+  HTTP. O cliente da ponte do observador usa somente HTTP sem proxy/redirect
+  e não carrega certificados por pedido (a ponte ficou sem consumidor desde a parte 4; vale se
+  voltar a ser usada). Medição:
   [custo da observação terminal](#custo-da-observação-terminal).
 
 - **Deltas Claude/Codex acumulam antes de publicar.** Prévia, pensamento e input em voo têm
@@ -120,6 +123,11 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   existe e o pid vive**; marcador de hook e pane são o fallback. `idle`/`busy`/`waiting` são o
   estado da TUI escrito por ela mesma; `waiting` inclui diálogo aberto (`/model`), que o pane
   rebaixa. Nunca escrever nesse arquivo.
+- **Permissão segurada para o app não aparece no pane nem no registro nativo: lista e `Monitor`
+  leem a pergunta segurada.** Com o app aberto, o hook `perm.ts` segura a permissão: a TUI fica em
+  "running PreToolUse hooks" sem cartão e o registro segue `busy`. O `Monitor` a lê dos fatos
+  empurrados (`question`); a lista, do `held` dos fatos da lista. Ver
+  [cartão de permissão segurado](#cartão-de-permissão-segurado-pelo-hook).
 - **O `wire.jsonl` do Kimi não é bem-comportado**: nem toda escrita é turno (`config.update` com
   a sessão parada), e o main fica mudo quando delega. Quem decide é a fronteira de turno, não o
   mtime. `tool.result` não tem `uuid` — id é `res:<toolCallId>`.
@@ -137,6 +145,11 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   Só `on-request` e `never` existem (`untrusted` morreu); o sandbox vai no `-c` da subida e trocar
   de modo reabre o servidor ocioso. Pedido do servidor sem tela recebe `-32601` + nota, nunca
   sucesso vazio. Um cliente por cano.
+- **A rota do terminal Claude só recebe sessão Claude.** `route_sync`, `run_admin` e
+  `answer_sync` abrem `prepare_session(name, "claude")`, que suspende a escrita sem vínculo
+  Claude nem pane. Rota que atende outros provedores filtra pelo provedor antes (`/answer`,
+  `/select`); erro que ainda escapar dela sai com código, nunca 500. Ver
+  [cartão do Codex sem terminal](#select-do-codex-sem-terminal-não-passa-pela-rota-do-terminal-claude).
 - **Nada no Hangar desvia a conversa da sessão para um proxy.** O `ANTHROPIC_BASE_URL` e o
   `model_provider` do Codex são do motor e do provedor, e o Hangar não os aponta para mais nada.
   Ligar o Jev numa sessão é só a chave no ambiente, para o `hangar-preview objetivo`. Por que o
@@ -386,6 +399,32 @@ Python. Depois da correção: `/clear` aplicado na hora e a mensagem seguinte en
 
 Fica de fora: no modo Python um `/clear` bem-sucedido volta 400 "resultado terminal incerto"
 (a troca da conversa acusa vínculo mudado depois do Enter), também antes desta correção.
+
+## Cartão de permissão segurado pelo hook
+
+(06/10/2026, parte 4 da migração, Task 6; Claude Code 2.1.291, Haiku, modo manual, backend
+isolado.) Sintoma: depois de pedir um `Bash`, a lista ficava `working` enquanto o chat mostrava o
+cartão. Reproduzido duas vezes: com a lista do dono aberta (`app_presente`), o hook `perm.ts`
+segura o `tool.check` em long-poll (`/api/plugin/ask`, janela de 5 s) e a TUI fica em
+"running PreToolUse hooks… 6/10" sem desenhar cartão nenhum; o registro nativo segue `busy` e o
+marcador `working` durante toda a espera (45 s). O `Monitor` já via a pergunta pelos fatos
+empurrados (`question` com `perm:`); a lista não tinha fonte: confiava no registro e não
+capturava. O Python de reserva (`registry.list_with_state`) tem o mesmo defeito.
+
+Conserto: o `POST /internal/list/facts` leva `held` (`pergunta_pendente` das linhas Claude com
+terminal, contrato 32), e a lista a mostra como o `Monitor` (`terminal_state::held_question`:
+"ferramenta: resumo", Yes/No). Sequência gravada em `gen_terminal.py`
+(`permission_card_after_bash`); `contract_terminal::permission_card_after_bash` confere lista e
+`Monitor` rodada a rodada.
+
+Com o `Monitor` vivo, a lista lê o último `state` dele (`state/published.rs`, por nome e session
+id, limpo quando o `Monitor` acaba ou publica `dead`) e não captura o pane da sessão: nem a
+classificação, nem a statusline, nem o radar de limite. Com 5 chats de 20 sessões sem marcador,
+13 → 9,75 capturas por segundo e o Rust de 39 para 30,5 ms/s parado
+(`docs/migracao-rust/parte4/medicao.md`, Task 6).
+
+Aberto: depois do Esc o hook é cancelado sem `/ask-fim`, e a pergunta segurada vale até vencer
+(35 s depois do último poll); o chat (e agora a lista) mostra o cartão nesse intervalo.
 
 ## Prévia da chamada em voo: o ● pisca
 
@@ -1550,7 +1589,9 @@ Contrato em `hook_state.py`: o registro vence o marcador enquanto `pid_vivo(pid)
 pid morto ou status desconhecido, vale o marcador e depois o pane, como antes. `waiting` vira
 `awaiting_input`, e o pane continua dono da pergunta e das opções (a lista raspa quem está
 `awaiting`) e do rebaixamento quando não há menu (`demote_awaiting`, só em memória — o arquivo é
-do Claude e nunca é escrito por nós). Marcador de hook não gera transição enquanto o registro
+do Claude e nunca é escrito por nós). No Rust (parte 4, Task 2) o rebaixamento que a lista decide
+vale também num mapa da própria ponte (`state/demote.rs`), lido pela lista e pelo `Monitor` e
+desfeito quando o `statusUpdatedAt` do registro muda; o aviso ao Python continua. Marcador de hook não gera transição enquanto o registro
 manda pela mesma sessão, senão o drain e o push disparariam duas vezes pelo mesmo evento.
 
 Em 19/09/2026, a reprodução com registro `idle` seguido de JSON parcial, status desconhecido
@@ -2878,3 +2919,22 @@ leitura de `/providers`, além da confirmação do provedor já selecionado. Fal
 aparece no mobile e requer uma escolha explícita. Avisos da gravação seguem pela resposta
 de criação e do bastão até as interfaces; falha ao mostrar um aviso não torna a criação uma
 falha nem provoca repetição. No nativo, a abertura por worktree também conserva esses avisos.
+
+## /select do Codex sem terminal não passa pela rota do terminal Claude
+
+Achado pela prova da parte 4 da migração Rust (Step 27, 06/10/2026): o cartão de aprovação do
+Codex sem terminal (gpt-6-luna em "Ask for approval") aparecia na lista e no chat, e
+`POST /select` respondia 500. Desde `bead8a454` (03/10) o `/select` chamava `route_sync` antes
+de olhar o provedor; `route_sync` abre `prepare_session(name, "claude")`, que sem vínculo Claude
+e sem pane levanta `RuntimeError("vínculo gerenciado indisponível; escrita suspensa")`. O ramo
+do Codex sem terminal (`adapter.select`), que já respondia o cartão, nunca era alcançado.
+Reproduzido em `test_select_on_headless_codex_answers_the_approval_without_the_claude_terminal_route`
+com o coordenador real. O `/answer` já filtrava pelo provedor; nas outras rotas que passam por
+`wrap_driver`, o Codex sem terminal é desviado antes (`/interrupt`) ou a rota é só de Claude/pane.
+
+O erro que ainda escapar da rota no `/select` sai com código: `TerminalOutcomeUnknown` (a tecla
+pode ter chegado) é 409 `erro_sem_confirmacao_resposta`, para ninguém repetir; o resto, anterior à
+entrega, é 503 `erro_opcao_nao_convergiu`.
+
+Prova real depois do conserto (`scripts/prova-parte4.py --casos 27`, backend isolado): Codex sem
+terminal com cartão → `/select` 200 e a sessão sai do cartão; Claude sem terminal segue 200.

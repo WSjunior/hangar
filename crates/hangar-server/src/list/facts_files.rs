@@ -15,7 +15,7 @@ use crate::transcript::ts_of_iso;
 
 const MARKER_DIR: &str = ".hangar-state";
 const NATIVE_DIR: &str = "sessions";
-const ASKQ_DIR: &str = ".hangar-askq";
+pub(crate) const ASKQ_DIR: &str = ".hangar-askq";
 const STATUS_DIR: &str = ".hangar-status";
 /// Teto para sidecar esquecido de uma sessão antiga cujo stem voltou a existir.
 const STATUS_MAX_AGE: f64 = 86_400.0;
@@ -33,6 +33,8 @@ struct Native {
     state: &'static str,
     ts: f64,
     pid: i64,
+    /// Status `shell`: parada com comando de fundo vivo (`hook_state.shells`).
+    shell: bool,
 }
 
 /// Status do registro nativo. `shell` é a sessão parada com comando de fundo vivo: aceita mensagem.
@@ -46,12 +48,12 @@ fn native_state(status: &str) -> Option<&'static str> {
 }
 
 /// Versão de um arquivo: muda a cada escrita.
-type FileKey = (SystemTime, u64);
+pub(crate) type FileKey = (SystemTime, u64);
 
 /// Mais novo que isto, a versão não prova que o conteúdo é o mesmo (granularidade do mtime).
-const RACY_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+pub(crate) const RACY_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 
-fn file_key(meta: &std::fs::Metadata) -> Option<FileKey> { Some((meta.modified().ok()?, meta.len())) }
+pub(crate) fn file_key(meta: &std::fs::Metadata) -> Option<FileKey> { Some((meta.modified().ok()?, meta.len())) }
 
 #[derive(Clone, PartialEq)]
 enum Parsed {
@@ -66,6 +68,8 @@ pub struct HookStates {
     markers: HashMap<String, Marker>,
     native: HashMap<String, Native>,
     files: HashMap<PathBuf, (FileKey, Parsed)>,
+    /// Registros nativos rebaixados, compartilhados entre a lista e o `Monitor`.
+    demoted: std::sync::Arc<crate::state::demote::Demoted>,
     #[cfg(test)]
     reads: usize,
 }
@@ -185,7 +189,7 @@ fn read_native(path: &Path) -> Result<(String, Native), &'static str> {
         super::facts::note("rust.list_native_status_unknown", "", "list_native_status_unknown".into(), "registro nativo com status desconhecido");
         return Err("status");
     };
-    Ok((sid, Native { state, ts, pid }))
+    Ok((sid, Native { state, ts, pid, shell: status == "shell" }))
 }
 
 /// Entradas da pasta; ausente é normal, outro erro (permissão, disco) avisa: calado, toda sessão
@@ -330,13 +334,24 @@ impl HookStates {
         changed
     }
 
+    pub fn set_demoted(&mut self, demoted: std::sync::Arc<crate::state::demote::Demoted>) { self.demoted = demoted; }
+
+    pub fn demoted(&self) -> &crate::state::demote::Demoted { &self.demoted }
+
     /// Registro nativo enquanto o pid dele vive (é o estado que a TUI tem); senão o marcador.
     pub fn get_state(&self, sid: Option<&str>, alive: impl Fn(i64) -> bool) -> Option<Marker> {
         let sid = sid.filter(|s| !s.is_empty())?;
         if let Some(n) = self.native.get(sid).filter(|n| alive(n.pid)) {
-            return Some(Marker { state: n.state.to_owned(), ts: n.ts });
+            let demoted = n.state == "awaiting_input" && self.demoted.applies(sid, n.ts);
+            return Some(Marker { state: if demoted { "idle" } else { n.state }.to_owned(), ts: n.ts });
         }
         self.markers.get(sid).cloned()
+    }
+
+    /// Pid do agente quando o registro nativo diz `shell` e o pid vive: só aí vale ler os filhos.
+    pub fn shell_pid(&self, sid: Option<&str>, alive: impl Fn(i64) -> bool) -> Option<i64> {
+        let n = self.native.get(sid.filter(|s| !s.is_empty())?)?;
+        (n.shell && alive(n.pid)).then_some(n.pid)
     }
 }
 

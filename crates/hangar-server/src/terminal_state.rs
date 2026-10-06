@@ -1,6 +1,5 @@
-//! `analyze` fornece os fatos da captura usada em produção.
-//! O redutor temporal abaixo é só referência da Parte 2B para as fixtures;
-//! na Parte 2C, o Python mantém a memória e calcula o estado final.
+//! `analyze` fornece os fatos da captura usada em produção; `reduce` é o redutor temporal do
+//! `state::Monitor` (porte do `StateMonitor` do Python), com a memória que atravessa as rodadas.
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -41,7 +40,7 @@ impl Default for PaneAnalysis {
     }
 }
 
-/// Memória da referência da Parte 2B; não é mantida pelo observador em produção.
+/// Memória do redutor entre rodadas.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct ReducerMemory {
@@ -50,15 +49,18 @@ pub struct ReducerMemory {
     pub no_spinner: u32,
     pub held_state: String,
     pub held_label: Option<String>,
+    /// Última divergência (plugin, pane) já registrada: uma linha por divergência, não por rodada.
+    #[serde(skip)]
+    pub divergence: Option<(String, String)>,
 }
 
 impl Default for ReducerMemory {
     fn default() -> Self {
-        Self { prev_spinner: None, frozen: 0, no_spinner: 0, held_state: "idle".into(), held_label: None }
+        Self { prev_spinner: None, frozen: 0, no_spinner: 0, held_state: "idle".into(), held_label: None, divergence: None }
     }
 }
 
-/// Entradas da referência da Parte 2B; o contrato privado não as recebe.
+/// Fatos da rodada que não vêm do pane.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ReducerFacts {
@@ -77,7 +79,7 @@ impl Default for ReducerFacts {
     }
 }
 
-/// Resultado da referência da Parte 2B, comparado às fixtures Python.
+/// Resultado da rodada, comparado às fixtures Python.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct ReducedState {
@@ -93,7 +95,7 @@ struct Patterns {
     unnumbered: Regex, user: Regex, banner: Regex, warning: Regex,
     tool: Regex, finished: Regex, activity: Regex, mcp: Regex,
     pi_box: Regex, overlay_rule: Regex, todo: Regex, ascii_spinner: Regex,
-    subagent: Regex, subagent_body: Regex, digit: Regex, word: Regex,
+    subagent: Regex, subagent_body: Regex, digit: Regex, word: Regex, agent_cursor: Regex,
 }
 
 static P: LazyLock<Patterns> = LazyLock::new(|| {
@@ -138,6 +140,7 @@ static P: LazyLock<Patterns> = LazyLock::new(|| {
         todo: r(r"^\s*[●○]?\s*Todos \(\d+/\d+\)\s*$"),
         ascii_spinner: r(r"^\*\s+\S[^\n]*(…|\))\s*$"),
         subagent: r(r"^Subagent\s+\S"),
+        agent_cursor: r(r"^\s*❯\s+[●◯]"),
         subagent_body: r(r"^\s*└"),
         digit: r(r"^\d$"),
         word: r(r"^\w$"),
@@ -147,7 +150,7 @@ static P: LazyLock<Patterns> = LazyLock::new(|| {
 fn whitespace(c: char) -> bool { c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c) }
 fn trim(s: &str) -> &str { s.trim_matches(whitespace) }
 fn left(s: &str) -> &str { s.trim_start_matches(whitespace) }
-fn right(s: &str) -> &str { s.trim_end_matches(whitespace) }
+pub(crate) fn right(s: &str) -> &str { s.trim_end_matches(whitespace) }
 fn word(c: char) -> bool {
     let mut encoded = [0; 4];
     P.word.is_match(c.encode_utf8(&mut encoded))
@@ -176,7 +179,8 @@ fn decimal_number(s: &str) -> Option<usize> {
         number.checked_mul(10)?.checked_add(((c as u32 - start) % 10) as usize)
     })
 }
-fn lines(pane: &str) -> Vec<&str> {
+/// `str.splitlines()` do Python.
+pub(crate) fn lines(pane: &str) -> Vec<&str> {
     if pane.is_empty() { return Vec::new(); }
     let mut out: Vec<_> = P.lines.split(pane).collect();
     if out.last() == Some(&"") { out.pop(); }
@@ -246,7 +250,7 @@ fn composer_end(lines: &[&str], end: usize) -> Option<usize> {
 pub fn footer_focus(pane: &str) -> bool {
     let lines = lines(pane);
     composer_end(&lines, lines.len()).is_some_and(|end| lines[end + 1..].iter()
-        .any(|l| P.unnumbered.is_match(l) || l.contains("Enter to view") || l.contains("↑/↓ to select")))
+        .any(|l| P.agent_cursor.is_match(l) || l.contains("Enter to view") || l.contains("↑/↓ to select")))
 }
 
 fn unnumbered_menu(lines: &[&str]) -> Option<TerminalQuestion> {
@@ -320,9 +324,14 @@ fn tool_header(lines: &[&str], i: usize) -> bool {
     lines[i + 1..].iter().find(|l| trim(l).is_empty() || boundary(l)).is_some_and(|l| left(l).starts_with('⎿'))
 }
 
-fn preview(lines: &[&str]) -> String {
-    let end = lines.iter().rposition(|l| P.rule.is_match(l) || P.overlay_rule.is_match(l) || P.pi_box.is_match(l))
+/// `anchor`: começo da faixa dos mods, que fica entre a conversa e a caixa de digitar e pode
+/// começar com ●; a ocorrência mais baixa dela fecha a conversa.
+fn preview(lines: &[&str], anchor: Option<&str>) -> String {
+    let mut end = lines.iter().rposition(|l| P.rule.is_match(l) || P.overlay_rule.is_match(l) || P.pi_box.is_match(l))
         .unwrap_or(lines.len());
+    if let Some(anchor) = anchor.filter(|a| !a.is_empty()) {
+        end = lines[..end].iter().rposition(|l| l.contains(anchor)).unwrap_or(end);
+    }
     let begin = lines[..end].iter().enumerate().filter(|(i, l)| P.user.is_match(l) && !(*i > 0 && P.rule.is_match(lines[*i - 1])))
         .map(|(i, _)| i + 1).last().unwrap_or(0);
     if begin == 0 && lines[..end].iter().any(|l| P.banner.is_match(l)) { return String::new(); }
@@ -352,6 +361,13 @@ fn preview(lines: &[&str]) -> String {
     out.join("\n")
 }
 
+/// Prévia do pane e se o spinner corre, sem o resto da análise: o `Monitor` a chama no quadro
+/// cortado na largura da conversa ou com a faixa dos mods à vista.
+pub fn pane_preview(pane: &str, anchor: Option<&str>) -> (String, bool) {
+    let lines = lines(pane);
+    (preview(&lines, anchor), live_spinner(&lines).is_some())
+}
+
 pub fn analyze(pane: &str) -> PaneAnalysis {
     let lines = lines(pane);
     let spinner = live_spinner(&lines);
@@ -361,7 +377,7 @@ pub fn analyze(pane: &str) -> PaneAnalysis {
         login: P.login.is_match(pane) && !P.composer.is_match(&tail(&lines, 12)),
         limit_reset: P.limit.captures(&lines[lines.len().saturating_sub(8)..].join("\n"))
             .map(|c| trim(c.get(1).unwrap().as_str()).into()),
-        preview: preview(&lines), codex_menu: codex_menu(&lines), ..Default::default()
+        preview: preview(&lines, None), codex_menu: codex_menu(&lines), ..Default::default()
     };
     let menu = if let Some((top, bottom)) = menu_block(&lines) {
         let region = &lines[top..bottom];
@@ -381,36 +397,46 @@ fn set_question(analysis: &mut PaneAnalysis, question: TerminalQuestion) {
     analysis.question = question.question; analysis.options = Some(question.options);
 }
 
-/// Diagnóstico da referência da Parte 2B, sem uso no observador em produção.
+/// A pergunta que o hook do plugin segura (`pergunta_pendente`), como a sessão a mostra: permissão
+/// vira "ferramenta: resumo" com Yes/No; pergunta sem itens não vale.
+pub fn held_question(q: &Value) -> Option<TerminalQuestion> {
+    if q.get("id").and_then(Value::as_str).is_some_and(|s| s.starts_with("perm:")) {
+        let tool = q.get("tool").and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or("?");
+        let summary = q.get("resumo").and_then(Value::as_str).unwrap_or("");
+        return Some(TerminalQuestion { question: Some(format!("{tool}: {summary}")), options: vec!["Yes".into(), "No".into()] });
+    }
+    let q = q.get("questions").and_then(Value::as_array).and_then(|q| q.first())?;
+    let question = q.get("question").and_then(Value::as_str).map(String::from);
+    let options = q.get("options").and_then(Value::as_array).map(|options| options.iter()
+        .map(|o| o.get("label").and_then(Value::as_str).unwrap_or("").into()).collect()).unwrap_or_default();
+    Some(TerminalQuestion { question, options })
+}
+
+/// O que a rodada viu além do estado.
 #[derive(Serialize)]
 pub struct ReducerDiagnostic {
     pub before_plugin: String,
     pub plugin_applied: bool,
+    /// O plugin corrigiu o pane, e essa divergência (plugin, pane) é nova: vai ao log.
+    pub divergence: Option<(String, String)>,
 }
 
-/// Referência da Parte 2B para as fixtures; o estado final em produção é calculado no Python.
 pub fn reduce(pane: &str, memory: ReducerMemory, facts: ReducerFacts) -> ReducedState {
     reduce_with_diagnostics(pane, memory, facts).0
 }
 
-/// Referência da Parte 2B com diagnóstico; não participa do contrato privado de captura.
-pub fn reduce_with_diagnostics(pane: &str, mut memory: ReducerMemory, facts: ReducerFacts) -> (ReducedState, ReducerDiagnostic) {
-    let mut analysis = analyze(pane);
+pub fn reduce_with_diagnostics(pane: &str, memory: ReducerMemory, facts: ReducerFacts) -> (ReducedState, ReducerDiagnostic) {
+    reduce_analysis(analyze(pane), memory, facts)
+}
+
+/// `reduce` sobre a análise que o `TerminalPool` já fez da captura.
+pub fn reduce_analysis(mut analysis: PaneAnalysis, mut memory: ReducerMemory, facts: ReducerFacts) -> (ReducedState, ReducerDiagnostic) {
     if analysis.state != "awaiting_input" && analysis.options.as_ref().is_none_or(Vec::is_empty) {
         if let Some(q) = facts.open_question { set_question(&mut analysis, q); }
     }
     if analysis.state != "awaiting_input" {
-        if let Some(q) = facts.plugin_question {
-            if q.get("id").and_then(Value::as_str).is_some_and(|s| s.starts_with("perm:")) {
-                let tool = q.get("tool").and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or("?");
-                let summary = q.get("resumo").and_then(Value::as_str).unwrap_or("");
-                set_question(&mut analysis, TerminalQuestion { question: Some(format!("{tool}: {summary}")), options: vec!["Yes".into(), "No".into()] });
-            } else if let Some(q) = q.get("questions").and_then(Value::as_array).and_then(|q| q.first()) {
-                let question = q.get("question").and_then(Value::as_str).map(String::from);
-                let options = q.get("options").and_then(Value::as_array).map(|options| options.iter()
-                    .map(|o| o.get("label").and_then(Value::as_str).unwrap_or("").into()).collect()).unwrap_or_default();
-                set_question(&mut analysis, TerminalQuestion { question, options });
-            }
+        if let Some(q) = facts.plugin_question.as_ref().and_then(held_question) {
+            set_question(&mut analysis, q);
         }
     }
     let mut animating = false;
@@ -430,11 +456,14 @@ pub fn reduce_with_diagnostics(pane: &str, mut memory: ReducerMemory, facts: Red
             analysis.state = "working".into(); analysis.label = memory.held_label.clone();
         }
     }
-    let mut diagnostic = ReducerDiagnostic { before_plugin: analysis.state.clone(), plugin_applied: false };
+    let mut diagnostic = ReducerDiagnostic { before_plugin: analysis.state.clone(), plugin_applied: false, divergence: None };
     if matches!(analysis.state.as_str(), "working" | "idle") {
         if let Some(plugin) = facts.plugin_state.filter(|s| matches!(s.as_str(), "working" | "idle")) {
             if !(plugin == "idle" && animating) {
                 diagnostic.plugin_applied = true;
+                let seen = (plugin != analysis.state).then(|| (plugin.clone(), analysis.state.clone()));
+                if seen.is_some() && seen != memory.divergence { diagnostic.divergence.clone_from(&seen); }
+                memory.divergence = seen;
                 analysis.state = plugin;
                 if analysis.state == "idle" { analysis.label = None; }
                 memory.prev_spinner = None; memory.frozen = 0; memory.no_spinner = 0;

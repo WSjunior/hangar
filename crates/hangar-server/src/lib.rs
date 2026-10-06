@@ -12,7 +12,9 @@ pub mod proxy;
 pub mod routes;
 pub mod runtime;
 pub mod side;
+pub mod state;
 pub mod tail;
+pub mod term;
 pub mod terminal_state;
 pub mod terminal_control;
 pub mod terminal_input;
@@ -70,6 +72,7 @@ pub async fn serve_until_with_state(
         let registry = std::sync::Arc::new(runtime::gateway::RuntimeRegistry::new(cfg.upstream,
             cfg.internal_secret.clone(),instance.clone()).with_mods(state.mods.clone()));
         state.list.set_runtime(registry.clone());
+        let _ = state.state.runtime.set(registry.clone());
         println!("{}",runtime::gateway::startup_line(INTERNAL_PROTOCOL,&instance,port));
         let gateway = runtime::gateway::serve(private,registry.clone(),cfg.internal_secret.clone(),instance,INTERNAL_PROTOCOL);
         let result = tokio::select! {

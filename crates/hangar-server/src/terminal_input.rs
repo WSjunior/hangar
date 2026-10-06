@@ -301,12 +301,15 @@ pub struct TerminalDriver {
     serial: Mutex<()>,
     /// A identidade do pane já foi conferida por quem criou o driver: as operações de mod não a refazem.
     pane_checked: bool,
+    /// Sem o Esc que devolve o foco do rodapé ao composer: a linha já tentou o bastante.
+    footer_kept: bool,
 }
 impl TerminalDriver {
-    pub fn new(binding: TerminalBinding, services: Arc<dyn TerminalServices>, io: Arc<dyn TerminalIo>, limits: InputLimits) -> Self { Self { binding, services, io, limits, serial: Mutex::new(()), pane_checked: false } }
+    pub fn new(binding: TerminalBinding, services: Arc<dyn TerminalServices>, io: Arc<dyn TerminalIo>, limits: InputLimits) -> Self { Self { binding, services, io, limits, serial: Mutex::new(()), pane_checked: false, footer_kept: false } }
     /// Driver para as operações de um clique de mod cujo pane já teve a identidade conferida na mesma
     /// reserva (`PaneOp::Hold`): sem a conferência, cada operação é um processo do multiplexador a menos.
     pub fn pane_checked(mut self) -> Self { self.pane_checked = true; self }
+    pub fn footer_kept(mut self) -> Self { self.footer_kept = true; self }
     pub fn binding(&self) -> &TerminalBinding { &self.binding }
     fn request(&self, args: Vec<String>, stdin: Vec<u8>) -> Result<CommandRequest, IoFailure> {
         let (program, prefix) = self.binding.mux_argv.split_first().ok_or(IoFailure { code: "mux_missing", may_have_written: false })?;
@@ -669,7 +672,7 @@ impl TerminalDriver {
         }
         if !facts.ready { return DeliveryResult::new(Disposition::Deferred, DeliveryStage::Ready, "not_ready"); }
         let draft = match self.snapshot().await {
-            Err(e) if e.code == "footer_focus" => self.return_footer_focus().await,
+            Err(e) if e.code == "footer_focus" && !self.footer_kept => self.return_footer_focus().await,
             other => other,
         };
         let draft = match draft { Ok(d) => d, Err(e) => return Self::failed(e, DeliveryStage::Composer) };
@@ -732,6 +735,11 @@ impl TerminalDriver {
     }
     pub async fn interrupt(&self, clear: bool) -> DeliveryResult {
         let _serial = self.serial.lock().await;
+        // Com o foco no rodapé o primeiro Esc só o devolve ao composer: o segundo interrompe.
+        if self.composer_capture().await.is_ok_and(|(screen, _)| crate::terminal_state::footer_focus(&screen)) {
+            if let Err(e) = self.key_inner("Escape").await { return Self::failed(e, DeliveryStage::Control); }
+            self.settle().await;
+        }
         if let Err(e) = self.key_inner("Escape").await { return Self::failed(e, DeliveryStage::Control); }
         if clear {
             self.settle().await;

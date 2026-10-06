@@ -329,6 +329,13 @@ Shared tokens/keyframes live in `app.css` (`--ease-out`, `--spring`, …); a glo
 
 ## Real terminal in the desktop footer
 
+**Who owns the PTY.** With the `hangar-server` up, every panel is a Rust PTY, Windows included
+(`crates/hangar-server/src/term/`): the owner on 8765 goes straight to it, and whoever reaches the
+Python (share guest, guest with login, owner via Connect) passes the `termsock` front door and is
+piped to `/__hangar_server/term`. One panel per session across ALL ports lives in the Rust `Terms`;
+the 409 asks it (`term.active`), and `terminal_panel` comes from its health. The Python engines
+below run only in the `python` reserve mode.
+
 (`app/termsock.py` + `components/TerminalPanel.svelte`,
   plus `tmux.new_hidden_shell` and the native-terminal launcher in `api.py`): one PTY per WebSocket
   running `tmux attach`, consumed by xterm.js. The backend interprets **nothing** here — no ANSI, no

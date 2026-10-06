@@ -134,11 +134,11 @@ static SID: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(
 static PYTHON: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"^python(?:\d+(?:\.\d+)*)?(?:\.exe)?$").unwrap());
 
-fn basename(arg: &str) -> &str {
+pub(crate) fn basename(arg: &str) -> &str {
     Path::new(arg).file_name().and_then(|n| n.to_str()).unwrap_or(arg)
 }
 
-fn exec_provider(base: &str) -> Option<&'static str> {
+pub(crate) fn exec_provider(base: &str) -> Option<&'static str> {
     EXEC_PROVIDER.iter().find(|(exe, _)| *exe == base).map(|(_, p)| *p)
 }
 
@@ -168,7 +168,7 @@ pub fn provider_from_argv(argv: &[String]) -> Option<&'static str> {
 }
 
 /// Raiz mais descendentes, em pilha (o último filho primeiro), como `_descendant_pids`.
-fn descendants(root: i64, children: &ChildrenMap) -> Vec<i64> {
+pub(crate) fn descendants(root: i64, children: &ChildrenMap) -> Vec<i64> {
     let (mut out, mut seen, mut stack) = (Vec::new(), HashSet::new(), vec![root]);
     while let Some(p) = stack.pop() {
         // ppid reciclado no Windows fecha anel no mapa.
@@ -182,7 +182,7 @@ fn descendants(root: i64, children: &ChildrenMap) -> Vec<i64> {
 }
 
 /// Processo da árvore que não é o REPL dono: daemon, host de pty e subagente.
-fn is_aux(cmd: &str) -> bool { cmd.contains("daemon") || cmd.contains("--bg-") || cmd.contains("--agent") }
+pub(crate) fn is_aux(cmd: &str) -> bool { cmd.contains("daemon") || cmd.contains("--bg-") || cmd.contains("--agent") }
 
 fn split(cmd: &str) -> Vec<String> { cmd.split_whitespace().map(String::from).collect() }
 

@@ -89,11 +89,7 @@ impl Hangar {
     fn pick_mention(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
         if !self.mention_is_open(cx) { return; }
         let range = self.mention.range.clone().unwrap();
-        self.composer.update(cx, |input, cx| {
-            input.set_selected_range(range, cx);
-            input.replace(format!("@{path}"), window, cx);
-            input.focus(window, cx);
-        });
+        self.replace_composer(range, format!("@{path}"), window, cx);
         self.mention.snapshot = Some(self.mention_snapshot(cx));
         self.mention.close();
         self.redraw(panes::Area::Bottom, cx);
