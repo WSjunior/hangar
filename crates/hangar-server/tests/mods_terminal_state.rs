@@ -1,0 +1,154 @@
+mod mods_support;
+
+use std::sync::atomic::Ordering::SeqCst;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use hangar_server::mods::state::*;
+use mods_support::Probe;
+use serde_json::{Value, json};
+
+fn pane(id: &str, placement: &str) -> TerminalPane {
+    TerminalPane { id: id.into(), title: id.into(), placement: placement.into(), columns: Some(58), tree: json!({"type": "Box"}) }
+}
+
+fn view(ids: &[&str], shown: Option<&str>) -> TerminalView {
+    TerminalView { above: json!({"type": "Box", "children": [{"type": "Button", "props": {"key": "abrir", "label": "▸ Abrir painéis"},
+        "press": {"plugin": "m", "handle": 1}}]}), columns: Some(82), panes: ids.iter().map(|id| pane(id, "dock")).collect(),
+        shown: shown.map(str::to_owned) }
+}
+
+fn setup() -> (Mods, Arc<Probe>) {
+    let mods = Mods::default();
+    let probe = Arc::new(Probe::default());
+    mods.attach_terminal("t", "proc-t", 1, probe.clone());
+    (mods, probe)
+}
+
+fn last_ui(mods: &Mods) -> Value {
+    serde_json::from_str(&mods.replay("t").into_iter().rev().find(|(event, _)| *event == "plugin_ui").unwrap().1).unwrap()
+}
+
+#[test]
+fn terminal_view_is_published_with_source_and_shown() {
+    let (mods, _) = setup();
+    assert!(mods.owns("t") && mods.is_terminal("t") && mods.terminal_view("t").is_none());
+    assert_eq!(mods.life("t"), Some(1));
+    assert_eq!(mods.bridge_session("t").as_deref(), Some("t"), "a ponte acha a sessão com terminal pelo nome de nascimento");
+    assert!(mods.terminal_ui("t", view(&["a", "b"], Some("b"))));
+    let ui = last_ui(&mods);
+    assert_eq!((ui["shown_id"].as_str(), ui["columns"].as_u64(), ui["source"].as_str()), (Some("b"), Some(82), Some("terminal")));
+    assert_eq!(ui["panes"].as_array().unwrap().len(), 2);
+    assert!(!mods.terminal_ui("t", view(&["a", "b"], Some("b"))), "igual ao último não sai de novo");
+}
+
+#[test]
+fn screen_shown_wins_and_falls_back_to_the_plugin() {
+    let (mods, _) = setup();
+    mods.terminal_ui("t", view(&["a", "b", "c"], Some("c")));
+    mods.set_screen_shown("t", Some("a".into()));
+    assert_eq!(last_ui(&mods)["shown_id"], "a");
+    // A tela mostrava um painel que fechou: vale o `shown` do plugin (o vizinho anterior).
+    mods.terminal_ui("t", view(&["b", "c"], Some("b")));
+    assert_eq!(last_ui(&mods)["shown_id"], "b");
+    mods.set_screen_shown("t", None);
+    mods.terminal_ui("t", view(&[], None));
+    assert!(last_ui(&mods)["shown_id"].is_null());
+}
+
+#[tokio::test]
+async fn shown_reads_are_joined_in_one_window() {
+    let (mods, probe) = setup();
+    mods.terminal_ui("t", view(&["a", "b"], Some("a")));
+    *probe.shown.lock().unwrap() = Some("b".into());
+    mods.schedule_shown("t");
+    mods.schedule_shown("t");
+    tokio::time::sleep(SHOWN_READ_WINDOW + Duration::from_millis(150)).await;
+    assert_eq!(probe.reads.load(SeqCst), 1);
+    assert_eq!(last_ui(&mods)["shown_id"], "b");
+}
+
+#[tokio::test]
+async fn presses_and_closed_panes_are_waited_for() {
+    let (mods, _) = setup();
+    mods.terminal_ui("t", view(&["a"], Some("a")));
+    let since = Instant::now();
+    let late = { let mods = mods.clone(); tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(50)).await; mods.pressed("t", "a", "k"); }) };
+    assert!(mods.wait_pressed("t", "a", "k", since, Duration::from_secs(1)).await);
+    late.await.unwrap();
+    assert!(!mods.wait_pressed("t", "a", "k", Instant::now(), Duration::from_millis(50)).await, "press antes do clique não conta");
+    assert!(!mods.wait_pane_gone("t", "a", Duration::from_millis(30)).await);
+    mods.terminal_ui("t", view(&[], None));
+    assert!(mods.wait_pane_gone("t", "a", Duration::from_millis(30)).await);
+}
+
+#[tokio::test]
+async fn focus_target_rewrites_only_in_the_target_site_and_plugin() {
+    let (mods, _) = setup();
+    assert!(!mods.focus_target("t", "p", Some("m"), Some("x")).armed);
+    let attempt = mods.arm_focus("t", "p", Some("m"), "alvo");
+    assert_eq!(mods.armed_focus("t").as_deref(), Some(attempt.as_str()));
+    assert_eq!(mods.focus_target("t", "above-prompt", Some("m"), Some("x")).rewrite, None);
+    assert_eq!(mods.focus_target("t", "p", None, None).rewrite, None, "parada do motor: sem plugin");
+    assert_eq!(mods.focus_target("t", "p", Some("outro"), Some("x")).rewrite, None, "não atravessa de um mod para outro");
+    assert_eq!(mods.focus_target("t", "p", Some("m"), Some("x")).rewrite.as_deref(), Some("alvo"));
+    let seq = mods.focus_seq("t");
+    assert!(mods.focused("t", &attempt, "p", Some("alvo"), false));
+    let seen = mods.wait_focus("t", &attempt, seq, Duration::from_millis(50), |s| s.request_id == "p").await.unwrap();
+    assert_eq!((seen.element.as_deref(), seen.denied), (Some("alvo"), false));
+    assert_eq!(mods.focus_target("t", "p", Some("m"), Some("x")).rewrite, None, "uma reescrita por alvo armado");
+    mods.disarm_focus("t", &attempt);
+    assert!(!mods.focused("t", &attempt, "p", Some("x"), false));
+}
+
+#[tokio::test]
+async fn scroll_offsets_are_followed() {
+    let (mods, _) = setup();
+    assert_eq!(mods.last_scroll("t", "p"), (0, None));
+    mods.scrolled("t", "p", 12);
+    let (seq, offset) = mods.last_scroll("t", "p");
+    assert_eq!(offset, Some(12));
+    assert_eq!(mods.wait_scroll("t", "p", 0, Duration::from_millis(10)).await, Some((seq, 12)));
+    assert_eq!(mods.wait_scroll("t", "p", seq, Duration::from_millis(30)).await, None);
+}
+
+#[tokio::test]
+async fn terminal_click_window_covers_a_slow_click_and_the_copy_wakes_the_end() {
+    let (mods, _) = setup();
+    let attempt = mods.begin_click("t", "a", "k");
+    tokio::time::sleep(Duration::from_millis(1600)).await;
+    assert_eq!(mods.match_click("t", "a", "k").as_deref(), Some(attempt.as_str()), "com terminal o press pode vir depois da rolagem");
+    assert!(!mods.click_copied("t", "outra", "texto"));
+    let late = { let (mods, attempt) = (mods.clone(), attempt.clone());
+        tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(50)).await; assert!(mods.click_copied("t", &attempt, "texto")); }) };
+    let started = Instant::now();
+    assert_eq!(mods.finish_click("t", &attempt, Duration::from_secs(2)).await.0.as_deref(), Some("texto"));
+    assert!(started.elapsed() < Duration::from_millis(500), "a cópia acorda o fim do clique em vez de esperar o prazo inteiro");
+    late.await.unwrap();
+}
+
+#[test]
+fn forget_stops_the_probe_and_keeps_the_birth_name_for_the_same_process() {
+    let (mods, probe) = setup();
+    mods.toast("t", 1, "m", "aviso", 4000);
+    mods.terminal_ui("t", view(&["a"], Some("a")));
+    mods.forget("t", 2);
+    assert!(mods.owns("t") && !probe.stopped.load(SeqCst), "outra vida não esquece esta sessão");
+    mods.forget("t", 1);
+    assert!(probe.stopped.load(SeqCst) && !mods.owns("t"));
+    // Reaberta com outro nome no mesmo processo (renomear), herda o nome de nascimento.
+    mods.attach_terminal("t2", "proc-t", 2, Arc::new(Probe::default()));
+    assert_eq!(mods.bridge_session("t").as_deref(), Some("t2"));
+}
+
+#[test]
+fn a_new_process_inherits_nothing() {
+    let (mods, probe) = setup();
+    mods.toast("t", 1, "m", "aviso", 4000);
+    mods.terminal_ui("t", view(&["a"], Some("a")));
+    mods.attach_terminal("t", "proc-novo", 2, Arc::new(Probe::default()));
+    assert!(probe.stopped.load(SeqCst), "o elo da sessão substituída para");
+    assert!(!mods.replay("t").iter().any(|(event, _)| *event == "plugin_toast"), "aviso de outro processo não passa (a8fd66ba)");
+    assert!(mods.terminal_view("t").is_none());
+    assert_eq!(mods.life("t"), Some(2));
+}

@@ -1,5 +1,6 @@
 mod mods_support;
 
+use hangar_server::mods::model::*;
 use hangar_server::mods::tree;
 use mods_support::{first_render, nth_render};
 use serde_json::json;
@@ -52,4 +53,31 @@ fn engine_only_band_is_empty() {
     assert!(!tree::is_engine_only(&band));
     assert_eq!(band["type"], "Box");
     assert_eq!(band["children"][0]["type"], "engine");
+}
+
+#[test]
+fn label_buttons_and_anchor() {
+    let tree = json!({"type": "Box", "children": [
+        {"type": "Text", "children": ["ok"]},
+        {"type": "Button", "props": {"key": "a", "label": "  [ copiar ]  "}, "press": {"plugin": "m", "handle": 1}},
+        {"type": "Button", "props": {"key": "b"}, "children": ["fe", "char"], "press": {"plugin": "m", "handle": 2}},
+    ]});
+    assert_eq!(tree::label(&tree, "a").as_deref(), Some("[ copiar ]"));
+    assert_eq!(tree::label(&tree, "b").as_deref(), Some("fechar"));
+    assert_eq!(tree::label(&tree, "c"), None);
+    assert_eq!(tree::count_buttons(&tree), 2);
+    // Como o `band_anchor` do Python: o primeiro texto com três ou mais letras ou dígitos, em 16 caracteres;
+    // o botão desenha o `label` antes dos filhos.
+    assert_eq!(tree::anchor(&tree).as_deref(), Some("[ copiar ]"));
+    assert_eq!(tree::anchor(&json!({"type": "Text", "children": ["V01 Vitrine uma linha na faixa"]})).as_deref(), Some("V01 Vitrine uma "));
+    assert_eq!(tree::anchor(&json!(null)), None);
+}
+
+#[test]
+fn terminal_refusals_use_the_phase_one_texts() {
+    // O app traduz pelo código; a `msg` só aparece em cliente antigo e é a de `messages/pt.json`.
+    assert_eq!(dialog_open().msg, "Há uma pergunta aberta no terminal da sessão; responda a ela antes.");
+    assert_eq!(draft_in_prompt().msg, "Há texto digitado no prompt do terminal; envie ou apague antes de usar este botão pelo app.");
+    assert_eq!(unreachable_pane().msg, "O terminal da sessão está estreito ou baixo demais para alcançar esse painel; aumente a janela ou use o terminal.");
+    assert_eq!(not_found("x").params, json!({"rotulo": "x"}));
 }

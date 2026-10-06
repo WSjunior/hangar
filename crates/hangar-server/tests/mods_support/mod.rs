@@ -3,10 +3,11 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 
 use hangar_server::mods::model::{ModsCall, ModsError, SurfaceEffect};
-use hangar_server::mods::state::Mods;
+use hangar_server::mods::state::{CallFuture, Mods, ShownFuture, SurfaceLink, TerminalProbe};
 use hangar_server::mods::surface::Surface;
 use hangar_server::runtime::gateway::RuntimeRegistry;
 use hangar_server::runtime::protocol::{CanoBinding, RequestId, RuntimeTarget};
@@ -69,6 +70,22 @@ impl hangar_server::mods::state::SurfaceLink for NoLink {
     fn call(&self, _: hangar_server::mods::model::ModsCall, _: std::time::Instant) -> hangar_server::mods::state::CallFuture {
         Box::pin(async { Err(hangar_server::mods::model::missing()) })
     }
+}
+
+/// Elo de sessão com terminal de mentira: o painel que a tela mostraria, quantas leituras houve e se o
+/// vigia parou. Os pedidos dos apps vão ao `NoLink`.
+#[derive(Default)]
+pub struct Probe { pub shown: Mutex<Option<String>>, pub reads: AtomicUsize, pub stopped: AtomicBool }
+impl SurfaceLink for Probe {
+    fn call(&self, call: ModsCall, deadline: std::time::Instant) -> CallFuture { SurfaceLink::call(&NoLink, call, deadline) }
+}
+impl TerminalProbe for Probe {
+    fn read_shown(&self) -> ShownFuture {
+        self.reads.fetch_add(1, SeqCst);
+        let shown = self.shown.lock().unwrap().clone();
+        Box::pin(async move { shown })
+    }
+    fn stop(&self) { self.stopped.store(true, SeqCst); }
 }
 
 /// Pedidos que mudam o estado do mod; desenho e rol só leem o estado.
