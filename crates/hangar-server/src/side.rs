@@ -26,6 +26,10 @@ pub enum Out {
     Tail(u64, Bytes),
     /// Quadro da conexão interna (estado, prévia, fila…); vale em qualquer geração.
     Side(Bytes),
+    /// O `plugin_ui` mudou para a versão dada. O quadro (a vista inteira dos mods, até ~400 KB) fica só no
+    /// retrato, e cada aparelho o lê na hora de enviar: aparelho lento pula os intermediários em vez de
+    /// acumulá-los na fila, como o `band_pump` do Python.
+    Ui(u64),
     /// O transcript ou o provider trocou: cada aparelho manda `reset` e refaz a cauda.
     Rebind,
     /// Provider fora do Rust ou sessão sumida: `reset` e fim; ao reconectar, vai ao Python.
@@ -69,6 +73,7 @@ pub fn remember_info(cache: &InfoCache, name: &str, info: Option<InternalInfo>) 
 /// abre o chat depois ficava sem a faixa até o mod redesenhar.
 const LATEST: [&str; 8] = ["state", "suggest", "ask_question", "stats", "preview", "pensamento", "ferramenta", "plugin_ui"];
 const ASK_QUESTION: usize = 2;
+const PLUGIN_UI: usize = 7;
 /// Mesmos tetos do Python (`plugin_bridge.TOASTS_KEPT`, `TOAST_MAX_MS`).
 pub(crate) const TOASTS_KEPT: usize = 20;
 pub(crate) const TOAST_MAX_MS: f64 = 5.0 * 60.0 * 1000.0;
@@ -97,6 +102,8 @@ pub struct SideCtx {
 #[derive(Default)]
 struct SideCache {
     latest: [Option<Bytes>; 8],
+    /// Sobe a cada `plugin_ui` gravado; é o que o marcador `Out::Ui` leva.
+    ui_version: u64,
     queue: Vec<(String, Bytes)>,
     /// Avisos de mod (`plugin_toast`) ainda vivos: (id, quando vence, dado). A conexão interna é
     /// uma só por sessão, então quem abre o chat depois não os receberia do Python; o retrato os
@@ -116,6 +123,9 @@ impl SideCache {
         }
         if let Some(i) = LATEST.iter().position(|e| *e == event) {
             self.latest[i] = Some(frame.clone());
+            if i == PLUGIN_UI {
+                self.ui_version += 1;
+            }
             if event == "state" && pane_question {
                 let awaiting = serde_json::from_str::<serde_json::Value>(data)
                     .ok()
@@ -181,11 +191,26 @@ pub struct Hub {
     side: Mutex<Option<tokio::task::AbortHandle>>,
 }
 
-/// O que um aparelho recebe ao entrar: cauda + retrato, e o canal para o resto.
+/// O que um aparelho recebe ao entrar: cauda + retrato, e o canal para o resto. `ui`: a versão do
+/// `plugin_ui` que já vai no retrato; marcador dela ou anterior não precisa sair de novo.
 pub struct Attach {
     pub generation: u64,
     pub rx: broadcast::Receiver<Out>,
     pub frames: Vec<Bytes>,
+    pub ui: u64,
+}
+
+/// Item da fila de envio de um aparelho: quadro pronto, ou o marcador do `plugin_ui`, resolvido pelo
+/// retrato só quando a conexão pode escrever (`Hub::resolve`).
+pub enum Queued {
+    Frame(Bytes),
+    Ui(u64),
+}
+
+impl From<Bytes> for Queued {
+    fn from(frame: Bytes) -> Self {
+        Queued::Frame(frame)
+    }
 }
 
 impl Hub {
@@ -294,7 +319,25 @@ impl Hub {
         // O envio fica sob a trava do retrato (o `send` do broadcast não bloqueia): com o Python e o Rust
         // escrevendo no mesmo hub, fora dela dois quadros poderiam sair em ordem diferente da do retrato.
         if !repeated {
-            let _ = self.tx.send(Out::Side(frame));
+            let _ = self.tx.send(Self::out(event, frame, &cache));
+        }
+    }
+
+    /// O `plugin_ui` sai pelo canal só como marcador da versão gravada no retrato.
+    fn out(event: &str, frame: Bytes, cache: &SideCache) -> Out {
+        if event == LATEST[PLUGIN_UI] { Out::Ui(cache.ui_version) } else { Out::Side(frame) }
+    }
+
+    /// O quadro de um item da fila de um aparelho. O marcador do `plugin_ui` vira o quadro só se a versão
+    /// dele ainda for a do retrato; vencido, some, porque o marcador da versão nova vem atrás dele na
+    /// mesma fila (ou o retrato dela, depois de um `reset`).
+    pub fn resolve(&self, item: Queued) -> Option<Bytes> {
+        match item {
+            Queued::Frame(frame) => Some(frame),
+            Queued::Ui(version) => {
+                let cache = self.cache.lock().unwrap();
+                if cache.ui_version == version { cache.latest[PLUGIN_UI].clone() } else { None }
+            }
         }
     }
 
@@ -302,15 +345,14 @@ impl Hub {
     /// a vaga dela ainda estiver vazia: um `publish_ui` ou `forget` que chegou depois do cálculo já a
     /// preencheu com o dado mais novo. Os avisos se resolvem pelo id (o app descarta o repetido).
     pub(crate) fn seed(&self, frames: Vec<(&'static str, String)>) {
-        let ui_slot = LATEST.iter().position(|e| *e == "plugin_ui").expect("plugin_ui está em LATEST");
         for (event, data) in frames {
             let frame = sse_frame(event, &data, None);
             let mut cache = self.cache.lock().unwrap();
-            if event == "plugin_ui" && cache.latest[ui_slot].is_some() {
+            if event == LATEST[PLUGIN_UI] && cache.latest[PLUGIN_UI].is_some() {
                 continue;
             }
             cache.record(event, &data, &frame, false);
-            let _ = self.tx.send(Out::Side(frame));
+            let _ = self.tx.send(Self::out(event, frame, &cache));
         }
     }
 
@@ -334,7 +376,10 @@ impl Hub {
             if self.bound.lock().unwrap().as_ref().map(|x| x.generation) != Some(b.generation) {
                 continue;
             }
-            let cached = self.cache.lock().unwrap().replay();
+            let (cached, ui) = {
+                let cache = self.cache.lock().unwrap();
+                (cache.replay(), cache.ui_version)
+            };
             let binding = b.binding.clone();
             let resume = resume.clone();
             let done = tokio::task::spawn_blocking(move || {
@@ -354,7 +399,7 @@ impl Hub {
                 }
             };
             frames.extend(cached);
-            return Some(Attach { generation: b.generation, rx, frames });
+            return Some(Attach { generation: b.generation, rx, frames, ui });
         }
     }
 }
@@ -572,6 +617,7 @@ mod tests {
 
     #[test]
     fn cache_keeps_last_value_and_queue_by_id_without_nav() {
+        assert_eq!(LATEST[PLUGIN_UI], "plugin_ui");
         let mut c = SideCache::default();
         let rec = |c: &mut SideCache, e: &str, d: &str| c.record(e, d, &sse_frame(e, d, None), true);
         rec(&mut c, "state", "{\"state\":\"working\"}");
@@ -676,8 +722,7 @@ mod tests {
         let stale = ctx.mods.replay("s");
         ctx.mods.publish_ui("s", 1, &ui("nova"));
         lease.hub.seed(stale);
-        let slot = LATEST.iter().position(|e| *e == "plugin_ui").unwrap();
-        let kept = lease.hub.cache.lock().unwrap().latest[slot].clone().unwrap();
+        let kept = lease.hub.cache.lock().unwrap().latest[PLUGIN_UI].clone().unwrap();
         assert!(String::from_utf8_lossy(&kept).contains("nova"), "a faixa nova fica");
     }
 

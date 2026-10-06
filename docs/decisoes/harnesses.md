@@ -1652,6 +1652,13 @@ de um redesenho, quando ainda restam os 3 s do prazo do pedido; com menos, respo
 desistido. O que fica é o mod lento: um `onPress` que leva mais que os 3 s responde sem resposta
 com o clique já rodando. Os desenhos de fundo continuam com 10 s.
 
+O `plugin_ui` leva a vista inteira dos mods (a árvore grande da vitrine tem ~398 KB) e, no hub dos
+aparelhos, vale só o mais novo, em todas as sessões, com e sem terminal: o canal do hub leva um
+marcador de versão, e cada conexão lê a vista do retrato só quando pode escrever, como o
+`band_pump` do Python. Aparelho lento pula as vistas intermediárias em vez de guardá-las (antes,
+até 1024 quadros por hub e 64 por conexão); os outros eventos seguem todos, na ordem, e a faixa
+sai no lugar do último marcador dela. O evento e o formato que os apps recebem não mudaram.
+
 O `claude -p` sobe com o plugin do Hangar (`--plugin-dir`) e as variáveis da ponte
 (`HANGAR_PLUGIN_URL`, `HANGAR_PLUGIN_TOKEN`), exceção explícita à regra de não acrescentar nada ao
 Python (S7, no lançador do `adapter.py`): a URL que um mod abre num clique do app (`xdg-open`) vai
@@ -1683,6 +1690,7 @@ Limites conhecidos:
 - o convidado não digita em campo de mod nas sessões sem terminal;
 - o `opened` com bind de LAN é limite antigo da ponte, que continua valendo;
 - a sessão com terminal, inclusive no Windows (onde o terminal já nasce no Rust), ainda não é superfície remota: a interface dos mods dela segue pelo plugin e pelo Python, e a ponte só entra nela na fase 3.
+- o aparelho que acompanha recebe a vista inteira a cada mudança da faixa, sem gzip (SSE): a barra do pmedico, que redesenha a 1 Hz com um painel grande aberto, custa ~400 KB/s por aparelho. Cortar isso pede mudança de contrato com os apps (um evento só da faixa, ou revisão por painel com a árvore omitida quando não mudou, com anúncio de capacidade no `/events` para os apps atrasados), fora deste trabalho.
 
 ### Mods: painel, clique e o que acontece no aparelho (04/10/2026)
 
