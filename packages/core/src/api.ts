@@ -1792,8 +1792,9 @@ export function getAtualizacao(procurar = false): Promise<Atualizacao> {
 }
 
 /** Tela temporária "Migração para Rust": quem atende cada área, versões e consumo. */
-export function getMigrationStatus(): Promise<MigrationStatus> {
-  return apiFetch('/api/migration/status', { signal: AbortSignal.timeout(10000) });
+export function getMigrationStatus(s: Server | null = null): Promise<MigrationStatus> {
+  return s ? apiFetchForServer(s, '/api/migration/status', {}, 10000)
+           : apiFetch('/api/migration/status', { signal: AbortSignal.timeout(10000) });
 }
 
 /** Lança a atualização. Devolve na hora — ela roda fora do processo do backend, que vai reiniciar. */

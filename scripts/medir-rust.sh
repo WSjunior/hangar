@@ -9,23 +9,46 @@ RUST=127.0.0.1:$porta
 
 # Token: HANGAR_TOKEN, o .env deste checkout, ou o do processo que escuta a porta. Achar o backend
 # pelo nome do processo falha quando o venv chama o executável de `python`.
-token=${HANGAR_TOKEN:-}
-[ -n "$token" ] || token=$(grep -s '^CP_AUTH_TOKEN=' "$(dirname "$0")/../backend/.env" | tail -1 | cut -d= -f2- || true)
-if [ -z "$token" ]; then
+token_do_processo() {
+  local pid p t
   pid=$(ss -Hltnp "sport = :$porta" 2>/dev/null | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2 || true)
-  [ -n "$pid" ] || { echo "backend do Hangar fora: nada escuta em $RUST"; exit 1; }
+  [ -n "$pid" ] || return 0
   # Com o Rust na porta, o Python é o pai dele; os dois recebem o token no ambiente.
   for p in "$pid" "$(ps -o ppid= -p "$pid" | tr -d ' ')"; do
-    token=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | grep '^CP_AUTH_TOKEN=' | cut -d= -f2- || true)
-    [ -n "$token" ] || token=$(grep -s '^CP_AUTH_TOKEN=' "$(readlink "/proc/$p/cwd")/.env" | tail -1 | cut -d= -f2- || true)
-    [ -n "$token" ] && break
+    t=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | grep '^CP_AUTH_TOKEN=' | cut -d= -f2- || true)
+    [ -n "$t" ] || t=$(grep -s '^CP_AUTH_TOKEN=' "$(readlink "/proc/$p/cwd")/.env" | tail -1 | cut -d= -f2- || true)
+    [ -n "$t" ] && { echo "$t"; return 0; }
   done
+  return 0
+}
+estado() {  # resposta + código HTTP na última linha; sai se não houver conexão
+  local rc=0 r
+  r=$(curl -s -m 10 -w '\n%{http_code}' -H "Authorization: Bearer $1" "http://$RUST/api/migration/status") || rc=$?
+  case $rc in
+    0) printf '%s' "$r" ;;
+    28) echo "o backend em $RUST aceitou a conexão mas não respondeu em 10 s"; exit 1 ;;
+    *) echo "backend do Hangar fora: nada responde em $RUST (curl $rc)"; exit 1 ;;
+  esac
+}
+token=${HANGAR_TOKEN:-}
+[ -n "$token" ] || token=$(grep -s '^CP_AUTH_TOKEN=' "$(dirname "$0")/../backend/.env" | tail -1 | cut -d= -f2- || true)
+[ -n "$token" ] || token=$(token_do_processo)
+if [ -z "$token" ]; then
+  ss -Hltn "sport = :$porta" 2>/dev/null | grep -q . || { echo "backend do Hangar fora: nada escuta em $RUST"; exit 1; }
+  echo "token não encontrado: defina HANGAR_TOKEN ou rode o script do checkout do backend"; exit 1
 fi
-[ -n "$token" ] || { echo "token não encontrado: defina HANGAR_TOKEN ou rode o script do checkout do backend"; exit 1; }
 
-resposta=$(curl -s -m 10 -w '\n%{http_code}' -H "Authorization: Bearer $token" "http://$RUST/api/migration/status") ||
-  { echo "backend do Hangar fora: nada responde em $RUST"; exit 1; }
+resposta=$(estado "$token") || { echo "$resposta"; exit 1; }
 codigo=${resposta##*$'\n'}
+if [ "$codigo" = 401 ] && [ -z "${HANGAR_TOKEN:-}" ]; then
+  # O .env deste checkout pode ser de outro backend (o app roda de outro checkout): vale o do processo.
+  outro=$(token_do_processo)
+  if [ -n "$outro" ] && [ "$outro" != "$token" ]; then
+    token=$outro
+    resposta=$(estado "$token") || { echo "$resposta"; exit 1; }
+    codigo=${resposta##*$'\n'}
+  fi
+fi
 case $codigo in
   200) ;;
   401|403) echo "o backend recusou o token (HTTP $codigo): confira o CP_AUTH_TOKEN"; exit 1 ;;
@@ -36,9 +59,9 @@ leitura=$(python3 -c '
 import json, sys
 s = json.load(sys.stdin); p = s.get("python") or {}
 print(s.get("served_by") or "-", p.get("mode") or "-", p.get("reason") or "-", p.get("port") or "-",
-      (p.get("binary") or {}).get("path") or "-")' <<< "${resposta%$'\n'*}") ||
+      s.get("python_error") or "-", (p.get("binary") or {}).get("path") or "-")' <<< "${resposta%$'\n'*}") ||
   { echo "resposta do estado da migração ilegível"; exit 1; }
-read -r atende modo motivo python_port binario <<< "$leitura"
+read -r atende modo motivo python_port erro_python binario <<< "$leitura"
 if [ "$atende" != rust ]; then
   case $motivo in
     sem_binario) motivo="binário hangar-server ausente (CP_RUST_SERVER_BIN, crates/target/release ou ~/.hangar/bin)" ;;
@@ -52,7 +75,7 @@ if [ "$atende" != rust ]; then
   esac
   echo "o Rust não está atendendo a porta $porta: o Python está sozinho (modo $modo) — $motivo"; exit 1
 fi
-[ "$python_port" != - ] || { echo "o Rust respondeu, mas o Python atrás dele não mandou a porta interna"; exit 1; }
+[ "$python_port" != - ] || { echo "o Rust respondeu, mas o Python atrás dele não mandou os dados (erro: $erro_python)"; exit 1; }
 echo "Rust na porta $porta (modo $modo, binário $binario); Python em 127.0.0.1:$python_port"
 PY="127.0.0.1:$python_port"
 

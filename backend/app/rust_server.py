@@ -128,6 +128,9 @@ def _runtime_ready(proc, instance: str) -> dict:
     if not raw.endswith(b"\n") or len(raw) > 4096:
         raise ValueError("partida incompleta ou acima do teto")
     ready = json.loads(raw.decode("utf-8"))
+    # Antes do formato: um binário de outro contrato pode ter outra linha de partida.
+    if isinstance(ready, dict) and "protocol" in ready and ready["protocol"] != RUST_SERVER_PROTOCOL:
+        raise ProtocolMismatch(ready["protocol"])
     if not isinstance(ready, dict) or set(ready) != {"type", "protocol", "instance", "port"}:
         raise ValueError("resposta de partida inválida")
     if ready["type"] != "runtime_ready" or ready["instance"] != instance:

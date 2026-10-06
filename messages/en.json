@@ -7225,8 +7225,8 @@
   "migration_area_dictation": "Dictation and voice",
   "migration_area_static": "Web app files",
   "migration_area_other": "Other routes",
-  "migration_private_send_headless": "Claude sessions without terminal (operations)",
-  "migration_private_send_terminal": "Claude sessions with terminal (operations)",
+  "migration_private_send_headless": "Sends to Claude sessions without terminal",
+  "migration_private_send_terminal": "Sends to Claude sessions with terminal",
   "migration_private_terminal_observe": "Terminal screen reading",
   "migration_private_workspace_bridge": "Git and files through the bridge",
   "migration_private_list_bridge": "List through the bridge"

@@ -241,6 +241,8 @@ impl Hangar {
         self.device = Device::new(window, cx);
         self.sync_channel_update_guard(cx);
         self.load_rate(cx);
+        // A troca levou a leitura periódica junto; com a página aberta, ela recomeça no servidor novo.
+        if self.settings == Some(Page::Migration) { self.migration_opened(cx); }
     }
 
     /// Página aberta: pede o que ela mostra do servidor.

@@ -213,6 +213,22 @@ fn areas_json(counts: &[[u64; 2]; AREAS.len()]) -> Value {
     }).collect()
 }
 
+const FACTS_TTL: Duration = Duration::from_secs(2);
+// Várias telas abertas (nativo, web, script) viram uma leitura do Python a cada 2 s, uma por vez.
+static FACTS: LazyLock<tokio::sync::Mutex<Option<(Instant, Value)>>> = LazyLock::new(Default::default);
+
+async fn cached_python_facts(st: &AppState) -> Result<Value, &'static str> {
+    let mut cache = FACTS.lock().await;
+    if let Some((at, value)) = cache.as_ref() {
+        if at.elapsed() < FACTS_TTL {
+            return Ok(value.clone());
+        }
+    }
+    let value = python_facts(st).await?;
+    *cache = Some((Instant::now(), value.clone()));
+    Ok(value)
+}
+
 async fn python_facts(st: &AppState) -> Result<Value, &'static str> {
     let req = axum::http::Request::get(format!("http://{}/internal/migration/status", st.cfg.upstream))
         .header("x-hangar-internal", &st.cfg.internal_secret)
@@ -238,7 +254,7 @@ pub async fn status(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     if !owner || req.method() != Method::GET {
         return pass(&st, req, &fwd).await;
     }
-    let (python, python_error) = match python_facts(&st).await {
+    let (python, python_error) = match cached_python_facts(&st).await {
         Ok(v) => (v, Value::Null),
         Err(code) => {
             st.diag.report("migration_status.python", "", code, "o backend não devolveu os fatos da migração");

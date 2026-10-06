@@ -1,22 +1,29 @@
 <script lang="ts">
   // Tela temporária: sai na parte 7, junto com o Python.
   import * as m from '../../paraglide/messages';
-  import { getMigrationStatus, fmtBytes, type MigrationStatus, type MigrationProcess } from '@hangar/core';
+  import { getMigrationStatus, fmtBytes, type MigrationStatus, type MigrationProcess, type Server } from '@hangar/core';
+
+  let { server = null }: { server?: Server | null } = $props();
 
   const EVERY_MS = 3000;
 
   let status = $state<MigrationStatus | null>(null);
   let erro = $state('');
   let carregando = $state(true);
+  let emVoo = false;
 
   async function load() {
+    // Uma por vez: resposta lenta não pode chegar depois da seguinte e voltar a tela no tempo.
+    if (emVoo || document.visibilityState === 'hidden') return;
+    emVoo = true;
     try {
-      status = await getMigrationStatus();
+      status = await getMigrationStatus(server);
       erro = '';
     } catch (e) {
       erro = e instanceof Error ? e.message : String(e);
     } finally {
       carregando = false;
+      emVoo = false;
     }
   }
 
@@ -62,6 +69,8 @@
   const py = $derived(status?.python ?? null);
   const procs = $derived.by(() => {
     const p = py?.processes;
+    // Sem os dados do Python não dá para dizer quem roda: a tela mostra o erro, não "não está rodando".
+    if (!p) return [];
     const rows: { label: string; proc: MigrationProcess | { rss_bytes: number; cpu_percent: number | null } | null }[] = [
       { label: m.migration_proc_python(), proc: p?.python ?? null },
       { label: m.migration_proc_rust(), proc: p?.rust ?? null },
@@ -108,20 +117,23 @@
         <dd>{m.migration_contract_value({ rust: status.rust ? String(status.rust.protocol) : '—', python: py ? String(py.protocol) : '—' })}</dd>
         {#if status.rust}
           <dt>{m.migration_binary()}</dt>
-          <dd><code>{status.rust.version} · {status.rust.commit ? status.rust.commit.slice(0, 10) : m.migration_binary_local()}</code></dd>
+          <dd>
+            <code>{status.rust.version} · {status.rust.commit ? status.rust.commit.slice(0, 10) : m.migration_binary_local()}</code>
+            {#if py?.binary}<br /><code class="path">{py.binary.path}</code>{/if}
+          </dd>
         {/if}
         {#if py}
-          {#if py.binary}<dt></dt><dd><code class="path">{py.binary.path}</code></dd>{/if}
           <dt>{m.migration_checkout()}</dt><dd><code>{py.branch ?? '—'} · {py.version}</code></dd>
           <dt>{m.migration_channel()}</dt><dd>{py.update_branch ?? m.migration_channel_none()}</dd>
         {/if}
       </dl>
     </section>
 
+    {#if procs.length}
     <section>
       <h3>{m.migration_usage()}</h3>
-      <table>
-        <thead><tr><th></th><th>{m.migration_memory()}</th><th>{m.migration_cpu()}</th></tr></thead>
+      <table aria-label={m.migration_usage()}>
+        <thead><tr><td></td><th>{m.migration_memory()}</th><th>{m.migration_cpu()}</th></tr></thead>
         <tbody>
           {#each procs as row (row.label)}
             <tr>
@@ -136,12 +148,13 @@
         </tbody>
       </table>
     </section>
+    {/if}
 
     <section>
       <h3>{m.migration_areas()}</h3>
       {#if status.areas}
         <p class="nota">{m.migration_window({ minutos: String(status.window_minutes ?? 10) })}</p>
-        <table>
+        <table aria-label={m.migration_areas()}>
           <tbody>
             {#each status.areas as a (a.key)}
               <tr>
@@ -159,7 +172,7 @@
         </table>
         {#if status.private}
           <h4>{m.migration_private()}</h4>
-          <table>
+          <table aria-label={m.migration_private()}>
             <tbody>
               {#each status.private as p (p.key)}
                 <tr><th scope="row">{PRIVATE[p.key]?.() ?? p.key}</th><td class="num">{p.rust}</td></tr>

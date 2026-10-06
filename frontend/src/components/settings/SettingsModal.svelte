@@ -129,7 +129,7 @@
   const convidado = $derived(papelDo(resolvedServer) === 'guest');
   const linhasVisiveis = $derived(convidado ? LINHAS.filter((l) => !l.servidor) : LINHAS);
   // Link direto para tela de servidor não pode abrir o que o backend recusa.
-  $effect(() => { if (convidado && TELAS_DE_SERVIDOR.includes(tela)) onIrPara('root'); });
+  $effect(() => { if (convidado && (TELAS_DE_SERVIDOR.includes(tela) || tela === 'migration')) onIrPara('root'); });
 
   // Troca de tela do modal: fly curto na direção da navegação (180ms ease-out, uso ocasional).
   // Entrar numa sub-tela vem da direita; voltar pra raiz vem da esquerda. Com reduced-motion
@@ -388,9 +388,9 @@
   {:else if telaAtual === 'diario'}
     <DiarioSettings />
   {:else if telaAtual === 'sobre'}
-    <SobreSettings onMigration={() => onIrPara('migration')} />
+    <SobreSettings onMigration={convidado ? undefined : () => onIrPara('migration')} />
   {:else if telaAtual === 'migration'}
-    <MigrationSettings />
+    <MigrationSettings server={resolvedServer} />
   {:else if telaAtual === 'maquinas'}
     <MaquinasSettings resolvedServer={resolvedServer} apiTarget={alvo}
       fallbackFocus={fecharEl} {store}

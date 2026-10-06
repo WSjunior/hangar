@@ -83,7 +83,8 @@ impl Hangar {
         self.device.migration_poll = Some(cx.spawn(async move |this, cx| loop {
             let open = this.update(cx, |this, cx| {
                 if this.settings != Some(Page::Migration) { return false; }
-                this.load_migration(cx);
+                // Escondida na bandeja ninguém lê a tela: não pede, mas segue viva para a volta.
+                if !this.window_tray.hidden { this.load_migration(cx); }
                 true
             });
             if !matches!(open, Ok(true)) { break; }

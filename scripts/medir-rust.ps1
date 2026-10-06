@@ -20,7 +20,8 @@ $rust = "127.0.0.1:$port"
 
 # A porta do Python, o modo e o motivo vem da tela de migracao: o log e o nome do processo mentem.
 $code = curl.exe -s -m 10 -o NUL -w '%{http_code}' -H "Authorization: Bearer $token" "http://$rust/api/migration/status"
-if ($LASTEXITCODE -ne 0 -or $code -eq '000') { Write-Host "backend do Hangar fora: nada responde em $rust"; exit 1 }
+if ($LASTEXITCODE -eq 28) { Write-Host "o backend em $rust aceitou a conexao mas nao respondeu em 10 s"; exit 1 }
+if ($LASTEXITCODE -ne 0 -or $code -eq '000') { Write-Host "backend do Hangar fora: nada responde em $rust (curl $LASTEXITCODE)"; exit 1 }
 switch ($code) {
     '200' { }
     { $_ -in '401', '403' } { Write-Host "o backend recusou o token (HTTP $code): confira o CP_AUTH_TOKEN"; exit 1 }
@@ -43,7 +44,7 @@ if ($status.served_by -ne 'rust') {
     if (-not $why) { $why = $facts.reason }
     Write-Host "o Rust nao esta atendendo a porta ${port}: o Python esta sozinho (modo $($facts.mode)) - $why"; exit 1
 }
-if (-not $facts -or -not $facts.port) { Write-Host 'o Rust respondeu, mas o Python atras dele nao mandou a porta interna'; exit 1 }
+if (-not $facts -or -not $facts.port) { Write-Host "o Rust respondeu, mas o Python atras dele nao mandou os dados (erro: $($status.python_error))"; exit 1 }
 Write-Host "Rust na porta $port (modo $($facts.mode), binario $($facts.binary.path)); Python em 127.0.0.1:$($facts.port)"
 $py = "127.0.0.1:$($facts.port)"
 

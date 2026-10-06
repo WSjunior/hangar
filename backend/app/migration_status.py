@@ -11,7 +11,6 @@ import os
 import sys
 import threading
 import time
-from functools import cache
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -61,17 +60,26 @@ def _mode() -> str:
     return current.mode if current is not None else runtime_coordinator._initial_mode
 
 
-@cache
+_branch: str | None = None
+
+
 def _checkout_branch() -> str | None:
-    # Uma vez por processo: a branch só muda no Atualizar, que reinicia o backend.
+    # Lida uma vez por processo, como a versão: a branch só muda no Atualizar, que reinicia o backend.
+    # Falha não fica guardada: a próxima visita tenta de novo.
+    global _branch
+    if _branch is not None:
+        return _branch
     from app import atualizar, git_ops
     try:
         result = git_ops._run(str(atualizar.REPO), "rev-parse", "--abbrev-ref", "HEAD", timeout=5)
-    except git_ops.GitError:
+    except git_ops.GitError as e:
+        diag.registrar("migration_status.branch", "aviso", **diag.erro_campos(e))
         return None
     if result.returncode != 0:
+        diag.registrar("migration_status.branch", "aviso", codigo=str(result.returncode))
         return None
-    return result.stdout.strip() or None
+    _branch = result.stdout.strip() or None
+    return _branch
 
 
 def _read_proc(pid: int) -> tuple[int, float] | None:
@@ -119,14 +127,17 @@ def _is_cano(pid: int) -> bool:
     # O pid vem do sidecar e pode ter sido reaproveitado por outro processo.
     if sys.platform.startswith("linux"):
         try:
-            return b"cano" in Path(f"/proc/{pid}/cmdline").read_bytes()
+            args = [a.decode(errors="replace") for a in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")]
         except OSError:
             return False
-    import psutil
-    try:
-        return "cano" in " ".join(psutil.Process(pid).cmdline())
-    except (psutil.Error, OSError):
-        return False
+    else:
+        import psutil
+        try:
+            args = psutil.Process(pid).cmdline()
+        except (psutil.Error, OSError):
+            return False
+    # O binário (`hangar-cano`, `.exe` no Windows) ou a reserva em Python (`cano.py`).
+    return any(Path(a).name in ("hangar-cano", "hangar-cano.exe", "cano.py") for a in args[:3])
 
 
 def _cano_pids() -> list[int]:
@@ -155,15 +166,18 @@ def _cano_pids() -> list[int]:
 
 
 def _canos_usage() -> dict:
-    total = {"count": 0, "rss_bytes": 0, "cpu_percent": None}
+    total = {"count": 0, "rss_bytes": 0, "cpu_percent": 0.0}
     for pid in _cano_pids():
         usage = _usage(pid)
         if usage is None:
             continue
         total["count"] += 1
         total["rss_bytes"] += usage["rss_bytes"]
-        if usage["cpu_percent"] is not None:
-            total["cpu_percent"] = round((total["cpu_percent"] or 0.0) + usage["cpu_percent"], 1)
+        # Um cano sem a segunda leitura deixa a soma incompleta: a tela mostra "medindo", não um número menor.
+        if usage["cpu_percent"] is None or total["cpu_percent"] is None:
+            total["cpu_percent"] = None
+        else:
+            total["cpu_percent"] = round(total["cpu_percent"] + usage["cpu_percent"], 1)
     return total
 
 
