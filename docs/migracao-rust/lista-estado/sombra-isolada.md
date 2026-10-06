@@ -9,7 +9,9 @@ Rodada final em 05/10/2026 sobre a integração `5d3a74928` (merge `68447c244` n
 
 - Backend isolado (`HOME`, portas, token e `tmux -L` próprios), `matar_orfaos` e a poda
   desligados no lançador, `hangar-server` release desta branch com `CP_LIST_SHADOW=1`.
-- Claude em `claude-haiku-4-5` na conta 02-200 (troca de conta para a `claude-200-3`), com e sem
+- Claude em `claude-haiku-4-5` na conta 02-200 (a troca de conta desta rodada usou a `claude-200-3`,
+  que é de uso real e não devia entrar em prova: o roteiro agora a recusa; a próxima usa a
+  `~/.claude-jefferson`), com e sem
   terminal; Codex em `gpt-6-luna` com e sem terminal, numa `CODEX_HOME` temporária com a cópia do
   login (sem renovação durante a prova: conferido no fim, nada copiado de volta).
 - A lista do dono fica aberta o tempo todo (sem ela o Python não tem lista para comparar).

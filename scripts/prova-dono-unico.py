@@ -38,6 +38,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 BACKEND = REPO / "backend"
 CONTA = Path.home() / ".claude-02-200"
+CONTAS_PROIBIDAS = {".claude-claude-200-1", ".claude-claude-200-3"}
 MODELO = "claude-haiku-4-5"
 PORTAS_REAIS = {8765, 8766, 8768}
 ENTREGA_S = 150
@@ -215,6 +216,9 @@ class Prova:
         self.marcas = {}   # marcador -> sessão
         self.linhas = []
         self.conta_b = Path(args.conta_b).expanduser().resolve() if args.conta_b else None
+        # Contas de uso real do dono: prova nenhuma gasta cota nem grava nelas.
+        if self.conta_b and self.conta_b.name in CONTAS_PROIBIDAS:
+            raise SystemExit(f"--conta-b {self.conta_b.name} é de uso real; use ~/.claude-jefferson")
         # O embrulho executa pelo nome `claude` (o link do PATH): é por ele que o Hangar reconhece o
         # agente do pane. O caminho real só serve para achar o processo.
         self.claude = shutil.which("claude") or ""
@@ -875,7 +879,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--casos", default=",".join(ORDEM), help="steps a rodar, ex.: 49,52")
     ap.add_argument("--n", type=int, default=10, help="sessões por modo no step 49")
-    ap.add_argument("--conta-b", help="segunda conta Claude com login, destino da troca de conta")
+    ap.add_argument("--conta-b", help="segunda conta Claude com login, destino da troca de conta "
+                    "(~/.claude-jefferson; claude-200-1 e claude-200-3 são recusadas)")
     ap.add_argument("--relatorio", help="grava a tabela neste arquivo")
     ap.add_argument("--manter", action="store_true", help="não apaga a pasta da prova (logs, HOME)")
     args = ap.parse_args()

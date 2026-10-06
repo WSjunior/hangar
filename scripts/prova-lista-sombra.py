@@ -433,7 +433,8 @@ ORDEM = ["nascer", "trabalhando", "permissao", "pergunta", "clear", "matar", "re
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--cenarios", default=",".join(ORDEM))
-    ap.add_argument("--conta-b", help="segunda conta Claude com login, destino da troca de conta")
+    ap.add_argument("--conta-b", help="segunda conta Claude com login, destino da troca de conta "
+                    "(~/.claude-jefferson; claude-200-1 e claude-200-3 são recusadas)")
     ap.add_argument("--codex", default="~/.codex-claude-200-2", help="conta Codex cujo login é copiado")
     ap.add_argument("--relatorio", help="grava a tabela neste arquivo")
     ap.add_argument("--manter", action="store_true", help="não apaga a pasta da prova")
