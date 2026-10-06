@@ -289,6 +289,8 @@ def _prep_resume(tmp_path, monkeypatch, visto, motor):
     monkeypatch.setattr(reg, "sanitize_cwd", lambda cwd: "-tmp")
     monkeypatch.setattr(reg.tmux, "kill_session", lambda n: None)
     monkeypatch.setattr(reg.tmux, "new_session", _fake_new)
+    # O cache é da classe: sem zerar, o "s" de um teste anterior sobrevive até aqui.
+    monkeypatch.setattr(reg.SessionRegistry, "_jsonl_cache", {})
     r = reg.SessionRegistry(projects_dir=tmp_path / "projects")
     monkeypatch.setattr(r, "_pane_of", lambda name: {"cwd": "/tmp", "pid": 4242})
     monkeypatch.setattr(r, "_forget", lambda name: None)
