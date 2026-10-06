@@ -50,6 +50,8 @@ pub struct Fake {
     transfer: Mutex<Option<StatusCode>>,
     /// Demora da guarda antes de responder, para o Rust ver o silêncio dela.
     transfer_delay: Mutex<Duration>,
+    /// Demora do `info` antes de responder (Python lento).
+    info_delay: Mutex<Duration>,
     /// Corpo cru que substitui o da guarda (o 409 do Python sem o `detail`).
     transfer_body: Mutex<Option<String>>,
     transfer_calls: AtomicUsize,
@@ -93,6 +95,9 @@ impl Fake {
         *self.transfer.lock().unwrap() = s;
     }
     /// A guarda demora isto antes de responder.
+    pub fn set_info_delay(&self, delay: Duration) {
+        *self.info_delay.lock().unwrap() = delay;
+    }
     pub fn set_transfer_delay(&self, delay: Duration) {
         *self.transfer_delay.lock().unwrap() = delay;
     }
@@ -125,6 +130,7 @@ pub async fn spawn_fake() -> (Arc<Fake>, SocketAddr) {
         list_facts_last: Mutex::new(Value::Null),
         transfer: Mutex::default(),
         transfer_delay: Mutex::default(),
+        info_delay: Mutex::default(),
         transfer_body: Mutex::default(),
         transfer_calls: AtomicUsize::new(0),
     });
@@ -152,6 +158,8 @@ fn status(s: StatusCode) -> Response {
 
 async fn fake_info(State(f): State<Arc<Fake>>, headers: HeaderMap) -> Response {
     f.info_calls.fetch_add(1, SeqCst);
+    let delay = *f.info_delay.lock().unwrap();
+    tokio::time::sleep(delay).await;
     if let Some(s) = *f.info_status.lock().unwrap() {
         return status(s);
     }
