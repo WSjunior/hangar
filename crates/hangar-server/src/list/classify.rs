@@ -25,6 +25,8 @@ pub const STATUS_BUDGET: usize = 2;
 pub const LIMIT_TTL_S: f64 = 30.0;
 /// Intervalo da segunda captura: spinner que não mudou nele está congelado no scrollback.
 pub const SPINNER_RECHECK: Duration = Duration::from_millis(150);
+/// Sessão sem terminal que o retrato do runtime não trouxe: o estado sai do marcador, e a linha diz.
+pub const RUNTIME_ABSENT: &str = "list_runtime_absent";
 
 /// Capturas simultâneas numa rodada: cada uma é um processo do multiplexador.
 const CAPTURE_PARALLEL: usize = 4;
@@ -61,8 +63,9 @@ pub struct Facts<'a> {
     pub hooks: &'a HookStates,
     pub alive: &'a (dyn Fn(i64) -> bool + Sync),
     pub config_dirs: &'a [PathBuf],
-    /// Retrato do runtime das sessões sem terminal, por nome (`RuntimeRegistry::snapshots`).
-    pub headless: &'a BTreeMap<String, Value>,
+    /// Retrato do runtime das sessões sem terminal, por nome (`RuntimeRegistry::snapshots`). `None`:
+    /// ninguém forneceu o retrato (a sombra, até o hub); sessão fora de um retrato fornecido está parada.
+    pub headless: Option<&'a BTreeMap<String, Value>>,
     /// Código de problema do runtime, por nome.
     pub problems: &'a BTreeMap<String, String>,
     pub stall_seconds: f64,
@@ -95,8 +98,16 @@ fn mtime(name: &str, jsonl: Option<&str>) -> Option<f64> {
     }
 }
 
-/// Sem terminal: o runtime vivo responde; parado, vale o marcador `working`/`idle`.
-fn headless_state(row: &mut SessionRow, snapshot: Option<&Value>, marker: Option<&facts_files::Marker>) {
+/// Sem terminal: o runtime vivo responde; parado (fora do retrato ou `alive: false`), vale o marcador
+/// `working`/`idle`. Sem retrato nenhum, também o marcador, com a ausência na linha: sessão parada
+/// calada esconderia que o runtime não foi consultado.
+fn headless_state(row: &mut SessionRow, retrato: Option<&BTreeMap<String, Value>>, marker: Option<&facts_files::Marker>) {
+    let Some(retrato) = retrato else {
+        row.problema = Some(RUNTIME_ABSENT.into());
+        row.state = marker.map(|m| m.state.as_str()).filter(|s| ["working", "idle"].contains(s)).unwrap_or("idle").into();
+        return;
+    };
+    let snapshot = retrato.get(&row.name);
     // Ausente ou `alive: false` é a sessão parada; erro ou retrato sem estado é falha do runtime.
     let broken = snapshot.is_some_and(|s| !s["error"].is_null()
         || (s["view"]["alive"] == true && !s["view"]["public_state"]["state"].is_string()));
@@ -175,9 +186,11 @@ impl Classifier {
             let marker = facts.hooks.get_state(sid.as_deref(), facts.alive);
             if row.headless {
                 row.last_activity = mtime(&row.name, row.jsonl.as_deref());
-                headless_state(row, facts.headless.get(&row.name), marker.as_ref());
-                // O problema registrado pelo adaptador é mais preciso que a falha genérica do retrato.
-                if let Some(p) = facts.problems.get(&row.name) { row.problema = Some(p.clone()); }
+                headless_state(row, facts.headless, marker.as_ref());
+                // O problema registrado pelo adaptador é mais preciso que a falha genérica do retrato; a
+                // ausência do retrato fica, senão a linha passaria por consultada.
+                if let Some(p) = facts.problems.get(&row.name)
+                    && row.problema.as_deref() != Some(RUNTIME_ABSENT) { row.problema = Some(p.clone()); }
                 continue;
             }
             if row.problema.is_none() {
@@ -425,7 +438,7 @@ mod tests {
         (dir, vec![cfg], row)
     }
 
-    async fn run(row: &mut SessionRow, dirs: &[PathBuf], io: &Fixed, headless: &BTreeMap<String, Value>) -> Vec<Effect> {
+    async fn run(row: &mut SessionRow, dirs: &[PathBuf], io: &Fixed, headless: Option<&BTreeMap<String, Value>>) -> Vec<Effect> {
         let hooks = HookStates::load(dirs);
         let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: dirs, headless,
                             problems: &BTreeMap::new(), stall_seconds: 300.0 };
@@ -438,13 +451,13 @@ mod tests {
         for (age, want) in [(5.0, vec![]), (60.0, vec![Effect::DemoteAwaiting { sid: "abc".into() }])] {
             let (_d, dirs, mut row) = setup("awaiting_input", 1000.0 - age);
             let io = Fixed { frame: Ok(IDLE.into()), wall: 1000.0, calls: Mutex::new(0) };
-            assert_eq!(run(&mut row, &dirs, &io, &BTreeMap::new()).await, want, "idade {age}");
+            assert_eq!(run(&mut row, &dirs, &io, Some(&BTreeMap::new())).await, want, "idade {age}");
             assert_eq!(row.state, "idle");
         }
         // Sem quadro não há prova: o marcador fica, sem rebaixar, e a falha aparece na linha.
         let (_d, dirs, mut row) = setup("awaiting_input", 900.0);
         let io = Fixed { frame: Err(CaptureFailed { code: "capture_refused" }), wall: 1000.0, calls: Mutex::new(0) };
-        assert_eq!(run(&mut row, &dirs, &io, &BTreeMap::new()).await, vec![]);
+        assert_eq!(run(&mut row, &dirs, &io, Some(&BTreeMap::new())).await, vec![]);
         assert_eq!((row.state.as_str(), row.problema.as_deref()), ("awaiting_input", Some("list_capture_failed")));
     }
 
@@ -474,7 +487,7 @@ mod tests {
             }
             let hooks = HookStates::load(&dirs);
             let (headless, problems) = (BTreeMap::new(), BTreeMap::new());
-            let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &dirs, headless: &headless,
+            let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &dirs, headless: Some(&headless),
                                 problems: &problems, stall_seconds: 1e12 };
             let mut c = Classifier::default();
             let io = Fixed { frame: Ok(frame.clone()), wall: 1e9, calls: Mutex::new(0) };
@@ -509,7 +522,7 @@ mod tests {
         let mut rows: Vec<SessionRow> = (0..20).map(|i| serde_json::from_value(serde_json::json!({"name": format!("s{i}")})).unwrap()).collect();
         let hooks = HookStates::default();
         let (headless, problems) = (BTreeMap::new(), BTreeMap::new());
-        let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: &headless,
+        let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: Some(&headless),
                             problems: &problems, stall_seconds: 300.0 };
         let io = Slow { now: Mutex::new(0), peak: Mutex::new(0) };
         Classifier::default().classify(&mut rows, &facts, &io).await;
@@ -522,7 +535,7 @@ mod tests {
         fn send<T: Send>(_: T) {}
         let hooks = HookStates::default();
         let (headless, problems) = (BTreeMap::new(), BTreeMap::new());
-        let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: &headless,
+        let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: Some(&headless),
                             problems: &problems, stall_seconds: 300.0 };
         let io = MuxCapture::new("tmux", Duration::from_secs(1), BTreeMap::new());
         send(Classifier::default().classify(&mut [], &facts, &io));
@@ -536,18 +549,41 @@ mod tests {
         let snap = |alive: bool| BTreeMap::from([("s".to_owned(), serde_json::json!({"error": null, "view": {"alive": alive,
             "public_state": {"state": "awaiting_input", "label": null, "question": "Permitir Bash?",
                              "options": ["Permitir", "Negar"], "status_line": "🤖 Haiku 4.5"}}}))]);
-        run(&mut row, &dirs, &io, &snap(true)).await;
+        run(&mut row, &dirs, &io, Some(&snap(true))).await;
         assert_eq!((row.state.as_str(), row.question.as_deref()), ("awaiting_input", Some("Permitir Bash?")));
         assert_eq!(row.options, Some(vec!["Permitir".into(), "Negar".into()]));
         assert_eq!(row.status_line.as_deref(), Some("🤖 Haiku 4.5"));
         // Processo parado: o marcador responde. Pane nunca é raspado.
         row.question = None;
-        run(&mut row, &dirs, &io, &snap(false)).await;
+        run(&mut row, &dirs, &io, Some(&snap(false))).await;
         assert_eq!(row.state, "working");
         assert_eq!(*io.calls.lock().unwrap(), 0);
         // Runtime com erro não passa por sessão parada calada.
         let broken = BTreeMap::from([("s".to_owned(), serde_json::json!({"error": "cano_exited", "view": {"alive": true}}))]);
-        run(&mut row, &dirs, &io, &broken).await;
+        run(&mut row, &dirs, &io, Some(&broken)).await;
         assert_eq!((row.state.as_str(), row.problema.as_deref()), ("working", Some("list_runtime_unavailable")));
+    }
+
+    #[tokio::test]
+    async fn headless_without_runtime_view_is_marked() {
+        let (_d, dirs, mut row) = setup("working", 990.0);
+        row.headless = true;
+        let io = Fixed { frame: Ok(String::new()), wall: 1000.0, calls: Mutex::new(0) };
+        // Sem retrato fornecido, o marcador responde, mas a linha diz que o runtime não foi consultado.
+        run(&mut row, &dirs, &io, None).await;
+        assert_eq!((row.state.as_str(), row.problema.as_deref()), ("working", Some(RUNTIME_ABSENT)));
+        // Retrato fornecido sem a sessão: ela está parada, como o `hl.snapshot() = None` do Python.
+        let other = BTreeMap::from([("outra".to_owned(), serde_json::json!({"error": null, "view": {"alive": true}}))]);
+        row.problema = None;
+        run(&mut row, &dirs, &io, Some(&other)).await;
+        assert_eq!((row.state.as_str(), row.problema.as_deref()), ("working", None));
+        assert_eq!(*io.calls.lock().unwrap(), 0);
+        // O problema do adaptador não apaga a ausência do retrato.
+        let hooks = HookStates::load(&dirs);
+        let problems = BTreeMap::from([("s".to_owned(), "cano_exited".to_owned())]);
+        let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &dirs, headless: None,
+                            problems: &problems, stall_seconds: 300.0 };
+        Classifier::default().classify(std::slice::from_mut(&mut row), &facts, &io).await;
+        assert_eq!(row.problema.as_deref(), Some(RUNTIME_ABSENT));
     }
 }

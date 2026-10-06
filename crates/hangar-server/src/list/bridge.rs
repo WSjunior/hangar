@@ -83,7 +83,7 @@ pub fn parse_dirs(raw: &str) -> Option<Dirs> {
 #[derive(Default)]
 pub struct ProduceFacts {
     /// Retrato do runtime das sessões sem terminal, por nome (`RuntimeRegistry::snapshots`).
-    pub headless: BTreeMap<String, Value>,
+    pub headless: Option<BTreeMap<String, Value>>,
     pub owner_clients: u32,
     /// Rodada em sombra: nada do que ela produz sai daqui, nem o rebaixamento de `awaiting`.
     pub shadow: bool,
@@ -230,7 +230,7 @@ impl ListBridge {
             };
             hooks.refresh(&config_dirs);
             let alive = |pid: i64| pid_alive(&*env.procs, pid);
-            let facts = Facts { hooks: &hooks, alive: &alive, config_dirs: &config_dirs, headless: &headless,
+            let facts = Facts { hooks: &hooks, alive: &alive, config_dirs: &config_dirs, headless: headless.as_ref(),
                 problems: &py.problems, stall_seconds: py.stall_seconds };
             let io = MuxCapture::new(env.capture_program.clone(), CAPTURE_TIMEOUT, targets);
             let effects = handle.block_on(lock(&classifier).classify(&mut rows, &facts, &io));

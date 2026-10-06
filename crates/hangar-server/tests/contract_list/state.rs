@@ -146,7 +146,7 @@ fn run_case(doc: &Value, case: &Value) -> usize {
             .map(|r| discovered(defaults, &serde_json::from_str(&real(&r.to_string(), root)).unwrap()))
             .collect();
         let alive_fn = |pid: i64| alive.contains(&pid);
-        let facts = Facts { hooks: &hooks, alive: &alive_fn, config_dirs: &dirs, headless: &headless,
+        let facts = Facts { hooks: &hooks, alive: &alive_fn, config_dirs: &dirs, headless: Some(&headless),
                             problems: &problems, stall_seconds: 300.0 };
         let effects = rt.block_on(classifier.classify(&mut rows, &facts, &fake));
         let claude: HashSet<String> = rows.iter().filter(|r| r.provider == "claude").map(|r| r.name.clone()).collect();

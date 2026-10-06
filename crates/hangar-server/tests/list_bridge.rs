@@ -248,7 +248,7 @@ async fn measure_tick_20_sessions() {
         let p = bridge.produce(&input).await.unwrap();
         let py = p.facts.shadow.as_ref().expect("assinatura do Python");
         let c = std::time::Instant::now();
-        reporter.update(hangar_server::list::shadow::compare(&p.rows, py));
+        reporter.record(hangar_server::list::shadow::compare(&p.rows, py), std::time::Instant::now());
         cmp += c.elapsed();
     }
     println!("tique da sombra (20 sessões): parede {:.2} ms, CPU (com filhos) {:.2} ms, comparação {:.0} µs, pico RSS {} kB",
