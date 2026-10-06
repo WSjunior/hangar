@@ -123,7 +123,7 @@ async function askFocus($: EngineInterface, requestId: string, plugin: string | 
 // Prazo da pergunta do envio segurado: a rota da ponte responde em ~1 s no pior caso (sessão renomeada).
 const ARMED_ASK_MS = 2000;
 
-/** O backend ainda tem um alvo de foco armado? `null` sem resposta no prazo: aí vale a janela. */
+/** O backend ainda tem um alvo de foco armado? `null` sem resposta no prazo. */
 async function armedNow($: EngineInterface): Promise<boolean | null> {
   // `requestId` que não é de painel, sem mod nem elemento: a rota só lê, sem reescrita nem registro.
   const ask = askFocus($, "prompt", null, null).then((alvo) => (alvo === undefined ? null : alvo !== null), () => null);
@@ -267,12 +267,15 @@ export function registerUi(on: On) {
 
   // Enquanto a reserva por teclado corre, o envio do composer fica segurado: uma letra digitada no meio
   // devolveria o teclado ao prompt e o `Enter` do backend mandaria o rascunho ao modelo ((aa)). Dentro da
-  // janela, só segura com o alvo ainda armado no backend: ele desarma antes de soltar a fila, e a mensagem
-  // que a fila entrega logo depois (o `Enter` do executor também é um envio do composer) passa.
+  // janela, só segura com o alvo confirmado como armado no backend: ele desarma antes de soltar a fila, e a
+  // mensagem que a fila entrega logo depois (o `Enter` do executor também é um envio do composer) passa. Sem
+  // resposta, passa também: derrubar faria a mensagem da fila sumir como entregue, e a reserva já recusa com
+  // rascunho no prompt, então deixar passar não manda nada indevido.
   on("prompt.submit", { origin: { kind: "composer" } }, async ($, e, next) => {
     if (!holding(await $.clock.now(), holdUntil)) return next(e);
-    if ((await armedNow($)) === false) {
-      holdUntil = null;
+    const armed = await armedNow($);
+    if (armed !== true) {
+      if (armed === false) holdUntil = null;
       return next(e);
     }
     return { drop: "Hangar: envio segurado durante um clique do app pelo teclado; a seta para cima traz o texto de volta. / Hangar: send held during an app click by keyboard; the Up arrow brings the text back." };
