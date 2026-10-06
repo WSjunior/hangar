@@ -826,6 +826,8 @@ pub async fn finish(ctx: &Ctx<'_>) {
     }
     if let Some((columns, rows)) = undo.with(|p| p.height) {
         let clean = ctx.fresh();
+        // A reserva renovada no começo cobria a volta ao prompt: a devolução da altura ganha a dela.
+        if held { renew(&clean, UNDO_MAX).await; }
         give_back(&clean, columns, rows, clean.until).await;
         undo.with(|p| p.height = None);
     }
