@@ -68,7 +68,10 @@ async fn a_renamed_session_is_found_by_its_birth_name() {
     let (status, _) = post(server, "ui", signed("t", json!({"above": {"type": "Box"}, "columns": 87, "bodyColumns": 82, "panes": []}))).await;
     assert_eq!(status, 200);
     assert_eq!(last_ui(&mods, "novo")["source"], "terminal");
-    assert_eq!(python.hits_to("/api/plugin/ui"), 1, "a cópia leva o nome e o token que o plugin mandou");
+    // O cache do Python é pelo nome de agora: a cópia leva o nome atual e o token dele.
+    let copy = python.plugin_ui_bodies();
+    assert_eq!(copy.len(), 1, "a cópia da faixa vai ao Python");
+    assert_eq!((copy[0]["sessao"].as_str(), copy[0]["token"].as_str()), (Some("novo"), Some(mint(OWNER, "novo").as_str())));
 }
 
 #[tokio::test]
