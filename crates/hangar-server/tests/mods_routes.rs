@@ -241,7 +241,7 @@ async fn copy_during_the_click_goes_back_to_the_app() {
     let link = FakeLink::with(FakeInner { copy: Some((mods.clone(), "Texto copiado pela vitrine (V44)".into())), ..Default::default() });
     mods.attach("s", 1, Arc::new(link.clone()));
     // A cópia só é do clique quando vem do mod do botão (A11): o botão tem de estar no último `plugin_ui`.
-    mods.publish_ui("s", 1, &json!({"above": null, "shown_id": "vitrine-botoes", "columns": 110, "source": "surface",
+    mods.publish_ui("s", 1, json!({"above": null, "shown_id": "vitrine-botoes", "columns": 110, "source": "surface",
         "panes": [{"id": "vitrine-botoes", "title": "Botões", "placement": "dock", "columns": 58,
             "tree": {"type": "Button", "props": {"key": "V44-copiar", "label": "Copiar"}, "press": {"plugin": "vitrine", "handle": 7}}}]}));
     let (status, body) = post(server, "s", "press", json!({"site": "vitrine-botoes", "key": "V44-copiar"}), Some(OWNER)).await;

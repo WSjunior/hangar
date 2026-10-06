@@ -43,11 +43,19 @@ struct Click {
     opened: Option<String>,
 }
 
+/// O último `plugin_ui`: a árvore, para achar o mod de um botão sem refazer o parse, e o texto, que é o
+/// que sai aos aparelhos e o que se compara. Os dois por `Arc`: quem lê copia o ponteiro sob a trava
+/// global e trabalha fora dela.
+struct Ui {
+    tree: Arc<Value>,
+    raw: Arc<str>,
+}
+
 struct Session {
     generation: u64,
     link: Arc<dyn SurfaceLink>,
     lock: Arc<tokio::sync::Mutex<()>>,
-    ui: Option<String>,
+    ui: Option<Ui>,
     toasts: Vec<(Instant, Value)>,
     click: Option<Click>,
 }
@@ -80,11 +88,10 @@ fn boot() -> &'static str {
 
 /// O mod do botão `key` no lugar `site` do `plugin_ui` guardado. Sem o botão (desenho vencido), nenhum:
 /// a cópia que chegar no meio do clique vira aviso.
-fn button_plugin(ui: &str, site: &str, key: &str) -> Option<String> {
-    let ui: Value = serde_json::from_str(ui).ok()?;
-    let tree = if site == BAND_SITE { ui["above"].clone() }
-        else { ui["panes"].as_array()?.iter().find(|pane| pane["id"] == site)?["tree"].clone() };
-    super::tree::find(&tree, key, &["Button"]).map(|control| control.plugin)
+fn button_plugin(ui: &Value, site: &str, key: &str) -> Option<String> {
+    let tree = if site == BAND_SITE { &ui["above"] }
+        else { &ui["panes"].as_array()?.iter().find(|pane| pane["id"] == site)?["tree"] };
+    super::tree::find(tree, key, &["Button"]).map(|control| control.plugin)
 }
 
 /// `plugin_ui` sem faixa e sem painel: a sessão saiu do Rust.
@@ -125,16 +132,17 @@ impl Mods {
         self.inner.lock().unwrap().sessions.get(name).map(|session| (session.link.clone(), session.lock.clone()))
     }
 
-    /// Guarda e entrega o `plugin_ui`; devolve se mudou.
-    pub fn publish_ui(&self, name: &str, generation: u64, data: &Value) -> bool {
-        let raw = data.to_string();
+    /// Guarda e entrega o `plugin_ui`; devolve se mudou. É o único ponto que compara a vista nova com a
+    /// anterior: a superfície publica a cada desenho guardado, sem guardar cópia para comparar.
+    pub fn publish_ui(&self, name: &str, generation: u64, data: Value) -> bool {
+        let raw: Arc<str> = data.to_string().into();
         {
             let mut inner = self.inner.lock().unwrap();
             let Some(session) = inner.sessions.get_mut(name).filter(|session| session.generation == generation) else { return false };
-            if session.ui.as_deref() == Some(raw.as_str()) {
+            if session.ui.as_ref().is_some_and(|ui| ui.raw == raw) {
                 return false;
             }
-            session.ui = Some(raw.clone());
+            session.ui = Some(Ui { tree: Arc::new(data), raw: raw.clone() });
         }
         self.deliver(name, "plugin_ui", &raw);
         true
@@ -143,7 +151,7 @@ impl Mods {
     /// O ator morreu sem passar pelo `close`: a faixa e os painéis somem dos apps, e a sessão segue com o
     /// mesmo dono até o `close` a esquecer.
     pub fn clear_ui(&self, name: &str, generation: u64) {
-        self.publish_ui(name, generation, &empty_ui());
+        self.publish_ui(name, generation, empty_ui());
     }
 
     /// Aviso de mod (`ui_toast`, S6): o Claude Code já descarta o que vem a menos de 2 s do anterior do
@@ -193,8 +201,10 @@ impl Mods {
     /// para quem clicou.
     pub fn begin_click(&self, name: &str, site: &str, key: &str) -> String {
         let attempt = random_hex(8);
+        // A busca do botão na árvore (até ~400 KB) fica fora da trava de todas as sessões.
+        let tree = self.inner.lock().unwrap().sessions.get(name).and_then(|session| session.ui.as_ref().map(|ui| ui.tree.clone()));
+        let plugin = tree.and_then(|tree| button_plugin(&tree, site, key));
         if let Some(session) = self.inner.lock().unwrap().sessions.get_mut(name) {
-            let plugin = session.ui.as_deref().and_then(|ui| button_plugin(ui, site, key));
             session.click = Some(Click { site: site.to_owned(), key: key.to_owned(), plugin, attempt: attempt.clone(),
                 until: Instant::now() + CLICK_WINDOW, matched: false, copied: None, opened: None });
         }
@@ -252,11 +262,14 @@ impl Mods {
     /// O que um hub novo precisa para nascer em dia: a última faixa e os avisos vivos, com o tempo
     /// que resta a cada um.
     pub fn replay(&self, name: &str) -> Vec<(&'static str, String)> {
-        let inner = self.inner.lock().unwrap();
-        let Some(session) = inner.sessions.get(name) else { return Vec::new() };
+        let (ui, toasts) = {
+            let inner = self.inner.lock().unwrap();
+            let Some(session) = inner.sessions.get(name) else { return Vec::new() };
+            (session.ui.as_ref().map(|ui| ui.raw.clone()), session.toasts.clone())
+        };
         let now = Instant::now();
-        let mut frames: Vec<(&'static str, String)> = session.ui.iter().map(|ui| ("plugin_ui", ui.clone())).collect();
-        for (until, toast) in session.toasts.iter().filter(|(until, _)| *until > now) {
+        let mut frames: Vec<(&'static str, String)> = ui.iter().map(|ui| ("plugin_ui", ui.to_string())).collect();
+        for (until, toast) in toasts.iter().filter(|(until, _)| *until > now) {
             let mut toast = toast.clone();
             toast["timeoutMs"] = json!(crate::side::remaining_ms(*until, now));
             frames.push(("plugin_toast", toast.to_string()));

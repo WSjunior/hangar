@@ -600,7 +600,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                             tracing::warn!(key=%target.key,session=%target.name,"pedido da interface dos mods descartado com o canal do cano cheio");
                         }
                     }
-                    SurfaceEffect::Publish { data } => { if let Some(mods) = &engine.mods { mods.publish_ui(&target.name,target.generation,&data); } }
+                    SurfaceEffect::Publish { data } => { if let Some(mods) = &engine.mods { mods.publish_ui(&target.name,target.generation,data); } }
                     SurfaceEffect::Toast { plugin,text,timeout_ms } => { if let Some(mods) = &engine.mods { mods.toast(&target.name,target.generation,&plugin,&text,timeout_ms); } }
                     SurfaceEffect::Copied { plugin,text } => { if let Some(mods) = &engine.mods { mods.copied(&target.name,target.generation,&plugin,&text); } }
                     SurfaceEffect::Reply { token,result } => { if let Some(waiter) = mods_waiters.remove(&token) { let _ = waiter.send(result); } }
@@ -1244,7 +1244,7 @@ mod tests {
         let ui = |mods:&crate::mods::state::Mods| mods.replay("session").into_iter().find(|(event,_)|*event == "plugin_ui")
             .map(|(_,data)|serde_json::from_str::<Value>(&data).unwrap()).unwrap();
         // Saída normal: desarmada, a faixa fica para o `close` limpar.
-        mods.publish_ui("session",1,&band);
+        mods.publish_ui("session",1,band.clone());
         let mut guard = ClearOnDrop { mods:Some(mods.clone()),name:"session".into(),generation:1 };
         guard.mods = None;
         drop(guard);

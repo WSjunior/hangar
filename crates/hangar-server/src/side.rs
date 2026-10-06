@@ -718,9 +718,9 @@ mod tests {
         ctx.mods.attach("s", 1, Arc::new(Quiet));
         let lease = ctx.hubs.acquire("s", binding, &ctx);
         let ui = |text: &str| json!({"above": {"type": "Text", "children": [text]}, "panes": []});
-        ctx.mods.publish_ui("s", 1, &ui("velha"));
+        ctx.mods.publish_ui("s", 1, ui("velha"));
         let stale = ctx.mods.replay("s");
-        ctx.mods.publish_ui("s", 1, &ui("nova"));
+        ctx.mods.publish_ui("s", 1, ui("nova"));
         lease.hub.seed(stale);
         let kept = lease.hub.cache.lock().unwrap().latest[PLUGIN_UI].clone().unwrap();
         assert!(String::from_utf8_lossy(&kept).contains("nova"), "a faixa nova fica");

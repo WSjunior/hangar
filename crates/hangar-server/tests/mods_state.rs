@@ -39,9 +39,9 @@ fn attach_owns_and_forget_checks_generation() {
 fn publish_keeps_the_latest_and_skips_repeats() {
     let mods = mods();
     let band = json!({"above": {"type": "Text"}, "panes": [], "shown_id": null, "columns": 110, "source": "surface"});
-    assert!(mods.publish_ui("s", 1, &band));
-    assert!(!mods.publish_ui("s", 1, &band), "igual ao último não sai de novo");
-    assert!(!mods.publish_ui("s", 0, &json!({"above": null})), "geração velha não publica");
+    assert!(mods.publish_ui("s", 1, band.clone()));
+    assert!(!mods.publish_ui("s", 1, band.clone()), "igual ao último não sai de novo");
+    assert!(!mods.publish_ui("s", 0, json!({"above": null})), "geração velha não publica");
     assert_eq!(replayed(&mods, "plugin_ui"), vec![band]);
 }
 
@@ -70,7 +70,7 @@ fn toasts_follow_the_python_limits() {
 #[tokio::test]
 async fn click_effects_belong_to_the_open_click() {
     let mods = mods();
-    mods.publish_ui("s", 1, &with_button());
+    mods.publish_ui("s", 1, with_button());
     let attempt = mods.begin_click("s", "painel", "abrir");
     assert_eq!(mods.match_click("s", "painel", "outra"), None);
     assert_eq!(mods.match_click("s", "painel", "abrir").as_deref(), Some(attempt.as_str()));
@@ -88,7 +88,7 @@ async fn copy_from_another_mod_is_a_toast() {
     // A janela de 1,5 s é do mod dono do botão (A11): um relógio de outro mod que copia no meio não vai
     // para o aparelho de quem clicou.
     let mods = mods();
-    mods.publish_ui("s", 1, &with_button());
+    mods.publish_ui("s", 1, with_button());
     let attempt = mods.begin_click("s", "painel", "abrir");
     mods.copied("s", 1, "outro-mod", "texto de outro");
     assert_eq!(mods.finish_click("s", &attempt, Duration::from_millis(10)).await, (None, None));

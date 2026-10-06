@@ -29,10 +29,10 @@ async fn setup() -> (std::sync::Arc<Fake>, std::net::SocketAddr, Mods, tempfile:
 #[tokio::test]
 async fn rust_band_reaches_open_and_late_devices() {
     let (_python, server, mods, _dir) = setup().await;
-    mods.publish_ui("s", 1, &band("antes"));
+    mods.publish_ui("s", 1, band("antes"));
     let mut early = sse(open_events(server, "s", "", &[]).await);
     assert_eq!(next_named(&mut early, "plugin_ui").await.data, band("antes").to_string(), "hub novo nasce com a faixa");
-    mods.publish_ui("s", 1, &band("depois"));
+    mods.publish_ui("s", 1, band("depois"));
     assert_eq!(next_named(&mut early, "plugin_ui").await.data, band("depois").to_string());
     let mut late = sse(open_events(server, "s", "", &[]).await);
     assert_eq!(next_named(&mut late, "plugin_ui").await.data, band("depois").to_string());
@@ -56,7 +56,7 @@ async fn rust_toast_reaches_devices_with_time_left() {
 #[tokio::test]
 async fn python_band_is_dropped_for_owned_session() {
     let (python, server, mods, _dir) = setup().await;
-    mods.publish_ui("s", 1, &band("rust"));
+    mods.publish_ui("s", 1, band("rust"));
     let mut events = sse(open_events(server, "s", "", &[]).await);
     assert_eq!(next_named(&mut events, "plugin_ui").await.data, band("rust").to_string());
     wait_until(|| python.side_conns() == 1).await;
@@ -73,7 +73,7 @@ async fn python_band_is_dropped_for_owned_session() {
 #[tokio::test]
 async fn rebind_keeps_the_rust_band() {
     let (python, server, mods, dir) = setup().await;
-    mods.publish_ui("s", 1, &band("rust"));
+    mods.publish_ui("s", 1, band("rust"));
     let mut events = sse(open_events(server, "s", "", &[]).await);
     assert_eq!(next_named(&mut events, "plugin_ui").await.data, band("rust").to_string());
     wait_until(|| python.side_conns() == 1).await;
@@ -95,7 +95,7 @@ async fn rebind_keeps_the_rust_band() {
 #[tokio::test]
 async fn forget_clears_the_band() {
     let (_python, server, mods, _dir) = setup().await;
-    mods.publish_ui("s", 1, &band("rust"));
+    mods.publish_ui("s", 1, band("rust"));
     let mut events = sse(open_events(server, "s", "", &[]).await);
     next_named(&mut events, "plugin_ui").await;
     mods.forget("s", 1);
