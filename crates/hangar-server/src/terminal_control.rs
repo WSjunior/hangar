@@ -117,7 +117,7 @@ impl ControlParser {
             else if std::str::from_utf8(&line).is_err() { return Err(TerminalError("invalid notification UTF-8")); }
             else if line.starts_with(b"%exit") { events.push(ControlEvent::Exit); }
             else if self.notices && let Some(kind) = notice(&line) { events.push(ControlEvent::Notice(kind)); }
-            else if line.starts_with(b"%begin") || line.starts_with(b"%end ") || line.starts_with(b"%error ") {
+            else if line.starts_with(b"%begin ") || line.starts_with(b"%end ") || line.starts_with(b"%error ") {
                 return Err(TerminalError("invalid control frame"));
             }
         }
@@ -487,9 +487,24 @@ pub fn watch_notices(mux_argv: &[String], name: &str) -> Result<(mpsc::Receiver<
         let mut parser = ControlParser::with_notices();
         let mut buffer = [0u8; 8192];
         loop {
-            let Ok(n) = stdout.read(&mut buffer).await else { return };
-            if n == 0 { return; }
-            let Ok(events) = parser.push(&buffer[..n]) else { return };
+            let n = match stdout.read(&mut buffer).await {
+                Ok(n) => n,
+                Err(error) => {
+                    tracing::warn!(code = "terminal watch read failed", io_kind = ?error.kind(), "vigia de tamanho do terminal encerrado");
+                    return;
+                }
+            };
+            if n == 0 {
+                tracing::warn!(code = "terminal watch EOF", "vigia de tamanho do terminal encerrado");
+                return;
+            }
+            let events = match parser.push(&buffer[..n]) {
+                Ok(events) => events,
+                Err(error) => {
+                    tracing::warn!(code = error.0, "vigia de tamanho do terminal encerrado");
+                    return;
+                }
+            };
             for event in events {
                 match event {
                     // Fila cheia: já há uma reposição pendente, e a próxima lê o estado atual.
