@@ -68,21 +68,19 @@ async fn typing_is_refused_without_waiting_the_turn_or_the_transfer_guard() {
 }
 
 #[tokio::test]
-async fn guests_are_refused_here_and_bad_tokens_go_to_python() {
+async fn requests_not_from_the_owner_go_to_python() {
     let (python, server, _mods, pane) = terminal_app().await;
-    // A forma do token de convidado: `secrets.token_urlsafe(32)`, 43 caracteres de base64url.
+    // Nenhum token tem tratamento pelo formato: o de convidado (`secrets.token_urlsafe(32)`, 43 caracteres de
+    // base64url) e o errado seguem ao Python, que autentica, recusa o convidado e conta a falha.
     let guest = format!("{}-_", "g".repeat(41));
-    for (route, body) in [("press", json!({"site": "pm-mock-mr", "key": "mr-a"})), ("show", json!({"site": "pm-mock-mr"})),
-        ("input", json!({"site": "pm-mock-mr", "key": "k", "kind": "submit", "value": "x"}))] {
-        let (status, answer) = post_as(server, route, body, &guest).await;
-        assert_eq!((status, answer["detail"]["code"].as_str()), (403, Some("erro_mod_convidado")), "{route}");
+    for token in [guest.as_str(), "errado"] {
+        for (route, body) in [("press", json!({"site": "pm-mock-mr", "key": "mr-a"})), ("show", json!({"site": "pm-mock-mr"})),
+            ("input", json!({"site": "pm-mock-mr", "key": "k", "kind": "submit", "value": "x"}))] {
+            assert_eq!(post_as(server, route, body, token).await.1, "from-python", "{route} {token}");
+        }
     }
     assert_eq!(python.hits_to("/api/sessions/t/plugin/press") + python.hits_to("/api/sessions/t/plugin/show")
-        + python.hits_to("/api/sessions/t/plugin/input"), 0,
-        "o pedido do convidado não chega ao Python, que dirigiria o pane por fora");
-    // Nem dono nem convidado: o Python responde (401 ou 429) e conta a falha, como antes.
-    let (_, answer) = post_as(server, "press", json!({"site": "pm-mock-mr", "key": "mr-a"}), "errado").await;
-    assert_eq!(answer, "from-python");
+        + python.hits_to("/api/sessions/t/plugin/input"), 6);
     assert!(pane.actions().is_empty());
 }
 
@@ -188,4 +186,71 @@ async fn opening_gives_back_a_window_left_stretched() {
     attached.op(PaneOp::Resize { columns: 150, rows: 250 }, until()).await.unwrap();
     assert!(!unstretch(&attached, until()).await);
     assert_eq!(attached.actions(), ["resize 150 250"]);
+}
+
+/// Multiplexador de mentira para a abertura: confirma a identidade do pane, responde os formatos com a
+/// altura guardada (250 de início, a janela que um clique cortado deixou), nenhum cliente ligado, e anota
+/// `resize-window` e `set-window-option`. O resto (o vigia incluído) falha.
+#[cfg(unix)]
+fn stretched_mux(dir: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let script = r##"#!/bin/sh
+dir='DIR'
+case "$*" in
+  *"#{session_name}"*) printf 't\t%%1\t1\n';;
+  *"#{window_height}"*) rows=$(cat "$dir/rows" 2>/dev/null || echo 250); printf '1|1|0|150|%s\n' "$rows";;
+  list-clients*) ;;
+  resize-window*) echo "$*" >> "$dir/mux.log"; echo "$7" > "$dir/rows";;
+  set-window-option*) echo "$*" >> "$dir/mux.log";;
+  *) exit 1;;
+esac
+"##.replace("DIR", &dir.display().to_string());
+    let mux = dir.join("mux");
+    std::fs::write(&mux, script).unwrap();
+    std::fs::set_permissions(&mux, std::fs::Permissions::from_mode(0o755)).unwrap();
+    mux
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn opening_the_terminal_gives_back_the_stretched_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let mux = stretched_mux(dir.path());
+    let mods = Mods::default();
+    let registry = registry(&mods);
+    registry.open_terminal(target(dir.path(), mux.to_str().unwrap())).await.unwrap();
+    let log = std::fs::read_to_string(dir.path().join("mux.log")).unwrap_or_default();
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.first().copied(), Some("resize-window -t =t: -x 150 -y 40"), "{log}");
+    assert_eq!(lines.get(1).copied(), Some("set-window-option -t =t: window-size latest"), "{log}");
+    assert!(mods.is_terminal("t"));
+    registry.close("key-t", 1).await.unwrap();
+}
+
+#[tokio::test]
+async fn reopening_the_same_life_attaches_the_terminal_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let mods = Mods::default();
+    let registry = registry(&mods);
+    let target = target(dir.path(), "/does-not-exist/hangar-test-tmux");
+    registry.open_terminal(target.clone()).await.unwrap();
+    let life = mods.life("t").unwrap();
+    // Reabrir sem mudança não troca o elo nem a vida.
+    registry.open_terminal(target.clone()).await.unwrap();
+    assert_eq!(mods.life("t"), Some(life));
+
+    // O nome saiu do `Mods`: a reabertura liga de novo, na vida da entrada.
+    mods.forget("t", life);
+    assert!(!mods.owns("t"));
+    registry.open_terminal(target.clone()).await.unwrap();
+    assert!(mods.is_terminal("t") && mods.life("t") == Some(life));
+
+    // Outra vida tomou o nome: a reabertura também liga de novo a da entrada.
+    let other = mods.new_life();
+    mods.attach("t", other, Arc::new(NoLink));
+    registry.open_terminal(target).await.unwrap();
+    assert!(mods.is_terminal("t") && mods.life("t") == Some(life));
+
+    registry.close("key-t", 1).await.unwrap();
+    assert!(!mods.owns("t"), "o fechar esquece a vida religada");
 }
