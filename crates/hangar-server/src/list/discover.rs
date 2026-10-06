@@ -726,12 +726,23 @@ mod tests {
         let sid = "00000000-0000-0000-0000-000000000001";
         p.session = format!("fds-{}", dir.path().display());
         discover_panes(&[p], &Locked { sid: Some(sid.into()) }, &tree(), dir.path(), &mut r, &|_| false);
-        assert_eq!(codes(&mut r), ["list_fds_unreadable"]);
+        // Os fds só são lidos no Linux (`_fd_locked`); fora dele não há o que reportar.
+        let want: &[&str] = if cfg!(target_os = "linux") { &["list_fds_unreadable"] } else { &[] };
+        assert_eq!(codes(&mut r), want);
     }
 
     fn age(path: &Path, secs: u64) {
         let when = SystemTime::now() - Duration::from_secs(secs);
-        std::fs::File::open(path).unwrap().set_modified(when).unwrap();
+        // Também recebe pasta. No Windows o mtime pede FILE_WRITE_ATTRIBUTES, e pasta só abre com
+        // FILE_FLAG_BACKUP_SEMANTICS; no Linux pasta não abre para escrita.
+        #[cfg(windows)]
+        let file = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::File::options().access_mode(0x100).custom_flags(0x0200_0000).open(path).unwrap()
+        };
+        #[cfg(not(windows))]
+        let file = std::fs::File::open(path).unwrap();
+        file.set_modified(when).unwrap();
     }
 
     #[test]
