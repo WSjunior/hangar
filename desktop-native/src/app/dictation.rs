@@ -188,10 +188,46 @@ fn wav_pcm(bytes: &[u8]) -> Option<&[u8]> {
     data.filter(|pcm| format && !pcm.is_empty() && pcm.len() <= PCM_LIMIT && pcm.len() % 2 == 0)
 }
 
+/// Sessão que recebe o texto do ditado, capturada ao começar a gravar ou a transcrever um arquivo, com a conexão da
+/// máquina dela: o pedido segue para ela mesmo com outra sessão aberta.
+#[derive(Clone)]
+pub(super) struct DictationTarget { key: SessionKey, life: Option<String>, api: Api }
+
+/// Onde o resultado de um ditado vai parar.
+#[derive(Debug, PartialEq)]
+enum Place { Open, Away(SessionKey), Gone }
+
+/// Mesma sessão = mesmo nome e mesmo ciclo de vida, o critério do `follow_transcript`: `/clear` troca só o transcript,
+/// e a chave devolvida já é a do transcript de agora. Sem lista confiável da máquina (`None`: não lida, com erro, peer
+/// desligado, convite encerrado) não dá para dizer que a sessão acabou, e o texto vai para o rascunho da chave guardada.
+fn place(target: &DictationTarget, open: Option<&SessionInfo>, list: Option<&[SessionInfo]>) -> Place {
+    let same = |s: &&SessionInfo| s.name == target.key.name && s.lifecycle_id == target.life;
+    if open.filter(same).is_some() { return Place::Open; }
+    let Some(list) = list else { return Place::Away(target.key.clone()) };
+    match list.iter().find(same) {
+        Some(session) => Place::Away(SessionKey::new(&target.key.server, session).unwrap_or_else(|| target.key.clone())),
+        None => Place::Gone,
+    }
+}
+
+/// O que sair da tela do ditado faz com ele.
+#[derive(Debug, PartialEq)]
+enum OnLeave { Keep, Stop, Cancel }
+
+/// Texto que chega com a sessão fora da tela: no fim do rascunho, separado por espaço. Devolve o rascunho e o trecho do
+/// texto, para as versões o trocarem depois.
+fn dictation_append(draft: &str, text: &str) -> (String, std::ops::Range<usize>) {
+    let space = if draft.is_empty() || draft.ends_with(char::is_whitespace) { "" } else { " " };
+    let start = draft.len() + space.len();
+    (format!("{draft}{space}{text}"), start..start + text.len())
+}
+
 #[derive(Default)]
 pub(super) struct Dictation {
     seq: u64,
     owner: Option<SessionOwner>,
+    /// Sessão que recebe o texto; `None` na tela sem sessão, onde sair dela cancela como antes.
+    target: Option<DictationTarget>,
     recorder: Option<Recorder>,
     request: Option<JoinHandle<()>>,
     started: Option<Instant>,
@@ -210,6 +246,9 @@ pub(super) struct Dictation {
     inserted: Option<(String, std::ops::Range<usize>)>,
     cleaning: bool,
     error: Option<String>,
+    /// Erro que veio com o resultado (falha, texto vazio, rascunho mudado): é da sessão de destino e só aparece com ela
+    /// aberta. `error` fica para os desta tela (estilo, envio automático).
+    result_error: Option<String>,
     hands_free: bool,
     auto_send: bool,
     timed_out: bool,
@@ -238,9 +277,35 @@ impl Dictation {
         self.inserted.as_ref().is_none_or(|(draft, _)| draft == value)
     }
 
+    /// Saiu da tela do ditado (`owner` é o dono de agora). Com sessão de destino na mesma conexão nada se perde: a
+    /// gravação para e vai para ela, e o pedido em voo segue. Sem destino (tela sem sessão) ou com outra conexão, cuja
+    /// resposta o filtro de conexão descartaria, cancela.
+    fn on_leave(&self, owner: &Option<SessionOwner>, connection: u64) -> OnLeave {
+        if self.owner.is_none() || self.owner == *owner { return OnLeave::Keep; }
+        if self.target.is_none() || self.owner.as_ref().is_some_and(|(own, ..)| *own != connection) { return OnLeave::Cancel; }
+        if self.recorder.is_some() || self.countdown.is_some() { OnLeave::Stop } else { OnLeave::Keep }
+    }
+
+    /// Versões da gravação (cru e a que veio) para trocar sem novo pedido; arquivo anexado não tem versões.
+    fn remember_versions(&mut self, value: &Value) {
+        if self.file_name.is_some() { return; }
+        let text = value.get("text").and_then(Value::as_str).unwrap_or("").trim();
+        let raw = value.get("raw").and_then(Value::as_str).unwrap_or(text);
+        let applied = value.get("estilo_aplicado").and_then(Value::as_str).unwrap_or("cru");
+        if self.result.as_ref().and_then(|v| v.get("raw")) != value.get("raw") { self.versions.clear(); }
+        self.versions.insert("cru".into(), json!({"text": raw, "raw": raw, "estilo_aplicado": "cru"}));
+        self.versions.insert(applied.to_owned(), value.clone());
+    }
+
+    /// Arquivo de áudio vazio tem a frase do web; gravação vazia, a de gravar de novo.
+    fn empty_text_error(&self) -> String {
+        if self.file_name.is_some() { tr_shared("composer_transcricao_vazia", &[]) } else { tr("dictation_empty_text") }
+    }
+
     fn cancel(&mut self) {
         self.seq += 1;
         self.owner = None;
+        self.target = None;
         self.recorder = None;
         if let Some(task) = self.request.take() { task.abort(); }
         self.started = None;
@@ -253,6 +318,7 @@ impl Dictation {
         self.inserted = None;
         self.cleaning = false;
         self.error = None;
+        self.result_error = None;
         self.hands_free = false;
         self.auto_send = false;
         self.timed_out = false;
@@ -275,11 +341,52 @@ impl Hangar {
     pub(super) fn check_dictation_owner(&mut self, cx: &mut Context<Self>) -> u64 {
         let owner = self.dictation_owner(cx);
         let generation = self.dictation.observe_file_owner(owner.clone());
-        if self.dictation.owner.is_some() && self.dictation.owner != owner {
-            self.cancel_dictation();
-            self.redraw(panes::Area::Bottom, cx);
+        // O player do ditado só tem controles na barra da sessão dele: fora dela, tocaria sem como parar.
+        if self.dictation.owner.is_some() && self.dictation.owner != owner { self.stop_audio("dictation"); }
+        match self.dictation.on_leave(&owner, self.connection) {
+            OnLeave::Keep => return generation,
+            OnLeave::Cancel => self.cancel_dictation(),
+            OnLeave::Stop => {
+                // A contagem do envio automático é da tela que ficou para trás; a gravação vai para a origem.
+                self.dictation.countdown = None;
+                self.stop_dictation(false, false, cx);
+            }
         }
+        self.redraw(panes::Area::Bottom, cx);
         generation
+    }
+
+    /// Destino do ditado que começa agora: a sessão aberta, com a máquina dela. Tela sem sessão: nenhum.
+    fn open_dictation_target(&self) -> Option<DictationTarget> {
+        Some(DictationTarget { key: self.selected_key()?, life: self.selected.as_ref()?.lifecycle_id.clone(), api: self.session_api()? })
+    }
+
+    /// Lista da máquina `server` que pode dizer que uma sessão acabou: lida e sem erro. A ativa conta com o SSE no ar.
+    fn trusted_sessions(&self, server: &str) -> Option<&[SessionInfo]> {
+        let key = servers::norm(server);
+        if self.is_active_key(&key) { return (self.list_online && self.list_error.is_none()).then_some(self.sessions.as_slice()); }
+        self.remote.get(&key).filter(|list| list.loaded && list.error.is_none()).map(|list| list.sessions.as_slice())
+    }
+
+    fn dictation_place(&self, target: &DictationTarget) -> Place {
+        let open = self.selected.as_ref().filter(|_| self.session_server().as_deref() == Some(target.key.server.as_str()));
+        place(target, open, self.trusted_sessions(&target.key.server))
+    }
+
+    /// O ditado é da tela aberta: só então barra, estado e Cancelar aparecem e o texto entra no campo.
+    fn dictation_here(&self, cx: &App) -> bool {
+        match &self.dictation.target {
+            Some(target) => self.dictation_place(target) == Place::Open,
+            None => self.dictation.owner.is_none() || self.dictation.owner == self.dictation_owner(cx),
+        }
+    }
+
+    /// Para onde vai o pedido: a sessão de destino, mesmo fora da tela; sem ela, a tela sem sessão de agora.
+    fn dictation_request(&self, cx: &App) -> Option<(Api, Option<String>)> {
+        match &self.dictation.target {
+            Some(target) => Some((target.api.clone(), Some(target.key.name.clone()))),
+            None => self.dictation_target(cx),
+        }
     }
 
     /// Cancelar solta a gravação guardada: o player dela para junto.
@@ -383,6 +490,7 @@ impl Hangar {
         match Recorder::start() {
             Ok(recorder) => {
                 self.dictation.owner = self.dictation_owner(cx);
+                self.dictation.target = self.open_dictation_target();
                 self.dictation.hands_free = appearance::get().hands_free;
                 self.dictation.recorder = Some(recorder);
                 self.dictation.started = Some(Instant::now());
@@ -441,6 +549,7 @@ impl Hangar {
         let Some((api, session)) = self.dictation_target(cx) else { return Err(tr("connection_failed")); };
         self.cancel_dictation();
         self.dictation.owner = Some(owner);
+        self.dictation.target = self.open_dictation_target();
         self.dictation.file_name = Some(filename.clone());
         *self.dictation.audio.lock().unwrap() = bytes.clone();
         let (tx, connection, seq) = (self.tx.clone(), self.connection, self.dictation.seq);
@@ -454,7 +563,7 @@ impl Hangar {
 
     fn stop_dictation(&mut self, silence: bool, timed_out: bool, cx: &mut Context<Self>) {
         let Some(recorder) = self.dictation.recorder.take() else { return; };
-        let Some((api, session)) = self.dictation_target(cx) else { self.cancel_dictation(); return; };
+        let Some((api, session)) = self.dictation_request(cx) else { self.cancel_dictation(); return; };
         self.dictation.auto_send = silence && self.dictation.hands_free;
         self.dictation.timed_out = timed_out;
         let audio_cache = self.dictation.audio.clone();
@@ -518,19 +627,19 @@ impl Hangar {
 
     fn revise_dictation(&mut self, style: Option<&'static str>, window: &mut Window, cx: &mut Context<Self>) {
         if self.dictation.request.is_some() || self.dictation.recorder.is_some()
-            || self.dictation.owner.is_none() || self.dictation.owner != self.dictation_owner(cx)
+            || self.dictation.owner.is_none() || !self.dictation_here(cx)
             || (self.dictation.file_name.is_some() && style.is_some()) { return; }
         if !self.dictation.draft_matches(&self.composer.read(cx).value()) {
             self.dictation.error = Some(tr("dictation_draft_changed"));
             cx.notify();
             return;
         }
-        self.dictation.error = None;
+        (self.dictation.error, self.dictation.result_error) = (None, None);
         if let Some(value) = style.and_then(|style| self.dictation.versions.get(style)).cloned() {
             self.receive_dictation(self.dictation.seq, Ok(value), window, cx);
             return;
         }
-        let Some((api, session)) = self.dictation_target(cx) else { return; };
+        let Some((api, session)) = self.dictation_request(cx) else { return; };
         let raw =self.dictation.result.as_ref().and_then(|v| v.get("raw")).and_then(Value::as_str).unwrap_or("").to_owned();
         let audio = self.dictation.audio.lock().unwrap().clone();
         if (style.is_some() && raw.is_empty()) || (style.is_none() && audio.is_empty()) { return; }
@@ -555,7 +664,13 @@ impl Hangar {
     }
 
     pub(super) fn receive_dictation(&mut self, seq: u64, result: Result<Value, Failure>, window: &mut Window, cx: &mut Context<Self>) {
-        if self.dictation.seq != seq || self.dictation.owner.is_none() || self.dictation.owner != self.dictation_owner(cx) { return; }
+        if self.dictation.seq != seq || self.dictation.owner.is_none() { return; }
+        let place = match &self.dictation.target {
+            Some(target) => self.dictation_place(target),
+            // Tela sem sessão: o resultado só vale nela, como antes.
+            None if self.dictation.owner == self.dictation_owner(cx) => Place::Open,
+            None => return,
+        };
         let auto_send = std::mem::take(&mut self.dictation.auto_send);
         let timed_out = std::mem::take(&mut self.dictation.timed_out);
         self.dictation.request = None;
@@ -563,18 +678,28 @@ impl Hangar {
         self.dictation.level = 0.;
         self.dictation.bars.clear();
         self.dictation.cleaning = false;
-        self.dictation.error = None;
+        (self.dictation.error, self.dictation.result_error) = (None, None);
+        match place {
+            Place::Open => self.receive_dictation_here(result, auto_send, timed_out, window, cx),
+            Place::Away(key) => self.receive_dictation_away(key, result, window, cx),
+            Place::Gone => {
+                let name = self.dictation.target.as_ref().map(|target| target.key.name.clone()).unwrap_or_default();
+                self.cancel_dictation();
+                window.push_notification(Notification::warning(tr("dictation_target_gone").replace("{session}", &name)), cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// A sessão do ditado está aberta: o texto entra no cursor (ou no lugar da versão anterior), como sempre foi.
+    fn receive_dictation_here(&mut self, result: Result<Value, Failure>, auto_send: bool, timed_out: bool, window: &mut Window, cx: &mut Context<Self>) {
         match result {
             Ok(value) => {
                 let text = value.get("text").and_then(Value::as_str).unwrap_or("").trim();
-                let raw = value.get("raw").and_then(Value::as_str).unwrap_or(text);
-                let applied = value.get("estilo_aplicado").and_then(Value::as_str).unwrap_or("cru");
                 if text.is_empty() {
-                    self.dictation.error = Some(if self.dictation.file_name.is_some() {
-                        tr_shared("composer_transcricao_vazia", &[])
-                    } else { tr("dictation_empty_text") });
+                    self.dictation.result_error = Some(self.dictation.empty_text_error());
                 } else if !self.dictation.draft_matches(&self.composer.read(cx).value()) {
-                    self.dictation.error = Some(tr("dictation_draft_changed"));
+                    self.dictation.result_error = Some(tr("dictation_draft_changed"));
                 } else {
                     let draft_still_empty = self.composer.read(cx).value().trim().is_empty()
                         && self.composer_key().is_some_and(|key| self.attachments.get(&key).is_none_or(Vec::is_empty));
@@ -588,13 +713,7 @@ impl Hangar {
                         (input.value().to_string(), range.start..range.start + replacement.len())
                     });
                     self.dictation.inserted = Some(inserted);
-                    if self.dictation.file_name.is_none() {
-                        if self.dictation.result.as_ref().and_then(|v| v.get("raw")) != value.get("raw") {
-                            self.dictation.versions.clear();
-                        }
-                        self.dictation.versions.insert("cru".into(), json!({"text": raw, "raw": raw, "estilo_aplicado": "cru"}));
-                        self.dictation.versions.insert(applied.to_owned(), value.clone());
-                    }
+                    self.dictation.remember_versions(&value);
                     // Consome a mudança programática antes do observador de @menção.
                     self.refresh_mention(cx);
                     self.mention.close();
@@ -603,36 +722,72 @@ impl Hangar {
                     }
                     let warning = value.get("aviso").and_then(Value::as_str).is_some_and(|s| !s.is_empty());
                     self.dictation.result = Some(value);
-                    if timed_out && !warning { self.dictation.error = Some(tr("dictation_silence_timeout")); }
+                    if timed_out && !warning { self.dictation.result_error = Some(tr("dictation_silence_timeout")); }
                     if auto_send && draft_still_empty && !warning { self.start_dictation_countdown(window, cx); }
                 }
             }
-            Err(error) => self.dictation.error = Some(Self::dictation_failure(&error)),
+            Err(error) => self.dictation.result_error = Some(Self::dictation_failure(&error)),
         }
-        cx.notify();
+    }
+
+    /// A sessão do ditado está fora da tela: o texto vai para o fim do rascunho dela, sem envio automático, e a falha
+    /// fica guardada para aparecer na volta.
+    fn receive_dictation_away(&mut self, key: SessionKey, result: Result<Value, Failure>, window: &mut Window, cx: &mut Context<Self>) {
+        match result {
+            Ok(value) => {
+                let text = value.get("text").and_then(Value::as_str).unwrap_or("").trim();
+                if text.is_empty() {
+                    let message = self.dictation.empty_text_error();
+                    window.push_notification(Notification::warning(tr("dictation_empty_away")
+                        .replace("{session}", &key.name).replace("{error}", &message)), cx);
+                    self.dictation.result_error = Some(message);
+                    return;
+                }
+                let (draft, range) = dictation_append(self.drafts.get(&key).map_or("", String::as_str), text);
+                self.drafts.insert(key, draft.clone());
+                // Voltando à sessão o campo mostra este rascunho: as versões trocam o trecho que entrou aqui.
+                self.dictation.inserted = Some((draft, range));
+                self.dictation.remember_versions(&value);
+                if let Some(warning) = value.get("aviso").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                    window.push_notification(Notification::warning(warning.to_owned()), cx);
+                }
+                self.dictation.result = Some(value);
+            }
+            Err(error) => {
+                let message = Self::dictation_failure(&error);
+                window.push_notification(Notification::error(tr("dictation_failed_away")
+                    .replace("{session}", &key.name).replace("{error}", &message)), cx);
+                self.dictation.result_error = Some(message);
+            }
+        }
     }
 
     /// O microfone, a pílula do estilo (ao lado dele, como no web) e a faixa de estado do ditado, só quando há o que mostrar.
     pub(super) fn render_dictation(&self, readable: bool, cx: &mut Context<Self>) -> (Button, Option<AnyElement>, Option<AnyElement>) {
+        let here = self.dictation_here(cx);
         let recording = self.dictation.recorder.is_some();
-        let transcribing = self.dictation.request.is_some();
-        let label = tr(if recording { "dictation_stop" } else if transcribing { "dictation_working" } else { "dictation_start" });
+        let in_flight = self.dictation.request.is_some();
+        let transcribing = here && in_flight;
+        // Um microfone só: com a transcrição de outra sessão em voo, este espera também.
+        let elsewhere = in_flight && !here;
+        let label = tr(if recording { "dictation_stop" } else if transcribing { "dictation_working" }
+            else if elsewhere { "dictation_busy_elsewhere" } else { "dictation_start" });
         let mic = if recording {
             Button::new("dictation-toggle").ghost().size_7().rounded_md()
                 .child(div().size_3().rounded_sm().bg(theme::danger()))
         } else { chrome::icon_button("dictation-toggle", IconName::Mic, label.clone(), cx) };
         let mic = mic.accessibility_label(label.clone())
-            .disabled(transcribing || (!recording && (!readable || !self.dictation_ready())))
+            .disabled(in_flight || (!recording && (!readable || !self.dictation_ready())))
             .loading(transcribing)
             .tooltip(format!("{label} · {}", tr("dictation_shortcut")))
             .on_click(cx.listener(|this, _, window, cx| this.toggle_dictation(window, cx)));
-        let owner = self.dictation.owner.is_some() && self.dictation.owner == self.dictation_owner(cx);
+        let owner = here && self.dictation.owner.is_some();
         let style = self.dictation.style(self.connection).unwrap_or("prosa");
         let entity = cx.entity().downgrade();
         // Gravando, some: trocar no meio não muda nada (o backend lê o estilo no fim) e o espaço é do botão de parar.
         let pill = (!recording).then(|| chrome::pill_button("dictation-style", cx).pl(px(10.)).gap(px(6.))
             .tooltip(tr("dictation_style")).accessibility_label(format!("{}: {}", tr("dictation_style"), style_label(style)))
-            .disabled(transcribing || !readable)
+            .disabled(in_flight || !readable)
             .child(div().text_xs().text_color(theme::muted()).child(style_label(style)))
             .child(chrome::small_icon(IconName::ChevronDown, 12., theme::faint()))
             .dropdown_menu(move |menu, _, cx| {
@@ -672,7 +827,7 @@ impl Hangar {
                 let filename = this.dictation.file_name.clone().unwrap_or_else(|| "ditado.wav".into());
                 this.toggle_audio("dictation".into(), &filename, async move { Ok(audio) }, cx);
             }, cx))));
-        let status = (recording || transcribing).then(|| {
+        let status = (here && (recording || transcribing)).then(|| {
             let label = tr(if recording { "dictation_active" } else if self.dictation.cleaning { "dictation_cleaning" } else { "dictation_working" });
             let seconds = self.dictation.started.map(|start| start.elapsed().as_secs()).unwrap_or(0);
             div().flex().items_center().gap_2().text_sm().text_color(theme::muted())
@@ -714,7 +869,9 @@ impl Hangar {
                 }).w_0().h_0())
                 .into_any_element()
         });
-        let error = self.dictation.error.clone().map(|error| div().id("dictation-error").role(Role::Alert)
+        // O erro do resultado é da sessão de destino; o do estilo e o do envio automático são desta tela.
+        let message = self.dictation.error.clone().or_else(|| self.dictation.result_error.clone().filter(|_| here));
+        let error = message.map(|error| div().id("dictation-error").role(Role::Alert)
             .text_sm().text_color(theme::danger()).child(error));
         let busy = controls.is_some() || status.is_some() || countdown.is_some() || error.is_some();
         let strip = (readable && busy).then(|| div().flex().flex_col().gap_2().children(controls).children(status).children(countdown)
@@ -745,7 +902,8 @@ fn dictation_insert(value: &str, range: std::ops::Range<usize>, text: &str) -> S
 
 #[cfg(test)]
 mod tests {
-    use super::{dictation_insert, wav, wav_pcm, Dictation, Downmix, Recorder, Vad};
+    use super::{dictation_append, dictation_insert, place, wav, wav_pcm, Dictation, DictationTarget, Downmix, OnLeave, Place, Recorder, Vad};
+    use crate::{api::{Api, dto::SessionInfo}, delivery::SessionKey};
     use std::time::{Duration, Instant};
     #[test]
     fn downmix_turns_48k_stereo_into_16k_mono() {
@@ -863,5 +1021,75 @@ mod tests {
         assert!(wav_pcm(&bytes[..bytes.len() - 1]).is_none());
         bytes[22] = 2;
         assert!(wav_pcm(&bytes).is_none());
+    }
+
+    fn target(name: &str, life: &str) -> DictationTarget {
+        DictationTarget { key: SessionKey { server: "http://m/".into(), name: name.into(), jsonl: "/a.jsonl".into() },
+            life: Some(life.into()), api: Api::new("http://m/", "t").unwrap() }
+    }
+
+    fn session(name: &str, life: &str, jsonl: &str) -> SessionInfo {
+        SessionInfo { name: name.into(), lifecycle_id: Some(life.into()), jsonl: Some(jsonl.into()), ..Default::default() }
+    }
+
+    #[test]
+    fn leaving_stops_the_recording_for_the_origin_and_never_cancels_its_request() {
+        let mut state = Dictation::default();
+        let origin = Some((1, "http://m/".to_owned(), "x".to_owned()));
+        let other = Some((1, "http://m/".to_owned(), "y".to_owned()));
+        state.owner = origin.clone();
+        state.target = Some(target("x", "k:1"));
+        state.recorder = Some(Recorder { stream: None, failed: Default::default(), pcm: Default::default(), playback: None,
+            sampled: 0, last_signal: (0., 0.), last_pcm_at: None });
+        assert_eq!(state.on_leave(&origin, 1), OnLeave::Keep, "na própria sessão nada muda");
+        assert_eq!(state.on_leave(&other, 1), OnLeave::Stop, "gravando: para e transcreve para a origem");
+        state.recorder = None;
+        assert_eq!(state.on_leave(&other, 1), OnLeave::Keep, "transcrevendo: o pedido segue");
+        assert_eq!(state.on_leave(&other, 2), OnLeave::Cancel, "outra conexão descartaria a resposta");
+        state.target = None;
+        assert_eq!(state.on_leave(&other, 1), OnLeave::Cancel, "tela sem sessão cancela como antes");
+        state.target = Some(target("x", "k:1"));
+        state.result_error = Some("falhou".into());
+        state.cancel();
+        assert!(state.target.is_none() && state.owner.is_none() && state.result_error.is_none());
+    }
+
+    #[test]
+    fn off_screen_result_goes_to_the_end_of_that_sessions_draft() {
+        assert_eq!(dictation_append("", "fala"), ("fala".to_owned(), 0..4));
+        assert_eq!(dictation_append("antes", "fala"), ("antes fala".to_owned(), 6..10));
+        assert_eq!(dictation_append("antes\n", "fala"), ("antes\nfala".to_owned(), 6..10));
+        let (draft, range) = dictation_append("ação", "fala");
+        assert_eq!(&draft[range.clone()], "fala", "o trecho é o do texto, em bytes");
+        // A versão escolhida depois troca só o trecho, sem espaço a mais.
+        let mut revised = draft.clone();
+        revised.replace_range(range.clone(), &dictation_insert(&draft, range, "fala limpa"));
+        assert_eq!(revised, "ação fala limpa");
+        let x = target("x", "k:1");
+        let list = [session("x", "k:1", "/a.jsonl"), session("y", "k:2", "/y.jsonl")];
+        assert_eq!(place(&x, Some(&list[1]), Some(&list)), Place::Away(x.key.clone()));
+        assert_eq!(place(&x, Some(&list[0]), Some(&list)), Place::Open);
+    }
+
+    #[test]
+    fn clear_keeps_the_target_but_recreated_or_closed_is_gone() {
+        let x = target("x", "k:1");
+        let cleared = [session("x", "k:1", "/b.jsonl")];
+        let key = SessionKey { jsonl: "/b.jsonl".into(), ..x.key.clone() };
+        assert_eq!(place(&x, None, Some(&cleared)), Place::Away(key), "/clear: mesma sessão, chave do transcript novo");
+        assert_eq!(place(&x, Some(&cleared[0]), Some(&cleared)), Place::Open);
+        let recreated = [session("x", "k:2", "/c.jsonl")];
+        assert_eq!(place(&x, Some(&recreated[0]), Some(&recreated)), Place::Gone, "mesmo nome, outra sessão");
+        assert_eq!(place(&x, None, Some(&[])), Place::Gone, "fechada");
+    }
+
+    #[test]
+    fn unknown_or_failed_list_never_drops_the_text() {
+        let x = target("x", "k:1");
+        // Lista não lida, com erro, peer desligado ou convite encerrado: `trusted_sessions` devolve `None`.
+        assert_eq!(place(&x, None, None), Place::Away(x.key.clone()), "o texto vai para o rascunho da chave guardada");
+        let other = session("y", "k:2", "/y.jsonl");
+        assert_eq!(place(&x, Some(&other), None), Place::Away(x.key.clone()));
+        assert_eq!(place(&x, Some(&session("x", "k:1", "/a.jsonl")), None), Place::Open, "aberta é aberta mesmo sem lista");
     }
 }
