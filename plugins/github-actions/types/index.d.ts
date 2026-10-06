@@ -11,7 +11,8 @@ export type Pr = {
   revisao: 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | null
   checks: Checks
 }
-export type GhView = { branch: string; workflows: Workflow[]; pr: Pr | null }
+// `aviso`: por que a última consulta falhou; a faixa o mostra e segue tentando.
+export type GhView = { branch: string; workflows: Workflow[]; pr: Pr | null; aviso?: string | null }
 
 declare module 'claude-code' {
   interface PluginState {

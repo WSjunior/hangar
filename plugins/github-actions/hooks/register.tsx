@@ -1,6 +1,6 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
-import { disparaRun, ehGithub, ehPush, emAndamento, jobs, lembrarCommit, pr, precisaConsultar, runsVisiveis, situacao } from './gh'
+import { classificarFalha, disparaRun, ehGithub, ehPush, emAndamento, textoAviso, jobs, lembrarCommit, pr, precisaConsultar, runsVisiveis, situacao } from './gh'
 import type { Empurrado, Situacao } from './gh'
 import type { GhView, Job, JobGh, PrGh, RunGh, Workflow } from './gh'
 import { desenharFaixa } from './faixa'
@@ -11,6 +11,8 @@ const INTERVALO_MS = 15_000
 // Depois de um push o run novo leva alguns segundos para aparecer na API.
 const ESPERA_PUSH_MS = 3_000
 const PRAZO_PUSH_MS = 120_000
+// No limite da API, insistir a cada 15 s só gasta: tenta de minuto em minuto.
+const ESPERA_LIMITE_MS = 60_000
 // Sem nada rodando, o fim de turno reconsulta no máximo uma vez por minuto.
 const REVISITA_MS = 60_000
 // Commits empurrados lembrados por sessão, e quantas sessões ficam guardadas.
@@ -108,6 +110,19 @@ async function podar($: EngineInterface): Promise<void> {
   await Promise.all(datas.slice(0, chaves.length - MAX_SESSOES + 1).map(({ k }) => $.store.delete(k)))
 }
 
+// Horário local em que o limite da API volta, pelo próprio gh (a chamada não gasta cota).
+async function liberaEm($: EngineInterface): Promise<string | null> {
+  const reset = await texto($, ['gh', 'api', 'rate_limit', '--jq',
+    '[.resources.core,.resources.graphql] | map(select(.remaining==0)) | map(.reset) | max // empty'])
+  if (!reset) return null
+  return (await texto($, ['date', '-d', `@${reset}`, '+%H:%M'])) ?? (await texto($, ['date', '-r', reset, '+%H:%M']))
+}
+
+async function avisoDe($: EngineInterface, msg: string): Promise<string> {
+  const f = classificarFalha(msg)
+  return textoAviso(f, msg, f === 'limite' ? await liberaEm($) : null)
+}
+
 // Só os runs dos commits que ESTA sessão empurrou; o PR é o da branch.
 async function consultar($: EngineInterface, antes: GhView | null): Promise<GhView | null> {
   const remoto = await texto($, ['git', 'remote', 'get-url', 'origin'])
@@ -128,11 +143,13 @@ async function consultar($: EngineInterface, antes: GhView | null): Promise<GhVi
   // Commit que falhou fica com os runs da leitura anterior; todos falhando, a leitura inteira fica.
   const porCommit: RunGh[][] = []
   let falhas = 0
+  let erro: string | null = null
   for (const { sha, saida, argv } of lidos) {
     try {
       porCommit.push(lerJson<RunGh[]>(saida, argv))
     } catch (err) {
       falhas++
+      erro ??= String(err)
       $.ui.log(`github-actions: ${String(err)}`, { to: 'debug' })
       porCommit.push((antes?.workflows ?? []).filter(w => w.sha === sha).map(w => ({
         databaseId: w.id, workflowName: w.nome, headSha: w.sha, url: w.url,
@@ -140,7 +157,7 @@ async function consultar($: EngineInterface, antes: GhView | null): Promise<GhVi
       })))
     }
   }
-  if (lidos.length && falhas === lidos.length) throw new Error('gh run list falhou em todos os commits')
+  if (lidos.length && falhas === lidos.length) throw new Error(erro ?? 'gh run list falhou')
   const visiveis = runsVisiveis(porCommit)
   if (aguardando && visiveis.some(r => r.headSha === aguardando?.sha)) aguardando = null
   const workflows = await Promise.all(visiveis.map(r => workflowDe($, r, antes?.workflows.find(w => w.id === r.databaseId))))
@@ -148,8 +165,8 @@ async function consultar($: EngineInterface, antes: GhView | null): Promise<GhVi
   let p = mesma?.pr ?? null
   if (prSaida?.ok) p = pr(JSON.parse(prSaida.out) as PrGh)
   else if (!prSaida || /no pull requests found/i.test(prSaida.err)) p = null
-  else $.ui.log(`github-actions: gh pr view: ${prSaida.err}`, { to: 'debug' })
-  return { branch, workflows, pr: p }
+  else erro ??= prSaida.err
+  return { branch, workflows, pr: p, aviso: erro ? await avisoDe($, erro) : null }
 }
 
 function agendar($: EngineInterface, ms: number): void {
@@ -172,8 +189,16 @@ async function atualizar($: EngineInterface): Promise<void> {
     v = await consultar($, v)
     await update($, view, () => v)
   } catch (err) {
-    // gh fora do ar, sem login ou com limite: a faixa fica como estava e tenta de novo.
+    // gh fora do ar, sem login ou com limite: a faixa guarda o que tinha, diz o motivo e tenta de novo.
     $.ui.log(`github-actions: ${String(err)}`, { to: 'debug' })
+    try {
+      const aviso = await avisoDe($, String(err))
+      const antes = v
+      v = antes ? { ...antes, aviso } : { branch: '', workflows: [], pr: null, aviso }
+      await update($, view, () => v)
+    } catch (e2) {
+      $.ui.log(`github-actions: aviso: ${String(e2)}`, { to: 'debug' })
+    }
   } finally {
     consultando = false
     ultima = await $.clock.now().catch(() => ultima)
@@ -181,6 +206,8 @@ async function atualizar($: EngineInterface): Promise<void> {
     if (refazer) {
       refazer = false
       agendar($, 0)
+    } else if (v?.aviso) {
+      agendar($, v.aviso.startsWith('limite') ? ESPERA_LIMITE_MS : INTERVALO_MS)
     } else if (aguardando || precisaConsultar(v)) {
       agendar($, INTERVALO_MS)
     }
@@ -248,7 +275,7 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const v = e.props.hasSurvey ? null : await read($, view)
-    if (!v || (v.workflows.length === 0 && !v.pr)) return next(e)
+    if (!v || (v.workflows.length === 0 && !v.pr && !v.aviso)) return next(e)
     const t = $.ui.resolve(e)
     const nosso = desenharFaixa(t, v, e.props.bodyColumns, url => void abrir($, url))
     const abaixo = await next(e).catch(() => null)
