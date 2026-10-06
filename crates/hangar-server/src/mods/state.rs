@@ -37,6 +37,8 @@ pub type ShownFuture = Pin<Box<dyn Future<Output = Option<String>> + Send>>;
 pub trait TerminalProbe: SurfaceLink {
     fn read_shown(&self) -> ShownFuture;
     fn stop(&self);
+    /// A âncora da faixa do último `/ui` (`tree::anchor`), para o executor reconhecer a faixa inteira focada.
+    fn anchor(&self, anchor: Option<String>);
 }
 
 /// Janela que junta as leituras do painel na frente (risco "shown_id na troca de aba sem redesenho").
@@ -535,16 +537,17 @@ impl Mods {
     /// árvore (até ~400 KB) vira JSON fora da trava de todas as sessões.
     pub fn terminal_ui(&self, name: &str, view: TerminalView) -> bool {
         let view = Arc::new(view);
-        let (life, version, screen) = {
+        let (life, version, screen, probe) = {
             let mut inner = self.inner.lock().unwrap();
             let Some(session) = inner.sessions.get_mut(name) else { return false };
             let life = session.life;
             let Some(terminal) = session.terminal.as_mut() else { return false };
             terminal.version += 1;
             terminal.view = Some(view.clone());
-            (life, terminal.version, terminal.screen_shown.clone())
+            (life, terminal.version, terminal.screen_shown.clone(), terminal.probe.clone())
         };
         self.notify.notify_waiters();
+        probe.anchor(super::tree::anchor(&view.above));
         let data = view.app_json(screen.as_deref());
         self.publish_if(name, life, data, |session| session.terminal.as_ref().is_some_and(|terminal| terminal.version == version))
     }

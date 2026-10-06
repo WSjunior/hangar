@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use super::click::{self, Limits, Pane, Parts, Undo};
 use super::model::{ModsCall, no_answer};
 use super::state::{CallFuture, Mods, ShownFuture, SurfaceLink, TerminalProbe};
+use crate::runtime::terminal::ModsAnchor;
 
 /// Prazo da reposição do mínimo pelo vigia: redimensionar e assentar (até 1 s) com o piso das ações.
 const FLOOR_BUDGET: Duration = Duration::from_secs(5);
@@ -19,6 +20,8 @@ const SHOWN_READ_MAX: Duration = Duration::from_secs(2);
 pub struct TerminalLink {
     parts: Parts,
     watch: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// A âncora da faixa que o executor do terminal lê antes de escrever uma entrada.
+    anchor: ModsAnchor,
 }
 
 /// Aborta a tarefa ao sair de escopo: o leitor do vigia morre junto com o laço que o consome.
@@ -31,7 +34,12 @@ impl TerminalLink {
     /// `life` é a vida com que a sessão é ligada (`Mods::attach_terminal`): o clique, a leitura do painel na
     /// frente e o vigia só leem e escrevem o registro dessa vida.
     pub fn new(name: String, life: u64, pane: Arc<dyn Pane>, mods: Mods, limits: Limits) -> Arc<Self> {
-        Arc::new(Self { parts: Parts { name, pane, mods, limits, busy: Arc::default(), life }, watch: Mutex::new(None) })
+        Self::anchored(name, life, pane, mods, limits, ModsAnchor::default())
+    }
+
+    /// `new` com a âncora do executor do terminal (`TerminalHandle::anchor`), que o elo mantém em dia.
+    pub fn anchored(name: String, life: u64, pane: Arc<dyn Pane>, mods: Mods, limits: Limits, anchor: ModsAnchor) -> Arc<Self> {
+        Arc::new(Self { parts: Parts { name, pane, mods, limits, busy: Arc::default(), life }, watch: Mutex::new(None), anchor })
     }
 
     /// Repõe o tamanho mínimo quando nenhum terminal de verdade está ligado (T9). Com um pedido do app em
@@ -103,4 +111,6 @@ impl TerminalProbe for TerminalLink {
 
     /// Encerra o vigia e, com ele, o cliente de controle (`kill_on_drop`).
     fn stop(&self) { self.stop_watch(); }
+
+    fn anchor(&self, anchor: Option<String>) { *self.anchor.lock().unwrap() = anchor; }
 }

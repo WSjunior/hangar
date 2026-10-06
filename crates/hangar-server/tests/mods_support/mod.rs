@@ -77,7 +77,7 @@ impl hangar_server::mods::state::SurfaceLink for NoLink {
 /// Elo de sessão com terminal de mentira: o painel que a tela mostraria, quantas leituras houve e se o
 /// vigia parou. Os pedidos dos apps vão ao `NoLink`.
 #[derive(Default)]
-pub struct Probe { pub shown: Mutex<Option<String>>, pub reads: AtomicUsize, pub stopped: AtomicBool }
+pub struct Probe { pub shown: Mutex<Option<String>>, pub reads: AtomicUsize, pub stopped: AtomicBool, pub anchor: Mutex<Option<String>> }
 impl SurfaceLink for Probe {
     fn call(&self, call: ModsCall, deadline: std::time::Instant) -> CallFuture { SurfaceLink::call(&NoLink, call, deadline) }
 }
@@ -88,6 +88,7 @@ impl TerminalProbe for Probe {
         Box::pin(async move { shown })
     }
     fn stop(&self) { self.stopped.store(true, SeqCst); }
+    fn anchor(&self, anchor: Option<String>) { *self.anchor.lock().unwrap() = anchor; }
 }
 
 /// Pedidos que mudam o estado do mod; desenho e rol só leem o estado.

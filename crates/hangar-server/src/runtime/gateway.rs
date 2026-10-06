@@ -86,7 +86,8 @@ async fn attach_terminal_mods(mods:&crate::mods::state::Mods,target:&super::term
     handle:&super::terminal::TerminalHandle,life:u64) {
     // Antes de ligar: nenhum pedido de app pode estar esticando a janela enquanto ela é lida.
     crate::mods::click::unstretch(handle,std::time::Instant::now()+UNSTRETCH_MAX).await;
-    let link = crate::mods::terminal::TerminalLink::new(target.name.clone(),life,Arc::new(handle.clone()),mods.clone(),crate::mods::click::Limits::default());
+    let link = crate::mods::terminal::TerminalLink::anchored(target.name.clone(),life,Arc::new(handle.clone()),mods.clone(),
+        crate::mods::click::Limits::default(),handle.anchor());
     let process = format!("{}:{}:{}",target.key,target.binding.pane,target.binding.created);
     mods.attach_terminal(&target.name,&process,life,link.clone());
     // O vigia sobe depois de ligar: o `attach_terminal` para o vigia do elo que estava no nome, e se fosse
@@ -195,7 +196,9 @@ impl RuntimeRegistry {
                 let lease=wait_lease(&target.lease_path).await?;
                 let store=open_store(&target.state_path,&target.projection_dir,&target.key,target.generation,&target.name,lease.clone()).await?;
                 let revision=self.revisions.lock().await.entry(target.key.clone()).or_insert_with(||Arc::new(AtomicU64::new(0))).clone();
-                let handle=super::terminal::TerminalActor::spawn(target.clone(),QueueActor::start(store,lease),self.policy.clone(),super::terminal::TerminalOptions::default(),self.events.clone(),revision);
+                // A âncora nasce com o executor, que a lê, e passa ao elo pelo `handle`, também na reabertura.
+                let options=super::terminal::TerminalOptions {anchor:super::terminal::ModsAnchor::default(),..Default::default()};
+                let handle=super::terminal::TerminalActor::spawn(target.clone(),QueueActor::start(store,lease),self.policy.clone(),options,self.events.clone(),revision);
                 // A vida no `Mods` é única no servidor (`new_life`).
                 let life=match &self.mods {
                     Some(mods)=>{
