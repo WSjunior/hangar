@@ -1628,8 +1628,56 @@ sessão, então painel baixo cai nesse corte. Não tem relação com `--plugin-d
 Sem terminal o caminho é outro e não depende de ordem: o backend entra como superfície remota
 (`control_request` `ui_attach`, depois `ui_render` do `AbovePrompt`) e o CLI avisa a mudança
 com `system`/`ui_invalidate`. Medido num `claude -p` stream-json: a resposta traz a árvore da
-superfície pedida (`desktop`/`mobile`: a barra vem como `Svg`, não `Raster`). Fica para depois da
-migração do runtime sem terminal para o Rust.
+superfície pedida (`desktop`/`mobile`: a barra vem como `Svg`, não `Raster`).
+
+Feito na fase 2 dos mods, toda no `hangar-server`: a sessão Claude sem terminal atendida pelo Rust
+liga a superfície `desktop` depois do `initialize` (ou ao religar ao cano), com `client_id`
+`hangar`, viewport 120x40 em tela cheia e `answers: ["ui_copy"]`. Os pedidos `ui_*` saem fora do
+diário da fila e por um canal próprio e pequeno, que dá prioridade à conversa: uma rajada de
+efêmeros não atrasa mensagem nem permissão, e o efêmero que não cabe é descartado, porque a
+superfície tem prazo e se refaz. O `plugin_ui` sai pelo hub dos aparelhos com `shown_id`,
+`columns` (o `bodyColumns` de cada lugar) e `source: "surface"`, e o do Python é ignorado nessas
+sessões. Clique, troca de aba e digitação vão por `ui_press`, `ui_pane_show` e `ui_input`, com uma
+nova tentativa quando o `handle` vence; aviso e cópia chegam pelo canal (`ui_toast`, `ui_copy`), e
+a cópia só volta ao aparelho de quem clicou quando vem do mod do botão.
+
+Prazos: cada pedido de app (press, show, close, input e o redesenho que ele dispara) tem 3 s, o
+pior caminho soma 6 s e o teto no ator é 7 s; a rota do servidor mede desde a entrada e trabalha
+com 7,5 s, abaixo do corte de 8 s dos apps. O ator descarta, sem executar, o pedido que já
+venceu: assim o clique não roda depois de o app ter desistido (sem clique fantasma e sem fila
+atrás do pedido velho). Os desenhos de fundo continuam com 10 s.
+
+O `claude -p` sobe com o plugin do Hangar (`--plugin-dir`) e as variáveis da ponte
+(`HANGAR_PLUGIN_URL`, `HANGAR_PLUGIN_TOKEN`), exceção explícita à regra de não acrescentar nada ao
+Python (S7, no lançador do `adapter.py`): a URL que um mod abre num clique do app (`xdg-open`) vai
+ao aparelho de quem clicou pelo `press-start` e pelo `opened`, que o Rust atende; nesse processo o
+aviso e a cópia não passam pela ponte, para não chegarem em dobro. Com os mods desligados, o
+filho nunca herda `HANGAR_PLUGIN_*` do ambiente do backend.
+
+Antes de cada operação de mod, o Rust pergunta ao Python se a troca de agente está em curso
+(`/internal/sessions/{name}/transfer`, contrato interno 28) e devolve a recusa dele
+(`session_transfer_busy`); sem resposta, recusa com `erro_mod_guarda_indisponivel`. Essa guarda
+reaproveita a proteção que já existe no Python, em vez de portar a leitura do registro para o
+Rust.
+
+Códigos de erro novos ou revistos, todos com texto em pt e en, no `ERROS` do core e nas listas de
+teste de recusa do web e do nativo: `erro_mod_fechar_recusado`, `erro_mod_painel_inexistente`
+(o show de um painel que não está mais na frente, em vez da frase de botão, que seria falsa para
+uma aba), `erro_mod_guarda_indisponivel`, e as frases genéricas de `erro_mod_botao_inexistente`,
+`erro_mod_clique_sem_resposta` e `erro_mod_sem_digitacao` (esta vale também para a sessão que
+não atende como superfície). Nos dois apps, falha de show ou de input com código conhecido usa a
+frase do código mesmo num 5xx; só sem código cai na frase genérica. No celular, a faixa dos mods
+ganhou o botão "Ocultar", que desliga os mods na hora (a mesma preferência do menu).
+
+Limites conhecidos:
+
+- a guarda é perguntada uma vez, na entrada da operação, enquanto a rota do Python segura o
+  ingresso até o fim; uma troca que comece entre a resposta e o `ui_*` não é vista;
+- cada `change` de um campo paga uma ida ao Python (a guarda), com a falha dela virando
+  `erro_mod_guarda_indisponivel`;
+- o convidado não digita em campo de mod nas sessões sem terminal;
+- o `opened` com bind de LAN é limite antigo da ponte, que continua valendo;
+- no Windows o terminal ainda é do Python, e o que ele atende segue sem receber nada novo.
 
 ### Mods: painel, clique e o que acontece no aparelho (04/10/2026)
 
