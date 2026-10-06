@@ -362,7 +362,7 @@ impl Hangar {
         if let Some(session) = self.selected.clone() { self.controls.on_session_update(&key, &session); }
         if !probe && self.controls.open.as_ref().is_some_and(|o| o.key == key && o.ctl == ctl) { self.controls.open = None; cx.notify(); return; }
         self.command_panel = false;
-        self.recent = None;
+        self.close_recent();
         let (provider, headless) = self.provider();
         let provider = provider.to_owned();
         if provider == "claude" && ctl == Ctl::Model && self.controls.busy.contains_key(&key) { return; }

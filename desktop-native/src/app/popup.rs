@@ -98,7 +98,7 @@ impl Hangar {
         self.command_panel = false;
         self.accounts.card = false;
         self.context_card = false;
-        self.recent = None;
+        self.close_recent();
         open
     }
 

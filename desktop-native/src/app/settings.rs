@@ -463,7 +463,7 @@ impl Hangar {
         self.root_focus.focus(window, cx);
         self.close_controls();
         self.command_panel = false;
-        self.recent = None;
+        self.close_recent();
         self.settings_opened(page, cx);
         cx.notify();
     }

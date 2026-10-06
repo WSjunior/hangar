@@ -1255,7 +1255,7 @@ impl Hangar {
         self.plugin_tabs_seen = None;
         self.plugin_hovered.clear();
         self.plugin_fields.clear();
-        self.recent = None;
+        self.close_recent();
         self.command_panel = false;
         // Os menus são da tela sem sessão: sem isto, o Esc seguinte seria gasto num deles, já fora da tela.
         self.new_chat_folders.set(None);
@@ -2469,7 +2469,7 @@ impl Hangar {
 
     fn open_recent(&mut self, cx: &mut Context<Self>) {
         let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
-        if self.recent.as_ref().is_some_and(|recent| recent.key == key) { self.recent = None; cx.notify(); return; }
+        if self.recent.as_ref().is_some_and(|recent| recent.key == key) { self.close_recent(); cx.notify(); return; }
         self.command_panel = false;
         self.close_controls();
         self.recent = Some(Recent { key: key.clone(), files: None });
@@ -2486,7 +2486,7 @@ impl Hangar {
         let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
         let generation = self.check_dictation_owner(cx);
         let owner = self.dictation_owner(cx);
-        self.recent = None;
+        self.close_recent();
         let (connection, tx, uploads) = (self.connection, self.tx.clone(), self.uploads_for(&key));
         self.runtime.spawn(async move {
             let result = uploads.fetch(&api, &key.name, &Source::Upload(filename.clone())).await
@@ -2500,7 +2500,7 @@ impl Hangar {
     /// Áudio da lista de recentes volta ao ditado lido do arquivo que o servidor já tem.
     fn dictate_recent(&mut self, filename: String, cx: &mut Context<Self>) {
         let Some(key) = self.selected_key() else { return; };
-        self.recent = None;
+        self.close_recent();
         match self.dictate_upload(filename, cx) {
             Ok(()) => { self.action_feedback.remove(&key); }
             Err(problem) => { self.action_feedback.insert(key, (problem, true)); }
@@ -4159,7 +4159,7 @@ impl Hangar {
                 this.command_panel = !this.command_panel;
                 if this.command_panel {
                     this.close_controls();
-                    this.recent = None;
+                    this.close_recent();
                     this.ensure_commands(false);
                     this.command_search.update(cx, |input, cx| { input.set_value("", window, cx); input.focus(window, cx); });
                 }
