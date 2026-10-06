@@ -10,7 +10,7 @@ use std::{path::Path, process::{Command, Stdio}};
 const VIDEO_EXTS: [&str; 6] = ["mp4", "mov", "webm", "mkv", "m4v", "avi"];
 
 fn refusal(status: u16, detail: impl Into<String>) -> Failure {
-    Failure { status: Some(status), detail: detail.into(), retry_after: None, uncertain: false }
+    Failure { status: Some(status), detail: detail.into(), retry_after: None, uncertain: false, code: None }
 }
 
 /// `_slug`: nome de pasta seguro. O backend normaliza acento (NFKD) antes; aqui só nome ASCII, o resto vai ao backend.

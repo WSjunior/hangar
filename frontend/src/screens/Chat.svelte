@@ -12,7 +12,7 @@
   import { openInNewTab } from '../lib/openTab';
   import { desktop as janela } from '../lib/desktop.svelte';
   import { itemModsCelular, modsCelular, modsNaTela } from '../lib/modsCelular.svelte';
-  import { activePaneId, fieldSender, followLocalTab, inputPluginField, isMissingRoute, isPluginServerFailure, parsePluginToast, parsePluginUi, pressPluginButton, safeHref, showPluginPane, tabFollowsServer, type PluginInputKind, type PluginSource, type PluginNode as PluginTree, type PluginPane as PluginPaneData, type PluginToast } from '@hangar/core';
+  import { activePaneId, fieldSender, followLocalTab, inputPluginField, isMissingRoute, parsePluginToast, pluginFailureText, parsePluginUi, pressPluginButton, safeHref, showPluginPane, tabFollowsServer, type PluginInputKind, type PluginSource, type PluginNode as PluginTree, type PluginPane as PluginPaneData, type PluginToast } from '@hangar/core';
   import SessionSwitcherSheet from '../components/SessionSwitcherSheet.svelte';
   import CreateSessionSheet from '../components/CreateSessionSheet.svelte';
   import UsageSheet from '../components/UsageSheet.svelte';
@@ -541,9 +541,9 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     try {
       await showPluginPane(sessionName, site, sessionServer());
     } catch (err) {
-      // Sem resposta ou 5xx, a frase do app; com a recusa (4xx), o motivo que o servidor mandou.
-      if (!isMissingRoute(err)) showPluginNotice(isPluginServerFailure(err) ? m.plugin_aba_falhou()
-        : err instanceof Error ? err.message : String(err), true);
+      // Código conhecido, a frase dele em qualquer status; sem código, a frase do app (sem resposta ou 5xx)
+      // ou o motivo que o servidor mandou (4xx).
+      if (!isMissingRoute(err)) showPluginNotice(pluginFailureText(err, m.plugin_aba_falhou), true);
     }
   }
   // Digitação num `Input` de mod: só a sessão sem terminal aceita (o campo nem fica habilitado nas outras). Cada campo
@@ -556,9 +556,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     if (!sender) {
       sender = fieldSender(
         (k, v) => inputPluginField(sessionName, site, key, k, v, sessionServer()),
-        // Sem resposta ou 5xx, a frase do app; com a recusa (4xx), o motivo que o servidor mandou.
-        (err) => showPluginNotice(isPluginServerFailure(err) ? m.plugin_input_falhou()
-          : err instanceof Error ? err.message : String(err), true),
+        // Código conhecido, a frase dele em qualquer status; sem código, a frase do app ou o motivo do 4xx.
+        (err) => showPluginNotice(pluginFailureText(err, m.plugin_input_falhou), true),
       );
       pluginFieldSenders.set(id, sender);
     }

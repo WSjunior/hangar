@@ -60,15 +60,23 @@ pub struct Failure {
     pub detail: String,
     pub retry_after: Option<u64>,
     pub uncertain: bool,
+    /// O código do envelope `{code, params, msg}` da resposta, quando veio: quem precisa decidir pela recusa
+    /// (e não pelo status) olha aqui, porque o `detail` já é a frase traduzida.
+    pub code: Option<String>,
 }
 
 impl Failure {
     pub fn local(detail: impl Into<String>) -> Self {
-        Self { status: None, detail: detail.into(), retry_after: None, uncertain: false }
+        Self { status: None, detail: detail.into(), retry_after: None, uncertain: false, code: None }
     }
     fn transport(post: bool) -> Self {
         Self { uncertain: post, ..Self::local(if post { "delivery_uncertain" } else { "network_error" }) }
     }
+}
+
+/// O `code` do envelope `{"detail": {code, params, msg}}`; `detail` em texto ou em lista não tem código.
+fn envelope_code(body: Option<&Value>) -> Option<String> {
+    body?.get("detail")?.get("code")?.as_str().map(str::to_owned)
 }
 
 fn failure_detail(body: Option<Value>, status: u16) -> String {
@@ -167,8 +175,9 @@ impl Api {
         let status = response.status().as_u16();
         let retry_after = response.headers().get(header::RETRY_AFTER).and_then(|s| s.to_str().ok()).and_then(|s| s.parse().ok());
         let body = response.json::<Value>().await.ok();
+        let code = envelope_code(body.as_ref());
         let detail = failure_detail(body, status);
-        Err(Failure { status: Some(status), detail: detail.chars().take(500).collect(), retry_after, uncertain: post && status >= 500 })
+        Err(Failure { status: Some(status), detail: detail.chars().take(500).collect(), retry_after, uncertain: post && status >= 500, code })
     }
 
     pub async fn sessions(&self) -> Result<Vec<SessionInfo>, Failure> {
@@ -271,7 +280,7 @@ impl Api {
         // Erro de terceiro não tem o corpo lido: nem memória, nem texto escolhido por ele na tela.
         if matches!(source, Source::Remote(_)) && !r.status().is_success() {
             let status = r.status().as_u16();
-            return Err(Failure { status: Some(status), detail: failure_detail(None, status), retry_after: None, uncertain: false });
+            return Err(Failure { status: Some(status), detail: failure_detail(None, status), retry_after: None, uncertain: false, code: None });
         }
         let r = Self::checked(r, false).await?;
         if r.content_length().is_some_and(|n| n > MAX_BYTES) { return Err(Failure::local("attach_too_big")); }
@@ -337,7 +346,7 @@ impl Api {
         if r.status() == StatusCode::CONFLICT {
             let body = r.json::<Value>().await.unwrap_or(Value::Null);
             if let Some(prereqs) = share_blocked(&body) { return Err(ShareFailure::Blocked(prereqs)); }
-            return Err(ShareFailure::Other(Failure { status: Some(409), detail: failure_detail(Some(body), 409), retry_after: None, uncertain: false }));
+            return Err(ShareFailure::Other(Failure { status: Some(409), detail: failure_detail(Some(body), 409), retry_after: None, uncertain: false, code: None }));
         }
         Self::checked(r, true).await.map_err(ShareFailure::Other)?.json().await.map_err(|_| ShareFailure::Other(Failure::transport(true)))
     }
@@ -473,7 +482,7 @@ impl Api {
             let live = body.as_ref().and_then(|b| b.get("detail")).filter(|d| d.get("code").and_then(Value::as_str) == Some("erro_conversa_viva"))
                 .and_then(|d| d.pointer("/params/sessao")).and_then(Value::as_str).filter(|name| !name.is_empty()).map(str::to_owned);
             if let Some(name) = live { return Ok(Resumed::Live(name)); }
-            return Err(Failure { status: Some(409), detail: failure_detail(body, 409).chars().take(500).collect(), retry_after: None, uncertain: false });
+            return Err(Failure { status: Some(409), detail: failure_detail(body, 409).chars().take(500).collect(), retry_after: None, uncertain: false, code: None });
         }
         let session = Self::checked(r, true).await?.json().await.map_err(|_| Failure::local("invalid_response"))?;
         Ok(Resumed::New(session))
@@ -540,7 +549,7 @@ impl Api {
                     Some("error") => {
                         let status = event.get("status").and_then(Value::as_u64).unwrap_or(500) as u16;
                         let detail = failure_detail(Some(json!({"detail": event.get("detail")})), status);
-                        return Err(Failure { status: Some(status), detail: detail.chars().take(500).collect(), retry_after: None, uncertain: false });
+                        return Err(Failure { status: Some(status), detail: detail.chars().take(500).collect(), retry_after: None, uncertain: false, code: None });
                     }
                     _ => {}
                 }
@@ -752,6 +761,15 @@ mod tests {
     fn mod_press_refusals_use_the_web_sentence() {
         let text = failure_detail(Some(json!({"detail": {"code": "erro_mod_botao_ambiguo", "params": {"rotulo": "fechar"}, "msg": "x"}})), 409);
         assert!(text != "erro_mod_botao_ambiguo" && text.contains("fechar"), "{text}");
+    }
+
+    #[test]
+    fn the_envelope_code_goes_into_the_failure() {
+        let guard = json!({"ok": false, "detail": {"code": "erro_mod_guarda_indisponivel", "params": {"motivo": "x"}, "msg": "x"}});
+        assert_eq!(envelope_code(Some(&guard)).as_deref(), Some("erro_mod_guarda_indisponivel"));
+        assert_eq!(envelope_code(Some(&json!({"detail": "texto"}))), None);
+        assert_eq!(envelope_code(Some(&json!({"detail": [{"msg": "campo"}]}))), None);
+        assert_eq!(envelope_code(None), None);
     }
 
     #[test]

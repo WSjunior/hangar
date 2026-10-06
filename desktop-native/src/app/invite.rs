@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn redeem_codes_use_the_web_texts_by_key() {
-        let failure = |status, detail: &str| Failure { status: Some(status), detail: detail.into(), retry_after: None, uncertain: false };
+        let failure = |status, detail: &str| Failure { status: Some(status), detail: detail.into(), retry_after: None, uncertain: false, code: None };
         assert_eq!(redeem_failure(&failure(410, "erro_convite_usado")), tr_shared("erro_convite_usado", &[]));
         assert_eq!(redeem_failure(&failure(404, "erro_convite_inexistente")), tr_shared("erro_convite_inexistente", &[]));
         assert_eq!(redeem_failure(&failure(410, "HTTP 410")), tr_shared("erro_convite_encerrado", &[]));

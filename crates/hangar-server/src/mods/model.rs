@@ -83,10 +83,10 @@ pub fn stale() -> ModsError {
     ModsError::new("erro_mod_desenho_vencido", "O mod redesenhou a tela e esse item não está mais nela; tente de novo.")
 }
 pub fn missing() -> ModsError {
-    ModsError::new("erro_mod_botao_inexistente", "Esse botão não está mais na tela do mod.")
+    ModsError::new("erro_mod_botao_inexistente", "Esse item não está mais na tela do mod.")
 }
 pub fn no_answer() -> ModsError {
-    ModsError::new("erro_mod_clique_sem_resposta", "O mod não respondeu ao clique.")
+    ModsError::new("erro_mod_clique_sem_resposta", "O mod não respondeu a tempo.")
 }
 pub fn pane_missing() -> ModsError {
     ModsError::new("erro_mod_painel_inexistente", "Esse painel não está mais aberto no mod.")

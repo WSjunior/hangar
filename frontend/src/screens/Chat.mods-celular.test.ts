@@ -246,3 +246,29 @@ it('celular com a interface oculta: o aviso (toast) do mod continua aparecendo',
     await unmount(t.comp);
   }
 });
+
+it('troca de aba recusada: código conhecido mostra a frase dele em qualquer status; 5xx sem código, a frase do app', async () => {
+  janelaCtl.desktop = true;
+  const api = await import('@hangar/core');
+  const t = montar();
+  try {
+    await tick();
+    const segundo = { ...PAINEL, id: 'p2', title: 'Painel dois' };
+    sseCtl.handlers.get('plugin_ui')?.({ data: JSON.stringify({ above: FAIXA, panes: [PAINEL, segundo], shown_id: 'p1', source: 'surface' }) } as MessageEvent);
+    await tick();
+    const aba = () => [...t.el.querySelectorAll('button[role="tab"]')].find((b) => b.textContent === 'Painel dois') as HTMLElement;
+    const aviso = () => t.el.querySelector('.plugin-band .notice')?.textContent?.trim();
+    // 503 do dono único com `erro_mod_guarda_indisponivel`: a frase do código, não a genérica da aba.
+    vi.mocked(api.showPluginPane).mockRejectedValueOnce(Object.assign(new Error('503: motivo — erro_mod_guarda_indisponivel'),
+      { status: 503, code: 'erro_mod_guarda_indisponivel', envelope: { code: 'erro_mod_guarda_indisponivel', params: { motivo: 'x' }, msg: 'x' } }));
+    aba().click();
+    // A frase sai do core, no idioma dele: a mesma tabela de códigos (`mensagemDeErro`) que o app usa.
+    await vi.waitFor(() => expect(aviso()).toBe(api.mensagemDeErro('erro_mod_guarda_indisponivel')));
+    // 500 sem código: a frase genérica da troca de aba.
+    vi.mocked(api.showPluginPane).mockRejectedValueOnce(Object.assign(new Error('500: Internal Server Error'), { status: 500 }));
+    aba().click();
+    await vi.waitFor(() => expect(aviso()).toBe(m.plugin_aba_falhou()));
+  } finally {
+    await unmount(t.comp);
+  }
+});

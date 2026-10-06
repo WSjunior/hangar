@@ -148,6 +148,19 @@ async fn guard_without_answer_refuses_with_code() {
 }
 
 #[tokio::test]
+async fn conflict_without_detail_is_a_guard_failure() {
+    // Um 409 sem o `detail` do Python não diz o que recusar: vira a falha da guarda, nunca `{"detail": null}`.
+    let (python, server, _mods, link) = setup(FakeLink::default()).await;
+    python.set_transfer(Some(StatusCode::CONFLICT));
+    for raw in ["", "{}", r#"{"detail": "texto"}"#] {
+        python.set_transfer_body(Some(raw));
+        let (status, body) = post(server, "s", "press", json!({"site": "above-prompt", "key": "abrir"}), Some(OWNER)).await;
+        assert_eq!((status, body["detail"]["code"].as_str()), (503, Some("erro_mod_guarda_indisponivel")), "{raw:?}");
+    }
+    assert!(link.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn silent_guard_refuses_quickly_with_code() {
     // A guarda tem prazo curto e próprio: o silêncio do Python vira a recusa dela, não a espera do app inteiro.
     let (python, server, _mods, link) = setup(FakeLink::default()).await;
@@ -192,7 +205,7 @@ async fn stuck_mod_is_cut_before_the_app_gives_up_and_frees_the_turn() {
 
 #[tokio::test]
 async fn show_and_input_validate_and_answer() {
-    let (_python, server, _mods, link) = setup(FakeLink::default()).await;
+    let (python, server, _mods, link) = setup(FakeLink::default()).await;
     assert_eq!(post(server, "s", "show", json!({"site": "painel"}), Some(OWNER)).await, (200, json!({"ok": true, "shown_id": "painel"})));
     assert_eq!(post(server, "s", "input", json!({"site": "painel", "key": "V18-campo", "kind": "submit", "value": "olá"}), Some(OWNER)).await,
         (200, json!({"ok": true, "value": "olá"})));
@@ -202,6 +215,8 @@ async fn show_and_input_validate_and_answer() {
                 json!({"site": "", "key": "k", "kind": "change", "value": ""})] {
         assert_eq!(post(server, "s", "input", bad, Some(OWNER)).await.0, 422);
     }
+    // Corpo inválido é recusado antes da vez e da guarda: só os dois pedidos válidos a consultaram.
+    assert_eq!(python.transfer_calls(), 2);
     assert_eq!(*link.calls.lock().unwrap(), vec![
         ModsCall::Show { site: "painel".into() },
         ModsCall::Input { site: "painel".into(), key: "V18-campo".into(), submit: true, value: "olá".into() }]);

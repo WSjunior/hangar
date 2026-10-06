@@ -50,6 +50,8 @@ pub struct Fake {
     transfer: Mutex<Option<StatusCode>>,
     /// Demora da guarda antes de responder, para o Rust ver o silêncio dela.
     transfer_delay: Mutex<Duration>,
+    /// Corpo cru que substitui o da guarda (o 409 do Python sem o `detail`).
+    transfer_body: Mutex<Option<String>>,
     transfer_calls: AtomicUsize,
 }
 
@@ -94,6 +96,10 @@ impl Fake {
     pub fn set_transfer_delay(&self, delay: Duration) {
         *self.transfer_delay.lock().unwrap() = delay;
     }
+    /// A guarda responde este corpo cru, com o status de `set_transfer`.
+    pub fn set_transfer_body(&self, body: Option<&str>) {
+        *self.transfer_body.lock().unwrap() = body.map(str::to_owned);
+    }
     /// Quantas vezes o Rust perguntou à guarda.
     pub fn transfer_calls(&self) -> usize {
         self.transfer_calls.load(SeqCst)
@@ -119,6 +125,7 @@ pub async fn spawn_fake() -> (Arc<Fake>, SocketAddr) {
         list_facts_last: Mutex::new(Value::Null),
         transfer: Mutex::default(),
         transfer_delay: Mutex::default(),
+        transfer_body: Mutex::default(),
         transfer_calls: AtomicUsize::new(0),
     });
     let app = Router::new()
@@ -185,6 +192,9 @@ async fn fake_transfer(State(f): State<Arc<Fake>>, headers: HeaderMap) -> Respon
     let delay = *f.transfer_delay.lock().unwrap();
     tokio::time::sleep(delay).await;
     let answer = *f.transfer.lock().unwrap();
+    if let Some(raw) = f.transfer_body.lock().unwrap().clone() {
+        return Response::builder().status(answer.unwrap_or(StatusCode::OK)).body(Body::from(raw)).unwrap();
+    }
     let body = match answer {
         None => json!({"ok": true}),
         Some(StatusCode::CONFLICT) => json!({"detail": {"code": "session_transfer_busy",

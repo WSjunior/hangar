@@ -917,7 +917,7 @@ mod tests {
         fn run(&self, op: &str, server: &str) -> Result<(), Failure> {
             self.calls.borrow_mut().push(format!("{op} {server}"));
             match self.fail.iter().find(|(o, s, _)| *o == op && *s == server) {
-                Some((_, _, status)) => Err(Failure { status: Some(*status), detail: "boom".into(), retry_after: None, uncertain: false }),
+                Some((_, _, status)) => Err(Failure { status: Some(*status), detail: "boom".into(), retry_after: None, uncertain: false, code: None }),
                 None => Ok(()),
             }
         }
@@ -932,7 +932,7 @@ mod tests {
         async fn put_hub(&self, _: &GuestAdmin, servers: Value) -> Result<(), Failure> {
             *self.hub.borrow_mut() = Some(servers);
             match self.hub_fails {
-                Some(status) => Err(Failure { status: Some(status), detail: "boom".into(), retry_after: None, uncertain: false }),
+                Some(status) => Err(Failure { status: Some(status), detail: "boom".into(), retry_after: None, uncertain: false, code: None }),
                 None => Ok(()),
             }
         }

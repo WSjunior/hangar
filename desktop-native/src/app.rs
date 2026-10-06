@@ -966,23 +966,32 @@ impl Hangar {
         if error.status.is_none() && error.uncertain { tr("connection_failed") } else { Self::failure(error) }
     }
 
-    /// Clique num botão de mod: a recusa do backend (409) diz o motivo dela; sem resposta ou 5xx não é entrega de mensagem,
-    /// e a frase de reenviar enganaria.
+    /// Falha numa rota de mod. Recusa com código `erro_mod_*` que o app traduz (o mesmo critério do `failure_detail`) vale
+    /// em qualquer status, inclusive o 503 do dono único (`erro_mod_guarda_indisponivel`): o `detail` já é a frase dela.
+    /// Sem esse código, sem resposta ou 5xx é a frase `generic` do app, e a recusa (4xx) diz o motivo dela.
+    fn plugin_failure(error: &Failure, generic: impl FnOnce() -> String) -> String {
+        let known = error.code.as_deref()
+            .is_some_and(|code| code.starts_with("erro_mod_") && crate::i18n::tr_web(code, &HashMap::new()).is_some());
+        if known { error.detail.clone() }
+        else if error.status.is_none_or(|status| status >= 500) { generic() }
+        else { Self::failure(error) }
+    }
+
+    /// Clique num botão de mod: sem resposta ou 5xx não é entrega de mensagem, e a frase de reenviar enganaria.
     fn press_failure(error: &Failure) -> String {
-        if error.status.is_none_or(|status| status >= 500) { tr("plugin_press_failed") } else { Self::failure(error) }
+        Self::plugin_failure(error, || tr("plugin_press_failed"))
     }
 
-    /// Digitação num campo de mod que não chegou: sem resposta ou 5xx, a frase do app (a mesma do web); a recusa (4xx)
-    /// diz o motivo dela.
+    /// Digitação num campo de mod que não chegou: a frase genérica é a mesma do web.
     fn input_failure(error: &Failure) -> String {
-        if error.status.is_none_or(|status| status >= 500) { tr_shared("plugin_input_falhou", &[]) } else { Self::failure(error) }
+        Self::plugin_failure(error, || tr_shared("plugin_input_falhou", &[]))
     }
 
-    /// Troca de aba recusada. Servidor sem a rota (404 ou 405) é servidor antigo, não erro: a troca local já valeu. Sem
-    /// resposta ou 5xx, a frase da troca de aba (a mesma do web); a recusa (4xx) diz o motivo dela.
+    /// Troca de aba recusada. Servidor sem a rota (404 ou 405) é servidor antigo, não erro: a troca local já valeu. A frase
+    /// genérica é a da troca de aba do web.
     fn show_failure(error: &Failure) -> Option<String> {
         if matches!(error.status, Some(404 | 405)) { return None; }
-        Some(if error.status.is_none_or(|status| status >= 500) { tr_shared("plugin_aba_falhou", &[]) } else { Self::failure(error) })
+        Some(Self::plugin_failure(error, || tr_shared("plugin_aba_falhou", &[])))
     }
 
     fn selected_key(&self) -> Option<SessionKey> {
@@ -6312,7 +6321,7 @@ mod tests {
     #[test]
     fn plugin_show_404_is_an_older_server_not_an_error() {
         use super::{Failure, Hangar};
-        let failure = |status| Failure { status, detail: "x".into(), retry_after: None, uncertain: false };
+        let failure = |status| Failure { status, detail: "x".into(), retry_after: None, uncertain: false, code: None };
         assert_eq!(Hangar::show_failure(&failure(Some(404))), None);
         assert_eq!(Hangar::show_failure(&failure(Some(405))), None);
         assert_eq!(Hangar::show_failure(&failure(Some(409))), Some(Hangar::failure(&failure(Some(409)))));
@@ -6326,7 +6335,7 @@ mod tests {
     fn mod_field_failure_without_an_answer_or_with_5xx_is_the_app_phrase() {
         use super::{Failure, Hangar};
         use crate::i18n::tr_shared;
-        let failure = |status| Failure { status, detail: "x".into(), retry_after: None, uncertain: true };
+        let failure = |status| Failure { status, detail: "x".into(), retry_after: None, uncertain: true, code: None };
         assert_eq!(Hangar::input_failure(&failure(None)), tr_shared("plugin_input_falhou", &[]));
         assert_eq!(Hangar::input_failure(&failure(Some(502))), tr_shared("plugin_input_falhou", &[]));
         // A recusa traz o motivo, como no clique.
@@ -6335,9 +6344,31 @@ mod tests {
     }
 
     #[test]
+    fn mod_refusal_with_a_known_code_uses_its_sentence_at_any_status() {
+        use super::{Failure, Hangar};
+        use crate::i18n::{tr_shared, tr_web};
+        use std::collections::HashMap;
+        // 503 do dono único com `erro_mod_guarda_indisponivel`: o `detail` já é a frase dele, nos três pedidos de mod.
+        let sentence = tr_web("erro_mod_guarda_indisponivel", &HashMap::new()).unwrap();
+        let guard = Failure { status: Some(503), detail: sentence.clone(), retry_after: None, uncertain: true,
+            code: Some("erro_mod_guarda_indisponivel".into()) };
+        assert_eq!(Hangar::show_failure(&guard), Some(sentence.clone()));
+        assert_eq!(Hangar::input_failure(&guard), sentence);
+        assert_eq!(Hangar::press_failure(&guard), sentence);
+        // 500 sem código: a frase genérica de cada um.
+        let bare = Failure { status: Some(500), detail: "HTTP 500".into(), retry_after: None, uncertain: true, code: None };
+        assert_eq!(Hangar::show_failure(&bare), Some(tr_shared("plugin_aba_falhou", &[])));
+        assert_eq!(Hangar::input_failure(&bare), tr_shared("plugin_input_falhou", &[]));
+        assert_eq!(Hangar::press_failure(&bare), tr("plugin_press_failed"));
+        // Código que o app não conhece não vale como frase: 5xx com ele segue a genérica.
+        let unknown = Failure { code: Some("internal_info".into()), ..bare };
+        assert_eq!(Hangar::show_failure(&unknown), Some(tr_shared("plugin_aba_falhou", &[])));
+    }
+
+    #[test]
     fn mod_click_failure_is_not_a_message_delivery() {
         use super::{Failure, Hangar};
-        let failure = |status| Failure { status, detail: "x".into(), retry_after: None, uncertain: true };
+        let failure = |status| Failure { status, detail: "x".into(), retry_after: None, uncertain: true, code: None };
         assert_eq!(Hangar::press_failure(&failure(Some(500))), tr("plugin_press_failed"));
         assert_eq!(Hangar::press_failure(&failure(None)), tr("plugin_press_failed"));
         assert_eq!(Hangar::press_failure(&failure(Some(409))), Hangar::failure(&failure(Some(409))));
@@ -6390,7 +6421,7 @@ mod tests {
     #[test]
     fn orq_texts_come_from_the_web_keys() {
         use crate::{api::Failure, i18n::tr_shared};
-        let refused = Failure { status: Some(409), detail: "erro_sessao_orq".into(), retry_after: None, uncertain: false };
+        let refused = Failure { status: Some(409), detail: "erro_sessao_orq".into(), retry_after: None, uncertain: false, code: None };
         assert_eq!(super::Hangar::failure(&refused), "O orquestrador não recebe mensagens; fale com o árbitro.");
         assert_eq!(tr_shared("orq_row_badge", &[]), "Orquestrador · sem LLM");
         assert_eq!(tr_shared("orq_talk_to_arbiter", &[]), "Falar com o árbitro");

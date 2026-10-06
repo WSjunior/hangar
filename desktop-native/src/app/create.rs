@@ -2728,7 +2728,7 @@ mod tests {
     #[test]
     fn transfer_errors_keep_recovery_code_and_backend_reason() {
         for code in ["session_transfer_restore_failed", "session_transfer_source_changed"] {
-            let error = Failure { status: Some(409), detail: format!("{code}: backend reason"), retry_after: None, uncertain: false };
+            let error = Failure { status: Some(409), detail: format!("{code}: backend reason"), retry_after: None, uncertain: false, code: None };
             let text = super::transfer_failure(&error);
             assert!(text.starts_with(&tr(code)));
             assert!(text.ends_with("backend reason"));
@@ -2820,7 +2820,7 @@ mod tests {
 
     #[test]
     fn checkout_hides_only_unsupported_or_non_git_and_rejects_old_folders() {
-        let failure = |status, detail: &str| Err(Failure { status: Some(status), detail: detail.into(), retry_after: None, uncertain: false });
+        let failure = |status, detail: &str| Err(Failure { status: Some(status), detail: detail.into(), retry_after: None, uncertain: false, code: None });
         assert!(super::checkout_of(failure(404, "Not Found")).unwrap().is_none());
         assert!(super::checkout_of(failure(409, "fatal: not a git repository (or any of the parent directories): .git")).unwrap().is_none());
         assert_eq!(super::checkout_of(failure(409, "fatal: bad config")).unwrap_err(), "fatal: bad config");
@@ -2879,7 +2879,7 @@ mod tests {
 
     #[test]
     fn scan_refusals_become_the_reason_and_not_a_list() {
-        let refused = |status| Err(Failure { status: Some(status), detail: "x".into(), retry_after: None, uncertain: false });
+        let refused = |status| Err(Failure { status: Some(status), detail: "x".into(), retry_after: None, uncertain: false, code: None });
         for (status, key) in [(400, "create_scan_invalid"), (403, "create_scan_root"), (404, "create_scan_missing"), (500, "create_scan_failed")] {
             let scan = scan_of(refused(status)).ok().unwrap();
             assert!(scan.entries.is_empty());
