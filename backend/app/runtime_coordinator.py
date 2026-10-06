@@ -699,12 +699,20 @@ class RuntimeCoordinator:
                     if fresh is None or fresh.key != binding.key:
                         self.slots[binding.key] = Slot(binding=binding)
                         if fresh is None:
+                            from app import diag, tmux
+                            exists = await asyncio.to_thread(tmux.sessao_existe, binding.name)
+                            born = await asyncio.to_thread(tmux.session_created, binding.name) if exists else 0.0
+                            # Sessão tmux de outra vida com o mesmo nome (fechada e recriada, até em
+                            # outro provedor): o registro morto não reserva o nome, senão a nova fica sem dados.
+                            recorded = binding.meta["terminal"].get("created")
+                            if born and recorded and born != recorded:
+                                diag.registrar("runtime.stale_terminal_record", "ok", sessao=binding.name)
+                                continue
                             self.slots[binding.key].awaiting_identity = True
                             self.names.setdefault(binding.name, binding.key)
-                            from app import diag, tmux
                             # Sem sessão tmux com o nome é sessão fechada (o estado da fila fica no
                             # disco); falha é haver sessão sem vínculo provado, ou o tmux não responder.
-                            if await asyncio.to_thread(tmux.sessao_existe, binding.name) is not False:
+                            if exists is not False:
                                 diag.registrar("runtime.registration_failed", "erro", sessao=binding.name, codigo="terminal_binding")
                             continue
                     else:
