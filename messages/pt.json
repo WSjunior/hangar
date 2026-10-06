@@ -956,6 +956,8 @@
   "problema_runtime_falhou": "O runtime da sessão falhou",
   "problema_headless_sem_login": "Esta conta não está logada no Claude — abra um terminal e rode `claude /login` uma vez (com a mesma conta); depois é só mandar o prompt de novo",
   "problema_terminal_observacao_falhou": "Observação do terminal indisponível",
+  "problema_state_facts_unavailable": "Estado talvez velho: o servidor não respondeu o que o plugin da sessão disse",
+  "problema_permission_observe_failed": "Não deu para confirmar o modo de permissão desta sessão",
   "problema_terminal_input_composer_busy": "A mensagem está esperando: o campo de digitação do terminal tem texto",
   "problema_terminal_input_composer_unreadable": "A mensagem está esperando: não deu para ler o campo de digitação do terminal",
   "problema_terminal_input_capture_failed": "A mensagem está esperando: a leitura da tela do terminal falhou",
