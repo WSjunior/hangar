@@ -18,6 +18,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `-Update` só sem UAC (já admin); senão vira pendência com o comando.
 - **Instalador guiado: duas perguntas, o resto é padrão.** Sem terminal, tudo é NÃO. O log nunca
   carrega o token.
+- **O instalador exige UM agente de código, não o Claude Code.** Usa os que já existem; nenhum →
+  instala o Claude Code (o padrão). `--agentes=`/`-Agentes` e o `--avancado` escolhem; o comando
+  dos que não são o Claude sai de `app/harness_commands.py`, a mesma tabela do painel de
+  Harnesses. Ver [a entrada](#o-instalador-exige-um-agente-de-código-não-o-claude-code).
 - **Atualizar pelo app faz tudo sozinho, mas nada é irreversível**: resgate antes de qualquer
   passo destrutivo, com a ref conferida. Passo só entra no registro depois da prova passar, e o
   registro é do que JÁ RODOU aqui — não do intervalo de commits.
@@ -423,3 +427,20 @@ Agora o registrador remove o bloco marcado, confere pelo `tomllib` se o app já 
 com a mesma URL e o mesmo token (nada a fazer) e, senão, tira toda seção `[mcp_servers.hangar…]`
 antes de anexar o bloco marcado — idempotente contra a reescrita do app e autocorretivo num
 arquivo já duplicado. Teste em `scripts/test_registrar_mcp.py`.
+
+## O instalador exige um agente de código, não o Claude Code
+
+(06/10/2026) O `install.sh` e o `install.ps1` tinham o Claude Code como dependência obrigatória
+do passo 1/8: sem ele a instalação parava em "faltam: Claude Code", mesmo para quem só usa Codex.
+O Codex era só verificado e Pi, omp e Kimi nem isso. O pedido foi: o Claude continua o padrão,
+mas não pode ser o único, e tem que haver pelo menos um agente.
+
+Sem a opção, a escolha sai do disco e não vira pergunta nova, porque o guiado mantém as duas
+perguntas: os agentes que já existem bastam, e só sem nenhum o Claude Code é instalado.
+`--agentes=`/`-Agentes` e o `--avancado` escolhem explicitamente. O Claude segue pelo caminho
+próprio (no Windows o `Instale-ClaudeCode` conserta o PATH que o instalador da Anthropic não
+põe). Os outros rodam no 2/8, já com o venv, por `python -m app.harness_commands <cli>`: um
+módulo só com biblioteca padrão para o instalador não carregar o backend inteiro, e que o painel
+de Harnesses também lê, para o comando conferido de cada fornecedor morar num lugar só. Kimi no
+Windows não tem comando conferido e vira pendência com o link. A prova do 2/8 é ter algum agente
+no PATH; o `hangar-doctor` só dá erro quando não há nenhum.

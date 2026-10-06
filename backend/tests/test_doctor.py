@@ -95,6 +95,23 @@ def test_erro_sai_um_e_aviso_nao(monkeypatch, capsys):
     assert "aviso(s)" in saida and "nada quebrado" in saida
 
 
+def test_so_codex_sem_claude_nao_e_erro(monkeypatch):
+    _tudo_ok(monkeypatch)
+    monkeypatch.setattr(doctor, "_binario", lambda nome: None if nome == "claude" else "/usr/bin/x")
+    linhas = doctor.diagnosticar(_settings())
+    assert not [l for l in linhas if l.nivel == "erro"]
+    agentes = next(l for l in linhas if "agentes de código" in l.titulo)
+    assert agentes.nivel == "ok" and "Codex" in agentes.titulo
+
+
+def test_nenhum_agente_e_erro(monkeypatch):
+    _tudo_ok(monkeypatch)
+    sem = {"claude", "codex", "pi", "omp", "kimi"}
+    monkeypatch.setattr(doctor, "_binario", lambda nome: None if nome in sem else "/usr/bin/x")
+    linha = next(l for l in doctor.diagnosticar(_settings()) if "nenhum agente" in l.titulo)
+    assert linha.nivel == "erro" and "claude.ai/install" in linha.conserto
+
+
 def test_ascii_para_o_console_do_windows():
     assert doctor._ascii("endereço — não") == "endereco - nao"
 

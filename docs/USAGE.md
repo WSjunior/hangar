@@ -11,7 +11,8 @@ como PWA e operar o chat. Pra arquitetura/API ver o [README](../README.md).
 
 ## 1. Pré-requisitos
 
-- `tmux`, `claude` (Claude Code), Python 3.14 + [`uv`](https://docs.astral.sh/uv/), Node 20+.
+- `tmux`, Python 3.14 + [`uv`](https://docs.astral.sh/uv/), Node 20+.
+- Pelo menos um agente de código: Claude Code (o padrão), Codex, Pi, omp ou Kimi Code.
 - Celular na **mesma rede** do PC (Wi-Fi) **ou** ambos no **mesmo tailnet** (Tailscale).
 
 **Instalar é uma linha só** — ela clona o repositório em `~/hangar` e chama o instalador:
@@ -78,6 +79,10 @@ verifica a resposta HTTP a cada cinco minutos e recupera travamentos, respeitand
 e a atualização. Fechar o Electron não encerra o backend; ainda é necessário estar logado.
 Quer escolher cada extra? No checkout: `./install.sh --avancado` / `.\install.ps1 -Avancado`
 (o `bootstrap.ps1` não repassa argumentos; o `bootstrap.sh` aceita `bash -s -- --avancado`).
+Agentes de código: o instalador usa os que já estão no computador e só instala o Claude Code
+quando não acha nenhum. Para escolher: `./install.sh --agentes=codex,pi` /
+`.\install.ps1 -Agentes codex,pi` (aceita `claude`, `codex`, `pi`, `omp` e `kimi`); o
+`--avancado` também pergunta. Os outros se instalam depois pelo painel Harnesses do app.
 Algo não abriu? `hangar-doctor` diz o que falta e como consertar.
 
 ### hangar-doctor
@@ -90,7 +95,7 @@ falha:
 - token de acesso definido
 - Hangar respondendo na porta configurada
 - multiplexador de terminal (tmux) no PATH
-- Claude Code instalado e logado
+- pelo menos um agente de código; com o Claude Code instalado, ele precisa estar logado
 - Tailscale: instalado / logado / publicado (três estados — cada um falha sozinho: pode
   estar instalado e sem login, ou logado e sem o `serve` publicado)
 - endereço da rede local responde (celular no mesmo Wi-Fi)

@@ -11,6 +11,7 @@
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -SoChecar  # so diz o que falta
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -Update    # re-aplica o que o git pull nao atualiza
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -Avancado  # volta a perguntar tudo
+#   powershell -ExecutionPolicy Bypass -File install.ps1 -Agentes codex,pi  # claude, codex, pi, omp, kimi
 #
 # Espelha o install.sh do Linux. Escrito pra Windows PowerShell 5.1 (o que vem no Windows):
 # nada de operador ternario nem API de .NET Core, senao quebra em quem nao instalou o PS 7.
@@ -19,8 +20,23 @@
 # agendada - e nao toca em nada que peca decisao ou elevacao: sem instalar dependencia, sem
 # token, sem firewall, sem Tailscale. Um hook que trava pedindo confirmacao no meio de um pull
 # e pior que hook nenhum.
-param([switch]$Sim, [switch]$SoChecar, [switch]$Update, [switch]$Avancado)
+param([switch]$Sim, [switch]$SoChecar, [switch]$Update, [switch]$Avancado, [string]$Agentes)
 if ($Update) { $Sim = $true }
+
+# O Hangar pilota agentes de codigo e precisa de pelo menos um; o Claude Code e o padrao, nao o unico.
+$todosAgentes = @('claude', 'codex', 'pi', 'omp', 'kimi')
+$nomesAgentes = @{ claude = 'Claude Code'; codex = 'Codex'; pi = 'Pi'; omp = 'omp'; kimi = 'Kimi Code' }
+function Lista-Agentes($texto) {
+    # Virgula ou espaco: chamado de dentro do PowerShell, `-Agentes codex,pi` chega como "codex pi".
+    $lista = @("$texto" -split '[,\s]+' | Where-Object { $_ })
+    if ($lista.Count -eq 0 -or @($lista | Where-Object { $todosAgentes -notcontains $_ }).Count) { return $null }
+    return ,$lista
+}
+$listaAgentes = @()
+if ($Agentes) {
+    $listaAgentes = Lista-Agentes $Agentes
+    if (-not $listaAgentes) { Write-Host "-Agentes aceita, separados por virgula: $($todosAgentes -join ', ')"; exit 1 }
+}
 
 $ErrorActionPreference = 'Stop'
 $raiz = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -434,7 +450,7 @@ function Instale($rotulo, $cmd, $id, $porque) {
     return $false
 }
 
-function Instale-ClaudeCode {
+function Instale-ClaudeCode($porque) {
     # NAO vai por winget. O pacote 'Anthropic.ClaudeCode' de la depende de alguem atualizar o
     # manifesto da comunidade, e fica pra tras das versoes que a Anthropic publica - o usuario
     # instalava e ja nascia velho. O instalador oficial baixa do canal de releases deles, confere
@@ -449,7 +465,7 @@ function Instale-ClaudeCode {
     # pro hangar-send).
     $rotulo = 'Claude Code'
     if (Tem 'claude') { Ok $rotulo; return $true }
-    if ($SoChecar) { Falta "$rotulo - e o que o app pilota"; $script:pendencias += $rotulo; return $false }
+    if ($SoChecar) { Falta "$rotulo - $porque"; $script:pendencias += $rotulo; return $false }
     if ($Update)   { Erro "$rotulo faltando (-Update nao instala dependencia)"; $script:pendencias += $rotulo; return $false }
 
     Write-Host '  .. instalando Claude Code (instalador oficial da Anthropic)'
@@ -711,7 +727,35 @@ if ($Update -and (Tem 'tailscale')) { $script:querTailscale = $true }
 # -- 1/8 Dependencias obrigatorias -------------------------------------------
 Titulo '1/8 Dependencias'
 Instale 'psmux (multiplexador)' 'psmux'  'marlocarlo.psmux'     'sem ele nao existe sessao' | Out-Null
-Instale-ClaudeCode | Out-Null
+$achados = @($todosAgentes | Where-Object { Tem $_ })
+# So o -Avancado pergunta: o guiado tem duas perguntas e decide o resto pelo que ja esta no disco.
+if (-not $Agentes -and $Avancado -and $script:Interativo -and -not $Update -and -not $SoChecar) {
+    $padrao = if ($achados.Count) { $achados -join ',' } else { 'claude' }
+    Write-Host "  Quais agentes de codigo voce vai usar? ($($todosAgentes -join ', '); separe por virgula)"
+    while ($true) {
+        $r = Read-Host "  Agentes [$padrao]"
+        if (-not $r) { $r = $padrao }
+        $listaAgentes = Lista-Agentes $r
+        if ($listaAgentes) { break }
+        Erro "nao conheco algum desses - use: $($todosAgentes -join ', ')"
+    }
+}
+# Escolhidos que faltam e nao sao o Claude: o comando oficial deles roda no 2/8, com o backend
+# pronto, pela mesma tabela do painel de Harnesses (backend\app\harness_commands.py).
+$script:agentesNovos = @()
+if ($listaAgentes.Count) {
+    foreach ($a in $listaAgentes) {
+        if ($a -eq 'claude') { Instale-ClaudeCode 'agente escolhido' | Out-Null }
+        elseif (Tem $a) { Ok $nomesAgentes[$a] }
+        elseif ($SoChecar -or $Update) { Falta "$($nomesAgentes[$a]) - agente escolhido"; $script:pendencias += $nomesAgentes[$a] }
+        else { $script:agentesNovos += $a; Nota "$($nomesAgentes[$a]): instalado no passo 2/8" }
+    }
+} elseif ($achados.Count) {
+    foreach ($a in $achados) { Ok $nomesAgentes[$a] }
+    if (-not (Tem 'claude')) { Nota 'Claude Code nao e obrigatorio; para instalar: install.ps1 -Agentes claude' }
+} else {
+    Instale-ClaudeCode 'nenhum agente de codigo encontrado; o Claude Code e o padrao' | Out-Null
+}
 Instale 'Python'                'py'     'Python.Python.3.14'   'o backend e Python'        | Out-Null
 # 3.14, nao 3.13: backend/pyproject.toml exige >=3.14 (e .python-version = 3.14). Com o 3.13 o
 # `uv sync` ate funcionava - baixava um 3.14 gerenciado por conta propria - mas o Python do winget
@@ -848,7 +892,22 @@ $rcSync = Nativo uv sync --quiet
 if ($rcSync -ne 0) { Pop-Location; Pare 'uv sync falhou - o backend ficou sem as dependencias' @('rodar na mao:  cd backend ; uv sync') }
 Ok 'dependencias instaladas'
 Nota 'psutil entra aqui: no Windows nao ha /proc pra ler informacao de processo'
+$pyVenvAgentes = Join-Path $raiz 'backend\.venv\Scripts\python.exe'
+foreach ($a in $script:agentesNovos) {
+    $nome = $nomesAgentes[$a]
+    Write-Host "  .. instalando $nome"
+    $rcAgente = Nativo $pyVenvAgentes -m app.harness_commands $a
+    Atualiza-Path
+    if ($rcAgente -eq 0 -and (Tem $a)) { Ok "$nome instalado" }
+    elseif ($rcAgente -eq 0) { Falta "$nome instalou, mas o comando $a nao aparece no PATH - abra outro terminal e rode o instalador de novo"; $script:pendencias += $nome }
+    elseif ($rcAgente -eq 2) { Falta "$nome nao tem instalador conferido para Windows - veja o painel Harnesses do app"; $script:pendencias += $nome }
+    else { Falta "$nome nao instalou (exit $rcAgente) - instale pelo painel Harnesses do app"; $script:pendencias += $nome }
+}
 Pop-Location
+# Prova do minimo: sem nenhum agente o app abre, mas nao tem o que pilotar.
+if (-not @($todosAgentes | Where-Object { Tem $_ }).Count) {
+    Pare 'nenhum agente de codigo instalado - o Hangar precisa de pelo menos um' @('powershell -ExecutionPolicy Bypass -File install.ps1 -Agentes claude')
+}
 
 # -- 3/8 Token de acesso -----------------------------------------------------
 Titulo '3/8 Token de acesso'
@@ -2573,10 +2632,12 @@ $urlCel = if ($script:cpPublicUrl) { $script:cpPublicUrl } else { "http://127.0.
 if ($qrMostrado) { $linha2 = "No celular: leia o QR acima (ou abra $urlCel e digite o token)." }
 elseif ($script:cpPublicUrl) { $linha2 = "No celular: abra $urlCel e digite o token." }
 else { $linha2 = "Neste PC: abra $urlCel. Pro celular entrar, veja 'acesso pelo celular' no guia." }
+$primeiroAgente = @($todosAgentes | Where-Object { Tem $_ }) | Select-Object -First 1
+if (-not $primeiroAgente) { $primeiroAgente = 'claude' }
 Write-Host @"
 
   O QUE FAZER AGORA
-   1. No PC: abra um terminal, digite  claude  e faca o login (so na primeira vez).
+   1. No PC: abra um terminal, digite  $primeiroAgente  e faca o login (so na primeira vez).
    2. $linha2
 "@
 if ($script:querTailscale -and -not $Update) { Write-Host '   3. No celular: instale o app Tailscale e entre com a MESMA conta do PC.' }

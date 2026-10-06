@@ -5,6 +5,7 @@
 #   ./install.sh --yes        # aceita tudo (não pergunta nada)
 #   ./install.sh --check      # só diz o que falta e sai, sem instalar nada
 #   ./install.sh --avancado   # pergunta cada extra (o padrão instala o recomendado sem perguntar)
+#   ./install.sh --agentes=codex,pi   # agentes de código a instalar (claude, codex, pi, omp, kimi)
 #   ./install.sh --update        # re-aplica só o que um `git pull` não atualiza sozinho
 #   ./install.sh --no-frontend   # só o backend (o PWA já roda noutro lugar)
 #   ./install.sh --no-wrapper --no-services --no-hangar-send --no-panel   # pula partes
@@ -15,12 +16,13 @@ set -euo pipefail
 cd "$(dirname "$0")"
 REPO=$(pwd)
 
-YES=0; CHECK=0; UPDATE=0; WRAPPER=1; SERVICES=1; CPSEND=1; PANEL=1; FRONTEND=1; AVANCADO=0
+YES=0; CHECK=0; UPDATE=0; WRAPPER=1; SERVICES=1; CPSEND=1; PANEL=1; FRONTEND=1; AVANCADO=0; AGENTES=''
 for arg in "$@"; do
   case "$arg" in
     --yes|-y)      YES=1 ;;
     --check)       CHECK=1 ;;
     --avancado)    AVANCADO=1 ;;
+    --agentes=*)   AGENTES=${arg#--agentes=} ;;
     # --update: modo do hook post-merge. Re-aplica o que o `git pull` NÃO atualiza (units com
     # caminho cravado, o bloco de protocolo no ~/.claude/CLAUDE.md, deps do backend, build do
     # front) e NÃO toca em nada que peça senha ou decisão: sem instalar dependência, sem token,
@@ -36,6 +38,20 @@ for arg in "$@"; do
     *) echo "flag desconhecida: $arg"; exit 1 ;;
   esac
 done
+
+# O Hangar pilota agentes de código e precisa de pelo menos um; o Claude Code é o padrão, não o único.
+TODOS_AGENTES="claude codex pi omp kimi"
+nome_agente() {
+  case $1 in claude) echo "Claude Code" ;; codex) echo "Codex" ;; pi) echo "Pi" ;; omp) echo "omp" ;; kimi) echo "Kimi Code" ;; esac
+}
+agentes_validos() { # agentes_validos <lista separada por vírgula>: 0 = todos conhecidos e não vazia
+  local a lista=${1//,/ }
+  [ -n "${lista// /}" ] || return 1
+  for a in $lista; do case " $TODOS_AGENTES " in *" $a "*) ;; *) return 1 ;; esac; done
+}
+if [ -n "$AGENTES" ] && ! agentes_validos "$AGENTES"; then
+  echo "--agentes aceita, separados por vírgula: ${TODOS_AGENTES// /, }"; exit 1
+fi
 
 say() {
   # Título numerado ("3/8 ...") ganha a barra de progresso; os demais seguem só em negrito.
@@ -262,7 +278,42 @@ precisa_root() { # precisa_root <rótulo> <cmd> <pacote> <pra quê>
 [ "$UPDATE" = 1 ] && say "Modo --update: só o que um git pull não atualiza sozinho" || true
 say "1/8 Dependências"
 precisa_root "tmux"        tmux   tmux 'sem ele não existe sessão' || true
-precisa_home "Claude Code" claude 'curl -fsSL https://claude.ai/install.sh | bash' 'é o que o app pilota' || true
+CLAUDE_INSTALL='curl -fsSL https://claude.ai/install.sh | bash'
+ACHADOS=''
+for a in $TODOS_AGENTES; do command -v "$a" >/dev/null && ACHADOS="$ACHADOS $a"; done
+# Só o --avancado pergunta: o guiado tem duas perguntas e decide o resto pelo que já está no disco.
+if [ -z "$AGENTES" ] && [ "$AVANCADO" = 1 ] && [ "$TEM_TTY" = 1 ] && [ "$UPDATE" = 0 ] && [ "$CHECK" = 0 ]; then
+  PADRAO_AGENTES=$(echo ${ACHADOS:-claude} | tr ' ' ',')
+  echo "  Quais agentes de código você vai usar? (${TODOS_AGENTES// /, }; separe por vírgula)"
+  while :; do
+    printf '  Agentes [%s]: ' "$PADRAO_AGENTES"
+    read -r AGENTES <&3 || AGENTES=''
+    AGENTES=${AGENTES// /}; AGENTES=${AGENTES:-$PADRAO_AGENTES}
+    agentes_validos "$AGENTES" && break
+    erro "não conheço algum desses — use: ${TODOS_AGENTES// /, }"
+  done
+fi
+# Escolhidos que faltam e não são o Claude: o comando oficial deles roda no 2/8, com o backend
+# pronto, pela mesma tabela do painel de Harnesses (backend/app/harness_commands.py).
+AGENTES_NOVOS=''
+if [ -n "$AGENTES" ]; then
+  for a in ${AGENTES//,/ }; do
+    if [ "$a" = claude ]; then
+      precisa_home "Claude Code" claude "$CLAUDE_INSTALL" 'agente escolhido' || true
+    elif command -v "$a" >/dev/null; then
+      ok "$(nome_agente "$a")"
+    elif [ "$CHECK" = 1 ] || [ "$UPDATE" = 1 ]; then
+      falta "$(nome_agente "$a") — agente escolhido"; PENDENTE+=("$(nome_agente "$a")")
+    else
+      AGENTES_NOVOS="$AGENTES_NOVOS $a"; nota "$(nome_agente "$a"): instalado no passo 2/8"
+    fi
+  done
+elif [ -n "$ACHADOS" ]; then
+  for a in $ACHADOS; do ok "$(nome_agente "$a")"; done
+  command -v claude >/dev/null || nota "Claude Code não é obrigatório; para instalar: ./install.sh --agentes=claude"
+else
+  precisa_home "Claude Code" claude "$CLAUDE_INSTALL" 'nenhum agente de código encontrado; o Claude Code é o padrão' || true
+fi
 precisa_home "uv"          uv     'curl -LsSf https://astral.sh/uv/install.sh | sh' 'gerencia o venv do backend' || true
 if [ "$FRONTEND" = 0 ]; then
   ok "Node: dispensado (--no-frontend)"
@@ -276,12 +327,6 @@ else
   ok "node $(node --version)"
 fi
 
-# Codex é OPCIONAL: o app é primariamente um cockpit de Claude Code. Exigir o binário aqui
-# travava a instalação inteira de quem só usa Claude.
-if command -v codex >/dev/null; then ok "codex"; else
-  falta "codex ausente — sessões Codex indisponíveis, o resto funciona"
-  nota "habilitar depois: https://developers.openai.com/codex/cli"
-fi
 command -v git >/dev/null && ok "git" || falta "git ausente — o painel de git e o chip de branch ficam vazios"
 
 # Tailscale entra aqui, junto das outras dependências: a decisão já foi tomada no passo 0, e o
@@ -318,6 +363,20 @@ say "2/8 Backend"
 (cd backend && uv sync --quiet) || fail "uv sync falhou — o backend ficou sem as dependências"
 ok "dependências instaladas"
 nota "psutil NÃO entra aqui: no Linux existe /proc e ele é mais rápido (ver app/procinfo.py)"
+
+for a in $AGENTES_NOVOS; do
+  if (cd backend && gira "instalando $(nome_agente "$a")" uv run --quiet --no-sync python -m app.harness_commands "$a"); then
+    export PATH="$HOME/.local/bin:$PATH"; hash -r 2>/dev/null || true
+    if command -v "$a" >/dev/null; then ok "$(nome_agente "$a") instalado"
+    else anota_problema "$(nome_agente "$a") instalou, mas o comando $a não aparece no PATH — abra outro terminal e rode ./install.sh de novo"; fi
+  else
+    anota_problema "$(nome_agente "$a") não instalou — instale pelo painel Harnesses do app ou veja a saída acima"
+  fi
+done
+# Prova do mínimo: sem nenhum agente o app abre, mas não tem o que pilotar.
+TEM_AGENTE=0
+for a in $TODOS_AGENTES; do command -v "$a" >/dev/null && TEM_AGENTE=1; done
+[ "$TEM_AGENTE" = 1 ] || fail "nenhum agente de código instalado — o Hangar precisa de pelo menos um (./install.sh --agentes=claude)"
 
 # ── 3/8 Token de acesso ──────────────────────────────────────────────────────
 # O trabalho foi feito no passo 0: token e Tailscale são as DUAS decisões da pessoa, e elas
@@ -774,8 +833,10 @@ fi
 cat <<EOF
 
   O QUE FAZER AGORA
-   1. No PC: abra um terminal, digite  claude  e faça o login (só na primeira vez).
 EOF
+PRIMEIRO_AGENTE=''
+for a in $TODOS_AGENTES; do command -v "$a" >/dev/null && { PRIMEIRO_AGENTE=$a; break; }; done
+echo "   1. No PC: abra um terminal, digite  ${PRIMEIRO_AGENTE:-claude}  e faça o login (só na primeira vez)."
 if [ "$QR_MOSTRADO" = 1 ]; then
   echo "   2. No celular: leia o QR acima (ou abra $URL_FIM e digite o token)."
 else

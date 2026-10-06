@@ -111,7 +111,7 @@ cd hangar
 
 ### Windows PowerShell
 
-Python **3.14+**, Node 20+, Git, `uv`, and the current Claude Code CLI are required. The Windows installer uses psmux as the tmux-compatible multiplexer.
+Python **3.14+**, Node 20+, Git, `uv`, and at least one coding agent (Claude Code by default, or Codex, Pi, omp, Kimi Code) are required. The Windows installer uses psmux as the tmux-compatible multiplexer.
 
 ```powershell
 irm https://raw.githubusercontent.com/jeffer1312/hangar/main/bootstrap.ps1 | iex
@@ -132,6 +132,8 @@ para usar administrador; no modo comum, pede UAC só para o que precisar. Cria a
 Iniciar e na Área de Trabalho com o ícone do PWA.
 Quer escolher cada extra? No checkout: `./install.sh --avancado` / `.\install.ps1 -Avancado`
 (o `bootstrap.ps1` não repassa argumentos; o `bootstrap.sh` aceita `bash -s -- --avancado`).
+Só Codex, ou outro agente? `./install.sh --agentes=codex` / `.\install.ps1 -Agentes codex`;
+sem a opção, ele usa os agentes que já existem e só instala o Claude Code quando não há nenhum.
 Algo não abriu? `hangar-doctor` diz o que falta e como consertar.
 
 For pairing and PWA installation, see [docs/USAGE.md](docs/USAGE.md).
