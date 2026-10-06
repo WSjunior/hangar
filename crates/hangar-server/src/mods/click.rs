@@ -64,6 +64,8 @@ pub const ACTION_MARGIN: Duration = Duration::from_millis(300);
 pub const UNDO_MAX: Duration = Duration::from_secs(2);
 /// Folga da reserva renovada na limpeza além do tempo que ela cobre: a operação ainda na caixa do executor.
 pub const HOLD_MARGIN: Duration = Duration::from_millis(500);
+/// Distância, em linhas e colunas, até a qual um clique conta como vizinho do anterior (`click_gap_near`).
+const NEAR_CELLS: usize = 2;
 /// Teto de uma volta ao prompt na limpeza: abaixo dos 10 s de cada reserva no executor, com a folga.
 pub const BACK_MAX: Duration = Duration::from_secs(9);
 /// O mais longo que a limpeza segura o pane: a primeira volta ao prompt, as novas tentativas até
@@ -91,13 +93,21 @@ pub struct Limits {
     pub keep_held: Duration,
     pub retry_gap: Duration,
     /// Intervalo mínimo entre dois cliques de mouse no pane: mais perto que isso o Claude Code os toma por
-    /// duplo clique e engole o segundo (medido no tmux: até 250 ms some, a partir de 300 ms funciona).
+    /// duplo clique e engole o segundo (medido no tmux: a 2 células ou mais, até 250 ms some e a partir de
+    /// 300 ms funciona).
     pub click_gap: Duration,
+    /// O intervalo quando o segundo clique cai a até `NEAR_CELLS` do anterior: aí o Claude Code engole até
+    /// 450 ms e aceita a partir de 500 ms. É também o preferido: usado sempre que o prazo comporta.
+    pub click_gap_near: Duration,
+    /// Quanto um passo do anel custa num botão da faixa que não está desenhado: a tela não muda, e o passo
+    /// termina com o `ui.focus` do botão, não com a espera da tela.
+    pub ring_hidden_step: Duration,
     /// Quanto o anel do teclado espera a tela mudar depois de uma tecla (ela aparece em 50 a 60 ms no tmux e
     /// no psmux): a leitura seguinte é repetida até ver a mudança ou até este teto.
     pub key_settle: Duration,
-    /// Quanto um passo do anel do `ctrl+x tab` pode custar: a tecla, a leitura e a espera da tela. Medido no
-    /// psmux em 0,38 a 0,44 s com seis processos por passo; com dois, fica abaixo disso, e o teto guarda folga.
+    /// Quanto um passo do anel do `ctrl+x tab` pode custar: a tecla, a leitura e a espera da tela. Nas provas
+    /// de 06/10/2026 o anel andou a 0,04 s por passo no tmux e a 0,06 a 0,13 s no psmux (com o pane conferido
+    /// uma vez por reserva); o teto guarda folga.
     pub ring_step: Duration,
 }
 
@@ -108,7 +118,8 @@ impl Default for Limits {
             wheel_gap: Duration::from_millis(150), wheel_events: 80, wheel_max: Duration::from_secs(4), scroll_wait: Duration::from_millis(600),
             key_gap: Duration::from_millis(20), focus_wait: Duration::from_millis(500), settle_poll: Duration::from_millis(100),
             settle_max: Duration::from_secs(1), keep_held: Duration::from_secs(10), retry_gap: Duration::from_millis(500),
-            click_gap: Duration::from_millis(350), key_settle: Duration::from_millis(300), ring_step: Duration::from_millis(450) }
+            click_gap: Duration::from_millis(350), click_gap_near: Duration::from_millis(550),
+            ring_hidden_step: Duration::from_millis(200), key_settle: Duration::from_millis(300), ring_step: Duration::from_millis(200) }
     }
 }
 
@@ -118,7 +129,8 @@ impl Limits {
             wheel_gap: Duration::ZERO, wheel_events: 80, wheel_max: Duration::from_secs(2), scroll_wait: Duration::from_millis(50),
             key_gap: Duration::ZERO, focus_wait: Duration::from_millis(100), settle_poll: Duration::from_millis(1),
             settle_max: Duration::from_millis(10), keep_held: Duration::from_millis(100), retry_gap: Duration::from_millis(20),
-            click_gap: Duration::from_millis(20), key_settle: Duration::from_millis(10), ring_step: Duration::from_millis(50) }
+            click_gap: Duration::from_millis(20), click_gap_near: Duration::from_millis(20),
+            ring_hidden_step: Duration::from_millis(20), key_settle: Duration::from_millis(10), ring_step: Duration::from_millis(50) }
     }
 }
 
@@ -164,8 +176,9 @@ pub struct Ctx<'a> {
     /// A vida da sessão que pediu (`Mods::new_life`): o que o clique lê e escreve no registro é só dela, e
     /// a sessão que reabriu com o mesmo nome no meio do clique não recebe nada dele.
     pub life: u64,
-    /// Quando saiu o último clique de mouse neste pane, deste pedido ou de um anterior (`Parts::clicked`).
-    pub clicked: &'a Mutex<Option<Instant>>,
+    /// Quando e onde saiu o último clique de mouse neste pane, deste pedido ou de um anterior
+    /// (`Parts::clicked`).
+    pub clicked: &'a Mutex<Option<(Instant, (usize, usize))>>,
 }
 
 /// O que o app pediu, resolvido no espelho que o plugin mandou.
@@ -252,26 +265,33 @@ impl<'a> Ctx<'a> {
         Ok((screen::read_screen(&ansi, usize::from(f.columns), usize::from(f.rows), titles, anchor), ansi))
     }
     /// `read_known` depois de uma tecla: repete a leitura até a tela mudar em relação a `before`, até
-    /// `key_settle`. Sem a espera, a captura logo depois da tecla ainda pode mostrar a tela de antes.
-    async fn read_after(&self, titles: &[String], anchor: Option<&str>, f: PaneFormats, before: &str) -> Result<(Screen, String), ModsError> {
+    /// `key_settle`. Sem a espera, a captura logo depois da tecla ainda pode mostrar a tela de antes. Com
+    /// `focus_after`, um `ui.focus` mais novo que ele também encerra a espera: num botão da faixa que não está
+    /// desenhado a tela não muda, e o evento é o único sinal de que a tecla chegou.
+    async fn read_after(&self, titles: &[String], anchor: Option<&str>, f: PaneFormats, before: &str, focus_after: Option<u64>) -> Result<(Screen, String), ModsError> {
         let deadline = Instant::now() + self.limits.key_settle;
         loop {
             let (s, ansi) = self.read_known(titles, anchor, f).await?;
-            if ansi != before || Instant::now() >= deadline { return Ok((s, ansi)); }
+            let focused = focus_after.is_some_and(|seq| self.mods.focus_seq(self.name, self.life) > seq);
+            if ansi != before || focused || Instant::now() >= deadline { return Ok((s, ansi)); }
             tokio::time::sleep(self.limits.activate_poll.min(deadline.saturating_duration_since(Instant::now()))).await;
         }
     }
-    /// Clique de mouse, no mínimo `click_gap` depois do anterior no mesmo pane. A espera entra na conta do
+    /// Clique de mouse, depois do anterior no mesmo pane: `click_gap_near` sempre que o prazo comporta, e
+    /// sempre a até `NEAR_CELLS` do anterior; fora disso, ao menos `click_gap`. A espera entra na conta do
     /// prazo: sem tempo para ela, a ação e a confirmação, o clique não sai.
     async fn click(&self, (row, col): (usize, usize), after: Duration) -> Result<(), ModsError> {
         let last = *self.clicked.lock().unwrap();
-        let wait = last.map_or(Duration::ZERO, |at| (at + self.limits.click_gap).saturating_duration_since(Instant::now()));
-        if !wait.is_zero() {
-            self.start_by(wait + after)?;
-            tokio::time::sleep(wait).await;
+        let wait = |gap: Duration| last.map_or(Duration::ZERO, |(at, _)| (at + gap).saturating_duration_since(Instant::now()));
+        let near = last.is_some_and(|(_, (r, c))| r.abs_diff(row) <= NEAR_CELLS && c.abs_diff(col) <= NEAR_CELLS);
+        let mut pause = wait(self.limits.click_gap_near);
+        if !pause.is_zero() && self.start_by(pause + after).is_err() && !near { pause = wait(self.limits.click_gap); }
+        if !pause.is_zero() {
+            self.start_by(pause + after)?;
+            tokio::time::sleep(pause).await;
         }
         let result = self.act(PaneOp::Mouse { row: row as u16, col: col as u16 }, after).await;
-        *self.clicked.lock().unwrap() = Some(Instant::now());
+        *self.clicked.lock().unwrap() = Some((Instant::now(), (row, col)));
         result
     }
     async fn wheel(&self, (row, col): (usize, usize), down: bool) -> Result<(), ModsError> {
@@ -452,22 +472,29 @@ async fn stretched(ctx: &Ctx<'_>, t: &Target, label: &str, f: PaneFormats) -> Re
     }
 }
 
-/// Roda com o ponteiro sobre o corpo, lendo o `offset` do `ui.scroll` depois de cada evento: contar eventos
-/// não serve, em rajada a rolagem acelera ((u); três linhas por evento no psmux). Cada evento só sai com
-/// tempo para a espera do `ui.scroll` e o clique final; sem isso, `erro_mod_clique_sem_resposta`.
-/// Quanto do prazo a reserva por teclado precisa para chegar a `t`: um passo do anel por botão das faixas e
-/// por painel até o dele, mais o `Tab`, a espera do foco, a confirmação do `Enter` e a folga.
-fn keyboard_need(ctx: &Ctx<'_>, t: &Target) -> Duration {
+/// Quanto do prazo a reserva por teclado precisa para chegar a `t`, pela tela `s`: um passo do anel por
+/// painel até o dele e mais dois, os botões da faixa que estão no anel (nenhum com a faixa recolhida, e os
+/// sem desenho mais baratos, porque o passo termina no `ui.focus`), o `Tab`, a espera do foco, a
+/// confirmação do `Enter` e a folga.
+fn keyboard_need(ctx: &Ctx<'_>, t: &Target, s: &Screen) -> Duration {
     let index = t.ids.iter().position(|id| *id == t.site).unwrap_or(t.ids.len());
-    let steps = u32::try_from(t.band_buttons + index + 2).unwrap_or(u32::MAX);
-    ctx.limits.ring_step.saturating_mul(steps) + ctx.limits.focus_wait + ctx.limits.confirm + ACTION_MARGIN
+    let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+    let band = match s.band_state {
+        "collapsed" => Duration::ZERO,
+        "full" => ctx.limits.ring_step.saturating_mul(count(t.band_buttons)),
+        _ => ctx.limits.ring_hidden_step.saturating_mul(count(t.band_buttons)),
+    };
+    band + ctx.limits.ring_step.saturating_mul(count(index + 2)) + ctx.limits.focus_wait + ctx.limits.confirm + ACTION_MARGIN
 }
 
 /// Roda com o ponteiro sobre o corpo até o rótulo aparecer. Cada evento espaçado rola pouco (uma linha no
 /// tmux, três no psmux) e só em rajada acelera, sem conta previsível: um botão a dezenas de linhas não cabe
 /// no prazo. A roda para a tempo de a reserva por teclado ainda caber, ou no teto dela, e passa ao teclado,
-/// cujo `Tab` rola o painel sozinho até o botão. Chegar às duas pontas sem o rótulo é recusa.
-async fn roll_until(ctx: &Ctx<'_>, t: &Target, label: &str) -> Result<Found, ModsError> {
+/// cujo `Tab` rola o painel sozinho até o botão. Se o teclado não cabia, a roda usa o prazo inteiro, que é
+/// a única chance. Chegar às duas pontas sem o rótulo é recusa.
+/// `keyboard_by`: até quando a roda pode ir e ainda sobrar o tempo do teclado (`in_pane`); `None` quando o
+/// teclado não cabe e a roda fica com o prazo inteiro.
+async fn roll_until(ctx: &Ctx<'_>, t: &Target, label: &str, keyboard_by: Option<Instant>) -> Result<Found, ModsError> {
     let f = ctx.formats().await?;
     let (titles, anchor) = (&t.titles, t.anchor.as_deref());
     let (s, _) = ctx.read_known(titles, anchor, f).await?;
@@ -476,15 +503,16 @@ async fn roll_until(ctx: &Ctx<'_>, t: &Target, label: &str) -> Result<Found, Mod
     let (mut seq, mut last) = ctx.mods.last_scroll(ctx.name, ctx.life, &t.site);
     let mut down = true;
     let started = Instant::now();
-    let need = keyboard_need(ctx, t);
     for _ in 0..ctx.limits.wheel_events {
-        if started.elapsed() >= ctx.limits.wheel_max || ctx.left() < need { return Ok(Found::Keyboard); }
+        if let Some(by) = keyboard_by && (started.elapsed() >= ctx.limits.wheel_max || Instant::now() >= by) { return Ok(Found::Keyboard); }
         ctx.wheel(pointer, down).await?;
         match ctx.mods.wait_scroll(ctx.name, ctx.life, &t.site, seq, ctx.limits.scroll_wait.min(ctx.left())).await {
             Some((next, offset)) if Some(offset) != last => { seq = next; last = Some(offset); }
             other => {
                 if let Some((next, _)) = other { seq = next; }
-                if !down { return Err(unreachable_pane()); }
+                // As duas pontas sem o rótulo (ou um painel que a roda não rola): o `Tab` do teclado rola o
+                // painel até o botão, se ainda houver tempo para ele.
+                if !down { return if keyboard_by.is_some() { Ok(Found::Keyboard) } else { Err(unreachable_pane()) }; }
                 down = false;   // chegou ao fim: tenta para cima
                 continue;
             }
@@ -503,6 +531,16 @@ async fn in_pane(ctx: &Ctx<'_>, t: &Target, label: &str) -> Result<Found, ModsEr
     if s.placement.is_none() { return Err(unreachable_pane()); }
     // Rótulo repetido na árvore, mesmo fora da tela: nenhuma ação de mouse, direto ao teclado.
     if t.repeated { return Ok(Found::Keyboard); }
+    // A escolha entre o mouse (ativar a aba, esticar, rolar) e o teclado é feita aqui, antes de ativar: o
+    // teclado traz a aba sozinho pelo anel, e precisa do tempo dele reservado. Se ativar a aba já não deixa
+    // esse tempo, vai direto ao teclado; se o teclado não cabe nem agora, o mouse fica com o prazo inteiro.
+    let need = keyboard_need(ctx, t, &s);
+    let index = t.ids.iter().position(|id| *id == t.site);
+    let gap = (*ctx.clicked.lock().unwrap()).map_or(Duration::ZERO, |(at, _)| (at + ctx.limits.click_gap_near).saturating_duration_since(Instant::now()));
+    let activation = if s.active == index { Duration::ZERO } else { gap + ctx.limits.activate_max + ACTION_MARGIN };
+    let fits = ctx.left() >= need;
+    if fits && ctx.left() < need + activation { return Ok(Found::Keyboard); }
+    let keyboard_by = fits.then(|| ctx.until - need);
     let Some(s) = activate(ctx, t, s).await? else { return Ok(Found::Keyboard) };
     let hits = s.body.as_ref().map(|b| screen::find_in(&s, label, b)).unwrap_or_default();
     match hits.len() { 0 => {}, 1 => return Ok(Found::Cell(hits[0])), _ => return Ok(Found::Keyboard) }   // repetido no painel: teclado
@@ -510,7 +548,7 @@ async fn in_pane(ctx: &Ctx<'_>, t: &Target, label: &str) -> Result<Found, ModsEr
         && let Some(found) = stretched(ctx, t, label, f).await? {
         return Ok(found);
     }
-    roll_until(ctx, t, label).await
+    roll_until(ctx, t, label, keyboard_by).await
 }
 
 /// Conferidas antes da primeira tecla (T5): com um diálogo qualquer tecla mexe nele, e com rascunho o
@@ -524,25 +562,32 @@ fn locks(s: &Screen) -> Result<(), ModsError> {
 /// O anel do teclado lê o tamanho uma vez e guarda a última tela crua: cada passo custa a tecla e uma
 /// leitura, e a leitura depois da tecla espera a tela mudar. No psmux cada operação é um processo, e reler
 /// o tamanho a cada passo estourava o prazo com uma dúzia de botões na faixa.
-struct Ring { f: PaneFormats, last: String }
+struct Ring { f: PaneFormats, last: String, hidden_band: bool }
 
 impl Ring {
     async fn start(ctx: &Ctx<'_>, t: &Target) -> Result<(Self, Screen), ModsError> {
         let f = ctx.formats().await?;
         let (s, last) = ctx.read_known(&t.titles, t.anchor.as_deref(), f).await?;
-        Ok((Self { f, last }, s))
+        Ok((Self { f, last, hidden_band: band_hidden(&s) }, s))
     }
     async fn read(&mut self, ctx: &Ctx<'_>, t: &Target) -> Result<Screen, ModsError> {
         let (s, last) = ctx.read_known(&t.titles, t.anchor.as_deref(), self.f).await?;
         self.last = last;
         Ok(s)
     }
-    async fn after_key(&mut self, ctx: &Ctx<'_>, t: &Target) -> Result<Screen, ModsError> {
-        let (s, last) = ctx.read_after(&t.titles, t.anchor.as_deref(), self.f, &self.last).await?;
+    /// `focus`: o `focus_seq` de antes da tecla. Com a faixa sem desenho, o `ui.focus` do botão dela encerra
+    /// a espera da tela.
+    async fn after_key(&mut self, ctx: &Ctx<'_>, t: &Target, focus: u64) -> Result<Screen, ModsError> {
+        let focus_after = self.hidden_band.then_some(focus);
+        let (s, last) = ctx.read_after(&t.titles, t.anchor.as_deref(), self.f, &self.last, focus_after).await?;
         self.last = last;
         Ok(s)
     }
 }
+
+/// A faixa está no anel do `ctrl+x tab` sem aparecer na tela: encolhida (`↓ N more`) ou não desenhada. A
+/// recolhida sai do anel.
+fn band_hidden(s: &Screen) -> bool { !matches!(s.band_state, "full" | "collapsed") }
 
 /// Tamanho do anel do `ctrl+x tab`: os botões das faixas, os painéis e o prompt.
 fn cap(t: &Target) -> usize { t.band_buttons + t.ids.len() + 1 }
@@ -574,7 +619,7 @@ async fn reach_pane(ctx: &Ctx<'_>, t: &Target, ring: &mut Ring) -> Result<u64, M
     for _ in 0..cap(t) {
         let seq = ctx.mods.focus_seq(ctx.name, ctx.life);
         ctx.keys(&["C-x", "Tab"], ctx.limits.focus_wait).await?;
-        let s = ring.after_key(ctx, t).await?;
+        let s = ring.after_key(ctx, t, seq).await?;
         if s.dialog || s.survey { return Err(dialog_open()); }
         match s.focus {
             Some("pane") => { passed = true; if s.active == Some(index) { return Ok(seq); } }
@@ -594,7 +639,7 @@ async fn reach_band_key(ctx: &Ctx<'_>, t: &Target, attempt: &str, ring: &mut Rin
         let seq = ctx.mods.focus_seq(ctx.name, ctx.life);
         ctx.keys(&["C-x", "Tab"], ctx.limits.focus_wait).await?;
         let seen = last_focus(ctx, attempt, seq, ctx.limits.focus_wait.min(ctx.left())).await;
-        let s = ring.after_key(ctx, t).await?;
+        let s = ring.after_key(ctx, t, seq).await?;
         if s.dialog || s.survey { return Err(dialog_open()); }
         match seen {
             Some(seen) if is_target(&seen, BAND_SITE, &t.key) => return Ok(seen.seq),
@@ -763,7 +808,7 @@ async fn back_to_prompt(ctx: &Ctx<'_>, back: &Back) -> bool {
         if s.dialog || s.survey { return false; }
         if ctx.op(PaneOp::Keys(vec!["C-x".into(), "Tab".into()]), ctx.until).await.is_err() { return false; }
         tokio::time::sleep(ctx.limits.key_gap).await;
-        let Ok(read) = ctx.read_after(titles, anchor, f, &last).await else { return false };
+        let Ok(read) = ctx.read_after(titles, anchor, f, &last, None).await else { return false };
         (s, last) = read;
     }
     s.focus == Some("prompt") && !s.dialog && !s.survey
@@ -852,7 +897,7 @@ pub struct Parts {
     /// A vida da sessão a que o elo pertence (`Ctx::life`).
     pub life: u64,
     /// O último clique de mouse no pane, entre um pedido e o seguinte (`Ctx::clicked`).
-    pub clicked: Arc<Mutex<Option<Instant>>>,
+    pub clicked: Arc<Mutex<Option<(Instant, (usize, usize))>>>,
 }
 
 impl Parts {
