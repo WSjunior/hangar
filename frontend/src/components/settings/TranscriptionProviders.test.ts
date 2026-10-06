@@ -65,10 +65,11 @@ describe('TranscriptionProviders', () => {
     const chave = alvo.querySelector<HTMLInputElement>('#tp-key-a')!;
     expect(chave.value).toBe('');
     chave.value = 'nova';
-    chave.dispatchEvent(new Event('input'));
+    // O Svelte 5 delega `input` na raiz da montagem: sem bolhar, o handler não roda.
+    chave.dispatchEvent(new Event('input', { bubbles: true }));
     expect(setRascunho).toHaveBeenLastCalledWith('transcription_providers', [{ ...ELEVEN, api_key: 'nova' }]);
     chave.value = '';
-    chave.dispatchEvent(new Event('input'));
+    chave.dispatchEvent(new Event('input', { bubbles: true }));
     expect(setRascunho).toHaveBeenLastCalledWith('transcription_providers', [ELEVEN]);
     unmount(app);
   });
