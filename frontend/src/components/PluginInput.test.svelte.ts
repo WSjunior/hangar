@@ -37,6 +37,18 @@ describe('Input de mod', () => {
     expect(el.querySelector('button.submit')!.textContent).toBe('ecoar');
   });
 
+  it('Enter com composição de IME em andamento não envia', () => {
+    const onInput = vi.fn();
+    const el = montar({ label: '', placeholder: '', value: '', submitLabel: '', onInput });
+    const campo = el.querySelector('input')!;
+    campo.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true }));
+    // Safari manda o Enter que confirma a composição com keyCode 229.
+    campo.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 229, bubbles: true }));
+    expect(onInput).not.toHaveBeenCalled();
+    campo.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(onInput.mock.calls).toEqual([['submit', '']]);
+  });
+
   it('digitação igual ao valor desenhado também vai ao servidor (nada é engolido)', () => {
     const onInput = vi.fn();
     const el = montar({ label: '', placeholder: '', value: 'a', submitLabel: '', onInput });
