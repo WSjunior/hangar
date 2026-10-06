@@ -78,6 +78,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   principal entra. Medida de outro transcript ou mais velha que a última resposta do
   transcript não vale; aí a reserva sai do jsonl e leva "~", porque inclui a espera pelo
   primeiro token. Ver [velocidade de geração](#velocidade-de-geração-tok-s).
+  No Codex, "agora" e "últimas 10" usam essa reserva, com os deltas do uso oficial e os
+  intervalos atribuídos ao modelo, sem o tempo de ferramentas. "1ª resposta" usa a média
+  dos turnos observados até o primeiro delta de texto; sem essa medida, mantém a reserva.
 
 - **Modo de abertura omitido herda a preferência do servidor.** `headless_default` nasce
   ligado para Claude/Codex; a escolha humana do dono na criação passa a ser o padrão.
@@ -2760,6 +2763,20 @@ com `claude -p --include-partial-messages --thinking-display summarized` (Opus 5
 `message_start` em 5,04 s, primeiro `thinking_delta` em 7,31 s, fim em 11,00 s com 431 tokens.
 Partindo do primeiro pedaço daria 117 tok/s; partindo do `message_start`, 72. Os tokens do
 pensamento foram gerados antes de o resumo dele chegar.
+
+### Velocidade recente e primeira resposta do Codex (06/10/2026)
+
+O acumulador Codex não preenchia as chamadas recentes. Passa a usar cada avanço do contador
+oficial de saída e o tempo de modelo acumulado desde o avanço anterior; contador repetido não
+cria chamada. "Agora" e "últimas 10" permanecem aproximados e incluem espera/processamento
+inicial. Os totais e a média da sessão permanecem com o mesmo cálculo.
+
+A primeira resposta é medida de `turn/started` até o primeiro `item/agentMessage/delta`
+não vazio da mesma thread e turno, antes do agrupamento da prévia, nos adapters Python e Rust.
+A média usa os turnos observados desde a conexão do consumidor; turnos anteriores conservam
+a reserva do transcript quando não existe medida ao vivo. A identidade da mescla usa
+`session_key`, porque o nome do rollout Codex inclui data e hora antes do UUID.
+O evento privado `rate` ganhou a medida de primeira resposta; protocolo Python/Rust 35.
 
 ## Contexto e cota sem a statusline do Hangar (03/10/2026)
 

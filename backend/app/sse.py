@@ -887,7 +887,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                 snap = await asyncio.to_thread(acc.collect)
                 if snap:
                     # Medida do stream (adapter sem terminal ou plugin) vence a reserva do transcript.
-                    snap.update(live_snapshot(name, Path(path).stem, acc.last_call_ts()))
+                    snap.update(live_snapshot(name, session_key(path), acc.last_call_ts()))
                 if snap and snap != last:
                     last = snap
                     await queue.put(("stats", json.dumps(snap)))
