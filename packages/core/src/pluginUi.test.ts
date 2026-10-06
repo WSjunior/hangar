@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { activePaneId, buttonKey, followLocalTab, hoverProps, inputKey, isHoverScope, isMissingRoute, isPluginServerFailure, tabFollowsServer, decodeRaster, inkColor, isEmptyBand, parsePluginToast, parsePluginUi, textOf, type PluginElement } from './pluginUi';
+import { activePaneId, buttonKey, followLocalTab, hoverProps, inputKey, isHoverScope, isMissingRoute, isPluginServerFailure, pluginFailureText, tabFollowsServer, decodeRaster, inkColor, isEmptyBand, parsePluginToast, parsePluginUi, textOf, type PluginElement } from './pluginUi';
+import { mensagemDeErro } from './errosApi';
 import amostras from './__fixtures__/plugin-ui-arvores.json';
 
 function cells(words: number[]): string {
@@ -181,6 +182,22 @@ describe('falha de servidor numa rota de mod', () => {
     expect(isPluginServerFailure(Object.assign(new Error('x'), { status: 503 }))).toBe(true);
     expect(isPluginServerFailure(Object.assign(new Error('409: frase'), { status: 409 }))).toBe(false);
     expect(isPluginServerFailure(Object.assign(new Error('x'), { status: 404 }))).toBe(false);
+  });
+});
+
+describe('frase da falha numa rota de mod', () => {
+  const generica = () => 'frase-generica';
+  it('código conhecido vira a frase dele em qualquer status, inclusive o 503 do dono único', () => {
+    const guarda = Object.assign(new Error('503: motivo — erro_mod_guarda_indisponivel'), { status: 503, code: 'erro_mod_guarda_indisponivel' });
+    expect(pluginFailureText(guarda, generica)).toBe(mensagemDeErro('erro_mod_guarda_indisponivel'));
+    const recusa = Object.assign(new Error('409: x'), { status: 409, code: 'erro_mod_sem_digitacao' });
+    expect(pluginFailureText(recusa, generica)).toBe(mensagemDeErro('erro_mod_sem_digitacao'));
+  });
+  it('sem código: 5xx ou sem resposta é a frase genérica; 4xx é o motivo que veio', () => {
+    expect(pluginFailureText(Object.assign(new Error('500: Internal Server Error'), { status: 500 }), generica)).toBe('frase-generica');
+    expect(pluginFailureText(new Error('rede'), generica)).toBe('frase-generica');
+    expect(pluginFailureText(Object.assign(new Error('503: x'), { status: 503, code: 'codigo_desconhecido' }), generica)).toBe('frase-generica');
+    expect(pluginFailureText(Object.assign(new Error('409: motivo'), { status: 409 }), generica)).toBe('409: motivo');
   });
 });
 

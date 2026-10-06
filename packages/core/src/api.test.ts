@@ -1027,6 +1027,17 @@ it.each([404, 405])('plugin/show num servidor sem a rota rejeita com status %i, 
   expect(isMissingRoute(erro)).toBe(true);
 });
 
+it('plugin/show e plugin/input com servidor explícito levam o código do servidor no erro', async () => {
+  const envelope = { ok: false, error_code: 'erro_mod_guarda_indisponivel', message: 'motivo',
+    detail: { code: 'erro_mod_guarda_indisponivel', params: { motivo: 'motivo' }, msg: 'motivo — erro_mod_guarda_indisponivel' } };
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify(envelope), { status: 503 }));
+  for (const chamada of [() => showPluginPane('sessao', 'painel', server),
+                         () => inputPluginField('sessao', 'painel', 'V18-campo', 'change', 'a', server)]) {
+    const erro = await chamada().catch((e: unknown) => e);
+    expect(erro).toMatchObject({ status: 503, code: 'erro_mod_guarda_indisponivel' });
+  }
+});
+
 it('plugin/input sem resposta e sem servidor explícito é cortado em 8 s, e a fila do campo segue', async () => {
   const { fieldSender } = await import('./pluginField');
   vi.useFakeTimers();

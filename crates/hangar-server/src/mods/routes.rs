@@ -116,7 +116,11 @@ async fn transfer(st: &AppState, headers: &HeaderMap, name: &str, deadline: Inst
         return failed();
     }
     let Ok(Ok(collected)) = tokio::time::timeout_at(until, response.into_body().collect()).await else { return failed() };
+    // Um 409 sem o `detail` do Python (corpo vazio, outro formato) não diz o que recusar: é falha da guarda.
     let Ok(answer) = serde_json::from_slice::<Value>(&collected.to_bytes()) else { return failed() };
+    if !answer["detail"].is_object() {
+        return failed();
+    }
     Some(reply(headers, StatusCode::CONFLICT, json!({"detail": answer["detail"]})))
 }
 

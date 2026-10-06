@@ -1,3 +1,5 @@
+import { mensagemDeErro } from './errosApi';
+
 /** Árvore de elementos que os mods do Claude Code desenham (`ui.render`), como o engine a entrega
  *  a uma superfície remota. O Hangar não conhece mod nenhum: só traduz estes elementos. */
 export interface PluginElement {
@@ -203,6 +205,20 @@ export function isMissingRoute(err: unknown): boolean {
 export function isPluginServerFailure(err: unknown): boolean {
   const status = err && typeof err === 'object' ? (err as { status?: unknown }).status : undefined;
   return typeof status !== 'number' || status >= 500;
+}
+
+/** Frase de uma falha numa rota de mod. Código que o app conhece (`ERROS`) vira a frase dele em qualquer status,
+ *  inclusive o 503 do dono único (`erro_mod_guarda_indisponivel`). Sem código: sem resposta ou 5xx, a frase
+ *  genérica de quem chama; com 4xx, o motivo que o servidor mandou. */
+export function pluginFailureText(err: unknown, generic: () => string): string {
+  const fields = err && typeof err === 'object' ? (err as { code?: unknown; envelope?: { params?: unknown } }) : {};
+  if (typeof fields.code === 'string') {
+    const params = fields.envelope?.params;
+    const text = mensagemDeErro(fields.code, params && typeof params === 'object' ? (params as Record<string, unknown>) : {});
+    if (text) return text;
+  }
+  if (isPluginServerFailure(err)) return generic();
+  return err instanceof Error ? err.message : String(err);
 }
 
 /** Aviso (`$.ui.toast`) que um mod mostrou no terminal; `plugin` é o mod que o emitiu. */
