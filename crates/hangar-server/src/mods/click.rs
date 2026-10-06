@@ -152,9 +152,7 @@ struct Target {
     ids: Vec<String>,
     titles: Vec<String>,
     anchor: Option<String>,
-    #[expect(dead_code, reason = "a reserva por teclado (Task 14) conta o anel do `ctrl+x tab` por aqui")]
     band_buttons: usize,
-    #[expect(dead_code, reason = "a reserva por teclado (Task 14) arma o foco com o mod do botão")]
     plugin: Option<String>,
 }
 
@@ -215,7 +213,6 @@ impl Ctx<'_> {
     async fn wheel(&self, (row, col): (usize, usize), down: bool) -> Result<(), ModsError> {
         self.act(PaneOp::Wheel { row: row as u16, col: col as u16, down }, self.limits.scroll_wait).await
     }
-    #[expect(dead_code, reason = "a reserva por teclado (Task 14) manda as teclas por aqui")]
     async fn keys(&self, keys: &[&str], after: Duration) -> Result<(), ModsError> {
         self.act(PaneOp::Keys(keys.iter().map(|k| (*k).to_owned()).collect()), after).await?;
         tokio::time::sleep(self.limits.key_gap).await;
@@ -409,8 +406,97 @@ async fn in_pane(ctx: &Ctx<'_>, t: &Target, label: &str) -> Result<Found, ModsEr
     roll_until(ctx, t, label).await
 }
 
-async fn reserve_press(_ctx: &Ctx<'_>, _t: &Target) -> Result<Value, ModsError> { Err(unreachable_pane()) }
-async fn reserve_close(_ctx: &Ctx<'_>, _t: &Target) -> Result<Value, ModsError> { Err(unreachable_pane()) }
+/// Conferidas antes da primeira tecla (T5): com um diálogo qualquer tecla mexe nele, e com rascunho o
+/// `Enter` que perdesse o alvo o enviaria ((y), (aa)).
+fn locks(s: &Screen) -> Result<(), ModsError> {
+    if s.dialog || s.survey { return Err(dialog_open()); }
+    if !s.draft.is_empty() { return Err(draft_in_prompt()); }
+    Ok(())
+}
+
+/// Tamanho do anel do `ctrl+x tab`: os botões das faixas, os painéis e o prompt.
+fn cap(t: &Target) -> usize { t.band_buttons + t.ids.len() + 1 }
+
+/// `ctrl+x tab` até o painel pedido estar na frente e com o teclado. O anel passa antes pelos botões das
+/// faixas ((t)); se a borda apagar depois de ter passado por painéis, ele não está no ciclo. Cada tecla
+/// só sai com tempo para a espera do foco e o `Enter` confirmado.
+async fn reach_pane(ctx: &Ctx<'_>, t: &Target) -> Result<(), ModsError> {
+    let index = t.ids.iter().position(|id| *id == t.site).ok_or_else(pane_missing)?;
+    let mut passed = false;
+    for _ in 0..cap(t) {
+        ctx.keys(&["C-x", "Tab"], ctx.limits.focus_wait).await?;
+        let (s, _) = ctx.read(t).await?;
+        if s.dialog || s.survey { return Err(dialog_open()); }
+        match s.focus {
+            Some("pane") => { passed = true; if s.active == Some(index) { return Ok(()); } }
+            Some("prompt") if passed => break,
+            _ => {}
+        }
+    }
+    Err(unreachable_pane())
+}
+
+/// `ctrl+x tab` até o `ui.focus` da faixa trazer a `key` pedida: o hook do plugin reescreve no primeiro
+/// evento do mod do alvo, e a reescrita não atravessa de um mod para outro ((t)).
+async fn reach_band_key(ctx: &Ctx<'_>, t: &Target, attempt: &str) -> Result<(), ModsError> {
+    let mut seq = ctx.mods.focus_seq(ctx.name, ctx.life);
+    for _ in 0..cap(t) {
+        ctx.keys(&["C-x", "Tab"], ctx.limits.focus_wait).await?;
+        let seen = ctx.mods.wait_focus(ctx.name, ctx.life, attempt, seq, ctx.limits.focus_wait.min(ctx.left()), |_| true).await;
+        let (s, _) = ctx.read(t).await?;
+        if s.dialog || s.survey { return Err(dialog_open()); }
+        if let Some(seen) = seen {
+            seq = seen.seq;
+            if seen.request_id == BAND_SITE && !seen.denied && seen.element.as_deref() == Some(t.key.as_str()) { return Ok(()); }
+        }
+        if s.focus == Some("pane") { break; }   // passou da faixa sem o botão
+    }
+    Err(unreachable_pane())
+}
+
+/// Lê a tela imediatamente antes do `Enter`: um diálogo que chegou tomaria o `Enter` como aprovação, e uma
+/// letra no meio teria devolvido o teclado ao prompt ((y), (aa)).
+async fn enter_confirmed(ctx: &Ctx<'_>, t: &Target) -> Result<(), ModsError> {
+    let (s, _) = ctx.read(t).await?;
+    if s.dialog || s.survey { return Err(dialog_open()); }
+    if !matches!(s.focus, Some("pane" | "band")) { return Err(no_answer()); }
+    let since = Instant::now();
+    ctx.keys(&["Enter"], Duration::ZERO).await?;
+    if ctx.mods.wait_pressed(ctx.name, ctx.life, &t.site, &t.key, since, ctx.confirm()).await { Ok(()) } else { Err(no_answer()) }
+}
+
+/// Clique pelo teclado (T5), só nos casos medidos e com as travas; uma tecla por operação, com pausa.
+/// Desarmar o alvo e voltar ao prompt ficam com a limpeza, registrados antes da primeira tecla.
+async fn reserve_press(ctx: &Ctx<'_>, t: &Target) -> Result<Value, ModsError> {
+    let (s, _) = ctx.read(t).await?;
+    locks(&s)?;
+    let attempt = ctx.mods.arm_focus(ctx.name, ctx.life, &t.site, t.plugin.as_deref(), &t.key);
+    ctx.undo.focus(&attempt);
+    ctx.undo.keyboard(t.titles.clone(), t.anchor.clone(), cap(t));
+    if t.site == BAND_SITE {
+        reach_band_key(ctx, t, &attempt).await?;
+    } else {
+        reach_pane(ctx, t).await?;
+        let seq = ctx.mods.focus_seq(ctx.name, ctx.life);
+        ctx.keys(&["Tab"], ctx.limits.focus_wait).await?;
+        let seen = ctx.mods.wait_focus(ctx.name, ctx.life, &attempt, seq, ctx.limits.focus_wait.min(ctx.left()),
+            |s| s.request_id == t.site).await;
+        if !seen.is_some_and(|s| !s.denied && s.element.as_deref() == Some(t.key.as_str())) { return Err(no_answer()); }
+    }
+    enter_confirmed(ctx, t).await?;
+    Ok(json!({}))
+}
+
+/// Fechar pelo teclado: o painel com o teclado e `ctrl+x x` ((m)), confirmado pelo `ui.close`. A volta ao
+/// prompt fica com a limpeza.
+async fn reserve_close(ctx: &Ctx<'_>, t: &Target) -> Result<Value, ModsError> {
+    let (s, _) = ctx.read(t).await?;
+    locks(&s)?;
+    ctx.undo.keyboard(t.titles.clone(), t.anchor.clone(), cap(t));
+    reach_pane(ctx, t).await?;
+    ctx.keys(&["C-x", "x"], Duration::ZERO).await?;
+    if ctx.mods.wait_pane_gone(ctx.name, ctx.life, &t.site, ctx.confirm()).await { Ok(json!({})) } else { Err(no_answer()) }
+}
 
 async fn press_inner(ctx: &Ctx<'_>, site: &str, key: &str) -> Result<Value, ModsError> {
     let t = target(ctx, site, key)?;
