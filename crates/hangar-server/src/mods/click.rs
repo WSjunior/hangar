@@ -475,10 +475,10 @@ async fn stretched(ctx: &Ctx<'_>, t: &Target, label: &str, f: PaneFormats) -> Re
     }
 }
 
-/// Quanto do prazo a reserva por teclado precisa para chegar a `t`, pela tela `s`: um passo do anel por
-/// painel até o dele e mais dois, os botões da faixa que estão no anel (nenhum com a faixa recolhida, e os
-/// sem desenho mais baratos, porque o passo termina no `ui.focus`), o `Tab`, a espera do foco, a
-/// confirmação do `Enter` e a folga.
+/// Quanto do prazo a reserva por teclado precisa para chegar a `t`, pela tela `s`: a leitura que abre o
+/// anel, um passo do anel por painel até o dele e mais dois, os botões da faixa que estão no anel (nenhum com
+/// a faixa recolhida, e os sem desenho mais baratos, porque o passo termina no `ui.focus`), a espera da tela
+/// ao entrar no painel, o `Tab`, a espera do foco, a confirmação do `Enter` e a folga.
 fn keyboard_need(ctx: &Ctx<'_>, t: &Target, s: &Screen) -> Duration {
     let index = t.ids.iter().position(|id| *id == t.site).unwrap_or(t.ids.len());
     let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
@@ -487,7 +487,8 @@ fn keyboard_need(ctx: &Ctx<'_>, t: &Target, s: &Screen) -> Duration {
         "full" => ctx.limits.ring_step.saturating_mul(count(t.band_buttons)),
         _ => ctx.limits.ring_hidden_step.saturating_mul(count(t.band_buttons)),
     };
-    band + ctx.limits.ring_step.saturating_mul(count(index + 2)) + ctx.limits.focus_wait + ctx.limits.confirm + ACTION_MARGIN
+    band + ctx.limits.ring_step.saturating_mul(count(index + 3)) + ctx.limits.key_settle + ctx.limits.focus_wait + ctx.limits.confirm
+        + ACTION_MARGIN
 }
 
 /// Roda com o ponteiro sobre o corpo até o rótulo aparecer. Cada evento espaçado rola pouco (uma linha no
@@ -506,8 +507,14 @@ async fn roll_until(ctx: &Ctx<'_>, t: &Target, label: &str, keyboard_by: Option<
     let (mut seq, mut last) = ctx.mods.last_scroll(ctx.name, ctx.life, &t.site);
     let mut down = true;
     let started = Instant::now();
+    // Uma volta (evento, espera da rolagem, leitura e intervalo) só começa se outra do tamanho da maior até
+    // aqui ainda termina antes de `keyboard_by`: a que passasse dele comeria o tempo do teclado. Antes da
+    // primeira, a volta conta ao menos o intervalo dela.
+    let (mut lap, mut lap_start) = (ctx.limits.wheel_gap, started);
     for _ in 0..ctx.limits.wheel_events {
-        if let Some(by) = keyboard_by && (started.elapsed() >= ctx.limits.wheel_max || Instant::now() >= by) { return Ok(Found::Keyboard); }
+        lap = lap.max(lap_start.elapsed());
+        lap_start = Instant::now();
+        if let Some(by) = keyboard_by && (started.elapsed() >= ctx.limits.wheel_max || Instant::now() + lap >= by) { return Ok(Found::Keyboard); }
         ctx.wheel(pointer, down).await?;
         match ctx.mods.wait_scroll(ctx.name, ctx.life, &t.site, seq, ctx.limits.scroll_wait.min(ctx.left())).await {
             Some((next, offset)) if Some(offset) != last => { seq = next; last = Some(offset); }
