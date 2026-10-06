@@ -763,6 +763,21 @@ async fn pane_operation_past_its_start_does_not_run() {
     assert!(f.io.calls.lock().unwrap().iter().all(|r|r.args[0]!="send-keys"),"nada chega ao pane");
 }
 
+/// O `Release` atrasado (limpeza do clique depois do prazo) solta na hora: a fila não fica guardada até
+/// o fim da reserva.
+#[tokio::test]
+async fn a_late_release_still_frees_the_pane() {
+    let f=Fixture::new().await; let h=f.start();
+    assert_eq!(h.pane(PaneOp::Hold{millis:5000},far()).await.unwrap(),PaneReply::Done);
+    let past=std::time::Instant::now()-Duration::from_secs(1);
+    assert_eq!(h.pane(PaneOp::Release,past).await.unwrap(),PaneReply::Done,"soltar vale sempre");
+    let started=std::time::Instant::now();
+    h.command(f.command("depois","Depois do soltar")).await.unwrap();
+    assert!(started.elapsed()<Duration::from_secs(2),"o comando não esperou a reserva de 5 s");
+    f.wait_for("entrega depois do soltar",||f.state()["rows"].as_array().unwrap().iter().all(|r|r["delivered"]==true)).await;
+    h.stop().await.unwrap();
+}
+
 /// Com o pane reservado ao clique de mod, nem a fila nem um comando escrevem nele; o que chegou sai na
 /// ordem depois do `Release`.
 #[tokio::test]
