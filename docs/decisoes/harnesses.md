@@ -1677,7 +1677,7 @@ Limites conhecidos:
   `erro_mod_guarda_indisponivel`;
 - o convidado não digita em campo de mod nas sessões sem terminal;
 - o `opened` com bind de LAN é limite antigo da ponte, que continua valendo;
-- no Windows o terminal ainda é do Python, e o que ele atende segue sem receber nada novo.
+- a sessão com terminal, inclusive no Windows (onde o terminal já nasce no Rust), ainda não é superfície remota: a interface dos mods dela segue pelo plugin e pelo Python, e a ponte só entra nela na fase 3.
 
 ### Mods: painel, clique e o que acontece no aparelho (04/10/2026)
 
