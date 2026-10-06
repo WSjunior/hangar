@@ -199,7 +199,7 @@ o hub descarta e registra uma vez por sessão (a troca vazou). Nada de rodada em
   `terminal_control.rs:173`). A captura lê a saída, não só o código de retorno; "não existe" se
   separa de "falhou" por `has-session`; quadro com U+FFFD não vale como bom. A mesma fonte serve a
   lista (`classify.rs:407-408` hoje decide pelo código).
-- Terminal real: `portable-pty` cria o ConPTY com `INHERIT_CURSOR | RESIZE_QUIRK |
+- Terminal real no Rust também no Windows (decisão do dono, 06/10, opção A): `portable-pty` cria o ConPTY com `INHERIT_CURSOR | RESIZE_QUIRK |
   WIN32_INPUT_MODE` fixos (`pseudocon.rs:85-87`); o Python usa 0. Com `INHERIT_CURSOR` o console
   pede a posição do cursor (`ESC[6n`) e espera resposta do cliente. Antes de juntar, prova na VM
   com web e nativo; se travar ou sujar a tela, troca o lado Windows por um ConPTY próprio (porte
@@ -208,8 +208,8 @@ o hub descarta e registra uma vez por sessão (a troca vazou). Nada de rodada em
 
 ## Contrato interno
 
-Sobe duas vezes, cada uma no próximo número livre na junção (hoje 27): fatos, serviços,
-`state-facts` e canal privado do estado; ponte `term.*`, `/internal/term/origin`,
+Sobe em cada Task que o muda, sempre no próximo número livre na junção (hoje 27): fatos,
+serviços e `state-facts`; canal privado do estado; `/internal/term/origin`; ponte `term.active`,
 `/__hangar_server/term` e `terminal_panel` na saúde.
 
 ## Desempenho (conferido contra "erros que já custaram")
