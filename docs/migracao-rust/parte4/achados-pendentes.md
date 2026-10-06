@@ -14,7 +14,8 @@ Achados médios e baixos das revisões por Task que entraram na `feat/parte4` se
   o terminal não aceita tecla nenhuma — xterm.js e nativo respondem, mas qualquer cliente que não
   responda fica mudo; (b) tecla enviada logo depois do primeiro byte (antes de ~3 s) se perde
   durante a partida do `tmux attach`; falta comparar com o Python. Falta a prova manual com web
-  e nativo numa sessão Claude da VM.
+  e nativo numa sessão Claude da VM. Decisão da coordenação: (a) só registrado (os dois clientes
+  respondem); (b) é corrigido antes da prova manual (sessão `parte4-t10b`).
 - Task 5: no Windows a prévia pelo pane captura a 0,15 s com um processo psmux por toque
   (~25–50 ms cada) enquanto a sessão trabalha sem arquivo do hook; medir na VM e, se pesar,
   limitar o ritmo rápido no Windows. O Monitor no Windows (psmux) e o convidado de convite de
