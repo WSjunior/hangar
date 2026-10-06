@@ -32,19 +32,20 @@ function claude
         set pre hangar-engine --exec $CP_ENGINE --
     end
 
-    # Plugin do Hangar por `--plugin-dir`, igual às sessões que o backend abre: só assim ele fica por
-    # fora dos plugins do marketplace e espelha no app a faixa que os mods desenham. O caminho vem do
-    # arquivo que o backend grava (este wrapper não sabe onde o repositório mora); o backend só o
-    # grava quando o `claude` aceita a flag. Modo -p não tem faixa e segue como estava.
+    # Plugins do Hangar por `--plugin-dir`, igual às sessões que o backend abre: só assim ficam por
+    # fora dos plugins do marketplace e o do Hangar espelha no app a faixa que os mods desenham. Os
+    # caminhos vêm do arquivo que o backend grava, um por linha e o do Hangar primeiro (este wrapper
+    # não sabe onde o repositório mora); o backend só o grava quando o `claude` aceita a flag. Modo
+    # -p não tem faixa e segue como estava.
     set -l plug
     if not contains -- -p $argv; and not contains -- --print $argv; and test -r "$HOME/.hangar/plugin-dir"
-        set -l plugdir
-        read plugdir <"$HOME/.hangar/plugin-dir"
-        if test -n "$plugdir"; and test -d "$plugdir"
-            set plug --plugin-dir $plugdir
-        else if test -n "$plugdir"
-            echo "hangar: plugin-dir '$plugdir' não existe; a faixa dos mods não vai para o app" >&2
-        end
+        while read -l plugdir
+            if test -n "$plugdir"; and test -d "$plugdir"
+                set -a plug --plugin-dir $plugdir
+            else if test -n "$plugdir"
+                echo "hangar: plugin-dir '$plugdir' não existe; a faixa dos mods não vai para o app" >&2
+            end
+        end <"$HOME/.hangar/plugin-dir"
     end
 
     for a in $argv

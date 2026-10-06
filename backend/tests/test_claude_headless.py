@@ -528,9 +528,12 @@ def test_sem_terminal_carrega_o_plugin_do_hangar(adapter, monkeypatch):
     aparelho de quem clicou a URL que um mod abriria na máquina do servidor. Mods desligados
     (`raizes_dos_plugins` vazia): o argv fica como era."""
     from app import plugin_bridge
-    monkeypatch.setattr(plugin_bridge, "raizes_dos_plugins", lambda: ["/repo/plugins/hangar"])
+    monkeypatch.setattr(plugin_bridge, "raizes_dos_plugins",
+                        lambda: ["/repo/plugins/hangar", "/repo/plugins/outro"])
     argv = adapter._argv("sid", resume=False)
-    assert argv[argv.index("--plugin-dir") + 1] == "/repo/plugins/hangar"
+    i = argv.index("--plugin-dir")
+    # Na ordem da lista: o do Hangar primeiro é o que o deixa por fora na cadeia de hooks.
+    assert argv[i:i + 4] == ["--plugin-dir", "/repo/plugins/hangar", "--plugin-dir", "/repo/plugins/outro"]
     monkeypatch.setattr(plugin_bridge, "raizes_dos_plugins", lambda: [])
     assert "--plugin-dir" not in adapter._argv("sid", resume=False)
 

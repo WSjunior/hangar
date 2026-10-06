@@ -28,9 +28,12 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   de hooks, o primeiro plugin carregado fica por fora: `--plugin-dir` vem antes do marketplace,
   e a pasta de skills vem depois. A faixa dos mods (`plugins/hangar/hooks/ui.ts`) só recebe por
   `next(e)` o que os plugins de dentro desenham, e um mod que responde a faixa sem chamar
-  `next` esconde tudo dos que estão por dentro dele. O wrapper do `claude` no shell passa o
-  mesmo `--plugin-dir`, lido de `~/.hangar/plugin-dir`, que o backend grava só quando o CLI
-  aceita a flag; `claude` cru (`command claude`) carrega só pela pasta de skills e não espelha a
+  `next` esconde tudo dos que estão por dentro dele. Os outros mods do repositório
+  (`plugins/<nome>/` com `.claude-plugin/plugin.json`) entram pelo mesmo caminho, um
+  `--plugin-dir` cada, sempre DEPOIS de `plugins/hangar`, sem pergunta do CLI e sem marketplace.
+  O wrapper do `claude` no shell passa a mesma lista, lida de `~/.hangar/plugin-dir` (uma pasta
+  por linha, a do Hangar primeiro; o arquivo antigo de uma linha continua valendo), que o
+  backend grava só quando o CLI aceita a flag; `claude` cru (`command claude`) carrega só pela pasta de skills e não espelha a
   faixa dos mods do marketplace. Ver
   [faixa dos mods](#faixa-dos-mods-ordem-na-cadeia-medida-03102026).
 
