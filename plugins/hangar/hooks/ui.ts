@@ -1,7 +1,8 @@
 import type { EngineInterface, On } from "claude-code";
 import { type Bridge, bridge, onResend, setSurfaceBridge, surfaceBridge } from "./bridge";
+import { focusElement, holding, HOLD_MS, type FocusTarget } from "./uiFocus";
 import { openerUrl } from "./uiIntercept";
-import { bandBody, type PaneEntry } from "./uiPayload";
+import { bandBody, scrollOffset, shownAfterClose, UNDRAWN, type PaneEntry } from "./uiPayload";
 
 // A faixa redesenha a cada segundo enquanto um mod mostra relógio: o envio junta os quadros.
 const SEND_DELAY_MS = 500;
@@ -11,6 +12,15 @@ const MAX_BODY_CHARS = 256 * 1024;
 let above: unknown = null;
 let columns: number | null = null;
 const panes = new Map<string, PaneEntry>();
+// O painel cujo `ui.render` chegou por último: no terminal o painel escondido não é redesenhado, então o
+// último desenhado é o da frente (T1). O backend confere pela linha de abas da tela.
+let shown: string | null = null;
+// Painéis que já tiveram desenho: um reaberto com as mesmas props volta sem `ui.render`.
+const drawn = new Set<string>();
+// Onde o último painel foi colocado; vale para o painel registrado antes do primeiro desenho.
+let lastPlacement: "dock" | "inline" = "dock";
+// Até quando o envio do composer fica segurado (reserva por teclado em curso).
+let holdUntil: number | null = null;
 let sent: string | null = null;
 let scheduled = false;
 // Reenvio pedido quando a ponte volta, fora de qualquer hook: o engine não deixa guardar o `$`
@@ -39,7 +49,7 @@ async function post($: EngineInterface, path: string, extra: string, ponte: Brid
 // ponte ou com recusa, a faixa sai de novo quando a ponte aparece ou o backend diz que não a tem.
 async function flush($: EngineInterface) {
   scheduled = false;
-  const body = bandBody(above, columns, [...panes.values()], MAX_BODY_CHARS);
+  const body = bandBody(above, columns, [...panes.values()], shown, MAX_BODY_CHARS);
   if (body === sent || !bridge()) return;
   sent = body;
   if ((await post($, "ui", body))?.status !== 200) sent = null;
@@ -80,7 +90,7 @@ function originOf(next: unknown): string | undefined {
 
 // Clique, cópia e abertura confirmam ao backend o clique que o app pediu. Devolve se o backend
 // aceitou: recusado, a cópia ou a abertura acontece onde o mod roda.
-async function tell($: EngineInterface, path: "pressed" | "copied" | "opened", o: Record<string, unknown>, ponte: Bridge | null = bridge()): Promise<boolean> {
+async function tell($: EngineInterface, path: "pressed" | "copied" | "opened" | "focused" | "scroll", o: Record<string, unknown>, ponte: Bridge | null = bridge()): Promise<boolean> {
   return (await post($, path, fields(o), ponte))?.status === 200;
 }
 
@@ -90,6 +100,16 @@ async function fromApp($: EngineInterface, requestId: string, element: string, p
   if (r?.status !== 200) return null;
   const { attempt } = JSON.parse(r.text) as { attempt?: string | null };
   return typeof attempt === "string" && attempt ? attempt : null;
+}
+
+// O alvo de foco armado pelo backend, ou null (nada armado, sem ponte, ou o backend não respondeu; a
+// ponte Python da reserva sem Rust não tem a rota e responde 404).
+async function focusTarget($: EngineInterface, requestId: string, plugin: string | null, element: string | null): Promise<FocusTarget | null> {
+  const r = await post($, "focus-target", fields({ requestId, plugin, element }));
+  if (r?.status !== 200) return null;
+  const v = JSON.parse(r.text) as { armed?: boolean; attempt?: unknown; rewrite?: unknown };
+  if (!v.armed || typeof v.attempt !== "string") return null;
+  return { attempt: v.attempt, rewrite: typeof v.rewrite === "string" ? v.rewrite : null };
 }
 
 /** Espelha no Hangar a faixa acima do prompt, os painéis e os avisos, os de TODOS os mods.
@@ -114,8 +134,9 @@ export function registerUi(on: On) {
     const tree = await next(e);
     if (e.surface === "terminal") {
       above = tree;
-      // As 5 colunas do `[-]` voltam: é a largura da coluna da conversa, o corte da prévia.
-      columns = e.props.bodyColumns + 5;
+      // O `bodyColumns` que o mod recebeu; o `bandBody` manda ele (para o evento) e ele mais as 5 colunas
+      // do `[-]` (o `columns` de hoje, que o Python lê para cortar a prévia).
+      columns = e.props.bodyColumns;
       schedule($);
     }
     return tree;
@@ -124,25 +145,39 @@ export function registerUi(on: On) {
   on("ui.render", { component: "Pane" }, async ($, e, next) => {
     const tree = await next(e);
     if (e.surface === "terminal") {
+      lastPlacement = e.props.placement;
       panes.set(e.requestId, {
         id: e.requestId, title: e.props.title, placement: e.props.placement, columns: e.props.bodyColumns, tree,
       });
+      drawn.add(e.requestId);
+      shown = e.requestId;
       schedule($);
     }
     return tree;
   });
 
-  // Reaberto com as mesmas props, o painel volta com o desenho que o engine guardou, sem `ui.render`:
-  // sem pedir o desenho de novo, o Hangar ficaria sem o painel que o terminal mostra.
   on("ui.open", async ($, e, next) => {
     const r = await next(e);
-    if (!panes.has(e.id)) $.ui.invalidate("ui.render");
+    // Colocado e ainda sem desenho: entra já na lista, para o app ter a aba. Não colocado (aberto sem
+    // pedido abaixo de 144 colunas) não aparece no terminal e não vai ao app (T7). O `ui.open` é uma
+    // chamada do `$`: o resultado vem embrulhado em `{ value }` (ou `{ deny }`).
+    if (r.value?.isPlaced && !panes.has(e.id)) {
+      panes.set(e.id, { id: e.id, title: e.title ?? e.id, placement: lastPlacement, columns: null, tree: UNDRAWN });
+      schedule($);
+    }
+    // Reaberto com as mesmas props, o painel volta com o desenho guardado, sem `ui.render`.
+    if (!drawn.has(e.id)) $.ui.invalidate("ui.render");
     return r;
   });
 
   on("ui.close", async ($, e, next) => {
     const r = await next(e);
-    if (!(r as { deny?: unknown } | undefined)?.deny && panes.delete(e.id)) schedule($);
+    if (!(r as { deny?: unknown } | undefined)?.deny && panes.has(e.id)) {
+      shown = shownAfterClose([...panes.keys()], shown, e.id);
+      panes.delete(e.id);
+      drawn.delete(e.id);
+      schedule($);
+    }
     return r;
   });
 
@@ -181,5 +216,35 @@ export function registerUi(on: On) {
     const clique = url ? await appAttempt($, originOf(next)) : null;
     if (!url || !clique || !(await tell($, "opened", { attempt: clique.attempt, url }, clique.ponte))) return next(e);
     return { value: { exitCode: 0, stdout: "", stderr: "", isStdoutTruncated: false, isStderrTruncated: false } };
+  });
+
+  // A rolagem de um painel (roda ou teclas): o backend acompanha o `offset` para alcançar pelo mouse um
+  // botão fora da área visível (T4). Só com a ponte do terminal.
+  on("ui.scroll", async ($, e, next) => {
+    const r = await next(e);
+    if (bridge() && !(r as { deny?: unknown } | undefined)?.deny) {
+      void tell($, "scroll", { requestId: e.requestId, offset: scrollOffset(e), bodyRows: e.bodyRows, contentRows: e.contentRows });
+    }
+    return r;
+  });
+
+  // Reserva por teclado do clique do app (T5): com um alvo armado, a `key` dele entra no evento e o
+  // backend fica sabendo onde o anel pousou; sem alvo, o foco segue como veio.
+  on("ui.focus", async ($, e, next) => {
+    if (!bridge()) return next(e);
+    const alvo = await focusTarget($, e.requestId, e.plugin ?? null, e.element ?? null);
+    if (!alvo) return next(e);
+    holdUntil = (await $.clock.now()) + HOLD_MS;
+    const element = focusElement(e, alvo);
+    const r = await next(element === e.element ? e : { ...e, element });
+    void tell($, "focused", { attempt: alvo.attempt, requestId: e.requestId, element: element ?? null, denied: Boolean((r as { deny?: unknown } | undefined)?.deny) });
+    return r;
+  });
+
+  // Enquanto a reserva por teclado corre, o envio do composer fica segurado: uma letra digitada no meio
+  // devolveria o teclado ao prompt e o `Enter` do backend mandaria o rascunho ao modelo ((aa)).
+  on("prompt.submit", { origin: { kind: "composer" } }, async ($, e, next) => {
+    if (!holding(await $.clock.now(), holdUntil)) return next(e);
+    return { drop: "Hangar: envio segurado durante um clique do app pelo teclado; a seta para cima traz o texto de volta. / Hangar: send held during an app click by keyboard; the Up arrow brings the text back." };
   });
 }
