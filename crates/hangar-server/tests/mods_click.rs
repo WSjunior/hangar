@@ -41,7 +41,7 @@ fn far() -> Instant { Instant::now() + Duration::from_secs(30) }
 /// Um pedido do app como o `spawn` o atende, sem a tarefa: o pedido e depois a limpeza.
 async fn run(mods: &Mods, pane: &FakePane, until: Instant, call: ModsCall) -> Result<Value, ModsError> {
     let (limits, undo) = (Limits::quick(), Undo::default());
-    let ctx = Ctx { name: S, pane, mods, limits: &limits, until, undo: &undo };
+    let ctx = Ctx { name: S, pane, mods, limits: &limits, until, undo: &undo, life: 1 };
     let result = click::dispatch(&ctx, call).await;
     click::finish(&ctx).await;
     result
@@ -62,7 +62,7 @@ async fn until(check: impl Fn() -> bool) {
         .await.expect("condição esperada");
 }
 fn parts(mods: &Mods, pane: &Arc<FakePane>) -> Parts {
-    Parts { name: S.into(), pane: pane.clone(), mods: mods.clone(), limits: Limits::quick(), busy: Arc::default() }
+    Parts { name: S.into(), pane: pane.clone(), mods: mods.clone(), limits: Limits::quick(), busy: Arc::default(), life: 1 }
 }
 
 #[tokio::test]
@@ -144,7 +144,7 @@ async fn without_a_terminal_the_floor_is_restored() {
     let (mods, pane) = setup("tmux-240-caixa-104", vitrine());
     pane.clients(0);
     let (limits, undo) = (Limits::quick(), Undo::default());
-    click::floor(&Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: far(), undo: &undo }).await.unwrap();
+    click::floor(&Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: far(), undo: &undo, life: 1 }).await.unwrap();
     assert_eq!(pane.actions()[0], "resize 144 45");
 }
 
@@ -185,6 +185,19 @@ async fn show_clicks_the_title_and_publishes_the_shown_pane() {
 }
 
 #[tokio::test]
+async fn a_click_of_a_replaced_life_does_nothing_in_the_new_one() {
+    // A sessão reabriu com outro processo e o mesmo nome: o pedido da vida 1 não lê o espelho nem clica na nova.
+    let (mods, pane) = setup("tmux-01-tres-paineis-150", pm());
+    mods.attach_terminal(S, "proc-novo", 2, Arc::new(Probe::default()));
+    mods.terminal_ui(S, pm());
+    pane.on_click((0, 104), vec![Show("tmux-02-apos-clicar-mr-150")]);
+    assert_eq!(code(show(&mods, &pane, "pm-mock-mr").await), "erro_mod_painel_inexistente");
+    assert!(pane.actions().is_empty());
+    let ui: Value = serde_json::from_str(&mods.replay(S).into_iter().rev().find(|(e, _)| *e == "plugin_ui").unwrap().1).unwrap();
+    assert_eq!(ui["shown_id"], "pm-mock-jenkins", "o painel na frente da vida nova é o do espelho dela");
+}
+
+#[tokio::test]
 async fn show_refuses_without_fullscreen_and_with_the_title_off_the_row() {
     let (mods, pane) = setup("tmux-01-tres-paineis-150", pm());
     pane.mouse(false);
@@ -197,9 +210,9 @@ async fn show_refuses_without_fullscreen_and_with_the_title_off_the_row() {
 async fn read_shown_reads_the_active_tab() {
     let (limits, undo) = (Limits::quick(), Undo::default());
     let (mods, pane) = setup("tmux-02-apos-clicar-mr-150", pm());
-    assert_eq!(click::read_shown(&Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: far(), undo: &undo }).await.as_deref(), Some("pm-mock-mr"));
+    assert_eq!(click::read_shown(&Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: far(), undo: &undo, life: 1 }).await.as_deref(), Some("pm-mock-mr"));
     let (mods, pane) = setup("psmux-700-dialogo-com-caixa-100", pm());
-    assert_eq!(click::read_shown(&Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: far(), undo: &undo }).await, None);
+    assert_eq!(click::read_shown(&Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: far(), undo: &undo, life: 1 }).await, None);
 }
 
 #[tokio::test]

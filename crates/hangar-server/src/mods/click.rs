@@ -139,6 +139,9 @@ pub struct Ctx<'a> {
     /// confirmação dentro dele.
     pub until: Instant,
     pub undo: &'a Undo,
+    /// A vida da sessão que pediu (`Mods::new_life`): o que o clique lê e escreve no registro é só dela, e
+    /// a sessão que reabriu com o mesmo nome no meio do clique não recebe nada dele.
+    pub life: u64,
 }
 
 /// O que o app pediu, resolvido no espelho que o plugin mandou.
@@ -162,7 +165,7 @@ fn target_of(view: &TerminalView, site: &str, key: &str, tree: Value) -> Target 
 }
 
 fn target(ctx: &Ctx<'_>, site: &str, key: &str) -> Result<Target, ModsError> {
-    let view = ctx.mods.terminal_view(ctx.name).ok_or_else(pane_missing)?;
+    let view = ctx.mods.terminal_view_in(ctx.name, ctx.life).ok_or_else(pane_missing)?;
     let tree = if site == BAND_SITE { view.above.clone() }
         else { view.panes.iter().find(|p| p.id == site).map(|p| p.tree.clone()).ok_or_else(pane_missing)? };
     Ok(target_of(&view, site, key, tree))
@@ -312,7 +315,7 @@ async fn click_confirmed(ctx: &Ctx<'_>, t: &Target, label: &str, mut cell: (usiz
             [one] if *one == cell => {
                 let since = Instant::now();
                 ctx.click(cell, Duration::ZERO).await?;
-                return if ctx.mods.wait_pressed(ctx.name, &t.site, &t.key, since, ctx.confirm()).await { Ok(()) } else { Err(no_answer()) };
+                return if ctx.mods.wait_pressed(ctx.name, ctx.life, &t.site, &t.key, since, ctx.confirm()).await { Ok(()) } else { Err(no_answer()) };
             }
             [one] => cell = *one,
             [] => return Err(not_found(label)),
@@ -369,13 +372,13 @@ async fn roll_until(ctx: &Ctx<'_>, t: &Target, label: &str) -> Result<Found, Mod
     let (s, _) = ctx.read(t).await?;
     let body = s.body.clone().ok_or_else(unreachable_pane)?;
     let pointer = ((body.rows.0 + body.rows.1) / 2, (body.lo + body.hi) / 2);
-    let (mut seq, mut last) = ctx.mods.last_scroll(ctx.name, &t.site);
+    let (mut seq, mut last) = ctx.mods.last_scroll(ctx.name, ctx.life, &t.site);
     let mut down = true;
     let started = Instant::now();
     for _ in 0..ctx.limits.wheel_events {
         if started.elapsed() >= ctx.limits.wheel_max { break; }
         ctx.wheel(pointer, down).await?;
-        match ctx.mods.wait_scroll(ctx.name, &t.site, seq, ctx.limits.scroll_wait.min(ctx.left())).await {
+        match ctx.mods.wait_scroll(ctx.name, ctx.life, &t.site, seq, ctx.limits.scroll_wait.min(ctx.left())).await {
             Some((next, offset)) if Some(offset) != last => { seq = next; last = Some(offset); }
             other => {
                 if let Some((next, _)) = other { seq = next; }
@@ -432,7 +435,7 @@ async fn press_inner(ctx: &Ctx<'_>, site: &str, key: &str) -> Result<Value, Mods
 pub async fn press(ctx: &Ctx<'_>, site: &str, key: &str) -> Result<Value, ModsError> {
     let result = press_inner(ctx, site, key).await;
     // A aba da frente pode ter mudado sem redesenho (troca para painel já desenhado, (s)).
-    ctx.mods.schedule_shown(ctx.name);
+    ctx.mods.schedule_shown_in(ctx.name, ctx.life);
     result
 }
 
@@ -449,9 +452,9 @@ pub async fn close(ctx: &Ctx<'_>, site: &str) -> Result<Value, ModsError> {
         let Some(s) = activate(ctx, &t, s).await? else { return reserve_close(ctx, &t).await };
         let cell = s.close.ok_or_else(|| not_found("✕"))?;
         ctx.click(cell, Duration::ZERO).await?;
-        if ctx.mods.wait_pane_gone(ctx.name, site, ctx.confirm()).await { Ok(json!({})) } else { Err(no_answer()) }
+        if ctx.mods.wait_pane_gone(ctx.name, ctx.life, site, ctx.confirm()).await { Ok(json!({})) } else { Err(no_answer()) }
     }.await;
-    ctx.mods.schedule_shown(ctx.name);
+    ctx.mods.schedule_shown_in(ctx.name, ctx.life);
     result
 }
 
@@ -464,7 +467,7 @@ pub async fn show(ctx: &Ctx<'_>, site: &str) -> Result<Value, ModsError> {
     let (s, _) = ctx.read(&t).await?;
     if s.dialog || s.survey { return Err(dialog_open()); }
     activate(ctx, &t, s).await?.ok_or_else(unreachable_pane)?;
-    ctx.mods.set_screen_shown(ctx.name, Some(site.to_owned()));
+    ctx.mods.set_screen_shown(ctx.name, ctx.life, Some(site.to_owned()));
     Ok(json!({"shown_id": site}))
 }
 
@@ -481,7 +484,7 @@ pub async fn dispatch(ctx: &Ctx<'_>, call: ModsCall) -> Result<Value, ModsError>
 
 /// O painel que a linha de abas mostra na frente; `None` sem linha de abas na tela.
 pub async fn read_shown(ctx: &Ctx<'_>) -> Option<String> {
-    let view = ctx.mods.terminal_view(ctx.name)?;
+    let view = ctx.mods.terminal_view_in(ctx.name, ctx.life)?;
     if view.panes.is_empty() { return None; }
     let t = target_of(&view, "", "", Value::Null);
     let (s, _) = ctx.read(&t).await.ok()?;
@@ -509,7 +512,7 @@ pub async fn finish(ctx: &Ctx<'_>) {
     let undo = ctx.undo;
     let clean = Ctx { until: Instant::now() + UNDO_MAX, ..*ctx };
     if let Some(attempt) = undo.with(|p| p.focus.clone()) {
-        ctx.mods.disarm_focus(ctx.name, &attempt);
+        ctx.mods.disarm_focus(ctx.name, ctx.life, &attempt);
         undo.with(|p| p.focus = None);
     }
     if let Some(back) = undo.with(|p| p.keyboard.clone()) {
@@ -535,6 +538,8 @@ pub struct Parts {
     pub limits: Limits,
     /// Um pedido por vez no pane, contando a limpeza do anterior: a vez da rota solta antes dela.
     pub busy: Arc<tokio::sync::Mutex<()>>,
+    /// A vida da sessão a que o elo pertence (`Ctx::life`).
+    pub life: u64,
 }
 
 /// Desfaz o que ficou quando a tarefa do clique some sem chegar ao fim (pânico, servidor encerrando,
@@ -550,7 +555,7 @@ impl Drop for UndoOnDrop {
             runtime.spawn(async move {
                 let _busy = busy;
                 let ctx = Ctx { name: &parts.name, pane: parts.pane.as_ref(), mods: &parts.mods, limits: &parts.limits,
-                    until: Instant::now(), undo: &undo };
+                    until: Instant::now(), undo: &undo, life: parts.life };
                 finish(&ctx).await;
             });
         }
@@ -578,7 +583,8 @@ pub fn spawn(parts: Parts, call: ModsCall, until: Instant) -> (tokio::task::Join
         };
         let undo = Arc::new(Undo::default());
         let _guard = UndoOnDrop { parts: parts.clone(), undo: undo.clone(), busy: Some(busy) };
-        let ctx = Ctx { name: &parts.name, pane: parts.pane.as_ref(), mods: &parts.mods, limits: &parts.limits, until, undo: &undo };
+        let ctx = Ctx { name: &parts.name, pane: parts.pane.as_ref(), mods: &parts.mods, limits: &parts.limits, until, undo: &undo,
+            life: parts.life };
         let result = match hold(&ctx).await {
             Ok(()) => dispatch(&ctx, call).await,
             Err(error) => Err(error),
