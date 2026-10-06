@@ -47,8 +47,11 @@ interface Props {
 
 type PendingAttach = PickedAttachment;
 // O campo é só um `/nome` sendo digitado (nem argumento nem outro texto): é ele que o comando
-// escolhido substitui por inteiro.
-const soComando = (texto: string) => slashTokenAt(texto, texto.length)?.whole === true;
+// escolhido substitui por inteiro. Espaço no fim não conta: a lista abre com o cursor antes dele.
+const soComando = (texto: string) => {
+  const t = texto.trimEnd();
+  return slashTokenAt(t, t.length)?.whole === true;
+};
 
 // Número do selo da fila: crescer com o texto ampliado o cortava dentro do botão; a dica acessível já diz a contagem.
 const GLYPH_MAX_SCALE = 1.4;
