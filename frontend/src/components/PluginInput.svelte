@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { PluginInputKind } from '@hangar/core';
+  import { FieldSync, type PluginInputKind } from '@hangar/core';
   import * as m from '../paraglide/messages';
 
   interface Props {
@@ -17,63 +17,39 @@
   let { label, placeholder, value, submitLabel, onInput, frame }: Props = $props();
   let field: HTMLInputElement | undefined = $state();
 
-  // Quando o valor desenhado entra, como no nativo: só conta como posto quando é posto. Com a pessoa no campo ele fica
-  // pendente (um redesenho atrasado não apaga o que se digita) e entra quando o campo perde o foco. Logo depois do
-  // envio do próprio campo, o desenho seguinte entra mesmo com foco: é como o mod limpa o campo depois do envio, e o
-  // valor pode ser igual ao de antes (vazio). Digitar depois que o pendente chegou o descarta: perder o foco nunca apaga
-  // texto digitado e não enviado. `sent` guarda o que o campo mandou como `change` desde o último valor aplicado: os ecos
-  // atrasados desses valores não tomam a vez da resposta ao envio. Não são estado reativo: só o desenho novo, o blur e
-  // os handlers as leem.
-  let pending: string | null = null;
-  let submitted = false;
-  const sent = new Set<string>();
+  // Quando o valor desenhado entra no campo: a regra é o `FieldSync` do core, a mesma do nativo (pendente em foco, vez
+  // da resposta ao envio, ecos velhos). Não é estado reativo: só o desenho novo, o blur e os handlers o leem.
+  const sync = new FieldSync();
   let sendButton: HTMLButtonElement | undefined = $state();
 
-  /** O valor do mod entra: o que se mandou antes dele deixa de contar como eco. */
-  function put(drawn: string) {
-    sent.clear();
-    if (field && field.value !== drawn) field.value = drawn;
+  function put(next: string | null) {
+    if (field && next !== null) field.value = next;
   }
 
   $effect(() => {
     const drawn = value;
     void frame;
     if (!field) return;
-    // Depois do envio, um desenho igual ao que se vê ou a um `change` mandado (eco atrasado de antes do envio) não é a
-    // resposta: a vez fica, e ele espera como pendente. Limite: uma resposta igual a um valor digitado antes (o vazio
-    // depois de a pessoa apagar tudo) só entra quando o campo perde o foco.
-    const answer = submitted && drawn !== field.value && !sent.has(drawn);
-    if (document.activeElement !== field || answer) {
-      pending = null;
-      submitted = false;
-      put(drawn);
-    } else {
-      pending = drawn;
-    }
+    put(sync.draw(drawn, field.value, document.activeElement === field));
   });
 
   function blur(e: FocusEvent) {
     // Tab até o rótulo de envio e Enter: o foco sai do campo antes do envio, e aplicar o pendente aqui faria o envio
     // mandar o valor do mod, e não o que está no campo. A resposta ao envio entra no desenho seguinte. (O clique no
     // rótulo não chega aqui: o `mousedown` dele não tira o foco do campo.)
-    if (pending !== null && e.relatedTarget !== sendButton) put(pending);
-    pending = null;
+    if (e.relatedTarget === sendButton) sync.leftToSend();
+    else if (field) put(sync.draw(null, field.value, false));
   }
 
   function change(text: string) {
-    // Voltar a digitar descarta o pendente e fecha a vez do desenho que responde ao envio; o valor mandado passa a
-    // contar como eco.
-    if (onInput) sent.add(text);
-    pending = null;
-    submitted = false;
-    onInput?.('change', text);
+    if (!onInput) return;
+    sync.typed(text);
+    onInput('change', text);
   }
 
   function submit() {
     if (!field || !onInput) return;
-    // O que foi enviado é o que está no campo: um eco de antes do envio não volta ao perder o foco.
-    pending = null;
-    submitted = true;
+    sync.submitted();
     onInput('submit', field.value);
   }
 </script>
