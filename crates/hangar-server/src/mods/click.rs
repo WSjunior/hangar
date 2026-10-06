@@ -90,6 +90,9 @@ pub struct Limits {
     /// Quanto o anel do teclado espera a tela mudar depois de uma tecla (ela aparece em 50 a 60 ms no tmux e
     /// no psmux): a leitura seguinte é repetida até ver a mudança ou até este teto.
     pub key_settle: Duration,
+    /// Quanto um passo do anel do `ctrl+x tab` pode custar: a tecla, a leitura e a espera da tela. Medido no
+    /// psmux em 0,38 a 0,44 s com seis processos por passo; com dois, fica abaixo disso, e o teto guarda folga.
+    pub ring_step: Duration,
 }
 
 impl Default for Limits {
@@ -99,7 +102,7 @@ impl Default for Limits {
             wheel_gap: Duration::from_millis(150), wheel_events: 80, wheel_max: Duration::from_secs(4), scroll_wait: Duration::from_millis(600),
             key_gap: Duration::from_millis(20), focus_wait: Duration::from_millis(500), settle_poll: Duration::from_millis(100),
             settle_max: Duration::from_secs(1), keep_held: Duration::from_secs(5), retry_gap: Duration::from_millis(500),
-            click_gap: Duration::from_millis(350), key_settle: Duration::from_millis(300) }
+            click_gap: Duration::from_millis(350), key_settle: Duration::from_millis(300), ring_step: Duration::from_millis(450) }
     }
 }
 
@@ -109,7 +112,7 @@ impl Limits {
             wheel_gap: Duration::ZERO, wheel_events: 80, wheel_max: Duration::from_secs(2), scroll_wait: Duration::from_millis(50),
             key_gap: Duration::ZERO, focus_wait: Duration::from_millis(100), settle_poll: Duration::from_millis(1),
             settle_max: Duration::from_millis(10), keep_held: Duration::from_millis(100), retry_gap: Duration::from_millis(20),
-            click_gap: Duration::from_millis(20), key_settle: Duration::from_millis(10) }
+            click_gap: Duration::from_millis(20), key_settle: Duration::from_millis(10), ring_step: Duration::from_millis(50) }
     }
 }
 
@@ -444,31 +447,46 @@ async fn stretched(ctx: &Ctx<'_>, t: &Target, label: &str, f: PaneFormats) -> Re
 /// Roda com o ponteiro sobre o corpo, lendo o `offset` do `ui.scroll` depois de cada evento: contar eventos
 /// não serve, em rajada a rolagem acelera ((u); três linhas por evento no psmux). Cada evento só sai com
 /// tempo para a espera do `ui.scroll` e o clique final; sem isso, `erro_mod_clique_sem_resposta`.
+/// Quanto do prazo a reserva por teclado precisa para chegar a `t`: um passo do anel por botão das faixas e
+/// por painel até o dele, mais o `Tab`, a espera do foco, a confirmação do `Enter` e a folga.
+fn keyboard_need(ctx: &Ctx<'_>, t: &Target) -> Duration {
+    let index = t.ids.iter().position(|id| *id == t.site).unwrap_or(t.ids.len());
+    let steps = u32::try_from(t.band_buttons + index + 2).unwrap_or(u32::MAX);
+    ctx.limits.ring_step.saturating_mul(steps) + ctx.limits.focus_wait + ctx.limits.confirm + ACTION_MARGIN
+}
+
+/// Roda com o ponteiro sobre o corpo até o rótulo aparecer. Cada evento espaçado rola pouco (uma linha no
+/// tmux, três no psmux) e só em rajada acelera, sem conta previsível: um botão a dezenas de linhas não cabe
+/// no prazo. A roda para a tempo de a reserva por teclado ainda caber, ou no teto dela, e passa ao teclado,
+/// cujo `Tab` rola o painel sozinho até o botão. Chegar às duas pontas sem o rótulo é recusa.
 async fn roll_until(ctx: &Ctx<'_>, t: &Target, label: &str) -> Result<Found, ModsError> {
-    let (s, _) = ctx.read(t).await?;
+    let f = ctx.formats().await?;
+    let (titles, anchor) = (&t.titles, t.anchor.as_deref());
+    let (s, _) = ctx.read_known(titles, anchor, f).await?;
     let body = s.body.clone().ok_or_else(unreachable_pane)?;
     let pointer = ((body.rows.0 + body.rows.1) / 2, (body.lo + body.hi) / 2);
     let (mut seq, mut last) = ctx.mods.last_scroll(ctx.name, ctx.life, &t.site);
     let mut down = true;
     let started = Instant::now();
+    let need = keyboard_need(ctx, t);
     for _ in 0..ctx.limits.wheel_events {
-        if started.elapsed() >= ctx.limits.wheel_max { break; }
+        if started.elapsed() >= ctx.limits.wheel_max || ctx.left() < need { return Ok(Found::Keyboard); }
         ctx.wheel(pointer, down).await?;
         match ctx.mods.wait_scroll(ctx.name, ctx.life, &t.site, seq, ctx.limits.scroll_wait.min(ctx.left())).await {
             Some((next, offset)) if Some(offset) != last => { seq = next; last = Some(offset); }
             other => {
                 if let Some((next, _)) = other { seq = next; }
-                if !down { break; }
+                if !down { return Err(unreachable_pane()); }
                 down = false;   // chegou ao fim: tenta para cima
                 continue;
             }
         }
-        let (s, _) = ctx.read(t).await?;
+        let (s, _) = ctx.read_known(titles, anchor, f).await?;
         let hits = s.body.as_ref().map(|b| screen::find_in(&s, label, b)).unwrap_or_default();
         match hits.len() { 0 => {}, 1 => return Ok(Found::Cell(hits[0])), _ => return Ok(Found::Keyboard) }
         tokio::time::sleep(ctx.limits.wheel_gap).await;
     }
-    Err(unreachable_pane())
+    Ok(Found::Keyboard)
 }
 
 async fn in_pane(ctx: &Ctx<'_>, t: &Target, label: &str) -> Result<Found, ModsError> {

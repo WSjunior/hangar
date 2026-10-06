@@ -702,3 +702,47 @@ async fn the_keyboard_ring_with_a_dozen_band_buttons_fits_the_deadline() {
     assert_eq!(keys(&pane).iter().filter(|k| *k == "C-x Tab").count(), 14 + 2, "o anel inteiro e a volta ao prompt");
     assert!(keys(&pane).contains(&"Enter".to_string()));
 }
+
+/// O MR com o botão `mr-a` fora da área visível: a tela não o mostra, e a roda não chega a ele.
+fn pm_with_far_button() -> TerminalView { pm_with_mr(json!({"type": "Box", "children": [mr_button("mr-a", "Botão lá embaixo")]})) }
+
+/// Como o teclado chega ao MR a partir da tela com ele na frente e o prompt com o teclado.
+fn keyboard_to_mr(pane: &FakePane) {
+    to_mr(pane);
+    pane.on_keys("Tab", vec![Focus("pm-mock-mr", "mr-a", false)]);
+    pane.on_keys("Enter", vec![Pressed("pm-mock-mr", "mr-a")]);
+    back_from_mr(pane);
+}
+
+#[tokio::test]
+async fn a_button_beyond_the_wheel_goes_to_the_keyboard() {
+    // Com terminal ligado não se estica a janela; cada evento da roda rola uma linha, e o botão está a ~40.
+    // No teto da roda, o clique passa à reserva por teclado, cujo `Tab` rola o painel até o botão.
+    let (mods, pane) = setup("tmux-02-apos-clicar-mr-150", pm_with_far_button());
+    for offset in 1..=40 { pane.on_wheel(vec![Scroll("pm-mock-mr", offset)]); }
+    keyboard_to_mr(&pane);
+    let (limits, undo, clicked) = (Limits { wheel_events: 16, ..Limits::quick() }, Undo::default(), Mutex::default());
+    let ctx = Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: far(), undo: &undo, life: 1, clicked: &clicked };
+    let result = click::dispatch(&ctx, ModsCall::Press { site: "pm-mock-mr".into(), key: "mr-a".into() }).await;
+    click::finish(&ctx).await;
+    result.unwrap();
+    assert_eq!(pane.actions().iter().filter(|a| a.starts_with("wheel ")).count(), 16);
+    assert_eq!(keys(&pane), ["C-x Tab", "C-x Tab", "C-x Tab", "Tab", "Enter", "C-x Tab", "C-x Tab"]);
+}
+
+#[tokio::test]
+async fn the_wheel_stops_in_time_for_the_keyboard() {
+    // A roda lenta não vai até o teto dela: para quando sobra só o que a reserva por teclado precisa.
+    let (mods, pane) = setup("tmux-02-apos-clicar-mr-150", pm_with_far_button());
+    for offset in 1..=200 { pane.on_wheel(vec![Scroll("pm-mock-mr", offset)]); }
+    keyboard_to_mr(&pane);
+    let (limits, undo, clicked) = (Limits { wheel_gap: Duration::from_millis(50), ..Limits::quick() }, Undo::default(), Mutex::default());
+    let ctx = Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: Instant::now() + Duration::from_millis(2500), undo: &undo,
+        life: 1, clicked: &clicked };
+    let result = click::dispatch(&ctx, ModsCall::Press { site: "pm-mock-mr".into(), key: "mr-a".into() }).await;
+    click::finish(&ctx).await;
+    result.unwrap();
+    let wheels = pane.actions().iter().filter(|a| a.starts_with("wheel ")).count();
+    assert!(wheels > 0 && wheels < limits.wheel_events, "{wheels} eventos");
+    assert!(keys(&pane).contains(&"Enter".to_string()), "{:?}", keys(&pane));
+}
