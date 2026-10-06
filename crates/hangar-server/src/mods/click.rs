@@ -84,6 +84,9 @@ pub struct Limits {
     /// fila não entrega mensagem com o teclado ainda num painel. O executor corta a reserva em 10 s.
     pub keep_held: Duration,
     pub retry_gap: Duration,
+    /// Intervalo mínimo entre dois cliques de mouse no pane: mais perto que isso o Claude Code os toma por
+    /// duplo clique e engole o segundo (medido no tmux: até 250 ms some, a partir de 300 ms funciona).
+    pub click_gap: Duration,
 }
 
 impl Default for Limits {
@@ -92,7 +95,8 @@ impl Default for Limits {
         Self { confirm: Duration::from_secs(2), activate_poll: Duration::from_millis(50), activate_max: Duration::from_millis(300),
             wheel_gap: Duration::from_millis(150), wheel_events: 80, wheel_max: Duration::from_secs(4), scroll_wait: Duration::from_millis(600),
             key_gap: Duration::from_millis(20), focus_wait: Duration::from_millis(500), settle_poll: Duration::from_millis(100),
-            settle_max: Duration::from_secs(1), keep_held: Duration::from_secs(5), retry_gap: Duration::from_millis(500) }
+            settle_max: Duration::from_secs(1), keep_held: Duration::from_secs(5), retry_gap: Duration::from_millis(500),
+            click_gap: Duration::from_millis(350) }
     }
 }
 
@@ -101,7 +105,8 @@ impl Limits {
         Self { confirm: Duration::from_millis(300), activate_poll: Duration::from_millis(1), activate_max: Duration::from_millis(50),
             wheel_gap: Duration::ZERO, wheel_events: 80, wheel_max: Duration::from_secs(2), scroll_wait: Duration::from_millis(50),
             key_gap: Duration::ZERO, focus_wait: Duration::from_millis(100), settle_poll: Duration::from_millis(1),
-            settle_max: Duration::from_millis(10), keep_held: Duration::from_millis(100), retry_gap: Duration::from_millis(20) }
+            settle_max: Duration::from_millis(10), keep_held: Duration::from_millis(100), retry_gap: Duration::from_millis(20),
+            click_gap: Duration::from_millis(20) }
     }
 }
 
@@ -147,6 +152,8 @@ pub struct Ctx<'a> {
     /// A vida da sessão que pediu (`Mods::new_life`): o que o clique lê e escreve no registro é só dela, e
     /// a sessão que reabriu com o mesmo nome no meio do clique não recebe nada dele.
     pub life: u64,
+    /// Quando saiu o último clique de mouse neste pane, deste pedido ou de um anterior (`Parts::clicked`).
+    pub clicked: &'a Mutex<Option<Instant>>,
 }
 
 /// O que o app pediu, resolvido no espelho que o plugin mandou.
@@ -223,8 +230,18 @@ impl<'a> Ctx<'a> {
     async fn read(&self, t: &Target) -> Result<(Screen, PaneFormats), ModsError> {
         self.read_view(&t.titles, t.anchor.as_deref()).await
     }
+    /// Clique de mouse, no mínimo `click_gap` depois do anterior no mesmo pane. A espera entra na conta do
+    /// prazo: sem tempo para ela, a ação e a confirmação, o clique não sai.
     async fn click(&self, (row, col): (usize, usize), after: Duration) -> Result<(), ModsError> {
-        self.act(PaneOp::Mouse { row: row as u16, col: col as u16 }, after).await
+        let last = *self.clicked.lock().unwrap();
+        let wait = last.map_or(Duration::ZERO, |at| (at + self.limits.click_gap).saturating_duration_since(Instant::now()));
+        if !wait.is_zero() {
+            self.start_by(wait + after)?;
+            tokio::time::sleep(wait).await;
+        }
+        let result = self.act(PaneOp::Mouse { row: row as u16, col: col as u16 }, after).await;
+        *self.clicked.lock().unwrap() = Some(Instant::now());
+        result
     }
     async fn wheel(&self, (row, col): (usize, usize), down: bool) -> Result<(), ModsError> {
         self.act(PaneOp::Wheel { row: row as u16, col: col as u16, down }, self.limits.scroll_wait).await
@@ -738,12 +755,15 @@ pub struct Parts {
     pub busy: Arc<tokio::sync::Mutex<()>>,
     /// A vida da sessão a que o elo pertence (`Ctx::life`).
     pub life: u64,
+    /// O último clique de mouse no pane, entre um pedido e o seguinte (`Ctx::clicked`).
+    pub clicked: Arc<Mutex<Option<Instant>>>,
 }
 
 impl Parts {
     /// O contexto de um pedido neste pane, com o prazo `until` e o pendente `undo`.
     pub fn ctx<'a>(&'a self, until: Instant, undo: &'a Undo) -> Ctx<'a> {
-        Ctx { name: &self.name, pane: self.pane.as_ref(), mods: &self.mods, limits: &self.limits, until, undo, life: self.life }
+        Ctx { name: &self.name, pane: self.pane.as_ref(), mods: &self.mods, limits: &self.limits, until, undo, life: self.life,
+            clicked: &self.clicked }
     }
 }
 
