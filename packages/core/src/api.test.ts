@@ -10,7 +10,7 @@ function overwriteGetLocale(fn: () => 'en' | 'pt') {
 }
 import { configureApi } from './apiEnv';
 // `getHistoryDesde` veio da main junto com o histórico condicional (304 + ETag).
-import { getConfig, getConfigForServer, patchConfig, patchConfigForServer, createSession, getHistory, getHistoryDesde, isAbortError, transcribeFile, transcribeFileForServer, getModelOptions, setEngineModel, rotaGenerica, pairSession } from './api';
+import { getConfig, getConfigForServer, patchConfig, patchConfigForServer, createSession, getHistory, getHistoryDesde, isAbortError, transcribeFile, transcribeFileForServer, transcribeUploaded, transcribeUploadedForServer, uploadFile, uploadFileForServer, getModelOptions, setEngineModel, rotaGenerica, pairSession } from './api';
 import { createSessionForServer, getFolderGitForServer, folderGitActionForServer, defaultBase } from './api';
 import { mensagemDeErro, formataErro } from './errosApi';
 import { passarBastao, getSyncSetupForServer, setupSyncForServer, disableSyncForServer } from './api';
@@ -652,8 +652,7 @@ describe('mensagemDeErro (parecer task 10)', () => {
   });
 });
 
-// A corrente toggleRecord -> addFiles({ditado:true}) -> transcribeIntoComposer -> transcribeFile
-// so pode acender `limpar=1` no pedido do mic. Este e o elo mais barato de quebrar (um `{ditado:
+// Só o pedido do mic (`limpar: true`) pode acender `limpar=1`. Este e o elo mais barato de quebrar (um `{ditado:
 // true}` esquecido no caminho do anexo manda audio de 10min pro LLM) e o unico sem teste algum.
 describe('transcribeFile', () => {
 
@@ -673,6 +672,61 @@ describe('transcribeFile', () => {
 
     await transcribeFile('sessao', file, {});
     expect(fetchMock.mock.calls[2][0]).toBe('https://a.test/api/sessions/sessao/transcribe');
+  });
+
+  it('?arquivo= vai sem corpo, com a limpeza e o nome escapado', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(JSON.stringify({ path: '/u/gravação 1.webm', text: 't', provider: 'ElevenLabs' }), { status: 200 }),
+    );
+    const r = await transcribeUploaded('sessao', 'gravação 1.webm', { limpar: true });
+    expect(fetchMock.mock.calls[0][0])
+      .toBe('https://a.test/api/sessions/sessao/transcribe?limpar=1&arquivo=grava%C3%A7%C3%A3o%201.webm');
+    expect(fetchMock.mock.calls[0][1]?.body).toBeUndefined();
+    expect(r.provider).toBe('ElevenLabs');
+
+    await transcribeUploaded('sessao', '/home/u/.hangar/uploads/p/velho/a.webm');
+    expect(fetchMock.mock.calls[1][0])
+      .toBe('https://a.test/api/sessions/sessao/transcribe?arquivo=%2Fhome%2Fu%2F.hangar%2Fuploads%2Fp%2Fvelho%2Fa.webm');
+
+    await transcribeUploadedForServer(server, 'sessao', 'a.webm', { limpar: true, estilo: 'prosa' });
+    expect(fetchMock.mock.calls[2][0])
+      .toBe('https://a.test/api/sessions/sessao/transcribe?limpar=1&estilo=prosa&arquivo=a.webm');
+    expect(fetchMock.mock.calls[2][1]?.body).toBeUndefined();
+    expect(JSON.stringify(fetchMock.mock.calls[2][1]?.headers)).not.toContain('application/json');
+  });
+
+  it('upload do ditado pede só áudio; os outros uploads não mudam', async () => {
+    const abertos: string[] = [];
+    vi.stubGlobal('XMLHttpRequest', class {
+      status = 200; responseText = '{"path":"/up/g.webm"}'; upload = {}; timeout = 0;
+      onload?: () => void;
+      open(_m: string, url: string) { abertos.push(url); }
+      setRequestHeader() {}
+      send() { queueMicrotask(() => this.onload?.()); }
+    });
+    await uploadFile('sessao', new File(['a'], 'g.webm'), undefined, null, { audioOnly: true });
+    await uploadFile('sessao', new File(['a'], 'f.png'));
+    expect(abertos).toEqual([
+      'https://a.test/api/sessions/sessao/upload?audio_only=1',
+      'https://a.test/api/sessions/sessao/upload',
+    ]);
+    vi.unstubAllGlobals();
+
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response('{"path":"/up/g.webm"}', { status: 200 }));
+    await uploadFileForServer(server, 'sessao', new File(['a'], 'g.webm'), { audioOnly: true });
+    await uploadFileForServer(server, 'sessao', new File(['a'], 'f.png'));
+    expect(fetchMock.mock.calls.map((c) => c[0])).toEqual([
+      'https://a.test/api/sessions/sessao/upload?audio_only=1',
+      'https://a.test/api/sessions/sessao/upload',
+    ]);
+  });
+
+  it('falha de ?arquivo= leva o status', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(JSON.stringify({ detail: 'provedor fora' }), { status: 502 }));
+    await expect(transcribeUploaded('sessao', 'a.webm')).rejects.toMatchObject({ status: 502, message: 'provedor fora' });
+    await expect(transcribeUploadedForServer(server, 'sessao', 'a.webm')).rejects.toMatchObject({ status: 502 });
   });
 });
 

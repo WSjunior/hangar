@@ -705,23 +705,36 @@ it('SSE que fecha seguido com a sessao viva desiste no terceiro', async () => {
 // A chave era só o nome: um envio que falhou voltou pro composer da sessão `hangar`, ela morreu, e
 // a sessão Codex criada no dia seguinte com o mesmo nome abriu com o texto da morta no campo.
 it('rascunho de OUTRO transcript com o mesmo nome é descartado', async () => {
-  localStorage.setItem('cp-draft:sess', JSON.stringify({ text: 'da sessão morta', jsonl: '/velha.jsonl' }));
+  localStorage.setItem('cp-draft:srv-test::sess', JSON.stringify({ text: 'da sessão morta', jsonl: '/velha.jsonl' }));
   sessionsStoreCtl.rows = [{ name: 'sess', state: 'idle', serverId: 'srv-test', jsonl: '/nova.jsonl' }];
   const t = montar(true);
   try {
-    await vi.waitFor(() => expect(localStorage.getItem('cp-draft:sess')).toBeNull());
+    await vi.waitFor(() => expect(localStorage.getItem('cp-draft:srv-test::sess')).toBeNull());
   } finally {
     await unmount(t.comp);
   }
 });
 
 it('rascunho do MESMO transcript é restaurado', async () => {
-  localStorage.setItem('cp-draft:sess', JSON.stringify({ text: 'meu rascunho', jsonl: '/mesma.jsonl' }));
+  localStorage.setItem('cp-draft:srv-test::sess', JSON.stringify({ text: 'meu rascunho', jsonl: '/mesma.jsonl' }));
   sessionsStoreCtl.rows = [{ name: 'sess', state: 'idle', serverId: 'srv-test', jsonl: '/mesma.jsonl' }];
   const t = montar(true);
   try {
     await tick(); await tick();
-    expect(JSON.parse(localStorage.getItem('cp-draft:sess')!).text).toBe('meu rascunho');
+    expect(JSON.parse(localStorage.getItem('cp-draft:srv-test::sess')!).text).toBe('meu rascunho');
+  } finally {
+    await unmount(t.comp);
+  }
+});
+
+it('rascunho na chave antiga (só o nome) é movido para a do servidor', async () => {
+  localStorage.setItem('cp-draft:sess', JSON.stringify({ text: 'de antes', jsonl: '/mesma.jsonl' }));
+  sessionsStoreCtl.rows = [{ name: 'sess', state: 'idle', serverId: 'srv-test', jsonl: '/mesma.jsonl' }];
+  const t = montar(true);
+  try {
+    await tick(); await tick();
+    expect(localStorage.getItem('cp-draft:sess')).toBeNull();
+    expect(JSON.parse(localStorage.getItem('cp-draft:srv-test::sess')!).text).toBe('de antes');
   } finally {
     await unmount(t.comp);
   }

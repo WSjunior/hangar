@@ -17,6 +17,7 @@ import { intlLocale } from '../lib/locale';
   import { selectServer, listOwnServers, getActiveId, serverColor } from '../lib/auth';
   import ProviderGlyph from '../components/icons/ProviderGlyph.svelte';
   import { basename, providerName } from '@hangar/core';
+  import { draftStorageKey, parseStoredDraft, readMigrating } from '../lib/dictationStore.svelte';
 
   interface Props {
     onBack: () => void;
@@ -213,7 +214,7 @@ import { intlLocale } from '../lib/locale';
         const err = e as { status?: number; code?: string; envelope?: { sessao?: unknown; params?: { sessao?: unknown } } };
         const live = err.envelope?.sessao ?? err.envelope?.params?.sessao;
         if (err.status === 409 && err.code === 'erro_conversa_viva' && typeof live === 'string' && live) {
-          mergeDraft(live, text);
+          mergeDraft(server.id, live, text);
           if (deepLink) selectServer(deepLink.serverId);
           window.location.hash = `#/chat/${encodeURIComponent(server.id)}/${encodeURIComponent(live)}`;
           return;
@@ -224,7 +225,7 @@ import { intlLocale } from '../lib/locale';
       }
       console.error('archive: resume ok, send failed', name, e);
       // A sessao ja existe: o texto volta ao campo do chat dela pelo rascunho que o Chat ja restaura.
-      try { localStorage.setItem(`cp-draft:${name}`, JSON.stringify({ text, jsonl: null })); } catch { /* sem storage */ }
+      try { localStorage.setItem(draftStorageKey(server.id, name), JSON.stringify({ text, jsonl: null })); } catch { /* sem storage */ }
     } finally {
       resuming = false;
     }
@@ -244,20 +245,10 @@ import { intlLocale } from '../lib/locale';
   }
 
   // Rascunho do chat dela: junta ao que já estava lá em vez de sobrescrever. Mesma forma que o Chat lê.
-  function mergeDraft(session: string, text: string) {
-    const key = `cp-draft:${session}`;
-    let prev = '', jsonl: string | null = null;
+  function mergeDraft(serverId: string, session: string, text: string) {
+    const key = draftStorageKey(serverId, session);
     try {
-      const cru = localStorage.getItem(key);
-      if (cru) {
-        try {
-          const d = JSON.parse(cru);
-          if (d && typeof d === 'object' && typeof d.text === 'string') {
-            prev = d.text;
-            jsonl = typeof d.jsonl === 'string' ? d.jsonl : null;
-          } else prev = cru;
-        } catch { prev = cru; }
-      }
+      const { text: prev, jsonl } = parseStoredDraft(readMigrating(key, `cp-draft:${session}`));
       localStorage.setItem(key, JSON.stringify({ text: prev ? `${prev}\n\n${text}` : text, jsonl }));
     } catch { /* sem storage */ }
   }
