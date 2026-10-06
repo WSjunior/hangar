@@ -177,9 +177,9 @@ jobs:
           gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
             || gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false "${criar[@]}" \
             || gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null
-          gh release upload "$tag" hangar-server-* hangar-cano-* --repo "$GITHUB_REPOSITORY" --clobber
           protocol=$(sed -n 's/^pub const INTERNAL_PROTOCOL: u32 = \([0-9][0-9]*\);.*/\1/p' ../hangar-server/src/lib.rs)
           test -n "$protocol" || { echo "::error::INTERNAL_PROTOCOL não encontrado em crates/hangar-server/src/lib.rs"; exit 1; }
+          gh release upload "$tag" hangar-server-* hangar-cano-* --repo "$GITHUB_REPOSITORY" --clobber
           python - "$tag" "$PLATFORM" "$protocol" <<'EOF'
           import hashlib, json, os, pathlib, random, shutil, subprocess, sys, time
 
@@ -222,6 +222,10 @@ jobs:
                   s = json.loads(b)
                   by_plat[s["platform"]] = s
               sources = list(by_plat.values())
+              # Fonte nunca é apagada: sistema do manifesto sem fonte na leitura é outro job no meio do --clobber
+              # dela (apaga e sobe), e compor agora o tiraria da release.
+              if set(old.get("platforms", {})) - set(by_plat):
+                  continue
               # Manifesto de antes das fontes (sem `platforms`): o sistema que ainda não publicou ganha uma semente
               # com a entrada que ele já tinha, para não sair da release. Ela tem nome próprio para nunca sobrescrever
               # a fonte que o job do sistema grava, e toda regravação do manifesto vem depois dela.
@@ -255,3 +259,22 @@ jobs:
               sys.exit(f"{LATEST} não estabilizou")
           EOF
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$tag" -f sha="$GITHUB_SHA" -F force=true >/dev/null
+
+  # Windows e macOS têm continue-on-error para a falha de build deles não segurar o Linux; publicação que falhou
+  # depois de começar (binário novo com manifesto velho) não pode passar calada por isso.
+  publish-check:
+    needs: build
+    if: always() && startsWith(github.ref, 'refs/heads/')
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          failed=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" --paginate \
+            --jq '.jobs[] | select(any(.steps[]?; .name == "Publicar na release" and .conclusion == "failure")) | .name')
+          if [ -n "$failed" ]; then
+            echo "::error::publicação falhou em: $failed"
+            exit 1
+          fi
