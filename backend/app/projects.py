@@ -164,6 +164,10 @@ def _entry(name: str) -> dict:
 # Acontece no macOS, onde psutil.net_connections() exige root.
 DONO_INDETERMINADO = "<indeterminado>"
 
+# socket:[inode] -> cwd do dono. O inode só existe enquanto o socket vive, então o dono não muda;
+# a varredura de /proc/*/fd fica só para socket novo.
+_dono_por_socket: dict[str, str | None] = {}
+
 
 def _port_info(ports: set[int]) -> dict[int, tuple[bool, str | None]]:
     """porta -> (escutando?, cwd realpath do processo dono do LISTEN).
@@ -196,9 +200,14 @@ def _port_info(ports: set[int]) -> dict[int, tuple[bool, str | None]]:
                     port = want[hexport]
                     out[port] = (True, None)
                     inodes[f"socket:[{f[9]}]"] = port
+    global _dono_por_socket
+    _dono_por_socket = {s: d for s, d in _dono_por_socket.items() if s in inodes}
     if not inodes:
         return out
-    pending = set(inodes.values())
+    for sock, port in inodes.items():
+        if (dono := _dono_por_socket.get(sock)) is not None:
+            out[port] = (True, dono)
+    pending = {p for s, p in inodes.items() if s not in _dono_por_socket and out[p][1] is None}
     for pid in os.listdir("/proc"):
         if not pending:
             break
@@ -210,15 +219,20 @@ def _port_info(ports: set[int]) -> dict[int, tuple[bool, str | None]]:
             continue  # processo de outro usuario/ja morto: dono fica None, nunca atribuido
         for fd in fds:
             try:
-                port = inodes.get(os.readlink(fd.path))
+                link = os.readlink(fd.path)
             except OSError:
                 continue
+            port = inodes.get(link)
             if port is not None and port in pending:
                 try:
                     out[port] = (True, os.path.realpath(f"/proc/{pid}/cwd"))
+                    _dono_por_socket[link] = out[port][1]
                 except OSError:
                     pass
                 pending.discard(port)
+    # Socket sem dono visível também fica guardado: sem isso cada poll varria /proc inteiro.
+    for sock in inodes:
+        _dono_por_socket.setdefault(sock, None)
     return out
 
 
