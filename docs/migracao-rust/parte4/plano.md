@@ -254,9 +254,9 @@ por painel, Python × Rust), contrato nos dois lados, `medicao.md`.
 `term::origin_refused_before_upgrade`, `term::shortcut_resolves_owner`,
 `term::panel_cap_refuses_1013`; Python `test_internal_term_origin_same_rules`.
 
-- [ ] **Step 17: Ler "Regras vigentes" de `windows.md` e as entradas do terminal em `frontend.md`; testes, vistos falhar; medida "antes" (`medir-terminal.py`, release)**
-- [ ] **Step 18: Rotas, porta de entrada, PTY, desmontagem, reposição; contrato; testes focados**
-- [ ] **Step 19: Medida "depois"; `medicao.md`; revisar**
+- [x] **Step 17: Ler "Regras vigentes" de `windows.md` e as entradas do terminal em `frontend.md`; testes, vistos falhar; medida "antes" (`medir-terminal.py`, release)**
+- [x] **Step 18: Rotas, porta de entrada, PTY, desmontagem, reposição; contrato; testes focados**
+- [x] **Step 19: Medida "depois"; `medicao.md`; revisar**
 
 ### Task 9: Python como porteiro, 409 e capacidade (contrato)
 

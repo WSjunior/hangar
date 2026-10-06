@@ -41,6 +41,11 @@ rusqlite.workspace = true
 rayon.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
 
+# Painel de terminal real (`term/`); o Windows ainda é do Python.
+[target.'cfg(unix)'.dependencies]
+portable-pty = "=0.9.0"
+libc.workspace = true
+
 # Processos fora do Linux; no Linux o leitor é o /proc (`list/procs.rs`).
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 sysinfo = { version = "=0.39.6", default-features = false, features = ["system"] }
@@ -49,6 +54,8 @@ sysinfo = { version = "=0.39.6", default-features = false, features = ["system"]
 tempfile.workspace = true
 # Relógio pausado: as rodadas do `state::Monitor` contadas sem esperar o tempo real.
 tokio = { workspace = true, features = ["test-util"] }
+# Cliente WebSocket dos testes do painel; mesma versão que o axum puxa.
+tokio-tungstenite = "=0.29.0"
 
 # O leitor `sysinfo` (`list/procs.rs`) também é testado no Linux.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
