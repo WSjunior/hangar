@@ -2,7 +2,7 @@
 import { act, createElement, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { FirstConversationAttempt, MotivoFim } from '@hangar/core';
+import { estilosDitado, type FirstConversationAttempt, type MotivoFim } from '@hangar/core';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -39,7 +39,7 @@ const nativeNavigation = {
 const routerPush = vi.hoisted(() => vi.fn());
 const navigation = vi.hoisted(() => ({ back: vi.fn(), replace: vi.fn(), canGoBack: true }));
 const route = vi.hoisted(() => ({ params: { server: 's1', name: 'sess' }, segments: ['s'] }));
-const realFirstInput = vi.hoisted(() => ({ enabled: false, send: vi.fn(), history: vi.fn(), transcribe: vi.fn(),
+const realFirstInput = vi.hoisted(() => ({ enabled: false, send: vi.fn(), history: vi.fn(), transcribe: vi.fn(), relimpar: vi.fn(),
   upload: vi.fn(async () => ({ path: '/up/sess/ditado-1.m4a' })) }));
 const voiceInput = vi.hoisted(() => ({ onFim: null as null | ((file: File, reason: MotivoFim, uri: string) => Promise<void>) }));
 vi.mock('expo-router', () => ({
@@ -55,6 +55,7 @@ vi.mock('@hangar/core', async (original) => ({
   transcribeUploadedForServer: realFirstInput.transcribe,
   // O ditado sobe o áudio por aqui (`audioOnly`) antes de transcrever.
   uploadFileForServer: realFirstInput.upload,
+  relimparDitado: realFirstInput.relimpar,
 }));
 vi.mock('../stores/servers', () => {
   const state = { ready: true, servers: [{ id: 's1' }, { id: 's2' }], ensureActive: () => true };
@@ -100,6 +101,7 @@ vi.mock('../paraglide/messages', () => Object.fromEntries(
     .concat(' permissao_pedido comum_cancelar msg_aria_mensagens chat_plan_proposto composer_falha_envio nova_conversa_envio_incerto nova_conversa_resultado_salvar_erro nova_conversa_salvar_erro')
     .concat(' askq_enviando board_falha_envio board_falha_upload chat_chegou_mas chat_envio_incerto chat_nao_chegou_em chat_servidor_removido codex_orientar_recebido codex_orientar_sem_envio composer_ditado_anterior composer_ditado_aplicado composer_ditado_indisponivel composer_ditado_interrompido composer_ditado_recuperavel composer_draft_read_again composer_draft_recover_attach_busy composer_falha_gravacao composer_falha_transcricao composer_fila_erro composer_sem_acesso_fotos composer_sem_acesso_mic composer_submission_check composer_submission_rejected composer_submission_sending composer_transcrever_de_novo composer_transcricao_vazia composer_aguarde_transcricao')
     .concat(' draft_read_error draft_invalid draft_write_error draft_clear_error composer_draft_previous composer_draft_recover composer_draft_discard composer_draft_read_again')
+    .concat(' composer_ditado_cru composer_ditado_versao composer_ditado_trocando native_dictation_draft_changed')
     .concat(' sessao_nova nova_conversa_placeholder nova_conversa_sem_destino nova_conversa_opcoes nova_conversa_opcoes_fechar nova_conversa_destino_hint nova_conversa_config_hint nova_conversa_enviar criar_criando')
     .concat(' composer_mensagem_para comandos_titulo native_new_chat_title native_empty_chat_hint')
     .concat(' uso_titulo uso_vazio uso_secao_cota uso_secao_conversa uso_secao_numeros uso_statusline uso_custo uso_tempo_sessao uso_linha_projeto uso_reset composer_modelo ctx_contexto stats_faixa_aria')
@@ -1161,6 +1163,48 @@ describe('ditado entregue à conversa de origem', () => {
     expect(container.querySelector('textarea')!.value).toBe('');
     expect(container.textContent).toContain('composer_ditado_recuperavel');
     expect(button(container, 'composer_draft_recover')).toBeDefined();
+    act(() => root.unmount());
+  });
+
+  it('barra do ditado: cru sem rede, estilo pelo relimpar, edição fora do ditado recusa a troca', async () => {
+    realFirstInput.transcribe.mockClear().mockResolvedValueOnce({
+      path: '/up/sess/ditado-1.m4a', text: 'texto prosa', raw: 'texto cru', aviso: null, estilo_aplicado: 'prosa',
+    });
+    realFirstInput.relimpar.mockClear().mockResolvedValueOnce({ text: 'texto limpo', aviso: null, estilo_aplicado: 'limpar' });
+    const { container, root } = await render(createElement(Composer, props));
+    type(container, 'antes');
+    await act(async () => mic(container).click());
+    await act(async () => voiceInput.onFim!(new File(['a'], 'ditado.m4a', { type: 'audio/m4a' }), 'botao', 'file:///cache/ditado.m4a'));
+    expect(container.querySelector('textarea')!.value).toBe('antes texto prosa');
+    expect(button(container, 'composer_ditado_fechar')).toBeUndefined();
+    await act(async () => button(container, 'composer_ditado_cru')!.click());
+    expect(container.querySelector('textarea')!.value).toBe('antes texto cru');
+    expect(realFirstInput.relimpar).not.toHaveBeenCalled();
+    const limpar = estilosDitado().find((e) => e.valor === 'limpar')!.rotulo;
+    await act(async () => button(container, limpar)!.click());
+    expect(realFirstInput.relimpar).toHaveBeenCalledExactlyOnceWith('texto cru', 'limpar', { id: 's1' });
+    expect(container.querySelector('textarea')!.value).toBe('antes texto limpo');
+    // Texto ditado intacto: as versões ficam, mas a troca recusa para não perder a edição.
+    type(container, 'antes texto limpo e mais');
+    await act(async () => button(container, 'composer_ditado_cru')!.click());
+    expect(container.querySelector('textarea')!.value).toBe('antes texto limpo e mais');
+    expect(container.textContent).toContain('native_dictation_draft_changed');
+    // Mexer no próprio texto ditado esconde as versões.
+    type(container, 'antes outro texto');
+    expect(button(container, 'composer_ditado_cru')).toBeUndefined();
+    act(() => root.unmount());
+  });
+
+  it('enviar fecha a barra do ditado', async () => {
+    realFirstInput.transcribe.mockClear().mockResolvedValueOnce({
+      path: '/up/sess/ditado-1.m4a', text: 'texto prosa', raw: 'texto cru', aviso: null, estilo_aplicado: 'prosa',
+    });
+    const { container, root } = await render(createElement(Composer, props));
+    await act(async () => mic(container).click());
+    await act(async () => voiceInput.onFim!(new File(['a'], 'ditado.m4a', { type: 'audio/m4a' }), 'botao', 'file:///cache/ditado.m4a'));
+    expect(button(container, 'composer_ditado_cru')).toBeDefined();
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="composer_enviar_mensagem"]')!.click());
+    expect(button(container, 'composer_ditado_cru')).toBeUndefined();
     act(() => root.unmount());
   });
 });

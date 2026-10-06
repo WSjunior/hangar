@@ -3,7 +3,7 @@ import * as Haptics from 'expo-haptics';
 import { AccessibilityInfo, ActivityIndicator, Alert, AppState, Platform, Pressable, Text, View, type NativeSyntheticEvent, type TextInput, type TextInputKeyPressEventData } from 'react-native';
 import type { NativeStackNavigationProp } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { broadcast, formataErro, hexParaRgb, uploadFileForServer, steerSession, podeEnviarSozinho, providerName, sendInputForServer, sideQuestionOf, slashMatches } from '@hangar/core';
+import { broadcast, formataErro, hexParaRgb, uploadFileForServer, steerSession, podeEnviarSozinho, providerName, sendInputForServer, sideQuestionOf, slashMatches, relimparDitado, estilosDitado } from '@hangar/core';
 import type { CommandInfo, MotivoFim, Provider, Server } from '@hangar/core';
 import { Glass } from '../ui/Glass';
 import { Icon } from '../ui/Icon';
@@ -91,6 +91,20 @@ function keepRecoverable(serverId: string, name: string, old: ConversationDraft)
   writeRecoverableDraft(serverId, name, value);
   return value;
 }
+
+const VERSION_KEYS = ['cru', 'limpar', 'prosa', 'briefing'];
+const versionOptions = () => [{ v: 'cru', label: m.composer_ditado_cru() },
+  ...estilosDitado().map((e) => ({ v: e.valor as string, label: e.rotulo }))];
+
+// Barra do último ditado inserido (no fim do campo). `field` é o campo logo depois da inserção e
+// `shown` a versão que está nele: como no PC, o texto ditado intacto mantém as versões à vista.
+type DictationBar = { field: string; shown: string; raw: string; applied: string; versions: Record<string, string>; serverPath: string | null };
+const barFor = (field: string, text: string, raw: string, applied: string, serverPath: string | null): DictationBar =>
+  ({ field, shown: text, raw, applied, versions: raw ? { cru: raw, [applied]: text } : { [applied]: text }, serverPath });
+const dictatedInField = (bar: DictationBar, value: string) => {
+  const start = bar.field.length - bar.shown.length;
+  return value.slice(start, start + bar.shown.length) === bar.shown;
+};
 
 export function Composer({ serverId, name, draft, returned, onReturnedAdopted, firstInputId, firstInputSent = false, sessionProvider, headless = false, onStop, stopping = false }: Props) {
   const { theme } = useUnistyles();
@@ -358,6 +372,10 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   const recordingTargetRef = useRef<{ server: Server; snapshot: ConversationDraft; generation: number; estilo?: string } | null>(null);
   const micStartingRef = useRef(false);
   const [undo, setUndo] = useState<{ before: string; raw: string; revision: number } | null>(null);
+  const [bar, setBarState] = useState<DictationBar | null>(null);
+  const barRef = useRef<DictationBar | null>(null);
+  const setBar = useCallback((next: DictationBar | null) => { barRef.current = next; setBarState(next); }, []);
+  const [revising, setRevising] = useState<string | null>(null);
   const [failed, setFailed] = useState<{ file: File; motivo: MotivoFim; uri: string } | null>(null);
   const [autoN, setAutoN] = useState<number | null>(null);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
@@ -576,6 +594,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       } else {
         await sendText(finalText, sentRevision, true);
       }
+      setBar(null);
       if (attach && persistDraft({ attachment: null })) {
         dropCopy(attach.uri);
         setPendingAttach(null);
@@ -592,7 +611,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       setSending(false);
       sendingRef.current = false;
     }
-  }, [text, sending, uploading, chat, sendText, limparUndo, cancelarAuto, pendingAttach, serverId, name, firstInputId, pairPeers, sendToPair, persistText, persistDraft, origin, submissionBlocksSend, isClaude]);
+  }, [text, sending, uploading, chat, sendText, limparUndo, cancelarAuto, pendingAttach, serverId, name, firstInputId, pairPeers, sendToPair, persistText, persistDraft, origin, submissionBlocksSend, isClaude, setBar]);
 
   // auto-envio: contagem de 3s
   const iniciarAuto = useCallback(
@@ -616,7 +635,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           if (!toSend) return;
           limparUndo();
           void sendText(toSend, revision)
-            .then(() => setError(''))
+            .then(() => { setError(''); setBar(null); })
             .catch((e: unknown) => {
               const msg = e instanceof Error ? e.message : m.composer_falha_envio();
               setError(msg);
@@ -626,7 +645,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
         setAutoN(Math.ceil(rest / 1000));
       }, 250);
     },
-    [cancelarAuto, sendText, limparUndo],
+    [cancelarAuto, sendText, limparUndo, setBar],
   );
 
   const offerUndo = useCallback((before: string, raw: string, cleaned: string, revision: number) => {
@@ -658,7 +677,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     }
     if (mountedRef.current) setDictation(voice);
     try {
-      const { completed, text: trimmed, raw, aviso } = await runDictation(server, origin.serverId, origin.name, voice, source, {
+      const { completed, text: trimmed, raw, aviso, path, applied } = await runDictation(server, origin.serverId, origin.name, voice, source, {
         check: () => {
           const sessions = useSessions.getState();
           const live = sessions.byServerRecord?.[origin.serverId]?.find((s) => s.name === origin.name)
@@ -686,6 +705,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           setText(completed.draft.text);
           setSelection({ start: completed.draft.text.length, end: completed.draft.text.length });
           offerUndo(voice.before, raw, trimmed, completed.draft.revision);
+          setBar(barFor(completed.draft.text, trimmed, raw, applied ?? 'cru', path));
           if (aviso) setError(aviso);
           if (allowAuto && podeEnviarSozinho({
             motivo: voice.motivo, texto: trimmed, aviso: aviso || null,
@@ -711,7 +731,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       transcribingRef.current = false;
       if (mountedRef.current) setTranscribing(false);
     }
-  }, [origin, offerUndo, iniciarAuto, navigation]);
+  }, [origin, offerUndo, iniciarAuto, navigation, setBar]);
 
   const handleTranscribe = useCallback(
     async (file: File, motivo: MotivoFim, uri: string, allowAuto = true) => {
@@ -781,6 +801,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       const style = useDitadoEstiloStore.getState();
       recordingTargetRef.current = { server: { ...server }, snapshot,
         generation: activityGenerationRef.current, estilo: style.pronto ? style.valor : undefined };
+      setBar(null);
       await iniciar();
       // O diálogo de permissão pode resolver antes de chegar o AppState active.
       if (mountedRef.current && recordingTargetRef.current) {
@@ -794,7 +815,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
         setError(e instanceof Error ? e.message : m.composer_falha_gravacao());
       }
     } finally { micStartingRef.current = false; }
-  }, [gravando, iniciar, parar, autoN, cancelarAuto, dictation, origin, persistText]);
+  }, [gravando, iniciar, parar, autoN, cancelarAuto, dictation, origin, persistText, setBar]);
 
   const handleUndo = useCallback(() => {
     if (!undo) return;
@@ -808,6 +829,44 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     limparUndo();
     setSelection({ start: restored.length, end: restored.length });
   }, [undo, limparUndo, cancelarAuto, persistText]);
+
+  // Como no PC: o cru já está aqui; os estilos saem do /ditado/relimpar e ficam guardados na barra.
+  // Campo editado fora do texto ditado recusa a troca, para não perder o que foi digitado.
+  const handleVersion = useCallback(async (version: string) => {
+    const current = barRef.current;
+    if (!current || revising !== null) return;
+    if (textRef.current !== current.field) { setError(m.native_dictation_draft_changed()); return; }
+    let next = current.versions[version];
+    let applied = version;
+    if (next === undefined) {
+      const server = useServers.getState().servers.find((s) => s.id === origin.serverId);
+      if (!server) { setError(m.chat_servidor_removido()); return; }
+      setRevising(version);
+      setError('');
+      try {
+        const r = await relimparDitado(current.raw, version, { ...server });
+        next = r.text.trim();
+        if (!next) { setError(m.composer_transcricao_vazia()); return; }
+        // A limpeza pode desistir e devolver o cru: marca o que o servidor aplicou, não o botão.
+        applied = r.estilo_aplicado && VERSION_KEYS.includes(r.estilo_aplicado) ? r.estilo_aplicado : version;
+        if (r.aviso) setError(r.aviso);
+      } catch (e) {
+        if (mountedRef.current) setError(e instanceof Error ? e.message : m.composer_falha_transcricao());
+        return;
+      } finally {
+        if (mountedRef.current) setRevising(null);
+      }
+    }
+    if (!mountedRef.current || barRef.current !== current) return;
+    if (textRef.current !== current.field) { setError(m.native_dictation_draft_changed()); return; }
+    const field = current.field.slice(0, current.field.length - current.shown.length) + next;
+    if (!persistText(field)) return;
+    textRef.current = field;
+    setText(field);
+    setSelection({ start: field.length, end: field.length });
+    limparUndo();
+    setBar({ ...current, field, shown: next, applied, versions: { ...current.versions, [applied]: next } });
+  }, [revising, origin, persistText, limparUndo, setBar]);
 
   const handleRetry = useCallback(async () => {
     if (transcribingRef.current) return;
@@ -857,9 +916,10 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     setText(result.draft.text);
     setSelection({ start: result.draft.text.length, end: result.draft.text.length });
     offerUndo(before, voice.raw, voice.text, result.draft.revision);
+    setBar(barFor(result.draft.text, voice.text, voice.raw, voice.applied ?? voice.estilo ?? 'cru', voice.serverPath ?? null));
     if (!result.dictation && voice.audio) dropCopy(voice.audio.uri);
     setError(voice.issue);
-  }, [offerUndo]);
+  }, [offerUndo, setBar]);
 
   const handleRecoverDictation = useCallback(() => {
     if (!dictation?.text || dictation.status !== 'ready' || transcribingRef.current) return;
@@ -927,6 +987,8 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
 
   const originServer = useServers((s) => s.servers.find((x) => x.id === origin.serverId));
   const dictationPlayer = dictation ? dictationAudio(originServer, origin.name, dictation.audio, dictation.serverPath) : null;
+  const barPlayer = bar ? dictationAudio(originServer, origin.name, null, bar.serverPath) : null;
+  const barVersions = !!bar && !!bar.raw && (revising !== null || dictatedInField(bar, text));
   // Gravando ou transcrevendo, o texto do campo ainda vai mudar: enviar agora mandaria a metade.
   // Transcrição desta tela ou de uma montagem anterior da mesma conversa ainda no ar.
   const busyVoice = transcribing || dictation?.status === 'pending';
@@ -1256,6 +1318,30 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           ) : null}
         </View>
 
+        {bar && (barVersions || barPlayer) ? (
+          <View style={styles.versionRow}>
+            {barVersions ? (
+              <>
+                <Text style={[styles.hint, { color: theme.tokens.text.muted }]}>{m.composer_ditado_versao()}</Text>
+                {versionOptions().map((o) => {
+                  const selected = bar.applied === o.v;
+                  return (
+                    <Pressable key={o.v} onPress={() => void handleVersion(o.v)} disabled={revising !== null || busyVoice || gravando}
+                      hitSlop={7} accessibilityRole="button" accessibilityLabel={o.label}
+                      accessibilityState={{ selected, disabled: revising !== null || busyVoice || gravando, busy: revising === o.v }}
+                      style={[styles.versionBtn, selected && { backgroundColor: theme.tokens.fillSubtle }]}>
+                      <Text style={[styles.undoText, { color: selected ? theme.tokens.text.primary : theme.tokens.text.secondary }]}>
+                        {revising === o.v ? m.composer_ditado_trocando() : o.label}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </>
+            ) : null}
+            {barPlayer && !gravando ? <AudioChip uri={barPlayer.uri} headers={barPlayer.headers} name={barPlayer.name} /> : null}
+          </View>
+        ) : null}
+
         {dictation && !busyVoice ? (
           <View style={styles.errorRow}>
             <Text style={[styles.hint, styles.recoverText, { color: theme.tokens.text.muted }]} accessibilityLiveRegion="polite">
@@ -1546,6 +1632,18 @@ const styles = StyleSheet.create((theme) => ({
   retryText: {
     fontSize: theme.base.text.xs,
     fontWeight: '600',
+  },
+  versionRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: theme.base.space[1],
+  },
+  versionBtn: {
+    minHeight: 30,
+    borderRadius: 15,
+    paddingHorizontal: 10,
+    justifyContent: 'center',
   },
   hint: {
     fontSize: theme.base.text.xs,
