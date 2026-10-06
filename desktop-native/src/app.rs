@@ -1826,8 +1826,11 @@ impl Hangar {
                     if let Some(from) = moved { self.drafts.remove(&from); }
                 }
                 Some(new) => {
-                    if let Some(key) = self.selected_key() { self.controls.on_session_update(&key, &new); }
+                    let before = self.selected_key();
+                    if let Some(key) = &before { self.controls.on_session_update(key, &new); }
                     self.selected = Some(new);
+                    // Recentes listados para a chave de antes: com outra chave, a lista some da tela mas seguiria aberta.
+                    if self.selected_key() != before { self.close_recent(); }
                 }
                 None => {
                     self.close_terminal(false, window, cx);

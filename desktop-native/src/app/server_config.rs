@@ -68,6 +68,12 @@ fn parse_provider_status(value: &Value) -> Result<Vec<ProviderStatus>, String> {
 }
 
 fn provider_text<'a>(item: &'a Value, field: &str) -> &'a str { item.get(field).and_then(Value::as_str).unwrap_or("") }
+/// O servidor só troca a máscara pela chave guardada com o mesmo tipo e endpoint do item salvo.
+fn provider_keeps_key(item: &Value, saved: &Value) -> bool {
+    let kind = provider_text(item, "kind");
+    kind == provider_text(saved, "kind")
+        && (kind == "elevenlabs" || provider_text(item, "base_url").trim() == provider_text(saved, "base_url"))
+}
 
 /// Um ajuste da voz (`AJUSTES_VOZ` do web): chave, nome das mensagens, padrão, mínimo e máximo.
 struct Tune { key: &'static str, name: &'static str, default: i64, min: i64, max: i64 }
@@ -393,10 +399,14 @@ impl ServerConfig {
     /// Lista de serviços de transcrição (rascunho ou servidor).
     fn providers(&self) -> Vec<Value> { self.current(PROVIDERS).as_array().cloned().unwrap_or_default() }
 
+    /// O serviço como a última leitura trouxe (chave mascarada).
+    fn provider_saved(&self, id: &str) -> Option<&Value> {
+        self.fields.get(PROVIDERS)?.get("valor")?.as_array()?.iter().find(|p| provider_text(p, "id") == id)
+    }
+
     /// Máscara da chave guardada de um serviço, como a última leitura trouxe.
     fn provider_mask(&self, id: &str) -> Option<String> {
-        self.fields.get(PROVIDERS)?.get("valor")?.as_array()?.iter().find(|p| provider_text(p, "id") == id)
-            .map(|p| provider_text(p, "api_key").to_owned()).filter(|mask| !mask.is_empty())
+        self.provider_saved(id).map(|p| provider_text(p, "api_key").to_owned()).filter(|mask| !mask.is_empty())
     }
 
     /// Novo serviço no fim da lista; a identidade nasce aqui e não muda mais.
@@ -421,11 +431,27 @@ impl ServerConfig {
     }
 
     /// Um campo de um serviço. Chave apagada volta à máscara guardada: o servidor lê a máscara como "mantém a chave".
+    /// Ele só a aceita com o tipo e o endpoint salvos: trocados, a máscara sai e o "falta a chave" segura o Salvar em
+    /// vez do 400; de volta ao salvo, ela volta (`editTranscriptionProviderTarget` do core).
     fn edit_provider(&mut self, id: &str, field: &str, text: String) -> bool {
+        let saved = self.provider_saved(id).cloned();
         let mask = self.provider_mask(id);
         let mut list = self.providers();
         let Some(item) = list.iter_mut().find(|p| provider_text(p, "id") == id) else { return false };
-        item[field] = Value::String(if field == "api_key" && text.is_empty() { mask.unwrap_or_default() } else { text });
+        // Mesmo valor (tipo já escolhido, campo reposto pela leitura) não suja o rascunho.
+        if field != "api_key" && provider_text(item, field) == text { return false; }
+        let keeps = |item: &Value| saved.as_ref().is_some_and(|saved| provider_keeps_key(item, saved));
+        if field == "api_key" {
+            let value = if text.is_empty() && keeps(&*item) { mask.unwrap_or_default() } else { text };
+            item[field] = Value::String(value);
+        } else {
+            item[field] = Value::String(text);
+            if let Some(mask) = mask {
+                let (key, kept) = (provider_text(item, "api_key").to_owned(), keeps(&*item));
+                if !kept && key == mask { item["api_key"] = Value::String(String::new()); }
+                else if kept && key.is_empty() { item["api_key"] = Value::String(mask); }
+            }
+        }
         self.stage(PROVIDERS, Value::Array(list))
     }
 
@@ -438,7 +464,7 @@ impl ServerConfig {
     /// Serviço da lista no rascunho sem chave: o servidor recusaria (400) o Salvar inteiro, de todas as páginas, porque
     /// o rascunho é um só. O Salvar espera a chave.
     fn provider_missing_key(&self) -> bool {
-        self.draft.contains_key(PROVIDERS) && self.providers().iter().any(|p| provider_text(p, "api_key").is_empty())
+        self.draft.contains_key(PROVIDERS) && self.providers().iter().any(|p| provider_text(p, "api_key").trim().is_empty())
     }
 
     /// A lista mostra o valor atual; valor que ela não conhece fica sem escolha, em vez de parecer o padrão.
@@ -1258,7 +1284,7 @@ impl Hangar {
                 match reason { Some(reason) => format!("{text}: {reason}"), None => text }
             });
             let mask = s.provider_mask(&id).filter(|mask| provider_text(item, "api_key") == mask);
-            let no_key = provider_text(item, "api_key").is_empty();
+            let no_key = provider_text(item, "api_key").trim().is_empty();
             let inputs = s.provider_inputs.iter().find(|(known, ..)| *known == id).map(|(_, inputs, _)| inputs.clone());
             let labeled = |label: &'static str, input: Entity<InputState>| div().flex().flex_col().gap(px(4.))
                 .child(div().text_size(px(12.5)).text_color(theme::muted()).child(tr(label)))
@@ -1268,7 +1294,7 @@ impl Hangar {
                 .child(labeled("voice_provider_key", key))
                 .children(mask.map(|mask| div().flex().items_center().gap(px(6.)).text_size(px(12.5)).text_color(theme::muted())
                     .child(div().font_family(theme::MONO).child(mask)).child(tr("server_secret_set"))))
-                .when(no_key, |el| el.child(div().id(SharedString::from(format!("provider-{id}-no-key"))).role(Role::Alert)
+                .when(no_key, |el| el.child(div().id(SharedString::from(format!("provider-{id}-no-key"))).role(Role::Status)
                     .text_size(px(12.5)).text_color(theme::warning()).child(tr("voice_provider_missing_key"))))
                 .child(labeled("voice_provider_model", model)));
             let kinds = div().flex().gap(px(6.)).children([("openai", "voice_provider_kind_openai"), ("elevenlabs", "voice_provider_kind_elevenlabs")]
@@ -1832,6 +1858,29 @@ mod tests {
         assert!(s.remove_provider("b") && s.remove_provider("a"));
         assert_eq!(s.draft.get("transcription_providers"), Some(&json!([])), "lista vazia volta ao serviço único");
         assert_eq!(s.transcribe_status(), None);
+    }
+
+    #[test]
+    fn changing_a_saved_providers_kind_or_endpoint_asks_for_the_key_again() {
+        let mut s = ServerConfig::default();
+        s.fields.insert("transcription_providers".into(), json!({"valor": [
+            {"id": "a", "kind": "openai", "name": "", "base_url": "https://a/v1", "api_key": "gsk_••••1234", "model": ""}], "origem": "app"}));
+        let key = |s: &ServerConfig| super::provider_text(&s.providers()[0], "api_key").to_owned();
+        assert!(!s.edit_provider("a", "kind", "openai".into()), "o tipo já escolhido não suja o rascunho");
+        assert!(!s.draft.contains_key("transcription_providers"));
+        assert!(s.edit_provider("a", "kind", "elevenlabs".into()));
+        assert_eq!(key(&s), "", "a máscara não vale para outro serviço");
+        assert!(s.provider_missing_key(), "o Salvar espera a chave nova em vez do 400");
+        assert!(s.edit_provider("a", "api_key", String::new()));
+        assert_eq!(key(&s), "", "apagar não devolve a máscara de outro serviço");
+        assert!(s.edit_provider("a", "kind", "openai".into()));
+        assert_eq!(key(&s), "gsk_••••1234", "de volta ao salvo, a chave guardada volta a valer");
+        assert!(s.edit_provider("a", "base_url", "https://b/v1".into()));
+        assert_eq!(key(&s), "");
+        assert!(s.edit_provider("a", "base_url", "https://a/v1 ".into()));
+        assert_eq!(key(&s), "gsk_••••1234");
+        assert!(s.edit_provider("a", "api_key", "  ".into()));
+        assert!(s.provider_missing_key(), "chave só de espaços é chave nenhuma");
     }
 
     #[test]

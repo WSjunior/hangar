@@ -852,8 +852,9 @@ impl Hangar {
             }
             Err(error) => {
                 let message = Self::dictation_failure(&error);
+                // A frase já traz o ponto final dela: "{error}." sairia com dois.
                 window.push_notification(Notification::error(tr("dictation_failed_away")
-                    .replace("{session}", &key.name).replace("{error}", &message)), cx);
+                    .replace("{session}", &key.name).replace("{error}", message.trim_end_matches('.'))), cx);
                 self.dictation.result_error = Some(message);
             }
         }
@@ -987,6 +988,8 @@ impl Hangar {
     }
 
     fn dictation_failure(error: &Failure) -> String {
+        // "De novo" de um áudio que a retenção já apagou: a frase da tela, não a do backend.
+        if error.code.as_deref() == Some("erro_upload_inexistente") { return tr("dictation_audio_gone"); }
         match error.status {
             Some(503) => tr("dictation_unconfigured"),
             Some(401 | 403 | 429) => Self::failure(error),
@@ -1243,6 +1246,15 @@ mod tests {
             "depois de /clear a pasta é outra: vai o caminho inteiro");
         state.server_path = None;
         assert_eq!(state.saved_for_retry(true), None, "upload que falhou: o de novo sobe a cópia em memória");
+    }
+
+    #[test]
+    fn retry_of_an_audio_retention_removed_says_it_in_the_apps_words() {
+        let gone = crate::api::Failure { status: Some(404), detail: "o áudio não está mais na pasta da sessão".into(),
+            retry_after: None, uncertain: false, code: Some("erro_upload_inexistente".into()) };
+        assert_eq!(super::Hangar::dictation_failure(&gone), crate::i18n::tr("dictation_audio_gone"));
+        let other = crate::api::Failure { code: None, detail: "502: fora".into(), status: Some(502), ..gone };
+        assert_eq!(super::Hangar::dictation_failure(&other), "502: fora");
     }
 
     #[test]
