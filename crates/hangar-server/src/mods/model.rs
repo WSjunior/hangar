@@ -94,10 +94,11 @@ pub fn pane_missing() -> ModsError {
 pub fn close_refused() -> ModsError {
     ModsError::new("erro_mod_fechar_recusado", "O mod não deixou fechar o painel.")
 }
-/// `plugin/input` numa sessão que o Rust não atende como superfície (Task 10) e, na fase 3, na sessão com
-/// terminal: não há por onde digitar no campo do mod.
+/// `plugin/input` numa sessão que o Rust não atende como superfície (Task 10): com terminal, ou sem
+/// terminal fora da superfície (processo parado, antes do `initialize`, Codex, mods desligados). O
+/// texto vale para as duas situações; é o de `messages/pt.json`.
 pub fn no_typing() -> ModsError {
-    ModsError::new("erro_mod_sem_digitacao", "Nesta sessão com terminal, o campo do mod só aceita digitação no terminal.")
+    ModsError::new("erro_mod_sem_digitacao", "Nesta sessão, o campo do mod só aceita digitação no terminal ou não está ligado ao app.")
 }
 
 /// O que a superfície pede ao ator.
