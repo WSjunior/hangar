@@ -118,6 +118,12 @@ Supervisor que sobe o Rust (sai na parte 7).
     `degraded` (falha calada); base começando com `-` sem `--end-of-options` no `rev-list`/`log`;
     reflog por worktree sem `hangar-base` custa 1 processo a mais. Do #68 (nativo): busca global
     ignora a subpasta aberta (desenho do PR).
+19. Instáveis novos (06/10): `test_sigterm_encerra_o_filho_e_limpa_o_socket[cano.py]` (pytest,
+    Linux, 1 vez: o laço viu o filho morto e o assert, µs depois, vivo; causa não provada, 1500
+    rodadas sob carga não reproduziram; diagnóstico do `/proc` no teste desde `39c075837`) e
+    `costs_routes.rs` no Windows (4 testes, "coleta não concluiu"/503 "índice não reabriu", run
+    `37440942165` job `112194259171`; repetir passou). O macOS `terminal_input_tmux` era rótulo
+    tmux repetido entre os dois testes paralelos (relógio de 1 µs), corrigido em `2f0811c15`.
 
 ## Regras e decisões que valem
 
