@@ -9,5 +9,6 @@ pub mod state;
 pub mod surface;
 pub mod routes;
 pub mod bridge;
+pub mod click;
 pub mod screen;
 mod http;
