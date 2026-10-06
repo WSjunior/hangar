@@ -16,6 +16,10 @@ pub fn ok(surface: &mut Surface, frame: &Value, body: Value, now: f64) -> Vec<Su
     let id = RequestId::String(frame["request_id"].as_str().unwrap().into());
     surface.on_response(&id, &json!({"subtype": "success", "request_id": frame["request_id"], "response": body}), now)
 }
+/// Pedido de app com o prazo de quem acabou de chegar à rota (7 s no ator).
+pub fn app(surface: &mut Surface, token: u64, call: ModsCall, now: f64) -> Vec<SurfaceEffect> {
+    surface.call(token, call, now, now + 7.0)
+}
 pub fn panes(list: Value, shown: &str) -> Value {
     json!({"type": "system", "subtype": "ui_panes", "panes": list, "shown_id": shown, "focused_id": null, "focus_requested_id": null})
 }
@@ -225,7 +229,7 @@ fn invalidate_during_render_waits_for_the_answer() {
 fn invalidate_during_click_refresh_waits_for_it() {
     let mut surface = ready(json!({"type": "Text"}));
     // Botão fora do desenho guardado: pede o desenho de novo antes de tentar (S4).
-    let refresh = request(&surface.call(1, ModsCall::Press { site: BAND_SITE.into(), key: "x".into() }, 1.0), "ui_render");
+    let refresh = request(&app(&mut surface, 1, ModsCall::Press { site: BAND_SITE.into(), key: "x".into() }, 1.0), "ui_render");
     let all = json!({"type": "system", "subtype": "ui_invalidate", "event": "ui.render"});
     assert!(writes(&surface.on_notice(&all, 1.5)).is_empty());
     assert!(writes(&surface.tick(1.6)).is_empty(), "a nova tentativa conta como desenho em voo");
@@ -293,7 +297,7 @@ fn recorded_invalid_and_big_trees_pass() {
 #[test]
 fn stale_handle_redraws_and_tries_once() {
     let mut surface = ready(button("ok", 1));
-    let first = request(&surface.call(7, press("above-prompt", "ok"), 0.1), "ui_press");
+    let first = request(&app(&mut surface, 7, press("above-prompt", "ok"), 0.1), "ui_press");
     assert_eq!((first["request"]["handle"].as_i64(), first["request"]["key"].as_str()), (Some(1), Some("ok")));
     assert_eq!(first["request"]["surface"], "desktop");
     let redraw = request(&ok(&mut surface, &first, json!({"handled": false}), 0.2), "ui_render");
@@ -307,26 +311,26 @@ fn stale_handle_redraws_and_tries_once() {
 #[test]
 fn second_refusal_or_missing_key_is_desenho_vencido() {
     let mut surface = ready(button("ok", 1));
-    let first = request(&surface.call(1, press("above-prompt", "ok"), 0.1), "ui_press");
+    let first = request(&app(&mut surface, 1, press("above-prompt", "ok"), 0.1), "ui_press");
     let redraw = request(&ok(&mut surface, &first, json!({"handled": false}), 0.2), "ui_render");
     let again = request(&ok(&mut surface, &redraw, json!({"tree": button("ok", 2)}), 0.3), "ui_press");
     assert_eq!(code(reply_of(&ok(&mut surface, &again, json!({"handled": false}), 0.4), 1)), "erro_mod_desenho_vencido");
 
     let mut surface = ready(button("ok", 1));
-    let redraw = request(&surface.call(2, press("above-prompt", "sumiu"), 0.1), "ui_render");
+    let redraw = request(&app(&mut surface, 2, press("above-prompt", "sumiu"), 0.1), "ui_render");
     assert_eq!(code(reply_of(&ok(&mut surface, &redraw, json!({"tree": button("ok", 3)}), 0.2), 2)), "erro_mod_desenho_vencido");
 }
 
 #[test]
 fn unknown_site_is_botao_inexistente_for_press_and_painel_inexistente_for_show_and_close() {
     let mut surface = ready(button("ok", 1));
-    assert_eq!(code(reply_of(&surface.call(1, press("painel-fechado", "ok"), 0.1), 1)), "erro_mod_botao_inexistente");
-    assert_eq!(code(reply_of(&surface.call(2, ModsCall::Close { site: "above-prompt".into() }, 0.1), 2)), "erro_mod_painel_inexistente");
-    assert_eq!(code(reply_of(&surface.call(4, ModsCall::Show { site: "above-prompt".into() }, 0.1), 4)), "erro_mod_painel_inexistente");
-    assert_eq!(code(reply_of(&surface.call(5, ModsCall::Show { site: "fechado".into() }, 0.1), 5)), "erro_mod_painel_inexistente");
-    assert_eq!(code(reply_of(&surface.call(6, ModsCall::Close { site: "fechado".into() }, 0.1), 6)), "erro_mod_painel_inexistente");
+    assert_eq!(code(reply_of(&app(&mut surface, 1, press("painel-fechado", "ok"), 0.1), 1)), "erro_mod_botao_inexistente");
+    assert_eq!(code(reply_of(&app(&mut surface, 2, ModsCall::Close { site: "above-prompt".into() }, 0.1), 2)), "erro_mod_painel_inexistente");
+    assert_eq!(code(reply_of(&app(&mut surface, 4, ModsCall::Show { site: "above-prompt".into() }, 0.1), 4)), "erro_mod_painel_inexistente");
+    assert_eq!(code(reply_of(&app(&mut surface, 5, ModsCall::Show { site: "fechado".into() }, 0.1), 5)), "erro_mod_painel_inexistente");
+    assert_eq!(code(reply_of(&app(&mut surface, 6, ModsCall::Close { site: "fechado".into() }, 0.1), 6)), "erro_mod_painel_inexistente");
     let idle = &mut Surface::new("ui:t".into());
-    assert_eq!(code(reply_of(&idle.call(3, press("above-prompt", "ok"), 0.1), 3)), "erro_mod_botao_inexistente", "antes de ligar");
+    assert_eq!(code(reply_of(&app(idle, 3, press("above-prompt", "ok"), 0.1), 3)), "erro_mod_botao_inexistente", "antes de ligar");
 }
 
 #[test]
@@ -336,7 +340,7 @@ fn input_goes_with_key_component_and_instance() {
     let field = json!({"type": "Input", "props": {"key": "V18-campo", "value": ""}, "press": {"plugin": "vitrine", "handle": 9}});
     ok(&mut surface, &request(&out, "ui_render"), json!({"tree": field}), 1.0);
     let call = ModsCall::Input { site: "campos".into(), key: "V18-campo".into(), submit: true, value: "olá, mundo".into() };
-    let input = request(&surface.call(4, call, 1.1), "ui_input");
+    let input = request(&app(&mut surface, 4, call, 1.1), "ui_input");
     assert_eq!(input["request"], json!({"subtype": "ui_input", "plugin": "vitrine", "handle": 9, "kind": "submit", "value": "olá, mundo",
         "key": "V18-campo", "component": "Pane", "instance_id": "campos", "surface": "desktop", "client_id": "hangar"}));
     let done = ok(&mut surface, &input, json!({"handled": true, "element": "V18-campo", "value": "olá, mundo"}), 1.2);
@@ -347,17 +351,17 @@ fn input_goes_with_key_component_and_instance() {
 fn close_waits_for_the_roster_and_can_be_refused() {
     let mut surface = ready(json!({"type": "Text"}));
     surface.on_notice(&panes(json!([{"id": "p", "title": "P", "plugin": "m"}]), "p"), 0.5);
-    let close = request(&surface.call(3, ModsCall::Close { site: "p".into() }, 1.0), "ui_close");
+    let close = request(&app(&mut surface, 3, ModsCall::Close { site: "p".into() }, 1.0), "ui_close");
     assert_eq!(close["request"], json!({"subtype": "ui_close", "id": "p", "client_id": "hangar"}));
     assert!(reply_of(&ok(&mut surface, &close, json!({"closed": true}), 1.1), 3).is_none(), "fechar espera o rol");
     let out = surface.on_notice(&panes(json!([]), "p"), 1.2);
     assert_eq!(reply_of(&out, 3), Some(Ok(json!({}))));
 
     surface.on_notice(&panes(json!([{"id": "q", "title": "Q", "plugin": "m"}]), "q"), 2.0);
-    let refused = request(&surface.call(4, ModsCall::Close { site: "q".into() }, 2.0), "ui_close");
+    let refused = request(&app(&mut surface, 4, ModsCall::Close { site: "q".into() }, 2.0), "ui_close");
     assert_eq!(code(reply_of(&ok(&mut surface, &refused, json!({"closed": false}), 2.1), 4)), "erro_mod_fechar_recusado");
 
-    let silent = request(&surface.call(5, ModsCall::Close { site: "q".into() }, 3.0), "ui_close");
+    let silent = request(&app(&mut surface, 5, ModsCall::Close { site: "q".into() }, 3.0), "ui_close");
     ok(&mut surface, &silent, json!({"closed": true}), 3.1);
     assert!(reply_of(&surface.tick(4.9), 5).is_none(), "o prazo de 2 s ainda não venceu");
     assert_eq!(code(reply_of(&surface.tick(5.2), 5)), "erro_mod_clique_sem_resposta", "sem o rol em 2 s");
@@ -367,17 +371,17 @@ fn close_waits_for_the_roster_and_can_be_refused() {
 fn show_is_confirmed_by_shown_id() {
     let mut surface = ready(json!({"type": "Text"}));
     surface.on_notice(&panes(json!([{"id": "a", "title": "A", "plugin": "m"}, {"id": "b", "title": "B", "plugin": "m"}]), "b"), 0.5);
-    let show = request(&surface.call(6, ModsCall::Show { site: "a".into() }, 1.0), "ui_pane_show");
+    let show = request(&app(&mut surface, 6, ModsCall::Show { site: "a".into() }, 1.0), "ui_pane_show");
     assert_eq!(show["request"], json!({"subtype": "ui_pane_show", "id": "a", "surface": "desktop", "client_id": "hangar"}));
     assert_eq!(reply_of(&ok(&mut surface, &show, json!({"shown_id": "a"}), 1.1), 6), Some(Ok(json!({"shown_id": "a"}))));
-    let show = request(&surface.call(7, ModsCall::Show { site: "a".into() }, 1.2), "ui_pane_show");
+    let show = request(&app(&mut surface, 7, ModsCall::Show { site: "a".into() }, 1.2), "ui_pane_show");
     assert_eq!(code(reply_of(&ok(&mut surface, &show, json!({"shown_id": "b"}), 1.3), 7)), "erro_mod_painel_inexistente");
 }
 
 #[test]
 fn press_without_answer_times_out() {
     let mut surface = ready(button("ok", 1));
-    surface.call(8, press("above-prompt", "ok"), 1.0);
+    app(&mut surface, 8, press("above-prompt", "ok"), 1.0);
     assert!(reply_of(&surface.tick(3.9), 8).is_none());
     assert_eq!(code(reply_of(&surface.tick(4.0), 8)), "erro_mod_clique_sem_resposta", "3 s sem resposta");
 }
@@ -388,7 +392,7 @@ fn refresh_then_press_answers_within_the_app_limit() {
     // do prazo e o clique fica sem resposta. A recusa sai antes dos 7 s do ator (e dos 8 s do app).
     assert!(hangar_server::mods::surface::APP_CALL_MAX_S < 7.0);
     let mut surface = ready(json!({"type": "Text"}));
-    let refresh = request(&surface.call(8, press("above-prompt", "ok"), 1.0), "ui_render");
+    let refresh = request(&app(&mut surface, 8, press("above-prompt", "ok"), 1.0), "ui_render");
     assert_eq!(surface.deadline(), Some(4.0), "o desenho de novo do clique vale 3 s, não os 10 s do desenho de fundo");
     let out = ok(&mut surface, &refresh, json!({"tree": button("ok", 1)}), 3.9);
     assert_eq!(request(&out, "ui_press")["request"]["handle"], 1);
@@ -400,7 +404,7 @@ fn refresh_then_press_answers_within_the_app_limit() {
 #[test]
 fn refresh_without_answer_gives_up_in_three_seconds() {
     let mut surface = ready(json!({"type": "Text"}));
-    surface.call(8, press("above-prompt", "ok"), 1.0);
+    app(&mut surface, 8, press("above-prompt", "ok"), 1.0);
     assert!(reply_of(&surface.tick(3.9), 8).is_none());
     assert_eq!(code(reply_of(&surface.tick(4.0), 8)), "erro_mod_clique_sem_resposta");
 }
@@ -408,10 +412,43 @@ fn refresh_without_answer_gives_up_in_three_seconds() {
 #[test]
 fn exit_fails_pending_calls() {
     let mut surface = ready(button("ok", 1));
-    surface.call(9, press("above-prompt", "ok"), 1.0);
+    app(&mut surface, 9, press("above-prompt", "ok"), 1.0);
     let out = surface.on_exit();
     assert_eq!(code(reply_of(&out, 9)), "erro_mod_clique_sem_resposta");
     let view = published(&out).unwrap();
     assert!(view["above"].is_null() && view["panes"] == json!([]));
     assert!(!surface.is_ready());
+}
+
+#[test]
+fn no_action_leaves_without_time_for_the_answer_to_come_back() {
+    // I1: com menos de 3 s do prazo de quem pediu, nada sai ao mod; senão a rota responderia antes e o
+    // clique rodaria depois de o app ter mostrado erro (clique fantasma).
+    let mut surface = ready(button("ok", 1));
+    surface.on_notice(&panes(json!([{"id": "p", "title": "P", "plugin": "m"}]), "p"), 0.5);
+    for (token, call) in [(1, press("above-prompt", "ok")), (2, ModsCall::Show { site: "p".into() }), (3, ModsCall::Close { site: "p".into() }),
+                          (4, ModsCall::Input { site: "above-prompt".into(), key: "ok".into(), submit: true, value: "x".into() })] {
+        let out = surface.call(token, call, 1.0, 3.9);
+        assert!(writes(&out).is_empty(), "nenhum pedido ao mod");
+        assert_eq!(code(reply_of(&out, token)), "erro_mod_clique_sem_resposta");
+    }
+    // Com o prazo inteiro do pedido dentro do de quem pediu, sai.
+    assert_eq!(request(&surface.call(5, press("above-prompt", "ok"), 1.0, 4.0), "ui_press")["request"]["handle"], 1);
+}
+
+#[test]
+fn retry_after_a_slow_redraw_does_not_press_without_time_left() {
+    // O desenho de novo gastou o que sobrava: a nova tentativa não leva o clique ao mod.
+    let mut surface = ready(button("ok", 1));
+    let first = request(&surface.call(1, press("above-prompt", "ok"), 1.0, 8.0), "ui_press");
+    let redraw = request(&ok(&mut surface, &first, json!({"handled": false}), 2.0), "ui_render");
+    let out = ok(&mut surface, &redraw, json!({"tree": button("ok", 2)}), 5.5);
+    assert!(writes(&out).iter().all(|frame| frame["request"]["subtype"] != "ui_press"), "o press vencido não sai");
+    assert_eq!(code(reply_of(&out, 1)), "erro_mod_clique_sem_resposta");
+    // Botão fora do desenho guardado: o mesmo vale depois do desenho de novo.
+    let mut surface = ready(json!({"type": "Text"}));
+    let redraw = request(&surface.call(2, press("above-prompt", "ok"), 1.0, 8.0), "ui_render");
+    let out = ok(&mut surface, &redraw, json!({"tree": button("ok", 3)}), 5.1);
+    assert!(writes(&out).iter().all(|frame| frame["request"]["subtype"] != "ui_press"));
+    assert_eq!(code(reply_of(&out, 2)), "erro_mod_clique_sem_resposta");
 }

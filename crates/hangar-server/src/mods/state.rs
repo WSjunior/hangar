@@ -14,9 +14,10 @@ use crate::side::{WeakHubs, TOASTS_KEPT};
 
 pub type CallFuture = Pin<Box<dyn Future<Output = Result<Value, ModsError>> + Send>>;
 
-/// Quem leva o pedido do app à superfície da sessão: o ator do runtime (`RuntimeHandle`).
+/// Quem leva o pedido do app à superfície da sessão: o ator do runtime (`RuntimeHandle`). `deadline` é o
+/// prazo de quem pediu: depois dele a resposta não serve, e a ação não pode rodar no mod.
 pub trait SurfaceLink: Send + Sync {
-    fn call(&self, call: ModsCall) -> CallFuture;
+    fn call(&self, call: ModsCall, deadline: Instant) -> CallFuture;
 }
 
 /// Mesmos tetos do Python (`plugin_bridge`): o app trata o aviso igual nas duas fontes. O máximo e a
