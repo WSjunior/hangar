@@ -18,18 +18,19 @@ python_port=$(grep -o 'upstream=127.0.0.1:[0-9]*' "$log" 2>/dev/null | tail -1 |
 RUST=127.0.0.1:8765
 PY="$python_port"
 
-pedido_ms() {  # $1 = host:porta, $2 = caminho
+# Tempos internos em microssegundos: rota que responde abaixo de 1 ms não pode virar 0.
+pedido_us() {  # $1 = host:porta, $2 = caminho
   curl -s -o /dev/null -w '%{http_code} %{time_total}\n' -H "Authorization: Bearer $token" "http://$1$2" |
-    awk '$1 != 200 {print "erro HTTP " $1 > "/dev/stderr"; exit 1} {printf "%.0f", $2 * 1000}'
+    awk '$1 != 200 {print "erro HTTP " $1 > "/dev/stderr"; exit 1} {printf "%.0f", $2 * 1000000}'
 }
 
-primeira_mensagem_ms() {  # $1 = host:porta, $2 = sessão; o ping inicial não conta
+primeira_mensagem_us() {  # $1 = host:porta, $2 = sessão; o ping inicial não conta
   local start end
   start=$(date +%s%N)
   end=$( { curl -sN --max-time 3 -H "Authorization: Bearer $token" "http://$1/api/sessions/$2/events" || true; } |
     { grep -m1 -q '^event: message' && date +%s%N; } ) || true
   [ -n "$end" ] || { echo "sem mensagem em 3 s" >&2; return 1; }
-  echo $(( (end - start) / 1000000 ))
+  echo $(( (end - start) / 1000 ))
 }
 
 par() {  # $1 = função, $2.. = argumentos; Rust e Python alternados, 1 aquecimento + 5 medidas
@@ -47,24 +48,26 @@ linha() {  # $1 = rótulo, $2 = tipo, $3 = "Rust Python"
   read -r r p <<< "$3"
   local ganho
   ganho=$(awk -v r="$r" -v p="$p" 'BEGIN { if (r > 0) printf "%.1fx", p / r; else print "-" }')
-  printf '%-34s %-16s %6s ms %6s ms %7s\n' "$1" "$2" "$r" "$p" "$ganho"
+  # O awk formata: o printf do bash segue o locale e recusa "1.5" em pt_BR.
+  printf '%-34s %-16s %11s %11s %7s\n' "$1" "$2" "$(awk -v v="$r" 'BEGIN{printf "%.1f ms", v/1000}')" \
+    "$(awk -v v="$p" 'BEGIN{printf "%.1f ms", v/1000}')" "$ganho"
 }
 
 sessoes=$(curl -s -H "Authorization: Bearer $token" "http://$RUST/api/sessions" |
   python3 -c 'import json,sys; [print(x["name"], x.get("provider")) for x in json.load(sys.stdin) if x.get("jsonl")]')
 [ -n "$sessoes" ] || { echo "nenhuma sessão aberta com conversa"; exit 1; }
 
-printf '%-34s %-16s %9s %9s %7s\n' medida tipo Rust Python ganho
+printf '%-34s %-16s %11s %11s %7s\n' medida tipo Rust Python ganho
 echo "— Abrir o chat (últimas 200 mensagens, parte 1)"
 while read -r nome tipo; do
   [ -n "$nome" ] || continue
-  t=$(par pedido_ms "/api/sessions/$nome/history?limit=200") && linha "$nome" "$tipo" "$t"
+  t=$(par pedido_us "/api/sessions/$nome/history?limit=200") && linha "$nome" "$tipo" "$t"
 done <<< "$sessoes"
 
 echo "— Chat ao vivo: até a primeira mensagem (parte 1 e 2B)"
 while read -r nome tipo; do
   [ -n "$nome" ] || continue
-  t=$(par primeira_mensagem_ms "$nome") && linha "$nome" "$tipo" "$t"
+  t=$(par primeira_mensagem_us "$nome") && linha "$nome" "$tipo" "$t"
 done <<< "$sessoes"
 
 # Com o Rust de pé o Python não roda Git/arquivos: a rota dele chama o núcleo Rust pela ponte,
@@ -73,18 +76,21 @@ echo "— Git e arquivos do painel da sessão (PR #30), na sessão $(head -1 <<<
 nome=$(head -1 <<< "$sessoes" | cut -d' ' -f1)
 for rota in "branches" "git/files" "git/log?n=50" "files/list?so_modificados=false" \
             "files/read?path=README.md" "files/search?q=import&mode=names"; do
-  t=$(par pedido_ms "/api/sessions/$nome/$rota") && linha "${rota%%\?*}" git "$t" || echo "${rota%%\?*}: não respondeu 200, pulado"
+  t=$(par pedido_us "/api/sessions/$nome/$rota") && linha "${rota%%\?*}" git "$t" || echo "${rota%%\?*}: não respondeu 200, pulado"
 done
-t=$(par pedido_ms /api/fs/roots) && linha "fs/roots" arquivos "$t"
+t=$(par pedido_us /api/fs/roots) && linha "fs/roots" arquivos "$t"
 
 echo "— Lista de worktrees (Rust desde feat/worktrees-rust; o Python ainda tem a rota antiga)"
-t=$(par pedido_ms /api/worktrees) && linha worktrees lista "$t" || echo "worktrees: não respondeu 200, pulado"
+t=$(par pedido_us /api/worktrees) && linha worktrees lista "$t" || echo "worktrees: não respondeu 200, pulado"
 
 # Rust serve a lista publicada pelo ListHub; o Python direto ainda varre /proc e tmux e classifica
 # cada pane, como fazia antes da troca. Com a lista do app aberta o Python reaproveita o snapshot do
 # refresher dele, que no modo rust não roda: a coluna Python é a varredura inteira.
 echo "— Lista de sessões do dono (Rust desde feat/session-list-state)"
-t=$(par pedido_ms /api/sessions) && linha "lista de sessões" lista "$t" || echo "lista de sessões: não respondeu 200, pulado"
+t=$(par pedido_us /api/sessions) && linha "lista do app" lista "$t" || echo "lista do app: não respondeu 200, pulado"
+echo "  (pedir a lista custa ~1 ms nos dois: ambos servem uma lista já montada. O ganho é montar e"
+echo "   avisar: mudança de estado chega ao app em ~0,16 s no Rust contra 1,4–2,3 s no Python, e o pior"
+echo "   caso de uma rodada cai de 1,5 s para 24 ms — medido por scripts/medir-lista-hub.py)"
 
 # A tela inicial pede ?view=summary; o Python ignora o parâmetro e manda o relatório inteiro, que
 # era o que a tela recebia antes. Por isso a coluna Python desta linha é o "antes".
@@ -101,9 +107,9 @@ aquecer() {  # $1 = caminho; o lado que não é dono responde 202 até montar o 
   done
 }
 aquecer "/api/costs?period=all"; aquecer /api/uso
-t=$(par pedido_ms "/api/costs?period=all&view=summary") && linha "custos: tela inicial" resumo "$t"
-t=$(par pedido_ms "/api/costs?period=all") && linha "custos: tela Custos" inteiro "$t"
-t=$(par pedido_ms /api/uso) && linha uso - "$t"
+t=$(par pedido_us "/api/costs?period=all&view=summary") && linha "custos: tela inicial" resumo "$t"
+t=$(par pedido_us "/api/costs?period=all") && linha "custos: tela Custos" inteiro "$t"
+t=$(par pedido_us /api/uso) && linha uso - "$t"
 for alvo in "/api/costs?period=all&view=summary" "/api/costs?period=all"; do
   r=$(curl -s -H "Authorization: Bearer $token" -H 'Accept-Encoding: gzip' -o /dev/null -w '%{size_download}' "http://$RUST$alvo")
   p=$(curl -s -H "Authorization: Bearer $token" -H 'Accept-Encoding: gzip' -o /dev/null -w '%{size_download}' "http://$PY$alvo")
