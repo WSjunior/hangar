@@ -149,7 +149,7 @@ static P: LazyLock<Patterns> = LazyLock::new(|| {
 fn whitespace(c: char) -> bool { c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c) }
 fn trim(s: &str) -> &str { s.trim_matches(whitespace) }
 fn left(s: &str) -> &str { s.trim_start_matches(whitespace) }
-fn right(s: &str) -> &str { s.trim_end_matches(whitespace) }
+pub(crate) fn right(s: &str) -> &str { s.trim_end_matches(whitespace) }
 fn word(c: char) -> bool {
     let mut encoded = [0; 4];
     P.word.is_match(c.encode_utf8(&mut encoded))
@@ -304,9 +304,14 @@ fn tool_header(lines: &[&str], i: usize) -> bool {
     lines[i + 1..].iter().find(|l| trim(l).is_empty() || boundary(l)).is_some_and(|l| left(l).starts_with('⎿'))
 }
 
-fn preview(lines: &[&str]) -> String {
-    let end = lines.iter().rposition(|l| P.rule.is_match(l) || P.overlay_rule.is_match(l) || P.pi_box.is_match(l))
+/// `anchor`: começo da faixa dos mods, que fica entre a conversa e a caixa de digitar e pode
+/// começar com ●; a ocorrência mais baixa dela fecha a conversa.
+fn preview(lines: &[&str], anchor: Option<&str>) -> String {
+    let mut end = lines.iter().rposition(|l| P.rule.is_match(l) || P.overlay_rule.is_match(l) || P.pi_box.is_match(l))
         .unwrap_or(lines.len());
+    if let Some(anchor) = anchor.filter(|a| !a.is_empty()) {
+        end = lines[..end].iter().rposition(|l| l.contains(anchor)).unwrap_or(end);
+    }
     let begin = lines[..end].iter().enumerate().filter(|(i, l)| P.user.is_match(l) && !(*i > 0 && P.rule.is_match(lines[*i - 1])))
         .map(|(i, _)| i + 1).last().unwrap_or(0);
     if begin == 0 && lines[..end].iter().any(|l| P.banner.is_match(l)) { return String::new(); }
@@ -336,6 +341,13 @@ fn preview(lines: &[&str]) -> String {
     out.join("\n")
 }
 
+/// Prévia do pane e se o spinner corre, sem o resto da análise: o `Monitor` a chama no quadro
+/// cortado na largura da conversa ou com a faixa dos mods à vista.
+pub fn pane_preview(pane: &str, anchor: Option<&str>) -> (String, bool) {
+    let lines = lines(pane);
+    (preview(&lines, anchor), live_spinner(&lines).is_some())
+}
+
 pub fn analyze(pane: &str) -> PaneAnalysis {
     let lines = lines(pane);
     let spinner = live_spinner(&lines);
@@ -345,7 +357,7 @@ pub fn analyze(pane: &str) -> PaneAnalysis {
         login: P.login.is_match(pane) && !P.composer.is_match(&tail(&lines, 12)),
         limit_reset: P.limit.captures(&lines[lines.len().saturating_sub(8)..].join("\n"))
             .map(|c| trim(c.get(1).unwrap().as_str()).into()),
-        preview: preview(&lines), codex_menu: codex_menu(&lines), ..Default::default()
+        preview: preview(&lines, None), codex_menu: codex_menu(&lines), ..Default::default()
     };
     let menu = if let Some((top, bottom)) = menu_block(&lines) {
         let region = &lines[top..bottom];

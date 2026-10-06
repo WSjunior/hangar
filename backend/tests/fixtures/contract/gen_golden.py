@@ -23,7 +23,7 @@ sys.path.insert(0, str(HERE.parents[2]))
 
 import tempfile  # noqa: E402
 
-from app import pqueue, registry, state  # noqa: E402
+from app import pqueue, registry, sse, state  # noqa: E402
 from app.adapters.codex.rollout import parse_rollout_line  # noqa: E402
 from app.models import StateEvent, scrub_surrogates  # noqa: E402
 from app.sse import _ask_question_event  # noqa: E402
@@ -476,6 +476,100 @@ def ask_rows() -> list[dict]:
                    expected=None if ev is None else json.loads(ev["data"]))
         rows.append(row)
     return rows
+RULE = "─" * 60
+# Painel ancorado à direita da conversa, a partir da coluna 40: sem o corte, a borda │ dele e o ●
+# do mod entram na prévia.
+DOCK_PANE = "\n".join([
+    "❯ resume o arquivo".ljust(40) + "│ Mod",
+    "".ljust(40) + "│ ● Progresso 3/5",
+    "● Resposta em andamento com texto".ljust(40) + "│ item um",
+    "  segunda linha da resposta".ljust(40) + "│ item dois",
+    RULE, "❯ ", RULE, "  🤖 modelo"])
+WIDE_PANE = "\n".join([
+    "❯ traduz",
+    "● 日本語のテキストです🤖 e mais texto depois",
+    "  linha curta",
+    RULE, "❯ ", RULE])
+BAND_PANE = "\n".join([
+    "❯ faça a tarefa",
+    "● Texto da resposta em voo",
+    "  continuação do texto",
+    "",
+    "● Progresso do mod: 3 de 5",
+    "  ▓▓▓░░",
+    RULE, "❯ ", RULE])
+PREVIEW_PANES = [
+    ("dock_sem_corte", DOCK_PANE, None, None),
+    ("dock_cortado", DOCK_PANE, 40, None),
+    ("largos_cortados", WIDE_PANE, 12, None),
+    ("largos_borda_no_meio", WIDE_PANE, 7, None),
+    ("faixa_sem_ancora", BAND_PANE, None, None),
+    ("faixa_com_ancora", BAND_PANE, None, "Progresso do mod: 3 de 5"),
+    ("ancora_ausente", BAND_PANE, None, "nada disso aparece"),
+    ("corte_e_ancora", DOCK_PANE, 40, "Progresso"),
+]
+NOW = 1_000_000.0
+# (nome, arquivos por pasta de config — texto cru ou None —, marcador (estado, ts) ou None)
+PREVIEW_SIDECARS = [
+    ("novo", [json.dumps({"text": "abc", "ts": NOW - 1})], None),
+    ("ausente", [None], None),
+    ("velho_marcador_trabalhando", [json.dumps({"text": "abc", "ts": NOW - 700})], ("working", NOW - 10)),
+    ("velho_marcador_velho", [json.dumps({"text": "abc", "ts": NOW - 700})], ("working", NOW - 700)),
+    ("velho_marcador_parado", [json.dumps({"text": "abc", "ts": NOW - 700})], ("idle", NOW - 10)),
+    ("velho_sem_marcador", [json.dumps({"text": "abc", "ts": NOW - 700})], None),
+    ("vazio_velho_honrado", [json.dumps({"text": "", "ts": NOW - 7000})], None),
+    ("json_quebrado", ["{nao"], None),
+    ("nao_objeto", ["[1, 2]"], None),
+    ("texto_nao_str", [json.dumps({"text": 3, "ts": NOW})], None),
+    ("sem_ts", [json.dumps({"text": "sem relogio"})], None),
+    ("ts_texto", [json.dumps({"text": "x", "ts": "123"})], None),
+    ("ts_inteiro_velho", [json.dumps({"text": "x", "ts": int(NOW) - 601})], None),
+    ("segunda_pasta", [json.dumps({"text": "a", "ts": NOW - 700}), json.dumps({"text": "b", "ts": NOW})], None),
+    ("primeira_vence", [json.dumps({"text": "a", "ts": NOW}), json.dumps({"text": "b", "ts": NOW})], None),
+]
+PREVIEW_COMMITTED = [
+    ("curta", "abc def", "abc def ghi jkl mno"),
+    ("contida_com_markdown", "Confirma a mudança no arquivo agora",
+     "**Confirma** a mudança no `arquivo` agora e depois sigo"),
+    ("gravado_e_prefixo", "Texto já gravado aqui completo\nMaking 1 scratchpad edit…", "Texto já gravado aqui completo"),
+    ("outra_coisa", "Um texto que não tem nada a ver", "Resposta completamente diferente desta"),
+    ("lista_pintada", "• item um bem longo\n• item dois", "- item um bem longo\n- item dois"),
+    ("sem_gravado", "Um texto qualquer bem comprido", ""),
+    ("quebra_da_tela", "linha que o terminal\n  quebrou no meio da frase", "linha que o terminal quebrou no meio da frase."),
+]
+
+
+def preview_rows() -> dict:
+    import tempfile
+    from unittest import mock
+
+    from app import preview
+
+    panes = []
+    for name, pane, columns, anchor in PREVIEW_PANES:
+        cropped = pane if columns is None else "\n".join(preview.crop_cells(ln, columns) for ln in pane.split("\n"))
+        panes.append({"name": name, "pane": pane, "columns": columns, "anchor": anchor,
+                      "expected": preview.extract_assistant_text(cropped, "claude", anchor)})
+    sidecars = []
+    with mock.patch.object(preview.time, "time", return_value=NOW):
+        for name, files, marker in PREVIEW_SIDECARS:
+            with tempfile.TemporaryDirectory() as tmp:
+                dirs = []
+                for i, raw in enumerate(files):
+                    d = Path(tmp) / str(i)
+                    (d / ".hangar-preview").mkdir(parents=True)
+                    if raw is not None:
+                        (d / ".hangar-preview" / "sid.json").write_text(raw, encoding="utf-8")
+                    dirs.append(d)
+                # A ordem das pastas aqui é entrada do caso; em produção ela vem de um conjunto.
+                with (mock.patch.object(preview, "_config_dirs", return_value=dirs),
+                      mock.patch.object(preview.hook_state, "get_state", return_value=marker)):
+                    sidecars.append({"name": name, "files": files, "marker": marker, "now": NOW,
+                                     "expected": preview.read_sidecar("sid")})
+    committed = [{"name": name, "preview": text, "committed": raw, "norm": preview._norm(raw),
+                  "expected": sse.preview_is_committed(text, preview._norm(raw))}
+                 for name, text, raw in PREVIEW_COMMITTED]
+    return {"panes": panes, "sidecars": sidecars, "committed": committed}
 
 
 def main() -> None:
@@ -502,6 +596,7 @@ def main() -> None:
     } for raw in PYJSON])
     write_golden("isotime.json", [[s, _ts({"timestamp": s})] for s in ISO])
     write_golden("ask_question.json", ask_rows())
+    write_golden("preview.json", preview_rows())
 
 
 if __name__ == "__main__":

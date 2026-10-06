@@ -69,6 +69,22 @@ def tem_pty_windows() -> bool:
     return conpty.disponivel()
 
 
+def _rust_owner() -> Optional[object]:
+    """O coordenador quando o Rust é (ou será, em `pending`) o dono do painel; senão None."""
+    from app import runtime_coordinator
+    owner = runtime_coordinator.current()
+    return owner if owner is not None and owner.mode != "python" else None
+
+
+def painel_aberto(name: str) -> bool:
+    """Há painel anexado à sessão? Com o Rust dono, pergunta a ele (falha levanta
+    `ListBridgeError`): o painel do Python não existe nesse modo."""
+    if _rust_owner() is not None:
+        from app import list_bridge
+        return list_bridge.term_active(name)
+    return name in _ativos
+
+
 def painel_disponivel() -> bool:
     """Da pra abrir o painel de terminal NESTA maquina? (o que o /api/config publica)
 
@@ -81,6 +97,10 @@ def painel_disponivel() -> bool:
     DLL no import, e a resposta e cacheada la dentro), mas o `or` curto-circuita e o caminho POSIX
     — que e o de producao do Linux — nem chega a tocar no modulo.
     """
+    owner = _rust_owner()
+    if owner is not None and owner.mode == "rust":
+        from app import rust_server
+        return rust_server.terminal_panel is True
     return _PTY_POSIX or tem_pty_windows()
 
 
@@ -349,7 +369,15 @@ async def term_ws(ws: WebSocket, name: str, resolve=None) -> None:
     if prep is None:
         return                                   # ja fechou o ws com o codigo certo
     cols, rows, name = prep
-    if _PTY_POSIX:
+    from app import runtime_coordinator
+    try:
+        rust = await _terminal_do_rust()
+    except runtime_coordinator.RuntimeStarting:
+        await _recusa_ponte(ws, name, "terminal_runtime_starting")
+        return
+    if rust:
+        await _motor_rust(ws, name, cols, rows)
+    elif _PTY_POSIX:
         await _motor_posix(ws, name, cols, rows)
     else:
         await _motor_windows(ws, name, cols, rows)
@@ -409,6 +437,117 @@ async def _porta_de_entrada(ws: WebSocket, name: str, resolve=None) -> Optional[
         await ws.close(code=1008, reason="cols/rows invalidos")
         return None
     return cols, rows, name
+
+
+async def _terminal_do_rust() -> bool:
+    """O PTY é do Rust? Em `pending` espera o desfecho (levanta `RuntimeStarting` no prazo)."""
+    owner = _rust_owner()
+    if owner is None:
+        return False
+    if owner.mode == "pending":
+        await owner.await_mode()
+    return owner.mode != "python"
+
+
+async def _recusa_ponte(ws: WebSocket, name: str, codigo: str, **campos) -> None:
+    """Sem o Rust, nenhum PTY abre aqui: 1013 (o cliente tenta de novo) e o código no diário."""
+    from app import diag
+    _log.warning("termsock: %r sem o terminal do Rust (%s %s)", name, codigo, campos)
+    diag.registrar("terminal.ponte", "erro", codigo=codigo, sessao=name, **campos)
+    await ws.accept()
+    await ws.close(code=1013, reason="terminal indisponivel")
+
+
+async def _motor_rust(ws: WebSocket, name: str, cols: int, rows: int) -> None:
+    """Liga os bytes do cliente ao painel do Rust (`/__hangar_server/term` na porta privada).
+
+    A porta de entrada já rodou aqui; o Rust recebe só o alvo conferido e tem o painel único de
+    todas as portas. Fechamento do Rust (1000 "outra conexao assumiu", 1011, 1013) chega igual ao
+    cliente; cliente que sai, ou convidado revogado (o `share_gate` cancela esta task), fecha o
+    lado do Rust, que desmonta.
+    """
+    from urllib.parse import urlencode
+    from websockets.asyncio.client import connect
+    from websockets.exceptions import ConnectionClosed, InvalidStatus
+    from websockets.protocol import State
+    from app import diag, list_bridge
+    endpoint = list_bridge.endpoint()
+    if endpoint is None:
+        await _recusa_ponte(ws, name, "terminal_bridge_off")
+        return
+    address, secret = endpoint
+    url = f"ws://{address}/__hangar_server/term?" + urlencode({"target": name, "cols": cols, "rows": rows})
+    try:
+        # Sem proxy do ambiente, sem compressão e sem ping: o Rust pinga este lado, e o uvicorn
+        # pinga o cliente. Quadros do Rust têm até 64 KiB; o teto é o do cliente nativo.
+        upstream = await connect(url, additional_headers={"x-hangar-internal": secret}, proxy=None,
+                                 compression=None, ping_interval=None, open_timeout=5,
+                                 close_timeout=2, max_size=_SAIDA_MAX)
+    except InvalidStatus as e:
+        status = e.response.status_code
+        # 403 é a sessão que morreu depois da porta de entrada: como o `has_session` daqui.
+        if status == 403:
+            await ws.close(code=1008, reason="sessao nao existe")
+            return
+        await _recusa_ponte(ws, name, "terminal_bridge_refused", status=status)
+        return
+    except Exception as e:                       # noqa: BLE001 — qualquer falha da ponte vira código
+        codigo = "terminal_bridge_timeout" if isinstance(e, TimeoutError) else "terminal_bridge_unavailable"
+        await _recusa_ponte(ws, name, codigo, tipo=type(e).__name__)
+        return
+
+    async def do_cliente():
+        while True:
+            msg = await ws.receive()
+            if msg["type"] == "websocket.disconnect":
+                return
+            if (b := msg.get("bytes")) is not None:
+                await upstream.send(b)
+            elif (t := msg.get("text")) is not None:
+                await upstream.send(t)
+
+    async def do_rust():
+        async for dados in upstream:
+            if isinstance(dados, bytes):
+                await ws.send_bytes(dados)
+            else:
+                await ws.send_text(dados)
+
+    tarefas: set[asyncio.Future] = set()
+    rust_fechou = False
+    try:
+        await ws.accept()
+        _log.info("termsock: %r ligado ao terminal do Rust (%dx%d)", name, cols, rows)
+        tarefas = {asyncio.ensure_future(do_cliente()), asyncio.ensure_future(do_rust())}
+        await asyncio.wait(tarefas, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for t in tarefas:
+            t.cancel()
+        if tarefas:
+            # `wait`, não `await` em cada uma: o cancelamento desta task (convidado revogado) segue
+            # valendo em vez de ser engolido junto com o das filhas.
+            await asyncio.wait(tarefas)
+        for t in tarefas:
+            erro_t = None if t.cancelled() else t.exception()
+            if erro_t is not None and not isinstance(
+                    erro_t, (ConnectionClosed, WebSocketDisconnect, ClientDisconnected)):
+                _log.error("termsock: %r — repasse terminou com %s", name, type(erro_t).__name__)
+        # O Rust fechou primeiro: o código dele vale, quem terminou antes aqui não importa.
+        rust_fechou = upstream.state is not State.OPEN
+        try:
+            await upstream.close()
+        finally:
+            if upstream.state is not State.CLOSED:
+                upstream.transport.abort()
+    if rust_fechou:
+        code, reason = upstream.close_code, upstream.close_reason or ""
+        if code in (None, 1005, 1006):
+            # Sem código: o painel do outro lado caiu sem fechar.
+            diag.registrar("terminal.ponte", "erro", codigo="terminal_bridge_dropped", sessao=name)
+            code, reason = 1011, "terminal do Rust caiu"
+        with contextlib.suppress(RuntimeError, WebSocketDisconnect, ClientDisconnected):
+            await ws.close(code=code, reason=reason)
+    _log.info("termsock: %r desligado do terminal do Rust", name)
 
 
 async def _motor_posix(ws: WebSocket, name: str, cols: int, rows: int) -> None:

@@ -32,12 +32,15 @@ _log = logging.getLogger("hangar.rust_server")
 HEALTH_PATH = "/__hangar_server/health"
 # Versão do contrato interno (rotas /internal, side-events, ambiente). Tem de casar com o
 # `protocol` da saúde (hangar_server::INTERNAL_PROTOCOL); outro número = o Python atende sozinho.
-RUST_SERVER_PROTOCOL = 28
+RUST_SERVER_PROTOCOL = 30
 START_TIMEOUT = 10.0
 OP_TIMEOUT_S = 75
 CRASH_WINDOW = 60.0
 MAX_CRASHES = 3
 _POLL = 0.25
+# Capacidade de painel de terminal do Rust, lida da saúde a cada subida (o `/api/config` a publica
+# no modo `rust`).
+terminal_panel: bool | None = None
 
 # Literal, e não `subprocess.CREATE_NO_WINDOW`: o atributo só existe no Windows.
 _CREATE_NO_WINDOW = 0x08000000
@@ -311,6 +314,8 @@ class Supervisor:
     async def _start(self) -> str:
         """`up`, `died` (morreu subindo), `silent` (vivo e calado até o prazo), `protocol` ou
         `address` (endereço privado ausente ou inválido na saúde)."""
+        global terminal_panel
+        terminal_panel = None
         from app import list_bridge, workspace_bridge
         workspace_bridge.configure(None, None)
         list_bridge.configure(None, None)
@@ -342,6 +347,12 @@ class Supervisor:
                     return "protocol"
                 if self.proc.poll() is not None:
                     return "died"
+                panel = health.get("terminal_panel")
+                if type(panel) is not bool:
+                    _log.error("hangar-server sem terminal_panel válido na saúde")
+                    diag.registrar("hangar_server.partida", "erro", codigo="capacidade_invalida")
+                    return "address"
+                terminal_panel = panel
                 address = health.get("terminal_address")
                 try:
                     if address is None:
