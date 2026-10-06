@@ -453,17 +453,26 @@ fn element(v: &Value, c: &Ctx, at: &Spot) -> AnyElement {
 
 /// `Input` de mod: rótulo, campo e rótulo de envio. Sem `submit` (sessão com terminal, servidor que não diz a fonte ou só
 /// leitura) o campo fica desabilitado, com a dica de digitar no terminal.
+/// Largura mínima e base do campo, em pixels: as do web (`min-width: 12ch`, `flex: 1 1 16ch`) em células.
+fn field_width() -> (f32, f32) { (12. * CELL_W, 16. * CELL_W) }
+
 fn field(p: &Value, c: &Ctx) -> AnyElement {
     let label = text_of(&p["label"]);
     let key = p["key"].as_str().filter(|k| !k.is_empty());
-    let row = div().flex().flex_row().items_center().gap_2().min_w_0()
+    // Sem `min_w_0`: a linha não fica menor que rótulo, campo mínimo e envio. Encolhida, os filhos dela saíam por cima
+    // dos vizinhos; assim, numa faixa estreita a linha passa da borda e o lugar a recorta.
+    let row = div().flex().flex_row().items_center().gap_2()
         .when(!label.is_empty(), |el| el.child(div().flex_shrink_0().child(label)));
     let Some(state) = key.and_then(|k| c.view.fields.get(&field_id(c.site, k))) else {
         // Antes de o app criar o campo (o primeiro quadro), só o texto de ajuda.
         return row.child(div().text_color(theme::muted()).child(text_of(&p["placeholder"]))).into_any_element();
     };
     let typing = c.view.submit.clone().zip(key.map(str::to_owned));
-    let row = row.child(div().flex_1().min_w_0().child(Input::new(&state.state).small().disabled(typing.is_none())));
+    // Sem largura mínima o campo ficava com 18 px (só o enfeite) numa linha com textos ao lado, e o clique caía no
+    // enfeite, que tem foco próprio: o anel acendia, mas o texto não recebia a digitação.
+    let (min, basis) = field_width();
+    let row = row.child(div().flex_grow(1.).flex_shrink(1.).flex_basis(px(basis)).min_w(px(min))
+        .child(Input::new(&state.state).small().disabled(typing.is_none())));
     match typing {
         Some((submit, key)) => {
             let site = c.site.to_owned();
@@ -473,7 +482,7 @@ fn field(p: &Value, c: &Ctx) -> AnyElement {
                 .px(px(CELL_W)).rounded(px(4.)).bg(theme::raised()).child(send)
                 .on_click(move |_, window, cx| submit(&site, &key, window, cx))).into_any_element()
         }
-        None => div().flex().flex_col().min_w_0().child(row)
+        None => div().flex().flex_col().child(row)
             .child(div().text_color(theme::muted()).whitespace_normal().child(crate::i18n::tr_shared("plugin_input_no_terminal", &[])))
             .into_any_element(),
     }
@@ -775,7 +784,7 @@ fn unmark(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     // Importação explícita: `super::*` traz o `test` do gpui_kit, e o `#[test]` passaria a ser o dele.
-    use super::{accepts_typing, active_pane, box_background, button_key, cell_color, color, field_id, fields, fills_place, follow_local, follows_server,
+    use super::{accepts_typing, active_pane, box_background, button_key, cell_color, color, field_id, field_width, fields, CELL_W, fills_place, follow_local, follows_server,
         hover_props, input_kind, input_request, is_empty, keep_hovered, pane_ids, plain_deep, raster_row, raster_runs, safe_href,
         scope_active, surfaces, text_row, toast, wants_hover, FieldSpec, Surfaces, Toast, UiSource};
     use gpui_kit::component::input::InputEvent;
@@ -1025,6 +1034,13 @@ mod tests {
         let drawn = fields(&amostras()["campoV18"]).remove(0).value;
         assert_eq!(input_request(Some(UiSource::Surface), false, "vitrine-campos", "V18-campo", "change", &drawn),
             Some(json!({"site": "vitrine-campos", "key": "V18-campo", "kind": "change", "value": drawn})));
+    }
+
+    #[test]
+    fn field_keeps_the_web_minimum_and_basis_in_cells() {
+        // Como o `min-width: 12ch` e o `flex: 1 1 16ch` do web: numa linha com textos ao lado o campo não encolhe até sumir.
+        let (min, basis) = field_width();
+        assert_eq!((min, basis), (12. * CELL_W, 16. * CELL_W));
     }
 
     #[test]
