@@ -2629,7 +2629,9 @@ class SessionRegistry:
         if model and not meta.get("engine"):
             from app import default_model
             # Na conta Anthropic, id de motor herdado do processo antigo derruba cada turno.
-            model = model if default_model.anthropic(model) else None
+            if not default_model.anthropic(model):
+                _log.warning("modelo %r não é da Anthropic; sessão relançada no padrão da conta", model)
+                model = None
         if meta.get("engine_account"):
             from app import cliproxy, engines
             binding = cliproxy.engine_env(meta["engine"], model, meta.get("context_window"), meta["engine_account"],
@@ -3294,7 +3296,9 @@ class SessionRegistry:
             modelo = esforco = janela = service_tier = None
         if modelo and not motor:
             from app import default_model
-            modelo = modelo if default_model.anthropic(modelo) else None
+            if not default_model.anthropic(modelo):
+                _log.warning("resume %s: modelo %r não é da Anthropic; volta no padrão da conta", name, modelo)
+                modelo = None
         service_tier = _claude_service_tier(motor, modelo, service_tier)
         # Sem motor, a variável veio do `-e` da criação e sumiria no relançamento; com motor, é dele.
         subagente = (procinfo._env_var_of(ag, "CLAUDE_CODE_SUBAGENT_MODEL")

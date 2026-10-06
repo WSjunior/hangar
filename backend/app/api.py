@@ -2242,13 +2242,17 @@ async def create_session(body: CreateBody):
         if aviso:
             _log.warning("create_session %s: %s", body.name, aviso)
             body = body.model_copy(update={"config_dir": config_dir})
-    if body.provider == "claude":
+    if body.provider == "claude" and not body.engine and (
+            body.config_dir is None or body.config_dir in {c.path for c in list_config_dirs()}):
         cfg = Path(body.config_dir) if body.config_dir else None
-        for valor in await asyncio.to_thread(default_model.drop_foreign, cfg):
+        removidos, falhas = await asyncio.to_thread(default_model.drop_foreign, cfg)
+        for valor in removidos:
             _log.warning("create_session %s: modelo padrão %r não é da Anthropic; removido do settings.json",
                          body.name, valor)
             avisos_extra.append(f"O modelo padrão '{valor}' do settings.json não é da Anthropic "
-                                "(veio de um /model numa sessão de motor) e foi removido.")
+                                "(provavelmente veio de um /model numa sessão de motor) e foi removido.")
+        avisos_extra += [f"Não consegui tirar do settings.json um modelo que não é da Anthropic: {f}"
+                         for f in falhas]
     with _acompanhar_criacao(body.name):
         worktree: dict = {}
         try:

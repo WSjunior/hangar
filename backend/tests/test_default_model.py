@@ -105,14 +105,35 @@ def test_drop_foreign_tira_modelo_de_motor_da_conta_e_do_principal(tmp_path, mon
     conta.mkdir()
     _settings(conta, {"model": "kimi-for-coding"})
 
-    assert default_model.drop_foreign(conta) == ["kimi-for-coding", "claude-200-2/gpt-6.1-sol[1m]"]
+    assert default_model.drop_foreign(conta) == (["kimi-for-coding", "claude-200-2/gpt-6.1-sol[1m]"], [])
     assert json.loads((principal / "settings.json").read_text()) == {"outputStyle": "x"}
     assert json.loads((conta / "settings.json").read_text()) == {}
 
 
 def test_drop_foreign_mantem_modelo_anthropic(tmp_path, monkeypatch):
     monkeypatch.setattr(default_model.Path, "home", lambda: tmp_path / "home")
-    for valor in ("opus[1m]", "sonnet", "claude-opus-5-5", "claude-opus-5-5[1m]", "fable"):
+    for valor in ("opus[1m]", "sonnet", "claude-opus-5-5", "claude-opus-5-5[1m]", "fable",
+                  "us.anthropic.claude-sonnet-4-20250514-v1:0", "claude-sonnet-4@20250514",
+                  "arn:aws:bedrock:us-east-1:123:inference-profile/x"):
         _settings(tmp_path, {"model": valor})
-        assert default_model.drop_foreign(tmp_path) == []
+        assert default_model.drop_foreign(tmp_path) == ([], [])
         assert json.loads((tmp_path / "settings.json").read_text()) == {"model": valor}
+
+
+def test_drop_foreign_falha_de_escrita_vira_falha_e_segue(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setattr(default_model.Path, "home", lambda: home)
+    (home / ".claude").mkdir(parents=True)
+    _settings(home / ".claude", {"model": "kimi-for-coding"})
+    _settings(tmp_path, {"model": "kimi-for-coding"})
+    reais = default_model._gravar
+
+    def gravar(path, d):
+        if path.parent == tmp_path:
+            raise OSError("somente leitura")
+        reais(path, d)
+    monkeypatch.setattr(default_model, "_gravar", gravar)
+
+    removidos, falhas = default_model.drop_foreign(tmp_path)
+    assert removidos == ["kimi-for-coding"] and len(falhas) == 1
+    assert json.loads((home / ".claude" / "settings.json").read_text()) == {}
