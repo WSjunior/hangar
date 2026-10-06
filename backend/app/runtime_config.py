@@ -26,6 +26,9 @@ EDITAVEIS: dict[str, type] = {
     "groq_api_key": str,          # transcrição de áudio e de vídeo
     "transcription_base_url": str,  # base OpenAI-compatible; vazio = serviço padrão
     "transcription_model": str,     # modelo de áudio; vazio = whisper-large-v3-turbo
+    # Lista ordenada de serviços de transcrição com reserva automática. Vazia ou ausente = o
+    # serviço único das três chaves acima. Ver transcribe.transcribe_with_provider.
+    "transcription_providers": list,
     "upload_retention_days": int,  # dias que um anexo sobrevive
     "notify_finished": bool,
     "notify_dead": bool,
@@ -238,6 +241,77 @@ def mascarar(valor: str) -> str:
     return f"{valor[:4]}{'•' * 8}{valor[-4:]}"
 
 
+TRANSCRIPTION_KINDS = ("openai", "elevenlabs")
+_TRANSCRIPTION_FIELDS = ("id", "kind", "name", "base_url", "api_key", "model")
+_TRANSCRIPTION_MAX = 10
+
+
+def _validate_transcription_providers(valor: Any) -> list[dict]:
+    """Normaliza a lista de serviços de transcrição. Recusa na gravação o que a transcrição teria
+    de pular calada depois: item sem chave, tipo inexistente, endpoint que não é URL."""
+    if not isinstance(valor, list):
+        raise ValueError("transcription_providers: esperado uma lista")
+    if len(valor) > _TRANSCRIPTION_MAX:
+        raise ValueError(f"transcription_providers: no maximo {_TRANSCRIPTION_MAX} servicos")
+    out: list[dict] = []
+    ids: set[str] = set()
+    for i, item in enumerate(valor, start=1):
+        onde = f"transcription_providers: item {i}"
+        if not isinstance(item, dict):
+            raise ValueError(f"{onde} nao e um objeto")
+        campos: dict[str, str] = {}
+        for nome in _TRANSCRIPTION_FIELDS:
+            v = item.get(nome)
+            v = "" if v is None else v
+            if not isinstance(v, str):
+                raise ValueError(f"{onde}: {nome} deve ser texto")
+            campos[nome] = v.strip()
+        if not campos["id"] or len(campos["id"]) > 64:
+            raise ValueError(f"{onde} sem id")
+        if campos["id"] in ids:
+            raise ValueError(f"{onde}: id repetido")
+        ids.add(campos["id"])
+        if campos["kind"] not in TRANSCRIPTION_KINDS:
+            raise ValueError(
+                f"{onde}: tipo '{campos['kind']}' nao existe. Use um de: {', '.join(TRANSCRIPTION_KINDS)}."
+            )
+        if not campos["api_key"]:
+            raise ValueError(f"{onde} sem chave")
+        # Máscara que não casou com a chave guardada do MESMO id (item novo, id trocado) viraria a
+        # chave de verdade: o serviço recusaria toda requisição sem a tela dizer por quê.
+        if "•" in campos["api_key"]:
+            raise ValueError(f"{onde}: a chave esta mascarada; digite a chave de novo")
+        if campos["kind"] == "elevenlabs":
+            campos["base_url"] = ""
+        elif campos["base_url"] and not campos["base_url"].startswith(("http://", "https://")):
+            raise ValueError(f"{onde}: use endpoint vazio ou uma URL http(s)://")
+        out.append(campos)
+    return out
+
+
+def _keep_masked_keys(items: list, stored: Any) -> list:
+    """Item devolvido com a chave mascarada mantém a chave guardada do mesmo `id` — a regra de
+    SEGREDOS, item a item. Só se o tipo e o endpoint forem os mesmos: a chave guardada nunca vai
+    para outro serviço por causa de uma troca de endpoint na tela."""
+    old = {p.get("id"): p for p in (stored if isinstance(stored, list) else []) if isinstance(p, dict)}
+    out = []
+    for i, item in enumerate(items, start=1):
+        if isinstance(item, dict) and isinstance(item.get("api_key"), str):
+            antigo = old.get(item.get("id")) or {}
+            key = antigo.get("api_key") or ""
+            if key and item["api_key"].strip() == mascarar(key):
+                kind = str(item.get("kind") or "").strip()
+                mesmo = kind == antigo.get("kind") and (
+                    kind == "elevenlabs"
+                    or str(item.get("base_url") or "").strip() == (antigo.get("base_url") or ""))
+                if not mesmo:
+                    raise ValueError(f"transcription_providers: item {i} mudou de tipo ou endpoint; "
+                                     "digite a chave de novo")
+                item = {**item, "api_key": key}
+        out.append(item)
+    return out
+
+
 # As acoes internas que a fileira conhece (os botoes nativos de hoje). Item com action fora
 # daqui seria um botao morto na tela — recusa na gravacao, apontando o item.
 _SHORTCUT_INTERNAL_ACTIONS = {"terminal", "modo", "navegador", "anexos", "rodar", "externo"}
@@ -296,6 +370,8 @@ def validate_shortcut_item(item: Any, where: str) -> None:
 def _coagir(campo: str, valor: Any) -> Any:
     """Converte o que veio do JSON pro tipo do campo. Levanta ValueError no que não dá."""
     tipo = EDITAVEIS[campo]
+    if tipo is list:
+        return _validate_transcription_providers(valor)
     if tipo is bool:
         if isinstance(valor, bool):
             return valor
@@ -407,6 +483,8 @@ def _aplicar_travado(mudancas: dict[str, Any], remover: set[str]) -> dict[str, A
         # "a string é só bullets?" — mas a máscara real é mista (gsk_••••••••1234), então NUNCA
         # batia: encostar no campo sobrescrevia a chave verdadeira pelo texto mascarado, sem volta.
         # Compara com a máscara do valor ATUAL, que é exatamente o que o cliente recebeu.
+        if campo == "transcription_providers" and isinstance(valor, list):
+            valor = _keep_masked_keys(valor, atual.get(campo))
         if campo in SEGREDOS and isinstance(valor, str):
             efetivo = atual.get(campo) if campo in atual else getattr(settings, campo, "")
             if valor.strip() in {mascarar(efetivo or ""), ""} and efetivo:
@@ -477,6 +555,14 @@ def estado() -> dict[str, Any]:
     out: dict[str, Any] = {}
     for campo in EDITAVEIS:
         valor = get(campo)
+        if campo == "transcription_providers":
+            lista = [p for p in (valor if isinstance(valor, list) else []) if isinstance(p, dict)]
+            out[campo] = {
+                "valor": [{**p, "api_key": mascarar(p.get("api_key") or "")} for p in lista],
+                "definido": bool(lista),
+                "origem": "app" if campo in overrides else "env",
+            }
+            continue
         out[campo] = {
             "valor": mascarar(valor or "") if campo in SEGREDOS else valor,
             "definido": bool(valor) if campo in SEGREDOS else valor is not None,
