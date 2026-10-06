@@ -879,8 +879,20 @@ async fn stop_during_a_mods_hold_answers_runtime_stopping() {
 
 const RULE_80:&str="────────────────────────────────────────────────────────────────────────────────";
 
-/// Foco na faixa de um mod: um botão em inverso logo acima da caixa de digitar.
-fn band_focus_screen()->String {format!("Resposta do Claude\n\x1b[7m Aprovar \x1b[0m  Recusar\n{RULE_80}\n❯ \n{RULE_80}\n")}
+/// Foco na faixa de um mod que a leitura reconhece sem a âncora: a faixa recolhida, em inverso.
+fn band_focus_screen()->String {format!("Resposta do Claude\n\x1b[7m plugin panel hidden \x1b[0m\n{RULE_80}\n❯ \n{RULE_80}\n")}
+
+/// Um realce do próprio Claude Code logo acima do prompt, sem mod na tela, não segura a mensagem.
+#[tokio::test]
+async fn an_inverse_above_the_prompt_without_a_mod_does_not_defer() {
+    let f=Fixture::new().await;
+    *f.io.mods_screen.lock().unwrap()=Some(format!("Resposta do Claude\n\x1b[7m opção selecionada \x1b[0m  outra opção\n{RULE_80}\n❯ \n{RULE_80}\n"));
+    let h=f.start();
+    let reply=h.command(f.command("realce","Com um realce na tela")).await.unwrap();
+    assert_eq!(reply.disposition,hangar_server::runtime::protocol::Disposition::Accepted,"{:?}",reply.payload);
+    assert_eq!(typed_at(&f,"Com um realce na tela").len(),1);
+    h.stop().await.unwrap();
+}
 
 /// Foco no painel ao lado: a borda `│` na cor do foco até a régua do prompt.
 fn pane_focus_screen()->String {
