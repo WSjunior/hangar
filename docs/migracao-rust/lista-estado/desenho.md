@@ -116,6 +116,20 @@ pânico do laço, que recomeça) na hora, como `rust.list_shadow_failed`; motivo
 `rust.list_shadow_blind`. A sombra tem cliente de fatos próprio: não espera a produção de verdade
 nem lhe passa uma falha. Ela só faz sentido com o Python dono (antes da Task 16).
 
+### Consumidores Python (Task 16)
+
+Com o modo `rust` (ou `pending`, que espera o desfecho até 30 s e falha com `list_runtime_starting`),
+`registry.list()`, `list_with_state()` e `resolve_tracked()` vão à ponte; criar, trocar de modo,
+voltar de transferência e renomear semeiam, esquecem e renomeiam o cache de resolução do Rust
+(esquecer levanta e segura a criação; semear e renomear, já feitos, ficam no diário). O produtor da
+lista no Python relê o modo a cada tique e, no `rust`, só repassa `list.snapshot` (dono, até o hub
+da Task 17, e convidado); `GET /api/sessions`, vigia de travada e `prune` leem o mesmo retrato ou a
+descoberta. `list.snapshot` com fatos que nunca responderam é erro (`list_facts_unknown`), nunca
+lista. Erro da ponte em rota é 503 `erro_lista_indisponivel`. `registry.PYTHON_DISCOVERY` conta cada
+descoberta Python (lista, resolução, decoração, produtor); no modo `rust` fica zerado. O pedido de
+retrato manda `owner_clients = 0`: sem o hub não há lista do dono aberta no Rust, e o Python soma a
+dele (`app_entrou`); a Task 17 tira essa contagem do retrato.
+
 **Diferenças aceitas** (fora do diário, cada uma da Task que a criou):
 
 | Diferença | Onde aparece | Motivo |

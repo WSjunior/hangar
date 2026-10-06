@@ -321,9 +321,9 @@ que falha), `test_resolve_tracked_uses_bridge_in_rust_mode`, `test_create_seeds_
 `test_stall_watch_reads_bridge_snapshot_without_clients`, `test_prune_keeps_files_on_bridge_error`,
 `test_guest_list_filters_bridge_snapshot`, `test_dead_pair_sweep_outside_discovery`.
 
-- [ ] **Step 35: Auditoria; testes, vistos falhar**
-- [ ] **Step 36: Delegação no modo `rust`/`pending`; o código atual só no modo `python`**
-- [ ] **Step 37: Testes focados; revisar**
+- [x] **Step 35: Auditoria; testes, vistos falhar**
+- [x] **Step 36: Delegação no modo `rust`/`pending`; o código atual só no modo `python`**
+- [x] **Step 37: Testes focados; revisar**
 
 ### Task 17: `ListHub` — as rotas da lista no Rust
 

@@ -1,4 +1,5 @@
 import asyncio
+import collections
 import json
 import logging
 import os
@@ -54,6 +55,53 @@ from app.procinfo import (_proc_children_map, _descendant_pids, _open_jsonl, _cm
 _UNSET = object()
 
 _log = logging.getLogger("hangar.registry")
+
+# Vezes que a descoberta Python rodou, por caminho. Com o Rust dono fica zerada: é a prova de que
+# nenhum caminho a chama (`tests/test_list_consumers.py`).
+PYTHON_DISCOVERY: collections.Counter[str] = collections.Counter()
+
+
+def rust_owns_list() -> bool:
+    """Com o Rust dono, a descoberta e o cache de resolução do transcript são dele (`list_bridge`).
+    `pending` espera o desfecho até `PENDING_WAIT_S`; no próprio laço não há como esperar. Sem
+    desfecho, levanta com código: a lista nunca passa ao Python por isso."""
+    from app import list_bridge, runtime_coordinator
+    owner = runtime_coordinator.current()
+    if owner is None:
+        return False
+    if owner.mode == "pending" and not runtime_coordinator._mode_bypass.get():
+        from app.runtime_adapter import run_sync
+        try:
+            run_sync(owner.await_mode, owner.loop)
+        except (runtime_coordinator.RuntimeStarting, TimeoutError) as e:
+            raise list_bridge.ListBridgeError("list_runtime_starting") from e
+        except RuntimeError as e:
+            # Chamada de dentro do laço: esperar ali travaria o próprio desfecho.
+            raise list_bridge.ListBridgeError("list_wait_on_loop") from e
+    # Ainda `pending` depois da espera = adoção das sessões no Rust que acabou de subir (o
+    # bypass da espera): ele já está de pé e a descoberta é dele.
+    return owner.mode != "python"
+
+
+async def rust_owns_list_async() -> bool:
+    from app import list_bridge, runtime_coordinator
+    owner = runtime_coordinator.current()
+    if owner is None:
+        return False
+    if owner.mode == "pending" and not runtime_coordinator._mode_bypass.get():
+        try:
+            await owner.await_mode()
+        except runtime_coordinator.RuntimeStarting as e:
+            raise list_bridge.ListBridgeError("list_runtime_starting") from e
+    return owner.mode != "python"
+
+
+def _rust_caches() -> bool:
+    """Semear, esquecer e invalidar só valem com o Rust de pé: em `pending` o próximo Rust nasce
+    com os caches vazios, e esperar por ele aqui só atrasaria a criação."""
+    from app import runtime_coordinator
+    owner = runtime_coordinator.current()
+    return owner is not None and owner.mode == "rust"
 
 
 # Idade minima de um marcador awaiting_input pra que um pane raspado SEM menu o rebaixe pra idle
@@ -1063,6 +1111,10 @@ class SessionRegistry:
 
     def resolve_tracked(self, name: str, cwd: str, pid=_UNSET,
                         children: Optional[dict[int, list[int]]] = None) -> tuple[Optional[str], bool]:
+        if rust_owns_list():
+            from app import list_bridge
+            return list_bridge.resolve(name, cwd, None if pid is _UNSET else pid)
+        PYTHON_DISCOVERY["resolve_tracked"] += 1
         jsonl, tracked = self._resolve_tracked_impl(name, cwd, pid, children)
         self._log_change(name, jsonl, tracked)
         return jsonl, tracked
@@ -1189,7 +1241,45 @@ class SessionRegistry:
         proj = (cdir / "projects") if cdir else self.projects_dir
         return self.resolve_jsonl(cwd, proj), False
 
-    def _forget(self, name: str) -> None:
+    def _seed(self, name: str, jsonl: str, required: bool = False) -> None:
+        """Transcript da sessão que acabou de nascer ou trocar de modo: vale antes de o agente
+        escrevê-lo. A sessão já existe; se a ponte falhar, a falha já está no diário (`lista.ponte`)
+        e o Rust resolve pelo `--session-id` ou pelo sidecar dela. `required`: transferência, em
+        que o transcript não se deduz do processo; aí a falha levanta."""
+        self._jsonl_cache[name] = jsonl
+        if _rust_caches():
+            from app import list_bridge
+            try:
+                list_bridge.seed(name, jsonl)
+            except (list_bridge.ListBridgeError, tmux.MuxIndisponivel):
+                if required:
+                    raise
+
+    def _rename_rust(self, old: str, new: str) -> None:
+        """O rename já aconteceu: falha da ponte fica no diário (`lista.ponte`), e o nome velho é
+        esquecido de novo antes de qualquer sessão nascer com ele (`_forget` na criação)."""
+        if _rust_caches():
+            from app import list_bridge
+            try:
+                list_bridge.rename(old, new)
+            except (list_bridge.ListBridgeError, tmux.MuxIndisponivel):
+                pass
+
+    def _forget(self, name: str, required: bool = False) -> None:
+        """Esquece o nome aqui e no Rust. `required`: criação, antes de qualquer efeito; a falha
+        levanta, porque o nome reusado herdaria o cache e abriria a conversa da morta. Nos demais
+        a sessão já morreu ou trocou: a falha fica no diário (`lista.ponte`) e a criação seguinte
+        do mesmo nome esquece de novo."""
+        if _rust_caches():
+            from app import list_bridge
+            try:
+                list_bridge.forget(name)
+            except (list_bridge.ListBridgeError, tmux.MuxIndisponivel):
+                if required:
+                    raise
+        self._forget_local(name)
+
+    def _forget_local(self, name: str) -> None:
         self._jsonl_cache.pop(name, None)
         self._fd_locked.discard(name)
         # Nome pode ser reusado por outra sessao: sem isto a nova herdaria a statusline da morta
@@ -1296,7 +1386,13 @@ class SessionRegistry:
                              "caindo no pane ATIVO", name, len(panes))
         return next((p for p in panes if p["active"]), panes[0])
 
-    def list(self) -> list[SessionInfo]:
+    def list(self, newer_than: float | None = None) -> list[SessionInfo]:
+        # `newer_than` (época): sessão criada há menos de 1 s, só vale descoberta começada depois.
+        # No Python quem garante isso é o `_guardar_snap(forcar=True)`, que relê os processos.
+        if rust_owns_list():
+            from app import list_bridge
+            return list_bridge.discover(newer_than)
+        PYTHON_DISCOVERY["list"] += 1
         # Resolucao de jsonl/tracked de todas as sessoes. Otimizado: UM mapa /proc + UMA chamada tmux
         # (pane_pid em lote) reusados por sessao -> O(P + S·descendentes) em vez de O(S·P). NAO calcula
         # state (sai 'idle' default): este caminho so resolve transcript; quem quer state usa
@@ -1491,10 +1587,6 @@ class SessionRegistry:
                 name=run["name"], cwd=run["repo"], jsonl=run["timeline"], provider="orq",
                 tracked=True, pair_gid=run["gid"], orq_arbiter=run["arbiter"]))
         _decorate_transfers(out)
-        try:
-            self._varrer_pares_mortos({i.name for i in out})
-        except Exception as e:
-            _log.warning("varredura de pares falhou (lista segue): %r", e)
         return out
 
     async def _radar_de_limite(self, infos: list[SessionInfo], raspadas: set[str]) -> None:
@@ -1528,6 +1620,15 @@ class SessionRegistry:
         # thread) e por cima classifica o pane de cada sessao concorrentemente. `infos` opcional: um
         # snapshot ja resolvido (ex: cache compartilhado dos pollers do SSE) pula a re-resolucao.
         # `state_only`: só o estado (fatos da lista, `list_facts`); a decoração é do Rust.
+        if not state_only:
+            if await rust_owns_list_async():
+                from app import list_bridge
+                rows = await asyncio.to_thread(list_bridge.snapshot)
+                if infos is not None:
+                    wanted = {i.name for i in infos}
+                    rows = [r for r in rows if r.name in wanted]
+                return rows
+            PYTHON_DISCOVERY["list_with_state"] += 1
         if infos is None:
             infos = await asyncio.to_thread(self.list)
         # Orquestrador: sem pane, hook, statusline nem git próprio. O estado sai só da atividade da
@@ -1615,8 +1716,9 @@ class SessionRegistry:
             if getattr(info, "provider", "claude") == "codex":
                 info.last_activity = _jsonl_mtime(info.jsonl)
                 if not info.jsonl:
-                    # Sem thread, nenhum cache de uma sessão anterior pertence a esta abertura.
-                    self._forget(info.name)
+                    # Sem thread, nenhum cache de uma sessão anterior pertence a esta abertura. Só
+                    # o daqui: isto roda nos fatos que o Rust pediu, dentro do laço.
+                    self._forget_local(info.name)
                     # Janela entre o pane nascer e o lancador gravar o sidecar: nao ha rollout, e
                     # tanto a chave do marcador quanto a leitura do turno EXIGEM um caminho
                     # (session_key(None) levanta TypeError). Sem esta saida, uma sessao Codex
@@ -2277,7 +2379,7 @@ class SessionRegistry:
         if protected_prefix:
             cmd = tmux.join_cmd([*protected_prefix, "/bin/sh", "-c", cmd])
         diag.registrar("sessao.criar_etapa", sessao=name, provider=provider, etapa="criar_terminal")
-        self._forget(name)
+        self._forget(name, required=True)
         # Sessao NOVA = sid novo = transcript fresco. A fila duravel e keyed pelo NOME (sobrevive ao
         # fim da sessao antiga), entao entradas remanescentes de uma sessao morta de mesmo nome
         # fantasmariam aqui via merged_history. Limpa ANTES do pane: depois dele o runtime ja adota
@@ -2315,7 +2417,7 @@ class SessionRegistry:
         # escrever o arquivo, evitando o fallback newest-by-mtime pescar um jsonl ja existente da pasta.
         # Pi (jsonl=None) nao entra no cache — nao ha path a fixar, e a resolucao dele nem passa por aqui.
         if jsonl is not None:
-            self._jsonl_cache[name] = jsonl
+            self._seed(name, jsonl)
         diag.registrar("sessao.criada", sessao=name, provider=provider, etapa="terminal_criado")
         return SessionInfo(name=name, cwd=cwd, jsonl=jsonl, tracked=jsonl is not None,
                            provider=provider, engine=engine, engine_account=engine_account,
@@ -2353,7 +2455,7 @@ class SessionRegistry:
         model_args.validar("claude", model, effort, permission_mode)
         diag.registrar("sessao.criar_etapa", sessao=name, provider="claude", etapa="confiar_pasta")
         _pretrust_cwd(cwd, config_dir)
-        self._forget(name)
+        self._forget(name, required=True)
         # Antes do sidecar: depois dele o runtime pode adotar a sessão nova no meio da limpeza.
         _retire_waiting_runtime(name)
         PromptQueue(name).clear()
@@ -2372,7 +2474,7 @@ class SessionRegistry:
         _encerrar_pares_externos(name)
         self._clear_pair(name)
         jsonl = get_adapter(CLAUDE_HEADLESS).transcript_path_de(meta)
-        self._jsonl_cache[name] = jsonl
+        self._seed(name, jsonl)
         diag.registrar("sessao.criada", sessao=name, provider="claude", etapa="sidecar_gravado")
         return SessionInfo(name=name, cwd=cwd, jsonl=jsonl, tracked=True, provider="claude",
                            headless=True, engine=engine, engine_account=engine_account,
@@ -2404,7 +2506,7 @@ class SessionRegistry:
         diag.registrar("sessao.criar_etapa", sessao=name, provider="codex", etapa="confiar_pasta")
         if transfer_id is None:
             codex_sessions.pretrust_cwd(cwd, codex_home=codex_home)
-        self._forget(name)
+        self._forget(name, required=True)
         target = {}
         if transfer_id:
             from app.conversation_transfer import load_transfer
@@ -2462,7 +2564,7 @@ class SessionRegistry:
                                 **_env_sessao(meta.get("subagent_model"), bool(meta.get("jev")))):
             headless_sessions.restaurar(meta)
             raise ValueError("falha ao criar o terminal; a sessao segue sem terminal")
-        self._jsonl_cache[name] = jsonl
+        self._seed(name, jsonl)
         return SessionInfo(name=name, cwd=meta["cwd"], jsonl=jsonl, tracked=True,
                            provider="claude", engine=meta.get("engine"),
                            engine_account=meta.get("engine_account"),
@@ -2613,7 +2715,7 @@ class SessionRegistry:
                                     **_env_sessao(subagente, jev)):
                 _log.error("troca para sem terminal: sidecar e pane falharam, sessao %s ficou sem nada", name)
             raise
-        self._jsonl_cache[name] = jsonl
+        self._seed(name, jsonl)
         return meta
 
     def transfer_origin(self, info: SessionInfo) -> tuple[dict, dict]:
@@ -2695,8 +2797,9 @@ class SessionRegistry:
                 raise TransferError("session_transfer_source_changed")
             headless_sessions.delete(record.name)
         get_adapter(CLAUDE_HEADLESS)._sessions.pop(record.name, None)
-        self._forget(record.name)
-        self._jsonl_cache[record.name] = record.boundary.rollout_path
+        # Fora do laço: com o Rust dono, esquecer e semear são chamadas à ponte.
+        await asyncio.to_thread(self._forget, record.name)
+        await asyncio.to_thread(self._seed, record.name, record.boundary.rollout_path, True)
 
     async def restore_transfer_source(self, record, private: dict) -> None:
         from app.conversation_transfer import _processes_stopped, TransferError
@@ -2799,8 +2902,8 @@ class SessionRegistry:
             if not loaded:
                 raise TransferError("session_transfer_restore_failed")
             headless_sessions.delete(record.name)
-        self._forget(record.name)
-        self._jsonl_cache[record.name] = meta["jsonl"]
+        await asyncio.to_thread(self._forget, record.name)
+        await asyncio.to_thread(self._seed, record.name, meta["jsonl"], True)
 
     def rename(self, old: str, new: str) -> None:
         from app.conversation_transfer import require_available
@@ -2817,6 +2920,7 @@ class SessionRegistry:
             headless_sessions.rename(old, new)
             get_adapter(CLAUDE_HEADLESS).rename(old, new)
             self._jsonl_cache.pop(old, None)
+            self._rename_rust(old, new)
             PromptQueue(old).rename(new)
             ThenLink(old).rename(new)
             rename_pair(old, new)
@@ -2846,6 +2950,7 @@ class SessionRegistry:
             self._limit_cache[new] = self._limit_cache.pop(old)
         if old in self._reply_cache:
             self._reply_cache[new] = self._reply_cache.pop(old)
+        self._rename_rust(old, new)
         # A fila duravel tambem e keyed por NOME -> move junto, senao a sessao renomeada perde as
         # entradas nao-drenadas e elas ficam orfas no nome velho (fantasma se reusarem `old`).
         PromptQueue(old).rename(new)
@@ -2978,12 +3083,18 @@ class SessionRegistry:
             # fora do kill), e a falha aparecia no log como se fosse de um encerramento.
             _log.warning("_clear_pair(%s): falha ao sair do grupo de pareamento: %r", name, e)
 
+    def sweep_pairs(self, list_fn: Callable[[], list[SessionInfo]], agora: float | None = None) -> None:
+        """Lista que falha levanta antes de varrer: vazia por erro dissolveria grupos vivos. Sem
+        nenhum pareado, nem pergunta a lista."""
+        vivos = {i.name for i in list_fn()} if pair.referenciados_locais() else set()
+        self._varrer_pares_mortos(vivos, agora)
+
     def _varrer_pares_mortos(self, vivos: set[str], agora: float | None = None) -> None:
         """Membro de grupo cuja sessão morreu FORA do app (Ctrl-C, crash, reboot): ninguém chamou
         leave, o sidecar apontava pra um fantasma pra sempre. Morto = ausente da lista viva numa
-        varredura anterior E há pelo menos _PAIR_AUSENCIA_MIN_S — kill() e rename() chamam list()
-        numa janela em que o nome está ausente de propósito, e só o tempo separa isso de morte.
-        O aviso vai pela fila durável, nunca send-keys: isto roda dentro do list(), no tick do SSE."""
+        varredura anterior E há pelo menos _PAIR_AUSENCIA_MIN_S — kill() e rename() deixam o nome
+        ausente de propósito por um instante, e só o tempo separa isso de morte. Roda no laço
+        `pair_sweep_loop`, fora da descoberta."""
         try:
             sozinhos = pair.dissolve_lone_orq()
         except Exception as e:

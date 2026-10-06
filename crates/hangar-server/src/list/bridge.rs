@@ -243,10 +243,10 @@ impl ListBridge {
         Ok((rows, agent_pids, panes, children))
     }
 
-    /// Lista decorada para quem pergunta fora do hub (vigia de travada, `prune`, convidado): o retrato
-    /// de até 2 s, senão produz na hora com os fatos do último `produce` de verdade. Antes da Task 16
-    /// nenhum consumidor lê isto. Task 17: o hub chama `produce` com o retrato do runtime e a contagem
-    /// de clientes dele; até lá o retrato fica sem runtime (`None`) e com zero clientes.
+    /// Lista decorada para quem pergunta fora do hub (vigia de travada, lista do convidado e, até o
+    /// hub, a do dono): o retrato de até 2 s, senão produz na hora com os fatos do último `produce` de
+    /// verdade. Task 17: o hub chama `produce` com o retrato do runtime e a contagem de clientes dele;
+    /// até lá o retrato fica sem runtime (`None`) e com zero clientes.
     pub async fn snapshot(&self) -> Result<Produced, ListError> {
         let mut slot = self.snapshot.lock().await;
         let epoch = self.epoch.load(Ordering::SeqCst);
@@ -256,7 +256,10 @@ impl ListBridge {
         let at = Instant::now();
         let input = lock(&self.last_input).clone();
         let produced = self.produce(&input).await?;
-        *slot = Some(Snapshot { at, epoch, produced: produced.clone() });
+        // Sem fatos ainda não é retrato: guardado, o Python que acabou de responder esperaria 2 s.
+        if !produced.facts.unknown {
+            *slot = Some(Snapshot { at, epoch, produced: produced.clone() });
+        }
         Ok(produced)
     }
 
@@ -603,7 +606,15 @@ async fn execute(bridge: &Arc<ListBridge>, op: Operation) -> Result<Value, ListE
     };
     match op {
         Operation::Discover { newer_than } => rows(&bridge.discover(newer_than).await?),
-        Operation::Snapshot {} => rows(&bridge.snapshot().await?.rows),
+        Operation::Snapshot {} => {
+            let produced = bridge.snapshot().await?;
+            // Sem nenhuma resposta boa do Python, acesso, escondidas e transferências são
+            // desconhecidos, não vazios: o convidado veria o que não é dele.
+            if produced.facts.unknown {
+                return Err(fail("list_facts_unknown", "fatos da lista ainda sem resposta"));
+            }
+            rows(&produced.rows)
+        }
         Operation::Invalidate {} => { bridge.invalidate(); Ok(Value::Null) }
         Operation::Resolve { name, cwd, pid } => {
             let t = bridge.resolve(&name, &cwd, pid).await?;
