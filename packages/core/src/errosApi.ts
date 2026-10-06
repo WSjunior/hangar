@@ -503,6 +503,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_mod_rascunho_no_prompt: () => m.erro_mod_rascunho_no_prompt(),
   erro_mod_painel_nao_alcancavel: () => m.erro_mod_painel_nao_alcancavel(),
   erro_mod_fechar_recusado: () => m.erro_mod_fechar_recusado(),
+  erro_mod_guarda_indisponivel: () => m.erro_mod_guarda_indisponivel(),
   erro_mod_painel_inexistente: () => m.erro_mod_painel_inexistente(),
 };
 

@@ -1198,9 +1198,11 @@ fn publish(events:&broadcast::Sender<RuntimeEvent>,target:&RuntimeTarget,revisio
 type ModsWaiters = BTreeMap<u64,oneshot::Sender<Result<Value,ModsError>>>;
 
 /// Pedido de app que chegou à vez. Já vencido (o `timeout` do app venceu com a mensagem na caixa), não
-/// roda: virar clique depois que o app mostrou erro seria um clique fantasma.
+/// roda: virar clique depois que o app mostrou erro seria um clique fantasma. Quem pediu e já desistiu
+/// (a rota cortou a chamada no orçamento dela, antes deste prazo) também não.
 fn take_mods(engine:&mut RuntimeEngine,waiters:&mut ModsWaiters,token:&mut u64,call:ModsCall,deadline:Instant,
     response:oneshot::Sender<Result<Value,ModsError>>,clock:ClockSample) -> Vec<Effect> {
+    if response.is_closed() { return Vec::new(); }
     if Instant::now() >= deadline { let _ = response.send(Err(crate::mods::model::no_answer())); return Vec::new(); }
     *token += 1;
     match engine.mods_call(*token,call,clock) {
@@ -1267,6 +1269,11 @@ mod tests {
         let effects = take_mods(&mut engine,&mut waiters,&mut token,press(),Instant::now() - Duration::from_millis(1),response,sample);
         assert!(effects.is_empty() && waiters.is_empty() && token == 0);
         assert_eq!(receive.try_recv().unwrap().unwrap_err().code,"erro_mod_clique_sem_resposta");
+        // No prazo, mas quem pediu já desistiu (a rota cortou a chamada): também não roda.
+        let (response,receive) = oneshot::channel();
+        drop(receive);
+        let effects = take_mods(&mut engine,&mut waiters,&mut token,press(),Instant::now() + Duration::from_secs(5),response,sample);
+        assert!(effects.is_empty() && waiters.is_empty() && token == 0);
         // No prazo: vai à superfície, que ainda não ligou e responde que o botão não está lá.
         let (response,_receive) = oneshot::channel();
         let effects = take_mods(&mut engine,&mut waiters,&mut token,press(),Instant::now() + Duration::from_secs(5),response,sample);

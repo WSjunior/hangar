@@ -46,6 +46,11 @@ pub struct Fake {
     pub list_facts: Mutex<(Value, Duration)>,
     pub list_facts_calls: AtomicUsize,
     pub list_facts_last: Mutex<Value>,
+    /// Resposta da guarda da troca de agente (`/internal/sessions/{name}/transfer`): `None` = livre.
+    transfer: Mutex<Option<StatusCode>>,
+    /// Demora da guarda antes de responder, para o Rust ver o silêncio dela.
+    transfer_delay: Mutex<Duration>,
+    transfer_calls: AtomicUsize,
 }
 
 impl Fake {
@@ -80,6 +85,19 @@ impl Fake {
     pub fn last_hit(&self) -> (String, HeaderMap) {
         self.hits.lock().unwrap().last().cloned().expect("algum pedido repassado")
     }
+    /// A guarda da troca de agente responde este status: 409 é a troca em curso, com o corpo que o Python
+    /// manda; outro status é o backend falhando. `None` volta a "livre".
+    pub fn set_transfer(&self, s: Option<StatusCode>) {
+        *self.transfer.lock().unwrap() = s;
+    }
+    /// A guarda demora isto antes de responder.
+    pub fn set_transfer_delay(&self, delay: Duration) {
+        *self.transfer_delay.lock().unwrap() = delay;
+    }
+    /// Quantas vezes o Rust perguntou à guarda.
+    pub fn transfer_calls(&self) -> usize {
+        self.transfer_calls.load(SeqCst)
+    }
 }
 
 pub async fn spawn_fake() -> (Arc<Fake>, SocketAddr) {
@@ -99,12 +117,16 @@ pub async fn spawn_fake() -> (Arc<Fake>, SocketAddr) {
             Duration::ZERO)),
         list_facts_calls: AtomicUsize::new(0),
         list_facts_last: Mutex::new(Value::Null),
+        transfer: Mutex::default(),
+        transfer_delay: Mutex::default(),
+        transfer_calls: AtomicUsize::new(0),
     });
     let app = Router::new()
         .route("/internal/sessions/{name}/info", get(fake_info))
         .route("/internal/sessions/{name}/side-events", get(fake_side))
         .route("/internal/diag", axum::routing::post(fake_diag))
         .route("/internal/list/facts", axum::routing::post(fake_list_facts))
+        .route("/internal/sessions/{name}/transfer", get(fake_transfer))
         .fallback(fake_python)
         .with_state(fake.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -153,6 +175,24 @@ async fn fake_diag(State(f): State<Arc<Fake>>, headers: HeaderMap, body: Bytes) 
     }
     f.diag.lock().unwrap().push(serde_json::from_slice(&body).unwrap());
     status(StatusCode::OK)
+}
+
+async fn fake_transfer(State(f): State<Arc<Fake>>, headers: HeaderMap) -> Response {
+    if !internal_ok(&headers) {
+        return status(StatusCode::NOT_FOUND);
+    }
+    f.transfer_calls.fetch_add(1, SeqCst);
+    let delay = *f.transfer_delay.lock().unwrap();
+    tokio::time::sleep(delay).await;
+    let answer = *f.transfer.lock().unwrap();
+    let body = match answer {
+        None => json!({"ok": true}),
+        Some(StatusCode::CONFLICT) => json!({"detail": {"code": "session_transfer_busy",
+            "msg": "A sessão está trocando de agente; tente novamente quando terminar.", "params": {}}}),
+        Some(other) => return status(other),
+    };
+    Response::builder().status(answer.unwrap_or(StatusCode::OK)).header("content-type", "application/json")
+        .body(Body::from(body.to_string())).unwrap()
 }
 
 async fn fake_side(
