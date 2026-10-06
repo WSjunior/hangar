@@ -67,6 +67,7 @@
     { tela: 'diario', rotulo: m.config_diag_ultimas, descricao: m.config_diag_regra_sem_conversa },
 
     { tela: 'sobre', rotulo: m.atualizar_procurar_curto, descricao: m.config_sobre_desc },
+    { tela: 'migration', rotulo: m.migration_open, descricao: m.migration_temporary },
 
     { tela: 'maquinas', rotulo: m.maquinas_secao, descricao: m.maquinas_secao_legenda },
     { tela: 'maquinas', rotulo: m.peers_identificador, descricao: m.peers_legenda_identificador },
