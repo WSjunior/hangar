@@ -9,13 +9,14 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde::Serialize;
 
+use crate::terminal_state::is_rule;
+
 /// Borda do painel ao lado da conversa quando ele tem o teclado ((i), (z)).
 pub const FOCUS_BORDER: (u8, u8, u8) = (177, 185, 249);
 pub const COLLAPSED_TEXT: &str = "plugin panel hidden";
 pub const SURVEY_TEXT: &str = "How is Claude doing this session?";
 /// Linhas acima da caixa de digitar onde a faixa pode estar.
 pub const MAX_BAND_ROWS: usize = 20;
-static RULE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[\s─]*─{10,}[\s─]*$").unwrap());
 static SHRUNK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[↓↑] \d+ more").unwrap());
 
 /// Faixas de largura dupla (East Asian Wide e Fullwidth do Unicode, as mesmas que o `cell_width` do
@@ -211,8 +212,8 @@ pub struct Screen {
 /// A régua de cima da caixa de digitar: régua, linha do ❯ e outra régua logo abaixo. Sem ela há um
 /// diálogo ou seletor por cima ((y)).
 fn prompt_row(text: &[String]) -> Option<usize> {
-    (0..text.len().saturating_sub(1)).rev().find(|&i| RULE.is_match(&text[i]) && text[i + 1].trim_start().starts_with('❯')
-        && (i + 2..text.len().min(i + 12)).any(|j| RULE.is_match(&text[j])))
+    (0..text.len().saturating_sub(1)).rev().find(|&i| is_rule(&text[i]) && text[i + 1].trim_start().starts_with('❯')
+        && (i + 2..text.len().min(i + 12)).any(|j| is_rule(&text[j])))
 }
 
 /// Painel em caixa: `╭…✕─╮` (o `✕` na antepenúltima coluna) e a `╰…╯` de baixo ((g)).
@@ -325,7 +326,7 @@ fn find_draft(grid: &[Vec<Cell>], text: &[String], prompt: Option<usize>) -> Str
     let Some(prompt) = prompt else { return String::new() };
     let mut parts = Vec::new();
     for r in prompt + 1..text.len() {
-        if RULE.is_match(&text[r]) { break; }
+        if is_rule(&text[r]) { break; }
         parts.push(grid[r].iter().filter(|c| !c.dim && !c.wide_tail).map(|c| c.ch).collect::<String>());
     }
     let joined = parts.join("\n");

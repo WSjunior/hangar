@@ -379,6 +379,13 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   é marcada; hook que ainda pergunta 2 s depois sobreviveu e ela volta a contar. Sem long-poll por
   mais de 3 s (Esc digitado no terminal), a pergunta também deixa de contar.
 
+- **A régua da caixa de digitar do Claude Code pode trazer o nome da sessão, e há uma regra só para
+  ela.** Com `claude --name` ou `/rename`, a régua de cima vira `──── nome ─`. No Rust, estado,
+  prévia, foco no rodapé e tela dos mods leem a régua por `terminal_state::is_rule`; não criar
+  outra regex de régua. O Python (`state.py`, `preview.py`, `plugin_screen.py`) segue com a régua
+  pura: é limite da reserva sem Rust e do Windows. Ver
+  [régua com o nome da sessão](#régua-com-o-nome-da-sessão-06102026).
+
 ## O /clear e o rodapé do Claude Code
 
 Medido em 06/10/2026, Claude Code 2.1.291, Haiku, backend isolado (issues #84 e #85, item 16 da
@@ -1884,6 +1891,26 @@ mod chama `$.ui.toast(texto, { timeoutMs: 15000 })` a cada 20 s, sem turno nenhu
 
 O aviso preso por um painel aberto com `holdToasts` espera no terminal e sai na hora no app: o
 `ui.toast` passa pelo hook quando o mod chama, não quando o terminal desenha.
+
+### Régua com o nome da sessão (06/10/2026)
+
+Claude Code 2.1.292 (Linux, tmux, tela cheia). Uma sessão aberta com `--name sessao-de-prova`
+desenha a caixa de digitar assim, com o nome no fim da régua de cima e a de baixo pura:
+
+```
+──────────────────────────────────── sessao-de-prova ─
+❯ Try "…"
+──────────────────────────────────────────────────────
+```
+
+Com a régua exigindo só `─` e espaços, a tela não tinha caixa de digitar. Os mods davam diálogo
+aberto em todo clique ("Há uma pergunta aberta no terminal da sessão"). No `terminal_state`, o
+`composer_end` deixava de achar o par de réguas. Com o painel de agentes em foco, a análise virava
+`awaiting_input` com a pergunta "Enter to view · x to stop" (o defeito do #85 de volta), e a
+prévia em voo descartava o `❯` da caixa como se fosse mensagem do usuário. As capturas
+`tmux-160`/`tmux-161` em `crates/hangar-server/tests/fixtures/mods_screen` e o teste
+`terminal_state_session_name_in_the_rule_reads_the_same` cobrem os dois lados. O rótulo é
+`[^─│]+`: um `│` no meio é borda de painel, não nome.
 
 ## O `wire.jsonl` do Kimi não é um transcript bem-comportado
 
