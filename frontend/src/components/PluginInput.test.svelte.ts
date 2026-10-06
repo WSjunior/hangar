@@ -129,6 +129,18 @@ describe('Input de mod', () => {
     expect(campo.value).toBe('ab');
   });
 
+  it('mod que não ecoa o value: um redesenho sem mudança não apaga o texto ao clicar fora', () => {
+    const { campo, redesenho, digitar } = montarVivo('');
+    campo.focus();
+    digitar('abc');
+    // Outro mod redesenha a faixa: o valor deste campo segue `""`.
+    redesenho('');
+    expect(campo.value).toBe('abc');
+    campo.blur();
+    flushSync();
+    expect(campo.value).toBe('abc');
+  });
+
   it('clicar no botão de envio deixa o foco no campo e manda o que está nele, mesmo com um eco atrasado pendente', () => {
     const { campo, redesenho, digitar, clicarEnviar, onInput } = montarVivo('');
     campo.focus();

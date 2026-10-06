@@ -78,12 +78,46 @@ describe('FieldSync', () => {
   it('limite conhecido: resposta igual a um valor digitado antes espera o blur', () => {
     // A pessoa apagou tudo (`change ""`) antes de digitar `x`. A resposta `""` ao envio é igual a um valor mandado,
     // então passa por eco velho, fica pendente em foco e só entra quando o campo perde o foco.
-    const sync = new FieldSync();
+    // O mod não ecoou: o desenho anterior também era `""`, e mesmo assim a resposta espera o blur.
+    const sync = new FieldSync('');
     for (const v of ['a', '', 'x']) sync.typed(v);
     sync.submitted();
     expect(sync.draw('', 'x', true)).toBeNull();
     expect(sync.draw(null, 'x', true)).toBeNull();
     expect(sync.draw(null, 'x', false)).toBe('');
+  });
+
+  it('redesenho sem mudança do valor desenhado não cria pendente (mod que não ecoa o value)', () => {
+    // O mod desenha `""` e não devolve o que se digita; outro mod redesenha a faixa no meio da digitação.
+    const sync = new FieldSync('');
+    sync.typed('abc');
+    expect(sync.draw('', 'abc', true)).toBeNull();
+    // A pessoa clica fora: o texto digitado fica.
+    expect(sync.draw(null, 'abc', false)).toBeNull();
+    // Valor que mudou em relação ao desenho anterior continua pendente e entra no blur.
+    expect(sync.draw('x', 'abc', true)).toBeNull();
+    expect(sync.draw(null, 'abc', false)).toBe('x');
+  });
+
+  it('redesenho sem mudança mantém o pendente que já havia', () => {
+    const sync = new FieldSync('');
+    expect(sync.draw('ab', 'abc', true)).toBeNull();
+    expect(sync.draw('ab', 'abc', true)).toBeNull();
+    expect(sync.draw(null, 'abc', false)).toBe('ab');
+  });
+
+  it('sem desenho anterior, o primeiro valor conta como mudança', () => {
+    const sync = new FieldSync();
+    expect(sync.draw('', 'abc', true)).toBeNull();
+    expect(sync.draw(null, 'abc', false)).toBe('');
+  });
+
+  it('a resposta ao envio igual ao desenho anterior entra mesmo assim', () => {
+    // O mod limpa o campo com o mesmo vazio que já desenhava: a vez da resposta não depende de o valor mudar.
+    const sync = new FieldSync('');
+    sync.typed('abc');
+    sync.submitted();
+    expect(sync.draw('', 'abc', true)).toBe('');
   });
 
   it('o foco que sai para o rótulo de envio descarta o pendente sem aplicá-lo', () => {
