@@ -32,6 +32,11 @@ fn calls(dir: &Path, sub: &str) -> usize {
 }
 
 async fn spawn(dir: &Path, exit: i32) -> SocketAddr {
+    spawn_with(dir, exit, "127.0.0.1:9".parse().unwrap()).await
+}
+
+/// `facts`: o Python dos fatos; o de `spawn` não responde.
+async fn spawn_with(dir: &Path, exit: i32, facts: SocketAddr) -> SocketAddr {
     let script = fake_mux(dir, exit);
     let home = dir.join("home");
     let dirs = parse_dirs(&json!({"home": home, "claude": home.join(".claude"), "codex_home": home.join(".codex"),
@@ -44,7 +49,7 @@ async fn spawn(dir: &Path, exit: i32) -> SocketAddr {
         capture_program: script.into_os_string(),
         procs: Arc::new(hangar_server::list::procs::SystemProcs::default()),
         dirs,
-    }, FactsClient::new("127.0.0.1:9".parse().unwrap(), String::new())));
+    }, FactsClient::new(facts, SECRET.into())));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let app = terminal_router(Arc::new(state)).into_make_service_with_connect_info::<SocketAddr>();
@@ -111,12 +116,43 @@ async fn newer_than_forces_fresh() {
 #[tokio::test]
 async fn snapshot_is_single_flight() {
     let dir = tempfile::tempdir().unwrap();
-    let addr = spawn(dir.path(), 0).await;
+    let (_python, upstream) = fake::spawn_fake().await;
+    let addr = spawn_with(dir.path(), 0, upstream).await;
     let (a, b) = tokio::join!(call(addr, Some(SECRET), "list.snapshot", json!({})),
                               call(addr, Some(SECRET), "list.snapshot", json!({})));
     assert_eq!((names(&a.1), names(&b.1)), (vec!["alpha"], vec!["alpha"]));
     assert_eq!((calls(dir.path(), "list-panes"), calls(dir.path(), "capture-pane")), (1, 1),
         "duas perguntas sem retrato produzem uma vez");
+}
+
+/// Fatos que nunca responderam não viram lista servida: acesso e escondidas seriam vazios, e o
+/// convidado veria sessões que não são dele.
+#[tokio::test]
+async fn snapshot_without_facts_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let addr = spawn(dir.path(), 0).await;
+    let (status, body) = call(addr, Some(SECRET), "list.snapshot", json!({})).await;
+    assert_eq!(status, 200);
+    assert_eq!((&body["ok"], &body["error"]["code"]), (&json!(false), &json!("list_facts_unknown")));
+    // Não fica no retrato: a próxima pergunta produz de novo (e captura de novo).
+    call(addr, Some(SECRET), "list.snapshot", json!({})).await;
+    assert_eq!(calls(dir.path(), "capture-pane"), 2);
+}
+
+/// Com o Python respondendo, o retrato sai com os fatos aplicados.
+#[tokio::test(flavor = "multi_thread")]
+async fn snapshot_with_facts_serves_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let (bridge, _python) = bridge_with_sessions(dir.path(), 1, ("idle", -60.0)).await;
+    let mut state = AppState::new(config("127.0.0.1:9".parse().unwrap(), ""));
+    state.list = Arc::new(bridge);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = terminal_router(Arc::new(state)).into_make_service_with_connect_info::<SocketAddr>();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (status, body) = call(addr, Some(SECRET), "list.snapshot", json!({})).await;
+    assert_eq!(status, 200);
+    assert_eq!(names(&body), ["s0"]);
 }
 
 #[tokio::test]
@@ -248,7 +284,7 @@ async fn measure_tick_20_sessions() {
         let p = bridge.produce(&input).await.unwrap();
         let py = p.facts.shadow.as_ref().expect("assinatura do Python");
         let c = std::time::Instant::now();
-        reporter.update(hangar_server::list::shadow::compare(&p.rows, py));
+        reporter.record(hangar_server::list::shadow::compare(&p.rows, py), std::time::Instant::now());
         cmp += c.elapsed();
     }
     println!("tique da sombra (20 sessões): parede {:.2} ms, CPU (com filhos) {:.2} ms, comparação {:.0} µs, pico RSS {} kB",

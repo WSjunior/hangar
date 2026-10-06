@@ -109,7 +109,11 @@ async def _default_list_fn():
     # Import local: evita ciclo (sse importa registry; stall_watch e independente de ambos ate aqui).
     # Reusa o snapshot compartilhado do SSE (_cached_list, TTL curto) em vez de escanear tmux//proc de
     # novo — o list_events da lista ja costuma ter rodado ha <1s.
-    from app import sse
+    # Com o Rust dono, o retrato é dele e é produzido na hora mesmo sem lista aberta; erro levanta
+    # e o ciclo é perdido, nunca vira "todo mundo morreu".
+    from app import list_bridge, registry, sse
+    if await registry.rust_owns_list_async():
+        return await asyncio.to_thread(list_bridge.snapshot)
     snap = [i.model_copy() for i in await sse._cached_list()]
     return await sse._list_registry.list_with_state(snap)
 

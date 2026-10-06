@@ -97,6 +97,8 @@ impl PlanTracker {
                     if crate::warn_limit::allow(None, "list_plan_dir_unreadable") {
                         tracing::warn!(code = "list_plan_dir_unreadable", kind = ?e.kind(), "pasta de planos ilegivel");
                     }
+                    super::facts::note("rust.list_plan_unreadable", &row_key(root), format!("list_plan_dir_unreadable:{:?}", e.kind()),
+                        "pasta de planos ilegível; o plano some da linha");
                     return None;
                 }
             },
@@ -177,11 +179,17 @@ impl PlanTracker {
     }
 }
 
-/// Roda a cada tique: um aviso por minuto.
+/// Roda a cada tique: um aviso por minuto, no log e no diário.
 fn plan_unreadable(e: &io::Error) {
     if crate::warn_limit::allow(None, "list_plan_unreadable") {
         tracing::warn!(code = "list_plan_unreadable", kind = ?e.kind(), "plano ilegivel");
     }
+    super::facts::note("rust.list_plan_unreadable", "", format!("list_plan_unreadable:{:?}", e.kind()), "plano ilegível; fica de fora da eleição");
+}
+
+/// A pasta de planos no diário: o repositório, sem o caminho inteiro.
+fn row_key(root: &Path) -> String {
+    root.ancestors().nth(3).and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
 fn mtime(path: &Path) -> io::Result<SystemTime> {
@@ -227,7 +235,16 @@ fn pin_path(root: &Path) -> PathBuf {
 
 /// Stem fixado, ou None. Pin ilegível, inseguro ou de `.md` que sumiu é sem pin.
 fn read_pin(root: &Path) -> Option<String> {
-    let raw = fs::read(pin_path(root)).ok()?;
+    let raw = match fs::read(pin_path(root)) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            // Calado, o plano fixado sumiria e a eleição automática trocaria o da linha.
+            super::facts::note("rust.list_plan_unreadable", &row_key(root), format!("list_plan_pin_unreadable:{:?}", e.kind()),
+                "pin do plano ilegível; vale a eleição automática");
+            return None;
+        }
+    };
     let v = String::from_utf8_lossy(&raw).trim().to_owned();
     if v.is_empty() || v.contains(['/', '\\']) || v == "." || v == ".." {
         return None;
@@ -325,6 +342,18 @@ mod tests {
         assert_eq!(p.tasks, vec![(1, 1), (1, 2)]);
         assert_eq!((p.task_idx, p.task_total), (2, 2));
         assert_eq!(plan("```\n- [x] **Step 1: a**\n```\n- [ ] **Step 2: b**\n"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_pin_reaches_the_diary() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("plan-pin-repo");
+        let plans = repo.join("docs/superpowers/plans");
+        fs::create_dir_all(&plans).unwrap();
+        fs::create_dir_all(repo.join(".git").join(PIN_FILE)).unwrap(); // pasta no lugar do arquivo: EISDIR
+        assert_eq!(read_pin(&plans), None);
+        assert_eq!(super::super::facts::notes_for("plan-pin-repo"), ["list_plan_pin_unreadable:IsADirectory"]);
     }
 
     #[test]
