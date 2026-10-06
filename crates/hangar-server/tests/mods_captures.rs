@@ -27,11 +27,17 @@ fn every_case_has_its_file_and_no_file_is_extra() {
 
 #[test]
 fn nothing_personal_nor_from_a_company() {
+    // Padrões da classe de vazamento, sem nome de ninguém: caminho de pasta pessoal, link de sessão, e-mail,
+    // identificador de sessão e UUID. Os nomes de mod e de empresa já não passam pela lista de palavras
+    // permitidas da ferramenta (`every_word_is_allowed_or_replaced`).
+    let patterns = [r"/home/", r"(?i)c:\\users", r"claude\.ai/code", r"session_id", r"(?i)[a-z0-9._%+-]+@[a-z0-9-]+\.[a-z]{2,}",
+        r"(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"];
+    let forbidden: Vec<regex::Regex> = patterns.iter().map(|p| regex::Regex::new(p).unwrap()).collect();
     for case in cases() {
         let name = case["nome"].as_str().unwrap();
-        let raw = std::fs::read_to_string(folder().join(format!("{name}.ansi"))).unwrap().to_lowercase();
-        for forbidden in ["pm-18", "ms_devops", "pserver", "promedico", "waldir", "pessoais", "claude.ai/code"] {
-            assert!(!raw.contains(forbidden), "{name}: contém {forbidden}");
+        let raw = std::fs::read_to_string(folder().join(format!("{name}.ansi"))).unwrap();
+        for pattern in &forbidden {
+            assert!(!pattern.is_match(&raw), "{name}: casa com {pattern}");
         }
     }
 }

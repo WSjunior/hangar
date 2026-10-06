@@ -94,8 +94,8 @@ def conferir() -> int:
     limpo = limpar(bruto)
     if limpo != "\x1b[1;7m xx-00000 \x1b[0m│ xx_xxxxxx Contar xxx │":
         erros.append(f"limpeza de exemplo: {limpo!r}")
-    osc = limpar("\x1b]8;id=ab12;https://claude.ai/code/s1\x1b\\x\x1b]8;;\x1b\\")
-    if "claude" in osc or "ab12" in osc:
+    osc = limpar("\x1b]8;id=ab12;https://example.invalid/s1\x1b\\x\x1b]8;;\x1b\\")
+    if "example" in osc or "ab12" in osc:
         erros.append(f"hiperlink OSC 8 sem limpar: {osc!r}")
     largura = lambda texto: sum(_largura(c) for c in ESC.sub("", texto))
     if largura(limpo) != largura(bruto):
