@@ -48,3 +48,11 @@ pub fn texts(node: &Value) -> String {
         _ => String::new(),
     }
 }
+
+/// Superfície que nunca responde: para os testes que só mexem no registro.
+pub struct NoLink;
+impl hangar_server::mods::state::SurfaceLink for NoLink {
+    fn call(&self, _: hangar_server::mods::model::ModsCall) -> hangar_server::mods::state::CallFuture {
+        Box::pin(async { Err(hangar_server::mods::model::missing()) })
+    }
+}

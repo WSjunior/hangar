@@ -70,8 +70,8 @@ pub fn remember_info(cache: &InfoCache, name: &str, info: Option<InternalInfo>) 
 const LATEST: [&str; 8] = ["state", "suggest", "ask_question", "stats", "preview", "pensamento", "ferramenta", "plugin_ui"];
 const ASK_QUESTION: usize = 2;
 /// Mesmos tetos do Python (`plugin_bridge.TOASTS_KEPT`, `TOAST_MAX_MS`).
-const TOASTS_KEPT: usize = 20;
-const TOAST_MAX_MS: f64 = 5.0 * 60.0 * 1000.0;
+pub(crate) const TOASTS_KEPT: usize = 20;
+pub(crate) const TOAST_MAX_MS: f64 = 5.0 * 60.0 * 1000.0;
 const CHANNEL: usize = 1024;
 const SIDE_CONNECT: Duration = Duration::from_secs(10);
 /// O Python manda `ping` a cada 10 s; três calados = conexão morta.
@@ -264,6 +264,25 @@ impl Hub {
         let _ = self.tx.send(Out::Rebind);
     }
 
+    /// Quadro de evento para os aparelhos: entra no retrato e sai pelo canal, salvo quando é igual
+    /// ao último do mesmo tipo (o aparelho já o tem). Serve ao Python (side-events) e ao Rust (mods).
+    fn deliver(&self, event: &str, data: &str) {
+        let frame = sse_frame(event, data, None);
+        // Retrato antes do envio: quem assina entre os dois recebe repetido, nunca nada.
+        let pane_question = self.bound.lock().unwrap().as_ref().is_some_and(|b| b.binding.provider == Provider::Claude);
+        let repeated = {
+            let mut cache = self.cache.lock().unwrap();
+            // Pergunta repetida é pergunta nova: o aparelho já fechou a anterior.
+            let repeated = event != "ask_question"
+                && LATEST.iter().position(|e| *e == event).is_some_and(|i| cache.latest[i].as_ref() == Some(&frame));
+            cache.record(event, data, &frame, pane_question);
+            repeated
+        };
+        if !repeated {
+            let _ = self.tx.send(Out::Side(frame));
+        }
+    }
+
     fn close(self: &Arc<Self>) {
         self.ctx.hubs.evict(&self.name, self);
         self.bound.lock().unwrap().take();
@@ -425,24 +444,7 @@ async fn side_once(hub: &Arc<Hub>, attempt: &mut u32) -> SideEnd {
                 }
             }
             "ping" => {}
-            event => {
-                let frame = sse_frame(event, &ev.data, None);
-                // Retrato antes do envio: quem assina entre os dois recebe repetido, nunca nada.
-                let pane_question =
-                    hub.bound.lock().unwrap().as_ref().is_some_and(|b| b.binding.provider == Provider::Claude);
-                let repeated = {
-                    let mut cache = hub.cache.lock().unwrap();
-                    // Igual ao último do mesmo tipo: o aparelho já o tem, reenviar só o faz redesenhar.
-                    // Pergunta repetida é pergunta nova: o aparelho já fechou a anterior.
-                    let repeated = event != "ask_question"
-                        && LATEST.iter().position(|e| *e == event).is_some_and(|i| cache.latest[i].as_ref() == Some(&frame));
-                    cache.record(event, &ev.data, &frame, pane_question);
-                    repeated
-                };
-                if !repeated {
-                    let _ = hub.tx.send(Out::Side(frame));
-                }
-            }
+            event => hub.deliver(event, &ev.data),
         }
     }
 }
@@ -450,6 +452,16 @@ async fn side_once(hub: &Arc<Hub>, attempt: &mut u32) -> SideEnd {
 /// Hubs vivos por nome de sessão, com a contagem de aparelhos.
 #[derive(Clone, Default)]
 pub struct Hubs(Arc<Mutex<HashMap<String, (Arc<Hub>, usize)>>>);
+
+/// O mapa de hubs sem segurá-lo vivo: o `Mods` entrega por aqui sem formar ciclo com o `SideCtx`.
+#[derive(Clone)]
+pub struct WeakHubs(Weak<Mutex<HashMap<String, (Arc<Hub>, usize)>>>);
+
+impl WeakHubs {
+    pub fn upgrade(&self) -> Option<Hubs> {
+        self.0.upgrade().map(Hubs)
+    }
+}
 
 pub struct Lease {
     hubs: Hubs,
@@ -473,6 +485,19 @@ impl Hubs {
         drop(map);
         hub.ensure_current(&binding);
         Lease { hubs: self.clone(), hub }
+    }
+
+    pub fn downgrade(&self) -> WeakHubs {
+        WeakHubs(Arc::downgrade(&self.0))
+    }
+
+    /// Evento do próprio Rust (interface dos mods) para o hub da sessão. Sem aparelho não há hub, e o
+    /// `Mods` guarda o valor para semear o hub que nascer depois.
+    pub fn deliver(&self, name: &str, event: &str, data: &str) {
+        let hub = self.0.lock().unwrap().get(name).map(|(hub, _)| hub.clone());
+        if let Some(hub) = hub {
+            hub.deliver(event, data);
+        }
     }
 
     fn evict(&self, name: &str, hub: &Arc<Hub>) {
