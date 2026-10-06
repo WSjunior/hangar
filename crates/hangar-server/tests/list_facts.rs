@@ -23,7 +23,7 @@ fn state(s: &str) -> Value {
 /// Resposta completa do Python, com `extra` por cima.
 fn full(extra: Value) -> Value {
     let mut v = json!({"states": {}, "overrides": [], "frozen": [], "orq": [], "shared": [], "owners": {},
-        "hidden": [], "problems": {}, "stall_seconds": 300.0, "nav": {}, "shortcuts": null, "shadow": null});
+        "hidden": [], "problems": {}, "held": {}, "stall_seconds": 300.0, "nav": {}, "shortcuts": null, "shadow": null});
     for (k, x) in extra.as_object().unwrap() { v[k] = x.clone(); }
     v
 }

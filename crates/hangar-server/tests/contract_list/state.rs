@@ -147,7 +147,8 @@ fn run_case(doc: &Value, case: &Value) -> usize {
             .collect();
         let alive_fn = |pid: i64| alive.contains(&pid);
         let facts = Facts { hooks: &hooks, alive: &alive_fn, config_dirs: &dirs, headless: Some(&headless),
-                            problems: &problems, stall_seconds: 300.0 };
+                            problems: &problems, stall_seconds: 300.0, held: &BTreeMap::new(),
+                            monitors: &hangar_server::state::published::Published::default() };
         let effects = rt.block_on(classifier.classify(&mut rows, &facts, &fake));
         let claude: HashSet<String> = rows.iter().filter(|r| r.provider == "claude").map(|r| r.name.clone()).collect();
         for (got, want) in rows.iter().zip(&want) {

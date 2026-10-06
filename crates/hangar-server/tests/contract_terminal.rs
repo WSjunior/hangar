@@ -174,4 +174,53 @@ mod monitor {
             }
         }
     }
+    /// A lista (sem `Monitor`) repete as entradas do caso real e diz, rodada a rodada, o mesmo
+    /// estado que o `Monitor` publicou: a permissão segurada pelo hook é `awaiting_input` nos dois.
+    struct Pane(Mutex<String>);
+
+    impl hangar_server::list::classify::CaptureSource for Pane {
+        async fn capture(&self, _: &str) -> Result<String, hangar_server::list::classify::CaptureFailed> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+        async fn pause(&self, _: std::time::Duration) {}
+        fn wall(&self) -> f64 { 1000.0 }
+        fn mono(&self) -> f64 { 1000.0 }
+    }
+
+    #[tokio::test]
+    async fn permission_card_after_bash() {
+        use hangar_server::list::classify::{Classifier, Facts};
+        use hangar_server::list::facts_files::HookStates;
+        use std::collections::BTreeMap;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../backend/tests/fixtures/contract");
+        let rows: Value = serde_json::from_slice(&std::fs::read(root.join("golden/terminal_monitor.json")).unwrap()).unwrap();
+        let row = rows.as_array().unwrap().iter().find(|r| r["name"] == "permission_card_after_bash").expect("sequência gravada");
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join(".claude");
+        std::fs::create_dir_all(cfg.join(".hangar-state")).unwrap();
+        let dirs = vec![cfg.clone()];
+        let base: hangar_api::session::SessionRow = serde_json::from_value(serde_json::json!({
+            "name": "fixture", "jsonl": dir.path().join("fixture-sid.jsonl").to_str().unwrap()})).unwrap();
+        let (pane, mut classifier, mut monitor_state, mut awaiting) = (Pane(Mutex::default()), Classifier::default(), None, 0);
+        let (headless, problems, monitors) = (BTreeMap::new(), BTreeMap::new(), hangar_server::state::published::Published::default());
+        for (i, (frame, round)) in row["frames"].as_array().unwrap().iter().zip(row["rounds"].as_array().unwrap()).enumerate() {
+            if let Some(state) = round["event"]["state"].as_str() { monitor_state = Some(state.to_owned()); }
+            *pane.0.lock().unwrap() = frame["pane"].as_str().unwrap().to_owned();
+            std::fs::write(cfg.join(".hangar-state/fixture-sid.json"),
+                format!(r#"{{"state":"{}","ts":999.0}}"#, frame["marker"].as_str().unwrap())).unwrap();
+            // O Python só manda a pergunta ainda valendo (`pergunta_pendente`).
+            let q = &frame["facts"]["question"];
+            let held: BTreeMap<String, Value> = (!q.is_null() && q["seen_age_ms"].as_u64() <= Some(35_000))
+                .then(|| ("fixture".to_owned(), q.clone())).into_iter().collect();
+            let hooks = HookStates::load(&dirs);
+            let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &dirs, headless: Some(&headless),
+                                problems: &problems, stall_seconds: 300.0, held: &held, monitors: &monitors };
+            // Cada tique parte da linha da descoberta, como na produção.
+            let mut session = base.clone();
+            classifier.classify(std::slice::from_mut(&mut session), &facts, &pane).await;
+            assert_eq!(Some(session.state.as_str()), monitor_state.as_deref(), "rodada {i}: lista × Monitor");
+            awaiting += usize::from(session.state == "awaiting_input");
+        }
+        assert!(awaiting >= 4, "a espera pela permissão aparece na lista");
+    }
 }

@@ -68,6 +68,9 @@ pub struct ListFacts {
     /// Escondidas do dono (sessão de convidado que ele não vê).
     pub hidden: HashSet<String>,
     pub problems: BTreeMap<String, String>,
+    /// Pergunta que o hook do plugin segura agora, por nome (`plugin_bridge.pergunta_pendente`):
+    /// a permissão segurada para o app não desenha cartão no pane.
+    pub held: BTreeMap<String, Value>,
     pub stall_seconds: f64,
     /// Pedidos de navegador vivos, `{nome: {url, ts}}`, já vencidos pelo Python.
     pub nav: Value,
@@ -85,7 +88,7 @@ pub struct ListFacts {
 impl Default for ListFacts {
     fn default() -> Self {
         Self { states: HashMap::new(), overrides: Vec::new(), frozen: HashSet::new(), orq: Vec::new(),
-            orq_error: None, shared: HashSet::new(), owners: HashMap::new(), hidden: HashSet::new(), problems: BTreeMap::new(),
+            orq_error: None, shared: HashSet::new(), owners: HashMap::new(), hidden: HashSet::new(), problems: BTreeMap::new(), held: BTreeMap::new(),
             stall_seconds: 300.0, nav: Value::Null, shortcuts: None, shadow: None, unknown: true }
     }
 }
@@ -376,7 +379,7 @@ mod tests {
 
     fn facts_json(orq: Value, orq_error: Value) -> String {
         json!({"states": {}, "overrides": [], "frozen": [], "orq": orq, "orq_error": orq_error, "shared": [], "owners": {},
-            "hidden": [], "problems": {}, "stall_seconds": 300.0, "nav": null, "shortcuts": null, "shadow": null}).to_string()
+            "hidden": [], "problems": {}, "held": {}, "stall_seconds": 300.0, "nav": null, "shortcuts": null, "shadow": null}).to_string()
     }
 
     #[tokio::test]

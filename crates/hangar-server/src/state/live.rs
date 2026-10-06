@@ -141,6 +141,8 @@ pub fn spawner(env: Arc<StateEnv>) -> SpawnMonitor {
     })
 }
 
+static NEXT_OWNER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 struct CaptureSlot { generation: u64, target: String, capture: Arc<PaneCapture> }
 
 #[derive(Default)]
@@ -158,6 +160,8 @@ pub struct LiveSources {
     capture: tokio::sync::Mutex<Option<CaptureSlot>>,
     snapshot: Mutex<Snapshot>,
     hook_files: Arc<Mutex<HookFiles>>,
+    /// Dono da entrada deste `Monitor` no mapa que a lista lê (`Published`).
+    owner: u64,
 }
 
 impl LiveSources {
@@ -169,7 +173,8 @@ impl LiveSources {
             tokio::spawn(watch_runtime(registry.clone(), name.clone(), runtime_view.clone(), runtime_wake.clone())).abort_handle()
         });
         Self { hub_wake: hub.wake(), hub: Arc::downgrade(hub), name, wake, runtime_wake, runtime_view, runtime_task, env,
-            capture: tokio::sync::Mutex::new(None), snapshot: Mutex::default(), hook_files: Arc::default() }
+            capture: tokio::sync::Mutex::new(None), snapshot: Mutex::default(), hook_files: Arc::default(),
+            owner: NEXT_OWNER.fetch_add(1, Ordering::Relaxed) }
     }
 
     fn publish_raw(&self, event: &str, data: &str) -> bool { self.hub.upgrade().is_some_and(|h| h.publish_own(event, data)) }
@@ -220,6 +225,8 @@ impl Drop for LiveSources {
             t.abort();
         }
         self.env.facts().forget_watcher(&self.name, &self.wake);
+        // Sem `Monitor`, a lista volta a classificar sozinha: estado dele parado aqui mentiria.
+        self.env.list.published.clear(self.owner, &self.name);
         let slot = self.capture.get_mut().take();
         // O consumidor do pool vive até o fim do aluguel se ninguém o soltar.
         if let (Some(slot), Ok(rt)) = (slot, tokio::runtime::Handle::try_current()) {
@@ -306,7 +313,19 @@ impl Sources for LiveSources {
 
     async fn publish(&self, event: StateEvent) -> bool {
         match serde_json::to_string(&event) {
-            Ok(data) => self.publish_raw("state", &data),
+            Ok(data) => {
+                let sid = self.sid();
+                let published = &self.env.list.published;
+                // Hub fechado não publica, e a lista não pode ficar com o estado que ninguém viu.
+                let sent = self.publish_raw("state", &data);
+                // `dead` sai do mapa: a lista nunca mostra sessão morta, a linha some com a descoberta.
+                if sent && event.state != "dead" {
+                    published.set(self.owner, &self.name, sid, Arc::new(event));
+                } else {
+                    published.clear(self.owner, &self.name);
+                }
+                sent
+            }
             Err(_) => {
                 self.report("rust.state_publish_failed", "state_serialize", "estado: evento não serializou");
                 true

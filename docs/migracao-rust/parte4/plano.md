@@ -204,9 +204,9 @@ virar regra), `medicao.md`.
 `classify::permission_card_after_bash_is_awaiting`,
 `contract_terminal::permission_card_after_bash` (lista e `Monitor` dizem `awaiting_input`).
 
-- [ ] **Step 12: Reproduzir com sessão real isolada (Haiku, modo padrão, `Bash` que pede permissão): lista `working` com cartão na tela; provar a causa (superpowers:systematic-debugging) e gravar a sequência**
-- [ ] **Step 13: Testes, vistos falhar; conserto e leitura do `Monitor` pela lista; testes focados**
-- [ ] **Step 14: Medida antes/depois do tique da lista com 5 chats abertos (capturas evitadas, CPU); `medicao.md`; revisar**
+- [x] **Step 12: Reproduzir com sessão real isolada (Haiku, modo padrão, `Bash` que pede permissão): lista `working` com cartão na tela; provar a causa (superpowers:systematic-debugging) e gravar a sequência**
+- [x] **Step 13: Testes, vistos falhar; conserto e leitura do `Monitor` pela lista; testes focados**
+- [x] **Step 14: Medida antes/depois do tique da lista com 5 chats abertos (capturas evitadas, CPU); `medicao.md`; revisar**
 
 ### Task 7: Windows — captura avulsa pelo psmux
 

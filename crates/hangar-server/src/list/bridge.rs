@@ -204,6 +204,8 @@ pub struct ListBridge {
     pub state_facts: Arc<crate::state::facts::FactsStore>,
     /// Registros nativos rebaixados pela lista, lidos também pelo `Monitor`.
     pub demoted: Arc<crate::state::demote::Demoted>,
+    /// Último estado de cada `Monitor` vivo: a lista o lê em vez de capturar o pane.
+    pub published: Arc<crate::state::published::Published>,
 }
 
 /// Tarefa bloqueante que entrou em pânico: o hook já registrou onde; aqui fica qual operação.
@@ -225,7 +227,7 @@ impl ListBridge {
             discovery: tokio::sync::Mutex::new(None),
             snapshot: tokio::sync::Mutex::new(None), git_running: Arc::default(),
             git_slots: Arc::new(tokio::sync::Semaphore::new(GIT_SLOTS)), epoch: AtomicU64::new(0),
-            state_facts: Arc::default(), demoted }
+            state_facts: Arc::default(), demoted, published: Arc::default() }
     }
 
     /// Rebaixamentos da rodada: valem já aqui (lista e `Monitor`), e os session ids vão ao Python.
@@ -360,6 +362,7 @@ impl ListBridge {
         };
         let dirs = self.dirs()?;
         let (env, caches, handle) = (self.env.clone(), self.caches.clone(), tokio::runtime::Handle::current());
+        let published = self.published.clone();
         let done = tokio::task::spawn_blocking(move || {
             let config_dirs = caches.config_dirs(&dirs);
             let alive = |pid: i64| pid_alive(&*env.procs, pid);
@@ -376,7 +379,8 @@ impl ListBridge {
                     return None;
                 }
                 let facts = Facts { hooks, alive: &alive, config_dirs: &config_dirs, headless: inp.headless.as_ref(),
-                    problems: &inp.facts.problems, stall_seconds: inp.facts.stall_seconds };
+                    problems: &inp.facts.problems, stall_seconds: inp.facts.stall_seconds, held: &inp.facts.held,
+                    monitors: &published };
                 let effects = handle.block_on(classifier.classify_some(&mut rows, &facts, &io));
                 Some((rows, effects))
             });
@@ -429,7 +433,7 @@ impl ListBridge {
         capped::set_live(rows.len() + aside.len());
         // Classificação e decoração leem arquivo (marcador, transcript, plano) e esperam captura:
         // fora da thread do runtime, que atende todas as conexões.
-        let inp = inputs.clone();
+        let (inp, published) = (inputs.clone(), self.published.clone());
         let (rows, effects, git_dirs, pre) = tokio::task::spawn_blocking(move || {
             let config_dirs = caches.config_dirs(&dirs);
             let alive = |pid: i64| pid_alive(&*env.procs, pid);
@@ -438,7 +442,8 @@ impl ListBridge {
             let effects = caches.classify.with(|Classify { classifier, hooks }| {
                 hooks.refresh(&config_dirs);
                 let facts = Facts { hooks, alive: &alive, config_dirs: &config_dirs,
-                    headless: inp.headless.as_ref(), problems: &inp.facts.problems, stall_seconds: inp.facts.stall_seconds };
+                    headless: inp.headless.as_ref(), problems: &inp.facts.problems, stall_seconds: inp.facts.stall_seconds,
+                    held: &inp.facts.held, monitors: &published };
                 handle.block_on(classifier.classify(&mut rows, &facts, &io))
             });
             let git_dirs = decorate(&env, &caches, &dirs, &config_dirs, &inp, &mut rows, io.wall(), io.mono(), true);

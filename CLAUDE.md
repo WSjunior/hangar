@@ -472,7 +472,8 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   sessões e o hub descarta, registrando uma vez, os quatro que vierem dele. Captura em processo
   (`-C`; psmux avulso no Windows), fatos por empurrão e retrato com prazo; retrato que não vem é
   `problema=state_facts_unavailable`, nunca estado inventado. O `Sources` não tem método com corpo
-  padrão: fonte que esquece um não compila. No modo `python` tudo roda como antes. Evidência em
+  padrão: fonte que esquece um não compila. A lista lê o último `state` do `Monitor` vivo
+  (`state/published.rs`) e não captura o pane dessa sessão. No modo `python` tudo roda como antes. Evidência em
   [plataforma.md](docs/decisoes/plataforma.md#estado-ao-vivo-de-claude-com-terminal-no-monitor-do-rust).
 
 ## tmux + Claude Code truecolor

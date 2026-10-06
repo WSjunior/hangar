@@ -377,6 +377,21 @@ fn set_question(analysis: &mut PaneAnalysis, question: TerminalQuestion) {
     analysis.question = question.question; analysis.options = Some(question.options);
 }
 
+/// A pergunta que o hook do plugin segura (`pergunta_pendente`), como a sessão a mostra: permissão
+/// vira "ferramenta: resumo" com Yes/No; pergunta sem itens não vale.
+pub fn held_question(q: &Value) -> Option<TerminalQuestion> {
+    if q.get("id").and_then(Value::as_str).is_some_and(|s| s.starts_with("perm:")) {
+        let tool = q.get("tool").and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or("?");
+        let summary = q.get("resumo").and_then(Value::as_str).unwrap_or("");
+        return Some(TerminalQuestion { question: Some(format!("{tool}: {summary}")), options: vec!["Yes".into(), "No".into()] });
+    }
+    let q = q.get("questions").and_then(Value::as_array).and_then(|q| q.first())?;
+    let question = q.get("question").and_then(Value::as_str).map(String::from);
+    let options = q.get("options").and_then(Value::as_array).map(|options| options.iter()
+        .map(|o| o.get("label").and_then(Value::as_str).unwrap_or("").into()).collect()).unwrap_or_default();
+    Some(TerminalQuestion { question, options })
+}
+
 /// O que a rodada viu além do estado.
 #[derive(Serialize)]
 pub struct ReducerDiagnostic {
@@ -400,17 +415,8 @@ pub fn reduce_analysis(mut analysis: PaneAnalysis, mut memory: ReducerMemory, fa
         if let Some(q) = facts.open_question { set_question(&mut analysis, q); }
     }
     if analysis.state != "awaiting_input" {
-        if let Some(q) = facts.plugin_question {
-            if q.get("id").and_then(Value::as_str).is_some_and(|s| s.starts_with("perm:")) {
-                let tool = q.get("tool").and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or("?");
-                let summary = q.get("resumo").and_then(Value::as_str).unwrap_or("");
-                set_question(&mut analysis, TerminalQuestion { question: Some(format!("{tool}: {summary}")), options: vec!["Yes".into(), "No".into()] });
-            } else if let Some(q) = q.get("questions").and_then(Value::as_array).and_then(|q| q.first()) {
-                let question = q.get("question").and_then(Value::as_str).map(String::from);
-                let options = q.get("options").and_then(Value::as_array).map(|options| options.iter()
-                    .map(|o| o.get("label").and_then(Value::as_str).unwrap_or("").into()).collect()).unwrap_or_default();
-                set_question(&mut analysis, TerminalQuestion { question, options });
-            }
+        if let Some(q) = facts.plugin_question.as_ref().and_then(held_question) {
+            set_question(&mut analysis, q);
         }
     }
     let mut animating = false;
