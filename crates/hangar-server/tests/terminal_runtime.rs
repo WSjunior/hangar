@@ -1,5 +1,6 @@
 use hangar_server::runtime::{actor::PolicyClient,protocol::{RuntimeCommand,OperationKind,ClockSample},queue::{self,QueueActor,Store,Action},terminal::{TerminalActor,TerminalTarget,TerminalOptions}};
 use hangar_server::terminal_input::*;
+use hangar_server::mods::click::{PaneOp,PaneReply};
 use serde_json::{Value,json};
 use std::sync::{Arc,Mutex,atomic::AtomicU64};
 use std::time::Duration;
@@ -730,3 +731,72 @@ async fn terminal_runtime_restart_during_a_deferral_without_write_requeues_and_d
     h.stop().await.unwrap();
 }
 
+
+/// Bem longe: o teste não depende do prazo.
+fn far()->std::time::Instant {std::time::Instant::now()+Duration::from_secs(30)}
+
+/// Operação de mod pelo executor: serial com a entrada, fora do diário, recusada com o teclado emprestado.
+#[tokio::test]
+async fn pane_operations_skip_the_journal_and_respect_the_loan() {
+    let f=Fixture::new().await; let h=f.start();
+    // O retrato espera o ator terminar a recuperação do início, que grava no diário.
+    h.snapshot().await.unwrap();
+    let before=f.state()["operations"].as_object().map_or(0,|o|o.len());
+    assert_eq!(h.pane(PaneOp::Mouse{row:0,col:104},far()).await.unwrap(),PaneReply::Done);
+    assert!(matches!(h.pane(PaneOp::Screen,far()).await.unwrap(),PaneReply::Screen(s) if s.contains('❯')));
+    let sent:Vec<Vec<String>>=f.io.calls.lock().unwrap().iter().filter(|r|r.args[0]=="send-keys").map(|r|r.args.clone()).collect();
+    assert_eq!(sent,vec![vec!["send-keys".to_string(),"-t".into(),"%1".into(),"-l".into(),"--".into(),"\u{1b}[<0;105;1M\u{1b}[<0;105;1m".into()]]);
+    assert!(f.calls.lock().unwrap().iter().all(|v|v["kind"]!="terminal_facts"),"o clique não pergunta os fatos ao Python");
+    assert_eq!(f.state()["operations"].as_object().map_or(0,|o|o.len()),before,"operação de mod não entra no diário");
+    let loan=h.control("loan-1".into(),"keyboard_loan".into(),json!({"seconds":30})).await.unwrap();
+    assert_eq!(serde_json::to_value(loan.disposition).unwrap(),"accepted");
+    assert_eq!(h.pane(PaneOp::Mouse{row:0,col:104},far()).await.unwrap_err().code,"keyboard_loan");
+    assert_eq!(h.pane(PaneOp::Hold{millis:5000},far()).await.unwrap_err().code,"keyboard_loan","não reserva o pane emprestado");
+}
+
+/// Operação que chegou à vez dela depois do ponto de partida não age: o app já ouviu que o clique falhou.
+#[tokio::test]
+async fn pane_operation_past_its_start_does_not_run() {
+    let f=Fixture::new().await; let h=f.start();
+    let late=std::time::Instant::now();
+    assert_eq!(h.pane(PaneOp::Mouse{row:0,col:104},late).await.unwrap_err().code,"mods_deadline");
+    assert!(f.io.calls.lock().unwrap().iter().all(|r|r.args[0]!="send-keys"),"nada chega ao pane");
+}
+
+/// Com o pane reservado ao clique de mod, nem a fila nem um comando escrevem nele; o que chegou sai na
+/// ordem depois do `Release`.
+#[tokio::test]
+async fn mods_hold_parks_writes_until_release() {
+    let f=Fixture::new().await;
+    f.idle.store(false,std::sync::atomic::Ordering::Release); f.ready.store(false,std::sync::atomic::Ordering::Release);
+    let h=f.start();
+    h.command(f.command("fila","Na fila")).await.unwrap();
+    assert_eq!(h.pane(PaneOp::Hold{millis:5000},far()).await.unwrap(),PaneReply::Done);
+    f.idle.store(true,std::sync::atomic::Ordering::Release); f.ready.store(true,std::sync::atomic::Ordering::Release);
+    let direct={let h=h.clone();let command=f.command("direto","Durante o clique");tokio::spawn(async move {h.command(command).await})};
+    tokio::time::sleep(Duration::from_millis(150)).await;     // dez ciclos do relógio de 15 ms
+    assert!(!direct.is_finished(),"o comando espera o clique soltar o pane");
+    assert!(f.io.calls.lock().unwrap().iter().all(|r|r.args[0]!="send-keys"),"nada digitado com o pane reservado");
+    assert!(matches!(h.pane(PaneOp::Screen,far()).await.unwrap(),PaneReply::Screen(_)),"o clique segue lendo o pane");
+    assert_eq!(h.pane(PaneOp::Release,far()).await.unwrap(),PaneReply::Done);
+    direct.await.unwrap().unwrap();
+    let typed=|text:&str|f.io.calls.lock().unwrap().iter().filter(|r|r.args.iter().any(|a|a.contains(text))).count();
+    // A linha vira `delivered` no `Claim`, antes de digitar: a espera é pelas duas digitadas, e a parada,
+    // serial com a entrega em curso, garante que nada mais sai depois da contagem.
+    f.wait_for("entregas depois do clique",||f.state()["rows"].as_array().unwrap().iter().all(|r|r["delivered"]==true)
+        && typed("Na fila")>0 && typed("Durante o clique")>0).await;
+    h.stop().await.unwrap();
+    assert_eq!((typed("Na fila"),typed("Durante o clique")),(1,1),"cada entrada sai uma vez");
+}
+
+/// Sem `Release` (a tarefa do clique sumiu), a reserva vence sozinha no prazo dela.
+#[tokio::test]
+async fn a_mods_hold_ends_by_itself() {
+    let f=Fixture::new().await; let h=f.start();
+    assert_eq!(h.pane(PaneOp::Hold{millis:200},far()).await.unwrap(),PaneReply::Done);
+    let started=std::time::Instant::now();
+    h.command(f.command("depois","Depois da reserva")).await.unwrap();
+    assert!(started.elapsed()>=Duration::from_millis(150),"o comando esperou a reserva vencer");
+    f.wait_for("entrega depois da reserva",||f.state()["rows"].as_array().unwrap().iter().all(|r|r["delivered"]==true)).await;
+    h.stop().await.unwrap();
+}

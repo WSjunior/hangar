@@ -90,6 +90,14 @@ pub fn missing() -> ModsError {
 pub fn no_answer() -> ModsError {
     ModsError::new("erro_mod_clique_sem_resposta", "O mod não respondeu a tempo.")
 }
+/// O pane não respondeu à operação (multiplexador, pane trocado, teclado emprestado ao Python, prazo
+/// vencido na caixa do executor). O código vai nos parâmetros, para o log; o app recebe o mesmo
+/// `erro_mod_clique_sem_resposta`.
+pub fn pane_failed(code: &str) -> ModsError {
+    let mut error = no_answer();
+    error.params = json!({"causa": code});
+    error
+}
 pub fn pane_missing() -> ModsError {
     ModsError::new("erro_mod_painel_inexistente", "Esse painel não está mais aberto no mod.")
 }

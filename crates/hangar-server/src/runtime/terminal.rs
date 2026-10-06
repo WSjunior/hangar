@@ -1,8 +1,9 @@
 //! Executor terminal serial; diário, posse e confirmação são os mesmos da fila.
 use super::{actor::PolicyClient,protocol::{ClockSample,Disposition,RequestId,RuntimeCommand,RuntimeError,RuntimeEvent,RuntimeReply},queue::{Action,QueueActor,Status},receipt::{DispatchCursor,ReceiptIndex}};
 use crate::terminal_input::{self as input,TerminalBinding,TerminalDriver,TerminalIo,TerminalServices,InputFacts,InputLimits,PluginRequest,PluginReply,ServiceFuture,ServiceError,DeliveryResult,QuestionAnswer,AnswerKind};
+use crate::mods::click::{Pane,PaneFuture,PaneOp,PaneReply};
 use serde_json::{Value,json};
-use std::{path::PathBuf,sync::{Arc,atomic::{AtomicBool,AtomicU64,Ordering}},time::{Duration,SystemTime,UNIX_EPOCH}};
+use std::{collections::VecDeque,path::PathBuf,sync::{Arc,atomic::{AtomicBool,AtomicU64,Ordering}},time::{Duration,SystemTime,UNIX_EPOCH}};
 use tokio::sync::{Mutex,mpsc,oneshot,broadcast};
 
 #[derive(Clone)]
@@ -29,6 +30,8 @@ fn delivery(id:&str,result:DeliveryResult)->RuntimeReply {
 enum Message {
     Command {id:String,kind:String,payload:Value,response:oneshot::Sender<Result<RuntimeReply,RuntimeError>>},
     Queue {id:String,action:Action,response:oneshot::Sender<Result<Value,RuntimeError>>},
+    /// Operação de mod; `start_by`: depois disso ela não age (C1).
+    Pane {op:PaneOp,start_by:std::time::Instant,response:oneshot::Sender<Result<PaneReply,RuntimeError>>},
     Snapshot(oneshot::Sender<Result<Value,RuntimeError>>),Drain(oneshot::Sender<Result<Value,RuntimeError>>),
     Confirm(oneshot::Sender<Result<Value,RuntimeError>>),Stop(oneshot::Sender<Result<(),RuntimeError>>),
 }
@@ -49,6 +52,12 @@ impl TerminalHandle {
         let (response,receive)=oneshot::channel(); self.sender.send(Message::Queue {id,action,response}).await.map_err(|_|error("runtime_closed"))?;
         receive.await.map_err(|_|error("runtime_closed"))?
     }
+    /// Operação de mod no pane: entra na fila deste ator (serial com a entrada), fora do diário.
+    pub async fn pane(&self,op:PaneOp,start_by:std::time::Instant)->Result<PaneReply,RuntimeError> {
+        if self.closed.load(Ordering::Acquire) {return Err(error("runtime_stopping"));}
+        let (response,receive)=oneshot::channel(); self.sender.send(Message::Pane {op,start_by,response}).await.map_err(|_|error("runtime_closed"))?;
+        receive.await.map_err(|_|error("runtime_closed"))?
+    }
     async fn query(&self,kind:&str)->Result<Value,RuntimeError> {
         if self.closed.load(Ordering::Acquire) {return Err(error("runtime_stopping"));}
         let (send,receive)=oneshot::channel(); let message=match kind {"drain"=>Message::Drain(send),"confirm"=>Message::Confirm(send),_=>Message::Snapshot(send)};
@@ -66,6 +75,19 @@ impl TerminalHandle {
         if let Some(task)=self.task.lock().await.take() {let joined=task.await.map_err(|_|error("runtime_panic")).and_then(|r|r); if joined.is_err(){result=joined;}}
         *stopped=Some(result.clone()); result
     }
+}
+impl Pane for TerminalHandle {
+    fn op(&self,op:PaneOp,start_by:std::time::Instant)->PaneFuture {
+        let handle=self.clone();
+        Box::pin(async move {handle.pane(op,start_by).await.map_err(|failure|crate::mods::model::pane_failed(&failure.code))})
+    }
+}
+
+/// O clique de mod não lê os fatos do Python: confere só a identidade do pane.
+struct NoFacts;
+impl TerminalServices for NoFacts {
+    fn facts<'a>(&'a self,_:&'a TerminalBinding)->ServiceFuture<'a,InputFacts> {Box::pin(async {Err(ServiceError("mods_no_facts"))})}
+    fn publish<'a>(&'a self,_:&'a TerminalBinding,_:PluginRequest)->ServiceFuture<'a,PluginReply> {Box::pin(async {Err(ServiceError("mods_no_publish"))})}
 }
 
 struct Services {
@@ -117,6 +139,10 @@ struct Executor {
     /// Linha da fila que o terminal recusa sem escrever (composer ocupado, tela ilegível): espera
     /// crescente entre as tentativas e, passado o `stall_notice`, o motivo na vista.
     stall:Option<Stall>,
+    /// Pane reservado a um clique de mod (`PaneOp::Hold`) até este instante.
+    hold:Option<tokio::time::Instant>,
+    /// Comandos e pedidos de drenagem que chegaram com o pane reservado: saem na ordem depois do `Release`.
+    parked:VecDeque<Message>,
 }
 struct Stall {row:String,code:String,since:tokio::time::Instant,wait:Duration,next:tokio::time::Instant,surfaced:bool}
 /// Teto da espera entre tentativas: o composer que esvazia é visto na hora, e o resto (tela
@@ -131,6 +157,9 @@ fn stalled_code(result:&RuntimeReply)->Option<&str> {
 }
 /// Teto do empréstimo: a administração mais longa (troca de modelo/motor) leva segundos.
 const MAX_LOAN_S:u64=120;
+/// Teto da reserva do pane a um clique de mod: os 7,5 s do pedido mais os 2 s da limpeza, com folga.
+/// Vence sozinha: uma tarefa de clique que sumiu sem o `Release` não segura a fila.
+const MAX_MODS_HOLD:Duration=Duration::from_secs(10);
 pub struct TerminalActor;
 impl TerminalActor {
     pub fn spawn(target:TerminalTarget,queue:QueueActor,policy:PolicyClient,options:TerminalOptions,events:broadcast::Sender<RuntimeEvent>,revision:Arc<AtomicU64>)->TerminalHandle {
@@ -139,7 +168,7 @@ impl TerminalActor {
         let sequence=Arc::new(AtomicU64::new(queue.initial_state().next_seq.max(previous.max(queue.initial_state().operations.len() as u64).saturating_add(1))));
         let receipt=ReceiptIndex::new("claude",&target.binding.conversation);
         let (sender,receiver)=mpsc::channel(64); let closed=Arc::new(AtomicBool::new(false));
-        let executor=Executor {target,queue:Arc::new(queue),policy,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,loan:None,stall:None};
+        let executor=Executor {target,queue:Arc::new(queue),policy,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,loan:None,stall:None,hold:None,parked:VecDeque::new()};
         let task=tokio::spawn(executor.run(receiver,closed.clone()));
         TerminalHandle {sender,closed,task:Arc::new(Mutex::new(Some(task))),stopped:Arc::new(Mutex::new(None))}
     }
@@ -152,6 +181,11 @@ impl Executor {
             self.loan=None;
         }
         self.loan.is_some()
+    }
+    /// Pane reservado a um clique de mod (`PaneOp::Hold`); vence sozinho no prazo, mesmo sem o `Release`.
+    fn held(&mut self)->bool {
+        if self.hold.is_some_and(|until|tokio::time::Instant::now()>=until) {self.hold=None;}
+        self.hold.is_some()
     }
     /// O Python pede o teclado por uma operação; fila, trava e estado continuam aqui. O ator é serial:
     /// quando o pedido chega não há digitação em curso.
@@ -222,43 +256,88 @@ impl Executor {
         }
         let mut timer=tokio::time::interval(self.options.tick.max(Duration::from_millis(1))); timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            tokio::select! {biased;
-                message=receiver.recv()=>match message {
-                    Some(Message::Command {id,kind,payload,response})=>{
-                        let result=if matches!(kind.as_str(),"keyboard_loan"|"keyboard_return") {self.loan_control(&id,&kind,&payload)}
-                            else {self.execute(&id,&kind,payload,None).await};
-                        let _=response.send(result);},
-                    Some(Message::Queue {id,action,response})=>{
-                        let result=match action {
-                            Action::Finish {id,status,result}=>self.native_receipt(&id,status,result).await,
-                            Action::Claim {..}|Action::SetDelivered {value:false,..}|Action::BumpAttempts {..}|Action::Reconcile {..}|Action::ReplaceRows {..}|Action::Prepare {..}|Action::BeginDispatch {..}|Action::MarkWriting {..}|Action::BindDispatch {..}|Action::Recover|Action::Confirm {..}|Action::ConfirmOccurrence {..}|Action::SetRuntimeState {..}|Action::LateRpcResolution {..}=>Err(error("terminal_queue_action")),
-                            action=>self.queue.exec(self.target.generation,&id,sample(),action).await.map_err(|_|error("queue_io")),
-                        };
-                        if result.is_ok(){self.publish().await?;} let _=response.send(result);
-                    },
-                    Some(Message::Snapshot(response))=>{let _=response.send(self.snapshot().await);},
-                    Some(Message::Drain(response))=>{let result=self.drain_once(None).await;
-                        // Durante o empréstimo nada foi relido: o erro de manutenção continua valendo.
-                        if let Err(failure)=&result {self.enter_error(failure.clone()).await?;}
-                        else if result.as_ref().is_ok_and(|v|v["keyboard_loan"]!=true) {self.clear_maintenance_error("terminal_facts").await?;}
-                        let _=response.send(result);},
-                    Some(Message::Confirm(response))=>{let result=self.confirm_rows().await;
-                        if let Err(failure)=&result {self.enter_error(failure.clone()).await?;}else{self.clear_maintenance_error("receipt_scan").await?;}
-                        let _=response.send(result);},
-                    Some(Message::Stop(response))=>{
-                        closed.store(true,Ordering::Release);
-                        let queue=Arc::try_unwrap(self.queue).map_err(|_|error("terminal_lease_inflight"))?;
-                        let result=queue.shutdown().await.map_err(|_|error("queue_stop")); let _=response.send(result.clone()); return result;
-                    },
-                    None=>{let queue=Arc::try_unwrap(self.queue).map_err(|_|error("terminal_lease_inflight"))?;return queue.shutdown().await.map_err(|_|error("queue_stop"));}
-                },
-                _=timer.tick(),if !closed.load(Ordering::Acquire) && (self.last_error.is_none() || self.reconciling())=>{
-                    if self.last_error.is_some() {self.reconcile_uncertain().await?;continue;}
-                    let result=async {self.confirm_rows().await?;self.drain_once(None).await?;Ok::<_,RuntimeError>(())}.await;
-                    if let Err(failure)=result {self.enter_error(failure).await?;}
+            // Guardadas durante um clique de mod: saem na ordem em que chegaram, assim que ele solta o pane.
+            let message=if !self.parked.is_empty() && !self.held() {self.parked.pop_front()} else {
+                // A reserva que vence sem `Release` solta o que estava guardado na hora, mesmo com o relógio
+                // desligado pelo erro de manutenção.
+                let release_at=self.hold.filter(|_|!self.parked.is_empty());
+                tokio::select! {biased;
+                    message=receiver.recv()=>message,
+                    _=tokio::time::sleep_until(release_at.unwrap_or_else(tokio::time::Instant::now)),if release_at.is_some()=>continue,
+                    _=timer.tick(),if !closed.load(Ordering::Acquire) && (self.last_error.is_none() || self.reconciling())=>{
+                        // Clique de mod em curso: a fila não entrega nem reconcilia no pane até ele soltar (C6).
+                        if self.held() {continue;}
+                        if self.last_error.is_some() {self.reconcile_uncertain().await?;continue;}
+                        let result=async {self.confirm_rows().await?;self.drain_once(None).await?;Ok::<_,RuntimeError>(())}.await;
+                        if let Err(failure)=result {self.enter_error(failure).await?;}
+                        continue;
+                    }
                 }
+            };
+            // O que escreve no pane (comando e drenagem pedida) espera o clique de mod soltar; operação de mod,
+            // fila, retrato, confirmação e parada seguem.
+            let held=self.held();
+            let message=match message {
+                Some(message@(Message::Command {..}|Message::Drain(_))) if held=>{self.parked.push_back(message);continue;},
+                other=>other,
+            };
+            match message {
+                Some(Message::Command {id,kind,payload,response})=>{
+                    let result=if matches!(kind.as_str(),"keyboard_loan"|"keyboard_return") {self.loan_control(&id,&kind,&payload)}
+                        else {self.execute(&id,&kind,payload,None).await};
+                    let _=response.send(result);},
+                Some(Message::Queue {id,action,response})=>{
+                    let result=match action {
+                        Action::Finish {id,status,result}=>self.native_receipt(&id,status,result).await,
+                        Action::Claim {..}|Action::SetDelivered {value:false,..}|Action::BumpAttempts {..}|Action::Reconcile {..}|Action::ReplaceRows {..}|Action::Prepare {..}|Action::BeginDispatch {..}|Action::MarkWriting {..}|Action::BindDispatch {..}|Action::Recover|Action::Confirm {..}|Action::ConfirmOccurrence {..}|Action::SetRuntimeState {..}|Action::LateRpcResolution {..}=>Err(error("terminal_queue_action")),
+                        action=>self.queue.exec(self.target.generation,&id,sample(),action).await.map_err(|_|error("queue_io")),
+                    };
+                    if result.is_ok(){self.publish().await?;} let _=response.send(result);
+                },
+                Some(Message::Pane {op,start_by,response})=>{
+                    // Esperou na caixa além do ponto de partida: não age (C1).
+                    let result=if std::time::Instant::now()>=start_by {Err(error("mods_deadline"))} else {self.pane_op(op).await};
+                    let _=response.send(result);},
+                Some(Message::Snapshot(response))=>{let _=response.send(self.snapshot().await);},
+                Some(Message::Drain(response))=>{let result=self.drain_once(None).await;
+                    // Durante o empréstimo nada foi relido: o erro de manutenção continua valendo.
+                    if let Err(failure)=&result {self.enter_error(failure.clone()).await?;}
+                    else if result.as_ref().is_ok_and(|v|v["keyboard_loan"]!=true) {self.clear_maintenance_error("terminal_facts").await?;}
+                    let _=response.send(result);},
+                Some(Message::Confirm(response))=>{let result=self.confirm_rows().await;
+                    if let Err(failure)=&result {self.enter_error(failure.clone()).await?;}else{self.clear_maintenance_error("receipt_scan").await?;}
+                    let _=response.send(result);},
+                Some(Message::Stop(response))=>{
+                    closed.store(true,Ordering::Release);
+                    let queue=Arc::try_unwrap(self.queue).map_err(|_|error("terminal_lease_inflight"))?;
+                    let result=queue.shutdown().await.map_err(|_|error("queue_stop")); let _=response.send(result.clone()); return result;
+                },
+                None=>{let queue=Arc::try_unwrap(self.queue).map_err(|_|error("terminal_lease_inflight"))?;return queue.shutdown().await.map_err(|_|error("queue_stop"));}
             }
         }
+    }
+    /// Clique, roda, tecla da reserva, leitura, tamanho e reserva do pane para os mods. Com o teclado
+    /// emprestado ao Python (administração digitando no pane), recusa: duas mãos no mesmo pane erram o alvo.
+    async fn pane_op(&mut self,op:PaneOp)->Result<PaneReply,RuntimeError> {
+        // Soltar vale sempre: é a limpeza do clique.
+        if op==PaneOp::Release {self.hold=None; return Ok(PaneReply::Done);}
+        if self.loaned() {return Err(error("keyboard_loan"));}
+        if let PaneOp::Hold {millis}=op {
+            self.hold=Some(tokio::time::Instant::now()+Duration::from_millis(millis).min(MAX_MODS_HOLD));
+            return Ok(PaneReply::Done);
+        }
+        let driver=TerminalDriver::new(self.target.binding.clone(),Arc::new(NoFacts),self.options.io.clone(),self.options.limits.clone());
+        let failed=|failure:input::IoFailure|error(failure.code);
+        Ok(match op {
+            PaneOp::Formats=>PaneReply::Formats(driver.mods_formats().await.map_err(failed)?),
+            PaneOp::Clients=>PaneReply::Clients(driver.mods_clients().await.map_err(failed)?),
+            PaneOp::Screen=>PaneReply::Screen(driver.mods_screen().await.map_err(failed)?),
+            PaneOp::Mouse {row,col}=>{driver.mouse(row,col).await.map_err(failed)?; PaneReply::Done},
+            PaneOp::Wheel {row,col,down}=>{driver.wheel(row,col,down).await.map_err(failed)?; PaneReply::Done},
+            PaneOp::Keys(keys)=>{let keys:Vec<&str>=keys.iter().map(String::as_str).collect(); driver.mods_keys(&keys).await.map_err(failed)?; PaneReply::Done},
+            PaneOp::Resize {columns,rows}=>{driver.resize(columns,rows).await.map_err(failed)?; PaneReply::Done},
+            PaneOp::Hold {..}|PaneOp::Release=>PaneReply::Done,
+        })
     }
     async fn execute(&mut self,id:&str,kind:&str,payload:Value,entry:Option<String>)->Result<RuntimeReply,RuntimeError> {
         if id.is_empty() || id.starts_with("call::") || id.starts_with("terminal-") {return Err(error("operation_id"));}
