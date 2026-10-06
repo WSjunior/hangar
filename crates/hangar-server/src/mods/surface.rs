@@ -34,8 +34,8 @@ enum Pending {
     Attach,
     Panes,
     Render { instance: String },
-    Press { token: u64, site: String, key: String, retried: bool },
-    Input { token: u64, site: String, key: String, submit: bool, value: String, retried: bool },
+    /// Clique ou digitação levados ao mod pelo `handle` do desenho guardado.
+    Act { token: u64, call: ModsCall, retried: bool },
     /// Desenho pedido para tentar de novo um clique ou uma digitação (S4).
     Refresh { token: u64, call: ModsCall },
     Close { token: u64, site: String },
@@ -45,7 +45,7 @@ enum Pending {
 impl Pending {
     fn token(&self) -> Option<u64> {
         match self {
-            Pending::Press { token, .. } | Pending::Input { token, .. } | Pending::Refresh { token, .. }
+            Pending::Act { token, .. } | Pending::Refresh { token, .. }
             | Pending::Close { token, .. } | Pending::Show { token, .. } => Some(*token),
             Pending::Attach | Pending::Panes | Pending::Render { .. } => None,
         }
@@ -138,22 +138,20 @@ impl Surface {
                 // O que ficou sujo enquanto este desenho estava em voo sai na próxima janela.
                 self.arm(now);
             }
-            Pending::Press { token, site, key, retried } => match (ok, body["handled"] == true) {
+            Pending::Act { token, call, retried } => match (ok, body["handled"] == true) {
                 (false, _) => out.push(reply(token, Err(no_answer()))),
-                (true, true) => out.push(reply(token, Ok(json!({"element": body["element"]})))),
+                (true, true) => {
+                    let mut answer = json!({"element": body["element"]});
+                    if matches!(call, ModsCall::Input { .. }) { answer["value"] = body["value"].clone(); }
+                    out.push(reply(token, Ok(answer)));
+                }
                 (true, false) if retried => out.push(reply(token, Err(stale()))),
                 // Nada rodou no mod (P03): o desenho que o servidor tem está vencido.
-                (true, false) => self.refresh(token, ModsCall::Press { site, key }, now, &mut out),
-            },
-            Pending::Input { token, site, key, submit, value, retried } => match (ok, body["handled"] == true) {
-                (false, _) => out.push(reply(token, Err(no_answer()))),
-                (true, true) => out.push(reply(token, Ok(json!({"element": body["element"], "value": body["value"]})))),
-                (true, false) if retried => out.push(reply(token, Err(stale()))),
-                (true, false) => self.refresh(token, ModsCall::Input { site, key, submit, value }, now, &mut out),
+                (true, false) => self.refresh(token, call, now, &mut out),
             },
             Pending::Refresh { token, call } => {
                 if ok { self.store(call.site(), &body, &mut out); }
-                self.retry(token, call, now, &mut out);
+                self.act(token, call, true, now, &mut out);
                 self.arm(now);
             }
             Pending::Close { token, site } => {
@@ -290,14 +288,7 @@ impl Surface {
             ModsCall::Close { site } if site != BAND_SITE => self.request("ui_close",
                 json!({"id": site, "client_id": CLIENT_ID}), Pending::Close { token, site }, now, &mut out),
             ModsCall::Show { .. } | ModsCall::Close { .. } => out.push(reply(token, Err(pane_missing()))),
-            ModsCall::Press { site, key } => match self.control(&site, &key, "Button") {
-                Some(control) => self.press_with(token, site, key, control, false, now, &mut out),
-                None => self.refresh(token, ModsCall::Press { site, key }, now, &mut out),
-            },
-            ModsCall::Input { site, key, submit, value } => match self.control(&site, &key, "Input") {
-                Some(control) => self.input_with(token, (site, key, submit, value), control, false, now, &mut out),
-                None => self.refresh(token, ModsCall::Input { site, key, submit, value }, now, &mut out),
-            },
+            call @ (ModsCall::Press { .. } | ModsCall::Input { .. }) => self.act(token, call, false, now, &mut out),
         }
         out
     }
@@ -434,33 +425,24 @@ impl Surface {
         }
     }
 
-    fn retry(&mut self, token: u64, call: ModsCall, now: f64, out: &mut Vec<SurfaceEffect>) {
-        match call {
-            ModsCall::Press { site, key } => match self.control(&site, &key, "Button") {
-                Some(control) => self.press_with(token, site, key, control, true, now, out),
-                None => out.push(reply(token, Err(stale()))),
-            },
-            ModsCall::Input { site, key, submit, value } => match self.control(&site, &key, "Input") {
-                Some(control) => self.input_with(token, (site, key, submit, value), control, true, now, out),
-                None => out.push(reply(token, Err(stale()))),
-            },
-            ModsCall::Close { .. } | ModsCall::Show { .. } => out.push(reply(token, Err(stale()))),
+    /// Clique ou digitação pelo `handle` do desenho guardado. Sem o elemento nele, pede o desenho de novo
+    /// e procura uma vez (S4); na nova tentativa, a falta é desenho vencido. No `ui_input` vão `key`,
+    /// `component` e `instance_id` juntos: o Claude Code acha o campo mesmo com o `handle` vencido, e a
+    /// digitação não se perde num redesenho (P09).
+    fn act(&mut self, token: u64, call: ModsCall, retried: bool, now: f64, out: &mut Vec<SurfaceEffect>) {
+        let found = match &call {
+            ModsCall::Press { site, key } => self.control(site, key, "Button").map(|control| ("ui_press",
+                json!({"plugin": control.plugin, "handle": control.handle, "key": key, "surface": SURFACE, "client_id": CLIENT_ID}))),
+            ModsCall::Input { site, key, submit, value } => self.control(site, key, "Input").map(|control| ("ui_input",
+                json!({"plugin": control.plugin, "handle": control.handle, "kind": if *submit { "submit" } else { "change" },
+                    "value": value, "key": key, "component": if site == BAND_SITE { "AbovePrompt" } else { "Pane" },
+                    "instance_id": site, "surface": SURFACE, "client_id": CLIENT_ID}))),
+            ModsCall::Close { .. } | ModsCall::Show { .. } => None,
+        };
+        match found {
+            Some((subtype, body)) => self.request(subtype, body, Pending::Act { token, call, retried }, now, out),
+            None if retried => out.push(reply(token, Err(stale()))),
+            None => self.refresh(token, call, now, out),
         }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn press_with(&mut self, token: u64, site: String, key: String, control: tree::Control, retried: bool, now: f64, out: &mut Vec<SurfaceEffect>) {
-        self.request("ui_press", json!({"plugin": control.plugin, "handle": control.handle, "key": key,
-            "surface": SURFACE, "client_id": CLIENT_ID}), Pending::Press { token, site, key, retried }, now, out);
-    }
-
-    /// `key`, `component` e `instance_id` juntos: o Claude Code acha o campo mesmo com o `handle`
-    /// vencido, e a digitação não se perde num redesenho (P09).
-    fn input_with(&mut self, token: u64, field: (String, String, bool, String), control: tree::Control, retried: bool, now: f64, out: &mut Vec<SurfaceEffect>) {
-        let (site, key, submit, value) = field;
-        let component = if site == BAND_SITE { "AbovePrompt" } else { "Pane" };
-        self.request("ui_input", json!({"plugin": control.plugin, "handle": control.handle, "kind": if submit { "submit" } else { "change" },
-            "value": value, "key": key, "component": component, "instance_id": site, "surface": SURFACE, "client_id": CLIENT_ID}),
-            Pending::Input { token, site, key, submit, value, retried }, now, out);
     }
 }
