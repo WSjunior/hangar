@@ -77,6 +77,8 @@ struct State {
     actions: Vec<String>,
     /// Quando cada ação saiu, para medir o intervalo entre elas.
     stamps: Vec<(Instant, String)>,
+    /// Quanto cada operação demora a responder (no psmux, um processo do multiplexador por operação).
+    cost: Duration,
     on_click: HashMap<(u16, u16), Vec<Effect>>,
     on_keys: VecDeque<(String, Vec<Effect>)>,
     on_wheel: VecDeque<Vec<Effect>>,
@@ -97,6 +99,7 @@ impl FakePane {
     pub fn on_keys(&self, chord: &str, effects: Vec<Effect>) { self.state.lock().unwrap().on_keys.push_back((chord.into(), effects)); }
     pub fn on_wheel(&self, effects: Vec<Effect>) { self.state.lock().unwrap().on_wheel.push_back(effects); }
     pub fn on_resize(&self, rows: u16, effects: Vec<Effect>) { self.state.lock().unwrap().on_resize.push((rows, effects)); }
+    pub fn cost(&self, each: Duration) { self.state.lock().unwrap().cost = each; }
     pub fn stall_on(&self, prefix: &str) { self.state.lock().unwrap().stall = Some(prefix.into()); }
     /// Ações que mexem no mod (clique, roda, tecla, tamanho), na ordem; leituras e reserva ficam de fora.
     pub fn actions(&self) -> Vec<String> { self.state.lock().unwrap().actions.clone() }
@@ -205,9 +208,12 @@ impl Pane for FakePane {
         if self.state.lock().unwrap().dead {
             return Box::pin(async { Err(pane_failed("terminal_gone")) });
         }
+        // Reservar e soltar ficam no executor, sem processo do multiplexador.
+        let cost = if matches!(op, PaneOp::Hold { .. } | PaneOp::Release) { Duration::ZERO } else { self.state.lock().unwrap().cost };
         let (result, stalled) = self.handle(op);
         Box::pin(async move {
             if stalled { std::future::pending::<()>().await; }
+            tokio::time::sleep(cost).await;
             result
         })
     }

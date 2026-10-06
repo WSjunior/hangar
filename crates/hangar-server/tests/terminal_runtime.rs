@@ -946,3 +946,25 @@ async fn the_full_band_focused_defers_the_queue_with_the_mods_anchor() {
     f.wait_for("entrega sem a âncora",||!typed_at(&f,"Com a faixa focada").is_empty()).await;
     h.stop().await.unwrap();
 }
+
+/// Dentro da reserva de um clique de mod o pane é conferido uma vez: no psmux cada conferência é mais um
+/// processo, e a reserva por teclado com uma dúzia de botões na faixa estourava o prazo. Fora dela, cada
+/// operação confere de novo.
+#[tokio::test]
+async fn within_a_mods_hold_the_pane_is_checked_once() {
+    let f=Fixture::new().await; let h=f.start();
+    let checks=||f.io.calls.lock().unwrap().iter().filter(|r|r.args.last().is_some_and(|a|a.starts_with("#{session_name}"))).count();
+    let before=checks();
+    assert_eq!(h.pane(PaneOp::Hold{millis:5000},far()).await.unwrap(),PaneReply::Done);
+    for _ in 0..3 {
+        assert!(matches!(h.pane(PaneOp::Formats,far()).await.unwrap(),PaneReply::Formats(_)));
+        assert!(matches!(h.pane(PaneOp::Screen,far()).await.unwrap(),PaneReply::Screen(_)));
+        assert_eq!(h.pane(PaneOp::Keys(vec!["C-x".into(),"Tab".into()]),far()).await.unwrap(),PaneReply::Done);
+    }
+    assert_eq!(checks()-before,1,"uma conferência na reserva inteira");
+    assert_eq!(h.pane(PaneOp::Release,far()).await.unwrap(),PaneReply::Done);
+    assert!(matches!(h.pane(PaneOp::Screen,far()).await.unwrap(),PaneReply::Screen(_)));
+    assert!(matches!(h.pane(PaneOp::Screen,far()).await.unwrap(),PaneReply::Screen(_)));
+    assert_eq!(checks()-before,3,"fora da reserva, cada operação confere");
+    h.stop().await.unwrap();
+}
