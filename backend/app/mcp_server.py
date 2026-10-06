@@ -187,10 +187,14 @@ async def unpair(ctx: Context) -> dict[str, Any]:
 
 
 @mcp.tool(description="Cria outra sessão nesta máquina, como `hangar-send --new <nome> <cwd>`. Nunca "
-                      "`tmux new-session` cru. `provider`: claude|codex|pi|omp|kimi; `headless` só "
-                      "claude/codex; omitido herda o modo padrão do servidor, false força terminal. A sessão nasce na MESMA conta de quem chama, e a resposta "
-                      "devolve o `config_dir` usado — confira. `conta` (caminho do config dir) "
-                      "força outra; pra conta que ainda precisa ser preparada, use o CLI "
+                      "`tmux new-session` cru. `provider`: claude|codex|pi|omp|kimi. O que for "
+                      "omitido HERDA de quem chama: a conta (claude/pi/omp), o modo de permissão "
+                      "(claude; `plan` herda o modo de base) e o sem terminal (`headless`, só "
+                      "claude/codex). Parâmetro explícito vence: `headless: false` força terminal, "
+                      "`conta` (caminho do config dir) força outra conta. Conta herdada com 95% ou "
+                      "mais de uso nasce na conta de mais folga (como `--conta auto`); a resposta "
+                      "devolve `config_dir` e `account_source` (`inherited` ou `quota`) — confira. "
+                      "Pra conta que ainda precisa ser preparada, use o CLI "
                       "(`hangar-send --new --conta <nome>`). `jev`: a sessão nasce com a chave do "
                       "Jev no ambiente, e só aí o `hangar-preview objetivo` (o laço que navega e "
                       "preenche tela sozinho) funciona nela. Omitido, vale o padrão do servidor.")
@@ -204,34 +208,19 @@ async def new_session(ctx: Context, nome: str, cwd: str, provider: str | None = 
         provider = await api._default_session_provider(conta, engine)
     if headless and provider not in ("claude", "codex"):
         raise ToolError(f"headless só vale com provider claude ou codex (veio: {provider})")
-    # A conta da sessão nova é a de QUEM CHAMA. Antes o nome resolvido era descartado e o
-    # `config_dir` ia vazio: o backend caía na conta padrão (~/.claude), e uma sessão que vive
-    # noutra conta criava a irmã na conta errada — dizendo, pela descrição desta tool, que tinha
-    # herdado. Gasta a cota de quem ninguém escolheu e só aparece quando alguém confere.
-    config_dir = conta
-    if config_dir is None and provider in ("claude", "pi", "omp"):
-        cfg, confiavel = await asyncio.to_thread(api._caller_config_dir, eu)
-        if not confiavel:
-            # Não deu pra ler a conta de quem chama. Criar assim mesmo repetiria o bug de cima,
-            # só que calado; quem quiser seguir escolhe a conta no parâmetro.
-            raise ToolError(f"não consegui confirmar a conta da sessão '{eu}' — passe `conta` "
-                            f"com o caminho do config dir, ou use `hangar-send --new --conta`")
-        config_dir = str(cfg) if cfg else None
-    aviso = None
-    if conta is None and provider == "claude" and not engine:
-        # Herdar não é escolher: conta herdada sem cota daria uma sessão que nasce e não responde.
-        from app import cotas
-        config_dir, aviso = await asyncio.to_thread(cotas.conta_com_cota, config_dir, cotas.cotas_claude())
+    # Conta, modo e sem terminal omitidos herdam de `eu` dentro do create_session, que é o mesmo
+    # caminho do `hangar-send --new`.
     try:
         info = await api.create_session(api.CreateBody(
             name=nome, cwd=cwd, provider=provider, engine=engine, model=model, effort=effort,
             permission_mode=permissao, headless=headless, read_only=read_only,
-            config_dir=config_dir, jev=jev))
+            config_dir=conta, jev=jev, creator=eu))
     except HTTPException as e:
         raise ToolError(_detalhe(e)) from e
     return {"name": info.name, "cwd": info.cwd, "provider": info.provider, "headless": info.headless,
             # Volta na resposta pra que herdar errado nunca mais passe despercebido.
-            "config_dir": config_dir, **({"aviso": aviso} if aviso else {})}
+            "config_dir": info.config_dir, "account_source": info.account_source,
+            **({"avisos": info.avisos} if info.avisos else {})}
 
 
 VERBOS_NAV = ("snapshot", "click", "fill", "type", "press", "hover", "wait", "eval", "layout", "console",
