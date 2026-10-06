@@ -4,9 +4,15 @@
 //! só quando ela muda. Cada conexão só lê o último publicado. Contrato público do `list_events`
 //! (`sse.py`): `sessions`, `list_error` uma vez na transição, `shortcut_terminals`, `nav` uma vez
 //! por conexão, `ping` a cada 8 s e comentário a cada 15 s. Convidado continua no Python.
+//!
+//! Entre os tiques, o produtor observa as pastas de estado das contas (marcador, registro nativo,
+//! pergunta aberta): escrita nelas reclassifica só a sessão do arquivo e publica na hora, com a
+//! rajada juntada em 150 ms. O observador que falha vai ao diário e o tique continua valendo.
 use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,10 +23,12 @@ use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
 use hangar_api::session::SessionRow;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, watch};
 
-use super::bridge::{ListBridge, ListError, Produced};
+use super::bridge::{ListBridge, ListError, Partial, Produced};
+use super::facts_files;
 use super::sig;
 use crate::diag::DiagClient;
 use crate::routes::{AppState, cors, gate, pass};
@@ -32,6 +40,10 @@ const PING_EVERY: Duration = Duration::from_secs(8);
 const COMMENT_EVERY: Duration = Duration::from_secs(15);
 /// Envio preso por 30 s fecha a conexão, como o `send_timeout` do Python.
 const SEND_TIMEOUT: Duration = Duration::from_secs(30);
+/// Janela que junta uma rajada de escritas numa rodada só.
+const COALESCE: Duration = Duration::from_millis(150);
+/// Avisos de arquivo entre duas rodadas; cheia, os avisos se perdem e a rodada é a inteira.
+const WAKE_QUEUE: usize = 256;
 
 /// Retrato do runtime das sessões sem terminal, por chave da sessão.
 pub trait HeadlessSource: Send + Sync {
@@ -114,6 +126,7 @@ async fn supervise(hub: Arc<ListHub>, list: Arc<ListBridge>, diag: DiagClient) {
 /// O laço único. Para quando a última lista fecha; quem abrir depois religa.
 async fn produce(hub: Arc<ListHub>, list: Arc<ListBridge>, diag: DiagClient) {
     let mut last = Last::default();
+    let mut files = FileWake::new();
     loop {
         let clients = {
             let mut r = lock(&hub.refs);
@@ -127,6 +140,9 @@ async fn produce(hub: Arc<ListHub>, list: Arc<ListBridge>, diag: DiagClient) {
             r.clients
         };
         list.set_owner_clients(clients);
+        // Armado antes de produzir: escrita depois da leitura dos marcadores acorda a parcial, e a
+        // lista publicada nunca é mais velha que o observador.
+        files = files.sync(&list, &diag).await;
         // Pânico na produção vira erro da rodada, e o laço segue.
         let l = list.clone();
         let outcome = match tokio::spawn(async move { l.refresh().await }).await {
@@ -139,7 +155,195 @@ async fn produce(hub: Arc<ListHub>, list: Arc<ListBridge>, diag: DiagClient) {
             diag.report("rust.list_failed", "", code, "lista do dono em erro");
         }
         publish(&hub.tx, &mut last, outcome, &diag);
-        tokio::time::sleep(TICK).await;
+        let tick = tokio::time::Instant::now() + TICK;
+        // Até o tique, escrita numa pasta de estado reclassifica só a sessão dela.
+        loop {
+            let first = tokio::select! {
+                () = tokio::time::sleep_until(tick) => break,
+                w = files.recv() => w,
+            };
+            tokio::time::sleep(COALESCE).await;
+            let Some(asked) = files.drain(first, &diag) else { break };
+            match list.reclassify(asked).await {
+                Ok(Partial::Done(p)) => publish(&hub.tx, &mut last, Ok(p), &diag),
+                // Sem produção guardada (fatos desconhecidos, invalidada) quem resolve é o tique: rodar a
+                // inteira a cada escrita tiraria o teto de frequência.
+                Ok(Partial::Unchanged | Partial::NeedsFull) => {}
+                Err(e) => diag.report("rust.list_failed", "", e.code, "rodada acordada por arquivo falhou; vale o tique"),
+            }
+        }
+    }
+}
+
+enum Wake { Path(PathBuf), Failed }
+
+fn watch_code(e: &notify::Error) -> &'static str {
+    match e.kind {
+        notify::ErrorKind::MaxFilesWatch => "list_watch_limit",
+        notify::ErrorKind::PathNotFound => "list_watch_missing",
+        notify::ErrorKind::Io(_) => "list_watch_io",
+        _ => "list_watch_failed",
+    }
+}
+
+/// Identidade da pasta; `None` se não é pasta (ou sumiu). Fora do Unix, só a existência.
+fn dir_inode(dir: &Path) -> Option<u64> {
+    let meta = std::fs::metadata(dir).ok().filter(std::fs::Metadata::is_dir)?;
+    #[cfg(unix)]
+    { use std::os::unix::fs::MetadataExt; Some(meta.ino()) }
+    #[cfg(not(unix))]
+    { let _ = meta; Some(0) }
+}
+
+/// `<conta>/<pasta>`: o diário diz qual pasta sem o caminho inteiro.
+fn dir_label(dir: &Path) -> String {
+    let mut parts = dir.iter().rev().take(2).map(|p| p.to_string_lossy()).collect::<Vec<_>>();
+    parts.reverse();
+    parts.join("/")
+}
+
+/// Observador das pastas de estado das contas, vivo enquanto o produtor roda: um só (um inotify)
+/// para todas, sem tarefa por evento. O callback só enfileira o caminho.
+struct FileWake {
+    watcher: Option<RecommendedWatcher>,
+    tx: mpsc::Sender<Wake>,
+    rx: mpsc::Receiver<Wake>,
+    /// Fila cheia ou `rescan` do sistema: avisos perdidos, só a rodada inteira serve.
+    lost: Arc<AtomicBool>,
+    /// Última falha vista pelo callback; fora da fila, que pode estar cheia justamente nela.
+    fault: Arc<Mutex<Option<&'static str>>>,
+    /// Pasta observada e o inode dela: apagada e recriada entre dois tiques, o observador da velha
+    /// já foi solto pelo sistema.
+    watched: HashMap<PathBuf, u64>,
+    /// Último código de falha por pasta (a do observador na chave vazia): o diário só na troca.
+    failed: HashMap<PathBuf, &'static str>,
+}
+
+impl FileWake {
+    fn new() -> Self {
+        let (tx, rx) = mpsc::channel(WAKE_QUEUE);
+        Self { watcher: None, tx, rx, lost: Arc::default(), fault: Arc::default(), watched: HashMap::new(), failed: HashMap::new() }
+    }
+
+    /// Arma o que falta e solta a pasta que sumiu, uma vez por tique. Stat e `inotify_add_watch`
+    /// fora da thread do runtime.
+    async fn sync(mut self, list: &Arc<ListBridge>, diag: &DiagClient) -> Self {
+        let list = list.clone();
+        let (me, report) = match tokio::task::spawn_blocking(move || {
+            let report = match list.watch_dirs() {
+                Ok(dirs) => self.arm(&dirs),
+                // Sem pastas a ponte também recusa a produção, que já vai ao diário.
+                Err(_) => Vec::new(),
+            };
+            (self, report)
+        }).await {
+            Ok(v) => v,
+            Err(_) => {
+                diag.report("rust.list_watch", "", "list_watch_task_failed", "observador das pastas de estado interrompido; vale o tique");
+                return Self::new();
+            }
+        };
+        for (dir, code) in report {
+            diag.report("rust.list_watch", &dir, code, "pasta de estado sem observador; vale o tique");
+        }
+        me
+    }
+
+    fn arm(&mut self, dirs: &[PathBuf]) -> Vec<(String, &'static str)> {
+        let mut report = Vec::new();
+        let mut note = |failed: &mut HashMap<PathBuf, &'static str>, dir: &Path, code: &'static str| {
+            if failed.insert(dir.to_owned(), code) != Some(code) {
+                report.push((dir_label(dir), code));
+            }
+        };
+        if self.watcher.is_none() {
+            let (tx, lost, fault) = (self.tx.clone(), self.lost.clone(), self.fault.clone());
+            let failed = move |code: &'static str| {
+                *lock(&fault) = Some(code);
+                // Cheia, já há aviso na fila para acordar o produtor.
+                let _ = tx.try_send(Wake::Failed);
+            };
+            let tx = self.tx.clone();
+            let made = notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
+                // A fila do sistema transbordou: o que mudou não está nos avisos.
+                Ok(ev) if ev.need_rescan() => {
+                    lost.store(true, Ordering::Relaxed);
+                    failed("list_watch_overflow");
+                }
+                // O notify 7 assina abrir/fechar: a leitura da própria lista o acordaria sem fim.
+                Ok(ev) if ev.kind.is_access() => {}
+                Ok(ev) => {
+                    for p in ev.paths.into_iter().filter(|p| p.extension().is_some_and(|x| x == "json")) {
+                        if tx.try_send(Wake::Path(p)).is_err() {
+                            lost.store(true, Ordering::Relaxed);
+                        }
+                    }
+                }
+                Err(e) => failed(watch_code(&e)),
+            });
+            match made {
+                Ok(w) => {
+                    self.watcher = Some(w);
+                    self.failed.remove(Path::new(""));
+                }
+                Err(e) => {
+                    note(&mut self.failed, Path::new(""), watch_code(&e));
+                    return report;
+                }
+            }
+        }
+        let Some(w) = self.watcher.as_mut() else { return report };
+        let gone: Vec<PathBuf> = self.watched.iter()
+            .filter(|(d, ino)| dir_inode(d) != Some(**ino) || !dirs.contains(d)).map(|(d, _)| d.clone()).collect();
+        for d in gone {
+            // O sistema já soltou a pasta apagada; o erro do `unwatch` é esse.
+            let _ = w.unwatch(&d);
+            self.watched.remove(&d);
+            if dir_inode(&d).is_none() {
+                note(&mut self.failed, &d, "list_watch_gone");
+            }
+        }
+        for d in dirs {
+            // Conta sem a pasta é normal: o tique cobre até ela nascer.
+            let Some(ino) = dir_inode(d).filter(|_| !self.watched.contains_key(d)) else { continue };
+            match w.watch(d, RecursiveMode::NonRecursive) {
+                Ok(()) => {
+                    self.watched.insert(d.clone(), ino);
+                    self.failed.remove(d);
+                }
+                Err(e) => note(&mut self.failed, d, watch_code(&e)),
+            }
+        }
+        report
+    }
+
+    /// Sem observador, só o tique acorda.
+    async fn recv(&mut self) -> Wake {
+        match self.rx.recv().await {
+            Some(w) => w,
+            // O `tx` mora aqui: a fila nunca fecha.
+            None => std::future::pending().await,
+        }
+    }
+
+    /// O que chegou na janela: sessões cuja pergunta aberta mudou (marcador e registro nativo a
+    /// ponte acha sozinha), ou `None` se só a rodada inteira serve.
+    fn drain(&mut self, first: Wake, diag: &DiagClient) -> Option<Vec<String>> {
+        let mut asked = Vec::new();
+        let mut take = |w: Wake| match w {
+            Wake::Path(p) => {
+                if let Some(sid) = facts_files::askq_sid(&p).filter(|s| !asked.contains(s)) { asked.push(sid) }
+            }
+            Wake::Failed => {}
+        };
+        take(first);
+        while let Ok(w) = self.rx.try_recv() {
+            take(w);
+        }
+        if let Some(code) = lock(&self.fault).take() {
+            diag.report("rust.list_watch", "", code, "observador das pastas de estado falhou; vale o tique");
+        }
+        (!self.lost.swap(false, Ordering::Relaxed)).then_some(asked)
     }
 }
 

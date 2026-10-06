@@ -4,90 +4,15 @@
 //! conta as chamadas e recusa enquanto existir o arquivo `fail`.
 #![cfg(unix)]
 mod fake;
+mod list_support;
 
-use fake::{OWNER, SECRET, client, config, next_named, sse, Events};
-use hangar_server::list::bridge::{ListBridge, ListEnv, parse_dirs};
-use hangar_server::list::facts::FactsClient;
+use fake::{OWNER, client, next_named};
 use hangar_server::list::hub::HeadlessSource;
-use hangar_server::list::mux::Mux;
-use hangar_server::routes::{AppState, router};
+use list_support::*;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
-use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-
-fn now() -> f64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64() }
-
-/// `n` sessões Claude paradas (`s0`..), marcador `idle`, pane pronto; `fail` presente = recusa.
-fn sessions(root: &Path, n: usize) -> std::path::PathBuf {
-    let home = root.join("home");
-    let mut panes = String::new();
-    for i in 0..n {
-        let cwd = root.join(format!("w{i}"));
-        let sid = format!("00000000-0000-0000-0000-{i:012}");
-        let proj = home.join(".claude/projects").join(hangar_workspace::worktrees::sanitize_cwd(cwd.to_str().unwrap()));
-        std::fs::create_dir_all(&proj).unwrap();
-        std::fs::create_dir_all(&cwd).unwrap();
-        std::fs::write(proj.join(format!("{sid}.jsonl")), fake::claude_line(0)).unwrap();
-        std::fs::create_dir_all(home.join(".claude/.hangar-state")).unwrap();
-        std::fs::write(home.join(format!(".claude/.hangar-state/{sid}.json")), format!(r#"{{"state":"idle","ts":{}}}"#, now() + 60.0)).unwrap();
-        panes.push_str(&format!("s{i}\\t1\\t\\t{}\\t%%{i}\\t\\t\\t\\t0\\t0\\n", cwd.display()));
-    }
-    let script = root.join("tmux");
-    std::fs::write(&script, format!(
-        "#!/bin/sh\necho \"$1\" >> '{log}'\n[ -e '{fail}' ] && exit 2\n[ \"$1\" = list-panes ] || {{ printf '● pronto\\n❯\\n'; exit 0; }}\nprintf '{panes}'\n",
-        log = root.join("calls.log").display(), fail = root.join("fail").display())).unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    script
-}
-
-fn calls(root: &Path, sub: &str) -> usize {
-    std::fs::read_to_string(root.join("calls.log")).unwrap_or_default().lines().filter(|l| *l == sub).count()
-}
-
-struct Server { addr: SocketAddr, python: Arc<fake::Fake>, list: Arc<ListBridge> }
-
-async fn server(root: &Path, n: usize) -> Server {
-    let script = sessions(root, n);
-    let home = root.join("home");
-    let dirs = parse_dirs(&json!({"home": home, "claude": home.join(".claude"), "codex_home": home.join(".codex"),
-        "pi_sessions": home.join(".pi/agent/sessions"), "omp_config": home.join(".omp"),
-        "omp_agent": home.join(".omp/agent"), "kimi_home": home.join(".kimi-code")}).to_string());
-    let (python, upstream) = fake::spawn_fake().await;
-    let mut state = AppState::new(config(upstream, ""));
-    let list = Arc::new(ListBridge::new(ListEnv { mux: Mux::with_program(&script, Duration::from_secs(5)),
-        capture_program: script.into_os_string(), procs: Arc::new(hangar_server::list::procs::SystemProcs::default()), dirs },
-        FactsClient::new(upstream, SECRET.into())));
-    state.list = list.clone();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let app = router(Arc::new(state)).into_make_service_with_connect_info::<SocketAddr>();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    Server { addr, python, list }
-}
-
-async fn get(addr: SocketAddr, token: &str) -> (u16, Value) {
-    let resp = client().get(format!("http://{addr}/api/sessions")).bearer_auth(token).send().await.unwrap();
-    let status = resp.status().as_u16();
-    let text = resp.text().await.unwrap();
-    (status, serde_json::from_str(&text).unwrap_or(Value::String(text)))
-}
-
-async fn open(addr: SocketAddr) -> Events {
-    let resp = client().get(format!("http://{addr}/api/sessions/events?token={OWNER}")).send().await.unwrap();
-    assert_eq!(resp.status(), 200);
-    assert_eq!(resp.headers()["cache-control"], "no-store");
-    sse(resp)
-}
-
-fn names(v: &Value) -> Vec<&str> { v.as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap()).collect() }
-
-fn set_facts(python: &fake::Fake, key: &str, value: Value) {
-    python.list_facts.lock().unwrap().0[key] = value;
-}
 
 /// Cinco listas abertas pagam a varredura de uma: o produtor é do servidor, não da conexão.
 #[tokio::test(flavor = "multi_thread")]
@@ -254,3 +179,54 @@ async fn headless_rows_take_the_runtime_state() {
     assert_eq!((row("h0")["state"].clone(), row("h0")["problema"].clone()), (json!("working"), Value::Null));
     assert_eq!(row("h1")["problema"], "list_runtime_unavailable");
 }
+
+/// Marcador escrito sai na lista sem esperar o tique de 1,5 s, e sem uma descoberta por escrita.
+#[tokio::test(flavor = "multi_thread")]
+async fn marker_change_publishes_without_tick() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 2).await;
+    let mut es = open(srv.addr).await;
+    next_named(&mut es, "sessions").await;
+    let start = std::time::Instant::now();
+    let scans = calls(dir.path(), "list-panes");
+    let mut slow = Vec::new();
+    for (k, state) in ["working", "idle", "working", "idle", "working"].into_iter().enumerate() {
+        // Fases diferentes do tique: só o tique daria uma espera de até 1,5 s.
+        tokio::time::sleep(Duration::from_millis(330 * k as u64 % 1100)).await;
+        let t = std::time::Instant::now();
+        write_marker(dir.path(), 0, state);
+        let (_, took) = until_state(&mut es, 0, state, t).await;
+        if took > Duration::from_millis(600) { slow.push(took); }
+    }
+    assert!(slow.is_empty(), "marcador demorou o tique: {slow:?}");
+    let ticks = (start.elapsed().as_secs_f64() / 1.5).ceil() as usize + 1;
+    let scans = calls(dir.path(), "list-panes") - scans;
+    assert!(scans <= ticks, "a escrita não roda a descoberta: {scans} varreduras em {ticks} tiques");
+}
+
+/// Rajada de escritas vira uma publicação com todas, não uma por arquivo.
+#[tokio::test(flavor = "multi_thread")]
+async fn burst_of_writes_coalesces() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 10).await;
+    let mut es = open(srv.addr).await;
+    next_named(&mut es, "sessions").await;
+    for (round, state) in ["working", "idle", "working"].into_iter().enumerate() {
+        tokio::time::sleep(Duration::from_millis(400 * round as u64)).await;
+        let t = std::time::Instant::now();
+        for i in 0..10 {
+            write_marker(dir.path(), i, state);
+            tokio::time::sleep(Duration::from_millis(8)).await;
+        }
+        // Um tique pode cair no meio da rajada e publicar parte dela; uma por arquivo seriam dez.
+        let mut published = 0;
+        let took = loop {
+            let rows: Value = serde_json::from_str(&next_named(&mut es, "sessions").await.data).unwrap();
+            published += 1;
+            if rows.as_array().unwrap().iter().all(|r| r["state"] == state) { break t.elapsed() }
+        };
+        assert!(published <= 2, "rajada saiu em {published} publicações");
+        assert!(took < Duration::from_millis(700), "rajada esperou o tique: {took:?}");
+    }
+}
+
