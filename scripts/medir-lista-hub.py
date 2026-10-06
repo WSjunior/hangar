@@ -132,6 +132,14 @@ def main():
             raise SystemExit("hangar-server não está de pé")
         tmux_pid = int(subprocess.run(["/usr/bin/tmux", "-L", m.tmux, "display", "-p", "#{pid}"],
                                       capture_output=True, text=True).stdout.strip())
+        time.sleep(10)
+        c0 = (cpu(py), cpu(rs), cpu(tmux_pid), time.monotonic())
+        time.sleep(60)
+        c1 = (cpu(py), cpu(rs), cpu(tmux_pid), time.monotonic())
+        dur = c1[3] - c0[3]
+        out["cpu_ms_por_s_sem_lista"] = {"python": round((c1[0] - c0[0]) / dur * 1000, 1),
+                                         "rust": round((c1[1] - c0[1]) / dur * 1000, 1),
+                                         "tmux": round((c1[2] - c0[2]) / dur * 1000, 1)}
         leitor = Leitor(m)
         leitor.start()
         assert base.esperar(lambda: leitor.ultimo is not None and len(leitor.ultimo) == N, 60), "lista não chegou"
@@ -161,9 +169,10 @@ def main():
         out["latencia_mediana_max_s"] = (statistics.median(vals), max(vals)) if vals else None
         gets = []
         for _ in range(20):
-            st, dados, t, _h = m.api("GET", "/api/sessions", timeout=20)
+            t0 = time.perf_counter()   # o `api()` da base arredonda para 10 ms
+            st, dados, _t, _h = m.api("GET", "/api/sessions", timeout=20)
             assert st == 200 and len(dados) == N, st
-            gets.append(t)
+            gets.append(round(time.perf_counter() - t0, 4))
             time.sleep(0.3)
         out["get_s_mediana_max"] = (statistics.median(gets), max(gets))
         out["pico_rss_kb"] = {"python": hwm(py), "rust": hwm(rs)}
