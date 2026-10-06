@@ -353,8 +353,10 @@ terminal, contrato 32), e a lista a mostra como o `Monitor` (`terminal_state::he
 `Monitor` rodada a rodada.
 
 Com o `Monitor` vivo, a lista lê o último `state` dele (`state/published.rs`, por nome e session
-id, limpo quando o `Monitor` acaba) e não captura o pane da sessão: nem a classificação, nem a
-statusline, nem o radar de limite.
+id, limpo quando o `Monitor` acaba ou publica `dead`) e não captura o pane da sessão: nem a
+classificação, nem a statusline, nem o radar de limite. Com 5 chats de 20 sessões sem marcador,
+13 → 9,75 capturas por segundo e o Rust de 39 para 30,5 ms/s parado
+(`docs/migracao-rust/parte4/medicao.md`, Task 6).
 
 Aberto: depois do Esc o hook é cancelado sem `/ask-fim`, e a pergunta segurada vale até vencer
 (35 s depois do último poll); o chat (e agora a lista) mostra o cartão nesse intervalo.

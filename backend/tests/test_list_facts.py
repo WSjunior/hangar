@@ -208,6 +208,13 @@ def test_orq_failure_goes_as_a_fact_not_an_empty_list(monkeypatch):
 def test_facts_held_question_for_claude_terminal(monkeypatch):
     # A permissão que o hook segura para o app não desenha cartão no pane: a lista só a vê por aqui.
     held = {"ct": {"id": "perm:t1", "questions": [], "tool": "Bash", "resumo": "ls"}}
-    monkeypatch.setattr(plugin_bridge, "pergunta_pendente", lambda name: held.get(name))
-    out = _compute([_row("ct"), _row("ch", headless=True), _row("ok")])
+    pending = {**held, "ch": held["ct"], "cx": held["ct"]}
+    monkeypatch.setattr(plugin_bridge, "pergunta_pendente", lambda name: pending.get(name))
+
+    async def keep(infos, state_only=False):
+        return infos
+
+    monkeypatch.setattr(sse._list_registry, "list_with_state", keep)
+    out = _compute([_row("ct"), _row("ch", headless=True), _row("cx", "codex"), _row("ok")])
+    # Sem terminal e outros provedores têm o próprio caminho da pergunta.
     assert out["held"] == held

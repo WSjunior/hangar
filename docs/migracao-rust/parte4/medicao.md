@@ -106,3 +106,29 @@ chat, com o pane de spinner parado (o marcador decide), 10 amostras.
   (250 ms): com 20 chats, metade das amostras de latência foi a 0,84–0,87 s (a rodada lia a cópia
   velha e esperava a seguinte).
 - Não medido aqui: Windows (psmux avulso por rodada), convidado de verdade e celular.
+
+## Task 6: lista lê o `Monitor`, 06/10/2026
+
+**Com 5 chats abertos de 20 sessões, a lista deixa de capturar as 5 que têm `Monitor`: 13,0 →
+9,75 capturas por segundo paradas e 23,5 → 18 trabalhando, e o Rust cai de 39 para 30,5 ms de CPU
+por segundo parado e de 75,8 para 64 trabalhando.** Python e tmux ficam no ruído. A queda das
+capturas (5 de 20 linhas, 25%) também prova, com vínculo real, que o session id do hub casa com o do
+transcript da linha.
+
+Como: `scripts/medir-lista-monitor.py` (montagem de `medir-estado.py`), backend isolado, binários
+release. "Antes" = `git archive` de `f99826e47` (base desta Task, com o backend dela e o roteiro
+copiado para dentro); "depois" = esta Task. 20 sessões de mentira **sem marcador do hook** (o caso
+em que a lista cai no pane a cada tique), lista do dono aberta (`/api/sessions/events`) e 5 chats.
+Capturas = `capture-pane` contados pelo `tmux` do PATH (a captura do `Monitor` é o cliente `-C` e
+fica de fora nos dois lados). CPU como na Task 5, janela de 20 s depois de 8 s assentando. Duas
+rodadas de cada lado; a tabela traz a média.
+
+| Modo | Capturas/s | Python | Rust | tmux |
+|---|---:|---:|---:|---:|
+| parado | 13,0 → 9,75 | 20,3 → 19,5 | 39,0 → 30,5 | 8,3 → 6,8 |
+| trabalhando | 23,5 → 18,0 | 21,3 → 20,3 | 75,8 → 64,0 | 46,3 → 44,5 |
+
+- Rodadas (Rust, trabalhando): antes 70,0 e 81,5; depois 67,5 e 60,5. RSS sem mudança (Python
+  ~140 MB, Rust ~34 MB).
+- Com marcador do hook nas sessões a lista quase não captura (só a statusline, 2 por tique, e o
+  radar de limite); a economia aqui é o teto, não o caso comum.

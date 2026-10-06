@@ -315,8 +315,16 @@ impl Sources for LiveSources {
         match serde_json::to_string(&event) {
             Ok(data) => {
                 let sid = self.sid();
-                self.env.list.published.set(self.owner, &self.name, sid, Arc::new(event));
-                self.publish_raw("state", &data)
+                let published = &self.env.list.published;
+                // Hub fechado não publica, e a lista não pode ficar com o estado que ninguém viu.
+                let sent = self.publish_raw("state", &data);
+                // `dead` sai do mapa: a lista nunca mostra sessão morta, a linha some com a descoberta.
+                if sent && event.state != "dead" {
+                    published.set(self.owner, &self.name, sid, Arc::new(event));
+                } else {
+                    published.clear(self.owner, &self.name);
+                }
+                sent
             }
             Err(_) => {
                 self.report("rust.state_publish_failed", "state_serialize", "estado: evento não serializou");

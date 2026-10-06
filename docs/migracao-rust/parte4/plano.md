@@ -206,7 +206,7 @@ virar regra), `medicao.md`.
 
 - [x] **Step 12: Reproduzir com sessão real isolada (Haiku, modo padrão, `Bash` que pede permissão): lista `working` com cartão na tela; provar a causa (superpowers:systematic-debugging) e gravar a sequência**
 - [x] **Step 13: Testes, vistos falhar; conserto e leitura do `Monitor` pela lista; testes focados**
-- [ ] **Step 14: Medida antes/depois do tique da lista com 5 chats abertos (capturas evitadas, CPU); `medicao.md`; revisar**
+- [x] **Step 14: Medida antes/depois do tique da lista com 5 chats abertos (capturas evitadas, CPU); `medicao.md`; revisar**
 
 ### Task 7: Windows — captura avulsa pelo psmux
 

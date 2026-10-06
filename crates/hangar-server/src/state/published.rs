@@ -14,9 +14,14 @@ pub struct Published(Mutex<HashMap<String, Entry>>);
 impl Published {
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Entry>> { self.0.lock().unwrap_or_else(|e| e.into_inner()) }
 
-    /// `owner` separa o `Monitor` que saiu do que nasceu no lugar dele com o mesmo nome.
+    /// `owner` cresce a cada `Monitor`: o que está saindo (abortado no meio da publicação) não
+    /// sobrescreve nem apaga o que nasceu no lugar dele com o mesmo nome.
     pub fn set(&self, owner: u64, name: &str, sid: Option<String>, event: Arc<StateEvent>) {
-        self.lock().insert(name.to_owned(), Entry { owner, sid, event });
+        let mut map = self.lock();
+        if map.get(name).is_some_and(|e| e.owner > owner) {
+            return;
+        }
+        map.insert(name.to_owned(), Entry { owner, sid, event });
     }
 
     pub fn clear(&self, owner: u64, name: &str) {
@@ -42,6 +47,7 @@ mod tests {
         let ev = |s: &str| Arc::new(StateEvent { state: s.into(), ..Default::default() });
         p.set(1, "s", Some("a".into()), ev("idle"));
         p.set(2, "s", Some("a".into()), ev("working"));
+        p.set(1, "s", Some("a".into()), ev("idle"));
         p.clear(1, "s");
         assert_eq!(p.get("s", Some("a")).map(|e| e.state.clone()).as_deref(), Some("working"));
         assert!(p.get("s", Some("b")).is_none(), "conversa nova não herda o estado da anterior");
