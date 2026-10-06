@@ -54,7 +54,7 @@ from app.pi_inbox import INBOX
 from app import registry as registry_mod
 from app.registry import KillFailed, SessionRegistry, sanitize_cwd
 from app.names import sanitize_session_name
-from app.models import (SessionInfo, ChatEvent, CostReport, UsoReport, RunnersResponse, RunBody,
+from app.models import (SessionInfo, CreatedSessionInfo, ChatEvent, CostReport, UsoReport, RunnersResponse, RunBody,
                         RunInfo, Runner, CustomRunnersBody, ProjectStatus, ShortcutShellBody, RunCodeBody,
                         ProjectShortcutsBody, ShortcutAnswerBody, session_key)
 from app import uso_report
@@ -1752,6 +1752,9 @@ class CreateBody(_StrictBody):
     # Claude ou Codex SEM terminal roda atrás do cano, sem tmux. O que depende de pane
     # (painel de terminal, espelho) não existe.
     headless: bool | None = Field(default=None, strict=True)
+    # Sessão que pediu a criação (MCP `new_session`, `hangar-send --new`). O que vier omitido
+    # (modo de permissão, sem terminal) herda dela; sem ela, vale o padrão do servidor.
+    creator: str | None = Field(default=None, min_length=1)
 
 
 def _jev_efetivo(pedido: bool | None) -> bool:
@@ -2223,26 +2226,78 @@ async def _kill_unclaimed(name: str) -> None:
         await asyncio.to_thread(_invalidate_lists)
 
 
-@app.post("/api/sessions", dependencies=[Depends(require_auth)], response_model=SessionInfo)
-async def create_session(body: CreateBody):
+def _creator_permission_mode(name: str, jsonl: str | None) -> str | None:
+    """Modo fora de `plan` da sessão Claude `name`, no nome que o `--permission-mode` aceita."""
+    meta = headless_sessions.load(name)
+    modo = None
+    if meta:
+        modo = meta.get("permission_mode")
+        if modo == "plan":
+            modo = meta.get("previous_non_plan")
+    modo = modo or permission_mode.session_non_plan_mode(jsonl or _jsonl_atual(name))
+    modo = "manual" if modo == "default" else modo
+    return modo if modo in model_args.MODOS_PERMISSAO_CLAUDE and modo != "plan" else None
+
+
+async def _inherit_from_creator(body: CreateBody) -> tuple[CreateBody, str | None, list[str]]:
+    """Preenche o que veio omitido com o da sessão criadora; devolve também `"inherited"` quando a
+    conta veio dela e os avisos do que não deu para herdar. O modo conta porque o primeiro recado
+    de uma criadora em bypass para uma irmã em Manual fica retido no receptor (`mode-mismatch`)."""
+    # Convidado não herda a conta nem o modo de uma sessão do dono.
+    if not body.creator or guest_users.current.get() is not None:
+        return body, None, []
+    info = await _cached_info(body.creator)
+    if info is None:
+        return body, None, [f"sessão criadora '{body.creator}' não encontrada; nada foi herdado"]
+    update: dict = {}
+    avisos: list[str] = []
+    account_source = None
+    # Perfil do omp já define a conta.
+    if body.config_dir is None and body.provider in ("claude", "pi", "omp") and not body.omp_profile:
+        cfg, confiavel = await asyncio.to_thread(_caller_config_dir, info.name)
+        if not confiavel:
+            # Criar assim nasceria na conta padrão, calado: gasta a cota de quem ninguém escolheu.
+            raise HTTPException(409, detail=erro(
+                "erro_conta_criadora", f"não consegui confirmar a conta da sessão '{info.name}' — "
+                "escolha a conta (`conta` no MCP, `--conta` no hangar-send)"))
+        account_source = "inherited"
+        if cfg:
+            update["config_dir"] = str(cfg)
+    if body.headless is None and body.provider in ("claude", "codex") and not body.read_only:
+        update["headless"] = bool(info.headless)
+    if body.permission_mode is None and body.provider == "claude" and info.provider == "claude":
+        modo = await asyncio.to_thread(_creator_permission_mode, info.name, info.jsonl)
+        if modo:
+            update["permission_mode"] = modo
+        else:
+            avisos.append(f"não consegui ler o modo de permissão de '{info.name}'; vale o padrão da conta")
+    return (body.model_copy(update=update) if update else body), account_source, avisos
+
+
+@app.post("/api/sessions", dependencies=[Depends(require_auth)], response_model=CreatedSessionInfo)
+async def create_session(body: CreateBody) -> CreatedSessionInfo:
     if "provider" not in body.model_fields_set:
         provider = await _default_session_provider(body.config_dir, body.engine, body.codex_account,
                                                    body.omp_profile, body.subagent_model)
         body = body.model_copy(update={"provider": provider})
-    avisos_extra: list[str] = []
+    explicit_account = body.config_dir is not None
+    body, account_source, avisos_extra = await _inherit_from_creator(body)
     # Convidado fica na conta Codex padrão: as outras contas são do dono.
     if body.provider == "codex" and body.codex_account is None and guest_users.current.get() is None:
         connected = await _connected_codex_accounts()
         if connected and not any(account.is_default for account in connected):
             body = body.model_copy(update={"codex_account": connected[0].id})
             avisos_extra.append(f"A conta Codex padrão não está conectada; a sessão usa a conta {connected[0].id}.")
-    if body.config_dir is None and body.provider == "claude" and not body.engine:
-        # Sem conta pedida, a padrão só vale se tiver cota; senão nasce na de mais folga.
+    if not explicit_account and body.provider == "claude" and not body.engine:
+        # Sem conta pedida, a herdada ou a padrão só vale se não estiver acabando; senão nasce na de
+        # mais folga, e a resposta diz que trocou.
         from app import cotas
-        config_dir, aviso = await asyncio.to_thread(cotas.conta_com_cota, None, cotas.cotas_claude())
+        config_dir, aviso = await asyncio.to_thread(cotas.conta_com_cota, body.config_dir, cotas.cotas_claude())
         if aviso:
             _log.warning("create_session %s: %s", body.name, aviso)
             body = body.model_copy(update={"config_dir": config_dir})
+            avisos_extra.append(aviso)
+            account_source = "quota"
     if body.provider == "claude" and not body.engine and (
             body.config_dir is None or body.config_dir in {c.path for c in list_config_dirs()}):
         cfg = Path(body.config_dir) if body.config_dir else None
@@ -2276,6 +2331,8 @@ async def create_session(body: CreateBody):
                 info = info.model_copy(update={"owner": guest.name})
             if avisos_extra:
                 info = info.model_copy(update={"avisos": [*info.avisos, *avisos_extra]})
+            info = CreatedSessionInfo(**info.model_dump(), config_dir=body.config_dir,
+                                      account_source=account_source)
             if (guest is None and body.remember_provider
                     and runtime_config.get("last_session_provider") != info.provider):
                 try:
