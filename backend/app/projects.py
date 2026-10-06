@@ -15,6 +15,8 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 from app import atomico, runner
@@ -166,7 +168,10 @@ DONO_INDETERMINADO = "<indeterminado>"
 
 # socket:[inode] -> cwd do dono. O inode só existe enquanto o socket vive, então o dono não muda;
 # a varredura de /proc/*/fd fica só para socket novo.
-_dono_por_socket: dict[str, str | None] = {}
+_dono_por_socket: dict[str, str] = {}
+_sem_dono_desde: dict[str, float] = {}
+_REPROCURA_S = 60.0
+_dono_lock = threading.Lock()
 
 
 def _port_info(ports: set[int]) -> dict[int, tuple[bool, str | None]]:
@@ -200,39 +205,45 @@ def _port_info(ports: set[int]) -> dict[int, tuple[bool, str | None]]:
                     port = want[hexport]
                     out[port] = (True, None)
                     inodes[f"socket:[{f[9]}]"] = port
-    global _dono_por_socket
-    _dono_por_socket = {s: d for s, d in _dono_por_socket.items() if s in inodes}
-    if not inodes:
-        return out
-    for sock, port in inodes.items():
-        if (dono := _dono_por_socket.get(sock)) is not None:
-            out[port] = (True, dono)
-    pending = {p for s, p in inodes.items() if s not in _dono_por_socket and out[p][1] is None}
-    for pid in os.listdir("/proc"):
-        if not pending:
-            break
-        if not pid.isdigit():
-            continue
-        try:
-            fds = os.scandir(f"/proc/{pid}/fd")
-        except OSError:
-            continue  # processo de outro usuario/ja morto: dono fica None, nunca atribuido
-        for fd in fds:
-            try:
-                link = os.readlink(fd.path)
-            except OSError:
+    global _dono_por_socket, _sem_dono_desde
+    # Polls simultâneos rodam em threads do threadpool: a trava cobre a leitura e a troca do cache.
+    with _dono_lock:
+        agora = time.monotonic()
+        donos = {s: d for s, d in _dono_por_socket.items() if s in inodes}
+        sem_dono = {s: t for s, t in _sem_dono_desde.items() if s in inodes}
+        pending = {s for s in inodes
+                   if s not in donos and agora - sem_dono.get(s, -_REPROCURA_S) >= _REPROCURA_S}
+        for pid in os.listdir("/proc"):
+            if not pending:
+                break
+            if not pid.isdigit():
                 continue
-            port = inodes.get(link)
-            if port is not None and port in pending:
+            try:
+                fds = os.scandir(f"/proc/{pid}/fd")
+            except OSError:
+                continue  # processo de outro usuario/ja morto: dono fica None, nunca atribuido
+            for fd in fds:
                 try:
-                    out[port] = (True, os.path.realpath(f"/proc/{pid}/cwd"))
-                    _dono_por_socket[link] = out[port][1]
+                    link = os.readlink(fd.path)
                 except OSError:
-                    pass
-                pending.discard(port)
-    # Socket sem dono visível também fica guardado: sem isso cada poll varria /proc inteiro.
-    for sock in inodes:
-        _dono_por_socket.setdefault(sock, None)
+                    continue
+                if link in pending:
+                    try:
+                        # readlink, não realpath: com o processo morto o realpath devolve o
+                        # próprio "/proc/<pid>/cwd" em vez de falhar.
+                        donos[link] = os.readlink(f"/proc/{pid}/cwd")
+                    except OSError:
+                        continue
+                    pending.discard(link)
+        # Sem dono visível (outro usuário, processo trocando): procura de novo só depois de um
+        # intervalo, senão cada poll varreria /proc inteiro.
+        for sock in pending:
+            sem_dono[sock] = agora
+        _dono_por_socket = donos
+        _sem_dono_desde = sem_dono
+    for sock, port in inodes.items():
+        if (dono := donos.get(sock)) is not None:
+            out[port] = (True, dono)
     return out
 
 

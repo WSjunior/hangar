@@ -59,14 +59,16 @@ def _mtime(p: Path) -> float:
 
 # O cabeçalho não muda depois de gravado, e o do Codex chega a centenas de KB: sem isto o índice
 # relia todos os rollouts a cada passada. Chave com inode: arquivo recriado no mesmo caminho relê.
-_CWD_CACHE: dict[tuple[str, int, Callable], str] = {}
+# Sem o extrator na chave: cada caminho é de um provider só, e o do Pi é um lambda novo por chamada.
+# Entrada de arquivo apagado fica: cresce com o total de transcripts, não com o tempo.
+_CWD_CACHE: dict[tuple[str, int], str] = {}
 
 
 def _cwd_do_cabecalho(p: Path, campo: Callable[[dict], Optional[str]], max_linhas: int = 5) -> Optional[str]:
     """cwd lido das PRIMEIRAS linhas do transcript. Pi e Codex gravam na 1a, mas ler algumas a mais
     cobre um cabecalho que ganhe linha nova."""
     try:
-        chave = (str(p), p.stat().st_ino, campo)
+        chave = (str(p), p.stat().st_ino)
     except OSError:
         chave = None
     if chave is not None and (cwd := _CWD_CACHE.get(chave)) is not None:
