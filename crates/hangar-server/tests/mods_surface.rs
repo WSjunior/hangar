@@ -283,10 +283,13 @@ fn second_refusal_or_missing_key_is_desenho_vencido() {
 }
 
 #[test]
-fn unknown_site_or_band_close_is_botao_inexistente() {
+fn unknown_site_is_botao_inexistente_for_press_and_painel_inexistente_for_show_and_close() {
     let mut surface = ready(button("ok", 1));
     assert_eq!(code(reply_of(&surface.call(1, press("painel-fechado", "ok"), 0.1), 1)), "erro_mod_botao_inexistente");
-    assert_eq!(code(reply_of(&surface.call(2, ModsCall::Close { site: "above-prompt".into() }, 0.1), 2)), "erro_mod_botao_inexistente");
+    assert_eq!(code(reply_of(&surface.call(2, ModsCall::Close { site: "above-prompt".into() }, 0.1), 2)), "erro_mod_painel_inexistente");
+    assert_eq!(code(reply_of(&surface.call(4, ModsCall::Show { site: "above-prompt".into() }, 0.1), 4)), "erro_mod_painel_inexistente");
+    assert_eq!(code(reply_of(&surface.call(5, ModsCall::Show { site: "fechado".into() }, 0.1), 5)), "erro_mod_painel_inexistente");
+    assert_eq!(code(reply_of(&surface.call(6, ModsCall::Close { site: "fechado".into() }, 0.1), 6)), "erro_mod_painel_inexistente");
     let idle = &mut Surface::new("ui:t".into());
     assert_eq!(code(reply_of(&idle.call(3, press("above-prompt", "ok"), 0.1), 3)), "erro_mod_botao_inexistente", "antes de ligar");
 }
