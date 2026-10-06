@@ -76,6 +76,22 @@ async fn open_store(state_path:&std::path::Path,projection_dir:&std::path::Path,
 
 fn failure(code:&str) -> RuntimeError { RuntimeError::new(code,"runtime indisponível para esta chave ou geração") }
 
+/// Prazo da devolução da janela esticada ao abrir a sessão com terminal (`unstretch`).
+const UNSTRETCH_MAX:Duration = Duration::from_secs(2);
+
+/// Um clique cortado pelo fim do servidor deixa a janela com a altura esticada (`TALL_ROWS`): a guarda de
+/// limpeza dele não rodou. Sem terminal ligado, quem abre a sessão devolve o tamanho mínimo; o redimensionar
+/// do executor devolve junto o `window-size latest`. Com um terminal ligado, o `window-size latest` já lhe
+/// deu o tamanho. `true` quando devolveu; qualquer falha deixa a janela como está.
+pub async fn unstretch(pane:&dyn crate::mods::click::Pane,until:std::time::Instant) -> bool {
+    use crate::mods::click::{MIN_COLUMNS,MIN_ROWS,PaneOp,PaneReply,TALL_ROWS};
+    let op = |op:PaneOp| tokio::time::timeout_at(until.into(),pane.op(op,until));
+    let Ok(Ok(PaneReply::Formats(formats))) = op(PaneOp::Formats).await else { return false };
+    if formats.rows != TALL_ROWS { return false; }
+    let Ok(Ok(PaneReply::Clients(0))) = op(PaneOp::Clients).await else { return false };
+    matches!(op(PaneOp::Resize { columns:formats.columns.max(MIN_COLUMNS),rows:MIN_ROWS }).await,Ok(Ok(_)))
+}
+
 impl RuntimeRegistry {
     pub fn new(upstream:SocketAddr,secret:String,instance:String) -> Self {
         Self { entries:Mutex::new(BTreeMap::new()),events:broadcast::channel(1024).0,
@@ -167,7 +183,29 @@ impl RuntimeRegistry {
                 let store=open_store(&target.state_path,&target.projection_dir,&target.key,target.generation,&target.name,lease.clone()).await?;
                 let revision=self.revisions.lock().await.entry(target.key.clone()).or_insert_with(||Arc::new(AtomicU64::new(0))).clone();
                 let handle=super::terminal::TerminalActor::spawn(target.clone(),QueueActor::start(store,lease),self.policy.clone(),super::terminal::TerminalOptions::default(),self.events.clone(),revision);
-                self.entries.lock().await.insert(target.key.clone(),Entry {generation:target.generation,handle:EntryHandle::Terminal {target:target.clone(),handle:handle.clone()},lease_path:target.lease_path.clone(),name:target.name.clone(),mods_life:0});handle
+                // Interface dos mods da sessão com terminal (fase 3): o Rust é o dono do terminal aqui, então é
+                // dono do clique e da faixa dela. A vida é única no servidor (`new_life`); o processo é a chave
+                // durável mais o pane e a criação dele, que o renomear mantém.
+                let life=match &self.mods {
+                    Some(mods)=>{
+                        // Antes de ligar: nenhum pedido de app pode estar esticando a janela enquanto ela é lida.
+                        unstretch(&handle,std::time::Instant::now()+UNSTRETCH_MAX).await;
+                        let life=mods.new_life();
+                        let link=crate::mods::terminal::TerminalLink::new(target.name.clone(),life,Arc::new(handle.clone()),mods.clone(),crate::mods::click::Limits::default());
+                        let process=format!("{}:{}:{}",target.key,target.binding.pane,target.binding.created);
+                        mods.attach_terminal(&target.name,&process,life,link.clone());
+                        // O vigia sobe depois de ligar: o `attach_terminal` para o vigia do elo que estava no
+                        // nome, e se fosse este mesmo elo o derrubaria. No psmux não há vigia (o `watch_notices`
+                        // recusa no Windows): lá o mínimo volta na operação seguinte, no `prepare` do clique. O
+                        // mínimo vale já na abertura: a janela pode ter ficado pequena com um terminal que se
+                        // desligou.
+                        if !target.binding.windows {link.watch(&target.binding.mux_argv);}
+                        tokio::spawn(async move {link.floor().await;});
+                        life
+                    },
+                    None=>0,
+                };
+                self.entries.lock().await.insert(target.key.clone(),Entry {generation:target.generation,handle:EntryHandle::Terminal {target:target.clone(),handle:handle.clone()},lease_path:target.lease_path.clone(),name:target.name.clone(),mods_life:life});handle
             }
         };
         let snapshot=handle.snapshot().await?;
@@ -196,9 +234,9 @@ impl RuntimeRegistry {
             tracing::warn!(key,code=%error.code,"ator do runtime já tinha terminado; sessão liberada");
         }
         self.entries.lock().await.remove(key);
-        // A sessão saiu do Rust: os apps perdem a faixa e os pedidos voltam a não ter dono (S9). Sessão
-        // com terminal nunca entrou no `Mods`; não pode apagar a sem terminal de mesmo nome.
-        if matches!(handle,EntryHandle::Headless(_)) && let Some(mods) = &self.mods { mods.forget(&name,life); }
+        // A sessão saiu do Rust: os apps perdem a faixa e os pedidos voltam a não ter dono (S9). Com ou sem
+        // terminal, esquece só esta vida: outra sessão que tenha tomado o nome (outra vida) fica.
+        if let Some(mods) = &self.mods { mods.forget(&name,life); }
         Ok(json!({"closed":true}))
     }
     async fn barrier(&self,key:&str) -> Arc<Mutex<()>> {

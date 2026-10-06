@@ -1123,6 +1123,7 @@
   "erro_mod_fechar_recusado": "The mod didn't let the pane close.",
   "erro_mod_guarda_indisponivel": "Couldn't confirm that the session is free of the agent switch; try again.",
   "erro_mod_painel_inexistente": "That pane is no longer open in the mod.",
+  "erro_mod_convidado": "Only the session owner can use its mods from the app; guests can watch but not click.",
   "plugin_clique_falhou": "Couldn't complete the click on the mod.",
   "plugin_aba_falhou": "Couldn't switch the mod's pane tab.",
   "plugin_abas_label": "Plugin panes",

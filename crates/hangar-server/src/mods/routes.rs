@@ -3,6 +3,11 @@
 //! não atende assim, ou pedido de convidado, segue para o Python, que é o dono, como no `/events`; a
 //! digitação, que o Python não tem, é recusada aqui.
 //!
+//! A sessão com terminal que o Rust atende (fase 3) usa as mesmas rotas, com o clique pela tela. Nela, o
+//! pedido com token de convidado é recusado aqui (`erro_mod_convidado`): repassado, o `plugin_press` do
+//! Python dirigiria o pane do executor. A digitação é recusada logo na entrada, sem esperar a vez da sessão
+//! nem consultar a guarda da troca de agente.
+//!
 //! Antes de cada operação a rota pergunta ao Python se a troca de agente está em curso
 //! (`GET /internal/sessions/{name}/transfer`): a coordenação da troca mora lá, e o 409 volta ao app como
 //! o Python o deu. Limite aceito (ruling A12): a rota do Python segura o ingresso (`session_ingress`)
@@ -66,8 +71,9 @@ fn refused(headers: &HeaderMap, error: &ModsError) -> Response {
 /// viajar no `Err`.
 type Done = Box<Response>;
 
-/// O Rust atende quando o pedido é do dono e a sessão é superfície dele; senão, o Python. `outside`: a
-/// recusa do dono numa sessão sem superfície no Rust, para a rota que o Python não tem (`input`).
+/// O Rust atende quando o pedido é do dono e a sessão é dele; senão, o Python. `outside`: a recusa do dono
+/// numa sessão sem superfície no Rust, para a rota que o Python não tem (`input`). Na sessão com terminal do
+/// Rust, o convidado é recusado aqui, sem repasse.
 async fn owned(st: &Arc<AppState>, peer: SocketAddr, path: Result<Path<String>, PathRejection>, req: Request,
     outside: Option<fn() -> ModsError>) -> Result<(String, HeaderMap, Body), Done> {
     let (fwd, owner) = gate(st, peer, &req);
@@ -76,9 +82,22 @@ async fn owned(st: &Arc<AppState>, peer: SocketAddr, path: Result<Path<String>, 
             let headers = req.headers().clone();
             Ok((name, headers, req.into_body()))
         }
+        (Ok(Path(name)), _) if !owner && st.mods.is_terminal(&name) && guest_shaped(&req, fwd.https) => {
+            Err(Box::new(reply(Some(req.headers()), StatusCode::FORBIDDEN, json!({"detail": guest_refused().detail()}))))
+        }
         (Ok(Path(_)), Some(refusal)) if owner => Err(Box::new(refused(req.headers(), &refusal()))),
         _ => Err(Box::new(pass(st, req, &fwd).await)),
     }
+}
+
+/// Token com a forma do de convidado: o convite e o usuário convidado recebem `secrets.token_urlsafe(32)`
+/// (`share_store.py`, `guest_users.py`), 43 caracteres de base64url. Sem essa forma, o pedido segue ao
+/// Python, que responde 401 ou 429 e conta a falha (o mesmo bloqueio por tentativas de antes): o Python só
+/// aceita dono ou convidado, e o dono o Rust já reconheceu. Contar aqui o token de convidado como falha
+/// bloquearia o atalho do dono que estivesse no mesmo IP.
+fn guest_shaped(req: &Request, https: bool) -> bool {
+    crate::auth::presented_token(req.headers(), req.uri().query(), req.method(), https)
+        .is_some_and(|token| token.len() == 43 && token.iter().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
 }
 
 async fn body<T: DeserializeOwned>(headers: &HeaderMap, raw: Body) -> Result<T, Done> {
@@ -185,6 +204,11 @@ pub async fn input(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
     path: Result<Path<String>, PathRejection>, req: Request) -> Response {
     let deadline = Instant::now() + REQUEST_BUDGET;
     let (name, headers, raw) = match owned(&st, peer, path, req, Some(no_typing)).await { Ok(parts) => parts, Err(response) => return *response };
+    // Com terminal não há por onde digitar no campo do mod: a recusa não espera a vez da sessão (um clique
+    // em curso a segura por segundos) nem pergunta ao Python pela troca de agente.
+    if st.mods.is_terminal(&name) {
+        return refused(&headers, &no_typing());
+    }
     let request: InputBody = match body(&headers, raw).await { Ok(request) => request, Err(response) => return *response };
     if !fits(&request.site, 64) || !fits(&request.key, 256) || !matches!(request.kind.as_str(), "change" | "submit")
         || request.value.chars().count() > VALUE_MAX {
