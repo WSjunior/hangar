@@ -49,14 +49,15 @@ impl Default for AgentPanes {
 }
 
 impl AgentPanes {
-    /// `compute` só roda sem resposta guardada há menos de `TTL`.
+    /// `compute` só roda sem resposta guardada há menos de `TTL`, fora da trava (lê processos e
+    /// o multiplexador: chamar por `spawn_blocking`).
     pub fn target(&self, name: &str, now: Instant, compute: impl FnOnce() -> Option<String>) -> Option<String> {
-        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((target, _)) = cache.get(name).filter(|(_, at)| now.saturating_duration_since(*at) < TTL) {
+        let lock = || self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((target, _)) = lock().get(name).filter(|(_, at)| now.saturating_duration_since(*at) < TTL) {
             return target.clone();
         }
         let target = compute();
-        cache.insert(name.to_owned(), (target.clone(), now));
+        lock().insert(name.to_owned(), (target.clone(), now));
         target
     }
 

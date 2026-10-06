@@ -33,7 +33,9 @@ pub fn parse_permission_mode(pane: &str) -> Option<&'static str> {
 
 /// O que já foi perguntado ao Python. Fora da operação controlada a resposta dele para a mesma
 /// leitura não muda, então só se pergunta na leitura nova, a cada rodada da operação e uma vez
-/// quando ela acaba.
+/// quando ela acaba. ponytail: uma troca de modo gravada por outro caminho do Python
+/// (`observar_modo`) só chega ao evento quando o pane muda; perguntar a cada rodada custaria um
+/// HTTP por 0,75 s por chat.
 #[derive(Debug, Default)]
 pub struct Watch {
     key: Option<String>,

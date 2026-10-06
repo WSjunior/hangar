@@ -133,8 +133,7 @@ impl<S: Sources> Monitor<S> {
             match self.round().await {
                 Step::Exit(exit) => return exit,
                 Step::Again => {}
-                Step::Sleep => tokio::time::sleep(self.poll).await,
-                Step::Wait { alive: false } => tokio::time::sleep(self.poll).await,
+                Step::Sleep | Step::Wait { alive: false } => tokio::time::sleep(self.poll).await,
                 Step::Wait { alive: true } => tokio::select! {
                     () = tokio::time::sleep(self.poll) => {}
                     () = notified => {}
@@ -159,26 +158,34 @@ impl<S: Sources> Monitor<S> {
         if self.src.epoch() != epoch {
             return Step::Again;
         }
-        // `has-session` só separa "morreu" de "pane em branco": no quadro vazio, e na falha só ao
-        // entrar nela e a cada nova tentativa do pool (até lá ele repete a mesma falha).
+        // `has-session` só separa "morreu" de "pane em branco": no quadro vazio, e na falha ao
+        // entrar nela e a cada nova tentativa do pool (até lá ele repete a mesma falha sem tentar).
+        // Falha que o pool não guarda é tentativa nova a cada rodada.
         let probe = match &captured {
             Ok(frame) => {
                 self.mem.failure = None;
                 frame.text.is_empty()
             }
-            Err(f) => self.mem.failure.replace(f.attempt) != Some(f.attempt),
+            Err(f) => f.attempt.is_none() || self.mem.failure != Some(f.attempt),
         };
-        if probe && self.src.has_session().await == Some(false) {
-            if facts.in_transfer {
-                return Step::Sleep;
-            }
-            match self.src.dead().await {
-                Ok(Dead::Ok) => {
-                    let _ = self.src.publish(StateEvent { session: self.src.name().to_owned(), state: "dead".into(), ..Default::default() }).await;
-                    return Step::Exit(Exit::Dead);
+        if probe {
+            match self.src.has_session().await {
+                // Só a resposta definitiva conta como conferida; o resto repete no tique seguinte.
+                Some(true) => if let Err(f) = &captured { self.mem.failure = Some(f.attempt) },
+                None => {
+                    if crate::warn_limit::allow(Some(self.src.name()), "state_mux_no_answer") {
+                        tracing::warn!(session = self.src.name(), code = "state_mux_no_answer", "estado: has-session sem resposta");
+                    }
                 }
-                Ok(Dead::InTransfer) => return Step::Sleep,
-                Err(code) => return self.fail(UNAVAILABLE, code, &facts).await,
+                Some(false) if facts.in_transfer => return Step::Sleep,
+                Some(false) => match self.src.dead().await {
+                    Ok(Dead::Ok) => {
+                        let _ = self.src.publish(StateEvent { session: self.src.name().to_owned(), state: "dead".into(), ..Default::default() }).await;
+                        return Step::Exit(Exit::Dead);
+                    }
+                    Ok(Dead::InTransfer) => return Step::Sleep,
+                    Err(code) => return self.fail(UNAVAILABLE, code, &facts).await,
+                },
             }
         }
         match captured {
@@ -225,7 +232,12 @@ impl<S: Sources> Monitor<S> {
             if self.mem.permission.due(&key, observed, facts.permission_op) {
                 match self.src.observe_permission(&key, observed).await {
                     Ok(answer) => self.mem.permission.answered(&key, observed, facts.permission_op, answer),
-                    Err(code) => { problem.get_or_insert((PERMISSION_FAILED, code)); }
+                    Err(code) => {
+                        if crate::warn_limit::allow(Some(&name), PERMISSION_FAILED) {
+                            tracing::warn!(session = name.as_str(), code = PERMISSION_FAILED, detail = code.as_str(), "estado: permission.observe falhou");
+                        }
+                        problem.get_or_insert((PERMISSION_FAILED, code));
+                    }
                 }
             }
         }
@@ -277,7 +289,7 @@ impl PoolCapture {
     pub async fn capture(&self) -> Result<Frame, CaptureFailed> {
         match self.pool.capture(self.request.clone()).await {
             Ok(r) => Ok(Frame { text: r.text, analysis: r.analysis }),
-            Err(e) => Err(CaptureFailed { code: e.0.to_owned(), attempt: self.pool.failure_attempts(&self.request).await }),
+            Err(e) => Err(CaptureFailed { code: e.0.to_owned(), attempt: self.pool.failure_attempts(&self.request, &e).await }),
         }
     }
 
@@ -377,9 +389,9 @@ mod tests {
         let task = tokio::spawn(Monitor::new(fake.clone()).run());
         tokio::time::sleep(POLL * 14).await;
         assert!(fake.rounds() >= 14);
-        // Entrada (tentativa 0), nova tentativa (1), falha que o pool não guarda (uma vez),
+        // Entrada (tentativa 0), nova tentativa (1), falha que o pool não guarda (toda rodada: 3),
         // e a entrada de novo depois do quadro bom.
-        assert_eq!(fake.has_session.load(Ordering::SeqCst), 4);
+        assert_eq!(fake.has_session.load(Ordering::SeqCst), 6);
         let problems: Vec<_> = fake.events.lock().unwrap().iter().map(|(_, e)| e.problema.clone()).collect();
         assert_eq!(problems, [None, Some(OBSERVATION_FAILED.into()), None, Some(OBSERVATION_FAILED.into())],
             "um evento por código; a volta publica de novo");

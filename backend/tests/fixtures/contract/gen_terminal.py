@@ -231,6 +231,7 @@ async def monitor_sequence(frames):
 
     def observe(key, mode, sessao=None):
         result = original_observe(key, mode, sessao=sessao)
+        assert rounds[-1]["observe"] is None, "duas perguntas de permissão na mesma rodada"
         rounds[-1]["observe"] = list(result)
         return result
 
@@ -264,7 +265,8 @@ async def monitor_sequence(frames):
                 rounds[-1]["event"] = event.model_dump(mode="json")
         except Finished:
             pass
-    _load_plugin(None)
+        finally:
+            _load_plugin(None)
     return rounds
 
 
@@ -284,7 +286,9 @@ def monitor_sequences():
     ask = dict(id="q", questions=[dict(question="Qual?", options=[dict(label="A"), dict(label="B")])], seen_age_ms=0)
     stale = lambda age, **kw: facts(plugin_state=dict(state="working", reason=None, age_ms=age), **kw)
     return {
-        # Spinner congelado: STALE_LIMIT rodadas iguais viram idle, contando as acordadas pelo plugin.
+        # Spinner congelado: STALE_LIMIT rodadas iguais viram idle. O Python conta por rodada; `wake`
+        # só é lido pelo replay do Rust, que acorda a espera por empurrão. Cada quadro traz todos os
+        # fatos da rodada: ausente é vazio, não "o de antes".
         "frozen_spinner_with_wakes": [f(spinner, facts=facts(waiter_open=True), wake=True)] * 5,
         # Sem spinner: IDLE_DEBOUNCE rodadas segurando o working.
         "debounce": [f(spinner)] + [f(plain)] * 5,
