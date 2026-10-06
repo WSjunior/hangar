@@ -672,3 +672,33 @@ async fn the_click_gap_counts_against_the_deadline() {
     assert_eq!(code(result), "erro_mod_clique_sem_resposta");
     assert_eq!(pane.actions(), ["click 0 87"]);
 }
+
+#[tokio::test]
+async fn the_keyboard_ring_with_a_dozen_band_buttons_fits_the_deadline() {
+    // Doze botões na faixa antes dos painéis, com o custo de uma operação no psmux (um processo: cerca de
+    // 70 ms na prova, aqui 100 ms) e os tempos de verdade: cada passo do anel é a tecla e uma leitura, sem
+    // reler o tamanho, e o `Enter` sai dentro dos 7,5 s do pedido.
+    let mut faixa = pm();
+    faixa.above = json!({"type": "Box", "children": (0..12).map(|i| mods_support::pane::button(&format!("b{i}"), &format!("Botão {i}"), "vitrine"))
+        .collect::<Vec<_>>()});
+    let (mods, pane) = setup("tmux-14-ciclo-4-prompt", faixa);
+    pane.mouse(false);
+    pane.cost(Duration::from_millis(100));
+    // Na tela de verdade cada botão da faixa muda o inverso; aqui duas telas se alternam para a leitura ver a
+    // mudança, e nenhuma delas tem o foco num painel.
+    for i in 0..12 { pane.on_keys("C-x Tab", vec![Show(if i % 2 == 0 { "tmux-14-ciclo-5-faixa" } else { "tmux-14-ciclo-4-prompt" })]); }
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-6-painel-1")]);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-7-painel-2")]);
+    pane.on_keys("Tab", vec![Focus("pm-mock-mr", "mr-a", false)]);
+    pane.on_keys("Enter", vec![Pressed("pm-mock-mr", "mr-a")]);
+    back_from_mr(&pane);
+    let started = Instant::now();
+    let (limits, undo, clicked) = (Limits::default(), Undo::default(), Mutex::default());
+    let ctx = Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: started + Duration::from_millis(7500), undo: &undo, life: 1,
+        clicked: &clicked };
+    let result = click::dispatch(&ctx, ModsCall::Press { site: "pm-mock-mr".into(), key: "mr-a".into() }).await;
+    click::finish(&ctx).await;
+    result.unwrap();
+    assert_eq!(keys(&pane).iter().filter(|k| *k == "C-x Tab").count(), 14 + 2, "o anel inteiro e a volta ao prompt");
+    assert!(keys(&pane).contains(&"Enter".to_string()));
+}

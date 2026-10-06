@@ -299,9 +299,14 @@ pub struct TerminalDriver {
     io: Arc<dyn TerminalIo>,
     limits: InputLimits,
     serial: Mutex<()>,
+    /// A identidade do pane já foi conferida por quem criou o driver: as operações de mod não a refazem.
+    pane_checked: bool,
 }
 impl TerminalDriver {
-    pub fn new(binding: TerminalBinding, services: Arc<dyn TerminalServices>, io: Arc<dyn TerminalIo>, limits: InputLimits) -> Self { Self { binding, services, io, limits, serial: Mutex::new(()) } }
+    pub fn new(binding: TerminalBinding, services: Arc<dyn TerminalServices>, io: Arc<dyn TerminalIo>, limits: InputLimits) -> Self { Self { binding, services, io, limits, serial: Mutex::new(()), pane_checked: false } }
+    /// Driver para as operações de um clique de mod cujo pane já teve a identidade conferida na mesma
+    /// reserva (`PaneOp::Hold`): sem a conferência, cada operação é um processo do multiplexador a menos.
+    pub fn pane_checked(mut self) -> Self { self.pane_checked = true; self }
     pub fn binding(&self) -> &TerminalBinding { &self.binding }
     fn request(&self, args: Vec<String>, stdin: Vec<u8>) -> Result<CommandRequest, IoFailure> {
         let (program, prefix) = self.binding.mux_argv.split_first().ok_or(IoFailure { code: "mux_missing", may_have_written: false })?;
@@ -323,6 +328,7 @@ impl TerminalDriver {
     }
     /// Mesmo pane e mesma vida do multiplexador, sem perguntar pela conversa.
     async fn verify_pane(&self) -> Result<(), IoFailure> {
+        if self.pane_checked { return Ok(()); }
         let output = self.raw(vec!["display-message".into(), "-p".into(), "-t".into(), self.binding.pane.clone(), "#{session_name}\t#{pane_id}\t#{session_created}".into()], vec![]).await?;
         if !output.success { return Err(IoFailure { code: "identity_failed", may_have_written: false }); }
         let output = std::str::from_utf8(&output.stdout).map_err(|_| IoFailure { code: "identity_utf8", may_have_written: false })?;

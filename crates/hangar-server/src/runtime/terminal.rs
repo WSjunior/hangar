@@ -146,6 +146,8 @@ struct Executor {
     stall:Option<Stall>,
     /// Pane reservado a um clique de mod (`PaneOp::Hold`) até este instante.
     hold:Option<tokio::time::Instant>,
+    /// A identidade do pane já foi conferida nesta reserva: as operações seguintes do clique não a refazem.
+    hold_checked:bool,
     /// Comandos e pedidos de drenagem que chegaram com o pane reservado: saem na ordem depois do `Release`.
     parked:VecDeque<Message>,
 }
@@ -173,7 +175,7 @@ impl TerminalActor {
         let sequence=Arc::new(AtomicU64::new(queue.initial_state().next_seq.max(previous.max(queue.initial_state().operations.len() as u64).saturating_add(1))));
         let receipt=ReceiptIndex::new("claude",&target.binding.conversation);
         let (sender,receiver)=mpsc::channel(64); let closed=Arc::new(AtomicBool::new(false)); let anchor=options.anchor.clone();
-        let executor=Executor {target,queue:Arc::new(queue),policy,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,loan:None,stall:None,hold:None,parked:VecDeque::new()};
+        let executor=Executor {target,queue:Arc::new(queue),policy,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,loan:None,stall:None,hold:None,hold_checked:false,parked:VecDeque::new()};
         let task=tokio::spawn(executor.run(receiver,closed.clone()));
         TerminalHandle {sender,closed,task:Arc::new(Mutex::new(Some(task))),stopped:Arc::new(Mutex::new(None)),anchor}
     }
@@ -189,7 +191,7 @@ impl Executor {
     }
     /// Pane reservado a um clique de mod (`PaneOp::Hold`); vence sozinho no prazo, mesmo sem o `Release`.
     fn held(&mut self)->bool {
-        if self.hold.is_some_and(|until|tokio::time::Instant::now()>=until) {self.hold=None;}
+        if self.hold.is_some_and(|until|tokio::time::Instant::now()>=until) {self.hold=None; self.hold_checked=false;}
         self.hold.is_some()
     }
     /// O Python pede o teclado por uma operação; fila, trava e estado continuam aqui. O ator é serial:
@@ -379,13 +381,24 @@ impl Executor {
     /// emprestado ao Python (administração digitando no pane), recusa: duas mãos no mesmo pane erram o alvo.
     async fn pane_op(&mut self,op:PaneOp)->Result<PaneReply,RuntimeError> {
         // Soltar vale sempre: é a limpeza do clique.
-        if op==PaneOp::Release {self.hold=None; return Ok(PaneReply::Done);}
+        if op==PaneOp::Release {self.hold=None; self.hold_checked=false; return Ok(PaneReply::Done);}
         if self.loaned() {return Err(error("keyboard_loan"));}
         if let PaneOp::Hold {millis}=op {
+            // A renovação da mesma reserva (a limpeza) mantém a conferência já feita.
+            if !self.held() {self.hold_checked=false;}
             self.hold=Some(tokio::time::Instant::now()+Duration::from_millis(millis).min(MAX_MODS_HOLD));
             return Ok(PaneReply::Done);
         }
-        let driver=TerminalDriver::new(self.target.binding.clone(),Arc::new(NoFacts),self.options.io.clone(),self.options.limits.clone());
+        // Dentro de uma reserva o pane é conferido uma vez: no psmux cada conferência é mais um processo, e
+        // a reserva por teclado com uma dúzia de botões na faixa estourava o prazo do pedido.
+        let checked=self.held() && self.hold_checked;
+        let mut driver=TerminalDriver::new(self.target.binding.clone(),Arc::new(NoFacts),self.options.io.clone(),self.options.limits.clone());
+        if checked {driver=driver.pane_checked();}
+        let reply=self.pane_effect(&driver,op).await;
+        if reply.is_ok() && self.hold.is_some() {self.hold_checked=true;}
+        reply
+    }
+    async fn pane_effect(&self,driver:&TerminalDriver,op:PaneOp)->Result<PaneReply,RuntimeError> {
         let failed=|failure:input::IoFailure|error(failure.code);
         Ok(match op {
             PaneOp::Formats=>PaneReply::Formats(driver.mods_formats().await.map_err(failed)?),
