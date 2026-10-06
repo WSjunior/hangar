@@ -1034,3 +1034,62 @@ async fn a_failed_return_backs_off_and_keeps_the_entry() {
     f.wait_for("entrega com o foco de volta",||!typed_at(&f,"Sem volta").is_empty()).await;
     h.stop().await.unwrap();
 }
+
+/// O painel focado com o anel numa linha do corpo: a pessoa andando nele muda a linha.
+fn pane_ring_screen(row:usize)->String {
+    let border="\x1b[38;2;177;185;249m│\x1b[0m";
+    let left=|text:&str,ring:bool|format!("{text:<50}{border} {}",if ring {"\x1b[7m[ Botão ]\x1b[0m"} else {"[ Botão ]"});
+    format!("{}\n{}\n{}\n{}\n❯ \n{}\n",left("Resposta do Claude",row==0),left("",row==1),left("",row==2),&RULE_80[..50*3],&RULE_80[..50*3])
+}
+
+/// A espera do foco é da linha: uma linha que saiu da fila com o foco num painel não deixa a seguinte
+/// devolver o foco na hora.
+#[tokio::test]
+async fn the_focus_wait_starts_over_for_the_next_row() {
+    let f=Fixture::new().await; *f.io.mods_screen.lock().unwrap()=Some(pane_focus_screen());
+    f.io.ring_returns.store(true,std::sync::atomic::Ordering::Release);
+    let h=f.start_returning(broadcast::channel(128).0,Duration::from_secs(30),Duration::from_millis(600));
+    assert_eq!(h.command(f.command("primeira","Primeira")).await.unwrap().payload["code"],"mods_focus");
+    h.queue("abandona".into(),Action::Abandon {entry_id:"primeira".into()}).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(f.io.ring_keys.load(std::sync::atomic::Ordering::SeqCst),0);
+    let started=std::time::Instant::now();
+    assert_eq!(h.command(f.command("segunda","Segunda")).await.unwrap().payload["code"],"mods_focus");
+    f.wait_for("entrega da segunda",||!typed_at(&f,"Segunda").is_empty()).await;
+    assert!(started.elapsed()>=Duration::from_millis(600),"a segunda esperou o prazo dela: {:?}",started.elapsed());
+    h.stop().await.unwrap();
+}
+
+/// Quem anda pelo painel no terminal adia a devolução: o prazo conta da última mexida.
+#[tokio::test]
+async fn moving_in_the_pane_delays_the_return() {
+    let f=Fixture::new().await; *f.io.mods_screen.lock().unwrap()=Some(pane_ring_screen(0));
+    f.io.ring_returns.store(true,std::sync::atomic::Ordering::Release);
+    let h=f.start_returning(broadcast::channel(128).0,Duration::from_secs(30),Duration::from_millis(300));
+    let started=std::time::Instant::now();
+    assert_eq!(h.command(f.command("lendo","Enquanto mexe")).await.unwrap().payload["code"],"mods_focus");
+    for step in 1..=8 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        *f.io.mods_screen.lock().unwrap()=Some(pane_ring_screen(step%3));
+    }
+    assert_eq!(f.io.ring_keys.load(std::sync::atomic::Ordering::SeqCst),0,"nenhuma devolução enquanto a pessoa mexe");
+    assert!(typed_at(&f,"Enquanto mexe").is_empty());
+    f.wait_for("entrega depois de parar de mexer",||!typed_at(&f,"Enquanto mexe").is_empty()).await;
+    assert!(started.elapsed()>=Duration::from_millis(800+300),"{:?}",started.elapsed());
+    h.stop().await.unwrap();
+}
+
+/// Cada reserva confere o pane uma vez, também a renovação: a conferência não vale por todas.
+#[tokio::test]
+async fn each_mods_hold_checks_the_pane_again() {
+    let f=Fixture::new().await; let h=f.start();
+    let checks=||f.io.calls.lock().unwrap().iter().filter(|r|r.args.last().is_some_and(|a|a.starts_with("#{session_name}"))).count();
+    let before=checks();
+    for _ in 0..2 {
+        assert_eq!(h.pane(PaneOp::Hold{millis:5000},far()).await.unwrap(),PaneReply::Done);
+        assert!(matches!(h.pane(PaneOp::Screen,far()).await.unwrap(),PaneReply::Screen(_)));
+        assert!(matches!(h.pane(PaneOp::Screen,far()).await.unwrap(),PaneReply::Screen(_)));
+    }
+    assert_eq!(checks()-before,2,"uma conferência por reserva");
+    h.stop().await.unwrap();
+}
