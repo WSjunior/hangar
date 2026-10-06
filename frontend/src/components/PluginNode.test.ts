@@ -82,12 +82,12 @@ describe('hover nos mods', () => {
 
 // A linha da faixa do mod `pm-mock`: dois botões `plain` e um texto cortado com trechos coloridos dentro.
 const LINHA_PM: Node = { type: 'Box', props: { key: 'pm-linha', flexDirection: 'row', width: 150 }, children: [
-  { type: 'Button', props: { key: 'pm-abrir', plain: true, label: '▸ PM-18904' } },
+  { type: 'Button', props: { key: 'pm-abrir', plain: true, label: '▸ TAREFA-123' } },
   { type: 'Text', children: [' '] },
   { type: 'Button', props: { key: 'pm-fechar', plain: true, dimColor: true, label: 'fechar' } },
   { type: 'Text', props: { wrap: 'truncate-end' }, children: [
     { type: 'Text', props: { dimColor: true }, children: [' · '] },
-    { type: 'Text', props: { color: '#3fb97a', wrap: 'wrap' }, children: ['ms_devops ● 2 threads abertas'] },
+    { type: 'Text', props: { color: '#3fb97a', wrap: 'wrap' }, children: ['servico_exemplo ● 2 threads abertas'] },
   ] },
 ] };
 
