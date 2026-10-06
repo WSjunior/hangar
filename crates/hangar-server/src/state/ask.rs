@@ -32,8 +32,32 @@ fn is_tui_extra(label: &str) -> bool { TUI_EXTRAS.contains(&without_box(label).t
 
 /// O sidecar responde à pergunta que o pane mostra agora? Só em `awaiting_input`.
 pub fn matches(state: &StateEvent, payload: &AskQuestion) -> bool {
-    let _ = (state, payload, is_tui_extra as fn(&str) -> bool);
-    false
+    if state.state != "awaiting_input" {
+        return false;
+    }
+    let Some(first) = payload.questions.first() else { return false };
+    let first: BTreeSet<&str> = first.options.iter().map(|o| o.label.as_str()).collect();
+    let pane: BTreeSet<&str> = state.options.iter().flatten().filter(|o| !is_tui_extra(o)).map(|o| without_box(o)).collect();
+    if first.is_empty() || pane.is_empty() {
+        return false;
+    }
+    let has_preview = payload.questions.iter().flat_map(|q| &q.options).any(|o| !o.preview.is_empty());
+    // Sem prévia, igualdade exata: a resposta vai por índice, e opção a mais no pane cairia na
+    // linha errada. Com prévia o pane trunca o rótulo: prefixo numa direção só, mesma contagem
+    // (rótulo curto do pane casando com um longo do sidecar não troca a permissão por outra).
+    let (ok, reason) = if has_preview {
+        (first.len() == pane.len() && first.iter().all(|l| pane.iter().any(|s| !s.is_empty() && l.starts_with(s))), "askq_preview_mismatch")
+    } else if !first.is_subset(&pane) {
+        (false, "askq_label_outside_menu")
+    } else {
+        (pane.is_subset(&first), "askq_pane_extra_option")
+    };
+    // Degradar para os botões do pane é silencioso na tela: a frequência no diário é o sinal de
+    // que o TUI mudou o texto das linhas dele.
+    if !ok && crate::warn_limit::allow(Some(&state.session), reason) {
+        tracing::info!(session = state.session.as_str(), code = reason, sidecar = first.len(), pane = pane.len(), "askq: menu não casa, fica com os botões do pane");
+    }
+    ok
 }
 
 /// `<config>/projects/<cwd>/<sid>.jsonl` → `<config>/.hangar-askq/<sid>.json`.

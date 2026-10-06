@@ -165,7 +165,7 @@ a aceitar texto" → `session.deliverable` uma vez por borda e uma ao nascer), c
 `monitor::deliverable_edge_calls_service_once`, `monitor::runtime_problem_in_key_and_wakes`,
 `monitor::suggest_on_change`; vitest dos três mapas de `problema` com os códigos novos.
 
-- [ ] **Step 7: Testes e golden, vistos falhar**
+- [x] **Step 7: Testes e golden, vistos falhar**
 - [ ] **Step 8: Porte; códigos nos três clientes; testes focados; revisar**
 
 ### Task 5: Troca de dono do estado (contrato)
