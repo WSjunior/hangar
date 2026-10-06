@@ -501,3 +501,31 @@ async fn clients_skip_control_mode() {
  let capture = { d.mods_screen().await.unwrap(); io.calls.lock().unwrap().iter().rev().find(|r| r.args.iter().any(|a| a == "capture-pane")).unwrap().args.clone() };
  assert!(capture.contains(&"-e".to_string()) && !capture.contains(&"-S".to_string()), "só a parte visível, com atributos");
 }
+// #85: com o foco no painel de agentes o texto digitado some (e o `x` dele para um subagente).
+const AGENTS_FOCUSED: &str = include_str!("../../../backend/tests/fixtures/pane_agents_panel_focused.txt");
+const AGENTS_FOOTER: &str = include_str!("../../../backend/tests/fixtures/pane_agents_footer_focused.txt");
+#[tokio::test]
+async fn terminal_input_footer_focus_returns_to_composer_with_escape_before_typing() {
+ for focused in [AGENTS_FOCUSED, AGENTS_FOOTER] {
+  let io=Arc::new(FakeIo::new(vec![focused.into(),screen(""),screen("hello"),screen("")]));
+  assert_eq!(driver(io.clone(),Arc::new(Services::new())).prompt("hello","id").await.disposition,Disposition::Accepted);
+  let writes=io.writes(); assert_eq!(writes[0].args.last().unwrap(),"Escape"); assert_eq!(writes[1].args.last().unwrap(),"hello");
+ }
+}
+#[tokio::test]
+async fn terminal_input_footer_focus_that_stays_defers_without_typing() {
+ let io=Arc::new(FakeIo::new(vec![AGENTS_FOCUSED.into()]));
+ let r=driver(io.clone(),Arc::new(Services::new())).prompt("/clear","id").await;
+ assert_eq!(r.disposition,Disposition::Deferred); assert_eq!(r.code,"footer_focus");
+ let writes=io.writes(); assert_eq!(writes.len(),1); assert_eq!(writes[0].args.last().unwrap(),"Escape");
+}
+#[test]
+fn terminal_state_agents_panel_is_not_a_menu() {
+ for pane in [AGENTS_FOCUSED, include_str!("../../../backend/tests/fixtures/pane_agents_panel_focused_working.txt")] {
+  let analysis=hangar_server::terminal_state::analyze(pane);
+  assert_ne!(analysis.state,"awaiting_input"); assert!(analysis.options.is_none());
+  assert!(hangar_server::terminal_state::footer_focus(pane));
+ }
+ assert!(!hangar_server::terminal_state::footer_focus(&screen("")));
+ assert!(!hangar_server::terminal_state::footer_focus(include_str!("../../../backend/tests/fixtures/pane_trust_dialog.txt")));
+}

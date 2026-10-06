@@ -329,6 +329,59 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   caracteres após reinício. Essa captura simulada não comprova interface, modelo real ou
   restauração física. Ver [transferência em validação](#transferência-claude--codex-captura-nativa-em-validação).
 
+- **Painel de agentes do Claude Code não é menu, e o escritor não digita com o foco nele.** Abaixo
+  do composer, o `❯` na frente de `●`/`◯` é o foco no painel de agentes; com o foco no rodapé
+  (painel ou pílula "Enter to view tasks") o texto digitado some e o `x` para um subagente. Antes
+  de digitar, Rust e Python dão um Esc, que só devolve o foco ao composer, e adiam se ele não
+  voltar. Ver [o /clear e o rodapé do Claude Code](#o-clear-e-o-rodapé-do-claude-code).
+
+- **A trava do `/clear` só sobe se o Enter pode ter saído e sempre tem saída.** Aceito, ou incerto
+  nas etapas do Enter (`submit`, `submit_proof`; no Python, `*.submeter`). Incerto antes do Enter
+  é entrega incerta comum. Passado o prazo com a sessão parada e sem conversa nova (nem no vínculo
+  nem transcript novo começando por `<command-name>/clear`), a trava sai, a operação fica
+  recusada (`clear_not_applied`, a reabertura não a ergue de novo), a fila segue e a vista avisa.
+  O `/clear` nunca é reenviado sozinho. Com o Claude trabalhando ele espera na fila do Claude
+  Code, e a trava espera o turno.
+
+- **Comando de barra adiado é erro na tela, nunca 200.** Ele não tem linha na fila e não roda
+  depois sozinho (`erro_comando_nao_executado`).
+
+- **Pergunta do plugin interrompida pelo app sai na hora.** O Esc fecha o diálogo e o hook morre
+  sem `/ask-fim`, deixando o long-poll aberto até a janela fechar; sem long-poll por mais de 3 s
+  (Esc digitado no terminal), a pergunta também deixa de contar.
+
+## O /clear e o rodapé do Claude Code
+
+Medido em 06/10/2026, Claude Code 2.1.291, Haiku, backend isolado (issues #84 e #85, item 16 da
+coordenação da migração).
+
+**Rodapé.** Com agentes em segundo plano, abaixo do composer aparece `● main` / `◯ <subagente>`.
+`↓` (o "↓ to manage") leva o foco à pílula ("Enter to view tasks") e, de novo, ao painel
+(`↑/↓ to select`, depois `❯ ◯ … Enter to view · x to stop`). Com o foco lá, `/clear` digitado
+não aparece no composer; o `x` para o subagente. O `←` com shells rodando abre outro diálogo,
+"Background this session?", que é menu de verdade. Um Esc com o foco no painel ou na pílula só
+devolve o foco ao composer: com o Claude trabalhando o turno continuou (o contador seguiu).
+Telas em `backend/tests/fixtures/pane_agents_*.txt`, no contrato Python/Rust.
+
+**Trava presa (#84).** O `/clear` digitado no painel não chegava ao composer: `prove_input`
+falhava, a limpeza não se provava e a entrega voltava `unknown` em `input_proof`, sem Enter.
+`Accepted | Unknown` erguia a `clear_barrier`; como a conversa não mudava, toda mensagem seguinte
+voltava 503 `runtime_clear_barrier`, e o Recover a reerguia depois de reiniciar.
+
+**Prazo.** O transcript novo nasce em menos de 1 s depois do Enter do `/clear`, e começa pelo
+registro `<command-name>/clear</command-name>`. Com o Claude trabalhando, o `/clear` digitado fica
+na fila do Claude Code e só rodou 21 s depois, no fim do turno: por isso a saída da trava exige a
+sessão parada. Prazo de 10 s.
+
+**Item 16.** Interromper o AskUserQuestion pelo app (Esc) mata o hook do plugin sem `/ask-fim`,
+e o long-poll dele ficou aberto até a janela de 25 s fechar: `pergunta_pendente` dizia "aberta"
+por até 35 s depois do Esc. O `/clear` mandado nesse intervalo era adiado (`question_open`) e,
+sem linha na fila, sumia com 200; a mensagem seguinte não chegou em 60 s. Nos modos Rust e
+Python. Depois da correção: `/clear` aplicado na hora e a mensagem seguinte entregue uma vez.
+
+Fica de fora: no modo Python um `/clear` bem-sucedido volta 400 "resultado terminal incerto"
+(a troca da conversa acusa vínculo mudado depois do Enter), também antes desta correção.
+
 ## Prévia da chamada em voo: o ● pisca
 
 Medido em 05/10/2026, Claude Code 2.1.289. Com um comando rodando, a TUI desenha a chamada como

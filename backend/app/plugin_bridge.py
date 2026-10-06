@@ -42,6 +42,9 @@ plugin_router = APIRouter(prefix="/api/plugin")
 # Quanto o backend segura o long-poll antes de responder 204. Curto o bastante
 # para a morte da sessão aparecer, longo o bastante para a espera não virar poll.
 ESPERA_S = 25.0
+# Entre dois long-polls o hook volta em milissegundos (2 s se o backend falhar). Sem long-poll aberto
+# por mais que isto, o hook morreu: o Esc no terminal interrompe a ferramenta sem o `/ask-fim`.
+SEM_POLL_S = 3.0
 
 _lock = threading.Lock()
 _waiters: dict[str, asyncio.Queue] = {}
@@ -1296,13 +1299,28 @@ async def opened(body: OpenedBody):
 _perguntas: dict[str, dict] = {}
 
 
+def interrompeu(name: str) -> None:
+    """O Esc do app fecha o diálogo no terminal, e o hook morre sem `/ask-fim` deixando o long-poll
+    aberto até a janela fechar. A pergunta interrompida deixa de contar na hora (a tela ainda mostra
+    um diálogo que tenha ficado), e o long-poll é acordado para terminar."""
+    with _lock:
+        p = _perguntas.get(name)
+        if p is None:
+            return
+        p["interrompida"] = True
+        fila = p.get("fila")
+    if fila is not None:
+        fila.put_nowait({"answers": None})
+
+
 def pergunta_pendente(name: str) -> dict | None:
     """A pergunta que o plugin segura agora (`id`, `questions`), ou None.
 
     Só vale com o long-poll batendo: hook que morreu não pode segurar a resposta do app."""
     with _lock:
         p = _perguntas.get(name)
-        if p is None or time.monotonic() - p["visto"] > ESPERA_S + 10:
+        idade = time.monotonic() - p["visto"] if p is not None else 0
+        if p is None or p.get("interrompida") or idade > ESPERA_S + 10 or not p.get("fila") and idade > SEM_POLL_S:
             return None
         return {"id": p["id"], "questions": p["questions"], "tool": p.get("tool"),
                 "resumo": p.get("resumo")}

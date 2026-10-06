@@ -17,8 +17,8 @@ from app import plugin_bridge
 from app import tmux
 from app.models import scrub_surrogates
 from app.pqueue import PromptQueue, _transcript_start_ts
-from app.state import (_live_spinner, classify, cursor_sem_numero, is_overlay, menu_codex, omp_box,
-                       aprovacao_kimi_no_pane)
+from app.state import (_live_spinner, classify, cursor_sem_numero, foco_no_rodape, is_overlay, menu_codex,
+                       omp_box, aprovacao_kimi_no_pane)
 from app.tmux import send_keys
 
 _log = logging.getLogger("hangar.terminal_input")
@@ -1476,6 +1476,20 @@ def _texto_composer_claude(name: str) -> str | None:
     return _sem_espaco(miolo.replace(_GLIFO_COMPOSER_CLAUDE, ""))
 
 
+def _devolver_foco_ao_composer(name: str) -> bool:
+    """Com o foco no rodapé do Claude Code (painel de agentes, pílula de tarefas) o texto digitado
+    some e o `x` para um subagente. Um Esc lá só devolve o foco ao composer, sem interromper o turno.
+    False = o foco continua fora: quem chama adia sem digitar."""
+    if not foco_no_rodape(_capture(name)):
+        return True
+    send_keys(name, "Escape")
+    for _ in range(6):
+        time.sleep(0.1)
+        if not foco_no_rodape(_capture(name)):
+            return True
+    return False
+
+
 def _esvaziar_composer_claude(name: str) -> bool:
     """Apaga o que estiver parado no composer do Claude antes de digitar. True = confirmado vazio.
 
@@ -1738,6 +1752,10 @@ class TerminalInput:
             # manda tudo grudado e o reconcile reentrega. ANTES da foto dos placeholders abaixo, pra
             # um `[Pasted text #N]` velho sair junto e nao confundir a prova de entrega.
             if provider == "claude":
+                if not _devolver_foco_ao_composer(name):
+                    _avisa_deferred(name, "foco no rodapé do Claude Code (painel de agentes)",
+                                    _INDISPONIVEL_WARNED, _INDISPONIVEL_DEFER_COUNT, None)
+                    return "deferred"
                 _esvaziar_composer_claude(name)
             if "\n" in text or _exige_clipboard(text, provider):
                 # Foto dos placeholders de paste ANTES do nosso: so um numero NOVO conta como

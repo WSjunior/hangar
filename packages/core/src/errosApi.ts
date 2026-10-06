@@ -296,6 +296,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_fila_nao_entregue: () => m.erro_fila_nao_entregue(),
   erro_envio_falhou_desconhecida: () => m.erro_envio_falhou_desconhecida(),
   erro_envio_falhou: (p) => m.erro_envio_falhou({ erro: fmtParam(p.erro) }),
+  erro_comando_nao_executado: (p) => m.erro_comando_nao_executado({ comando: fmtParam(p.comando), motivo: fmtParam(p.motivo) }),
   erro_group_message_slash: () => m.erro_group_message_slash(),
   erro_group_message_resposta: () => m.erro_group_message_resposta(),
   erro_group_message_tempestade: (p) => m.erro_group_message_tempestade({ max: fmtParam(p.max), janela: fmtParam(p.janela) }),

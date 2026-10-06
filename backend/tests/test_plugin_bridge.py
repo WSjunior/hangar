@@ -80,6 +80,42 @@ def test_permissao_so_vai_ao_app_quando_o_modo_pergunta(monkeypatch, rodape, seg
     assert (pb.pergunta_pendente("s1") is not None) is segura
 
 
+def test_pergunta_do_hook_morto_sai_sem_esperar_o_teto_do_long_poll(monkeypatch):
+    # Item 16: o Esc no terminal interrompe o AskUserQuestion e o hook morre sem o `/ask-fim`. A
+    # pergunta seguia "aberta" por 35 s e o /clear do app era adiado nesse intervalo.
+    monkeypatch.setattr(pb, "terminal_preso", lambda name: False)
+    pb.app_entrou()
+    asyncio.run(pb.ask(_corpo("ask:t1", questions=[{"question": "A ou B?"}], janela_ms=20)))
+    assert pb.pergunta_pendente("s1") is not None
+    pb._perguntas["s1"]["visto"] -= pb.SEM_POLL_S + 1
+    assert pb.pergunta_pendente("s1") is None
+    # Com o long-poll aberto a pergunta vale até o teto de sempre.
+    pb._perguntas["s1"]["fila"] = asyncio.Queue()
+    assert pb.pergunta_pendente("s1") is not None
+
+
+def test_interrupcao_pelo_app_solta_a_pergunta_na_hora_e_acorda_o_long_poll(monkeypatch):
+    # O /interrupt do app é o Esc que fecha o diálogo; o long-poll do hook morto ficava aberto até a
+    # janela de 25 s fechar, segurando a pergunta.
+    monkeypatch.setattr(pb, "terminal_preso", lambda name: False)
+    pb.app_entrou()
+
+    async def cena():
+        espera = asyncio.create_task(pb.ask(_corpo("ask:t1", questions=[{"question": "A ou B?"}])))
+        while pb.pergunta_pendente("s1") is None:
+            await asyncio.sleep(0.01)
+        pb.interrompeu("s1")
+        assert pb.pergunta_pendente("s1") is None
+        return await asyncio.wait_for(espera, 2)
+
+    assert asyncio.run(cena()) == {"answers": None}
+    # Mesma pergunta re-perguntada pelo hook não volta; uma pergunta nova conta.
+    asyncio.run(pb.ask(_corpo("ask:t1", questions=[{"question": "A ou B?"}], janela_ms=20)))
+    assert pb.pergunta_pendente("s1") is None
+    asyncio.run(pb.ask(_corpo("ask:t2", questions=[{"question": "C ou D?"}], janela_ms=20)))
+    assert pb.pergunta_pendente("s1") is not None
+
+
 def test_resposta_do_app_chega_ao_hook_e_so_vale_com_o_aviso_dele(monkeypatch):
     monkeypatch.setattr(pb, "terminal_preso", lambda name: False)
     monkeypatch.setattr(pb, "CONFIRMA_S", 3.0)

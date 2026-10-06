@@ -16,11 +16,12 @@ pub struct TerminalTarget {
 pub type ModsAnchor=Arc<std::sync::Mutex<Option<String>>>;
 /// `stall_notice`: entrega adiada sem escrita por mais que isso aparece na vista e no log. `focus_return`:
 /// com uma entrada esperando e o foco num painel ou na faixa de um mod há mais que isso, sem clique em curso,
-/// o executor devolve o teclado ao prompt e escreve.
-pub struct TerminalOptions { pub io:Arc<dyn TerminalIo>,pub limits:InputLimits,pub tick:Duration,pub stall_notice:Duration,pub anchor:ModsAnchor,pub focus_return:Duration }
+/// o executor devolve o teclado ao prompt e escreve. `clear_wait`: quanto a trava do `/clear` espera a
+/// conversa nova antes de conferir se ele foi aplicado.
+pub struct TerminalOptions { pub io:Arc<dyn TerminalIo>,pub limits:InputLimits,pub tick:Duration,pub stall_notice:Duration,pub anchor:ModsAnchor,pub focus_return:Duration,pub clear_wait:Duration }
 impl Default for TerminalOptions {
     fn default()->Self {Self {io:Arc::new(input::ProcessIo::default()),limits:InputLimits::default(),tick:Duration::from_secs(1),stall_notice:Duration::from_secs(30),
-        anchor:ModsAnchor::default(),focus_return:FOCUS_RETURN}}
+        anchor:ModsAnchor::default(),focus_return:FOCUS_RETURN,clear_wait:CLEAR_APPLY_WAIT}}
 }
 /// Quanto uma linha espera, desde a primeira vez que viu o foco num mod, antes de o executor devolver o
 /// teclado ao prompt. Cobre quem acabou de levar o foco a um painel no terminal, sem deixar a mensagem do
@@ -170,6 +171,10 @@ struct Executor {
     parked:VecDeque<Message>,
     /// A entrada adiada porque o foco está num painel ou na faixa de um mod (`focus_guard`).
     away:Option<Away>,
+    /// Trava do `/clear` erguida: quando conferir se a conversa nova apareceu (`expire_clear`).
+    clear_watch:Option<tokio::time::Instant>,
+    /// Até quando a vista mostra que o último `/clear` não foi aplicado.
+    clear_notice:Option<tokio::time::Instant>,
 }
 struct Stall {row:String,code:String,since:tokio::time::Instant,wait:Duration,next:tokio::time::Instant,surfaced:bool}
 /// Teto da espera entre tentativas: o composer que esvazia é visto na hora, e o resto (tela
@@ -184,6 +189,35 @@ fn stalled_code(result:&RuntimeReply)->Option<&str> {
 }
 /// Teto do empréstimo: a administração mais longa (troca de modelo/motor) leva segundos.
 const MAX_LOAN_S:u64=120;
+/// O `clear_wait` padrão: o transcript novo do `/clear` nasce em menos de um segundo.
+const CLEAR_APPLY_WAIT:Duration=Duration::from_secs(10);
+/// Quanto o aviso de `/clear` não aplicado fica na vista.
+const CLEAR_NOTICE:Duration=Duration::from_secs(60);
+/// O `/clear` só pode ter trocado a conversa se o Enter saiu: aceito, ou incerto nas etapas do Enter
+/// (sem etapa é a queda no meio, que não se sabe). Incerto antes dele segue como entrega incerta comum.
+fn clear_may_have_run(disposition:Disposition,payload:&Value)->bool {
+    match disposition {
+        Disposition::Accepted=>true,
+        Disposition::Unknown=>payload["stage"].as_str().is_none_or(|stage|matches!(stage,"submit"|"submit_proof")),
+        _=>false,
+    }
+}
+/// A prova no disco de que o `/clear` rodou: um transcript novo na pasta da conversa, gravado depois da
+/// trava, que começa pelo registro do comando.
+fn clear_on_disk(transcript:&std::path::Path,since:f64)->bool {
+    use std::io::Read;
+    const MARK:&[u8]=b"<command-name>/clear</command-name>";
+    let Some(entries)=transcript.parent().and_then(|dir|std::fs::read_dir(dir).ok()) else {return false};
+    entries.flatten().any(|entry|{
+        let path=entry.path();
+        let fresh=entry.metadata().ok().and_then(|m|m.modified().ok()).and_then(|t|t.duration_since(UNIX_EPOCH).ok())
+            .is_some_and(|t|t.as_secs_f64()>=since-1.0);
+        let mut head=Vec::new();
+        path!=transcript && path.extension().is_some_and(|e|e=="jsonl") && fresh
+            && std::fs::File::open(&path).and_then(|f|f.take(16*1024).read_to_end(&mut head)).is_ok()
+            && head.windows(MARK.len()).any(|w|w==MARK)
+    })
+}
 /// Teto de cada reserva do pane a um clique de mod: os 7,5 s do pedido mais os 2 s da limpeza, com folga; a
 /// limpeza renova a sua a cada volta ao prompt, também abaixo disto. Vence sozinha: uma tarefa de clique que
 /// sumiu sem o `Release` não segura a fila.
@@ -196,7 +230,7 @@ impl TerminalActor {
         let sequence=Arc::new(AtomicU64::new(queue.initial_state().next_seq.max(previous.max(queue.initial_state().operations.len() as u64).saturating_add(1))));
         let receipt=ReceiptIndex::new("claude",&target.binding.conversation);
         let (sender,receiver)=mpsc::channel(64); let closed=Arc::new(AtomicBool::new(false)); let anchor=options.anchor.clone();
-        let executor=Executor {target,queue:Arc::new(queue),policy,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,loan:None,stall:None,hold:None,hold_checked:false,parked:VecDeque::new(),away:None};
+        let executor=Executor {target,queue:Arc::new(queue),policy,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,loan:None,stall:None,hold:None,hold_checked:false,parked:VecDeque::new(),away:None,clear_watch:None,clear_notice:None};
         let task=tokio::spawn(executor.run(receiver,closed.clone()));
         TerminalHandle {sender,closed,task:Arc::new(Mutex::new(Some(task))),stopped:Arc::new(Mutex::new(None)),anchor}
     }
@@ -250,7 +284,7 @@ impl Executor {
         if state.generation!=self.target.generation{return Err(error("runtime_generation"));}
         Ok(json!({"key":self.target.key,"generation":self.target.generation,"revision":self.revision.load(Ordering::Acquire),
             "view":{"terminal":true,"conversation":self.target.binding.conversation,"deliverable":self.deliverable && !self.cleared(&state),"preserve_binding":state.runtime_state["preserve_binding"],"clear_barrier":state.runtime_state["clear_barrier"],
-                "input_stalled":self.stall.as_ref().filter(|s|s.surfaced).map(|s|s.code.clone())},"channels":{},"error":self.last_error}))
+                "input_stalled":self.stall.as_ref().filter(|s|s.surfaced).map(|s|s.code.clone()).or_else(||self.clear_notice.map(|_|"clear_not_applied".into()))},"channels":{},"error":self.last_error}))
     }
     async fn publish(&self)->Result<(),RuntimeError> {
         self.revision.fetch_add(1,Ordering::AcqRel);
@@ -275,13 +309,16 @@ impl Executor {
     async fn run(mut self,mut receiver:mpsc::Receiver<Message>,closed:Arc<AtomicBool>)->Result<(),RuntimeError> {
         self.action(Action::Recover).await?; self.action(Action::EnsureProjection).await?;
         let recovered=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
+        // O `/clear` que não virou conversa nova (recusado pela saída da trava) ou que parou antes do
+        // Enter não ergue a trava de novo.
         if let Some(clear)=recovered.operations.values().find(|op|op.payload["kind"]=="input" && op.payload["payload"]["text"].as_str().is_some_and(is_clear)
-            && matches!(op.status,Status::Accepted|Status::Unknown|Status::Confirmed)
+            && match op.status {Status::Accepted|Status::Confirmed=>true,Status::Unknown=>clear_may_have_run(Disposition::Unknown,&op.result["payload"]),_=>false}
             && op.wire_attempts.keys().any(|wire|wire.starts_with(&format!("terminal:{}:",self.target.generation)))) {
             let mut state=recovered.runtime_state.clone(); state["preserve_binding"]=json!(true);
-            state["clear_barrier"]=json!({"generation":self.target.generation,"conversation":self.target.binding.conversation,"operation_id":clear.id});
+            state["clear_barrier"]=json!({"generation":self.target.generation,"conversation":self.target.binding.conversation,"operation_id":clear.id,"since":sample().epoch_s});
             self.action(Action::SetRuntimeState {state}).await?;
         }
+        if self.cleared(&self.queue.snapshot().await.map_err(|_|error("queue_io"))?) {self.clear_watch=Some(tokio::time::Instant::now()+self.options.clear_wait);}
         let mut timer=tokio::time::interval(self.options.tick.max(Duration::from_millis(1))); timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             // Guardadas durante um clique de mod: saem na ordem em que chegaram, assim que ele solta o pane.
@@ -293,11 +330,13 @@ impl Executor {
                 let message=tokio::select! {biased;
                     message=receiver.recv()=>message,
                     _=tokio::time::sleep_until(release_at.unwrap_or_else(tokio::time::Instant::now)),if release_at.is_some()=>continue,
-                    _=timer.tick(),if !closed.load(Ordering::Acquire) && (self.last_error.is_none() || self.reconciling())=>{
+                    _=timer.tick(),if !closed.load(Ordering::Acquire) && (self.last_error.is_none() || self.reconciling() || self.clear_watch.is_some() || self.clear_notice.is_some())=>{
+                        if self.clear_notice.is_some_and(|until|tokio::time::Instant::now()>=until) {self.clear_notice=None; self.publish().await?;}
                         // Clique de mod em curso, ou o que ele guardou ainda por sair: a fila não entrega nem
                         // reconcilia no pane antes disso (C6).
                         if self.held() || !self.parked.is_empty() {continue;}
-                        if self.last_error.is_some() {self.reconcile_uncertain().await?;continue;}
+                        // O `/clear` incerto depois do Enter deixa o erro de entrega incerta: a trava ainda vence.
+                        if self.last_error.is_some() {self.expire_clear().await; if self.reconciling() {self.reconcile_uncertain().await?;} continue;}
                         let result=async {self.confirm_rows().await?;self.drain_once(None).await?;Ok::<_,RuntimeError>(())}.await;
                         if let Err(failure)=result {self.enter_error(failure).await?;}
                         continue;
@@ -531,7 +570,7 @@ impl Executor {
             }
             return Ok(reply(id,Disposition::Unknown,json!({"code":"recovered_operation"})));
         }
-        if self.cleared(&state){return Err(error("runtime_clear_barrier"));}
+        if self.cleared(&state) && !self.expire_clear().await {return Err(error("runtime_clear_barrier"));}
         let text=payload["text"].as_str().unwrap_or("");
         let prompt=kind=="input"; let slash=prompt && text.trim_start().starts_with('/');
         let row_id=if prompt && !slash {Some(entry.unwrap_or_else(||id.into()))}else{None};
@@ -614,12 +653,13 @@ impl Executor {
             tracing::warn!(key=%self.target.key,session=%self.target.name,draft,code=%result.payload["code"].as_str().unwrap_or(""),
                 reason="o rascunho do dono não voltou igual ao composer; se o terminal marca › stashed, ele volta com Ctrl+S","rascunho do terminal");
         }
-        if slash && is_clear(text) && matches!(result.disposition,Disposition::Accepted|Disposition::Unknown) {
+        if slash && is_clear(text) && clear_may_have_run(result.disposition,&result.payload) {
             let mut state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?.runtime_state;
             state["preserve_binding"]=json!(true);
-            state["clear_barrier"]=json!({"generation":self.target.generation,"conversation":self.target.binding.conversation,"operation_id":id});
+            state["clear_barrier"]=json!({"generation":self.target.generation,"conversation":self.target.binding.conversation,"operation_id":id,"since":sample().epoch_s});
             self.action(Action::SetRuntimeState {state}).await?;
             result.payload["preserve_binding"]=json!(true);
+            self.clear_watch=Some(tokio::time::Instant::now()+self.options.clear_wait); self.clear_notice=None;
         }
         self.action(Action::Finish {id:id.into(),status:status(result.disposition),result:serde_json::to_value(&result).unwrap()}).await?;
         let repeated=row_id.as_deref().is_some_and(|row|self.track_stall(row,&result));
@@ -659,7 +699,7 @@ impl Executor {
         if self.loaned() {return Ok(json!({"drained":0,"keyboard_loan":true}));}
         let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
         if state.terminal_write_blocked(&self.target.binding.conversation) {return Ok(json!({"drained":0}));}
-        if self.cleared(&state){return Ok(json!({"drained":0,"preserve_binding":true}));}
+        if self.cleared(&state) && !self.expire_clear().await {return Ok(json!({"drained":0,"preserve_binding":true}));}
         if !state.rows.iter().any(|r|r["delivered"]==false && entry.as_ref().is_none_or(|id|r["id"]==*id)) {
             self.away=None;
             if self.stall.take().is_some_and(|s|s.surfaced) {self.publish().await?;}
@@ -740,6 +780,45 @@ impl Executor {
         tracing::info!(key=%self.target.key,session=%self.target.name,code="terminal_delivery_proved","entrega incerta comprovada pelo transcript");
         self.uncertain.clear();
         self.clear_maintenance_error("terminal_delivery_unknown").await
+    }
+    /// A saída da trava do `/clear`: passado o prazo com a sessão parada e sem conversa nova (nem nos
+    /// fatos do Python nem no disco), o `/clear` não foi aplicado. Com o Claude trabalhando ele espera na
+    /// fila do próprio Claude Code e roda no fim do turno. A trava sai, a operação fica recusada (a reabertura não a
+    /// ergue de novo), as linhas da fila seguem e a vista avisa. Nada é reenviado. `true` = soltou.
+    async fn expire_clear(&mut self)->bool {
+        let now=tokio::time::Instant::now();
+        if self.clear_watch.is_none_or(|at|now<at) {return false;}
+        let state=match self.queue.snapshot().await {Ok(state)=>state,Err(_)=>return false};
+        if !self.cleared(&state) {self.clear_watch=None; return false;}
+        let barrier=state.runtime_state["clear_barrier"].clone();
+        let changed=match self.services("maintenance","maintenance","").facts(&self.target.binding).await {
+            Ok(facts)=>facts.binding!=self.target.binding || !facts.idle,
+            Err(_)=>{self.clear_watch=Some(now+self.options.clear_wait); return false;}
+        };
+        // Ocupada, ou a conversa nova existe e só falta o Python reabrir: a troca do vínculo solta a trava.
+        if changed || clear_on_disk(&self.target.transcript,barrier["since"].as_f64().unwrap_or(0.0)) {
+            self.clear_watch=Some(now+self.options.clear_wait); return false;
+        }
+        let mut runtime=state.runtime_state.clone();
+        if let Some(fields)=runtime.as_object_mut() {fields.remove("clear_barrier"); fields.remove("preserve_binding");}
+        if let Err(failure)=self.action(Action::SetRuntimeState {state:runtime}).await {
+            tracing::warn!(key=%self.target.key,session=%self.target.name,code=%failure.code,"trava do /clear não saiu do diário; tenta de novo");
+            self.clear_watch=Some(now+self.options.clear_wait); return false;
+        }
+        let id=barrier["operation_id"].as_str().unwrap_or_default().to_string();
+        if let Some(op)=state.operations.get(&id) {
+            let result=reply(&id,Disposition::Rejected,json!({"code":"clear_not_applied","stage":op.result["payload"]["stage"],"cleanup":"not_needed"}));
+            if let Err(failure)=self.action(Action::Finish {id:id.clone(),status:Status::Rejected,result:serde_json::to_value(result).unwrap()}).await {
+                tracing::warn!(key=%self.target.key,session=%self.target.name,code=%failure.code,"/clear não aplicado não foi marcado; a reabertura confere de novo");
+            }
+        }
+        tracing::warn!(key=%self.target.key,session=%self.target.name,code="clear_not_applied",operation=%id,
+            "o /clear não virou conversa nova no prazo; a trava saiu e a fila segue, sem reenviar o /clear");
+        self.clear_watch=None; self.clear_notice=Some(now+CLEAR_NOTICE);
+        // A incerteza era a do `/clear`, que agora se sabe não aplicado: a fila volta a drenar.
+        if self.last_error.as_deref()==Some("terminal_delivery_unknown") && self.uncertain.is_empty() {self.unprovable=false; self.last_error=None;}
+        if let Err(failure)=self.publish().await {tracing::warn!(key=%self.target.key,code=%failure.code,"vista do /clear não aplicado não publicou");}
+        true
     }
     async fn native_receipt(&self,id:&str,receipt_status:Status,result:Value)->Result<Value,RuntimeError> {
         let native_status=result["payload"]["native_status"].as_str().ok_or_else(||error("native_receipt"))?;

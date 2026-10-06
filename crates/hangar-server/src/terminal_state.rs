@@ -233,6 +233,22 @@ fn question(lines: &[&str]) -> Option<String> {
     found
 }
 
+/// A régua de baixo da última caixa do composer (régua, `❯`, régua) antes de `end`: abaixo dela mora o
+/// rodapé do Claude Code.
+fn composer_end(lines: &[&str], end: usize) -> Option<usize> {
+    let rules: Vec<usize> = (0..end).filter(|&i| P.rule.is_match(lines[i])).collect();
+    let [.., upper, lower] = rules[..] else { return None };
+    lines[upper + 1..lower].iter().any(|l| left(l).starts_with('❯')).then_some(lower)
+}
+
+/// O teclado está no rodapé do Claude Code (painel de agentes ou pílula de tarefas), não no composer:
+/// o que se digita some, e o `x` do painel para um subagente.
+pub fn footer_focus(pane: &str) -> bool {
+    let lines = lines(pane);
+    composer_end(&lines, lines.len()).is_some_and(|end| lines[end + 1..].iter()
+        .any(|l| P.unnumbered.is_match(l) || l.contains("Enter to view") || l.contains("↑/↓ to select")))
+}
+
 fn unnumbered_menu(lines: &[&str]) -> Option<TerminalQuestion> {
     let cursor = lines.iter().rposition(|l| P.unnumbered.is_match(l) && !P.cursor.is_match(l))?;
     if lines[cursor + 1..].iter().any(|l| P.rule.is_match(l)) { return None; }
@@ -245,8 +261,11 @@ fn unnumbered_menu(lines: &[&str]) -> Option<TerminalQuestion> {
     while top > 0 && aligned(lines[top - 1]) { top -= 1; }
     let mut bottom = cursor + 1;
     while bottom < lines.len() && aligned(lines[bottom]) { bottom += 1; }
-    let options: Vec<_> = lines[top..bottom].iter().map(|l| trim(&l.chars().skip(col).collect::<String>()).into()).collect();
+    let options: Vec<String> = lines[top..bottom].iter().map(|l| trim(&l.chars().skip(col).collect::<String>()).into()).collect();
     if options.len() < 2 { return None; }
+    // O painel de agentes ("← for agents": ● principal, ◯ subagente) com foco põe o `❯` num agente e
+    // parece um menu sem número; responder ao cartão dele navegava no painel.
+    if options.iter().all(|o| o.starts_with(['●', '◯'])) && composer_end(lines, top).is_some() { return None; }
     let start = lines[..top].iter().rposition(|l| P.rule.is_match(l)).map_or(0, |i| i + 1);
     let question = lines[start..top].iter().find(|l| !trim(l).is_empty()).map(|l| trim(l).into());
     Some(TerminalQuestion { question, options })

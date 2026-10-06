@@ -274,6 +274,45 @@ def test_slash_without_row_clear_blocks_until_generation_change(monkeypatch,tmp_
     asyncio.run(flow())
 
 
+def test_clear_unproved_before_enter_raises_no_barrier(monkeypatch,tmp_path):
+    # #84: o texto do /clear não chegou ao composer e o Enter nunca saiu: entrega incerta comum.
+    from app import terminal_input as ti
+    owner,slot,_ = live_owner(monkeypatch,tmp_path)
+    calls=[]
+    def send(self,name,text):
+        calls.append(text)
+        if text == '/clear':
+            ti._ULTIMA_LIMPEZA.stage='linha.prova'
+            ti._ULTIMA_LIMPEZA.limpou=False
+            return 'partial'
+        return 'sent'
+    monkeypatch.setattr(ti.TerminalInput,'send_prompt',send)
+    async def flow():
+        assert (await owner.op('session',{'kind':'submit','text':'/clear'},'clear'))['disposition'] == 'unknown'
+        assert 'clear_barrier' not in slot.store.state['runtime_state']
+        assert (await owner.op('session',{'kind':'submit','text':'new'},'new'))['disposition'] == 'accepted'
+        assert calls == ['/clear','new']
+    asyncio.run(flow())
+
+
+def test_clear_without_new_conversation_releases_barrier_without_resending(monkeypatch,tmp_path):
+    from app import runtime_terminal as rt, terminal_input as ti
+    owner,slot,_ = live_owner(monkeypatch,tmp_path)
+    calls=[]
+    monkeypatch.setattr(ti.TerminalInput,'send_prompt',lambda self,name,text:calls.append(text) or 'sent')
+    async def flow():
+        assert (await owner.op('session',{'kind':'submit','text':'/clear'},'clear'))['disposition'] == 'accepted'
+        with pytest.raises(RuntimeError): await owner.op('session',{'kind':'submit','text':'blocked'},'blocked')
+        # Passado o prazo, sem conversa nova no vínculo nem no disco: a trava sai.
+        monkeypatch.setattr(rt,'CLEAR_APPLY_WAIT_S',0)
+        assert (await owner.op('session',{'kind':'submit','text':'new'},'new'))['disposition'] == 'accepted'
+        assert 'clear_barrier' not in slot.store.state['runtime_state']
+        op = slot.store.state['operations']['clear']
+        assert op['status'] == 'rejected' and op['result']['payload']['code'] == 'clear_not_applied'
+        assert calls == ['/clear','new']
+    asyncio.run(flow())
+
+
 def test_same_name_new_mux_does_not_import_old_queue(monkeypatch,tmp_path):
     owner,slot,collected=live_owner(monkeypatch,tmp_path)
     slot.store.exec(1,'append',{'monotonic_s':1,'epoch_s':10},
