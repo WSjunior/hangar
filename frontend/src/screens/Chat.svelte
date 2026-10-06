@@ -534,7 +534,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       }
     } catch (err) {
       // Código conhecido, a frase dele em qualquer status; sem código, a frase do app ou o motivo do 4xx.
-      showPluginNotice(pluginFailureText(err, m.native_plugin_press_failed), true);
+      showPluginNotice(pluginFailureText(err, m.plugin_clique_falhou), true);
     }
   }
   // Trocar de aba avisa o servidor. Seguindo o `shown_id`, a aba só muda quando o novo chega; sem ele (servidor

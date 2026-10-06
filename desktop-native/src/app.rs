@@ -979,7 +979,7 @@ impl Hangar {
 
     /// Clique num botão de mod: sem resposta ou 5xx não é entrega de mensagem, e a frase de reenviar enganaria.
     fn press_failure(error: &Failure) -> String {
-        Self::plugin_failure(error, || tr("plugin_press_failed"))
+        Self::plugin_failure(error, || tr_shared("plugin_clique_falhou", &[]))
     }
 
     /// Digitação num campo de mod que não chegou: a frase genérica é a mesma do web.
@@ -6359,7 +6359,7 @@ mod tests {
         let bare = Failure { status: Some(500), detail: "HTTP 500".into(), retry_after: None, uncertain: true, code: None };
         assert_eq!(Hangar::show_failure(&bare), Some(tr_shared("plugin_aba_falhou", &[])));
         assert_eq!(Hangar::input_failure(&bare), tr_shared("plugin_input_falhou", &[]));
-        assert_eq!(Hangar::press_failure(&bare), tr("plugin_press_failed"));
+        assert_eq!(Hangar::press_failure(&bare), tr_shared("plugin_clique_falhou", &[]));
         // Código que o app não conhece não vale como frase: 5xx com ele segue a genérica.
         let unknown = Failure { code: Some("internal_info".into()), ..bare };
         assert_eq!(Hangar::show_failure(&unknown), Some(tr_shared("plugin_aba_falhou", &[])));
@@ -6369,8 +6369,11 @@ mod tests {
     fn mod_click_failure_is_not_a_message_delivery() {
         use super::{Failure, Hangar};
         let failure = |status| Failure { status, detail: "x".into(), retry_after: None, uncertain: true, code: None };
-        assert_eq!(Hangar::press_failure(&failure(Some(500))), tr("plugin_press_failed"));
-        assert_eq!(Hangar::press_failure(&failure(None)), tr("plugin_press_failed"));
+        // A frase do clique é a mesma do web (`plugin_clique_falhou`), não uma `native_*`.
+        let generic = crate::i18n::tr_shared("plugin_clique_falhou", &[]);
+        assert_ne!(generic, "plugin_clique_falhou");
+        assert_eq!(Hangar::press_failure(&failure(Some(500))), generic);
+        assert_eq!(Hangar::press_failure(&failure(None)), generic);
         assert_eq!(Hangar::press_failure(&failure(Some(409))), Hangar::failure(&failure(Some(409))));
     }
 
