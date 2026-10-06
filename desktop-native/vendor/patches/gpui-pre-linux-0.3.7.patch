@@ -1,7 +1,7 @@
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-linux-0.3.7/MODIFICADO.md gpui-pre-linux-0.3.7/MODIFICADO.md
 --- gpui-pre-linux-0.3.7/MODIFICADO.md
 +++ gpui-pre-linux-0.3.7/MODIFICADO.md
-@@ -0,0 +1,17 @@
+@@ -0,0 +1,22 @@
 +# Cópia modificada do gpui-pre-linux 0.3.7
 +
 +Origem: crate `gpui-pre-linux` 0.3.7 do crates.io, licença Apache-2.0 (`LICENSE-APACHE`).
@@ -19,6 +19,11 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 +de dentro do aviso de fechar. Só desmapear com buffer nulo não serve: o Hyprland não manda configure no commit
 +seguinte. No X11
 +(`src/linux/x11/window.rs`) é `UnmapWindow`/`MapWindow`.
++
++Colar arquivo: com `text/uri-list` na oferta, o `read()` do CLIPBOARD no Wayland (`src/linux/wayland/clipboard.rs`)
++devolve `ExternalPaths` mais o texto que o dono ofereceu, como o macOS e o Windows já fazem; sem texto do dono, os
++caminhos um por linha. A seleção primária continua só texto e o arrastar não muda. Leitura das linhas e montagem do
++item em `parse_uri_list` e `file_list_item` (`src/linux/platform.rs`).
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-linux-0.3.7/src/linux/platform.rs gpui-pre-linux-0.3.7/src/linux/platform.rs
 --- gpui-pre-linux-0.3.7/src/linux/platform.rs
 +++ gpui-pre-linux-0.3.7/src/linux/platform.rs
@@ -40,7 +45,48 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
  pub(super) const PIPE_READ_TIMEOUT: Duration = Duration::from_secs(4);
  
  #[cfg(any(feature = "wayland", feature = "x11"))]
-@@ -1381,6 +1392,30 @@
+@@ -979,6 +990,40 @@
+     }
+ }
+ 
++// RFC 2483: linha com `#` é comentário; só `file://` é arquivo local (link copiado do navegador também vem aqui).
++#[cfg(any(feature = "wayland", feature = "x11"))]
++pub(super) fn parse_uri_list(list: &str) -> smallvec::SmallVec<[PathBuf; 2]> {
++    list.lines()
++        .map(str::trim)
++        .filter(|line| !line.is_empty() && !line.starts_with('#'))
++        .filter_map(|line| url::Url::parse(line).ok())
++        .filter(|url| url.scheme() == "file")
++        .filter_map(|url| {
++            url.to_file_path()
++                .map_err(|()| log::error!("Failed turn {url:?} into a file path"))
++                .ok()
++        })
++        .collect()
++}
++
++// Sem texto do dono, `ClipboardItem::text` emendaria os caminhos sem separador no terminal; vai um por linha.
++#[cfg(any(feature = "wayland", feature = "x11"))]
++pub(super) fn file_list_item(paths: smallvec::SmallVec<[PathBuf; 2]>, text: Option<String>) -> ClipboardItem {
++    let text = text.filter(|text| !text.is_empty()).unwrap_or_else(|| {
++        paths
++            .iter()
++            .map(|path| path.display().to_string())
++            .collect::<Vec<_>>()
++            .join("\n")
++    });
++    ClipboardItem {
++        entries: vec![
++            gpui::ClipboardEntry::ExternalPaths(gpui::ExternalPaths(paths)),
++            gpui::ClipboardEntry::String(gpui::ClipboardString::new(text)),
++        ],
++    }
++}
++
+ #[cfg(any(feature = "wayland", feature = "x11"))]
+ pub(super) const DEFAULT_CURSOR_ICON_NAME: &str = "left_ptr";
+ 
+@@ -1381,6 +1426,30 @@
  
      #[cfg(any(feature = "wayland", feature = "x11"))]
      #[test]
@@ -71,6 +117,80 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      fn rejects_null_xkb_context() {
          let context = unsafe {
              // libxkbcommon permits unref on null, matching the value returned by Context::new on failure.
+@@ -1601,4 +1670,73 @@
+             assert_eq!(bytes, payload);
+         }
+     }
++
++    #[cfg(any(feature = "wayland", feature = "x11"))]
++    mod parse_uri_list {
++        use super::super::parse_uri_list;
++        use std::path::PathBuf;
++
++        #[test]
++        fn keeps_file_uris_in_order() {
++            let paths = parse_uri_list("file:///tmp/a.txt\nfile:///home/u/b.md\n");
++            assert_eq!(
++                paths.into_vec(),
++                vec![PathBuf::from("/tmp/a.txt"), PathBuf::from("/home/u/b.md")]
++            );
++        }
++
++        #[test]
++        fn decodes_percent_encoding() {
++            let paths = parse_uri_list("file:///tmp/meu%20arquivo%20a%C3%A7%C3%A3o.txt");
++            assert_eq!(paths.into_vec(), vec![PathBuf::from("/tmp/meu arquivo ação.txt")]);
++        }
++
++        #[test]
++        fn skips_comments_blank_lines_and_other_schemes() {
++            let list = "# copied by a file manager\n\nhttps://example.com/x.txt\nsmb://nas/share/y.txt\nfile:///tmp/z.txt\n";
++            assert_eq!(parse_uri_list(list).into_vec(), vec![PathBuf::from("/tmp/z.txt")]);
++        }
++
++        #[test]
++        fn tolerates_crlf() {
++            let paths = parse_uri_list("file:///tmp/a.txt\r\nfile:///tmp/b%20c.txt\r\n");
++            assert_eq!(
++                paths.into_vec(),
++                vec![PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/b c.txt")]
++            );
++        }
++
++        #[test]
++        fn plain_text_is_not_a_file_list() {
++            assert!(parse_uri_list("/tmp/a.txt\nhello world").is_empty());
++            assert!(parse_uri_list("").is_empty());
++        }
++    }
++
++    #[cfg(any(feature = "wayland", feature = "x11"))]
++    mod file_list_item {
++        use super::super::file_list_item;
++        use gpui::ClipboardEntry;
++        use smallvec::smallvec;
++        use std::path::PathBuf;
++
++        #[test]
++        fn paths_first_then_owner_text() {
++            let item = file_list_item(
++                smallvec![PathBuf::from("/tmp/a.txt")],
++                Some("/tmp/a.txt".to_string()),
++            );
++            assert!(matches!(&item.entries[0], ClipboardEntry::ExternalPaths(p) if p.paths() == [PathBuf::from("/tmp/a.txt")]));
++            assert_eq!(item.entries.len(), 2);
++            assert_eq!(item.text().as_deref(), Some("/tmp/a.txt"));
++        }
++
++        #[test]
++        fn without_owner_text_paths_go_one_per_line() {
++            let paths = smallvec![PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/b c.txt")];
++            assert_eq!(file_list_item(paths, None).text().as_deref(), Some("/tmp/a.txt\n/tmp/b c.txt"));
++            let paths = smallvec![PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/b.txt")];
++            assert_eq!(file_list_item(paths, Some(String::new())).text().as_deref(), Some("/tmp/a.txt\n/tmp/b.txt"));
++        }
++    }
+ }
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-linux-0.3.7/src/linux/wayland/client.rs gpui-pre-linux-0.3.7/src/linux/wayland/client.rs
 --- gpui-pre-linux-0.3.7/src/linux/wayland/client.rs
 +++ gpui-pre-linux-0.3.7/src/linux/wayland/client.rs
@@ -108,6 +228,48 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
                              }
                              state.compose_state = Some(compose);
                          }
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-linux-0.3.7/src/linux/wayland/clipboard.rs gpui-pre-linux-0.3.7/src/linux/wayland/clipboard.rs
+--- gpui-pre-linux-0.3.7/src/linux/wayland/clipboard.rs
++++ gpui-pre-linux-0.3.7/src/linux/wayland/clipboard.rs
+@@ -11,7 +11,7 @@
+ use wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1;
+ 
+ use crate::linux::{
+-    WaylandClientStatePtr,
++    WaylandClientStatePtr, file_list_item, parse_uri_list,
+     platform::{PIPE_READ_TIMEOUT, read_fd_with_timeout},
+ };
+ use gpui::{ClipboardEntry, ClipboardItem, Image, ImageFormat, hash};
+@@ -136,6 +136,19 @@
+         }
+         None
+     }
++
++    fn read_files(&self, connection: &Connection) -> Option<ClipboardItem> {
++        if !self.has_mime_type(FILE_LIST_MIME_TYPE) {
++            return None;
++        }
++        let bytes = self.read_bytes(connection, FILE_LIST_MIME_TYPE)?;
++        let paths = parse_uri_list(std::str::from_utf8(&bytes).ok()?);
++        if paths.is_empty() {
++            return None;
++        }
++        let text = self.read_text(connection).and_then(|item| item.text());
++        Some(file_list_item(paths, text))
++    }
+ }
+ 
+ impl Clipboard {
+@@ -207,7 +220,8 @@
+         }
+ 
+         let item = offer
+-            .read_text(&self.connection)
++            .read_files(&self.connection)
++            .or_else(|| offer.read_text(&self.connection))
+             .or_else(|| offer.read_image(&self.connection))?;
+ 
+         self.cached_read = Some(item.clone());
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-linux-0.3.7/src/linux/wayland/window.rs gpui-pre-linux-0.3.7/src/linux/wayland/window.rs
 --- gpui-pre-linux-0.3.7/src/linux/wayland/window.rs
 +++ gpui-pre-linux-0.3.7/src/linux/wayland/window.rs

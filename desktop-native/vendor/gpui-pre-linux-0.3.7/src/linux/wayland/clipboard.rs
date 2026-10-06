@@ -11,7 +11,7 @@ use wayland_client::{Connection, protocol::wl_data_offer::WlDataOffer};
 use wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1;
 
 use crate::linux::{
-    WaylandClientStatePtr,
+    WaylandClientStatePtr, file_list_item, parse_uri_list,
     platform::{PIPE_READ_TIMEOUT, read_fd_with_timeout},
 };
 use gpui::{ClipboardEntry, ClipboardItem, Image, ImageFormat, hash};
@@ -136,6 +136,19 @@ impl<T: ReceiveData> DataOffer<T> {
         }
         None
     }
+
+    fn read_files(&self, connection: &Connection) -> Option<ClipboardItem> {
+        if !self.has_mime_type(FILE_LIST_MIME_TYPE) {
+            return None;
+        }
+        let bytes = self.read_bytes(connection, FILE_LIST_MIME_TYPE)?;
+        let paths = parse_uri_list(std::str::from_utf8(&bytes).ok()?);
+        if paths.is_empty() {
+            return None;
+        }
+        let text = self.read_text(connection).and_then(|item| item.text());
+        Some(file_list_item(paths, text))
+    }
 }
 
 impl Clipboard {
@@ -207,7 +220,8 @@ impl Clipboard {
         }
 
         let item = offer
-            .read_text(&self.connection)
+            .read_files(&self.connection)
+            .or_else(|| offer.read_text(&self.connection))
             .or_else(|| offer.read_image(&self.connection))?;
 
         self.cached_read = Some(item.clone());

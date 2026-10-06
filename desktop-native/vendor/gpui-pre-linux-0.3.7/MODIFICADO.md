@@ -15,3 +15,8 @@ está escondida. Vale só para a janela principal (sem pai e sem diálogo), e n�
 de dentro do aviso de fechar. Só desmapear com buffer nulo não serve: o Hyprland não manda configure no commit
 seguinte. No X11
 (`src/linux/x11/window.rs`) é `UnmapWindow`/`MapWindow`.
+
+Colar arquivo: com `text/uri-list` na oferta, o `read()` do CLIPBOARD no Wayland (`src/linux/wayland/clipboard.rs`)
+devolve `ExternalPaths` mais o texto que o dono ofereceu, como o macOS e o Windows já fazem; sem texto do dono, os
+caminhos um por linha. A seleção primária continua só texto e o arrastar não muda. Leitura das linhas e montagem do
+item em `parse_uri_list` e `file_list_item` (`src/linux/platform.rs`).
