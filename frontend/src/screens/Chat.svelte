@@ -530,7 +530,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
         showPluginNotice(m.plugin_link_bloqueado(), false, { href: url });
       }
     } catch (err) {
-      showPluginNotice(err instanceof Error ? err.message : String(err), true);
+      // Código conhecido, a frase dele em qualquer status; sem código, a frase do app ou o motivo do 4xx.
+      showPluginNotice(pluginFailureText(err, m.native_plugin_press_failed), true);
     }
   }
   // Trocar de aba avisa o servidor. Seguindo o `shown_id`, a aba só muda quando o novo chega; sem ele (servidor

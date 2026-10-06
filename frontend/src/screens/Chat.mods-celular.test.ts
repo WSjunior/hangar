@@ -272,3 +272,26 @@ it('troca de aba recusada: código conhecido mostra a frase dele em qualquer sta
     await unmount(t.comp);
   }
 });
+
+it('clique recusado: código conhecido mostra a frase dele sem o status; 5xx sem código, a frase do clique', async () => {
+  janelaCtl.desktop = true;
+  const api = await import('@hangar/core');
+  const t = montar();
+  try {
+    await tick();
+    emitirPluginUi();
+    await tick();
+    const abrir = () => [...t.el.querySelectorAll('button.button')].find((b) => b.textContent === 'Abrir mod') as HTMLElement;
+    const aviso = () => t.el.querySelector('.plugin-band .notice')?.textContent?.trim();
+    // Com servidor explícito o erro vem com o status na frente ("503: ..."); a frase do código não leva o prefixo.
+    vi.mocked(api.pressPluginButton).mockRejectedValueOnce(Object.assign(new Error('503: motivo — erro_mod_guarda_indisponivel'),
+      { status: 503, code: 'erro_mod_guarda_indisponivel' }));
+    abrir().click();
+    await vi.waitFor(() => expect(aviso()).toBe(api.mensagemDeErro('erro_mod_guarda_indisponivel')));
+    vi.mocked(api.pressPluginButton).mockRejectedValueOnce(Object.assign(new Error('500: Internal Server Error'), { status: 500 }));
+    abrir().click();
+    await vi.waitFor(() => expect(aviso()).toBe(m.native_plugin_press_failed()));
+  } finally {
+    await unmount(t.comp);
+  }
+});
