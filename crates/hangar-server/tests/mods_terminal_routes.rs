@@ -122,12 +122,13 @@ async fn closing_the_terminal_forgets_only_its_own_life() {
     assert_eq!(mods.life("t"), Some(other));
 }
 
-/// O processo `pid` acabou (sumiu ou virou zumbi).
+/// O processo `pid` acabou (sumiu ou virou zumbi). `ps` e não `/proc`: o macOS não tem `/proc`, e ali
+/// todo pid parecia morto.
 #[cfg(unix)]
 fn gone(pid: &str) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |stat| {
-        stat.rsplit_once(") ").is_some_and(|(_, rest)| rest.starts_with('Z'))
-    })
+    let out = std::process::Command::new("ps").args(["-o", "stat=", "-p", pid]).output().unwrap();
+    let stat = String::from_utf8_lossy(&out.stdout);
+    stat.trim().is_empty() || stat.trim_start().starts_with('Z')
 }
 
 #[cfg(unix)]

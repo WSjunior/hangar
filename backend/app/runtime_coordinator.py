@@ -1453,7 +1453,7 @@ class RuntimeCoordinator:
             if key is not None and self.slots[key].awaiting_identity:
                 self.names.pop(name, None)
 
-    async def change(self, name, action, *, new_name=None, advance=True, remove=False, reopen=True, stopped=False):
+    async def change(self, name, action, *, new_name=None, advance=True, remove=False, reopen=True, stopped=False, preflight=None):
         """Administração da sessão. Do Rust: barreira → `close` (a trava e a fila voltam ao Python,
         sem cliente no cano) → ação → nova vida gravada na fila → `open` no Rust, salvo `stopped`
         ou sem processo para abrir. `reopen` só vale para o caminho Python."""
@@ -1463,7 +1463,7 @@ class RuntimeCoordinator:
         if self.in_lifecycle(slot):
             if slot.phase == Phase.Rust and slot.change is not None:
                 # Ação aninhada depois de reaberta (a volta atrás de uma troca de conta): fecha antes.
-                await self._close_for_change(name, slot)
+                await self._close_for_change(name, slot, preflight=preflight)
             return await action()
         if remove and slot.awaiting_identity:
             # Registro em espera nunca teve posse nem dono no Rust: fechar só solta o nome.
@@ -1477,7 +1477,7 @@ class RuntimeCoordinator:
                     raise RuntimeError("registro da sessão mudou durante a espera; tente de novo")
                 from_rust = slot.phase == Phase.Rust
                 if from_rust:
-                    await self._close_for_change(name, slot)
+                    await self._close_for_change(name, slot, preflight=preflight)
                 elif remove and self.legacy is not None:
                     # Fechar não escreve na conversa: basta esperar os escritores, mesmo com vínculo mudado.
                     await self.legacy.quiesce({**slot.binding.descriptor(), "removed":True})
@@ -1533,7 +1533,7 @@ class RuntimeCoordinator:
             await self.prepare_session(current.binding.name, current.binding.provider)
         return result
 
-    async def _close_for_change(self, name, slot):
+    async def _close_for_change(self, name, slot, preflight=None):
         """Fecha no Rust e devolve a trava e a fila ao Python sem cliente no cano. A vista do Rust,
         relida agora, fica guardada: é ela que diz se a sessão estava ociosa (transferência)."""
         try:
@@ -1543,6 +1543,8 @@ class RuntimeCoordinator:
             slot.cache_valid = False        # quem lê a ociosidade recusa por estado desconhecido
             from app import diag
             diag.registrar("runtime.refresh_failed", "aviso", sessao=name, **failure_reason(exc))
+        if preflight is not None:
+            await preflight()
         await self.detach(name, restore=False)
         slot.change_from_rust = True
 

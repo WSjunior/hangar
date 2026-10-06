@@ -204,6 +204,39 @@ def test_engines_expose_only_local_associated_identities(cli, tmp_path, monkeypa
     assert "private-token" not in response.text and CHAVE not in response.text
 
 
+@pytest.mark.parametrize("model", ["gpt-5.5[1m]", "fixed/gpt-5.5[1m]"])
+def test_context_suffix_preserves_fixed_model_binding(tmp_path, monkeypatch, model):
+    _fixed_engine(tmp_path, monkeypatch)
+    cfg = eng.listar()["proxy"]
+    account = cliproxy.account_for_engine(cfg, "default")
+    assert cliproxy.validate_models(cfg, model, account)[0]["id"] == "gpt-5.5"
+    env = cliproxy.engine_env("proxy", model, 400000, "default", home=account["home"])
+    assert env["ANTHROPIC_MODEL"] == "fixed/gpt-5.5[1m]"
+    assert env["CP_ENGINE_ACCOUNT"] == "default"
+    assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "1000000"
+    assert cliproxy.supports_fast("proxy", env["ANTHROPIC_MODEL"])
+
+
+@pytest.mark.parametrize("model", ["gpt-missing[1m]", "gpt-5.5[1m][1m]", "another/gpt-5.5[1m]"])
+def test_context_suffix_cannot_bypass_fixed_model_validation(tmp_path, monkeypatch, model):
+    _fixed_engine(tmp_path, monkeypatch)
+    cfg = eng.listar()["proxy"]
+    account = cliproxy.account_for_engine(cfg, "default")
+    with pytest.raises(ValueError):
+        cliproxy.validate_models(cfg, model, account)
+
+
+def test_context_suffix_is_not_removed_for_incompatible_models(tmp_path, monkeypatch):
+    _fixed_engine(tmp_path, monkeypatch)
+    cfg = eng.listar()["proxy"]
+    account = cliproxy.account_for_engine(cfg, "default")
+    catalog = [{"id": "fixed/codex-mini-latest"}]
+    with pytest.raises(ValueError, match="principal indisponível"):
+        cliproxy.validate_models(cfg, "codex-mini-latest[1m]", account, catalog)
+    assert eng.catalog_model("codex-mini-latest[1m]") == "codex-mini-latest[1m]"
+    assert eng.catalog_model("opus[1m]") == "opus[1m]"
+
+
 def test_model_options_return_base_models_only_for_fixed_account(cli, tmp_path, monkeypatch):
     _fixed_engine(tmp_path, monkeypatch)
     response = cli.get("/api/model-options", headers=AUTH,
@@ -214,6 +247,31 @@ def test_model_options_return_base_models_only_for_fixed_account(cli, tmp_path, 
     response = cli.get("/api/model-options", headers=AUTH,
                        params={"provider": "claude", "engine": "proxy", "engine_account": "missing"})
     assert response.status_code == 400
+
+
+@pytest.mark.parametrize("model,window", [("gpt-5.5[1m]", 1000000), ("gpt-5.5", 400000)])
+def test_fixed_context_toggle_reuses_model_route(cli, tmp_path, monkeypatch, model, window):
+    from app import api
+    from app.models import SessionInfo
+    _fixed_engine(tmp_path, monkeypatch)
+    monkeypatch.setattr(api, "_cached_info", AsyncMock(return_value=SessionInfo(
+        name="fixed", engine="proxy", engine_account="default")))
+    monkeypatch.setattr(api, "_engine_fast_selection", lambda name: ("fixed/gpt-5.5[1m]", "priority"))
+    reopen = AsyncMock(return_value={"ok": True})
+    monkeypatch.setattr(api, "_trocar_conta", reopen)
+    async def during(name, operation):
+        return await operation
+    monkeypatch.setattr(api, "_durante_troca", during)
+    response = cli.post("/api/sessions/fixed/engine/model", headers=AUTH, json={"model": model})
+    assert response.status_code == 200, response.text
+    assert response.json() == {"ok": True, "model": model}
+    assert reopen.await_count == 1
+    call = reopen.await_args
+    assert call is not None
+    assert call.args == ("fixed", None)
+    assert call.kwargs["model"] == model
+    assert call.kwargs["context_window"] == window
+    assert call.kwargs["engine_account"] == "default"
 
 
 @pytest.mark.parametrize("model,local_proxy,expected", [
@@ -274,7 +332,8 @@ def test_fast_blocks_incompatible_model_before_reopen(cli, tmp_path, monkeypatch
     apply.assert_not_called()
 
 
-def test_create_fixed_account_is_independent_of_claude_config(cli, tmp_path, monkeypatch):
+@pytest.mark.parametrize("model,window", [("gpt-5.5", 400000), ("gpt-5.5[1m]", 1000000)])
+def test_create_fixed_account_is_independent_of_claude_config(cli, tmp_path, monkeypatch, model, window):
     from app import api
     from app.models import SessionInfo
     _fixed_engine(tmp_path, monkeypatch)
@@ -288,11 +347,11 @@ def test_create_fixed_account_is_independent_of_claude_config(cli, tmp_path, mon
     monkeypatch.setattr(api.registry, "create", create)
     response = cli.post("/api/sessions", headers=AUTH, json={
         "name": "fixed", "cwd": str(tmp_path), "provider": "claude", "engine": "proxy",
-        "engine_account": "default", "model": "gpt-5.5", "headless": False})
+        "engine_account": "default", "model": model, "headless": False})
     assert response.status_code == 200, response.text
     assert seen[0][0] is None
     assert seen[0][1]["engine_account"] == "default"
-    assert seen[0][1]["model"] == "gpt-5.5" and seen[0][1]["context_window"] == 400000
+    assert seen[0][1]["model"] == model and seen[0][1]["context_window"] == window
     assert response.json()["engine_account"] == "default" and response.json()["conta"].startswith("codex:")
     seen.clear()
     response = cli.post("/api/sessions", headers=AUTH, json={
@@ -301,7 +360,8 @@ def test_create_fixed_account_is_independent_of_claude_config(cli, tmp_path, mon
     assert response.status_code == 400 and not seen
 
 
-def test_archive_resume_keeps_explicit_account_and_base_model(cli, tmp_path, monkeypatch):
+@pytest.mark.parametrize("model", ["gpt-5.5", "gpt-5.5[1m]"])
+def test_archive_resume_keeps_explicit_account_and_base_model(cli, tmp_path, monkeypatch, model):
     from app import api
     from app.models import SessionInfo
     _fixed_engine(tmp_path, monkeypatch)
@@ -314,10 +374,10 @@ def test_archive_resume_keeps_explicit_account_and_base_model(cli, tmp_path, mon
     create = MagicMock(return_value=SessionInfo(name="archived", provider="claude"))
     monkeypatch.setattr(api.registry, "create", create)
     response = cli.post(f"/api/archive/project/{sid}/resume", headers=AUTH, json={
-        "engine": "proxy", "engine_account": "default", "model": "gpt-5.5"})
+        "engine": "proxy", "engine_account": "default", "model": model})
     assert response.status_code == 200, response.text
     assert create.call_args.kwargs["engine_account"] == "default"
-    assert create.call_args.kwargs["model"] == "gpt-5.5"
+    assert create.call_args.kwargs["model"] == model
     assert create.call_args.kwargs["resume_session_id"] == sid
 
 

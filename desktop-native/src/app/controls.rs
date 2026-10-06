@@ -186,13 +186,33 @@ fn catalog_engine_matches(catalog: &Value, engine: Option<&str>) -> bool {
     } else { engine.is_none() }
 }
 
+pub(in crate::app) fn context_model(model: &str, on: bool) -> String {
+    let base = model.strip_suffix("[1m]").unwrap_or(model);
+    if on { format!("{base}[1m]") } else { base.to_owned() }
+}
+
+fn claude_context_model<'a>(catalog: &'a Value, model: &str) -> Option<&'a str> {
+    if text(catalog, "kind") != "engine" || catalog.get("supports_fast").and_then(Value::as_bool) != Some(true) { return None; }
+    let base = model.strip_suffix("[1m]").unwrap_or(model);
+    catalog.get("models")?.as_array()?.iter().find(|m| m.get("id").and_then(Value::as_str) == Some(base)
+        && m.get("supports_fast").and_then(Value::as_bool) == Some(true))?.get("id")?.as_str()
+}
+
+fn claude_context_state(catalog: &Value) -> Option<(&str, bool)> {
+    let model = catalog.pointer("/current/model")?.as_str()?;
+    Some((claude_context_model(catalog, model)?, model.ends_with("[1m]")))
+}
+
+fn engine_model_choice(catalog: &Value, id: &str) -> String {
+    if claude_context_state(catalog).is_some_and(|(_, on)| on) && claude_context_model(catalog, id).is_some() {
+        context_model(id, true)
+    } else { id.to_owned() }
+}
+
 fn claude_fast_state(catalog: &Value) -> Option<(bool, bool)> {
     if text(catalog, "kind") != "engine" || catalog.get("supports_fast").and_then(Value::as_bool) != Some(true) { return None; }
     let tier = catalog.pointer("/current/service_tier").and_then(Value::as_str);
-    let model = catalog.pointer("/current/model").and_then(Value::as_str);
-    let supported = catalog.get("models").and_then(Value::as_array).is_some_and(|models| models.iter()
-        .any(|m| model.is_some() && m.get("id").and_then(Value::as_str) == model
-            && m.get("supports_fast").and_then(Value::as_bool) == Some(true)));
+    let supported = claude_context_state(catalog).is_some();
     Some((tier == Some("priority"), supported && matches!(tier, Some("default" | "priority"))))
 }
 
@@ -457,12 +477,12 @@ impl Hangar {
                 let models = list(catalog, "models");
                 let ids: Vec<(String, bool)> = models.iter().map(|m| (text(m, "id"), m.get("active").and_then(Value::as_bool) == Some(true))).collect();
                 let confirmed = catalog.pointer("/current/model").and_then(Value::as_str).filter(|_| engine);
-                let on = confirmed.map(|model| ids.iter().position(|(id, _)| id == model))
+                let on = confirmed.map(|model| ids.iter().position(|(id, _)| id == model || Some(id.as_str()) == claude_context_model(catalog, model)))
                     .unwrap_or_else(|| claude_model_current(&ids, &current));
                 models.iter().enumerate().map(|(n, m)| {
                     let id = text(m, "id");
                     let name = Some(text(m, "name")).filter(|n| !n.is_empty()).unwrap_or_else(|| id.clone());
-                    if engine { choice(name, String::new(), vec!["engine", "model"], json!({"model": id}), on == Some(n)) }
+                    if engine { choice(name, String::new(), vec!["engine", "model"], json!({"model": engine_model_choice(catalog, &id)}), on == Some(n)) }
                     else { choice(name, text(m, "desc"), vec!["model-effort"], json!({"model": id, "scope": "session"}), on == Some(n)) }
                 }).collect()
             }
@@ -901,6 +921,28 @@ impl Hangar {
             .into_any_element())
     }
 
+    fn render_context_footer(&self, catalog: &Value, busy: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.provider().0 != "claude" { return None; }
+        let (Some(key), Some(session)) = (self.selected_key(), self.selected.as_ref()) else { return None; };
+        self.controls.model_catalog(&key, session)?;
+        if !catalog_engine_matches(catalog, session.engine.as_deref()) { return None; }
+        let (_, on) = claude_context_state(catalog)?;
+        Some(div().flex().items_center().gap_2().px_2().py_1()
+            .child(div().flex_1().min_w_0().flex().flex_col().gap_1()
+                .child(div().text_sm().child(tr("create_context_title")))
+                .child(div().text_xs().text_color(theme::muted()).whitespace_normal().child(tr("create_engine_context_help"))))
+            .child(Switch::new("ctl-context").small().checked(on).accessibility_label(tr("create_context_title"))
+                .disabled(busy || !self.chat_online)
+                .on_change(cx.listener(|this, on: &bool, _, cx| {
+                    let (Some(key), Some(session)) = (this.selected_key(), this.selected.as_ref()) else { return; };
+                    let Some(catalog) = this.controls.model_catalog(&key, session) else { return; };
+                    let Some((model, _)) = claude_context_state(catalog) else { return; };
+                    let model = context_model(model, *on);
+                    this.apply_ctl(Ctl::Model, vec!["engine", "model"], json!({"model": model}), model, cx);
+                })))
+            .into_any_element())
+    }
+
     pub(super) fn render_ctl_panel(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let key = self.selected_key()?;
         let open = self.controls.open.as_ref().filter(|o| o.key == key)?;
@@ -981,6 +1023,7 @@ impl Hangar {
                     .child(list)
                     .children(effort)
                     .children((ctl == Ctl::Model).then(|| self.render_fast_footer(catalog, busy, cx)).flatten())
+                    .children((ctl == Ctl::Model).then(|| self.render_context_footer(catalog, busy, cx)).flatten())
                     .when(ctl == Ctl::Effort, |el| el.child(popup::separator())
                         .child(div().px(px(8.)).pt(px(4.)).pb(px(2.)).text_xs().text_color(theme::muted()).child(tr("effort_hint"))))
                     .when_some(probe_note.filter(|_| needs_probe), |el, note| el.child(div().px(px(8.)).flex().items_center().gap_2()
@@ -1293,6 +1336,42 @@ mod tests {
         catalog["supports_fast"] = serde_json::json!(true);
         catalog["kind"] = serde_json::json!("claude");
         assert_eq!(super::claude_fast_state(&catalog), None);
+    }
+
+    #[test]
+    fn engine_context_uses_confirmed_model_and_keeps_suffix_only_for_local_gpt() {
+        let mut catalog = serde_json::json!({
+            "kind":"engine", "supports_fast":true,
+            "current":{"model":"gpt-one[1m]", "service_tier":"priority"},
+            "models":[{"id":"gpt-one", "supports_fast":true}, {"id":"gpt-two", "supports_fast":true},
+                {"id":"other", "supports_fast":false}, {"id":"opus"}, {"id":"opus[1m]"}]
+        });
+        assert_eq!(super::claude_context_state(&catalog), Some(("gpt-one", true)));
+        assert_eq!(super::claude_fast_state(&catalog), Some((true, true)));
+        assert_eq!(super::engine_model_choice(&catalog, "gpt-two"), "gpt-two[1m]");
+        assert_eq!(serde_json::json!({"model":super::engine_model_choice(&catalog, "gpt-two")}), serde_json::json!({"model":"gpt-two[1m]"}));
+        assert_eq!(super::engine_model_choice(&catalog, "other"), "other");
+        assert_eq!(super::context_model("gpt-one[1m]", false), "gpt-one");
+        assert_eq!(super::context_model("gpt-one[1m]", true), "gpt-one[1m]");
+        catalog["current"]["model"] = serde_json::json!("gpt-one");
+        assert_eq!(super::claude_context_state(&catalog), Some(("gpt-one", false)));
+        assert_eq!(super::engine_model_choice(&catalog, "gpt-two"), "gpt-two");
+        for invalid in ["account/gpt-one[1m]", "other[1m]", "gpt-one[1m][1m]"] {
+            catalog["current"]["model"] = serde_json::json!(invalid);
+            assert_eq!(super::claude_context_state(&catalog), None);
+            assert_eq!(super::claude_fast_state(&catalog), Some((true, false)));
+        }
+        catalog["current"]["model"] = serde_json::json!("gpt-one[1m]");
+        catalog["supports_fast"] = serde_json::json!(false);
+        assert_eq!(super::claude_context_state(&catalog), None);
+        assert_eq!(super::engine_model_choice(&catalog, "gpt-two"), "gpt-two");
+        catalog["supports_fast"] = serde_json::json!(true);
+        for kind in ["claude", "codex"] {
+            catalog["kind"] = serde_json::json!(kind);
+            assert_eq!(super::claude_context_state(&catalog), None);
+            assert_eq!(super::engine_model_choice(&catalog, "opus[1m]"), "opus[1m]");
+        }
+        assert_eq!(claude_model_current(&[("opus".into(), false), ("opus[1m]".into(), false)], "opus[1m]"), Some(1));
     }
 
     #[test]

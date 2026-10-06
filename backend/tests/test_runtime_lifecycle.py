@@ -62,8 +62,10 @@ def test_clear_changes_conversation(tmp_path, monkeypatch):
     async def change():
         target.meta["session_id"] = "after"
         target.jsonl = str(tmp_path / "after.jsonl")
+    async def preflight():
+        pytest.fail("a validação Rust não roda na posse Python")
     try:
-        asyncio.run(coordinator.change("session", change))
+        asyncio.run(coordinator.change("session", change, preflight=preflight))
         assert slot.binding.generation == 2
         assert slot.binding.meta["session_id"] == "after"
         assert slot.store.state["generation"] == 2
@@ -225,3 +227,126 @@ def test_terminal_rename_persists_new_name_without_new_generation(tmp_path, monk
         asyncio.run(scenario())
     finally:
         coordinator.close_python_leases()
+
+
+def rust_owner(tmp_path, monkeypatch, state):
+    coordinator, slot, target = owner(tmp_path, monkeypatch)
+    slot.lease.close()
+    slot.lease = None
+    slot.phase = Phase.Rust
+    slot.view, slot.cache_valid = {}, False
+    coordinator.instance, coordinator.mode = "test-instance", "rust"
+    calls = []
+    snapshot = {"key": target.key, "generation": target.generation, "revision": 1,
+                "channels": {}, "error": None,
+                "view": {"alive": True, "initialized": True, "in_progress": state == "working",
+                         "public_state": {"session": target.name, "state": state, "headless": True}}}
+    async def op(descriptor, command, operation_id, clock):
+        calls.append(command["kind"])
+        assert command["kind"] == "snapshot"
+        assert slot.phase == Phase.Rust and slot.lease is None
+        assert descriptor["generation"] == target.generation
+        return copy.deepcopy(snapshot)
+    coordinator.transport = SimpleNamespace(instance=coordinator.instance, op=op)
+    return coordinator, slot, calls, snapshot
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_rust_busy_preflight_preserves_owner_and_policy_view(tmp_path, monkeypatch, nested):
+    coordinator, slot, calls, snapshot = rust_owner(tmp_path, monkeypatch, "working")
+    before = slot.binding.state_path.read_bytes()
+    async def preflight():
+        calls.append("preflight")
+        assert slot.frozen and slot.cache_valid and slot.view == snapshot
+        assert await api._motivo_ocupada("session", True) == "erro_sessao_trabalhando"
+        raise HTTPException(409, detail={"code": "erro_sessao_trabalhando"})
+    async def action():
+        pytest.fail("a ação recusada não pode rodar")
+    async def detach(*args, **kwargs):
+        pytest.fail("a sessão ocupada não pode fechar no Rust")
+    async def reopen(*args, **kwargs):
+        pytest.fail("a recusa não pode precisar reabrir a sessão")
+    monkeypatch.setattr(coordinator, "detach", detach)
+    monkeypatch.setattr(coordinator, "_reopen_after_change", reopen)
+    async def scenario():
+        if nested:
+            async with coordinator.freeze("session"):
+                change = slot.change = {"from_rust": True}
+                with pytest.raises(HTTPException) as caught:
+                    await coordinator.change("session", action, preflight=preflight)
+                assert slot.change is change
+                slot.change = None
+        else:
+            with pytest.raises(HTTPException) as caught:
+                await coordinator.change("session", action, preflight=preflight)
+        assert caught.value.status_code == 409
+        assert caught.value.detail["code"] == "erro_sessao_trabalhando"
+        assert calls == ["snapshot", "preflight"]
+        assert slot.phase == Phase.Rust and slot.lease is None and slot.cache_valid
+        assert slot.binding.generation == 1 and slot.view == snapshot and not slot.frozen
+        assert not slot.change_from_rust
+        assert slot.binding.state_path.read_bytes() == before
+        alive = await coordinator.op("session", {"kind": "snapshot"}, "after-refusal")
+        assert alive["view"]["alive"] is True
+        assert calls == ["snapshot", "preflight", "snapshot"]
+        assert coordinator.source_view("session")["public_state"]["state"] == "working"
+    try:
+        asyncio.run(scenario())
+    finally:
+        coordinator.close_python_leases()
+
+
+def test_rust_idle_preflight_runs_after_snapshot_before_detach_and_action(tmp_path, monkeypatch):
+    coordinator, slot, calls, snapshot = rust_owner(tmp_path, monkeypatch, "idle")
+    async def preflight():
+        calls.append("preflight")
+        assert slot.phase == Phase.Rust and slot.cache_valid and slot.view == snapshot
+        assert slot.frozen and coordinator.source_view("session")["public_state"]["state"] == "idle"
+    async def detach(name, *, restore):
+        assert name == "session" and restore is False
+        assert calls == ["snapshot", "preflight"]
+        calls.append("detach")
+        slot.phase = Phase.Python
+    async def action():
+        assert slot.phase == Phase.Python
+        calls.append("action")
+        slot.phase = Phase.Rust
+        return "changed"
+    monkeypatch.setattr(coordinator, "detach", detach)
+    try:
+        assert asyncio.run(coordinator.change("session", action, preflight=preflight)) == "changed"
+        assert calls == ["snapshot", "preflight", "detach", "action"]
+        assert slot.phase == Phase.Rust and not slot.frozen and slot.change is None
+    finally:
+        coordinator.close_python_leases()
+
+
+def test_api_busy_preflight_closes_unstarted_coroutine_and_clears_life_guard(monkeypatch):
+    calls = []
+    class Coordinator:
+        def managed_queue(self, name):
+            return True
+        async def change(self, name, action, *, preflight):
+            assert name == "session"
+            await preflight()
+            pytest.fail("a troca ocupada não pode começar")
+    async def busy(name, headless):
+        assert name == "session" and headless is True
+        calls.append("preflight")
+        return "erro_sessao_trabalhando"
+    async def action():
+        pytest.fail("a corrotina recusada não pode executar")
+    monkeypatch.setattr(runtime_coordinator, "_current", Coordinator())
+    monkeypatch.setattr(api, "_headless", lambda name: True)
+    monkeypatch.setattr(api, "_motivo_ocupada", busy)
+    monkeypatch.setattr(api.share_api, "changing_mode", set())
+    monkeypatch.setattr(api, "session_life", lambda name: "same-life")
+    monkeypatch.setattr(api.share_store, "set_life", lambda *args: None)
+    monkeypatch.setattr(api.guest_users, "set_life", lambda *args: None)
+    monkeypatch.setattr(api, "_invalidate_lists", lambda: None)
+    pending = action()
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(api._during_transfer_life("session", pending, require_idle=True))
+    assert caught.value.status_code == 409 and caught.value.detail["code"] == "erro_sessao_trabalhando"
+    assert calls == ["preflight"] and pending.cr_frame is None
+    assert "session" not in api.share_api.changing_mode

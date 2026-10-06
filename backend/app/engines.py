@@ -286,6 +286,12 @@ def _inteiro_positivo(campo: str, valor: Any) -> int:
     return n
 
 
+def catalog_model(model: str) -> str:
+    if re.fullmatch(r"gpt-\d[^/]*\[1m\]", model.rsplit("/", 1)[-1]):
+        return model.removesuffix("[1m]")
+    return model
+
+
 def service_tier_env(service_tier: str, extra_body: str | None = None) -> dict[str, str]:
     """Escolha por execução, conservando os outros campos do corpo enviado ao motor."""
     if service_tier not in ("default", "priority"):
@@ -500,6 +506,8 @@ def env_de(nome: str, modelo: str | None = None, context_window: int | None = No
         from app.cliproxy_accounts import base_model
         if base_model(modelo_final, account["prefix"]) == base_model(e["model"], account["prefix"]):
             janela = e.get("context_window")
+    if catalog_model(modelo_final) != modelo_final:
+        janela = 1_000_000
     if janela:
         env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(_inteiro_positivo("context_window", janela))
     if _booleano("bundled_skills", e.get("bundled_skills")) is not True:
