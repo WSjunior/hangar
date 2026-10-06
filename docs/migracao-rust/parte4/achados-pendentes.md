@@ -31,6 +31,15 @@ Achados médios e baixos das revisões por Task que entraram na `feat/parte4` se
   limitar o ritmo rápido no Windows. O Monitor no Windows (psmux) e o convidado de convite de
   verdade não foram conferidos (só o Connect).
 
+## Limpeza depois da junção
+
+- A ponte `terminal_observer` → `POST /__hangar_server/terminal` ficou sem consumidor em todo
+  modo (Task 11): código morto no Python (`terminal_observer.lease/capture`) e no Rust
+  (`terminal_routes`, rota privada). Sai na limpeza ou na parte 7.
+- `plugin_bridge.modo_sem_dialogo` usava o quadro do `StateMonitor` (`state.shared_capture`); sem
+  ele, cada poll de permissão segurada captura o pane de novo (um processo por poll, só enquanto há
+  permissão segurada). Ler o modo do `Monitor` do Rust ou do retrato dos fatos.
+
 ## Fora da parte 4, achados pela prova (Task 12)
 
 - ~~`/select` no Codex sem terminal responde 500~~: corrigido em `427eb0d5d` (a rota do terminal
