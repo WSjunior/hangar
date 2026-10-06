@@ -1161,7 +1161,10 @@ class ClaudeHeadlessAdapter:
         env["CP_SESSION_NAME"] = sess.name
         # A ponte do plugin do Hangar desta sessão (S7). No `claude -p` ela serve só ao clique do app pela
         # superfície `desktop` (`press-start` e `opened`, atendidos pelo hangar-server): o aviso e a cópia
-        # já chegam ao Hangar pelo canal da superfície. Com os mods desligados, volta vazio.
+        # já chegam ao Hangar pelo canal da superfície. Com os mods desligados, volta vazio. A ponte que o
+        # backend herdou (subido de dentro de outra sessão) sai antes: o filho nunca leva a de outra sessão.
+        env.pop("HANGAR_PLUGIN_URL", None)
+        env.pop("HANGAR_PLUGIN_TOKEN", None)
         env.update(plugin_bridge.env_da_sessao(sess.name))
         if not meta.get("key"):
             meta = sess.meta = hl_sessions.update(sess.name, key=uuid.uuid4().hex) or meta

@@ -1577,6 +1577,47 @@ def test_processo_herda_chave_e_nao_o_pane_do_operador(sidecar, monkeypatch, lan
     assert visto["cano"]["escuta"].startswith(("unix:", "tcp:"))
     # O `--plugin-dir` vai no comando do claude, depois do `--` do cano.
     assert argv[argv.index("--plugin-dir", ultimo) + 1] == "/repo/plugins/hangar"
+    # O token da ponte vai só no ambiente, nunca no comando (o cmdline é legível por outros processos).
+    assert "tok-s1" not in " ".join(argv)
+
+
+def test_processo_nao_herda_a_ponte_de_outra_sessao(sidecar, monkeypatch, lancador_cano):
+    """Backend subido de dentro de uma sessão do Hangar tem a ponte DELA no ambiente. Com os mods
+    desligados (`env_da_sessao` vazio, fixture), o filho sai sem ponte nenhuma: nem a herdada, nem a
+    desta sessão; e sem `--plugin-dir`, como era."""
+    monkeypatch.setenv("HANGAR_PLUGIN_URL", "http://127.0.0.1:9/api/plugin")
+    monkeypatch.setenv("HANGAR_PLUGIN_TOKEN", "tok-de-outra")
+    visto = {}
+
+    async def exec_falso(*argv, env, **kw):
+        visto["env"] = env
+        visto["argv"] = argv
+
+        class _P:
+            pid = 1
+            returncode = None
+
+            async def wait(self):
+                return 0
+        return _P()
+
+    async def conectar_falso(cano, **kw):
+        return _ligacao_com([]), {"type": "cano_snapshot", "versao": A.cano_mod.VERSAO, "pid": 2,
+                                  "init": None, "aberto": False, "pendentes": [], "stderr_tail": []}
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", exec_falso)
+    monkeypatch.setattr(A.shutil, "which", lambda b: "/usr/bin/claude")
+    ad = ClaudeHeadlessAdapter()
+    sess = _Sessao("s1", S.load("s1"))
+
+    async def ctrl(s, sub, **kw):
+        return {}
+    ad._conectar = conectar_falso                 # type: ignore[method-assign]
+    ad._ler = lambda s: asyncio.sleep(0)          # type: ignore[method-assign]
+    ad._ctrl = ctrl                               # type: ignore[method-assign]
+    ad._agendar_cota = lambda s: None             # type: ignore[method-assign]
+    _run(ad._spawn(sess))
+    assert "HANGAR_PLUGIN_URL" not in visto["env"] and "HANGAR_PLUGIN_TOKEN" not in visto["env"]
+    assert "--plugin-dir" not in visto["argv"] and "tok-de-outra" not in " ".join(visto["argv"])
 
 
 @pytest.mark.parametrize("tier,supported", [(None, False), ("default", True), ("priority", True), ("default", False)])

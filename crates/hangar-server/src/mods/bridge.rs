@@ -54,6 +54,15 @@ async fn owned<T: DeserializeOwned + Named>(st: &Arc<AppState>, peer: SocketAddr
     }
 }
 
+/// Os limites do Pydantic do Python (`PressBody`, `OpenedBody`), contados em caracteres.
+fn fits(text: &str, max: usize) -> bool {
+    !text.is_empty() && text.chars().count() <= max
+}
+
+fn invalid() -> Response {
+    answer(StatusCode::UNPROCESSABLE_ENTITY, json!({"detail": "corpo inválido"}))
+}
+
 /// Comparação em tempo constante, como o `secrets.compare_digest` do Python.
 fn token_ok(st: &AppState, name: &str, token: &str) -> bool {
     mint(&st.cfg.auth_token, name).as_bytes().ct_eq(token.as_bytes()).into()
@@ -61,6 +70,9 @@ fn token_ok(st: &AppState, name: &str, token: &str) -> bool {
 
 pub async fn press_start(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let body: PressStart = match owned(&st, peer, req).await { Ok(body) => body, Err(response) => return response };
+    if !fits(&body.request_id, 64) || !fits(&body.element, 256) {
+        return invalid();
+    }
     if !token_ok(&st, &body.sessao, &body.token) {
         return answer(StatusCode::FORBIDDEN, json!({"detail": "token do plugin inválido"}));
     }
@@ -70,11 +82,14 @@ pub async fn press_start(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
 
 pub async fn opened(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let body: Opened = match owned(&st, peer, req).await { Ok(body) => body, Err(response) => return response };
+    if !fits(&body.attempt, 64) {
+        return invalid();
+    }
     if !token_ok(&st, &body.sessao, &body.token) {
         return answer(StatusCode::FORBIDDEN, json!({"detail": "token do plugin inválido"}));
     }
     let lower = body.url.to_ascii_lowercase();
-    if !(lower.starts_with("http://") || lower.starts_with("https://")) || body.url.len() > URL_MAX {
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) || body.url.chars().count() > URL_MAX {
         return answer(StatusCode::BAD_REQUEST, json!({"detail": "só http(s)"}));
     }
     if st.mods.opened(&body.sessao, &body.attempt, &body.url) {
