@@ -6,9 +6,9 @@ import type { PluginInputKind } from './api';
 /** Quando o valor que o mod desenha entra no campo. Só conta como posto quando é posto: com a pessoa no campo ele fica
  *  pendente (se mudou em relação ao desenho anterior) e entra quando o campo perde o foco, salvo se a pessoa digitou
  *  depois que ele chegou. Logo depois do envio do próprio campo, o desenho seguinte entra mesmo com foco: é como o mod
- *  limpa o campo depois do envio, e o valor pode ser igual ao de antes (vazio). Os ecos atrasados dos `change` de antes do envio não tomam a vez da resposta:
- *  `sent` guarda o que o campo mandou como `change` desde o último valor aplicado, e um desenho com um desses valores
- *  é eco velho. */
+ *  limpa o campo depois do envio, e o valor pode ser igual ao de antes (vazio). Os ecos atrasados dos `change` de
+ *  antes do envio não tomam a vez da resposta: `sent` guarda o que o campo mandou como `change` desde o último valor
+ *  aplicado, e um desenho com um desses valores é eco velho. */
 export class FieldSync {
   private pending: string | null = null;
   private submitted_ = false;
@@ -108,7 +108,8 @@ export class InputOutbox {
   }
 }
 
-/** O envio de um campo pela `InputOutbox`: `send` faz o pedido, e `onError` avisa de uma falha, que não trava a fila. */
+/** O envio de um campo pela `InputOutbox`: `send` faz o pedido, e `onError` avisa de uma falha, que não trava a
+ *  fila. */
 export function fieldSender(
   send: (kind: PluginInputKind, value: string) => Promise<unknown>,
   onError: (err: unknown) => void,
