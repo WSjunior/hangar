@@ -14,6 +14,7 @@ use serde_json::Value;
 
 use super::capped::SESSION_CAP;
 use super::facts_files::{self, HookStates};
+use crate::state::capture::MuxProcess;
 use crate::terminal_state::{analyze, PaneAnalysis};
 
 /// Escrita no transcript até 1 s depois do idle é o resumo pós-Stop, não turno novo.
@@ -375,8 +376,7 @@ impl Classifier {
 
 /// Captura avulsa pelo multiplexador: a sessão sem chat aberto não tem cliente `-C` para alugar.
 pub struct MuxCapture {
-    program: OsString,
-    timeout: Duration,
+    mux: std::sync::Arc<MuxProcess>,
     /// Pane do agente por nome, da descoberta; sem ele vale o ativo da sessão (`=nome:`).
     pub targets: std::sync::Arc<BTreeMap<String, String>>,
 }
@@ -389,26 +389,15 @@ fn process_start() -> std::time::Instant {
 
 impl MuxCapture {
     pub fn new(program: impl Into<OsString>, timeout: Duration, targets: std::sync::Arc<BTreeMap<String, String>>) -> Self {
-        Self { program: program.into(), timeout, targets }
+        Self { mux: std::sync::Arc::new(MuxProcess::new(program, timeout)), targets }
     }
 }
 
 impl CaptureSource for MuxCapture {
     fn capture(&self, name: &str) -> impl Future<Output = Result<String, CaptureFailed>> + Send {
         let target = self.targets.get(name).cloned().unwrap_or_else(|| format!("={name}:"));
-        let mut command = crate::terminal_input::child_command(&self.program);
-        command.args(["capture-pane", "-p", "-t", &target, "-S", "-200"])
-            .stdin(std::process::Stdio::null()).kill_on_drop(true);
-        let timeout = self.timeout;
-        async move {
-            match tokio::time::timeout(timeout, command.output()).await {
-                Err(_) => Err(CaptureFailed { code: "capture_timeout" }),
-                Ok(Err(_)) => Err(CaptureFailed { code: "capture_spawn_failed" }),
-                // Saída vazia de uma recusa é indistinguível de pane vazio: a recusa é erro.
-                Ok(Ok(out)) if !out.status.success() => Err(CaptureFailed { code: "capture_refused" }),
-                Ok(Ok(out)) => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
-            }
-        }
+        let (mux, name) = (self.mux.clone(), name.to_owned());
+        async move { mux.capture_checked(&name, &target).await.map_err(|code| CaptureFailed { code }) }
     }
     fn pause(&self, d: Duration) -> impl Future<Output = ()> + Send { tokio::time::sleep(d) }
     fn wall(&self) -> f64 {
