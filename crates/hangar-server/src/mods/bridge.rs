@@ -16,7 +16,7 @@ use serde_json::json;
 use subtle::ConstantTimeEq;
 
 use super::http::{fits, invalid, reply};
-use crate::routes::{AppState, gate, pass};
+use crate::routes::{AppState, fetch_info, gate, pass};
 
 const BODY_LIMIT: usize = 16 * 1024;
 const URL_MAX: usize = 8192;
@@ -49,9 +49,17 @@ async fn owned<T: DeserializeOwned>(st: &Arc<AppState>, peer: SocketAddr, req: R
     let parsed = serde_json::from_slice::<Envelope<T>>(&bytes).ok()
         .and_then(|envelope| st.mods.bridge_session(&envelope.sessao).map(|name| (envelope, name)));
     match parsed {
-        Some(found) => Ok(found),
-        None => Err(Box::new(pass(st, Request::from_parts(parts, Body::from(bytes)), &fwd).await)),
+        Some((envelope, name)) if name == envelope.sessao || !named_elsewhere(st, &envelope.sessao).await => Ok((envelope, name)),
+        _ => Err(Box::new(pass(st, Request::from_parts(parts, Body::from(bytes)), &fwd).await)),
     }
+}
+
+/// O nome antigo de uma sessão renomeada pode ser o nome atual de outra, fora do Rust (com terminal, ou
+/// criada depois no Python), cujo plugin manda o mesmo `sessao` com um token que vale. Pergunta ao Python,
+/// sem o cache do `/events` (a resposta de um segundo atrás pode ser de antes do renomear): existindo a
+/// sessão, ou sem resposta, o pedido é dela e vai ao Python.
+async fn named_elsewhere(st: &AppState, sessao: &str) -> bool {
+    !matches!(fetch_info(&st.http, st.cfg.upstream, &st.cfg.internal_secret, sessao).await, Ok(None))
 }
 
 /// Comparação em tempo constante, como o `secrets.compare_digest` do Python.

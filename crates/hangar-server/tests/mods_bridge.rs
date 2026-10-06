@@ -163,6 +163,35 @@ async fn old_name_token_never_acts_on_a_new_session_with_that_name() {
     assert_eq!(mods.bridge_session("mods-s").as_deref(), Some("mods-s"));
 }
 
+#[tokio::test]
+async fn old_name_of_a_renamed_session_that_now_names_a_session_outside_rust_goes_to_python() {
+    // N2: renomeada A→B no Rust (o processo nasceu A), e uma sessão de fora do Rust (com terminal, no
+    // Python) chamada A. O plugin dela manda `sessao: A` com um token que vale: as chamadas são dela, não
+    // de B, e vão ao Python. O clique em aberto de B não é tocado.
+    let (python, server, mods, plugin) = setup().await;
+    mods.forget("mods-s", 1);
+    mods.attach_process("renomeada", "mods-s", 2, Arc::new(plugin));
+    python.set_info(json!({"provider": "claude", "jsonl": null, "session_key": "outra"}));
+    let attempt = mods.begin_click("renomeada", "a", "b");
+    let base = format!("http://{server}/api/plugin");
+    let token = mint(OWNER, "mods-s");
+    let start = post(format!("{base}/press-start"), json!({"sessao": "mods-s", "token": token, "requestId": "a", "element": "b"}), false).await;
+    assert_eq!(start.text().await.unwrap(), "from-python");
+    let opened = post(format!("{base}/opened"), json!({"sessao": "mods-s", "token": token, "attempt": attempt, "url": "https://x"}), false).await;
+    assert_eq!(opened.text().await.unwrap(), "from-python");
+    assert_eq!((python.hits_to("/api/plugin/press-start"), python.hits_to("/api/plugin/opened")), (1, 1));
+    assert_eq!(mods.match_click("renomeada", "a", "b").as_deref(), Some(attempt.as_str()), "o clique de B segue em aberto");
+    // Sem sessão A no Python, o nome de nascimento volta a levar a B.
+    python.set_info(serde_json::Value::Null);
+    let attempt = mods.begin_click("renomeada", "c", "d");
+    let start = json_of(post(format!("{base}/press-start"), json!({"sessao": "mods-s", "token": token, "requestId": "c", "element": "d"}), false).await).await;
+    assert_eq!((start["fromApp"].as_bool(), start["attempt"].as_str()), (Some(true), Some(attempt.as_str())));
+    // Sem resposta do Python, não dá para saber de quem é o nome: vai a ele.
+    python.fail_info(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    let unsure = post(format!("{base}/press-start"), json!({"sessao": "mods-s", "token": token, "requestId": "c", "element": "d"}), false).await;
+    assert_eq!(unsure.text().await.unwrap(), "from-python");
+}
+
 /// Superfície que não é chamada nos testes da ponte.
 mod mods_support_free {
     pub struct Quiet;
