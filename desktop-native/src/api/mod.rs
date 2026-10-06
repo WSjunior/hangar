@@ -745,6 +745,7 @@ mod tests {
             ("session_transfer_invalid_model_choice", "catálogo", "catalog"),
             ("session_transfer_queue_pending", "mensagens na fila", "Messages are queued"),
             ("session_transfer_source_busy", "permissão pendente", "pending question or approval"),
+            ("session_transfer_busy", "trocando de agente", "switching agents"),
         ] {
             let text = failure_detail(Some(json!({"detail": {"code": code,
                 "msg": "private-payload", "params": {"model": "chosen", "estimated": 123, "limit": 100}}})), 409);

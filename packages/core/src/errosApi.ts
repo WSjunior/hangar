@@ -505,6 +505,8 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_mod_fechar_recusado: () => m.erro_mod_fechar_recusado(),
   erro_mod_guarda_indisponivel: () => m.erro_mod_guarda_indisponivel(),
   erro_mod_painel_inexistente: () => m.erro_mod_painel_inexistente(),
+  // Troca de agente em curso: o Python recusa com este código, e o Rust o repassa nas rotas dos mods.
+  session_transfer_busy: () => m.session_transfer_busy(),
 };
 
 // Falha com código do servidor (503 do dono único): a frase traduzida já está no `message`.

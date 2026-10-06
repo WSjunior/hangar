@@ -354,3 +354,48 @@ it('desktop: sem o "Ocultar", na faixa e no painel', async () => {
     await unmount(t.comp);
   }
 });
+
+it('troca de agente em curso: clique, troca de aba e digitação recusados mostram a frase traduzida', async () => {
+  janelaCtl.desktop = true;
+  const api = await import('@hangar/core');
+  const t = montar();
+  try {
+    await tick();
+    const faixa = { type: 'Box', children: [botao('b1', 'Abrir mod'), { type: 'Input', props: { key: 'campo', label: 'Campo' } }] };
+    const segundo = { ...PAINEL, id: 'p2', title: 'Painel dois' };
+    sseCtl.handlers.get('plugin_ui')?.({ data: JSON.stringify({ above: faixa, panes: [PAINEL, segundo], shown_id: 'p1', source: 'surface' }) } as MessageEvent);
+    await tick();
+    const aviso = () => t.el.querySelector('.plugin-band .notice')?.textContent?.trim();
+    const frase = api.mensagemDeErro('session_transfer_busy');
+    expect(frase).toBeTruthy();
+    // Como chega com servidor explícito: o status na frente do texto cru do Python, com o código no erro.
+    const recusa = () => Object.assign(new Error('409: A sessão está trocando de agente; tente novamente quando terminar.'),
+      { status: 409, code: 'session_transfer_busy' });
+    const abrir = () => ([...t.el.querySelectorAll('button.button')].find((b) => b.textContent === 'Abrir mod') as HTMLElement).click();
+    // Entre um pedido e outro, um aviso diferente (o 500 do clique): sem ele, a mesma frase de antes passaria pelo teste.
+    const limpar = async () => {
+      vi.mocked(api.pressPluginButton).mockRejectedValueOnce(Object.assign(new Error('500'), { status: 500 }));
+      abrir();
+      await vi.waitFor(() => expect(aviso()).toBe(m.plugin_clique_falhou()));
+    };
+
+    vi.mocked(api.pressPluginButton).mockRejectedValueOnce(recusa());
+    abrir();
+    await vi.waitFor(() => expect(aviso()).toBe(frase));
+
+    await limpar();
+    vi.mocked(api.showPluginPane).mockRejectedValueOnce(recusa());
+    ([...t.el.querySelectorAll('button[role="tab"]')].find((b) => b.textContent === 'Painel dois') as HTMLElement).click();
+    await vi.waitFor(() => expect(aviso()).toBe(frase));
+
+    await limpar();
+    vi.mocked(api.inputPluginField).mockRejectedValueOnce(recusa());
+    const campo = t.el.querySelector('.plugin-band input') as HTMLInputElement;
+    campo.value = 'o';
+    campo.dispatchEvent(new Event('input', { bubbles: true }));
+    await vi.waitFor(() => expect(vi.mocked(api.inputPluginField)).toHaveBeenCalled());
+    await vi.waitFor(() => expect(aviso()).toBe(frase));
+  } finally {
+    await unmount(t.comp);
+  }
+});
