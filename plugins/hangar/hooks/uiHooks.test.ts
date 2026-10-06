@@ -108,7 +108,7 @@ test("rolagem e foco com alvo armado vão ao backend, e a key armada entra no ev
   expect(bodies(posts, "focused")).toEqual([{ ...ponte, attempt: "t-1", requestId: "pm-a", element: "alvo", denied: false }]);
 });
 
-test("na janela do foco armado, o envio do composer só cai enquanto o backend tem o alvo armado", PLUGINS, async ($, on) => {
+test("na janela do foco armado, o envio do composer só cai com o alvo confirmado como armado", PLUGINS, async ($, on) => {
   on("ui.focus", () => ({}));
   const enviados: string[] = [];
   on("prompt.submit", ($, e) => {
@@ -125,20 +125,25 @@ test("na janela do foco armado, o envio do composer só cai enquanto o backend t
   const composer = (text: string) => $.prompt.submit({ text, wait: false, origin: { kind: "composer" } });
   await $.ui.focus({ component: "Pane", requestId: "pm-a", plugin: "paineis", element: "x", origin: { kind: "person" } });
   await composer("letra no meio do clique");
-  // Sem resposta que sirva, vale a janela: segura.
+  expect(enviados).toEqual([]);
+  // A ponte sem resposta não confirma o alvo: o envio passa, para a mensagem da fila não sumir como entregue.
   estado = "fora";
   await composer("backend sem resposta");
-  expect(enviados).toEqual([]);
+  expect(enviados).toEqual(["backend sem resposta"]);
+  // A janela segue: com o alvo armado de novo, segura.
+  estado = "armado";
+  await composer("outra letra");
+  expect(enviados).toEqual(["backend sem resposta"]);
   // Desarmado antes de a fila soltar: a mensagem dela passa, ainda dentro dos 3 s.
   estado = "desarmado";
   await composer("mensagem da fila");
-  expect(enviados).toEqual(["mensagem da fila"]);
+  expect(enviados).toEqual(["backend sem resposta", "mensagem da fila"]);
   // A pergunta é só de leitura: sem mod nem elemento, com um `requestId` que não é de painel.
   expect(bodies(posts, "focus-target").at(-1)).toMatchObject({ requestId: "prompt", plugin: null, element: null });
   // A janela fechou com o desarme: o próximo envio nem pergunta.
   const perguntas = bodies(posts, "focus-target").length;
   await composer("depois");
-  expect(enviados).toEqual(["mensagem da fila", "depois"]);
+  expect(enviados).toEqual(["backend sem resposta", "mensagem da fila", "depois"]);
   expect(bodies(posts, "focus-target")).toHaveLength(perguntas);
   void clock;
 });
