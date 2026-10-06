@@ -175,7 +175,7 @@ pub fn input_request(source: Option<UiSource>, read_only: bool, site: &str, key:
 /// rótulo e não há `✕`. `columns` é a largura, em colunas, para a qual a faixa foi desenhada.
 pub struct View<'a> {
     pub press: Option<Press>,
-    pub show: Option<Show>,
+    pub show: Show,
     pub columns: Option<f64>,
     pub hover: Option<Hover>,
     pub hovered: &'a HashSet<String>,
@@ -453,7 +453,7 @@ fn tabs(panes: &[Value], active: &str, view: &View) -> AnyElement {
                 .when(on, |el| el.bg(theme::raised()).font_weight(FontWeight::SEMIBOLD))
                 .when(!on, |el| el.text_color(theme::muted()).cursor_pointer())
                 .child(div().min_w_0().truncate().child(title));
-            match view.show.clone().filter(|_| !on) {
+            match (!on).then(|| view.show.clone()) {
                 Some(show) => tab.on_click(move |_, window, cx| show(&id, window, cx)).into_any_element(),
                 None => tab.into_any_element(),
             }
