@@ -5886,7 +5886,24 @@ class PluginPressBody(_StrictBody):
     key: str = Field(min_length=1, max_length=256)
 
 
-@app.post("/api/sessions/{name}/plugin/press", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+def _recusa_convidado_no_terminal_do_rust(name: str, request: Request) -> None:
+    """Convidado (com login ou de convite) não clica em mod de sessão cujo terminal é do Rust.
+
+    O pane é do executor do Rust: o `plugin_click` daqui o dirigiria por fora dele. O Rust repassa ao
+    Python todo pedido que não é do dono, e o convite chega pela porta 8766 sem passar pelo Rust, por
+    isso a recusa mora aqui, depois da autenticação.
+    """
+    from app import guest_users, runtime_coordinator
+    if guest_of(request) is None and guest_users.current.get() is None:
+        return
+    coordinator = runtime_coordinator.current()
+    if coordinator is not None and coordinator.terminal_in_rust(name):
+        raise HTTPException(403, detail=erro("erro_mod_convidado",
+            "Só o dono da sessão aciona os mods dela pelo app; quem acompanha como convidado vê, mas não clica."))
+
+
+@app.post("/api/sessions/{name}/plugin/press", dependencies=[Depends(require_auth),
+    Depends(_recusa_convidado_no_terminal_do_rust), Depends(_transfer_guard)])
 async def plugin_press(name: str, body: PluginPressBody):
     """Clique num botão que um mod desenhou na faixa ou num painel, pedido pelo app."""
     from app import plugin_click
