@@ -22,6 +22,9 @@ pub enum IoEvent {
 pub struct WireFrame {
     pub operation_id: String,
     pub frame: Value,
+    /// Pedido `ui_*` da interface dos mods: sai a cada desenho e não muda a conversa, então o escritor
+    /// não guarda o id para barrar repetição (a lista cresceria sem fim).
+    pub ephemeral: bool,
 }
 
 pub struct CanoConnection {
@@ -221,7 +224,7 @@ impl CanoConnection {
             let work = async {
                 let mut used = HashSet::new();
                 while let Some(command) = commands.recv().await {
-                    if !used.insert(command.operation_id.clone()) { continue; }
+                    if !command.ephemeral && !used.insert(command.operation_id.clone()) { continue; }
                     let frame = command.frame.to_string();
                     if !command.frame.is_object() || frame.len() > MAX_FRAME {
                         let _ = events_tx.send(IoEvent::WriteAck { operation_id: command.operation_id, outcome: WriteOutcome::NotWritten }).await;

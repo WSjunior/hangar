@@ -1,5 +1,6 @@
 use super::{cano::{CanoConnection,IoEvent,WireFrame},claude::ClaudeEngine,codex::Engine as CodexEngine,
     protocol::*,queue::{Action,QueueActor,Status},receipt::ReceiptIndex};
+use crate::mods::model::{ModsCall,ModsError,SurfaceEffect};
 use serde_json::{Value,json};
 use std::collections::{BTreeMap,BTreeSet,VecDeque};
 use std::sync::{Arc,atomic::{AtomicBool,AtomicU64,Ordering}};
@@ -65,17 +66,31 @@ pub struct RuntimeEngine {
     policy:Option<PolicyClient>,
     publisher:Option<broadcast::Sender<RuntimeEvent>>,
     revision:Arc<AtomicU64>,
+    mods:Option<crate::mods::state::Mods>,
 }
 
 impl RuntimeEngine {
     pub fn new(provider:&str,metadata:Value,generation:u64,clock:ClockSample) -> Result<Self,RuntimeError> {
         let core = match provider { "claude"=>Core::Claude(ClaudeEngine::new(metadata,generation,clock)),
             "codex"=>Core::Codex(CodexEngine::new(metadata,generation,clock)),_=>return Err(failure("provider")) };
-        Ok(Self { core,policy:None,publisher:None,revision:Arc::new(AtomicU64::new(0)) })
+        Ok(Self { core,policy:None,publisher:None,revision:Arc::new(AtomicU64::new(0)),mods:None })
     }
     pub fn with_policy(mut self,policy:PolicyClient) -> Self { self.policy = Some(policy); self }
     pub fn with_publisher(mut self,publisher:broadcast::Sender<RuntimeEvent>) -> Self { self.publisher = Some(publisher); self }
     pub fn with_revision(mut self,revision:Arc<AtomicU64>) -> Self { self.revision = revision; self }
+    /// Liga a interface dos mods: o Claude sem terminal vira superfície `desktop` e publica no `Mods`.
+    /// O prefixo dos pedidos é único por ator, para a resposta de uma vida anterior não casar.
+    pub fn with_mods(mut self,mods:crate::mods::state::Mods) -> Self {
+        static ACTORS:AtomicU64 = AtomicU64::new(0);
+        if let Core::Claude(core) = &mut self.core {
+            core.enable_surface(format!("ui:{}.{}",std::process::id(),ACTORS.fetch_add(1,Ordering::Relaxed)));
+            self.mods = Some(mods);
+        }
+        self
+    }
+    fn mods_call(&mut self,token:u64,call:ModsCall,clock:ClockSample) -> Result<Vec<Effect>,ModsError> {
+        match &mut self.core { Core::Claude(core)=>core.mods_call(token,call,clock),Core::Codex(_)=>Err(crate::mods::model::missing()) }
+    }
     fn view(&self) -> Value {
         match &self.core { Core::Claude(core)=>core.view(),Core::Codex(core)=> {
             let mut view = core.control_view(); view["public_state"] = core.view(); view["conversation"] = view["thread_id"].clone(); view
@@ -154,6 +169,7 @@ enum Message {
     Snapshot(oneshot::Sender<Result<Value,RuntimeError>>),
     Drain(oneshot::Sender<Result<Value,RuntimeError>>),
     Confirm(oneshot::Sender<Result<Value,RuntimeError>>),
+    Mods { call:ModsCall,response:oneshot::Sender<Result<Value,ModsError>> },
     Stop(oneshot::Sender<Result<(),RuntimeError>>),
 }
 
@@ -192,6 +208,14 @@ impl RuntimeHandle {
         let (send,receive) = oneshot::channel(); self.sender.send(Message::Confirm(send)).await.map_err(|_|self.gone("runtime_closed"))?;
         receive.await.map_err(|_|self.gone("runtime_closed"))?
     }
+    /// Pedido de um app à interface dos mods desta sessão. Ator parado ou sumido responde com código,
+    /// nunca pendura o app.
+    pub async fn mods(&self,call:ModsCall) -> Result<Value,ModsError> {
+        if self.closed.load(Ordering::Acquire) { return Err(crate::mods::model::no_answer()); }
+        let (response,receive) = oneshot::channel();
+        self.sender.send(Message::Mods { call,response }).await.map_err(|_|crate::mods::model::no_answer())?;
+        receive.await.map_err(|_|crate::mods::model::no_answer())?
+    }
     pub async fn ensure_projection(&self) -> Result<Value,RuntimeError> {
         self.queue(format!("projection:{}",unique()),Action::EnsureProjection).await
     }
@@ -216,6 +240,13 @@ impl RuntimeHandle {
         }
         *stopped = Some(result.clone());
         result
+    }
+}
+
+impl crate::mods::state::SurfaceLink for RuntimeHandle {
+    fn call(&self,call:ModsCall) -> crate::mods::state::CallFuture {
+        let handle = self.clone();
+        Box::pin(async move { handle.mods(call).await })
     }
 }
 
@@ -321,6 +352,9 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
     let mut drain_requested = true;
     let mut drain_active = false;
     let mut drain_waiters = Vec::new();
+    let mut mods_waiters:BTreeMap<u64,oneshot::Sender<Result<Value,ModsError>>> = BTreeMap::new();
+    let mut mods_token = 0u64;
+    let mut ui_writes = 0u64;
     effects.extend(engine.hydrate(snapshot)?);
     if engine.view()["initialized"] != true || target.provider == "codex" && engine.view()["ready"] != true {
         let id = format!("bootstrap:{}:{}",target.key,target.generation);
@@ -513,6 +547,21 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                         queue.exec(generation,&format!("local-confirm:{}",unique()),sample,Action::Confirm { entry_ids }).await.map(|_|()).map_err(io_failure)
                     }.await) });
                 },
+                Effect::Surface { effect } => match effect {
+                    SurfaceEffect::Write { frame } => {
+                        // `ui_*` não muda a conversa nem precisa sobreviver a uma queda: sai direto, fora do
+                        // diário, que gravaria no disco a cada desenho.
+                        ui_writes += 1;
+                        let frame = WireFrame { operation_id:format!("ui:{}:{ui_writes}",target.generation),frame,ephemeral:true };
+                        if io.writer.try_send(frame).is_err() && crate::warn_limit::allow(Some(&target.key),"ui_write") {
+                            tracing::warn!(key=%target.key,session=%target.name,"pedido da interface dos mods não coube no canal do cano");
+                        }
+                    }
+                    SurfaceEffect::Publish { data } => { if let Some(mods) = &engine.mods { mods.publish_ui(&target.name,target.generation,&data); } }
+                    SurfaceEffect::Toast { plugin,text,timeout_ms } => { if let Some(mods) = &engine.mods { mods.toast(&target.name,target.generation,&plugin,&text,timeout_ms); } }
+                    SurfaceEffect::Copied { plugin,text } => { if let Some(mods) = &engine.mods { mods.copied(&target.name,target.generation,&plugin,&text); } }
+                    SurfaceEffect::Reply { token,result } => { if let Some(waiter) = mods_waiters.remove(&token) { let _ = waiter.send(result); } }
+                },
                 Effect::Stop { .. } => { closed.store(true,Ordering::Release); },
             }
         }
@@ -524,7 +573,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
             if result.is_err() || ended || !engine.write_is_current(&attempt.logical_id) {
                 effects.extend(engine.apply(EngineInput::WriteAck { operation_id:attempt.logical_id.clone(),outcome:WriteOutcome::NotWritten },clock(start))?);
                 if let Err(failure) = result { enter_error(&mut error,&target,failure); }
-            } else if io.writer.try_send(WireFrame { operation_id:wire,frame:attempt.frame.clone() }).is_err() {
+            } else if io.writer.try_send(WireFrame { operation_id:wire,frame:attempt.frame.clone(),ephemeral:false }).is_err() {
                 effects.extend(engine.apply(EngineInput::WriteAck { operation_id:attempt.logical_id.clone(),outcome:WriteOutcome::NotWritten },clock(start))?);
             }
         }
@@ -616,6 +665,13 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                             preparation.1.notify_waiters();
                             Job::Root { id,result }
                         });
+                    }
+                    Message::Mods { call,response } => {
+                        mods_token += 1;
+                        match engine.mods_call(mods_token,call,clock(start)) {
+                            Ok(next) => { mods_waiters.insert(mods_token,response); effects.extend(next); }
+                            Err(error) => { let _ = response.send(Err(error)); }
+                        }
                     }
                     Message::Queue { call_id,action,response } => {
                         let queue = queue.clone(); let generation = target.generation; let sample = clock(start);

@@ -1,4 +1,7 @@
+mod mods_support;
+
 use hangar_server::runtime::{claude::ClaudeEngine, protocol::*};
+use hangar_server::mods::model::{ModsCall,SurfaceEffect};
 use serde_json::{Value, json};
 
 #[test]
@@ -14,8 +17,7 @@ fn model_effort_intent_is_not_an_extra_cli_model_field() {
 #[test]
 fn hydrated_reader_requests_usage_and_reload_stamp_without_viewers() {
     let mut engine = engine(json!({"name":"session","session_id":"sid","initialized":true}));
-    let snapshot = CanoSnapshot::parse(json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,
-        "aberto":false,"pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}})).unwrap();
+    let snapshot = CanoSnapshot::parse(mods_support::cano_snapshot_json()).unwrap();
     let effects = engine.hydrate(snapshot).unwrap();
     for service in ["last_usage","reload_stamp"] {
         assert!(effects.iter().any(|effect|matches!(effect,Effect::Policy { kind,.. } if kind == service)));
@@ -163,4 +165,15 @@ fn late_ack_does_not_override_result() {
     let effects = engine.apply(EngineInput::WriteAck { operation_id:"init".into(),outcome:WriteOutcome::Unknown },clock(12.0)).unwrap();
     assert!(!effects.iter().any(|e|matches!(e,Effect::Reply { disposition:Disposition::Unknown,.. })));
     assert_eq!(engine.view()["deliverable"],true);
+}
+
+#[test]
+fn mods_call_needs_a_surface_and_a_live_attach() {
+    let mut engine = engine(json!({"name":"session","initialized":true}));
+    let refused = engine.mods_call(1,ModsCall::Show { site:"p".into() },clock(10.0)).err().unwrap();
+    assert_eq!(refused.code,"erro_mod_botao_inexistente","sem superfície ligada");
+    engine.enable_surface("ui:t".into());
+    let effects = engine.mods_call(2,ModsCall::Show { site:"p".into() },clock(10.0)).unwrap();
+    assert!(effects.iter().any(|effect|matches!(effect,Effect::Surface { effect:SurfaceEffect::Reply { token:2,result:Err(error) } }
+        if error.code == "erro_mod_painel_inexistente")),"superfície ainda não ligada responde na hora");
 }

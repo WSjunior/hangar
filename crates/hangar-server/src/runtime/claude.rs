@@ -1,4 +1,5 @@
 use super::{LiveBuffer, protocol::*};
+use crate::mods::{model::{ModsCall,ModsError,SurfaceEffect,missing},surface::Surface};
 use hangar_api::state::StateEvent;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -68,6 +69,7 @@ pub struct ClaudeEngine {
     effort_deadline: Option<f64>,
     active_input: Option<String>,
     unknown: BTreeSet<String>,
+    surface: Option<Surface>,
 }
 
 fn string(value:&Value) -> Option<String> { value.as_str().map(str::to_owned) }
@@ -94,7 +96,7 @@ impl ClaudeEngine {
             preview:LiveBuffer::default(),thinking:LiveBuffer::default(),tool_input:LiveBuffer::default(),tool_name:None,tool_visible:false,
             label:None,compacting:false,turn_start:None,label_deadline:None,tokens_closed:0,tokens_message:None,gen_start:None,
             token_chars:0,thinking_start:None,thought_s:0.0,tasks:Vec::new(),usage:metadata.get("usage").cloned().unwrap_or(Value::Null),
-            context_window:metadata["context_window"].as_u64(),cost:metadata["cost"].as_f64(),effort_intent,effort_deadline:None,active_input:None,unknown:BTreeSet::new(),metadata };
+            context_window:metadata["context_window"].as_u64(),cost:metadata["cost"].as_f64(),effort_intent,effort_deadline:None,active_input:None,unknown:BTreeSet::new(),surface:None,metadata };
         if let Some(controls) = engine.metadata["control_carry"].as_array() {
             for control in controls {
                 let Ok(request_id) = serde_json::from_value::<RequestId>(control["request_id"].clone()) else { continue };
@@ -108,6 +110,30 @@ impl ClaudeEngine {
     }
 
     pub fn write_is_current(&self,id:&str) -> bool { !self.retired_writes.contains(id) }
+
+    /// Liga a superfície remota dos mods. Sem ela o motor segue como antes: nenhum `ui_*` sai e um
+    /// `ui_copy` recebe a resposta vazia de pedido desconhecido.
+    pub fn enable_surface(&mut self,prefix:String) { self.surface = Some(Surface::new(prefix)); }
+
+    fn surface_out(effects:&mut Vec<Effect>,out:Vec<SurfaceEffect>) {
+        effects.extend(out.into_iter().map(|effect|Effect::Surface { effect }));
+    }
+
+    // Sem chamador até a ligação ao processo (ligação inicial e reconexão); o `allow` sai junto.
+    #[allow(dead_code)]
+    fn start_surface(&mut self,effects:&mut Vec<Effect>) {
+        let now = self.clock.monotonic_s;
+        if let Some(surface) = self.surface.as_mut() { let out = surface.start(now); Self::surface_out(effects,out); }
+    }
+
+    /// Pedido de um app; a resposta sai depois, como `SurfaceEffect::Reply` com o mesmo `token`.
+    pub fn mods_call(&mut self,token:u64,call:ModsCall,clock:ClockSample) -> Result<Vec<Effect>,ModsError> {
+        self.clock = clock;
+        let surface = self.surface.as_mut().ok_or_else(missing)?;
+        let mut effects = Vec::new();
+        Self::surface_out(&mut effects,surface.call(token,call,clock.monotonic_s));
+        Ok(effects)
+    }
 
     fn reset_conversation(&mut self,effects:&mut Vec<Effect>) {
         for (id,wire) in &mut self.wires {
