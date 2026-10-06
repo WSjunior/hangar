@@ -1,6 +1,6 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
-import { disparaRun, ehGithub, jobs, pr, precisaConsultar, runsAtuais, situacao } from './gh'
+import { disparaRun, ehGithub, jobs, lembrarCommit, pr, precisaConsultar, runsVisiveis, situacao } from './gh'
 import type { GhView, Job, JobGh, PrGh, RunGh, Workflow } from './gh'
 import { desenharFaixa } from './faixa'
 
@@ -12,6 +12,12 @@ const ESPERA_PUSH_MS = 3_000
 const PRAZO_PUSH_MS = 120_000
 // Sem nada rodando, o fim de turno reconsulta no máximo uma vez por minuto.
 const REVISITA_MS = 60_000
+// Commits empurrados lembrados por sessão, e quantas sessões ficam guardadas.
+const MAX_COMMITS = 5
+const MAX_SESSOES = 30
+const SALVO = 'commits:'
+
+type Salvo = { em: number; shas: string[] }
 
 type Timer = { cancel: () => void }
 
@@ -50,7 +56,7 @@ function lerJson<T>(r: Saida | null, argv: string[]): T {
 }
 
 async function workflowDe($: EngineInterface, r: RunGh, antes: Workflow | undefined): Promise<Workflow> {
-  const base = { id: r.databaseId, nome: r.workflowName, url: r.url }
+  const base = { id: r.databaseId, nome: r.workflowName, sha: r.headSha, url: r.url }
   const fim = r.status === 'completed' ? situacao(r.status, r.conclusion) : null
   if (!fim) jobsFinais.delete(r.databaseId)
   const guardados = jobsFinais.get(r.databaseId)
@@ -67,20 +73,46 @@ async function workflowDe($: EngineInterface, r: RunGh, antes: Workflow | undefi
   return { ...base, situacao: fim ?? (js.some(j => j.situacao === 'rodando') ? 'rodando' : 'esperando'), jobs: js }
 }
 
+async function commitsDaSessao($: EngineInterface): Promise<string[]> {
+  const salvo = (await $.store.get(SALVO + (await $.session.id()))) as Salvo | undefined
+  return salvo?.shas ?? []
+}
+
+async function guardarCommit($: EngineInterface, sha: string): Promise<void> {
+  const shas = lembrarCommit(await commitsDaSessao($), sha, MAX_COMMITS)
+  const salvo: Salvo = { em: await $.clock.now(), shas }
+  await $.store.set(SALVO + (await $.session.id()), salvo)
+}
+
+// Cada sessão grava uma chave; as mais velhas saem uma vez, no início.
+async function podar($: EngineInterface): Promise<void> {
+  const chaves = (await $.store.keys()).filter(k => k.startsWith(SALVO))
+  if (chaves.length <= MAX_SESSOES) return
+  const datas = await Promise.all(chaves.map(async k => ({ k, em: ((await $.store.get(k)) as Salvo | undefined)?.em ?? 0 })))
+  datas.sort((a, b) => a.em - b.em)
+  await Promise.all(datas.slice(0, chaves.length - MAX_SESSOES).map(({ k }) => $.store.delete(k)))
+}
+
+// Só os runs dos commits que ESTA sessão empurrou; o PR é o da branch.
 async function consultar($: EngineInterface, antes: GhView | null): Promise<GhView | null> {
   const remoto = await texto($, ['git', 'remote', 'get-url', 'origin'])
   const branch = await texto($, ['git', 'branch', '--show-current'])
   if (!remoto || !branch || !ehGithub(remoto)) return null
-  const runArgv = ['gh', 'run', 'list', '--branch', branch, '--limit', '30',
-    '--json', 'databaseId,workflowName,status,conclusion,headSha,url']
+  const shas = await commitsDaSessao($)
   const prArgv = ['gh', 'pr', 'view', branch,
     '--json', 'number,title,url,state,isDraft,reviewDecision,statusCheckRollup']
-  const [runSaida, prSaida] = await Promise.all([sh($, runArgv), sh($, prArgv)])
-  if (!runSaida) return null
-  const atuais = runsAtuais(lerJson<RunGh[]>(runSaida, runArgv))
-  if (aguardando && atuais[0]?.headSha === aguardando.sha) aguardando = null
+  const [prSaida, ...porCommit] = await Promise.all([
+    sh($, prArgv),
+    ...shas.map(async sha => {
+      const argv = ['gh', 'run', 'list', '--commit', sha, '--limit', '20',
+        '--json', 'databaseId,workflowName,status,conclusion,headSha,url']
+      return lerJson<RunGh[]>(await sh($, argv), argv)
+    }),
+  ])
+  const visiveis = runsVisiveis(porCommit)
+  if (aguardando && visiveis.some(r => r.headSha === aguardando?.sha)) aguardando = null
+  const workflows = await Promise.all(visiveis.map(r => workflowDe($, r, antes?.workflows.find(w => w.id === r.databaseId))))
   const mesma = antes?.branch === branch ? antes : null
-  const workflows = await Promise.all(atuais.map(r => workflowDe($, r, mesma?.workflows.find(w => w.nome === r.workflowName))))
   let p = mesma?.pr ?? null
   if (prSaida?.ok) p = pr(JSON.parse(prSaida.out) as PrGh)
   else if (!prSaida || /no pull requests found/i.test(prSaida.err)) p = null
@@ -143,6 +175,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const r = await next(e)
     cabeca = await headAtual($)
+    void podar($).catch(() => undefined)
     void atualizar($)
     return r
   })
@@ -151,7 +184,10 @@ export const register: Register = on => {
     const r = await next(e)
     if (disparaRun(e.command)) {
       const sha = await texto($, ['git', 'rev-parse', 'HEAD'])
-      if (sha) aguardando = { sha, ate: (await $.clock.now()) + PRAZO_PUSH_MS }
+      if (sha) {
+        aguardando = { sha, ate: (await $.clock.now()) + PRAZO_PUSH_MS }
+        await guardarCommit($, sha)
+      }
       agendar($, ESPERA_PUSH_MS)
     }
     return r

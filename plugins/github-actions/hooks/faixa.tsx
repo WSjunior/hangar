@@ -58,20 +58,26 @@ export function desenharFaixa(t: Tabela, v: GhView, colunas: number, abrir: (url
     )
   }
 
-  for (const w of v.workflows) linhas.push(...linhaWorkflow(t, w, colunas, pinta, abrir))
+  // Runs de mais de um commit na tela: cada linha diz de qual commit é.
+  const comSha = new Set(v.workflows.map(w => w.sha)).size > 1
+  for (const w of v.workflows) linhas.push(...linhaWorkflow(t, w, colunas, comSha, pinta, abrir))
   return <Box flexDirection="column">{linhas}</Box>
 }
 
-function linhaWorkflow(t: Tabela, w: Workflow, colunas: number, pinta: Pinta, abrir: (url: string) => void): JSX.Element[] {
+function linhaWorkflow(
+  t: Tabela, w: Workflow, colunas: number, comSha: boolean, pinta: Pinta, abrir: (url: string) => void,
+): JSX.Element[] {
   const { Box, Text, Button } = t
+  const sha = comSha ? ` ${w.sha.slice(0, 7)}` : ''
   const out = [
     <Box key={`wf-${w.id}`} flexDirection="row" justifyContent="space-between" width={colunas}>
       <Box flexDirection="row" flexWrap="wrap" flexShrink={1} columnGap={1}>
         {pinta(w.situacao, `${ICONE[w.situacao]} ${w.nome}`, true)}
+        {sha ? <Text dimColor>{sha.trim()}</Text> : null}
         {w.jobs.map((j, i) => <Box key={`j-${i}`}>{pinta(j.situacao, rotuloJob(j))}</Box>)}
       </Box>
       {/* Rótulo único por linha: o Hangar acha o botão pelo texto para o clique vindo do app. */}
-      <Button key={`abrir-${w.id}`} label={`abrir ${w.nome}`} dimColor onPress={() => abrir(w.url)} />
+      <Button key={`abrir-${w.id}`} label={`abrir ${w.nome}${sha}`} dimColor onPress={() => abrir(w.url)} />
     </Box>,
   ]
   w.jobs.forEach((j, i) => {

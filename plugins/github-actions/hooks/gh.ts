@@ -44,15 +44,25 @@ export function jobs(lista: readonly JobGh[]): Job[] {
   })
 }
 
-/** Último run de cada workflow, só os do commit mais novo da branch (o `gh` lista do mais novo). */
-export function runsAtuais(runs: readonly RunGh[]): RunGh[] {
-  const sha = runs[0]?.headSha
+/** Runs a mostrar, de listas por commit do mais novo para o mais velho (cada uma como o `gh` lista,
+ *  do run mais novo): o último de cada workflow e, além dele, todo run que ainda não terminou. */
+export function runsVisiveis(porCommit: readonly (readonly RunGh[])[]): RunGh[] {
   const vistos = new Set<string>()
-  return runs.filter(r => {
-    if (r.headSha !== sha || vistos.has(r.workflowName)) return false
+  const ids = new Set<number>()
+  const out: RunGh[] = []
+  for (const r of porCommit.flat()) {
+    const novo = !vistos.has(r.workflowName)
+    if ((!novo && r.status === 'completed') || ids.has(r.databaseId)) continue
     vistos.add(r.workflowName)
-    return true
-  })
+    ids.add(r.databaseId)
+    out.push(r)
+  }
+  return out
+}
+
+/** Commits empurrados pela sessão, o mais novo primeiro, sem repetir e com teto. */
+export function lembrarCommit(lista: readonly string[], sha: string, max: number): string[] {
+  return [sha, ...lista.filter(s => s !== sha)].slice(0, max)
 }
 
 type CheckGh = { __typename?: string; status?: string; conclusion?: string | null; state?: string }
