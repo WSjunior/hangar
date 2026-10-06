@@ -31,6 +31,7 @@ describe('recusas novas dos mods', () => {
     'erro_mod_rascunho_no_prompt',
     'erro_mod_painel_nao_alcancavel',
     'erro_mod_fechar_recusado',
+    'erro_mod_painel_inexistente',
   ])('%s vira frase do app, não o texto do servidor', (code) => {
     const texto = formataErro({ code, params: {}, msg: 'texto-do-servidor' });
     expect(texto).not.toBe('texto-do-servidor');

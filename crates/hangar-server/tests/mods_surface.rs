@@ -247,13 +247,12 @@ fn recorded_invalid_and_big_trees_pass() {
     drive.call(1, press("above-prompt", "abrir-invalida"));
     assert!(drive.reply(1).unwrap().is_ok());
     let quebrado = drive.view()["panes"].as_array().unwrap().iter().find(|pane| pane["id"] == "vitrine-quebrado").cloned().unwrap();
-    assert_eq!(quebrado["tree"], json!({"type": "engine", "ref": 0}));
+    assert_eq!(quebrado["tree"], nth_render("vitrine", "vitrine-quebrado", 0));
     drive.call(2, press("above-prompt", "abrir-grande"));
     drive.advance(0.2);
     assert!(drive.reply(2).unwrap().is_ok(), "o segundo clique também é respondido (A18)");
     let grande = drive.view()["panes"].as_array().unwrap().iter().find(|pane| pane["id"] == "vitrine-quebrado").cloned().unwrap();
-    // Os ~398 KB de V55 contam os espaços do JSON gravado; em formato compacto são ~369 KB.
-    assert!(grande["tree"].to_string().len() > 360_000, "V55: a árvore grande passa inteira");
+    assert_eq!(grande["tree"], nth_render("vitrine", "vitrine-quebrado", 1), "V55: a árvore grande gravada (~398 KB) passa inteira");
 }
 
 #[test]
@@ -322,6 +321,7 @@ fn close_waits_for_the_roster_and_can_be_refused() {
 
     let silent = request(&surface.call(5, ModsCall::Close { site: "q".into() }, 3.0), "ui_close");
     ok(&mut surface, &silent, json!({"closed": true}), 3.1);
+    assert!(reply_of(&surface.tick(4.9), 5).is_none(), "o prazo de 2 s ainda não venceu");
     assert_eq!(code(reply_of(&surface.tick(5.2), 5)), "erro_mod_clique_sem_resposta", "sem o rol em 2 s");
 }
 
@@ -333,7 +333,7 @@ fn show_is_confirmed_by_shown_id() {
     assert_eq!(show["request"], json!({"subtype": "ui_pane_show", "id": "a", "surface": "desktop", "client_id": "hangar"}));
     assert_eq!(reply_of(&ok(&mut surface, &show, json!({"shown_id": "a"}), 1.1), 6), Some(Ok(json!({"shown_id": "a"}))));
     let show = request(&surface.call(7, ModsCall::Show { site: "a".into() }, 1.2), "ui_pane_show");
-    assert_eq!(code(reply_of(&ok(&mut surface, &show, json!({"shown_id": "b"}), 1.3), 7)), "erro_mod_botao_inexistente");
+    assert_eq!(code(reply_of(&ok(&mut surface, &show, json!({"shown_id": "b"}), 1.3), 7)), "erro_mod_painel_inexistente");
 }
 
 #[test]
