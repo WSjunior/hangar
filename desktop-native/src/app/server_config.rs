@@ -1549,15 +1549,19 @@ impl Hangar {
             }
         }
         let dirty = !s.draft.is_empty();
+        let blocked = s.provider_missing_key();
         div().flex().flex_col().gap(px(8.))
             .child(settings_box().child(self.config_row(field("term_origins"), cx)))
             .when_some(s.save_error.clone(), |el, error| el.child(div().id("machines-save-error").role(Role::Alert)
                 .text_size(px(12.5)).text_color(theme::danger()).whitespace_normal().child(error)))
+            // O rodapé das páginas do servidor não aparece aqui: o motivo do Salvar desligado fica junto do botão.
+            .when(blocked, |el| el.child(div().id("machines-config-blocked").role(Role::Status).text_size(px(12.5))
+                .text_color(theme::warning()).whitespace_normal().child(tr("server_save_blocked_provider_key"))))
             .when(dirty || s.saving || s.saved.is_some(), |el| el.child(div().flex().items_center().justify_end().gap(px(12.))
                 .when(s.saved.is_some(), |el| el.child(div().id("machines-saved").role(Role::Status).text_size(px(12.5))
                     .text_color(theme::success()).child(tr("server_saved"))))
                 .when(dirty || s.saving, |el| el.child(Button::new("machines-config-save").primary().small()
-                    .label(tr(if s.saving { "server_saving" } else { "server_save" })).loading(s.saving).disabled(s.saving || s.provider_missing_key())
+                    .label(tr(if s.saving { "server_saving" } else { "server_save" })).loading(s.saving).disabled(s.saving || blocked)
                     .on_click(cx.listener(|this, _, _, cx| this.save_server_config(cx)))))))
     }
 
