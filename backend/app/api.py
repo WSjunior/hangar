@@ -6676,6 +6676,12 @@ def _auto_update_motivo() -> Optional[str]:
             idade = _AUTO_UPDATE_FALHA_JANELA_S
         if idade < _AUTO_UPDATE_FALHA_JANELA_S:
             return "ultima atualizacao falhou"
+    # Como o dist: o automático espera o topo inteiro publicado; parar antes dele é só no botão.
+    ate = atualizar.pinned_target("main")[0]
+    if ate is None:
+        return "nao deu pra conferir o binario do Rust publicado"
+    if ate != "origin/main":
+        return "binario do Rust do topo ainda nao publicado para este sistema"
     try:
         with urllib.request.urlopen(_DIST_SHA_URL, timeout=15) as r:
             sha_dist = r.read().decode().strip()

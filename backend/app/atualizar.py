@@ -37,6 +37,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -555,11 +556,12 @@ def _troca_de_branch(pre: dict) -> bool:
     return bool(atual) and atual != destino and not (destino == "main" and atual in _PRINCIPAIS)
 
 
-def _trocar_para(destino: str) -> None:
+def _trocar_para(destino: str, ref: str) -> None:
     """Põe o checkout na branch do alvo, com as mesmas proteções do alinhamento.
 
     A ref local do alvo é a que o `reset --hard` de `_puxar` alcança: com commit que o origin não
-    tem, ela ganha resgate conferido antes, como no `resguardar`.
+    tem, ela ganha resgate conferido antes, como no `resguardar`. Branch local nova nasce em `ref`,
+    e não no topo: senão o fast-forward até o commit escolhido não teria o que fazer.
     """
     local = f"refs/heads/{destino}"
     if _git("rev-parse", "--verify", "--quiet", local, timeout=30).returncode == 0:
@@ -572,7 +574,7 @@ def _trocar_para(destino: str) -> None:
             _avisar(f"a branch local {destino} tinha commits fora do origin: guardados em {nome}")
         args = ("checkout", destino)
     else:
-        args = ("checkout", "-b", destino, "--track", f"origin/{destino}")
+        args = ("checkout", "-b", destino, ref)
     c = _git(*args, timeout=120)
     if c.returncode != 0:
         # Arquivo solto que colide com a outra branch recusa o checkout: guarda e tenta de novo.
@@ -584,11 +586,116 @@ def _trocar_para(destino: str) -> None:
         c = _git(*args, timeout=120)
         if c.returncode != 0:
             raise RuntimeError(f"nao consegui trocar para a branch {destino}: {_cauda(c)}")
+    if args[1] == "-b":
+        u = _git("branch", "--set-upstream-to", f"origin/{destino}", timeout=30)
+        if u.returncode != 0:
+            _avisar(f"a branch {destino} ficou sem upstream: {_cauda(u, 4)}")
     _marcar_canal(destino)
 
 
-def _puxar(pre: dict) -> None:
-    """`fetch` + fast-forward. Só reseta quando o ff é impossível — e o resgate já rodou."""
+def _git_quiet(*args: str) -> subprocess.CompletedProcess:
+    """Leitura de git que não vai ao log da tela (um `git show` encheria o terminalzinho).
+
+    Falha vira código 1: quem lê aqui cai no comportamento de antes, nunca derruba a atualização.
+    """
+    args = ["git", "-C", str(REPO), *args]
+    try:
+        return subprocess.run(args, capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=30,
+                              env={**os.environ, "LC_ALL": "C", "LANGUAGE": "C"},
+                              creationflags=_SEM_JANELA_WINDOWS)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        _log.warning("git %s falhou: %s", args[3], e)
+        return subprocess.CompletedProcess(args, 1, "", str(e))
+
+
+_PROTOCOL_FILE = "backend/app/rust_server.py"
+_PROTOCOL_RE = re.compile(r"^RUST_SERVER_PROTOCOL = (\d+)", re.M)
+
+
+def _protocol_at(rev: str) -> int | None:
+    p = _git_quiet("show", f"{rev}:{_PROTOCOL_FILE}")
+    m = _PROTOCOL_RE.search(p.stdout) if p.returncode == 0 else None
+    return int(m.group(1)) if m else None
+
+
+def _binary_commit(release: tuple | None) -> str | None:
+    """Commit do binário deste sistema na release, ou `None` sem build dele."""
+    manifest = release[2] if release else None
+    plat = rust_release.platform_key()
+    if not isinstance(manifest, dict) or plat is None or not rust_release.has_build(manifest, plat):
+        return None
+    commit = manifest.get("commit")
+    # Só sha completo: nome de ref ou texto com `-` viraria outra coisa no `git show`.
+    return commit if isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{40}", commit) else None
+
+
+def _behind_top() -> bool:
+    """HEAD estritamente atrás de `origin/<alvo>`: commit local adiante não conta."""
+    topo = _git_quiet("rev-parse", f"origin/{alvo()}").stdout.strip()
+    head = _git_quiet("rev-parse", "HEAD").stdout.strip()
+    return (bool(topo) and bool(head) and head != topo
+            and _git_quiet("merge-base", "--is-ancestor", head, topo).returncode == 0)
+
+
+def pinned_target(destino: str) -> tuple[str | None, tuple | None]:
+    """Até onde o checkout pode ir, e a release lida para escolher.
+
+    O commit mais novo de `origin/<destino>` (primeiro pai) cujo contrato interno é o do binário
+    publicado para este sistema: o topo sem binário próprio deixaria o Supervisor recusando o
+    hangar-server antigo. Sem Rust, sem release própria da branch ou sem build deste sistema,
+    devolve o topo, como antes. `None` = não deu para conferir (rede, git); quem chama decide.
+    Depois do `fetch`: lê `origin/<destino>` local.
+    """
+    topo = f"origin/{destino}"
+    plat = rust_release.platform_key()
+    if not config.settings.rust_server or plat is None:
+        return topo, None
+    # A release da branch para onde o checkout vai, não da que ele está agora; o ambiente vence, como no `fetch`.
+    if url := os.environ.get("HANGAR_SERVER_RELEASE_URL"):
+        url, tag = url.rstrip("/"), None
+    else:
+        tag = rust_release.tag_for(destino)
+        url = f"{rust_release.RELEASES_URL}/{tag}"
+    try:
+        manifest = rust_release.read_manifest(url)
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            _log.warning("manifesto do hangar-server em %s: HTTP %s", url, e.code)
+            return None, None
+        # Branch sem release própria: o `fetch` cai na da main, cujo commit não é desta branch.
+        return topo, None
+    except Exception as e:                           # noqa: BLE001 — rede, JSON torto
+        _log.warning("manifesto do hangar-server em %s ilegivel: %s", url, e)
+        return None, None
+    release = (url, tag, manifest)
+    if not rust_release.has_build(manifest, plat):
+        return topo, release
+    commit = _binary_commit(release)
+    want = _protocol_at(commit) if commit else None
+    if want is None:
+        _log.warning("protocolo do binario publicado ilegivel (commit %r)", manifest.get("commit"))
+        return None, release
+    if _protocol_at(topo) == want:
+        return topo, release
+    # Só os commits que mexeram no número: o pai de cada um é o último com o valor anterior.
+    # `-m` e não `--diff-merges=first-parent`, que só existe do git 2.31 em diante.
+    p = _git_quiet("log", "-m", "--first-parent", "--no-patch", "--format=%H",
+                   "-G", "^RUST_SERVER_PROTOCOL = ", topo, "--", _PROTOCOL_FILE)
+    if p.returncode != 0:
+        _log.warning("git log do protocolo falhou (%s): %s", p.returncode, p.stderr.strip()[-300:])
+        return None, release
+    for sha in p.stdout.split():
+        anterior = _git_quiet("rev-parse", "--verify", "--quiet", f"{sha}^1").stdout.strip()
+        if anterior and _protocol_at(anterior) == want:
+            return anterior, release
+    _log.warning("nenhum commit de %s fala o protocolo %s do binario", topo, want)
+    return None, release
+
+
+def _puxar(pre: dict) -> tuple | None:
+    """`fetch` + fast-forward até `pinned_target`. Só reseta quando o ff é impossível — e o
+    resgate já rodou. Devolve a release lida na escolha, para o download usar a mesma."""
     destino = pre.get("alvo") or "main"
     f = _git("fetch", "origin", timeout=300)
     if f.returncode != 0:
@@ -601,12 +708,17 @@ def _puxar(pre: dict) -> None:
     if t.returncode != 0:
         _log.warning("tag dist-latest nao atualizada: %s", _cauda(t))
 
+    ref, release = pinned_target(destino)
+    if ref is None:
+        _avisar("não consegui conferir o binário do Rust publicado para este sistema; o código foi ao topo")
+        ref = f"origin/{destino}"
     if _troca_de_branch(pre):
-        _trocar_para(destino)
+        _trocar_para(destino, ref)
 
-    m = _git("merge", "--ff-only", f"origin/{destino}", timeout=120)
+    # Commit já à frente de `ref` fica: o ff-only não recua.
+    m = _git("merge", "--ff-only", ref, timeout=120)
     if m.returncode == 0:
-        return
+        return release
 
     # ff-only falhou: ou divergiu, ou a árvore tem algo no caminho. Antes do reset, guarda também o
     # que NÃO está rastreado — e este stash é diferente do que o `resguardar` já pode ter feito.
@@ -623,9 +735,10 @@ def _puxar(pre: dict) -> None:
         # `resguardar`: sem prova de que dá pra voltar, nada destrutivo acontece.
         raise RuntimeError(f"nao consegui guardar o que estava no disco: {_cauda(s)}")
 
-    r = _git("reset", "--hard", f"origin/{destino}", timeout=120)
+    r = _git("reset", "--hard", ref, timeout=120)
     if r.returncode != 0:
         raise RuntimeError(f"nao consegui alinhar com o codigo novo: {_cauda(r)}")
+    return release
 
 
 def _electron_instalado() -> bool:
@@ -659,7 +772,7 @@ def _hash_arquivo(caminho: Path) -> str:
         return ""
 
 
-def _preparar(topologia: str, *, dist: bool = True) -> None:
+def _preparar(topologia: str, *, dist: bool = True, release: tuple | None = None) -> None:
     """O que o `git pull` não traz e o backend novo precisa pra subir — SEM o instalador.
 
     O instalador inteiro (`install.ps1 -Update`, 8 etapas) rodava a cada atualização, e cada etapa
@@ -714,7 +827,7 @@ def _preparar(topologia: str, *, dist: bool = True) -> None:
             _log.warning(aviso)
         # Sem o hangar-server o Python atende sozinho: falha aqui é aviso, nunca etapa quebrada.
         # A volta (`dist=False`) não baixa: a release é a mais nova, não a do commit de antes.
-        binarios = rust_release.fetch() or []
+        binarios = (rust_release.fetch(release=release) if release else rust_release.fetch()) or []
         if binarios:
             _escrever(avisos=list(estado().get("avisos") or []) + binarios)
         _renovar_chromium()
@@ -878,15 +991,22 @@ def _executar(porta: int) -> dict:
             _escrever(resgate=resgate)
 
         _etapa("codigo")
-        _puxar(pre)
+        release = _puxar(pre)
         para = _git("rev-parse", "HEAD", timeout=30).stdout.strip()
         _escrever(commit_para=para, shell_mudou=_shell_mudou(de, para))
+        if binario := _binary_commit(release):
+            if _protocol_at(binario) != _protocol_at("HEAD"):
+                _avisar(f"o binário do Rust publicado para este sistema (commit {binario[:8]}) fala outro "
+                        "contrato que este código; o Python atende sozinho até sair o binário novo")
+            elif _behind_top():
+                _avisar(f"versão mais nova ainda sem binário do Rust para este sistema (compilando, ou o "
+                        f"build falhou); atualizado até {para[:8]}")
 
         _etapa("passos")
         _aplicar_passos()
 
         _etapa("instalar")
-        _preparar(pre["topologia"])
+        _preparar(pre["topologia"], release=release)
 
     except Exception as e:                           # noqa: BLE001 — ver abaixo: é deliberado
         # `Exception`, e não uma lista de tipos. Isto roda num processo DESTACADO cuja única forma
@@ -1238,14 +1358,15 @@ def _atualizar_dist() -> str | None:
     `frontend`/`packages` é quem está desenvolvendo e quer o SEU código na tela: aí compila local,
     como o `install.sh` interativo — recusar deixava a máquina de desenvolvimento sem jeito de
     atualizar a tela pelo app, porque a árvore dela está sempre suja. Fora da main também compila:
-    o CI só publica o dist da main.
+    o CI só publica o dist da main. E também com o checkout atrás do topo (a atualização parou
+    antes dele por falta do binário do Rust), porque o dist publicado é o do topo.
     """
     import tarfile
     import tempfile
     import urllib.request
     p = _git("status", "--porcelain", "--", "frontend", "packages", timeout=30)
     fora_da_main = _git("rev-parse", "--abbrev-ref", "HEAD", timeout=30).stdout.strip() not in _PRINCIPAIS
-    if p.returncode != 0 or p.stdout.strip() or fora_da_main:
+    if p.returncode != 0 or p.stdout.strip() or fora_da_main or _behind_top():
         npm = shutil.which("npm")
         if not npm:
             return "tela não atualizada: ela precisa ser compilada aqui e não achei o npm"

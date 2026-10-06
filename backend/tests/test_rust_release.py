@@ -409,3 +409,23 @@ def test_fetch_uses_the_branch_release_and_env_wins(monkeypatch, tmp_path):
     monkeypatch.setenv("HANGAR_SERVER_RELEASE_URL", "http://127.0.0.1:1/x/")
     rust_release.fetch(dest=tmp_path / "bin")
     assert urls[-1] == "http://127.0.0.1:1/x/server-latest.json"
+
+
+def test_fetch_with_a_release_already_read_does_not_reread_the_manifest(release, tmp_path):
+    url, pasta, pedidos = release
+    _publish(pasta, {"hangar-server": SERVER, "hangar-cano": CANO})
+    manifest = json.loads((pasta / "server-latest.json").read_text())
+    (pasta / "server-latest.json").unlink()          # republicada no meio: o lido é o que vale
+    assert rust_release.fetch(dest=tmp_path / "bin", release=(url, "server-x", manifest)) == []
+    assert "/server-latest.json" not in pedidos
+    assert (tmp_path / "bin" / "hangar-server").read_bytes() == SERVER
+
+
+def test_tag_for_and_has_build():
+    assert rust_release.tag_for("main") == rust_release.tag_for("master") == "server-latest"
+    assert rust_release.tag_for("feature/x") == "server-feature-x"
+    files = {f"linux-x86_64/{n}": {} for n in rust_release.NAMES}
+    assert rust_release.has_build({"files": files}, "linux-x86_64")
+    assert not rust_release.has_build({"files": files}, "windows-x86_64")
+    assert not rust_release.has_build({"files": []}, "linux-x86_64")
+
