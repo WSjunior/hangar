@@ -5970,6 +5970,7 @@
   "native_dictation_busy_elsewhere": "Transcrevendo o ditado de outra sessão",
   "native_dictation_target_gone": "A sessão {session} foi fechada ou recriada antes de a transcrição voltar, e o texto não entrou em nenhum campo. O áudio está nos anexos da sessão antiga.",
   "native_dictation_failed_away": "O ditado de {session} falhou: {error}. Abra a sessão para transcrever de novo.",
+  "native_dictation_audio_gone": "O áudio não está mais nos anexos da sessão.",
   "native_dictation_empty_away": "O ditado de {session} não virou texto: {error}",
   "native_voice_status_custom": "Personalizado",
   "native_voice_status_on": "Ativa",

@@ -230,7 +230,8 @@ enum Payload {
     // Barra lateral: prévia, leitura do silenciar e as gravações do menu da sessão.
     Sidebar(sidebar::SidebarReply),
     Terminal(terminal::Reply),
-    Dictation(u64, Result<Value, Failure>),
+    // O caminho do áudio que este pedido guardou nos anexos, também quando a transcrição falhou.
+    Dictation(u64, Option<String>, Result<Value, Failure>),
     // Aba Atividade: a conta de subagentes no disco e a lista da aba.
     Activity(activity::ActivityReply),
     FileView(files::FileReply),
@@ -1674,7 +1675,7 @@ impl Hangar {
                 self.receive_sidebar(reply, window, cx); return;
             }
             Payload::Activity(reply) => { self.receive_activity(reply, cx); return; }
-            Payload::Dictation(seq, result) => { self.receive_dictation(seq, result, window, cx); return; }
+            Payload::Dictation(seq, path, result) => { self.receive_dictation(seq, path, result, window, cx); return; }
             Payload::FileView(reply) => { self.receive_file_view(reply, window, cx); return; }
             Payload::Dossier(key, seq, result) => { self.receive_dossier(key, seq, result, cx); return; }
             Payload::DesktopPalette(seq, result) => { self.receive_desktop_palette(seq, result, window, cx); return; }

@@ -5970,6 +5970,7 @@
   "native_dictation_busy_elsewhere": "Transcribing another session's dictation",
   "native_dictation_target_gone": "Session {session} was closed or recreated before the transcription came back, so the text was not added anywhere. The audio is in the old session's attachments.",
   "native_dictation_failed_away": "Dictation for {session} failed: {error}. Open the session to transcribe it again.",
+  "native_dictation_audio_gone": "The audio is no longer in the session's attachments.",
   "native_dictation_empty_away": "Dictation for {session} produced no text: {error}",
   "native_voice_status_custom": "Custom",
   "native_voice_status_on": "On",

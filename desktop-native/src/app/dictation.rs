@@ -222,6 +222,24 @@ fn dictation_append(draft: &str, text: &str) -> (String, std::ops::Range<usize>)
     (format!("{draft}{space}{text}"), start..start + text.len())
 }
 
+/// Grava o áudio nos anexos da sessão (disco desta máquina ou `POST /upload`) e transcreve o arquivo salvo
+/// (`?arquivo=`). O caminho volta mesmo quando a transcrição falha; falha ao gravar não tem caminho, e o "de novo"
+/// tenta de novo com a cópia em memória.
+async fn upload_and_transcribe(api: Api, uploads: disk::Uploads, name: String, bytes: Vec<u8>, style: Option<&'static str>)
+    -> (Option<String>, Result<Value, Failure>) {
+    let saved = match uploads {
+        disk::Uploads::Remote => api.upload_audio(&name, "ditado.wav", bytes).await,
+        local => local.upload(&api, &name, "ditado.wav", bytes, None).await,
+    };
+    let path = match saved {
+        Ok(saved) => saved.path,
+        Err(error) => return (None, Err(error)),
+    };
+    let file = path.rsplit(['/', '\\']).next().unwrap_or(&path).to_owned();
+    let result = api.transcribe_saved(&name, &file, true, style).await;
+    (Some(path), result)
+}
+
 #[derive(Default)]
 pub(super) struct Dictation {
     seq: u64,
@@ -240,6 +258,8 @@ pub(super) struct Dictation {
     style_task: Option<Task<()>>,
     audio: Arc<Mutex<Vec<u8>>>,
     file_name: Option<String>,
+    /// Onde o áudio ficou nos anexos da sessão (o `path` do upload ou da resposta). Da lista de recentes, só o nome.
+    server_path: Option<String>,
     file_owner: Option<SessionOwner>,
     file_generation: u64,
     versions: HashMap<String, Value>,
@@ -304,6 +324,18 @@ impl Dictation {
         if self.file_name.is_some() { tr_shared("composer_transcricao_vazia", &[]) } else { tr("dictation_empty_text") }
     }
 
+    /// Nome do áudio nos anexos da sessão: o último pedaço do caminho guardado.
+    fn server_file(&self) -> Option<&str> {
+        self.server_path.as_deref().and_then(|path| path.rsplit(['/', '\\']).next()).filter(|name| !name.is_empty())
+    }
+
+    /// O que vai no `?arquivo=` do "de novo": o nome com o transcript de sempre; depois de `/clear` (outra pasta de
+    /// anexos), o caminho inteiro, que o backend valida dentro da pasta de anexos do projeto.
+    fn saved_for_retry(&self, same_transcript: bool) -> Option<String> {
+        if self.target.is_none() { return None; }
+        if same_transcript { self.server_file().map(str::to_owned) } else { self.server_path.clone() }
+    }
+
     fn cancel(&mut self) {
         self.seq += 1;
         self.owner = None;
@@ -316,6 +348,7 @@ impl Dictation {
         self.result = None;
         self.audio = Default::default();
         self.file_name = None;
+        self.server_path = None;
         self.versions.clear();
         self.inserted = None;
         self.cleaning = false;
@@ -389,6 +422,22 @@ impl Hangar {
             Some(target) => Some((target.api.clone(), Some(target.key.name.clone()))),
             None => self.dictation_target(cx),
         }
+    }
+
+    /// Nome do áudio para TOCAR pelo servidor, só enquanto o transcript é o do destino: o `GET /uploads/{nome}` lê a
+    /// pasta do transcript de agora, que o `/clear` troca.
+    fn dictation_saved_file(&self) -> Option<String> {
+        let target = self.dictation.target.as_ref()?;
+        if self.selected_key().as_ref() != Some(&target.key) { return None; }
+        self.dictation.server_file().map(str::to_owned)
+    }
+
+    /// Áudio dos anexos que não se pôde ler: sumido (retenção) tem frase própria, o resto é a falha da leitura.
+    /// `pub(super)`: a lista de recentes (`app.rs`) usa a mesma frase.
+    pub(super) fn saved_audio_failure(error: &Failure) -> String {
+        // Do disco desta máquina, arquivo ausente chega sem status (`invalid_response`); do backend, 404.
+        if error.status == Some(404) || (error.status.is_none() && error.detail == "invalid_response") { tr("dictation_audio_gone") }
+        else { Self::fetch_failure(error) }
     }
 
     /// Cancelar solta a gravação guardada: o player dela para junto.
@@ -557,7 +606,7 @@ impl Hangar {
         let (tx, connection, seq) = (self.tx.clone(), self.connection, self.dictation.seq);
         self.dictation.request = Some(self.runtime.spawn(async move {
             let result = api.transcribe(session.as_deref(), &filename, bytes, false, None).await;
-            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Dictation(seq, result) }).await;
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Dictation(seq, None, result) }).await;
         }));
         cx.notify();
         Ok(())
@@ -570,18 +619,24 @@ impl Hangar {
         self.dictation.timed_out = timed_out;
         let audio_cache = self.dictation.audio.clone();
         let style = self.dictation.style(self.connection);
+        // Com sessão de destino, o áudio entra nos anexos dela antes de transcrever: a falha não o perde e o "de novo"
+        // não reenvia. A tela sem sessão não tem pasta e segue no `/transcribe` com corpo.
+        let uploads = self.dictation.target.as_ref().map(|target| self.uploads_for(&target.key));
         let (tx, connection, seq) = (self.tx.clone(), self.connection, self.dictation.seq);
         // O fluxo de áudio não troca de thread; soltá-lo e montar o WAV é rápido o bastante para a tela.
         let audio = recorder.finish();
         self.dictation.request = Some(self.runtime.spawn(async move {
-            let result = match audio {
+            let (path, result) = match audio {
                 Ok(bytes) => {
                     *audio_cache.lock().unwrap() = bytes.clone();
-                    api.transcribe(session.as_deref(), "ditado.wav", bytes, true, style).await
-                },
-                Err(error) => Err(error),
+                    match (session, uploads) {
+                        (Some(name), Some(uploads)) => upload_and_transcribe(api, uploads, name, bytes, style).await,
+                        (session, _) => (None, api.transcribe(session.as_deref(), "ditado.wav", bytes, true, style).await),
+                    }
+                }
+                Err(error) => (None, Err(error)),
             };
-            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Dictation(seq, result) }).await;
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Dictation(seq, path, result) }).await;
         }));
         cx.notify();
     }
@@ -638,13 +693,18 @@ impl Hangar {
         }
         (self.dictation.error, self.dictation.result_error) = (None, None);
         if let Some(value) = style.and_then(|style| self.dictation.versions.get(style)).cloned() {
-            self.receive_dictation(self.dictation.seq, Ok(value), window, cx);
+            self.receive_dictation(self.dictation.seq, None, Ok(value), window, cx);
             return;
         }
         let Some((api, session)) = self.dictation_request(cx) else { return; };
         let raw =self.dictation.result.as_ref().and_then(|v| v.get("raw")).and_then(Value::as_str).unwrap_or("").to_owned();
         let audio = self.dictation.audio.lock().unwrap().clone();
-        if (style.is_some() && raw.is_empty()) || (style.is_none() && audio.is_empty()) { return; }
+        // Nome guardado com o mesmo transcript; depois de `/clear`, o caminho inteiro (outra pasta de anexos).
+        let same_transcript = self.dictation.target.as_ref().is_some_and(|target| self.selected_key().as_ref() == Some(&target.key));
+        let saved = self.dictation.saved_for_retry(same_transcript);
+        // Upload que falhou na primeira vez: a gravação sobe de novo antes de transcrever.
+        let uploads = self.dictation.target.as_ref().map(|target| self.uploads_for(&target.key));
+        if (style.is_some() && raw.is_empty()) || (style.is_none() && audio.is_empty() && saved.is_none()) { return; }
         self.dictation.seq += 1;
         self.dictation.cleaning = style.is_some();
         let clean = self.dictation.file_name.is_none();
@@ -652,20 +712,24 @@ impl Hangar {
         let recording_style = if clean { self.dictation.style(self.connection) } else { None };
         let (tx, connection, seq) = (self.tx.clone(), self.connection, self.dictation.seq);
         self.dictation.request = Some(self.runtime.spawn(async move {
-            let result = if let Some(style) = style {
-                api.server_send(reqwest::Method::POST, &["ditado", "relimpar"], Some(json!({"texto": raw, "estilo": style})), 180).await
+            let (path, result) = if let Some(style) = style {
+                (None, api.server_send(reqwest::Method::POST, &["ditado", "relimpar"], Some(json!({"texto": raw, "estilo": style})), 180).await
                     .and_then(|mut value| {
                         let fields = value.as_object_mut().ok_or_else(|| Failure::local("invalid_response"))?;
                         fields.insert("raw".into(), json!(raw));
                         Ok(value)
-                    })
-            } else { api.transcribe(session.as_deref(), &filename, audio, clean, recording_style).await };
-            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Dictation(seq, result) }).await;
+                    }))
+            } else if let (Some(file), Some(name)) = (saved, session.as_deref()) {
+                (None, api.transcribe_saved(name, &file, clean, recording_style).await)
+            } else if let (true, Some(name), Some(uploads)) = (clean, session.clone(), uploads) {
+                upload_and_transcribe(api, uploads, name, audio, recording_style).await
+            } else { (None, api.transcribe(session.as_deref(), &filename, audio, clean, recording_style).await) };
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Dictation(seq, path, result) }).await;
         }));
         cx.notify();
     }
 
-    pub(super) fn receive_dictation(&mut self, seq: u64, result: Result<Value, Failure>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn receive_dictation(&mut self, seq: u64, path: Option<String>, result: Result<Value, Failure>, window: &mut Window, cx: &mut Context<Self>) {
         if self.dictation.seq != seq || self.dictation.owner.is_none() { return; }
         let place = match &self.dictation.target {
             Some(target) => self.dictation_place(target),
@@ -681,6 +745,10 @@ impl Hangar {
         self.dictation.bars.clear();
         self.dictation.cleaning = false;
         (self.dictation.error, self.dictation.result_error) = (None, None);
+        // O áudio está nos anexos da sessão (upload deste pedido ou `path` da resposta): ouvir e transcrever de novo
+        // sem reenviar.
+        let saved = path.or_else(|| result.as_ref().ok().and_then(|value| value.get("path")).and_then(Value::as_str).map(str::to_owned));
+        if saved.is_some() { self.dictation.server_path = saved; }
         match place {
             Place::Open => self.receive_dictation_here(result, auto_send, timed_out, window, cx),
             Place::Away(key) => self.receive_dictation_away(key, result, window, cx),
@@ -807,8 +875,9 @@ impl Hangar {
         let versions = owner && self.dictation.file_name.is_none() && self.dictation.result.is_some()
             && (transcribing || self.dictation.text_in_field(&self.composer.read(cx).value()));
         let has_audio = !self.dictation.audio.lock().unwrap().is_empty();
-        let again = owner && self.dictation.result.is_none() && has_audio;
-        let file_audio = owner && self.dictation.file_name.is_some() && has_audio;
+        let playable = has_audio || self.dictation_saved_file().is_some();
+        let again = owner && self.dictation.result.is_none() && (has_audio || (self.dictation.target.is_some() && self.dictation.server_path.is_some()));
+        let file_audio = owner && self.dictation.file_name.is_some() && playable;
         let controls = (versions || again || file_audio).then(|| div().flex().flex_wrap().items_center().gap_2()
             .when(versions, |el| {
                 let applied = self.dictation.result.as_ref().and_then(|v| v.get("estilo_aplicado")).and_then(Value::as_str).unwrap_or("cru");
@@ -824,8 +893,17 @@ impl Hangar {
                     .disabled(recording || transcribing)
                     .on_click(cx.listener(|this, _, window, cx| this.revise_dictation(None, window, cx)))))
             // A gravação que virou o texto, para ouvir de novo antes de enviar.
-            .when(!recording && has_audio, |el| el.child(self.audio_controls("dictation", |this, cx| {
+            .when(!recording && playable, |el| el.child(self.audio_controls("dictation", |this, cx| {
                 let audio = this.dictation.audio.lock().unwrap().clone();
+                if audio.is_empty() {
+                    // Sem a cópia em memória, a que o servidor guardou nos anexos da sessão.
+                    let (Some(api), Some(key), Some(file)) = (this.session_api(), this.selected_key(), this.dictation_saved_file()) else { return; };
+                    let (uploads, source) = (this.uploads_for(&key), Source::Upload(file.clone()));
+                    this.toggle_audio("dictation".into(), &file, async move {
+                        uploads.fetch(&api, &key.name, &source).await.map_err(|error| Self::saved_audio_failure(&error))
+                    }, cx);
+                    return;
+                }
                 let filename = this.dictation.file_name.clone().unwrap_or_else(|| "ditado.wav".into());
                 this.toggle_audio("dictation".into(), &filename, async move { Ok(audio) }, cx);
             }, cx))));
@@ -1111,5 +1189,32 @@ mod tests {
         state.error = Some("estilo".into());
         state.observe_file_owner(other.clone());
         assert_eq!(state.error.as_deref(), Some("estilo"), "erro do estilo em Y continua visível");
+    }
+
+    #[test]
+    fn saved_audio_name_is_the_last_part_of_the_server_path_until_cancel() {
+        let mut state = Dictation::default();
+        assert_eq!(state.server_file(), None);
+        state.server_path = Some("/home/u/.hangar/uploads/p-1a/s1/ditado-3.wav".into());
+        assert_eq!(state.server_file(), Some("ditado-3.wav"));
+        state.server_path = Some(r"C:\Users\u\.hangar\uploads\p\s\ditado.wav".into());
+        assert_eq!(state.server_file(), Some("ditado.wav"));
+        state.server_path = Some("ditado-4.wav".into());
+        assert_eq!(state.server_file(), Some("ditado-4.wav"), "a lista de recentes guarda só o nome");
+        state.cancel();
+        assert_eq!(state.server_path, None);
+    }
+
+    #[test]
+    fn retry_sends_the_name_or_after_clear_the_whole_path() {
+        let mut state = Dictation::default();
+        state.server_path = Some("/home/u/.hangar/uploads/p-1a/s1/ditado-3.wav".into());
+        assert_eq!(state.saved_for_retry(true), None, "sem sessão de destino não há anexos");
+        state.target = Some(target("x", "k:1"));
+        assert_eq!(state.saved_for_retry(true).as_deref(), Some("ditado-3.wav"));
+        assert_eq!(state.saved_for_retry(false).as_deref(), Some("/home/u/.hangar/uploads/p-1a/s1/ditado-3.wav"),
+            "depois de /clear a pasta é outra: vai o caminho inteiro");
+        state.server_path = None;
+        assert_eq!(state.saved_for_retry(true), None, "upload que falhou: o de novo sobe a cópia em memória");
     }
 }
