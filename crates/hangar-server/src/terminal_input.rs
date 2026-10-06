@@ -671,7 +671,7 @@ impl TerminalDriver {
         let mut refresh_guard = false;
         if facts.plugin_live && !text.trim_start().starts_with('/') {
             // Com algo guardado, o envio vai pelo composer: só ele devolve o guardado.
-            let mode = if facts.plugin_user && facts.idle && !before.stashed && !text.contains('@') && !text.trim_start().starts_with('!') { PluginMode::User } else { PluginMode::Fill };
+            let mode = if user_mode(&facts, text, before.stashed) { PluginMode::User } else { PluginMode::Fill };
             let request = PluginRequest { id: id.into(), text: text.into(), mode: mode.clone() };
             if self.services.writing().await.is_err() { return DeliveryResult::new(Disposition::Deferred, DeliveryStage::Plugin, "write_journal"); }
             match self.services.publish(&self.binding, request).await {
@@ -833,6 +833,21 @@ impl TerminalDriver {
         DeliveryResult::new(Disposition::Unknown, DeliveryStage::Answer, "answer_unproved")
     }
 }
+/// O plugin entrega sem tecla nenhuma (`PluginMode::User`): sessão parada, sem rascunho guardado, sem `@`
+/// nem `!`. Com o plugin vivo e fora disso, `Fill`, que aperta `Enter`.
+fn user_mode(facts: &InputFacts, text: &str, stashed: bool) -> bool {
+    facts.plugin_user && facts.idle && !stashed && !text.contains('@') && !text.trim_start().starts_with('!')
+}
+
+/// A entrega de `text` com estes fatos vai apertar tecla no pane? Não no modo `User` do plugin nem na
+/// entrega nativa (socket), que não passam pelo teclado. Antes do rascunho ser lido: com um rascunho
+/// guardado o modo vira `Fill`, e a entrega nativa que não escreve cai na digitação.
+pub fn presses_keys(facts: &InputFacts, text: &str) -> bool {
+    if facts.native.is_some() && recognized_message(text).is_some() { return false; }
+    let slash = text.trim_start().starts_with('/');
+    !(facts.plugin_live && !slash && user_mode(facts, text, false))
+}
+
 fn recognized_message(text: &str) -> Option<&str> {
     let closing = text.find(']')?;
     let prefix = text.get(1..closing)?;

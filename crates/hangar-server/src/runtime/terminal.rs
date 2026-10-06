@@ -22,27 +22,20 @@ impl Default for TerminalOptions {
     fn default()->Self {Self {io:Arc::new(input::ProcessIo::default()),limits:InputLimits::default(),tick:Duration::from_secs(1),stall_notice:Duration::from_secs(30),
         anchor:ModsAnchor::default(),focus_return:FOCUS_RETURN}}
 }
-/// Quanto uma entrada espera, desde a última mexida da pessoa no mod (foco, aba ou rolagem), antes de o
-/// executor devolver o teclado ao prompt. Cobre quem levou o foco a um painel no terminal e está lendo,
-/// sem deixar a mensagem do app parada até alguém mexer no terminal; nenhum clique do app está em curso,
-/// porque com a reserva do pane a entrada nem chega aqui.
-const FOCUS_RETURN:Duration=Duration::from_secs(30);
-/// Teto da espera entre duas devoluções que falharam.
-const MAX_FOCUS_RETURN_WAIT:Duration=Duration::from_secs(60);
+/// Quanto uma linha espera, desde a primeira vez que viu o foco num mod, antes de o executor devolver o
+/// teclado ao prompt. Cobre quem acabou de levar o foco a um painel no terminal, sem deixar a mensagem do
+/// app parada até alguém mexer no terminal; nenhum clique do app está em curso, porque com a reserva do pane
+/// a entrada nem chega aqui.
+const FOCUS_RETURN:Duration=Duration::from_secs(10);
+/// Quantas devoluções uma linha tenta; as que falham não viram um laço de teclas, só o registro.
+const FOCUS_RETURN_TRIES:u32=2;
 /// Teclas de uma devolução: o anel do `ctrl+x tab` medido tem até 23 paradas (doze botões na faixa e dez
 /// painéis), com folga.
 const FOCUS_RETURN_KEYS:usize=32;
-/// Foco de um mod visto na escrita de uma linha: o retrato do que a pessoa mexe (`Touch`), desde quando ele
-/// não muda e quando a devolução ao prompt pode ser tentada. É da linha, como a série do `Stall`: a linha
-/// seguinte começa do zero.
-struct Away {row:String,touch:Touch,seen:tokio::time::Instant,since:tokio::time::Instant,next:tokio::time::Instant,wait:Duration}
-/// Teto da espera de uma linha desde que o foco foi visto no mod, em múltiplos de `focus_return`: um mod que
-/// mexa sozinho no que conta como mexida da pessoa (um inverso que anda) não segura a mensagem para sempre.
-const FOCUS_RETURN_CAP:u32=4;
-/// O que muda quando a pessoa mexe no mod pelo teclado ou pela roda, e não quando o mod se redesenha (um
-/// relógio, um build andando): quem tem o foco, a aba na frente e onde estão as células em inverso.
-#[derive(PartialEq)]
-struct Touch {focus:Option<&'static str>,active:Option<usize>,inverse:Vec<(usize,usize)>}
+const FOCUS_STEP_POLL:Duration=Duration::from_millis(20);
+/// Foco de um mod visto na escrita de uma linha: quando a devolução ao prompt pode ser tentada e quantas já
+/// foram. É da linha, como a série do `Stall`: a linha seguinte começa do zero.
+struct Away {row:String,since:tokio::time::Instant,next:tokio::time::Instant,tries:u32}
 fn error(code:&str)->RuntimeError {RuntimeError::new(code,"operação terminal conservada no diário")}
 fn sample()->ClockSample {ClockSample {monotonic_s:0.0,epoch_s:SystemTime::now().duration_since(UNIX_EPOCH).map(|d|d.as_secs_f64()).unwrap_or(0.0)}}
 fn safe_characters(text:&str)->bool {!text.chars().any(|c| c.is_control() && !matches!(c,'\n'|'\t'))}
@@ -375,7 +368,7 @@ impl Executor {
     /// escrita; um diálogo sem prompt também, porque a escrita já o adia como `overlay`.
     /// A tela dos mods, se o foco está num painel ou na faixa reconhecidos e o retrato do que a pessoa mexe.
     /// `Ok(None)` com o tamanho ilegível (a guarda não trava a entrega por isso); `Err` com a tela ilegível.
-    async fn mods_view(&self)->Result<Option<(crate::mods::screen::Screen,bool,Touch)>,&'static str> {
+    async fn mods_view(&self)->Result<Option<(crate::mods::screen::Screen,bool)>,&'static str> {
         let driver=TerminalDriver::new(self.target.binding.clone(),Arc::new(NoFacts),self.options.io.clone(),self.options.limits.clone());
         // O tamanho só delimita a leitura: sem ele (formato ilegível no multiplexador) a guarda não trava
         // toda entrega por um detalhe de leitura, e a escrita segue como antes.
@@ -390,83 +383,100 @@ impl Executor {
         };
         // A tela que não se lê também não seria escrita: a entrada espera, com o motivo.
         let ansi=driver.mods_screen().await.map_err(|failure|failure.code)?;
+        Ok(Some(self.mods_read(&ansi,formats)))
+    }
+    /// A leitura da tela dos mods num tamanho já conhecido: a tela e se o foco está num mod.
+    fn mods_read(&self,ansi:&str,formats:input::PaneFormats)->(crate::mods::screen::Screen,bool) {
         let (columns,rows)=(usize::from(formats.columns),usize::from(formats.rows));
         let anchor=self.options.anchor.lock().unwrap().clone();
-        let screen=crate::mods::screen::read_screen(&ansi,columns,rows,&[],anchor.as_deref());
+        let screen=crate::mods::screen::read_screen(ansi,columns,rows,&[],anchor.as_deref());
         // Só o que a leitura reconhece como mod conta: um realce do próprio Claude Code (seleção, menu)
         // acima do prompt não segura a mensagem da pessoa. Painel: com borda ou caixa e região. Faixa: o
         // inverso dentro da região que a leitura achou, a inteira pela âncora do mod, a recolhida e a
         // encolhida pela própria linha.
-        let grid=crate::mods::screen::parse_ansi(&ansi,columns,rows);
+        let grid=crate::mods::screen::parse_ansi(ansi,columns,rows);
         let away=match screen.focus {
             Some("pane")=>screen.placement.is_some() && screen.body.is_some(),
             Some("band")=>screen.band.as_ref().is_some_and(|band|
                 (band.rows.0..band.rows.1).any(|r|grid.get(r).is_some_and(|line|line[band.lo.min(line.len())..band.hi.min(line.len())].iter().any(|c|c.inverse)))),
             _=>false,
         };
-        let inverse=grid.iter().enumerate().flat_map(|(r,line)|line.iter().enumerate().filter(|(_,c)|c.inverse).map(move |(c,_)|(r,c))).collect();
-        let touch=Touch {focus:screen.focus,active:screen.active,inverse};
-        Ok(Some((screen,away,touch)))
+        (screen,away)
     }
     /// Quem tem o teclado do pane, pela tela dos mods, logo antes de digitar a entrada `row`: com o foco num
     /// painel ou na faixa de um mod, o `Enter` da entrada apertaria um botão do mod, e a escrita adia
     /// (`mods_focus`). Um diálogo sem prompt libera, porque a escrita já o adia como `overlay`.
     ///
-    /// A saída da fila: o foco parado num mod por mais que `focus_return` desde a última mexida da pessoa (a
+    /// A saída da fila: o foco num mod por mais que `focus_return` desde a primeira vez que a linha o viu (a
     /// limpeza de um clique que desistiu, ou quem levou o foco lá e saiu) é devolvido ao prompt, e a entrada
-    /// escreve. Sem voltar, a próxima tentativa espera o dobro, até `MAX_FOCUS_RETURN_WAIT`, e a falha vai ao
-    /// log. A contagem é da linha: a seguinte começa do zero.
+    /// escreve. A linha tenta `FOCUS_RETURN_TRIES` devoluções; depois, e com só a faixa na tela, só registra e
+    /// espera a pessoa. A contagem é da linha: a seguinte começa do zero.
     async fn focus_guard(&mut self,row:&str)->Option<&'static str> {
-        let touch=match self.mods_view().await {
+        let band_only=match self.mods_view().await {
             Err(code)=>return Some(code),
-            Ok(Some((_,true,touch)))=>touch,
+            Ok(Some((screen,true)))=>screen.placement.is_none(),
             Ok(_)=>{self.away=None; return None;},
         };
         let away=Some("mods_focus");
         let now=tokio::time::Instant::now();
-        let first=self.options.focus_return;
-        let fresh=|touch|Away {row:row.into(),touch,seen:now,since:now,next:now+first,wait:first};
-        let state=match self.away.take() {
-            Some(state) if state.row==row && state.touch==touch=>state,
-            // A pessoa mexeu no mod: o prazo recomeça dali, até o teto da linha, sem perder a espera dobrada
-            // de uma falha.
-            Some(state) if state.row==row=>Away {seen:state.seen,wait:state.wait,
-                next:(now+first).min(state.seen+first*FOCUS_RETURN_CAP).max(state.next),..fresh(touch)},
-            _=>fresh(touch),
-        };
-        let state=self.away.insert(state);
-        if now<state.next {return away;}
-        let since=state.since;
+        if self.away.as_ref().is_none_or(|state|state.row!=row) {
+            self.away=Some(Away {row:row.into(),since:now,next:now+self.options.focus_return,tries:0});
+        }
+        let Some(state)=self.away.as_mut() else {return away};
+        if now<state.next || state.tries>=FOCUS_RETURN_TRIES {return away;}
+        state.tries+=1;
+        let (since,tries)=(state.since,state.tries);
+        // Só com a faixa na tela o anel do `ctrl+x tab` gira dentro dela e nunca chega ao prompt (medição (i)):
+        // nenhuma tecla, só o registro.
+        if band_only {
+            state.tries=FOCUS_RETURN_TRIES;
+            tracing::warn!(key=%self.target.key,session=%self.target.name,code="mods_focus_band_only",
+                "o foco segue na faixa de um mod sem painel aberto; o ctrl+x tab não o devolve, e a entrada espera a pessoa");
+            return away;
+        }
         if self.return_focus().await {
             tracing::info!(key=%self.target.key,session=%self.target.name,code="mods_focus_returned",waited_s=now.duration_since(since).as_secs(),
                 "o foco seguia num mod com uma entrada esperando; o executor o devolveu ao prompt");
             self.away=None;
             return None;
         }
-        if let Some(state)=self.away.as_mut() {
-            state.wait=(state.wait*2).min(MAX_FOCUS_RETURN_WAIT);
-            state.next=tokio::time::Instant::now()+state.wait;
-            tracing::warn!(key=%self.target.key,session=%self.target.name,code="mods_focus_return_failed",retry_s=state.wait.as_secs(),
-                "o foco não voltou ao prompt; a entrada espera e o executor tenta de novo");
-        }
+        // A segunda tentativa espera o dobro do prazo.
+        if let Some(state)=self.away.as_mut() {state.next=tokio::time::Instant::now()+self.options.focus_return*2;}
+        tracing::warn!(key=%self.target.key,session=%self.target.name,code="mods_focus_return_failed",tries,
+            "o foco não voltou ao prompt; a entrada espera");
         away
     }
     /// Volta o teclado ao prompt pelo `ctrl+x tab`, a tecla medida para isso (o `Escape` age no Claude, e no
     /// psmux nem devolve o foco), lendo a tela antes de cada tecla. Para com um diálogo ou a pesquisa na tela,
     /// onde qualquer tecla mexe neles. `true` quando o foco saiu do mod.
+    ///
+    /// Como o anel do clique: o pane é conferido e o tamanho lido uma vez, e cada passo é a tecla e uma
+    /// leitura, repetida até a tela mudar, até o dobro do `settle` da entrada (300 ms). Na VM
+    /// cada passo custava 0,5 s com a conferência e o tamanho relidos e uma pausa fixa.
     async fn return_focus(&self)->bool {
         let driver=TerminalDriver::new(self.target.binding.clone(),Arc::new(NoFacts),self.options.io.clone(),self.options.limits.clone());
+        let Ok(formats)=driver.mods_formats().await else {return false};
+        let driver=driver.pane_checked();
+        let Ok(mut ansi)=driver.mods_screen().await else {return false};
         for _ in 0..FOCUS_RETURN_KEYS {
-            match self.mods_view().await {
-                Ok(Some((screen,true,_))) if !screen.dialog && !screen.survey=>{},
-                Ok(Some((_,false,_)))|Ok(None)=>return true,
+            match self.mods_read(&ansi,formats) {
+                (screen,true) if !screen.dialog && !screen.survey=>{},
+                (_,false)=>return true,
                 _=>return false,
             }
             if driver.mods_keys(&["C-x","Tab"]).await.is_err() {return false;}
-            // A tecla aparece na tela em 50 a 60 ms.
-            tokio::time::sleep(self.options.limits.settle).await;
+            // A tecla aparece em 50 a 60 ms; um botão da faixa sem desenho não muda a tela, e o passo segue no
+            // teto.
+            let until=tokio::time::Instant::now()+self.options.limits.settle*2;
+            loop {
+                let Ok(now)=driver.mods_screen().await else {return false};
+                let changed=now!=ansi;
+                ansi=now;
+                if changed || tokio::time::Instant::now()>=until {break;}
+                tokio::time::sleep(FOCUS_STEP_POLL).await;
+            }
         }
-        matches!(self.mods_view().await,Ok(Some((_,false,_)))|Ok(None))
+        !self.mods_read(&ansi,formats).1
     }
     /// Clique, roda, tecla da reserva, leitura, tamanho e reserva do pane para os mods. Com o teclado
     /// emprestado ao Python (administração digitando no pane), recusa: duas mãos no mesmo pane erram o alvo.
@@ -579,7 +589,9 @@ impl Executor {
                     _=>delivery(id,match kind {
                         // Foco fora do prompt: adia sem escrever, como o `overlay`; a linha volta à fila e
                         // o próximo tique tenta de novo.
-                        "input"=>match self.focus_guard(root).await {
+                        // Só quando a entrega vai apertar tecla: o modo `User` e a nativa não passam pelo teclado,
+                        // e a guarda só custaria leituras e atraso.
+                        "input"=>match if facts.as_ref().is_some_and(|f|f.as_ref().is_ok_and(|f|!input::presses_keys(f,text))) {None} else {self.focus_guard(root).await} {
                             Some(code)=>DeliveryResult {disposition:input::Disposition::Deferred,stage:input::DeliveryStage::Composer,cleanup:input::Cleanup::NotNeeded,
                                 native:false,message_id:None,code:code.into(),draft:None},
                             None=>driver.prompt(text,&publication).await,

@@ -994,11 +994,74 @@ async fn focus_left_on_a_mod_is_returned(screen:String,anchor:Option<&str>) {
     assert_eq!(typed_at(&f,"Foco esquecido no mod").len(),1);
 }
 
-/// A pessoa levou o foco à faixa no terminal e saiu: a mensagem do app não fica parada para sempre.
-#[tokio::test]
-async fn the_users_own_focus_on_the_band_does_not_hold_the_queue_forever() {
-    focus_left_on_a_mod_is_returned(full_band_focus_screen(),Some("Revisão do MR")).await;
+/// Foco num botão da faixa com um painel aberto ao lado: a borda do painel apagada, o inverso na faixa.
+fn band_focus_with_pane_screen()->String {
+    let left=|text:&str|format!("{text:<50}│ Painel do mod");
+    // O preenchimento conta os caracteres do texto visível, não os da sequência de escape.
+    let band=format!("Revisão do MR  \x1b[7m[ Abrir ]\x1b[0m{}│ Painel do mod"," ".repeat(50-24));
+    format!("{}\n{}\n{band}\n{}\n❯ \n{}\n",left("Resposta do Claude"),left(""),&RULE_80[..50*3],&RULE_80[..50*3])
 }
+
+/// A pessoa levou o foco à faixa no terminal, com um painel aberto, e saiu: a mensagem do app não fica
+/// parada.
+#[tokio::test]
+async fn the_users_own_focus_on_the_band_with_a_pane_is_returned() {
+    focus_left_on_a_mod_is_returned(band_focus_with_pane_screen(),Some("Revisão do MR")).await;
+}
+
+/// Só com a faixa na tela o `ctrl+x tab` gira dentro dela e não volta ao prompt: nenhuma tecla, a entrada
+/// espera a pessoa.
+#[tokio::test]
+async fn with_only_the_band_no_key_is_sent() {
+    let f=Fixture::new().await; *f.io.mods_screen.lock().unwrap()=Some(full_band_focus_screen());
+    f.io.ring_returns.store(true,std::sync::atomic::Ordering::Release);
+    let h=f.start_returning(broadcast::channel(128).0,Duration::from_secs(30),Duration::from_millis(100));
+    *h.anchor().lock().unwrap()=Some("Revisão do MR".into());
+    assert_eq!(h.command(f.command("faixa","Só a faixa")).await.unwrap().payload["code"],"mods_focus");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(f.io.ring_keys.load(std::sync::atomic::Ordering::SeqCst),0);
+    assert!(typed_at(&f,"Só a faixa").is_empty());
+    *f.io.mods_screen.lock().unwrap()=None;
+    f.wait_for("entrega com o foco de volta",||!typed_at(&f,"Só a faixa").is_empty()).await;
+    h.stop().await.unwrap();
+}
+
+/// A devolução que não volta ao prompt é tentada duas vezes por linha e depois só registrada: nada de um
+/// laço de teclas. A entrada continua na fila até o foco sair do mod.
+#[tokio::test]
+async fn a_failed_return_is_tried_twice_and_keeps_the_entry() {
+    let f=Fixture::new().await; *f.io.mods_screen.lock().unwrap()=Some(pane_focus_screen());
+    let h=f.start_returning(broadcast::channel(128).0,Duration::from_secs(30),Duration::from_millis(100));
+    assert_eq!(h.command(f.command("preso","Sem volta")).await.unwrap().payload["code"],"mods_focus");
+    let rings=||f.io.ring_keys.load(std::sync::atomic::Ordering::SeqCst);
+    f.wait_for("a primeira devolução",||rings()>=32).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(rings(),32,"a segunda espera o dobro do prazo");
+    f.wait_for("a segunda devolução",||rings()>=64).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(rings(),64,"sem terceira");
+    assert!(typed_at(&f,"Sem volta").is_empty());
+    *f.io.mods_screen.lock().unwrap()=None;
+    f.wait_for("entrega com o foco de volta",||!typed_at(&f,"Sem volta").is_empty()).await;
+    h.stop().await.unwrap();
+}
+
+/// No modo `User` o plugin entrega sem tecla: a guarda do foco não roda (nenhuma leitura da tela dos mods) e
+/// não atrasa, mesmo com o foco num painel. Com `@` a entrega é `Fill`, aperta `Enter`, e a guarda adia.
+#[tokio::test]
+async fn the_focus_guard_runs_only_when_the_delivery_presses_keys() {
+    for (text,guarded) in [("Sem tecla",false),("Com @arquivo",true)] {
+        let f=Fixture::new().await; *f.io.mods_screen.lock().unwrap()=Some(pane_focus_screen());
+        f.unknown.store(true,std::sync::atomic::Ordering::Release);
+        let h=f.start();
+        let mods_reads=||f.io.calls.lock().unwrap().iter().filter(|r|r.args[0]=="capture-pane" && !r.args.contains(&"-S".into())).count();
+        let reply=h.command(f.command("entrada",text)).await.unwrap();
+        assert_eq!(reply.payload["code"]=="mods_focus",guarded,"{text}: {:?}",reply.payload);
+        assert_eq!(mods_reads()>0,guarded,"{text}: a tela dos mods só é lida quando a entrega aperta tecla");
+        h.stop().await.unwrap();
+    }
+}
+
 
 /// A limpeza de um clique desistiu com o teclado num painel e a reserva venceu sozinha: a mensagem guardada
 /// durante o clique não fica presa.
@@ -1015,32 +1078,6 @@ async fn a_cleanup_that_gave_up_does_not_leave_the_message_stuck() {
     h.stop().await.unwrap();
 }
 
-/// Sem voltar ao prompt, a devolução não vira um laço de teclas: a próxima tentativa espera o dobro, e a
-/// entrada continua na fila até o foco sair do mod.
-#[tokio::test]
-async fn a_failed_return_backs_off_and_keeps_the_entry() {
-    let f=Fixture::new().await; *f.io.mods_screen.lock().unwrap()=Some(pane_focus_screen());
-    let h=f.start_returning(broadcast::channel(128).0,Duration::from_secs(30),Duration::from_millis(100));
-    let reply=h.command(f.command("preso","Sem volta")).await.unwrap();
-    assert_eq!(reply.payload["code"],"mods_focus");
-    let rings=||f.io.ring_keys.load(std::sync::atomic::Ordering::SeqCst);
-    f.wait_for("a primeira devolução",||rings()>=32).await;
-    // A próxima só depois de 200 ms (o dobro dos 100 ms do prazo): até lá, nenhuma tecla a mais.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(rings(),32,"uma devolução inteira e a espera antes da próxima");
-    assert!(typed_at(&f,"Sem volta").is_empty());
-    f.wait_for("a segunda devolução",||rings()>=64).await;
-    *f.io.mods_screen.lock().unwrap()=None;
-    f.wait_for("entrega com o foco de volta",||!typed_at(&f,"Sem volta").is_empty()).await;
-    h.stop().await.unwrap();
-}
-
-/// O painel focado com o anel numa linha do corpo: a pessoa andando nele muda a linha.
-fn pane_ring_screen(row:usize)->String {
-    let border="\x1b[38;2;177;185;249m│\x1b[0m";
-    let left=|text:&str,ring:bool|format!("{text:<50}{border} {}",if ring {"\x1b[7m[ Botão ]\x1b[0m"} else {"[ Botão ]"});
-    format!("{}\n{}\n{}\n{}\n❯ \n{}\n",left("Resposta do Claude",row==0),left("",row==1),left("",row==2),&RULE_80[..50*3],&RULE_80[..50*3])
-}
 
 /// A espera do foco é da linha: uma linha que saiu da fila com o foco num painel não deixa a seguinte
 /// devolver o foco na hora.
@@ -1060,24 +1097,6 @@ async fn the_focus_wait_starts_over_for_the_next_row() {
     h.stop().await.unwrap();
 }
 
-/// Quem anda pelo painel no terminal adia a devolução: o prazo conta da última mexida.
-#[tokio::test]
-async fn moving_in_the_pane_delays_the_return() {
-    let f=Fixture::new().await; *f.io.mods_screen.lock().unwrap()=Some(pane_ring_screen(0));
-    f.io.ring_returns.store(true,std::sync::atomic::Ordering::Release);
-    let h=f.start_returning(broadcast::channel(128).0,Duration::from_secs(30),Duration::from_millis(300));
-    let started=std::time::Instant::now();
-    assert_eq!(h.command(f.command("lendo","Enquanto mexe")).await.unwrap().payload["code"],"mods_focus");
-    for step in 1..=8 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        *f.io.mods_screen.lock().unwrap()=Some(pane_ring_screen(step%3));
-    }
-    assert_eq!(f.io.ring_keys.load(std::sync::atomic::Ordering::SeqCst),0,"nenhuma devolução enquanto a pessoa mexe");
-    assert!(typed_at(&f,"Enquanto mexe").is_empty());
-    f.wait_for("entrega depois de parar de mexer",||!typed_at(&f,"Enquanto mexe").is_empty()).await;
-    assert!(started.elapsed()>=Duration::from_millis(800+300),"{:?}",started.elapsed());
-    h.stop().await.unwrap();
-}
 
 /// Cada reserva confere o pane uma vez, também a renovação: a conferência não vale por todas.
 #[tokio::test]
