@@ -114,6 +114,10 @@ Supervisor que sobe o Rust (sai na parte 7).
     outros ajustes (`groq_api_key`, `jev_*`, `scan_roots`, `shortcuts`) calada; `mcp_server.py`
     `new_session` não devolve `avisos` (conta Codex trocada sem aviso); sonda de provedores sem
     proteção faz `POST /api/sessions` dar 500 sem `provider`. Vai num PR na `main`.
+18. Do #67 (worktrees, Python e Rust): `status --porcelain`/`ls-files` com erro não marca
+    `degraded` (falha calada); base começando com `-` sem `--end-of-options` no `rev-list`/`log`;
+    reflog por worktree sem `hangar-base` custa 1 processo a mais. Do #68 (nativo): busca global
+    ignora a subpasta aberta (desenho do PR).
 
 ## Regras e decisões que valem
 
