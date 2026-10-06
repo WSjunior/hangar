@@ -330,18 +330,30 @@ impl RuntimeActor {
         before(&handle);
         let run = run(target,queue,connection,engine,receiver,sender,closed,events);
         *slot = Some(tokio::spawn(async move {
+            let mut guard = ClearOnDrop { mods,name,generation };
             let result = run.await;
             // Saída por `?` deixava o ator mudo: só sobrava o runtime_closed de quem chamasse depois.
             if let Err(error) = &result {
-                tracing::warn!(key=%key,session=%name,code=%error.code,reason=%error.message,"ator do runtime terminou com erro");
-                // Sem `cano_saiu` a superfície não limpou: os apps ficariam com botões mortos até o `close`.
-                // A posse fica; quem a solta é o `close`.
-                if let Some(mods) = &mods { mods.clear_ui(&name,generation); }
+                tracing::warn!(key=%key,session=%guard.name,code=%error.code,reason=%error.message,"ator do runtime terminou com erro");
+            } else {
+                // Saída normal (`stop` ou caixa fechada): quem limpa a faixa é o `close`, com o `forget`.
+                guard.mods = None;
             }
             result
         }));
         drop(slot);
         handle
+    }
+}
+
+/// Armada durante a vida do ator: se ele sair com erro ou em pânico, sem `cano_saiu`, a superfície não
+/// limpou e os apps ficariam com botões mortos até o `close`. Ao ser solta, publica a interface vazia;
+/// a posse fica, quem a solta é o `close`. Desarmada com `mods = None`.
+struct ClearOnDrop { mods:Option<crate::mods::state::Mods>,name:String,generation:u64 }
+
+impl Drop for ClearOnDrop {
+    fn drop(&mut self) {
+        if let Some(mods) = &self.mods { mods.clear_ui(&self.name,self.generation); }
     }
 }
 
@@ -1214,6 +1226,33 @@ mod tests {
         let second = tokio::time::timeout(Duration::from_secs(2),handle.mods_within(call(),Duration::from_millis(50))).await.unwrap();
         assert_eq!(second.unwrap_err().code,"erro_mod_clique_sem_resposta");
         assert_eq!(MODS_CALL_LIMIT,Duration::from_secs(7));
+    }
+
+    #[test]
+    fn an_actor_panic_clears_the_band_and_a_normal_exit_does_not() {
+        let mods = crate::mods::state::Mods::default();
+        let (sender,_inbox) = mpsc::channel(1);
+        let link = RuntimeHandle { sender,task:Arc::new(Mutex::new(None)),closed:Arc::new(AtomicBool::new(false)),
+            events:broadcast::channel(1).0,stopped:Arc::new(Mutex::new(None)),key:"key".into() };
+        mods.attach("session",1,Arc::new(link));
+        let band = json!({"above":{"type":"Button","key":"k"},"panes":[],"shown_id":null,"columns":110,"source":"surface"});
+        let ui = |mods:&crate::mods::state::Mods| mods.replay("session").into_iter().find(|(event,_)|*event == "plugin_ui")
+            .map(|(_,data)|serde_json::from_str::<Value>(&data).unwrap()).unwrap();
+        // Saída normal: desarmada, a faixa fica para o `close` limpar.
+        mods.publish_ui("session",1,&band);
+        let mut guard = ClearOnDrop { mods:Some(mods.clone()),name:"session".into(),generation:1 };
+        guard.mods = None;
+        drop(guard);
+        assert_eq!(ui(&mods)["above"]["type"],"Button");
+        // Pânico no meio do ator: a guarda solta no desenrolar publica a interface vazia.
+        let armed = mods.clone();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = ClearOnDrop { mods:Some(armed),name:"session".into(),generation:1 };
+            panic!("pânico simulado do ator");
+        }));
+        assert!(panicked.is_err());
+        assert!(ui(&mods)["above"].is_null() && ui(&mods)["panes"] == json!([]));
+        assert!(mods.owns("session"),"a posse só sai no close");
     }
 
     #[test]
