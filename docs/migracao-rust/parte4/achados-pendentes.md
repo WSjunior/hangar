@@ -8,6 +8,13 @@ Achados médios e baixos das revisões por Task que entraram na `feat/parte4` se
 - Task 10: prova na VM DELPHI-02 (Step 23) com web e nativo. Os testes `term::conpty::*` e os
   `cfg(windows)` da Task 7 passaram no job Windows do CI (run 37467170394). O nativo responde ao
   `ESC[6n` (`desktop-native/src/term_view.rs:56-58`, `Event::PtyWrite`); o xterm.js também.
+  Prova automática na VM (06/10, `7a210b6a`, contrato 32, psmux, cliente WS por script):
+  abre em 70 ms, eco e resize ok, fechar não mata a sessão nem digita nada nela. Dois achados:
+  (a) sem resposta ao pedido de cursor (`ESC[6n`, efeito do `INHERIT_CURSOR` do `portable-pty`)
+  o terminal não aceita tecla nenhuma — xterm.js e nativo respondem, mas qualquer cliente que não
+  responda fica mudo; (b) tecla enviada logo depois do primeiro byte (antes de ~3 s) se perde
+  durante a partida do `tmux attach`; falta comparar com o Python. Falta a prova manual com web
+  e nativo numa sessão Claude da VM.
 - Task 5: no Windows a prévia pelo pane captura a 0,15 s com um processo psmux por toque
   (~25–50 ms cada) enquanto a sessão trabalha sem arquivo do hook; medir na VM e, se pesar,
   limitar o ritmo rápido no Windows. O Monitor no Windows (psmux) e o convidado de convite de
