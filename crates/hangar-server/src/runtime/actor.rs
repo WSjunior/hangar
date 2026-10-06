@@ -71,13 +71,15 @@ pub struct RuntimeEngine {
     publisher:Option<broadcast::Sender<RuntimeEvent>>,
     revision:Arc<AtomicU64>,
     mods:Option<crate::mods::state::Mods>,
+    /// A vida deste ator no `Mods` (`Mods::new_life`), com que ele publica e é esquecido.
+    mods_life:u64,
 }
 
 impl RuntimeEngine {
     pub fn new(provider:&str,metadata:Value,generation:u64,clock:ClockSample) -> Result<Self,RuntimeError> {
         let core = match provider { "claude"=>Core::Claude(ClaudeEngine::new(metadata,generation,clock)),
             "codex"=>Core::Codex(CodexEngine::new(metadata,generation,clock)),_=>return Err(failure("provider")) };
-        Ok(Self { core,policy:None,publisher:None,revision:Arc::new(AtomicU64::new(0)),mods:None })
+        Ok(Self { core,policy:None,publisher:None,revision:Arc::new(AtomicU64::new(0)),mods:None,mods_life:0 })
     }
     pub fn with_policy(mut self,policy:PolicyClient) -> Self { self.policy = Some(policy); self }
     pub fn with_publisher(mut self,publisher:broadcast::Sender<RuntimeEvent>) -> Self { self.publisher = Some(publisher); self }
@@ -88,10 +90,12 @@ impl RuntimeEngine {
         static ACTORS:AtomicU64 = AtomicU64::new(0);
         if let Core::Claude(core) = &mut self.core {
             core.enable_surface(format!("ui:{}.{}",std::process::id(),ACTORS.fetch_add(1,Ordering::Relaxed)));
+            self.mods_life = mods.new_life();
             self.mods = Some(mods);
         }
         self
     }
+    pub fn mods_life(&self) -> u64 { self.mods_life }
     fn mods_call(&mut self,token:u64,call:ModsCall,left_s:f64,clock:ClockSample) -> Result<Vec<Effect>,ModsError> {
         match &mut self.core { Core::Claude(core)=>core.mods_call(token,call,left_s,clock),Core::Codex(_)=>Err(crate::mods::model::missing()) }
     }
@@ -321,7 +325,7 @@ impl RuntimeActor {
         let (sender,receiver) = mpsc::channel(64);
         let events = engine.publisher.clone().unwrap_or_else(||broadcast::channel(256).0);
         let closed = Arc::new(AtomicBool::new(false));
-        let (key,name,generation) = (target.key.clone(),target.name.clone(),target.generation);
+        let (key,name,life) = (target.key.clone(),target.name.clone(),engine.mods_life);
         let mods = engine.mods.clone();
         let handle = RuntimeHandle { sender:sender.clone(),task:Arc::new(Mutex::new(None)),closed:closed.clone(),events:events.clone(),
             stopped:Arc::new(Mutex::new(None)),key:key.clone() };
@@ -331,7 +335,7 @@ impl RuntimeActor {
         before(&handle);
         let run = run(target,queue,connection,engine,receiver,sender,closed,events);
         *slot = Some(tokio::spawn(async move {
-            let mut guard = ClearOnDrop { mods,name,generation };
+            let mut guard = ClearOnDrop { mods,name,life };
             let result = run.await;
             // Saída por `?` deixava o ator mudo: só sobrava o runtime_closed de quem chamasse depois.
             if let Err(error) = &result {
@@ -350,11 +354,11 @@ impl RuntimeActor {
 /// Armada durante a vida do ator: se ele sair com erro ou em pânico, sem `cano_saiu`, a superfície não
 /// limpou e os apps ficariam com botões mortos até o `close`. Ao ser solta, publica a interface vazia;
 /// a posse fica, quem a solta é o `close`. Desarmada com `mods = None`.
-struct ClearOnDrop { mods:Option<crate::mods::state::Mods>,name:String,generation:u64 }
+struct ClearOnDrop { mods:Option<crate::mods::state::Mods>,name:String,life:u64 }
 
 impl Drop for ClearOnDrop {
     fn drop(&mut self) {
-        if let Some(mods) = &self.mods { mods.clear_ui(&self.name,self.generation); }
+        if let Some(mods) = &self.mods { mods.clear_ui(&self.name,self.life); }
     }
 }
 
@@ -600,9 +604,9 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                             tracing::warn!(key=%target.key,session=%target.name,"pedido da interface dos mods descartado com o canal do cano cheio");
                         }
                     }
-                    SurfaceEffect::Publish { data } => { if let Some(mods) = &engine.mods { mods.publish_ui(&target.name,target.generation,data); } }
-                    SurfaceEffect::Toast { plugin,text,timeout_ms } => { if let Some(mods) = &engine.mods { mods.toast(&target.name,target.generation,&plugin,&text,timeout_ms); } }
-                    SurfaceEffect::Copied { plugin,text } => { if let Some(mods) = &engine.mods { mods.copied(&target.name,target.generation,&plugin,&text); } }
+                    SurfaceEffect::Publish { data } => { if let Some(mods) = &engine.mods { mods.publish_ui(&target.name,engine.mods_life,data); } }
+                    SurfaceEffect::Toast { plugin,text,timeout_ms } => { if let Some(mods) = &engine.mods { mods.toast(&target.name,engine.mods_life,&plugin,&text,timeout_ms); } }
+                    SurfaceEffect::Copied { plugin,text } => { if let Some(mods) = &engine.mods { mods.copied(&target.name,engine.mods_life,&plugin,&text); } }
                     SurfaceEffect::Reply { token,result } => { if let Some(waiter) = mods_waiters.remove(&token) { let _ = waiter.send(result); } }
                 },
                 Effect::Stop { .. } => { closed.store(true,Ordering::Release); },
@@ -1230,14 +1234,14 @@ mod tests {
             .map(|(_,data)|serde_json::from_str::<Value>(&data).unwrap()).unwrap();
         // Saída normal: desarmada, a faixa fica para o `close` limpar.
         mods.publish_ui("session",1,band.clone());
-        let mut guard = ClearOnDrop { mods:Some(mods.clone()),name:"session".into(),generation:1 };
+        let mut guard = ClearOnDrop { mods:Some(mods.clone()),name:"session".into(),life:1 };
         guard.mods = None;
         drop(guard);
         assert_eq!(ui(&mods)["above"]["type"],"Button");
         // Pânico no meio do ator: a guarda solta no desenrolar publica a interface vazia.
         let armed = mods.clone();
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            let _guard = ClearOnDrop { mods:Some(armed),name:"session".into(),generation:1 };
+            let _guard = ClearOnDrop { mods:Some(armed),name:"session".into(),life:1 };
             panic!("pânico simulado do ator");
         }));
         assert!(panicked.is_err());

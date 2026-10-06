@@ -135,14 +135,45 @@ async fn bridge_applies_the_python_limits_before_the_token() {
 #[tokio::test]
 async fn renamed_session_is_found_by_the_name_its_process_was_born_with() {
     // M3: renomear fecha e reabre a sessão no Rust com o mesmo `claude -p`, que segue mandando à ponte o
-    // nome e o token de nascimento. A ponte acha a sessão pela chave durável, e a URL volta ao aparelho.
+    // nome e o token de nascimento. A ponte acha a sessão por esse nome, e a URL volta ao aparelho.
     let (_python, server, mods, plugin) = setup().await;
     mods.forget("mods-s", 1);
-    mods.attach_keyed("mods-s", "chave", 1, Arc::new(plugin.clone()));
-    mods.forget("mods-s", 1);
-    mods.attach_keyed("renomeada", "chave", 1, Arc::new(plugin));
+    mods.attach_process("renomeada", "mods-s", 2, Arc::new(plugin));
     assert_eq!(mods.bridge_session("mods-s").as_deref(), Some("renomeada"));
     let response = post(format!("http://{server}/api/sessions/renomeada/plugin/press"),
         json!({"site": "vitrine-botoes", "key": "V45-url"}), true).await;
     assert_eq!(json_of(response).await, json!({"ok": true, "opened": "https://example.com/vitrine"}));
+}
+
+#[tokio::test]
+async fn old_name_token_never_acts_on_a_new_session_with_that_name() {
+    // O token da ponte é derivado só do nome. Renomeada a sessão sem relançar o processo, e criada outra
+    // com o nome antigo, os dois processos vivos têm o mesmo token: a ponte não atende nenhum dos dois, e
+    // o clique em aberto da sessão nova não é tomado nem recebe URL de fora.
+    let (python, server, mods, plugin) = setup().await;
+    mods.forget("mods-s", 1);
+    mods.attach_process("renomeada", "mods-s", 2, Arc::new(plugin));
+    mods.attach_process("mods-s", "processo-novo", 3, Arc::new(mods_support_free::Quiet));
+    let attempt = mods.begin_click("mods-s", "a", "b");
+    let base = format!("http://{server}/api/plugin");
+    let token = mint(OWNER, "mods-s");
+    let start = post(format!("{base}/press-start"), json!({"sessao": "mods-s", "token": token, "requestId": "a", "element": "b"}), false).await;
+    assert_eq!(start.text().await.unwrap(), "from-python");
+    let opened = post(format!("{base}/opened"), json!({"sessao": "mods-s", "token": token, "attempt": attempt, "url": "https://x"}), false).await;
+    assert_eq!(opened.text().await.unwrap(), "from-python");
+    assert_eq!((python.hits_to("/api/plugin/press-start"), python.hits_to("/api/plugin/opened")), (1, 1));
+    assert!(mods.match_click("mods-s", "a", "b").is_some(), "o clique da sessão nova segue em aberto, sem dono de fora");
+    // A renomeada sai do Rust: o nome volta a ter um processo vivo só, e a ponte o atende.
+    mods.forget("renomeada", 2);
+    assert_eq!(mods.bridge_session("mods-s").as_deref(), Some("mods-s"));
+}
+
+/// Superfície que não é chamada nos testes da ponte.
+mod mods_support_free {
+    pub struct Quiet;
+    impl hangar_server::mods::state::SurfaceLink for Quiet {
+        fn call(&self, _: hangar_server::mods::model::ModsCall, _: std::time::Instant) -> hangar_server::mods::state::CallFuture {
+            Box::pin(async { Err(hangar_server::mods::model::missing()) })
+        }
+    }
 }
