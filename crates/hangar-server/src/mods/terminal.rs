@@ -12,8 +12,8 @@ use crate::runtime::terminal::ModsAnchor;
 
 /// Prazo da reposição do mínimo pelo vigia: redimensionar e assentar (até 1 s) com o piso das ações.
 const FLOOR_BUDGET: Duration = Duration::from_secs(5);
-/// Quanto o vigia espera a vez do pane: um pedido do app inteiro, do orçamento da rota à limpeza.
-const FLOOR_WAIT: Duration = super::routes::REQUEST_BUDGET.saturating_add(click::UNDO_MAX);
+/// Quanto o vigia espera a vez do pane: um pedido do app inteiro, do orçamento da rota à limpeza mais longa.
+const FLOOR_WAIT: Duration = super::routes::REQUEST_BUDGET.saturating_add(click::CLEANUP_MAX);
 /// Prazo da leitura do painel na frente, que não é pedido de app.
 const SHOWN_READ_MAX: Duration = Duration::from_secs(2);
 

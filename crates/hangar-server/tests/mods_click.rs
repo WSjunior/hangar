@@ -746,3 +746,28 @@ async fn the_wheel_stops_in_time_for_the_keyboard() {
     assert!(wheels > 0 && wheels < limits.wheel_events, "{wheels} eventos");
     assert!(keys(&pane).contains(&"Enter".to_string()), "{:?}", keys(&pane));
 }
+
+#[tokio::test]
+async fn the_cleanup_covers_a_long_ring_back_to_the_prompt() {
+    // Doze botões na faixa e dez painéis: depois do botão da faixa, a volta ao prompt passa por 22 paradas
+    // do anel. Com o custo do psmux, os 2 s de antes cobriam poucos passos e a limpeza desistia com o teclado
+    // num painel; o prazo da volta passa a acompanhar o tamanho do anel.
+    let ids: Vec<String> = (0..10).map(|i| format!("p{i}")).collect();
+    let mut grande = view(&ids.iter().map(|id| (id.as_str(), id.as_str(), "k", "x")).collect::<Vec<_>>());
+    grande.above = json!({"type": "Box", "children": (0..12).map(|i| mods_support::pane::button(&format!("b{i}"), &format!("Botão {i}"), "vitrine"))
+        .collect::<Vec<_>>()});
+    let (mods, pane) = setup("tmux-14-ciclo-4-prompt", grande);
+    pane.mouse(false);
+    pane.cost(Duration::from_millis(150));
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-5-faixa"), Focus("above-prompt", "b0", false)]);
+    pane.on_keys("Enter", vec![Pressed("above-prompt", "b0")]);
+    for i in 0..21 { pane.on_keys("C-x Tab", vec![Show(if i % 2 == 0 { "tmux-14-ciclo-6-painel-1" } else { "tmux-14-ciclo-5-faixa" })]); }
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-9-prompt")]);
+    let pane = Arc::new(pane);
+    let parts = Parts { limits: Limits::default(), ..parts(&mods, &pane) };
+    let (task, answer) = click::spawn(parts, ModsCall::Press { site: "above-prompt".into(), key: "b0".into() }, Instant::now() + Duration::from_millis(7500));
+    assert_eq!(answer.await.unwrap().unwrap(), json!({}));
+    task.await.unwrap();
+    assert_eq!(keys(&pane).iter().filter(|k| *k == "C-x Tab").count(), 1 + 22);
+    assert_eq!(pane.log().last().map(String::as_str), Some("release"), "o teclado voltou e o pane foi solto");
+}

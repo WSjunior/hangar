@@ -164,8 +164,9 @@ fn stalled_code(result:&RuntimeReply)->Option<&str> {
 }
 /// Teto do empréstimo: a administração mais longa (troca de modelo/motor) leva segundos.
 const MAX_LOAN_S:u64=120;
-/// Teto da reserva do pane a um clique de mod: os 7,5 s do pedido mais os 2 s da limpeza, com folga.
-/// Vence sozinha: uma tarefa de clique que sumiu sem o `Release` não segura a fila.
+/// Teto de cada reserva do pane a um clique de mod: os 7,5 s do pedido mais os 2 s da limpeza, com folga; a
+/// limpeza renova a sua a cada volta ao prompt, também abaixo disto. Vence sozinha: uma tarefa de clique que
+/// sumiu sem o `Release` não segura a fila.
 const MAX_MODS_HOLD:Duration=Duration::from_secs(10);
 pub struct TerminalActor;
 impl TerminalActor {
