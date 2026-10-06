@@ -395,13 +395,14 @@ def _base_of(path: str, branch: str, main: str, failed: list) -> str | None:
         source = next((line.removeprefix("branch: Created from ")
                        for line in reversed(p.stdout.splitlines())
                        if line.startswith("branch: Created from ")), "")
-        own = {branch, f"refs/heads/{branch}", refs.get(f"refs/heads/{branch}", "")}
+        own = {branch, f"refs/heads/{branch}"}
         own.update(f"{remote}/{branch}" for remote in remotes)
         own.update(f"refs/remotes/{remote}/{branch}" for remote in remotes)
         named = (source.startswith(("refs/heads/", "refs/remotes/"))
                  or f"refs/heads/{source}" in refs
                  or any(source.startswith(remote + "/") for remote in remotes))
-        # HEAD e hashes não registram qual branch era o destino; o upstream da própria não é base.
+        # HEAD e hashes não registram qual branch era o destino; o remoto homônimo é a própria
+        # branch publicada. O upstream não entra: `worktree add -b x ../w origin/release` rastreia a base.
         if named and source not in own and f"refs/remotes/{source}" not in own:
             base = source
         else:

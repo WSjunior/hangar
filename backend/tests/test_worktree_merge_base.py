@@ -51,6 +51,7 @@ def _remote_merge_scene(tmp_path, source, remote="origin"):
     ("remote-server", "main", "tag-main", "origin", "refs/remotes/origin/main", False, False),
     ("local-server", None, "ambiguous", "origin", "server", False, True),
     ("local-server", None, "upstream", "origin", "origin/server", True, False),
+    ("remote-server", None, "track", "origin", "origin/server", True, False),
 ])
 def test_merge_base_uses_creation_ref_and_published_history(
         tmp_path, backend, source, configured, action, remote, expected_base, merged, degraded):
@@ -65,6 +66,9 @@ def test_merge_base_uses_creation_ref_and_published_history(
         (feature / "pending.txt").write_text("Não integrada\n", encoding="utf-8")
         git(feature, "add", "pending.txt")
         git(feature, "commit", "-m", "Ainda em andamento")
+    elif action == "track":
+        # O que `worktree add -b feature ... origin/server` grava sem `--no-track`.
+        git(repo, "branch", "--set-upstream-to=origin/server", "feature")
     elif action == "missing":
         git(repo, "update-ref", "-d", f"refs/remotes/{remote}/server")
     elif action == "tag":

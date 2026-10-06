@@ -370,14 +370,13 @@ impl Repo {
                     || s.starts_with("refs/remotes/")
                     || refs.is_some_and(|r| r.contains_key(&format!("refs/heads/{s}")))
                     || remotes.iter().any(|r| s.starts_with(&format!("{r}/")));
-                let upstream = refs.and_then(|r| r.get(&format!("refs/heads/{branch}")));
                 let own = *s == branch
                     || *s == format!("refs/heads/{branch}")
-                    || upstream.is_some_and(|u| *s == u || format!("refs/remotes/{s}") == *u)
                     || remotes.iter().any(|r| {
                         *s == format!("{r}/{branch}") || *s == format!("refs/remotes/{r}/{branch}")
                     });
-                // HEAD e hashes não registram o destino; o upstream da própria não é base.
+                // HEAD e hashes não registram o destino; o remoto homônimo é a própria branch
+                // publicada. O upstream não entra: `worktree add -b x ../w origin/release` rastreia a base.
                 named && !own
             });
             source
