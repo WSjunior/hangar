@@ -82,14 +82,15 @@ pub async fn press_start(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
 
 pub async fn opened(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let body: Opened = match owned(&st, peer, req).await { Ok(body) => body, Err(response) => return response };
-    if !fits(&body.attempt, 64) {
+    // A URL não tem mínimo no Pydantic: vazia passa daqui e cai no 400 do esquema.
+    if !fits(&body.attempt, 64) || body.url.chars().count() > URL_MAX {
         return invalid();
     }
     if !token_ok(&st, &body.sessao, &body.token) {
         return answer(StatusCode::FORBIDDEN, json!({"detail": "token do plugin inválido"}));
     }
     let lower = body.url.to_ascii_lowercase();
-    if !(lower.starts_with("http://") || lower.starts_with("https://")) || body.url.chars().count() > URL_MAX {
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
         return answer(StatusCode::BAD_REQUEST, json!({"detail": "só http(s)"}));
     }
     if st.mods.opened(&body.sessao, &body.attempt, &body.url) {

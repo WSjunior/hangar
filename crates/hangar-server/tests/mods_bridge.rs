@@ -95,9 +95,8 @@ async fn opened_checks_token_case_size_and_passes_invalid_bodies() {
     let attempt = mods.begin_click("mods-s", "a", "b");
     let wrong = post(format!("{base}/opened"), json!({"sessao": "mods-s", "token": "x", "attempt": attempt, "url": "https://x"}), false).await;
     assert_eq!(wrong.status().as_u16(), 403);
-    let over = format!("https://{}", "a".repeat(8192 - 8 + 1));
-    let too_long = post(format!("{base}/opened"), json!({"sessao": "mods-s", "token": token, "attempt": attempt, "url": over}), false).await;
-    assert_eq!(too_long.status().as_u16(), 400, "acima de 8192 caracteres");
+    let empty = post(format!("{base}/opened"), json!({"sessao": "mods-s", "token": token, "attempt": attempt, "url": ""}), false).await;
+    assert_eq!(empty.status().as_u16(), 400, "URL vazia não tem limite no Pydantic: é o esquema que recusa");
     // Mais de 8192 bytes, menos de 8192 caracteres: o teto conta caracteres, como o Pydantic do Python.
     let wide = format!("https://{}", "á".repeat(4100));
     let accepted = post(format!("{base}/opened"), json!({"sessao": "mods-s", "token": token, "attempt": attempt, "url": wide}), false).await;
@@ -121,6 +120,7 @@ async fn bridge_applies_the_python_limits_before_the_token() {
         ("press-start", json!({"sessao": "mods-s", "token": "x", "requestId": "a", "element": "é".repeat(257)})),
         ("opened", json!({"sessao": "mods-s", "token": "x", "attempt": "", "url": "https://x"})),
         ("opened", json!({"sessao": "mods-s", "token": "x", "attempt": "é".repeat(65), "url": "https://x"})),
+        ("opened", json!({"sessao": "mods-s", "token": "x", "attempt": "a", "url": format!("https://{}", "a".repeat(8192 - 8 + 1))})),
     ];
     for (route, body) in cases {
         let response = post(format!("{base}/{route}"), body.clone(), false).await;
