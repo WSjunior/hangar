@@ -49,6 +49,18 @@ pub(super) struct Entry {
 /// Uma pasta lida: as subpastas, ou o motivo de não haver lista (código do backend já em texto).
 pub(super) struct Scan { pub(super) entries: Vec<Entry>, pub(super) error: Option<String> }
 
+struct RootScan { root: Root, scan: Remote<Scan> }
+enum FolderIndex { Current(usize), Root(usize, usize) }
+
+fn global_folder_search(compact: bool, search_all: bool, query: &str) -> bool {
+    !compact && search_all && !query.trim().is_empty()
+}
+
+fn next_root(current: usize, count: usize, reverse: bool) -> Option<usize> {
+    if count == 0 { return None; }
+    Some(if reverse { (current + count - 1) % count } else { (current + 1) % count })
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct Probe { disponivel: bool }
 
@@ -101,7 +113,9 @@ impl CodexAccount {
 fn choose_codex_account(accounts: &[CodexAccount], requested: Option<&str>) -> Option<usize> {
     match requested {
         Some(id) => accounts.iter().position(|a| a.id == id),
-        None => accounts.iter().position(|a| a.is_default).or((!accounts.is_empty()).then_some(0)),
+        None => accounts.iter().position(|a| a.is_default && a.auth.status == "connected")
+            .or_else(|| accounts.iter().position(|a| a.auth.status == "connected"))
+            .or_else(|| accounts.iter().position(|a| a.is_default)).or((!accounts.is_empty()).then_some(0)),
     }
 }
 
@@ -212,6 +226,7 @@ pub(super) enum CreateReply {
     Roots(u64, Result<Value, Failure>, Option<String>),
     /// A pasta já convertida na tarefa do tokio: a lista grande não é lida na thread da janela.
     Scan(u64, Result<Scan, String>),
+    RootScan(u64, String, u64, Result<Scan, String>),
     Branches(u64, Result<Option<Checkout>, String>),
     Sessions(u64, Result<Vec<SessionInfo>, Failure>),
     Providers(u64, Result<Value, Failure>),
@@ -393,7 +408,10 @@ pub(in crate::app) struct NewSession {
     dir: String,
     scan: Remote<Scan>,
     /// Pastas da leitura que casam com a busca, na ordem da lista: refeito quando a busca ou a leitura mudam, não a cada quadro.
-    folders: Vec<usize>,
+    folders: Vec<FolderIndex>,
+    root_scans: Vec<RootScan>,
+    search_all: bool,
+    search_error: Option<String>,
     query: Entity<InputState>,
     /// A pasta escolhida: é ela que o formulário configura.
     picked: Option<String>,
@@ -542,9 +560,14 @@ impl NewSession {
                 _ => {}
             }),
         ];
+        let (search_all, search_error) = match appearance::search_all_folders() {
+            Ok(value) => (value, None),
+            Err(error) => (true, Some(format!("{} {error}", tr("create_search_preference_failed")))),
+        };
         Self {
             link, purpose: SessionDialogPurpose::Create, transfer_blocked: false, compact: false, menu: Default::default(), menu_query, servers: Remote::default(),
-            roots: Remote::default(), root: None, dir: String::new(), scan: Remote::default(), folders: Vec::new(), query, picked: None,
+            roots: Remote::default(), root: None, dir: String::new(), scan: Remote::default(), folders: Vec::new(),
+            root_scans: Vec::new(), search_all, search_error, query, picked: None,
             checkout: Remote::default(), branch: String::new(), worktrees: Remote::default(), existing: None, switching: false, base_open: false,
             preset: None, new_branch: false, base: String::new(), new_branch_name,
             git: Default::default(), git_name,
@@ -711,6 +734,7 @@ impl NewSession {
         self.worktrees.reset();
         self.new_branch_name.update(cx, |input, cx| input.set_value("", window, cx));
         self.roots.reset();
+        self.root_scans.clear();
         self.scan.reset();
         self.checkout.reset();
         self.sessions.reset();
@@ -824,8 +848,20 @@ impl NewSession {
         if self.compact { self.picked = Some(path.clone()); self.reset_git(); self.load_branches(window, cx); }
         let remember = path.clone();
         self.link.runtime.spawn_blocking(move || crate::appearance::remember_root(&remember));
-        self.query.update(cx, |input, cx| input.set_value("", window, cx));
         self.scan_dir(path, cx);
+    }
+
+    pub(super) fn root_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let key = &event.keystroke;
+        if self.compact || self.is_transfer() || key.key != "tab" || !key.modifiers.control || key.modifiers.alt || key.modifiers.platform { return false; }
+        if self.creating || self.headless_saving { return true; }
+        let Some(roots) = self.roots.ok() else { return true; };
+        let current = roots.iter().position(|root| self.root.as_ref().is_some_and(|r| r.path == root.path)).unwrap_or(0);
+        if let Some(index) = next_root(current, roots.len(), key.modifiers.shift) {
+            let root = roots[index].clone();
+            self.select_root(root, window, cx);
+        }
+        true
     }
 
     fn scan_dir(&mut self, path: String, cx: &mut Context<Self>) {
@@ -1157,8 +1193,10 @@ impl NewSession {
                     .and_then(|v| serde_json::from_value::<Vec<Root>>(v).map_err(|_| tr("invalid_response")));
                 if !self.roots.finish(seq, roots) { return None; }
                 let list = self.roots.ok().cloned().unwrap_or_default();
+                self.root_scans = list.iter().cloned().map(|root| RootScan { root, scan: Remote::default() }).collect();
                 if let Some(root) = list.iter().find(|r| Some(&r.path) == last.as_ref()).or(list.first()).cloned() { self.select_root(root, window, cx); }
                 self.apply_preset(window, cx);
+                self.refilter(cx);
             }
             CreateReply::Worktrees(seq, result) => {
                 if seq != self.worktrees.seq { return None; }
@@ -1166,6 +1204,12 @@ impl NewSession {
                 self.worktrees.finish(seq, list);
             }
             CreateReply::Scan(seq, result) => { if self.scan.finish(seq, result) { self.refilter(cx); } }
+            CreateReply::RootScan(epoch, path, seq, result) => {
+                if epoch != self.roots.seq { return None; }
+                if let Some(cached) = self.root_scans.iter_mut().find(|s| s.root.path == path) {
+                    if cached.scan.finish(seq, result) { self.refilter(cx); }
+                }
+            }
             CreateReply::Branches(seq, result) => {
                 if !self.compact || !self.checkout.finish(seq, result) { return None; }
                 // A base padrão da branch nova é a branch atual da pasta; com HEAD solto, a primeira local.
@@ -1458,18 +1502,22 @@ impl NewSession {
 
     fn render_rows(&self, cx: &mut Context<Self>) -> AnyElement {
         if self.root.is_none() { return div().into_any_element(); }
-        if self.scan.loading || self.scan.value.is_none() {
+        let global = self.global_search(cx);
+        let loading = if global { self.root_scans.iter().any(|s| s.scan.loading) } else { self.scan.loading || self.scan.value.is_none() };
+        if loading && (!global || self.folders.is_empty()) {
             // Esqueletos são marcadores de posição, sem item de domínio: a posição é a identidade deles.
             return div().flex().flex_col().gap(px(6.)).children((0..5usize).map(|i| div().flex().flex_col().gap(px(6.)).px(px(10.)).py(px(8.))
                 .child(Skeleton::new(("create-row-skeleton", i)).w(px(160.)).h(px(12.)))
                 .child(Skeleton::new(("create-row-skeleton-detail", i)).secondary().w(px(240.)).h(px(10.))))).into_any_element();
         }
-        let scan = match self.scan.value.as_ref() {
-            Some(Err(error)) => return alert("create-scan-error", error.clone()).into_any_element(),
-            Some(Ok(scan)) => scan,
-            None => return div().into_any_element(),
-        };
-        if let Some(error) = scan.error.clone() { return muted(error).into_any_element(); }
+        if !global {
+            let scan = match self.scan.value.as_ref() {
+                Some(Err(error)) => return alert("create-scan-error", error.clone()).into_any_element(),
+                Some(Ok(scan)) => scan,
+                None => return div().into_any_element(),
+            };
+            if let Some(error) = scan.error.clone() { return muted(error).into_any_element(); }
+        }
         if self.folders.is_empty() {
             let searching = !self.query.read(cx).value().trim().is_empty();
             return muted(tr(if searching { "create_no_results" } else { "create_no_subfolders" })).into_any_element();
@@ -1480,20 +1528,82 @@ impl NewSession {
         })).size_full().into_any_element()
     }
 
-    fn refilter(&mut self, cx: &App) {
+    fn global_search(&self, cx: &App) -> bool { global_folder_search(self.compact, self.search_all, &self.query.read(cx).value()) }
+
+    fn refilter(&mut self, cx: &mut Context<Self>) {
         let query = self.query.read(cx).value().to_string();
-        let root = self.root.as_ref().map(|r| r.path.as_str()).unwrap_or("");
-        self.folders = match self.scan.ok() {
-            Some(scan) => scan.entries.iter().enumerate().filter(|(_, e)| shown(&query, root, e)).map(|(ix, _)| ix).collect(),
-            None => Vec::new(),
-        };
+        if self.global_search(cx) {
+            let epoch = self.roots.seq;
+            let pending: Vec<_> = self.root_scans.iter_mut().filter(|s| s.scan.value.is_none() && !s.scan.loading)
+                .map(|s| (s.root.path.clone(), s.scan.start())).collect();
+            for (path, seq) in pending {
+                self.request(cx, move |api, send| Box::pin(async move {
+                    let result = scan_of(api.server_read(&["fs", "scan"], &[("root", path.as_str())], 15).await);
+                    send(CreateReply::RootScan(epoch, path, seq, result)).await;
+                }));
+            }
+            let mut seen = HashSet::new();
+            let mut folders = Vec::new();
+            for (root_index, root_scan) in self.root_scans.iter().enumerate() {
+                let Some(scan) = root_scan.scan.ok() else { continue; };
+                for (entry_index, entry) in scan.entries.iter().enumerate() {
+                    if shown(&query, &root_scan.root.path, entry) && seen.insert(entry.path.clone()) {
+                        folders.push(FolderIndex::Root(root_index, entry_index));
+                    }
+                }
+            }
+            self.folders = folders;
+        } else {
+            let root = self.root.as_ref().map(|r| r.path.as_str()).unwrap_or("");
+            self.folders = self.scan.ok().into_iter().flat_map(|scan| scan.entries.iter().enumerate())
+                .filter(|(_, e)| shown(&query, root, e)).map(|(ix, _)| FolderIndex::Current(ix)).collect();
+        }
+    }
+
+    fn set_search_all(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.creating { return; }
+        self.search_all = on;
+        self.search_error = appearance::set_search_all_folders(on).err().map(|error| format!("{} {error}", tr("create_search_preference_failed")));
+        self.refilter(cx);
+        cx.notify();
+    }
+
+    fn search_feedback(&self, cx: &mut Context<Self>) -> AnyElement {
+        let mut feedback = div().flex().flex_col().gap(px(4.)).children(self.search_error.clone().map(|error| alert("create-search-preference-error", error)));
+        if self.global_search(cx) {
+            let errors: Vec<_> = self.root_scans.iter().filter_map(|root_scan| {
+                let error = match root_scan.scan.value.as_ref()? {
+                    Err(error) => error.as_str(),
+                    Ok(scan) => scan.error.as_deref()?,
+                };
+                Some(format!("{}: {error}", root_scan.root.name))
+            }).collect();
+            if self.root_scans.iter().any(|s| s.scan.loading) { feedback = feedback.child(muted(tr("loading"))); }
+            if !errors.is_empty() {
+                feedback = feedback.child(alert("create-search-roots-errors", errors.join("\n")))
+                    .child(Button::new("create-search-retry").ghost().small().label(tr("create_try_again")).disabled(self.creating)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            for s in &mut this.root_scans {
+                                if matches!(s.scan.value, Some(Err(_))) || s.scan.ok().is_some_and(|scan| scan.error.is_some()) { s.scan.reset(); }
+                            }
+                            this.refilter(cx); cx.notify();
+                        })));
+            }
+        }
+        feedback.into_any_element()
     }
 
     fn folder_row(&self, ix: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let root = self.root.as_ref()?;
-        let entry = self.scan.ok()?.entries.get(*self.folders.get(ix)?)?;
+        let (root, entry) = match self.folders.get(ix)? {
+            FolderIndex::Current(ei) => (self.root.as_ref()?, self.scan.ok()?.entries.get(*ei)?),
+            FolderIndex::Root(ri, ei) => { let s = self.root_scans.get(*ri)?; (&s.root, s.scan.ok()?.entries.get(*ei)?) }
+        };
+        let pick_root = root.clone();
+        let open_root = root.clone();
         let on = self.picked.as_deref() == Some(entry.path.as_str());
         let (pick, open) = (entry.path.clone(), entry.path.clone());
+        let relative_path = rel_path(&root.path, &entry.path);
+        let display_path = if self.global_search(cx) { format!("{} · {relative_path}", root.name) } else { relative_path };
         // No diálogo, linha sem borda com o ícone da pasta à frente e etiquetas apagadas; o menu da tela sem sessão fica como estava.
         let soft = !self.compact;
         let badge = |text: &str| div().px(px(6.)).rounded(px(if soft { 5. } else { 4. })).text_size(px(10.5)).font_family(theme::MONO)
@@ -1512,19 +1622,25 @@ impl NewSession {
                     .child(div().w_full().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(entry.name.clone()))
                     .child(div().w_full().flex().items_center().gap(px(6.))
                         .child(div().flex_1().min_w_0().truncate().font_family(theme::MONO).text_size(px(11.)).text_color(theme::muted())
-                            .child(rel_path(&root.path, &entry.path)))
+                            .child(display_path))
                         .when(entry.is_git, |el| el.child(badge("git")))
                         .when(entry.has_claude_md, |el| el.child(badge("CLAUDE.md")))
                         .when_some(entry.mtime, |el, t| el.child(div().flex_shrink_0().text_size(px(11.)).text_color(theme::faint()).child(folder_time(t)))))))
-                .on_click(cx.listener(move |this, _, window, cx| this.pick(pick.clone(), window, cx))))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if this.root.as_ref().is_none_or(|root| root.path != pick_root.path) { this.select_root(pick_root.clone(), window, cx); }
+                    this.pick(pick.clone(), window, cx);
+                })))
             .child(Button::new(SharedString::from(format!("create-open-{}", entry.path))).ghost().small().flex_shrink_0().disabled(self.creating)
                 .icon(IconName::ChevronRight).accessibility_label(tr("create_open").replace("{nome}", &entry.name))
-                .on_click(cx.listener(move |this, _, window, cx| this.drill(open.clone(), window, cx))))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if this.root.as_ref().is_none_or(|root| root.path != open_root.path) { this.select_root(open_root.clone(), window, cx); }
+                    this.drill(open.clone(), window, cx);
+                })))
             .into_any_element())
     }
 
     fn render_left(&self, cx: &mut Context<Self>) -> Div {
-        let drilled = self.root.as_ref().filter(|r| r.path != self.dir);
+        let drilled = self.root.as_ref().filter(|r| r.path != self.dir && !self.global_search(cx));
         let path_row = drilled.map(|root| div().flex().flex_col().gap(px(8.))
             .child(div().id("create-crumbs").aria_label(tr("create_path")).flex().flex_wrap().items_center().gap(px(2.))
                 .children(crumbs(root, &self.dir).into_iter().enumerate().map(|(n, (text, path))| div().flex().items_center().gap(px(2.))
@@ -1561,8 +1677,11 @@ impl NewSession {
         column
             .children(self.render_machines(cx))
             .child(self.render_roots(cx))
-            .when(self.root.is_some(), |el| el.child(Input::new(&self.query).rounded(px(10.)).cleanable(true).prefix(chrome::small_icon(IconName::Search, 14., theme::muted()))
-                .aria_label(tr("create_search"))))
+            .child(Input::new(&self.query).rounded(px(10.)).cleanable(true).disabled(self.creating)
+                .prefix(chrome::small_icon(IconName::Search, 14., theme::muted())).aria_label(tr("create_search")))
+            .child(Checkbox::new("create-search-all").label(tr("create_search_all")).checked(self.search_all).disabled(self.creating)
+                .on_click(cx.listener(|this, checked: &bool, _, cx| this.set_search_all(*checked, cx))))
+            .child(self.search_feedback(cx))
             .children(path_row)
             // A lista de pastas rola sozinha; carregando, vazia ou com erro, a caixa é que rola.
             .child(div().id("create-folders").flex_1().min_h_0().flex().flex_col()
@@ -2374,6 +2493,7 @@ impl Hangar {
         let link = Link { api, runtime: self.runtime.clone(), tx: self.tx.clone(), connection: self.connection,
             servers: self.server_choices(), servers_rev: self.servers_rev };
         let dialog = cx.new(|cx| NewSession::new(link, baton, window, cx));
+        let query = dialog.read(cx).query.clone();
         dialog.update(cx, |d, cx| d.load(window, cx));
         self.new_session = Some(dialog.clone());
         let weak = cx.entity().downgrade();
@@ -2388,6 +2508,7 @@ impl Hangar {
                     if this.new_session.as_ref().is_some_and(|d| d.entity_id() == me) { this.new_session = None; }
                 }); })
         });
+        query.update(cx, |input, cx| input.focus(window, cx));
     }
 
     pub(super) fn receive_create(&mut self, dialog: EntityId, reply: CreateReply, window: &mut Window, cx: &mut Context<Self>) {
@@ -2504,6 +2625,34 @@ mod tests {
         assert_eq!(super::choose_codex_account(&accounts, None), Some(0));
         assert_eq!(super::choose_codex_account(&accounts[1..], None), Some(0));
         assert_eq!(super::choose_codex_account(&[], Some("account-b")), None);
+    }
+
+    #[test]
+    fn compact_folder_picker_keeps_search_local_to_the_navigated_folder() {
+        assert!(!super::global_folder_search(true, true, "src"));
+        assert!(super::global_folder_search(false, true, "src"));
+        assert!(!super::global_folder_search(false, false, "src"));
+        assert!(!super::global_folder_search(false, true, "  "));
+    }
+
+    #[test]
+    fn root_shortcut_wraps_in_both_directions() {
+        assert_eq!(super::next_root(0, 0, false), None);
+        assert_eq!(super::next_root(0, 1, true), Some(0));
+        assert_eq!(super::next_root(0, 3, false), Some(1));
+        assert_eq!(super::next_root(2, 3, false), Some(0));
+        assert_eq!(super::next_root(0, 3, true), Some(2));
+        assert_eq!(super::next_root(2, 3, true), Some(1));
+    }
+
+    #[test]
+    fn new_codex_session_prefers_connected_account_over_disconnected_default() {
+        let accounts: Vec<super::CodexAccount> = serde_json::from_value(json!([
+            {"id":"old", "name":"Old", "is_default":true, "auth":{"status":"disconnected"}},
+            {"id":"ready", "name":"Ready", "auth":{"status":"connected"}}
+        ])).unwrap();
+        assert_eq!(super::choose_codex_account(&accounts, None), Some(1));
+        assert_eq!(super::choose_codex_account(&accounts, Some("old")), Some(0));
     }
 
     fn transfer_request() -> super::TransferRequest {

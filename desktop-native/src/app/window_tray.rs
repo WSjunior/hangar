@@ -74,6 +74,32 @@ impl Hangar {
         cx.notify();
     }
 
+    fn restart_from_tray(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let updater = cx.global::<crate::update::Handle>().0.clone();
+        let task = match updater.update(cx, |updater, cx| updater.restart_desktop(cx)) {
+            Ok(task) => task,
+            Err(reason) => {
+                self.show_from_tray(window, cx);
+                window.push_notification(Notification::error(reason), cx);
+                return;
+            }
+        };
+        let handle = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            let ready = task.await.unwrap_or(false);
+            let _ = handle.update(cx, |_, window, cx| { let _ = this.update(cx, |this, cx| {
+                if ready {
+                    this.window_tray.icon = None;
+                    cx.quit();
+                } else {
+                    updater.update(cx, |updater, cx| updater.finish_desktop_restart(cx));
+                    this.show_from_tray(window, cx);
+                    window.push_notification(Notification::error(tr("app_restart_failed")), cx);
+                }
+            }); });
+        }).detach();
+    }
+
     pub(super) fn on_tray_event(&mut self, event: TrayEvent, window: &mut Window, cx: &mut Context<Self>) {
         if event == TrayEvent::Toggle {
             let now = Instant::now();
@@ -84,6 +110,7 @@ impl Hangar {
             // Minimizada conta como fora da tela: o clique a traz de volta em vez de escondê-la.
             TrayEvent::Toggle if !self.window_tray.hidden && window.is_visible() && self.closes_to_tray() => self.hide_to_tray(window, cx),
             TrayEvent::Toggle | TrayEvent::Show => self.show_from_tray(window, cx),
+            TrayEvent::Restart => self.restart_from_tray(window, cx),
             // O ícone sai antes: encerrar com ele de pé deixa um ícone morto na bandeja do Windows.
             TrayEvent::Quit => { self.window_tray.icon = None; cx.quit(); }
             TrayEvent::Host(online) => {

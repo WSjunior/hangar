@@ -764,7 +764,8 @@ impl Hangar {
             let Some(event) = window.current_key_down_event().cloned() else { return; };
             if event.keystroke != stroke.keystroke { return; }
             let _ = weak.update(cx, |this, cx| {
-                if (event.keystroke.key == "escape" && this.keyboard_escape(window, cx))
+                let root_key = this.new_session.clone().is_some_and(|dialog| dialog.update(cx, |dialog, cx| dialog.root_key_down(&event, window, cx)));
+                if root_key || (event.keystroke.key == "escape" && this.keyboard_escape(window, cx))
                     || this.keyboard_key_down(&event, window, cx) || this.session_number_key(&event, window, cx) {
                     cx.stop_propagation();
                 }

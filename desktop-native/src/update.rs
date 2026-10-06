@@ -340,8 +340,19 @@ enum Run {
     Searching,
     Server { step: u64, total: u64, text: String },
     Restarting,
+    DesktopRestart,
     App,
     Failed(String),
+}
+
+impl Run {
+    fn busy(&self) -> bool { !matches!(self, Self::Idle | Self::Failed(_)) }
+
+    fn begin_server_search(&mut self) -> bool {
+        if self.busy() { return false; }
+        *self = Self::Searching;
+        true
+    }
 }
 
 pub struct Updater {
@@ -497,6 +508,19 @@ impl Updater {
 
     pub fn is_busy(&self) -> bool { self.busy() }
 
+    pub fn restart_desktop(&mut self, cx: &mut Context<Self>) -> Result<tokio::task::JoinHandle<bool>, String> {
+        if self.busy() { return Err(tr("app_restart_busy")); }
+        let exe = self.exe.clone().ok_or_else(|| tr("app_restart_failed"))?;
+        self.run = Run::DesktopRestart;
+        cx.notify();
+        Ok(self.runtime.spawn(async move { relaunch(&exe).await }))
+    }
+
+    pub fn finish_desktop_restart(&mut self, cx: &mut Context<Self>) {
+        // Falha manual não é falha de instalação: nunca oferece download no botão de tentar de novo.
+        if matches!(self.run, Run::DesktopRestart) { self.run = Run::Idle; cx.notify(); }
+    }
+
     pub fn channel_lines(&self) -> Vec<String> { app_channel(BUILT_CHANNEL, &self.channel()) }
 
     pub fn server_outdated(&self) -> bool { self.active_state.as_ref().is_some_and(|state| outdated(state, CURRENT)) }
@@ -523,7 +547,7 @@ impl Updater {
         }).detach();
     }
 
-    fn busy(&self) -> bool { !matches!(self.run, Run::Idle | Run::Failed(_)) }
+    fn busy(&self) -> bool { self.run.busy() }
 
     fn plan(&self) -> Plan {
         if self.is_channel_blocked() { return Plan { server: ServerStep::Held(Hold::ChannelDraft), app: self.offer.is_some() }; }
@@ -592,7 +616,10 @@ impl Updater {
     /// depois do push. Com o estado novo, o plano é refeito antes de pedir qualquer coisa.
     fn search_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(api) = self.local.clone() else { return };
-        self.run = Run::Searching;
+        if !self.run.begin_server_search() {
+            window.push_notification(Notification::error(tr("app_restart_busy")), cx);
+            return;
+        }
         cx.notify();
         let task = read_state(&self.runtime, &api, &[("procurar", "1")], 150);
         let handle = window.window_handle();
@@ -749,6 +776,7 @@ impl Render for Updater {
                 tr("update_step").replace("{step}", &step.to_string()).replace("{total}", &total.to_string()).replace("{text}", text), theme::accent()),
             Run::Server { .. } => ("topbar-update", tr("update_running"), tr("update_running"), theme::accent()),
             Run::Restarting => ("topbar-update", tr("app_update_server_restarting"), tr("update_restarting"), theme::accent()),
+            Run::DesktopRestart => ("topbar-update", tr("app_restarting"), tr("app_restarting"), theme::accent()),
             Run::App => ("topbar-update", tr("app_update_running"), tr("app_update_running"), theme::accent()),
             Run::Failed(reason) => ("topbar-update-retry", tr("app_update_retry"), reason.clone(), theme::danger()),
         };
@@ -768,6 +796,29 @@ mod tests {
     use super::*;
     // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
     use core::prelude::v1::test;
+
+    #[test]
+    fn restart_and_installation_share_the_same_busy_gate() {
+        assert!(!Run::Idle.busy());
+        assert!(!Run::Failed("installation failed".into()).busy());
+        for run in [Run::Searching, Run::Server { step: 0, total: 0, text: String::new() },
+            Run::Restarting, Run::DesktopRestart, Run::App] {
+            assert!(run.busy());
+        }
+    }
+
+    #[test]
+    fn pending_update_confirmation_cannot_overwrite_a_desktop_restart() {
+        let mut run = Run::DesktopRestart;
+        assert!(!run.begin_server_search());
+        assert!(matches!(run, Run::DesktopRestart));
+        let mut run = Run::Idle;
+        assert!(run.begin_server_search());
+        assert!(matches!(run, Run::Searching));
+        assert!(!run.begin_server_search());
+        let mut run = Run::Failed("failed".into());
+        assert!(run.begin_server_search());
+    }
 
     #[test]
     fn about_shows_test_channel_only_off_main() {

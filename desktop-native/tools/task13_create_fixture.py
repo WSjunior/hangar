@@ -30,11 +30,12 @@ import os
 import pathlib
 import time
 from urllib.parse import parse_qs, urlparse
+from typing import Any
 
 HERE = pathlib.Path(__file__).resolve().parent
 WEB = pathlib.Path(os.environ.get("T13_WEB", pathlib.Path.home() / "hangar/frontend/dist")).resolve()
 SOURCE = (HERE / "parity_session_fixture.py").read_text(encoding="utf-8")
-BASE = {"__name__": "parity_session_base", "__file__": str(HERE / "parity_session_fixture.py")}
+BASE: dict[str, Any] = {"__name__": "parity_session_base", "__file__": str(HERE / "parity_session_fixture.py")}
 exec(compile(SOURCE[:SOURCE.index("\nserver = ThreadingHTTPServer(")], "parity_session_fixture.py", "exec"), BASE)
 
 LOCK, SESSIONS, record, fail, bump, info, state, TOKEN = (BASE[k] for k in ("LOCK", "SESSIONS", "record", "fail", "bump", "info", "state", "TOKEN"))
@@ -44,7 +45,9 @@ T13 = {"roots": "ok", "scan": "ok", "providers": "ok", "configs": "ok", "codex":
        "models": "ok", "engines": "ok", "quotas": "ok", "config": "ok", "configpost": "ok", "context": "ok", "contextpost": "ok",
        "account": "ok", "delete": "ok", "archive": "ok", "preview": "ok", "resume": "ok",
        "context_delay": 0.0, "account_delay": 0.0, "preview_delay": 0.0, "models_delay": 0.0,
-       "providers_delay": 0.0, "configs_delay": 0.0, "codex_delay": 0.0, "progress_delay": 0.0}
+       "providers_delay": 0.0, "configs_delay": 0.0, "codex_delay": 0.0, "progress_delay": 0.0,
+       "scan_projects": "ok", "scan_studies": "ok", "scan_hangar": "ok",
+       "scan_projects_delay": 0.0, "scan_studies_delay": 0.0, "scan_hangar_delay": 0.0}
 FIRST_CONFIGS = [{"path": "/sintetica/.claude", "label": "default", "active": True},
                  {"path": "/sintetica/.claude-sintetica-trabalho", "label": "sintetica-trabalho", "active": False},
                  {"path": "/sintetica/.claude-sintetica-velha", "label": "sintetica-velha", "active": False}]
@@ -54,13 +57,14 @@ T13B = {"configs": [dict(c) for c in FIRST_CONFIGS], "jev_padrao": False, "conte
 CREATING = {}
 
 ROOT_A, ROOT_B = "/sintetica/projetos", "/sintetica/estudos"
+ROOT_C = ROOT_A + "/hangar-sintetico"
 NOW = time.time()
 TREE = {
     ROOT_A: [("hangar-sintetico", True, True, 600), ("api-sintetica", True, False, 7200), ("Área de trabalho", False, False, 3 * 86400),
              ("notas", False, False, 40 * 86400)],
     ROOT_A + "/hangar-sintetico": [("backend", False, True, 1200), ("frontend", False, False, 5000), ("desktop-native", False, False, 90)],
     ROOT_A + "/hangar-sintetico/backend": [],
-    ROOT_B: [("rust-sintetico", True, False, 86400 * 2)],
+    ROOT_B: [("rust-sintetico", True, False, 86400 * 2), ("api-sintetica", True, False, 40)],
 }
 
 
@@ -126,6 +130,11 @@ class Handler(BASE["Handler"]):
                 for key, values in query.items():
                     if key in T13:
                         T13[key] = float(values[0]) if key.endswith("delay") else values[0]
+                if "append" in query:
+                    text = query["append"][0]
+                    session = SESSIONS["p5-long"]
+                    session["events"].append(BASE["msg"]("assistant_msg", f"live-usability-{len(session['events'])}", text))
+                    bump()
                 current = dict(T13)
             self.send_json(current)
             return
@@ -163,17 +172,25 @@ class Handler(BASE["Handler"]):
         if mode == "empty":
             self.send_json([])
         elif mode:
-            self.send_json([{"name": "projetos", "path": ROOT_A}, {"name": "estudos", "path": ROOT_B}])
+            self.send_json([{"name": "projetos", "path": ROOT_A}, {"name": "estudos", "path": ROOT_B},
+                            {"name": "hangar", "path": ROOT_C}])
 
     def scan(self, query):
         mode = self.mine("scan")
         if not mode:
             return
         root, path = query.get("root", [""])[0], query.get("path", [""])[0] or query.get("root", [""])[0]
+        scope = {ROOT_A: "scan_projects", ROOT_B: "scan_studies", ROOT_C: "scan_hangar"}.get(root)
+        if scope:
+            scoped = self.mine(scope)
+            if not scoped:
+                return
+            if mode == "ok":
+                mode = scoped
         codes = {"400": "path escapes its root", "403": "root not allowed", "404": "path not found"}
         if mode in codes:
             self.send_json({"detail": codes[mode]}, int(mode))
-        elif root not in (ROOT_A, ROOT_B) or not path.startswith(root):
+        elif root not in (ROOT_A, ROOT_B, ROOT_C) or not path.startswith(root):
             self.send_json({"detail": "root not allowed"}, 403)
         elif mode == "unreadable":
             self.send_json({"entries": [], "error": "permission_denied"})
@@ -210,12 +227,23 @@ class Handler(BASE["Handler"]):
             catalog = []
         elif mode == "reduced":
             catalog = [{"id": "opus"}, {"id": "sonnet"}, {"id": "haiku"}]
+        engine = query.get("engine", [""])[0]
+        if engine.startswith("chatgpt-"):
+            account = query.get("engine_account", [""])[0]
+            catalog = [{"id": f"gpt-{account}", "name": f"GPT sintético · {account}"}]
         self.send_json({"kind": provider, "reduced": mode == "reduced", "models": catalog})
 
     def engines(self, _):
         mode = self.mine("engines")
         if mode:
-            motores = {} if mode == "empty" else {"motor-sintetico": {"label": "Motor sintético", "model": "modelo-sintetico-1"}}
+            contas = [{"account": "", "credential_id": "codex:invalida", "label": "Inválida", "email": ""},
+                      {"account": "sem-credencial", "credential_id": "", "label": "Sem credencial", "email": ""},
+                      {"account": "chatgpt-1", "credential_id": "codex:sintetica-1", "label": "ChatGPT sintética 1", "email": "um@exemplo.test"},
+                      {"account": "chatgpt-2", "credential_id": "codex:sintetica-2", "label": "ChatGPT sintética 2", "email": "dois@exemplo.test"}]
+            motores = {} if mode == "empty" else {
+                "motor-sintetico": {"label": "Motor sintético", "model": "modelo-sintetico-1"},
+                "chatgpt-sintetico": {"label": "ChatGPT sintético", "model": "gpt-sintetico-sol", "cliproxy_accounts": contas},
+                "chatgpt-irmão": {"label": "ChatGPT irmão", "model": "gpt-sintetico-sol", "cliproxy_accounts": contas[3:]}}
             self.send_json({"motores": motores})
 
     def quotas(self, _):
@@ -426,7 +454,7 @@ class Handler(BASE["Handler"]):
                 CREATING.pop(name, None)
 
 
-server = BASE["ThreadingHTTPServer"](("127.0.0.1", 0), Handler)
+server = BASE["ThreadingHTTPServer"](("127.0.0.1", int(os.environ.get("T13_PORT", "0"))), Handler)
 print(f"Fixture URL: http://127.0.0.1:{server.server_port}", flush=True)
 try:
     server.serve_forever()

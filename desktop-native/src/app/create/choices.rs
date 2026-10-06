@@ -75,9 +75,18 @@ pub(super) struct Motor {
     cliproxy_error: Option<String>,
 }
 
+fn eligible_engine_account(account: &crate::api::dto::CliProxyAccount) -> bool {
+    !account.account.is_empty() && account.credential_id.strip_prefix("codex:").is_some_and(|id| !id.is_empty())
+}
+
+fn choose_engine_account<'a>(accounts: &'a [crate::api::dto::CliProxyAccount], selected: &str) -> Option<&'a str> {
+    accounts.iter().find(|a| a.account == selected && eligible_engine_account(a))
+        .or_else(|| accounts.iter().find(|a| eligible_engine_account(a))).map(|a| a.account.as_str())
+}
+
 fn engine_account_ready(motor: &Motor, account: &str) -> bool {
     motor.cliproxy_error.is_none() && motor.cliproxy_accounts.as_ref().is_none_or(|list|
-        list.iter().any(|a| !account.is_empty() && a.account == account && a.credential_id.starts_with("codex:")))
+        list.iter().any(|a| a.account == account && eligible_engine_account(a)))
 }
 
 /// O Jev só existe com a chave guardada no servidor; o padrão é o `jev_padrao` lido de lá.
@@ -249,8 +258,9 @@ impl NewSession {
             self.engine_account_pick = None;
             return;
         };
-        if !accounts.iter().any(|a| a.account == self.engine_account) { self.engine_account.clear(); }
-        let choices: Vec<ModelChoice> = self.proxy_accounts().unwrap_or_default().iter().map(|a| ModelChoice {
+        let selected = choose_engine_account(accounts, &self.engine_account).unwrap_or_default().to_owned();
+        self.engine_account = selected;
+        let choices: Vec<ModelChoice> = self.proxy_accounts().unwrap_or_default().iter().filter(|a| eligible_engine_account(a)).map(|a| ModelChoice {
             id: a.account.clone(), label: if a.label.is_empty() { a.email.clone() } else { a.label.clone() },
             hint: [Some(a.email.clone()), self.quota_of(&a.credential_id).map(QuotaLine::summary)]
                 .into_iter().flatten().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · "),
@@ -574,7 +584,6 @@ impl NewSession {
         self.engine_pick = Some(picker(choices, at, |this, name, window, cx| {
             if this.creating || this.engine == name { return; }
             this.engine = name;
-            this.engine_account.clear();
             this.asking = false;
             this.confirming = false;
             this.build_engine_account_pick(window, cx);
@@ -995,6 +1004,24 @@ mod tests {
             {"id":"standard"}
         ])).unwrap();
         assert_eq!(models.iter().map(ModelOption::supports_fast).collect::<Vec<_>>(), [true,false,false,false]);
+    }
+
+    #[test]
+    fn proxy_account_fallback_skips_invalid_entries_and_preserves_valid_selection() {
+        let accounts = serde_json::from_value::<Vec<crate::api::dto::CliProxyAccount>>(serde_json::json!([
+            {"account":"", "credential_id":"codex:x", "email":"", "label":"empty"},
+            {"account":"broken", "credential_id":"", "email":"", "label":"broken"},
+            {"account":"empty-id", "credential_id":"codex:", "email":"", "label":"empty-id"},
+            {"account":"wrong", "credential_id":"claude:x", "email":"", "label":"wrong"},
+            {"account":"first", "credential_id":"codex:first", "email":"", "label":"first"},
+            {"account":"second", "credential_id":"codex:second", "email":"", "label":"second"}
+        ])).unwrap();
+        assert_eq!(super::choose_engine_account(&accounts, ""), Some("first"));
+        assert_eq!(super::choose_engine_account(&accounts, "broken"), Some("first"));
+        assert_eq!(super::choose_engine_account(&accounts, "removed"), Some("first"));
+        assert_eq!(super::choose_engine_account(&accounts, "second"), Some("second"));
+        assert_eq!(super::choose_engine_account(&accounts[..4], "first"), None);
+        assert_eq!(super::choose_engine_account(&[], "first"), None);
     }
 
     #[test]

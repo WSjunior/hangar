@@ -18,6 +18,8 @@ use collections::VecDeque;
 use refineable::Refineable as _;
 use std::{cell::RefCell, ops::Range, rc::Rc};
 use sum_tree::{Bias, Dimensions, SumTree};
+#[path = "list_tail.rs"]
+mod tail;
 
 type RenderItemFn = dyn FnMut(usize, &mut Window, &mut App) -> AnyElement + 'static;
 
@@ -1078,7 +1080,7 @@ impl StateInner {
         // Com o fim à vista no último layout (colado nele ou pousado logo acima pela mola de quem acompanha), o trecho da
         // régua até o fim que cresceu ou encolheu vai para a folga, e quem estava à vista fica onde estava.
         if let Some((ix, before)) = self.tail_ref.filter(|(ix, _)| self.tail_visible && *ix < self.items.summary().count) {
-            let slack = (self.tail_slack + before - tail_from(&self.items, ix)).clamp(px(0.), max);
+            let slack = px(tail::held_slack(self.tail_slack.0, before.0, tail_from(&self.items, ix).0, max.0));
             if (slack - self.tail_slack).abs() >= px(0.5) {
                 self.tail_slack = slack;
                 response = self.layout_items_once(available_width, available_height, &held(slack), render_item, window, cx);
@@ -1607,6 +1609,13 @@ impl Element for List {
         style.refine(&self.style);
 
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+
+        // Reflow não é redução de conteúdo: a régua e a folga só valem na geometria em que foram medidas.
+        if tail::geometry_changed(state.last_layout_bounds.map(|last| last.size), bounds.size) {
+            state.tail_slack = px(0.);
+            state.tail_ref = None;
+            state.tail_visible = false;
+        }
 
         // If the width of the list has changed, invalidate all cached item heights
         if state

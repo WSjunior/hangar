@@ -29,6 +29,9 @@ mod theme;
 mod tray;
 mod ui_map;
 mod update;
+#[cfg(test)]
+#[path = "../vendor/gpui-pre-0.3.7/src/elements/list_tail.rs"]
+mod list_tail_tests;
 use gpui_kit::{component::{Root, Theme, ThemeMode}, *};
 use std::{borrow::Cow, sync::Arc};
 
