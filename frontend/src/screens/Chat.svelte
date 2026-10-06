@@ -12,7 +12,7 @@
   import { openInNewTab } from '../lib/openTab';
   import { desktop as janela } from '../lib/desktop.svelte';
   import { itemModsCelular, modsCelular, modsNaTela } from '../lib/modsCelular.svelte';
-  import { activePaneId, fieldSender, followLocalTab, inputPluginField, isMissingRoute, parsePluginToast, pluginFailureText, parsePluginUi, pressPluginButton, safeHref, showPluginPane, tabFollowsServer, type PluginInputKind, type PluginSource, type PluginNode as PluginTree, type PluginPane as PluginPaneData, type PluginToast } from '@hangar/core';
+  import { activePaneId, fieldSender, followLocalTab, inputPluginField, isEmptyBand, isMissingRoute, parsePluginToast, pluginFailureText, parsePluginUi, pressPluginButton, safeHref, showPluginPane, tabFollowsServer, type PluginInputKind, type PluginSource, type PluginNode as PluginTree, type PluginPane as PluginPaneData, type PluginToast } from '@hangar/core';
   import SessionSwitcherSheet from '../components/SessionSwitcherSheet.svelte';
   import CreateSessionSheet from '../components/CreateSessionSheet.svelte';
   import UsageSheet from '../components/UsageSheet.svelte';
@@ -480,6 +480,9 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // Celular: a interface dos mods fica oculta até a pessoa ligar no "⋯" (preferência do aparelho). Os avisos
   // (toasts) seguem, e com ela oculta o app não chama nenhuma rota de mod.
   const modsVisiveis = $derived(modsNaTela(janela.atual, modsCelular.ligado));
+  // Só no celular: o "Ocultar" na faixa (ou no painel, quando não há faixa) desliga a mesma preferência do menu "⋯".
+  const ocultarMods = $derived(janela.atual ? undefined : () => { modsCelular.ligado = false; });
+  const faixaVazia = $derived(isEmptyBand(pluginBand));
   const modsItem = $derived(itemModsCelular(janela.atual, pluginBand, pluginPanes.length));
   // Avisos (`$.ui.toast`) dos mods (SSE 'plugin_toast'). A reconexão repõe os que ainda não
   // venceram: o id diz quais já passaram por aqui.
@@ -3503,10 +3506,12 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       {#if modsVisiveis}
         {#if pluginActivePane}
           <PluginPane pane={pluginActivePane} tabs={pluginPanes} onPress={pressPlugin} onShow={showPlugin}
-                      onInput={pluginSource === 'surface' ? inputPlugin : undefined} />
+                      onInput={pluginSource === 'surface' ? inputPlugin : undefined}
+                      onHide={faixaVazia ? ocultarMods : undefined} />
         {/if}
         <PluginBand tree={pluginBand} columns={pluginColumns} onPress={pressPlugin}
-                    onInput={pluginSource === 'surface' ? inputPlugin : undefined} notice={pluginNotice} />
+                    onInput={pluginSource === 'surface' ? inputPlugin : undefined} notice={pluginNotice}
+                    onHide={ocultarMods} />
       {/if}
       <!-- Composer SEMPRE visivel (exceto sessao morta). Antes ele sumia em awaiting_input e,
            se as opcoes nao fossem parseadas, o usuario ficava sem input E sem botoes = preso.

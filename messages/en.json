@@ -1132,6 +1132,7 @@
   "mods_celular_mostrar_um": "Show mods interface (1 pane)",
   "mods_celular_mostrar_paineis": "Show mods interface ({n} panes)",
   "mods_celular_ocultar": "Hide mods interface",
+  "mods_celular_ocultar_curto": "Hide",
   "mods_celular_sub": "Only on this device; mod notices keep showing.",
   "plugin_toque_para_copiar": "Tap to copy",
   "servidores_aviso_persistencia": "Couldn't save the server list on this device. It works now, but it may be gone next time you open the app.",
