@@ -190,3 +190,16 @@ def test_facts_codex_without_snapshot_keeps_sidecar_tier(monkeypatch):
     monkeypatch.setattr(sse._list_registry, "list_with_state", keep)
     out = _compute([_row("cx", "codex", codex_service_tier="priority")])
     assert out["states"]["cx"]["codex_service_tier"] == "priority"
+
+
+def test_orq_failure_goes_as_a_fact_not_an_empty_list(monkeypatch):
+    """Leitura das orquestrações que falha vira código nos fatos: o Rust fica com as da última
+    resposta boa, marcadas, em vez de servir a lista sem elas calado."""
+    def broken():
+        raise OSError("disco")
+
+    monkeypatch.setattr(registry.orq_runs, "active", broken)
+    out = list_facts._files([], [], {})
+    assert (out["orq"], out["orq_error"]) == ([], "orq_unreadable")
+    monkeypatch.setattr(registry.orq_runs, "active", lambda: [])
+    assert list_facts._files([], [], {})["orq_error"] is None

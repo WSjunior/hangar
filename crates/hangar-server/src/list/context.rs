@@ -22,6 +22,7 @@ pub const TTL_SECS: f64 = 20.0;
 
 // `claude-haiku-4-5-20251001`: a data do snapshot não é parte do nome que a tela mostra.
 static DATED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"-\d{8}$").unwrap());
+static USAGE: LazyLock<memchr::memmem::Finder<'static>> = LazyLock::new(|| memchr::memmem::Finder::new(b"\"usage\""));
 static FAMILY: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^(?:claude-)?(opus|sonnet|haiku|fable)\b").unwrap());
 
@@ -82,9 +83,20 @@ pub fn declared_window_value(v: &Value) -> Option<u64> {
 
 /// Contexto da última resposta do agente principal e o id do modelo que a deu.
 pub fn read(jsonl: &Path, account_dir: &Path, model: Option<&str>, window_tokens: Option<u64>) -> Reading {
-    let Some(tail) = read_tail(jsonl) else { return (None, None) };
+    let tail = match read_tail(jsonl) {
+        Ok(tail) => tail,
+        // Sessão que acabou de fechar; o cache guarda o último valor do mesmo transcript.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (None, None),
+        Err(e) => {
+            // Calado, o contexto ficaria velho ou cairia na janela de 200k sem rastro.
+            let sid = jsonl.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            super::facts::note("rust.list_context_unreadable", &sid, format!("list_context_unreadable:{:?}", e.kind()),
+                "rabo do transcript ilegível; o contexto fica no último valor");
+            return (None, None);
+        }
+    };
     for line in tail.split(|b| *b == b'\n').rev() {
-        if !contains(line, b"\"usage\"") {
+        if USAGE.find(line).is_none() {
             continue;
         }
         let Ok(Value::Object(obj)) = serde_json::from_slice::<Value>(line) else { continue };
@@ -196,13 +208,14 @@ impl ContextCache {
     }
 }
 
-fn read_tail(path: &Path) -> Option<Vec<u8>> {
-    let mut fh = std::fs::File::open(path).ok()?;
-    let end = fh.seek(SeekFrom::End(0)).ok()?;
-    fh.seek(SeekFrom::Start(end.saturating_sub(TAIL))).ok()?;
-    let mut buf = Vec::new();
-    fh.read_to_end(&mut buf).ok()?;
-    Some(buf)
+fn read_tail(path: &Path) -> std::io::Result<Vec<u8>> {
+    let mut fh = std::fs::File::open(path)?;
+    let end = fh.seek(SeekFrom::End(0))?;
+    let start = end.saturating_sub(TAIL);
+    fh.seek(SeekFrom::Start(start))?;
+    let mut buf = Vec::with_capacity(usize::try_from(end - start).unwrap_or(0));
+    fh.read_to_end(&mut buf)?;
+    Ok(buf)
 }
 
 fn account_model(account_dir: &Path) -> Option<String> {
@@ -212,14 +225,23 @@ fn account_model(account_dir: &Path) -> Option<String> {
         Ok(Value::Object(obj)) => obj.get("model").and_then(Value::as_str).filter(|m| !m.is_empty()).map(str::to_owned),
         // settings.json quebrado deixaria a pílula do modelo em branco sem rastro.
         Ok(_) => {
-            tracing::warn!(dir = %account_dir.display(), "settings.json não é objeto");
+            settings_rejected(account_dir, "object".into());
             None
         }
         Err(e) => {
-            tracing::warn!(dir = %account_dir.display(), error = %e, "settings.json ilegível");
+            settings_rejected(account_dir, format!("{:?}", e.classify()));
             None
         }
     }
+}
+
+/// Lido a cada rodada por sessão: aviso com o teto do `warn_limit`, no log e no diário.
+fn settings_rejected(account_dir: &Path, field: String) {
+    let account = account_dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if crate::warn_limit::allow(Some(&account), "list_settings_invalid") {
+        tracing::warn!(dir = %account_dir.display(), field, "settings.json da conta ilegível");
+    }
+    super::facts::note("rust.list_file_rejected", &account, format!("list_settings_invalid:{field}"), "settings.json da conta ilegível");
 }
 
 fn family(model: &str) -> Option<String> {
@@ -232,10 +254,6 @@ fn family_of_is(model: &str, fam: &str) -> bool {
 
 fn non_empty(s: Option<&str>) -> Option<&str> {
     s.filter(|s| !s.is_empty())
-}
-
-fn contains(hay: &[u8], needle: &[u8]) -> bool {
-    hay.windows(needle.len()).any(|w| w == needle)
 }
 
 /// `int(x or 0)` do Python sobre um valor do `usage`. Divergência deliberada: texto que não é
@@ -260,5 +278,30 @@ fn truthy(v: &Value) -> bool {
         Value::String(s) => !s.is_empty(),
         Value::Array(a) => !a.is_empty(),
         Value::Object(o) => !o.is_empty(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn last_main_answer_wins_and_unreadable_tail_reaches_the_diary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let jsonl = tmp.path().join("ctx-ok.jsonl");
+        std::fs::write(&jsonl, concat!(
+            r#"{"type": "assistant", "message": {"model": "claude-haiku-4-5", "usage": {"input_tokens": 10}}}"#, "\n",
+            r#"{"type": "assistant", "isSidechain": true, "message": {"usage": {"input_tokens": 99}}}"#, "\n")).unwrap();
+        let (ctx, model) = read(&jsonl, tmp.path(), None, None);
+        assert_eq!((ctx.map(|c| (c.used, c.window)), model.as_deref()), (Some((10, WINDOW_DEFAULT)), Some("claude-haiku-4-5")));
+        // Pasta no lugar do transcript: a leitura falha (o Windows nem abre).
+        #[cfg(unix)]
+        {
+            let dir = tmp.path().join("ctx-pasta.jsonl");
+            std::fs::create_dir(&dir).unwrap();
+            assert_eq!(read(&dir, tmp.path(), None, None), (None, None));
+            let notes = super::super::facts::notes_for("ctx-pasta");
+            assert!(matches!(&notes[..], [n] if n.starts_with("list_context_unreadable:")), "{notes:?}");
+        }
     }
 }

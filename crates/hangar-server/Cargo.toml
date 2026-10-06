@@ -11,6 +11,8 @@ indexmap.workspace = true
 hangar-api.workspace = true
 hangar-workspace = { path = "../hangar-workspace" }
 regex.workspace = true
+# Busca de trecho no rabo do transcript; já vem pelo regex.
+memchr = "=2.8.3"
 md-5.workspace = true
 sha1_smol.workspace = true
 # sha256 do workdir_key do Kimi; já vem pelo rustls, sem crate novo.
