@@ -27,6 +27,18 @@ pub fn first_render(name: &str, instance: &str) -> Value {
         .map(|(_, msg)| msg["response"]["response"]["tree"].clone()).unwrap()
 }
 
+/// A árvore da `n`-ésima resposta (contando de 0) ao desenho de `instance`.
+pub fn nth_render(name: &str, instance: &str, n: usize) -> Value {
+    let lines = fixture(name);
+    let ids: Vec<Value> = lines.iter().filter(|(dir, msg)| dir == "out" && msg["request"]["subtype"] == "ui_render"
+        && msg["request"]["instance_id"] == instance).map(|(_, msg)| msg["request_id"].clone()).collect();
+    let answers: Vec<Value> = ids.iter().filter_map(|id| lines.iter().find(|(dir, msg)| dir == "in"
+        && msg["type"] == "control_response" && msg["response"]["request_id"] == *id)
+        .map(|(_, msg)| msg["response"]["response"]["tree"].clone())).collect();
+    answers.get(n).cloned()
+        .unwrap_or_else(|| panic!("{name}: só há {} respostas ao desenho de {instance}, faltou a {n}", answers.len()))
+}
+
 /// Todo o texto dos filhos de uma árvore, na ordem do documento.
 pub fn texts(node: &Value) -> String {
     match node {
