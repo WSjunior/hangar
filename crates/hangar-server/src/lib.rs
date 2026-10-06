@@ -6,6 +6,7 @@ pub mod costs_routes;
 pub mod costs_failure;
 pub mod diag;
 pub mod list;
+pub mod mods;
 pub mod proxy;
 pub mod routes;
 pub mod runtime;
