@@ -411,16 +411,20 @@ async fn private_route_requires_secret() {
     tmux.session("p1");
     let srv = server(&tmux, |_| {}).await;
     let private = private_addr(srv.addr).await;
-    let path = "/__hangar_server/term?target=p1&cols=90&rows=30";
+    let path = "/__hangar_server/term?target=p1&cols=9999&rows=30";
     assert_eq!(connect(private, path).await.err(), Some(404), "sem segredo");
     assert_eq!(connect_with(private, path, &[("x-hangar-internal", "outro")]).await.err(), Some(404));
     assert_eq!(connect_with(private, path, &[("x-hangar-internal", "s"), ("x-forwarded-for", "203.0.113.9")]).await.err(), Some(404),
                "repasse de fora não é o Python");
     assert_eq!(connect_with(srv.addr, path, &[("x-hangar-internal", "s")]).await.err(), Some(404), "nunca na porta pública");
     assert_eq!(connect_with(private, "/__hangar_server/term?cols=90", &[("x-hangar-internal", "s")]).await.err(), Some(400));
+    assert_eq!(connect_with(private, "/__hangar_server/term?target=p1&cols=abc", &[("x-hangar-internal", "s")]).await.err(), Some(400));
+    assert_eq!(connect_with(private, "/__hangar_server/term?target=morta", &[("x-hangar-internal", "s")]).await.err(), Some(403),
+               "sessão que morreu depois da porta do Python não vira painel");
+    assert!(srv.terms.active().is_empty());
     assert!(tmux.clients("p1").is_empty());
     let mut ws = connect_with(private, path, &[("x-hangar-internal", "s")]).await.expect("o Python liga com o segredo");
-    until("anexado em 90x30", || tmux.clients("p1").iter().any(|c| c.ends_with(" 90x30"))).await;
+    until("anexado em 500x30, com o clamp", || tmux.clients("p1").iter().any(|c| c.ends_with(" 500x30"))).await;
     ws.send(Ws::Binary("priv-4410\r".into())).await.unwrap();
     read_until(&mut ws, b"priv-4410").await;
     assert_eq!(srv.py.term_hits.load(Ordering::SeqCst), 0);

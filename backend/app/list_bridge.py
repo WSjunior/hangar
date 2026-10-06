@@ -154,6 +154,7 @@ def endpoint() -> tuple[str, str] | None:
 def term_active(name: str) -> bool:
     result = _request("term.active", {"name": name}, timeout=5)
     if not isinstance(result, dict) or type(result.get("active")) is not bool:
+        _failed("term.active", "list_bridge_invalid")
         raise ListBridgeError("list_bridge_invalid", "term.active")
     return result["active"]
 

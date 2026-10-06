@@ -5780,6 +5780,7 @@ def _recusa_se_so_enfileirou(name: str, res: dict) -> None:
 
 
 def _recusa_se_painel_aberto(name: str) -> None:
+    # Com o Rust dono, pergunta pela ponte (HTTP): rota `async` chama por `asyncio.to_thread`.
     # Com o painel anexado, a janela do tmux esta no tamanho DELE (~120x20). Quem conta linha no
     # pane — o seletor de opcao, o stepper do AskUserQuestion (terminal_input.answer_questions /
     # answer_question_pi) e o model_picker (lista e troca de modelo, que dirige o /model contando
@@ -5939,7 +5940,7 @@ async def pergunta_lateral(name: str, body: BtwBody):
     sem_terminal = await _send_thread(_headless, name)
     if not sem_terminal:
         await _send_thread(_exige_claude_de_terminal, name)
-        _recusa_se_painel_aberto(name)
+        await asyncio.to_thread(_recusa_se_painel_aberto, name)
     try:
         perguntar = btw.perguntar_sem_terminal if sem_terminal else btw.perguntar
         item = await asyncio.to_thread(perguntar, name, body.question)
@@ -6110,7 +6111,7 @@ async def _guard_permissao_codex(name: str) -> None:
     if _provider_of(name) != "codex":
         raise HTTPException(400, detail=erro("erro_permissao_so_codex",
                                              "este modo de permissao so vale para sessoes Codex"))
-    _recusa_se_painel_aberto(name)
+    await asyncio.to_thread(_recusa_se_painel_aberto, name)
     if not await get_adapter("codex").deliverable(name):
         raise HTTPException(409, detail=erro("erro_permissao_ocupada",
                                              "a sessao esta trabalhando — espere ela terminar"))
@@ -9154,7 +9155,7 @@ async def model_effort(name: str, body: ModelEffortBody):
         except Exception as e:
             raise HTTPException(409, detail=erro("erro_modelo_indisponivel", f"não consegui trocar: {e}"))
         return {"ok": True, "scope": "session", "result": None}
-    _recusa_se_painel_aberto(name)
+    await asyncio.to_thread(_recusa_se_painel_aberto, name)
     try:
         return await asyncio.to_thread(terminal.set_model_effort, name, body.model, body.effort, body.scope)
     except PickerError as e:
@@ -9233,7 +9234,7 @@ async def permission_modes(name: str, sondar: bool = False):
         anterior = (vivo.modo_nao_plan if vivo and vivo.vivo else None) or meta.get("previous_non_plan")
         return {"current": atual, "modes": list(model_args.MODOS_PERMISSAO_CLAUDE), "sondavel": False,
                 "previous_non_plan": anterior}
-    _guard_perm(name, info)
+    await asyncio.to_thread(_guard_perm, name, info)
     key = _cache_key_perm(name, info)
     # leitura do atual sem tecla (bloqueador 1)
     try:
@@ -9324,7 +9325,7 @@ async def permission_mode_set(name: str, body: PermissionModeBody):
         view = runtime_data(name)
         return {"mode": ficou, "current": ficou,
                 "previous_non_plan":view.get("previous_non_plan") if view is not None else vivo.modo_nao_plan if vivo else None}
-    _guard_perm(name, info)
+    await asyncio.to_thread(_guard_perm, name, info)
     if alvo == "bypassPermissions" and not await asyncio.to_thread(_bypass_no_ciclo, name):
         return await _bypass_reopen(name, info)
     tracking_key = _tracking_key_perm(name, info)
@@ -9601,7 +9602,7 @@ async def model_options(name: str):
                 "models": claude_models.para_tela(modelos, atual)}
     # Conta Anthropic: le o picker de verdade. Abre e fecha um overlay — nao vai pro scrollback,
     # nao entra no transcript e nao gasta token.
-    _recusa_se_painel_aberto(name)
+    await asyncio.to_thread(_recusa_se_painel_aberto, name)
     chave = _chave_config(_session_config_dir(name))
     cacheado = _models_cache_get(chave)
     if cacheado is not None:
@@ -9720,7 +9721,7 @@ async def engine_model_set(name: str, body: EngineModelBody):
     settings.json e capturado antes e reposto depois: a troca vale onde foi pedida e em lugar nenhum
     mais. Ver app/default_model.py.
     """
-    _recusa_se_painel_aberto(name)
+    await asyncio.to_thread(_recusa_se_painel_aberto, name)
     info = await _cached_info(name)
     if not info:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessao nao encontrada"))
@@ -9988,7 +9989,7 @@ async def kimi_models_list(name: str):
 @app.post("/api/sessions/{name}/kimi/model", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 async def kimi_model_set(name: str, body: KimiModelBody):
     info = await _kimi_info(name)
-    _recusa_se_painel_aberto(name)
+    await asyncio.to_thread(_recusa_se_painel_aberto, name)
     # Sessão TRABALHANDO: o `/model` digitado cairia no composer e o Enter o enfileiraria como
     # MENSAGEM — a troca viraria um "/model" pro modelo ler. No Claude o _require_drivable cobre
     # isso pelo spinner; o do Kimi são fases de lua, fora do que ele detecta, então a guarda é o

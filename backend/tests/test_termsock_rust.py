@@ -32,10 +32,11 @@ def _lookup(t):
 class FakeRust:
     """A rota privada `/__hangar_server/term` do Rust: manda um quadro, ecoa os bytes e anota tudo."""
 
-    def __init__(self, close_with=None):
+    def __init__(self, close_with=None, reject=None):
         self.requests, self.received = [], []
         self.closed = threading.Event()
         self.close_with = close_with
+        self.reject = reject
         self.loop = asyncio.new_event_loop()
         started = threading.Event()
 
@@ -44,7 +45,7 @@ class FakeRust:
             self.stop_fut = self.loop.create_future()
 
             async def main():
-                async with serve(self.handler, "127.0.0.1", 0) as server:
+                async with serve(self.handler, "127.0.0.1", 0, process_request=self.gate) as server:
                     self.port = next(iter(server.sockets)).getsockname()[1]
                     started.set()
                     await self.stop_fut
@@ -53,6 +54,12 @@ class FakeRust:
         self.thread = threading.Thread(target=run, daemon=True)
         self.thread.start()
         assert started.wait(5)
+
+    def gate(self, conn, request):
+        if self.reject:
+            self.requests.append((request.path, dict(request.headers)))
+            return conn.respond(self.reject, "")
+        return None
 
     async def handler(self, conn):
         self.requests.append((conn.request.path, dict(conn.request.headers)))
@@ -73,6 +80,7 @@ class FakeRust:
     def stop(self):
         self.loop.call_soon_threadsafe(self.stop_fut.set_result, None)
         self.thread.join(5)
+        assert not self.thread.is_alive(), "Rust falso não parou: conexão do repasse ficou aberta"
 
 
 def _until(cond, timeout=3.0):
@@ -252,3 +260,20 @@ def test_409_asks_rust_and_503_on_bridge_error(monkeypatch):
         with pytest.raises(HTTPException) as e:
             api._recusa_se_painel_aberto("s1")
         assert e.value.status_code == 409 and asked == []
+
+
+@pytest.mark.parametrize("status, code", [(403, 1008), (404, 1013), (500, 1013)])
+def test_rust_refusal_maps_to_a_close_code_with_status_in_the_diary(rust, monkeypatch, status, code):
+    events = []
+    monkeypatch.setattr(diag, "registrar", lambda evento, nivel="info", **campos: events.append((evento, campos)))
+    refusing = FakeRust(reject=status)
+    list_bridge.configure(f"127.0.0.1:{refusing.port}", "sek")
+    try:
+        with pytest.raises(WebSocketDisconnect) as e:
+            with _guest().websocket_connect(f"{GUEST_WS}/api/sessions/cc/term?token=g") as ws:
+                ws.receive_bytes()
+        assert e.value.code == code
+        if status != 403:
+            assert ("terminal.ponte", {"codigo": "terminal_bridge_refused", "sessao": "cc", "status": status}) in events
+    finally:
+        refusing.stop()

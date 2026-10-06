@@ -159,23 +159,34 @@ pub async fn private_ws(State(st): State<Arc<AppState>>, ConnectInfo(peer): Conn
     let Some(target) = auth::query_param(query, "target").filter(|t| !t.is_empty()) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    let number = |key, default: i64| match auth::query_param(query, key) {
-        None => Some(default),
-        Some(v) => v.trim().parse::<i64>().ok(),
-    };
-    let (Some(cols), Some(rows)) = (number("cols", 80), number("rows", 24)) else {
+    let Some((cols, rows)) = size_of(query) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
     let (mut parts, _) = req.into_parts();
     let Ok(ws) = WebSocketUpgrade::from_request_parts(&mut parts, &()).await else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    let (cols, rows) = pty::clamp(cols, rows);
+    // Conferido de novo aqui: a sessão pode ter morrido entre a porta do Python e esta conexão,
+    // e um painel nela registraria um painel fantasma no `term.active`.
+    match resolve::has_session(&st.term.cfg, &target).await {
+        Ok(true) => {}
+        Ok(false) => return refuse("sessao nao existe"),
+        Err(resolve::MuxDown) => return mux_down(&st, ws, &target),
+    }
     let Some(slot) = st.term.slot() else {
         st.diag.report("rust.term_failed", &target, "panel_cap", "teto de painéis de terminal atingido");
         return close_after_accept(ws, 1013, "limite de paineis");
     };
     ws.on_upgrade(move |socket| run(st, socket, target, cols, rows, slot))
+}
+
+/// `cols`/`rows` da query com o clamp; ausente vale 80x24, inválido é `None`.
+fn size_of(query: Option<&str>) -> Option<(u16, u16)> {
+    let number = |key, default: i64| match auth::query_param(query, key) {
+        None => Some(default),
+        Some(v) => v.trim().parse::<i64>().ok(),
+    };
+    Some(pty::clamp(number("cols", 80)?, number("rows", 24)?))
 }
 
 /// Recusa antes do aceite: o que o `ws.close` antes do `accept` do Python vira, um 403.
@@ -239,15 +250,9 @@ async fn serve(st: Arc<AppState>, peer: SocketAddr, req: Request, want: Want) ->
         Ok(false) => return refuse("sessao nao existe"),
         Err(resolve::MuxDown) => return mux_down(&st, ws, &label),
     }
-    let query = parts.uri.query();
-    let number = |key, default: i64| match auth::query_param(query, key) {
-        None => Some(default),
-        Some(v) => v.trim().parse::<i64>().ok(),
-    };
-    let (Some(cols), Some(rows)) = (number("cols", 80), number("rows", 24)) else {
+    let Some((cols, rows)) = size_of(parts.uri.query()) else {
         return refuse("cols/rows invalidos");
     };
-    let (cols, rows) = pty::clamp(cols, rows);
     let Some(slot) = st.term.slot() else {
         st.diag.report("rust.term_failed", &label, "panel_cap", "teto de painéis de terminal atingido");
         return close_after_accept(ws, 1013, "limite de paineis");

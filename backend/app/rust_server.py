@@ -314,6 +314,8 @@ class Supervisor:
     async def _start(self) -> str:
         """`up`, `died` (morreu subindo), `silent` (vivo e calado até o prazo), `protocol` ou
         `address` (endereço privado ausente ou inválido na saúde)."""
+        global terminal_panel
+        terminal_panel = None
         from app import list_bridge, workspace_bridge
         workspace_bridge.configure(None, None)
         list_bridge.configure(None, None)
@@ -350,6 +352,7 @@ class Supervisor:
                     _log.error("hangar-server sem terminal_panel válido na saúde")
                     diag.registrar("hangar_server.partida", "erro", codigo="capacidade_invalida")
                     return "address"
+                terminal_panel = panel
                 address = health.get("terminal_address")
                 try:
                     if address is None:
@@ -366,8 +369,6 @@ class Supervisor:
                     _log.error("hangar-server sem endereço privado válido na saúde")
                     diag.registrar("hangar_server.partida", "erro", codigo="endereco_invalido")
                     return "address"
-                global terminal_panel
-                terminal_panel = panel
                 self.configure_runtime(ready, env["HANGAR_INTERNAL_SECRET"], env["HANGAR_RUNTIME_INSTANCE"])
                 return "up"
             await asyncio.sleep(_POLL)
