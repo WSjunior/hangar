@@ -211,7 +211,30 @@ def test_plugin_entra_por_plugin_dir_mesmo_com_mods_por_padrao(monkeypatch):
     monkeypatch.setattr(pb, "ligado", lambda: True)
     for mods in (True, False):
         monkeypatch.setattr(pb, "mods_by_default", lambda mods=mods: mods)
-        assert pb.raizes_dos_plugins() == [str(pb.PLUGIN_SRC)]
+        assert pb.raizes_dos_plugins()[0] == str(pb.PLUGIN_SRC)
+
+
+def test_hangar_abre_a_lista_dos_mods_e_pasta_sem_manifesto_fica_fora(tmp_path, monkeypatch):
+    # O do Hangar fica por fora na cadeia e repassa a faixa ao app: "aaa" vem antes dele no
+    # alfabeto e ainda assim entra depois.
+    for nome in ("zzz", "aaa", "hangar"):
+        (tmp_path / nome / ".claude-plugin").mkdir(parents=True)
+        (tmp_path / nome / ".claude-plugin" / "plugin.json").write_text("{}")
+    (tmp_path / "sem-manifesto" / "hooks").mkdir(parents=True)
+    monkeypatch.setattr(pb, "PLUGINS_ROOT", tmp_path)
+    monkeypatch.setattr(pb, "PLUGIN_SRC", tmp_path / "hangar")
+    monkeypatch.setattr(pb, "ligado", lambda: True)
+    raizes = [str(tmp_path / n) for n in ("hangar", "aaa", "zzz")]
+    assert pb.raizes_dos_plugins() == raizes
+
+    from app.adapters import get_adapter
+    argv = get_adapter("claude").spawn_command("/tmp/p", "sid")
+    assert argv[:9] == ["claude", "--session-id", "sid",
+                        "--plugin-dir", raizes[0], "--plugin-dir", raizes[1], "--plugin-dir", raizes[2]]
+
+    home = tmp_path / "home"
+    pb._publish_plugin_dir(home)
+    assert pb.plugin_dir_file(home).read_text(encoding="utf-8") == "".join(f"{r}\n" for r in raizes)
 
 
 def test_interruptor_desligado_tira_o_plugin_mesmo_com_mods_por_padrao(monkeypatch):

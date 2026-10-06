@@ -170,7 +170,8 @@ _TTL_CAPACIDADE_S = 600.0
 _capacidade: tuple[float, bool] | None = None
 # Mods ligados por padrão no CLI daqui em diante; a variável do acesso antecipado é ignorada.
 MODS_BY_DEFAULT = (2, 1, 287)
-PLUGIN_SRC = Path(__file__).resolve().parents[2] / "plugins" / "hangar"
+PLUGINS_ROOT = Path(__file__).resolve().parents[2] / "plugins"
+PLUGIN_SRC = PLUGINS_ROOT / "hangar"
 _versao: tuple[float, tuple[int, ...] | None] | None = None
 
 
@@ -241,14 +242,21 @@ def ligado() -> bool:
 
 
 def raizes_dos_plugins() -> list[str]:
-    """`--plugin-dir` sempre, mesmo com o plugin na pasta de skills da conta.
+    """Um `--plugin-dir` por mod de `plugins/`, com `plugins/hangar` sempre primeiro.
 
     Só o plugin de `--plugin-dir` fica POR FORA dos instalados pelo marketplace na cadeia de hooks,
-    e a faixa dos mods (`ui.ts`) só enxerga o que os plugins abaixo dele desenham. Com o mesmo nome
-    nos dois lugares, o CLI carrega só o de `--plugin-dir`."""
+    e a faixa dos mods (`ui.ts`) só enxerga o que os plugins depois dele desenham: por isso o do
+    Hangar abre a lista. Com o mesmo nome nos dois lugares, o CLI carrega só o de `--plugin-dir`."""
     if not ligado():
         return []
-    return [str(PLUGIN_SRC)]
+    try:
+        outros = sorted(p for p in PLUGINS_ROOT.iterdir()
+                        if p != PLUGIN_SRC and (p / ".claude-plugin" / "plugin.json").is_file())
+    except OSError as e:
+        # Mod que não deu para listar fica de fora; a sessão nasce com o do Hangar.
+        _log.warning("plugin: não deu para listar %s: %r", PLUGINS_ROOT, e)
+        outros = []
+    return [str(PLUGIN_SRC), *map(str, outros)]
 
 
 def env_da_sessao(name: str) -> dict[str, str]:
@@ -312,7 +320,7 @@ def plugin_dir_file(home: Path | None = None) -> Path:
 
 
 def _publish_plugin_dir(home: Path | None = None) -> None:
-    """Caminho do plugin para o wrapper do shell, que não sabe onde o repositório mora.
+    """Caminhos dos plugins para o wrapper do shell, que não sabe onde o repositório mora.
 
     Sessão aberta no terminal precisa do mesmo `--plugin-dir` das que o backend abre: só pela pasta
     de skills o plugin fica por dentro do marketplace e não enxerga a faixa dos mods. Sem
@@ -324,8 +332,8 @@ def _publish_plugin_dir(home: Path | None = None) -> None:
         return
     alvo.parent.mkdir(parents=True, exist_ok=True)
     tmp = alvo.with_name(alvo.name + ".tmp")
-    # Uma linha, texto puro: quem lê é shell (bash, zsh, fish, PowerShell), sem parser de JSON.
-    tmp.write_text(raizes[0] + "\n", encoding="utf-8", newline="\n")
+    # Uma pasta por linha, texto puro: quem lê é shell (bash, zsh, fish, PowerShell), sem JSON.
+    tmp.write_text("".join(r + "\n" for r in raizes), encoding="utf-8", newline="\n")
     atomico.substituir(tmp, alvo)
 
 
