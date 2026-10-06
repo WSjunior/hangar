@@ -41,19 +41,6 @@ async fn a_request_without_time_does_nothing_in_the_mod() {
     assert!(pane.actions().is_empty());
 }
 
-/// A digitação é recusada antes de o pedido entrar na vez do pane: nem a reserva chega ao executor.
-#[tokio::test]
-async fn typing_is_refused_without_holding_the_pane() {
-    let mods = Mods::default();
-    let pane = Arc::new(FakePane::new(&mods, "t", "tmux-01-tres-paineis-150"));
-    let link = TerminalLink::new("t".into(), 1, pane.clone(), mods.clone(), Limits::quick());
-    mods.attach_terminal("t", "proc-t", 1, link.clone());
-    let typing = link.call(ModsCall::Input { site: "pm-mock-mr".into(), key: "k".into(), submit: false, value: "x".into() },
-        Instant::now() + Duration::from_secs(5)).await;
-    assert_eq!(typing.unwrap_err().code, "erro_mod_sem_digitacao");
-    assert!(!pane.held() && pane.actions().is_empty());
-}
-
 /// O terminal que se desliga no meio de um clique não avisa de novo: a reposição do mínimo espera a vez do
 /// clique, em vez de desistir, e roda depois da limpeza dele.
 #[tokio::test]

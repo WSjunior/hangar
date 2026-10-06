@@ -79,26 +79,13 @@ fn failure(code:&str) -> RuntimeError { RuntimeError::new(code,"runtime indispon
 /// Prazo da devolução da janela esticada ao abrir a sessão com terminal (`unstretch`).
 const UNSTRETCH_MAX:Duration = Duration::from_secs(2);
 
-/// Um clique cortado pelo fim do servidor deixa a janela com a altura esticada (`TALL_ROWS`): a guarda de
-/// limpeza dele não rodou. Sem terminal ligado, quem abre a sessão devolve o tamanho mínimo; o redimensionar
-/// do executor devolve junto o `window-size latest`. Com um terminal ligado, o `window-size latest` já lhe
-/// deu o tamanho. `true` quando devolveu; qualquer falha deixa a janela como está.
-pub async fn unstretch(pane:&dyn crate::mods::click::Pane,until:std::time::Instant) -> bool {
-    use crate::mods::click::{MIN_COLUMNS,MIN_ROWS,PaneOp,PaneReply,TALL_ROWS};
-    let op = |op:PaneOp| tokio::time::timeout_at(until.into(),pane.op(op,until));
-    let Ok(Ok(PaneReply::Formats(formats))) = op(PaneOp::Formats).await else { return false };
-    if formats.rows != TALL_ROWS { return false; }
-    let Ok(Ok(PaneReply::Clients(0))) = op(PaneOp::Clients).await else { return false };
-    matches!(op(PaneOp::Resize { columns:formats.columns.max(MIN_COLUMNS),rows:MIN_ROWS }).await,Ok(Ok(_)))
-}
-
 /// Interface dos mods da sessão com terminal (fase 3): o Rust é o dono do terminal aqui, então é dono do
 /// clique e da faixa dela. Liga a sessão ao `Mods` na vida `life` com um elo novo; o processo é a chave
 /// durável mais o pane e a criação dele, que o renomear mantém.
 async fn attach_terminal_mods(mods:&crate::mods::state::Mods,target:&super::terminal::TerminalTarget,
     handle:&super::terminal::TerminalHandle,life:u64) {
     // Antes de ligar: nenhum pedido de app pode estar esticando a janela enquanto ela é lida.
-    unstretch(handle,std::time::Instant::now()+UNSTRETCH_MAX).await;
+    crate::mods::click::unstretch(handle,std::time::Instant::now()+UNSTRETCH_MAX).await;
     let link = crate::mods::terminal::TerminalLink::new(target.name.clone(),life,Arc::new(handle.clone()),mods.clone(),crate::mods::click::Limits::default());
     let process = format!("{}:{}:{}",target.key,target.binding.pane,target.binding.created);
     mods.attach_terminal(&target.name,&process,life,link.clone());

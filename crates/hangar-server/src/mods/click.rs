@@ -8,7 +8,6 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
 
@@ -19,7 +18,7 @@ use super::tree;
 use crate::terminal_input::PaneFormats;
 
 /// O que o clique pede ao pane. Linha e coluna a partir de 0.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PaneOp {
     Formats,
     Clients,
@@ -181,8 +180,10 @@ fn target(ctx: &Ctx<'_>, site: &str, key: &str) -> Result<Target, ModsError> {
 
 enum Found { Cell((usize, usize)), Keyboard, Clicked }
 
-impl Ctx<'_> {
+impl<'a> Ctx<'a> {
     fn left(&self) -> Duration { self.until.saturating_duration_since(Instant::now()) }
+    /// O mesmo pedido com o prazo da limpeza (`UNDO_MAX`) contado de agora, fora do de quem pediu.
+    fn fresh(&self) -> Ctx<'a> { Ctx { until: Instant::now() + UNDO_MAX, ..*self } }
     /// A sessão ainda é a que pediu: com o nome reaberto por outro processo (ou a sessão fora), o pane é de
     /// outra vida e nada do clique chega a ele.
     fn alive(&self) -> bool { self.mods.life(self.name) == Some(self.life) }
@@ -248,6 +249,19 @@ impl Ctx<'_> {
     }
     /// A confirmação de um clique ou tecla final, sem passar do prazo.
     fn confirm(&self) -> Duration { self.limits.confirm.min(self.left()) }
+}
+
+/// Um clique cortado pelo fim do servidor deixa a janela com a altura esticada (`TALL_ROWS`): a guarda de
+/// limpeza dele não rodou. Sem terminal ligado, quem abre a sessão devolve o tamanho mínimo, e o
+/// redimensionar do executor devolve junto o `window-size latest`. Com um terminal ligado, o
+/// `window-size latest` já lhe deu o tamanho. `true` quando devolveu; qualquer falha deixa a janela como
+/// está. Fala direto com o pane: roda antes de existir o elo e a vida no `Mods`.
+pub async fn unstretch(pane: &dyn Pane, until: Instant) -> bool {
+    let op = |op: PaneOp| tokio::time::timeout_at(until.into(), pane.op(op, until));
+    let Ok(Ok(PaneReply::Formats(f))) = op(PaneOp::Formats).await else { return false };
+    if f.rows != TALL_ROWS { return false; }
+    let Ok(Ok(PaneReply::Clients(0))) = op(PaneOp::Clients).await else { return false };
+    matches!(op(PaneOp::Resize { columns: f.columns.max(MIN_COLUMNS), rows: MIN_ROWS }).await, Ok(Ok(_)))
 }
 
 /// Sem terminal de verdade ligado, garante o tamanho mínimo (T9).
@@ -667,11 +681,9 @@ async fn renew(ctx: &Ctx<'_>, cover: Duration) {
 async fn keep_trying(ctx: &Ctx<'_>, back: &Back) -> bool {
     let keep_until = Instant::now() + ctx.limits.keep_held;
     while Instant::now() < keep_until {
-        let clean = Ctx { until: Instant::now() + UNDO_MAX, ..*ctx };
-        renew(&clean, ctx.limits.retry_gap + UNDO_MAX).await;
+        renew(&ctx.fresh(), ctx.limits.retry_gap + UNDO_MAX).await;
         tokio::time::sleep(ctx.limits.retry_gap).await;
-        let clean = Ctx { until: Instant::now() + UNDO_MAX, ..*ctx };
-        if back_to_prompt(&clean, back).await { return true; }
+        if back_to_prompt(&ctx.fresh(), back).await { return true; }
     }
     false
 }
@@ -685,7 +697,7 @@ async fn keep_trying(ctx: &Ctx<'_>, back: &Back) -> bool {
 pub async fn finish(ctx: &Ctx<'_>) {
     let undo = ctx.undo;
     let held = undo.with(|p| p.hold);
-    let clean = Ctx { until: Instant::now() + UNDO_MAX, ..*ctx };
+    let clean = ctx.fresh();
     // A reserva do pedido conta do começo dele e pode vencer no meio da limpeza.
     if held { renew(&clean, UNDO_MAX).await; }
     if let Some(attempt) = undo.with(|p| p.focus.clone()) {
@@ -702,13 +714,13 @@ pub async fn finish(ctx: &Ctx<'_>) {
         undo.with(|p| p.keyboard = None);
     }
     if let Some((columns, rows)) = undo.with(|p| p.height) {
-        let clean = Ctx { until: Instant::now() + UNDO_MAX, ..*ctx };
+        let clean = ctx.fresh();
         give_back(&clean, columns, rows, clean.until).await;
         undo.with(|p| p.height = None);
     }
     if held {
         if back_ok {
-            let clean = Ctx { until: Instant::now() + UNDO_MAX, ..*ctx };
+            let clean = ctx.fresh();
             let _ = clean.op(PaneOp::Release, clean.until).await;
         }
         undo.with(|p| p.hold = false);
@@ -728,6 +740,13 @@ pub struct Parts {
     pub life: u64,
 }
 
+impl Parts {
+    /// O contexto de um pedido neste pane, com o prazo `until` e o pendente `undo`.
+    pub fn ctx<'a>(&'a self, until: Instant, undo: &'a Undo) -> Ctx<'a> {
+        Ctx { name: &self.name, pane: self.pane.as_ref(), mods: &self.mods, limits: &self.limits, until, undo, life: self.life }
+    }
+}
+
 /// Desfaz o que ficou quando a tarefa do clique some sem chegar ao fim (pânico, servidor encerrando,
 /// `abort`): o `Drop` passa o pendente e a vez do pane a uma tarefa nova, que fala com o executor.
 struct UndoOnDrop { parts: Parts, undo: Arc<Undo>, busy: Option<tokio::sync::OwnedMutexGuard<()>> }
@@ -740,9 +759,7 @@ impl Drop for UndoOnDrop {
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
                 let _busy = busy;
-                let ctx = Ctx { name: &parts.name, pane: parts.pane.as_ref(), mods: &parts.mods, limits: &parts.limits,
-                    until: Instant::now(), undo: &undo, life: parts.life };
-                finish(&ctx).await;
+                finish(&parts.ctx(Instant::now(), &undo)).await;
             });
         }
     }
@@ -769,8 +786,7 @@ pub fn spawn(parts: Parts, call: ModsCall, until: Instant) -> (tokio::task::Join
         };
         let undo = Arc::new(Undo::default());
         let _guard = UndoOnDrop { parts: parts.clone(), undo: undo.clone(), busy: Some(busy) };
-        let ctx = Ctx { name: &parts.name, pane: parts.pane.as_ref(), mods: &parts.mods, limits: &parts.limits, until, undo: &undo,
-            life: parts.life };
+        let ctx = parts.ctx(until, &undo);
         let result = match hold(&ctx).await {
             Ok(()) => dispatch(&ctx, call).await,
             Err(error) => Err(error),

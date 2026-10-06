@@ -275,7 +275,7 @@ fn overlay(screen: &str) -> bool {
 }
 
 /// O que o clique de mod precisa saber do pane antes de cada passo.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PaneFormats { pub mouse: bool, pub in_mode: bool, pub columns: u16, pub rows: u16 }
 /// `|` e não tab: o psmux devolve vazio para formato que não conhece, e o campo vazio precisa sobrar.
 pub const MODS_FORMATS: &str = "#{mouse_sgr_flag}|#{alternate_on}|#{pane_in_mode}|#{window_width}|#{window_height}";
