@@ -284,6 +284,12 @@ def monitor_sequences():
     eof = "terminal observer EOF"
     question = lambda age: dict(id="perm:1", questions=[], tool="Bash", resumo="ls", seen_age_ms=age)
     ask = dict(id="q", questions=[dict(question="Qual?", options=[dict(label="A"), dict(label="B")])], seen_age_ms=0)
+    manual = "\n  ⏸ manual mode on · ← for agents"
+    manual_idle = "────────────\n❯\n────────────" + manual
+    held_pane = lambda glyph, t: (f"{glyph} Photosynthesizing… (running PreToolUse hooks… 6/10 · {t}s · thinking)\n"
+                                  "  ⎿  Tip: Hit shift+tab to cycle between manual mode, auto-accept edit mode, and plan mode\n"
+                                  + manual_idle)
+    perm = lambda age: dict(id="perm:t1", questions=[], tool="Bash", resumo="ls", seen_age_ms=age)
     stale = lambda age, **kw: facts(plugin_state=dict(state="working", reason=None, age_ms=age), **kw)
     return {
         # Spinner congelado: STALE_LIMIT rodadas iguais viram idle. O Python conta por rodada; `wake`
@@ -326,6 +332,15 @@ def monitor_sequences():
                                 f(None, fail=eof, attempt=2, exists=False), f(plain)],
         "empty_pane_alive": [f(""), f("", exists=None), f(plain)],
         "empty_pane_dead": [f(plain), f("", exists=False)],
+        # Caso real (Haiku, modo manual, app aberto): o hook do plugin segura a permissão do Bash
+        # para o app, a TUI fica em "running PreToolUse hooks" sem cartão e o registro nativo
+        # segue `busy` (marcador `working`). Esc: o registro volta a `idle` e a pergunta segurada
+        # ainda vale até vencer.
+        "permission_card_after_bash": [f(held_pane("✽", 1), marker="working", facts=facts(waiter_open=True))]
+        + [f(held_pane(g, t), marker="working", facts=facts(waiter_open=True, question=perm(age)))
+           for g, t, age in (("·", 2, 0), ("✢", 3, 1_000), ("✳", 4, 2_000), ("✶", 5, 3_000))]
+        + [f(manual_idle, marker="idle", facts=facts(waiter_open=True, question=perm(5_000))),
+           f(manual_idle, marker="idle", facts=facts(waiter_open=True))],
     }
 
 

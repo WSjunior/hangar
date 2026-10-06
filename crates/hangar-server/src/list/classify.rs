@@ -15,7 +15,9 @@ use serde_json::Value;
 use super::capped::SESSION_CAP;
 use super::facts_files::{self, HookStates};
 use crate::state::capture::MuxProcess;
-use crate::terminal_state::{analyze, PaneAnalysis};
+use crate::state::published::Published;
+use crate::terminal_state::{analyze, held_question, PaneAnalysis};
+use hangar_api::state::StateEvent;
 
 /// Escrita no transcript até 1 s depois do idle é o resumo pós-Stop, não turno novo.
 pub const IDLE_STALE_S: f64 = 1.0;
@@ -71,6 +73,10 @@ pub struct Facts<'a> {
     /// Código de problema do runtime, por nome.
     pub problems: &'a BTreeMap<String, String>,
     pub stall_seconds: f64,
+    /// Pergunta que o hook do plugin segura agora (`plugin_bridge.pergunta_pendente`), por nome.
+    pub held: &'a BTreeMap<String, Value>,
+    /// Último estado de cada `Monitor` vivo.
+    pub monitors: &'a Published,
 }
 
 /// Caches que atravessam rodadas.
@@ -131,6 +137,19 @@ fn headless_state(row: &mut SessionRow, retrato: Option<&BTreeMap<String, Value>
     }
 }
 
+/// O que o `Monitor` vivo publicou: estado, pergunta, statusline e limite; o problema dele só
+/// quando a lista não tem outro.
+fn from_monitor(row: &mut SessionRow, ev: &StateEvent) {
+    row.state.clone_from(&ev.state);
+    row.label.clone_from(&ev.label);
+    row.question.clone_from(&ev.question);
+    row.options.clone_from(&ev.options);
+    row.status_line.clone_from(&ev.status_line);
+    row.limit_reset.clone_from(&ev.limit_reset);
+    row.limited = ev.limited;
+    if row.problema.is_none() { row.problema.clone_from(&ev.problema); }
+}
+
 fn apply(row: &mut SessionRow, a: &PaneAnalysis) {
     row.state = a.state.clone();
     row.label = a.label.clone();
@@ -188,6 +207,8 @@ impl Classifier {
     pub async fn classify_some<C: CaptureSource>(&mut self, rows: &mut [SessionRow], facts: &Facts<'_>, io: &C) -> Vec<Effect> {
         let mut effects = Vec::new();
         let mut pending = Vec::new();
+        // Linhas com `Monitor` vivo: nenhuma captura, nem a da statusline nem a do limite.
+        let mut watched = HashSet::new();
         for (i, row) in rows.iter_mut().enumerate() {
             if row.provider != "claude" {
                 continue;
@@ -205,6 +226,12 @@ impl Classifier {
             }
             if row.problema.is_none() {
                 row.problema = facts.problems.get(&row.name).cloned();
+            }
+            if let Some(ev) = facts.monitors.get(&row.name, sid.as_deref()) {
+                from_monitor(row, &ev);
+                row.last_activity = mtime(&row.name, row.jsonl.as_deref());
+                watched.insert(row.name.clone());
+                continue;
             }
             let Some(m) = marker else { pending.push(i); continue };
             let mtime = mtime(&row.name, row.jsonl.as_deref());
@@ -273,10 +300,22 @@ impl Classifier {
             }
         }
 
-        // Pergunta que o pane não mostra mais (o menu rolou para fora) e o marcador não carrega.
+        // Pergunta que o pane não mostra: a permissão que o hook do plugin segura para o app (a TUI
+        // não desenha cartão e o registro nativo segue `busy`), ou o menu que rolou para fora e o
+        // marcador não carrega.
         for row in rows.iter_mut() {
             if row.provider != "claude" || row.headless || row.state == "awaiting_input"
-                || row.options.as_ref().is_some_and(|o| !o.is_empty()) || row.jsonl.is_none() {
+                || row.options.as_ref().is_some_and(|o| !o.is_empty()) || watched.contains(&row.name) {
+                continue;
+            }
+            if let Some(q) = facts.held.get(&row.name).and_then(held_question) {
+                row.state = "awaiting_input".into();
+                row.label = None;
+                row.question = q.question;
+                row.options = Some(q.options);
+                continue;
+            }
+            if row.jsonl.is_none() {
                 continue;
             }
             if let Some(q) = facts_files::open_question(sid(row).as_deref(), facts.config_dirs) {
@@ -288,7 +327,8 @@ impl Classifier {
         }
 
         // Statusline das que não foram raspadas: no máximo STATUS_BUDGET capturas, das mais velhas.
-        let scraped: HashSet<String> = pending.iter().map(|&i| rows[i].name.clone()).collect();
+        let mut scraped: HashSet<String> = pending.iter().map(|&i| rows[i].name.clone()).collect();
+        scraped.extend(watched.iter().cloned());
         let now = io.mono();
         let age = |c: &BTreeMap<String, (f64, Option<String>)>, n: &str| c.get(n).map_or(0.0, |v| v.0);
         let mut stale: Vec<String> = rows.iter()
@@ -322,6 +362,9 @@ impl Classifier {
             let published = || facts_files::published_status(sid(row).as_deref(), facts.config_dirs, wall).map(|p| p.line);
             if row.headless {
                 if row.status_line.is_none() { row.status_line = published(); }
+                continue;
+            }
+            if watched.contains(&row.name) {
                 continue;
             }
             // Sidecar antes do pane: a captura traz a linha cortada na largura da janela.
@@ -438,8 +481,55 @@ mod tests {
     async fn run(row: &mut SessionRow, dirs: &[PathBuf], io: &Fixed, headless: Option<&BTreeMap<String, Value>>) -> Vec<Effect> {
         let hooks = HookStates::load(dirs);
         let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: dirs, headless,
-                            problems: &BTreeMap::new(), stall_seconds: 300.0 };
+                            problems: &BTreeMap::new(), stall_seconds: 300.0, held: &BTreeMap::new(), monitors: &Published::default() };
         Classifier::default().classify(std::slice::from_mut(row), &facts, io).await
+    }
+
+    #[tokio::test]
+    async fn permission_card_after_bash_is_awaiting() {
+        // Com o app aberto, o hook do plugin segura a permissão do Bash: a TUI não desenha cartão,
+        // o registro nativo fica `busy` e o marcador `working`. Só a pergunta segurada diz que espera.
+        let (_d, dirs, mut row) = setup("working", 990.0);
+        let io = Fixed { frame: Ok(IDLE.into()), wall: 1000.0, calls: Mutex::new(0) };
+        let hooks = HookStates::load(&dirs);
+        let held = BTreeMap::from([("s".to_owned(), serde_json::json!({"id": "perm:t1", "questions": [], "tool": "Bash", "resumo": "ls"}))]);
+        let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &dirs, headless: Some(&BTreeMap::new()),
+                            problems: &BTreeMap::new(), stall_seconds: 300.0, held: &held, monitors: &Published::default() };
+        Classifier::default().classify(std::slice::from_mut(&mut row), &facts, &io).await;
+        assert_eq!((row.state.as_str(), row.question.as_deref()), ("awaiting_input", Some("Bash: ls")));
+        assert_eq!(row.options, Some(vec!["Yes".into(), "No".into()]));
+        assert_eq!(row.label, None);
+        // Sem pergunta segurada, o marcador responde como antes.
+        let mut row2 = setup("working", 990.0).2;
+        row2.jsonl = row.jsonl.clone();
+        run(&mut row2, &dirs, &io, Some(&BTreeMap::new())).await;
+        assert_eq!(row2.state, "working");
+    }
+
+    #[tokio::test]
+    async fn uses_monitor_state_when_alive() {
+        // Marcador awaiting manda capturar; com `Monitor` vivo, vale o que ele publicou, sem captura.
+        let (_d, dirs, mut row) = setup("awaiting_input", 900.0);
+        let io = Fixed { frame: Ok(IDLE.into()), wall: 1000.0, calls: Mutex::new(0) };
+        let hooks = HookStates::load(&dirs);
+        let monitors = Published::default();
+        monitors.set(1, "s", Some("abc".into()), std::sync::Arc::new(hangar_api::state::StateEvent {
+            session: "s".into(), state: "awaiting_input".into(), question: Some("Bash: ls".into()),
+            options: Some(vec!["Yes".into(), "No".into()]), status_line: Some("🤖 Haiku".into()),
+            limited: true, limit_reset: Some("9:10pm".into()), ..Default::default() }));
+        let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &dirs, headless: Some(&BTreeMap::new()),
+                            problems: &BTreeMap::new(), stall_seconds: 300.0, held: &BTreeMap::new(), monitors: &monitors };
+        let effects = Classifier::default().classify(std::slice::from_mut(&mut row), &facts, &io).await;
+        assert_eq!(*io.calls.lock().unwrap(), 0, "nenhuma captura com o Monitor vivo");
+        assert_eq!(effects, vec![], "o Monitor não rebaixa o registro nativo pela lista");
+        assert_eq!((row.state.as_str(), row.question.as_deref()), ("awaiting_input", Some("Bash: ls")));
+        assert_eq!((row.status_line.as_deref(), row.limited, row.limit_reset.as_deref()), (Some("🤖 Haiku"), true, Some("9:10pm")));
+        // Outra conversa (depois do `/clear`): o retrato do Monitor não vale e a lista captura.
+        monitors.set(1, "s", Some("outra".into()), std::sync::Arc::new(hangar_api::state::StateEvent {
+            state: "working".into(), ..Default::default() }));
+        Classifier::default().classify(std::slice::from_mut(&mut row), &facts, &io).await;
+        assert!(*io.calls.lock().unwrap() > 0);
+        assert_eq!(row.state, "idle");
     }
 
     #[tokio::test]
@@ -485,7 +575,7 @@ mod tests {
             let hooks = HookStates::load(&dirs);
             let (headless, problems) = (BTreeMap::new(), BTreeMap::new());
             let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &dirs, headless: Some(&headless),
-                                problems: &problems, stall_seconds: 1e12 };
+                                problems: &problems, stall_seconds: 1e12, held: &BTreeMap::new(), monitors: &Published::default() };
             let mut c = Classifier::default();
             let io = Fixed { frame: Ok(frame.clone()), wall: 1e9, calls: Mutex::new(0) };
             let n = 200;
@@ -520,7 +610,7 @@ mod tests {
         let hooks = HookStates::default();
         let (headless, problems) = (BTreeMap::new(), BTreeMap::new());
         let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: Some(&headless),
-                            problems: &problems, stall_seconds: 300.0 };
+                            problems: &problems, stall_seconds: 300.0, held: &BTreeMap::new(), monitors: &Published::default() };
         let io = Slow { now: Mutex::new(0), peak: Mutex::new(0) };
         Classifier::default().classify(&mut rows, &facts, &io).await;
         assert!(rows.iter().all(|r| r.state == "idle"));
@@ -533,7 +623,7 @@ mod tests {
         let hooks = HookStates::default();
         let (headless, problems) = (BTreeMap::new(), BTreeMap::new());
         let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: Some(&headless),
-                            problems: &problems, stall_seconds: 300.0 };
+                            problems: &problems, stall_seconds: 300.0, held: &BTreeMap::new(), monitors: &Published::default() };
         let io = MuxCapture::new("tmux", Duration::from_secs(1), Default::default());
         send(Classifier::default().classify(&mut [], &facts, &io));
     }
@@ -579,7 +669,7 @@ mod tests {
         let hooks = HookStates::load(&dirs);
         let problems = BTreeMap::from([("s".to_owned(), "cano_exited".to_owned())]);
         let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &dirs, headless: None,
-                            problems: &problems, stall_seconds: 300.0 };
+                            problems: &problems, stall_seconds: 300.0, held: &BTreeMap::new(), monitors: &Published::default() };
         Classifier::default().classify(std::slice::from_mut(&mut row), &facts, &io).await;
         assert_eq!(row.problema.as_deref(), Some(RUNTIME_ABSENT));
     }

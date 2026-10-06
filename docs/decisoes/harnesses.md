@@ -119,6 +119,11 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   existe e o pid vive**; marcador de hook e pane são o fallback. `idle`/`busy`/`waiting` são o
   estado da TUI escrito por ela mesma; `waiting` inclui diálogo aberto (`/model`), que o pane
   rebaixa. Nunca escrever nesse arquivo.
+- **Permissão segurada para o app não aparece no pane nem no registro nativo: lista e `Monitor`
+  leem a pergunta segurada.** Com o app aberto, o hook `perm.ts` segura a permissão: a TUI fica em
+  "running PreToolUse hooks" sem cartão e o registro segue `busy`. O `Monitor` a lê dos fatos
+  empurrados (`question`); a lista, do `held` dos fatos da lista. Ver
+  [cartão de permissão segurado](#cartão-de-permissão-segurado-pelo-hook).
 - **O `wire.jsonl` do Kimi não é bem-comportado**: nem toda escrita é turno (`config.update` com
   a sessão parada), e o main fica mudo quando delega. Quem decide é a fronteira de turno, não o
   mtime. `tool.result` não tem `uuid` — id é `res:<toolCallId>`.
@@ -329,6 +334,30 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   Na captura stdio 0.159.3, manter `tool_output_token_limit` da sessão conservou 144.000
   caracteres após reinício. Essa captura simulada não comprova interface, modelo real ou
   restauração física. Ver [transferência em validação](#transferência-claude--codex-captura-nativa-em-validação).
+
+## Cartão de permissão segurado pelo hook
+
+(06/10/2026, parte 4 da migração, Task 6; Claude Code 2.1.291, Haiku, modo manual, backend
+isolado.) Sintoma: depois de pedir um `Bash`, a lista ficava `working` enquanto o chat mostrava o
+cartão. Reproduzido duas vezes: com a lista do dono aberta (`app_presente`), o hook `perm.ts`
+segura o `tool.check` em long-poll (`/api/plugin/ask`, janela de 5 s) e a TUI fica em
+"running PreToolUse hooks… 6/10" sem desenhar cartão nenhum; o registro nativo segue `busy` e o
+marcador `working` durante toda a espera (45 s). O `Monitor` já via a pergunta pelos fatos
+empurrados (`question` com `perm:`); a lista não tinha fonte: confiava no registro e não
+capturava. O Python de reserva (`registry.list_with_state`) tem o mesmo defeito.
+
+Conserto: o `POST /internal/list/facts` leva `held` (`pergunta_pendente` das linhas Claude com
+terminal, contrato 32), e a lista a mostra como o `Monitor` (`terminal_state::held_question`:
+"ferramenta: resumo", Yes/No). Sequência gravada em `gen_terminal.py`
+(`permission_card_after_bash`); `contract_terminal::permission_card_after_bash` confere lista e
+`Monitor` rodada a rodada.
+
+Com o `Monitor` vivo, a lista lê o último `state` dele (`state/published.rs`, por nome e session
+id, limpo quando o `Monitor` acaba) e não captura o pane da sessão: nem a classificação, nem a
+statusline, nem o radar de limite.
+
+Aberto: depois do Esc o hook é cancelado sem `/ask-fim`, e a pergunta segurada vale até vencer
+(35 s depois do último poll); o chat (e agora a lista) mostra o cartão nesse intervalo.
 
 ## Prévia da chamada em voo: o ● pisca
 

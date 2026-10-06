@@ -9,6 +9,7 @@ pub mod live;
 pub mod monitor;
 pub mod permission;
 pub mod preview;
+pub mod published;
 pub mod shells;
 #[cfg(test)]
 pub mod testing;
