@@ -248,3 +248,20 @@ def test_elevenlabs_sem_texto_tem_motivo_proprio(monkeypatch):
     r = transcribe_with_provider(b"a", "a.webm")
     assert r.aviso == f"Transcrito pelo {TURBO_NOME}: ElevenLabs deu resposta sem texto"
     assert mod._load_waits() == {}
+
+
+def test_status_mostra_a_espera_na_ordem_da_lista(monkeypatch):
+    futuro = time.time() + 600
+    _grava_espera({"el": {"until": futuro, "reason": "sem cota (402)"},
+                   "turbo": {"until": time.time() - 1, "reason": "sem cota (429)"}})
+    _config(monkeypatch, [EL, TURBO])
+    assert mod.providers_status() == [
+        {"id": "el", "name": "ElevenLabs", "kind": "elevenlabs", "waiting_until": futuro,
+         "reason": "sem cota (402)"},
+        {"id": "turbo", "name": TURBO_NOME, "kind": "openai", "waiting_until": None, "reason": None},
+    ]
+
+
+def test_status_sem_lista_e_vazio(monkeypatch):
+    _config(monkeypatch, [])
+    assert mod.providers_status() == []

@@ -1718,6 +1718,16 @@ def test_relimpar_aplica_outro_estilo_sem_audio(api_client, monkeypatch):
     assert visto == {"texto": "eu queria falar sobre uma coisa aqui", "estilo": "briefing"}
 
 
+def test_status_dos_servicos_de_transcricao(api_client, monkeypatch):
+    linhas = [{"id": "el", "name": "ElevenLabs", "kind": "elevenlabs",
+               "waiting_until": 1900000000.0, "reason": "sem cota (402)"}]
+    monkeypatch.setattr(api_mod, "providers_status", lambda: linhas)
+    r = api_client.get("/api/transcription/providers/status", headers=_h())
+    assert r.status_code == 200
+    assert r.json() == {"providers": linhas}
+    assert api_client.get("/api/transcription/providers/status").status_code == 401
+
+
 def test_relimpar_recusa_estilo_que_nao_existe(api_client):
     # 400, e nao "cai no padrao": aqui a pessoa CLICOU num botao. Entregar outro estilo calada seria
     # mentir sobre o que ela apertou (na transcricao o estilo e palpite da tela, e cair na config e

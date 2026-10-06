@@ -76,7 +76,7 @@ from app.sse import invalidate_recent_list, merged_events, nav_confirmar, nav_pe
 from app.state import corrige_ocioso_kimi, forget_frame, menu_codex
 from app.uploads import save_upload, resolve_upload, prune_old, list_uploads, UploadError, MAX_BYTES
 from app.video import is_video, extract_frames, extract_audio
-from app.transcribe import transcribe, TranscribeError
+from app.transcribe import transcribe, providers_status, TranscribeError
 from app.config import (list_config_dirs, ConfigDirInfo, _backend_config_base, settings,
                         resolve_scan_roots,
                         automations_enabled, resolve_bind_ip, variaveis_env)
@@ -7139,6 +7139,13 @@ async def relimpar_ditado(body: RelimparBody):
     texto, aviso = await asyncio.to_thread(narrar.limpar_ditado, body.texto, body.estilo)
     aplicado = "cru" if (aviso or texto == body.texto) else narrar.estilo_efetivo(body.texto, body.estilo)
     return {"text": texto, "aviso": aviso, "estilo_aplicado": aplicado}
+
+
+@app.get("/api/transcription/providers/status", dependencies=[Depends(require_auth)])
+def transcription_providers_status():
+    """Espera por cota de cada serviço de transcrição, para a tela de configuração. `def` e não
+    `async`: lê um arquivo, e o FastAPI já roda isso na threadpool."""
+    return {"providers": providers_status()}
 
 
 class PensamentoPtBody(_StrictBody):

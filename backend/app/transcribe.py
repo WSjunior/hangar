@@ -424,3 +424,20 @@ def transcribe_with_provider(content: bytes, filename: str | None,
         aviso = f"Transcrito pelo {name}: {'; '.join(reasons)}" if reasons else None
         return Transcription(text, name, aviso)
     raise first_error or TranscribeError(504, "nenhum servico de transcricao respondeu a tempo")
+
+
+def providers_status() -> list[dict]:
+    """Cada serviço da lista e, quando em espera por cota, até quando e por quê."""
+    waits = _load_waits()
+    now = time.time()
+    out = []
+    for p in configured_providers():
+        until = _waiting_until(waits, p["id"], now)
+        out.append({
+            "id": p["id"],
+            "name": display_name(p),
+            "kind": p["kind"],
+            "waiting_until": until,
+            "reason": waits[p["id"]].get("reason") if until is not None else None,
+        })
+    return out
