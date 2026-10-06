@@ -35,9 +35,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **Código de retorno no Windows não se lê como falha** (`taskkill` sem processo devolve 128).
   Separe "comando não existe" de "comando falhou"; stderr vem na codepage do console.
 - **Captura avulsa do pane (`state/capture.rs`) decide pela saída, não pelo código.** Saída com
-  texto é o quadro, com qualquer código; sem saída, código 0 é pane vazio e código ≠ 0 é recusa,
-  que o `has-session` separa da sessão sumida. Quadro com U+FFFD é erro, nunca estado. A lista e o
-  `Monitor` do Windows usam essa fonte. Ver
+  texto é o quadro, com qualquer código; sem saída, código 0 é pane vazio e código ≠ 0 é recusa.
+  Recusa e vazio passam pelo `has-session`, que separa a sessão sumida (e o multiplexador calado).
+  Byte que não decodifica é erro, nunca estado; no Windows também U+FFFD, que é o byte que o psmux
+  não leu (no Linux é texto do pane). A lista e o `Monitor` do Windows usam essa fonte. Ver
   [Captura avulsa pela saída](#captura-avulsa-pela-saída-não-pelo-código).
 - **`shutil.rmtree` em pasta onde o git escreveu precisa de `onexc`** que tira o somente-leitura:
   o git grava packs read-only e o Windows recusa o unlink (WinError 5); no POSIX passa.
@@ -721,6 +722,7 @@ o pane por um processo do psmux, mas decidia pelo código de retorno (`rc != 0` 
 `capture_refused`) e trocava byte inválido por U+FFFD sem marcar, contra as duas regras acima.
 `state/capture.rs` passou a ser a fonte única da captura avulsa: a lista usa em toda plataforma,
 e o `Monitor` de estado no Windows, onde o `-C` continua desligado (`terminal_control.rs`). O
-`has-session` só roda quando a captura é recusada, porque cada processo custa ~25 ms no Windows.
+`has-session` só roda quando a captura é recusada ou vem vazia, porque cada processo custa
+~25 ms no Windows.
 O psmux honra o `=` exato no `has-session`. Os testes usam um multiplexador falso (`.cmd` no
 Windows, `sh` no resto); o caminho Windows é conferido pelo job Windows do CI.

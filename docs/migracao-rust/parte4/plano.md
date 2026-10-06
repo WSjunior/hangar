@@ -222,7 +222,7 @@ bom), `list/classify.rs:375-417` (mesma fonte; hoje `rc != 0` vira `capture_refu
 `monitor::windows_uses_subprocess`.
 
 - [x] **Step 15: Ler "Regras vigentes" de `windows.md`; testes, vistos falhar**
-- [ ] **Step 16: Fonte por subprocesso no `Monitor` e na lista; job Windows do CI pelo log; revisar**
+- [x] **Step 16: Fonte por subprocesso no `Monitor` e na lista; job Windows do CI pelo log; revisar**
 
 ---
 

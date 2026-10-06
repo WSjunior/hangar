@@ -13,14 +13,16 @@ pub const TIMEOUT: Duration = Duration::from_secs(5);
 pub struct MuxProcess { program: OsString, timeout: Duration }
 
 /// Quadro da saída do `capture-pane`, não do código de retorno: o psmux sai com código ≠ 0 tendo
-/// escrito o quadro. Sem saída, o código decide entre recusa e pane vazio. Quadro com U+FFFD
-/// (byte que não decodificou, aqui ou no psmux) não é o pane.
+/// escrito o quadro. Sem saída, o código decide entre recusa e pane vazio. Byte que não decodifica
+/// não é o pane; no Windows nem U+FFFD, que é o que o psmux põe no lugar do byte que ele não leu.
 fn read_output(success: bool, stdout: &[u8]) -> Result<String, &'static str> {
     if stdout.is_empty() {
         return if success { Ok(String::new()) } else { Err("capture_refused") };
     }
-    let text = String::from_utf8_lossy(stdout);
-    if text.contains('\u{fffd}') { Err("capture_undecodable") } else { Ok(text.into_owned()) }
+    match std::str::from_utf8(stdout) {
+        Ok(text) if !(cfg!(windows) && text.contains('\u{fffd}')) => Ok(text.to_owned()),
+        _ => Err("capture_undecodable"),
+    }
 }
 
 impl MuxProcess {
@@ -47,10 +49,16 @@ impl MuxProcess {
         self.output(&["has-session", "-t", &format!("={name}")]).await.ok().map(|out| out.status.success())
     }
 
-    /// Captura que, recusada, separa a sessão que sumiu da que falhou.
+    /// Captura que, recusada ou vazia, separa a sessão que sumiu da que falhou: o psmux aceita
+    /// comando que não executa, e o vazio de uma sessão morta não pode virar pane parado.
     pub async fn capture_checked(&self, name: &str, target: &str) -> Result<String, &'static str> {
         match self.capture(target).await {
-            Err("capture_refused") if self.has_session(name).await == Some(false) => Err("capture_session_missing"),
+            Err("capture_refused") => Err(match self.has_session(name).await {
+                Some(false) => "capture_session_missing",
+                Some(true) => "capture_refused",
+                None => "capture_mux_no_answer",
+            }),
+            Ok(text) if text.is_empty() && self.has_session(name).await == Some(false) => Err("capture_session_missing"),
             other => other,
         }
     }
@@ -103,8 +111,10 @@ mod tests {
     const IDLE: &str = "● pronto\n────────────\n❯\n────────────\n🤖 Opus 4.5\n";
 
     /// Multiplexador falso: `capture-pane` escreve `frame` e sai com `capture_rc`; `has-session`
-    /// sai com `has_rc` e deixa uma linha em `calls`.
+    /// sai com `has_rc` (`HANG`: não responde) e deixa uma linha em `calls`.
     struct Fake { dir: tempfile::TempDir, program: PathBuf }
+
+    const HANG: i32 = -1;
 
     impl Fake {
         fn new(frame: &[u8], capture_rc: i32, has_rc: i32) -> Self {
@@ -113,17 +123,19 @@ mod tests {
             std::fs::write(&out, frame).unwrap();
             #[cfg(unix)]
             let program = {
+                let has_exit = if has_rc == HANG { "sleep 5; exit 0".to_owned() } else { format!("exit {has_rc}") };
                 use std::os::unix::fs::PermissionsExt;
                 let path = dir.path().join("fake-tmux");
-                std::fs::write(&path, format!("#!/bin/sh\ncase \"$1\" in\n  has-session) echo has >> '{}'; exit {has_rc};;\n  capture-pane) cat '{}'; exit {capture_rc};;\nesac\nexit 99\n",
+                std::fs::write(&path, format!("#!/bin/sh\ncase \"$1\" in\n  has-session) echo has >> '{}'; {has_exit};;\n  capture-pane) cat '{}'; exit {capture_rc};;\nesac\nexit 99\n",
                     calls.display(), out.display())).unwrap();
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
                 path
             };
             #[cfg(windows)]
             let program = {
+                let has_exit = if has_rc == HANG { "ping -n 6 127.0.0.1 >nul\r\n  exit /b 0".to_owned() } else { format!("exit /b {has_rc}") };
                 let path = dir.path().join("fake-psmux.cmd");
-                std::fs::write(&path, format!("@echo off\r\nif \"%1\"==\"has-session\" (\r\n  echo has>>\"{}\"\r\n  exit /b {has_rc}\r\n)\r\nif \"%1\"==\"capture-pane\" (\r\n  type \"{}\"\r\n  exit /b {capture_rc}\r\n)\r\nexit /b 99\r\n",
+                std::fs::write(&path, format!("@echo off\r\nif \"%1\"==\"has-session\" (\r\n  echo has>>\"{}\"\r\n  {has_exit}\r\n)\r\nif \"%1\"==\"capture-pane\" (\r\n  type \"{}\"\r\n  exit /b {capture_rc}\r\n)\r\nexit /b 99\r\n",
                     calls.display(), out.display())).unwrap();
                 path
             };
@@ -164,6 +176,11 @@ mod tests {
         assert_eq!(list.capture("s").await.map_err(|e| e.code), Err("capture_undecodable"));
         let failed = PaneCapture::process(&fake.program, "=s:".into()).capture().await.unwrap_err();
         assert_eq!((failed.code.as_str(), failed.attempt), ("capture_undecodable", None));
+        // U+FFFD bem formado é texto do pane fora do Windows; lá é o byte que o psmux não leu.
+        let shown = format!("{IDLE}� no log\n");
+        let fake = Fake::new(shown.as_bytes(), 0, 0);
+        let want = if cfg!(windows) { Err("capture_undecodable") } else { Ok(shown.clone()) };
+        assert_eq!(fake.mux().capture("=s:").await, want);
     }
 
     #[tokio::test]
@@ -179,6 +196,15 @@ mod tests {
         assert_eq!(gone.mux().has_session("s").await, Some(false));
         assert_eq!(failed.mux().has_session("s").await, Some(true));
         assert_eq!(MuxProcess::new("/nonexistent/psmux", TIMEOUT).has_session("s").await, None, "sem resposta não é sessão morta");
+        // Vazio com código 0 também confere: o psmux aceita comando que não executa.
+        let vanished = Fake::new(b"", 0, 1);
+        assert_eq!(vanished.mux().capture_checked("s", "=s:").await, Err("capture_session_missing"));
+        let blank = Fake::new(b"", 0, 0);
+        assert_eq!(blank.mux().capture_checked("s", "=s:").await.as_deref(), Ok(""));
+        // Recusa com o multiplexador calado no `has-session` não é recusa conferida.
+        let silent = Fake::new(b"", 1, HANG);
+        let mux = MuxProcess::new(&silent.program, Duration::from_millis(500));
+        assert_eq!(mux.capture_checked("s", "=s:").await, Err("capture_mux_no_answer"));
     }
 
     #[test]
