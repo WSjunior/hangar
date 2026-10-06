@@ -107,7 +107,8 @@ impl FakePane {
                 Effect::Show(screen) => state.queue = VecDeque::from([(*screen).to_owned()]),
                 Effect::Pressed(site, key) => self.mods.pressed(&self.name, site, key),
                 Effect::CloseAll => {
-                    let view = self.mods.terminal_view(&self.name).unwrap();
+                    let life = self.mods.life(&self.name).unwrap();
+                    let view = self.mods.terminal_view_in(&self.name, life).unwrap();
                     self.mods.terminal_ui(&self.name, TerminalView { panes: Vec::new(), shown: None, ..(*view).clone() });
                 }
                 Effect::Focus(site, element, denied) => {

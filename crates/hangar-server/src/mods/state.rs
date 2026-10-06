@@ -526,11 +526,7 @@ impl Mods {
         self.inner.lock().unwrap().sessions.get(name).is_some_and(|session| session.terminal.is_some())
     }
 
-    pub fn terminal_view(&self, name: &str) -> Option<Arc<TerminalView>> {
-        self.inner.lock().unwrap().sessions.get(name)?.terminal.as_ref()?.view.clone()
-    }
-
-    /// `terminal_view` só na vida `life`: o clique de uma sessão substituída não lê o espelho da nova.
+    /// O espelho da sessão com terminal só na vida `life`: o clique de uma sessão substituída não lê o da nova.
     pub fn terminal_view_in(&self, name: &str, life: u64) -> Option<Arc<TerminalView>> {
         Self::terminal_in(&self.inner.lock().unwrap(), name, life)?.view.clone()
     }
@@ -689,6 +685,8 @@ impl Mods {
         });
     }
 
+    /// O alvo armado agora; só os testes perguntam.
+    #[doc(hidden)]
     pub fn armed_focus(&self, name: &str) -> Option<String> {
         Some(self.inner.lock().unwrap().sessions.get(name)?.terminal.as_ref()?.focus.as_ref()?.attempt.clone())
     }

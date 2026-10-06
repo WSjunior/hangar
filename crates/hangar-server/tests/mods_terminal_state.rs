@@ -32,7 +32,7 @@ fn last_ui(mods: &Mods) -> Value {
 #[test]
 fn terminal_view_is_published_with_source_and_shown() {
     let (mods, _) = setup();
-    assert!(mods.owns("t") && mods.is_terminal("t") && mods.terminal_view("t").is_none());
+    assert!(mods.owns("t") && mods.is_terminal("t") && mods.terminal_view_in("t", 1).is_none());
     assert_eq!(mods.life("t"), Some(1));
     assert_eq!(mods.bridge_session("t").as_deref(), Some("t"), "a ponte acha a sessão com terminal pelo nome de nascimento");
     assert!(mods.terminal_ui("t", view(&["a", "b"], Some("b"))));
@@ -207,6 +207,6 @@ fn a_new_process_inherits_nothing() {
     assert_eq!(mods.match_click("t", "a", "k"), None, "o clique em aberto da sessão substituída não passa");
     assert!(!mods.replay("t").iter().any(|(event, _)| *event == "plugin_ui"), "a faixa da sessão substituída não passa");
     assert!(!mods.replay("t").iter().any(|(event, _)| *event == "plugin_toast"), "aviso de outro processo não passa (a8fd66ba)");
-    assert!(mods.terminal_view("t").is_none());
+    assert!(mods.terminal_view_in("t", 2).is_none());
     assert_eq!(mods.life("t"), Some(2));
 }

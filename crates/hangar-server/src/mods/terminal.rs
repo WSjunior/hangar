@@ -5,8 +5,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use super::click::{self, Ctx, Limits, Pane, Parts, Undo};
-use super::model::{ModsCall, no_answer, no_typing};
+use super::click::{self, Limits, Pane, Parts, Undo};
+use super::model::{ModsCall, no_answer};
 use super::state::{CallFuture, Mods, ShownFuture, SurfaceLink, TerminalProbe};
 
 /// Prazo da reposição do mínimo pelo vigia: redimensionar e assentar (até 1 s) com o piso das ações.
@@ -34,11 +34,6 @@ impl TerminalLink {
         Arc::new(Self { parts: Parts { name, pane, mods, limits, busy: Arc::default(), life }, watch: Mutex::new(None) })
     }
 
-    fn ctx<'a>(&'a self, until: Instant, undo: &'a Undo) -> Ctx<'a> {
-        let parts = &self.parts;
-        Ctx { name: &parts.name, pane: parts.pane.as_ref(), mods: &parts.mods, limits: &parts.limits, until, undo, life: parts.life }
-    }
-
     /// Repõe o tamanho mínimo quando nenhum terminal de verdade está ligado (T9). Com um pedido do app em
     /// curso espera a vez dele, até `FLOOR_WAIT`, e só então relê clientes e tamanho: o terminal que se
     /// desliga no meio do clique não avisa de novo, e desistir deixaria a janela abaixo do mínimo.
@@ -48,7 +43,7 @@ impl TerminalLink {
             return;
         };
         let undo = Undo::default();
-        if let Err(error) = click::floor(&self.ctx(Instant::now() + FLOOR_BUDGET, &undo)).await {
+        if let Err(error) = click::floor(&self.parts.ctx(Instant::now() + FLOOR_BUDGET, &undo)).await {
             tracing::debug!(session = %self.parts.name, code = %error.code, "tamanho mínimo do terminal não reposto");
         }
     }
@@ -92,11 +87,6 @@ impl SurfaceLink for TerminalLink {
     /// O pedido roda numa tarefa própria (`click::spawn`): se a rota desistir no fim do orçamento, ele não
     /// começa ação nova e a limpeza roda mesmo assim. A resposta chega antes da limpeza.
     fn call(&self, call: ModsCall, deadline: Instant) -> CallFuture {
-        // Com terminal não há por onde digitar no campo do mod (fora do escopo desta entrega): recusa sem
-        // reservar o pane.
-        if matches!(call, ModsCall::Input { .. }) {
-            return Box::pin(async { Err(no_typing()) });
-        }
         let (_task, reply) = click::spawn(self.parts.clone(), call, deadline);
         Box::pin(async move { reply.await.unwrap_or_else(|_| Err(no_answer())) })
     }
@@ -107,9 +97,7 @@ impl TerminalProbe for TerminalLink {
         let parts = self.parts.clone();
         Box::pin(async move {
             let undo = Undo::default();
-            let ctx = Ctx { name: &parts.name, pane: parts.pane.as_ref(), mods: &parts.mods, limits: &parts.limits,
-                until: Instant::now() + SHOWN_READ_MAX, undo: &undo, life: parts.life };
-            click::read_shown(&ctx).await
+            click::read_shown(&parts.ctx(Instant::now() + SHOWN_READ_MAX, &undo)).await
         })
     }
 

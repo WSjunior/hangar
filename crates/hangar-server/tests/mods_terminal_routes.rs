@@ -7,11 +7,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fake::*;
-use hangar_server::mods::click::{Limits, Pane, PaneOp};
+use hangar_server::mods::click::{Limits, Pane, PaneOp, unstretch};
 use hangar_server::mods::state::*;
 use hangar_server::mods::terminal::TerminalLink;
 use hangar_server::routes::AppState;
-use hangar_server::runtime::gateway::{RuntimeRegistry, unstretch};
+use hangar_server::runtime::gateway::RuntimeRegistry;
 use hangar_server::runtime::terminal::TerminalTarget;
 use hangar_server::terminal_input::TerminalBinding;
 use mods_support::NoLink;
