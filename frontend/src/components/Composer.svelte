@@ -1773,21 +1773,21 @@ import { cachePrazo } from '../lib/cachePrazo';
     if (files && files.length) addFiles(files);
   }
 
-  // Colar imagem(ns) (desktop garante; iOS Safari e instavel). Pega todos os itens de imagem
-  // do clipboard e joga no mesmo fluxo do anexo.
+  // Colar arquivo = mesmo fluxo do arrasto: imagem vira preview, áudio vai pro ditado, o resto vira
+  // chip. Texto continua colando como texto. Navegador no Linux não entrega à página arquivo
+  // copiado no gerenciador de arquivos; Android (Chrome) e iPad entregam.
   function onPaste(e: ClipboardEvent) {
     const items = e.clipboardData?.items;
     if (!items) return;
-    const imgs: File[] = [];
+    const files: File[] = [];
     for (const it of items) {
-      if (it.kind === 'file' && it.type.startsWith('image/')) {
-        const f = it.getAsFile();
-        if (f) imgs.push(f);
-      }
+      if (it.kind !== 'file') continue;
+      const f = it.getAsFile();
+      if (f) files.push(f);
     }
-    if (imgs.length) {
+    if (files.length) {
       e.preventDefault();
-      addFiles(imgs);
+      addFiles(files);
     }
   }
 
