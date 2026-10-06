@@ -39,23 +39,24 @@ try:
    render()
 finally: termios.tcsetattr(fd,termios.TCSADRAIN,old)
 "#;
-struct FakeCli {_dir:tempfile::TempDir,receipt:std::path::PathBuf,label:String,_guard:IsolatedMux,driver:TerminalDriver}
+struct FakeCli {_dir:tempfile::TempDir,receipt:std::path::PathBuf,err:std::path::PathBuf,label:String,_guard:IsolatedMux,driver:TerminalDriver}
 async fn fake_cli() -> FakeCli {
- let dir=tempfile::tempdir().unwrap();let cli=dir.path().join("fake_cli.py");let receipt=dir.path().join("receipt.json");
+ let dir=tempfile::tempdir().unwrap();let cli=dir.path().join("fake_cli.py");let receipt=dir.path().join("receipt.json");let err=dir.path().join("fake_cli.err");
  std::fs::write(&cli,FAKE_CLI).unwrap();
  let label=format!("hangar-input-test-{}-{}",std::process::id(),SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos());let guard=IsolatedMux(label.clone());
- let cli_cmd=format!("python3 '{}' '{}'",cli.display(),receipt.display());
- let new=Command::new("tmux").args(["-L",&label,"new-session","-d","-s","test","-x","100","-y","40",&cli_cmd]).output().await.unwrap();assert!(new.status.success());
+ // O stderr do CLI falso vai a um arquivo: quando o pane morre cedo, é a única pista do motivo.
+ let cli_cmd=format!("python3 '{}' '{}' 2>'{}'",cli.display(),receipt.display(),err.display());
+ let new=Command::new("tmux").args(["-L",&label,"new-session","-d","-s","test","-x","100","-y","40",&cli_cmd]).output().await.unwrap();assert!(new.status.success(),"new-session: {}; fake_cli stderr: {}",String::from_utf8_lossy(&new.stderr),std::fs::read_to_string(&err).unwrap_or_default());
  let meta=Command::new("tmux").args(["-L",&label,"display-message","-p","-t","=test:0.0","#{pane_id}\t#{session_created}"]).output().await.unwrap();assert!(meta.status.success());let meta=String::from_utf8(meta.stdout).unwrap();let mut fields=meta.trim().split('\t');let pane=fields.next().unwrap().to_string();let created=fields.next().unwrap().parse().unwrap();
  let binding=TerminalBinding{name:"test".into(),pane,conversation:"fake-conversation".into(),generation:1,created,mux_argv:vec!["tmux".into(),"-L".into(),label.clone()],windows:false,clipboard_lock_path:None};
  let driver=TerminalDriver::new(binding.clone(),Arc::new(Facts(binding)),Arc::new(ProcessIo::default()),InputLimits{settle:Duration::from_millis(10),literal_settle:Duration::from_millis(25),multiline_settle:Duration::from_millis(25),slash_settle:Duration::from_millis(25),proof_attempts:40,ready_attempts:40,cleanup_attempts:4});
  for _ in 0..100 {if driver.capture().await.is_ok_and(|s|ComposerSnapshot::parse(&s).is_some()){break;}tokio::time::sleep(Duration::from_millis(10)).await;}
- FakeCli {_dir:dir,receipt,label,_guard:guard,driver}
+ FakeCli {_dir:dir,receipt,err,label,_guard:guard,driver}
 }
 #[tokio::test]
 async fn terminal_input_tmux_isolated_fake_cli_unicode_multiline_and_clear() {
  let f=fake_cli().await;let d=&f.driver;
- for (id,text) in [("short","ok"),("unicode","ação 😀 C:\\Users\\test"),("multiline","first\nsecond\nthird"),("clear","/clear"),("semicolon","literal;")] {let r=d.prompt(text,id).await;assert_eq!(r.disposition,Disposition::Accepted,"{id}: {}; fake capture={:?}",r.code,d.capture().await);}
+ for (id,text) in [("short","ok"),("unicode","ação 😀 C:\\Users\\test"),("multiline","first\nsecond\nthird"),("clear","/clear"),("semicolon","literal;")] {let r=d.prompt(text,id).await;assert_eq!(r.disposition,Disposition::Accepted,"{id}: {}; fake capture={:?}; fake_cli stderr: {}",r.code,d.capture().await,std::fs::read_to_string(&f.err).unwrap_or_default());}
  let received:Vec<String>=serde_json::from_slice(&std::fs::read(&f.receipt).unwrap()).unwrap();assert_eq!(received,vec!["ok","ação 😀 C:\\Users\\test","first\nsecond\nthird","/clear","literal;"]);
 }
 #[tokio::test]
@@ -68,7 +69,7 @@ async fn terminal_input_tmux_owner_draft_is_stashed_and_comes_back_identical() {
  assert!(tmux(&["paste-buffer","-t","=test:0.0","-b","dono","-p","-d"]).status.success());
  for _ in 0..100 {if d.capture().await.is_ok_and(|s|s.contains("rascunho do dono")){break;}tokio::time::sleep(Duration::from_millis(10)).await;}
  let r=d.prompt("mensagem do app","app").await;
- assert_eq!(r.disposition,Disposition::Accepted,"{}; capture={:?}",r.code,d.capture().await);
+ assert_eq!(r.disposition,Disposition::Accepted,"{}; capture={:?}; fake_cli stderr: {}",r.code,d.capture().await,std::fs::read_to_string(&f.err).unwrap_or_default());
  assert_eq!(r.draft,Some(DraftOutcome::Returned));
  // O Enter do dono manda o rascunho de volta igual: nada dele foi para a mensagem do app.
  assert!(tmux(&["send-keys","-t","=test:0.0","-l","--","\r"]).status.success());
