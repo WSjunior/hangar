@@ -17,6 +17,9 @@ const panes = new Map<string, PaneEntry>();
 let shown: string | null = null;
 // Painéis que já tiveram desenho: um reaberto com as mesmas props volta sem `ui.render`.
 const drawn = new Set<string>();
+// Painéis fechados e não reabertos: um desenho que estava em curso no fechamento (o mod redesenha a cada
+// segundo, ou o vizinho que veio à frente) termina depois dele e não pode devolver o painel à lista.
+const closed = new Set<string>();
 // Onde o último painel foi colocado; vale para o painel registrado antes do primeiro desenho.
 let lastPlacement: "dock" | "inline" = "dock";
 // Até quando o envio do composer fica segurado (reserva por teclado em curso).
@@ -160,7 +163,7 @@ export function registerUi(on: On) {
 
   on("ui.render", { component: "Pane" }, async ($, e, next) => {
     const tree = await next(e);
-    if (e.surface === "terminal") {
+    if (e.surface === "terminal" && !closed.has(e.requestId)) {
       lastPlacement = e.props.placement;
       panes.set(e.requestId, {
         id: e.requestId, title: e.props.title, placement: e.props.placement, columns: e.props.bodyColumns, tree,
@@ -173,11 +176,14 @@ export function registerUi(on: On) {
   });
 
   on("ui.open", async ($, e, next) => {
+    // Antes do `next`: o primeiro desenho do reaberto pode chegar antes de o `ui.open` responder.
+    closed.delete(e.id);
     const r = await next(e);
-    // Colocado e ainda sem desenho: entra já na lista, para o app ter a aba. Não colocado (aberto sem
-    // pedido abaixo de 144 colunas) não aparece no terminal e não vai ao app (T7). O `ui.open` é uma
-    // chamada do `$`: o resultado vem embrulhado em `{ value }` (ou `{ deny }`).
-    if (r.value?.isPlaced && !panes.has(e.id)) {
+    // Colocado e ainda sem desenho: entra já na lista, no fim, como a aba no terminal. Não colocado (aberto
+    // sem pedido abaixo de 144 colunas) não aparece no terminal e não vai ao app (T7). O `ui.open` é uma
+    // chamada do `$`: o resultado vem embrulhado em `{ value }` (ou `{ deny }`). Fechado enquanto abria,
+    // fica de fora.
+    if (r.value?.isPlaced && !panes.has(e.id) && !closed.has(e.id)) {
       panes.set(e.id, { id: e.id, title: e.title ?? e.id, placement: lastPlacement, columns: null, tree: UNDRAWN });
       schedule($);
     }
@@ -188,7 +194,9 @@ export function registerUi(on: On) {
 
   on("ui.close", async ($, e, next) => {
     const r = await next(e);
-    if (!(r as { deny?: unknown } | undefined)?.deny && panes.has(e.id)) {
+    if ((r as { deny?: unknown } | undefined)?.deny) return r;
+    closed.add(e.id);
+    if (panes.has(e.id)) {
       shown = shownAfterClose([...panes.keys()], shown, e.id);
       panes.delete(e.id);
       drawn.delete(e.id);
