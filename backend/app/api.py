@@ -5946,31 +5946,47 @@ class PluginPressBody(_StrictBody):
     key: str = Field(min_length=1, max_length=256)
 
 
+_MOD_CONVIDADO = erro("erro_mod_convidado",
+    "Só o dono da sessão aciona os mods dela pelo app; quem acompanha como convidado vê, mas não clica.")
+
+
+def _convidado(request: Request) -> bool:
+    from app import guest_users
+    return guest_of(request) is not None or guest_users.current.get() is not None
+
+
 def _recusa_convidado_no_terminal_do_rust(name: str, request: Request) -> None:
     """Convidado (com login ou de convite) não clica em mod de sessão cujo terminal é do Rust.
 
     O pane é do executor do Rust: o `plugin_click` daqui o dirigiria por fora dele. O Rust repassa ao
     Python todo pedido que não é do dono, e o convite chega pela porta 8766 sem passar pelo Rust, por
-    isso a recusa mora aqui, depois da autenticação.
+    isso a recusa mora aqui, depois da autenticação. Esta é só a recusa rápida, por uma fotografia da
+    posse; a que vale é a do empréstimo do teclado (`runtime_terminal._borrow_keyboard`), sob a
+    barreira da sessão, que alcança também a sessão aberta no Rust pelo próprio clique.
     """
-    from app import guest_users, runtime_coordinator
-    if guest_of(request) is None and guest_users.current.get() is None:
+    from app import runtime_coordinator
+    if not _convidado(request):
         return
     coordinator = runtime_coordinator.current()
     if coordinator is not None and coordinator.terminal_in_rust(name):
-        raise HTTPException(403, detail=erro("erro_mod_convidado",
-            "Só o dono da sessão aciona os mods dela pelo app; quem acompanha como convidado vê, mas não clica."))
+        raise HTTPException(403, detail=_MOD_CONVIDADO)
 
 
 @app.post("/api/sessions/{name}/plugin/press", dependencies=[Depends(require_auth),
     Depends(_recusa_convidado_no_terminal_do_rust), Depends(_transfer_guard)])
-async def plugin_press(name: str, body: PluginPressBody):
+async def plugin_press(name: str, body: PluginPressBody, request: Request):
     """Clique num botão que um mod desenhou na faixa ou num painel, pedido pelo app."""
     from app import plugin_click
+    from app.runtime_terminal import GuestRefused, guest_admin
+    marca = guest_admin.set(_convidado(request))
     try:
         return await plugin_click.press(name, body.site, body.key)
     except plugin_click.PressRefused as e:
         raise HTTPException(409, detail=e.detail)
+    except GuestRefused:
+        raise HTTPException(403, detail=_MOD_CONVIDADO) from None
+    finally:
+        guest_admin.reset(marca)
 
 
 @app.post("/api/sessions/{name}/interrupt", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
