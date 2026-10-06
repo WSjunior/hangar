@@ -1134,8 +1134,10 @@ export function worktreeAgeDays(w: WorktreeStatus, now = Date.now() / 1000): num
   return at ? Math.max(0, Math.floor((now - at) / 86400)) : null;
 }
 
+/** Pronta para apagar: mesclada, sem alteração e sem sessão. Arquivo ignorado não segura (cópia
+ *  do CLAUDE.local.md, cache); a confirmação lista o que ele perde. */
 export function worktreeReady(w: WorktreeStatus): boolean {
-  return w.merged && !w.dirty && !w.ignored.length && !w.sessions.length && !w.degraded;
+  return w.merged && !w.dirty && !w.sessions.length && !w.degraded;
 }
 
 /** Soma do disco de várias: com alguma pendente, falha ou parcial, o total é só um mínimo. */

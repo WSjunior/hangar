@@ -83,7 +83,7 @@
   const chaveLote = (b: Bloco, repo: string) => `${b.servidor.id}::${repo}`;
 
   // A confirmação congela o que a pessoa viu: o lote apaga essas e só essas.
-  // As prontas entram sempre; as mescladas que perdem arquivos só se a pessoa marcar cada uma.
+  // As prontas entram sempre; as mescladas com alteração não commitada só se a pessoa marcar cada uma.
   type Confirmacao = { bloco: Bloco; repo: string; prontas: WorktreeStatus[]; comArquivos: WorktreeStatus[];
                        blocked: WorktreeStatus[] };
   let confirmando = $state<Confirmacao | null>(null);
@@ -304,8 +304,9 @@
         {@const agentes = visiveis.filter(worktreeIsAgent)}
         {@const lote = mergedWorktreeBatch(r)}
         {@const prontasRepo = r.worktrees.filter(worktreeReady)}
-        <!-- O botão conta as prontas, igual ao contador; sem prontas, o lote (mescladas com arquivos) segue alcançável. -->
-        {@const limpar = prontasRepo.length ? prontasRepo : lote.deletable}
+        <!-- O botão conta as prontas, igual ao contador; sem prontas, o lote (mescladas com alteração) segue alcançável. -->
+        {@const [limpar, rotuloLimpar] = prontasRepo.length ? [prontasRepo, m.worktree_limpar_mescladas]
+                                                            : [lote.deletable, m.worktree_clean_merged_with_changes]}
         {@const k = chaveLote(b, r.repo)}
         {@const subAberto = filtro !== 'todas' || !!subAbertos[k]}
         {@const principal = r.worktrees.find((w) => w.main_branch)?.main_branch}
@@ -319,7 +320,7 @@
             {#if lote.deletable.length}
               <button type="button" class="lote" disabled={loteAndando === k} onclick={() => pedirLote(b, r)}>
                 {#if loteAndando === k}<Spinner />{/if}
-                {m.worktree_limpar_mescladas({ n: limpar.length, tamanho: worktreesSizeSum(limpar) })}
+                {rotuloLimpar({ n: limpar.length, tamanho: worktreesSizeSum(limpar) })}
               </button>
             {/if}
             {#if erroLote[k]}<p class="erro" role="alert">{erroLote[k]}</p>{/if}
