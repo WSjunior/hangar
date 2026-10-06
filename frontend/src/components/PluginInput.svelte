@@ -11,25 +11,59 @@
     submitLabel: string;
     /** Sem ele (sessão com terminal, ou servidor que não diz a fonte) o campo fica desabilitado, com a dica. */
     onInput?: (kind: PluginInputKind, value: string) => void;
+    /** Identidade do desenho do mod (o nó da árvore): muda a cada evento novo, mesmo com o mesmo `value`. */
+    frame?: unknown;
   }
-  let { label, placeholder, value, submitLabel, onInput }: Props = $props();
+  let { label, placeholder, value, submitLabel, onInput, frame }: Props = $props();
   let field: HTMLInputElement | undefined = $state();
 
-  // O valor desenhado só entra com o campo fora de foco: um redesenho atrasado não apaga o que se digita.
+  // Quando o valor desenhado entra, como no nativo: só conta como posto quando é posto. Com a pessoa no campo ele fica
+  // pendente (um redesenho atrasado não apaga o que se digita) e entra quando o campo perde o foco. Logo depois do
+  // envio do próprio campo, o desenho seguinte entra mesmo com foco: é como o mod limpa o campo depois do envio, e o
+  // valor pode ser igual ao de antes (vazio). Não são estado reativo: só o desenho novo e o blur as leem.
+  let pending: string | null = null;
+  let submitted = false;
+
+  function put(drawn: string) {
+    if (field && field.value !== drawn) field.value = drawn;
+  }
+
   $effect(() => {
     const drawn = value;
-    if (field && document.activeElement !== field && field.value !== drawn) field.value = drawn;
+    void frame;
+    if (!field) return;
+    // Depois do envio, um desenho igual ao que se vê (o eco da última tecla) não é a resposta ao envio: a vez fica.
+    if (document.activeElement !== field || (submitted && drawn !== field.value)) {
+      pending = null;
+      submitted = false;
+      put(drawn);
+    } else {
+      pending = drawn;
+    }
   });
 
+  function blur() {
+    if (pending !== null) put(pending);
+    pending = null;
+  }
+
+  function change(text: string) {
+    // Voltar a digitar fecha a vez do desenho que responde ao envio.
+    submitted = false;
+    onInput?.('change', text);
+  }
+
   function submit() {
-    if (field) onInput?.('submit', field.value);
+    if (!field || !onInput) return;
+    submitted = true;
+    onInput('submit', field.value);
   }
 </script>
 
 <span class="plugin-field">
   {#if label}<span class="label">{label}</span>{/if}
   <input bind:this={field} type="text" {placeholder} aria-label={label || placeholder} disabled={!onInput}
-         oninput={(e) => onInput?.('change', e.currentTarget.value)}
+         oninput={(e) => change(e.currentTarget.value)} onblur={blur}
          onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } }} />
   {#if onInput}
     <button type="button" class="submit" onclick={submit}>{submitLabel || m.plugin_input_enviar()}</button>
