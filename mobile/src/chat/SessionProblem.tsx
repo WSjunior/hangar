@@ -27,6 +27,7 @@ const problemLabels: Record<string, () => string> = {
   terminal_input_composer_unreadable: m.problema_terminal_input_composer_unreadable,
   terminal_input_capture_failed: m.problema_terminal_input_capture_failed,
   terminal_input_stalled: m.problema_terminal_input_stalled,
+  terminal_clear_not_applied: m.problema_terminal_clear_not_applied,
   list_capture_failed: m.problema_list_capture_failed,
   list_runtime_unavailable: m.problema_list_runtime_unavailable,
   list_runtime_absent: m.problema_list_runtime_absent,

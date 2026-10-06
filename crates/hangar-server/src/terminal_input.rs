@@ -509,9 +509,22 @@ impl TerminalDriver {
     }
     fn composer(screen: &str, typed: &str) -> Result<ComposerSnapshot, IoFailure> {
         if overlay(screen) { return Err(IoFailure { code: "overlay", may_have_written: false }); }
+        if crate::terminal_state::footer_focus(screen) { return Err(IoFailure { code: "footer_focus", may_have_written: false }); }
         let mut snapshot = ComposerSnapshot::parse(typed).ok_or(IoFailure { code: "composer_unreadable", may_have_written: false })?;
         snapshot.stashed = stash_held(screen);
         Ok(snapshot)
+    }
+    /// Com o foco no rodapé do Claude Code (painel de agentes, pílula de tarefas) o texto digitado some
+    /// e o `x` para um subagente. Um Esc lá só devolve o foco ao composer, sem interromper o turno; o
+    /// foco que não volta adia a entrada sem digitar.
+    async fn return_footer_focus(&self) -> Result<ComposerSnapshot, IoFailure> {
+        self.key_inner("Escape").await.map_err(|e| IoFailure { may_have_written: false, ..e })?;
+        let mut last = IoFailure { code: "footer_focus", may_have_written: false };
+        for _ in 0..4 {
+            self.settle().await;
+            match self.snapshot().await { Err(e) if e.code == "footer_focus" => last = e, other => return other }
+        }
+        Err(last)
     }
     async fn refresh_input_guard(&self) -> Result<ComposerSnapshot, IoFailure> {
         let facts = self.verify().await?;
@@ -655,7 +668,11 @@ impl TerminalDriver {
             facts = match self.verify().await { Ok(f) => f, Err(e) => return Self::failed(e, DeliveryStage::Identity) };
         }
         if !facts.ready { return DeliveryResult::new(Disposition::Deferred, DeliveryStage::Ready, "not_ready"); }
-        let draft = match self.snapshot().await { Ok(d) => d, Err(e) => return Self::failed(e, DeliveryStage::Composer) };
+        let draft = match self.snapshot().await {
+            Err(e) if e.code == "footer_focus" => self.return_footer_focus().await,
+            other => other,
+        };
+        let draft = match draft { Ok(d) => d, Err(e) => return Self::failed(e, DeliveryStage::Composer) };
         if draft.is_empty() { return self.deliver(text, id, draft, None).await; }
         // O guardado tem uma vaga só: ocupado, o Ctrl+S jogaria fora o que já estava nele.
         if draft.stashed { return DeliveryResult::new(Disposition::Deferred, DeliveryStage::Composer, "composer_busy"); }

@@ -1,0 +1,31 @@
+✻ Waiting for 1 background agent to finish
+
+● Agent "Sleep 240 seconds then report done" finished · 6s
+
+● The background agent has checked in. It launched the sleep command and is running it in the background — the 240-second timer is still counting. It will
+  report "done" when the sleep completes.
+
+✻ Cogitated for 12s · done 14:32 · 1 shell still running
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Enter to view · x to stop
+
+  ● main
+❯ ◯ general-purpose  Sleep 240 seconds then report done                                                                                    6s · ↓ 22.6k tokens

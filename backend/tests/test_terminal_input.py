@@ -1,3 +1,4 @@
+from pathlib import Path
 from unittest.mock import patch, call
 
 import pytest
@@ -1621,7 +1622,9 @@ def test_send_prompt_claude_esvazia_residuo_antes_de_digitar(monkeypatch):
     # Regressao do caso real: o C-u tem de sair ANTES do texto, senao o Enter gruda as mensagens.
     monkeypatch.setattr(terminal_input, "deliverable", lambda name: True)
     monkeypatch.setattr(terminal_input, "_wait_input_ready", lambda name, provider="claude": True)
-    panes = iter([_pane_claude(["❯ residuo parado no composer"]), _pane_claude(["❯"])])
+    # A primeira leitura é a do foco (`_devolver_foco_ao_composer`).
+    residuo = _pane_claude(["❯ residuo parado no composer"])
+    panes = iter([residuo, residuo, _pane_claude(["❯"])])
     ultimo = [None]
 
     def captura(*_a, **_k):
@@ -1633,6 +1636,40 @@ def test_send_prompt_claude_esvazia_residuo_antes_de_digitar(monkeypatch):
          patch.object(terminal_input, "send_keys") as sk:
         assert TerminalInput().send_prompt("cc", "corrige o bug") == "sent"
     assert sk.call_args_list[:2] == [call("cc", "C-u"), call("cc", "corrige o bug", literal=True)]
+
+
+# #85: com o foco no rodapé do Claude Code (painel de agentes) o texto digitado sumia — foi lá que
+# o /clear do app caiu. Telas reais do Claude Code em backend/tests/fixtures.
+_FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def test_send_prompt_claude_devolve_o_foco_do_painel_de_agentes_antes_de_digitar(monkeypatch):
+    monkeypatch.setattr(terminal_input, "deliverable", lambda name: True)
+    monkeypatch.setattr(terminal_input, "_wait_input_ready", lambda name, provider="claude": True)
+    monkeypatch.setattr(terminal_input.time, "sleep", lambda s: None)
+    panes = iter([(_FIXTURES / "pane_agents_panel_focused.txt").read_text(encoding="utf-8"), _pane_claude(["❯"])])
+    ultimo = [None]
+
+    def captura(*_a, **_k):
+        ultimo[0] = next(panes, ultimo[0])
+        return ultimo[0]
+
+    with patch("app.terminal_input.tmux.capture_pane", side_effect=captura), \
+         patch.object(terminal_input, "_entrou_no_composer", lambda *_a: True), \
+         patch.object(terminal_input, "send_keys") as sk:
+        assert TerminalInput().send_prompt("cc", "/clear") == "sent"
+    assert sk.call_args_list[:2] == [call("cc", "Escape"), call("cc", "/clear", literal=True)]
+
+
+def test_send_prompt_claude_foco_que_nao_volta_adia_sem_digitar(monkeypatch):
+    monkeypatch.setattr(terminal_input, "deliverable", lambda name: True)
+    monkeypatch.setattr(terminal_input, "_wait_input_ready", lambda name, provider="claude": True)
+    monkeypatch.setattr(terminal_input.time, "sleep", lambda s: None)
+    pane = (_FIXTURES / "pane_agents_footer_focused.txt").read_text(encoding="utf-8")
+    with patch.object(terminal_input, "_capture", return_value=pane), \
+         patch.object(terminal_input, "send_keys") as sk:
+        assert TerminalInput().send_prompt("cc", "/clear") == "deferred"
+    assert sk.call_args_list == [call("cc", "Escape")]
 
 
 def test_send_prompt_pi_nao_ganha_a_limpeza_do_claude(monkeypatch):

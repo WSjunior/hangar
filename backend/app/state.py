@@ -345,6 +345,32 @@ def menu_codex(pane_text: str) -> Optional[tuple[Optional[str], list[str]]]:
 # default permission mode?"): as opções vêm sem número e o `_CURSOR_RE` não o enxerga. Sem isto a
 # sessão parecia ociosa e o envio digitava em cima da pergunta.
 _CURSOR_SEM_NUMERO_RE = re.compile(r"^(\s*❯\s+)\S")
+# Dicas que o Claude Code põe no rodapé quando o foco está nele, no lugar de "↓ to manage".
+_FOCO_NO_RODAPE_RE = re.compile(r"Enter to view|↑/↓ to select")
+
+
+def _fim_do_composer(lines: list[str], ate: Optional[int] = None) -> Optional[int]:
+    """A régua de baixo da última caixa do composer (régua, `❯`, régua) antes de `ate`, ou None.
+    Abaixo dela mora o rodapé do Claude Code."""
+    regras = [j for j, ln in enumerate(lines[:ate]) if _RULE_RE.match(ln)]
+    if len(regras) < 2 or not any(ln.lstrip().startswith("❯") for ln in lines[regras[-2] + 1:regras[-1]]):
+        return None
+    return regras[-1]
+
+
+def _painel_de_agentes(lines: list[str], top: int, options: list[str]) -> bool:
+    # O painel de agentes ("← for agents": ● principal, ◯ subagente) com foco põe o `❯` num agente e
+    # parece um menu sem número; responder ao cartão dele navegava no painel.
+    return all(o[:1] and o[0] in "●◯" for o in options) and _fim_do_composer(lines, top) is not None
+
+
+def foco_no_rodape(pane_text: str) -> bool:
+    """O teclado está no rodapé do Claude Code (painel de agentes ou pílula de tarefas), não no
+    composer: o que se digita some, e o `x` do painel para um subagente."""
+    lines = pane_text.splitlines()
+    fim = _fim_do_composer(lines)
+    return fim is not None and any(_CURSOR_SEM_NUMERO_RE.match(ln) or _FOCO_NO_RODAPE_RE.search(ln)
+                                   for ln in lines[fim + 1:])
 
 
 def _menu_sem_numero(lines: list[str]) -> Optional[tuple[Optional[str], list[str], int]]:
@@ -371,7 +397,7 @@ def _menu_sem_numero(lines: list[str]) -> Optional[tuple[Optional[str], list[str
     while bot < len(lines) and na_coluna(lines[bot]):
         bot += 1
     options = [lines[i][col:].strip() for i in range(top, bot)]
-    if len(options) < 2:
+    if len(options) < 2 or _painel_de_agentes(lines, top, options):
         return None
     # A pergunta é o título: primeira linha com texto depois da régua que abre o diálogo.
     inicio = max((i for i in range(top) if _RULE_RE.match(lines[i])), default=-1) + 1

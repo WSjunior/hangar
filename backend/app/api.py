@@ -4726,6 +4726,15 @@ async def _send_managed(name: str, text: str, provider: str, *, track_entry: boo
                 **({"entry_id":operation_id} if track_entry and queued else {})}
         if disposition not in {"accepted", "deferred"}:
             raise RuntimeError("resultado incerto; entrada conservada sem reenvio" if disposition == "unknown" else "entrada recusada pelo runtime")
+        if (disposition == "deferred" and command["kind"] == "submit" and not queued and provider == "claude"
+                and isinstance(coordinator.slot(name).binding.meta.get("terminal"), dict)):
+            # Comando de barra não tem linha na fila: adiado, ele não roda depois sozinho.
+            motivo = str((reply.get("payload") or {}).get("code") or "deferred")
+            comando = text.split()[0]
+            diag.registrar("runtime.command_deferred", "aviso", sessao=name, codigo=motivo[:60])
+            return {"ok":False, "error":erro("erro_comando_nao_executado",
+                f"{comando} não foi executado: o terminal não aceitou agora ({motivo}). Mande de novo.",
+                comando=comando, motivo=motivo)}
         return {"ok":True, "error":None, "delivered":disposition == "accepted",
             **({"native":True} if (reply.get("payload") or {}).get("native") is True else {}),
             **({"entry_id":operation_id} if track_entry and command["kind"] == "submit" and not text.lstrip().startswith("/") else {})}
@@ -6066,7 +6075,9 @@ async def interrupt(name: str, clear: bool = False):
     # clear=True: alem de interromper, limpa o input (2o Esc). So o front com msg pendente passa isso —
     # garante input nao-vazio, evitando que o Esc-Esc abra o menu de rewind num input ja vazio.
     # terminal.interrupt e SYNC (tmux) -> threadpool pra nao bloquear o event loop (handler async agora).
+    pergunta = (plugin_bridge.pergunta_pendente(name) or {}).get("id")
     await asyncio.to_thread(terminal.interrupt, name, clear=clear)
+    plugin_bridge.interrompeu(name, pergunta)
     return {"ok": True}
 
 

@@ -390,6 +390,21 @@ def test_is_overlay_ve_o_trust_dialog_do_claude():
     assert state_mod.is_overlay(pane) is True
 
 
+def test_painel_de_agentes_com_foco_nao_e_menu():
+    # #85: o "← for agents" do Claude Code com foco põe o `❯` num agente (● principal, ◯ subagente)
+    # abaixo do composer. Lido como menu sem número, o app mostrava "Escolha uma opção" e responder
+    # navegava no painel. Telas reais, parada e trabalhando.
+    for nome in ("pane_agents_panel_focused.txt", "pane_agents_panel_focused_working.txt"):
+        pane = (Path(__file__).parent / "fixtures" / nome).read_text(encoding="utf-8")
+        assert state_mod.classify(pane)[0] == "working"
+        assert state_mod.cursor_sem_numero(pane) is None
+        assert state_mod.foco_no_rodape(pane) is True
+    rodape = (Path(__file__).parent / "fixtures" / "pane_agents_footer_focused.txt").read_text(encoding="utf-8")
+    assert state_mod.foco_no_rodape(rodape) is True
+    confianca = (Path(__file__).parent / "fixtures" / "pane_trust_dialog.txt").read_text(encoding="utf-8")
+    assert state_mod.foco_no_rodape(confianca) is False
+
+
 def test_dialogo_sem_numero_e_sem_rodape_e_pergunta():
     # "Make auto mode your default permission mode?" (Claude Code 2.1.280): opcoes sem numero e sem
     # rodape de navegacao. Classificado como idle, o envio digitava em cima da pergunta e voltava
