@@ -164,6 +164,9 @@ impl Undo {
     fn with<T>(&self, change: impl FnOnce(&mut Pending) -> T) -> T { change(&mut self.0.lock().unwrap()) }
 }
 
+/// Quando e em que célula saiu o último clique de mouse no pane.
+pub type LastClick = Option<(Instant, (usize, usize))>;
+
 pub struct Ctx<'a> {
     pub name: &'a str,
     pub pane: &'a dyn Pane,
@@ -178,7 +181,7 @@ pub struct Ctx<'a> {
     pub life: u64,
     /// Quando e onde saiu o último clique de mouse neste pane, deste pedido ou de um anterior
     /// (`Parts::clicked`).
-    pub clicked: &'a Mutex<Option<(Instant, (usize, usize))>>,
+    pub clicked: &'a Mutex<LastClick>,
 }
 
 /// O que o app pediu, resolvido no espelho que o plugin mandou.
@@ -897,7 +900,7 @@ pub struct Parts {
     /// A vida da sessão a que o elo pertence (`Ctx::life`).
     pub life: u64,
     /// O último clique de mouse no pane, entre um pedido e o seguinte (`Ctx::clicked`).
-    pub clicked: Arc<Mutex<Option<(Instant, (usize, usize))>>>,
+    pub clicked: Arc<Mutex<LastClick>>,
 }
 
 impl Parts {
