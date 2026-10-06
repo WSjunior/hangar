@@ -11,4 +11,5 @@ pub mod routes;
 pub mod bridge;
 pub mod click;
 pub mod screen;
+pub mod terminal;
 mod http;

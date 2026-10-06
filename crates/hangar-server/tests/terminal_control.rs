@@ -562,3 +562,21 @@ fn stray_hook_output_in_another_encoding_is_ignored_too() {
     let mut parser = ControlParser::default();
     assert!(parser.push(b"sa\xeddo do hook em latin-1\n%begin 4 9 0\nok\n%end 4 9 0\n").unwrap().len() == 1);
 }
+
+#[test]
+fn notices_only_with_the_watch_parser() {
+    let feed = b"%session-changed $0 t\n%client-session-changed /dev/pts/5 $0 t\n%layout-change @0 ca7d,100x29,0,0,0 ca7d,100x29,0,0,0 *\n%client-detached /dev/pts/5\n%window-add @1\n";
+    assert!(ControlParser::default().push(feed).unwrap().is_empty(), "o observador da prévia não muda");
+    let notices: Vec<ControlEvent> = ControlParser::with_notices().push(feed).unwrap();
+    assert_eq!(notices, ["session-changed", "client-session-changed", "layout-change", "client-detached"]
+        .map(|kind| ControlEvent::Notice(kind.into())).to_vec());
+}
+
+/// No psmux o Hangar não liga cliente de controle: a contagem de terminais por `#{session_attached}` da
+/// Task 9 depende disso.
+#[cfg(windows)]
+#[tokio::test]
+async fn the_watch_refuses_on_windows() {
+    let Err(error) = hangar_server::terminal_control::watch_notices(&["tmux".into()], "t") else { panic!("o vigia não pode subir no Windows") };
+    assert_eq!(error.0, "terminal control unavailable");
+}
