@@ -139,3 +139,25 @@ fn attach_keeps_the_live_toasts() {
     assert_eq!(toasts.len(), 1);
     assert_eq!(toasts[0]["text"], "fica");
 }
+
+#[test]
+fn bridge_finds_a_renamed_session_by_its_old_names_and_the_current_name_wins() {
+    let mods = Mods::default();
+    mods.attach_keyed("a", "k1", 1, Arc::new(NoLink));
+    assert_eq!(mods.bridge_session("a").as_deref(), Some("a"));
+    assert_eq!(mods.bridge_session("b"), None);
+    // Renomeada duas vezes sem relançar o processo: os dois nomes antigos levam à sessão.
+    mods.forget("a", 1);
+    mods.attach_keyed("b", "k1", 1, Arc::new(NoLink));
+    mods.forget("b", 1);
+    mods.attach_keyed("c", "k1", 1, Arc::new(NoLink));
+    assert_eq!((mods.bridge_session("a").as_deref(), mods.bridge_session("b").as_deref()), (Some("c"), Some("c")));
+    // Outra sessão (outra chave) que nasce com um nome antigo fica com ele.
+    mods.attach_keyed("a", "k2", 1, Arc::new(NoLink));
+    assert_eq!((mods.bridge_session("a").as_deref(), mods.bridge_session("b").as_deref()), (Some("a"), Some("c")));
+    // Fechada de vez, a sessão não é achada por nome nenhum; reaberta com outra chave, não herda.
+    mods.forget("c", 1);
+    assert_eq!(mods.bridge_session("b"), None);
+    mods.attach_keyed("d", "k3", 1, Arc::new(NoLink));
+    assert_eq!(mods.bridge_session("b"), None);
+}

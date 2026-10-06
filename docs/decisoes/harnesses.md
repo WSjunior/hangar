@@ -1689,6 +1689,7 @@ Limites conhecidos:
   `erro_mod_guarda_indisponivel`;
 - o convidado não digita em campo de mod nas sessões sem terminal;
 - o `opened` com bind de LAN é limite antigo da ponte, que continua valendo;
+- a sessão sem terminal renomeada continua com o mesmo `claude -p`, que manda à ponte o nome com que nasceu (`CP_SESSION_NAME`) e o token desse nome. O renomear fecha e reabre a sessão no Rust, e a reabertura herda, pela chave durável, os nomes de antes; com isso `press-start` e `opened` acham a sessão. Se o `hangar-server` reiniciar depois do renomear, ele não conhece o nome antigo, e a URL de um clique do app abre na máquina do servidor até o processo ser relançado. Fechar isso pede gravar o nome de nascimento no sidecar da sessão, no Python, fora da exceção S7;
 - a sessão com terminal, inclusive no Windows (onde o terminal já nasce no Rust), ainda não é superfície remota: a interface dos mods dela segue pelo plugin e pelo Python, e a ponte só entra nela na fase 3.
 - o aparelho que acompanha recebe a vista inteira a cada mudança da faixa, sem gzip (SSE): a barra do pmedico, que redesenha a 1 Hz com um painel grande aberto, custa ~400 KB/s por aparelho. Cortar isso pede mudança de contrato com os apps (um evento só da faixa, ou revisão por painel com a árvore omitida quando não mudou, com anúncio de capacidade no `/events` para os apps atrasados), fora deste trabalho.
 
