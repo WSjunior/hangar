@@ -4,13 +4,12 @@
 # Uso: powershell -ExecutionPolicy Bypass -File scripts\medir-rust.ps1
 $ErrorActionPreference = 'Stop'
 
-$proc = Get-CimInstance Win32_Process |
-    Where-Object { $_.CommandLine -like '*-m app.main*' -and $_.Name -like 'python*' } |
-    Select-Object -First 1
-if (-not $proc) { Write-Host 'backend do Hangar nao esta rodando'; exit 1 }
-# python.exe fica em backend\.venv\Scripts; o .env fica em backend.
-$backend = Split-Path (Split-Path (Split-Path $proc.ExecutablePath))
-$tokenLine = Get-Content (Join-Path $backend '.env') | Where-Object { $_ -like 'CP_AUTH_TOKEN=*' } | Select-Object -First 1
+# O token vem do .env do checkout deste script. Achar o backend pelo processo falha quando ele roda
+# elevado ou em outra sessao: sem admin o Windows esconde a linha de comando dele.
+$envFile = Join-Path (Split-Path $PSScriptRoot) 'backend\.env'
+if (-not (Test-Path $envFile)) { Write-Host "nao achei $envFile"; exit 1 }
+$tokenLine = Get-Content $envFile | Where-Object { $_ -like 'CP_AUTH_TOKEN=*' } | Select-Object -First 1
+if (-not $tokenLine) { Write-Host "CP_AUTH_TOKEN ausente em $envFile"; exit 1 }
 $token = $tokenLine.Substring('CP_AUTH_TOKEN='.Length)
 $headers = @{ Authorization = "Bearer $token" }
 
