@@ -489,3 +489,21 @@ fn only_actions_carry_a_deadline_to_the_writer() {
     let redraw = ok(&mut surface, &first, json!({"handled": false}), 0.2);
     assert_eq!(until(&redraw, "ui_render"), None, "o desenho vai sem prazo");
 }
+
+/// Dois mods desenham um controle com a mesma `key` no mesmo lugar: o app não diz de qual mod é, e nenhum é
+/// acionado, nem botão nem campo. A resposta é a do item que não está mais na tela.
+#[test]
+fn the_same_key_from_two_mods_triggers_neither() {
+    let two = |kind: &str| json!({"type": "Box", "children": [
+        {"type": kind, "props": {"key": "ok", "label": "OK"}, "press": {"plugin": "um", "handle": 1}},
+        {"type": kind, "props": {"key": "ok", "label": "OK"}, "press": {"plugin": "outro", "handle": 2}}]});
+    let mut surface = ready(two("Button"));
+    let out = app(&mut surface, 1, press("above-prompt", "ok"), 0.1);
+    assert!(writes(&out).is_empty(), "nada sai ao mod: {:?}", writes(&out));
+    assert_eq!(code(reply_of(&out, 1)), "erro_mod_botao_inexistente");
+    let mut surface = ready(two("Input"));
+    let typing = ModsCall::Input { site: "above-prompt".into(), key: "ok".into(), submit: true, value: "x".into() };
+    let out = app(&mut surface, 2, typing, 0.1);
+    assert!(writes(&out).is_empty());
+    assert_eq!(code(reply_of(&out, 2)), "erro_mod_botao_inexistente");
+}

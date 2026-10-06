@@ -894,3 +894,14 @@ async fn a_pane_the_wheel_does_not_roll_goes_to_the_keyboard() {
     assert_eq!(pane.actions().iter().filter(|a| a.starts_with("wheel ")).count(), 2, "para baixo e para cima");
     assert!(keys(&pane).contains(&"Enter".to_string()));
 }
+
+#[tokio::test]
+async fn the_same_key_from_two_mods_on_the_terminal_triggers_neither() {
+    // Dois mods com a mesma `key` no painel: nenhuma ação chega ao pane, e a resposta é a do item ausente.
+    let mut v = pm();
+    v.panes[1].tree = json!({"type": "Box", "children": [mods_support::pane::button("mr-a", "Abrir", "pm-mock"),
+        mods_support::pane::button("mr-a", "Outro", "vitrine")]});
+    let (mods, pane) = setup("tmux-02-apos-clicar-mr-150", v);
+    assert_eq!(code(press(&mods, &pane, "pm-mock-mr", "mr-a").await), "erro_mod_botao_inexistente");
+    assert!(pane.actions().is_empty(), "{:?}", pane.actions());
+}

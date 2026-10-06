@@ -9,9 +9,37 @@ pub struct Control {
     pub handle: i64,
 }
 
-/// O primeiro elemento de um dos `kinds` com esta `key`, na ordem do documento, com o `press` dele.
-/// Sem `press` não há como acionar: conta como ausente.
+/// O elemento de um dos `kinds` com esta `key`, com o `press` dele. Sem `press` não há como acionar: conta
+/// como ausente. Mais de um (dois mods desenhando a mesma `key` no mesmo lugar) também: o app não diz de
+/// qual mod é o controle, e acionar o primeiro seria acionar o mod errado.
 pub fn find(tree: &Value, key: &str, kinds: &[&str]) -> Option<Control> {
+    match controls(tree, key, kinds).as_slice() {
+        [one] => Some(one.clone()),
+        _ => None,
+    }
+}
+
+/// Mais de um elemento de um dos `kinds` com esta `key`, acionável ou não.
+pub fn ambiguous(tree: &Value, key: &str, kinds: &[&str]) -> bool {
+    let mut stack = vec![tree];
+    let mut seen = 0;
+    while let Some(node) = stack.pop() {
+        let Some(object) = node.as_object() else { continue };
+        let kind = object.get("type").and_then(Value::as_str).unwrap_or("");
+        if kinds.contains(&kind) && node["props"]["key"] == key {
+            seen += 1;
+            if seen > 1 { return true; }
+        }
+        if let Some(children) = object.get("children").and_then(Value::as_array) {
+            stack.extend(children.iter().rev());
+        }
+    }
+    false
+}
+
+/// Todos os elementos acionáveis de um dos `kinds` com esta `key`, na ordem do documento.
+fn controls(tree: &Value, key: &str, kinds: &[&str]) -> Vec<Control> {
+    let mut found = Vec::new();
     let mut stack = vec![tree];
     while let Some(node) = stack.pop() {
         let Some(object) = node.as_object() else { continue };
@@ -19,14 +47,14 @@ pub fn find(tree: &Value, key: &str, kinds: &[&str]) -> Option<Control> {
         if kinds.contains(&kind) && node["props"]["key"] == key {
             let press = &node["press"];
             if let (Some(plugin), Some(handle)) = (press["plugin"].as_str(), press["handle"].as_i64()) {
-                return Some(Control { kind: kind.to_owned(), plugin: plugin.to_owned(), handle });
+                found.push(Control { kind: kind.to_owned(), plugin: plugin.to_owned(), handle });
             }
         }
         if let Some(children) = object.get("children").and_then(Value::as_array) {
             stack.extend(children.iter().rev());
         }
     }
-    None
+    found
 }
 
 /// Faixa sem nada de mod: só o nó `engine` (`ref: 1` com mods carregados, `ref: 0` sem mod nenhum).
