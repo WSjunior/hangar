@@ -259,6 +259,8 @@ pub(super) struct Dictation {
 impl Dictation {
     fn observe_file_owner(&mut self, owner: Option<SessionOwner>) -> u64 {
         if self.file_owner != owner {
+            // `error` é da tela que ficou para trás; o ditado em curso segue, então só a troca o limpa.
+            if self.owner.is_some() { self.error = None; }
             self.file_owner = owner;
             self.file_generation += 1;
         }
@@ -630,7 +632,7 @@ impl Hangar {
             || self.dictation.owner.is_none() || !self.dictation_here(cx)
             || (self.dictation.file_name.is_some() && style.is_some()) { return; }
         if !self.dictation.draft_matches(&self.composer.read(cx).value()) {
-            self.dictation.error = Some(tr("dictation_draft_changed"));
+            self.dictation.result_error = Some(tr("dictation_draft_changed"));
             cx.notify();
             return;
         }
@@ -1091,5 +1093,23 @@ mod tests {
         let other = session("y", "k:2", "/y.jsonl");
         assert_eq!(place(&x, Some(&other), None), Place::Away(x.key.clone()));
         assert_eq!(place(&x, Some(&session("x", "k:1", "/a.jsonl")), None), Place::Open, "aberta é aberta mesmo sem lista");
+    }
+
+    #[test]
+    fn switching_session_clears_the_screen_error_only_on_the_switch() {
+        let mut state = Dictation::default();
+        let origin = Some((1, "http://m/".to_owned(), "x".to_owned()));
+        let other = Some((1, "http://m/".to_owned(), "y".to_owned()));
+        state.owner = origin.clone();
+        state.target = Some(target("x", "k:1"));
+        state.observe_file_owner(origin.clone());
+        state.error = Some("envio automático falhou".into());
+        state.result_error = Some("rascunho mudou".into());
+        state.observe_file_owner(other.clone());
+        assert!(state.error.is_none(), "o erro de X não aparece em Y");
+        assert!(state.result_error.is_some(), "o do resultado fica para a volta a X");
+        state.error = Some("estilo".into());
+        state.observe_file_owner(other.clone());
+        assert_eq!(state.error.as_deref(), Some("estilo"), "erro do estilo em Y continua visível");
     }
 }
