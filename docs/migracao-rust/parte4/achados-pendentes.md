@@ -17,6 +17,10 @@ Achados médios e baixos das revisões por Task que entraram na `feat/parte4` se
   `FileTail` e zera o `committed` no `rebind`; acordar o `Monitor` no commit para a limpeza ser
   imediata (hoje vem no toque seguinte, até 0,15 s trabalhando e 0,75 s parado);
   `preview_files`/`preview_capture` com `spawn_blocking` e prazo.
+- Task 4: os métodos do `Sources` com implementação padrão escondem o que a produção esquecer
+  (a Task 5 implementa todos e prova num teste); `deliverable()` sem retorno: falha só o
+  implementador registra e a borda não repete (igual ao Python); `suggest` e `asked` são por
+  `Monitor`, quem conecta depois depende da reposição do `SideCache`.
 
 ## Antes da `hangar-server-parte1`
 
@@ -37,6 +41,11 @@ Achados médios e baixos das revisões por Task que entraram na `feat/parte4` se
   do texto do hook por toque; `norm()` sem os separadores `\x1c-\x1f`; a época zera a prévia sem
   publicar vazio (o reset do hub cobre); largura por `unicode-width` pode divergir do Python em
   caracteres raros.
+- Task 4: com `awaiting_input` e sem `ask_question` emitido, o `Monitor` relê o arquivo da
+  pergunta a cada rodada (o Python só relê na mudança de estado) — desvio aceito: o hook pode
+  gravar depois de o menu aparecer; problema do runtime perde para o dos fatos e da observação
+  (igual ao Python); o celular não mostra o detalhe dos códigos novos; casamento degradado vai
+  ao log em `info` (igual ao Python); nativo não compilado nesta Task (só o `messages`).
 - Task 8: fila de entrada limitada em quadros (64), não em bytes; `lock().unwrap()`; erro de
   leitura do PTY que não é EIO fecha como fim normal; resize do PTY que falha só aparece em debug;
   `restore_after_crash` na subida sem diário (só `warn`); troca de painel com desmontagem acima de
