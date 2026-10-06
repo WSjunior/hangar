@@ -168,6 +168,28 @@ def test_connect_owner_terminal_pipes_to_rust(rust, no_pty):
     assert len(rust.requests) == 1
 
 
+class _SlowCleanup:
+    """`asyncio` do termsock com a espera da limpeza lenta: o cancelamento pega o `finally` no meio."""
+
+    def __getattr__(self, name):
+        return getattr(asyncio, name)
+
+    async def wait(self, fs, *args, **kwargs):
+        if "return_when" not in kwargs:
+            await asyncio.sleep(0.2)
+        return await asyncio.wait(fs, *args, **kwargs)
+
+
+def test_cancel_during_cleanup_still_closes_upstream(rust, monkeypatch):
+    # O TestClient cancela o app logo após o desconectar, como um convidado revogado no meio da
+    # limpeza: o repasse ao Rust fecha mesmo assim (o `stop` da fixture confere).
+    monkeypatch.setattr(termsock, "asyncio", _SlowCleanup())
+    c = TestClient(_app(), base_url=f"http://127.0.0.1:{CONNECT_PORT}", client=("127.0.0.1", 5))
+    with c.websocket_connect(f"ws://127.0.0.1:{CONNECT_PORT}/api/sessions/dono/term?token=secret") as ws:
+        assert ws.receive_bytes() == b"hello-from-rust"
+    _until(rust.closed.is_set)
+
+
 def test_revoked_guest_closes_upstream_4410(rust, monkeypatch):
     monkeypatch.setattr(share_gate, "WATCH_INTERVAL", 0.05)
     with _guest().websocket_connect(f"{GUEST_WS}/api/sessions/cc/term?token=g") as ws:
