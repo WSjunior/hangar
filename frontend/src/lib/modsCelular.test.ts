@@ -13,6 +13,10 @@ function fakeStorage(initial: Record<string, string> = {}) {
 
 // A primeira importação puxa o @hangar/core e o Paraglide e, com a suíte inteira em paralelo, passa dos 5 s de um
 // caso; aquece aqui, com prazo próprio, para o tempo do primeiro caso ser só o dele.
+// O resetModules de cada caso reimporta o grafo inteiro, então com a máquina carregada os casos seguintes também
+// passam dos 5 s: o prazo do arquivo cobre isso.
+vi.setConfig({ testTimeout: 30_000 });
+
 beforeAll(async () => {
   vi.stubGlobal('localStorage', fakeStorage());
   await import('./modsCelular.svelte');
