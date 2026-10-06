@@ -351,10 +351,12 @@ async fn median_ms(addr: std::net::SocketAddr) -> f64 {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn large_chunked_body_is_not_held_by_nagle() {
     // Sem TCP_NODELAY o pedaço pequeno do fim espera o ACK atrasado do cliente a cada resposta.
+    // Essa espera é o ACK atrasado inteiro (40 ms); com a CPU disputada do runner, o repasse em debug
+    // chega a 20 ms sem ela. O limite fica entre os dois.
     let (pieces, size) = (300, 1000);
     let up = spawn_chunked_upstream(pieces, size).await;
     let srv = spawn_server(config(up, "127.0.0.1")).await;
     let direct = median_ms(up).await;
     let proxied = median_ms(srv).await;
-    assert!(proxied < direct + 20.0, "repasse {proxied:.1} ms contra {direct:.1} ms direto");
+    assert!(proxied < direct + 30.0, "repasse {proxied:.1} ms contra {direct:.1} ms direto");
 }

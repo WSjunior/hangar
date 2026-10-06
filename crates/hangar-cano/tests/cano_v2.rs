@@ -96,6 +96,10 @@ fn exercise_stream<S: std::io::Read + std::io::Write>(old: S, peek: S) {
     assert!(ack && echo);
 }
 
+/// Só flagra a resposta que não chega: o eco vem do `python3` filho, e no runner Windows ele já demorou
+/// mais de 3 s.
+const READ_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[test]
 fn peek_keeps_old_writer_tcp() {
     let address = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
@@ -109,7 +113,7 @@ fn peek_keeps_old_writer_tcp() {
         }
     };
     let peek = std::net::TcpStream::connect(address).unwrap();
-    for stream in [&old, &peek] { stream.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap(); }
+    for stream in [&old, &peek] { stream.set_read_timeout(Some(READ_WAIT)).unwrap(); }
     exercise_stream(old, peek);
 }
 
@@ -129,7 +133,7 @@ fn peek_keeps_old_writer_unix_private_socket() {
     };
     assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
     let peek = UnixStream::connect(&path).unwrap();
-    for stream in [&old, &peek] { stream.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap(); }
+    for stream in [&old, &peek] { stream.set_read_timeout(Some(READ_WAIT)).unwrap(); }
     exercise_stream(old, peek);
     std::fs::remove_file(path).unwrap();
 }

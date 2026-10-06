@@ -8,8 +8,9 @@ use std::sync::atomic::{AtomicUsize,Ordering};
 use std::time::{Duration,Instant};
 use tokio::io::{AsyncBufReadExt,AsyncWriteExt,BufReader};
 
-/// Cano Claude falso: responde o `initialize` depois de `init_delay` e conta os `user` escritos.
-async fn cano(init_delay:Duration,init:Option<&str>) -> (String,Arc<AtomicUsize>,tokio::task::JoinHandle<()>) {
+/// Cano Claude falso: responde o `initialize` quando `init_gate` libera (na hora, sem ele) e conta os
+/// `user` escritos.
+async fn cano(init_gate:Option<Arc<tokio::sync::Notify>>,init:Option<&str>) -> (String,Arc<AtomicUsize>,tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let users = Arc::new(AtomicUsize::new(0));
@@ -37,9 +38,9 @@ async fn cano(init_delay:Duration,init:Option<&str>) -> (String,Arc<AtomicUsize>
             write.lock().await.write_all(format!("{ack}\n").as_bytes()).await.unwrap();
             if frame["type"] == "user" { counter.fetch_add(1,Ordering::SeqCst); }
             if frame["type"] == "control_request" && frame["request"]["subtype"] == "initialize" {
-                let write = write.clone();
+                let (write,init_gate) = (write.clone(),init_gate.clone());
                 tokio::spawn(async move {
-                    tokio::time::sleep(init_delay).await;
+                    if let Some(gate) = init_gate { gate.notified().await; }
                     let reply = json!({"type":"control_response","response":{"subtype":"success",
                         "request_id":frame["request_id"],"response":{"commands":[]}}});
                     let line = json!({"type":"cano_output","frame":reply.to_string()});
@@ -105,7 +106,7 @@ async fn open_runs_queue_recover() {
         store.exec(1,"begin",clock(),Action::BeginDispatch { id:"op".into(),wire_id:"wire".into(),staged:false }).unwrap();
         drop(lease);
     }
-    let (escuta,_,server) = cano(Duration::ZERO,None).await;
+    let (escuta,_,server) = cano(None,None).await;
     let registry = registry().await;
     registry.open(RuntimeTarget { binding:CanoBinding { escuta,..target.binding.clone() },..target.clone() }).await.unwrap();
     let state:Value = serde_json::from_slice(&std::fs::read(&target.state_path).unwrap()).unwrap();
@@ -117,17 +118,19 @@ async fn open_runs_queue_recover() {
 #[tokio::test]
 async fn open_answers_before_initialize() {
     let dir = tempfile::tempdir().unwrap();
-    let (escuta,users,server) = cano(Duration::from_secs(2),None).await;
+    // O `initialize` só sai quando o teste soltar: open que o esperasse não voltaria.
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let (escuta,users,server) = cano(Some(gate.clone()),None).await;
     let registry = registry().await;
-    let started = Instant::now();
-    let opened = registry.open(target(dir.path(),escuta,false)).await.unwrap();
-    assert!(started.elapsed() < Duration::from_millis(1500),"open esperou o initialize: {:?}",started.elapsed());
+    let opened = tokio::time::timeout(Duration::from_secs(30),registry.open(target(dir.path(),escuta,false))).await
+        .expect("open esperou o initialize").unwrap();
     assert_eq!(opened["opened"],true);
     let handle = registry.handle("key",1).await.unwrap();
     let reply = handle.command(RuntimeCommand { operation_id:"msg".into(),kind:OperationKind::Input,
         payload:json!({"text":"Olá","entry_id":"msg"}) }).await.unwrap();
     assert_eq!(reply.disposition,Disposition::Deferred);
     assert_eq!(users.load(Ordering::SeqCst),0);
+    gate.notify_one();
     tokio::time::timeout(Duration::from_secs(10),async {
         while users.load(Ordering::SeqCst) == 0 { tokio::time::sleep(Duration::from_millis(20)).await; }
     }).await.expect("a entrada sai depois do initialize");
@@ -141,7 +144,7 @@ async fn open_answers_before_initialize() {
 async fn open_waits_for_lease_then_refuses() {
     for (held,opens) in [(Duration::from_secs(1),true),(Duration::from_secs(4),false)] {
         let dir = tempfile::tempdir().unwrap();
-        let (escuta,_,server) = cano(Duration::ZERO,None).await;
+        let (escuta,_,server) = cano(None,None).await;
         let target = target(dir.path(),escuta,true);
         let lease = acquire_lease(&target.lease_path).unwrap();
         let holder = tokio::spawn(async move { tokio::time::sleep(held).await; drop(lease); });
@@ -158,7 +161,7 @@ async fn open_waits_for_lease_then_refuses() {
 #[tokio::test]
 async fn close_releases_lease() {
     let dir = tempfile::tempdir().unwrap();
-    let (escuta,_,server) = cano(Duration::ZERO,None).await;
+    let (escuta,_,server) = cano(None,None).await;
     let target = target(dir.path(),escuta,true);
     let registry = registry().await;
     registry.open(target.clone()).await.unwrap();
@@ -175,7 +178,7 @@ async fn reopen_of_initialized_cano_becomes_deliverable() {
     // o Rust reenvia e o Claude real responde `success` de novo (medição em harnesses.md).
     let dir = tempfile::tempdir().unwrap();
     let init = json!({"type":"system","subtype":"init","session_id":"sid-1","model":"claude-haiku-4-5"}).to_string();
-    let (escuta,users,server) = cano(Duration::ZERO,Some(&init)).await;
+    let (escuta,users,server) = cano(None,Some(&init)).await;
     let registry = registry().await;
     registry.open(target(dir.path(),escuta,false)).await.unwrap();
     let handle = registry.handle("key",1).await.unwrap();

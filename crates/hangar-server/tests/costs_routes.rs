@@ -11,6 +11,9 @@ use std::time::{Duration, Instant};
 
 const OWNER: &str = "dono-de-teste";
 const SECRET: &str = "interno-de-teste";
+/// Prazo de quem espera a varredura do índice: só flagra a que não termina. No runner Windows o disco
+/// faz a varredura das amostras passar de 5 s de vez em quando.
+const SCAN_WAIT: Duration = Duration::from_secs(30);
 
 fn session_error(message: &str) -> Value {
     json!({"detail": {"code": "erro_sessao_inexistente", "params": {}, "msg": message}})
@@ -145,7 +148,7 @@ impl Harness {
     }
 
     async fn ready(&self) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + SCAN_WAIT;
         loop {
             let response = self.request(reqwest::Method::GET, "/api/costs").send().await.unwrap();
             assert!(Instant::now() < deadline, "coleta não concluiu");
@@ -156,7 +159,7 @@ impl Harness {
     }
 
     async fn usage(&self, path: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + SCAN_WAIT;
         loop {
             let response = self.request(reqwest::Method::GET, path).send().await.unwrap();
             assert!(Instant::now() < deadline, "uso não concluiu");
@@ -168,7 +171,7 @@ impl Harness {
 
     /// Passa pelo 202 e confere o 503 do Rust: código no corpo e nada repassado ao Python.
     async fn failure(&self, path: &str) -> String {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + SCAN_WAIT;
         loop {
             let response = self.request(reqwest::Method::GET, path).send().await.unwrap();
             assert!(Instant::now() < deadline, "falha não chegou");
@@ -234,7 +237,7 @@ async fn missing_scopes_fail_with_code_and_next_request_rescans() {
     assert_eq!(h.failure("/api/costs").await, "costs_no_scopes");
     *h.upstream.scopes.lock().unwrap() = Some(saved);
     // A falha guardada dispara a coleta nova; sem `fresco`, sem esperar 30 s.
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + SCAN_WAIT;
     loop {
         let response = h.request(reqwest::Method::GET, "/api/costs").send().await.unwrap();
         if response.status() == StatusCode::OK {
@@ -254,7 +257,7 @@ async fn blocked_index_fails_with_code_and_recovers_after_the_block_goes() {
     std::fs::write(&index_path, "bloqueio sintético").unwrap();
     assert_eq!(h.failure("/api/costs").await, "costs_no_disk");
     std::fs::remove_file(&index_path).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + SCAN_WAIT;
     loop {
         let response = h.request(reqwest::Method::GET, "/api/costs").send().await.unwrap();
         if response.status() == StatusCode::OK { break; }
