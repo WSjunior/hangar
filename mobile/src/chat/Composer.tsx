@@ -3,7 +3,7 @@ import * as Haptics from 'expo-haptics';
 import { AccessibilityInfo, ActivityIndicator, Alert, AppState, Platform, Pressable, Text, View, type NativeSyntheticEvent, type TextInput, type TextInputKeyPressEventData } from 'react-native';
 import type { NativeStackNavigationProp } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { broadcast, formataErro, hexParaRgb, uploadFileForServer, transcribeFileForServer, steerSession, podeEnviarSozinho, providerName, sendInputForServer, sideQuestionOf, slashMatches } from '@hangar/core';
+import { broadcast, formataErro, hexParaRgb, uploadFileForServer, transcribeFileForServer, steerSession, podeEnviarSozinho, providerName, sendInputForServer, sideQuestionOf, slashMatches, slashTokenAt, replaceSlashToken } from '@hangar/core';
 import type { CommandInfo, MotivoFim, Provider, Server } from '@hangar/core';
 import { Glass } from '../ui/Glass';
 import { Icon } from '../ui/Icon';
@@ -24,7 +24,6 @@ import { CommandSheet, useSessionCommands } from './CommandSheet';
 import { SessionSettingsButton } from './SessionSettings';
 import { SideQuestionSheet } from './SideQuestionSheet';
 import { SlashSuggest } from './SlashSuggest';
-import { comandoParcial } from './comandoParcial';
 import type { PickedAttachment } from '../ui/attachmentPicker';
 import { AttachSheet } from '../ui/AttachSheet';
 import { AttachmentPreview } from '../ui/AttachmentPreview';
@@ -47,6 +46,10 @@ interface Props {
 }
 
 type PendingAttach = PickedAttachment;
+// O campo é só um `/nome` sendo digitado (nem argumento nem outro texto): é ele que o comando
+// escolhido substitui por inteiro.
+const soComando = (texto: string) => slashTokenAt(texto, texto.length)?.whole === true;
+
 // Número do selo da fila: crescer com o texto ampliado o cortava dentro do botão; a dica acessível já diz a contagem.
 const GLYPH_MAX_SCALE = 1.4;
 
@@ -365,6 +368,9 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   // Só é definido quando o app MOVE o cursor (ditado, undo, draft); o onSelectionChange devolve o
   // controle ao campo logo em seguida — preso, ele impediria a pessoa de mexer no cursor.
   const [selection, setSelection] = useState<{ start: number; end: number } | undefined>();
+  // Seleção que o campo informou por último: decide qual palavra é o `/nome` das sugestões. null =
+  // ainda não informou; vale o fim do texto.
+  const [caret, setCaret] = useState<{ start: number; end: number } | null>(null);
   const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const autoAlvoRef = useRef<number>(0);
@@ -900,28 +906,32 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     ]);
   }, [onStop]);
 
-  // ── Comandos: lista da folha e sugestões em linha enquanto a linha é só `/nome` ──
-  const slashQuery = comandoParcial(text);
+  // ── Comandos: lista da folha e sugestões em linha enquanto a palavra sob o cursor é `/nome` ──
+  // Cursor movido pelo app (`selection`) vale até o campo devolver o dele.
+  const sel = selection ?? caret;
+  const caretPos = !sel ? text.length : sel.start === sel.end ? Math.min(sel.end, text.length) : -1;
+  const slashToken = useMemo(() => slashTokenAt(text, caretPos), [text, caretPos]);
+  const slashQuery = slashToken?.query ?? null;
   const { commands, error: commandsError, retry: retryCommands } = useSessionCommands(name, provider, commandSheetOpen || slashQuery !== null);
   const suggestions = useMemo(() => slashMatches(commands ?? [], slashQuery), [commands, slashQuery]);
 
-  const replaceText = useCallback((next: string) => {
+  const replaceText = useCallback((next: string, cursor = next.length) => {
     textRef.current = next;
     persistText(next);
     setText(next);
-    setSelection({ start: next.length, end: next.length });
+    setSelection({ start: cursor, end: cursor });
   }, [persistText]);
 
   // Preenche `/nome ` para a pessoa digitar o argumento. Texto já escrito (que não é o próprio
   // comando sendo digitado) fica como argumento, em vez de sumir.
   const fillCommand = useCallback((cmdName: string) => {
-    const kept = comandoParcial(textRef.current) === null ? textRef.current.trim() : '';
+    const kept = soComando(textRef.current) ? '' : textRef.current.trim();
     replaceText(kept ? `/${cmdName} ${kept}` : `/${cmdName} `);
   }, [replaceText]);
 
   // Comando sem argumento sai na hora, como o PWA: sem eco na conversa nem rascunho.
   const runCommand = useCallback(async (cmd: string) => {
-    if (comandoParcial(textRef.current) !== null) replaceText('');
+    if (soComando(textRef.current)) replaceText('');
     const btw = isClaude ? sideQuestionOf(cmd) : null;
     if (btw !== null) { setSideQuestion(btw); return; }
     const server = useServers.getState().servers.find((s) => s.id === origin.serverId);
@@ -949,6 +959,13 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     if (isCodex || c.argumentHint || c.destructive) { fillCommand(c.name); return; }
     void runCommand('/' + c.name);
   }, [isCodex, replaceText, openSelector, fillCommand, runCommand]);
+
+  // No meio do texto a sugestão só completa o nome: o resto da mensagem fica, e nada é enviado.
+  const pickSlash = useCallback((c: CommandInfo) => {
+    if (!slashToken || slashToken.whole) { handleSuggestPick(c); return; }
+    const next = replaceSlashToken(textRef.current, slashToken, c.name);
+    replaceText(next.text, next.cursor);
+  }, [slashToken, handleSuggestPick, replaceText]);
 
   const handleKeyPress = useCallback(
     (ev: NativeSyntheticEvent<TextInputKeyPressEventData>) => {
@@ -1073,7 +1090,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
         ) : null}
 
 
-        <SlashSuggest matches={suggestions} onPick={handleSuggestPick}
+        <SlashSuggest matches={suggestions} onPick={pickSlash}
           error={slashQuery !== null ? commandsError : ''} onRetry={retryCommands} />
 
         {/* Campo em linha própria: dividindo a linha com os botões ele ficava só com a sobra. */}
@@ -1089,7 +1106,10 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
             maxHeight={120}
             onKeyPress={handleKeyPress}
             selection={selection}
-            onSelectionChange={() => setSelection(undefined)}
+            onSelectionChange={(e) => {
+              setSelection(undefined);
+              setCaret(e.nativeEvent.selection);
+            }}
             onFocus={() => setFocado(true)}
             onBlur={() => setFocado(false)}
             onPaste={handlePaste}

@@ -1,52 +1,28 @@
 <script lang="ts">
-  import type { CommandInfo } from '@hangar/core';
+  import { slashMatches, type CommandInfo } from '@hangar/core';
   import * as m from '../paraglide/messages';
 
-  // Tira inline de autocomplete acima do textarea. Aparece so quando o texto comeca com '/'
-  // (primeiro caractere nao-branco) e ainda nao tem argumento (sem espaco depois do nome).
+  // Tira inline de autocomplete acima do textarea. Aparece enquanto a palavra sob o cursor e um
+  // `/nome` sem argumento (`query` = o que veio depois da barra; null = nada sendo digitado).
   // Renderiza no fluxo normal, acima do input, pra nunca ficar atras do teclado.
   interface Props {
     commands: CommandInfo[];
-    query: string;
+    query: string | null;
     onPick: (cmd: CommandInfo) => void;
     onComplete: (cmd: CommandInfo) => void;
+    onDismiss: () => void;
     listboxId: string;
     activeOptionId?: string;
   }
   let {
-    commands, query, onPick, onComplete, listboxId,
+    commands, query, onPick, onComplete, onDismiss, listboxId,
     activeOptionId = $bindable(),
   }: Props = $props();
 
-  const MAX = 8;
   let selectedName = $state('');
   let rows: HTMLButtonElement[] = [];
 
-  const trimmed = $derived(query.replace(/^\s+/, ''));
-  const active = $derived(trimmed.startsWith('/'));
-  // prefixo digitado apos a '/', ate o primeiro espaco
-  const token = $derived(active ? trimmed.slice(1).split(/\s/)[0].toLowerCase() : '');
-  // ja entrou argumento (tem espaco depois do nome) -> some com as sugestoes
-  const typingArgs = $derived(active && /\s/.test(trimmed.slice(1)));
-
-  function rank(c: CommandInfo): number {
-    const n = c.name.toLowerCase();
-    if (token === '') return 1;
-    if (n.startsWith(token)) return 0; // melhor: casa o prefixo
-    if (n.includes(token)) return 1; // fuzzy leve: substring
-    return -1; // sem match
-  }
-
-  const matches = $derived(
-    !active || typingArgs
-      ? []
-      : commands
-          .map((c) => ({ c, r: rank(c) }))
-          .filter((x) => x.r >= 0)
-          .sort((a, b) => a.r - b.r)
-          .slice(0, MAX)
-          .map((x) => x.c)
-  );
+  const matches = $derived(slashMatches(commands, query));
   const selected = $derived(matches.find((c) => c.name === selectedName) ?? matches[0]);
   const selectedIndex = $derived(selected ? matches.indexOf(selected) : -1);
 
@@ -56,6 +32,12 @@
 
   export function handleKeydown(event: KeyboardEvent): boolean {
     if (!selected || event.ctrlKey || event.altKey || event.metaKey) return false;
+    // Esc fecha a lista e deixa o texto como esta; ela volta quando a palavra mudar.
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      onDismiss();
+      return true;
+    }
     if (event.key === 'Tab' && !event.shiftKey) {
       event.preventDefault();
       onComplete(selected);
