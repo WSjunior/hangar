@@ -5690,7 +5690,7 @@ impl Hangar {
                 let value = input.read(cx).value().to_string();
                 this.input_plugin(&site, &key, kind, value);
             });
-            let field = crate::plugin_ui::Field { state, sync: Default::default(), seen: self.plugin_draws, _changes: changes };
+            let field = crate::plugin_ui::Field { state, sync: crate::plugin_ui::FieldSync::new(&spec.value), seen: self.plugin_draws, _changes: changes };
             self.plugin_fields.insert(id, field);
         }
     }

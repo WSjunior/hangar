@@ -41,14 +41,19 @@ pub struct FieldSpec { pub key: String, pub placeholder: String, pub value: Stri
 pub struct Field { pub state: Entity<InputState>, pub sync: FieldSync, pub seen: u64, pub _changes: Subscription }
 
 /// Quando o valor que o mod desenha entra no campo. Só conta como posto quando é posto: com a pessoa no campo ele fica
-/// pendente e entra quando o campo perde o foco, salvo se a pessoa digitou depois que ele chegou. Logo depois do envio do
-/// próprio campo, o desenho seguinte entra mesmo com foco: é como o mod limpa o campo depois do envio, e o valor pode ser
-/// igual ao de antes (vazio). Os ecos atrasados dos `change` de antes do envio não tomam a vez da resposta: `sent` guarda
-/// o que o campo mandou como `change` desde o último valor aplicado, e um desenho com um desses valores é eco velho.
+/// pendente (se mudou em relação ao desenho anterior) e entra quando o campo perde o foco, salvo se a pessoa digitou
+/// depois que ele chegou. Logo depois do envio do próprio campo, o desenho seguinte entra mesmo com foco: é como o mod
+/// limpa o campo depois do envio, e o valor pode ser igual ao de antes (vazio). Os ecos atrasados dos `change` de antes
+/// do envio não tomam a vez da resposta: `sent` guarda o que o campo mandou como `change` desde o último valor
+/// aplicado, e um desenho com um desses valores é eco velho. A mesma regra está no web, em
+/// `packages/core/src/pluginField.ts`, com os mesmos casos de teste.
 #[derive(Default)]
-pub struct FieldSync { pending: Option<String>, submitted: bool, sent: Vec<String> }
+pub struct FieldSync { pending: Option<String>, submitted: bool, sent: Vec<String>, last: Option<String> }
 
 impl FieldSync {
+    /// Campo criado com o valor `first` já desenhado: o próximo desenho com o mesmo valor não é mudança.
+    pub fn new(first: &str) -> FieldSync { FieldSync { last: Some(first.to_owned()), ..FieldSync::default() } }
+
     /// Um desenho do app. `drawn` é o valor de um desenho novo do mod (`None` num redesenho do app sem evento novo),
     /// `shown` o que o campo mostra e `focused` se a pessoa está nele. Devolve o valor a pôr no campo agora.
     pub fn draw(&mut self, drawn: Option<&str>, shown: &str, focused: bool) -> Option<String> {
@@ -61,12 +66,18 @@ impl FieldSync {
         // a resposta: a vez fica, e ele espera como pendente. Limite: uma resposta igual a um valor digitado antes (o
         // vazio depois de a pessoa apagar tudo) só entra quando o campo perde o foco.
         let answer = self.submitted && drawn != shown && !self.sent.iter().any(|v| v == drawn);
+        let changed = self.last.as_deref() != Some(drawn);
+        if changed { self.last = Some(drawn.to_owned()); }
         if !focused || answer {
             self.pending = None;
             self.submitted = false;
             return self.apply(drawn.to_owned(), shown);
         }
-        self.pending = Some(drawn.to_owned());
+        // Só vira pendente o valor que mudou em relação ao desenho anterior: um redesenho sem mudança (outro mod que
+        // redesenha o lugar) não traz nada do mod para este campo, e no blur apagaria o que se digitou num mod que não
+        // ecoa o `value`. O pendente que já havia fica. Na vez da resposta ao envio vale qualquer desenho: a pessoa não
+        // digitou depois do envio, e a resposta pode repetir o valor de antes (o vazio que limpa o campo).
+        if changed || self.submitted { self.pending = Some(drawn.to_owned()); }
         None
     }
 
@@ -1173,12 +1184,50 @@ mod tests {
     fn an_answer_equal_to_a_value_typed_before_waits_for_the_blur() {
         // Limite conhecido: a pessoa apagou tudo (`change ""`) antes de digitar `x`. A resposta `""` ao envio é igual a
         // um valor mandado, então passa por eco velho, fica pendente em foco e só entra quando o campo perde o foco.
-        let mut sync = FieldSync::default();
+        // O mod não ecoou: o desenho anterior também era `""`, e mesmo assim a resposta espera o blur.
+        let mut sync = FieldSync::new("");
         for v in ["a", "", "x"] { sync.typed(v); }
         sync.submitted();
         assert_eq!(sync.draw(Some(""), "x", true), None);
         assert_eq!(sync.draw(None, "x", true), None);
         assert_eq!(sync.draw(None, "x", false).as_deref(), Some(""));
+    }
+
+    #[test]
+    fn a_redraw_without_a_change_of_the_drawn_value_does_not_create_a_pending_value() {
+        // O mod desenha `""` e não devolve o que se digita; outro mod redesenha a faixa no meio da digitação.
+        let mut sync = FieldSync::new("");
+        sync.typed("abc");
+        assert_eq!(sync.draw(Some(""), "abc", true), None);
+        // A pessoa clica fora: o texto digitado fica.
+        assert_eq!(sync.draw(None, "abc", false), None);
+        // Valor que mudou em relação ao desenho anterior continua pendente e entra no blur.
+        assert_eq!(sync.draw(Some("x"), "abc", true), None);
+        assert_eq!(sync.draw(None, "abc", false).as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn a_redraw_without_a_change_keeps_the_pending_value_already_there() {
+        let mut sync = FieldSync::new("");
+        assert_eq!(sync.draw(Some("ab"), "abc", true), None);
+        assert_eq!(sync.draw(Some("ab"), "abc", true), None);
+        assert_eq!(sync.draw(None, "abc", false).as_deref(), Some("ab"));
+    }
+
+    #[test]
+    fn without_a_previous_draw_the_first_value_counts_as_a_change() {
+        let mut sync = FieldSync::default();
+        assert_eq!(sync.draw(Some(""), "abc", true), None);
+        assert_eq!(sync.draw(None, "abc", false).as_deref(), Some(""));
+    }
+
+    #[test]
+    fn the_answer_to_the_submit_equal_to_the_previous_draw_still_applies() {
+        // O mod limpa o campo com o mesmo vazio que já desenhava: a vez da resposta não depende de o valor mudar.
+        let mut sync = FieldSync::new("");
+        sync.typed("abc");
+        sync.submitted();
+        assert_eq!(sync.draw(Some(""), "abc", true).as_deref(), Some(""));
     }
 
     #[test]
