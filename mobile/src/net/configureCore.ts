@@ -5,6 +5,7 @@ import { useServers } from '../stores/servers';
 import { useAparencia } from '../stores/aparencia';
 import { createEventSource } from './sse';
 import { iniciarDiag } from './diag';
+import { toast } from '../ui/Toast';
 
 export function configureCore() {
   // uma fonte só: o mesmo getLocale alimenta o runtime do core e o do paraglide mobile.
@@ -21,6 +22,7 @@ export function configureCore() {
     },
     rememberLan: (id, lan) => useServers.getState().rememberLan(id, lan),
     getToken: () => useServers.getState().active()?.token ?? null,
+    onSessionWarnings: (warnings) => toast.aviso(warnings.join('\n')),
     onUnauthorized: () => {
       const a = useServers.getState().active();
       if (a) useServers.getState().markInvalid(a.id);

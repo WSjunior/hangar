@@ -3,6 +3,14 @@ import { mensagemDeErro } from './errosApi';
 import * as m from './paraglide/messages';
 
 export type AuthMethod = 'oauth' | 'api_key' | 'none' | 'unknown';
+
+export function defaultCodexAccount(accounts: CodexAccount[], remembered?: string): CodexAccount | undefined {
+  return accounts.find((account) => account.id === remembered && account.auth.status === 'connected')
+    ?? accounts.find((account) => account.is_default && account.auth.status === 'connected')
+    ?? accounts.find((account) => account.auth.status === 'connected')
+    ?? accounts.find((account) => account.is_default) ?? accounts[0];
+}
+
 export interface CodexAccount {
   id: string;
   credential_id: string;

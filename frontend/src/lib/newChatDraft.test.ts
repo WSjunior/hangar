@@ -5,6 +5,7 @@ const core = vi.hoisted(() => ({
   createSessionForServer: vi.fn(), sendInputForServer: vi.fn(), fetchSessionsForServer: vi.fn(),
   getCodexAccountsForServer: vi.fn(), getFolderBranchesForServer: vi.fn(), getRootsForServer: vi.fn(),
   listClaudeConfigs: vi.fn(), getClaudeAccountSuggestion: vi.fn(), getProviders: vi.fn(), modelOptions: vi.fn(),
+  modelOptionsForServer: vi.fn(),
 }));
 vi.mock('@hangar/core', async (orig) => ({ ...(await orig<object>()), ...core }));
 vi.mock('./auth', () => ({ listOwnServers: () => [srv], selectServer: vi.fn(() => true), getActiveId: () => 'pc' }));
@@ -27,10 +28,12 @@ function fakeStorage(initial: Record<string, string>) {
 beforeEach(() => {
   vi.resetAllMocks();
   vi.stubGlobal('localStorage', fakeStorage({ 'cp_newchat_cwd:pc': '/home/u/proj' }));
-  for (const fn of [core.getProviders, core.getRootsForServer, core.getFolderBranchesForServer, core.getClaudeAccountSuggestion])
+  for (const fn of [core.getRootsForServer, core.getFolderBranchesForServer, core.getClaudeAccountSuggestion])
     fn.mockImplementation(never);
+  core.getProviders.mockResolvedValue({});
   core.listClaudeConfigs.mockResolvedValue([{ path: '/c', label: 'c', active: true }]);
   core.modelOptions.mockResolvedValue({ models: [], reduced: false });
+  core.modelOptionsForServer.mockResolvedValue({ models: [], reduced: false });
 });
 
 async function ready() {
@@ -119,6 +122,37 @@ describe('NewChatDraft.send', () => {
 });
 
 describe('NewChatDraft — respostas atrasadas', () => {
+  it('espera a seleção inicial e respeita escolha manual feita antes da resposta', async () => {
+    let resolve!: (value: unknown) => void;
+    core.getProviders.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+    const draft = await ready();
+    expect(draft.loading).toBe(true);
+    await expect(draft.send('oi')).rejects.toThrow();
+    draft.setProvider('claude');
+    resolve({ claude: { disponivel: true }, codex: { disponivel: true, default: true } });
+    await flush();
+    expect(draft.provider).toBe('claude');
+    expect(core.createSessionForServer).not.toHaveBeenCalled();
+  });
+
+  it('pré-seleciona GPT com Claude instalado e usa a conta Codex conectada', async () => {
+    core.getProviders.mockResolvedValue({ claude: { disponivel: true }, codex: { disponivel: true, default: true } });
+    core.getCodexAccountsForServer.mockResolvedValue([
+      { id: 'default', is_default: true, auth: { status: 'disconnected' } },
+      { id: 'gpt', is_default: false, auth: { status: 'connected' } },
+    ]);
+    core.fetchSessionsForServer.mockResolvedValue([]);
+    core.createSessionForServer.mockResolvedValue({ name: 'proj' });
+    core.sendInputForServer.mockResolvedValue(undefined);
+    const draft = await ready();
+    expect(draft.provider).toBe('codex');
+    expect(draft.codexAccount).toBe('gpt');
+    await draft.send('oi');
+    expect(core.createSessionForServer).toHaveBeenCalledWith(srv, expect.objectContaining({
+      provider: 'codex', codex_account: 'gpt', remember_provider: true,
+    }));
+  });
+
   it('trocar de provider com o catálogo do Claude em voo: a resposta velha é descartada e o modelo some', async () => {
     localStorage.setItem('cp_last_model:pc:claude:-', 'opus');
     let resolveClaude!: (v: unknown) => void;

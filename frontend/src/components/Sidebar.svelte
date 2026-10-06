@@ -230,13 +230,10 @@ import ConfirmDialog from './ConfirmDialog.svelte';
                               headless?: boolean, subagentModel?: string | null, jev?: boolean,
                               worktree?: WorktreeChoice | null) {
     // O CreateSessionSheet já posicionou o servidor-alvo como ativo (selectServer).
-    const info = await createSession(name, cwd, configDir, provider, engine, model, effort, permissionMode, ompProfile, null, headless, subagentModel, jev,
+    await createSession(name, cwd, configDir, provider, engine, model, effort, permissionMode, ompProfile, null, headless, subagentModel, jev,
                                      worktree ?? undefined);
     abrirSessaoDoSheet(name);
-    // Aviso da reconciliação da conta (plugin ligado sem instalação etc): antes só ia pro log do
-    // backend e a sessão abria "normal" sem o plugin. Texto vem pronto do backend.
-    // Não é erro: a conta foi sincronizada com o principal. Vai pra linha discreta, não pro toast.
-    if (info?.avisos?.length) notar(m.sessao_flash_avisos_conta({ n: info.avisos.join(' · ') }));
+    // Os avisos da criação (`info.avisos`) aparecem no aviso global do App, via onSessionWarnings.
     // SSE stream emitirá a sessão nova automaticamente
   }
   // TODA saída do CreateSessionSheet passa por aqui — o create normal, o "continuar conversa" e a

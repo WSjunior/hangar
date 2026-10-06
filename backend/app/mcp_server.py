@@ -194,12 +194,14 @@ async def unpair(ctx: Context) -> dict[str, Any]:
                       "(`hangar-send --new --conta <nome>`). `jev`: a sessão nasce com a chave do "
                       "Jev no ambiente, e só aí o `hangar-preview objetivo` (o laço que navega e "
                       "preenche tela sozinho) funciona nela. Omitido, vale o padrão do servidor.")
-async def new_session(ctx: Context, nome: str, cwd: str, provider: str = "claude", engine: str | None = None,
+async def new_session(ctx: Context, nome: str, cwd: str, provider: str | None = None, engine: str | None = None,
                       model: str | None = None, effort: str | None = None, permissao: str | None = None,
                       headless: bool | None = None, read_only: bool = False,
                       conta: str | None = None, jev: bool | None = None) -> dict[str, Any]:
     from app import api
     eu = await _eu(ctx)
+    if provider is None:
+        provider = await api._default_session_provider(conta, engine)
     if headless and provider not in ("claude", "codex"):
         raise ToolError(f"headless só vale com provider claude ou codex (veio: {provider})")
     # A conta da sessão nova é a de QUEM CHAMA. Antes o nome resolvido era descartado e o
@@ -207,7 +209,7 @@ async def new_session(ctx: Context, nome: str, cwd: str, provider: str = "claude
     # noutra conta criava a irmã na conta errada — dizendo, pela descrição desta tool, que tinha
     # herdado. Gasta a cota de quem ninguém escolheu e só aparece quando alguém confere.
     config_dir = conta
-    if config_dir is None:
+    if config_dir is None and provider in ("claude", "pi", "omp"):
         cfg, confiavel = await asyncio.to_thread(api._caller_config_dir, eu)
         if not confiavel:
             # Não deu pra ler a conta de quem chama. Criar assim mesmo repetiria o bug de cima,
