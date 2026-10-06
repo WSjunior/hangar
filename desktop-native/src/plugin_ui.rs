@@ -37,8 +37,9 @@ pub type Submit = Rc<dyn Fn(&str, &str, &mut Window, &mut App)>;
 pub struct FieldSpec { pub key: String, pub placeholder: String, pub value: String }
 
 /// O campo de texto que o app mantém para um `Input`, pela `key`. `seen` é o desenho do mod (contador de eventos
-/// `plugin_ui`) que o campo já conferiu; `sync` decide quando o valor desenhado entra.
-pub struct Field { pub state: Entity<InputState>, pub sync: FieldSync, pub seen: u64, pub _changes: Subscription }
+/// `plugin_ui`) que o campo já conferiu; `sync` decide quando o valor desenhado entra; `outbox` põe em ordem o que o
+/// campo manda à rota.
+pub struct Field { pub state: Entity<InputState>, pub sync: FieldSync, pub outbox: Outbox, pub seen: u64, pub _changes: Subscription }
 
 /// Quando o valor que o mod desenha entra no campo. Só conta como posto quando é posto: com a pessoa no campo ele fica
 /// pendente (se mudou em relação ao desenho anterior) e entra quando o campo perde o foco, salvo se a pessoa digitou
@@ -100,6 +101,38 @@ impl FieldSync {
         if !self.sent.iter().any(|v| v == sent) { self.sent.push(sent.to_owned()); }
         self.pending = None;
         self.submitted = false;
+    }
+}
+
+/// Um pedido à rota `plugin/input`: o tipo (`change` ou `submit`) e o valor.
+pub type InputRequest = (&'static str, String);
+
+/// Ordem do que um campo manda ao mod: um pedido em voo por vez. Enquanto um voa, só o `change` mais recente fica
+/// guardado (os de antes já não dizem nada ao mod), e um `submit` sai sempre depois dos `change` que o antecederam. Sem
+/// isso, cada tecla seria um pedido solto, e o `change "ab"` poderia chegar depois do `change "abc"`. Espelha a
+/// `InputOutbox` do web, em `packages/core/src/pluginField.ts`.
+#[derive(Default)]
+pub struct Outbox { busy: bool, queue: std::collections::VecDeque<InputRequest> }
+
+impl Outbox {
+    /// O campo quer mandar `kind`/`value`. Devolve o pedido a mandar agora, ou `None` quando ele ficou na fila.
+    pub fn push(&mut self, kind: &'static str, value: String) -> Option<InputRequest> {
+        if !self.busy {
+            self.busy = true;
+            return Some((kind, value));
+        }
+        match self.queue.back_mut() {
+            Some(last) if kind == "change" && last.0 == "change" => last.1 = value,
+            _ => self.queue.push_back((kind, value)),
+        }
+        None
+    }
+
+    /// O pedido em voo voltou (com ou sem erro). Devolve o próximo a mandar, ou `None` quando a fila acabou.
+    pub fn done(&mut self) -> Option<InputRequest> {
+        let next = self.queue.pop_front();
+        self.busy = next.is_some();
+        next
     }
 }
 
@@ -853,7 +886,7 @@ fn unmark(text: &str) -> String {
 mod tests {
     // Importação explícita: `super::*` traz o `test` do gpui_kit, e o `#[test]` passaria a ser o dele.
     use super::{accepts_typing, active_pane, box_background, button_key, cell_color, color, field_id, field_width, fields, FieldSync, CELL_W, fills_place, follow_local, follows_server,
-        hover_props, input_kind, input_request, is_empty, keep_hovered, pane_ids, plain_deep, raster_row, raster_runs, safe_href,
+        hover_props, input_kind, input_request, is_empty, keep_hovered, Outbox, pane_ids, plain_deep, raster_row, raster_runs, safe_href,
         scope_active, surfaces, text_row, toast, wants_hover, FieldSpec, Surfaces, Toast, UiSource};
     use gpui_kit::component::input::InputEvent;
     use gpui_kit::{rgb, Hsla};
@@ -1228,6 +1261,41 @@ mod tests {
         sync.typed("abc");
         sync.submitted();
         assert_eq!(sync.draw(Some(""), "abc", true).as_deref(), Some(""));
+    }
+
+    // Os mesmos casos da `InputOutbox` em `packages/core/src/pluginField.test.ts`.
+    #[test]
+    fn one_request_in_flight_and_only_the_latest_change_waits() {
+        let mut outbox = Outbox::default();
+        assert_eq!(outbox.push("change", "a".into()), Some(("change", "a".to_owned())));
+        assert_eq!(outbox.push("change", "ab".into()), None);
+        assert_eq!(outbox.push("change", "abc".into()), None);
+        assert_eq!(outbox.done(), Some(("change", "abc".to_owned())));
+        assert_eq!(outbox.done(), None);
+        // Livre de novo: o próximo sai na hora.
+        assert_eq!(outbox.push("change", "abcd".into()), Some(("change", "abcd".to_owned())));
+    }
+
+    #[test]
+    fn the_submit_goes_after_the_pending_changes_and_what_is_typed_after_it_goes_after() {
+        let mut outbox = Outbox::default();
+        assert_eq!(outbox.push("change", "a".into()), Some(("change", "a".to_owned())));
+        for (kind, value) in [("change", "ab"), ("submit", "ab"), ("change", "abc"), ("change", "abcd")] {
+            assert_eq!(outbox.push(kind, value.into()), None);
+        }
+        assert_eq!(outbox.done(), Some(("change", "ab".to_owned())));
+        assert_eq!(outbox.done(), Some(("submit", "ab".to_owned())));
+        assert_eq!(outbox.done(), Some(("change", "abcd".to_owned())));
+        assert_eq!(outbox.done(), None);
+    }
+
+    #[test]
+    fn two_submits_in_a_row_both_go_in_order() {
+        let mut outbox = Outbox::default();
+        for value in ["a", "b", "c"] { outbox.push("submit", value.into()); }
+        assert_eq!(outbox.done(), Some(("submit", "b".to_owned())));
+        assert_eq!(outbox.done(), Some(("submit", "c".to_owned())));
+        assert_eq!(outbox.done(), None);
     }
 
     #[test]

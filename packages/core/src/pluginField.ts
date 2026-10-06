@@ -1,6 +1,8 @@
 // Campo de texto (`Input`) de mod: quando o valor que o mod desenha entra no campo. Espelha o `FieldSync` do app
 // nativo (`desktop-native/src/plugin_ui.rs`), e os casos de teste são os mesmos nos dois lados.
 
+import type { PluginInputKind } from './api';
+
 /** Quando o valor que o mod desenha entra no campo. Só conta como posto quando é posto: com a pessoa no campo ele fica
  *  pendente (se mudou em relação ao desenho anterior) e entra quando o campo perde o foco, salvo se a pessoa digitou
  *  depois que ele chegou. Logo depois do envio do próprio campo, o desenho seguinte entra mesmo com foco: é como o mod
@@ -73,4 +75,54 @@ export class FieldSync {
     this.sent.clear();
     return value !== shown ? value : null;
   }
+}
+
+/** Um pedido à rota `plugin/input`. */
+export interface InputRequest { kind: PluginInputKind; value: string }
+
+/** Ordem do que um campo manda ao mod: um pedido em voo por vez. Enquanto um voa, só o `change` mais recente fica
+ *  guardado (os de antes já não dizem nada ao mod), e um `submit` sai sempre depois dos `change` que o antecederam.
+ *  Sem isso, cada tecla seria um pedido solto, e o `change "ab"` poderia chegar depois do `change "abc"`. Espelha o
+ *  `Outbox` do nativo. */
+export class InputOutbox {
+  private busy = false;
+  private readonly queue: InputRequest[] = [];
+
+  /** O campo quer mandar `kind`/`value`. Devolve o pedido a mandar agora, ou `null` quando ele ficou na fila. */
+  push(kind: PluginInputKind, value: string): InputRequest | null {
+    if (!this.busy) {
+      this.busy = true;
+      return { kind, value };
+    }
+    const last = this.queue[this.queue.length - 1];
+    if (kind === 'change' && last?.kind === 'change') last.value = value;
+    else this.queue.push({ kind, value });
+    return null;
+  }
+
+  /** O pedido em voo voltou (com ou sem erro). Devolve o próximo a mandar, ou `null` quando a fila acabou. */
+  done(): InputRequest | null {
+    const next = this.queue.shift() ?? null;
+    this.busy = next !== null;
+    return next;
+  }
+}
+
+/** O envio de um campo pela `InputOutbox`: `send` faz o pedido, e `onError` avisa de uma falha, que não trava a fila. */
+export function fieldSender(
+  send: (kind: PluginInputKind, value: string) => Promise<unknown>,
+  onError: (err: unknown) => void,
+): (kind: PluginInputKind, value: string) => void {
+  const outbox = new InputOutbox();
+  async function run(request: InputRequest | null) {
+    while (request) {
+      try {
+        await send(request.kind, request.value);
+      } catch (err) {
+        onError(err);
+      }
+      request = outbox.done();
+    }
+  }
+  return (kind, value) => void run(outbox.push(kind, value));
 }

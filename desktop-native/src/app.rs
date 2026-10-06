@@ -220,8 +220,9 @@ enum Payload {
     PluginPressed(Result<Value, Failure>),
     // Troca de aba de mod: só a falha interessa; a aba nova chega pelo `shown_id`.
     PluginShown(Result<Value, Failure>),
-    // Digitação num campo de mod: só a falha interessa.
-    PluginInput(Result<Value, Failure>),
+    // Digitação num campo de mod: o lugar, a `key` e a identidade do campo que mandou; a volta libera o próximo pedido
+    // da fila dele, e só a falha aparece.
+    PluginInput(String, String, EntityId, Result<Value, Failure>),
     // Lista de outra máquina: a geração dos SSE de lista, a chave do servidor e o que chegou.
     Remote(u64, String, servers::RemoteUpdate),
     HeadlessPlan(SessionKey, controls::PlanOutcome),
@@ -1630,8 +1631,12 @@ impl Hangar {
                 }
                 return;
             }
-            Payload::PluginInput(result) => {
+            Payload::PluginInput(site, key, field, result) => {
                 if let Err(error) = result { window.push_notification(Notification::warning(Self::press_failure(&error)), cx); }
+                // O próximo da fila só sai pelo mesmo campo: um campo recriado com a mesma `key` tem fila própria.
+                let next = self.plugin_fields.get_mut(&crate::plugin_ui::field_id(&site, &key))
+                    .filter(|f| f.state.entity_id() == field).and_then(|f| f.outbox.done());
+                if let Some(next) = next { self.send_plugin_input(&site, &key, next); }
                 return;
             }
             Payload::Sidebar(reply) => {
@@ -5613,7 +5618,7 @@ impl Hangar {
     }
 
     /// Chama uma rota `plugin/<ação>` da sessão aberta; a resposta volta como o `Payload` que `wrap` monta.
-    fn spawn_plugin(&mut self, action: &'static str, body: Value, wrap: fn(Result<Value, Failure>) -> Payload) {
+    fn spawn_plugin(&mut self, action: &'static str, body: Value, wrap: impl FnOnce(Result<Value, Failure>) -> Payload + Send + 'static) {
         let (Some(api), Some(session)) = (self.session_api(), self.selected.clone()) else { return };
         let (connection, selection, tx) = (self.connection, self.selection, self.tx.clone());
         self.runtime.spawn(async move {
@@ -5690,21 +5695,34 @@ impl Hangar {
                 let value = input.read(cx).value().to_string();
                 this.input_plugin(&site, &key, kind, value);
             });
-            let field = crate::plugin_ui::Field { state, sync: crate::plugin_ui::FieldSync::new(&spec.value), seen: self.plugin_draws, _changes: changes };
+            let field = crate::plugin_ui::Field { state, sync: crate::plugin_ui::FieldSync::new(&spec.value), outbox: Default::default(),
+                seen: self.plugin_draws, _changes: changes };
             self.plugin_fields.insert(id, field);
         }
     }
 
     /// Digitação num `Input` de mod, só na sessão sem terminal e fora do só leitura. Todo `change` vai: o `set_value`
-    /// que repõe o valor desenhado não emite `Change`, então o que chega aqui é a pessoa digitando. Sem `notify`: nada do
-    /// app muda, e cada tecla redesenharia a janela inteira; o campo se redesenha sozinho e o mod responde por evento.
+    /// que repõe o valor desenhado não emite `Change`, então o que chega aqui é a pessoa digitando. Sai pela fila do
+    /// campo (`Outbox`): um pedido em voo por vez, para as teclas chegarem ao mod na ordem. Sem `notify`: nada do app
+    /// muda, e cada tecla redesenharia a janela inteira; o campo se redesenha sozinho e o mod responde por evento.
     fn input_plugin(&mut self, site: &str, key: &str, kind: &'static str, value: String) {
         let read_only = self.selected.as_ref().is_some_and(|s| s.read_only());
-        let Some(body) = crate::plugin_ui::input_request(self.plugin_source, read_only, site, key, kind, &value) else { return };
-        if let Some(field) = self.plugin_fields.get_mut(&crate::plugin_ui::field_id(site, key)) {
-            if kind == "submit" { field.sync.submitted() } else { field.sync.typed(&value) }
-        }
-        self.spawn_plugin("input", body, Payload::PluginInput);
+        if !crate::plugin_ui::accepts_typing(self.plugin_source, read_only) { return; }
+        let Some(field) = self.plugin_fields.get_mut(&crate::plugin_ui::field_id(site, key)) else { return };
+        if kind == "submit" { field.sync.submitted() } else { field.sync.typed(&value) }
+        if let Some(request) = field.outbox.push(kind, value) { self.send_plugin_input(site, key, request); }
+    }
+
+    /// Manda à rota o pedido que a fila do campo liberou. Se a sessão deixou de aceitar digitação no meio, a fila acaba.
+    fn send_plugin_input(&mut self, site: &str, key: &str, (kind, value): crate::plugin_ui::InputRequest) {
+        let read_only = self.selected.as_ref().is_some_and(|s| s.read_only());
+        let Some(field) = self.plugin_fields.get_mut(&crate::plugin_ui::field_id(site, key)) else { return };
+        let Some(body) = crate::plugin_ui::input_request(self.plugin_source, read_only, site, key, kind, &value) else {
+            field.outbox = Default::default();
+            return;
+        };
+        let (site, key, id) = (site.to_owned(), key.to_owned(), field.state.entity_id());
+        self.spawn_plugin("input", body, move |result| Payload::PluginInput(site, key, id, result));
     }
 
     /// O rótulo de envio do `Input`: manda o que está no campo.
