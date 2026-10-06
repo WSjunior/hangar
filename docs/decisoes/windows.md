@@ -92,6 +92,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   relê de lá (`%%` desfeito). Opção de valor vazio nem é gravada. O código de saída vem do
   `<id>.exit`, nunca do `pane_dead_status`. Arquivo sem terminal dono é varrido. Medições completas,
   ver [Terminais de atalho no psmux](#terminais-de-atalho-no-psmux).
+- **Terminal real do dono no Windows é do Rust, pelo ConPTY do `portable-pty`.** O filho
+  (`tmux attach`) morre ANTES de o pseudoconsole fechar, e com filho vivo o pseudoconsole vaza em
+  vez de fechar; não há reposição de tamanho; o escritor é o `take_writer` (pipe puro, soltar só
+  fecha). Medição em [Terminal real do dono no Windows](#terminal-real-do-dono-no-windows).
 - **App nativo: botão de janela dentro de área `Drag` leva `.occlude()`, e a área `Drag` suprime a
   seleção de texto no apertar.** O `WM_NCHITTEST` do GPUI devolve a PRIMEIRA área de controle sob o
   ponteiro na ordem de pintura (`gpui-pre/src/window.rs`, `on_hit_test_window_control`); a barra pinta
@@ -726,3 +730,24 @@ e o `Monitor` de estado no Windows, onde o `-C` continua desligado (`terminal_co
 ~25 ms no Windows.
 O psmux honra o `=` exato no `has-session`. Os testes usam um multiplexador falso (`.cmd` no
 Windows, `sh` no resto); o caminho Windows é conferido pelo job Windows do CI.
+
+## Terminal real do dono no Windows
+
+(06/10/2026, parte 4 da migração, Task 10.) O `term/pty.rs` usa o `portable-pty` 0.9 também no
+Windows. Diferenças conferidas na fonte do crate e no `conpty.py`:
+
+- O `take_writer` do Unix tem um `Drop` que escreve `"\n"` + Ctrl-D no PTY (por isso o Unix usa
+  `dup` do mestre); o do Windows devolve o `FileDescriptor` do pipe de entrada, e soltá-lo só faz
+  `CloseHandle`. Teste: `term::conpty::dropping_writer_writes_nothing`.
+- O `Drop` do mestre chama `ClosePseudoConsole`, que pode travar com o cliente vivo
+  (microsoft/terminal#17716). O `close` mata o filho (`TerminateProcess`, código 1), espera até
+  3 s e só então solta o mestre numa thread de bloqueio, com prazo de 5 s (`pty_close_timeout`);
+  filho que não saiu vaza o conhost com `client_not_reaped`, como o `conpty.py`. Teste:
+  `term::conpty::child_killed_before_close` exige código 1, não o 0xC000013A do CTRL_CLOSE.
+  Os testes `term::conpty::*` só rodam no job Windows do CI.
+- Sem `detach-client` e sem `@hangar_term_size`: o psmux não tem identidade de cliente e
+  `resize-window`/`setw` voltam 0 sem efeito (medido em 22/08/2026 para o `termsock`).
+- O crate cria o ConPTY com `INHERIT_CURSOR | RESIZE_QUIRK | WIN32_INPUT_MODE` (o Python usa 0).
+  Com `INHERIT_CURSOR` o console pede a posição do cursor (`ESC[6n`) e espera a resposta do
+  cliente; a prova com web e nativo na DELPHI-02 é o Step 23 do plano da parte 4.
+

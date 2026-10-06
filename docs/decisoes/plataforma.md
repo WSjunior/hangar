@@ -1143,7 +1143,9 @@ Recusa antes do aceite é 403, como o fechamento antes do `accept` do Starlette;
 fora e teto de 64 painéis aceitam e fecham com 1013 e o motivo. O tamanho da janela fica na
 opção `@hangar_term_size` da sessão enquanto o painel vive, e o `main.rs` repõe ao subir o das
 sessões que um Rust anterior deixou no tamanho do painel. Convidado e Connect seguem no PTY do
-Python até a Task 9. Medidas em `docs/migracao-rust/parte4/medicao.md`.
+Python até a Task 9. Medidas em `docs/migracao-rust/parte4/medicao.md`. Desde a Task 10 o
+Windows também abre o painel do dono no Rust (ConPTY do `portable-pty`); as regras de lá estão em
+`windows.md`, "Terminal real do dono no Windows é do Rust".
 
 ## Lista do dono no hangar-server
 

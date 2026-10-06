@@ -424,7 +424,7 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   [plataforma.md](docs/decisoes/plataforma.md#connect-a-porta-dele-nunca-é-local).
 - **A porta 8765 é do `hangar-server` (Rust); o Python escuta atrás, numa porta de loopback.**
   Ele atende `/history` e `/events` de Claude/Codex, `/api/costs`, `/api/uso`, `/api/cotacao` e o
-  custo de sessão Codex com o token do dono, e fora do Windows o terminal real do dono (só pelo
+  custo de sessão Codex com o token do dono, e o terminal real do dono (só pelo
   `?token=`; a Origin ainda é decidida pelo Python em `/internal/term/origin`). Custos e uso têm índice próprio
   (`custos-rust.sqlite3`) no cache local; cotas e stats ficam no Python. O resto, convidado
   incluído, é repassado com `X-Forwarded-For`. 8766 e 8768 ficam no Python. Sem binário

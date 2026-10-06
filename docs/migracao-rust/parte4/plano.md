@@ -292,7 +292,7 @@ duplex), testes `cfg(windows)`, `docs/decisoes/windows.md`.
 
 - [ ] **Step 22: Ler "Regras vigentes" de `windows.md`; testes, vistos falhar; job Windows do CI pelo log**
 - [ ] **Step 23: VM DELPHI-02 com web e nativo: abre, digita, resize, Claude Code em tela cheia, nenhum travamento no pedido de posição do cursor (`INHERIT_CURSOR`); reprovou → `conpty.rs` com flags 0 e repetir (verificação manual)**
-- [ ] **Step 24: Regra em `windows.md`; revisar**
+- [x] **Step 24: Regra em `windows.md`; revisar**
 
 ---
 

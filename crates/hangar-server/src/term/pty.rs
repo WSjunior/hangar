@@ -22,6 +22,8 @@ pub(crate) const SIZE_OPTION: &str = "@hangar_term_size";
 pub(crate) struct Pty {
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
+    /// Vazio no Windows: o psmux não tem identidade de cliente.
+    #[cfg_attr(windows, allow(dead_code))]
     pub(crate) tty: String,
 }
 
@@ -41,7 +43,6 @@ fn size(cols: u16, rows: u16) -> PtySize {
 
 /// Bloqueante (fork + exec): chamar em `spawn_blocking`.
 pub(crate) fn open(cfg: &TermConfig, target: &str, cols: u16, rows: u16, slot: Arc<Slot>) -> Result<Opened, &'static str> {
-    let pair = portable_pty::native_pty_system().openpty(size(cols, rows)).map_err(|_| "pty_open")?;
     let mut cmd = CommandBuilder::new(&cfg.program);
     if let Some(socket) = &cfg.socket {
         cmd.arg("-S");
@@ -62,31 +63,34 @@ pub(crate) fn open(cfg: &TermConfig, target: &str, cols: u16, rows: u16, slot: A
     if let Ok(dir) = std::env::current_dir() {
         cmd.cwd(dir);
     }
+    spawn(cmd, cols, rows, slot)
+}
+
+/// O PTY com `cmd` dentro, leitor e escritor nas threads. Bloqueante.
+pub(crate) fn spawn(cmd: CommandBuilder, cols: u16, rows: u16, slot: Arc<Slot>) -> Result<Opened, &'static str> {
+    let pair = portable_pty::native_pty_system().openpty(size(cols, rows)).map_err(|_| "pty_open")?;
     let child = pair.slave.spawn_command(cmd).map_err(|_| "pty_spawn")?;
     // Sem soltar o escravo aqui, o leitor nunca vê o fim quando o cliente sai.
     drop(pair.slave);
+    #[cfg(unix)]
     let tty = pair.master.tty_name().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    #[cfg(windows)]
+    let tty = String::new();
     let pty = Pty { master: pair.master, child, tty };
-    // Daqui em diante todo erro mata e colhe o `tmux attach`, que senão ficaria anexado.
+    // Daqui em diante todo erro mata e colhe o `tmux attach`, que senão ficaria anexado. O filho
+    // morre antes do mestre: no Windows soltar o mestre fecha o pseudoconsole.
     let fail = |mut pty: Pty, code| {
-        signal(&pty, libc::SIGKILL);
+        kill(&mut pty);
         let _ = pty.child.wait();
         Err(code)
     };
     // Sem o tty não dá para soltar só o nosso cliente na saída.
+    #[cfg(unix)]
     if pty.tty.is_empty() {
         return fail(pty, "pty_tty");
     }
     let Ok(reader) = pty.master.try_clone_reader() else { return fail(pty, "pty_reader") };
-    // Nunca o `take_writer`: o `Drop` dele escreve "\n" + EOF no PTY, e o tmux entrega ao pane —
-    // fechar o painel mandaria Enter e Ctrl-D ao agente. Um `dup` do mestre só fecha.
-    let writer = pty.master.as_raw_fd()
-        // SAFETY: duplica um descritor vivo do mestre.
-        .map(|fd| unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) })
-        .filter(|fd| *fd >= 0)
-        // SAFETY: o descritor acabou de nascer do `fcntl` e ninguém mais é dono dele.
-        .map(|fd| unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd) });
-    let Some(writer) = writer else { return fail(pty, "pty_writer") };
+    let Some(writer) = writer(&pty) else { return fail(pty, "pty_writer") };
     let (out_tx, output) = mpsc::channel(OUTPUT_SLOTS);
     let (input, in_rx) = mpsc::channel(INPUT_SLOTS);
     let read_slot = slot.clone();
@@ -100,18 +104,40 @@ pub(crate) fn open(cfg: &TermConfig, target: &str, cols: u16, rows: u16, slot: A
     Ok(Opened { pty, output, input })
 }
 
-/// Lê até o fim do PTY ou até ninguém mais ouvir. Canal cheio segura a leitura.
+/// Lê até o fim do PTY. Canal cheio segura a leitura; sem ninguém ouvindo, segue lendo e
+/// descarta: no Windows o `ClosePseudoConsole` espera o conhost esvaziar a saída.
 pub(crate) fn pump(mut reader: impl Read, tx: mpsc::Sender<Bytes>) {
     let mut buf = vec![0u8; CHUNK];
+    let mut tx = Some(tx);
     loop {
         match reader.read(&mut buf) {
             Ok(0) => return,
-            Ok(n) => if tx.blocking_send(Bytes::copy_from_slice(&buf[..n])).is_err() { return },
+            Ok(n) => if tx.as_ref().is_some_and(|t| t.blocking_send(Bytes::copy_from_slice(&buf[..n])).is_err()) {
+                tx = None;
+            },
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
             // O fim do mestre no Linux chega como EIO, não como 0.
             Err(_) => return,
         }
     }
+}
+
+/// Nunca o `take_writer` no Unix: o `Drop` dele escreve "\n" + EOF no PTY, e o tmux entrega ao
+/// pane — fechar o painel mandaria Enter e Ctrl-D ao agente. Um `dup` do mestre só fecha.
+#[cfg(unix)]
+fn writer(pty: &Pty) -> Option<std::fs::File> {
+    pty.master.as_raw_fd()
+        // SAFETY: duplica um descritor vivo do mestre.
+        .map(|fd| unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) })
+        .filter(|fd| *fd >= 0)
+        // SAFETY: o descritor acabou de nascer do `fcntl` e ninguém mais é dono dele.
+        .map(|fd| unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd) })
+}
+
+/// No Windows o `take_writer` é o pipe de entrada do ConPTY, e soltá-lo só fecha o handle.
+#[cfg(windows)]
+fn writer(pty: &Pty) -> Option<Box<dyn Write + Send>> {
+    pty.master.take_writer().ok()
 }
 
 fn write_loop(mut writer: impl Write, mut rx: mpsc::Receiver<Bytes>) {
@@ -130,6 +156,18 @@ impl Pty {
     }
 }
 
+#[cfg(unix)]
+fn kill(pty: &mut Pty) {
+    signal(pty, libc::SIGKILL);
+}
+
+#[cfg(windows)]
+fn kill(pty: &mut Pty) {
+    // Filho que já saiu devolve erro de acesso; quem decide é a espera depois.
+    let _ = pty.child.kill();
+}
+
+#[cfg(unix)]
 fn signal(pty: &Pty, sig: i32) {
     if let Some(pid) = pty.child.process_id() {
         // SAFETY: kill(2) só envia sinal; o pid é do nosso filho ainda não colhido.
@@ -137,6 +175,7 @@ fn signal(pty: &Pty, sig: i32) {
     }
 }
 
+#[cfg(unix)]
 async fn reaped(pty: &mut Pty, within: Duration) -> bool {
     let until = tokio::time::Instant::now() + within;
     loop {
@@ -156,6 +195,11 @@ fn parse_size(text: &str, sep: char) -> Option<(u32, u32)> {
 /// Tamanho a repor na saída. Uma opção que ficou de uma queda vale mais que a janela de agora,
 /// que pode estar no tamanho do painel que caiu.
 pub(crate) async fn remember_size(cfg: &TermConfig, target: &str) -> Option<(u32, u32)> {
+    // No psmux a janela segue o cliente anexado, e `resize-window`/`setw` voltam 0 sem fazer
+    // nada: não há o que repor (`termsock._desmontar_windows`).
+    if cfg!(windows) {
+        return None;
+    }
     let t = format!("={target}:");
     if let Ok(out) = tmux(cfg, &["show-options", "-v", "-t", &t, SIZE_OPTION]).await {
         if let Some(saved) = out.status.success().then(|| parse_size(&String::from_utf8_lossy(&out.stdout), 'x')).flatten() {
@@ -193,6 +237,7 @@ pub(crate) async fn restore_size(cfg: &TermConfig, target: &str, (w, h): (u32, u
 /// Ordem do `termsock._desmontar`: soltar o nosso cliente, fechar, colher, esperar ele sair da
 /// lista e só então repor o tamanho (antes disso o tmux reimpõe o do cliente). `Err` = o código
 /// do que ficou para trás (cliente vivo ou janela no tamanho do painel).
+#[cfg(unix)]
 pub(crate) async fn teardown(cfg: &TermConfig, target: &str, mut pty: Pty, saved: Option<(u32, u32)>) -> Result<(), &'static str> {
     // `-t <tty>`, nunca `-s`: `-s` derruba também o `tmux attach` nativo do dono.
     let _ = tmux(cfg, &["detach-client", "-t", &pty.tty]).await;
@@ -245,5 +290,39 @@ pub(crate) async fn restore_after_crash(cfg: &TermConfig, open: impl Fn(&str) ->
                 tracing::warn!(session = %name, "terminal: tamanho deixado por um Rust anterior não reposto");
             }
         }
+    }
+}
+
+/// No psmux matar o NOSSO `tmux attach` é o desmonte: não há `detach-client -t <tty>`, e `-s`
+/// derrubaria também o cliente nativo do dono.
+#[cfg(windows)]
+pub(crate) async fn teardown(_cfg: &TermConfig, _target: &str, pty: Pty, _saved: Option<(u32, u32)>) -> Result<(), &'static str> {
+    close(pty).await.map(|_| ())
+}
+
+/// Mata o filho e só então fecha o pseudoconsole: `ClosePseudoConsole` com o cliente vivo pode
+/// travar esperando ele sair (microsoft/terminal#17716).
+#[cfg(windows)]
+pub(crate) async fn close(mut pty: Pty) -> Result<portable_pty::ExitStatus, &'static str> {
+    kill(&mut pty);
+    let until = tokio::time::Instant::now() + Duration::from_secs(3);
+    let status = loop {
+        match pty.child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if tokio::time::Instant::now() < until => tokio::time::sleep(Duration::from_millis(50)).await,
+            _ => break None,
+        }
+    };
+    let Some(status) = status else {
+        // Vazar um conhost é o mal menor: fechar com o filho vivo prenderia a thread para sempre.
+        std::mem::forget(pty.master);
+        return Err("client_not_reaped");
+    };
+    // Fechar pode esperar o conhost esvaziar a saída, e o mestre ainda segura a ponta de leitura:
+    // fora das threads do runtime e com prazo, para o painel não ficar preso sem código.
+    match tokio::time::timeout(Duration::from_secs(5), tokio::task::spawn_blocking(move || drop(pty))).await {
+        Ok(Ok(())) => Ok(status),
+        Ok(Err(_)) => Err("pty_close_panic"),
+        Err(_) => Err("pty_close_timeout"),
     }
 }

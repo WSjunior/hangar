@@ -250,26 +250,38 @@ async fn teardown_detaches_own_client_and_restores_size() {
 
 #[test]
 fn backpressure_pauses_reader() {
-    struct Endless(Arc<AtomicUsize>);
+    struct Endless(Arc<AtomicUsize>, Arc<std::sync::atomic::AtomicBool>);
     impl std::io::Read for Endless {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.1.load(Ordering::SeqCst) {
+                return Ok(0);
+            }
             self.0.fetch_add(1, Ordering::SeqCst);
             buf.fill(b'x');
             Ok(buf.len())
         }
     }
     let reads = Arc::new(AtomicUsize::new(0));
+    let eof = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (tx, rx) = mpsc::channel(pty::OUTPUT_SLOTS);
-    let r = reads.clone();
-    let reader = std::thread::spawn(move || pty::pump(Endless(r), tx));
+    let (r, e) = (reads.clone(), eof.clone());
+    let reader = std::thread::spawn(move || pty::pump(Endless(r, e), tx));
     std::thread::sleep(Duration::from_millis(300));
     // O canal enche (1 MiB) e a leitura seguinte fica presa esperando vaga.
     assert_eq!(reads.load(Ordering::SeqCst), pty::OUTPUT_SLOTS + 1);
     assert_eq!(pty::OUTPUT_SLOTS * pty::CHUNK, 1 << 20);
+    // Sem ouvinte o leitor segue drenando até o fim: o ConPTY só fecha com a saída esvaziada.
     drop(rx);
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while reads.load(Ordering::SeqCst) < pty::OUTPUT_SLOTS * 4 {
+        assert!(std::time::Instant::now() < deadline, "leitor parou de drenar sem ouvinte");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!reader.is_finished(), "leitor saiu antes do fim do PTY");
+    eof.store(true, Ordering::SeqCst);
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while !reader.is_finished() {
-        assert!(std::time::Instant::now() < deadline, "leitor não saiu sem ouvinte");
+        assert!(std::time::Instant::now() < deadline, "leitor não saiu no fim do PTY");
         std::thread::sleep(Duration::from_millis(10));
     }
 }
