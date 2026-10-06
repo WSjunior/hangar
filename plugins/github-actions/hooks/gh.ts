@@ -44,15 +44,37 @@ export function jobs(lista: readonly JobGh[]): Job[] {
   })
 }
 
-/** Último run de cada workflow, só os do commit mais novo da branch (o `gh` lista do mais novo). */
-export function runsAtuais(runs: readonly RunGh[]): RunGh[] {
-  const sha = runs[0]?.headSha
+/** Runs a mostrar, de listas por commit do mais novo para o mais velho (cada uma como o `gh` lista,
+ *  do run mais novo): o último de cada workflow e, além dele, todo run que ainda não terminou. */
+export function runsVisiveis(porCommit: readonly (readonly RunGh[])[]): RunGh[] {
   const vistos = new Set<string>()
-  return runs.filter(r => {
-    if (r.headSha !== sha || vistos.has(r.workflowName)) return false
+  const ids = new Set<number>()
+  const out: RunGh[] = []
+  for (const r of porCommit.flat()) {
+    const novo = !vistos.has(r.workflowName)
+    if ((!novo && r.status === 'completed') || ids.has(r.databaseId)) continue
     vistos.add(r.workflowName)
-    return true
-  })
+    ids.add(r.databaseId)
+    out.push(r)
+  }
+  return out
+}
+
+export type Empurrado = { sha: string; branch: string }
+
+/** Commits empurrados pela sessão, o mais novo primeiro, sem repetir e com teto. */
+export function lembrarCommit(lista: readonly Empurrado[], novo: Empurrado, max: number): Empurrado[] {
+  return [novo, ...lista.filter(c => c.sha !== novo.sha)].slice(0, max)
+}
+
+/** Só `git push` registra commit; `gh pr|run|workflow` só pede consulta. */
+export const ehPush = (cmd: string) => /\bgit\s+push\b/.test(cmd)
+
+/** Rótulo do botão de cada linha, único na faixa: o Hangar acha o botão pelo texto. */
+export function rotulosAbrir(ws: readonly { id: number; nome: string; sha: string }[]): string[] {
+  const comSha = new Set(ws.map(w => w.sha)).size > 1
+  const base = ws.map(w => `abrir ${w.nome}${comSha ? ` ${w.sha.slice(0, 7)}` : ''}`)
+  return base.map((r, i) => (base.indexOf(r) !== base.lastIndexOf(r) ? `${r} #${ws[i]?.id ?? i}` : r))
 }
 
 type CheckGh = { __typename?: string; status?: string; conclusion?: string | null; state?: string }

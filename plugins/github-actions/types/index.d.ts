@@ -1,6 +1,6 @@
 export type Situacao = 'ok' | 'falhou' | 'rodando' | 'esperando' | 'pulado' | 'cancelado'
 export type Job = { nome: string; situacao: Situacao; passo: string | null }
-export type Workflow = { id: number; nome: string; situacao: Situacao; url: string; jobs: Job[] }
+export type Workflow = { id: number; nome: string; sha: string; situacao: Situacao; url: string; jobs: Job[] }
 export type Checks = { ok: number; falhou: number; rodando: number }
 export type Pr = {
   numero: number
