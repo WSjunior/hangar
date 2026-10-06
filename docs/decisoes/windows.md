@@ -735,3 +735,19 @@ clique SGR são os do tmux; o que muda:
   os dois não fazem nada: o clique do `hangar-server` confere o tamanho depois de redimensionar e, se ele
   não mudou, segue pela roda.
 - A pesquisa de satisfação do fim do turno esconde a faixa e responde aos dígitos: conta como diálogo.
+- Contagem de clientes, medida na prova da VM (06/10/2026, psmux 3.3.8):
+  - o `list-clients -F` é ignorado e o psmux imprime o formato padrão (`/dev/pts/N: sessão: título
+    [100x29] (utf8) [activity=…]`), com o cliente de controle marcado só como `(control mode)` no texto,
+    sem `client_flags`. O ramo do tmux, que separa `control-mode` por vírgula, contaria o cliente de
+    controle como terminal;
+  - o `#{session_attached}` só vale 0 ou 1: um terminal dá 1, dois terminais dão 1, e o cliente de
+    controle sozinho também daria 1;
+  - o ramo atual (`#{session_attached}` comparado com 0) acerta porque o vigia e o observador da prévia
+    não rodam no Windows; quem ligar um cliente de controle lá precisa de outra contagem.
+- O `window-size latest` pega: depois do mínimo do Hangar (144x40) e de um clique esticado (144x250 de
+  volta a 144x40), um terminal de 100x30 que se liga deixa a janela em 100x29. Com dois terminais a
+  janela segue o último que se ligou e, quando ele sai, fica no tamanho dele. `#{window_size}` sai vazio.
+- Cada operação do clique é um processo do psmux, e cada passo do anel do `ctrl+x tab` custava 0,38 a
+  0,44 s com a conferência do pane e a releitura do tamanho (seis processos). Dentro da reserva do pane o
+  executor confere o pane uma vez, e o anel faz a tecla e uma leitura por passo; a volta ao prompt da
+  limpeza tem prazo pelo tamanho do anel (até 9 s).
