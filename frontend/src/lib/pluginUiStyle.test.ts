@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { boxStyle, buttonStyle, fillsPlace } from './pluginUiStyle';
+import { boxStyle, buttonStyle, fillsPlace, textStyle } from './pluginUiStyle';
 
 describe('tokens do tema nos estilos dos mods', () => {
   // `var()` de um token que o tema não define vira o valor inicial: a borda some (`border-style: none`), a cor
@@ -79,5 +79,20 @@ describe('buttonStyle', () => {
     expect(s).toContain('font-style:italic');
     expect(s).toContain('text-decoration:underline line-through');
     expect(s).toContain('opacity:0.6');
+  });
+});
+
+describe('textStyle', () => {
+  it('Text de fora com corte: uma linha só, recortada com reticências', () => {
+    const s = textStyle({ wrap: 'truncate-end' });
+    for (const parte of ['white-space:pre', 'overflow:hidden', 'text-overflow:ellipsis', 'min-width:0']) expect(s).toContain(parte);
+    expect(textStyle({})).toContain('white-space:pre-wrap');
+  });
+
+  it('Text dentro de Text ignora o próprio wrap e herda o do Text de fora, como o trecho do motor', () => {
+    for (const wrap of [undefined, 'wrap', 'truncate-end', 'truncate-middle']) {
+      const s = textStyle({ wrap, color: '#3fb97a' }, true);
+      expect(s).toBe('color:#3fb97a');
+    }
   });
 });

@@ -71,13 +71,17 @@ export function boxStyle(p: Props, place?: number | null): string {
   });
 }
 
-/** `Text` do Ink: cor, ênfase e corte. `dimColor` é opacidade, como no terminal. */
-export function textStyle(p: Props): string {
+/** `Text` do Ink: cor, ênfase e corte. `dimColor` é opacidade, como no terminal.
+ *
+ *  `nested` é um `Text` dentro de outro. No motor ele vira trecho do texto de fora (`ink-virtual-text`, sem nó de
+ *  layout), e só o `wrap` do `Text` de fora vale para o texto inteiro: o de dentro não declara quebra nem corte e
+ *  herda o `white-space` do de fora, senão um `pre-wrap` próprio voltaria a quebrar a linha cortada. */
+export function textStyle(p: Props, nested = false): string {
   const fg = inkColor(p.color);
   const bg = inkColor(p.backgroundColor);
   const inverse = p.inverse === true;
   const wrap = typeof p.wrap === 'string' ? p.wrap : 'wrap';
-  const truncate = wrap.startsWith('truncate') || wrap === 'end' || wrap === 'middle';
+  const truncate = !nested && (wrap.startsWith('truncate') || wrap === 'end' || wrap === 'middle');
   const deco = [p.underline === true && 'underline', p.strikethrough === true && 'line-through'].filter(Boolean);
   return css({
     color: inverse ? (bg ?? 'var(--bg-base)') : fg,
@@ -86,7 +90,7 @@ export function textStyle(p: Props): string {
     'font-style': p.italic === true ? 'italic' : null,
     'text-decoration': deco.length ? deco.join(' ') : null,
     opacity: p.dimColor === true ? 0.6 : null,
-    'white-space': truncate ? 'pre' : 'pre-wrap',
+    'white-space': nested ? null : truncate ? 'pre' : 'pre-wrap',
     overflow: truncate ? 'hidden' : null,
     'text-overflow': truncate ? 'ellipsis' : null,
     'min-width': truncate ? '0' : null,

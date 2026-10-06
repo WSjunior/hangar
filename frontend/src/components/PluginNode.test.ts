@@ -79,3 +79,36 @@ describe('hover nos mods', () => {
     expect(estilo(el.querySelector('span'))).not.toContain('#ff0000');
   });
 });
+
+// A linha da faixa do mod `pm-mock`: dois botões `plain` e um texto cortado com trechos coloridos dentro.
+const LINHA_PM: Node = { type: 'Box', props: { key: 'pm-linha', flexDirection: 'row', width: 150 }, children: [
+  { type: 'Button', props: { key: 'pm-abrir', plain: true, label: '▸ PM-18904' } },
+  { type: 'Text', children: [' '] },
+  { type: 'Button', props: { key: 'pm-fechar', plain: true, dimColor: true, label: 'fechar' } },
+  { type: 'Text', props: { wrap: 'truncate-end' }, children: [
+    { type: 'Text', props: { dimColor: true }, children: [' · '] },
+    { type: 'Text', props: { color: '#3fb97a', wrap: 'wrap' }, children: ['ms_devops ● 2 threads abertas'] },
+  ] },
+] };
+
+describe('corte e quebra como no terminal (W6)', () => {
+  it('o corte do Text de fora vale para os Text de dentro: eles herdam o white-space e não declaram o deles', async () => {
+    const el = await montar({ node: LINHA_PM, onPress: vi.fn() });
+    const [, cortado, ponto, colorido] = [...el.querySelectorAll('span')];
+    for (const parte of ['white-space:pre', 'overflow:hidden', 'text-overflow:ellipsis', 'min-width:0']) expect(estilo(cortado)).toContain(parte);
+    for (const filho of [ponto, colorido]) expect(estilo(filho)).not.toMatch(/white-space|overflow|min-width/);
+    expect(estilo(colorido)).toContain('color:#3fb97a');
+    expect(getComputedStyle(colorido).whiteSpace).toBe('pre');
+  });
+
+  it('o Button não encolhe na linha nem estica na coluna, e o rótulo não quebra no meio', async () => {
+    const el = await montar({ node: LINHA_PM, onPress: vi.fn() });
+    for (const botao of el.querySelectorAll('button')) {
+      const s = getComputedStyle(botao);
+      expect(s.flexShrink).toBe('0');
+      expect(s.alignSelf).toBe('flex-start');
+      expect(s.whiteSpace).toBe('pre-wrap');
+      expect(s.maxWidth).toBe('100%');
+    }
+  });
+});
