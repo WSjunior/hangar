@@ -5630,7 +5630,7 @@ impl Hangar {
     }
 
     /// Chama uma rota `plugin/<ação>` da sessão aberta; a resposta volta como o `Payload` que `wrap` monta.
-    fn spawn_plugin(&mut self, action: &'static str, body: Value, wrap: impl FnOnce(Result<Value, Failure>) -> Payload + Send + 'static) {
+    fn spawn_plugin(&self, action: &'static str, body: Value, wrap: impl FnOnce(Result<Value, Failure>) -> Payload + Send + 'static) {
         let (Some(api), Some(session)) = (self.session_api(), self.selected.clone()) else { return };
         let (connection, selection, tx) = (self.connection, self.selection, self.tx.clone());
         self.runtime.spawn(async move {
@@ -5764,7 +5764,7 @@ impl Hangar {
                 let _ = entity.update(cx, |this, cx| this.submit_plugin_field(&site, &key, cx));
             })
         });
-        crate::plugin_ui::View { press: self.plugin_press(cx), show: Some(show), columns: self.plugin_columns,
+        crate::plugin_ui::View { press: self.plugin_press(cx), show, columns: self.plugin_columns,
             hover: Some(self.plugin_hover(cx)), hovered: &self.plugin_hovered, fields: &self.plugin_fields, submit }
     }
 
