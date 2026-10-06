@@ -6,6 +6,24 @@ terminal real das sessões com terminal, quem consome e o que o Rust já tem. Li
 Desenho: `desenho.md`. Ponto de partida anterior: Fase C de `../lista-estado/plano.md` (Tasks
 19–24), cujas linhas ficaram velhas (tabela no fim).
 
+## O que virou Rust (Task 11, 06/10/2026)
+
+As tabelas abaixo são o retrato de partida. Depois das Tasks 1–10, com o Rust de pé (`rust` ou
+`pending`), cada peça mudou de dono assim; no modo `python` tudo segue como nas tabelas.
+
+| Seção | Agora no Rust | Continua no Python |
+|---|---|---|
+| 1 e 2. Estado ao vivo | `Monitor` por hub (`state/monitor.rs`, `state/live.rs`, `side.rs`): captura (`PoolCapture`, `-C`), `reduce`, morta com `em_troca`, permissão (`state/permission.rs`), shells, pane do agente, rebaixamento (`state/demote.rs`), dedupe; canal privado `/__hangar_server/state/{name}/events` para 8766/8768 | fatos por empurrão (`state_facts.py`: plugin, `em_troca`, operação de permissão) e os serviços `permission.observe` e `session.dead`; a ponte `terminal_observer` ficou sem consumidor |
+| 3. Prévia | `state/preview.rs`: arquivo do hook, pane, corte, captura rápida, supressão pelo transcript do hub | — |
+| 4. Pergunta, sugestão, `problema`, entrega | `state/ask.rs`, `state/edges.rs`: `ask_question` uma vez, `suggest` pelo fato, `problema` do runtime e da observação, borda de entrega | a entrega em si (`session.deliverable` → `adapter.drain`) |
+| Lista (Task 6) | lê o último `state` do `Monitor` vivo (`state/published.rs`) e não captura essa sessão; cartão segurado pelo `held` dos fatos | — |
+| 6. Outros provedores | — | Codex (app-server), Pi, omp e Kimi (`StateMonitor`/`PreviewBroker`): parte 5 |
+| 7. Terminal real | todo PTY (`term/`: `pty.rs`, `resolve.rs`, um painel por sessão em todas as portas, contrapressão, desmontagem e tamanho reposto pela opção `@hangar_term_size`); capacidade na saúde (`terminal_panel`) | porta de entrada da 8766/8768 (`termsock`, ligada a `/__hangar_server/term`), a Origin (`/internal/term/origin`, `term/origin.rs`) e o 409, que pergunta `term.active` |
+| 8. Windows | `Monitor` com captura avulsa pelo psmux (`state/capture.rs`, decide pela saída); ConPTY do `portable-pty` com entrada segurada até o psmux pintar | — |
+
+Medidas em `medicao.md`, prova em `prova-real.md`, achados sem conserto em `achados-pendentes.md`.
+Contrato interno: 35.
+
 ## 1. Como o `state` chega ao cliente hoje (Claude com terminal)
 
 1. O cliente abre `/api/sessions/{name}/events` no Rust (`routes.rs:372-409`, hub em `side.rs`).

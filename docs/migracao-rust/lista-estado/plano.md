@@ -363,6 +363,11 @@ contas; mudança reclassifica a sessão e publica na hora, coalescida em 150 ms)
 
 ## Fase C — estado do chat das sessões Claude com terminal
 
+> **Substituída pela parte 4** (decisão do dono: opção A abaixo). O estado do chat, a prévia, a
+> pergunta nativa e o terminal real foram planejados e executados em `../parte4/` (Tasks 1–7 no
+> lugar das 19–22). As Tasks 19–22 abaixo ficam como esboço, com linhas velhas
+> (`../parte4/inventario.md`, "Linhas velhas no esboço da Fase C"); não executar.
+
 ### Task 19: Fatos e serviços do estado do chat (contrato 24)
 
 **Arquivos:** `backend/app/list_facts.py` (por sessão Claude com terminal: `plugin_bridge.estado_recente`
@@ -427,6 +432,10 @@ marcador, âncora do plugin, `em_troca`, `dead`), `state_monitor::one_lease_per_
 
 ### Task 23: Documentação restante
 
+> Coberta pela Task 11 da parte 4 (`../parte4/plano.md`): README da migração (partes e "Ainda no
+> Python") e `superado.md` (descoberta e lista Python, `StateMonitor` de Claude com terminal); o
+> `inventario.md` desta pasta fica como retrato de partida.
+
 **Arquivos:** `CLAUDE.md`, `docs/migracao-rust/README.md` (partes e "Ainda no Python"),
 `docs/decisoes/superado.md` (`_ListRefresher`, `resolve_tracked` Python e `StateMonitor` de Claude
 com terminal como donos), `inventario.md`.
@@ -434,6 +443,11 @@ com terminal como donos), `inventario.md`.
 - [ ] **Step 52: Varrer `CLAUDE.md` e `docs/decisoes/` por regra que ficou falsa; corrigir; revisar**
 
 ### Task 24: Prova de uso real
+
+> **Substituída pelas Tasks 12 e 13 da parte 4**: prova isolada com carga e reserva em
+> `../parte4/prova-real.md` (Step 29 cobre CPU e reserva dos Steps 53–54 abaixo; a latência até a
+> lista ver a mudança está em `plataforma.md`, "Lista acordada por arquivo"); uso real com o dono e VM nos
+> Steps 30–31 de `../parte4/plano.md`. Este arquivo `prova-real.md` não será escrito.
 
 **Arquivos:** `docs/migracao-rust/lista-estado/prova-real.md`.
 

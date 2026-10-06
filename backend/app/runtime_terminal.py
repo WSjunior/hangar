@@ -36,6 +36,10 @@ class KeyboardLoanExpired(RuntimeError):
     safe_detail = True
 
 
+class TerminalOutcomeUnknown(RuntimeError):
+    """A entrada pode ter chegado ao pane: quem chama não repete nem diz que nada foi enviado."""
+
+
 class TerminalControlError(RuntimeError):
     def __init__(self, control, disposition, code):
         self.control, self.disposition, self.code = control, disposition, code
@@ -853,7 +857,7 @@ def _reserve_execute(coordinator, descriptor, command, operation_id, *, entry_id
         result = _reply(operation_id, 'unknown' if dispatched else 'deferred', cleanup='unproved' if dispatched else 'not_needed')
         _queue(coordinator, descriptor, {'kind':'finish','id':operation_id,'status':result['disposition'],'result':result})
         if dispatched and isinstance(exc, Exception):
-            raise RuntimeError('resultado terminal incerto; efeito conservado sem fallback') from exc
+            raise TerminalOutcomeUnknown('resultado terminal incerto; efeito conservado sem fallback') from exc
         raise
     # Só o /clear cujo Enter pode ter saído ergue a trava; incerto antes do Enter é entrega incerta comum.
     stage = (result.get('payload') or {}).get('stage') or ''
@@ -938,7 +942,7 @@ async def route(coordinator, name, command):
     if result.get('disposition') == 'rejected':
         raise RuntimeError(f"entrada recusada pelo terminal ({(result.get('payload') or {}).get('code') or 'sem código'})")
     if result.get('disposition') not in {None,'accepted','deferred'}:
-        raise RuntimeError('resultado terminal incerto; não repetir por outro transporte')
+        raise TerminalOutcomeUnknown('resultado terminal incerto; não repetir por outro transporte')
     return result
 
 
