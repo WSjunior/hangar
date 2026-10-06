@@ -502,6 +502,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_mod_dialogo_aberto: () => m.erro_mod_dialogo_aberto(),
   erro_mod_rascunho_no_prompt: () => m.erro_mod_rascunho_no_prompt(),
   erro_mod_painel_nao_alcancavel: () => m.erro_mod_painel_nao_alcancavel(),
+  erro_mod_fechar_recusado: () => m.erro_mod_fechar_recusado(),
 };
 
 // Falha com código do servidor (503 do dono único): a frase traduzida já está no `message`.
