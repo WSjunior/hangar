@@ -1,7 +1,7 @@
 mod mods_support;
 
 use hangar_server::mods::tree;
-use mods_support::{first_render, fixture};
+use mods_support::{first_render, nth_render};
 use serde_json::json;
 
 #[test]
@@ -43,18 +43,13 @@ fn first_in_document_order_wins() {
     assert_eq!(tree::find(&tree, "k", &["Button"]).unwrap().handle, 1);
 }
 
-/// A primeira resposta ao desenho da faixa é só o nó `engine` (`ref: 1`) mesmo com mods carregados;
-/// a faixa com conteúdo é a última resposta gravada.
-fn last_band(name: &str) -> serde_json::Value {
-    fixture(name).iter().rev()
-        .find(|(dir, msg)| dir == "in" && msg["type"] == "control_response"
-            && msg["response"]["response"]["tree"].is_object())
-        .map(|(_, msg)| msg["response"]["response"]["tree"].clone()).unwrap()
-}
-
 #[test]
 fn engine_only_band_is_empty() {
     assert!(tree::is_engine_only(&first_render("sem-plugins", "above-prompt")));
     assert!(tree::is_engine_only(&first_render("vitrine", "above-prompt")), "ref 1 antes de o mod desenhar");
-    assert!(!tree::is_engine_only(&last_band("vitrine")));
+    // A segunda resposta é a faixa já desenhada pelo mod: um Box que contém o `engine`.
+    let band = nth_render("vitrine", "above-prompt", 1);
+    assert!(!tree::is_engine_only(&band));
+    assert_eq!(band["type"], "Box");
+    assert_eq!(band["children"][0]["type"], "engine");
 }
