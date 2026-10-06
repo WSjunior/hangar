@@ -6,8 +6,8 @@ use std::sync::{Arc,Mutex,atomic::AtomicU64};
 use std::time::Duration;
 use tokio::sync::{broadcast,Notify};
 
-struct Io { calls:Mutex<Vec<CommandRequest>>, text:Mutex<String>, gate:Notify, blocked:std::sync::atomic::AtomicBool, fail_write:std::sync::atomic::AtomicBool, fail_enter:std::sync::atomic::AtomicBool, rotate_enter:std::sync::atomic::AtomicBool, conversation:Arc<Mutex<String>>, socket_calls:Mutex<Vec<Vec<u8>>>, ghost:Mutex<String>, hold_capture:std::sync::atomic::AtomicBool, mods_screen:Mutex<Option<String>>, ring_keys:std::sync::atomic::AtomicUsize, ring_returns:std::sync::atomic::AtomicBool, drop_on_enter:std::sync::atomic::AtomicBool, notice:Mutex<String>, drop_keeps_text:std::sync::atomic::AtomicBool, sent:Mutex<Vec<String>>, entered_anyway:Mutex<Option<std::path::PathBuf>> }
-impl Io { fn new()->Self { Self { calls:Mutex::new(vec![]),text:Mutex::new(String::new()),gate:Notify::new(),blocked:std::sync::atomic::AtomicBool::new(false),fail_write:std::sync::atomic::AtomicBool::new(false),fail_enter:std::sync::atomic::AtomicBool::new(false),rotate_enter:std::sync::atomic::AtomicBool::new(false),conversation:Arc::new(Mutex::new("sid".into())),socket_calls:Mutex::new(vec![]),ghost:Mutex::new(String::new()),hold_capture:std::sync::atomic::AtomicBool::new(false),mods_screen:Mutex::new(None),ring_keys:Default::default(),ring_returns:Default::default(),drop_on_enter:Default::default(),notice:Mutex::new(String::new()),drop_keeps_text:Default::default(),sent:Mutex::new(vec![]),entered_anyway:Mutex::new(None) } } }
+struct Io { calls:Mutex<Vec<CommandRequest>>, text:Mutex<String>, gate:Notify, blocked:std::sync::atomic::AtomicBool, fail_write:std::sync::atomic::AtomicBool, fail_enter:std::sync::atomic::AtomicBool, rotate_enter:std::sync::atomic::AtomicBool, conversation:Arc<Mutex<String>>, socket_calls:Mutex<Vec<Vec<u8>>>, ghost:Mutex<String>, hold_capture:std::sync::atomic::AtomicBool, mods_screen:Mutex<Option<String>>, ring_keys:std::sync::atomic::AtomicUsize, ring_returns:std::sync::atomic::AtomicBool }
+impl Io { fn new()->Self { Self { calls:Mutex::new(vec![]),text:Mutex::new(String::new()),gate:Notify::new(),blocked:std::sync::atomic::AtomicBool::new(false),fail_write:std::sync::atomic::AtomicBool::new(false),fail_enter:std::sync::atomic::AtomicBool::new(false),rotate_enter:std::sync::atomic::AtomicBool::new(false),conversation:Arc::new(Mutex::new("sid".into())),socket_calls:Mutex::new(vec![]),ghost:Mutex::new(String::new()),hold_capture:std::sync::atomic::AtomicBool::new(false),mods_screen:Mutex::new(None),ring_keys:Default::default(),ring_returns:Default::default() } } }
 impl TerminalIo for Io {
     fn command<'a>(&'a self,r:CommandRequest)->IoFuture<'a,CommandOutput> { Box::pin(async move {
         let cmd=r.args[0].clone();
@@ -20,8 +20,7 @@ impl TerminalIo for Io {
             "capture-pane" if !r.args.contains(&"-S".into()) && self.mods_screen.lock().unwrap().is_some()=>self.mods_screen.lock().unwrap().clone().unwrap().into_bytes(),
             "capture-pane"=>{let text=self.text.lock().unwrap().clone();let ghost=self.ghost.lock().unwrap().clone();
                 // O fantasma é rascunho que o Ctrl+S não guarda: o composer fica ocupado.
-                let notice=self.notice.lock().unwrap().clone();
-                format!("{notice}────────────────────────────────\n❯ {}\n────────────────────────────────\n",if text.is_empty(){ghost}else{text}).into_bytes()},
+                format!("────────────────────────────────\n❯ {}\n────────────────────────────────\n",if text.is_empty(){ghost}else{text}).into_bytes()},
             // O `ctrl+x tab` da devolução do foco: com `ring_returns`, o foco volta ao prompt.
             "send-keys" if r.args.iter().any(|a|a=="C-x")=>{
                 self.ring_keys.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
@@ -31,18 +30,7 @@ impl TerminalIo for Io {
             "send-keys"=>{
                 if self.blocked.load(std::sync::atomic::Ordering::Acquire) { self.gate.notified().await; }
                 let text=r.args.last().unwrap();
-                // O plugin do Hangar derruba o envio: o composer esvazia e o aviso aparece acima dele.
-                let dropped=text=="\r" && self.drop_on_enter.load(std::sync::atomic::Ordering::Acquire);
-                if dropped {*self.notice.lock().unwrap()=format!("{} durante um clique do app\n",PLUGIN_HELD_NOTICE);}
-                // O que o `Enter` mandou ao modelo de verdade: o que estava no composer, fora do envio derrubado.
-                else if text=="\r" && !self.text.lock().unwrap().is_empty() {self.sent.lock().unwrap().push(self.text.lock().unwrap().clone());}
-                // O aviso é de outro envio derrubado no mesmo instante, e este entrou: o transcript o mostra.
-                if dropped && let Some(path)=self.entered_anyway.lock().unwrap().clone() {
-                    let line=json!({"type":"user","uuid":"u1","message":{"content":self.text.lock().unwrap().clone()}});
-                    std::fs::write(path,format!("{line}\n")).unwrap();
-                }
-                if dropped && self.drop_keeps_text.load(std::sync::atomic::Ordering::Acquire) {}
-                else if text=="\r" || text=="C-u" { self.text.lock().unwrap().clear(); if text=="\r" && self.rotate_enter.load(std::sync::atomic::Ordering::Acquire){*self.conversation.lock().unwrap()="new-sid".into();} if text=="\r" && self.fail_enter.load(std::sync::atomic::Ordering::Acquire){return Err(IoFailure {code:"enter_uncertain",may_have_written:true});} }
+                if text=="\r" || text=="C-u" { self.text.lock().unwrap().clear(); if text=="\r" && self.rotate_enter.load(std::sync::atomic::Ordering::Acquire){*self.conversation.lock().unwrap()="new-sid".into();} if text=="\r" && self.fail_enter.load(std::sync::atomic::Ordering::Acquire){return Err(IoFailure {code:"enter_uncertain",may_have_written:true});} }
                 else if r.args.contains(&"-l".into()) {
                     *self.text.lock().unwrap()=text.clone();
                     if self.fail_write.load(std::sync::atomic::Ordering::Acquire){return Err(IoFailure {code:"partial_write",may_have_written:true});}
@@ -1104,72 +1092,4 @@ async fn each_mods_hold_checks_the_pane_again() {
     }
     assert_eq!(checks()-before,2,"uma conferência por reserva");
     h.stop().await.unwrap();
-}
-
-/// O plugin derrubou o envio (o aviso dele apareceu com o `Enter`): a mensagem volta à fila em vez de contar
-/// como enviada, e sai na tentativa seguinte.
-#[tokio::test]
-async fn a_send_dropped_by_the_plugin_is_deferred_not_submitted() {
-    let f=Fixture::new().await; f.io.drop_on_enter.store(true,std::sync::atomic::Ordering::Release);
-    let h=f.start();
-    let reply=h.command(f.command("segurada","Mensagem segurada")).await.unwrap();
-    assert_eq!(reply.disposition,hangar_server::runtime::protocol::Disposition::Deferred,"{:?}",reply.payload);
-    assert_eq!(reply.payload["code"],"plugin_held");
-    assert!(f.io.sent.lock().unwrap().is_empty(),"o envio derrubado não chegou ao modelo");
-    f.io.drop_on_enter.store(false,std::sync::atomic::Ordering::Release);
-    f.wait_for("a segunda tentativa",||!f.io.sent.lock().unwrap().is_empty()).await;
-    h.stop().await.unwrap();
-    // O composer esvaziou no envio derrubado: a nova tentativa digita de novo uma vez e a mensagem sai uma
-    // vez só; a linha termina entregue.
-    assert_eq!(*f.io.sent.lock().unwrap(),["Mensagem segurada"]);
-    assert_eq!(typed_at(&f,"Mensagem segurada").len(),2);
-    assert_eq!(f.state()["rows"].as_array().unwrap().len(),1);
-    assert_eq!(f.state()["rows"][0]["delivered"],true);
-}
-
-/// Um envio derrubado que deixasse o texto no composer não volta à fila: a nova tentativa guardaria o
-/// próprio texto como rascunho e digitaria de novo. Fica incerto, sem redigitar.
-#[tokio::test]
-async fn a_dropped_send_that_keeps_the_text_is_not_retyped() {
-    let f=Fixture::new().await;
-    f.io.drop_on_enter.store(true,std::sync::atomic::Ordering::Release); f.io.drop_keeps_text.store(true,std::sync::atomic::Ordering::Release);
-    let h=f.start();
-    let reply=h.command(f.command("presa","Texto que ficou")).await.unwrap();
-    assert_ne!(reply.disposition,hangar_server::runtime::protocol::Disposition::Deferred,"{:?}",reply.payload);
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    h.stop().await.unwrap();
-    assert_eq!(typed_at(&f,"Texto que ficou").len(),1,"digitado uma vez só");
-    assert!(f.io.sent.lock().unwrap().is_empty());
-}
-
-/// O aviso que já estava na tela antes do `Enter` é de outro envio: este conta como enviado, sem repetir.
-#[tokio::test]
-async fn an_old_held_notice_does_not_defer_a_new_send() {
-    let f=Fixture::new().await; *f.io.notice.lock().unwrap()=format!("{PLUGIN_HELD_NOTICE} antigo\n");
-    let h=f.start();
-    let reply=h.command(f.command("nova","Mensagem nova")).await.unwrap();
-    assert_eq!(reply.payload["code"],"submitted","{:?}",reply.payload);
-    h.stop().await.unwrap();
-    assert_eq!(typed_at(&f,"Mensagem nova").len(),1);
-}
-
-/// O aviso do plugin e a constante do Rust são o mesmo texto.
-#[test]
-fn the_held_notice_matches_the_plugin() {
-    let ui=std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/hangar/hooks/ui.ts")).unwrap();
-    assert!(ui.contains(&format!("drop: \"{PLUGIN_HELD_NOTICE}")),"o aviso do ui.ts mudou");
-}
-
-/// O aviso apareceu, mas a mensagem desta linha já está no transcript (o aviso era de outro envio): ela
-/// conta como enviada e não volta à fila, para não sair duas vezes.
-#[tokio::test]
-async fn a_held_notice_with_the_row_in_the_transcript_counts_as_sent() {
-    let f=Fixture::new().await; f.io.drop_on_enter.store(true,std::sync::atomic::Ordering::Release);
-    *f.io.entered_anyway.lock().unwrap()=Some(f.target.transcript.clone());
-    let h=f.start();
-    let reply=h.command(f.command("entrou","Mensagem que entrou")).await.unwrap();
-    assert_eq!(reply.disposition,hangar_server::runtime::protocol::Disposition::Accepted,"{:?}",reply.payload);
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    h.stop().await.unwrap();
-    assert_eq!(typed_at(&f,"Mensagem que entrou").len(),1,"não foi digitada de novo");
 }

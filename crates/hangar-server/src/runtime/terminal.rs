@@ -596,12 +596,6 @@ impl Executor {
                     })
                 }
             };
-        // O aviso do plugin na tela não é do envio desta linha se ela já está no transcript (a pessoa enviou
-        // algo no terminal e teve o envio dela derrubado no mesmo instante): aí ela entrou, e voltar à fila a
-        // mandaria de novo.
-        if result.payload["code"]=="plugin_held" && let Some(row)=&row_id && self.entered(id,row).await {
-            result.disposition=Disposition::Accepted; result.payload["disposition"]=json!("accepted"); result.payload["code"]=json!("submitted");
-        }
         // Só o desfecho: o texto do rascunho nunca sai do terminal; antes de
         // qualquer `?`, para a falha do diário não calar o aviso.
         if let Some(draft)=result.payload["draft"].as_str().filter(|draft|*draft!="returned") {
@@ -683,16 +677,6 @@ impl Executor {
         let attempt=format!("queue:{}:{}",row_id,self.sequence.fetch_add(1,Ordering::Relaxed));
         let outcome=self.execute(&attempt,"input",json!({"text":row["text"],"pre_transcript":row["pre_transcript"]==true}),Some(row_id)).await?;
         Ok(json!({"drained":1,"reply":outcome}))
-    }
-    /// A linha `row`, despachada pela operação `id`, já aparece no transcript depois do cursor dela? Espera um
-    /// instante para o Claude gravar. Na dúvida (transcript ilegível), `true`: a linha não volta à fila.
-    async fn entered(&mut self,id:&str,row:&str)->bool {
-        tokio::time::sleep(self.options.limits.slash_settle).await;
-        let Ok(state)=self.queue.snapshot().await else {return true};
-        let (Some(line),Some(op))=(state.rows.iter().find(|r|r["id"]==row),state.operations.get(id)) else {return true};
-        let Ok(cursor)=serde_json::from_value::<DispatchCursor>(op.dispatch_cursor.clone()) else {return true};
-        if self.receipt.scan(&self.target.transcript).is_err() {return true;}
-        self.receipt.match_after(&self.target.transcript,&cursor,line,&state.used_occurrences).map_or(true,|proof|proof.is_some())
     }
     async fn confirm_rows(&mut self)->Result<Value,RuntimeError> {
         let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;

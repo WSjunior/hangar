@@ -290,8 +290,6 @@ impl PaneFormats {
         Some(Self { mouse, in_mode: *mode == "1", columns: columns.parse().ok()?, rows: rows.parse().ok()? })
     }
 }
-/// O começo do aviso com que o plugin do Hangar derruba um envio do composer (`plugins/hangar/hooks/ui.ts`).
-pub const PLUGIN_HELD_NOTICE: &str = "Hangar: envio segurado";
 /// As teclas da reserva por teclado (T5): uma por chamada, e só os dois acordes medidos juntos.
 const MODS_KEYS: [&[&str]; 4] = [&["C-x", "Tab"], &["Tab"], &["Enter"], &["C-x", "x"]];
 
@@ -592,9 +590,6 @@ impl TerminalDriver {
         if !self.verify().await.is_ok_and(|facts| !facts.open_question) {
             return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Submit, "submission_blocked");
         }
-        // O aviso do envio segurado que já estava na tela antes do `Enter` não diz nada sobre este envio.
-        // O pane acabou de ser conferido no `verify` acima.
-        let held_before = self.composer_capture_unverified().await.is_ok_and(|(screen, _)| screen.contains(PLUGIN_HELD_NOTICE));
         if let Err(error) = self.key_inner("Enter").await { return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Submit, error.code); }
         let mut slash_selected = false;
         let clear = text.split_whitespace().next() == Some("/clear");
@@ -609,11 +604,6 @@ impl TerminalDriver {
                 // Só aceita se o texto também sumiu da tela com estilo: esmaecido nunca prova envio.
                 if ComposerSnapshot::parse(&typed).is_some_and(|now| now.is_empty())
                     && !ComposerSnapshot::parse(&screen).is_some_and(|now| now.proves(text, before) == Proof::Present) {
-                    // O plugin do Hangar derrubou o envio (clique do app pelo teclado em curso, ou a ponte sem
-                    // resposta): o composer esvaziou sem a mensagem entrar, e ela volta à fila.
-                    if !held_before && screen.contains(PLUGIN_HELD_NOTICE) {
-                        return DeliveryResult::new(Disposition::Deferred, DeliveryStage::SubmitProof, "plugin_held");
-                    }
                     return DeliveryResult::new(Disposition::Accepted, DeliveryStage::SubmitProof, "submitted");
                 }
                 // O guardado só sai do Ctrl+S sozinho no envio: ele volta ao composer e a marca some.
