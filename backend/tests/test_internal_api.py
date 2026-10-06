@@ -255,3 +255,29 @@ def test_list_facts_route_carries_the_shadow_flag():
         ok = _client().post("/internal/list/facts", json={**body, "shadow": True}, headers={"X-Hangar-Internal": SECRET})
     assert (old.status_code, wrong.status_code, ok.status_code) == (400, 400, 200)
     assert seen == [True]
+
+
+def test_internal_term_origin_same_rules(monkeypatch):
+    # O painel do dono abre no Rust, mas a Origin continua decidida pela regra do Python: a resposta
+    # da rota é exatamente o `_origem_aceita` com o Host original que o Rust recebeu.
+    from app import termsock as ts
+    monkeypatch.setattr(ts.settings, "public_url", "https://notebook.tailnet.ts.net", raising=False)
+    monkeypatch.setattr(ts.settings, "term_origins", "https://pocket.exemplo.com", raising=False)
+    monkeypatch.setattr(ts, "_peers_conhecidos", lambda: ["http://100.64.0.2:8766"])
+    casos = [("http://127.0.0.1:8765", "127.0.0.1:8765"), ("https://notebook.tailnet.ts.net", "127.0.0.1:8765"),
+             ("https://pocket.exemplo.com", None), ("http://100.64.0.2:8766", "127.0.0.1:8765"),
+             ("https://notebook.tailnet.ts.net.evil.com", "127.0.0.1:8765"), ("https://evil.com", None), ("", "x")]
+    client = _client()
+    vistos = set()
+    for origem, host in casos:
+        r = client.post("/internal/term/origin", json={"origin": origem, "host": host},
+                        headers={"X-Hangar-Internal": SECRET})
+        assert r.status_code == 200
+        assert r.json() == {"ok": ts._origem_aceita(origem, host)}, origem
+        vistos.add(r.json()["ok"])
+    assert vistos == {True, False}
+    for corpo in ({"origin": 1, "host": None}, {"origin": "x"}, ["x"], {"origin": "x", "host": "y", "z": 1}):
+        r = client.post("/internal/term/origin", json=corpo, headers={"X-Hangar-Internal": SECRET})
+        assert r.status_code == 400
+    r = client.post("/internal/term/origin", json={"origin": "x", "host": None}, headers={"X-Hangar-Internal": "errado"})
+    assert r.status_code == 404

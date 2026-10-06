@@ -1,0 +1,225 @@
+//! O PTY de um painel: `tmux attach` na sessão, leitor e escritor em threads, desmontagem que
+//! solta só o NOSSO cliente e devolve à janela o tamanho de antes.
+use std::io::{Read, Write};
+use std::sync::Arc;
+use std::time::Duration;
+
+use bytes::Bytes;
+use portable_pty::{CommandBuilder, MasterPty, PtySize};
+use tokio::sync::mpsc;
+
+use super::resolve::tmux;
+use super::{Slot, TermConfig};
+
+/// Leitura do PTY; quadro sempre abaixo do 1 MiB do cliente nativo.
+pub(crate) const CHUNK: usize = 64 * 1024;
+/// 16 × 64 KiB = 1 MiB parado no canal; cheio, o leitor espera (contrapressão até o `cat`).
+pub(crate) const OUTPUT_SLOTS: usize = 16;
+const INPUT_SLOTS: usize = 64;
+/// Tamanho da janela antes do primeiro painel, para repor na saída ou depois de uma queda.
+pub(crate) const SIZE_OPTION: &str = "@hangar_term_size";
+
+pub(crate) struct Pty {
+    master: Box<dyn MasterPty + Send>,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    pub(crate) tty: String,
+}
+
+pub(crate) struct Opened {
+    pub(crate) pty: Pty,
+    pub(crate) output: mpsc::Receiver<Bytes>,
+    pub(crate) input: mpsc::Sender<Bytes>,
+}
+
+pub(crate) fn clamp(cols: i64, rows: i64) -> (u16, u16) {
+    (cols.clamp(20, 500) as u16, rows.clamp(5, 200) as u16)
+}
+
+fn size(cols: u16, rows: u16) -> PtySize {
+    PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }
+}
+
+/// Bloqueante (fork + exec): chamar em `spawn_blocking`.
+pub(crate) fn open(cfg: &TermConfig, target: &str, cols: u16, rows: u16, slot: Arc<Slot>) -> Result<Opened, &'static str> {
+    let pair = portable_pty::native_pty_system().openpty(size(cols, rows)).map_err(|_| "pty_open")?;
+    let mut cmd = CommandBuilder::new(&cfg.program);
+    if let Some(socket) = &cfg.socket {
+        cmd.arg("-S");
+        cmd.arg(socket);
+    }
+    // A SESSÃO, nunca o pane: `attach -t %N` troca o pane ativo para todos os clientes anexados.
+    cmd.args(["attach", "-t", &format!("={target}:")]);
+    // Sem TERM o attach nem abre no serviço; os outros dois são o contrato de cor.
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    cmd.env("CLAUDE_CODE_TMUX_TRUECOLOR", "1");
+    // `TMUX` herdado faz o attach recusar ("sessions should be nested") quando o servidor sobe de
+    // dentro de um pane.
+    for name in ["NOTIFY_SOCKET", "INVOCATION_ID", "LISTEN_FDS", "LISTEN_PID", "LISTEN_FDNAMES", "PSMUX_SESSION",
+                 "TMUX", "TMUX_PANE", "HANGAR_INTERNAL_SECRET", "HANGAR_RUNTIME_INSTANCE", "CP_AUTH_TOKEN"] {
+        cmd.env_remove(name);
+    }
+    if let Ok(dir) = std::env::current_dir() {
+        cmd.cwd(dir);
+    }
+    let child = pair.slave.spawn_command(cmd).map_err(|_| "pty_spawn")?;
+    // Sem soltar o escravo aqui, o leitor nunca vê o fim quando o cliente sai.
+    drop(pair.slave);
+    let master = pair.master;
+    let tty = master.tty_name().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    let reader = master.try_clone_reader().map_err(|_| "pty_reader")?;
+    // Nunca o `take_writer`: o `Drop` dele escreve "\n" + EOF no PTY, e o tmux entrega ao pane —
+    // fechar o painel mandaria Enter e Ctrl-D ao agente. Um `dup` do mestre só fecha.
+    let writer = master.as_raw_fd()
+        // SAFETY: duplica um descritor vivo do mestre; o `File` passa a ser dono só da cópia.
+        .map(|fd| unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) })
+        .filter(|fd| *fd >= 0)
+        .map(|fd| unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd) })
+        .ok_or("pty_writer")?;
+    let (out_tx, output) = mpsc::channel(OUTPUT_SLOTS);
+    let (input, in_rx) = mpsc::channel(INPUT_SLOTS);
+    let mut pty = Pty { master, child, tty };
+    let read_slot = slot.clone();
+    let spawned = std::thread::Builder::new().name("term-read".into())
+        .spawn(move || { pump(reader, out_tx); drop(read_slot); })
+        .and_then(|_| std::thread::Builder::new().name("term-write".into())
+            .spawn(move || { write_loop(writer, in_rx); drop(slot); }));
+    if spawned.is_err() {
+        signal(&pty, libc::SIGKILL);
+        let _ = pty.child.wait();
+        return Err("pty_thread");
+    }
+    Ok(Opened { pty, output, input })
+}
+
+/// Lê até o fim do PTY ou até ninguém mais ouvir. Canal cheio segura a leitura.
+pub(crate) fn pump(mut reader: impl Read, tx: mpsc::Sender<Bytes>) {
+    let mut buf = vec![0u8; CHUNK];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => return,
+            Ok(n) => if tx.blocking_send(Bytes::copy_from_slice(&buf[..n])).is_err() { return },
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            // O fim do mestre no Linux chega como EIO, não como 0.
+            Err(_) => return,
+        }
+    }
+}
+
+fn write_loop(mut writer: impl Write, mut rx: mpsc::Receiver<Bytes>) {
+    while let Some(b) = rx.blocking_recv() {
+        if writer.write_all(&b).is_err() {
+            return;
+        }
+    }
+}
+
+impl Pty {
+    pub(crate) fn resize(&self, cols: u16, rows: u16) {
+        if self.master.resize(size(cols, rows)).is_err() {
+            tracing::debug!("terminal: resize do pty falhou");
+        }
+    }
+}
+
+fn signal(pty: &Pty, sig: i32) {
+    if let Some(pid) = pty.child.process_id() {
+        // SAFETY: kill(2) só envia sinal; o pid é do nosso filho ainda não colhido.
+        unsafe { libc::kill(pid as i32, sig) };
+    }
+}
+
+async fn reaped(pty: &mut Pty, within: Duration) -> bool {
+    let until = tokio::time::Instant::now() + within;
+    loop {
+        match pty.child.try_wait() {
+            Ok(Some(_)) | Err(_) => return true,
+            Ok(None) if tokio::time::Instant::now() >= until => return false,
+            Ok(None) => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    }
+}
+
+fn parse_size(text: &str, sep: char) -> Option<(u32, u32)> {
+    let (w, h) = text.trim().split_once(sep)?;
+    Some((w.parse().ok()?, h.parse().ok()?))
+}
+
+/// Tamanho a repor na saída. Uma opção que ficou de uma queda vale mais que a janela de agora,
+/// que pode estar no tamanho do painel que caiu.
+pub(crate) async fn remember_size(cfg: &TermConfig, target: &str) -> Option<(u32, u32)> {
+    let t = format!("={target}:");
+    if let Ok(out) = tmux(cfg, &["show-options", "-v", "-t", &t, SIZE_OPTION]).await {
+        if let Some(saved) = out.status.success().then(|| parse_size(&String::from_utf8_lossy(&out.stdout), 'x')).flatten() {
+            return Some(saved);
+        }
+    }
+    // Com `:`: só `={name}` deixa window_width vazio no `display -p`.
+    let out = tmux(cfg, &["display", "-p", "-t", &t, "#{window_width}\t#{window_height}"]).await.ok()?;
+    let (w, h) = out.status.success().then(|| parse_size(&String::from_utf8_lossy(&out.stdout), '\t')).flatten()?;
+    let _ = tmux(cfg, &["set-option", "-t", &t, SIZE_OPTION, &format!("{w}x{h}")]).await;
+    Some((w, h))
+}
+
+/// `resize-window` sozinho deixa a janela em tamanho manual; o par com `setw latest` devolve o normal.
+pub(crate) async fn restore_size(cfg: &TermConfig, target: &str, (w, h): (u32, u32)) {
+    let s = format!("={target}");
+    let _ = tmux(cfg, &["resize-window", "-t", &s, "-x", &w.to_string(), "-y", &h.to_string()]).await;
+    let _ = tmux(cfg, &["setw", "-t", &s, "window-size", "latest"]).await;
+    let _ = tmux(cfg, &["set-option", "-u", "-t", &format!("={target}:"), SIZE_OPTION]).await;
+}
+
+/// Ordem do `termsock._desmontar`: soltar o nosso cliente, fechar, colher, esperar ele sair da
+/// lista e só então repor o tamanho (antes disso o tmux reimpõe o do cliente).
+pub(crate) async fn teardown(cfg: &TermConfig, target: &str, mut pty: Pty, saved: Option<(u32, u32)>) {
+    // `-t <tty>`, nunca `-s`: `-s` derruba também o `tmux attach` nativo do dono.
+    if !pty.tty.is_empty() {
+        let _ = tmux(cfg, &["detach-client", "-t", &pty.tty]).await;
+    }
+    signal(&pty, libc::SIGHUP);
+    if !reaped(&mut pty, Duration::from_secs(3)).await {
+        signal(&pty, libc::SIGKILL);
+        if !reaped(&mut pty, Duration::from_secs(1)).await {
+            tracing::warn!(session = %target, "terminal: cliente do painel não saiu nem com SIGKILL");
+        }
+    }
+    let Pty { master, tty, .. } = pty;
+    drop(master);
+    let Some(saved) = saved else { return };
+    let until = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let Ok(out) = tmux(cfg, &["list-clients", "-t", &format!("={target}"), "-F", "#{client_tty}"]).await else { return };
+        if !out.status.success() {
+            return;
+        }
+        if !String::from_utf8_lossy(&out.stdout).split_whitespace().any(|t| t == tty) {
+            break;
+        }
+        if tokio::time::Instant::now() >= until {
+            tracing::warn!(session = %target, "terminal: cliente do painel ainda anexado após 3 s; tamanho não reposto");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    restore_size(cfg, target, saved).await;
+}
+
+/// Ao subir: sessões que guardaram o tamanho e não têm painel são de um Rust que caiu no meio.
+pub(crate) async fn restore_after_crash(cfg: &TermConfig, open: impl Fn(&str) -> bool) {
+    let format = format!("#{{session_name}}\t#{{{SIZE_OPTION}}}");
+    let Ok(out) = tmux(cfg, &["list-sessions", "-F", &format]).await else {
+        tracing::warn!("terminal: multiplexador sem resposta ao repor tamanhos");
+        return;
+    };
+    if !out.status.success() {
+        return;
+    }
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let Some((name, value)) = line.split_once('\t') else { continue };
+        if let Some(saved) = parse_size(value, 'x') {
+            if !open(name) {
+                restore_size(cfg, name, saved).await;
+            }
+        }
+    }
+}

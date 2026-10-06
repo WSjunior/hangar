@@ -184,6 +184,21 @@ async def list_facts(request: Request) -> dict:
         raise HTTPException(400) from None
 
 
+@router.post("/term/origin")
+async def term_origin(request: Request) -> dict:
+    """Origin do painel de terminal que o Rust abre para o dono: a regra e as fontes ficam aqui."""
+    from app import termsock
+    raw = await request.body()
+    try:
+        body = json.loads(raw) if len(raw) <= 8192 else None
+        if (not isinstance(body, dict) or set(body) != {"origin", "host"} or not isinstance(body["origin"], str)
+                or not isinstance(body["host"], (str, type(None)))):
+            raise ValueError("origem inválida")
+    except (ValueError, RecursionError):
+        raise HTTPException(400) from None
+    return {"ok": termsock._origem_aceita(body["origin"], body["host"])}
+
+
 @router.post("/list/demote")
 async def list_demote(request: Request) -> dict:
     """`hooks.demote_awaiting`: o pane que a lista do Rust capturou contradisse o marcador."""

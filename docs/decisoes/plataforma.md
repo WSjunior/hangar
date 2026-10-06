@@ -1135,6 +1135,16 @@ Anotar valor e unidade, a sessão de cada `/history`, e o que não deu para medi
 | `/history` completo, Claude 300 MB / `limit=200` | |
 | Threads e inotify do Python com 4 chats abertos, contra 0 abertos | |
 
+**Terminal real do dono (parte 4, Task 8, 06/10/2026).** Fora do Windows, o `WS .../term` do
+dono (`?token=` só; Bearer e cookie seguem ao Python, como no `termsock`) abre o PTY no Rust
+(`term/`, `portable-pty`). A Origin continua decidida pelo `_origem_aceita` do Python, perguntada
+uma vez por conexão em `/internal/term/origin` (prazo 1 s; falha = 503 com código no diário).
+Recusa antes do aceite é 403, como o fechamento antes do `accept` do Starlette; multiplexador
+fora e teto de 64 painéis aceitam e fecham com 1013 e o motivo. O tamanho da janela fica na
+opção `@hangar_term_size` da sessão enquanto o painel vive, e o `main.rs` repõe ao subir o das
+sessões que um Rust anterior deixou no tamanho do painel. Convidado e Connect seguem no PTY do
+Python até a Task 9. Medidas em `docs/migracao-rust/parte4/medicao.md`.
+
 ## Lista do dono no hangar-server
 
 (05/10/2026, lista-estado Task 17; contrato interno 27, sem mudança.) `GET /api/sessions` e
