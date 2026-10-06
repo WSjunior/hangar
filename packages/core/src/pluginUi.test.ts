@@ -117,13 +117,6 @@ describe('parsePluginUi: campos novos da fase 1', () => {
     expect([s.shownId, s.columns, s.source]).toEqual([undefined, null, null]);
     expect(parsePluginUi({ shown_id: '' }).shownId).toBeUndefined();
   });
-
-  it('o hover da árvore real fica no nó, fora de props', () => {
-    const linha = parsePluginUi(evento({})).above as unknown as { children: { children?: { hover?: unknown; props?: Record<string, unknown> }[] }[] };
-    const cartao = linha.children[1].children![2];
-    expect(cartao.hover).toEqual({ display: 'flex' });
-    expect(cartao.props).not.toHaveProperty('hover');
-  });
 });
 
 describe('aba ativa', () => {

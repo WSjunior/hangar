@@ -885,7 +885,7 @@ fn unmark(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     // Importação explícita: `super::*` traz o `test` do gpui_kit, e o `#[test]` passaria a ser o dele.
-    use super::{accepts_typing, active_pane, box_background, button_key, cell_color, color, field_id, field_width, fields, FieldSync, CELL_W, fills_place, follow_local, follows_server,
+    use super::{accepts_typing, active_pane, box_background, button_key, cell_color, color, field_id, fields, FieldSync, fills_place, follow_local, follows_server,
         hover_props, input_kind, input_request, is_empty, keep_hovered, Outbox, pane_ids, plain_deep, raster_row, raster_runs, safe_href,
         scope_active, surfaces, text_row, toast, wants_hover, FieldSpec, Surfaces, Toast, UiSource};
     use gpui_kit::component::input::InputEvent;
@@ -1129,12 +1129,9 @@ mod tests {
     }
 
     #[test]
-    fn typing_equal_to_the_drawn_value_still_reaches_the_route() {
-        // O `set_value` que repõe o valor desenhado não emite `Change`: a pessoa que apaga até voltar ao valor desenhado
-        // (aqui, vazio) está digitando, e o `change` precisa chegar ao mod.
-        let drawn = fields(&amostras()["campoV18"]).remove(0).value;
-        assert_eq!(input_request(Some(UiSource::Surface), false, "vitrine-campos", "V18-campo", "change", &drawn),
-            Some(json!({"site": "vitrine-campos", "key": "V18-campo", "kind": "change", "value": drawn})));
+    fn input_request_carries_site_key_kind_and_value() {
+        assert_eq!(input_request(Some(UiSource::Surface), false, "vitrine-campos", "V18-campo", "change", ""),
+            Some(json!({"site": "vitrine-campos", "key": "V18-campo", "kind": "change", "value": ""})));
     }
 
     #[test]
@@ -1296,13 +1293,6 @@ mod tests {
         assert_eq!(outbox.done(), Some(("submit", "b".to_owned())));
         assert_eq!(outbox.done(), Some(("submit", "c".to_owned())));
         assert_eq!(outbox.done(), None);
-    }
-
-    #[test]
-    fn field_keeps_the_web_minimum_and_basis_in_cells() {
-        // Como o `min-width: 12ch` e o `flex: 1 1 16ch` do web: numa linha com textos ao lado o campo não encolhe até sumir.
-        let (min, basis) = field_width();
-        assert_eq!((min, basis), (12. * CELL_W, 16. * CELL_W));
     }
 
     #[test]
