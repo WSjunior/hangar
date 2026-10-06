@@ -171,8 +171,13 @@ async fn without_a_terminal_the_window_is_stretched_and_given_back() {
 
 #[tokio::test]
 async fn wheel_without_the_label_goes_down_then_up_and_refuses() {
+    // Sem tempo para o teclado (o anel caro demais), as duas pontas sem o rótulo são recusa.
     let (mods, pane) = setup("tmux-230-longo-topo-150", longo());
-    assert_eq!(code(press(&mods, &pane, "vitrine-longo", "V37-meio").await), "erro_mod_painel_nao_alcancavel");
+    let (limits, undo, clicked) = (Limits { ring_step: Duration::from_secs(60), ..Limits::quick() }, Undo::default(), Mutex::default());
+    let ctx = Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: far(), undo: &undo, life: 1, clicked: &clicked };
+    let result = click::dispatch(&ctx, ModsCall::Press { site: "vitrine-longo".into(), key: "V37-meio".into() }).await;
+    click::finish(&ctx).await;
+    assert_eq!(code(result), "erro_mod_painel_nao_alcancavel");
     assert_eq!(pane.actions(), ["wheel 20 115 true", "wheel 20 115 false"]);
 }
 
@@ -645,8 +650,10 @@ async fn a_click_after_another_waits_the_gap_also_in_the_next_request() {
     pane.on_click((0, 87), vec![Show("tmux-402-vitrine-texto-150")]);
     pane.on_click((1, 88), vec![Pressed("vitrine-texto", "V04-vitrine-texto")]);
     pane.on_click((0, 148), vec![CloseAll]);
-    let gap = Duration::from_millis(250);
-    let (limits, clicked) = (Limits { click_gap: gap, ..Limits::quick() }, Mutex::default());
+    // Os três cliques ficam longe da janela do duplo clique: o título e o botão logo abaixo dele são vizinhos
+    // (até 450 ms o Claude Code engole o segundo), e com prazo de sobra o intervalo é sempre o maior.
+    let gap = Duration::from_millis(300);
+    let (limits, clicked) = (Limits { click_gap: Duration::from_millis(100), click_gap_near: gap, ..Limits::quick() }, Mutex::default());
     for call in [ModsCall::Press { site: "vitrine-texto".into(), key: "V04-vitrine-texto".into() }, ModsCall::Close { site: "vitrine-texto".into() }] {
         let undo = Undo::default();
         let ctx = Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: far(), undo: &undo, life: 1, clicked: &clicked };
@@ -664,7 +671,10 @@ async fn the_click_gap_counts_against_the_deadline() {
     let (mods, pane) = setup("tmux-400-vitrine-abas-150", vitrine());
     pane.on_click((0, 87), vec![Show("tmux-402-vitrine-texto-150")]);
     pane.on_click((1, 88), vec![Pressed("vitrine-texto", "V04-vitrine-texto")]);
-    let (limits, undo, clicked) = (Limits { click_gap: Duration::from_millis(500), ..Limits::quick() }, Undo::default(), Mutex::default());
+    // O anel caro demais tira o teclado da conta: o caminho é o do mouse até o fim.
+    let (limits, undo, clicked) = (Limits { click_gap: Duration::from_millis(500), click_gap_near: Duration::from_millis(500),
+        ring_step: Duration::from_secs(60), ..Limits::quick() },
+        Undo::default(), Mutex::default());
     let ctx = Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: Instant::now() + Duration::from_millis(900), undo: &undo,
         life: 1, clicked: &clicked };
     let result = click::dispatch(&ctx, ModsCall::Press { site: "vitrine-texto".into(), key: "V04-vitrine-texto".into() }).await;
@@ -758,7 +768,7 @@ async fn the_cleanup_covers_a_long_ring_back_to_the_prompt() {
         .collect::<Vec<_>>()});
     let (mods, pane) = setup("tmux-14-ciclo-4-prompt", grande);
     pane.mouse(false);
-    pane.cost(Duration::from_millis(150));
+    pane.cost(Duration::from_millis(60));
     pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-5-faixa"), Focus("above-prompt", "b0", false)]);
     pane.on_keys("Enter", vec![Pressed("above-prompt", "b0")]);
     for i in 0..21 { pane.on_keys("C-x Tab", vec![Show(if i % 2 == 0 { "tmux-14-ciclo-6-painel-1" } else { "tmux-14-ciclo-5-faixa" })]); }
@@ -770,4 +780,117 @@ async fn the_cleanup_covers_a_long_ring_back_to_the_prompt() {
     task.await.unwrap();
     assert_eq!(keys(&pane).iter().filter(|k| *k == "C-x Tab").count(), 1 + 22);
     assert_eq!(pane.log().last().map(String::as_str), Some("release"), "o teclado voltou e o pane foi solto");
+}
+
+#[tokio::test]
+async fn a_far_click_short_of_time_uses_the_shorter_gap_but_a_near_one_does_not() {
+    // Com pouco prazo, o clique longe do anterior espera só o intervalo curto; o vizinho exige o longo, e sem
+    // tempo para ele não sai.
+    let (mods, pane) = setup("tmux-400-vitrine-abas-150", vitrine());
+    pane.on_click((0, 87), vec![Show("tmux-402-vitrine-texto-150")]);
+    pane.on_click((1, 88), vec![Pressed("vitrine-texto", "V04-vitrine-texto")]);
+    let limits = Limits { click_gap: Duration::from_millis(100), click_gap_near: Duration::from_millis(600), ring_step: Duration::from_secs(60),
+        ..Limits::quick() };
+    let clicked = Mutex::new(Some((Instant::now(), (30, 10))));
+    let undo = Undo::default();
+    // Longe (linha 30): sobra para 100 ms, não para 600 ms.
+    let ctx = Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: Instant::now() + Duration::from_millis(1000), undo: &undo,
+        life: 1, clicked: &clicked };
+    let started = Instant::now();
+    let result = click::dispatch(&ctx, ModsCall::Press { site: "vitrine-texto".into(), key: "V04-vitrine-texto".into() }).await;
+    click::finish(&ctx).await;
+    // O título saiu com o intervalo curto; o botão, vizinho do título, já não tinha tempo para o longo.
+    assert_eq!(pane.actions().first().map(String::as_str), Some("click 0 87"));
+    assert!(started.elapsed() < Duration::from_millis(600), "{:?}", started.elapsed());
+    assert_eq!(code(result), "erro_mod_clique_sem_resposta");
+    assert_eq!(pane.actions(), ["click 0 87"]);
+}
+
+/// O espelho `pm()` com doze botões na faixa e o `pm-a` do primeiro painel fora da área visível.
+fn pm_with_band_and_far_button() -> TerminalView {
+    let mut v = pm();
+    v.panes[0].tree = json!({"type": "Box", "children": [mods_support::pane::button("pm-a", "Botão lá embaixo", "pm-mock")]});
+    v.above = json!({"type": "Box", "children": (0..12).map(|i| mods_support::pane::button(&format!("b{i}"), &format!("Botão {i}"), "vitrine"))
+        .collect::<Vec<_>>()});
+    v
+}
+
+#[tokio::test]
+async fn with_the_band_collapsed_the_wheel_runs_before_the_keyboard() {
+    // Faixa recolhida: os doze botões dela saem do anel e não contam no que o teclado precisa. A roda tenta
+    // primeiro (o botão está a ~40 linhas, uma por evento) e, no tempo que o teclado ainda cabe, passa a ele.
+    let (mods, pane) = setup("tmux-140-faixa-recolhida-150", pm_with_band_and_far_button());
+    for offset in 1..=200 { pane.on_wheel(vec![Scroll("pm-mock-pm", offset)]); }
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-6-painel-1")]);
+    pane.on_keys("Tab", vec![Focus("pm-mock-pm", "pm-a", false)]);
+    pane.on_keys("Enter", vec![Pressed("pm-mock-pm", "pm-a")]);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-9-prompt")]);
+    let (limits, undo, clicked) = (Limits::default(), Undo::default(), Mutex::default());
+    let ctx = Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: Instant::now() + Duration::from_millis(7500), undo: &undo,
+        life: 1, clicked: &clicked };
+    let result = click::dispatch(&ctx, ModsCall::Press { site: "pm-mock-pm".into(), key: "pm-a".into() }).await;
+    click::finish(&ctx).await;
+    result.unwrap();
+    assert!(pane.actions().iter().filter(|a| a.starts_with("wheel ")).count() > 5, "{:?}", pane.actions());
+    assert_eq!(keys(&pane), ["C-x Tab", "Tab", "Enter", "C-x Tab"]);
+}
+
+#[tokio::test]
+async fn the_ring_does_not_wait_the_screen_on_band_buttons_that_are_not_drawn() {
+    // A faixa da árvore não aparece na tela (a âncora dela não está lá): cada `ctrl+x tab` pelos doze botões
+    // não muda a tela, e o passo termina no `ui.focus` do botão, não na espera inteira da tela (300 ms).
+    let (mods, pane) = setup("tmux-14-ciclo-4-prompt", pm_with_band_and_far_button());
+    pane.mouse(false);
+    for i in 0..12 { pane.on_keys("C-x Tab", vec![Focus("above-prompt", ["b0","b1","b2","b3","b4","b5","b6","b7","b8","b9","b10","b11"][i], false)]); }
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-6-painel-1")]);
+    pane.on_keys("Tab", vec![Focus("pm-mock-pm", "pm-a", false)]);
+    pane.on_keys("Enter", vec![Pressed("pm-mock-pm", "pm-a")]);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-9-prompt")]);
+    let (limits, undo, clicked) = (Limits::default(), Undo::default(), Mutex::default());
+    let started = Instant::now();
+    let ctx = Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: started + Duration::from_millis(7500), undo: &undo, life: 1,
+        clicked: &clicked };
+    let result = click::dispatch(&ctx, ModsCall::Press { site: "pm-mock-pm".into(), key: "pm-a".into() }).await;
+    click::finish(&ctx).await;
+    result.unwrap();
+    assert!(started.elapsed() < Duration::from_millis(12 * 300), "{:?}", started.elapsed());
+}
+
+#[tokio::test]
+async fn another_tab_in_front_and_a_far_button_keep_time_for_the_keyboard() {
+    // Terminal ligado, outra aba na frente, o botão longe e a faixa da árvore sem desenho (doze botões no
+    // anel). A escolha é feita antes de ativar a aba: a roda tenta até a hora em que o teclado ainda cabe, e o
+    // anel passa pelos botões invisíveis sem esperar a tela, até o painel, dentro do prazo.
+    let mut v = pm_with_far_button();
+    v.above = pm_with_band_and_far_button().above;
+    let (mods, pane) = setup("tmux-01-tres-paineis-150", v);
+    pane.cost(Duration::from_millis(60));
+    pane.on_click((0, 104), vec![Show("tmux-02-apos-clicar-mr-150")]);
+    for offset in 1..=200 { pane.on_wheel(vec![Scroll("pm-mock-mr", offset)]); }
+    for i in 0..12 { pane.on_keys("C-x Tab", vec![Focus("above-prompt", ["b0","b1","b2","b3","b4","b5","b6","b7","b8","b9","b10","b11"][i], false)]); }
+    keyboard_to_mr(&pane);
+    let (limits, undo, clicked) = (Limits::default(), Undo::default(), Mutex::default());
+    let ctx = Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: Instant::now() + Duration::from_millis(7500), undo: &undo,
+        life: 1, clicked: &clicked };
+    let result = click::dispatch(&ctx, ModsCall::Press { site: "pm-mock-mr".into(), key: "mr-a".into() }).await;
+    click::finish(&ctx).await;
+    result.unwrap();
+    assert_eq!(pane.actions()[0], "click 0 104", "a aba foi ativada pelo mouse");
+    assert!(pane.actions().iter().any(|a| a.starts_with("wheel ")), "a roda tentou antes");
+    assert!(keys(&pane).contains(&"Enter".to_string()), "{:?}", keys(&pane));
+}
+
+#[tokio::test]
+async fn a_pane_the_wheel_does_not_roll_goes_to_the_keyboard() {
+    // A roda não rola o painel nem para baixo nem para cima (painel em caixa de poucas linhas): com tempo para
+    // o teclado, o `Tab` dele rola até o botão, em vez de recusar.
+    let (mods, pane) = setup("tmux-02-apos-clicar-mr-150", pm_with_far_button());
+    keyboard_to_mr(&pane);
+    let (limits, undo, clicked) = (Limits::quick(), Undo::default(), Mutex::default());
+    let ctx = Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: far(), undo: &undo, life: 1, clicked: &clicked };
+    let result = click::dispatch(&ctx, ModsCall::Press { site: "pm-mock-mr".into(), key: "mr-a".into() }).await;
+    click::finish(&ctx).await;
+    result.unwrap();
+    assert_eq!(pane.actions().iter().filter(|a| a.starts_with("wheel ")).count(), 2, "para baixo e para cima");
+    assert!(keys(&pane).contains(&"Enter".to_string()));
 }
