@@ -808,15 +808,8 @@ async fn execute(bridge: &Arc<ListBridge>, op: Operation) -> Result<Value, ListE
     }
 }
 
-#[cfg(unix)]
 fn term_active(st: &AppState, name: &str) -> Result<Value, ListError> {
     Ok(json!({"active": st.term.is_active(name)}))
-}
-
-/// No Windows o painel ainda é do Python: responder "fechado" seria inventar.
-#[cfg(not(unix))]
-fn term_active(_: &AppState, _: &str) -> Result<Value, ListError> {
-    Err(fail("term_not_in_rust", "o painel de terminal não é do Rust nesta plataforma"))
 }
 
 fn reply(value: Value) -> Response {

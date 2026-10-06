@@ -115,7 +115,6 @@ def rust(monkeypatch, no_pty):
     monkeypatch.setattr(share_api, "confirmed_absent", lambda name: False)
     monkeypatch.setattr(tmux, "has_session", lambda name: True)
     monkeypatch.setattr(runtime_coordinator, "_current", SimpleNamespace(mode="rust"))
-    monkeypatch.setattr(termsock, "_RUST_PTY", True)
     fake = FakeRust()
     list_bridge.configure(f"127.0.0.1:{fake.port}", "sek")
     yield fake
@@ -212,14 +211,6 @@ def test_bridge_failure_closes_1013_with_code_and_no_pty(rust, no_pty, monkeypat
     assert no_pty == [] and rust.requests == []
 
 
-def test_windows_rust_mode_keeps_the_python_pty(rust, no_pty, monkeypatch):
-    # No Windows o Rust ainda não tem ConPTY: o termsock segue abrindo o PTY dele.
-    monkeypatch.setattr(termsock, "_RUST_PTY", False)
-    with _guest().websocket_connect(f"{GUEST_WS}/api/sessions/cc/term?token=g") as ws:
-        assert ws.receive_bytes() == b"python-pty"
-    assert no_pty == ["cc"] and rust.requests == []
-
-
 def test_python_mode_keeps_the_python_pty(rust, no_pty, monkeypatch):
     monkeypatch.setattr(runtime_coordinator, "_current", SimpleNamespace(mode="python"))
     with _guest().websocket_connect(f"{GUEST_WS}/api/sessions/cc/term?token=g") as ws:
@@ -230,7 +221,6 @@ def test_python_mode_keeps_the_python_pty(rust, no_pty, monkeypatch):
 def test_409_asks_rust_and_503_on_bridge_error(monkeypatch):
     from app import api
     monkeypatch.setattr(runtime_coordinator, "_current", SimpleNamespace(mode="rust"))
-    monkeypatch.setattr(termsock, "_RUST_PTY", True)
     # Um painel antigo do Python não conta: no modo `rust` o painel é do Rust.
     monkeypatch.setitem(termsock._ativos, "s1", object())
     answers = {"s1": {"active": False}, "s2": {"active": True}}
@@ -252,14 +242,12 @@ def test_409_asks_rust_and_503_on_bridge_error(monkeypatch):
     assert e.value.detail["code"] == "erro_terminal_indisponivel"
     assert e.value.detail["params"]["detalhe"] == "list_bridge_unavailable"
     assert asked[0] == ("term.active", {"name": "s1"})
-    # Modo `python` (reserva) e Windows: o painel é o do Python, sem perguntar ao Rust.
-    for mode, rust_pty in (("python", True), ("rust", False)):
-        monkeypatch.setattr(runtime_coordinator, "_current", SimpleNamespace(mode=mode))
-        monkeypatch.setattr(termsock, "_RUST_PTY", rust_pty)
-        asked.clear()
-        with pytest.raises(HTTPException) as e:
-            api._recusa_se_painel_aberto("s1")
-        assert e.value.status_code == 409 and asked == []
+    # Modo `python` (reserva): o painel é o do Python, sem perguntar ao Rust.
+    monkeypatch.setattr(runtime_coordinator, "_current", SimpleNamespace(mode="python"))
+    asked.clear()
+    with pytest.raises(HTTPException) as e:
+        api._recusa_se_painel_aberto("s1")
+    assert e.value.status_code == 409 and asked == []
 
 
 @pytest.mark.parametrize("status, code", [(403, 1008), (404, 1013), (500, 1013)])

@@ -1143,20 +1143,22 @@ Recusa antes do aceite é 403, como o fechamento antes do `accept` do Starlette;
 fora e teto de 64 painéis aceitam e fecham com 1013 e o motivo. O tamanho da janela fica na
 opção `@hangar_term_size` da sessão enquanto o painel vive, e o `main.rs` repõe ao subir o das
 sessões que um Rust anterior deixou no tamanho do painel. Medidas em
-`docs/migracao-rust/parte4/medicao.md`.
+`docs/migracao-rust/parte4/medicao.md`. Desde a Task 10 o Windows também abre o painel do dono
+no Rust (ConPTY do `portable-pty`); as regras de lá estão em `windows.md`, "Terminal real do
+dono no Windows é do Rust".
 
 **Porteiro do terminal (parte 4, Task 9, contrato 30).** Com o modo `rust` (ou `pending`, que
-espera o desfecho) e fora do Windows, o `termsock` não abre PTY: depois da porta de entrada de
-hoje (convidado de convite, convidado com login, dono pelo Connect) ele liga os bytes a
-`/__hangar_server/term` na porta privada (segredo e loopback; alvo já conferido, `cols`/`rows`).
+espera o desfecho), o `termsock` não abre PTY em nenhuma plataforma: depois da porta de entrada
+de hoje (convidado de convite, convidado com login, dono pelo Connect) ele liga os bytes a
+`/__hangar_server/term` na porta privada (segredo e loopback; alvo conferido de novo lá, `cols`/`rows`).
 O painel é o mesmo `Terms` da 8765, então dono e convidado se derrubam com 1000 "outra conexao
 assumiu" como dois donos. Revogação pelo `share_gate` cancela o repasse, que fecha o lado do
 Rust; o código de fechamento do Rust chega igual ao cliente, queda sem fechamento vira 1011.
-Ponte desligada, Rust subindo ou recusa do aperto de mão: 1013 e `terminal.ponte` no diário. O
-409 (`_recusa_se_painel_aberto`) pergunta `term.active` pela ponte da lista; erro é 503
+Ponte desligada, Rust subindo ou recusa do aperto de mão: 1013 (sessão morta: 1008) e
+`terminal.ponte` no diário com o código. O 409 (`_recusa_se_painel_aberto`) pergunta
+`term.active` pela ponte da lista, fora do laço de eventos; erro é 503
 `erro_terminal_indisponivel`. `/api/config.terminal_panel` e `/run-code` leem o `terminal_panel`
-da saúde no modo `rust`; saúde sem o campo booleano é falha de partida. No Windows o PTY segue
-no Python até o ConPTY do Rust (Task 10).
+da saúde no modo `rust`; saúde sem o campo booleano é falha de partida.
 
 ## Lista do dono no hangar-server
 

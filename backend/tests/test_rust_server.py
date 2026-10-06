@@ -576,7 +576,6 @@ def test_terminal_panel_from_rust_health(monkeypatch):
     monkeypatch.setattr(rust_server, "_runtime_ready", lambda proc, instance: {"type":"runtime_ready",
         "protocol":rust_server.RUST_SERVER_PROTOCOL, "instance":instance, "port":1})
     monkeypatch.setattr(supervisor, "configure_runtime", lambda *args: None)
-    monkeypatch.setattr(termsock, "_RUST_PTY", True)
     health = {"protocol": rust_server.RUST_SERVER_PROTOCOL, "terminal_address": "127.0.0.1:9"}
     monkeypatch.setattr(rust_server, "_health", lambda host, port: health)
     try:

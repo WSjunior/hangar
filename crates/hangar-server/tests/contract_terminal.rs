@@ -127,6 +127,7 @@ mod monitor {
                 loop_info: f["loop"].as_object().map(|l| LoopInfo { status: l["status"].as_str().map(String::from),
                     iter: l["iter"].as_u64().map(|v| v as u32), max: l["max_iters"].as_u64().map(|v| v as u32) }),
                 shells: f.get("shells").map_or_else(Vec::new, |s| serde_json::from_value::<Vec<ShellVivo>>(s.clone()).unwrap()),
+                ..FileFacts::default()
             }
         }
         async fn publish(&self, event: StateEvent) -> bool {

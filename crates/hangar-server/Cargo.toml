@@ -11,6 +11,8 @@ indexmap.workspace = true
 hangar-api.workspace = true
 hangar-workspace = { path = "../hangar-workspace" }
 regex.workspace = true
+# Largura em células para cortar o pane na coluna da conversa (`plugin_screen.cell_width`).
+unicode-width = "=0.2.2"
 # Busca de bytes nos transcripts da lista; já vem pelo regex, sem crate novo.
 memchr = "=2.8.3"
 md-5.workspace = true
@@ -40,10 +42,10 @@ base64 = "=0.23.1"
 rusqlite.workspace = true
 rayon.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
-
-# Painel de terminal real (`term/`); o Windows ainda é do Python.
-[target.'cfg(unix)'.dependencies]
+# Painel de terminal real (`term/`): PTY no Unix, ConPTY no Windows.
 portable-pty = "=0.9.0"
+
+[target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
 # Processos fora do Linux; no Linux o leitor é o /proc (`list/procs.rs`).

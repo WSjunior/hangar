@@ -69,15 +69,11 @@ def tem_pty_windows() -> bool:
     return conpty.disponivel()
 
 
-# No Windows o painel segue no Python mesmo com o Rust de pé: o Rust ainda não tem ConPTY.
-_RUST_PTY = os.name != "nt"
-
-
 def _rust_owner() -> Optional[object]:
     """O coordenador quando o Rust é (ou será, em `pending`) o dono do painel; senão None."""
     from app import runtime_coordinator
     owner = runtime_coordinator.current()
-    return owner if _RUST_PTY and owner is not None and owner.mode != "python" else None
+    return owner if owner is not None and owner.mode != "python" else None
 
 
 def painel_aberto(name: str) -> bool:

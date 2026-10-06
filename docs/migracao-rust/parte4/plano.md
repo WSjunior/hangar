@@ -147,8 +147,8 @@ quando o bloco entra nele, porte de `sse.py:54-72, 852-855`; vaga única; `text,
 `preview::suppressed_when_in_transcript`, `preview::cleared_on_commit`,
 `preview::fast_captures_only_for_pane_preview`.
 
-- [ ] **Step 5: Testes e golden, vistos falhar**
-- [ ] **Step 6: Prévia; testes focados; revisar**
+- [x] **Step 5: Testes e golden, vistos falhar**
+- [x] **Step 6: Prévia; testes focados; revisar**
 
 ### Task 4: Pergunta nativa, sugestão, `problema` e entrega no `Monitor` (sem produção)
 
@@ -221,8 +221,8 @@ bom), `list/classify.rs:375-417` (mesma fonte; hoje `rc != 0` vira `capture_refu
 `capture::replacement_char_frame_not_good`, `capture::missing_vs_failed_by_has_session`,
 `monitor::windows_uses_subprocess`.
 
-- [ ] **Step 15: Ler "Regras vigentes" de `windows.md`; testes, vistos falhar**
-- [ ] **Step 16: Fonte por subprocesso no `Monitor` e na lista; job Windows do CI pelo log; revisar**
+- [x] **Step 15: Ler "Regras vigentes" de `windows.md`; testes, vistos falhar**
+- [x] **Step 16: Fonte por subprocesso no `Monitor` e na lista; job Windows do CI pelo log; revisar**
 
 ---
 
@@ -278,7 +278,7 @@ motores e capacidade), `docs/decisoes/superado.md`.
 `bridge::term_active`.
 
 - [x] **Step 20: Testes, vistos falhar**
-- [ ] **Step 21: Porteiro, 409, capacidade; contrato; regras corrigidas; testes focados; revisar**
+- [x] **Step 21: Porteiro, 409, capacidade; contrato; regras corrigidas; testes focados; revisar**
 
 ### Task 10: Windows — ConPTY
 
@@ -292,7 +292,7 @@ duplex), testes `cfg(windows)`, `docs/decisoes/windows.md`.
 
 - [ ] **Step 22: Ler "Regras vigentes" de `windows.md`; testes, vistos falhar; job Windows do CI pelo log**
 - [ ] **Step 23: VM DELPHI-02 com web e nativo: abre, digita, resize, Claude Code em tela cheia, nenhum travamento no pedido de posição do cursor (`INHERIT_CURSOR`); reprovou → `conpty.rs` com flags 0 e repetir (verificação manual)**
-- [ ] **Step 24: Regra em `windows.md`; revisar**
+- [x] **Step 24: Regra em `windows.md`; revisar**
 
 ---
 

@@ -52,7 +52,7 @@ Python só atende o que migrou quando é dono da porta inteira. Regras em
 `hangar-server` de pé, o `termsock` abria o PTY do convidado e do dono pelo Connect no Python
 (`_motor_posix`), enquanto o dono na 8765 já tinha o PTY no Rust: dois donos do "um painel por
 sessão" (`termsock._ativos` e o `Terms` do Rust), e o 409 e o `terminal_panel` do `/api/config`
-só enxergavam o do Python. Fora do Windows o motor do Python ficou só para o modo `python`.
+só enxergavam o do Python. Os motores do Python ficaram só para o modo `python`.
 
 ## Aviso de reinício do atualizador às sessões
 
