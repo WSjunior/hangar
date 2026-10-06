@@ -11,7 +11,7 @@ indexmap.workspace = true
 hangar-api.workspace = true
 hangar-workspace = { path = "../hangar-workspace" }
 regex.workspace = true
-# Busca de trecho no rabo do transcript; já vem pelo regex.
+# Busca de bytes nos transcripts da lista; já vem pelo regex, sem crate novo.
 memchr = "=2.8.3"
 md-5.workspace = true
 sha1_smol.workspace = true

@@ -222,7 +222,11 @@ impl ListBridge {
         }
         let dirs = self.dirs()?;
         let (at, wall) = (Instant::now(), wall_now());
-        let panes = Arc::new(self.env.mux.list_panes().await.map_err(|e| fail("mux_unavailable", e.code))?);
+        let (panes, dropped) = self.env.mux.list_panes_checked().await.map_err(|e| fail("mux_unavailable", e.code))?;
+        if let Some(p) = dropped {
+            self.facts.diag.report("rust.list_discovery", &p.key, p.code, p.reason);
+        }
+        let panes = Arc::new(panes);
         let (env, caches, p) = (self.env.clone(), self.caches.clone(), panes.clone());
         let max_age = if newer_than.is_some() { Duration::ZERO } else { procs::CHILDREN_TTL };
         let (rows, agent_pids, children, problems) = tokio::task::spawn_blocking(move || {
@@ -230,8 +234,8 @@ impl ListBridge {
             let (rows, pids, problems) = caches.resolver.with(|r| run_discovery(&p, &*env.procs, &children, r, &dirs));
             Ok::<_, ListError>((Arc::new(rows), Arc::new(pids), children, problems))
         }).await.map_err(|e| joined(e, "descoberta interrompida"))??;
-        for (code, key, reason) in problems {
-            self.facts.diag.report("rust.list_discovery", &key, code, reason);
+        for p in problems {
+            self.facts.diag.report("rust.list_discovery", &p.key, p.code, p.reason);
         }
         self.flush_notes();
         *slot = Some(Discovery { at, wall, epoch, fresh: newer_than.is_some(), rows: rows.clone(), agent_pids: agent_pids.clone(),
@@ -304,7 +308,9 @@ impl ListBridge {
                 }
                 for row in rows.iter_mut() {
                     d.plans.decorate(row, wall, mono);
-                    super::links::fill_loop(row, &dirs);
+                    if let Some(p) = super::links::fill_loop(row, &dirs) {
+                        list_facts::note("rust.list_discovery", &p.key, p.code.to_owned(), p.reason);
+                    }
                 }
             });
             let git_dirs: Vec<String> = rows.iter().map(|r| git_dir(r).to_owned()).filter(|d| !d.is_empty()).collect();
@@ -463,15 +469,12 @@ fn labelled_path(item: &str) -> String {
 }
 
 /// (código, chave, motivo) de um arquivo ou processo que a descoberta não leu: vai ao diário.
-type DiscoveryProblem = (&'static str, String, &'static str);
-
 /// Linhas descobertas, o pid do agente de cada uma (contexto de abertura e alvo da captura) e o que
 /// a descoberta não conseguiu ler.
 fn run_discovery(panes: &[Pane], procs: &dyn ProcessView, children: &ChildrenMap, resolver: &mut Resolver, dirs: &Dirs)
-    -> (Vec<SessionRow>, HashMap<String, u32>, Vec<DiscoveryProblem>) {
+    -> (Vec<SessionRow>, HashMap<String, u32>, Vec<discover::DiscoveryProblem>) {
     let found = discover_other::discover_rows(panes, procs, children, resolver, dirs);
-    // Junção com a lista-tdesc: `found.problems.into_iter().map(|p| (p.code, p.key, p.reason)).collect()`.
-    (found.rows, found.agent_pids, Vec::new())
+    (found.rows, found.agent_pids, found.problems)
 }
 
 /// Pid do pane das linhas Pi e omp: o sidecar do catálogo, de onde sai a conta, mora no
