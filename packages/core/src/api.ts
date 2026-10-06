@@ -2466,7 +2466,7 @@ export async function pressPluginButton(
 ): Promise<{ ok: boolean; copied?: string; opened?: string }> {
   const path = `/api/sessions/${encodeURIComponent(name)}/plugin/press`;
   const init = { method: 'POST', body: JSON.stringify({ site, key }) };
-  return server ? apiFetchForServer<{ ok: boolean; copied?: string; opened?: string }>(server, path, init)
+  return server ? apiFetchForServer<{ ok: boolean; copied?: string; opened?: string }>(server, path, init, 8000, true)
                 : apiFetch<{ ok: boolean; copied?: string; opened?: string }>(path, init);
 }
 
