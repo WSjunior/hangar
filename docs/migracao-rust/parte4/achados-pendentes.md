@@ -13,6 +13,16 @@ Achados médios e baixos das revisões por Task que entraram na `feat/parte4` se
   limitar o ritmo rápido no Windows. O Monitor no Windows (psmux) e o convidado de convite de
   verdade não foram conferidos (só o Connect).
 
+## Fora da parte 4, achados pela prova (Task 12)
+
+- `/select` no Codex sem terminal responde 500: `route_sync` → `prepare_session('claude')` levanta
+  antes do ramo do sem terminal (`api.py:5818`, desde 03/10). O cartão de aprovação aparece e não
+  se responde.
+- Codex 0.159.3 mudou o rodapé do `/permissions` (`enter select · esc back`);
+  `codex_permissions.py` não reconhece e responde 409 `erro_permissao_picker`.
+- Codex com terminal com menu de aprovação na TUI fica `working` na lista e no chat: o Python só
+  lê `menu_codex` antes de existir thread (estado do Codex é da parte 5).
+
 ## Médios e baixos
 
 - Task 1: envio de fatos que falha não é reenviado sozinho (o Rust recupera pelo retrato a cada
