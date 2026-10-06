@@ -5705,7 +5705,7 @@ impl Hangar {
         let read_only = self.selected.as_ref().is_some_and(|s| s.read_only());
         let Some(body) = crate::plugin_ui::input_request(self.plugin_source, read_only, site, key, kind, &value) else { return };
         if let Some(field) = self.plugin_fields.get_mut(&crate::plugin_ui::field_id(site, key)) {
-            if kind == "submit" { field.sync.submitted() } else { field.sync.typed() }
+            if kind == "submit" { field.sync.submitted() } else { field.sync.typed(&value) }
         }
         self.spawn_plugin("input", body, Payload::PluginInput);
     }

@@ -226,4 +226,55 @@ describe('Input de mod', () => {
     redesenho('');
     expect(campo.value).toBe('abcd');
   });
+
+  // Mod que ecoa cada `change` com atraso: o envio sai antes de qualquer eco.
+  it('depois do envio, os ecos atrasados dos change de antes não tomam a vez da resposta', () => {
+    const { campo, redesenho, digitar, enter, clicarEnviar } = montarVivo('');
+    campo.focus();
+    digitar('a');
+    digitar('ab');
+    digitar('abc');
+    enter();
+    redesenho('a');
+    expect(campo.value).toBe('abc');
+    redesenho('ab');
+    expect(campo.value).toBe('abc');
+    redesenho('');
+    expect(campo.value).toBe('');
+    expect(document.activeElement).toBe(campo);
+    // O mesmo pelo botão de envio.
+    digitar('x');
+    digitar('xy');
+    clicarEnviar();
+    redesenho('x');
+    expect(campo.value).toBe('xy');
+    redesenho('');
+    expect(campo.value).toBe('');
+  });
+
+  it('ecos e resposta no mesmo desenho: entra a resposta', () => {
+    const { campo, redesenho, digitar, enter } = montarVivo('');
+    campo.focus();
+    digitar('a');
+    digitar('ab');
+    digitar('abc');
+    enter();
+    redesenho('');
+    expect(campo.value).toBe('');
+  });
+
+  it('limite conhecido: resposta igual a um valor digitado antes só entra quando o campo perde o foco', () => {
+    // A pessoa apagou tudo (`change ""`) antes de digitar `x`: a resposta `""` passa por eco velho.
+    const { campo, redesenho, digitar, enter } = montarVivo('');
+    campo.focus();
+    digitar('a');
+    digitar('');
+    digitar('x');
+    enter();
+    redesenho('');
+    expect(campo.value).toBe('x');
+    campo.blur();
+    flushSync();
+    expect(campo.value).toBe('');
+  });
 });
