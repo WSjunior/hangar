@@ -55,6 +55,8 @@ pub struct Fake {
     /// Corpo cru que substitui o da guarda (o 409 do Python sem o `detail`).
     transfer_body: Mutex<Option<String>>,
     transfer_calls: AtomicUsize,
+    /// Corpos que chegaram em `/api/plugin/ui` (a cópia da faixa que o Rust manda).
+    plugin_ui: Mutex<Vec<Value>>,
 }
 
 impl Fake {
@@ -109,6 +111,10 @@ impl Fake {
     pub fn transfer_calls(&self) -> usize {
         self.transfer_calls.load(SeqCst)
     }
+    /// Os corpos que chegaram em `/api/plugin/ui`, na ordem.
+    pub fn plugin_ui_bodies(&self) -> Vec<Value> {
+        self.plugin_ui.lock().unwrap().clone()
+    }
 }
 
 pub async fn spawn_fake() -> (Arc<Fake>, SocketAddr) {
@@ -133,6 +139,7 @@ pub async fn spawn_fake() -> (Arc<Fake>, SocketAddr) {
         info_delay: Mutex::default(),
         transfer_body: Mutex::default(),
         transfer_calls: AtomicUsize::new(0),
+        plugin_ui: Mutex::default(),
     });
     let app = Router::new()
         .route("/internal/sessions/{name}/info", get(fake_info))
@@ -241,6 +248,10 @@ async fn fake_python(State(f): State<Arc<Fake>>, mut req: Request) -> Response {
     let full = req.uri().path_and_query().map(|p| p.to_string()).unwrap_or_default();
     f.hits.lock().unwrap().push((full, req.headers().clone()));
     let path = req.uri().path().to_owned();
+    if path == "/api/plugin/ui" {
+        let bytes = axum::body::to_bytes(std::mem::take(req.body_mut()), 1 << 20).await.unwrap_or_default();
+        f.plugin_ui.lock().unwrap().push(serde_json::from_slice(&bytes).unwrap_or(Value::Null));
+    }
     match path.as_str() {
         "/redirect" => Response::builder().status(302).header("location", "/outro").body(Body::empty()).unwrap(),
         "/probe" => status(StatusCode::UNAUTHORIZED),

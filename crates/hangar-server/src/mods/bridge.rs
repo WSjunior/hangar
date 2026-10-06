@@ -198,8 +198,10 @@ pub async fn ui(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<
     if !st.mods.is_terminal(&name) {
         return ok();
     }
-    // Antes de responder e em ordem: dois `/ui` seguidos não chegam trocados ao cache do Python.
-    copy_to_python(&st, &json!({"sessao": sessao, "token": token, "above": body.above, "columns": body.columns, "panes": body.panes})).await;
+    // Antes de responder e em ordem: dois `/ui` seguidos não chegam trocados ao cache do Python. Com o nome
+    // atual e o token dele: numa sessão renomeada, o cache do Python é pelo nome de agora.
+    let copy = json!({"sessao": name, "token": mint(&st.cfg.auth_token, &name), "above": body.above, "columns": body.columns, "panes": body.panes});
+    copy_to_python(&st, &copy).await;
     st.mods.terminal_ui(&name, TerminalView { above: body.above, columns: body.body_columns, panes: body.panes, shown: body.shown });
     st.mods.schedule_shown(&name);
     ok()
