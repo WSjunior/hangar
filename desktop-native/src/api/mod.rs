@@ -777,7 +777,7 @@ mod tests {
     fn new_mod_refusals_use_the_web_sentence() {
         for code in ["erro_mod_sem_digitacao", "erro_mod_desenho_vencido", "erro_mod_dialogo_aberto",
             "erro_mod_rascunho_no_prompt", "erro_mod_painel_nao_alcancavel", "erro_mod_fechar_recusado",
-            "erro_mod_guarda_indisponivel", "erro_mod_painel_inexistente"] {
+            "erro_mod_guarda_indisponivel", "erro_mod_painel_inexistente", "erro_mod_convidado"] {
             let text = failure_detail(Some(json!({"detail": {"code": code, "params": {}, "msg": "texto-do-servidor"}})), 409);
             assert!(text != code && text != "texto-do-servidor", "{code}: {text}");
         }
