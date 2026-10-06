@@ -465,6 +465,8 @@ PREVIEW_COMMITTED = [
 
 def preview_rows() -> dict:
     import tempfile
+    from unittest import mock
+
     from app import preview
 
     panes = []
@@ -473,9 +475,7 @@ def preview_rows() -> dict:
         panes.append({"name": name, "pane": pane, "columns": columns, "anchor": anchor,
                       "expected": preview.extract_assistant_text(cropped, "claude", anchor)})
     sidecars = []
-    real_time, real_dirs, real_state = preview.time.time, preview._config_dirs, preview.hook_state.get_state
-    preview.time.time = lambda: NOW
-    try:
+    with mock.patch.object(preview.time, "time", return_value=NOW):
         for name, files, marker in PREVIEW_SIDECARS:
             with tempfile.TemporaryDirectory() as tmp:
                 dirs = []
@@ -485,12 +485,11 @@ def preview_rows() -> dict:
                     if raw is not None:
                         (d / ".hangar-preview" / "sid.json").write_text(raw, encoding="utf-8")
                     dirs.append(d)
-                preview._config_dirs = lambda dirs=dirs: dirs
-                preview.hook_state.get_state = lambda sid, marker=marker: marker
-                sidecars.append({"name": name, "files": files, "marker": marker, "now": NOW,
-                                 "expected": preview.read_sidecar("sid")})
-    finally:
-        preview.time.time, preview._config_dirs, preview.hook_state.get_state = real_time, real_dirs, real_state
+                # A ordem das pastas aqui é entrada do caso; em produção ela vem de um conjunto.
+                with (mock.patch.object(preview, "_config_dirs", return_value=dirs),
+                      mock.patch.object(preview.hook_state, "get_state", return_value=marker)):
+                    sidecars.append({"name": name, "files": files, "marker": marker, "now": NOW,
+                                     "expected": preview.read_sidecar("sid")})
     committed = [{"name": name, "preview": text, "committed": raw, "norm": preview._norm(raw),
                   "expected": sse.preview_is_committed(text, preview._norm(raw))}
                  for name, text, raw in PREVIEW_COMMITTED]

@@ -99,7 +99,8 @@ pub trait Sources: Send + Sync {
     fn publish(&self, event: StateEvent) -> impl Future<Output = bool> + Send;
     /// Captura só para a prévia, entre as rodadas de estado; `None`: a fonte não as faz.
     fn preview_capture(&self) -> impl Future<Output = Option<Result<Frame, CaptureFailed>>> + Send { async { None } }
-    /// `.hangar-preview/<stem>.json` legíveis, na ordem das pastas de config.
+    /// `.hangar-preview/<stem>.json` legíveis, na ordem das pastas de config. Chamado a cada toque
+    /// rápido: quem implementa lê o disco fora do runtime (`HookFiles` em `spawn_blocking`).
     fn preview_files(&self, _stem: &str) -> impl Future<Output = Vec<HookFile>> + Send { async { Vec::new() } }
     /// Última resposta já gravada no transcript, normalizada (`preview::norm`).
     fn committed(&self) -> Option<Arc<str>> { None }
@@ -197,6 +198,7 @@ impl<S: Sources> Monitor<S> {
         let epoch = self.src.epoch();
         if epoch != self.epoch {
             // `/clear` ou troca do filho: quadro, chave e memória temporal são da conversa anterior.
+            // A prévia zera sem publicar: o `rebind` do hub apaga o retrato e o app recebe `reset`.
             (self.mem, self.epoch) = (Memory::default(), epoch);
         }
         let captured = self.src.capture().await;

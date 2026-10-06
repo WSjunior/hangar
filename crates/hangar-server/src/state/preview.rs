@@ -74,14 +74,28 @@ impl HookFiles {
         for dir in dirs {
             let path = dir.join(SUBDIR).join(format!("{stem}.json"));
             // Ausente é o caso normal: sessão sem o hook.
-            let Some(key) = std::fs::metadata(&path).ok().as_ref().and_then(file_key) else { continue };
+            let meta = match std::fs::metadata(&path) {
+                Ok(meta) => meta,
+                Err(e) => {
+                    read_failed(stem, &e);
+                    continue;
+                }
+            };
+            let Some(key) = file_key(&meta) else { continue };
             let settled = key.0.elapsed().is_ok_and(|age| age > RACY_WINDOW);
             let parsed = match previous.remove(&path) {
                 Some((k, parsed)) if k == key && settled => parsed,
                 _ => {
                     #[cfg(test)]
                     { self.reads += 1; }
-                    std::fs::read(&path).ok().and_then(|raw| parse_hook(&raw))
+                    match std::fs::read(&path) {
+                        Ok(raw) => parse_hook(&raw),
+                        // Erro de E/S não entra no cache: a versão igual não pode prendê-lo.
+                        Err(e) => {
+                            read_failed(stem, &e);
+                            continue;
+                        }
+                    }
                 }
             };
             out.extend(parsed.clone());
@@ -142,8 +156,18 @@ pub fn is_committed(preview: &str, committed: &str) -> bool {
     n.chars().count() >= COMMITTED_MIN && !committed.is_empty() && (committed.contains(&n) || n.starts_with(committed))
 }
 
+fn read_failed(stem: &str, e: &std::io::Error) {
+    if e.kind() != std::io::ErrorKind::NotFound && crate::warn_limit::allow(Some(stem), "preview_hook_read") {
+        tracing::warn!(stem, code = "preview_hook_read", kind = ?e.kind(), "prévia: arquivo do hook ilegível");
+    }
+}
+
 /// Gancho do leitor do transcript: a resposta que um quadro `message` acabou de gravar.
 pub fn committed_from_frame(frame: &[u8]) -> Option<String> {
+    // Barato antes do serde: o leitor manda todo quadro, inclusive resultado de ferramenta grande.
+    if memchr::memmem::find(frame, b"\"assistant_msg\"").is_none() {
+        return None;
+    }
     let frame = std::str::from_utf8(frame).ok()?;
     let mut event = None;
     let mut data = Vec::new();
@@ -157,7 +181,16 @@ pub fn committed_from_frame(frame: &[u8]) -> Option<String> {
     if event != Some("message") {
         return None;
     }
-    let ev: ChatEvent = serde_json::from_str(&data.join("\n")).ok()?;
+    let ev: ChatEvent = match serde_json::from_str(&data.join("\n")) {
+        Ok(ev) => ev,
+        Err(e) => {
+            // Sem isto a supressão pararia calada e a resposta gravada voltaria como prévia.
+            if crate::warn_limit::allow(None, "preview_committed_parse") {
+                tracing::warn!(code = "preview_committed_parse", category = ?e.classify(), "prévia: quadro do transcript ilegível");
+            }
+            return None;
+        }
+    };
     (ev.kind == ChatKind::AssistantMsg).then_some(ev.text).flatten().filter(|t| !t.is_empty()).map(|t| norm(&t))
 }
 
@@ -233,7 +266,14 @@ pub async fn tick<S: Sources>(src: &S, slot: &mut Slot, frame: Option<&Frame>, e
                 None => match src.preview_capture().await {
                     Some(Ok(f)) => { captured = f; &captured }
                     // Falha ou fonte sem captura rápida: fica o texto que tinha, até a próxima rodada.
-                    Some(Err(_)) | None => { slot.fast = false; return true; }
+                    Some(Err(e)) => {
+                        if crate::warn_limit::allow(Some(src.name()), "preview_capture_failed") {
+                            tracing::warn!(session = src.name(), code = "preview_capture_failed", detail = e.code.as_str(), "prévia: captura rápida falhou");
+                        }
+                        slot.fast = false;
+                        return true;
+                    }
+                    None => { slot.fast = false; return true; }
                 },
             };
             let (text, working) = from_pane(frame, slot.columns, slot.anchor.as_deref());
