@@ -29,8 +29,8 @@ roda o código atual.
    conta e `config_dir`, a trava `contas.ciclo_conta`, o ambiente do motor (`engines.py`),
    criar worktree (mutações de worktree estão na parte 6) e a raiz do convidado. A parte que é da
    sessão já está no Rust: o vínculo nasce lá (`_await_birth`, `ensure_open`). Portar a criação
-   agora traria metade da parte 6 junto. *Pedido original listava a criação no escopo; é a mudança
-   que precisa de aprovação.*
+   agora traria metade da parte 6 junto. *Aprovado pelo dono em 07/10/2026 (o pedido original
+   listava a criação no escopo).*
 2. **`model_picker.py`: parte 5** (subparte C4). É o que obriga o empréstimo do teclado no
    `/model-effort`.
 3. **Motores (`engines.py`): parte 6.** Só entram na criação e no relançamento. A C4 lê
@@ -62,7 +62,7 @@ roda o código atual.
 
 Cada subparte é uma junção na `main` e sobe o contrato interno uma vez.
 
-### 5-0 Caminho de escrita (comum aos dois provedores; feita por esta metade, revisada pela Codex)
+### 5-0 Caminho de escrita (comum aos dois provedores; feita e revisada por esta metade)
 
 - **Tabela de despacho no Rust** (`rs/session_write/`): para cada rota, provedor e modo da sessão
   (com/sem terminal), `Rust` ou `Python`. O Rust reivindica a rota em `routes::router` e em
