@@ -29,10 +29,19 @@ if ($Update) { $Sim = $true }
 # -App: modo do assistente do app nativo. As marcas ##HANGAR-* sao o contrato com ele
 # (docs/superpowers/specs/2026-10-06-instalador-grafico-design.md).
 $HangarProtocol = 1
+# Antes do try: o finally do fim le os dois mesmo quando a falha vem antes de tudo.
+$script:currentStep = ''
+$script:finalState = 'falhou'
+# Os lancadores .cmd vao na codepage do console de quem os roda, nunca na UTF-8 do -App.
+$script:launcherCodePage = [Console]::OutputEncoding.CodePage
 if ($App) {
+    # O console que o app passa pode ja estar em UTF-8; o terminal que roda o .cmd abre na OEM do sistema.
+    try { $script:launcherCodePage = [int](Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Nls\CodePage').OEMCP } catch { }
     # O app le a saida como UTF-8; sem isto o 5.1 escreveria na codepage OEM do console.
     try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }
     $OutputEncoding = New-Object System.Text.UTF8Encoding $false
+    # O mesmo para o Python (app.doctor, uv run), que escreveria em cp1252 no arquivo do app.
+    $env:PYTHONIOENCODING = 'utf-8'
     Write-Host "##HANGAR-PROTOCOLO## $HangarProtocol"
 }
 # A senha do celular chega pelo ambiente, nunca pelo argv; sai dele ja aqui, para nenhum
@@ -155,8 +164,6 @@ function Pare($mensagem, $dicas) {
 }
 
 # Marcas de etapa do assistente; so no -App. A ##HANGAR-FIM## sai no finally do fim do arquivo.
-$script:currentStep = ''
-$script:finalState = 'falhou'
 function Mark-Step($etapa, $estado) {
     if (-not $App) { return }
     if ($estado -eq 'fazendo') { $script:currentStep = $etapa }
@@ -365,7 +372,7 @@ function Escrever-Lancador($caminho, $texto, [ValidateSet('cmd','sh','vbs')][str
       Conteudo 100% ASCII sai byte a byte igual ao de antes nos tres casos.
     #>
     $enc = switch ($Tipo) {
-        'cmd' { [System.Text.Encoding]::GetEncoding([Console]::OutputEncoding.CodePage) }
+        'cmd' { [System.Text.Encoding]::GetEncoding($script:launcherCodePage) }
         'vbs' { New-Object System.Text.UnicodeEncoding $false, $true }   # UTF-16LE + BOM
         'sh'  { New-Object System.Text.UTF8Encoding $false }
     }
@@ -2770,8 +2777,19 @@ Write-Host ""
 $script:finalState = 'ok'
 Pausa-Fim
 Pausa-Log
+} catch {
+    # -App: o erro sai antes da FIM, que tem de ser a ultima linha (sem o catch ele sairia depois).
+    if (-not $App) { throw }
+    Write-Host "  X   $($_.Exception.Message)"
+    exit 1
 } finally {
-    try { Liberar-Instalacao }
+    # A trava de outra instalacao falha antes de a funcao existir, e ai nao ha o que liberar.
+    try { if (Get-Command Liberar-Instalacao -ErrorAction SilentlyContinue) { Liberar-Instalacao } }
+    catch {
+        if (-not $App) { throw }
+        Write-Host "  X   $($_.Exception.Message)"
+        $script:finalState = 'falhou'
+    }
     finally {
         # Ultima linha no -App: sem ela o app sabe que a instalacao foi interrompida.
         if ($App) {

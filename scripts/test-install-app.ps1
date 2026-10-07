@@ -123,6 +123,48 @@ foreach ($caso in @(@{ roda = $false; esperado = 0 }, @{ roda = $true; esperado 
     Assert ($script:conptyCalls -eq $caso.esperado) "-App -ConsertarRoda:$($caso.roda): install-psmux-conpty.ps1 chamado $($caso.esperado) vez(es)"
 }
 
+# Preambulo do -App: a codepage dos .cmd e lida antes da troca para UTF-8, e o Python sai em UTF-8
+$iCp = $texto.IndexOf('$script:launcherCodePage = [Console]::OutputEncoding.CodePage')
+$iUtf = $texto.IndexOf('try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }')
+Assert ($iCp -ge 0 -and $iCp -lt $iUtf) 'a codepage dos .cmd e guardada antes da troca para UTF-8'
+$appIf = $ast.Find({ param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Clauses[0].Item1.Extent.Text -eq '$App' -and $n.Extent.Text.Contains('HANGAR-PROTOCOLO') }, $true)
+Assert ($appIf -and $appIf.Extent.Text.Contains("`$env:PYTHONIOENCODING = 'utf-8'")) '-App: o Python escreve em UTF-8'
+Assert ($appIf -and $appIf.Extent.Text.Contains("`$script:launcherCodePage = [int](Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Nls\CodePage').OEMCP")) '-App: os .cmd vao na OEM do sistema, nao na do console herdado'
+$d = $ast.Find({ param($x) $x -is [Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq 'Escrever-Lancador' }, $true)
+. ([scriptblock]::Create($d.Extent.Text))
+$cmdFile = Join-Path $env:TEMP ("hangar-test-" + [guid]::NewGuid().ToString('N') + '.cmd')
+$encAnt = [Console]::OutputEncoding
+try {
+    $script:launcherCodePage = 850
+    [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+    [void](Escrever-Lancador $cmdFile ("@echo C:\Users\Jo" + [char]0x00E3 + "o") -Tipo cmd)
+    $b = [IO.File]::ReadAllBytes($cmdFile)
+    Assert ($b -contains 0xC6 -and -not ($b -contains 0xC3)) '-App: o .cmd sai na codepage guardada (850), nao em UTF-8'
+} finally {
+    [Console]::OutputEncoding = $encAnt
+    Remove-Item $cmdFile -ErrorAction SilentlyContinue
+}
+
+# Outra instalacao segurando a trava: a FIM continua sendo a ultima linha
+$mutex = New-Object Threading.Mutex($false, 'Local\HangarInstall')
+$segurou = $false
+try { $segurou = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $segurou = $true }
+if ($segurou) {
+    $out = Join-Path $env:TEMP ("hangar-test-" + [guid]::NewGuid().ToString('N') + '.txt')
+    try {
+        & cmd /c "powershell -NoProfile -ExecutionPolicy Bypass -File `"$installer`" -App -Tailscale nao > `"$out`" 2>&1 < NUL"
+        $linhas = @(Get-Content $out | Where-Object { $_.Trim() })
+        Assert ($linhas.Count -and $linhas[-1] -eq '##HANGAR-FIM## falhou') "-App com a trava ocupada: ultima linha FIM falhou (veio: $($linhas[-1]))"
+        Assert (@($linhas | Where-Object { $_ -match 'Outra instalacao' }).Count -eq 1) '-App com a trava ocupada: o motivo aparece'
+    } finally {
+        $mutex.ReleaseMutex()
+        Remove-Item $out -ErrorAction SilentlyContinue
+    }
+} else {
+    [Console]::WriteLine('skip trava ocupada: ha uma instalacao de verdade rodando')
+}
+$mutex.Dispose()
+
 # --- fim dos casos ---
 if ($script:falhas) { [Console]::WriteLine("$($script:falhas) falha(s)"); exit 1 }
 [Console]::WriteLine('tudo ok')
