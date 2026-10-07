@@ -16,6 +16,8 @@ pub const SURFACE: &str = "desktop";
 pub const BAND_COLUMNS: u64 = 110;
 /// Largura de painel quando o mod não pediu uma.
 pub const PANE_COLUMNS: u64 = 60;
+/// Teto do nome de mod que os apps e o plugin do Hangar mandam, o mesmo do Python (`PluginPressBody`).
+pub const PLUGIN_MAX: usize = 256;
 /// Duração do aviso de mod que não traz uma, a mesma do Python (`plugin_bridge`).
 pub const TOAST_DEFAULT_MS: u64 = 4000;
 
@@ -45,13 +47,14 @@ impl PaneItem {
     }
 }
 
-/// Pedido de um app à interface dos mods de uma sessão.
+/// Pedido de um app à interface dos mods de uma sessão. Botão e campo vêm com o mod (`plugin`) que os
+/// desenhou: a `key` só é única dentro de um mod.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ModsCall {
-    Press { site: String, key: String },
+    Press { site: String, plugin: String, key: String },
     Close { site: String },
     Show { site: String },
-    Input { site: String, key: String, submit: bool, value: String },
+    Input { site: String, plugin: String, key: String, submit: bool, value: String },
 }
 
 impl ModsCall {

@@ -1840,7 +1840,6 @@ Limites conhecidos da fase 3:
 - convidado que pede `show` ou `input` numa sessão com terminal do Rust recebe 405 do Python, que só tem a rota `plugin/press`, em vez do 403 `erro_mod_convidado` do `press`: nada é acionado, mas o app mostra um erro genérico. Fechar pede as duas rotas no Python ou a recusa do convidado no Rust;
 - a publicação da vista é montada fora da trava e conferida sob ela pela versão, mas entregue aos aparelhos depois de soltá-la: numa corrida entre dois `/ui` (ou um `/ui` e a leitura da tela), a vista mais velha pode chegar por último. O próximo `/ui` ou a próxima leitura da tela corrige (T11-a);
 - a limpeza renova a reserva do pane no começo e de novo antes de devolver a altura, mas entre a última renovação e o `Release` a reserva ainda pode vencer alguns milissegundos antes do fim quando a operação no executor demora: a fila só entrega com o teclado já no prompt, então a mensagem não aperta botão, só pode sair um instante antes de a altura voltar (T13-a);
-- o pedido do app diz o lugar e a `key` do controle, não o mod: com dois mods desenhando um controle de mesma `key` no mesmo lugar (faixa ou painel), nenhum é acionado e o app ouve que o item não está mais na tela (com e sem terminal). Levar o mod no contrato dos apps, para acionar o certo, fica para depois;
 - dentro dos 3 s depois de um foco armado, o plugin pergunta ao backend se o alvo ainda está armado antes de derrubar um envio do composer, e só derruba com a confirmação; sem resposta em 2 s (sessão renomeada com o Python lento ou fora do ar), o envio passa, e uma letra que a pessoa digitasse no meio da reserva, com o `Enter` do clique, poderia ir ao modelo. A reserva recusa já de início com rascunho no prompt. Responder `Deferred` pelo aviso do plugin na tela foi tentado e revertido: o texto do aviso pode estar na tela por outra razão, e a linha seria digitada de novo;
 - o hook de `ui.focus` do plugin espera o `focus-target` sem prazo próprio antes de seguir; numa sessão renomeada cada movimento do anel paga também a pergunta ao Python sobre o nome antigo (até 1 s). O hook tem o teto de 10 s do engine.
 
@@ -1873,6 +1872,29 @@ O engine recusa carregar um módulo que guarda o próprio `$` numa variável (`e
 o `$` no ponto da chamada ou num closure, como nos timers. O `tsc` não pega isso, o
 `claude plugin validate` pega. Um painel que o mod abre sem pedido da pessoa só é desenhado a
 partir de 144 colunas (110 depois de pedido); abaixo disso não há árvore para espelhar.
+
+### Mods: o mod vai no contrato dos apps (06/10/2026)
+
+A `key` de um controle só é única dentro do mod que o desenhou: dois mods podem desenhar a mesma
+`key` no mesmo lugar (faixa ou painel). Antes, o app mandava só o lugar e a `key`, e o servidor
+recusava os dois controles, porque acionar o primeiro podia ser acionar o mod errado. Agora o app
+manda também o mod (`plugin`) que leu do `press` do nó, e o servidor resolve o controle por lugar,
+mod e `key`, com e sem terminal. Medido no Claude Code 2.1.292: a árvore que o terminal entrega ao
+plugin do Hangar já traz `press: {plugin, handle}` em cada botão, então o clique pela tela filtra
+o rótulo pelo mod como a superfície remota filtra o `handle`.
+
+- `plugin/press` leva `plugin`; só o fechar painel (`key: "__close__"`) vai sem ele. `plugin/input`
+  leva `plugin` sempre. Sem o mod, a rota responde 422, no Rust e no Python. `plugin/show` não muda:
+  o id do painel já é único.
+- Controle sem `press.plugin` (ou sem `key`) é só rótulo nos apps: não há como o servidor achá-lo.
+- O campo do app (`Input`) é identificado por lugar, mod e `key`, no web e no nativo. Medido no
+  2.1.292: o engine recusa a faixa inteira quando dois mods desenham `Input` com a mesma `key` no
+  mesmo lugar ("Input "campo" is drawn twice; each takes its own key") e desenha a dele; dois
+  `Button` com a mesma `key` passam. O mod no `input` segue o do `press`, e não depende dessa recusa.
+- O plugin do Hangar manda o mod no `press-start` e no `pressed`, e o servidor só casa o press com
+  o clique do mesmo mod. Sem o campo (plugin já carregado numa sessão viva antes desta versão), o
+  casamento continua por lugar e `key`.
+- O mesmo mod com a mesma `key` duas vezes no lugar continua recusado: não há como saber qual.
 
 ### Aviso de mod medido (04/10/2026)
 

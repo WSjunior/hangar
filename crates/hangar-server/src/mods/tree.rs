@@ -9,24 +9,23 @@ pub struct Control {
     pub handle: i64,
 }
 
-/// O elemento de um dos `kinds` com esta `key`, com o `press` dele. Sem `press` não há como acionar: conta
-/// como ausente. Mais de um (dois mods desenhando a mesma `key` no mesmo lugar) também: o app não diz de
-/// qual mod é o controle, e acionar o primeiro seria acionar o mod errado.
-pub fn find(tree: &Value, key: &str, kinds: &[&str]) -> Option<Control> {
-    match controls(tree, key, kinds).as_slice() {
+/// O elemento de um dos `kinds` do mod `plugin` com esta `key`, com o `press` dele. Sem `press` não há
+/// como acionar: conta como ausente. Mais de um (o mesmo mod desenhando a mesma `key` duas vezes no lugar)
+/// também: acionar o primeiro poderia ser acionar o controle errado.
+pub fn find(tree: &Value, plugin: &str, key: &str, kinds: &[&str]) -> Option<Control> {
+    match controls(tree, plugin, key, kinds).as_slice() {
         [one] => Some(one.clone()),
         _ => None,
     }
 }
 
-/// Mais de um elemento de um dos `kinds` com esta `key`, acionável ou não.
-pub fn ambiguous(tree: &Value, key: &str, kinds: &[&str]) -> bool {
+/// Mais de um elemento de um dos `kinds` do mod `plugin` com esta `key`.
+pub fn ambiguous(tree: &Value, plugin: &str, key: &str, kinds: &[&str]) -> bool {
     let mut stack = vec![tree];
     let mut seen = 0;
     while let Some(node) = stack.pop() {
         let Some(object) = node.as_object() else { continue };
-        let kind = object.get("type").and_then(Value::as_str).unwrap_or("");
-        if kinds.contains(&kind) && node["props"]["key"] == key {
+        if is_control(node, plugin, key, kinds) {
             seen += 1;
             if seen > 1 { return true; }
         }
@@ -37,18 +36,22 @@ pub fn ambiguous(tree: &Value, key: &str, kinds: &[&str]) -> bool {
     false
 }
 
-/// Todos os elementos acionáveis de um dos `kinds` com esta `key`, na ordem do documento.
-fn controls(tree: &Value, key: &str, kinds: &[&str]) -> Vec<Control> {
+/// O nó é um elemento de um dos `kinds`, desenhado pelo mod `plugin`, com esta `key`. A `key` só é única
+/// dentro de um mod: dois mods podem usar a mesma no mesmo lugar.
+fn is_control(node: &Value, plugin: &str, key: &str, kinds: &[&str]) -> bool {
+    let kind = node["type"].as_str().unwrap_or("");
+    kinds.contains(&kind) && node["props"]["key"] == key && node["press"]["plugin"] == plugin
+}
+
+/// Todos os elementos acionáveis de um dos `kinds` do mod `plugin` com esta `key`, na ordem do documento.
+fn controls(tree: &Value, plugin: &str, key: &str, kinds: &[&str]) -> Vec<Control> {
     let mut found = Vec::new();
     let mut stack = vec![tree];
     while let Some(node) = stack.pop() {
         let Some(object) = node.as_object() else { continue };
-        let kind = object.get("type").and_then(Value::as_str).unwrap_or("");
-        if kinds.contains(&kind) && node["props"]["key"] == key {
-            let press = &node["press"];
-            if let (Some(plugin), Some(handle)) = (press["plugin"].as_str(), press["handle"].as_i64()) {
-                found.push(Control { kind: kind.to_owned(), plugin: plugin.to_owned(), handle });
-            }
+        if is_control(node, plugin, key, kinds) && let Some(handle) = node["press"]["handle"].as_i64() {
+            let kind = object.get("type").and_then(Value::as_str).unwrap_or("");
+            found.push(Control { kind: kind.to_owned(), plugin: plugin.to_owned(), handle });
         }
         if let Some(children) = object.get("children").and_then(Value::as_array) {
             stack.extend(children.iter().rev());
@@ -62,12 +65,12 @@ pub fn is_engine_only(tree: &Value) -> bool {
     tree["type"] == "engine"
 }
 
-/// O rótulo do `Button` de `key`, como o terminal o desenha: `label`, ou o texto dos filhos.
-pub fn label(tree: &Value, key: &str) -> Option<String> {
+/// O rótulo do `Button` de `key` do mod `plugin`, como o terminal o desenha: `label`, ou o texto dos filhos.
+pub fn label(tree: &Value, plugin: &str, key: &str) -> Option<String> {
     let mut stack = vec![tree];
     while let Some(node) = stack.pop() {
         let Some(object) = node.as_object() else { continue };
-        if object.get("type").and_then(Value::as_str) == Some("Button") && node["props"]["key"] == key {
+        if is_control(node, plugin, key, &["Button"]) {
             let text = match node["props"]["label"].as_str().filter(|label| !label.is_empty()) {
                 Some(label) => label.to_owned(),
                 None => object.get("children").and_then(Value::as_array)

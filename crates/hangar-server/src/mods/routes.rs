@@ -51,9 +51,10 @@ const EFFECT_WAIT: Duration = Duration::from_millis(300);
 const VALUE_MAX: usize = 16384;
 const TRANSFER_REASON: &str = "o backend não confirmou que a sessão está livre da troca de agente";
 
+/// `plugin`: o mod do botão. Fechar o painel (`key: "__close__"`) não fala de botão e dispensa.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PressBody { site: String, key: String }
+struct PressBody { site: String, key: String, #[serde(default)] plugin: Option<String> }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -61,7 +62,7 @@ struct ShowBody { site: String }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct InputBody { site: String, key: String, kind: String, value: String }
+struct InputBody { site: String, plugin: String, key: String, kind: String, value: String }
 
 fn refused(headers: &HeaderMap, error: &ModsError) -> Response {
     reply(Some(headers), StatusCode::CONFLICT, json!({"detail": error.detail()}))
@@ -135,7 +136,7 @@ async fn run(st: &AppState, headers: &HeaderMap, name: &str, call: ModsCall, dea
     if Instant::now() >= deadline {
         return refused(headers, &no_answer());
     }
-    let attempt = match &call { ModsCall::Press { site, key } => Some(st.mods.begin_click(name, site, key)), _ => None };
+    let attempt = match &call { ModsCall::Press { site, plugin, key } => Some(st.mods.begin_click(name, site, plugin, key)), _ => None };
     // O que sobra do orçamento limita a chamada e vai junto até a superfície, que não leva ação ao mod sem
     // tempo para a resposta voltar antes dele. Cortada, a resposta que vier depois cai num canal fechado, e
     // o ator não leva à superfície um pedido que ainda estava na caixa dele.
@@ -166,11 +167,14 @@ pub async fn press(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
     let deadline = Instant::now() + REQUEST_BUDGET;
     let (name, headers, raw) = match owned(&st, peer, path, req, None).await { Ok(parts) => parts, Err(response) => return *response };
     let request: PressBody = match body(&headers, raw).await { Ok(request) => request, Err(response) => return *response };
-    if !fits(&request.site, 64) || !fits(&request.key, 256) {
+    if !fits(&request.site, 64) || !fits(&request.key, 256) || request.plugin.as_deref().is_some_and(|plugin| !fits(plugin, PLUGIN_MAX)) {
         return invalid(Some(&headers));
     }
-    let call = if request.key == CLOSE_KEY { ModsCall::Close { site: request.site } }
-        else { ModsCall::Press { site: request.site, key: request.key } };
+    let call = match request.plugin {
+        _ if request.key == CLOSE_KEY => ModsCall::Close { site: request.site },
+        Some(plugin) => ModsCall::Press { site: request.site, plugin, key: request.key },
+        None => return invalid(Some(&headers)),
+    };
     run(&st, &headers, &name, call, deadline).await
 }
 
@@ -197,10 +201,10 @@ pub async fn input(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
         return refused(&headers, &no_typing());
     }
     let request: InputBody = match body(&headers, raw).await { Ok(request) => request, Err(response) => return *response };
-    if !fits(&request.site, 64) || !fits(&request.key, 256) || !matches!(request.kind.as_str(), "change" | "submit")
+    if !fits(&request.site, 64) || !fits(&request.plugin, PLUGIN_MAX) || !fits(&request.key, 256) || !matches!(request.kind.as_str(), "change" | "submit")
         || request.value.chars().count() > VALUE_MAX {
         return invalid(Some(&headers));
     }
-    let call = ModsCall::Input { site: request.site, key: request.key, submit: request.kind == "submit", value: request.value };
+    let call = ModsCall::Input { site: request.site, plugin: request.plugin, key: request.key, submit: request.kind == "submit", value: request.value };
     run(&st, &headers, &name, call, deadline).await
 }

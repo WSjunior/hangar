@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { activePaneId, buttonKey, followLocalTab, hoverProps, inputKey, isHoverScope, isMissingRoute, isPluginServerFailure, pluginFailureText, tabFollowsServer, decodeRaster, inkColor, isEmptyBand, parsePluginToast, parsePluginUi, textOf, type PluginElement } from './pluginUi';
+import { activePaneId, buttonControl, followLocalTab, hoverProps, inputControl, isHoverScope, isMissingRoute, isPluginServerFailure, pluginFailureText, tabFollowsServer, decodeRaster, inkColor, isEmptyBand, parsePluginToast, parsePluginUi, textOf, type PluginElement } from './pluginUi';
 import { mensagemDeErro } from './errosApi';
 import amostras from './__fixtures__/plugin-ui-arvores.json';
 
@@ -86,10 +86,12 @@ describe('parsePluginToast', () => {
   });
 });
 
-it('buttonKey só para Button com key em texto', () => {
-  expect(buttonKey({ type: 'Button', props: { key: 'cp-1' } })).toBe('cp-1');
-  expect(buttonKey({ type: 'Button', props: {} })).toBeNull();
-  expect(buttonKey({ type: 'Text', props: { key: 'x' } })).toBeNull();
+it('buttonControl só para Button com key em texto e o mod do press', () => {
+  const press = { plugin: 'pm-mock', handle: 1 };
+  expect(buttonControl({ type: 'Button', props: { key: 'cp-1' }, press })).toEqual({ plugin: 'pm-mock', key: 'cp-1' });
+  expect(buttonControl({ type: 'Button', props: { key: 'cp-1' } })).toBeNull();
+  expect(buttonControl({ type: 'Button', props: {}, press })).toBeNull();
+  expect(buttonControl({ type: 'Text', props: { key: 'x' }, press })).toBeNull();
 });
 
 describe('parsePluginUi: campos novos da fase 1', () => {
@@ -220,9 +222,10 @@ describe('hover', () => {
     expect(hoverProps(v30, true)).toEqual({});
   });
 
-  it('inputKey só para Input com key em texto', () => {
-    expect(inputKey(amostras.campoV18 as unknown as PluginElement)).toBe('V18-campo');
-    expect(inputKey({ type: 'Input', props: {} })).toBeNull();
-    expect(inputKey({ type: 'Button', props: { key: 'x' } })).toBeNull();
+  it('inputControl só para Input com key em texto e o mod do press', () => {
+    expect(inputControl(amostras.campoV18 as unknown as PluginElement)).toEqual({ plugin: 'vitrine', key: 'V18-campo' });
+    expect(inputControl({ type: 'Input', props: { key: 'V18-campo' } })).toBeNull();
+    expect(inputControl({ type: 'Input', props: {}, press: { plugin: 'vitrine' } })).toBeNull();
+    expect(inputControl({ type: 'Button', props: { key: 'x' }, press: { plugin: 'vitrine' } })).toBeNull();
   });
 });

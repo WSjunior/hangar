@@ -30,15 +30,16 @@ class PressRefused(Exception):
         self.detail = erro(code, msg, **params)
 
 
-def button_label(tree, key: str) -> str | None:
-    """O rótulo do `Button` de `key`: `label`, ou o texto dos filhos."""
+def button_label(tree, key: str, plugin: str | None = None) -> str | None:
+    """O rótulo do `Button` de `key` do mod `plugin`: `label`, ou o texto dos filhos."""
     pilha = [tree]
     while pilha:
         no = pilha.pop()
         if not isinstance(no, dict):
             continue
         props = no.get("props") or {}
-        if no.get("type") == "Button" and props.get("key") == key:
+        if (no.get("type") == "Button" and props.get("key") == key
+                and (plugin is None or (no.get("press") or {}).get("plugin") == plugin)):
             texto = props.get("label") or "".join(c for c in no.get("children") or [] if isinstance(c, str))
             return texto.strip() or None
         pilha.extend(no.get("children") or [])
@@ -116,10 +117,10 @@ async def _click(name: str, linha: int, coluna: int) -> None:
         raise PressRefused("erro_mod_clique_sem_resposta", "O clique não chegou ao terminal.")
 
 
-async def press(name: str, site: str, key: str) -> dict:
+async def press(name: str, site: str, key: str, plugin: str | None = None) -> dict:
     async with _locks.setdefault(name, asyncio.Lock()):
         tree, placement = _site(name, site)
-        rotulo = CLOSE_LABEL if key == CLOSE_KEY and site != BAND_SITE else button_label(tree, key)
+        rotulo = CLOSE_LABEL if key == CLOSE_KEY and site != BAND_SITE else button_label(tree, key, plugin)
         if not rotulo:
             raise PressRefused("erro_mod_botao_inexistente", "O botão não está mais na tela do mod.")
         recusa = await run_tmux(terminal_refusal, name)

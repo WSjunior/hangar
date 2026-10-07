@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { buttonKey, decodeRaster, hoverProps, inputKey, isHoverScope, safeHref, textOf, type PluginElement, type PluginInputKind, type PluginNode as Node, type RasterCell } from '@hangar/core';
+  import { buttonControl, decodeRaster, hoverProps, inputControl, isHoverScope, safeHref, textOf, type PluginControl, type PluginElement, type PluginInputKind, type PluginNode as Node, type RasterCell } from '@hangar/core';
   import { boxStyle, buttonStyle, textStyle } from '../lib/pluginUiStyle';
   import { renderMarkdown } from '../lib/markdown';
   import PluginInput from './PluginInput.svelte';
@@ -7,10 +7,10 @@
 
   interface Props {
     node: Node;
-    /** Clique num botão de mod, pela `key` dele; sem ele, os botões são só rótulo. */
-    onPress?: (key: string) => void;
+    /** Clique num botão de mod, pelo mod e pela `key` dele; sem ele, os botões são só rótulo. */
+    onPress?: (button: PluginControl) => void;
     /** Digitação num `Input`, só sem terminal; sem ele, o campo fica desabilitado com a dica. */
-    onInput?: (key: string, kind: PluginInputKind, value: string) => void;
+    onInput?: (field: PluginControl, kind: PluginInputKind, value: string) => void;
     /** Largura do lugar em colunas (faixa ou painel): `width` que a alcança vira 100%. */
     place?: number | null;
     /** O escopo de hover mais próximo (Box com `key`) está com o ponteiro em cima. */
@@ -81,21 +81,21 @@
       <span>{label}</span>
     {/if}
   {:else if el.type === 'Button'}
-    {@const key = buttonKey(el)}
+    {@const button = buttonControl(el)}
     {@const label = str(p.label) || textOf(el.children)}
-    {#if onPress && key}
+    {#if onPress && button}
       <button type="button" class="button" class:plain={p.plain === true} class:primary={p.variant === 'primary'}
-              class:dim={p.dimColor === true} style={buttonStyle(p)} onclick={() => onPress(key)}>{label}</button>
+              class:dim={p.dimColor === true} style={buttonStyle(p)} onclick={() => onPress(button)}>{label}</button>
     {:else}
       <span class="button" class:plain={p.plain === true} class:primary={p.variant === 'primary'}
             class:dim={p.dimColor === true} style={buttonStyle(p)}>{label}</span>
     {/if}
   {:else if el.type === 'Input'}
-    {@const key = inputKey(el)}
+    {@const field = inputControl(el)}
     <!-- `frame` é o nó: cada evento traz uma árvore nova, e o campo sabe que o mod desenhou de novo. -->
     <PluginInput label={str(p.label)} placeholder={str(p.placeholder)} value={str(p.value)} submitLabel={str(p.submitLabel)}
-                 frame={el} keyless={!key}
-                 onInput={onInput && key ? (kind, value) => onInput(key, kind, value) : undefined} />
+                 frame={el} keyless={!field}
+                 onInput={onInput && field ? (kind, value) => onInput(field, kind, value) : undefined} />
   {:else if el.type === 'Image'}
     <span class="alt">{str(p.alt)}</span>
   {:else}

@@ -56,7 +56,7 @@ test("sem terminal: a URL do clique do app vai ao Hangar; cópia e aviso seguem 
   expect(rodados).toEqual([]);
   expect(posts.filter((p) => p.url.endsWith("/opened")).map((p) => p.body)).toEqual([{ sessao: "sessao-a", token: "tok", attempt: "t-1", url: URL_MOD }]);
   expect(posts.filter((p) => p.url.endsWith("/press-start")).map((p) => p.body)).toEqual(["abrir", "copiar", "avisar"].map((element) => (
-    { sessao: "sessao-a", token: "tok", requestId: "painel", element })));
+    { sessao: "sessao-a", token: "tok", requestId: "painel", plugin: "outro-mod", element })));
   // Cópia e aviso seguem ao engine (que os manda ao Hangar pelo canal da superfície), uma vez cada.
   expect(copias).toEqual(["texto do mod"]);
   expect(avisos).toEqual(["aviso do mod"]);

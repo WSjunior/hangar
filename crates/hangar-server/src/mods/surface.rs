@@ -450,8 +450,8 @@ impl Surface {
         self.publish(out);
     }
 
-    fn control(&self, site: &str, key: &str, kind: &str) -> Option<tree::Control> {
-        self.trees.get(site).and_then(|tree| tree::find(tree, key, &[kind]))
+    fn control(&self, site: &str, plugin: &str, key: &str, kind: &str) -> Option<tree::Control> {
+        self.trees.get(site).and_then(|tree| tree::find(tree, plugin, key, &[kind]))
     }
 
     /// A ação só sai com o prazo inteiro dela ainda dentro do de quem pediu.
@@ -476,17 +476,17 @@ impl Surface {
             out.push(reply(token, Err(no_answer())));
             return;
         }
-        // Dois mods com a mesma `key` no mesmo lugar: o app não diz de qual é, e nenhum é acionado.
+        // O mesmo mod com a mesma `key` duas vezes no lugar: não há como saber qual, e nenhum é acionado.
         let kind = if matches!(call, ModsCall::Input { .. }) { "Input" } else { "Button" };
-        if let ModsCall::Press { site, key } | ModsCall::Input { site, key, .. } = &call
-            && self.trees.get(site.as_str()).is_some_and(|tree| tree::ambiguous(tree, key, &[kind])) {
+        if let ModsCall::Press { site, plugin, key } | ModsCall::Input { site, plugin, key, .. } = &call
+            && self.trees.get(site.as_str()).is_some_and(|tree| tree::ambiguous(tree, plugin, key, &[kind])) {
             out.push(reply(token, Err(missing())));
             return;
         }
         let found = match &call {
-            ModsCall::Press { site, key } => self.control(site, key, "Button").map(|control| ("ui_press",
+            ModsCall::Press { site, plugin, key } => self.control(site, plugin, key, "Button").map(|control| ("ui_press",
                 json!({"plugin": control.plugin, "handle": control.handle, "key": key, "surface": SURFACE, "client_id": CLIENT_ID}))),
-            ModsCall::Input { site, key, submit, value } => self.control(site, key, "Input").map(|control| ("ui_input",
+            ModsCall::Input { site, plugin, key, submit, value } => self.control(site, plugin, key, "Input").map(|control| ("ui_input",
                 json!({"plugin": control.plugin, "handle": control.handle, "kind": if *submit { "submit" } else { "change" },
                     "value": value, "key": key, "component": if site == BAND_SITE { "AbovePrompt" } else { "Pane" },
                     "instance_id": site, "surface": SURFACE, "client_id": CLIENT_ID}))),

@@ -193,24 +193,24 @@ struct Target {
     titles: Vec<String>,
     anchor: Option<String>,
     band_buttons: usize,
-    plugin: Option<String>,
+    /// O mod do botão, como o app pediu; vazio fora do clique num botão (fechar, trocar de aba).
+    plugin: String,
     /// O rótulo aparece mais de uma vez na árvore do painel ou da faixa, visível ou não: o mouse não
     /// distingue um do outro e o clique vai pelo teclado (T5).
     repeated: bool,
 }
 
-fn target_of(view: &TerminalView, site: &str, key: &str, tree: Value) -> Target {
-    let plugin = tree::find(&tree, key, &["Button"]).map(|control| control.plugin);
-    let repeated = tree::label(&tree, key).is_some_and(|label| tree::label_count(&tree, &label) > 1);
+fn target_of(view: &TerminalView, site: &str, plugin: &str, key: &str, tree: Value) -> Target {
+    let repeated = tree::label(&tree, plugin, key).is_some_and(|label| tree::label_count(&tree, &label) > 1);
     Target { site: site.into(), key: key.into(), ids: view.ids(), titles: view.titles(), anchor: tree::anchor(&view.above),
-        band_buttons: tree::count_buttons(&view.above), plugin, repeated, tree }
+        band_buttons: tree::count_buttons(&view.above), plugin: plugin.into(), repeated, tree }
 }
 
-fn target(ctx: &Ctx<'_>, site: &str, key: &str) -> Result<Target, ModsError> {
+fn target(ctx: &Ctx<'_>, site: &str, plugin: &str, key: &str) -> Result<Target, ModsError> {
     let view = ctx.mods.terminal_view_in(ctx.name, ctx.life).ok_or_else(pane_missing)?;
     let tree = if site == BAND_SITE { view.above.clone() }
         else { view.panes.iter().find(|p| p.id == site).map(|p| p.tree.clone()).ok_or_else(pane_missing)? };
-    Ok(target_of(&view, site, key, tree))
+    Ok(target_of(&view, site, plugin, key, tree))
 }
 
 enum Found { Cell((usize, usize)), Keyboard, Clicked }
@@ -424,7 +424,7 @@ async fn click_confirmed(ctx: &Ctx<'_>, t: &Target, label: &str, mut cell: (usiz
             [one] if *one == cell => {
                 let since = Instant::now();
                 ctx.click(cell, Duration::ZERO).await?;
-                return if ctx.mods.wait_pressed(ctx.name, ctx.life, &t.site, &t.key, since, ctx.confirm()).await { Ok(()) } else { Err(no_answer()) };
+                return if ctx.mods.wait_pressed(ctx.name, ctx.life, &t.site, &t.plugin, &t.key, since, ctx.confirm()).await { Ok(()) } else { Err(no_answer()) };
             }
             [one] => cell = *one,
             [] => return Err(not_found(label)),
@@ -676,7 +676,7 @@ async fn enter_confirmed(ctx: &Ctx<'_>, t: &Target, attempt: &str, seq: u64, rin
     }
     let since = Instant::now();
     ctx.keys(&["Enter"], Duration::ZERO).await?;
-    if ctx.mods.wait_pressed(ctx.name, ctx.life, &t.site, &t.key, since, ctx.confirm()).await { Ok(()) } else { Err(no_answer()) }
+    if ctx.mods.wait_pressed(ctx.name, ctx.life, &t.site, &t.plugin, &t.key, since, ctx.confirm()).await { Ok(()) } else { Err(no_answer()) }
 }
 
 /// Clique pelo teclado (T5), só nos casos medidos e com as travas; uma tecla por operação, com pausa.
@@ -684,7 +684,7 @@ async fn enter_confirmed(ctx: &Ctx<'_>, t: &Target, attempt: &str, seq: u64, rin
 async fn reserve_press(ctx: &Ctx<'_>, t: &Target) -> Result<Value, ModsError> {
     let (mut ring, s) = Ring::start(ctx, t).await?;
     locks(&s)?;
-    let attempt = ctx.mods.arm_focus(ctx.name, ctx.life, &t.site, t.plugin.as_deref(), &t.key);
+    let attempt = ctx.mods.arm_focus(ctx.name, ctx.life, &t.site, Some(&t.plugin), &t.key);
     ctx.undo.focus(&attempt);
     ctx.undo.keyboard(t.titles.clone(), t.anchor.clone(), cap(t));
     let seq = if t.site == BAND_SITE {
@@ -719,11 +719,11 @@ async fn reserve_close(ctx: &Ctx<'_>, t: &Target) -> Result<Value, ModsError> {
     if ctx.mods.wait_pane_gone(ctx.name, ctx.life, &t.site, ctx.confirm()).await { Ok(json!({})) } else { Err(no_answer()) }
 }
 
-async fn press_inner(ctx: &Ctx<'_>, site: &str, key: &str) -> Result<Value, ModsError> {
-    let t = target(ctx, site, key)?;
-    // Dois mods com a mesma `key` no mesmo lugar: o app não diz de qual é, e nenhum é acionado.
-    if tree::ambiguous(&t.tree, key, &["Button"]) { return Err(missing()); }
-    let label = tree::label(&t.tree, key).ok_or_else(missing)?;
+async fn press_inner(ctx: &Ctx<'_>, site: &str, plugin: &str, key: &str) -> Result<Value, ModsError> {
+    let t = target(ctx, site, plugin, key)?;
+    // O mesmo mod com a mesma `key` duas vezes no lugar: não há como saber qual, e nenhum é acionado.
+    if tree::ambiguous(&t.tree, plugin, key, &["Button"]) { return Err(missing()); }
+    let label = tree::label(&t.tree, plugin, key).ok_or_else(missing)?;
     let f = prepare(ctx).await?;
     // Sem tela cheia o clique enviado é ignorado (achado 8): vai pelo teclado.
     if !f.mouse { return reserve_press(ctx, &t).await; }
@@ -743,8 +743,8 @@ async fn press_inner(ctx: &Ctx<'_>, site: &str, key: &str) -> Result<Value, Mods
 }
 
 /// Clique num botão de mod pedido pelo app (T4).
-pub async fn press(ctx: &Ctx<'_>, site: &str, key: &str) -> Result<Value, ModsError> {
-    let result = press_inner(ctx, site, key).await;
+pub async fn press(ctx: &Ctx<'_>, site: &str, plugin: &str, key: &str) -> Result<Value, ModsError> {
+    let result = press_inner(ctx, site, plugin, key).await;
     // A aba da frente pode ter mudado sem redesenho (troca para painel já desenhado, (s)).
     ctx.mods.schedule_shown_in(ctx.name, ctx.life);
     result
@@ -754,7 +754,7 @@ pub async fn press(ctx: &Ctx<'_>, site: &str, key: &str) -> Result<Value, ModsEr
 /// fechamentos que o mod faz em seguida não são erro ((e)).
 pub async fn close(ctx: &Ctx<'_>, site: &str) -> Result<Value, ModsError> {
     let result: Result<Value, ModsError> = async {
-        let t = target(ctx, site, CLOSE_KEY)?;
+        let t = target(ctx, site, "", CLOSE_KEY)?;
         let f = prepare(ctx).await?;
         if !f.mouse { return reserve_close(ctx, &t).await; }
         let (s, _) = ctx.read(&t).await?;
@@ -777,7 +777,7 @@ pub async fn close(ctx: &Ctx<'_>, site: &str) -> Result<Value, ModsError> {
 /// Troca de aba pedida pelo app (T2): o clique no título, sozinho. A reserva por teclado não deixa o painel
 /// pedido na frente (a volta por `ctrl+x tab` passa pelos seguintes, (z)): título fora da linha é recusa.
 pub async fn show(ctx: &Ctx<'_>, site: &str) -> Result<Value, ModsError> {
-    let t = target(ctx, site, "")?;
+    let t = target(ctx, site, "", "")?;
     let f = prepare(ctx).await?;
     if !f.mouse { return Err(mouse_off()); }
     let (s, _) = ctx.read(&t).await?;
@@ -790,7 +790,7 @@ pub async fn show(ctx: &Ctx<'_>, site: &str) -> Result<Value, ModsError> {
 /// O pedido do app ao clique com terminal.
 pub async fn dispatch(ctx: &Ctx<'_>, call: ModsCall) -> Result<Value, ModsError> {
     match call {
-        ModsCall::Press { site, key } => press(ctx, &site, &key).await,
+        ModsCall::Press { site, plugin, key } => press(ctx, &site, &plugin, &key).await,
         ModsCall::Close { site } => close(ctx, &site).await,
         ModsCall::Show { site } => show(ctx, &site).await,
         // Com terminal não há por onde digitar no campo do mod (fora do escopo desta entrega).
@@ -802,7 +802,7 @@ pub async fn dispatch(ctx: &Ctx<'_>, call: ModsCall) -> Result<Value, ModsError>
 pub async fn read_shown(ctx: &Ctx<'_>) -> Option<String> {
     let view = ctx.mods.terminal_view_in(ctx.name, ctx.life)?;
     if view.panes.is_empty() { return None; }
-    let t = target_of(&view, "", "", Value::Null);
+    let t = target_of(&view, "", "", "", Value::Null);
     let (s, _) = ctx.read(&t).await.ok()?;
     s.active.and_then(|index| view.panes.get(index)).map(|p| p.id.clone())
 }

@@ -6039,6 +6039,15 @@ def select_submit(name: str):
 class PluginPressBody(_StrictBody):
     site: str = Field(min_length=1, max_length=64)
     key: str = Field(min_length=1, max_length=256)
+    # O mod do botão: a `key` só é única dentro de um mod. Fechar o painel não fala de botão e dispensa.
+    plugin: str | None = Field(default=None, min_length=1, max_length=256)
+
+    @model_validator(mode="after")
+    def _plugin_do_botao(self):
+        from app.plugin_click import CLOSE_KEY
+        if self.plugin is None and self.key != CLOSE_KEY:
+            raise ValueError("informe o mod (plugin) do botão")
+        return self
 
 
 _MOD_CONVIDADO = erro("erro_mod_convidado",
@@ -6075,7 +6084,7 @@ async def plugin_press(name: str, body: PluginPressBody, request: Request):
     from app.runtime_terminal import GuestRefused, guest_admin
     marca = guest_admin.set(_convidado(request))
     try:
-        return await plugin_click.press(name, body.site, body.key)
+        return await plugin_click.press(name, body.site, body.key, body.plugin)
     except plugin_click.PressRefused as e:
         raise HTTPException(409, detail=e.detail)
     except GuestRefused:

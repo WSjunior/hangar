@@ -17,6 +17,7 @@ use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use subtle::ConstantTimeEq;
 
 use super::http::{fits, invalid, reply};
+use super::model::PLUGIN_MAX;
 use super::state::{TerminalPane, TerminalView};
 use crate::routes::{AppState, gate, pass};
 
@@ -43,8 +44,10 @@ const PYTHON_COPY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 #[derive(Deserialize)]
 struct Envelope<T> { sessao: String, token: String, #[serde(flatten)] body: T }
 
+/// Corpo do `press-start` e do `pressed`. `plugin`: o mod do press, que o plugin do Hangar carregado antes
+/// desta versão não manda. O Python, que atende a sessão fora do Rust, ignora o campo.
 #[derive(Deserialize)]
-struct PressStart { #[serde(rename = "requestId")] request_id: String, element: String }
+struct PressBody { #[serde(rename = "requestId")] request_id: String, element: String, #[serde(default)] plugin: Option<String> }
 
 #[derive(Deserialize)]
 struct Opened { attempt: String, url: String }
@@ -104,16 +107,16 @@ fn token_ok(st: &AppState, name: &str, token: &str) -> bool {
 }
 
 pub async fn press_start(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let (envelope, name) = match owned::<PressStart>(&st, peer, req).await { Ok(found) => found, Err(response) => return *response };
+    let (envelope, name) = match owned::<PressBody>(&st, peer, req).await { Ok(found) => found, Err(response) => return *response };
     let body = &envelope.body;
     // Os limites do Pydantic do Python (`PressBody`) vêm antes do token, como lá.
-    if !fits(&body.request_id, 64) || !fits(&body.element, 256) {
+    if !fits(&body.request_id, ID_MAX) || !fits(&body.element, ELEMENT_MAX) || !fits_opt(&body.plugin, PLUGIN_MAX) {
         return invalid(None);
     }
     if !token_ok(&st, &envelope.sessao, &envelope.token) {
         return reply(None, StatusCode::FORBIDDEN, json!({"detail": "token do plugin inválido"}));
     }
-    let attempt = st.mods.match_click(&name, &body.request_id, &body.element);
+    let attempt = st.mods.match_click(&name, &body.request_id, body.plugin.as_deref(), &body.element);
     reply(None, StatusCode::OK, json!({"fromApp": attempt.is_some(), "attempt": attempt}))
 }
 
@@ -151,8 +154,6 @@ struct UiBody {
 }
 #[derive(Deserialize)]
 struct ToastBody { text: String, #[serde(rename = "timeoutMs", default)] timeout_ms: Option<f64>, #[serde(default)] plugin: Option<String> }
-#[derive(Deserialize)]
-struct PressedBody { #[serde(rename = "requestId")] request_id: String, element: String }
 #[derive(Deserialize)]
 struct CopiedBody { attempt: String, text: String }
 #[derive(Deserialize)]
@@ -221,15 +222,15 @@ pub async fn toast(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
 }
 
 pub async fn pressed(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let (envelope, name) = match owned::<PressedBody>(&st, peer, req).await { Ok(found) => found, Err(response) => return *response };
+    let (envelope, name) = match owned::<PressBody>(&st, peer, req).await { Ok(found) => found, Err(response) => return *response };
     let body = &envelope.body;
-    if !fits(&body.request_id, ID_MAX) || !fits(&body.element, ELEMENT_MAX) {
+    if !fits(&body.request_id, ID_MAX) || !fits(&body.element, ELEMENT_MAX) || !fits_opt(&body.plugin, PLUGIN_MAX) {
         return invalid(None);
     }
     if !token_ok(&st, &envelope.sessao, &envelope.token) {
         return forbidden();
     }
-    st.mods.pressed(&name, &body.request_id, &body.element);
+    st.mods.pressed(&name, &body.request_id, body.plugin.as_deref(), &body.element);
     ok()
 }
 

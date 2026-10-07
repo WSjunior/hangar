@@ -47,7 +47,7 @@ async fn apps_reach_the_terminal_through_the_link() {
     pane.on_click((0, 104), vec![Show("tmux-02-apos-clicar-mr-150")]);
     pane.on_click((0, 148), vec![CloseAll]);
     assert_eq!(post_as(server, "show", json!({"site": "pm-mock-mr"}), OWNER).await, (200, json!({"ok": true, "shown_id": "pm-mock-mr"})));
-    let (status, body) = post_as(server, "input", json!({"site": "pm-mock-mr", "key": "k", "kind": "submit", "value": "x"}), OWNER).await;
+    let (status, body) = post_as(server, "input", json!({"site": "pm-mock-mr", "plugin": "pm-mock", "key": "k", "kind": "submit", "value": "x"}), OWNER).await;
     assert_eq!((status, body["detail"]["code"].as_str()), (409, Some("erro_mod_sem_digitacao")));
     assert_eq!(post_as(server, "press", json!({"site": "pm-mock-mr", "key": "__close__"}), OWNER).await, (200, json!({"ok": true})));
     assert_eq!(pane.actions(), ["click 0 104", "click 0 148"]);
@@ -60,7 +60,7 @@ async fn typing_is_refused_without_waiting_the_turn_or_the_transfer_guard() {
     let turn = mods.link("t").unwrap().lock;
     let _held = turn.lock().await;
     let started = Instant::now();
-    let (status, body) = post_as(server, "input", json!({"site": "pm-mock-mr", "key": "k", "kind": "change", "value": "x"}), OWNER).await;
+    let (status, body) = post_as(server, "input", json!({"site": "pm-mock-mr", "plugin": "pm-mock", "key": "k", "kind": "change", "value": "x"}), OWNER).await;
     assert_eq!((status, body["detail"]["code"].as_str()), (409, Some("erro_mod_sem_digitacao")));
     assert!(started.elapsed() < Duration::from_secs(2), "a recusa saiu em {:?}", started.elapsed());
     assert_eq!(python.transfer_calls(), 0, "a guarda da troca de agente não é consultada");
@@ -74,8 +74,8 @@ async fn requests_not_from_the_owner_go_to_python() {
     // base64url) e o errado seguem ao Python, que autentica, recusa o convidado e conta a falha.
     let guest = format!("{}-_", "g".repeat(41));
     for token in [guest.as_str(), "errado"] {
-        for (route, body) in [("press", json!({"site": "pm-mock-mr", "key": "mr-a"})), ("show", json!({"site": "pm-mock-mr"})),
-            ("input", json!({"site": "pm-mock-mr", "key": "k", "kind": "submit", "value": "x"}))] {
+        for (route, body) in [("press", json!({"site": "pm-mock-mr", "plugin": "pm-mock", "key": "mr-a"})), ("show", json!({"site": "pm-mock-mr"})),
+            ("input", json!({"site": "pm-mock-mr", "plugin": "pm-mock", "key": "k", "kind": "submit", "value": "x"}))] {
             assert_eq!(post_as(server, route, body, token).await.1, "from-python", "{route} {token}");
         }
     }

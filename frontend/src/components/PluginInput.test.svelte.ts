@@ -236,7 +236,7 @@ describe('Input de mod', () => {
   it('na faixa, a árvore nova do evento seguinte ao envio limpa o campo mesmo com o mesmo valor desenhado', () => {
     const arvore = (): Node => ({ type: 'Box', children: [
       { type: 'Text', children: ['campo'] },
-      { type: 'Input', props: { key: 'E-campo', value: '', placeholder: 'digite' } }] });
+      { type: 'Input', props: { key: 'E-campo', value: '', placeholder: 'digite' }, press: { plugin: 'mod-e', handle: 1 } }] });
     const onInput = vi.fn();
     const props = $state({ tree: arvore(), onInput });
     alvo = document.createElement('div');
@@ -248,7 +248,7 @@ describe('Input de mod', () => {
     campo.value = 'abc';
     campo.dispatchEvent(new Event('input', { bubbles: true }));
     campo.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-    expect(onInput).toHaveBeenLastCalledWith('above-prompt', 'E-campo', 'submit', 'abc');
+    expect(onInput).toHaveBeenLastCalledWith('above-prompt', { plugin: 'mod-e', key: 'E-campo' }, 'submit', 'abc');
     props.tree = arvore();
     flushSync();
     expect(campo.value).toBe('');

@@ -5,7 +5,7 @@
 </script>
 
 <script lang="ts">
-  import { BAND_SITE, isEmptyBand, type PluginInputKind, type PluginNode as Node } from '@hangar/core';
+  import { BAND_SITE, isEmptyBand, type PluginControl, type PluginInputKind, type PluginNode as Node } from '@hangar/core';
   import * as m from '../paraglide/messages';
   import PluginNode from './PluginNode.svelte';
 
@@ -15,9 +15,9 @@
     /** Largura, em colunas, para a qual a faixa foi desenhada (`columns` do evento); null num servidor antigo. */
     columns?: number | null;
     /** Clique num botão de mod; sem ele, os botões são só rótulo. */
-    onPress?: (site: string, key: string) => void;
+    onPress?: (site: string, button: PluginControl) => void;
     /** Digitação num `Input` da faixa; só sem terminal. */
-    onInput?: (site: string, key: string, kind: PluginInputKind, value: string) => void;
+    onInput?: (site: string, field: PluginControl, kind: PluginInputKind, value: string) => void;
     /** Resultado do último clique; some sozinho. */
     notice?: PluginNotice | null;
   }
@@ -28,8 +28,8 @@
   <!-- Sem aria-live na faixa: mod com relógio muda a cada segundo, e o leitor de tela leria sem parar. -->
   <section class="plugin-band" aria-label={m.plugin_band_label()}>
     {#if !isEmptyBand(tree)}
-      <PluginNode node={tree} place={columns} onPress={onPress ? (key) => onPress(BAND_SITE, key) : undefined}
-                  onInput={onInput ? (key, kind, value) => onInput(BAND_SITE, key, kind, value) : undefined} />
+      <PluginNode node={tree} place={columns} onPress={onPress ? (button) => onPress(BAND_SITE, button) : undefined}
+                  onInput={onInput ? (field, kind, value) => onInput(BAND_SITE, field, kind, value) : undefined} />
     {/if}
     {#if notice}
       <p class="notice" class:error={notice.error} role="status">

@@ -223,7 +223,7 @@ enum Payload {
     PluginShown(Result<Value, Failure>),
     // Digitação num campo de mod: o lugar, a `key` e a identidade do campo que mandou; a volta libera o próximo pedido
     // da fila dele, e só a falha aparece.
-    PluginInput(String, String, EntityId, Result<Value, Failure>),
+    PluginInput(String, crate::plugin_ui::Control, EntityId, Result<Value, Failure>),
     // Lista de outra máquina: a geração dos SSE de lista, a chave do servidor e o que chegou.
     Remote(u64, String, servers::RemoteUpdate),
     HeadlessPlan(SessionKey, controls::PlanOutcome),
@@ -1659,14 +1659,14 @@ impl Hangar {
                 }
                 return;
             }
-            Payload::PluginInput(site, key, field, result) => {
+            Payload::PluginInput(site, control, field, result) => {
                 if let Err(error) = result {
                     window.push_notification(Notification::warning(Self::input_failure(&error)).id::<PluginFailure>(), cx);
                 }
                 // O próximo da fila só sai pelo mesmo campo: um campo recriado com a mesma `key` tem fila própria.
-                let next = self.plugin_fields.get_mut(&crate::plugin_ui::field_id(&site, &key))
+                let next = self.plugin_fields.get_mut(&crate::plugin_ui::field_id(&site, &control))
                     .filter(|f| f.state.entity_id() == field).and_then(|f| f.outbox.done());
-                if let Some(next) = next { self.send_plugin_input(&site, &key, next); }
+                if let Some(next) = next { self.send_plugin_input(&site, &control, next); }
                 return;
             }
             Payload::Sidebar(reply) => {
@@ -5735,9 +5735,9 @@ impl Hangar {
     fn plugin_press(&self, cx: &mut Context<Self>) -> Option<crate::plugin_ui::Press> {
         if self.selected.as_ref().is_some_and(|s| s.read_only()) { return None; }
         let view = cx.entity().downgrade();
-        Some(std::rc::Rc::new(move |site: &str, key: &str, _: &mut Window, cx: &mut App| {
-            let (site, key) = (site.to_owned(), key.to_owned());
-            let _ = view.update(cx, |this, cx| this.press_plugin(site, key, cx));
+        Some(std::rc::Rc::new(move |site: &str, button: Option<&crate::plugin_ui::Control>, _: &mut Window, cx: &mut App| {
+            let (site, button) = (site.to_owned(), button.cloned());
+            let _ = view.update(cx, |this, cx| this.press_plugin(site, button, cx));
         }))
     }
 
@@ -5751,10 +5751,17 @@ impl Hangar {
         });
     }
 
-    fn press_plugin(&mut self, site: String, key: String, cx: &mut Context<Self>) {
-        // O `✕` tira o painel da tela: o hover dele sai junto, sem esperar o evento que confirma o fechamento.
-        if key == crate::plugin_ui::PANE_CLOSE_KEY { self.keep_plugin_hovered_without(Some(&site)); }
-        self.spawn_plugin("press", json!({"site": site, "key": key}), Payload::PluginPressed);
+    /// `button`: o botão do mod; `None` é o `✕`, que fecha o painel `site`.
+    fn press_plugin(&mut self, site: String, button: Option<crate::plugin_ui::Control>, cx: &mut Context<Self>) {
+        let body = match button {
+            Some(button) => json!({"site": site, "plugin": button.plugin, "key": button.key}),
+            None => {
+                // O `✕` tira o painel da tela: o hover dele sai junto, sem esperar o evento que confirma o fechamento.
+                self.keep_plugin_hovered_without(Some(&site));
+                json!({"site": site, "key": crate::plugin_ui::PANE_CLOSE_KEY})
+            }
+        };
+        self.spawn_plugin("press", body, Payload::PluginPressed);
         cx.notify();
     }
 
@@ -5793,7 +5800,7 @@ impl Hangar {
             std::iter::once((crate::plugin_ui::BAND_SITE.to_owned(), &self.plugin_band))
                 .chain(self.plugin_panes.iter().map(|p| (p["id"].as_str().unwrap_or("").to_owned(), &p["tree"])))
                 .flat_map(|(site, tree)| crate::plugin_ui::fields(tree).into_iter()
-                    .map(move |f| (crate::plugin_ui::field_id(&site, &f.key), site.clone(), f)))
+                    .map(move |f| (crate::plugin_ui::field_id(&site, &f.control), site.clone(), f)))
                 .collect();
         self.plugin_fields.retain(|id, _| wanted.iter().any(|(w, _, _)| w == id));
         for (id, site, spec) in wanted {
@@ -5816,13 +5823,13 @@ impl Hangar {
                 continue;
             }
             let state = cx.new(|cx| InputState::new(window, cx).placeholder(spec.placeholder.clone()).default_value(spec.value.clone()));
-            let key = spec.key.clone();
+            let control = spec.control.clone();
             let changes = cx.subscribe_in(&state, window, move |this, input, event: &InputEvent, _, cx| {
                 // A faixa de baixo é uma área guardada: sem redesenho, o valor pendente só entraria no próximo evento.
                 if matches!(event, InputEvent::Blur) { this.redraw(panes::Area::Bottom, cx); return; }
                 let Some(kind) = crate::plugin_ui::input_kind(event) else { return };
                 let value = input.read(cx).value().to_string();
-                this.input_plugin(&site, &key, kind, value);
+                this.input_plugin(&site, &control, kind, value);
             });
             let field = crate::plugin_ui::Field { state, sync: crate::plugin_ui::FieldSync::new(&spec.value), outbox: Default::default(),
                 placeholder: spec.placeholder, seen: self.plugin_draws, _changes: changes };
@@ -5834,30 +5841,30 @@ impl Hangar {
     /// que repõe o valor desenhado não emite `Change`, então o que chega aqui é a pessoa digitando. Sai pela fila do
     /// campo (`Outbox`): um pedido em voo por vez, para as teclas chegarem ao mod na ordem. Sem `notify`: nada do app
     /// muda, e cada tecla redesenharia a janela inteira; o campo se redesenha sozinho e o mod responde por evento.
-    fn input_plugin(&mut self, site: &str, key: &str, kind: &'static str, value: String) {
+    fn input_plugin(&mut self, site: &str, control: &crate::plugin_ui::Control, kind: &'static str, value: String) {
         let read_only = self.selected.as_ref().is_some_and(|s| s.read_only());
         if !crate::plugin_ui::accepts_typing(self.plugin_source, read_only) { return; }
-        let Some(field) = self.plugin_fields.get_mut(&crate::plugin_ui::field_id(site, key)) else { return };
+        let Some(field) = self.plugin_fields.get_mut(&crate::plugin_ui::field_id(site, control)) else { return };
         if kind == "submit" { field.sync.submitted() } else { field.sync.typed(&value) }
-        if let Some(request) = field.outbox.push(kind, value) { self.send_plugin_input(site, key, request); }
+        if let Some(request) = field.outbox.push(kind, value) { self.send_plugin_input(site, control, request); }
     }
 
     /// Manda à rota o pedido que a fila do campo liberou. Se a sessão deixou de aceitar digitação no meio, a fila acaba.
-    fn send_plugin_input(&mut self, site: &str, key: &str, (kind, value): crate::plugin_ui::InputRequest) {
+    fn send_plugin_input(&mut self, site: &str, control: &crate::plugin_ui::Control, (kind, value): crate::plugin_ui::InputRequest) {
         let read_only = self.selected.as_ref().is_some_and(|s| s.read_only());
-        let Some(field) = self.plugin_fields.get_mut(&crate::plugin_ui::field_id(site, key)) else { return };
-        let Some(body) = crate::plugin_ui::input_request(self.plugin_source, read_only, site, key, kind, &value) else {
+        let Some(field) = self.plugin_fields.get_mut(&crate::plugin_ui::field_id(site, control)) else { return };
+        let Some(body) = crate::plugin_ui::input_request(self.plugin_source, read_only, site, control, kind, &value) else {
             field.outbox = Default::default();
             return;
         };
-        let (site, key, id) = (site.to_owned(), key.to_owned(), field.state.entity_id());
-        self.spawn_plugin("input", body, move |result| Payload::PluginInput(site, key, id, result));
+        let (site, control, id) = (site.to_owned(), control.clone(), field.state.entity_id());
+        self.spawn_plugin("input", body, move |result| Payload::PluginInput(site, control, id, result));
     }
 
     /// O rótulo de envio do `Input`: manda o que está no campo.
-    fn submit_plugin_field(&mut self, site: &str, key: &str, cx: &mut Context<Self>) {
-        let Some(value) = self.plugin_fields.get(&crate::plugin_ui::field_id(site, key)).map(|f| f.state.read(cx).value().to_string()) else { return };
-        self.input_plugin(site, key, "submit", value);
+    fn submit_plugin_field(&mut self, site: &str, control: &crate::plugin_ui::Control, cx: &mut Context<Self>) {
+        let Some(value) = self.plugin_fields.get(&crate::plugin_ui::field_id(site, control)).map(|f| f.state.read(cx).value().to_string()) else { return };
+        self.input_plugin(site, control, "submit", value);
     }
 
     /// O que a faixa e os painéis dos mods precisam do app. A digitação só existe na sessão sem terminal e fora do só
@@ -5871,9 +5878,9 @@ impl Hangar {
         });
         let typing = crate::plugin_ui::accepts_typing(self.plugin_source, self.selected.as_ref().is_some_and(|s| s.read_only()));
         let submit = typing.then(|| -> crate::plugin_ui::Submit {
-            std::rc::Rc::new(move |site: &str, key: &str, _: &mut Window, cx: &mut App| {
-                let (site, key) = (site.to_owned(), key.to_owned());
-                let _ = entity.update(cx, |this, cx| this.submit_plugin_field(&site, &key, cx));
+            std::rc::Rc::new(move |site: &str, control: &crate::plugin_ui::Control, _: &mut Window, cx: &mut App| {
+                let (site, control) = (site.to_owned(), control.clone());
+                let _ = entity.update(cx, |this, cx| this.submit_plugin_field(&site, &control, cx));
             })
         });
         crate::plugin_ui::View { press: self.plugin_press(cx), show, tabs_scroll: &self.plugin_tabs_scroll, columns: self.plugin_columns,

@@ -15,6 +15,7 @@ import {
 import type { CotaContaResumo } from './cotaResumo';
 import type { Shortcut, ProjectShortcut, ProjectShortcuts } from './shortcuts';
 import type { UsoFiltros, UsoReport } from './uso';
+import { PANE_CLOSE_KEY, type PluginControl } from './pluginUi';
 import type { ConfigSyncItem, ConfigSyncManifest, ConfigSyncProgress, ConfigSyncReport } from './configSync';
 import type {
   Atualizacao,
@@ -2615,13 +2616,14 @@ export async function interrupt(name: string, clear = false, server?: Server): P
                 : apiFetch<{ ok: boolean }>(path, init));
 }
 
-/** Clique num botão que um mod desenhou na faixa ou num painel. `copied` e `opened` são o que o mod
- *  copiou ou mandou abrir, para quem clicou fazer no próprio aparelho. Recusa vem como erro `erro_mod_*`. */
+/** Clique num botão que um mod desenhou na faixa ou num painel; `null` é o ✕, que fecha o painel `site`.
+ *  `copied` e `opened` são o que o mod copiou ou mandou abrir, para quem clicou fazer no próprio aparelho.
+ *  Recusa vem como erro `erro_mod_*`. */
 export async function pressPluginButton(
-  name: string, site: string, key: string, server?: Server,
+  name: string, site: string, button: PluginControl | null, server?: Server,
 ): Promise<{ ok: boolean; copied?: string; opened?: string }> {
   const path = `/api/sessions/${encodeURIComponent(name)}/plugin/press`;
-  const init = { method: 'POST', body: JSON.stringify({ site, key }) };
+  const init = { method: 'POST', body: JSON.stringify(button ? { site, ...button } : { site, key: PANE_CLOSE_KEY }) };
   return server ? apiFetchForServer<{ ok: boolean; copied?: string; opened?: string }>(server, path, init, 8000, true)
                 : apiFetch<{ ok: boolean; copied?: string; opened?: string }>(path, init);
 }
@@ -2639,10 +2641,10 @@ export type PluginInputKind = 'change' | 'submit';
  *  `erro_mod_sem_digitacao`. Sempre com prazo de 8 s, o mesmo do `apiFetchForServer` (que o aplica quando há
  *  servidor): o campo manda um pedido por vez, e um pedido pendurado prenderia toda a digitação nele. */
 export async function inputPluginField(
-  name: string, site: string, key: string, kind: PluginInputKind, value: string, server?: Server,
+  name: string, site: string, field: PluginControl, kind: PluginInputKind, value: string, server?: Server,
 ): Promise<{ ok: boolean }> {
   const path = `/api/sessions/${encodeURIComponent(name)}/plugin/input`;
-  const init = { method: 'POST', body: JSON.stringify({ site, key, kind, value }) };
+  const init = { method: 'POST', body: JSON.stringify({ site, plugin: field.plugin, key: field.key, kind, value }) };
   return server ? apiFetchForServer<{ ok: boolean }>(server, path, init, 8000, true)
                 : apiFetch<{ ok: boolean }>(path, { ...init, signal: AbortSignal.timeout(8000) });
 }

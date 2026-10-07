@@ -24,7 +24,7 @@ async fn the_link_takes_the_app_requests_to_the_click() {
     // A resposta sai antes da limpeza: a reserva do pane é solta logo depois.
     tokio::time::timeout(Duration::from_secs(5), async { while pane.held() { tokio::time::sleep(Duration::from_millis(5)).await; } })
         .await.expect("reserva do pane solta");
-    let typing = surface.call(ModsCall::Input { site: "pm-mock-mr".into(), key: "k".into(), submit: true, value: "x".into() }, deadline()).await;
+    let typing = surface.call(ModsCall::Input { site: "pm-mock-mr".into(), plugin: "vitrine".into(), key: "k".into(), submit: true, value: "x".into() }, deadline()).await;
     assert_eq!(typing.unwrap_err().code, "erro_mod_sem_digitacao");
     assert_eq!(link.read_shown().await.as_deref(), Some("pm-mock-mr"));
 }

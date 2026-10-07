@@ -46,6 +46,16 @@ def test_rotulo_do_botao_vem_da_arvore():
     assert pc.button_label(PAINEL, "nao-existe") is None
 
 
+def test_rotulo_e_o_do_botao_do_mod_pedido():
+    # Dois mods com a mesma `key` no mesmo lugar: o rótulo é o do botão do mod que o app disse.
+    dois = {"type": "Box", "children": [
+        {"type": "Button", "props": {"key": "k", "label": "do um"}, "press": {"plugin": "um", "handle": 1}},
+        {"type": "Button", "props": {"key": "k", "label": "do outro"}, "press": {"plugin": "outro", "handle": 2}}]}
+    assert pc.button_label(dois, "k", "outro") == "do outro"
+    assert pc.button_label(dois, "k", "um") == "do um"
+    assert pc.button_label(dois, "k", "terceiro") is None
+
+
 @pytest.mark.asyncio
 async def test_clique_na_faixa_confirmado(sessao, monkeypatch):
     async def confirma(name, site, key, desde, timeout):

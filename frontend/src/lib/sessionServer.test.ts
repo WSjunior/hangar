@@ -52,7 +52,7 @@ describe('servidor da sessão fixado no chat', () => {
     ['subagents', (s: Server) => getSubagents('hangar', s), '/api/sessions/hangar/subagents'],
     ['orq', (s: Server) => getOrqGrupo('hangar', s), '/api/sessions/hangar/orq'],
     ['input', (s: Server) => sendInput('hangar', 'oi', s), '/api/sessions/hangar/input'],
-    ['plugin/press', (s: Server) => pressPluginButton('hangar', 'faixa', 'k', s), '/api/sessions/hangar/plugin/press'],
+    ['plugin/press', (s: Server) => pressPluginButton('hangar', 'faixa', { plugin: 'm', key: 'k' }, s), '/api/sessions/hangar/plugin/press'],
   ])('%s continua no servidor da sessão depois de o ativo mudar', async (_rota, chamar, caminho) => {
     const sessao = sessionServerFor(getActiveId() ?? '');
     selectServer('principal');

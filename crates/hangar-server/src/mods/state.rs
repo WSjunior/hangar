@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 
-use super::model::{ModsCall, ModsError, BAND_SITE, TOAST_DEFAULT_MS};
+use super::model::{ModsCall, ModsError, TOAST_DEFAULT_MS};
 use crate::side::{WeakHubs, TOASTS_KEPT};
 
 pub type CallFuture = Pin<Box<dyn Future<Output = Result<Value, ModsError>> + Send>>;
@@ -126,6 +126,21 @@ struct Focus {
     rewritten: bool,
 }
 
+/// Um botão de mod pressionado no terminal, como o plugin contou.
+struct Pressed {
+    at: Instant,
+    site: String,
+    /// `None`: plugin do Hangar carregado antes de o press levar o mod.
+    plugin: Option<String>,
+    key: String,
+}
+
+/// O press é do mod `expected`. Sem o mod no press, vale só o lugar e a `key`, como antes: o plugin do
+/// Hangar já carregado numa sessão viva não o manda.
+fn same_mod(seen: Option<&str>, expected: &str) -> bool {
+    seen.is_none_or(|seen| seen == expected)
+}
+
 /// O que só a sessão com terminal tem.
 struct Terminal {
     probe: Arc<dyn TerminalProbe>,
@@ -136,7 +151,7 @@ struct Terminal {
     version: u64,
     screen_shown: Option<String>,
     reading: bool,
-    pressed: Vec<(Instant, String, String)>,
+    pressed: Vec<Pressed>,
     scrolls: HashMap<String, (u64, i64)>,
     focus: Option<Focus>,
     seen: Vec<FocusSeen>,
@@ -161,8 +176,8 @@ const CLICK_WINDOW: Duration = Duration::from_millis(1500);
 struct Click {
     site: String,
     key: String,
-    /// O mod do botão, lido do último `plugin_ui`: só a cópia dele é do clique (A11).
-    plugin: Option<String>,
+    /// O mod do botão, que veio no pedido do app: só a cópia dele é do clique (A11).
+    plugin: String,
     attempt: String,
     until: Instant,
     matched: bool,
@@ -170,14 +185,6 @@ struct Click {
     opened: Option<String>,
     /// Acorda quem espera o efeito do clique (`finish_click`) quando a cópia ou a URL chega.
     effect: Arc<tokio::sync::Notify>,
-}
-
-/// O último `plugin_ui`: a árvore, para achar o mod de um botão sem refazer o parse, e o texto, que é o
-/// que sai aos aparelhos e o que se compara. Os dois por `Arc`: quem lê copia o ponteiro sob a trava
-/// global e trabalha fora dela.
-struct Ui {
-    tree: Arc<Value>,
-    raw: Arc<str>,
 }
 
 struct Session {
@@ -191,7 +198,9 @@ struct Session {
     born: String,
     link: Arc<dyn SurfaceLink>,
     lock: Arc<tokio::sync::Mutex<()>>,
-    ui: Option<Ui>,
+    /// O último `plugin_ui`, no texto que sai aos aparelhos e que se compara. Por `Arc`: quem lê copia o
+    /// ponteiro sob a trava global e trabalha fora dela.
+    ui: Option<Arc<str>>,
     toasts: Vec<(Instant, Value)>,
     click: Option<Click>,
     /// Só na sessão com terminal (fase 3): o espelho que o plugin manda, o elo e as esperas do clique.
@@ -233,14 +242,6 @@ fn random_hex(bytes: usize) -> String {
 fn boot() -> &'static str {
     static BOOT: OnceLock<String> = OnceLock::new();
     BOOT.get_or_init(|| random_hex(4))
-}
-
-/// O mod do botão `key` no lugar `site` do `plugin_ui` guardado. Sem o botão (desenho vencido), nenhum:
-/// a cópia que chegar no meio do clique vira aviso.
-fn button_plugin(ui: &Value, site: &str, key: &str) -> Option<String> {
-    let tree = if site == BAND_SITE { &ui["above"] }
-        else { &ui["panes"].as_array()?.iter().find(|pane| pane["id"] == site)?["tree"] };
-    super::tree::find(tree, key, &["Button"]).map(|control| control.plugin)
 }
 
 /// `plugin_ui` sem faixa e sem painel: a sessão saiu do Rust ou foi substituída.
@@ -375,10 +376,10 @@ impl Mods {
         {
             let mut inner = self.inner.lock().unwrap();
             let Some(session) = inner.sessions.get_mut(name).filter(|session| session.life == life && current(session)) else { return false };
-            if session.ui.as_ref().is_some_and(|ui| ui.raw == raw) {
+            if session.ui.as_ref() == Some(&raw) {
                 return false;
             }
-            session.ui = Some(Ui { tree: Arc::new(data), raw: raw.clone() });
+            session.ui = Some(raw.clone());
         }
         self.deliver(name, "plugin_ui", &raw);
         true
@@ -423,7 +424,7 @@ impl Mods {
         let taken = {
             let mut inner = self.inner.lock().unwrap();
             let Some(session) = inner.sessions.get_mut(name).filter(|session| session.life == life) else { return };
-            match session.click.as_mut().filter(|click| click.until > Instant::now() && click.plugin.as_deref() == Some(plugin)) {
+            match session.click.as_mut().filter(|click| click.until > Instant::now() && click.plugin == plugin) {
                 Some(click) => {
                     click.copied = Some(text.to_owned());
                     click.effect.notify_one();
@@ -439,24 +440,22 @@ impl Mods {
 
     /// Abre o clique do app: o plugin do Hangar casa o press com ele (`press-start`) e o efeito volta
     /// para quem clicou.
-    pub fn begin_click(&self, name: &str, site: &str, key: &str) -> String {
+    pub fn begin_click(&self, name: &str, site: &str, plugin: &str, key: &str) -> String {
         let attempt = random_hex(8);
-        // A busca do botão na árvore (até ~400 KB) fica fora da trava de todas as sessões.
-        let tree = self.inner.lock().unwrap().sessions.get(name).and_then(|session| session.ui.as_ref().map(|ui| ui.tree.clone()));
-        let plugin = tree.and_then(|tree| button_plugin(&tree, site, key));
         if let Some(session) = self.inner.lock().unwrap().sessions.get_mut(name) {
             let window = if session.terminal.is_some() { TERMINAL_CLICK_WINDOW } else { CLICK_WINDOW };
-            session.click = Some(Click { site: site.to_owned(), key: key.to_owned(), plugin, attempt: attempt.clone(),
+            session.click = Some(Click { site: site.to_owned(), key: key.to_owned(), plugin: plugin.to_owned(), attempt: attempt.clone(),
                 until: Instant::now() + window, matched: false, copied: None, opened: None, effect: Arc::default() });
         }
         attempt
     }
 
-    /// O press é o clique que o app pediu? Sim uma vez só, como o `_do_app` do Python.
-    pub fn match_click(&self, name: &str, site: &str, key: &str) -> Option<String> {
+    /// O press é o clique que o app pediu? Sim uma vez só, como o `_do_app` do Python. `plugin`: o mod do
+    /// press, que o plugin do Hangar carregado antes desta versão não manda.
+    pub fn match_click(&self, name: &str, site: &str, plugin: Option<&str>, key: &str) -> Option<String> {
         let mut inner = self.inner.lock().unwrap();
         let click = inner.sessions.get_mut(name)?.click.as_mut()?;
-        if click.matched || click.site != site || click.key != key || click.until <= Instant::now() {
+        if click.matched || click.site != site || click.key != key || !same_mod(plugin, &click.plugin) || click.until <= Instant::now() {
             return None;
         }
         click.matched = true;
@@ -508,7 +507,7 @@ impl Mods {
         let (ui, toasts) = {
             let inner = self.inner.lock().unwrap();
             let Some(session) = inner.sessions.get(name) else { return Vec::new() };
-            (session.ui.as_ref().map(|ui| ui.raw.clone()), session.toasts.clone())
+            (session.ui.clone(), session.toasts.clone())
         };
         let now = Instant::now();
         let mut frames: Vec<(&'static str, String)> = ui.iter().map(|ui| ("plugin_ui", ui.to_string())).collect();
@@ -652,16 +651,17 @@ impl Mods {
     }
 
     /// Um botão de mod foi pressionado no terminal (`/api/plugin/pressed`).
-    pub fn pressed(&self, name: &str, site: &str, element: &str) {
+    pub fn pressed(&self, name: &str, site: &str, plugin: Option<&str>, element: &str) {
         self.with_terminal(name, None, |terminal, _| {
-            terminal.pressed.push((Instant::now(), site.to_owned(), element.to_owned()));
+            terminal.pressed.push(Pressed { at: Instant::now(), site: site.to_owned(), plugin: plugin.map(str::to_owned), key: element.to_owned() });
             let extra = terminal.pressed.len().saturating_sub(PRESSED_KEPT);
             terminal.pressed.drain(..extra);
         });
     }
 
-    pub async fn wait_pressed(&self, name: &str, life: u64, site: &str, key: &str, since: Instant, wait: Duration) -> bool {
-        self.wait_for(name, life, wait, |terminal| terminal.pressed.iter().any(|(at, s, k)| *at >= since && s == site && k == key)
+    pub async fn wait_pressed(&self, name: &str, life: u64, site: &str, plugin: &str, key: &str, since: Instant, wait: Duration) -> bool {
+        self.wait_for(name, life, wait, |terminal| terminal.pressed.iter().any(|seen| seen.at >= since && seen.site == site && seen.key == key
+            && same_mod(seen.plugin.as_deref(), plugin))
             .then_some(())).await.is_some()
     }
 

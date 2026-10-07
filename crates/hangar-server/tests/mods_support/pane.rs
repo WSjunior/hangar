@@ -112,7 +112,7 @@ impl FakePane {
         for effect in effects {
             match effect {
                 Effect::Show(screen) => state.queue = VecDeque::from([(*screen).to_owned()]),
-                Effect::Pressed(site, key) => self.mods.pressed(&self.name, site, key),
+                Effect::Pressed(site, key) => self.mods.pressed(&self.name, site, None, key),
                 Effect::CloseAll => {
                     let life = self.mods.life(&self.name).unwrap();
                     let view = self.mods.terminal_view_in(&self.name, life).unwrap();

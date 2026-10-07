@@ -95,7 +95,7 @@ async fn click_writes_and_waits_stay_in_their_life() {
     mods.terminal_ui("t", view(&["a", "b"], Some("a")));
     // O `forget` encerra a espera na hora, sem gastar o prazo.
     let started = Instant::now();
-    let waiting = { let mods = mods.clone(); tokio::spawn(async move { mods.wait_pressed("t", 1, "a", "k", Instant::now(), Duration::from_secs(3)).await }) };
+    let waiting = { let mods = mods.clone(); tokio::spawn(async move { mods.wait_pressed("t", 1, "a", "m", "k", Instant::now(), Duration::from_secs(3)).await }) };
     tokio::time::sleep(Duration::from_millis(30)).await;
     mods.forget("t", 1);
     assert!(!waiting.await.unwrap());
@@ -104,14 +104,14 @@ async fn click_writes_and_waits_stay_in_their_life() {
     mods.attach_terminal("t", "proc-novo", 2, Arc::new(Probe::default()));
     mods.terminal_ui("t", view(&["a", "b"], Some("a")));
     let started = Instant::now();
-    mods.pressed("t", "a", "k");
+    mods.pressed("t", "a", None, "k");
     mods.scrolled("t", "a", 9);
-    assert!(!mods.wait_pressed("t", 1, "a", "k", started, Duration::from_secs(3)).await);
+    assert!(!mods.wait_pressed("t", 1, "a", "m", "k", started, Duration::from_secs(3)).await);
     assert_eq!(mods.wait_scroll("t", 1, "a", 0, Duration::from_secs(3)).await, None);
     assert!(!mods.wait_pane_gone("t", 1, "a", Duration::from_secs(3)).await);
     assert_eq!(mods.last_scroll("t", 1, "a"), (0, None));
     assert!(started.elapsed() < Duration::from_secs(1), "nenhuma espera da vida 1 gasta o prazo");
-    assert!(mods.wait_pressed("t", 2, "a", "k", started, Duration::from_millis(10)).await);
+    assert!(mods.wait_pressed("t", 2, "a", "m", "k", started, Duration::from_millis(10)).await);
     // O que o clique da vida 1 escreve não chega à 2.
     mods.set_screen_shown("t", 1, Some("b".into()));
     assert_eq!(last_ui(&mods)["shown_id"], "a");
@@ -128,10 +128,15 @@ async fn presses_and_closed_panes_are_waited_for() {
     let (mods, _) = setup();
     mods.terminal_ui("t", view(&["a"], Some("a")));
     let since = Instant::now();
-    let late = { let mods = mods.clone(); tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(50)).await; mods.pressed("t", "a", "k"); }) };
-    assert!(mods.wait_pressed("t", 1, "a", "k", since, Duration::from_secs(1)).await);
+    let late = { let mods = mods.clone(); tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(50)).await; mods.pressed("t", "a", None, "k"); }) };
+    assert!(mods.wait_pressed("t", 1, "a", "m", "k", since, Duration::from_secs(1)).await);
     late.await.unwrap();
-    assert!(!mods.wait_pressed("t", 1, "a", "k", Instant::now(), Duration::from_millis(50)).await, "press antes do clique não conta");
+    assert!(!mods.wait_pressed("t", 1, "a", "m", "k", Instant::now(), Duration::from_millis(50)).await, "press antes do clique não conta");
+    let since = Instant::now();
+    mods.pressed("t", "a", Some("outro"), "k");
+    assert!(!mods.wait_pressed("t", 1, "a", "m", "k", since, Duration::from_millis(50)).await, "a mesma `key` de outro mod não conta");
+    mods.pressed("t", "a", Some("m"), "k");
+    assert!(mods.wait_pressed("t", 1, "a", "m", "k", since, Duration::from_millis(50)).await);
     assert!(!mods.wait_pane_gone("t", 1, "a", Duration::from_millis(30)).await);
     mods.terminal_ui("t", view(&[], None));
     assert!(mods.wait_pane_gone("t", 1, "a", Duration::from_millis(30)).await);
@@ -170,9 +175,9 @@ async fn scroll_offsets_are_followed() {
 #[tokio::test]
 async fn terminal_click_window_covers_a_slow_click_and_the_copy_wakes_the_end() {
     let (mods, _) = setup();
-    let attempt = mods.begin_click("t", "a", "k");
+    let attempt = mods.begin_click("t", "a", "vitrine", "k");
     tokio::time::sleep(Duration::from_millis(1600)).await;
-    assert_eq!(mods.match_click("t", "a", "k").as_deref(), Some(attempt.as_str()), "com terminal o press pode vir depois da rolagem");
+    assert_eq!(mods.match_click("t", "a", None, "k").as_deref(), Some(attempt.as_str()), "com terminal o press pode vir depois da rolagem");
     assert!(!mods.click_copied("t", "outra", "texto"));
     let late = { let (mods, attempt) = (mods.clone(), attempt.clone());
         tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(50)).await; assert!(mods.click_copied("t", &attempt, "texto")); }) };
@@ -201,10 +206,10 @@ fn a_new_process_inherits_nothing() {
     let (mods, probe) = setup();
     mods.toast("t", 1, "m", "aviso", 4000);
     mods.terminal_ui("t", view(&["a"], Some("a")));
-    mods.begin_click("t", "a", "k");
+    mods.begin_click("t", "a", "vitrine", "k");
     mods.attach_terminal("t", "proc-novo", 2, Arc::new(Probe::default()));
     assert!(probe.stopped.load(SeqCst), "o elo da sessão substituída para");
-    assert_eq!(mods.match_click("t", "a", "k"), None, "o clique em aberto da sessão substituída não passa");
+    assert_eq!(mods.match_click("t", "a", None, "k"), None, "o clique em aberto da sessão substituída não passa");
     assert!(!mods.replay("t").iter().any(|(event, _)| *event == "plugin_ui"), "a faixa da sessão substituída não passa");
     assert!(!mods.replay("t").iter().any(|(event, _)| *event == "plugin_toast"), "aviso de outro processo não passa (a8fd66ba)");
     assert!(mods.terminal_view_in("t", 2).is_none());

@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mount, tick, unmount } from 'svelte';
-import { PANE_CLOSE_KEY, type PluginPane as Pane } from '@hangar/core';
+import type { PluginPane as Pane } from '@hangar/core';
 import PluginPane from './PluginPane.svelte';
 
 const painel = (id: string, title: string, tree: Pane['tree'] = { type: 'Text', children: [`corpo ${id}`] }): Pane =>
@@ -48,7 +48,7 @@ describe('PluginPane com vários painéis', () => {
     const fechar = el.querySelectorAll<HTMLButtonElement>('button.close');
     expect(fechar).toHaveLength(1);
     fechar[0].click();
-    expect(onPress).toHaveBeenCalledWith('pm-mock-mr', PANE_CLOSE_KEY);
+    expect(onPress).toHaveBeenCalledWith('pm-mock-mr', null);
   });
 
   it('com um painel só, o cabeçalho de sempre, sem fileira de abas', async () => {
