@@ -50,7 +50,10 @@ pub enum Effect {
     Show(&'static str),
     Pressed(&'static str, &'static str),
     CloseAll,
+    /// Foco sem o mod, como o plugin do Hangar de antes de o foco levá-lo.
     Focus(&'static str, &'static str, bool),
+    /// Foco no elemento de um mod: lugar, mod e elemento.
+    FocusOf(&'static str, &'static str, &'static str),
     Scroll(&'static str, i64),
     /// A sessão reabre com outro processo e a vida dada, no meio do clique. O executor da vida antiga morre
     /// com ela: daí em diante este pane recusa toda operação, como o executor encerrado.
@@ -120,7 +123,11 @@ impl FakePane {
                 }
                 Effect::Focus(site, element, denied) => {
                     let attempt = self.mods.armed_focus(&self.name).expect("alvo armado");
-                    self.mods.focused(&self.name, &attempt, site, Some(element), *denied);
+                    self.mods.focused(&self.name, &attempt, site, None, Some(element), *denied);
+                }
+                Effect::FocusOf(site, plugin, element) => {
+                    let attempt = self.mods.armed_focus(&self.name).expect("alvo armado");
+                    self.mods.focused(&self.name, &attempt, site, Some(plugin), Some(element), false);
                 }
                 Effect::Scroll(site, offset) => self.mods.scrolled(&self.name, site, *offset),
                 Effect::NewLife(life) => {

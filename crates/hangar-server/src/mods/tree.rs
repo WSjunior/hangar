@@ -11,16 +11,17 @@ pub struct Control {
 
 /// O elemento de um dos `kinds` do mod `plugin` com esta `key`, com o `press` dele. Sem `press` não há
 /// como acionar: conta como ausente. Mais de um (o mesmo mod desenhando a mesma `key` duas vezes no lugar)
-/// também: acionar o primeiro poderia ser acionar o controle errado.
-pub fn find(tree: &Value, plugin: &str, key: &str, kinds: &[&str]) -> Option<Control> {
+/// também: acionar o primeiro poderia ser acionar o controle errado. `plugin: None` aceita qualquer mod.
+pub fn find(tree: &Value, plugin: Option<&str>, key: &str, kinds: &[&str]) -> Option<Control> {
     match controls(tree, plugin, key, kinds).as_slice() {
         [one] => Some(one.clone()),
         _ => None,
     }
 }
 
-/// Mais de um elemento de um dos `kinds` do mod `plugin` com esta `key`.
-pub fn ambiguous(tree: &Value, plugin: &str, key: &str, kinds: &[&str]) -> bool {
+/// Mais de um elemento de um dos `kinds` do mod `plugin` com esta `key`; `plugin: None` conta os de todos
+/// os mods.
+pub fn ambiguous(tree: &Value, plugin: Option<&str>, key: &str, kinds: &[&str]) -> bool {
     let mut stack = vec![tree];
     let mut seen = 0;
     while let Some(node) = stack.pop() {
@@ -38,18 +39,19 @@ pub fn ambiguous(tree: &Value, plugin: &str, key: &str, kinds: &[&str]) -> bool 
 
 /// O nó é um elemento de um dos `kinds`, desenhado pelo mod `plugin`, com esta `key`. A `key` só é única
 /// dentro de um mod: dois mods podem usar a mesma no mesmo lugar.
-fn is_control(node: &Value, plugin: &str, key: &str, kinds: &[&str]) -> bool {
+fn is_control(node: &Value, plugin: Option<&str>, key: &str, kinds: &[&str]) -> bool {
     let kind = node["type"].as_str().unwrap_or("");
-    kinds.contains(&kind) && node["props"]["key"] == key && node["press"]["plugin"] == plugin
+    kinds.contains(&kind) && node["props"]["key"] == key && plugin.is_none_or(|plugin| node["press"]["plugin"] == plugin)
 }
 
 /// Todos os elementos acionáveis de um dos `kinds` do mod `plugin` com esta `key`, na ordem do documento.
-fn controls(tree: &Value, plugin: &str, key: &str, kinds: &[&str]) -> Vec<Control> {
+fn controls(tree: &Value, plugin: Option<&str>, key: &str, kinds: &[&str]) -> Vec<Control> {
     let mut found = Vec::new();
     let mut stack = vec![tree];
     while let Some(node) = stack.pop() {
         let Some(object) = node.as_object() else { continue };
-        if is_control(node, plugin, key, kinds) && let Some(handle) = node["press"]["handle"].as_i64() {
+        if is_control(node, plugin, key, kinds)
+            && let (Some(plugin), Some(handle)) = (node["press"]["plugin"].as_str(), node["press"]["handle"].as_i64()) {
             let kind = object.get("type").and_then(Value::as_str).unwrap_or("");
             found.push(Control { kind: kind.to_owned(), plugin: plugin.to_owned(), handle });
         }
@@ -70,7 +72,7 @@ pub fn label(tree: &Value, plugin: &str, key: &str) -> Option<String> {
     let mut stack = vec![tree];
     while let Some(node) = stack.pop() {
         let Some(object) = node.as_object() else { continue };
-        if is_control(node, plugin, key, &["Button"]) {
+        if is_control(node, Some(plugin), key, &["Button"]) {
             let text = match node["props"]["label"].as_str().filter(|label| !label.is_empty()) {
                 Some(label) => label.to_owned(),
                 None => object.get("children").and_then(Value::as_array)

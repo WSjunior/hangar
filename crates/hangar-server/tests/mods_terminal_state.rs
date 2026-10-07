@@ -153,12 +153,12 @@ async fn focus_target_rewrites_only_in_the_target_site_and_plugin() {
     assert_eq!(mods.focus_target("t", "p", Some("outro"), Some("x")).rewrite, None, "não atravessa de um mod para outro");
     assert_eq!(mods.focus_target("t", "p", Some("m"), Some("x")).rewrite.as_deref(), Some("alvo"));
     let seq = mods.focus_seq("t", 1);
-    assert!(mods.focused("t", &attempt, "p", Some("alvo"), false));
+    assert!(mods.focused("t", &attempt, "p", Some("m"), Some("alvo"), false));
     let seen = mods.wait_focus("t", 1, &attempt, seq, Duration::from_millis(50), |s| s.request_id == "p").await.unwrap();
-    assert_eq!((seen.element.as_deref(), seen.denied), (Some("alvo"), false));
+    assert_eq!((seen.element.as_deref(), seen.plugin.as_deref(), seen.denied), (Some("alvo"), Some("m"), false));
     assert_eq!(mods.focus_target("t", "p", Some("m"), Some("x")).rewrite, None, "uma reescrita por alvo armado");
     mods.disarm_focus("t", 1, &attempt);
-    assert!(!mods.focused("t", &attempt, "p", Some("x"), false));
+    assert!(!mods.focused("t", &attempt, "p", Some("m"), Some("x"), false));
 }
 
 #[tokio::test]

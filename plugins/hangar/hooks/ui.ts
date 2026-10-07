@@ -262,7 +262,8 @@ export function registerUi(on: On) {
     holdUntil = (await $.clock.now()) + HOLD_MS;
     const element = focusElement(e, alvo);
     const r = await next(element === e.element ? e : { ...e, element });
-    void tell($, "focused", { attempt: alvo.attempt, requestId: e.requestId, element: element ?? null, denied: Boolean((r as { deny?: unknown } | undefined)?.deny) });
+    // O mod vai junto: dois mods podem ter a mesma `key` no lugar, e o backend só confirma o do alvo.
+    void tell($, "focused", { attempt: alvo.attempt, requestId: e.requestId, plugin: e.plugin ?? null, element: element ?? null, denied: Boolean((r as { deny?: unknown } | undefined)?.deny) });
     return r;
   });
 

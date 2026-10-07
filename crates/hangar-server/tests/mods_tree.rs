@@ -8,19 +8,19 @@ use serde_json::json;
 #[test]
 fn finds_button_by_key_with_its_press() {
     let tree = first_render("vitrine", "vitrine-botoes");
-    let comum = tree::find(&tree, "vitrine", "V15-comum", &["Button"]).unwrap();
+    let comum = tree::find(&tree, Some("vitrine"), "V15-comum", &["Button"]).unwrap();
     assert_eq!((comum.kind.as_str(), comum.plugin.as_str()), ("Button", "vitrine"));
     assert!(comum.handle > 0);
-    let a = tree::find(&tree, "vitrine", "V16-a", &["Button"]).unwrap();
-    let b = tree::find(&tree, "vitrine", "V16-b", &["Button"]).unwrap();
+    let a = tree::find(&tree, Some("vitrine"), "V16-a", &["Button"]).unwrap();
+    let b = tree::find(&tree, Some("vitrine"), "V16-b", &["Button"]).unwrap();
     assert_ne!(a.handle, b.handle, "mesmo rótulo, handle próprio (P04)");
 }
 
 #[test]
 fn input_is_found_only_as_input() {
     let tree = first_render("vitrine", "vitrine-campos");
-    assert!(tree::find(&tree, "vitrine", "V18-campo", &["Button"]).is_none());
-    assert_eq!(tree::find(&tree, "vitrine", "V18-campo", &["Input"]).unwrap().kind, "Input");
+    assert!(tree::find(&tree, Some("vitrine"), "V18-campo", &["Button"]).is_none());
+    assert_eq!(tree::find(&tree, Some("vitrine"), "V18-campo", &["Input"]).unwrap().kind, "Input");
 }
 
 #[test]
@@ -30,9 +30,9 @@ fn key_without_press_or_unknown_is_none() {
         {"type": "Text", "props": {"key": "k"}, "children": ["k"]},
         {"type": "Button", "props": {"key": "sem-press", "label": "x"}},
     ]});
-    assert!(tree::find(&tree, "m", "k", &["Button"]).is_none());
-    assert!(tree::find(&tree, "m", "sem-press", &["Button"]).is_none());
-    assert!(tree::find(&tree, "m", "nao-existe", &["Button"]).is_none());
+    assert!(tree::find(&tree, Some("m"), "k", &["Button"]).is_none());
+    assert!(tree::find(&tree, Some("m"), "sem-press", &["Button"]).is_none());
+    assert!(tree::find(&tree, Some("m"), "nao-existe", &["Button"]).is_none());
 }
 
 #[test]
@@ -42,11 +42,15 @@ fn two_mods_with_the_same_key_are_told_apart_by_the_mod() {
         {"type": "Box", "children": [{"type": "Button", "props": {"key": "k", "label": "do m"}, "press": {"plugin": "m", "handle": 1}}]},
         {"type": "Button", "props": {"key": "k", "label": "do outro"}, "press": {"plugin": "outro", "handle": 2}},
     ]});
-    assert_eq!(tree::find(&tree, "m", "k", &["Button"]).map(|c| c.handle), Some(1));
-    assert_eq!(tree::find(&tree, "outro", "k", &["Button"]).map(|c| c.handle), Some(2));
-    assert_eq!(tree::find(&tree, "terceiro", "k", &["Button"]), None);
-    assert!(!tree::ambiguous(&tree, "m", "k", &["Button"]));
+    assert_eq!(tree::find(&tree, Some("m"), "k", &["Button"]).map(|c| c.handle), Some(1));
+    assert_eq!(tree::find(&tree, Some("outro"), "k", &["Button"]).map(|c| c.handle), Some(2));
+    assert_eq!(tree::find(&tree, Some("terceiro"), "k", &["Button"]), None);
+    assert!(!tree::ambiguous(&tree, Some("m"), "k", &["Button"]));
     assert_eq!(tree::label(&tree, "outro", "k").as_deref(), Some("do outro"));
+    // Sem o mod (app de antes de o pedido levá-lo), a `key` nos dois não diz de qual é.
+    assert!(tree::ambiguous(&tree, None, "k", &["Button"]));
+    assert_eq!(tree::find(&tree, None, "k", &["Button"]), None);
+    assert_eq!(tree::find(&tree, None, "nao-existe", &["Button"]), None);
 }
 
 #[test]
@@ -56,9 +60,9 @@ fn the_same_mod_with_the_same_key_twice_finds_none() {
         {"type": "Box", "children": [{"type": "Button", "props": {"key": "k"}, "press": {"plugin": "m", "handle": 1}}]},
         {"type": "Button", "props": {"key": "k"}, "press": {"plugin": "m", "handle": 2}},
     ]});
-    assert_eq!(tree::find(&tree, "m", "k", &["Button"]), None);
-    assert!(tree::ambiguous(&tree, "m", "k", &["Button"]));
-    assert!(!tree::ambiguous(&tree, "m", "k", &["Input"]));
+    assert_eq!(tree::find(&tree, Some("m"), "k", &["Button"]), None);
+    assert!(tree::ambiguous(&tree, Some("m"), "k", &["Button"]));
+    assert!(!tree::ambiguous(&tree, Some("m"), "k", &["Input"]));
 }
 
 #[test]

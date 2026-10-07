@@ -451,7 +451,7 @@ impl Surface {
     }
 
     fn control(&self, site: &str, plugin: &str, key: &str, kind: &str) -> Option<tree::Control> {
-        self.trees.get(site).and_then(|tree| tree::find(tree, plugin, key, &[kind]))
+        self.trees.get(site).and_then(|tree| tree::find(tree, Some(plugin), key, &[kind]))
     }
 
     /// A ação só sai com o prazo inteiro dela ainda dentro do de quem pediu.
@@ -479,7 +479,7 @@ impl Surface {
         // O mesmo mod com a mesma `key` duas vezes no lugar: não há como saber qual, e nenhum é acionado.
         let kind = if matches!(call, ModsCall::Input { .. }) { "Input" } else { "Button" };
         if let ModsCall::Press { site, plugin, key } | ModsCall::Input { site, plugin, key, .. } = &call
-            && self.trees.get(site.as_str()).is_some_and(|tree| tree::ambiguous(tree, plugin, key, &[kind])) {
+            && self.trees.get(site.as_str()).is_some_and(|tree| tree::ambiguous(tree, Some(plugin), key, &[kind])) {
             out.push(reply(token, Err(missing())));
             return;
         }

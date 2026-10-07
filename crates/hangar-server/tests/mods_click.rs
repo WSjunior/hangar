@@ -359,6 +359,43 @@ async fn keyboard_for_a_band_button() {
     assert_eq!(keys(&pane), ["C-x Tab", "Enter", "C-x Tab", "C-x Tab", "C-x Tab", "C-x Tab"]);
 }
 
+/// A faixa do `pm()` com outro mod desenhando um botão com a mesma `key` (`pm-abrir`) antes do do `pm-mock`.
+fn band_with_a_shared_key() -> TerminalView {
+    let mut v = pm();
+    v.above = json!({"type": "Box", "children": [mods_support::pane::button("pm-abrir", "Outro", "outro-mod"),
+        mods_support::pane::button("pm-abrir", "▸ xx-00000", "pm-mock")]});
+    v
+}
+
+#[tokio::test]
+async fn keyboard_skips_another_mod_with_the_same_key() {
+    // O anel passa primeiro pelo botão do outro mod, com a mesma `key`: o `Enter` só sai no do mod pedido.
+    let (mods, pane) = setup("tmux-14-ciclo-4-prompt", band_with_a_shared_key());
+    pane.mouse(false);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-5-faixa"), FocusOf("above-prompt", "outro-mod", "pm-abrir")]);
+    pane.on_keys("C-x Tab", vec![FocusOf("above-prompt", "pm-mock", "pm-abrir")]);
+    pane.on_keys("Enter", vec![Pressed("above-prompt", "pm-abrir")]);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-6-painel-1")]);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-7-painel-2")]);
+    back_from_mr(&pane);
+    press(&mods, &pane, "above-prompt", "pm-abrir").await.unwrap();
+    assert_eq!(keys(&pane), ["C-x Tab", "C-x Tab", "Enter", "C-x Tab", "C-x Tab", "C-x Tab", "C-x Tab"]);
+}
+
+#[tokio::test]
+async fn keyboard_refuses_a_shared_key_when_the_focus_comes_without_the_mod() {
+    // O plugin do Hangar carregado antes de o foco levar o mod: com a `key` em dois mods, não há como saber
+    // de qual é o foco, e a recusa é a de antes, sem `Enter`.
+    let (mods, pane) = setup("tmux-14-ciclo-4-prompt", band_with_a_shared_key());
+    pane.mouse(false);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-5-faixa"), Focus("above-prompt", "pm-abrir", false)]);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-6-painel-1")]);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-7-painel-2")]);
+    back_from_mr(&pane);
+    assert_eq!(code(press(&mods, &pane, "above-prompt", "pm-abrir").await), "erro_mod_botao_inexistente");
+    assert!(!keys(&pane).contains(&"Enter".to_string()), "{:?}", keys(&pane));
+}
+
 #[tokio::test]
 async fn keyboard_refuses_with_a_draft_or_a_dialog_before_any_key() {
     let (mods, pane) = setup("tmux-440-rascunho-150", pm());
@@ -596,7 +633,7 @@ async fn a_late_band_focus_refuses_instead_of_pressing_with_the_focus_ahead() {
         tokio::spawn(async move {
             until(|| mods.armed_focus(S).is_some()).await;
             tokio::time::sleep(Duration::from_millis(150)).await;
-            if let Some(attempt) = mods.armed_focus(S) { mods.focused(S, &attempt, "above-prompt", Some("pm-abrir"), false); }
+            if let Some(attempt) = mods.armed_focus(S) { mods.focused(S, &attempt, "above-prompt", None, Some("pm-abrir"), false); }
         })
     };
     assert_eq!(code(press(&mods, &pane, "above-prompt", "pm-abrir").await), "erro_mod_clique_sem_resposta");

@@ -202,6 +202,8 @@ struct Button {
     /// O rótulo aparece mais de uma vez na árvore do painel ou da faixa, visível ou não: o mouse não
     /// distingue um do outro e o clique vai pelo teclado (T5).
     repeated: bool,
+    /// Outro mod usa a mesma `key` no lugar: o foco contado sem o mod não diz de qual é.
+    shared: bool,
 }
 
 fn target_of(view: &TerminalView, site: &str, tree: Value) -> Target {
@@ -219,10 +221,11 @@ fn target(ctx: &Ctx<'_>, site: &str) -> Result<Target, ModsError> {
 /// O botão `key` do mod `plugin` no lugar do `t`. O mesmo mod com a mesma `key` duas vezes no lugar não
 /// diz qual é, e nenhum é acionado.
 fn button(t: &Target, plugin: &str, key: &str) -> Result<Button, ModsError> {
-    if tree::ambiguous(&t.tree, plugin, key, &["Button"]) { return Err(missing()); }
+    if tree::ambiguous(&t.tree, Some(plugin), key, &["Button"]) { return Err(missing()); }
     let label = tree::label(&t.tree, plugin, key).ok_or_else(missing)?;
     let repeated = tree::label_count(&t.tree, &label) > 1;
-    Ok(Button { plugin: plugin.into(), key: key.into(), label, repeated })
+    let shared = tree::ambiguous(&t.tree, None, key, &["Button"]);
+    Ok(Button { plugin: plugin.into(), key: key.into(), label, repeated, shared })
 }
 
 enum Found { Cell((usize, usize)), Keyboard, Clicked }
@@ -615,9 +618,17 @@ fn band_hidden(s: &Screen) -> bool { !matches!(s.band_state, "full" | "collapsed
 /// Tamanho do anel do `ctrl+x tab`: os botões das faixas, os painéis e o prompt.
 fn cap(t: &Target) -> usize { t.band_buttons + t.ids.len() + 1 }
 
-/// O foco visto é o elemento pedido, no lugar pedido, sem recusa.
-fn is_target(seen: &FocusSeen, site: &str, key: &str) -> bool {
-    seen.request_id == site && !seen.denied && seen.element.as_deref() == Some(key)
+/// O foco visto é o botão pedido: no lugar, com a `key` e do mod dele, sem recusa. O plugin do Hangar
+/// carregado numa sessão viva antes de o foco levar o mod não o conta: com a `key` em mais de um mod no
+/// lugar não há como saber de qual é o foco, e o clique é recusado, como antes de o pedido levar o mod.
+fn is_target(seen: Option<&FocusSeen>, site: &str, b: &Button) -> Result<bool, ModsError> {
+    let Some(seen) = seen.filter(|seen| seen.request_id == site && !seen.denied && seen.element.as_deref() == Some(b.key.as_str()))
+        else { return Ok(false) };
+    match seen.plugin.as_deref() {
+        Some(plugin) => Ok(plugin == b.plugin),
+        None if b.shared => Err(missing()),
+        None => Ok(true),
+    }
 }
 
 /// O último foco do alvo depois de `after`: espera até `wait` pelo primeiro e pega também os que chegaram
@@ -665,7 +676,7 @@ async fn reach_band_key(ctx: &Ctx<'_>, t: &Target, b: &Button, attempt: &str, ri
         let s = ring.after_key(ctx, t, seq).await?;
         if s.dialog || s.survey { return Err(dialog_open()); }
         match seen {
-            Some(seen) if is_target(&seen, BAND_SITE, &b.key) => return Ok(seen.seq),
+            Some(seen) if is_target(Some(&seen), BAND_SITE, b)? => return Ok(seen.seq),
             None if s.focus == Some("band") => return Err(no_answer()),
             _ => {}
         }
@@ -684,7 +695,8 @@ async fn enter_confirmed(ctx: &Ctx<'_>, t: &Target, b: &Button, attempt: &str, s
     let placed = if t.site == BAND_SITE { s.focus == Some("band") }
         else { s.focus == Some("pane") && s.active.is_some() && s.active == t.ids.iter().position(|id| *id == t.site) };
     if !placed { return Err(no_answer()); }
-    if last_focus(ctx, attempt, seq, Duration::ZERO).await.is_some_and(|newer| !is_target(&newer, &t.site, &b.key)) {
+    let newer = last_focus(ctx, attempt, seq, Duration::ZERO).await;
+    if newer.is_some() && !is_target(newer.as_ref(), &t.site, b)? {
         return Err(no_answer());
     }
     let since = Instant::now();
@@ -710,12 +722,13 @@ async fn reserve_press(ctx: &Ctx<'_>, t: &Target, b: &Button) -> Result<Value, M
         // custava meio segundo a cada entrada no painel. Um evento que chegue depois do `Tab` não faz sair o
         // `Enter`: vale o último foco visto.
         let mut seen = last_focus(ctx, &attempt, entry, ctx.limits.key_settle.min(ctx.left())).await;
-        if !seen.as_ref().is_some_and(|s| is_target(s, &t.site, &b.key)) {
+        if !is_target(seen.as_ref(), &t.site, b)? {
             let seq = ctx.mods.focus_seq(ctx.name, ctx.life);
             ctx.keys(&["Tab"], ctx.limits.focus_wait).await?;
             seen = last_focus(ctx, &attempt, seq, ctx.limits.focus_wait.min(ctx.left())).await;
         }
-        seen.filter(|s| is_target(s, &t.site, &b.key)).ok_or_else(no_answer)?.seq
+        if !is_target(seen.as_ref(), &t.site, b)? { return Err(no_answer()); }
+        seen.ok_or_else(no_answer)?.seq
     };
     enter_confirmed(ctx, t, b, &attempt, seq, &mut ring).await?;
     Ok(json!({}))

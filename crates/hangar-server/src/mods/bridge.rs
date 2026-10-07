@@ -159,7 +159,8 @@ struct CopiedBody { attempt: String, text: String }
 #[derive(Deserialize)]
 struct FocusTargetBody { #[serde(rename = "requestId")] request_id: String, #[serde(default)] plugin: Option<String>, #[serde(default)] element: Option<String> }
 #[derive(Deserialize)]
-struct FocusedBody { attempt: String, #[serde(rename = "requestId")] request_id: String, #[serde(default)] element: Option<String>, denied: bool }
+struct FocusedBody { attempt: String, #[serde(rename = "requestId")] request_id: String, #[serde(default)] plugin: Option<String>,
+    #[serde(default)] element: Option<String>, denied: bool }
 #[derive(Deserialize)]
 struct ScrollBody { #[serde(rename = "requestId")] request_id: String, offset: u64,
     #[serde(rename = "bodyRows")] _body_rows: u64, #[serde(rename = "contentRows")] _content_rows: u64 }
@@ -268,13 +269,13 @@ pub async fn focus_target(State(st): State<Arc<AppState>>, ConnectInfo(peer): Co
 pub async fn focused(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let (envelope, name) = match owned::<FocusedBody>(&st, peer, req).await { Ok(found) => found, Err(response) => return *response };
     let body = &envelope.body;
-    if !fits(&body.attempt, ID_MAX) || !fits(&body.request_id, ID_MAX) || !fits_opt(&body.element, ELEMENT_MAX) {
+    if !fits(&body.attempt, ID_MAX) || !fits(&body.request_id, ID_MAX) || !fits_opt(&body.plugin, PLUGIN_MAX) || !fits_opt(&body.element, ELEMENT_MAX) {
         return invalid(None);
     }
     if !token_ok(&st, &envelope.sessao, &envelope.token) {
         return forbidden();
     }
-    if st.mods.focused(&name, &body.attempt, &body.request_id, body.element.as_deref(), body.denied) {
+    if st.mods.focused(&name, &body.attempt, &body.request_id, body.plugin.as_deref(), body.element.as_deref(), body.denied) {
         ok()
     } else {
         reply(None, StatusCode::CONFLICT, json!({"detail": "alvo do foco já desarmado"}))

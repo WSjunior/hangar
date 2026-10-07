@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 
-use super::model::{ModsCall, ModsError, TOAST_DEFAULT_MS};
+use super::model::{ModsCall, ModsError, BAND_SITE, TOAST_DEFAULT_MS};
 use crate::side::{WeakHubs, TOASTS_KEPT};
 
 pub type CallFuture = Pin<Box<dyn Future<Output = Result<Value, ModsError>> + Send>>;
@@ -115,6 +115,8 @@ pub struct FocusSeen {
     pub attempt: String,
     pub request_id: String,
     pub element: Option<String>,
+    /// O mod do elemento focado. `None`: parada do motor, ou plugin do Hangar de antes de o foco levá-lo.
+    pub plugin: Option<String>,
     pub denied: bool,
 }
 
@@ -438,6 +440,18 @@ impl Mods {
         }
     }
 
+    /// O mod do controle `key` (de um dos `kinds`) no lugar `site` do último `plugin_ui`, para o app de antes
+    /// de o pedido levar o mod. A `key` em mais de um mod no lugar não diz de qual é: nenhum.
+    pub fn plugin_of(&self, name: &str, site: &str, key: &str, kinds: &[&str]) -> Option<String> {
+        let raw = self.inner.lock().unwrap().sessions.get(name)?.ui.clone()?;
+        // O parse da árvore (até ~400 KB) fica fora da trava de todas as sessões.
+        let ui: Value = serde_json::from_str(&raw).ok()?;
+        let tree = if site == BAND_SITE { &ui["above"] }
+            else { &ui["panes"].as_array()?.iter().find(|pane| pane["id"] == site)?["tree"] };
+        if super::tree::ambiguous(tree, None, key, kinds) { return None; }
+        super::tree::find(tree, None, key, kinds).map(|control| control.plugin)
+    }
+
     /// Abre o clique do app: o plugin do Hangar casa o press com ele (`press-start`) e o efeito volta
     /// para quem clicou.
     pub fn begin_click(&self, name: &str, site: &str, plugin: &str, key: &str) -> String {
@@ -707,7 +721,7 @@ impl Mods {
     }
 
     /// O plugin viu um foco com o alvo `attempt` armado. Recusado quando o alvo já não é esse.
-    pub fn focused(&self, name: &str, attempt: &str, request_id: &str, element: Option<&str>, denied: bool) -> bool {
+    pub fn focused(&self, name: &str, attempt: &str, request_id: &str, plugin: Option<&str>, element: Option<&str>, denied: bool) -> bool {
         let mut accepted = false;
         self.with_terminal(name, None, |terminal, seq| {
             let Some(focus) = terminal.focus.as_mut().filter(|focus| focus.attempt == attempt) else { return };
@@ -715,7 +729,7 @@ impl Mods {
                 focus.rewritten = true;
             }
             terminal.seen.push(FocusSeen { seq, attempt: attempt.to_owned(), request_id: request_id.to_owned(),
-                element: element.map(str::to_owned), denied });
+                element: element.map(str::to_owned), plugin: plugin.map(str::to_owned), denied });
             let extra = terminal.seen.len().saturating_sub(FOCUS_KEPT);
             terminal.seen.drain(..extra);
             accepted = true;
