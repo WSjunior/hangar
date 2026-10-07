@@ -904,7 +904,7 @@ def test_ensure_tmux_tui_starts_remote_codex_for_thread():
     name, cwd, command = new_session.call_args.args
     assert (name, cwd) == ("cx", "/tmp/proj")
     assert command == (
-        "codex resume --remote ws://127.0.0.1:45123 --no-alt-screen thread-42"
+        "codex resume --remote ws://127.0.0.1:45123 --no-alt-screen -c check_for_update_on_startup=false thread-42"
     )
 
 
@@ -916,7 +916,7 @@ def test_ensure_tmux_tui_resumes_with_model_and_effort():
             model="gpt-5-codex", effort="high", service_tier="default",
         )
     assert new_session.call_args.args[2] == (
-        "codex resume --remote ws://127.0.0.1:45123 --no-alt-screen "
+        "codex resume --remote ws://127.0.0.1:45123 --no-alt-screen -c check_for_update_on_startup=false "
         "--model gpt-5-codex --config 'model_reasoning_effort=\"high\"' -c 'service_tier=\"default\"' thread-42"
     )
 
@@ -928,7 +928,7 @@ def test_ensure_tmux_tui_creates_thread_with_matching_permissions():
     command = new_session.call_args.args[2]
     assert command == (
         "codex --remote ws://127.0.0.1:45123 --no-alt-screen -C /tmp/proj "
-        "--sandbox danger-full-access --ask-for-approval never"
+        "--sandbox danger-full-access --ask-for-approval never -c check_for_update_on_startup=false"
     )
 
 

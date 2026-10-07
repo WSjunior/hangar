@@ -155,6 +155,20 @@ fn effort_is_deferred_until_a_safe_boundary() {
     assert_eq!(engine.view()["effort"],"high");
 }
 
+/// A CLI põe a SAÍDA no `local_command_source`, não o comando.
+#[test]
+fn local_answer_carries_the_slash_command_that_was_written() {
+    let mut engine = engine(json!({"name":"session","initialized":true}));
+    engine.command(command(OperationKind::Steer,json!({"text":"/btw"})),clock(11.0)).unwrap();
+    let effects = line(&mut engine,json!({"type":"assistant",
+        "local_command_source":"<local-command-stdout>/btw isn't available in this environment.</local-command-stdout>",
+        "message":{"content":[{"type":"text","text":"/btw isn't available in this environment."}]}}),12.0);
+    assert!(effects.iter().any(|e|matches!(e,Effect::Policy { kind,payload,.. } if kind == "local_output" && payload["source"] == "/btw")));
+    let again = line(&mut engine,json!({"type":"assistant","local_command_source":"<local-command-stdout>x</local-command-stdout>",
+        "message":{"content":[{"type":"text","text":"x"}]}}),13.0);
+    assert!(again.iter().any(|e|matches!(e,Effect::Policy { kind,payload,.. } if kind == "local_output" && payload["source"].is_null())));
+}
+
 #[test]
 fn late_ack_does_not_override_result() {
     let mut engine = engine(json!({"name":"session"}));

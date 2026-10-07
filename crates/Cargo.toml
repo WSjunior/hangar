@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["hangar-api", "hangar-server", "hangar-cano", "hangar-workspace"]
+members = ["hangar-api", "hangar-server", "hangar-cano", "hangar-workspace", "hangar-codex"]
 
 [workspace.package]
 version = "0.1.0"
@@ -38,6 +38,8 @@ notify = "=7.0.0"
 percent-encoding = "=2.3.2"
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 rayon = "=1.12.0"
+hangar-codex = { path = "hangar-codex" }
+tokio-tungstenite = "=0.29.0"
 
 [profile.release]
 strip = true

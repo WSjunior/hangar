@@ -46,7 +46,7 @@ from app.adapters.preview_push import PushPreviewSource, fonte_ferramenta, fonte
 from app.adapters.stream_buffer import StreamBuffer, error_frames
 from app.config import settings
 from app.pqueue import PromptQueue
-from app.procinfo import pid_vivo
+from app.procinfo import _argv, pid_vivo
 from app.state import StateEvent
 from app.live_rate import live_rate
 from app.transcript import ChatEvent, TranscriptTailer
@@ -232,6 +232,7 @@ class _Sessao:
         self.tarefas: dict[str, dict] = {}          # subagentes em voo: task_id -> {tipo, passo}
         self.effort_pendente: str | None = None     # `/effort` pedido com turno em voo: sai no result
         self.effort_aguardando: str | None = None   # `/effort` já no stdin, esperando a CLI confirmar
+        self.comando_enviado: str | None = None     # último `/comando` escrito: a CLI responde alguns sozinha
         self.tipos_desconhecidos: set[str] = set()  # eventos do stdout já avisados (uma nota por tipo)
         self.desconhecidos_gravados: collections.Counter[str] = collections.Counter()
         self.iniciando = False     # processo novo esperando o `initialize` (hooks de SessionStart)
@@ -473,6 +474,8 @@ class ClaudeHeadlessAdapter:
         from app.conversation_transfer import require_available
         require_available(sess.name)
         blocos, avisos = await asyncio.to_thread(_blocos_do_prompt, text)
+        if text.lstrip().startswith("/"):
+            sess.comando_enviado = text.strip()
         frame = {"type": "user", "session_id": "", "parent_tool_use_id": None,
                  "message": {"role": "user", "content": blocos}}
         if (claim := self.drain_claims.get(sess.name)) is not None:
@@ -1491,9 +1494,12 @@ class ClaudeHeadlessAdapter:
                     self._confirmar_effort(sess, texto)
                 if texto.startswith("## Context Usage"):
                     texto += _tabela_limites(sess.janelas)
+                # `local_command_source` traz a saída, não o comando: quem respondeu é o último `/` escrito.
+                comando, sess.comando_enviado = sess.comando_enviado, None
                 if texto:
-                    await self._nota_local(sess, texto)
+                    await self._nota_local(sess, texto, confirms=comando)
                 return
+            sess.comando_enviado = None
             _aplicar_uso_da_chamada(sess, (ev.get("message") or {}).get("usage"))
             tools = [b for b in blocos if isinstance(b, dict) and b.get("type") == "tool_use"]
             if tools:
@@ -1895,11 +1901,11 @@ class ClaudeHeadlessAdapter:
         tool, detalhe = _alvo_da_permissao(req)
         return f"Permitir {tool}? {detalhe}".strip()
 
-    async def _nota_local(self, sess: _Sessao, texto: str) -> None:
+    async def _nota_local(self, sess: _Sessao, texto: str, confirms: str | None = None) -> None:
         """Bolha do assistente fora do transcript (comando local, aviso de permissão): vai pela
         fila durável, que o histórico e o SSE já sabem ler. Falha vira log e problema visível."""
         try:
-            await asyncio.to_thread(PromptQueue(sess.name).append_saida_local, texto)
+            await asyncio.to_thread(PromptQueue(sess.name).append_saida_local, texto, confirms)
         except Exception:
             _log.exception("claude headless: nota local não gravada name=%s", sess.name)
             if not sess.problema:   # um problema real (login, turno) não pode ser coberto por este
@@ -2445,8 +2451,32 @@ def _hora_local(epoch) -> str | None:
     return time.strftime("%H:%M", time.localtime(epoch))
 
 
+def _e_cano(pid: int) -> bool:
+    """O pid ainda é um cano? Depois de reiniciar a máquina o número pode ser de outro processo."""
+    argv = _argv(pid)
+    if not argv and _zumbi(pid):
+        return True   # cano morto sem ser colhido: o `claude` do grupo dele pode seguir vivo
+    try:
+        log = argv[argv.index("--log") + 1]
+    except (ValueError, IndexError):
+        return False
+    return "--escuta" in argv and Path(log).name.startswith("cano-")
+
+
+def _zumbi(pid: int) -> bool:
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            return fh.read().rsplit(")", 1)[1].split()[0] == "Z"
+    except (OSError, IndexError):
+        return False
+
+
 def _matar_grupo(pid: int, name: str) -> None:
     """SIGTERM no grupo do cano (cano + claude, que é filho dele no mesmo grupo). Idempotente."""
+    if not _e_cano(pid):
+        if pid_vivo(pid):
+            _log.warning("pid %s do sidecar não é mais o cano da sessão name=%s; não matei", pid, name)
+        return
     if os.name == "nt":
         import subprocess
         if not pid_vivo(pid):

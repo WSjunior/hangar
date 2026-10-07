@@ -65,7 +65,11 @@ vi.mock('../ui/Screen', () => ({ Screen: ({ children }: { children: ReactNode })
 // A gaveta puxa o gesture-handler nativo, que o vitest não carrega; aqui só o conteúdo importa.
 vi.mock('../features/sessions/SessionsDrawer', () => ({ SessionsDrawer: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
 vi.mock('../features/sessions/ServerSheet', () => ({ ServerSheet: () => null }));
-vi.mock('react-native-keyboard-controller', () => ({ KeyboardAvoidingView: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
+vi.mock('react-native-keyboard-controller', () => ({
+  KeyboardAvoidingView: ({ children }: { children: ReactNode }) => createElement('div', null, children),
+  // O KeyboardBar do chat lê o estado do teclado; nestes testes ele está sempre fechado.
+  useKeyboardState: <T,>(select: (s: { isVisible: boolean }) => T) => select({ isVisible: false }),
+}));
 vi.mock('./LoopChip', () => ({ LoopChip: () => null }));
 vi.mock('./OrqFooter', () => ({ OrqFooter: () => null }));
 vi.mock('./TuiPill', () => ({ TuiPill: () => null }));

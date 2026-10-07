@@ -179,6 +179,7 @@ def test_stop_error_is_raised_before_cano_cleanup(monkeypatch):
     from app.adapters.claude_headless import adapter
     if adapter.os.name == "nt":
         pytest.skip("caminho POSIX")
+    monkeypatch.setattr(adapter, "_e_cano", lambda pid: True)
     monkeypatch.setattr(adapter.os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(adapter.os, "killpg", lambda *args: (_ for _ in ()).throw(PermissionError("synthetic")))
     with pytest.raises(RuntimeError):

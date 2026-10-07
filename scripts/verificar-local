@@ -164,10 +164,12 @@ passo_front() {
 passo_mobile() {
     npm_ci_se_mudou package-lock.json npm ci --workspace=@hangar/core --workspace=frontend || return 1
     npm_ci_se_mudou mobile/package-lock.json npm ci --prefix mobile || return 1
-    npm run check:app && npm run test:app
+    # O check do app compila as mensagens dele, não as do core; sem isto valem as da última rodada do front.
+    npm run i18n:compile -w @hangar/core && npm run check:app && npm run test:app
 }
 
-passo_nativo() { (cd desktop-native && cargo test --locked); }
+# O nativo é outro workspace: fora do target do crates/.
+passo_nativo() { (cd desktop-native && env -u CARGO_TARGET_DIR cargo test --locked); }
 passo_shell() {
     bash scripts/test-wrappers.sh || return 1
     [[ ! -f scripts/test-verificar-local.sh ]] || bash scripts/test-verificar-local.sh
@@ -234,6 +236,10 @@ executar() {   # $1 = so, $2 = sha, $3 = bundle ("-" = sem bundle), resto = pass
     # Cada arquivo de teste vira um binário; com depuração completa o target passa de 27 GB no Linux
     # e enche o disco da VM. Só as linhas basta para o backtrace, e o teste roda igual.
     CARGO_ENV=(CARGO_BUILD_JOBS=4 CARGO_PROFILE_DEV_DEBUG=line-tables-only)
+    # Os testes procuram os binários em crates/target; um `target-dir` no ~/.cargo/config.toml da
+    # máquina mandaria o build para outro lugar. A variável vence a configuração, e só chega aos
+    # passos pela lista do `env -i`.
+    if [[ "$SO" != windows ]]; then CARGO_ENV+=(CARGO_TARGET_DIR="$PWD/crates/target"); fi
     local livre minimo=4
     livre="$(df -Pk . | awk 'NR==2 {print int($4/1048576)}')"
     if (( livre < minimo )); then

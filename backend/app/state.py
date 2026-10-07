@@ -292,8 +292,10 @@ def _live_spinner(pane_text: str) -> Optional[str]:
 # TODO pane e um chevron solto no scrollback viraria menu fantasma. Aqui o portao e o rodape do
 # proprio widget, que so existe com ele na tela.
 _CODEX_OPT_RE = re.compile(r"^\s*[›>]?\s*(\d+)\.\s+(.*\S)\s*$")
-# "confirm" nos seletores de hooks/permissoes; "continue" no aviso de atualizacao do CLI.
-_CODEX_RODAPES = ("press enter to confirm", "press enter to continue")
+# "confirm" nos seletores de hooks/permissoes; "continue" no aviso de atualizacao do CLI. A TUI
+# mais nova encurtou o rodape para "enter continue · esc skip": sem a forma curta, o aviso nao vira
+# cartao e a abertura parece travada.
+_CODEX_RODAPES = ("enter to confirm", "enter to continue", "enter confirm", "enter continue")
 
 
 def menu_codex(pane_text: str) -> Optional[tuple[Optional[str], list[str]]]:

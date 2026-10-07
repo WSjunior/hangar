@@ -35,6 +35,7 @@ pub struct PolicyClient {
     quota:Arc<std::sync::Mutex<BTreeMap<String,(Instant,Value)>>>,
     /// `config_dir` -> quando a consulta não chegou ao Python (transporte ou prazo).
     quota_down:Arc<std::sync::Mutex<BTreeMap<String,(Instant,())>>>,
+    diag:crate::diag::DiagClient,
 }
 
 /// Guarda no mapa limitado a `QUOTA_ACCOUNTS`, tirando a entrada mais antiga para caber a nova.
@@ -48,7 +49,8 @@ fn remember<T>(cache:&std::sync::Mutex<BTreeMap<String,(Instant,T)>>,config_dir:
 
 impl PolicyClient {
     pub fn new(upstream:std::net::SocketAddr,secret:String,instance:String) -> Self {
-        Self { upstream,secret,instance,http:crate::proxy::client(),quota:Default::default(),quota_down:Default::default() }
+        Self { upstream,diag:crate::diag::DiagClient::new(upstream,secret.clone()),secret,instance,http:crate::proxy::client(),
+            quota:Default::default(),quota_down:Default::default() }
     }
     /// Janelas de cota da conta, só quando vai formatar. Falha formata sem janelas e deixa o cache
     /// anterior como está; o log leva o código, nunca o dado.
@@ -597,8 +599,9 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                     if kind == "local_output" {
                         let queue = queue.clone(); let generation = target.generation; let sample = clock(start);
                         let text = payload["text"].as_str().unwrap_or("").to_owned();
+                        let confirms = payload["source"].as_str().map(str::to_owned);
                         jobs.spawn(async move { Job::Saved(queue.exec(generation,&format!("local:{}",unique()),sample,
-                            Action::AppendLocal { text,entry_id:None }).await.map(|_|()).map_err(io_failure)) });
+                            Action::AppendLocal { text,entry_id:None,confirms }).await.map(|_|()).map_err(io_failure)) });
                         continue;
                     }
                     sequence += 1;
@@ -667,6 +670,11 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                     SurfaceEffect::Copied { plugin,text } => { if let Some(mods) = &engine.mods { mods.copied(&target.name,engine.mods_life,&plugin,&text); } }
                     SurfaceEffect::Reply { token,result } => { if let Some(waiter) = mods_waiters.remove(&token) { let _ = waiter.send(result); } }
                 },
+                Effect::Diag { event,code } => {
+                    // Versão é do servidor, não da sessão: sem nome, o limite de 1/min vale para todos.
+                    let session = if event == DiagEvent::CodexVersion { "" } else { target.name.as_str() };
+                    if let Some(policy) = &engine.policy { policy.diag.report(event.event(),session,&code,event.reason()); }
+                }
                 Effect::Stop { .. } => { closed.store(true,Ordering::Release); },
             }
         }
