@@ -72,7 +72,17 @@ struct Shared {
     raw_peak: AtomicU32,
     // 0 = ok, 1 = microfone caiu, 2 = saída caiu
     failed: AtomicU8,
+    // Vezes que a saída esvaziou no meio da fala: mede o "travando e pulando".
+    underruns: AtomicU32,
+    // Fluxo da reprodução no diário: amostras que entraram, que tocaram, descartadas pelo teto e quadros pedidos pela saída.
+    flow: [AtomicU32; 4],
 }
+
+// Reserva antes de tocar: o áudio chega em rajadas pela rede, e tocar no ato esvazia a fila a cada atraso.
+const PRIME_SAMPLES: usize = RATE as usize * 240 / 1000;
+
+/// Estado do callback de saída: o que já foi reamostrado e se está juntando reserva.
+struct OutputState { resampler: Resampler, carry: VecDeque<f32>, priming: bool }
 
 pub struct Audio {
     shared: Arc<Shared>,
@@ -109,7 +119,7 @@ impl Audio {
         let shared = Arc::new(Shared {
             capture_cap: in_rate as usize / 5,
             capture: Default::default(), render: Default::default(), playback: Default::default(),
-            input_level: AtomicU32::new(0), output_level: AtomicU32::new(0), raw_peak: AtomicU32::new(0), failed: AtomicU8::new(0),
+            input_level: AtomicU32::new(0), output_level: AtomicU32::new(0), raw_peak: AtomicU32::new(0), failed: AtomicU8::new(0), underruns: AtomicU32::new(0), flow: Default::default(),
         });
         crate::voice::log(format!("audio in rate={in_rate} ch={in_channels} fmt={:?} out rate={out_rate} ch={out_channels} fmt={:?}",
             in_config.sample_format(), out_config.sample_format()));
@@ -164,7 +174,16 @@ impl Audio {
         }
     }
 
-    pub fn play(&self, samples: &[f32]) { bounded_extend(&mut self.shared.playback.lock().unwrap(), samples.iter().copied(), MAX_QUEUE); }
+    pub fn play(&self, samples: &[f32]) {
+        let mut queue = self.shared.playback.lock().unwrap();
+        let dropped = (queue.len() + samples.len()).saturating_sub(MAX_QUEUE);
+        self.shared.flow[0].fetch_add(samples.len() as u32, Ordering::Relaxed);
+        self.shared.flow[2].fetch_add(dropped as u32, Ordering::Relaxed);
+        bounded_extend(&mut queue, samples.iter().copied(), MAX_QUEUE);
+    }
+
+    /// (entrou, tocou, descartado, quadros pedidos pela saída) desde a última leitura.
+    pub fn take_flow(&self) -> [u32; 4] { std::array::from_fn(|i| self.shared.flow[i].swap(0, Ordering::Relaxed)) }
 
     pub fn reset(&mut self) {
         self.shared.capture.lock().unwrap().clear();
@@ -182,6 +201,10 @@ impl Audio {
 
     pub fn capture_len(&self) -> usize { self.shared.capture.lock().unwrap().len() }
 
+    pub fn playback_len(&self) -> usize { self.shared.playback.lock().unwrap().len() }
+
+    pub fn take_underruns(&self) -> u32 { self.shared.underruns.swap(0, Ordering::Relaxed) }
+
     pub fn failed(&self) -> Option<AudioError> {
         match self.shared.failed.load(Ordering::Relaxed) { 1 => Some(AudioError::Microphone), 2 => Some(AudioError::Speaker), _ => None }
     }
@@ -195,19 +218,30 @@ fn on_input<T: cpal::SizedSample>(data: &[T], channels: usize, shared: &Shared) 
     bounded_extend(&mut shared.capture.lock().unwrap(), mono, shared.capture_cap);
 }
 
-fn on_output<T: cpal::SizedSample + cpal::FromSample<f32>>(data: &mut [T], channels: usize, shared: &Shared,
-    resampler: &mut Resampler, carry: &mut VecDeque<f32>) {
+fn on_output<T: cpal::SizedSample + cpal::FromSample<f32>>(data: &mut [T], channels: usize, shared: &Shared, state: &mut OutputState) {
     let frames = data.len() / channels;
-    while carry.len() < frames {
+    shared.flow[3].fetch_add(frames as u32, Ordering::Relaxed);
+    let OutputState { resampler, carry, priming } = state;
+    if *priming {
+        let queued = shared.playback.lock().unwrap().len();
+        if queued >= PRIME_SAMPLES { *priming = false; }
+    }
+    while !*priming && carry.len() < frames {
         let chunk: Vec<f32> = {
             let mut queue = shared.playback.lock().unwrap();
             let take = queue.len().min(FRAME);
+            shared.flow[1].fetch_add(take as u32, Ordering::Relaxed);
             queue.drain(..take).collect()
         };
         if chunk.is_empty() { break; }
         let mut out = Vec::new();
         resampler.push(&chunk, &mut out);
         carry.extend(out);
+    }
+    // Esvaziou com fala tocando: volta a juntar reserva em vez de picotar amostra a amostra.
+    if !*priming && carry.len() < frames {
+        *priming = true;
+        shared.underruns.fetch_add(1, Ordering::Relaxed);
     }
     let mono: Vec<f32> = (0..frames).map(|_| carry.pop_front().unwrap_or(0.0)).collect();
     shared.output_level.store(rms(&mono).to_bits(), Ordering::Relaxed);
@@ -236,9 +270,9 @@ fn build_output(device: &cpal::Device, config: &cpal::SupportedStreamConfig, rat
     macro_rules! output {
         ($t:ty) => {{
             let (data, error) = (shared.clone(), shared.clone());
-            let (mut resampler, mut carry) = (Resampler::new(RATE, rate), VecDeque::new());
+            let mut state = OutputState { resampler: Resampler::new(RATE, rate), carry: VecDeque::new(), priming: true };
             device.build_output_stream::<$t, _, _>(config.config(),
-                move |samples: &mut [$t], _| on_output(samples, channels, &data, &mut resampler, &mut carry),
+                move |samples: &mut [$t], _| on_output(samples, channels, &data, &mut state),
                 move |e| if is_fatal(&e) { error.failed.store(2, Ordering::Relaxed) }, None).ok()
         }};
     }

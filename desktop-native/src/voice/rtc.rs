@@ -54,7 +54,37 @@ fn audio_error(error: AudioError) -> RtcError {
 /// Contadores da janela de 5 s do diário: dizem se o microfone sai e se o áudio da OpenAI chega.
 #[derive(Default)]
 struct Window { written: u32, write_errors: u32, encode_errors: u32, no_writer: u32, no_opus: u32,
-    received: u32, decode_errors: u32, max_in: f32, max_out: f32 }
+    received: u32, decode_errors: u32, max_in: f32, max_out: f32,
+    // RTP que chegou ao socket antes do str0m: separa "a OpenAI não mandou" de "o str0m descartou".
+    rtp_raw: u32,
+    // Maior intervalo entre pacotes (ms) no socket e na entrega do str0m: rajada da rede ou do laço.
+    gap_raw_ms: u32, gap_media_ms: u32,
+    // Volta mais longa do laço (ms): se bate com o intervalo no socket, quem segura é o app.
+    loop_max_ms: u32 }
+
+/// RTP (não RTCP) pelo cabeçalho, que o SRTP deixa em claro.
+fn is_rtp(datagram: &[u8]) -> bool {
+    datagram.len() >= 12 && (128..=191).contains(&datagram[0]) && !(192..=223).contains(&datagram[1])
+}
+
+fn rtp_seq(datagram: &[u8]) -> u16 { u16::from_be_bytes([datagram[2], datagram[3]]) }
+
+/// A OpenAI manda um pacote solto e reinicia o fluxo com o mesmo SSRC e sequência menor; o str0m
+/// toma o solto como referência e descarta o resto como duplicado. Só libera após dois em sequência.
+#[derive(Default)]
+struct RtpStart { open: bool, held: Option<(u16, Vec<u8>, SocketAddr)> }
+
+enum Admit { Pass, Hold, Release(Vec<u8>, SocketAddr) }
+
+impl RtpStart {
+    fn admit(&mut self, seq: u16, datagram: &[u8], source: SocketAddr) -> Admit {
+        if self.open { return Admit::Pass; }
+        match self.held.take() {
+            Some((prev, bytes, from)) if seq == prev.wrapping_add(1) => { self.open = true; Admit::Release(bytes, from) }
+            _ => { self.held = Some((seq, datagram.to_vec(), source)); Admit::Hold }
+        }
+    }
+}
 
 const SUMMARY_EVERY: Duration = Duration::from_secs(5);
 
@@ -76,10 +106,16 @@ fn drive(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: &async_ch
     let mut encoder = opus_rs::OpusEncoder::new(48_000, 1, opus_rs::Application::Voip).map_err(|_| RtcError::Media)?;
     let mut decoder = opus_rs::OpusDecoder::new(48_000, 1).map_err(|_| RtcError::Media)?;
     let (mut connected, mut timestamp, mut buffer) = (false, 0u64, vec![0u8; 2000]);
+    let mut rtp_start = RtpStart::default();
+    let (mut last_raw, mut last_media): (Option<Instant>, Option<Instant>) = (None, None);
     let mut write_errors = 0u32;
     let (mut decoded, mut packet) = (vec![0f32; FRAME * 2], vec![0u8; 1500]);
     let (started, mut last_levels) = (Instant::now(), Instant::now());
+    let mut loop_top = Instant::now();
     let result = loop {
+        let now = Instant::now();
+        window.loop_max_ms = window.loop_max_ms.max(now.duration_since(loop_top).as_millis() as u32);
+        loop_top = now;
         if stop.load(Ordering::Relaxed) { break Ok(()); }
         // Ninguém ouve mais: sem isto o microfone ficaria aberto.
         if events.is_closed() { break Err(RtcError::Network); }
@@ -89,9 +125,10 @@ fn drive(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: &async_ch
         (window.max_in, window.max_out) = (window.max_in.max(input), window.max_out.max(output));
         if last_summary.elapsed() >= SUMMARY_EVERY {
             let w = std::mem::take(&mut window);
-            log(format!("rtc summary connected={connected} written={} write_errors={} encode_errors={} no_writer={} no_opus={} received={} decode_errors={} max_in={:.4} raw_in_peak={:.4} max_out={:.4} capture_queue={}",
-                w.written, w.write_errors, w.encode_errors, w.no_writer, w.no_opus, w.received, w.decode_errors,
-                w.max_in, audio.take_raw_peak(), w.max_out, audio.capture_len()));
+            let flow = audio.take_flow();
+            log(format!("rtc summary connected={connected} written={} write_errors={} encode_errors={} no_writer={} no_opus={} received={} rtp_raw={} decode_errors={} max_in={:.4} raw_in_peak={:.4} max_out={:.4} capture_queue={} playback_queue={} underruns={} flow_in={} flow_played={} flow_dropped={} out_frames={} gap_raw_ms={} gap_media_ms={} loop_max_ms={}",
+                w.written, w.write_errors, w.encode_errors, w.no_writer, w.no_opus, w.received, w.rtp_raw, w.decode_errors,
+                w.max_in, audio.take_raw_peak(), w.max_out, audio.capture_len(), audio.playback_len(), audio.take_underruns(), flow[0], flow[1], flow[2], flow[3], w.gap_raw_ms, w.gap_media_ms, w.loop_max_ms));
             last_summary = Instant::now();
         }
         let timeout = match rtc.poll_output() {
@@ -117,6 +154,9 @@ fn drive(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: &async_ch
                     }
                     Event::MediaData(media) => {
                         window.received += 1;
+                        let now = Instant::now();
+                        if let Some(prev) = last_media { window.gap_media_ms = window.gap_media_ms.max(now.duration_since(prev).as_millis() as u32); }
+                        last_media = Some(now);
                         match decoder.decode(&media.data, FRAME, &mut decoded) {
                             Ok(n) => audio.play(&decoded[..n]),
                             Err(_) => window.decode_errors += 1,
@@ -157,6 +197,21 @@ fn drive(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: &async_ch
         let _ = socket.set_read_timeout(Some(wait));
         match socket.recv_from(&mut buffer) {
             Ok((n, source)) => {
+                if is_rtp(&buffer[..n]) {
+                    window.rtp_raw += 1;
+                    let now = Instant::now();
+                    if let Some(prev) = last_raw { window.gap_raw_ms = window.gap_raw_ms.max(now.duration_since(prev).as_millis() as u32); }
+                    last_raw = Some(now);
+                    match rtp_start.admit(rtp_seq(&buffer[..n]), &buffer[..n], source) {
+                        Admit::Hold => continue,
+                        Admit::Pass => {}
+                        Admit::Release(held, from) => {
+                            log("rtc rtp stream open");
+                            let Ok(contents) = held.as_slice().try_into() else { continue };
+                            if rtc.handle_input(Input::Receive(Instant::now(), Receive { proto: Protocol::Udp, source: from, destination: local, contents })).is_err() { break Err(RtcError::Network); }
+                        }
+                    }
+                }
                 let Ok(contents) = buffer[..n].try_into() else { continue };
                 if rtc.handle_input(Input::Receive(Instant::now(), Receive { proto: Protocol::Udp, source, destination: local, contents })).is_err() { break Err(RtcError::Network); }
             }
@@ -171,6 +226,20 @@ fn drive(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: &async_ch
 mod tests {
     use super::*;
     use core::prelude::v1::test;
+
+    #[test]
+    fn stray_first_packet_is_dropped_and_stream_opens_on_consecutive_pair() {
+        let from: SocketAddr = "1.2.3.4:5".parse().unwrap();
+        let mut start = RtpStart::default();
+        // Medido: pacote solto seq 29604, depois o fluxo recomeça em 18768.
+        assert!(matches!(start.admit(29604, b"stray", from), Admit::Hold));
+        assert!(matches!(start.admit(18768, b"first", from), Admit::Hold));
+        assert!(matches!(start.admit(18769, b"second", from), Admit::Release(held, _) if held == b"first"));
+        assert!(matches!(start.admit(18770, b"third", from), Admit::Pass));
+        let mut wrap = RtpStart::default();
+        assert!(matches!(wrap.admit(u16::MAX, b"a", from), Admit::Hold));
+        assert!(matches!(wrap.admit(0, b"b", from), Admit::Release(..)));
+    }
 
     #[test]
     fn offer_has_opus_audio_and_events_channel() {
