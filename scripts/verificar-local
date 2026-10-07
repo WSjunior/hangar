@@ -447,14 +447,15 @@ exec 3>&2
     win_pid=""
     if [[ -n "$plano_win" ]]; then
         # shellcheck disable=SC2086
-        vm_rodar "$sha" $plano_win > "$ESTADO/logs/${sha:0:10}-windows.log" 2>&1 &
+        # 9>&-: processo que sobrar de um passo não pode segurar a fila da máquina.
+        vm_rodar "$sha" $plano_win > "$ESTADO/logs/${sha:0:10}-windows.log" 2>&1 9>&- &
         win_pid=$!
         echo ">> windows: rodando na VM $VM (log: $ESTADO/logs/${sha:0:10}-windows.log)" >&2
     fi
     rl=0
     if [[ -n "$plano_lin" ]]; then
         # shellcheck disable=SC2086
-        ORIGEM="$ORIGEM" nice -n 10 ionice -c 3 bash "$SCRIPT" --executar linux "$sha" - $plano_lin || rl=$?
+        ORIGEM="$ORIGEM" nice -n 10 ionice -c 3 bash "$SCRIPT" --executar linux "$sha" - $plano_lin 9>&- || rl=$?
     fi
     rw=0
     if [[ -n "$win_pid" ]]; then
