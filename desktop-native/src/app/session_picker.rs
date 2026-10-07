@@ -85,7 +85,13 @@ impl Hangar {
         let stroke = KeybindingKeystroke::new_with_mapper(event.keystroke.clone(), false, cx.keyboard_mapper().as_ref());
         let layout = cx.keyboard_layout();
         let digit = super::session_numbers::event_digit(event.physical_digit, stroke.key(), [layout.id(), layout.name()]);
-        let Some(digit) = digit else { return false; };
+        // Outra tecla com os modificadores presos é atalho (Ctrl+Shift+T abre um diálogo, que não repassa a soltura
+        // dos modificadores à raiz): os números saem da tela agora, em vez de ficarem presos até ele fechar.
+        let Some(digit) = digit else {
+            self.cancel_session_numbers(cx);
+            self.session_picker.cancelled = true;
+            return false;
+        };
         if !event.is_held && self.session_picker.selection.push_digit(digit, Instant::now()) {
             self.schedule_session_number(cx, window);
         }
