@@ -212,6 +212,10 @@ fi
 # depois disto o instalador segue sozinho, e o que restar de senha já foi anunciado aqui.
 # O --check não entra: ele não pode gravar nada no disco, token incluído.
 gera_token() { openssl rand -hex 24 2>/dev/null || python3 -c 'import secrets; print(secrets.token_hex(24))'; }
+# O backend lê o .env pelo python-dotenv, que corta o valor em " #" e expande "${VAR}": sem aspas
+# no .env, a senha com esses caracteres não chega inteira e o celular nunca entra.
+TOKEN_PROIBIDO="não vale # \$ ' \" \\ nem espaço no começo ou no fim"
+token_proibido() { case $1 in *'#'*|*'$'*|*\'*|*'"'*|*'\'*|[[:blank:]]*|*[[:blank:]]) return 0 ;; esac; return 1; }
 if [ "$UPDATE" = 0 ] && [ "$CHECK" = 0 ]; then
 say "0/8 Antes de começar"
 echo "  No máximo duas perguntas agora, e depois o instalador segue sozinho até o fim."
@@ -227,6 +231,8 @@ elif [ "$APP" = 1 ]; then
     APP_TOKEN=$(gera_token); ok "senha aleatória gerada (o app a lê de backend/.env)"
   elif [ ${#APP_TOKEN} -lt 8 ] || [ "$APP_TOKEN" = change-me ]; then
     fail "a senha do celular veio do app com menos de 8 caracteres"
+  elif token_proibido "$APP_TOKEN"; then
+    fail "a senha do celular veio do app com caractere que o backend não lê inteiro: $TOKEN_PROIBIDO"
   else
     ok "senha do celular escolhida no app"
   fi
@@ -258,6 +264,7 @@ else
     # O backend só recusa o literal 'change-me'; o piso de 8 é daqui, pra senha curta não passar.
     [ ${#TOKEN} -lt 8 ] && { erro "curto demais — no mínimo 8 caracteres"; continue; }
     [ "$TOKEN" = "change-me" ] && { erro "esse valor o backend recusa de propósito"; continue; }
+    token_proibido "$TOKEN" && { erro "$TOKEN_PROIBIDO"; continue; }
     break
   done
   printf 'CP_AUTH_TOKEN=%s\n' "$TOKEN" >> backend/.env
