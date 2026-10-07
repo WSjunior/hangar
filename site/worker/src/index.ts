@@ -15,7 +15,7 @@ const KNOWN_CODES = new Set(["sem-internet", "sem-winget", "sem-sudo", "senha-ca
 	"versao-diferente", "modo-desenvolvedor", "roda-do-mouse"]);
 /** O e-mail leva só o começo do relatório: o inteiro fica no KV, e e-mail grande é o que um abuso multiplicaria. */
 export const MAIL_REPORT_MAX = 8 * 1024;
-/** Metade das ~1000 escritas grátis por dia da conta: sobra para o resto. */
+/** Metade das ~1000 escritas grátis por dia da conta, contada por local da Cloudflare: freio aproximado, não garantia. */
 export const KV_DAILY_MAX = 500;
 
 export type Outcome = keyof typeof SUBJECTS;
@@ -108,7 +108,10 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
 	if (!(await deps.allowAll())) return json(429, { erro: "limite" });
 	const id = `${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}`;
 	// Acima do teto diário só o e-mail sai: as escritas grátis do KV são da conta inteira e acabariam.
-	const overDaily = (await deps.countToday()) > KV_DAILY_MAX;
+	const overDaily = await deps.countToday().then((n) => n > KV_DAILY_MAX, (e: unknown) => {
+		console.error(JSON.stringify({ message: "contador falhou", error: e instanceof Error ? e.name : typeof e }));
+		return false;
+	});
 	let stored = !overDaily;
 	if (!overDaily) try {
 		await deps.reports.put(id, JSON.stringify({ ...report, received: new Date().toISOString(), country: request.cf?.country ?? null }),
