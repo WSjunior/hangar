@@ -36,13 +36,19 @@ impl Hangar {
             let _ = done.send(local::probe(install).await);
         });
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(found) = result.await else { return };
-            let _ = this.update_in(cx, |this, window, cx| this.entry_found(found, window, cx));
+            // A procura morreu: o cartão de sempre, nunca o "procurando" para sempre.
+            let found = result.await.ok();
+            let _ = this.update_in(cx, |this, window, cx| match found {
+                Some(found) => this.entry_found(found, window, cx),
+                None => this.entry_other(window, cx),
+            });
         }).detach();
         cx.notify();
     }
 
     fn entry_found(&mut self, found: local::Found, window: &mut Window, cx: &mut Context<Self>) {
+        // Conectou por outro caminho enquanto procurava (importar do Electron): a entrada não vale mais.
+        if self.api.is_some() { self.entry = None; return; }
         match found {
             // É um Hangar, mas sem token legível: o cartão de sempre, com o endereço preenchido.
             local::Found::NeedsToken { address, .. } => {

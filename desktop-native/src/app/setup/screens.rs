@@ -174,7 +174,8 @@ impl SetupWizard {
                 let Some(screen) = steps.get(*ix).copied() else { return };
                 let _ = this.update(cx, |w, cx| if flow::reachable(&steps, screen, &w.view()) { w.go(screen, cx) });
             }))
-            .child(div().mt_auto().pt_3().border_t_1().border_color(theme::border()).flex().items_center().justify_between().gap_2()
+            // Versão numa linha própria: na mesma linha do "Fechar" ela não encolhe e encosta no botão.
+            .child(div().mt_auto().pt_3().border_t_1().border_color(theme::border()).flex().flex_col().items_start().gap_2()
                 .child(div().text_xs().font_family(theme::MONO).text_color(theme::faint())
                     .child(format!("v{} · {}-{}", crate::update::CURRENT, std::env::consts::OS, std::env::consts::ARCH)))
                 .child(Button::new("setup-close").ghost().xsmall().label(tr("setup_close")).on_click(cx.listener(|w, _, window, cx| w.close(window, cx)))))

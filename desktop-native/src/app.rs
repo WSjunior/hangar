@@ -1085,6 +1085,8 @@ impl Hangar {
         self.start_remote_lists();
         self.sync_updater(cx);
         self.connection_dialog = false;
+        // Conectado por qualquer caminho: reabrir o cartão mostra endereço + token, não a entrada da primeira abertura.
+        self.entry = None;
         self.root_focus.focus(window, cx);
         let tx = self.tx.clone();
         let connection = self.connection;
