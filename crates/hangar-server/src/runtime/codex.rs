@@ -215,6 +215,20 @@ fn lifecycle_from_raw(method:&str,params:&Value) -> Option<wire::ServerNotificat
     })
 }
 
+/// Comando, pasta e motivo do pedido de aprovação; fora do formato saem da linha crua, e comando que não é texto fica None.
+fn command_approval(request:&Value) -> (Option<String>,Option<String>,Option<String>) {
+    let raw = |key:&str|request["params"][key].as_str().map(str::to_owned);
+    match decoded(request) {
+        wire::ServerRequest::CommandExecutionApproval(p) => (p.command,p.cwd,p.reason),
+        _ => (raw("command"),raw("cwd"),raw("reason")),
+    }
+}
+
+/// "Sempre permitir" um comando que ninguém leu liberaria qualquer coisa pelo resto da sessão.
+fn unreadable_command(request:&Value) -> bool {
+    request["method"] == "item/commandExecution/requestApproval" && command_approval(request).0.is_none()
+}
+
 fn unsupported_notice(request:&Value) -> Option<String> {
     let method = request["method"].as_str()?;
     if matches!(method,"item/commandExecution/requestApproval" | "item/fileChange/requestApproval" | "item/tool/requestUserInput") { return None; }
@@ -278,14 +292,14 @@ impl Engine {
                 };
                 (format!("Editar arquivos{}",place(root)),reason)
             } else {
-                let (command,cwd,reason) = match decoded(request) {
-                    wire::ServerRequest::CommandExecutionApproval(p) => (p.command,p.cwd,p.reason),
-                    _ => (raw("command"),raw("cwd"),raw("reason")),
-                };
-                (format!("Rodar `{}`{}",command.as_deref().unwrap_or("?"),place(cwd)),reason)
+                let (command,cwd,reason) = command_approval(request);
+                let action = command.map_or_else(||"Rodar um comando que o Hangar não conseguiu ler".into(),|c|format!("Rodar `{c}`"));
+                (format!("{action}{}",place(cwd)),reason)
             };
             state.question = Some(format!("{target}?{}",reason.map_or(String::new(),|r|format!(" {r}"))));
-            state.options = Some(vec!["Permitir".into(),"Negar".into(),"Sempre permitir".into()]);
+            let mut options = vec!["Permitir".into(),"Negar".into()];
+            if !unreadable_command(request) { options.push("Sempre permitir".into()); }
+            state.options = Some(options);
         }
         serde_json::to_value(state).unwrap()
     }
@@ -655,11 +669,11 @@ impl Engine {
                 self.send(format!("{id}:settings"),self.thread_read(false),Some(json!({"kind":"set_mode","parent":id,"mode":mode})),&mut effects);
             }
             OperationKind::Select => {
-                let (request_id,_) = self.server_requests.iter().find(|(id,request)|!self.answering.contains(id)
+                let (request_id,request) = self.server_requests.iter().find(|(id,request)|!self.answering.contains(id)
                     && ["item/commandExecution/requestApproval","item/fileChange/requestApproval"].contains(&request["method"].as_str().unwrap_or("")))
                     .cloned().ok_or_else(||error("nenhuma aprovação pendente"))?;
                 let option = payload["option"].as_u64().ok_or_else(||error("opção inválida"))?;
-                let decision = match option { 1=>"accept",2=>"decline",3=>"acceptForSession",_=>return Err(error("opção inválida")) };
+                let decision = match option { 1=>"accept",2=>"decline",3 if !unreadable_command(&request)=>"acceptForSession",_=>return Err(error("opção inválida")) };
                 self.answer(id,request_id,json!({"decision":decision}),None,&mut effects)?;
             }
             OperationKind::AnswerQuestions => {
@@ -1165,6 +1179,7 @@ impl Engine {
             }
             self.changed(effects,true); return Ok(());
         }
+        let mut from_raw = false;
         let notification = match wire::ServerNotification::decode(method,params) {
             Ok(notification) => notification,
             Err(failure) => {
@@ -1173,6 +1188,7 @@ impl Engine {
                 effects.push(Effect::Diag { event:DiagEvent::CodexDecode,code:decode_code(&failure.method) });
                 self.report_format(format!("decode:{}",failure.method),||line.clone(),effects);
                 // Ciclo de vida não pode ser ignorado: a sessão ficaria `working` para sempre.
+                from_raw = true;
                 match lifecycle_from_raw(method,params) { Some(notification) => notification, None => return Ok(()) }
             }
         };
@@ -1197,7 +1213,9 @@ impl Engine {
                 self.first_response_start = None;
                 self.state.codex_buffering = false; self.response_started = false; self.clear_preview(effects);
                 self.server_requests.clear(); self.answering.clear(); self.request_epochs.clear();
-                if n.turn.status == "failed" {
+                // Status lido cru não é confiável: não apaga nem cria problema, só fecha o turno.
+                if from_raw {
+                } else if n.turn.status == "failed" {
                     let error = n.turn.error.unwrap_or_default();
                     let class = error.codex_error_info.as_ref().and_then(error_class);
                     // O `turn.error` pode vir sem `codexErrorInfo`; a causa já veio no `error` anterior.

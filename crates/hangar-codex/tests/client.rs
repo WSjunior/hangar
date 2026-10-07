@@ -129,3 +129,15 @@ async fn writer_dying_fails_pending_at_once() {
     let result = tokio::time::timeout(Duration::from_secs(2),call).await.expect("não pode esperar o prazo");
     assert!(matches!(result,Err(ClientError::Closed)));
 }
+
+#[tokio::test]
+async fn writer_dying_closes_incoming() {
+    let (ours,_theirs) = tokio::io::duplex(1 << 16);
+    let (r,_) = tokio::io::split(ours);
+    let (broken,gone) = tokio::io::duplex(64);
+    drop(gone);
+    let (client,mut incoming) = Client::over_lines(r,broken);
+    let _ = client.notify("initialized",json!({})).await;
+    let next = tokio::time::timeout(Duration::from_secs(2),incoming.recv()).await.expect("leitor seguiu vivo sem escritor");
+    assert!(next.is_none());
+}

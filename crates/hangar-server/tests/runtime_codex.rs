@@ -659,3 +659,37 @@ fn unreadable_codex_version_is_reported_without_problem() {
     assert_eq!(diags(&effects),vec![(DiagEvent::CodexVersion,"codex_desconhecida".into())]);
     assert!(engine.view()["problema"].is_null());
 }
+
+#[test]
+fn undecodable_turn_completed_keeps_the_retry_problem() {
+    let mut engine = engine();
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),10.0);
+    line(&mut engine,json!({"method":"error","params":{"threadId":"thread-1","turnId":"turn-1","willRetry":true,
+        "error":{"message":"stream disconnected"}}}),10.5);
+    assert_eq!(engine.view()["problema"],"codex_sem_conexao");
+    let effects = line(&mut engine,json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":5}}}),11.0);
+    assert!(effects.iter().any(|e|matches!(e,Effect::WakeQueue)));
+    assert_eq!(engine.view()["state"],"idle");
+    assert_eq!(engine.view()["problema"],"codex_sem_conexao");
+}
+
+#[test]
+fn undecodable_turn_completed_of_another_turn_is_ignored() {
+    let mut engine = engine();
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-2"}}}),10.0);
+    line(&mut engine,json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":5}}}),11.0);
+    assert_eq!(engine.view()["state"],"working");
+}
+
+#[test]
+fn unreadable_command_approval_offers_no_session_wide_grant() {
+    let mut engine = engine();
+    line(&mut engine,json!({"id":4,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-1",
+        "command":["rm","-rf","build"],"cwd":"/repo"}}),10.0);
+    let view = engine.view();
+    assert_eq!(view["question"],"Rodar um comando que o Hangar não conseguiu ler em /repo?");
+    assert_eq!(view["options"],json!(["Permitir","Negar"]));
+    assert!(engine.command(command(OperationKind::Select,json!({"option":3})),clock(10.1)).is_err());
+    let answer = frames(&engine.command(command(OperationKind::Select,json!({"option":2})),clock(10.2)).unwrap());
+    assert_eq!(answer[0]["result"]["decision"],"decline");
+}

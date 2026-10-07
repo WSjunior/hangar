@@ -46,8 +46,13 @@ impl Client {
                     tracing::warn!(request=method.is_some(),"id do app-server do Codex inválido; mensagem descartada");
                     // Pedido sem id legível não pode virar notificação: o Codex ficaria esperando a resposta.
                     // `try_send`: o leitor não pode travar atrás de um escritor parado.
-                    if method.is_some() && reader_out.upgrade().is_none_or(|out|out.try_send(json!({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"id inválido"}}).to_string()).is_err()) {
-                        tracing::warn!("resposta ao id inválido do Codex não coube na fila de saída");
+                    if method.is_some() {
+                        match reader_out.upgrade() {
+                            None => tracing::warn!("resposta ao id inválido do Codex não enviada: cliente encerrado"),
+                            Some(out) => if out.try_send(json!({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"id inválido"}}).to_string()).is_err() {
+                                tracing::warn!("resposta ao id inválido do Codex não coube na fila de saída");
+                            },
+                        }
                     }
                     continue;
                 }
@@ -85,7 +90,7 @@ impl Client {
     /// cliente na próxima mensagem do servidor; a partir daí todo `request` devolve `Closed`.
     pub fn over_lines(reader:impl AsyncRead+Unpin+Send+'static,mut writer:impl AsyncWrite+Unpin+Send+'static) -> (Self,mpsc::Receiver<Incoming>) {
         let (lines_tx,lines_rx) = mpsc::channel::<String>(INCOMING_CAPACITY);
-        tokio::spawn(async move {
+        let transport = tokio::spawn(async move {
             let mut reader = BufReader::new(reader);
             let mut buffer = Vec::new();
             loop {
@@ -115,6 +120,8 @@ impl Client {
                 let written = async { writer.write_all(line.as_bytes()).await?; writer.write_all(b"\n").await?; writer.flush().await }.await;
                 if let Err(e) = written {
                     tracing::warn!(error=?e.kind(),"escrita para o app-server do Codex falhou; conexão encerrada");
+                    // Parar a leitura fecha o `Incoming`: sem isso quem consome nunca sabe que o transporte caiu.
+                    transport.abort();
                     break;
                 }
             }
@@ -143,7 +150,7 @@ impl Client {
         let (socket,_) = tokio_tungstenite::connect_async_with_config(url,Some(config),false).await.map_err(|e|ClientError::Io(e.to_string()))?;
         let (mut sink,mut stream) = socket.split();
         let (lines_tx,lines_rx) = mpsc::channel::<String>(INCOMING_CAPACITY);
-        tokio::spawn(async move {
+        let transport = tokio::spawn(async move {
             while let Some(message) = stream.next().await {
                 match message {
                     Ok(Message::Text(text)) => { if lines_tx.send(text.to_string()).await.is_err() { break; } }
@@ -161,6 +168,7 @@ impl Client {
             while let Some(line) = out_rx.recv().await {
                 if let Err(e) = sink.send(Message::text(line)).await {
                     tracing::warn!(error=ws_error_kind(&e),"escrita no WebSocket do Codex falhou; conexão encerrada");
+                    transport.abort();
                     break;
                 }
             }
