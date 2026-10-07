@@ -29,6 +29,7 @@ mod theme;
 mod tray;
 mod ui_map;
 mod update;
+mod voice;
 #[cfg(test)]
 #[path = "../vendor/gpui-pre-0.3.7/src/elements/list_tail.rs"]
 mod list_tail_tests;

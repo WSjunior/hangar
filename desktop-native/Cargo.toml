@@ -13,7 +13,7 @@ gpui-kit = { version = "=0.7.0", features = [
     "tree-sitter-scala", "tree-sitter-sql", "tree-sitter-svelte", "tree-sitter-swift", "tree-sitter-toml",
     "tree-sitter-tsx", "tree-sitter-typescript", "tree-sitter-yaml", "tree-sitter-zig",
 ] }
-tokio = { version = "=1.53.1", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
+tokio = { version = "=1.53.1", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util", "process"] }
 reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "json", "stream"] }
 # Formatos da conversa compartilhados com o hangar-server: um tipo só dos dois lados.
 hangar-api = { path = "../crates/hangar-api" }
@@ -32,6 +32,10 @@ alacritty_terminal = { version = "=0.26.0", default-features = false }
 rusty-leveldb = "=4.0.1"
 notify = "=7.0.0"
 cpal = "=0.18.2"
+# Voz: WebRTC sans-IO (cripto aws-lc-rs, a mesma do rustls), Opus e cancelamento de eco, todos em Rust puro.
+str0m = "=0.24.1"
+opus-rs = "=0.1.37"
+sonora = { version = "=0.2.0", default-features = false }
 notify-rust = "=4.18.0"
 symphonia = { version = "=0.5.4", features = ["mp3", "aac", "isomp4"] }
 tree-sitter = "=0.26.13"
