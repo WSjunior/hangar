@@ -1,4 +1,4 @@
-import { toolGroupTitulo, type ChatEvent, type ItemConversa } from '@hangar/core';
+import { toolGroupTitulo, type ChatEvent, type HtmlPageRef, type ItemConversa } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 
 // Linha da lista do chat no layout do nativo: mensagem, ou um trecho de trabalho (raciocínios e
@@ -7,20 +7,33 @@ export type ConversationRow =
   | { type: 'event'; id: string; ev: ChatEvent }
   /** `source`: de que item do core o trecho veio; ausente quando a Árvore juntou vários. */
   | { type: 'fold'; id: string; parts: ChatEvent[]; source?: 'tool' | 'group' | 'pensamento' }
-  | { type: 'tasks'; id: string };
+  | { type: 'tasks'; id: string }
+  /** Página publicada pelo html_render: fora de qualquer trecho, ela existe para ser vista. */
+  | { type: 'page'; id: string; ev: ChatEvent; page: HtmlPageRef };
 
 // Na Árvore (`merge`), junta o que o agruparConversa separou (pensamento, chamada solta, grupo)
 // quando vem em sequência: entre duas mensagens o nativo mostra UM resumo, não um bloco por tipo.
 // No Clássico e nos Chips cada item do core vira o seu trecho. A regra de quem entra no pensamento
 // continua no core; aqui só muda o desenho. O id do trecho é o do primeiro item, então fica estável
-// enquanto o trecho cresce na cauda durante o streaming.
-export function foldConversation(items: ItemConversa[], merge = true): ConversationRow[] {
+// enquanto o trecho cresce na cauda durante o streaming. `pageOf` diz se a chamada já publicou uma
+// página; rodando ainda ou com erro, ela segue como linha comum do trecho.
+export function foldConversation(
+  items: ItemConversa[],
+  merge = true,
+  pageOf: (ev: ChatEvent) => HtmlPageRef | null = () => null,
+): ConversationRow[] {
   const rows: ConversationRow[] = [];
   let open: { type: 'fold'; id: string; parts: ChatEvent[] } | null = null;
   for (const item of items) {
     if (item.type === 'event') {
       open = null;
       rows.push(item);
+      continue;
+    }
+    const page = item.type === 'tool' ? pageOf(item.ev) : null;
+    if (page) {
+      open = null;
+      rows.push({ type: 'page', id: `p-${item.id}`, ev: item.ev, page });
       continue;
     }
     const parts = item.type === 'tool' ? [item.ev] : item.type === 'group' ? item.tools : item.eventos;
