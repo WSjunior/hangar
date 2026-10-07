@@ -41,7 +41,8 @@ def comando_do_lancador(cwd: str, initial_prompt: str | None = None,
                         codex_account: str | None = None,
                         approval: str | None = None, sandbox: str | None = None,
                         tool_output_token_limit: int | None = None,
-                        transfer_id: str | None = None) -> list[str]:
+                        transfer_id: str | None = None,
+                        service_tier: str | None = None) -> list[str]:
     """O comando do pane de uma sessao Codex: o lancador unico, o MESMO nos tres chamadores.
 
     O nome da sessao nao entra aqui — `tmux new-session` carimba CP_SESSION_NAME no pane e o
@@ -54,7 +55,11 @@ def comando_do_lancador(cwd: str, initial_prompt: str | None = None,
     sobrescrita de configuracao (`-c model_reasoning_effort=`). Quem faz essa traducao e o lancador,
     que e quem monta o argv do `codex`.
     """
+    if service_tier is not None and service_tier not in ("default", "priority"):
+        raise ValueError("service_tier: use default ou priority")
     argv = [EXECUTAVEL, "--cwd", cwd]
+    if service_tier is not None:
+        argv += ["--service-tier", service_tier]
     if codex_home:
         argv += ["--codex-home", codex_home]
     if codex_account:
@@ -77,6 +82,13 @@ def comando_do_lancador(cwd: str, initial_prompt: str | None = None,
     if initial_prompt:
         argv += ["--prompt", initial_prompt]
     return argv
+
+
+def service_tier_override(service_tier: str | None) -> list[str]:
+    if service_tier is None:
+        return []
+    import json
+    return ["-c", f"service_tier={json.dumps(service_tier)}"]
 
 
 def tool_output_override(limit: int | None, *, launcher: bool = False) -> list[str]:

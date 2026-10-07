@@ -286,6 +286,134 @@ def _inteiro_positivo(campo: str, valor: Any) -> int:
     return n
 
 
+def catalog_model(model: str) -> str:
+    if re.fullmatch(r"gpt-\d[^/]*\[1m\]", model.rsplit("/", 1)[-1]):
+        return model.removesuffix("[1m]")
+    return model
+
+
+def service_tier_env(service_tier: str, extra_body: str | None = None) -> dict[str, str]:
+    """Escolha por execução, conservando os outros campos do corpo enviado ao motor."""
+    if service_tier not in ("default", "priority"):
+        raise ValueError("service_tier: use default ou priority")
+    try:
+        body = json.loads(extra_body) if extra_body is not None else {}
+        json.dumps(body, allow_nan=False)
+    except (TypeError, ValueError):
+        raise ValueError("CLAUDE_CODE_EXTRA_BODY: JSON inválido") from None
+    if not isinstance(body, dict):
+        raise ValueError("CLAUDE_CODE_EXTRA_BODY: esperado um objeto JSON")
+    body["service_tier"] = service_tier
+    # O tradutor também aceita speed=fast, que reativaria a prioridade ao desligar.
+    if service_tier == "default" and body.get("speed") == "fast":
+        del body["speed"]
+    return {"CP_ENGINE_SERVICE_TIER": service_tier,
+            "CLAUDE_CODE_EXTRA_BODY": json.dumps(body, ensure_ascii=False, separators=(",", ":"))}
+
+
+def _read_settings(value: str, *, optional: bool = False, cwd: Path | None = None) -> dict:
+    try:
+        path = Path(value)
+        if cwd is not None and not path.is_absolute():
+            path = cwd / path
+        text = value if value.lstrip().startswith("{") else path.read_text(encoding="utf-8")
+        settings = json.loads(text)
+    except FileNotFoundError:
+        if optional:
+            return {}
+        raise ValueError("--settings: arquivo não encontrado") from None
+    except (OSError, ValueError):
+        raise ValueError("settings: arquivo ilegível ou JSON inválido") from None
+    if not isinstance(settings, dict) or not isinstance(settings.get("env", {}), dict):
+        raise ValueError("settings: esperado um objeto JSON com env como objeto")
+    return settings
+
+
+def _local_settings_root(cwd: Path) -> Path:
+    # O Claude usa o local da raiz Git no POSIX, apenas quando a pasta é do usuário.
+    if os.name == "nt":
+        return cwd
+    for root in (cwd, *cwd.parents):
+        if not (root / ".git").exists():
+            continue
+        if root == Path.home().resolve():
+            return cwd
+        try:
+            uid = os.geteuid()
+            entries = [root, root / ".git"]
+            if (root / ".claude").exists():
+                entries.append(root / ".claude")
+            return root if all(path.stat().st_uid == uid for path in entries) else cwd
+        except OSError:
+            return cwd
+    return cwd
+
+
+def service_tier_settings(cmd: list[str], env: dict[str, str], service_tier: str, *,
+                          cwd: str | Path | None = None) -> tuple[list[str], dict]:
+    """Resolve o mesmo corpo no pré-voo e no lançador, sem gravar nem mudar de pasta."""
+    cwd = Path(cwd or Path.cwd()).resolve()
+    explicit = {}
+    sources = {"user", "project", "local"}
+    args = [cmd[0]]
+    i = 1
+    while i < len(cmd):
+        arg = cmd[i]
+        if arg == "--":
+            args += cmd[i:]
+            break
+        if arg == "--settings":
+            if i + 1 >= len(cmd):
+                raise ValueError("--settings precisa de um valor")
+            explicit = _read_settings(cmd[i + 1], cwd=cwd)
+            i += 2
+        elif arg.startswith("--settings="):
+            explicit = _read_settings(arg.split("=", 1)[1], cwd=cwd)
+            i += 1
+        elif arg == "--setting-sources":
+            if i + 1 >= len(cmd):
+                raise ValueError("--setting-sources precisa de um valor")
+            sources = set(cmd[i + 1].split(","))
+            args += cmd[i:i + 2]
+            i += 2
+        elif arg.startswith("--setting-sources="):
+            sources = set(arg.split("=", 1)[1].split(","))
+            args.append(arg)
+            i += 1
+        else:
+            args.append(arg)
+            i += 1
+    config = Path(env.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    project = cwd / ".claude"
+    paths = []
+    if "user" in sources:
+        paths.append(config / "settings.json")
+    if "project" in sources:
+        paths.append(project / "settings.json")
+    if "local" in sources:
+        paths.append(project / "settings.local.json")
+        local_root = _local_settings_root(cwd)
+        if local_root != cwd:
+            paths.append(local_root / ".claude" / "settings.local.json")
+    extra = env.get("CLAUDE_CODE_EXTRA_BODY", "{}")
+    for path in paths:
+        source = _read_settings(str(path), optional=True, cwd=cwd)
+        if "CLAUDE_CODE_EXTRA_BODY" in source.get("env", {}):
+            extra = source["env"]["CLAUDE_CODE_EXTRA_BODY"]
+    if "CLAUDE_CODE_EXTRA_BODY" in explicit.get("env", {}):
+        extra = explicit["env"]["CLAUDE_CODE_EXTRA_BODY"]
+    if not isinstance(extra, str):
+        raise ValueError("CLAUDE_CODE_EXTRA_BODY: esperado texto JSON")
+    selected = service_tier_env(service_tier, extra)
+    explicit["env"] = {**explicit.get("env", {}), **selected}
+    try:
+        json.dumps(explicit, allow_nan=False)
+    except (TypeError, ValueError):
+        raise ValueError("settings: JSON inválido") from None
+    env.update(selected)
+    return args, explicit
+
+
 def env_de(nome: str, modelo: str | None = None, context_window: int | None = None,
            engine_account: str | None = None, *, engine_account_home: str | None = None,
            engine_account_base_url: str | None = None) -> dict[str, str]:
@@ -378,6 +506,8 @@ def env_de(nome: str, modelo: str | None = None, context_window: int | None = No
         from app.cliproxy_accounts import base_model
         if base_model(modelo_final, account["prefix"]) == base_model(e["model"], account["prefix"]):
             janela = e.get("context_window")
+    if catalog_model(modelo_final) != modelo_final:
+        janela = 1_000_000
     if janela:
         env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(_inteiro_positivo("context_window", janela))
     if _booleano("bundled_skills", e.get("bundled_skills")) is not True:

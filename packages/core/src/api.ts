@@ -18,6 +18,7 @@ import type { UsoFiltros, UsoReport } from './uso';
 import type { ConfigSyncItem, ConfigSyncManifest, ConfigSyncProgress, ConfigSyncReport } from './configSync';
 import type {
   Atualizacao,
+  MigrationStatus,
   SessionInfo,
   Provider,
   ChatEvent,
@@ -378,7 +379,9 @@ export function probeServerResponse(server: Server, path: string, init?: Request
 // de repositório grande. Teto ainda existe para máquina fora do ar atrás de VPN não prender a tela.
 const SESSION_FILE_TIMEOUT_MS = 60_000;
 
-async function apiFetchForServer<T>(s: Server, path: string, init?: RequestInit, prazoMs = 8000): Promise<T> {
+// `comCodigo`: o erro também leva o `code` e o `envelope` do servidor, como o do `apiFetch`. Opcional porque
+// quem já trata o erro destas chamadas pelo texto ou pelo status não muda de comportamento sem querer.
+async function apiFetchForServer<T>(s: Server, path: string, init?: RequestInit, prazoMs = 8000, comCodigo = false): Promise<T> {
   let res: Response;
   // Prazo por PADRAO. Esta funcao fala com OUTRO servidor, e servidor offline atras de VPN nao
   // recusa a conexao — o socket fica pendurado e a promessa nunca resolve (o comentario do
@@ -398,7 +401,11 @@ async function apiFetchForServer<T>(s: Server, path: string, init?: RequestInit,
     }
     throw e;
   }
-  if (!res.ok) throw Object.assign(new Error(`${res.status}: ${await errorDetail(res)}`), { status: res.status });
+  if (!res.ok) {
+    if (!comCodigo) throw Object.assign(new Error(`${res.status}: ${await errorDetail(res)}`), { status: res.status });
+    const { msg, code, envelope } = await lerErro(res);
+    throw Object.assign(new Error(`${res.status}: ${msg}`), { status: res.status, code, envelope });
+  }
   return res.json() as Promise<T>;
 }
 
@@ -447,12 +454,14 @@ export async function confirmarNavForServer(s: Server, name: string): Promise<vo
 // não paga este tempo: conexão recusada volta em milissegundos. Quem espera são os lentos de
 // verdade, e é exatamente por eles que este número existe.
 // `fresco` = botão "Atualizar dados": o servidor coleta agora em vez de servir a última leitura.
-export async function fetchCostsForServer(s: Server, period: string, fresco = false): Promise<Partial<CostReport>> {
-  const res = await apiFetchRes(`/api/costs?period=${encodeURIComponent(period)}${fresco ? '&fresco=1' : ''}`, {
+// `summary` = tela inicial: só totals/by_day/by_model/sem_tarifa/applied/usd_brl, sem `combos`.
+// Servidor antigo ignora o parâmetro e manda o relatório inteiro, que tem os mesmos campos.
+export async function fetchCostsForServer(s: Server, period: string, fresco = false, summary = false): Promise<Partial<CostReport>> {
+  const res = await apiFetchRes(`/api/costs?period=${encodeURIComponent(period)}${fresco ? '&fresco=1' : ''}${summary ? '&view=summary' : ''}`, {
     signal: AbortSignal.timeout(20000),
   }, s);
   if (res.status === 202) throw await Aquecendo.de(res);
-  if (!res.ok) throw new Error(`${res.status}`);
+  if (!res.ok) throw await falhaDeCustos(res);
   return res.json() as Promise<Partial<CostReport>>;
 }
 
@@ -496,8 +505,15 @@ export async function fetchUsoForServer(s: Server, period: string, filtros: UsoF
     signal: AbortSignal.timeout(20000),
   }, s);
   if (res.status === 202) throw await Aquecendo.de(res);
-  if (!res.ok) throw new Error(`${res.status}`);
+  if (!res.ok) throw await falhaDeCustos(res);
   return res.json() as Promise<Partial<UsoReport>>;
+}
+
+// 503 do servidor de custos traz código e motivo: a frase traduzida vai no `message` e o código
+// no erro, como no resto do dono único. Sem envelope, `message` continua sendo o status.
+async function falhaDeCustos(res: Response): Promise<Error> {
+  const { msg, code } = await lerErro(res);
+  return Object.assign(new Error(code ? msg : `${res.status}`), { status: res.status, code });
 }
 
 // 202 do /api/costs e /api/uso: a primeira leitura do histórico daquela máquina ainda está rodando no
@@ -1125,8 +1141,10 @@ export function worktreeAgeDays(w: WorktreeStatus, now = Date.now() / 1000): num
   return at ? Math.max(0, Math.floor((now - at) / 86400)) : null;
 }
 
+/** Pronta para apagar: mesclada, sem alteração e sem sessão. Arquivo ignorado não segura (cópia
+ *  do CLAUDE.local.md, cache); a confirmação lista o que ele perde. */
 export function worktreeReady(w: WorktreeStatus): boolean {
-  return w.merged && !w.dirty && !w.ignored.length && !w.sessions.length && !w.degraded;
+  return w.merged && !w.dirty && !w.sessions.length && !w.degraded;
 }
 
 /** Soma do disco de várias: com alguma pendente, falha ou parcial, o total é só um mínimo. */
@@ -1779,6 +1797,12 @@ export function getConfig(): Promise<ConfigServidor> {
 export function getAtualizacao(procurar = false): Promise<Atualizacao> {
   return apiFetch(`/api/atualizacao${procurar ? '?procurar=1' : ''}`,
                   { signal: AbortSignal.timeout(procurar ? 120000 : 20000) });
+}
+
+/** Tela temporária "Migração para Rust": quem atende cada área, versões e consumo. */
+export function getMigrationStatus(s: Server | null = null): Promise<MigrationStatus> {
+  return s ? apiFetchForServer(s, '/api/migration/status', {}, 10000)
+           : apiFetch('/api/migration/status', { signal: AbortSignal.timeout(10000) });
 }
 
 /** Lança a atualização. Devolve na hora — ela roda fora do processo do backend, que vai reiniciar. */
@@ -2451,8 +2475,29 @@ export async function pressPluginButton(
 ): Promise<{ ok: boolean; copied?: string; opened?: string }> {
   const path = `/api/sessions/${encodeURIComponent(name)}/plugin/press`;
   const init = { method: 'POST', body: JSON.stringify({ site, key }) };
-  return server ? apiFetchForServer<{ ok: boolean; copied?: string; opened?: string }>(server, path, init)
+  return server ? apiFetchForServer<{ ok: boolean; copied?: string; opened?: string }>(server, path, init, 8000, true)
                 : apiFetch<{ ok: boolean; copied?: string; opened?: string }>(path, init);
+}
+
+/** Traz um painel de mod para a frente (`plugin/show`). Servidor sem a rota responde 404 ou 405 (`isMissingRoute`). */
+export async function showPluginPane(name: string, site: string, server?: Server): Promise<{ ok: boolean }> {
+  const path = `/api/sessions/${encodeURIComponent(name)}/plugin/show`;
+  const init = { method: 'POST', body: JSON.stringify({ site }) };
+  return server ? apiFetchForServer<{ ok: boolean }>(server, path, init, 8000, true) : apiFetch<{ ok: boolean }>(path, init);
+}
+
+export type PluginInputKind = 'change' | 'submit';
+
+/** Digitação num `Input` de mod (`plugin/input`): só a sessão sem terminal aceita; com terminal vem
+ *  `erro_mod_sem_digitacao`. Sempre com prazo de 8 s, o mesmo do `apiFetchForServer` (que o aplica quando há
+ *  servidor): o campo manda um pedido por vez, e um pedido pendurado prenderia toda a digitação nele. */
+export async function inputPluginField(
+  name: string, site: string, key: string, kind: PluginInputKind, value: string, server?: Server,
+): Promise<{ ok: boolean }> {
+  const path = `/api/sessions/${encodeURIComponent(name)}/plugin/input`;
+  const init = { method: 'POST', body: JSON.stringify({ site, key, kind, value }) };
+  return server ? apiFetchForServer<{ ok: boolean }>(server, path, init, 8000, true)
+                : apiFetch<{ ok: boolean }>(path, { ...init, signal: AbortSignal.timeout(8000) });
 }
 
 // Pergunta lateral (/btw do Claude Code): o backend dirige o overlay da TUI e devolve a resposta.

@@ -5,7 +5,7 @@ import {
   projectKey, projectLabel, encodeCompareIds, parseCompareIds, latestAssistantEvent, resetsIn, relativeTime,
   clusterByPair, railLabel, sortSessions, bubblesFromTail, ctxWindow, fileKind, fmtBytes, providerName, providerTag, isOrq,
   untrackedReason,
-  summarizeText, summarizeToolInput, summarizeToolResult, toolPhase, toolGroupLabel, toolGroupCounts, toolGroupTitulo, toolVerbo,
+  summarizeText, summarizeToolInput, summarizeToolResult, toolPhase, toolGroupLabel, toolGroupCounts, toolGroupTitulo, splitTerminalRun, terminalFoldKind, terminalFoldTitle, toolVerbo,
   rotuloEstado,
   splitTodoBlock, parseImageMessage, parseCanal, parseRealtimeDelegation, parsePeerMessage, basename,
   parseFilePaths, separarComando, nomeFerramenta,
@@ -1097,5 +1097,102 @@ describe('formatElapsed', () => {
     overwriteGetLocale(() => 'pt');
     expect([undefined, null, -1, NaN].map(formatElapsed)).toEqual(['—', '—', '—', '—']);
     expect([0, 59, 60, 3599, 5400].map(formatElapsed)).toEqual(['0 s', '59 s', '1 min', '59 min', '1 h 30 min']);
+  });
+});
+
+describe('splitTerminalRun', () => {
+  const t = (tool_name: string, command?: string) => ({ tool_name, tool_input: command ? { command } : null });
+  const shape = (run: ReturnType<typeof t>[]) =>
+    splitTerminalRun(run).map((p) => (p.kind === 'fold' ? p.tools.map((x) => x.tool_name) : p.tool.tool_name));
+
+  it('buscas, leituras, MCP e comandos seguidos viram um bloco; edição e gravação ficam soltas', () => {
+    const run = [t('Read'), t('Grep'), t('Bash', 'make'), t('Edit'), t('Glob'), t('mcp__hangar__send'), t('Write'), t('Read')];
+    expect(shape(run)).toEqual([['Read', 'Grep', 'Bash'], 'Edit', ['Glob', 'mcp__hangar__send'], 'Write', ['Read']]);
+  });
+
+  it('agente e carregador de ferramentas não dobram', () => {
+    expect(shape([t('Agent'), t('ToolSearch'), t('Bash', 'ls')])).toEqual(['Agent', 'ToolSearch', ['Bash']]);
+  });
+
+  it('lista vazia devolve lista vazia', () => {
+    expect(splitTerminalRun([])).toEqual([]);
+  });
+});
+
+describe('terminalFoldKind', () => {
+  const bash = (command: string) => terminalFoldKind('Bash', { command });
+
+  it('comando só de busca, leitura ou listagem conta como esse tipo, como no Claude Code', () => {
+    expect(bash('rg -n foo src | head -5')).toBe('search');
+    expect(bash('cat a.txt | jq .x')).toBe('read');
+    expect(bash('ls -la && tree')).toBe('list');
+    expect(bash('echo oi; cat a')).toBe('read');
+  });
+
+  it('qualquer outro comando é comando de shell', () => {
+    expect(bash('cd src && ls')).toBe('shell');
+    expect(bash('npm run build')).toBe('shell');
+    expect(bash('echo "a | rg"')).toBe('shell');
+    expect(terminalFoldKind('Bash', null)).toBe('shell');
+    expect(terminalFoldKind('exec_command', { cmd: 'grep x y' })).toBe('search');
+    expect(terminalFoldKind('exec_command', { cmd: ['rg', '-n', 'x'] })).toBe('search');
+    expect(bash('(cd src && ls)')).toBe('shell');
+  });
+
+  it('leitura que grava, apaga ou roda outro comando não dobra', () => {
+    for (const cmd of [
+      'sort a > b', 'cat x > y', 'cat x >> y', "awk '{print $1}' f > out", 'echo oi > f', 'cat x &> log', 'cat x >&log',
+      'cat x >| y', 'cat x | tee y', 'sort -o out in', 'sort -uo out in', 'sort --output=out in',
+      'find . -delete', 'find . -exec rm {} +', 'find . -execdir rm {} \\;', 'find . -ok rm {} \\;', 'find . -okdir rm {} \\;',
+      'find . -fprint f', 'find . -fprintf f %p', 'find . -fls f',
+      'cat $(rm -rf x)', 'cat `rm -rf x`', 'grep "$(rm x)" f', 'diff <(ls a) b', 'cat x | grep y > z',
+    ]) expect(bash(cmd), cmd).toBe('shell');
+  });
+
+  it('descartar a saída ou juntar stderr não é gravação, e o & do redirecionamento não quebra o comando', () => {
+    expect(bash('grep foo f 2>&1 | head')).toBe('search');
+    expect(bash('cat x 2>/dev/null')).toBe('read');
+    expect(bash('cat x > /dev/null 2>&1')).toBe('read');
+    expect(bash('rg x &>/dev/null')).toBe('search');
+    expect(bash('cat x >&2')).toBe('read');
+    expect(bash("awk '$1 > 5' f")).toBe('read');
+    expect(bash("grep '$(x)' f")).toBe('search');
+    expect(bash('grep -o foo f | sort')).toBe('search');
+    expect(bash('sort -n f')).toBe('read');
+  });
+
+  it('nome sem diferenciar maiúsculas, com as ferramentas do Pi', () => {
+    expect(terminalFoldKind('read')).toBe('read');
+    expect(terminalFoldKind('ls')).toBe('list');
+    expect(terminalFoldKind('find')).toBe('search');
+  });
+
+  it('MCP dobra; nome sem servidor não', () => {
+    expect(terminalFoldKind('mcp__hangar__send')).toBe('mcp');
+    expect(terminalFoldKind('mcp__x')).toBeNull();
+    expect(terminalFoldKind('Edit')).toBeNull();
+  });
+});
+
+describe('terminalFoldTitle', () => {
+  beforeEach(() => overwriteGetLocale(() => 'pt'));
+  const tool = (tool_name: string, tool_input: Record<string, unknown> | null = null) => ({ tool_name, tool_input });
+
+  it('ordem e plural do Claude Code, arquivos distintos', () => {
+    const tools = [
+      tool('Read', { file_path: '/a' }), tool('Read', { file_path: '/a' }), tool('Read', { file_path: '/b' }),
+      tool('Grep'), tool('Bash', { command: 'make' }), tool('Bash', { command: 'ls' }),
+      tool('mcp__hangar__send'), tool('mcp__hangar-computer-control__objetivo'),
+    ];
+    expect(terminalFoldTitle(tools, false)).toBe('Buscou 1 padrão, leu 2 arquivos, listou 1 diretório, chamou hangar, computer-control 2 vezes, rodou 1 comando de shell');
+  });
+
+  it('leituras sem caminho somam aos arquivos distintos', () => {
+    const tools = [tool('Read', { file_path: '/a' }), tool('Bash', { command: 'cat b' }), tool('Bash', { command: 'cat c' })];
+    expect(terminalFoldTitle(tools, false)).toBe('Leu 3 arquivos');
+  });
+
+  it('rodando vai para o gerúndio com reticências', () => {
+    expect(terminalFoldTitle([tool('Bash', { command: 'make' }), tool('Bash', { command: 'make' })], true)).toBe('Rodando 2 comandos de shell…');
   });
 });

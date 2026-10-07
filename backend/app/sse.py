@@ -7,8 +7,10 @@ import re
 import sys
 import time
 import traceback
+import uuid
 from pathlib import Path
-from app import atomico, diag, guest_users, plugin_bridge, share_store
+from app import atomico, diag, guest_users, list_bridge, plugin_bridge, share_store
+from app import registry as registry_mod
 from app.adapters import CLAUDE_HEADLESS, chave_de, get_adapter
 from app.adapters.preview_push import PushPreviewSource, fonte_ferramenta, fonte_pensamento
 from app.difusor import Difusor
@@ -357,7 +359,8 @@ def _list_sig(infos) -> str:
     # identicos e ainda assim mudar a distribuicao por Task — sem isto a barra segmentada e a
     # Task atual ficam com o snapshot velho ate outra coisa qualquer mudar a sig.
     return json.dumps(
-        [(i.name, i.cwd, getattr(i, "branch", None), getattr(i, "git_dirty", None),
+        [(i.name, i.cwd, getattr(i, "branch", None), getattr(i, "git_cwd", None),
+          getattr(i, "worktree_gone", False), getattr(i, "git_dirty", None),
           i.state, i.tracked, getattr(i, "headless", False), i.jsonl, i.question, i.stalled, i.limited,
           getattr(i, "lifecycle_id", None), getattr(i, "transfer_id", None),
           getattr(i, "transfer_phase", None),
@@ -369,7 +372,7 @@ def _list_sig(infos) -> str:
            else bool(getattr(i, "label", None))),
           getattr(i, "startup_steps", []),
           getattr(i, "loop_status", None), getattr(i, "loop_iter", None),
-          getattr(i, "engine", None), getattr(i, "conta", None),
+          getattr(i, "engine", None), getattr(i, "conta", None), getattr(i, "codex_service_tier", None),
           getattr(i, "plan_name", None), getattr(i, "plan_done", None),
           getattr(i, "plan_total", None),
           getattr(i, "plan_task", None), getattr(i, "plan_task_total", None),
@@ -478,13 +481,22 @@ class _ListRefresher:
         self._sc_failing = False
         return value
 
+    async def _produce(self) -> tuple[list, bool]:
+        """A lista decorada e se foi o Python que a produziu. Com o Rust dono o retrato é dele
+        (`list.snapshot`) e a descoberta Python não roda; o modo é relido a cada tique, porque a
+        desistência do Rust passa tudo ao Python."""
+        if await registry_mod.rust_owns_list_async():
+            return await asyncio.to_thread(list_bridge.snapshot), False
+        registry_mod.PYTHON_DISCOVERY["refresher"] += 1
+        snap = [i.model_copy() for i in await _cached_list()]
+        return await _list_registry.list_with_state(snap), True
+
     async def _run(self):
         while True:
             self._launch_shortcuts()
             try:
                 started = time.monotonic()
-                snap = [i.model_copy() for i in await _cached_list()]
-                infos = await _list_registry.list_with_state(snap)
+                infos, ours = await self._produce()
                 sig = _list_sig(infos)
                 # Serializar a lista inteira só quando vai ser publicada (a sig decide, como antes).
                 data = (json.dumps([i.model_dump(mode="json") for i in infos], ensure_ascii=False)
@@ -509,7 +521,8 @@ class _ListRefresher:
                     quadro = traceback.extract_tb(_tb)[-1] if _tb else None
                     onde = f" @ {Path(quadro.filename).name}:{quadro.lineno}" if quadro else ""
                     diag.registrar("lista.refresher_falhou", "erro",
-                                   detalhe=f"{type(_exc).__name__}{onde}")
+                                   detalhe=f"{type(_exc).__name__}{onde}",
+                                   codigo=getattr(_exc, "code", None))
                     async with self._cond:
                         self.errored = True
                         self.version += 1
@@ -519,7 +532,9 @@ class _ListRefresher:
             # A cada tique, mesmo sem mudança na sig: o /api/sessions serve daqui campos que a sig
             # ignora (last_activity, statusline inteira). Lista já decorada não é mais escrita.
             # Idade conta do início do tique: lista iniciada antes de uma invalidação não vale.
-            self.latest = (started, infos)
+            # Só a do Python: a sombra compara o Rust com ela, e o `/api/sessions` pede o retrato
+            # do Rust direto a ele.
+            self.latest = (started, infos) if ours else None
             shortcuts = self._harvest_shortcuts()
             # sucesso: emite se a sig mudou OU se estava em erro (pra o front LIMPAR o list_error).
             # `data`/`sig` só andam quando a assinatura da lista muda: gravar `data` numa mudança que
@@ -670,6 +685,15 @@ async def list_events(ping_secs: float = 8.0, only=None, viewer=None, token=None
 
 
 def _confirm_codex_queue(name: str, jsonl: str) -> None:
+    from app import runtime_coordinator
+    from app.runtime_adapter import run_sync
+    coordinator = runtime_coordinator.current()
+    if coordinator is not None and coordinator.managed_runtime(name):
+        try:
+            run_sync(lambda: coordinator.op(name, {"kind":"confirm"}, uuid.uuid4().hex), coordinator.loop)
+        except runtime_coordinator.TransferInProgress:
+            pass        # posse passando ao Rust: a confirmação fica para a próxima rodada, o stream segue
+        return
     queue = PromptQueue(name)
     if not any(r.get("delivered") and not r.get("confirmed") for r in queue.load()):
         return
@@ -682,8 +706,90 @@ def _confirm_codex_queue(name: str, jsonl: str) -> None:
         queue.reconcile_delivered(committed, start, time.time(), grace=0, confirm_only=True)
 
 
+# Com o Rust de pé, estes quatro de Claude com terminal saem do `Monitor` do hub (parte 4, Task 5).
+_RUST_STATE_EVENTS = ("state", "preview", "ask_question", "suggest")
+# O hub pinga o canal a cada 10 s: três calados = conexão morta.
+_RUST_CHANNEL_IDLE_S = 30.0
+_RUST_CHANNEL_LINE = 1 << 20
+
+
+class RustStateChannelError(Exception):
+    """O canal privado do estado no Rust não abriu ou caiu: o stream fecha e o cliente reconecta."""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+def _estado_do_rust(provider: str) -> bool:
+    """Claude com terminal com o Rust esperado ou de pé (`pending`/`rust`): estado, prévia, pergunta
+    e sugestão são do `Monitor` do hub em qualquer porta, e nada disso sobe aqui."""
+    if provider != "claude":
+        return False
+    from app import runtime_coordinator
+    owner = runtime_coordinator.current()
+    return owner is not None and owner.mode in ("pending", "rust")
+
+
+async def _canal_do_estado(name: str):
+    """`(evento, dado)` do canal privado do hub (`/__hangar_server/state/{name}/events`), para quem
+    entrou pelas portas do Python. HTTP/1.0: o corpo vem cru até o fim, sem pedaços."""
+    from urllib.parse import quote
+    endpoint = list_bridge.endpoint()
+    if endpoint is None:
+        raise RustStateChannelError("state_channel_off")
+    address, secret = endpoint
+    host, port = address.rsplit(":", 1)
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host.strip("[]"), int(port), limit=_RUST_CHANNEL_LINE), 5)
+    except (OSError, TimeoutError) as e:
+        raise RustStateChannelError("state_channel_unavailable") from e
+    try:
+        writer.write((f"GET /__hangar_server/state/{quote(name, safe='')}/events HTTP/1.0\r\n"
+                      f"host: {address}\r\nx-hangar-internal: {secret}\r\n\r\n").encode())
+        await writer.drain()
+        status = (await asyncio.wait_for(reader.readline(), 10)).split()
+        if len(status) < 2 or status[1] != b"200":
+            raise RustStateChannelError(
+                f"state_channel_status:{status[1].decode(errors='replace')[:3] if len(status) > 1 else 'none'}")
+        while (await asyncio.wait_for(reader.readline(), 10)) not in (b"\r\n", b"\n", b""):
+            pass
+        event, data = None, []
+        while True:
+            line = await asyncio.wait_for(reader.readline(), _RUST_CHANNEL_IDLE_S)
+            if not line:
+                raise RustStateChannelError("state_channel_closed")
+            line = line.decode("utf-8").rstrip("\r\n")
+            if line.startswith("event:"):
+                event = line[6:].strip()
+            elif line.startswith("data:"):
+                data.append(line[5:].removeprefix(" "))
+            elif not line:
+                if event in _RUST_STATE_EVENTS:
+                    yield event, "\n".join(data)
+                event, data = None, []
+    except TimeoutError as e:
+        raise RustStateChannelError("state_channel_timeout") from e
+    except (OSError, ValueError, UnicodeDecodeError) as e:
+        raise RustStateChannelError("state_channel_read") from e
+    finally:
+        writer.close()
+
+
+def _info_event(name: str, provider: str, jsonl: str | None) -> dict:
+    """`info` da conexão interna: o mesmo JSON da rota /internal/sessions/{name}/info."""
+    from app.internal_api import info_payload   # internal_api importa este módulo
+    return {"event": "info",
+            "data": json.dumps(info_payload(name, provider, jsonl), ensure_ascii=False)}
+
+
 async def merged_events(name: str, jsonl: str, provider: str = "claude",
-                        start_offset: int | None = None, count_app: bool = True):
+                        start_offset: int | None = None, count_app: bool = True,
+                        side: bool = False):
+    # side=True: conexão interna do hangar-server (internal_api.side_events). Abre com `info` e o
+    # repete no lugar do `reset`. A conversa o hangar-server lê do arquivo; aqui o transcript só é
+    # seguido para a supressão da prévia e a baixa da fila do Codex.
     # count_app=False: conexao de convidado. Contar como app do dono aberto calaria as push dele.
     # provider: default "claude" preserva o comportamento de hoje pros callers que ainda nao passam
     # (api.py so passa quando uma tarefa futura ligar o seletor de provider no endpoint).
@@ -708,7 +814,9 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
         return _ESTADOS.ouvir((name, prov, current_jsonl), lambda: adap.state_monitor(
             name, sid_get=lambda: session_key(current_jsonl) if current_jsonl else None, **kw))
 
-    monitor_stream = _monitor_de(provider)
+    # Claude com terminal e o Rust de pé: o Python não observa o pane nem lê a prévia, em nenhuma
+    # porta. A conexão interna é o próprio hub; quem entrou pelo Python lê o canal privado dele.
+    rust_state = _estado_do_rust(provider)
     pqueue = PromptQueue(name)
     # Fonte do preview ao vivo ramifica por provider: Claude nao tem push (o app-server manda os
     # deltas, o TUI do Claude nao) -> continua no PreviewBroker (poll do pane). Codex nao tem pane
@@ -725,7 +833,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                 else PreviewBroker.get(name, prov,
                                        lambda: session_key(current_jsonl) if current_jsonl else None))
 
-    broker = _broker_de(provider)
+    broker = None if rust_state else _broker_de(provider)
     # Inicio da sessao atual: poda entradas de fila pre-/clear no live SSE (mesma regra do history).
     # `or 0.0`: aqui start_ts so PODA bolha de sessao anterior. Transcript ilegivel -> nao corta
     # nada, que e o fallback seguro deste lado (o perigoso e no reconcile, ver _transcript_start_ts).
@@ -828,6 +936,8 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                 # acaso coubesse no tamanho do novo passava na validacao, dava seek no meio dele e
                 # PULAVA calado todo o inicio da conversa nova (parse_line engole a linha parcial).
                 # Com o stem, id de outro transcript simplesmente nao e honrado.
+                if side:
+                    continue
                 ev_id = f"{session_key(path)}:{ev.offset}" if ev.offset is not None else None
                 await queue.put(("message", ev.model_dump_json(), ev_id))
         except asyncio.CancelledError:
@@ -850,7 +960,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                 snap = await asyncio.to_thread(acc.collect)
                 if snap:
                     # Medida do stream (adapter sem terminal ou plugin) vence a reserva do transcript.
-                    snap.update(live_snapshot(name, Path(path).stem, acc.last_call_ts()))
+                    snap.update(live_snapshot(name, session_key(path), acc.last_call_ts()))
                 if snap and snap != last:
                     last = snap
                     await queue.put(("stats", json.dumps(snap)))
@@ -938,6 +1048,27 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                            etapa="previa", erro_tipo=type(exc).__name__)
             await queue.put(("__error__", exc))
 
+    async def rust_state_pump():
+        # Estado, prévia, pergunta e sugestão do `Monitor` do Rust, como o hub os publicou.
+        try:
+            async for event, data in _canal_do_estado(name):
+                await queue.put(("__rust__", (event, data)))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # surface, never swallow
+            diag.registrar("sse.estado_rust_falhou", "erro", sessao=name, provider=current_provider,
+                           codigo=getattr(exc, "code", type(exc).__name__))
+            await queue.put(("__error__", exc))
+
+    def _fontes_do_estado(prov, rust):
+        """Tarefas do estado ao vivo por chave: as do Python, o canal do hub, ou nada (conexão interna
+        de sessão do Rust, que é o próprio hub). `rust` vem de quem montou o `broker`: reler o modo
+        aqui deixaria os dois discordarem se ele mudasse no meio."""
+        if rust:
+            return {} if side else {"rust": asyncio.create_task(rust_state_pump())}
+        return {"state": asyncio.create_task(pump("state", _monitor_de(prov))),
+                "preview": asyncio.create_task(preview_pump(broker))}
+
     em_voo_slots = {"pensamento": {"text": "", "pending": False},
                     "ferramenta": {"text": "", "pending": False}}
 
@@ -998,32 +1129,33 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
     def drain_done(task):
         drain_tasks.discard(task)
         if not task.cancelled() and (exc := task.exception()) is not None:
+            from app.runtime_coordinator import failure_reason
+            reason = failure_reason(exc)
             diag.registrar("sse.fila_falhou", "erro", sessao=name, provider=current_provider,
-                           erro_tipo=type(exc).__name__)
+                           erro_tipo=reason["codigo"], detalhe=reason["detalhe"])
 
     # start_offset so vale pro tail INICIAL (veio do Last-Event-ID desta conexao). O rebind do
     # /clear abaixo recria sem ele: o transcript e outro arquivo, o offset antigo nao significa nada.
     if provider == "codex":
         # Confirma antigas antes de o follow republicar a fila na reconexão.
         await asyncio.to_thread(_confirm_codex_queue, name, jsonl)
-    tail_task = asyncio.create_task(tail_pump(jsonl, start_offset))
+    # A conexão interna só seguia o transcript para a supressão da prévia, que agora é do hub.
+    tail_task = None if side and rust_state else asyncio.create_task(tail_pump(jsonl, start_offset))
     stats_task = asyncio.create_task(stats_pump(jsonl))
-    # Nomeadas porque as quatro sao refeitas quando o provider muda no meio do stream
-    # (__reprovider__): cada uma carrega o adapter antigo dentro de si (parser do transcript, fold
-    # das estatisticas, monitor de estado, fonte da previa) e trocar so uma deixaria o stream meio
-    # num provider e meio no outro.
-    state_task = asyncio.create_task(pump("state", monitor_stream))
-    preview_task = asyncio.create_task(preview_pump(broker))
+    # Nomeadas porque sao refeitas quando o provider muda no meio do stream (__reprovider__): cada
+    # uma carrega o adapter antigo dentro de si (parser do transcript, fold das estatisticas,
+    # monitor de estado, fonte da previa) e trocar so uma deixaria o stream meio num provider e
+    # meio no outro.
+    state_tasks = _fontes_do_estado(provider, rust_state)
     tasks = [
-        tail_task,
+        *([tail_task] if tail_task else []),
         stats_task,
         # Fila duravel: user_msg sinteticos (id "queued-") pras msgs enfileiradas. O front faz o
         # dedup cruzado (queued- vs real) por texto.
         asyncio.create_task(pump("message", pqueue.follow(min_ts=start_ts, emit_confirmed=True))),
-        state_task,
+        *state_tasks.values(),
         asyncio.create_task(ping_loop()),
         asyncio.create_task(nav_pump()),
-        preview_task,
         asyncio.create_task(em_voo_pump("pensamento", fonte_pensamento(name))),
         asyncio.create_task(em_voo_pump("ferramenta", fonte_ferramenta(name))),
         asyncio.create_task(jsonl_watcher()),
@@ -1047,6 +1179,9 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
     if count_app:
         plugin_bridge.app_entrou()
     try:
+        if side:
+            # Dentro do try: quem desconecta já aqui ainda passa pelo finally (tarefas, app_saiu).
+            yield _info_event(name, current_provider, current_jsonl)
         while True:
             # Só o tail_pump enfileira o 3o item (o offset -> `id:` do SSE); os demais produtores
             # continuam mandando pares. Desempacota tolerante em vez de tocar em todos eles.
@@ -1057,6 +1192,12 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                 _why = f"erro no pump: {type(data).__name__}: {data}"
                 motivo_diag = "falha_pump"
                 raise data
+            if event == "__rust__":
+                # Do `Monitor` do hub: já saiu com sugestão, pergunta, problema e entrega resolvidos.
+                rust_event, rust_data = data
+                _sent[rust_event if rust_event in _sent else "other"] += 1
+                yield {"event": rust_event, "data": rust_data}
+                continue
             if event == "__reprovider__":
                 # A sessao terminou de se identificar (ex: nasceu como "claude" e e Pi). Refaz TUDO
                 # que depende do adapter — transcript, estatisticas, estado e previa — e manda
@@ -1068,22 +1209,28 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                 _log.info("sse: provider mudou name=%s %s -> %s jsonl=%s",
                           name, current_provider, novo_prov,
                           Path(novo_jsonl).name if novo_jsonl else None)
-                for t in (tail_task, stats_task, state_task, preview_task):
-                    tasks.remove(t)
-                    t.cancel()
+                for t in (tail_task, stats_task, *state_tasks.values()):
+                    if t is not None:
+                        tasks.remove(t)
+                        t.cancel()
                 current_provider = novo_prov
                 current_jsonl = novo_jsonl
                 committed["text"] = ""
-                _enqueue_preview("")
-                broker = _broker_de(novo_prov)
-                broker.reset()
+                rust_state = _estado_do_rust(novo_prov)
+                broker = None if rust_state else _broker_de(novo_prov)
+                # A prévia do provider anterior sai; na conexão interna de sessão do Rust quem
+                # limpa é o hub, e uma prévia do Python ali seria descartada como vazamento.
+                if not (side and rust_state):
+                    _enqueue_preview("")
+                if broker is not None:
+                    broker.reset()
                 ask_q_emitted = False
-                tail_task = asyncio.create_task(tail_pump(novo_jsonl))
+                tail_task = None if side and rust_state else asyncio.create_task(tail_pump(novo_jsonl))
                 stats_task = asyncio.create_task(stats_pump(novo_jsonl))
-                state_task = asyncio.create_task(pump("state", _monitor_de(novo_prov)))
-                preview_task = asyncio.create_task(preview_pump(broker))
-                tasks += [tail_task, stats_task, state_task, preview_task]
-                yield {"event": "reset", "data": "{}"}
+                state_tasks = _fontes_do_estado(novo_prov, rust_state)
+                tasks += [t for t in (tail_task, stats_task, *state_tasks.values()) if t is not None]
+                yield (_info_event(name, current_provider, current_jsonl) if side
+                       else {"event": "reset", "data": "{}"})
                 continue
             if event == "__reset__":
                 diag.registrar("sse.reiniciou", sessao=name, provider=current_provider,
@@ -1098,27 +1245,38 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                 _log.info("sse: transcript trocou name=%s %s -> %s", name,
                           Path(current_jsonl).name if current_jsonl else None,
                           Path(data).name if data else None)
-                tasks.remove(tail_task)
-                tail_task.cancel()
+                if tail_task is not None:
+                    tasks.remove(tail_task)
+                    tail_task.cancel()
                 tasks.remove(stats_task)
                 stats_task.cancel()          # transcript novo -> acumulador novo (faixa zera)
                 committed["text"] = ""
-                _enqueue_preview("")
-                broker.reset()           # o texto em voo era do transcript APAGADO: sem isto o
+                if broker is not None:
+                    _enqueue_preview("")
+                    broker.reset()       # o texto em voo era do transcript APAGADO: sem isto o
                                          # broker republicava a conversa velha na 1a reconexao
                                          # (a supressao acabou de ser desarmada na linha acima)
                 current_jsonl = data
+                # O broker lê o transcript pela conexão que o pegou por último; se ela já fechou, o
+                # leitor dela ficou no transcript apagado e a prévia parava de vez. Quem fez o reset
+                # está viva: reinstala o leitor dela.
+                if broker is not None:
+                    broker = _broker_de(current_provider)
                 ask_q_emitted = False
-                tail_task = asyncio.create_task(tail_pump(data))
-                tasks.append(tail_task)
+                if tail_task is not None:
+                    tail_task = asyncio.create_task(tail_pump(data))
+                    tasks.append(tail_task)
                 stats_task = asyncio.create_task(stats_pump(data))
                 tasks.append(stats_task)
-                # O monitor e compartilhado por transcript: o deste chat agora e outro.
-                tasks.remove(state_task)
-                state_task.cancel()
-                state_task = asyncio.create_task(pump("state", _monitor_de(current_provider)))
-                tasks.append(state_task)
-                yield {"event": "reset", "data": "{}"}
+                # O monitor e compartilhado por transcript: o deste chat agora e outro. O canal do
+                # hub segue a troca sozinho (o `rebind` dele vem do `info` da conexão interna).
+                if "state" in state_tasks:
+                    tasks.remove(state_tasks["state"])
+                    state_tasks["state"].cancel()
+                    state_tasks["state"] = asyncio.create_task(pump("state", _monitor_de(current_provider)))
+                    tasks.append(state_tasks["state"])
+                yield (_info_event(name, current_provider, current_jsonl) if side
+                       else {"event": "reset", "data": "{}"})
                 continue
             if event == "preview":
                 # Le o ULTIMO texto do slot na hora do envio (frames antigos ja foram sobrescritos).
@@ -1160,6 +1318,12 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                 # Quando awaiting_input + overlay (rodape de abas = AskUserQuestion estruturado),
                 # emite ask_question UMA VEZ por prompt; reseta ao sair do estado.
                 parsed_state = json.loads(data)
+                if current_provider == "claude" and not parsed_state.get("problema"):
+                    # Sessão com terminal no Rust: o monitor do pane não sabe que o runtime falhou.
+                    from app.runtime_adapter import runtime_problem
+                    if problem := runtime_problem(name):
+                        parsed_state.update(problema=problem[0], problema_detalhe=problem[1])
+                        data = json.dumps(parsed_state, ensure_ascii=False)
                 ultimo_estado = parsed_state.get("state")
                 # Diagnostico do "medição indisponível": loga o statusline CRU quando o segmento 💬
                 # nao tem os 2 pares. Uma vez por statusline DISTINTO (nao a cada tick) pra nao virar

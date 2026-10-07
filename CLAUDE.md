@@ -17,7 +17,9 @@ Only terminal sessions use the tmux pane for live **state** and input. Backend p
 - `registry.py` — SessionRegistry: joins terminal sessions from tmux with durable Claude/Codex
   headless sidecars and their JSONL/rollout history.
 - `transcript.py` — tails `~/.claude/projects/<cwd>/<uuid>.jsonl` (the chat content).
-- `state.py` — classifies live state from `tmux capture-pane`: `working` / `idle` / `awaiting_input` / `dead`.
+- `state.py` — classifies live state from `tmux capture-pane`: `working` / `idle` / `awaiting_input` / `dead`
+  (Pi/omp/Kimi and the Python fallback; under the Rust server the live state of Claude with a terminal is the
+  Rust `Monitor`, and `classify` remains for push and actions).
 - `terminal_input.py` + `tmux.py` — input via `tmux send-keys` (prompt / option select via `(n-1)×Down`+`Enter` / `Esc`).
 - `adapters/codex/` — um app-server WebSocket de loopback por sessão Codex; o backend
   consome eventos JSON-RPC enquanto a TUI `codex --remote` da mesma thread roda no tmux.
@@ -249,8 +251,11 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   não podem ser só o nome — sem a época de recriação, a conversa da morta fica montada; sem o
   `jsonl` na marca, a nova nasce escondida para sempre.
 - **Terminal real no rodapé e no celular**: um PTY por WebSocket, backend não interpreta nada.
-  Um painel por sessão; xterm com fundo `rgba(0,0,0,0)`, nunca `'transparent'`. Com o painel
-  aberto, quem conta linha de pane responde 409 — e o app tem que MOSTRAR esse texto.
+  Um painel por sessão em todas as portas; xterm com fundo `rgba(0,0,0,0)`, nunca `'transparent'`.
+  Com o painel aberto, quem conta linha de pane responde 409 — e o app tem que MOSTRAR esse texto.
+  Com o Rust de pé, o PTY é só dele (Windows incluído): o `termsock` faz a porta de entrada de quem
+  chega ao Python (convidado, Connect) e liga os bytes a `/__hangar_server/term`; o 409 pergunta
+  `term.active` e erro da ponte é 503 (fechamento 1013 no socket), nunca PTY no Python.
 - **Aba ativa do navegador embutido é UMA só, compartilhada entre painel e CLI**; `--aba` age em
   outra sem trocar o que está na tela. O sidecar do navegador é ADITIVO: `url`/`targetId` no topo
   são os da aba ativa, e é só isso que o backend lê.
@@ -288,8 +293,8 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
 **Antes de mexer em** `backend/app/adapters/` (claude_headless, codex, kimi, omp, pi), `codex_*.py`,
 `engines.py`, `model_picker.py`, `permission_mode.py`, `skill_bridge.py`, `omp_dirs.py`, `loop.py`,
 `terminal_input.py`, `state.py`, statusline/prévia, hooks de estado, ou em sessão sem terminal:
-**leia a seção "Regras vigentes" de `docs/decisoes/harnesses.md`**. São 40 regras, e cada uma já
-custou um bug calado.
+**leia a seção "Regras vigentes" de `docs/decisoes/harnesses.md`**. Cada regra ali já custou um
+bug calado.
 
 ### Windows → [`docs/decisoes/windows.md`](docs/decisoes/windows.md)
 
@@ -337,6 +342,11 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   (`orq_timeline.py`). O `ChatEvent` leva `orq` (texto cru mantido); o painel é um `GET` por
   execução em `/api/sessions/{name}/orq/panel`, fora do alcance do convidado e sem escrita, e o
   Time lê o estado da lista de sessões. O `orq.py` só grava o que não dá para derivar.
+- **Worktrees mescladas usam a origem e a base publicada.** Base explícita vence; sem ela,
+  referência nomeada de criação no reflog, com fallback para a branch principal. Base local usa
+  seu upstream ou o único remoto correspondente. Ambiguidade e falha de leitura impedem marcar
+  mesclada; upstream apagado nunca comprova merge. Pontas iguais continuam protegidas. Evidência
+  e limites em [plataforma.md](docs/decisoes/plataforma.md#worktrees-mescladas-usam-a-origem-e-a-base-publicada).
 - **Plan progress lê o `.md` do plano**, sem arquivo de estado: blocos cercados são removidos
   preservando offsets, e a decoração roda dentro do `to_thread` do git.
 - **Ditado: a transcrição não é o problema, o que vem depois é.** Vocabulário vai para a Whisper
@@ -381,6 +391,12 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   bearer é conferido ANTES do sub-app (mount passa por fora do `Depends`) e nunca entra no
   ambiente do pane: Claude via `headersHelper`, Codex via `http_headers`. Tool mapeia 1:1 num
   endpoint que já existe; o CLI continua como fallback e resolve identidade sozinho.
+- **O git da sessão é o da worktree onde o agente trabalha (`git_cwd`), não o da pasta de
+  abertura.** O Claude Code não grava a worktree irmã no `cwd` do transcript: o sinal são as
+  chamadas recentes (`cd`, `git -C`, arquivo editado). Nada na principal tira a sessão da
+  worktree: consultar a principal é rotina e faria o rótulo alternar. Arquivos e execução seguem
+  no `cwd`.
+  Evidência em [plataforma.md](docs/decisoes/plataforma.md#git-da-sessão-segue-a-worktree-onde-o-agente-trabalha).
 - **Arquivo citado na conversa é LEGÍVEL e EDITÁVEL; a citação é o consentimento.** Fora da raiz
   da sessão a política de caminho é `_resolver_citado()` (aparece no transcript), não a raiz — e
   é a mesma para o `GET` e para o `POST` de `/file/text`. A mecânica de ler e gravar é a do
@@ -411,6 +427,56 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   "local" por cabeçalho. Cookie de login só autoriza `GET`/`HEAD` e, em https, só o
   `__Host-cp_token`: máquinas do Connect dividem o mesmo site. Evidência em
   [plataforma.md](docs/decisoes/plataforma.md#connect-a-porta-dele-nunca-é-local).
+- **A porta 8765 é do `hangar-server` (Rust); o Python escuta atrás, numa porta de loopback.**
+  Ele atende `/history` e `/events` de Claude/Codex, `/api/costs`, `/api/uso`, `/api/cotacao` e o
+  custo de sessão Codex com o token do dono, e o terminal real do dono (só pelo
+  `?token=`; a Origin ainda é decidida pelo Python em `/internal/term/origin`). Custos e uso têm índice próprio
+  (`custos-rust.sqlite3`) no cache local; cotas e stats ficam no Python. O resto, convidado
+  incluído, é repassado com `X-Forwarded-For`. 8766 e 8768 ficam no Python. Sem binário
+  (`CP_RUST_SERVER_BIN`, `crates/target/release`, `~/.hangar/bin`), com `CP_RUST_SERVER=0`, com
+  `protocol` da saúde diferente de `RUST_SERVER_PROTOCOL`, sem endereço privado válido ou com 3
+  quedas em 60 s, um segundo `uvicorn.Server` com `lifespan="off"` assume a porta: nunca um segundo
+  lifespan. O processo tem um modo só (`pending`/`rust`/`python`): queda 1–2 deixa as sessões
+  Claude sem dono por segundos (`pending`, até 30 s) e o Rust novo as reabre; só a desistência as
+  passa ao Python, cada uma uma vez. O segredo interno nunca entra no `os.environ`. Formato de
+  `ChatEvent`, ids de evento e contrato interno
+  mudam nos dois lados no mesmo commit. Mexeu no contrato interno (rotas `/internal`, eventos do
+  `side-events`, variáveis do filho): suba `RUST_SERVER_PROTOCOL` (Python) e `INTERNAL_PROTOCOL`
+  (Rust) juntos. O `versao` do snapshot do `hangar-cano` acompanha o `VERSAO` do `cano.py`.
+  Medidas e motivo em [plataforma.md](docs/decisoes/plataforma.md#hangar-server-a-porta-pública-em-rust-o-python-atrás).
+  Índice, paridade e medidas de custos em [plataforma.md](docs/decisoes/plataforma.md#custos-e-uso-no-hangar-server).
+- **A lista do dono é do Rust; o Python só fornece fatos.** `GET /api/sessions` e
+  `/api/sessions/events` do dono saem do `ListHub` (`list/hub.rs`): um produtor por servidor,
+  ligado enquanto houver lista aberta, tique de 1,5 s, JSON só quando a assinatura muda; cada
+  conexão só lê o publicado. Escrita nas pastas de estado das contas (marcador, registro nativo,
+  pergunta aberta) reclassifica só a sessão afetada sobre a última rodada boa, juntada em 150 ms;
+  observador que falha vai ao diário e o tique continua valendo. Estado de Codex/Pi/omp/Kimi,
+  transferências, `orq`, acesso, navegador e atalhos vêm de `POST /internal/list/facts`; sessão sem terminal, do `RuntimeRegistry`. Falha
+  nunca vira lista vazia nem a do Python: 503 com código no `GET`, `list_error` com código no SSE,
+  `problema` na linha quando só os fatos caíram. Convidado e outros métodos seguem ao Python.
+  Medidas em [plataforma.md](docs/decisoes/plataforma.md#lista-do-dono-no-hangar-server).
+- **A porta privada de loopback do Rust mora no mesmo filho**, anunciada na saúde somente como
+  endereço; o segredo vem do Supervisor em memória após conferir o protocolo. Uma captura canônica
+  por rodada, sem grade auxiliar: com o Rust de pé, quem captura o pane de Claude com terminal para o
+  estado ao vivo é o `Monitor` (abaixo; capturas avulsas de ação — push, modo de permissão, entrega —
+  seguem no Python), e a ponte Python do observador (`terminal_observer` →
+  `/__hangar_server/terminal`) ficou sem consumidor, porque o `StateMonitor`/`PreviewBroker` de
+  Claude só roda no modo `python`, com a ponte desligada. Pi, omp e Kimi capturam pelo Python e
+  guardam lá o estado temporal; Codex conserva estado e prévia nativos. `/clear` ou troca do filho
+  descartam leituras antigas; sidecar Claude vazio continua sendo uma resposta; erro de captura
+  vira `problema` visível, nunca leitura Python.
+  Evidência em [plataforma.md](docs/decisoes/plataforma.md#observação-terminal-rust-erro-visível-sem-captura-python).
+- **Estado ao vivo de Claude com terminal é do `Monitor` do Rust no modo `rust`/`pending`, em
+  qualquer porta.** Um por hub (`side.rs`), nascido com o primeiro assinante: o `/events` do dono
+  ou o canal privado `/__hangar_server/state/{name}/events`, que o Python lê para quem entrou pela
+  8766/8768. Ele publica `state`, `preview`, `ask_question` e `suggest` pelo retrato do hub e pede
+  a entrega por `session.deliverable`; o Python não sobe `StateMonitor` nem `PreviewBroker` dessas
+  sessões e o hub descarta, registrando uma vez, os quatro que vierem dele. Captura em processo
+  (`-C`; psmux avulso no Windows), fatos por empurrão e retrato com prazo; retrato que não vem é
+  `problema=state_facts_unavailable`, nunca estado inventado. O `Sources` não tem método com corpo
+  padrão: fonte que esquece um não compila. A lista lê o último `state` do `Monitor` vivo
+  (`state/published.rs`) e não captura o pane dessa sessão. No modo `python` tudo roda como antes. Evidência em
+  [plataforma.md](docs/decisoes/plataforma.md#estado-ao-vivo-de-claude-com-terminal-no-monitor-do-rust).
 
 ## tmux + Claude Code truecolor
 

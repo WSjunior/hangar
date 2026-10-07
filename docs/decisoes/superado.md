@@ -4,6 +4,79 @@ Estes trechos descrevem como algo **funcionava antes**. Ficam registrados porque
 medição continua valendo como história, mas não descrevem o código de hoje: cada um
 aponta a decisão que o substituiu. Não leia daqui para decidir implementação.
 
+## `StateMonitor` e `PreviewBroker` de Claude com terminal com o Rust de pé
+
+(Até a Task 5 da parte 4 da migração para Rust, 06/10/2026 → [estado ao vivo no `Monitor` do
+Rust](plataforma.md#estado-ao-vivo-de-claude-com-terminal-no-monitor-do-rust).) Com o
+`hangar-server` de pé, o `state` de Claude com terminal saía do `StateMonitor` do Python: o hub
+assinava o `side-events`, o `merged_events(side=True)` rodava o monitor (captura alugada ao pool do
+Rust por HTTP privado a 0,75 s) e o `PreviewBroker` (0,15 s trabalhando), seguia o transcript só para
+suprimir a prévia já gravada, emitia `suggest` e `ask_question` no tique do estado e disparava o
+`drain` na primeira borda entregável de cada conexão. Convidado (8766) e dono pelo Connect (8768)
+subiam outro `merged_events` com o mesmo monitor compartilhado pelo `Difusor`. Hoje isso só roda no
+modo `python`, e a ponte do observador que ele alugava (`terminal_observer` →
+`/__hangar_server/terminal`) ficou sem consumidor: no modo `python` ela está desligada.
+
+## Descoberta e lista do dono produzidas pelo Python com o Rust de pé
+
+(Até a lista-estado, Tasks 13–17, 05/10/2026 → [lista do dono no
+hangar-server](plataforma.md#lista-do-dono-no-hangar-server).) Com o `hangar-server` de pé, o
+`_ListRefresher` do `sse.py` descobria as sessões e montava a lista a cada 1,5 s, e o
+`registry.resolve_tracked` resolvia o transcript de cada uma no Python. Hoje a descoberta, a
+resolução e a lista do dono são do `ListHub`; o `resolve_tracked` pergunta à ponte
+(`list_bridge.resolve`), o `_ListRefresher` que sobra (lista do convidado) lê o retrato do Rust, e
+a produção Python só roda no modo `python` (contador `PYTHON_DISCOVERY`).
+
+## Passagem de sessão e de pedido entre Python e Rust com o Rust vivo
+
+(Partes 2B–2D, PR #30 e 2C da migração para Rust, até 04/10/2026 → dono único,
+`docs/migracao-rust/dono-unico/`.) Com o `hangar-server` de pé, uma sessão ou um pedido ainda
+podiam trocar de dono no meio da vida:
+
+- **Readoção a cada boot.** O lifespan registrava toda sessão sem terminal no Python e religava o
+  cliente Python em todo cano vivo (`religou`); quando o Rust subia, `adopt_registered` adotava
+  cada uma (`desligou`). A cada queda 1 ou 2 do Rust, `deactivate_runtime` fazia `recover` de todas
+  para o Python e o Rust novo as adotava de volta.
+- **Adoção com `quiesce`/`carry`.** O `adopt` passava a sessão por `PreparingRust`: `_peek` no cano,
+  `LegacyBridge.quiesce` desligava o cliente Python, cancelava o drain, devolvia a reivindicação da
+  fila (`drain_claims`, `runtime.unclaim_*`, `runtime.write_uncertain`) e montava o `carry` (modelo,
+  esforço, comandos, uso) que o Rust aplicava por cima. Leitura e escrita da passagem tinham ramos
+  próprios (`assert_legacy` `finishing`/`continuing`, `finish_wire(settling=...)`, `_SYNC` e
+  `route_queue` lendo a vista Python, `owner_state_stream` esperando o novo dono com o diário
+  `runtime.state_owner_stuck`).
+- **Administração por `detach` → Python → `adopt`.** Renomear, parar, recarregar, trocar modo ou
+  conta, transferir e o `run_admin` do terminal (`/model`, `/effort`, `/btw`, modo) devolviam a
+  sessão ao Python, religavam o cliente dele e a adotavam de novo no fim; a parada do backend fazia
+  `detach` + `quiesce` de toda sessão.
+- **"Três tentativas + uma" e "só aquela sessão vai para o Python".** Uma operação recusada pelo
+  Rust era repetida até 4 vezes com pausa de 2 s; esgotadas, `_hand_to_python` marcava a sessão
+  `rust_refused` (diário `runtime.parte_para_python`) e ela ficava no Python até reiniciar. A
+  entrega incerta do terminal também a passava.
+- **Repasse das rotas públicas por falha.** O `Fallback` do Rust (`FALLBACK_AFTER = 4`) mandava
+  histórico, eventos e Git/arquivos de uma sessão ao Python depois de 4 falhas, até reiniciar; o
+  repasse levava o cabeçalho `x-hangar-workspace-fallback`, e a ponte Python de Git/arquivos rodava o
+  próprio corpo quando o Rust devolvia vaga cheia, contexto quebrado ou indisponível
+  (`workspace.reserva_python`).
+- **Observação do terminal com reserva Python por erro.** Captura do Rust que falhava caía no
+  `tmux capture-pane` do Python, com um disjuntor por sessão (3 falhas, pausa de 1 a 30 s).
+
+O código de passagem foi a origem da maioria dos defeitos de 04/10 (primeira mensagem sumindo,
+"sessão em transferência", entrega marcada sem chegar, reserva circular de Git). Hoje o dono é
+decidido por processo, plataforma, provedor ou tipo de pedido, nunca por uma falha: com o Rust de pé,
+falha vira erro com código e motivo, a sessão sem terminal nasce e reabre direto nele, a
+administração fecha e reabre no Rust, o terminal empresta o teclado ao Python por uma operação, e o
+Python só atende o que migrou quando é dono da porta inteira. Regras em
+[plataforma.md](plataforma.md#hangar-server-a-porta-pública-em-rust-o-python-atrás) e o desenho em
+`docs/migracao-rust/dono-unico/desenho.md`.
+
+## `termsock` como dono do PTY com o Rust de pé
+
+(Até a parte 4, Task 9, 06/10/2026 → `plataforma.md`, "Porteiro do terminal".) Com o
+`hangar-server` de pé, o `termsock` abria o PTY do convidado e do dono pelo Connect no Python
+(`_motor_posix`), enquanto o dono na 8765 já tinha o PTY no Rust: dois donos do "um painel por
+sessão" (`termsock._ativos` e o `Terms` do Rust), e o 409 e o `terminal_panel` do `/api/config`
+só enxergavam o do Python. Os motores do Python ficaram só para o modo `python`.
+
 ## Aviso de reinício do atualizador às sessões
 
 (`atualizar._avisar_sessoes`, 25/08/2026 → removido em 24/09/2026). Antes de reiniciar, o botão

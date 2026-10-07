@@ -58,6 +58,11 @@ def build():
         "ask-codex": {"info": info("ask-codex", "codex"), "state": {"state": "awaiting_input"}, "ask": ASK_CODEX, "events": list(base)},
         "options-perm": {"info": info("options-perm", "claude"), "ask": None, "events": list(base),
                          "state": {"state": "awaiting_input", "question": "Permitir `Bash: rm -rf build`?", "options": ["Yes", "Yes, and don't ask again for rm", "No"]}},
+        # Menu do próprio Claude Code com as linhas do AskUserQuestion, mas sem `ask_question`: o cartão é o do pane.
+        "options-mods": {"info": info("options-mods", "claude"), "ask": None, "events": list(base),
+                         "state": {"state": "awaiting_input", "overlay": True,
+                                   "question": "Mods in this session's folder load when this turn ends and reload when their files change. They run with your permissions.",
+                                   "options": ["How does this work?", "Enable for this session", "Not now", "Type something.", "Chat about this"]}},
         "options-multi": {"info": info("options-multi", "claude"), "ask": None, "events": list(base),
                           "state": {"state": "awaiting_input", "question": "Quais pastas limpar?", "options": ["[ ] build", "[✔] dist", "[ ] .cache"]}},
         "plan-headless": {"info": info("plan-headless", "claude", headless=True), "ask": None, "events": list(base),

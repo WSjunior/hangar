@@ -4,7 +4,9 @@ stream-json medido contra a CLI (docs/research/claude-sem-terminal-monocode.md).
 import asyncio
 import base64
 import json
+import sys
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -52,6 +54,16 @@ def adapter(sidecar):
     ad._write = _write  # type: ignore[method-assign]
     ad.escritos = escritos  # type: ignore[attr-defined]
     return ad
+
+
+@pytest.fixture(autouse=True)
+def _plugin_do_hangar_fora(monkeypatch):
+    """O `_argv` e o `_spawn` perguntam ao `plugin_bridge` se o plugin do Hangar entra no `claude -p`
+    (S7). A resposta real depende do CLI e da config da máquina; aqui é sempre "não entra", e só os
+    testes do plugin trocam."""
+    from app import plugin_bridge
+    monkeypatch.setattr(plugin_bridge, "raizes_dos_plugins", lambda: [])
+    monkeypatch.setattr(plugin_bridge, "env_da_sessao", lambda name: {})
 
 
 def _run(coro):
@@ -297,8 +309,10 @@ def test_rotulo_da_tool_mostra_o_alvo_enquanto_o_input_escreve(adapter):
         await pedaco('{"comm')
         assert sess.label == "Bash…"
         await pedaco('and": "uv run py')
+        await sess.tool_buffer.flush()
         assert sess.label == "Bash: uv run py"   # string ainda sem aspa final
         await pedaco('test -k \\"x\\"\\nsegunda linha", "description": "roda"}')
+        await sess.tool_buffer.flush()
         assert sess.label == 'Bash: uv run pytest -k "x"'
         await stream({"type": "content_block_stop", "index": 1})
         assert sess.label == 'Bash: uv run pytest -k "x"' and sess.tool_json == ""
@@ -323,6 +337,7 @@ def test_pensamento_em_voo_vai_pra_fonte_propria_e_sai_quando_o_bloco_cai_no_jso
         for p in ("Vou ", "conferir o teste."):
             await stream({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": p}})
         await stream({"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "abc"}})
+        await sess.thinking_buffer.flush()
         assert fonte_pensamento("s1").text == "Vou conferir o teste."
         assert PushPreviewSource.get("s1").text == ""   # nunca vira bolha de resposta
         await adapter._on_event(sess, {"type": "assistant", "message": {"content": [
@@ -506,6 +521,21 @@ def test_plano_com_base_bypass_sobe_podendo_voltar_ao_bypass(adapter):
     # Já em bypass a própria --permission-mode basta; base que não é bypass não ganha a flag.
     assert flag not in adapter._argv("sid", resume=False, permission_mode="bypassPermissions", permitir_bypass=True)
     assert flag not in adapter._argv("sid", resume=False, permission_mode="plan")
+
+
+def test_sem_terminal_carrega_o_plugin_do_hangar(adapter, monkeypatch):
+    """S7: sem terminal o Hangar é a superfície `desktop` dos mods, e o plugin dele entra para levar ao
+    aparelho de quem clicou a URL que um mod abriria na máquina do servidor. Mods desligados
+    (`raizes_dos_plugins` vazia): o argv fica como era."""
+    from app import plugin_bridge
+    monkeypatch.setattr(plugin_bridge, "raizes_dos_plugins",
+                        lambda: ["/repo/plugins/hangar", "/repo/plugins/outro"])
+    argv = adapter._argv("sid", resume=False)
+    i = argv.index("--plugin-dir")
+    # Na ordem da lista: o do Hangar primeiro é o que o deixa por fora na cadeia de hooks.
+    assert argv[i:i + 4] == ["--plugin-dir", "/repo/plugins/hangar", "--plugin-dir", "/repo/plugins/outro"]
+    monkeypatch.setattr(plugin_bridge, "raizes_dos_plugins", lambda: [])
+    assert "--plugin-dir" not in adapter._argv("sid", resume=False)
 
 
 def test_sessao_parada_aceita_na_hora_e_sobe_em_segundo_plano(sidecar, monkeypatch):
@@ -1478,7 +1508,25 @@ def test_esforco_vai_como_comando_local_e_espera_o_turno(adapter):
     assert S.load("s1")["effort"] == "low"
 
 
-def test_processo_herda_chave_e_nao_o_pane_do_operador(sidecar, monkeypatch):
+_CANO_RUST_FALSO = Path("/opt/hangar/bin/hangar-cano")
+
+
+@pytest.fixture(params=["cano.py", "hangar-cano"])
+def lancador_cano(request, monkeypatch) -> list[str]:
+    """O backend sobe o hangar-cano quando acha o binário e o cano.py quando não acha; o resto
+    do comando é o mesmo nos dois."""
+    if request.param == "cano.py":
+        monkeypatch.setattr(A, "_usable_cano_bin", lambda: None)
+        return [sys.executable, str(A._CANO_PY)]
+    monkeypatch.setattr(A, "_usable_cano_bin", lambda: _CANO_RUST_FALSO)
+    return [str(_CANO_RUST_FALSO)]
+
+
+def test_processo_herda_chave_e_nao_o_pane_do_operador(sidecar, monkeypatch, lancador_cano):
+    from app import plugin_bridge
+    monkeypatch.setattr(plugin_bridge, "raizes_dos_plugins", lambda: ["/repo/plugins/hangar"])
+    monkeypatch.setattr(plugin_bridge, "env_da_sessao",
+                        lambda name: {"HANGAR_PLUGIN_URL": "http://127.0.0.1:1/api/plugin", "HANGAR_PLUGIN_TOKEN": f"tok-{name}"})
     monkeypatch.setenv("TMUX_PANE", "%9")
     monkeypatch.setenv("TMUX", "/tmp/x")
     visto = {}
@@ -1515,22 +1563,77 @@ def test_processo_herda_chave_e_nao_o_pane_do_operador(sidecar, monkeypatch):
     assert "TMUX" not in env and "TMUX_PANE" not in env
     assert env["CP_SESSION_NAME"] == "s1" and env["CP_SESSION_KEY"] == S.load("s1")["key"]
     assert env["HANGAR_CANO_KEY"] == S.load("s1")["key"]
+    assert env["HANGAR_CANO_OWNER"] == str(Path.home())
     assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "claude-opus-5"
+    # S7: a ponte do plugin do Hangar desta sessão, para o clique do app pela superfície `desktop`.
+    assert (env["HANGAR_PLUGIN_URL"], env["HANGAR_PLUGIN_TOKEN"]) == ("http://127.0.0.1:1/api/plugin", "tok-s1")
     # O processo que nasce é o cano, com o comando do claude depois do `--`; o sidecar guarda
     # onde ele escuta, pra o próximo backend religar.
     argv = list(visto["argv"])
     ultimo = len(argv) - 1 - argv[::-1].index("--")   # o escopo do systemd também tem um `--`
-    assert argv[ultimo + 1] == "/usr/bin/claude" and str(A._CANO_PY) in argv   # caminho resolvido
+    assert argv[ultimo + 1] == "/usr/bin/claude"       # caminho resolvido
+    inicio = argv.index(lancador_cano[-1]) - (len(lancador_cano) - 1)
+    assert argv[inicio:inicio + len(lancador_cano)] == lancador_cano
+    # A chave no cmdline é o que o registry.cwd_atual confere em /proc/<pid>/cmdline.
+    assert S.load("s1")["key"][:16] in " ".join(argv)
     assert S.load("s1")["cano"] == visto["cano"] and visto["cano"]["pid"] == 1
     assert visto["cano"]["escuta"].startswith(("unix:", "tcp:"))
+    # O `--plugin-dir` vai no comando do claude, depois do `--` do cano.
+    assert argv[argv.index("--plugin-dir", ultimo) + 1] == "/repo/plugins/hangar"
+    # O token da ponte vai só no ambiente, nunca no comando (o cmdline é legível por outros processos).
+    assert "tok-s1" not in " ".join(argv)
 
 
-def test_sessao_com_motor_chama_o_hangar_engine_pelo_caminho_resolvido(sidecar, monkeypatch):
+def test_processo_nao_herda_a_ponte_de_outra_sessao(sidecar, monkeypatch, lancador_cano):
+    """Backend subido de dentro de uma sessão do Hangar tem a ponte DELA no ambiente. Com os mods
+    desligados (`env_da_sessao` vazio, fixture), o filho sai sem ponte nenhuma: nem a herdada, nem a
+    desta sessão; e sem `--plugin-dir`, como era."""
+    monkeypatch.setenv("HANGAR_PLUGIN_URL", "http://127.0.0.1:9/api/plugin")
+    monkeypatch.setenv("HANGAR_PLUGIN_TOKEN", "tok-de-outra")
+    visto = {}
+
+    async def exec_falso(*argv, env, **kw):
+        visto["env"] = env
+        visto["argv"] = argv
+
+        class _P:
+            pid = 1
+            returncode = None
+
+            async def wait(self):
+                return 0
+        return _P()
+
+    async def conectar_falso(cano, **kw):
+        return _ligacao_com([]), {"type": "cano_snapshot", "versao": A.cano_mod.VERSAO, "pid": 2,
+                                  "init": None, "aberto": False, "pendentes": [], "stderr_tail": []}
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", exec_falso)
+    monkeypatch.setattr(A.shutil, "which", lambda b: "/usr/bin/claude")
+    ad = ClaudeHeadlessAdapter()
+    sess = _Sessao("s1", S.load("s1"))
+
+    async def ctrl(s, sub, **kw):
+        return {}
+    ad._conectar = conectar_falso                 # type: ignore[method-assign]
+    ad._ler = lambda s: asyncio.sleep(0)          # type: ignore[method-assign]
+    ad._ctrl = ctrl                               # type: ignore[method-assign]
+    ad._agendar_cota = lambda s: None             # type: ignore[method-assign]
+    _run(ad._spawn(sess))
+    assert "HANGAR_PLUGIN_URL" not in visto["env"] and "HANGAR_PLUGIN_TOKEN" not in visto["env"]
+    assert "--plugin-dir" not in visto["argv"] and "tok-de-outra" not in " ".join(visto["argv"])
+
+
+@pytest.mark.parametrize("tier,supported", [(None, False), ("default", True), ("priority", True), ("default", False)])
+def test_sessao_com_motor_chama_o_hangar_engine_pelo_caminho_resolvido(sidecar, monkeypatch, lancador_cano, tier, supported):
     # No Windows o `hangar-engine` é `.CMD`: o CreateProcess do cano não acha o nome sem extensão.
+    from app import cliproxy
+    monkeypatch.setattr(cliproxy, "supports_fast", lambda *a: supported)
+    monkeypatch.setenv("CP_ENGINE_SERVICE_TIER", "inherited")
     visto = {}
 
     async def exec_falso(*argv, env, **kw):
         visto["argv"] = argv
+        visto["env"] = env
 
         class _P:
             pid = 1
@@ -1546,16 +1649,33 @@ def test_sessao_com_motor_chama_o_hangar_engine_pelo_caminho_resolvido(sidecar, 
     exe = r"C:\Users\x\.local\bin\hangar-engine.CMD"
     monkeypatch.setattr(A.shutil, "which", lambda b: exe if b == "hangar-engine" else None)
     ad = ClaudeHeadlessAdapter()
-    sess = _Sessao("s1", S.update("s1", engine="kimi"))
+    sess = _Sessao("s1", S.update("s1", engine="kimi", service_tier=tier))
     ad._conectar = conectar_falso                 # type: ignore[method-assign]
     ad._ler = lambda s: asyncio.sleep(0)          # type: ignore[method-assign]
     ad._agendar_cota = lambda s: None             # type: ignore[method-assign]
     ad._esperar_initialize = lambda s: asyncio.sleep(0)   # type: ignore[method-assign]
     _run(ad._spawn(sess))
     argv = list(visto["argv"])
-    depois_do_cano = argv[argv.index("--", argv.index(str(A._CANO_PY))) + 1:]
+    depois_do_cano = argv[argv.index("--", argv.index(lancador_cano[-1])) + 1:]
     assert depois_do_cano[:3] == [exe, "--exec", "kimi"]
     assert depois_do_cano[depois_do_cano.index("--") + 1] == "claude"
+    if tier is not None and supported:
+        assert depois_do_cano[depois_do_cano.index("--service-tier") + 1] == tier
+    else:
+        assert "--service-tier" not in depois_do_cano
+    assert "CP_ENGINE_SERVICE_TIER" not in visto["env"]
+
+
+def test_headless_priority_incompatible_refuses_before_spawn(sidecar, monkeypatch):
+    from unittest.mock import MagicMock
+    from app import cliproxy
+    monkeypatch.setattr(cliproxy, "supports_fast", lambda *a: False)
+    spawn = MagicMock()
+    monkeypatch.setattr(A, "subir_cano_processo", spawn)
+    sess = _Sessao("s1", S.update("s1", engine="kimi", service_tier="priority"))
+    with pytest.raises(ValueError, match="service_tier"):
+        _run(ClaudeHeadlessAdapter()._lancar_cano(sess))
+    spawn.assert_not_called()
 
 
 def test_religa_no_cano_vivo_e_recupera_permissao_pendente(sidecar, monkeypatch):
@@ -1714,3 +1834,249 @@ def test_transcript_path_segue_o_jsonl_movido_pela_worktree(tmp_path):
     original.parent.mkdir(parents=True)
     original.write_text("{}\n")
     assert ad.transcript_path(cwd, sid, str(tmp_path)) == str(original)
+
+
+def test_tool_partial_is_parsed_on_publication_and_final_block(adapter, monkeypatch):
+    from app.adapters.preview_push import fonte_ferramenta
+    sess = adapter._sessions["s1"]
+    sess.tool_buffer._interval = 60  # o teste isola a publicação inicial e a do EOS
+    parsed = []
+    original = A._input_parcial
+    def parse(text):
+        parsed.append(text)
+        return original(text)
+    monkeypatch.setattr(A, "_input_parcial", parse)
+    async def run():
+        await adapter._on_stream(sess, {"type": "content_block_start", "content_block": {"type": "tool_use", "name": "Write"}})
+        await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "input_json_delta", "partial_json": '{"file_path":"/tmp/synthetic",'}})
+        assert json.loads(fonte_ferramenta("s1").text)["input"]["file_path"] == "/tmp/synthetic"
+        for part in ('"content":"', "body", '"}'):
+            await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "input_json_delta", "partial_json": part}})
+        assert len(parsed) == 1
+        await adapter._on_stream(sess, {"type": "content_block_stop"})
+        assert json.loads(fonte_ferramenta("s1").text)["input"] == {"file_path": "/tmp/synthetic", "content": "body"}
+        assert len(parsed) == 2
+        await adapter._on_event(sess, {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Write", "input": {"file_path": "/tmp/synthetic", "content": "body"}}]}})
+        assert fonte_ferramenta("s1").text == ""
+        assert sess.tool_json == ""
+    _run(run())
+
+
+def test_committed_text_cancels_late_preview_timer(adapter):
+    sess = adapter._sessions["s1"]
+    async def run():
+        await adapter._on_stream(sess, {"type": "content_block_start", "content_block": {"type": "text"}})
+        await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "first"}})
+        await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "text_delta", "text": " final"}})
+        await adapter._on_event(sess, {"type": "assistant", "message": {"content": [{"type": "text", "text": "first final"}]}})
+        await asyncio.sleep(0.18)
+        assert PushPreviewSource.get("s1").text == ""
+        assert sess.previa == ""
+    _run(run())
+
+
+@pytest.mark.parametrize("boundary", ["result", "conversation_reset", "interrupt"])
+def test_turn_boundary_cancels_all_partial_channels(adapter, boundary):
+    from app.adapters.preview_push import fonte_ferramenta, fonte_pensamento
+    sess = adapter._sessions["s1"]
+
+    async def run():
+        sess.in_progress = True
+        sess.janelas_ts = A.time.time()
+        for channel, delta in (("text", {"type": "text_delta", "text": "first"}),
+                               ("thinking", {"type": "thinking_delta", "thinking": "thought"}),
+                               ("tool_use", {"type": "input_json_delta", "partial_json": '{"command":"echo'})):
+            await adapter._on_stream(sess, {"type": "content_block_start", "content_block": {"type": channel, "name": "Bash"}})
+            await adapter._on_stream(sess, {"type": "content_block_delta", "delta": delta})
+            await adapter._on_stream(sess, {"type": "content_block_delta", "delta": delta})
+        if boundary == "interrupt":
+            assert await adapter.interrupt("s1")
+        else:
+            await adapter._on_event(sess, {"type": boundary, "subtype": "success"})
+        assert PushPreviewSource.get("s1").text == ""
+        assert fonte_pensamento("s1").text == ""
+        assert fonte_ferramenta("s1").text == ""
+        await asyncio.sleep(0.18)
+        assert PushPreviewSource.get("s1").text == ""
+        assert fonte_pensamento("s1").text == ""
+        assert fonte_ferramenta("s1").text == ""
+        if sess.drenador is not None:
+            await sess.drenador
+    _run(run())
+
+
+def test_permission_and_usage_do_not_wait_for_pending_preview(adapter):
+    sess = adapter._sessions["s1"]
+
+    async def run():
+        sess.preview_buffer._interval = 60
+        await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "first"}})
+        await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "tail"}})
+        await adapter._on_stream(sess, {"type": "message_delta", "usage": {"output_tokens": 27}})
+        await adapter._on_event(sess, {"type": "control_request", "request_id": "live-permission", "request": {
+            "subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "echo synthetic"}}})
+        assert adapter._evento(sess).state == "awaiting_input"
+        assert "live-permission" in sess.pending
+        assert sess.tokens_msg == 27 and sess.tokens_msg_chars == 9
+        assert PushPreviewSource.get("s1").text == "first"
+        await sess.preview_buffer.discard()
+    _run(run())
+
+
+def test_partial_timer_failure_reports_without_turn_error(adapter, monkeypatch, caplog):
+    sess = adapter._sessions["s1"]
+    reports = []
+    private_text = "private-conversation-fragment"
+
+    async def run():
+        failed = asyncio.Event()
+        source = PushPreviewSource.get("s1")
+        original = source.push
+
+        async def push(text):
+            if text == "firsttail":
+                try:
+                    raise OSError(5, private_text)
+                except OSError as cause:
+                    raise RuntimeError(private_text) from cause
+            await original(text)
+
+        def report(event, *args, **kwargs):
+            reports.append((event, kwargs))
+            failed.set()
+
+        monkeypatch.setattr(source, "push", push)
+        monkeypatch.setattr(A.diag, "registrar", report)
+        sess.preview_buffer._interval = 0.01
+        await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "first"}})
+        await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "tail"}})
+        await asyncio.wait_for(failed.wait(), 1)
+        await asyncio.gather(*adapter._tarefas)
+        assert reports == [("headless.previa_falhou", {"sessao": "s1", "provider": "claude", "erro_tipo": "RuntimeError",
+                                                     "causa_tipo": "OSError", "errno": 5, "winerror": None})]
+        failure = next(record for record in caplog.records if record.name == "hangar.claude_headless")
+        assert private_text not in caplog.text
+        assert private_text not in json.dumps(reports)
+        assert failure.exc_info is None
+        assert "test_claude_headless.py:" in failure.getMessage()
+        assert sess.problema is None
+        assert sess.version > 0
+        assert not adapter._tarefas
+        await sess.preview_buffer.discard()
+    _run(run())
+
+
+@pytest.mark.parametrize("path", ["fallback", "publisher", "notification"])
+def test_preview_validation_error_never_logs_input_value(adapter, monkeypatch, caplog, path):
+    from pydantic import BaseModel, ValidationError
+
+    class Input(BaseModel):
+        count: int
+
+    private_text = "private-validation-input-value"
+    with pytest.raises(ValidationError) as failure:
+        Input.model_validate({"count": private_text})
+    error = failure.value
+    reports = []
+    monkeypatch.setattr(A.diag, "registrar", lambda event, *args, **kwargs: reports.append((event, kwargs)))
+    sess = adapter._sessions["s1"]
+
+    async def run():
+        if path == "fallback":
+            sess._live_failed(error)
+        else:
+            if path == "notification":
+                async def notify(session):
+                    raise error
+                monkeypatch.setattr(adapter, "_notify", notify)
+            adapter._stream_error(sess, error)
+            await asyncio.gather(*adapter._tarefas, return_exceptions=True)
+        assert private_text not in caplog.text
+        assert private_text not in json.dumps(reports)
+        assert "ValidationError" in caplog.text
+        assert "test_claude_headless.py:" in caplog.text
+        assert all(record.exc_info is None for record in caplog.records)
+        if path != "fallback":
+            assert reports[0] == ("headless.previa_falhou", {"sessao": "s1", "provider": "claude",
+                                                          "erro_tipo": "ValidationError", "errno": None, "winerror": None})
+        if path == "notification":
+            assert reports[1][0] == "headless.previa_aviso_falhou"
+    _run(run())
+
+
+def test_rename_on_owner_loop_cancels_old_partial_channels(adapter):
+    from app.adapters.preview_push import fonte_pensamento
+    sess = adapter._sessions["s1"]
+
+    async def run():
+        sess.loop = asyncio.get_running_loop()
+        await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "old"}})
+        await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "tail"}})
+        await asyncio.to_thread(adapter.rename, "s1", "renamed")
+        assert adapter._sessions["renamed"] is sess
+        assert fonte_pensamento("s1").text == ""
+        await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "new"}})
+        await asyncio.sleep(0.18)
+        assert fonte_pensamento("renamed").text == "oldtailnew"
+        assert fonte_pensamento("s1").text == ""
+        await sess.thinking_buffer.discard()
+    _run(run())
+
+
+def test_old_eof_cannot_clear_replacement_partial_channels(adapter):
+    from app.adapters.preview_push import fonte_ferramenta, fonte_pensamento
+    old = adapter._sessions["s1"]
+
+    async def run():
+        stream = asyncio.StreamReader()
+        stream.feed_eof()
+        old.proc = A._Ligacao(stream, SimpleNamespace(close=lambda: None), 4242)
+        old.desligando = True
+        for delta in ({"type": "text_delta", "text": "old"},
+                      {"type": "thinking_delta", "thinking": "old"}):
+            await adapter._on_stream(old, {"type": "content_block_delta", "delta": delta})
+            await adapter._on_stream(old, {"type": "content_block_delta", "delta": delta})
+        await adapter._on_stream(old, {"type": "content_block_start", "content_block": {"type": "tool_use", "name": "Bash"}})
+        await adapter._on_stream(old, {"type": "content_block_delta", "delta": {"type": "input_json_delta", "partial_json": '{"command":"old'} })
+        await adapter._on_stream(old, {"type": "content_block_delta", "delta": {"type": "input_json_delta", "partial_json": '-tail"}'} })
+        finishing = asyncio.create_task(adapter._ler(old))
+        await asyncio.sleep(0)
+        assert not finishing.done()
+        new = _Sessao("s1", old.meta)
+        adapter._sessions["s1"] = new
+        await adapter._on_stream(new, {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "new"}})
+        await adapter._on_stream(new, {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "new"}})
+        await adapter._on_stream(new, {"type": "content_block_start", "content_block": {"type": "tool_use", "name": "Bash"}})
+        await adapter._on_stream(new, {"type": "content_block_delta", "delta": {"type": "input_json_delta", "partial_json": '{"command":"new"}'} })
+        await finishing
+        assert PushPreviewSource.get("s1").text == "new"
+        assert fonte_pensamento("s1").text == "new"
+        assert json.loads(fonte_ferramenta("s1").text)["input"] == {"command": "new"}
+        await new.preview_buffer.discard()
+        await new.thinking_buffer.discard()
+        await new.tool_buffer.discard()
+    _run(run())
+
+
+def test_rename_preserves_pending_tool_input_and_label(adapter):
+    from app.adapters.preview_push import fonte_ferramenta
+    sess = adapter._sessions["s1"]
+
+    async def run():
+        sess.loop = asyncio.get_running_loop()
+        sess.tool_buffer._interval = 60
+        await adapter._on_stream(sess, {"type": "content_block_start", "content_block": {"type": "tool_use", "name": "Write"}})
+        for part in ('{"file_path":"/tmp/ação",', '"content":"first'):
+            await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "input_json_delta", "partial_json": part}})
+        await asyncio.to_thread(adapter.rename, "s1", "renamed")
+        async with asyncio.timeout(1):
+            while not fonte_ferramenta("renamed").text:
+                await asyncio.sleep(0)
+        assert json.loads(fonte_ferramenta("renamed").text)["input"]["file_path"] == "/tmp/ação"
+        await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "input_json_delta", "partial_json": 'tail"}'}})
+        await adapter._on_stream(sess, {"type": "content_block_stop"})
+        assert json.loads(fonte_ferramenta("renamed").text) == {
+            "nome": "Write", "input": {"file_path": "/tmp/ação", "content": "firsttail"}}
+        assert sess.label == "Write: ação"
+        assert fonte_ferramenta("s1").text == ""
+    _run(run())

@@ -43,7 +43,7 @@ impl Surface {
 
     fn upload(&self, params: &Value) -> Result<(), String> {
         let bytes = base64::engine::general_purpose::STANDARD.decode(params["data"].as_str().unwrap_or("")).map_err(|e| e.to_string())?;
-        let pixels = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png).map_err(|e| e.to_string())?.into_rgba8();
+        let pixels = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).map_err(|e| e.to_string())?.into_rgba8();
         let (width, height) = pixels.dimensions();
         let (device, queue) = gpui_wgpu::WgpuContext::shared_device().ok_or("a GPUI não expôs o device wgpu")?;
         let mut shown = self.shown.lock().unwrap_or_else(PoisonError::into_inner);
@@ -314,8 +314,9 @@ impl Engine {
         }
         if !self.visible.replace(true) || resized {
             let (pw, ph) = ((w * scale).round() as i64, (h * scale).round() as i64);
-            // PNG: o JPEG borra o texto, e o Chromium mantém os mesmos quadros/s nos dois.
-            self.send("Page.startScreencast", json!({"format": "png", "maxWidth": pw.max(1), "maxHeight": ph.max(1), "everyNthFrame": 1}));
+            // JPEG alto em vez de PNG: o PNG pesa na decodificação e no pipe em página animada; o q92 deixa o texto
+            // legível (o q85 borrava). O `shot` continua em PNG.
+            self.send("Page.startScreencast", json!({"format": "jpeg", "quality": 92, "maxWidth": pw.max(1), "maxHeight": ph.max(1), "everyNthFrame": 1}));
         }
         // Zera antes de ler: um quadro que chegue no meio ainda avisa a tela.
         self.surface.pending.store(false, Ordering::SeqCst);

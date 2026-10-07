@@ -98,7 +98,7 @@ struct DiaryLine { when: String, event: String, context: String, level: Level }
 /// `missing`: servidor anterior à rota do diário; não é falha, só não há o que mostrar.
 pub(super) struct Diary { days: u64, bytes: u64, keep: u64, lines: Vec<DiaryLine>, missing: bool }
 
-pub(super) struct ServerVersion { version: String, local: bool, ts: Option<String> }
+pub(super) struct ServerVersion { version: String, local: bool, ts: Option<String>, channel: String }
 
 /// Onde está a atualização que este app mandou (ou achou rodando).
 #[derive(Clone, PartialEq)]
@@ -126,6 +126,8 @@ pub(super) struct Device {
     /// Marca do estado lido antes do clique: "pronto" com a mesma marca é o desfecho de uma atualização anterior.
     baseline_ts: Option<String>,
     diary_scroll: ScrollHandle,
+    pub(super) migration: Remote<Option<super::migration::MigrationView>>,
+    pub(super) migration_poll: Option<Task<()>>,
 }
 
 impl Drop for Device {
@@ -163,6 +165,7 @@ pub(super) enum DeviceReply {
     Channel(u64, bool, Result<Value, Failure>),
     Started(u64, Result<Value, Failure>),
     Tick(u64, Result<Value, Failure>),
+    Migration(u64, Result<Value, Failure>),
 }
 
 /// Valor em dólar na moeda escolhida. Real sem cotação fica em dólar.
@@ -172,7 +175,7 @@ pub(super) fn money(usd: f64, currency: Currency, rate: Option<f64>) -> String {
     format!("{symbol} {}", format!("{value:.2}").replace('.', &tr("decimal")))
 }
 
-fn size_text(bytes: u64) -> String {
+pub(super) fn size_text(bytes: u64) -> String {
     let (value, unit) = match bytes { b if b >= 1 << 20 => (b as f64 / (1 << 20) as f64, "MB"), b if b >= 1 << 10 => (b as f64 / 1024., "KB"), b => (b as f64, "B") };
     let text = if unit == "B" { format!("{value:.0}") } else { format!("{value:.1}").replace('.', &tr("decimal")) };
     format!("{text} {unit}")
@@ -219,7 +222,7 @@ fn parse_version(value: &Value) -> ServerVersion {
     let raw = value.pointer("/versao_legivel/backend").and_then(Value::as_str)
         .or_else(|| value.pointer("/versoes/backend").and_then(Value::as_str)).unwrap_or("?");
     let (version, local) = legible(raw);
-    ServerVersion { version, local, ts: value.pointer("/estado/ts").and_then(Value::as_str).map(str::to_owned) }
+    ServerVersion { version, local, ts: value.pointer("/estado/ts").and_then(Value::as_str).map(str::to_owned), channel: crate::update::alvo(value) }
 }
 
 /// Mudanças à espera: commits novos, ou o servidor rodando código diferente do que está no disco.
@@ -238,6 +241,8 @@ impl Hangar {
         self.device = Device::new(window, cx);
         self.sync_channel_update_guard(cx);
         self.load_rate(cx);
+        // A troca levou a leitura periódica junto; com a página aberta, ela recomeça no servidor novo.
+        if self.settings == Some(Page::Migration) { self.migration_opened(cx); }
     }
 
     /// Página aberta: pede o que ela mostra do servidor.
@@ -264,6 +269,7 @@ impl Hangar {
             Page::Sync => self.sync_opened(cx),
             Page::Connect => self.connect_opened(cx),
             Page::SharedConfig => self.shared_config_opened(cx),
+            Page::Migration => self.migration_opened(cx),
             _ => {}
         }
     }
@@ -337,7 +343,7 @@ impl Hangar {
     }
 
     /// Envio de resposta para depois, amarrado à conexão de agora.
-    fn device_send_later(&self) -> impl Fn(DeviceReply) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'static {
+    pub(super) fn device_send_later(&self) -> impl Fn(DeviceReply) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'static {
         let (tx, connection) = (self.tx.clone(), self.connection);
         move |reply| {
             let tx = tx.clone();
@@ -447,8 +453,18 @@ impl Hangar {
                         let draft = self.device.channel.draft.clone();
                         input.update(cx, |input, cx| input.set_value(draft, window, cx));
                     }
-                    if saved { self.device.search = None; self.load_about(false, cx); }
+                    if saved {
+                        self.device.search = None;
+                        self.load_about(false, cx);
+                        // O app segue o canal do servidor desta máquina: a procura da release dele refaz já.
+                        if let Some(updater) = cx.try_global::<crate::update::Handle>().map(|handle| handle.0.clone()) {
+                            updater.update(cx, |updater, cx| updater.refresh(cx));
+                        }
+                    }
                 }
+            }
+            DeviceReply::Migration(seq, result) => {
+                self.device.migration.finish(seq, result.map(|v| super::migration::parse(&v)).map_err(|e| Self::failure(&e)));
             }
             DeviceReply::Rate(seq, result) => {
                 let parsed = result.map_err(|e| Self::failure(&e))
@@ -611,6 +627,16 @@ impl Hangar {
                 }));
             settings_box().child(self.row(IconName::ArrowDownToLine, "settings_tray", Some(note), true, toggle.into_any_element()))
         });
+        // Senhas do Chrome só se leem no Linux; nos outros sistemas a opção não existe.
+        let autofill = cfg!(target_os = "linux").then(|| {
+            let toggle = Switch::new("chrome-autofill").checked(a.chrome_autofill).accessibility_label(tr("settings_chrome_autofill"))
+                .on_click(cx.listener(|this, on: &bool, _, cx| {
+                    let mut next = appearance::get();
+                    next.chrome_autofill = *on;
+                    this.apply_appearance(next, true, cx);
+                }));
+            settings_box().child(self.row(IconName::Key, "settings_chrome_autofill", Some(tr("settings_chrome_autofill_desc")), true, toggle.into_any_element()))
+        });
         let lead = tr(if crate::tray::SUPPORTED { "settings_general_lead_window" } else { "settings_general_lead" });
         div().flex().flex_col()
             .child(self.page_top("settings_page_general", lead))
@@ -619,6 +645,7 @@ impl Hangar {
                 .child(self.row(IconName::Languages, "settings_language", Some(tr("settings_language_desc")), true, language))
                 .child(self.row(IconName::Banknote, "settings_currency", Some(rate_note), true, currency)))
             .when_some(tray, |el, tray| el.child(self.heading("settings_window_group")).child(tray))
+            .when_some(autofill, |el, autofill| el.child(self.heading("settings_browser_group")).child(autofill))
             .into_any_element()
     }
 
@@ -688,7 +715,10 @@ impl Hangar {
         let mono = |text: String| div().font_family(theme::MONO).text_size(px(12.5)).child(text);
         let with_local = |text: String, local: bool| div().flex().flex_col().gap(px(2.)).child(mono(text))
             .when(local, |el| el.child(div().child(tr("settings_about_local"))));
+        let channel = |text: String| div().flex().items_center().gap(px(6.)).text_color(theme::warning())
+            .child(chrome::small_icon(IconName::GitBranch, 13., theme::warning())).child(text);
         let updater = cx.try_global::<crate::update::Handle>().map(|handle| handle.0.clone());
+        let app_channel = updater.as_ref().map(|u| u.read(cx).channel_lines()).unwrap_or_default();
         let (check, updating) = updater.as_ref().map(|u| (u.read(cx).app_check(), u.read(cx).is_busy())).unwrap_or((crate::update::AppCheck::Never, false));
         let (check_text, check_color) = match &check {
             crate::update::AppCheck::Never => (None, theme::muted()),
@@ -696,6 +726,8 @@ impl Hangar {
             crate::update::AppCheck::UpToDate => (Some(tr("settings_about_app_up_to_date")), theme::muted()),
             crate::update::AppCheck::Available(version) => (Some(tr("app_update_available").replace("{version}", version)), theme::text()),
             crate::update::AppCheck::Failed(reason) => (Some(tr("settings_about_failed").replace("{reason}", reason)), theme::danger()),
+            // A procura respondeu, só não há app da branch: não é falha de conexão, e o app atual continua.
+            crate::update::AppCheck::NoRelease(text) => (Some(text.clone()), theme::danger()),
         };
         let app_control = updater.map(|updater| match &check {
             crate::update::AppCheck::Available(_) => Button::new("app-update-start").primary().small().label(tr("app_update_now")).disabled(updating)
@@ -707,13 +739,14 @@ impl Hangar {
         }.into_any_element()).unwrap_or_else(|| div().into_any_element());
         let app_row = self.row_with(IconName::Monitor, "settings_about_app",
             with_local(format!("{} ({app_version}) · {}", env!("HANGAR_NATIVE_RELEASE"), tr("settings_about_built").replace("{date}", env!("HANGAR_NATIVE_BUILD_DATE"))), app_local)
+                .children(app_channel.into_iter().map(channel))
                 .when_some(check_text, |el, text| el.child(div().text_color(check_color).whitespace_normal().child(text))),
             true, app_control);
 
         let about = &self.device.about;
         let server_desc = match (&self.api, &about.value, about.loading) {
             (None, ..) => div().child(tr("settings_offline")),
-            (_, Some(Ok(v)), _) => with_local(v.version.clone(), v.local),
+            (_, Some(Ok(v)), _) => with_local(v.version.clone(), v.local).children(crate::update::test_channel(&v.channel).map(channel)),
             (_, _, true) => div().child(tr("settings_about_reading")),
             (_, Some(Err(error)), _) => div().child(div().text_color(theme::danger()).child(tr("settings_about_failed").replace("{reason}", error))),
             (_, None, false) => div(),
@@ -768,6 +801,9 @@ impl Hangar {
             .child(self.heading("settings_about_app_group")).child(settings_box().child(app_row))
             .child(self.heading("settings_about_server_group"))
             .child(settings_box().child(server_row).child(update_row).children(progress))
+            .when(!self.active_invite() && self.api.is_some(), |el| el.child(div().mt(px(12.)).child(Button::new("migration-open").outline().small()
+                .icon(IconName::Activity).label(tr_shared("migration_open", &[]))
+                .on_click(cx.listener(|this, _, window, cx| this.open_settings(Page::Migration, window, cx))))))
             .when(!self.active_invite() && !self.device.channel.unsupported, |el| el.child(self.heading("settings_channel_title")).child(self.render_channel(cx)))
             .into_any_element()
     }

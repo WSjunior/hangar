@@ -58,6 +58,15 @@ subida): lançado pelo `.desktop` ou pela tarefa do Windows ele nasce com stdout
 descongelou morriam sem leitura — foi o que faltou ao investigar um "ficou branco" que não se
 reproduziu depois.
 
+Em 04/10/2026 o diário desta máquina de 03/10 bateu os 4 MiB às 23:39 e parou de gravar
+tudo, falhas inclusive: 94,8% dos bytes eram nível `ok`, e 60% do arquivo (8.259 linhas) era
+`api.servidor` de `POST /api/plugin/pull`, o long-poll do plugin, que fecha vazio a cada 25 s
+e caía como "pedido lento". O sucesso do long-poll saiu do diário (falha dele continua), e o
+teto passou a valer por nível: acima de `_TETO_DIA` (4 MiB) só entram `aviso`/`erro`, até o
+`_TETO_RIGIDO` (8 MiB), que existe só para um laço de falhas não encher o disco. Cada teto
+cruzado deixa uma linha `diag.teto` com `etapa` `sucesso` ou `tudo`. Os 4 MiB a mais só
+existem num dia de laço de falhas, que é justamente o dia que precisa ir para quem analisa.
+
 Os diários antigos são copiados por origem para `diario/legado`, sem juntar arquivos de
 mesmo nome nem apagar originais; o download atualiza a cópia se uma versão antiga ainda
 escreveu lá. Logs privados antigos conhecidos têm a cauda de até 4 MiB copiada na subida;
@@ -281,12 +290,14 @@ texto, mas o backend a enviaria para o endpoint padrão do LLM.
   - **Saída não avisa os locais que ficaram** (26/09/2026, mesma medição acima): recado pra quem
     saiu volta "sessão não encontrada". Ficou o risco de uma sessão nova com o nome reusado receber
     recado dirigido à antiga. Remoto continua por `/unpair-remote` no unpair e no kill, senão o
-    sidecar de lá fica órfão; na varredura só loga (rede dentro do `list()` não).
-  - **Varredura de morto fora do app roda no fim de `list()`, e três coisas a seguram:** contador
-    DE CLASSE (há 4 instâncias de `SessionRegistry` — api, sse×2, prune — e todas chamam `list()`);
-    ausência confirmada por **tempo** (`_PAIR_AUSENCIA_MIN_S`), não por número de polls, porque
-    `kill()` e `rename()` chamam `list()` numa janela em que o nome está ausente de propósito; e lista
-    vazia = tmux fora = não varre, senão dissolvia todo grupo da máquina. O dict de classe (`_pair_ausencias`) é
+    sidecar de lá fica órfão; na varredura só loga (sem rede no laço da varredura).
+  - **Varredura de morto fora do app roda num laço próprio de 2 s (`api._pair_sweep_loop` →
+    `registry.sweep_pairs`), fora da descoberta, e três coisas a seguram:** contador DE CLASSE
+    (`_pair_ausencias`); ausência confirmada por **tempo** (`_PAIR_AUSENCIA_MIN_S`), não por número
+    de polls, porque `kill()` e `rename()` deixam o nome ausente de propósito por um instante; e
+    lista que falha levanta antes de varrer (lista vazia = tmux fora = não varre), senão dissolvia
+    todo grupo da máquina. Saiu de dentro do `list()` em 05/10/2026 (lista-estado, Task 16): com o
+    Rust dono da descoberta, o `list()` do Python não roda. O dict de classe (`_pair_ausencias`) é
     limpo com `pop(n, None)`, nunca `del` — as 4 instâncias varrem concorrentemente e outra thread
     pode já ter tirado a mesma chave.
   - **`--group` recusa `[grupo:`/`[de:` reencaminhado e limita 5/min por gid** (429). Todo membro
@@ -307,6 +318,20 @@ texto, mas o backend a enviaria para o endpoint padrão do LLM.
     `cc-socks/<pid>.sock` próprio pra receber `peer_message_status` (retido/recusado) e avisa a
     remetente com `[painel: entrega de recado]`. O recado vai com o prefixo `[de: X]` no corpo e o
     parser não o dobra (`_PEER_PREFIXO_RE`), pra `[grupo:]` sobreviver ao envelope.
+  - **O `from-mode` do envelope sai do modo real da sessão, nunca do padrão da conta**
+    (`_classe_modo`, 05/10/2026). Com `crossSessionInbound` sem valor, o Claude Code 2.1.289 só
+    entrega direto quando a classe declarada (`bypass`/`prompting`) é igual à do receptor; se for
+    diferente, abre o diálogo "Held message from another session" (`holdCause: mode-mismatch`).
+    A memória do pane é GRAVADA pelo session-id (stem do jsonl: `state.py` e as rotas de
+    permissão) e era LIDA pelo nome da sessão, então quase nunca era achada; o código caía em
+    `modo_da_conta`, e um `settings.json` com `"defaultMode": "default"` declarava `prompting`
+    para sessões lançadas com `--permission-mode bypassPermissions`. Todo recado entre sessões em
+    bypass parava no diálogo. Os três leitores (`_classe_modo`, `para_headless` e a origem da
+    transferência) agora passam por `permission_mode.session_non_plan_mode(jsonl)`: memória pelo
+    session-id e, sem ela (sessão sem monitor ou backend reiniciado), o `permissionMode` que o CLI
+    grava em cada fala do transcript. `plan` é pulado porque o receptor conta plan vindo de bypass
+    como bypass. Pôr `crossSessionInbound: "accept"` também resolveria, mas desligaria a proteção
+    do receptor contra uma sessão que pede aprovação mandar outra rodar sem pedir.
   - **Aviso do app sai como `[painel: <rótulo com espaço>]`, nunca `[de: …]`** (`pair_texto.PREFIXO`,
     24/09/2026). Os avisos de grupo saíam `[de: hangar]` e terminavam em "Confirme em uma linha": o
     uma sessão solta num grupo pelo arrasto confirmou com `hangar-send hangar …` e o
@@ -1002,3 +1027,624 @@ resolveria — as máquinas seguiriam no mesmo site entre si. Por isso o `cp_tok
 só vale o `__Host-cp_token`, que outra máquina não consegue gravar; o PWA grava o prefixado e
 apaga o antigo. O sync recusa ação com `Sec-Fetch-Site: same-site`/`cross-site`. O `cp_sync`
 mantém o nome por ora: o `hub()` do app nativo só guarda `Set-Cookie` começando com `cp_sync=`.
+
+## hangar-server: a porta pública em Rust, o Python atrás
+
+O serviço continua subindo `python -m app.main`. Com o binário e sem `CP_RUST_SERVER=0`, o
+uvicorn escuta numa porta livre de `127.0.0.1` e o `hangar-server` assume a porta pública como
+filho (`app/rust_server.py`), com a porta interna, o token, a lista `forwarded_allow_ips` do dono
+e um segredo novo a cada subida. O segredo vai só no ambiente do filho; no Python ele mora na
+memória de `internal_api` (`set_secret`), porque no `os.environ` vazaria para toda sessão que o
+backend sobe. O filho morre com o Python por um mecanismo só, em Linux, Windows e macOS: o
+Python segura o stdin dele como cano, e o binário sai quando o cano fecha. Sem `preexec_fn`, que
+não é seguro com threads vivas. No Windows o `Restart-HangarTask` reconhece o `hangar-server.exe`
+filho do backend: sem isso, a porta "de outro processo" barrava todo reinício.
+
+O vigia de 0,25 s (`refresh_members`) não varre a máquina: no Linux desce a árvore do filho por
+`/proc/<pid>/task/*/children` conferindo a sessão, e a varredura inteira (`psutil.process_iter`)
+fica como reforço a cada 5 s, porque o neto cujo pai morreu sai da árvore e segue na sessão. Fora
+do Linux, ou sem `children` no kernel (aviso no log uma vez), varre sempre. `runtime-process.json`
+só é regravado com pid novo, na primeira volta, depois de gravação que falhou ou se sumiu do disco.
+`cleanup` e `reconcile_startup` continuam com a varredura inteira. Medida (05/10/2026, backend
+isolado, zero sessões, sem cliente, ~615 processos): o Python caiu de 4,33% para 0,73% de um
+núcleo, e as regravações de 115 para 0 em 30 s. Cada varredura custava 9,5–11 ms; detalhes em
+`docs/migracao-rust/lista-estado/medicao.md`.
+
+A reserva é no mesmo processo, sem novo lifespan: dois lifespans rodariam watchers e hooks em
+dobro. O motivo vai ao diário como `hangar_server.reserva` (`sem_binario`, `sem_resposta`,
+`protocolo`, `endereco_privado`, `quedas`, `erro`, `porta_ocupada`); cada queda, como
+`hangar_server.caiu`.
+
+**Modo do processo (dono único, Task 5, 04/10/2026).** O coordenador tem um modo só para o processo:
+`pending` desde a subida com o binário esperado até o Supervisor decidir, e de novo entre uma queda 1
+ou 2 e a volta do Rust; `rust` quando a partida confirma; `python` sem binário, com
+`CP_RUST_SERVER=0`, `--reload`, ou quando o Supervisor desiste. Em `pending` as sessões Claude não
+passam ao Python: operações sobre elas esperam até `PENDING_WAIT_S = 30` s (uma partida leva até
+20 s) e depois falham com `runtime_starting`; as esperas longas (`run_sync`, fila síncrona) contam o
+próprio prazo depois disso. Com o Rust esperado, o lifespan não registra sessão Claude nem religa
+cano; ao entrar em `rust`, o Rust reabre as que eram dele e abre as do boot (cano vivo, ou morto
+com entrada não entregue, que é relançado), e só então roda a recuperação de transferência. Ao
+entrar em `python`, cada sessão do Rust é retomada uma vez e roda o que o lifespan fazia sem o Rust.
+A parada é decidida antes de qualquer ação (nem desativação nem retomada). Envio sem resposta
+porque o Rust morreu espera o Rust novo e repete o mesmo `operation_id` uma vez; senão fica
+incerto. Cliente Python no cano de sessão Claude em `pending`/`rust` é recusado
+(`refuse_python_client`); o Codex sem terminal segue no Python em qualquer modo. A saúde
+traz `protocol`, e o Python só aceita o mesmo `RUST_SERVER_PROTOCOL`: a `server-latest` é sempre a
+mais nova, e uma máquina atrasada pode baixar um binário que fala outro contrato interno. Com o
+Rust na frente, todo pedido chega ao uvicorn interno por `127.0.0.1`: o `forwarded_allow_ips`
+dele sempre inclui esse endereço, senão a LAN passaria por loopback e escaparia do limite de
+tentativas. O Rust põe no `X-Forwarded-For` o cliente já resolvido, nunca o que veio de fora.
+
+Os binários vêm da release `server-latest` para `~/.hangar/bin/`, pelo instalador, pelo botão
+Atualizar (`_preparar`) e pelo passo `2026-10-02-hangar-server-binarios`; falha vira aviso.
+
+### O contrato interno é versionado à mão
+
+Não há comparação de commit entre o binário e o Python: a `server-latest` acompanha a main, e
+uma máquina atrasada pode ter um `hangar-server` mais novo que as rotas `/internal` dela. Quem
+barra isso é o número. Qualquer mudança nas rotas `/internal`, no conjunto de eventos do
+`side-events` ou nas variáveis de ambiente passadas ao filho sobe `RUST_SERVER_PROTOCOL`
+(`backend/app/rust_server.py`) e `INTERNAL_PROTOCOL` (`crates/hangar-server/src/lib.rs`) juntos,
+no mesmo commit. Subir só um dos dois faz o Python recusar o binário e assumir a porta (visível
+no diário); não subir nenhum não dá aviso: o Python aceita um binário que fala outro contrato, e
+o defeito só aparece no comportamento. O `hangar-cano` segue o mesmo raciocínio com
+o `versao` do snapshot, que acompanha o `VERSAO` de `cano.py`
+(`backend/app/adapters/claude_headless/cano.py`; `VERSION` em `crates/hangar-cano/src/protocol.rs`).
+O download registra no diário o commit do manifesto, só para diagnóstico.
+
+### Linha de base (02/10/2026, antes da troca)
+
+Fonte: backend vivo (3 sessões, 4 conexões) e benchmarks avulsos em Python 3.14, nesta máquina
+(16 núcleos, 31 GB).
+
+| Métrica | Antes |
+|---|---|
+| Memória do backend | 232–312 MB de RSS, 247 MB anônimos, 20 threads |
+| CPU média | ~1,1% de um núcleo |
+| `cano.py` por sessão sem terminal | 22 MB de RSS, 6 threads, 22 ms para subir |
+| `/history` (Claude 0,9 MB / Codex 3 MB / Codex 35 MB) | 5–8 ms / 15–20 ms / 80–110 ms |
+| `/history` completo, Claude 300 MB / `limit=200` | 362 ms / 45 ms |
+| Atraso do laço com 8 leituras de histórico em paralelo | p99 9,6 ms, máx. 16 ms |
+| Recursos presos por chat aberto | 2 threads do pool do anyio (limite 200) e 2 inotify |
+
+### Depois da troca
+
+Preenchida na verificação manual com o dono, mesma máquina e mesmas sessões da linha de base.
+O `MainPID` do serviço é o `uv`, não o Python: o backend é o filho dele e o `hangar-server` é
+filho do backend.
+
+- Backend e `hangar-server` (RSS em KB):
+  `PY=$(pgrep -P $(systemctl --user show -p MainPID --value hangar-backend.service))`,
+  `RS=$(pgrep -f .hangar/bin/hangar-server)`, `ps -o pid,rss,nlwp,args -p $PY,$RS` e
+  `grep RssAnon /proc/$PY/status`.
+- `hangar-cano`: `ps -o pid,rss,nlwp,args -p $(pgrep -f hangar-cano | head -1)`.
+- `/history`, cinco vezes por sessão, mediana (`ls -l` do `jsonl` confere o tamanho):
+  `for i in 1 2 3 4 5; do curl -s -o /dev/null -w '%{time_total}\n' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:8765/api/sessions/<nome>/history"; done`;
+  na sessão Claude de 300 MB, sem e com `?limit=200`, se ela ainda existir.
+- Chats abertos: com nenhum aberto, `nlwp` do `$PY` e `ls -l /proc/$PY/fd | grep -c inotify`;
+  abrir 4 chats (2 sessões × celular e web) e repetir.
+
+Anotar valor e unidade, a sessão de cada `/history`, e o que não deu para medir e por quê.
+
+| Métrica | Depois |
+|---|---|
+| Backend Python (RSS, anônimos, threads) | |
+| `hangar-server` (RSS, threads) | |
+| `hangar-cano` por sessão sem terminal (RSS, threads) | |
+| `/history` (Claude 0,9 MB / Codex 3 MB / Codex 35 MB), mediana de 5 | |
+| `/history` completo, Claude 300 MB / `limit=200` | |
+| Threads e inotify do Python com 4 chats abertos, contra 0 abertos | |
+
+**Terminal real do dono (parte 4, Task 8, 06/10/2026).** Fora do Windows, o `WS .../term` do
+dono (`?token=` só; Bearer e cookie seguem ao Python, como no `termsock`) abre o PTY no Rust
+(`term/`, `portable-pty`). A Origin continua decidida pelo `_origem_aceita` do Python, perguntada
+uma vez por conexão em `/internal/term/origin` (prazo 1 s; falha = 503 com código no diário).
+Recusa antes do aceite é 403, como o fechamento antes do `accept` do Starlette; multiplexador
+fora e teto de 64 painéis aceitam e fecham com 1013 e o motivo. O tamanho da janela fica na
+opção `@hangar_term_size` da sessão enquanto o painel vive, e o `main.rs` repõe ao subir o das
+sessões que um Rust anterior deixou no tamanho do painel. Medidas em
+`docs/migracao-rust/parte4/medicao.md`. Desde a Task 10 o Windows também abre o painel do dono
+no Rust (ConPTY do `portable-pty`); as regras de lá estão em `windows.md`, "Terminal real do
+dono no Windows é do Rust".
+
+**Porteiro do terminal (parte 4, Task 9, contrato 30).** Com o modo `rust` (ou `pending`, que
+espera o desfecho), o `termsock` não abre PTY em nenhuma plataforma: depois da porta de entrada
+de hoje (convidado de convite, convidado com login, dono pelo Connect) ele liga os bytes a
+`/__hangar_server/term` na porta privada (segredo e loopback; alvo conferido de novo lá, `cols`/`rows`).
+O painel é o mesmo `Terms` da 8765, então dono e convidado se derrubam com 1000 "outra conexao
+assumiu" como dois donos. Revogação pelo `share_gate` cancela o repasse, que fecha o lado do
+Rust; o código de fechamento do Rust chega igual ao cliente, queda sem fechamento vira 1011.
+Ponte desligada, Rust subindo ou recusa do aperto de mão: 1013 (sessão morta: 1008) e
+`terminal.ponte` no diário com o código. O 409 (`_recusa_se_painel_aberto`) pergunta
+`term.active` pela ponte da lista, fora do laço de eventos; erro é 503
+`erro_terminal_indisponivel`. `/api/config.terminal_panel` e `/run-code` leem o `terminal_panel`
+da saúde no modo `rust`; saúde sem o campo booleano é falha de partida.
+
+## Lista do dono no hangar-server
+
+(05/10/2026, lista-estado Task 17; contrato interno 27, sem mudança.) `GET /api/sessions` e
+`GET /api/sessions/events` do dono saem do `ListHub` (`crates/hangar-server/src/list/hub.rs`);
+convidado, outros métodos e o Python em modo `python` continuam com o `sse.py`/`api.py`.
+
+- **Um produtor por servidor**, ligado pela primeira lista aberta e parado quando a última fecha
+  (como o `_ListRefresher`). Tique de 1,5 s contado do fim do trabalho: descoberta, fatos do Python
+  (`/internal/list/facts`, prazo de 1 s), classificação, decoração e rebaixamento. A assinatura é a
+  do `_list_sig`; o JSON só é montado quando ela muda, e cada conexão só lê o último publicado
+  (`watch`). Nenhum trabalho por conexão além de recortar quadros.
+- **Retrato compartilhado:** o tique grava o retrato da ponte (`ListBridge::refresh`); o `GET`, o
+  vigia de travada e a lista do convidado reaproveitam até 2 s, e invalidar (`list.invalidate`)
+  força produção nova. Sem lista aberta, o `GET` produz na hora.
+- **Contagem de listas do dono:** vai em todo pedido de fatos (o do tique e o do retrato), então a
+  chave do cache de fatos não alterna e o Python ajusta a presença do app por ela (`app_remoto`).
+- **Sessão sem terminal:** toda produção lê `RuntimeRegistry::list_snapshots` (por chave, prazo de
+  1 s por sessão) e acha a linha pela vida `k:<chave>`. Ator que não respondeu fica com o erro no
+  retrato e a linha mostra `list_runtime_unavailable`, nunca parada calada; sem runtime ligado, a
+  linha diz `list_runtime_absent`.
+- **Falha:** `GET` responde 503 no formato do `api.py` (`erro_mux_indisponivel` com o motivo do
+  multiplexador; demais, `erro_lista_indisponivel` com o código, `rust.list_route_failed` no
+  diário). O SSE manda `list_error` com `{"code"}` uma vez na transição (`rust.list_failed` no
+  diário) e a volta reemite a lista mesmo igual. Fatos que nunca responderam (`list_facts_unknown`)
+  são falha: acesso e escondidas seriam vazios. Fatos que caíram depois de uma resposta boa só marcam
+  as linhas (`list_facts_unavailable`). Linha escondida do dono não sai.
+- **Caches por sessão:** nome fora da lista por 10 s sai de resolução, contexto, resposta e
+  classificação (o `_forget` de quem morre sem o Python fechar). Os 10 s cobrem a linha que some numa
+  rodada só sem perder a resolução semeada.
+- **Telas:** os códigos `list_*` da linha têm frase em `messages/*.json` (`problema_list_*`), lida
+  pelo web (`lib/problema.ts`), pelo app (`SessionProblem.tsx`) e pelo nativo (`problema_<código>`).
+
+Medida (backend isolado, release, 20 sessões Claude de mentira paradas, uma lista do dono aberta):
+
+| | Antes (Python serve, Rust só retrato) | Depois (hub no Rust) |
+|---|---|---|
+| CPU do Python (ms por s) | 11,5 e 14,0 | 11,7 |
+| CPU do Rust com filhos (ms por s) | 5,5 e 5,7 | 7,3 |
+| Servidor tmux (ms por s) | 0,7 e 0,8 | 0,8 |
+| Marcador muda → `sessions` no SSE (mediana / máx, 10 vezes) | 1,36 / 2,28 s | 0,73 / 1,20 s |
+| Pico de RSS do Rust | 22,6 MB | 28,7 MB |
+
+Metodologia: CPU por `/proc/<pid>/stat` (`utime+stime+cutime+cstime`) em 60 s depois de 10 s de
+aquecimento; sessões são panes com `claude --session-id` de mentira, transcript de 50 linhas e
+marcador `idle` no `HOME` isolado; latência do `os.replace` do marcador até o `sessions` com o
+estado novo. O Python não caiu: antes ele produzia o refresher e respondia os fatos do retrato a
+cada 2 s; agora responde os fatos a cada tique (1,5 s). O Rust gasta mais porque produz a cada
+tique em vez de servir o retrato de 2 s, e é isso que corta a latência pela metade (antes o
+refresher de 1,5 s lia um retrato de até 2 s).
+
+### Lista acordada por arquivo
+
+(05/10/2026, lista-estado Task 18; contrato interno 27, sem mudança.) Entre os tiques, o produtor
+observa com `notify` as pastas `.hangar-state`, `sessions` (registro nativo) e `.hangar-askq` de
+cada conta: um observador só, pastas deduplicadas por `canonicalize` (conta com link para a mesma
+pasta conta uma vez), armado antes de cada rodada inteira para nenhuma escrita depois da leitura
+dos marcadores se perder. Abrir e fechar arquivo (`Access`) é ignorado: as leituras da própria
+lista o acordariam sem fim.
+
+- **Rodada parcial:** a escrita acorda o produtor; a rajada é juntada em 150 ms e
+  `ListBridge::reclassify` relê os marcadores (`HookStates::refresh` devolve as sessões cujo
+  arquivo mudou; a pergunta aberta sai do nome do arquivo) e reclassifica e decora só essas linhas
+  sobre a última rodada inteira guardada, sem descoberta, sem pergunta ao Python e sem `git`. A
+  assinatura decide se publica; o retrato do `GET` passa a levar o resultado.
+- **Só sobre a rodada inteira que deu certo:** rodada inteira com erro ou fatos desconhecidos
+  apaga a guardada, e a escrita espera o tique; senão a parcial republicaria a lista velha por
+  cima do `list_error`. Sessão nova (fora da rodada guardada) também espera o tique.
+- **Teto de frequência:** sem rodada guardada, com erro ou sem linha afetada, nada roda até o
+  tique. Fila de avisos com 256 lugares; cheia, ou `rescan` do sistema, a próxima rodada é a
+  inteira.
+- **Falha:** observador que não arma (limite do inotify, pasta ilegível) ou pasta observada que
+  some vai ao diário (`rust.list_watch`, `<conta>/<pasta>` e código) uma vez por troca de código;
+  pasta apagada e recriada entre dois tiques é rearmada pelo inode. O tique de 1,5 s continua
+  valendo. Conta sem a pasta é normal e não vai ao diário.
+
+Medida (mesma montagem acima, `scripts/medir-lista-hub.py`, duas rodadas de cada):
+
+| | Antes (só tique) | Depois (acordada por arquivo) |
+|---|---|---|
+| Marcador muda → `sessions` no SSE (mediana / máx, 10 vezes) | 0,74 / 1,20 s e 0,74 / 1,21 s | 0,16 / 0,16 s e 0,16 / 0,16 s |
+| CPU do Rust com filhos, parado (ms por s) | 7,3 e 7,7 | 7,8 e 7,8 |
+| CPU do Python, parado (ms por s) | 11,5 e 11,7 | 11,5 e 11,0 |
+| Pico de RSS do Rust | 27,7 e 27,8 MB | 23,3 e 22,2 MB |
+
+A latência que sobra é a janela de 150 ms. Parado, o custo a mais por tique é a cópia das linhas
+Claude da rodada (só com lista aberta) e o `stat` das pastas observadas: dentro do ruído.
+
+## Custos e uso no hangar-server
+
+(03/10/2026, Parte 3; contrato interno 20 na junção com o dono único e a lista de worktrees.) O Rust
+atende `/api/costs`, `/api/uso`, `/api/cotacao` e `/api/sessions/{name}/cost` para sessões Codex.
+Claude, Codex, Pi, omp e Kimi alimentam o índice de custos; o relatório de Uso mantém as fontes
+que a referência Python já oferece. Escopos e rótulos chegam do Python pelo contrato interno,
+incluindo a identidade canônica da conta e o repositório. Preços e mapa de áreas continuam
+sendo metadados explícitos da coleta. Fuso fixo UTC-3, chaves, ordem dos arrays/dicionários e
+campos nulos seguem os modelos Python.
+
+### Índice próprio e reserva
+
+Com o Rust de pé, as quatro rotas são só dele (regra do dono único, 04/10/2026): uma tentativa
+por pedido; falha interna vira 503 com `error_code` e `detail.{code,params.motivo,msg}` (o
+envelope que o `lerErro` do app traduz), uma linha no `hangar-server.log` e o evento
+`rust.costs_failed` no diário pelo `POST /internal/diag`. Códigos fixos `costs_no_scopes`,
+`costs_no_disk`, `costs_reader_panic`, `costs_sqlite`, `costs_json`, `costs_worker_join`,
+`costs_io`, `costs_non_finite` e `internal_info`; o campo `sessao` do diário leva o nome da
+sessão no custo avulso e a rota (`costs`, `uso`, `cotacao`) nas outras, para uma não esconder a
+outra no limite de uma linha por minuto. Nada é repassado ao Python por falha. A coleta que
+falhou fica guardada, e um pedido 5 s depois dela já dispara outra atrás (sem esperar `fresco`
+nem os 30 s; antes disso só a falha guardada, para disco ou escopos fora do ar não virarem uma
+varredura por pedido); por isso um pedido seguinte pode voltar 202 ou 200.
+
+**Pasta que não deu para ler nunca apaga linhas** (04/10/2026). A listagem separa pasta que
+sumiu (`NotFound`, as linhas dela saem) de pasta que não abriu, parou no meio ou cujo arquivo
+não se resolve (permissão, E/S): essas entram em `unread`, e `Index::sync_keeping` não apaga
+nenhuma linha conhecida debaixo delas. Conta Codex com pasta ilegível, ou cuja `home` nem se
+resolve, segue ativa no relatório com as linhas como estavam. `forget_outside` só apaga com
+`NotFound` (o `exists()` é falso também com permissão negada). A causa vai ao log
+(`custos_pasta_ilegivel`, tipo de erro, uma linha por tipo e minuto) e ao diário
+(`rust.costs_dir_unread`, código `costs_dir_<tipo>`, sessão = rota) no pedido seguinte; a
+resposta continua 200. Erro SQLite registra código e código estendido onde nasce (nunca a
+mensagem, que pode ecoar valor de coluna), e erro de disco registra a etapa e o tipo. Os cards
+da tela inicial mostram a frase traduzida do 503 com o código entre parênteses. Aquecimento 202,
+ausência legítima 404, relatório vazio e falta de tarifa/cotação não são falha. A versão
+anterior (contrato 8: quatro tentativas e passagem da parte ao Python, rota
+`/internal/rust-failure`) saiu na junção com o dono único (contrato 18, hoje 20).
+
+O índice Rust chama-se `custos-rust.sqlite3`. No Linux/macOS fica em
+`$XDG_CACHE_HOME/hangar/custos` quando a variável contém caminho absoluto, ou
+`~/.cache/hangar/custos`; no Windows, em `%LOCALAPPDATA%/hangar/custos`, com a reserva local do
+perfil quando essa variável falta. O banco Python é independente (`custos.sqlite3`). A mudança
+do destino padrão Python discutida no PR #27 não está integrada nesta branch; não pressupor
+que os dois índices já usam a mesma pasta. Nenhum índice vivo foi usado na prova.
+
+Índice ausente aquece em background e responde 202 com progresso; um pedido fresco tem espera
+limitada. Índice indisponível ou escopos inacessíveis viram 503 com código. Falta
+do binário, protocolo incompatível e `CP_RUST_SERVER=0` conservam a reserva geral da porta
+pública. A recuperação do índice corrompido fecha os recursos da tentativa antes de reconstruir
+e repetir, sem copiar o índice Python.
+
+A validação entre máquinas em 03/10/2026 revelou diferenças no último bit das somas quando
+a ordem dos arquivos variava. Python e Rust agora ordenam os caminhos na listagem e nas
+consultas do índice, preservando a sequência interna de cada arquivo. Ordenar a consulta
+também corrige índices existentes, cuja ordem de inserção muda após atualizar um arquivo.
+
+O CI de 03/10/2026 também expôs dois pontos de portabilidade: a raiz do repositório deve
+ser resolvida antes de classificar origens, e a seleção de regras de projeto deve aceitar
+ambos os separadores de caminho. Python e Rust usam essa seleção comum; o marcador
+`project-paths:1` nas assinaturas reconstrói somente as áreas salvas, preservando os custos.
+
+Cotas permanecem no Python: dependem das APIs dos provedores e compartilham cache/espera de
+429 com criação de sessão, loop e MCP. Duplicar isso no Rust criaria duas consultas e duas
+políticas de espera. `stats` continua no fluxo de chat Python; custo por papel da orquestração
+também continua usando seu índice Python. A porta pública em Rust não duplica esses produtores.
+
+### Medida e paridade
+
+A [análise anterior](../migracao-rust/parte3/analise.md) mediu **41,9 s** de coleta Python sem
+índice, **0,08–0,14 s** de atualização incremental e pico de **211 MB** após ler o uso inteiro.
+O corpus mudou desde essa análise; os números seguintes são uma nova comparação dos dois
+leitores sobre as mesmas entradas, não uma repetição daquele conjunto antigo.
+
+Prova final sobre `caf615db`, build release, processos avulsos no Linux/glibc. Snapshot de
+**5.547 arquivos**, **4.497.268.800 bytes**, preservando os caminhos e identidades originais.
+As dez sobreposições do namespace são somente leitura; os dois índices SQLite e o temporário
+do SQLite ficam numa pasta privada descartável. Escopos, rótulos, preços, áreas e `now` foram
+capturados uma vez; cotação nula nos dois relatórios. Cópia, metadados e compilação ficam fora
+do tempo de varredura. “Fria” significa **índice novo**: as páginas dos arquivos já estavam
+aquecidas pela cópia e pela leitura Python; não se limpou o cache de páginas do sistema.
+
+| Operação | Resultado |
+|---|---:|
+| Coleta Python com índice novo | 38,842 s |
+| Coleta Rust com índice novo | 3,270 s |
+| Coleta incremental Rust, mesmos bytes e mesmo índice | 0,038157 s |
+| Pico Rust após relatórios frios e serialização | 87 MiB |
+| Pico Rust do processo completo, incluindo incremental e novos relatórios | 93 MiB |
+| Divergências dos relatórios completos Python/Rust | 0 |
+| Divergências de linhas, offsets, tamanhos e caudas nos dois índices temporários | 0 |
+
+O pico é `VmHWM`, arredondado para cima, após leitura, agregação e serialização; inclui os
+relatórios incrementais, não apenas os workers da varredura. O uso percorreu **103.814 linhas**
+e **4.457 linhas de tokens**. A descoberta real das origens Rust e Python coincidiu em **198
+entradas**, incluindo valores e ordem; o builder Rust não recebeu o mapa Python como resultado.
+Após a segunda coleta, os relatórios Rust também permaneceram idênticos byte a byte aos frios.
+As metas de menos de 5 s e 100 MiB foram atingidas nessa prova.
+
+As primeiras comparações de arquivos vivos divergiram porque os transcripts cresceram entre
+leituras. O snapshot resolveu isso sem excluir fontes, alterar identidades ou ajustar golden.
+O script compara inteiros, tipos, chaves e ordem exatamente; frações seguem tolerância de
+`1e-9 * max(abs(a), abs(b), 1)`. Só contagens, posições de campos e códigos entram no diagnóstico;
+os bytes reais ficam fora de fixtures e logs e são removidos ao terminar.
+
+### O que reduziu tempo e memória
+
+`caf615db` preservou o contrato e corrigiu o custo da implementação: buffer antes do compressor
+do estado, janela limitada com mais trabalho disponível às quatro threads, cálculo das áreas
+nas leituras e pré-filtro das linhas Claude/Codex que nenhum acumulador consome. O Uso é
+agregado enquanto o índice entrega as linhas (`fold_usage`/`UsoBuilder`), sem materializar a
+coleção inteira. No Linux/glibc, `tune_allocator` fixa o limite de devolução de memória antes
+da coleta; o exemplo usa o mesmo ajuste do servidor. Não houve mudança de tarifa, corte de
+dados ou normalização de saída para atingir as metas.
+
+Reprodução, da raiz: `cd backend && uv run python ../scripts/comparar-custos.py --snapshot
+--profile --incremental --diagnose`. O build release precede a captura; `--binary` permite um
+executável previamente congelado, com conferência opcional por `--binary-sha256`. O modo de
+snapshot depende de `bwrap` no Linux e não altera serviços ou configuração da máquina.
+
+### Visão resumida da tela inicial (`?view=summary`)
+
+O card de uso da tela inicial (web, app e nativo) lê só `totals`, `by_day`, `by_model`,
+`sem_tarifa`, `applied` e `usd_brl`; o relatório inteiro tinha ~1 MB, quase todo `combos`.
+`GET /api/costs?view=summary` monta só esses seis campos pelas mesmas funções e na mesma ordem
+de soma (`build_summary`; teste compara campo a campo com o inteiro), com chave de cache própria.
+Sem o parâmetro, ou com outro valor, sai o relatório inteiro: cliente antigo e servidor antigo
+(Python incluído, que ignora o parâmetro) continuam iguais. A tela de Custos segue pedindo o
+inteiro.
+
+Medida em 04/10/2026, esta máquina (i5-13400F, carga 7–15 de outras sessões), `hangar-server`
+release isolado (porta livre, `XDG_CACHE_HOME` temporário, Python falso só com os escopos reais),
+mediana de 15 pedidos para "pronto" (relatório em cache) e o primeiro pedido para "remontando"
+(índice pronto, relatório fora do cache):
+
+| `/api/costs` | Inteiro | Resumido |
+|---|---:|---:|
+| `all`: pronto / remontando | 2,23 ms / 21,6 ms | 0,20 ms / 13,6 ms |
+| `all`: corpo / gzip | 1.020.394 B / 136.788 B | 15.798 B / 3.628 B |
+| `7d`: pronto / remontando | 0,92 ms / 14,6 ms | 0,32 ms / 14,6 ms |
+| `7d`: corpo / gzip | 368.571 B / 48.325 B | 5.521 B / 1.590 B |
+
+Python (medida do kick-off na mesma máquina): 2–8 ms pronto, 90–200 ms remontando, 1 MB.
+Reconstrução do índice do zero, mesmos escopos, rodadas seguidas na mesma hora: Python
+(`_sincronizar` com `_CACHE_DIR` temporário) 41,5 s e 40,6 s, pico 169 MiB; Rust
+(`examples/custos`, índice novo) 6,5 s e 6,3 s, pico 57–58 MiB (as três primeiras rodadas, com o
+cache de páginas ainda frio, deram 18,9 s, 10,8 s e 7,1 s). Pelo servidor, do primeiro pedido ao
+primeiro 200: 9,7 s.
+
+### Uso real ainda pendente
+
+A prova foi por arquivos e processos avulsos. O dono ainda precisa conferir Custos e Uso no
+web, o card no celular e no nativo; “Atualizar dados”; filtros e clique num item de Uso; custo
+de sessão Codex; aquecimento ao recriar o índice Rust; e reserva com `CP_RUST_SERVER=0`.
+Nenhuma tela, backend vivo, índice de produção ou serviço foi alterado nesta prova.
+
+### Prova de uso real do dono único (04/10/2026)
+
+Backend da branch `feat/rust-single-owner` (`d6dbdc36`) isolado pelo `scripts/prova-dono-unico.py`
+(unit transiente, HOME, portas e `tmux -L` próprios, Haiku). Criar e mandar na hora: 10/10 sem
+terminal e 10/10 com terminal, cada mensagem uma vez, nenhum "religou"/"desligou" e nenhum
+`runtime.*` no diário. Fila com o Claude ocupado (3 em ordem, uma vez cada), `/clear` com o chat
+aberto (não cai), restart com fila e com cano morto (uma entrega, parada em 0,2 s sem SIGKILL),
+uma queda do Rust (sessão segue no Rust novo, envio durante a queda sai uma vez), três quedas em
+60 s (o Python assume, nada duplicado), trava de escrita na fila (400 com código, sessão segue no
+Rust), Git ocupado (503 `workspace_busy` em 0,01 s, nada no Python) e troca de conta com e sem
+terminal (0,6–0,7 s, mesma chave, uma entrega na conta nova). Ficam manuais no app real a entrega
+incerta forçada no terminal e a transferência Claude → Codex. Tabela e achados (um
+`reopen_failed` intermitente no restart, e o 500 com pilha da política com geração antiga) em
+[`prova-real.md`](../migracao-rust/dono-unico/prova-real.md).
+
+## Estado ao vivo de Claude com terminal no `Monitor` do Rust
+
+(06/10/2026, parte 4 da migração, Task 5.) Com o `hangar-server` de pé (`rust` ou `pending`), o
+estado ao vivo, a prévia, a pergunta nativa, a sugestão e o `problema` de Claude com terminal saem
+de um `Monitor` por hub (`side.rs`, fonte de produção em `state/live.rs`), criado com o primeiro
+assinante e parado com o último. Assinante é o `/events` do dono ou o canal privado
+`GET /__hangar_server/state/{name}/events` (segredo e loopback, HTTP/1.0), que o `merged_events`
+do Python lê para o convidado (8766) e o dono pelo Connect (8768). Assim a sessão nunca tem dois
+donos: captura, `permission.observe` e `session.dead` saem uma vez, de um lugar só.
+
+- O `Monitor` publica pelo retrato do hub (`publish_own`, mesma regra de repetido) e pede a entrega
+  por `session.deliverable` na borda; a conexão interna do Python deixa de rodar `StateMonitor`,
+  `PreviewBroker`, o `tail_pump` (que só servia à supressão da prévia), a sugestão, a pergunta e o
+  `drain`. Se o Python mandar um dos quatro eventos para sessão do Rust, o hub descarta e registra
+  `state_python_leak` uma vez por sessão.
+- `rebind` (`/clear`, troca do filho) acorda o `Monitor` na hora: o retrato perde o estado e o novo
+  sai sem esperar o tique. A captura é recriada na época nova (o pool solta o vínculo velho do
+  mesmo consumidor) e solta ao fim do `Monitor`.
+- A resposta gravada que suprime a prévia vem das linhas do leitor do transcript do hub, semeada
+  pelo fim do arquivo ao ligar (o leitor começa no fim); a gravação acorda o `Monitor` e a prévia
+  repetida sai sem rodada nova.
+- Arquivos da sessão e prévia do hook em `spawn_blocking` com prazo; falha vai ao diário. Retrato
+  dos fatos que falha ou nunca chegou é `problema=state_facts_unavailable`
+  (`state_facts_missing` no detalhe quando não houve resposta nenhuma).
+- O `Sources` não tem corpo padrão em método nenhum: a fonte de produção que esquecer um não
+  compila (a remoção já pegou duas fontes de teste incompletas).
+- Medida (`docs/migracao-rust/parte4/medicao.md`, Task 5): 20 chats trabalhando, Python de 176,5
+  para 29 ms de CPU por segundo e o total de 297,5 para 146; latência marcador → `state` igual à do
+  Python (mediana ~0,45 s), com a cópia dos marcadores relida só quando o observador das pastas vê
+  escrita.
+
+## Observação terminal Rust: erro visível, sem captura Python
+
+(Parte 4, Tasks 5 e 7, 06/10/2026.) Com o Rust de pé, quem lê a captura de Claude com terminal é o
+`Monitor` do Rust, em processo (`PoolCapture` em `state/monitor.rs`, cliente `-C` do
+`TerminalPool`; no Windows a captura avulsa do psmux em `state/capture.rs`), e a falha dele sai com o mesmo `problema=terminal_observacao_falhou` sobre o último
+evento ([estado ao vivo no `Monitor`](#estado-ao-vivo-de-claude-com-terminal-no-monitor-do-rust)).
+A ponte Python descrita abaixo (`terminal_observer` → `POST /__hangar_server/terminal`) ficou sem
+consumidor: só o `StateMonitor` e o `PreviewBroker` de Claude a alugam, e eles só rodam no modo
+`python`, em que a ponte está desligada; Pi, omp e Kimi nunca a usaram. A porta privada continua,
+com o painel (`/__hangar_server/term`), o canal do estado, a lista e Git/arquivos. O texto abaixo
+vale como história da ponte.
+
+(04/10/2026, dono único, decisão 3 do dono.) Com a ponte ligada, o Rust é o único dono da
+captura de quem tem lease: erro de transporte, resposta torta, quadro inválido, alvo do pane ou
+vínculo que não se lê sobem como `ObservationFailed(<código>)`, nunca como `None`. O monitor de
+estado repete o último evento com `problema="terminal_observacao_falhou"` e o código em
+`problema_detalhe` (faixa na web e no app), dorme a rodada e pergunta ao Rust de novo; a prévia
+mantém o texto que tinha. O erro ainda passa pelo `has-session`: sessão que sumiu vira `dead`, não
+um aviso eterno. Sem evento anterior, o estado sai do plugin ou do marcador do hook, nunca de um
+`idle` presumido. A pausa entre tentativas é só a do Rust (`terminal_control.rs`,
+`record_failure`, até 60 s); o disjuntor por sessão do Python (3 falhas, pausa de 1 s a 30 s e
+diários `fallback`/`paused`/`recovered`) saiu, porque com ele cada falha voltava a capturar pelo
+Python e o cartão mostrava uma leitura que o Rust não confirmou. O diário grava
+`terminal_observer.erro` no máximo uma vez por minuto por sessão e código (um Rust que alterna
+sucesso e falha não enche o diário); o log do Rust diz "observação terminal
+falhou". `None` (captura Python) fica só para dono fixo ou Rust ausente (modo `pending`/`python`):
+ponte desligada, Windows, nome fora de `[A-Za-z0-9._-]{1,64}`, provider fora do Rust ou sessão ainda
+sem vínculo. No `pending` (subida do Rust, ou os segundos entre uma queda e a volta dele) a ponte está
+desligada e o Python atende Git/arquivos e a captura do painel: o Rust não está lá para atender, e
+nenhuma posse de sessão passa por isso.
+
+O texto abaixo é o da Parte 2C, quando o erro caía na captura Python; a regra acima o substitui.
+
+### Parte 2C: observação terminal Rust com reserva Python
+
+(03/10/2026, Parte 2C, ensaios isolados.) O `hangar-server` abre uma segunda porta em
+`127.0.0.1:0`, no mesmo processo e sob a mesma parada do listener público. Isso cobre também
+um bind público em IP LAN específico, que não aceita conexões destinadas a `127.0.0.1`.
+A saúde anuncia `terminal_address`; o Supervisor só o usa depois de confirmar o protocolo e
+conferir IP literal de loopback e porta válida. Endereço ausente/torto é falha de partida
+(`hangar_server.reserva` `endereco_privado`): o Python assume a porta inteira, em vez de ligar o
+Rust com as pontes desligadas (dono único, Task 5). A porta pública recusa o endpoint terminal e a privada só monta esse endpoint.
+
+`POST /__hangar_server/terminal` confere origem TCP de loopback e segredo interno em tempo
+constante antes de ler o corpo. Cabeçalho encaminhado externo, inclusive duplicado ou inválido,
+recusa com 404; token do dono/convidado não serve. O corpo tem teto de 16 MiB e prazo de 6 s,
+operações tipadas `acquire`, `capture`, `release`, sem comando livre. Corpo inválido
+responde frase fixa com 400; falha do controle responde 503, nunca pane vazio com sucesso.
+O pool mantém os limites da Parte 2C/Task 2 e a captura exata do alvo que `tmux._pane_target`
+resolveu. `acquire` inicial confere o alvo; renovações não recapturam. O cliente anexa com
+`ignore-size,no-output` e `-E`, sem grade auxiliar. Nunca `read-only`: no tmux 3.7b o `send-keys`
+de fora é atribuído a esse cliente e recusado ("client is read-only"), e a digitação do Python
+falhou no notebook do dono (04/10/2026, `envio.parcial` com 54 `send-keys` de retorno 1). Cada rodada confere a sessão/pane
+e lê um único `capture-pane`; duas molduras identificam cada comando. Mudança de alvo continua
+invalidando a leitura, e panes maiores não pagam um limite de células de outra grade.
+
+A ponte Python usa um opener `urllib` somente HTTP, sem proxy/redirect, em thread dedicada,
+corpo/UTF-8/JSON limitados, sem dependência
+runtime de `httpx`. Endereço e segredo ficam em memória, fora do ambiente global, e somem
+antes da nova geração do filho, na saída e no `stop`, inclusive sem processo guardado.
+A configuração recebe geração própria. Cache, captura em voo e análise acompanham provider,
+vínculo da conversa, época local, geração da ponte e início da leitura. `/clear` invalida tudo;
+mesmo texto e mesmo nome não autorizam reaproveitar uma análise velha. O contexto do produtor
+não vaza para quem consome eventos do monitor.
+
+Claude mantém uma lease por monitor e uma por produtor de prévia; a prévia renova mesmo
+quando recebe só sidecar. `None` no sidecar cai no pane; `""` publica vazio com markdown/full.
+Análise Rust do pane só fornece spinner/texto no mesmo quadro, com markdown/full desligados.
+O estado temporal, debounce e a precedência das perguntas/plugin/hooks permanecem no bloco
+Python original, sobre o texto já capturado. Não existe outro HTTP para o cálculo puro, nem
+coleta antecipada de fatos que esse estado não usa. O cálculo puro Rust permanece como
+referência testada contra as fixtures Python, sem operação privada. Permissão, loop, shells,
+dedupe, drain e SSE continuam no Python.
+
+Ao anexar, o observador vira o cliente "atual" do tmux (comando sem `-c`, hooks) e manda foco ao
+pane; isso é do `tmux -C` e fica. Por isso a saída avulsa de hook fora de `%begin/%end` é
+ignorada pelo parser, a liberação fura a vaga cheia (senão o cliente segue
+anexado até 90 s), e nome fora de `[A-Za-z0-9._-]{1,64}` não chama o Rust (04/10/2026, revisão
+com sessões reais em `docs/migracao-rust/parte2b/revisao-real.md`).
+
+Codex terminal não abre observador tmux sem consumidor de captura. Estado, pergunta, prévia
+por push e app-server continuam nativos. Kimi/Pi/omp seguem o caminho anterior.
+Windows usa captura/reducer Python, sem tentar controle tmux/psmux.
+
+Prova isolada: listener público em `127.0.0.2`, privado em `127.0.0.1` com porta efêmera;
+processador privado respondeu 200 e ambas as portas fecharam na parada. Executável fake provou
+um PID compartilhado entre dois produtores, renovação sem recaptura e reap na última liberação.
+A suíte focada cobre reserva, estado temporal Python, `/clear` em voo com vínculo/texto idênticos,
+troca de geração, sidecar vazio, autenticação antes do corpo e eventos Codex durante HTTP lento.
+O gerador das fixtures força a referência Python: não compara Rust contra Rust.
+
+`RUST_SERVER_PROTOCOL` e `INTERNAL_PROTOCOL` ficam em 3 após retirar a operação privada `reduce`.
+`side-events` permanece igual. Em 03/10/2026 a coordenação com `rust-parte2` combinou 3 nesta 2C
+e 4 para o contrato posterior da Parte 2B; não reutilizar 3 para dois contratos diferentes.
+Não houve reinício/instalação nem validação no app ou backend vivo. Windows não foi executado.
+Uma rodada vermelha tentou leitura real `tmux capture-pane -p -t %8 -S -200` em alvo fictício e
+recebeu `can't find pane: %8`; nenhuma conversa foi lida. A guarda dos novos testes passou a
+bloquear `_run`/`RUN` antes de I/O e conferir no teardown se alguma chamada bloqueada foi engolida.
+
+## Git da sessão segue a worktree onde o agente trabalha
+
+**Regra:** a lista de sessões leva `git_cwd`, a raiz do repositório onde o agente trabalha quando
+ele saiu do da pasta de abertura. Rotas `/git*`, `/branches` e `/checkout`, o resumo de git da
+lista, o painel de git local do nativo e o rodapé do chat usam essa pasta; arquivos, uploads,
+citações e execução continuam no `cwd`. No Claude, a pasta sai do `cwd` do transcript e das
+chamadas recentes: `cd X`/`git -C X` e Edit/Write numa worktree levam a sessão para ela. Nada na
+principal (`cd` ou edição) tira a sessão da worktree; ela volta à principal pelo `ExitWorktree`,
+quando a worktree é apagada ou quando os sinais saem da janela lida. Chamadas anteriores à última
+troca de `cwd` não contam.
+
+**Sessão que nasceu na worktree fica nela:** quando o `cwd` de abertura já é uma worktree ligada
+(opção "Nova worktree" da criação, que abre a sessão dentro dela, ou o agente aberto nela pelo
+terminal), o `locate` não lê sinal nenhum do transcript, para Claude e Codex. A heurística só
+existe para a worktree criada no meio da conversa.
+
+**Por que a principal não conta (04/10/2026):** o agente numa worktree consulta a principal o
+tempo todo (`cd <principal> && rg …`, anotações locais). Refazendo a regra comando a comando em
+cinco transcripts reais, contar o `cd` para a principal trocava o rótulo de 7 a 13 vezes por
+sessão, sempre principal ↔ worktree; sem ele, 1 a 2 trocas (a entrada na worktree).
+
+**Por quê (04/10/2026, Claude Code 2.1.289):** numa worktree irmã (`../<repo>-<x>`) o Claude Code
+devolve o shell à pasta de abertura a cada comando ("Shell cwd was reset"), e o `cwd` e o
+`gitBranch` gravados no transcript nunca saem dela. Medido em oito transcripts reais: as sessões
+que trabalhavam em worktrees irmãs gravavam a pasta de abertura e `main` em todas as linhas, e o
+app mostrava `main` e o painel de git vazio.
+Só o `EnterWorktree` muda o `cwd` gravado. O t3code não detecta a troca: a pasta da conversa é um
+campo (`worktreePath`) que só muda quando o app cria a worktree ou o agente chama a ferramenta MCP
+dele de passagem de worktree.
+
+**Leitura do transcript:** de trás para frente, em blocos de 256 KB, até 20 caminhos ou 8 MB.
+Imagem lida pela sessão entra em base64 e encheu sozinha os últimos 256 KB numa sessão real: sem
+ler mais fundo, a sessão voltava a parecer na principal. Medido: 2 a 9 ms por transcript de 4 a
+23 MB, sem cache.
+
+**Limites conhecidos:** caminho em variável (`W=/x; cat > $W/a`) não é reconhecido; `cd` em
+OUTRA worktree só para inspecionar leva a sessão para lá; sessão que sai da worktree para
+trabalhar de verdade na principal (sem `ExitWorktree`) segue mostrando a worktree até ela ser
+apagada ou os sinais saírem da janela. O Codex ainda lê só os últimos 256 KB e ainda conta o `cd`
+para a principal.
+
+**Contrato interno 14:** `/internal/workspace/context` passou a levar `session.git_cwd`, e o
+`workspace_routes.rs` usa essa pasta só nas operações de git. Contexto sem o campo cai no `cwd`.
+
+**Prova:** janela de teste do nativo atrás de um repassador que acrescentava o campo à lista do
+backend instalado; rodapé, título, card e painel de git das três sessões em worktree passaram a
+mostrar a worktree e a branch dela.
+
+## Worktrees mescladas usam a origem e a base publicada
+
+**Regra:** `branch.<branch>.hangar-base` tem prioridade. Sem ela, a base vem da referência
+nomeada de criação no reflog; `HEAD`, hashes e o upstream da própria branch não informam o
+destino. Sem origem recuperável, permanece o fallback para a branch do checkout principal.
+A base local usa seu upstream remoto ou, sem upstream, o único remoto correspondente. Mais
+de um candidato não autoriza escolher; referência ausente ou falha de leitura degrada a
+situação e impede classificá-la como mesclada. A abreviação da base não pode trocar a
+referência por uma tag ou branch homônima.
+
+**Por quê (05/10/2026):** a lista mostrava seis worktrees em andamento. Cinco já tinham PR
+mesclado e HEAD ancestral da base remota: uma na `main`, quatro na branch do servidor. A
+comparação usava `main` local para todas; ela estava atrasada, e `fetch --all --prune` não a
+avança. O pull resolveu apenas o caso da `main`. O reflog das seis branches guardava a origem
+remota correta, permitindo resolver o destino sem consulta a um provedor de PRs.
+
+**Exclusão conservadora:** só ancestralidade com pontas distintas comprova a integração.
+Apagar o upstream também ocorre sem merge; isso deixou de ser prova suficiente, inclusive
+para squash. Squash/rebase sem ancestralidade não são detectados automaticamente. Pontas
+iguais continuam protegidas, pois também representam uma worktree recém-criada. Commit
+posterior ao merge volta a impedir a classificação de mesclada.
+
+**Prova:** consulta das worktrees reais com o Python corrigido e o contrato Rust compilado:
+os dois reconheceram as cinco mescladas e mantiveram a sexta em andamento, contra suas bases
+remotas. A consulta Python ficou próxima de 0,66 s, ante 0,68 s antes da mudança. Casos de
+regressão escritos para prioridade de base explícita, reflog expirado, troca da branch
+principal, base remota ausente, commit posterior, remoto com outro nome, remotos ambíguos,
+upstream preferido, tag homônima e falha de leitura. Lista e detalhe do nativo conferidos numa
+janela isolada atrás de repassador somente leitura: as cinco aparecem mescladas e a sexta em
+andamento. A proteção de arquivos ignorados permanece independente da detecção de merge.
+Os 33 casos novos passaram no Linux e no Windows. O pytest completo do Linux teve 8.125
+aprovados, 66 ignorados e duas falhas de ambiente: autenticação herdada no teste de conta virgem
+e falta de espaço nos temporários; ambos passaram na repetição com isolamento. A suíte Rust
+teve duas falhas locais também reproduzidas na base pura (janela tmux fixada em zero e corrida
+nas vagas de escrita). No Windows, os três arquivos focados tiveram 92 aprovados e 11 falhas;
+as mesmas 11 se reproduziram na base pura, incluindo diferenças nos campos `sessions` e
+`closed` anteriores à correção.
+
+## Passagem ao Rust no boot com a fila Python ocupada
+
+(05/10/2026, DELPHI-02.) Nos dois reinícios do dia, a sessão terminal abriu no Python e
+`runtime.reopen_failed` saiu só com `RuntimeError`; a próxima ação a levou ao Rust. Reproduzido
+em teste: a leitura da fila do SSE entra no `queue_gate` (`slot.active`), delega pelo `op` e espera
+o modo sair de `pending`; o `_enter_rust` só termina depois de passar a sessão, e o
+`_open_slot_in_rust` recusava na hora com "fila da sessão em uso no Python". Agora a fila síncrona
+de sessão Claude espera o modo ANTES do portão (`settle_before_queue`), e a passagem espera até
+5 s o `active` zerar; dentro da barreira de lifecycle (renomear, fechar) a fila não espera o modo,
+porque quem o fecha espera a mesma barreira. O diário de falha do runtime leva `raise_site`
+(`arquivo:linha função` do `raise`): sem isso só o tipo chegava. A mensagem do Python continua
+fora, porque algumas carregam saída do modelo; o ponto do `raise` já diz qual frase foi. O campo
+não se chama `origem` porque o `diag.registrar` grava o dele por cima.
+

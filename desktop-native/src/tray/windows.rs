@@ -17,6 +17,7 @@ const CALLBACK: u32 = WM_APP + 1;
 const ICON_ID: u32 = 1;
 const OPEN: usize = 1;
 const QUIT: usize = 2;
+const RESTART: usize = 3;
 const RETRY_TIMER: usize = 1;
 const RETRY_MS: u32 = 2000;
 
@@ -104,10 +105,12 @@ fn pump() {
 }
 
 fn menu(hwnd: HWND) {
-    let (open, quit) = (HSTRING::from(crate::i18n::tr("tray_open")), HSTRING::from(crate::i18n::tr("tray_quit")));
+    let (open, restart, quit) = (HSTRING::from(crate::i18n::tr("tray_open")),
+        HSTRING::from(crate::i18n::tr("tray_restart")), HSTRING::from(crate::i18n::tr("tray_quit")));
     let picked = unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
         let _ = AppendMenuW(menu, MF_STRING, OPEN, PCWSTR(open.as_ptr()));
+        let _ = AppendMenuW(menu, MF_STRING, RESTART, PCWSTR(restart.as_ptr()));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, QUIT, PCWSTR(quit.as_ptr()));
         let mut at = POINT::default();
@@ -122,6 +125,7 @@ fn menu(hwnd: HWND) {
     };
     match picked {
         OPEN => send(TrayEvent::Show),
+        RESTART => send(TrayEvent::Restart),
         QUIT => send(TrayEvent::Quit),
         _ => {}
     }

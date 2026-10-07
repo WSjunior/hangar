@@ -1,4 +1,5 @@
 """A troca preserva a conversa e restaura o modo antigo quando o terminal falha."""
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -27,9 +28,9 @@ def transition(tmp_path, monkeypatch):
                   transfer_id=TRANSFER, tool_output_token_limit=144000)
     adapter = module.CodexAdapter()
     client = SimpleNamespace(server_requests={}, close=AsyncMock())
-    adapter._sessions["sess"] = dict(client=client, turn_state_known=True, in_progress=False,
+    adapter._sessions["sess"] = dict(client=client, thread_id="thread-1", turn_state_known=True, in_progress=False,
                                      async_questions=SimpleNamespace(pending=lambda: None))
-    monkeypatch.setattr(adapter, "read_settings", AsyncMock(return_value={"model": "model", "effort": "high", "mode": "plan"}))
+    monkeypatch.setattr(adapter, "read_settings", AsyncMock(return_value={"model": "model", "effort": "high", "mode": "plan", "service_tier": "priority"}))
     monkeypatch.setattr(adapter, "close_sync", lambda name, **kwargs: adapter._sessions.pop(name, None))
     monkeypatch.setattr(adapter, "set_mode", AsyncMock())
     monkeypatch.setattr(adapter, "_conectar", AsyncMock(return_value=client))
@@ -67,6 +68,7 @@ async def test_terminal_preserves_identity_and_permissions(transition, monkeypat
     meta = sessions.load("sess")
     assert not meta["headless"] and meta["key"] == "identity" and meta["jev"]
     assert meta["permission_mode"] == "Ask for approval"
+    assert meta["service_tier"] == "priority"
     assert meta["tool_output_token_limit"] == 144000 and meta["transfer_id"] == TRANSFER
     adapter.set_mode.assert_awaited_once_with("sess", "plan")
     probe.close.assert_awaited_once()
@@ -100,7 +102,7 @@ def terminal_transition(transition, monkeypatch):
     client.request = AsyncMock(return_value={
         "thread": {"id": "thread-1", "status": {"type": "idle"}},
         "approvalPolicy": "on-request", "sandbox": {"type": "readOnly"},
-        "model": "current-model", "reasoningEffort": "low",
+        "model": "current-model", "reasoningEffort": "low", "serviceTier": "default",
     })
     monkeypatch.setattr(module.tmux, "kill_session", lambda _: True)
     monkeypatch.setattr(adapter, "_start_tmux_watcher", lambda _: None)
@@ -118,6 +120,7 @@ async def test_headless_preserves_current_permissions_and_thread(terminal_transi
     assert meta["headless"] and meta["thread_id"] == "thread-1"
     assert meta["permission_mode"] == "Ask for approval"
     assert (meta["model"], meta["effort"]) == ("current-model", "low")
+    assert meta["service_tier"] == "default"
     assert meta["key"] == "identity" and meta["codex_account"] == "work" and meta["jev"]
     assert meta["endpoint"] is None and meta["app_pid"] is None
     assert adapter._subir_sem_terminal.call_args.args[1]["tool_output_token_limit"] == 144000
@@ -125,6 +128,51 @@ async def test_headless_preserves_current_permissions_and_thread(terminal_transi
     client.close.assert_awaited_once()
     client.request.assert_awaited_once_with("thread/resume", {"threadId": "thread-1"})
     adapter.set_mode.assert_awaited_once_with("sess", "plan")
+
+
+async def test_fast_cannot_confirm_while_terminal_transition_captures_and_rewrites_tier(terminal_transition, monkeypatch):
+    adapter, client = terminal_transition
+    captured = asyncio.Event()
+    release = asyncio.Event()
+    setter_started = asyncio.Event()
+    snapshot = {"thread": {"id": "thread-1", "status": {"type": "idle"}},
+                "approvalPolicy": "on-request", "sandbox": {"type": "readOnly"},
+                "model": "current-model", "reasoningEffort": "low", "serviceTier": "priority"}
+    old = adapter._sessions["sess"]
+    old["service_tier"] = "priority"
+    sessions.update("sess", service_tier="priority")
+
+    async def request(method, params, timeout=30.0):
+        assert method == "thread/resume", "Fast enviou uma alteração durante a troca"
+        captured.set()
+        await release.wait()
+        return snapshot
+
+    async def ensure(name):
+        setter_started.set()
+        return client
+
+    client.request.side_effect = request
+    monkeypatch.setattr(adapter, "ensure_running", ensure)
+    transition_task = asyncio.create_task(adapter.open_headless("sess"))
+    operation = None
+    try:
+        await asyncio.wait_for(captured.wait(), 1)
+        operation = asyncio.create_task(adapter.set_service_tier("sess", "default"))
+        await asyncio.wait_for(setter_started.wait(), 1)
+        assert not operation.done()
+        release.set()
+        await asyncio.wait_for(transition_task, 1)
+        with pytest.raises(RuntimeError, match="sessão mudou"):
+            await asyncio.wait_for(operation, 1)
+        assert sessions.load("sess")["service_tier"] == "priority"
+        assert client.request.await_count == 1
+    finally:
+        release.set()
+        transition_task.cancel()
+        if operation is not None:
+            operation.cancel()
+        await asyncio.gather(transition_task, *([operation] if operation is not None else []), return_exceptions=True)
 
 
 async def test_headless_failure_restores_terminal(terminal_transition, monkeypatch):

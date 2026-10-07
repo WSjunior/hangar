@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use serde_json::Value;
-use crate::{api::dto::{ChatEvent, Preview, SessionState}, interaction::Ask};
+use crate::{api::dto::{ChatEvent, ChatEventExt, Preview, SessionState}, interaction::Ask};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct LiveTool { pub name: String, pub input: Value }
@@ -11,8 +11,13 @@ pub struct Chat {
     pub preview: Preview,
     pub state: SessionState,
     pub ask: Option<Ask>,
+    /// Pergunta nativa vista neste aguardo: depois de respondida o pane ainda mostra o menu dela por um instante.
+    ask_seen: bool,
     pub live_thinking: String,
     pub live_tool: Option<LiveTool>,
+    /// Turno visto terminar nesta conversa, já em texto: a linha de trabalhando fica no lugar com ele, como o
+    /// "Worked for 16s" do Claude Code, em vez de sair e puxar o chat para baixo.
+    pub turn_done: Option<String>,
     // Último registro durável que consolidou um item em voo; barra o quadro atrasado do mesmo item.
     settled_thinking: String,
     settled_tool: Option<(LiveTool, Option<String>)>,
@@ -103,7 +108,7 @@ impl Chat {
                 self.settled_thinking = text;
             }
             "tool_use" => {
-                let durable = LiveTool { name: event.tool_name.clone().unwrap_or_default(), input: event.tool_input.clone().unwrap_or(Value::Null) };
+                let durable = LiveTool { name: event.tool_name.clone().unwrap_or_default(), input: event.tool_input.clone().map(Value::Object).unwrap_or(Value::Null) };
                 if self.live_tool.as_ref().is_some_and(|live| tool_matches(live, &durable)) { self.live_tool = None; }
                 self.settled_tool = Some((durable, event.tool_use_id.clone()));
             }
@@ -171,7 +176,12 @@ impl Chat {
     }
 
     pub fn update_preview(&mut self, next: Preview) -> bool {
-        if next.text.is_empty() { return false; }
+        // Vazio vindo do motor (`vivo`) é a ordem de limpar: o bloco já foi gravado. Do pane, é só a tela piscando.
+        if next.text.is_empty() {
+            if !next.vivo || self.preview.text.is_empty() { return false; }
+            self.clear_preview();
+            return true;
+        }
         if self.preview.md == next.md && self.preview.full == next.full && self.preview.vivo == next.vivo
             && next.text.len() < self.preview.text.len() && self.preview.text.starts_with(&next.text) {
             return false;
@@ -197,12 +207,20 @@ impl Chat {
     pub fn update_state(&mut self, state: SessionState) {
         // Pergunta do Claude fecha quando o pane sai do aguardo; a do Codex só pelo `null`; a do transcript, pelo `tool_result`.
         if state.state != "awaiting_input" && self.ask.as_ref().is_some_and(|ask| !ask.codex() && ask.tool_use_id.is_none()) { self.ask = None; }
+        if state.state != "awaiting_input" { self.ask_seen = false; }
         self.state = state;
+    }
+
+    /// O menu do pane é o de uma pergunta nativa, que o card responde. O formato sozinho não basta: o Claude Code usa o
+    /// mesmo seletor (com "Type something.") em menus próprios, como o de mods, que não têm `ask_question`.
+    pub fn ask_pane(&self) -> bool {
+        (self.ask.is_some() || self.ask_seen) && self.state.options.as_deref().is_some_and(crate::interaction::ask_picker)
     }
 
     /// Nova pergunta só troca a atual quando o conteúdo muda: o retrato de reconexão não apaga escolhas.
     pub fn update_ask(&mut self, ask: Option<Ask>) -> bool {
         if self.ask == ask { return false; }
+        self.ask_seen |= ask.is_some();
         self.ask = ask;
         true
     }
@@ -527,7 +545,7 @@ mod tests {
     fn shorter_preview_from_a_new_source_is_accepted() {
         let mut chat = Chat::default();
         chat.update_preview(Preview { text: "long pane preview".into(), ..Default::default() });
-        chat.update_preview(Preview { text: "long".into(), md: true, full: true, vivo: true });
+        chat.update_preview(Preview { text: "long".into(), md: true, full: true, vivo: true, ..Default::default() });
         assert_eq!(chat.preview.text, "long");
     }
 
@@ -584,6 +602,25 @@ mod tests {
     }
 
     #[test]
+    fn claude_code_own_picker_is_not_the_native_card() {
+        let mods = ["How does this work?", "Enable for this session", "Not now", "Type something.", "Chat about this"];
+        let waiting = || SessionState { state: "awaiting_input".into(), question: Some("Mods in this session's folder load…".into()),
+            options: Some(mods.iter().map(|o| (*o).to_owned()).collect()), ..Default::default() };
+        let mut chat = Chat::default();
+        chat.update_state(waiting());
+        assert!(!chat.ask_pane(), "menu de mods sem ask_question precisa do cartão de opções");
+        chat.update_ask(Some(ask(None, "a?")));
+        assert!(chat.ask_pane());
+        // Respondida: o pane ainda mostra o menu até o Claude seguir, e o cartão não pisca por cima.
+        chat.update_ask(None);
+        chat.update_state(waiting());
+        assert!(chat.ask_pane());
+        chat.update_state(SessionState { state: "working".into(), ..Default::default() });
+        chat.update_state(waiting());
+        assert!(!chat.ask_pane());
+    }
+
+    #[test]
     fn steer_marks_only_listed_entries_unless_promoted() {
         let mut chat = Chat::default();
         chat.apply(event("user_msg", "queued-a", "um"));
@@ -618,7 +655,7 @@ mod tests {
         let tool = LiveTool { name: "Bash".into(), input: serde_json::json!({"command": "ls"}) };
         chat.update_live_tool(tool.clone());
         chat.apply(ChatEvent { kind: "tool_use".into(), id: "u".into(), tool_name: Some("Bash".into()),
-            tool_input: Some(serde_json::json!({"command": "ls"})), tool_use_id: Some("x".into()), ..Default::default() });
+            tool_input: serde_json::json!({"command": "ls"}).as_object().cloned(), tool_use_id: Some("x".into()), ..Default::default() });
         assert!(chat.live_tool.is_none());
         assert!(!chat.update_live_tool(tool.clone()));
         chat.apply(ChatEvent { kind: "tool_result".into(), id: "r".into(), tool_use_id: Some("x".into()), ..Default::default() });

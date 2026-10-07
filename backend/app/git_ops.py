@@ -363,7 +363,8 @@ def switch_branch(cwd: str, branch: str) -> dict:
     suja, nome curto ambiguo entre remotes, etc) volta como 409 com o stderr do git."""
     info = list_branches(cwd)
     valid = set(info["branches"]) | set(info["remotes"])
-    if branch not in valid:
+    # `switch` não aceita `--` antes da branch, e um remoto pode anunciar `origin/--detach`.
+    if branch not in valid or branch.startswith("-"):
         raise GitError(400, "branch inexistente")
     p = _run(cwd, "switch", branch)
     if p.returncode != 0:
@@ -766,18 +767,19 @@ def commit_files(cwd: str, sha: str) -> list[dict]:
     lista o que o merge trouxe vs o 1o parent. Em commit normal/root o par de flags e no-op."""
     if not _SHA_RE.match(sha):
         raise GitError(400, "sha invalido")
-    p = _run(cwd, "show", "--name-status", "--format=", "-m", "--first-parent", sha)
+    p = _run(cwd, "-c", "core.quotePath=false", "show", "--name-status", "-z", "--format=", "-m", "--first-parent", sha)
     if p.returncode != 0:
         raise GitError(409, (p.stderr or "git show falhou").strip() or "git show falhou")
     out = []
-    for line in p.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split("\t")
-        code = parts[0][:1]
-        path = parts[-1]                 # rename/copy: "R100\told\tnew" -> usa o novo path
-        out.append({"path": path, "code": code})
+    fields = iter(part for part in p.stdout.split("\0") if part)
+    for status in fields:
+        path = next(fields, None)
+        if path is None:
+            break
+        # NUL conserva os nomes com acentos, espaços e quebras de linha sem aspas do Git.
+        if status[:1] in ("R", "C"):
+            path = next(fields, path)
+        out.append({"path": path, "code": status[:1]})
     return out
 
 
@@ -1315,6 +1317,27 @@ def push(cwd: str) -> dict:
     if r.returncode != 0:
         raise GitError(409, _scrub((r.stderr or r.stdout or "push falhou").strip()) or "push falhou")
     return {"ok": True, "output": _scrub((r.stdout + r.stderr).strip())}
+
+
+from app.workspace_bridge import delegate as _workspace_delegate
+
+# Estas prometem não levantar (a listagem de sessões depende disso); falha da ponte devolve o vazio delas.
+for _operation, _quiet in (("head_info", (None, False)), ("branch_of", None), ("git_summary", None),
+                           ("git_diffstat", None), ("git_log_since", [])):
+    globals()[_operation] = _workspace_delegate(_operation, GitError, quiet=_quiet)(globals()[_operation])
+for _operation in (
+    "list_branches", "git_log", "changed_files", "file_diff", "commit_files", "commit_file_diff",
+    "path_diff", "commit_diff", "diff_vs_worktree", "sequencer_state", "branches_containing",
+    "folder_status", "last_commit_message",
+):
+    globals()[_operation] = _workspace_delegate(_operation, GitError)(globals()[_operation])
+for _operation in (
+    "switch_branch", "create_worktree", "remove_worktree", "discard_file", "revert_commit",
+    "cherry_pick", "reset_to", "create_branch_at", "create_tag", "folder_fetch", "folder_pull",
+    "folder_switch", "folder_create_branch", "commit", "push",
+):
+    globals()[_operation] = _workspace_delegate(_operation, GitError, mutation=True)(globals()[_operation])
+git_action = _workspace_delegate("git_action", GitError)(git_action)
 
 
 if __name__ == "__main__":

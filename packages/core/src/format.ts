@@ -813,17 +813,24 @@ export function toolVerbo(nome: string | null | undefined): string {
   }
 }
 
+/** `mcp__hangar-computer-control__objetivo` -> ["computer-control", "objetivo"]; nome que não é de MCP, null. */
+function partesMcp(nome: string | null | undefined): [string, string] | null {
+  const partes = (nome ?? '').split('__');
+  if (partes[0] !== 'mcp' || partes.length < 3) return null;
+  return [partes[1].replace(/^hangar-/, ''), partes.slice(2).join('__')];
+}
+
 /** `mcp__hangar-computer-control__objetivo` -> "computer-control · objetivo"; o resto fica como veio. */
 export function nomeFerramenta(nome: string | null | undefined): string {
   if (!nome) return m.formato_tool_generico();
-  const partes = nome.split('__');
-  if (partes[0] !== 'mcp' || partes.length < 3) return nome;
-  return `${partes[1].replace(/^hangar-/, '')} · ${partes.slice(2).join('__')}`;
+  const mcp = partesMcp(nome);
+  return mcp ? mcp.join(' · ') : nome;
 }
 
 /** Quebra um comando de shell nos `;`, `&&`, `||` e quebras de linha de fora de aspas e parênteses,
- *  só pra leitura: `&&`/`||` ficam no começo da parte, o `;` some. */
-export function separarComando(cmd: string): string[] {
+ *  só pra leitura: `&&`/`||` ficam no começo da parte, o `;` some. Com `pipes`, quebra também em `|`
+ *  e `&` e descarta todo operador, deixando só os comandos. */
+export function separarComando(cmd: string, { pipes = false } = {}): string[] {
   const partes: string[] = [];
   let atual = '';
   let prof = 0;
@@ -842,6 +849,9 @@ export function separarComando(cmd: string): string[] {
     if (c === '(' || c === '{') prof++;
     else if ((c === ')' || c === '}') && prof > 0) prof--;
     if (prof === 0 && (c === ';' || c === '\n')) { fechar(); continue; }
+    // O `&` de `2>&1`, `<&3` e `&>` é redirecionamento, não separa comando.
+    const redir = c === '&' && (cmd[i - 1] === '>' || cmd[i - 1] === '<' || cmd[i + 1] === '>');
+    if (pipes && prof === 0 && (c === '|' || (c === '&' && !redir))) { fechar(); if (cmd[i + 1] === c) i++; continue; }
     if (prof === 0 && (c === '&' || c === '|') && cmd[i + 1] === c) { fechar(); atual = c + c; i++; continue; }
     atual += c;
   }
@@ -867,6 +877,140 @@ export function toolGroupTitulo(tools: { tool_name?: string | null; tool_input?:
   if (n.outra) partes.push(n.outra === 1 ? m.tool_titulo_outra_1() : m.tool_titulo_outras({ n: n.outra }));
   const texto = partes.join(' · ');
   return texto.charAt(0).toUpperCase() + texto.slice(1);
+}
+
+/** O que uma chamada conta na linha dobrada da pele 'terminal'. */
+export type TerminalFoldKind = 'search' | 'read' | 'list' | 'mcp' | 'shell';
+
+// Os conjuntos do Claude Code: comando de shell cujas partes só usam estes conta como busca, leitura
+// ou listagem; os neutros não decidem nada.
+const SHELL_BUSCA = new Set(['find', 'grep', 'rg', 'ag', 'ack', 'locate', 'which', 'whereis']);
+const SHELL_LEITURA = new Set(['cat', 'head', 'tail', 'less', 'more', 'wc', 'stat', 'file', 'strings', 'jq', 'awk', 'cut', 'sort', 'uniq', 'tr']);
+const SHELL_LISTA = new Set(['ls', 'tree', 'du']);
+const SHELL_NEUTRO = new Set(['echo', 'printf', 'true', 'false', ':']);
+
+const FIND_GRAVA = new Set(['-delete', '-exec', '-execdir', '-ok', '-okdir', '-fls']);
+
+// Se a parte grava ou roda outra coisa por baixo, ela não é leitura e a dobra não pode escondê-la:
+// redirecionamento de saída (fora `/dev/null` e a cópia de descritor `2>&1`), substituição de comando,
+// ou as opções de `find`/`sort` que apagam, executam ou gravam. Espelho do `part_writes` do nativo.
+function parteGrava(parte: string): boolean {
+  let aspas: string | null = null;
+  for (let i = 0; i < parte.length; i++) {
+    const c = parte[i];
+    if (c === '\\' && aspas !== "'") { i++; continue; }
+    if (aspas === "'") { if (c === "'") aspas = null; continue; }
+    if (c === '`' || (c === '$' && parte[i + 1] === '(')) return true;
+    if (aspas === '"') { if (c === '"') aspas = null; continue; }
+    if (c === "'" || c === '"') { aspas = c; continue; }
+    if (c === '<' && parte[i + 1] === '(') return true;
+    if (c !== '>') continue;
+    let j = i + 1;
+    if (parte[j] === '>' || parte[j] === '|') j++;
+    const dup = parte[j] === '&';
+    if (dup) j++;
+    while (parte[j] === ' ' || parte[j] === '\t') j++;
+    const alvo = /^[^\s;&|<>()]*/.exec(parte.slice(j))![0];
+    if (alvo !== '/dev/null' && !(dup && /^(\d+|-)$/.test(alvo))) return true;
+    i = j + alvo.length - 1;
+  }
+  const palavras = parte.split(/\s+/);
+  if (palavras[0] === 'find') return palavras.some((w) => FIND_GRAVA.has(w) || w.startsWith('-fprint'));
+  if (palavras[0] === 'sort') return palavras.some((w) => w.startsWith('--o') || (w.startsWith('-') && !w.startsWith('--') && w.includes('o')));
+  return false;
+}
+
+function shellFoldKind(cmd: string): TerminalFoldKind {
+  let busca = false, leitura = false, lista = false;
+  for (const parte of separarComando(cmd, { pipes: true })) {
+    if (parteGrava(parte)) return 'shell';
+    const palavra = /^\S+/.exec(parte)?.[0] ?? '';
+    if (SHELL_NEUTRO.has(palavra)) continue;
+    if (SHELL_BUSCA.has(palavra)) busca = true;
+    else if (SHELL_LEITURA.has(palavra)) leitura = true;
+    else if (SHELL_LISTA.has(palavra)) lista = true;
+    else return 'shell';
+  }
+  // A mesma precedência do Claude Code: listagem, depois busca, depois leitura.
+  return lista ? 'list' : busca ? 'search' : leitura ? 'read' : 'shell';
+}
+
+// O parse do comando roda a cada evento que chega: guardado pela entrada, que é o mesmo objeto
+// entre um recálculo e outro.
+const shellKinds = new WeakMap<object, TerminalFoldKind>();
+
+/** Tipo da chamada na linha dobrada da pele 'terminal', como o Claude Code conta; `null` não dobra
+ * (edição, gravação, agente e o carregador de ferramentas ficam sempre à vista). */
+export function terminalFoldKind(name: string | null | undefined, input?: Record<string, unknown> | null): TerminalFoldKind | null {
+  switch (name?.toLowerCase()) {
+    case 'read': case 'notebookread': return 'read';
+    case 'grep': case 'glob': case 'find': case 'websearch': case 'webfetch': return 'search';
+    case 'ls': return 'list';
+    case 'bash': case 'powershell': case 'shell': case 'exec': case 'exec_command': {
+      if (!input) return 'shell';
+      const guardado = shellKinds.get(input);
+      if (guardado) return guardado;
+      const cmd = input['command'] ?? input['cmd'];
+      const texto = typeof cmd === 'string' ? cmd : Array.isArray(cmd) ? cmd.filter((w) => typeof w === 'string').join(' ') : null;
+      const kind = texto === null ? 'shell' : shellFoldKind(texto);
+      shellKinds.set(input, kind);
+      return kind;
+    }
+  }
+  return partesMcp(name) ? 'mcp' : null;
+}
+
+// Frase de cada tipo: concluída e em andamento, no singular e no plural.
+const DOBRA_FRASES: Record<TerminalFoldKind, [(p: { nome: string }) => string, (p: { n: number; nome: string }) => string, (p: { nome: string }) => string, (p: { n: number; nome: string }) => string]> = {
+  search: [m.term_dobra_buscou_1, m.term_dobra_buscou, m.term_dobra_buscando_1, m.term_dobra_buscando],
+  read: [m.term_dobra_leu_1, m.term_dobra_leu, m.term_dobra_lendo_1, m.term_dobra_lendo],
+  list: [m.term_dobra_listou_1, m.term_dobra_listou, m.term_dobra_listando_1, m.term_dobra_listando],
+  mcp: [m.term_dobra_chamou_1, m.term_dobra_chamou, m.term_dobra_chamando_1, m.term_dobra_chamando],
+  shell: [m.term_dobra_rodou_1, m.term_dobra_rodou, m.term_dobra_rodando_1, m.term_dobra_rodando],
+};
+
+/** A linha dobrada, na ordem e no tempo verbal do Claude Code: "Buscou 1 padrão, leu 2 arquivos,
+ * rodou 3 comandos de shell"; enquanto alguma roda, "Lendo 2 arquivos…". */
+export function terminalFoldTitle(
+  tools: { tool_name?: string | null; tool_input?: Record<string, unknown> | null }[],
+  running: boolean,
+): string {
+  const n: Record<TerminalFoldKind, number> = { search: 0, read: 0, list: 0, mcp: 0, shell: 0 };
+  const arquivos = new Set<string>();
+  const servidores = new Set<string>();
+  let leiturasSemCaminho = 0;
+  for (const t of tools) {
+    const kind = terminalFoldKind(t.tool_name, t.tool_input);
+    if (!kind) continue;
+    n[kind]++;
+    const caminho = t.tool_input?.['file_path'] ?? t.tool_input?.['path'] ?? t.tool_input?.['notebook_path'];
+    if (kind === 'read') { if (typeof caminho === 'string' && caminho) arquivos.add(caminho); else leiturasSemCaminho++; }
+    if (kind === 'mcp') servidores.add(partesMcp(t.tool_name)![0]);
+  }
+  // Arquivos distintos, mais as leituras sem caminho (um `cat` no shell não diz qual arquivo leu).
+  n.read = arquivos.size + leiturasSemCaminho;
+  const nome = [...servidores].join(', ');
+  const partes = (Object.keys(DOBRA_FRASES) as TerminalFoldKind[]).filter((k) => n[k]).map((k) => {
+    const [feito1, feito, vivo1, vivo] = DOBRA_FRASES[k];
+    if (n[k] === 1) return (running ? vivo1 : feito1)({ nome });
+    return (running ? vivo : feito)({ n: n[k], nome });
+  });
+  const texto = partes.join(', ');
+  return texto.charAt(0).toUpperCase() + texto.slice(1) + (running ? '…' : '');
+}
+
+/** Pele 'terminal': chamadas seguidas que dobram (`terminalFoldKind`) somam numa linha, rodando ou
+ * com erro, como no Claude Code; edição e o resto mantêm a linha própria. */
+export function splitTerminalRun<T extends { tool_name?: string | null; tool_input?: Record<string, unknown> | null }>(
+  tools: T[],
+): ({ kind: 'fold'; tools: T[] } | { kind: 'tool'; tool: T })[] {
+  const out: ({ kind: 'fold'; tools: T[] } | { kind: 'tool'; tool: T })[] = [];
+  for (const tool of tools) {
+    if (!terminalFoldKind(tool.tool_name, tool.tool_input)) { out.push({ kind: 'tool', tool }); continue; }
+    const last = out[out.length - 1];
+    if (last?.kind === 'fold') last.tools.push(tool); else out.push({ kind: 'fold', tools: [tool] });
+  }
+  return out;
 }
 
 // Contagem por fase no cabeçalho do grupo ("2 rodando • 3 concluídos"), na ordem rodando → ok → erro.

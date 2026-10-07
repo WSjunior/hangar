@@ -144,6 +144,38 @@ async def test_clique_avisa_a_ponte_que_e_do_app(sessao, monkeypatch):
     assert marcados == [("above-prompt", "rv-1")]
 
 
+@pytest.mark.asyncio
+async def test_sem_posse_da_escrita_recusa_em_vez_de_500(sessao, monkeypatch):
+    # Rust mudo no detach (TimeoutError) ou vínculo em dúvida (RuntimeError): o app recebe o motivo.
+    def mudo(name, row, col):
+        raise TimeoutError("silent Rust")
+    monkeypatch.setattr(pc, "click", mudo)
+    with pytest.raises(pc.PressRefused) as e:
+        await pc.press("clk", "above-prompt", "rv-1")
+    assert e.value.detail["code"] == "erro_mod_clique_sem_resposta"
+
+
+@pytest.mark.asyncio
+async def test_recusa_sem_posse_deixa_a_causa_no_log(sessao, monkeypatch, caplog):
+    # Sem posse, vínculo em dúvida e Rust mudo viram o mesmo 409: só o log separa um do outro.
+    def sem_posse(name, row, col):
+        raise RuntimeError("Python sem posse da escrita terminal")
+    monkeypatch.setattr(pc, "click", sem_posse)
+    with caplog.at_level("WARNING", logger="hangar.plugin_click"), pytest.raises(pc.PressRefused):
+        await pc.press("clk", "above-prompt", "rv-1")
+    assert "sem posse da escrita" in caplog.text
+
+
+def test_clique_sem_coordenador_vai_direto_ao_terminal(monkeypatch):
+    # Sem o coordenador do runtime (a main e a reserva), o clique envolvido é o de sempre.
+    from app import runtime_coordinator, tmux
+    enviados = []
+    monkeypatch.setattr(runtime_coordinator, "current", lambda: None)
+    monkeypatch.setattr(tmux, "send_keys", lambda name, keys, literal=False: enviados.append((name, keys, literal)) or True)
+    assert pc.click("clk", 2, 5)
+    assert enviados == [("clk", "\x1b[<0;6;3M\x1b[<0;6;3m", True)]
+
+
 def test_recusa_do_terminal_por_motivo(monkeypatch):
     # Copy-mode: o ESC do clique cancelaria o modo e o resto da sequência cairia como texto no prompt.
     respostas = {"#{mouse_sgr_flag} #{pane_in_mode}": "1 1"}

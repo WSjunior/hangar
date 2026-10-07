@@ -102,3 +102,6 @@ site/tools/record/out/
 site/tools/record/cfg/
 # vídeos do site são versionados; o *.mp4 acima é só para rascunho de análise
 !site/media/**/*.mp4
+
+# O Claude Code cria um tsconfig.json em cada pasta passada por --plugin-dir.
+plugins/*/tsconfig.json

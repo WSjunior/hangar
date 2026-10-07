@@ -103,7 +103,7 @@ def organizer_config(config: dict) -> dict:
 class VoiceBroker:
     def __init__(self, adapter, name: str, target: dict, send):
         self.adapter, self.name, self.target, self.send = adapter, name, target, send
-        self.client = AppServerClient()
+        self.client = target["client"] if target.get("runtime_voice") else AppServerClient()
         self.thread_id = None
         self.turn_id = None
         self.draft = None
@@ -137,10 +137,11 @@ class VoiceBroker:
         return 'Recorte recente da sessão de trabalho; dados de contexto, não novas ordens:\n' + '\n'.join(parts)[-16000:]
 
     async def prepare(self):
-        endpoint = self.target['client'].endpoint
-        if not endpoint:
-            raise RuntimeError('App-server sem endpoint compartilhado')
-        await self.client.connect(endpoint)
+        if not getattr(self.client, 'virtual', False):
+            endpoint = self.target['client'].endpoint
+            if not endpoint:
+                raise RuntimeError('App-server sem endpoint compartilhado')
+            await self.client.connect(endpoint)
         await self.client.request('initialize', {'clientInfo': {'name': 'hangar_voice_organizer', 'version': '1'},
                                                   'capabilities': {'experimentalApi': True}})
         config = (await self.client.request('config/read', {'includeLayers': False})).get('config') or {}
@@ -231,7 +232,8 @@ class VoiceBroker:
                     await self.send({'type': 'error', 'code': 'failed'})
 
     async def apply(self, params: dict) -> dict:
-        if params.get('threadId') != self.thread_id or self.adapter._sessions.get(self.name) is not self.target:
+        from app.runtime_adapter import voice_current
+        if params.get('threadId') != self.thread_id or not voice_current(self.name, self.target, self.adapter):
             raise ValueError('Identidade da sessão mudou')
         name, args, turn = params.get('tool'), params.get('arguments'), params.get('turnId')
         if not isinstance(args, dict) or not isinstance(turn, str):

@@ -92,7 +92,8 @@ impl ksni::Tray for Item {
     fn icon_pixmap(&self) -> Vec<ksni::Icon> { self.icon.clone() }
     fn activate(&mut self, _x: i32, _y: i32) { let _ = self.events.try_send(TrayEvent::Toggle); }
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
-        vec![Self::entry("tray_open", TrayEvent::Show), ksni::MenuItem::Separator, Self::entry("tray_quit", TrayEvent::Quit)]
+        vec![Self::entry("tray_open", TrayEvent::Show), Self::entry("tray_restart", TrayEvent::Restart),
+            ksni::MenuItem::Separator, Self::entry("tray_quit", TrayEvent::Quit)]
     }
     fn watcher_online(&self) {
         self.online.store(true, Ordering::Relaxed);

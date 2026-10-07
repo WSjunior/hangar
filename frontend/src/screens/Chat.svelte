@@ -7,10 +7,13 @@
   import Composer from '../components/Composer.svelte';
   import PluginBand, { type PluginNotice } from '../components/PluginBand.svelte';
   import PluginPane from '../components/PluginPane.svelte';
+  import PluginHide from '../components/PluginHide.svelte';
   import PluginToasts from '../components/PluginToasts.svelte';
   import { copyText } from '../lib/clipboard';
   import { openInNewTab } from '../lib/openTab';
-  import { parsePluginToast, parsePluginUi, pressPluginButton, safeHref, type PluginNode as PluginTree, type PluginPane as PluginPaneData, type PluginToast } from '@hangar/core';
+  import { desktop as janela } from '../lib/desktop.svelte';
+  import { itemModsCelular, modsCelular, modsNaTela } from '../lib/modsCelular.svelte';
+  import { activePaneId, fieldSender, followLocalTab, inputPluginField, isMissingRoute, parsePluginToast, pluginFailureText, parsePluginUi, pressPluginButton, safeHref, showPluginPane, tabFollowsServer, type PluginInputKind, type PluginSource, type PluginNode as PluginTree, type PluginPane as PluginPaneData, type PluginToast } from '@hangar/core';
   import SessionSwitcherSheet from '../components/SessionSwitcherSheet.svelte';
   import CreateSessionSheet from '../components/CreateSessionSheet.svelte';
   import UsageSheet from '../components/UsageSheet.svelte';
@@ -464,6 +467,21 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // Faixa acima do prompt que os mods do Claude Code desenham (SSE 'plugin_ui').
   let pluginBand = $state<PluginTree>(null);
   let pluginPanes = $state<PluginPaneData[]>([]);
+  // Campos novos do `plugin_ui`. Ausentes num servidor antigo: aba pela escolha local, faixa com o teto em colunas
+  // e `Input` desabilitado.
+  let pluginShownId = $state<string | null | undefined>(undefined);
+  let pluginColumns = $state<number | null>(null);
+  let pluginSource = $state<PluginSource | null>(null);
+  // Escolha local da aba: começa no último painel aberto e sobrevive aos redesenhos.
+  let pluginLocalTab = $state<string | null>(null);
+  const pluginActivePane = $derived.by(() => {
+    const id = activePaneId(pluginPanes.map((p) => p.id), pluginShownId, pluginLocalTab);
+    return pluginPanes.find((p) => p.id === id) ?? null;
+  });
+  // Celular: a interface dos mods fica oculta até a pessoa ligar no "⋯" (preferência do aparelho). Os avisos
+  // (toasts) seguem, e com ela oculta o app não chama nenhuma rota de mod.
+  const modsVisiveis = $derived(modsNaTela(janela.atual, modsCelular.ligado));
+  const modsItem = $derived(itemModsCelular(janela.atual, pluginBand, pluginPanes.length));
   // Avisos (`$.ui.toast`) dos mods (SSE 'plugin_toast'). A reconexão repõe os que ainda não
   // venceram: o id diz quais já passaram por aqui.
   let pluginToasts = $state<PluginToast[]>([]);
@@ -495,6 +513,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // O clique vira clique de mouse no terminal da sessão; o que o mod copiar ou mandar abrir acontece
   // aqui, no aparelho de quem clicou, e não na máquina do terminal.
   async function pressPlugin(site: string, key: string) {
+    if (!modsVisiveis) return;
     try {
       const r = await pressPluginButton(sessionName, site, key, sessionServer());
       const texto = r.copied;
@@ -512,8 +531,39 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
         showPluginNotice(m.plugin_link_bloqueado(), false, { href: url });
       }
     } catch (err) {
-      showPluginNotice(err instanceof Error ? err.message : String(err), true);
+      // Código conhecido, a frase dele em qualquer status; sem código, a frase do app ou o motivo do 4xx.
+      showPluginNotice(pluginFailureText(err, m.plugin_clique_falhou), true);
     }
+  }
+  // Trocar de aba avisa o servidor. Seguindo o `shown_id`, a aba só muda quando o novo chega; sem ele (servidor
+  // antigo), a troca é local, e o 404/405 da rota que ainda não existe não é erro.
+  async function showPlugin(site: string) {
+    if (!modsVisiveis) return;
+    if (!tabFollowsServer(pluginPanes.map((p) => p.id), pluginShownId)) pluginLocalTab = site;
+    try {
+      await showPluginPane(sessionName, site, sessionServer());
+    } catch (err) {
+      // Código conhecido, a frase dele em qualquer status; sem código, a frase do app (sem resposta ou 5xx)
+      // ou o motivo que o servidor mandou (4xx).
+      if (!isMissingRoute(err)) showPluginNotice(pluginFailureText(err, m.plugin_aba_falhou), true);
+    }
+  }
+  // Digitação num `Input` de mod: só a sessão sem terminal aceita (o campo nem fica habilitado nas outras). Cada campo
+  // tem a sua fila (`fieldSender`): um pedido em voo por vez, para as teclas chegarem ao mod na ordem.
+  const pluginFieldSenders = new Map<string, (kind: PluginInputKind, value: string) => void>();
+  function inputPlugin(site: string, key: string, kind: PluginInputKind, value: string) {
+    if (!modsVisiveis) return;
+    const id = `${site}\u001f${key}`;
+    let sender = pluginFieldSenders.get(id);
+    if (!sender) {
+      sender = fieldSender(
+        (k, v) => inputPluginField(sessionName, site, key, k, v, sessionServer()),
+        // Código conhecido, a frase dele em qualquer status; sem código, a frase do app ou o motivo do 4xx.
+        (err) => showPluginNotice(pluginFailureText(err, m.plugin_input_falhou), true),
+      );
+      pluginFieldSenders.set(id, sender);
+    }
+    sender(kind, value);
   }
   let pensamentoTimer: ReturnType<typeof setTimeout> | undefined;
   function limparPensamento() {
@@ -2319,8 +2369,12 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       noteAlive();
       try {
         const s = parsePluginUi(JSON.parse(e.data));
+        pluginLocalTab = followLocalTab(pluginPanes.map((p) => p.id), s.panes.map((p) => p.id), pluginLocalTab);
         pluginBand = s.above;
         pluginPanes = s.panes;
+        pluginShownId = s.shownId;
+        pluginColumns = s.columns;
+        pluginSource = s.source;
       } catch {
         quadroFalhou('plugin_ui');
       }
@@ -2385,6 +2439,10 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       sugestao = '';        // era do contexto que o /clear acabou de apagar
       pluginBand = null;    // idem: o mod redesenha para a conversa nova
       pluginPanes = [];
+      pluginShownId = undefined;
+      pluginColumns = null;
+      pluginSource = null;
+      pluginLocalTab = null;
       retiredQueuedIds.clear();
       idIndex.clear();
       reseedDerived();          // zera activity/asstCount junto (loadHistory re-semeia com o novo)
@@ -2798,9 +2856,10 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     if (!problemaChave || problemaChave === problemaDispensado) return null;
     const texto = textoProblema(stateEvent?.problema ?? null);
     if (!texto) return null;
-    // Hook que barrou o prompt: o detalhe (qual hook e por quê) é a informação inteira, não cabe cortar.
-    const detalhe = stateEvent?.problema_detalhe?.split('\n')[0]
-      .slice(0, stateEvent.problema === 'codex_prompt_bloqueado' ? 300 : 80);
+    // Hook que barrou o prompt, ou código e motivo da falha do runtime: o detalhe é a informação
+    // inteira, não cabe cortar.
+    const inteiro = stateEvent?.problema === 'codex_prompt_bloqueado' || stateEvent?.problema === 'runtime_falhou';
+    const detalhe = stateEvent?.problema_detalhe?.split('\n')[0].slice(0, inteiro ? 300 : 80);
     return detalhe ? `${texto} — ${detalhe}` : texto;
   });
 
@@ -3442,10 +3501,19 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
                   onclick={() => (problemaDispensado = problemaChave)}>×</button>
         </div>
       {/if}
-      {#each pluginPanes as pane (pane.id)}
-        <PluginPane {pane} onPress={pressPlugin} />
-      {/each}
-      <PluginBand tree={pluginBand} onPress={pressPlugin} notice={pluginNotice} />
+      {#if modsVisiveis}
+        {#if modsItem}
+          <!-- Só no celular, numa linha própria acima dos mods: ao lado da faixa, o botão a estreitava e quebrava os
+               textos dos mods. Desliga a mesma preferência do menu "⋯", que continua sendo o caminho para ligar. -->
+          <div class="mods-ocultar"><PluginHide onHide={() => (modsCelular.ligado = false)} /></div>
+        {/if}
+        {#if pluginActivePane}
+          <PluginPane pane={pluginActivePane} tabs={pluginPanes} onPress={pressPlugin} onShow={showPlugin}
+                      onInput={pluginSource === 'surface' ? inputPlugin : undefined} />
+        {/if}
+        <PluginBand tree={pluginBand} columns={pluginColumns} onPress={pressPlugin}
+                    onInput={pluginSource === 'surface' ? inputPlugin : undefined} notice={pluginNotice} />
+      {/if}
       <!-- Composer SEMPRE visivel (exceto sessao morta). Antes ele sumia em awaiting_input e,
            se as opcoes nao fossem parseadas, o usuario ficava sem input E sem botoes = preso.
            Os OptionButtons continuam aparecendo na lista; o composer fica como saida garantida. -->
@@ -3576,6 +3644,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
              modoBloqueado={!modoLivre || trocandoModo}
              onRecarregar={recarregavel ? recarregar : undefined}
              recarregarBloqueado={currentState !== 'idle' || recarregando}
+             onAlternarMods={modsItem ? () => (modsCelular.ligado = !modsCelular.ligado) : undefined}
+             modsLigado={modsCelular.ligado} modsPaineis={modsItem?.paineis ?? 0}
              {activityRunning} {activityBadge} />
   <ShareSessionSheet open={shareOpen} name={sessionName} serverId={chatServerId} onClose={() => (shareOpen = false)} />
   <ConfirmSheet open={confirmaModo}
@@ -4212,6 +4282,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   }
   .faixa-problema.alerta .faixa-problema-texto { white-space: normal; overflow-wrap: anywhere; }
   .faixa-problema-dica { display: block; margin-top: var(--space-1); color: var(--text-muted); font-size: var(--text-xs); }
+  .mods-ocultar { display: flex; justify-content: flex-end; margin: 0 var(--space-3); }
   .faixa-problema-fechar {
     background: transparent;
     border: 0;

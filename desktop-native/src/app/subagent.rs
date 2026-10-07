@@ -70,7 +70,8 @@ fn tool_row(events: &[ChatEvent], call: usize, result: Option<usize>, finished: 
 
 fn prepare(events: &[ChatEvent], finished: bool, started: Option<f64>) -> Vec<Row> {
     let prompt = events.iter().position(|e| e.kind == "user_msg");
-    let view = conversation::View { thinking: appearance::get().thinking_tools, tasks: false, merge_thinking: tree() };
+    // Sem `every_run_groups`: o painel do subagente não desenha a dobra da pele Terminal.
+    let view = conversation::View { thinking: appearance::get().thinking_tools, tasks: false, merge_thinking: tree(), every_run_groups: false };
     let items = conversation::build(events, view, &HashSet::new());
     let paired = conversation::pair_results(events).0;
     let last = events.iter().rposition(|e| e.kind == "assistant_msg" || e.kind == "user_msg");
@@ -288,7 +289,8 @@ impl SubConversation {
         let error = tool.tone == Tone::Warning;
         let mut body = div().flex().flex_col().gap_2().pt_1().pb_2();
         // Edição de arquivo mostra o diff no lugar da entrada crua; o resultado só aparece se falhou.
-        let diff = (!tool.orphan).then(|| super::edits::card(&self.events[tool.call], cx)).flatten();
+        let result = tool.result.map(|i| &self.events[i]);
+        let diff = (!tool.orphan).then(|| super::edits::card(&self.events[tool.call], result, cx)).flatten();
         let has_diff = diff.is_some();
         if let Some(diff) = diff { body = body.child(diff); }
         else if !tool.orphan {

@@ -73,6 +73,22 @@ def is_local_engine(cfg: dict) -> bool:
     return bool(inst and normalize_base(str(cfg.get("base_url") or "")) == inst["base_url"])
 
 
+def supports_fast(engine: str | None, model: str | None = None) -> bool:
+    from app import engines
+    cfg = engines.listar().get(engine) if engine else None
+    if cfg is None:
+        return False
+    base = (model or cfg.get("model") or "").rsplit("/", 1)[-1]
+    if not re.fullmatch(r"gpt-\d[^/]*", base):
+        return False
+    try:
+        return is_local_engine(cfg)
+    except ValueError as exc:
+        from app import diag
+        diag.registrar("cliproxy.fast_unavailable", "erro", detalhe=str(exc))
+        return False
+
+
 def account_for_engine(cfg: dict, account: str, home: str | None = None) -> dict:
     from app.cliproxy_accounts import resolve
     inst = local()
@@ -84,7 +100,7 @@ def account_for_engine(cfg: dict, account: str, home: str | None = None) -> dict
 
 
 def validate_models(cfg: dict, model: str, account: dict, models: list[dict] | None = None) -> list[dict]:
-    from app import engine_probe
+    from app import engine_probe, engines
     from app.cliproxy_accounts import base_model, models_for
     if models is None:
         try:
@@ -94,7 +110,7 @@ def validate_models(cfg: dict, model: str, account: dict, models: list[dict] | N
     catalog = models_for(models, account["prefix"])
     available = {item["id"] for item in catalog}
     for label, selected in (("principal", model), ("dos subagentes", cfg.get("subagent_model") or model)):
-        if base_model(selected, account["prefix"]) not in available:
+        if engines.catalog_model(base_model(selected, account["prefix"])) not in available:
             raise ValueError(f"CLIProxyAPI: modelo {label} indisponível nesta conta")
     return catalog
 

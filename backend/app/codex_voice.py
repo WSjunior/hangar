@@ -11,6 +11,7 @@ from app.auth import require_auth
 from app.codex_voice_broker import VoiceBroker
 from app.share_gate import guest_of
 from app.termsock import _origem_aceita
+from app.runtime_adapter import native_slot, open_voice, voice_current
 
 _log = logging.getLogger(__name__)
 VOICES = ("alloy", "arbor", "ash", "ballad", "breeze", "cedar", "coral", "cove",
@@ -54,15 +55,18 @@ async def voice_ws(ws: WebSocket, name: str, adapter, provider_of=None) -> None:
     tasks = []
     broker = None
     try:
-        client = await adapter.ensure_running(name)
-        if client is None:
-            await ws.send_json({"type": "error", "code": "unavailable"})
-            return
-        sess = adapter._sessions[name]
-        if sess.get("voice_events") is not None:
-            await ws.send_json({"type": "error", "code": "busy"})
-            return
-        sess["voice_events"] = events
+        if native_slot(name) is not None:
+            sess = await open_voice(name, events)
+        else:
+            client = await adapter.ensure_running(name)
+            if client is None:
+                await ws.send_json({"type": "error", "code": "unavailable"})
+                return
+            sess = adapter._sessions[name]
+            if sess.get("voice_events") is not None:
+                await ws.send_json({"type": "error", "code": "busy"})
+                return
+            sess["voice_events"] = events
         thread_id = sess["thread_id"]
         ready = asyncio.Event()
 
@@ -108,7 +112,7 @@ async def voice_ws(ws: WebSocket, name: str, adapter, provider_of=None) -> None:
                 if runtime_config.get("codex_voice_beta") is not True:
                     await ws.send_json({"type": "error", "code": "disabled"})
                     return
-                if adapter._sessions.get(name) is not sess or sess["thread_id"] != thread_id:
+                if not voice_current(name, sess, adapter) or sess["thread_id"] != thread_id:
                     return
                 await ws.send_json({"type": "pong"})
 
@@ -131,6 +135,11 @@ async def voice_ws(ws: WebSocket, name: str, adapter, provider_of=None) -> None:
                 await broker.close()
             except Exception:
                 _log.warning("codex voice: encerramento do organizador não confirmado name=%s", name)
+        elif sess is not None and sess.get("runtime_voice"):
+            try:
+                await sess["client"].close()
+            except Exception:
+                _log.warning("codex voice: liberação da chamada não confirmada name=%s", name)
         if sess is not None and sess.get("voice_events") is events:
             sess.pop("voice_events", None)
         for task in tasks[:1]:

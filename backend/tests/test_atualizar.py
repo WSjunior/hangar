@@ -44,6 +44,8 @@ def repo(tmp_path, monkeypatch):
     # A prova por pid lê o systemd DESTA máquina (o backend real está no ar durante a suíte) e
     # veria "mesmo pid" em todo teste de fluxo. Quem testa a prova liga ela de volta.
     monkeypatch.setattr(atualizar, "_pid_do_servidor", lambda topologia, porta: None)
+    # Sem Rust o checkout vai ao topo sem ler release nenhuma; quem testa a escolha liga de volta.
+    monkeypatch.setattr(atualizar.config.settings, "rust_server", False)
     return d
 
 
@@ -376,14 +378,15 @@ def test_aviso_do_instalador_chega_no_estado(repo, monkeypatch):
 
 
 def _preparo_gravado(repo, monkeypatch, *, lock_igual: bool, node_modules: bool,
-                     topologia: str = "systemd"):
+                     topologia: str = "systemd", fetch=lambda: []):
     chamadas = []
     class P:
         returncode = 0
         stdout = ""
         stderr = ""
     monkeypatch.setattr(atualizar, "_rodar", lambda args, **kw: (chamadas.append(args), P())[1])
-    monkeypatch.setattr(atualizar, "_atualizar_dist", lambda: None)
+    monkeypatch.setattr(atualizar, "_atualizar_dist", lambda **k: None)
+    monkeypatch.setattr(atualizar.rust_release, "fetch", fetch)
     monkeypatch.setattr(atualizar, "_renovar_chromium", lambda: None)
     monkeypatch.setattr(atualizar.shutil, "which", lambda nome: f"/bin/{nome}")
     (repo / "backend").mkdir(exist_ok=True)
@@ -449,7 +452,8 @@ def test_preparar_sem_marca_assume_o_node_modules_do_instalador(repo, monkeypatc
         stdout = ""
         stderr = ""
     monkeypatch.setattr(atualizar, "_rodar", lambda args, **kw: (chamadas.append(args), P())[1])
-    monkeypatch.setattr(atualizar, "_atualizar_dist", lambda: None)
+    monkeypatch.setattr(atualizar, "_atualizar_dist", lambda **k: None)
+    monkeypatch.setattr(atualizar.rust_release, "fetch", lambda: [])
     monkeypatch.setattr(atualizar, "_renovar_chromium", lambda: None)
     monkeypatch.setattr(atualizar.shutil, "which", lambda nome: f"/bin/{nome}")
     (repo / "backend").mkdir(exist_ok=True)
@@ -466,6 +470,33 @@ def test_preparar_sem_node_modules_nao_instala_front(repo, monkeypatch):
     de 400 MB só porque o lock mudou."""
     cmds = _preparo_gravado(repo, monkeypatch, lock_igual=False, node_modules=False)
     assert not any("npm ci" in c for c in cmds)
+
+
+def test_preparar_baixa_os_binarios_e_a_falha_vira_aviso(repo, monkeypatch):
+    """Sem os binários o Python atende sozinho: o download que falha avisa e não para o `uv sync`."""
+    cmds = _preparo_gravado(repo, monkeypatch, lock_igual=True, node_modules=True,
+                            fetch=lambda: ["binários Rust não baixados: rede fora"])
+    assert any(c.endswith("uv sync") for c in cmds)
+    assert "binários Rust não baixados: rede fora" in atualizar.estado()["avisos"]
+
+
+def test_preparar_sem_build_para_a_maquina_nao_avisa(repo, monkeypatch):
+    _preparo_gravado(repo, monkeypatch, lock_igual=True, node_modules=True, fetch=lambda: None)
+    assert not atualizar.estado().get("avisos")
+
+
+def test_volta_para_a_versao_anterior_nao_troca_binario(repo, monkeypatch):
+    """O `_voltar` roda `_preparar(dist=False)`: a release é a mais nova, não a do commit de antes."""
+    class P:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+    monkeypatch.setattr(atualizar, "_rodar", lambda args, **kw: P())
+    monkeypatch.setattr(atualizar.shutil, "which", lambda nome: f"/bin/{nome}")
+    monkeypatch.setattr(atualizar.rust_release, "fetch",
+                        lambda: pytest.fail("a volta não baixa binário"))
+    (repo / "backend").mkdir(exist_ok=True)
+    atualizar._preparar("systemd", dist=False)
 
 
 def test_falha_do_instalador_mostra_o_motivo_marcado_nao_a_cauda(repo, monkeypatch):
@@ -1333,3 +1364,163 @@ def test_build_que_estoura_o_prazo_devolve_a_tela_anterior(repo, monkeypatch):
     with pytest.raises(subprocess.TimeoutExpired):
         atualizar._atualizar_dist()
     assert (dist / "index.html").read_text(encoding="utf-8") == "tela da main"
+
+
+# ─── Só até o commit cujo binário do Rust foi publicado ─────────────────────────────────────────
+
+def _protocolo(d, n):
+    (d / "backend" / "app").mkdir(parents=True, exist_ok=True)
+    _commit(d, "backend/app/rust_server.py", f"X = 1\nRUST_SERVER_PROTOCOL = {n}\nY = 2\n")
+
+
+@pytest.fixture
+def rust(repo, tmp_path, monkeypatch):
+    """Origin com a main em 35 → 35 (sem tocar no número) → 36; a release diz o commit do binário."""
+    origem = tmp_path / "origem.git"
+    _git(tmp_path, "clone", "-q", "--bare", str(repo), str(origem))
+    _git(repo, "remote", "add", "origin", str(origem))
+    _git(repo, "fetch", "-q", "origin")
+    _git(repo, "branch", "-q", "--set-upstream-to", "origin/main")
+    obra = tmp_path / "obra-rust"
+    _git(tmp_path, "clone", "-q", str(origem), str(obra))
+    _protocolo(obra, 35)
+    binario_35 = _rev(obra, "HEAD")
+    _commit(obra, "b.txt", "sem mexer no contrato\n")
+    ultimo_35 = _rev(obra, "HEAD")
+    _protocolo(obra, 36)
+    _git(obra, "push", "-q", "origin", "main")
+    pedidos, preparo = [], {}
+    manifesto = {"commit": binario_35, "files": {
+        f"linux-x86_64/{n}": {"name": f"{n}-linux-x86_64", "sha256": "0" * 64} for n in ("hangar-server", "hangar-cano")}}
+    monkeypatch.setattr(atualizar.config.settings, "rust_server", True)
+    monkeypatch.setattr(atualizar.rust_release, "platform_key", lambda: "linux-x86_64")
+    monkeypatch.delenv("HANGAR_SERVER_RELEASE_URL", raising=False)
+    monkeypatch.setattr(atualizar.rust_release, "read_manifest",
+                        lambda url: (pedidos.append(url), manifesto)[1])
+    monkeypatch.setattr(atualizar, "_aplicar_passos", lambda: None)
+    monkeypatch.setattr(atualizar, "_preparar", lambda t, **k: preparo.update(k))
+    monkeypatch.setattr(atualizar, "_reiniciar", lambda t, *a, **k: None)
+    monkeypatch.setattr(atualizar, "_subiu", lambda porta, teto=0: True)
+    return {"obra": obra, "manifesto": manifesto, "pedidos": pedidos, "preparo": preparo,
+            "binario_35": binario_35, "ultimo_35": ultimo_35, "topo": _rev(obra, "HEAD")}
+
+
+def test_topo_sem_binario_para_no_ultimo_commit_do_contrato_publicado(repo, rust):
+    final = atualizar.executar()
+    assert final["ok"] is True
+    assert _rev(repo, "HEAD") == rust["ultimo_35"] != rust["topo"]
+    assert final["avisos"] == ["versão mais nova ainda sem binário do Rust para este sistema (compilando, ou o "
+                               f"build falhou); atualizado até {rust['ultimo_35'][:8]}"]
+    assert rust["pedidos"] == [f"{atualizar.rust_release.RELEASES_URL}/server-latest"]
+    # O download usa o manifesto da escolha, e a tela (também no Reiniciar) é compilada aqui.
+    assert rust["preparo"]["release"][2] is rust["manifesto"]
+    assert atualizar._behind_top() is True
+
+
+def test_build_deste_sistema_atrasado_no_manifesto_por_sistema(repo, rust):
+    """O topo publicado para outro sistema não leva este: vale a entrada dele em `platforms`."""
+    rust["manifesto"]["commit"] = rust["topo"]
+    rust["manifesto"]["platforms"] = {
+        "linux-x86_64": {"commit": rust["binario_35"], "protocol": 35},
+        "windows-x86_64": {"commit": rust["topo"], "protocol": 36}}
+    final = atualizar.executar()
+    assert final["ok"] is True and _rev(repo, "HEAD") == rust["ultimo_35"]
+
+
+@pytest.mark.parametrize("platforms", [{"windows-x86_64": {"protocol": 36}}, None, []])
+def test_manifesto_por_sistema_sem_este_sistema_nao_confere(repo, rust, platforms):
+    rust["manifesto"]["platforms"] = platforms
+    final = atualizar.executar()
+    assert _rev(repo, "HEAD") == rust["topo"]
+    assert final["avisos"][0].startswith("não consegui conferir o binário do Rust")
+
+
+def test_topo_com_binario_avanca_ate_o_topo(repo, rust):
+    rust["manifesto"]["commit"] = rust["topo"]
+    final = atualizar.executar()
+    assert final["ok"] is True and _rev(repo, "HEAD") == rust["topo"]
+    assert final["avisos"] == [] and atualizar._behind_top() is False
+
+
+def _http(code):
+    def _falha(url):
+        raise atualizar.urllib.error.HTTPError(url, code, "x", {}, None)
+    return _falha
+
+
+@pytest.mark.parametrize("caso", ["outro_sistema", "sem_rust", "sem_release"])
+def test_sem_binario_deste_sistema_vai_ao_topo_como_antes(repo, rust, monkeypatch, caso):
+    if caso == "outro_sistema":
+        rust["manifesto"]["files"] = {k.replace("linux-x86_64", "windows-x86_64"): v
+                                      for k, v in rust["manifesto"]["files"].items()}
+    elif caso == "sem_rust":
+        monkeypatch.setattr(atualizar.config.settings, "rust_server", False)
+    else:
+        monkeypatch.setattr(atualizar.rust_release, "read_manifest", _http(404))
+    final = atualizar.executar()
+    assert final["ok"] is True and _rev(repo, "HEAD") == rust["topo"] and final["avisos"] == []
+
+
+@pytest.mark.parametrize("caso", ["rede", "http_500", "commit_torto", "commit_ausente"])
+def test_sem_como_conferir_vai_ao_topo_e_diz(repo, rust, monkeypatch, caso):
+    if caso == "rede":
+        monkeypatch.setattr(atualizar.rust_release, "read_manifest",
+                            lambda url: (_ for _ in ()).throw(OSError("rede fora")))
+    elif caso == "http_500":
+        monkeypatch.setattr(atualizar.rust_release, "read_manifest", _http(500))
+    elif caso == "commit_torto":
+        rust["manifesto"]["commit"] = "--output=/tmp/x"
+    else:
+        rust["manifesto"]["commit"] = "f" * 40
+    final = atualizar.executar()
+    assert final["ok"] is True and _rev(repo, "HEAD") == rust["topo"]
+    assert final["avisos"][0].startswith("não consegui conferir o binário do Rust")
+    assert atualizar.pinned_target("main")[0] is None
+
+
+def test_ja_no_topo_com_binario_de_outro_contrato_nao_recua_e_avisa(repo, rust):
+    """O caso que motivou a regra: a máquina já foi ao topo antes dela existir."""
+    _git(repo, "fetch", "-q", "origin")
+    _git(repo, "merge", "-q", "--ff-only", "origin/main")
+    final = atualizar.executar()
+    assert final["ok"] is True and _rev(repo, "HEAD") == rust["topo"]
+    assert final["avisos"] == [f"o binário do Rust publicado para este sistema (commit {rust['binario_35'][:8]}) "
+                               "fala outro contrato que este código; o Python atende sozinho até sair o binário novo"]
+
+
+def test_commit_local_adiante_do_topo_nao_e_atras_do_topo(repo, rust):
+    rust["manifesto"]["commit"] = rust["topo"]
+    _git(repo, "fetch", "-q", "origin")
+    _git(repo, "merge", "-q", "--ff-only", "origin/main")
+    _commit(repo, "local.txt", "meu\n")
+    final = atualizar.executar()
+    assert final["ok"] is True and final["avisos"] == [] and atualizar._behind_top() is False
+
+
+def test_branch_de_teste_nova_nasce_no_commit_escolhido_com_upstream(repo, rust, monkeypatch):
+    obra = rust["obra"]
+    _git(obra, "checkout", "-q", "-b", "teste")
+    _commit(obra, "t.txt", "teste\n")
+    teste_36 = _rev(obra, "HEAD")
+    _protocolo(obra, 37)
+    _git(obra, "push", "-q", "origin", "teste")
+    rust["manifesto"]["commit"] = rust["topo"]       # binário da branch: protocolo 36
+    monkeypatch.setattr(atualizar.config.settings, "update_branch", "teste")
+    final = atualizar.executar()
+    assert final["ok"] is True
+    assert _branch(repo) == "teste" and _rev(repo, "HEAD") == teste_36
+    assert _git(repo, "rev-parse", "--abbrev-ref", "teste@{upstream}").stdout.strip() == "origin/teste"
+    assert rust["pedidos"] == [f"{atualizar.rust_release.RELEASES_URL}/server-teste"]
+
+
+def test_merge_que_muda_o_contrato_conta_pelo_primeiro_pai(repo, rust):
+    obra = rust["obra"]
+    _git(obra, "checkout", "-q", "-b", "lado", rust["ultimo_35"])
+    _protocolo(obra, 37)
+    _git(obra, "checkout", "-q", "main")
+    _git(obra, "merge", "-q", "--no-ff", "-m", "junta", "lado", "-X", "theirs")
+    _git(obra, "push", "-q", "origin", "main")
+    rust["manifesto"]["commit"] = rust["topo"]       # o 36, antes do merge
+    final = atualizar.executar()
+    assert _rev(repo, "HEAD") == rust["topo"] and final["avisos"]
+

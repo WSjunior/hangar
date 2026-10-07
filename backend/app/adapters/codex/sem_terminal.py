@@ -17,7 +17,7 @@ from app import codex_contas, runtime_config
 from app.adapters.claude_headless import adapter as hl_adapter
 from app.adapters.codex import sessions as codex_sessions
 from app.adapters.codex.appserver import AppServerClient
-from app.adapters.codex.lancador import CLIENT_INFO, PERMISSION_POLICIES, tool_output_override
+from app.adapters.codex.lancador import CLIENT_INFO, PERMISSION_POLICIES, service_tier_override, tool_output_override
 
 
 class Ocupada(RuntimeError):
@@ -89,7 +89,8 @@ def argv(meta: dict) -> list[str]:
     approval, sandbox = politica(meta.get("permission_mode"))
     return ["codex", "app-server", "--stdio",
             "-c", f'sandbox_mode="{sandbox}"', "-c", f'approval_policy="{approval}"',
-            *tool_output_override(meta.get("tool_output_token_limit"))]
+            *tool_output_override(meta.get("tool_output_token_limit")),
+            *service_tier_override(meta.get("service_tier"))]
 
 
 def _ambiente(meta: dict) -> dict:
@@ -107,6 +108,7 @@ def _ambiente(meta: dict) -> dict:
     env["CP_SESSION_NAME"] = meta["name"]
     env["CP_SESSION_KEY"] = meta["key"]
     env[hl_adapter._MARCADOR_CANO] = meta["key"]
+    env[hl_adapter._CANO_OWNER] = str(Path.home())
     # Escolha da abertura, como no Claude sem terminal: marcador sempre, chave só com o recurso
     # ligado. Herdar do backend daria o Jev a toda sessão.
     env.update(runtime_config.env_jev(bool(meta.get("jev"))))
@@ -138,8 +140,9 @@ async def conectar(cano: dict, *, esperar: float = 0.0) -> tuple[AppServerClient
     if ligacao is None:
         return None
     lig, snap = ligacao
+    cano["versao"] = snap.get("versao", 1)
     client = AppServerClient()
-    client._attach(lig.stdout, lig.stdin)
+    client.cano_snapshot = snap
     for linha in snap.get("stderr_tail") or []:
         client.stderr_tail.append(linha)
     # Pedidos que o servidor fez enquanto o backend estava fora: voltam pela fila como se
@@ -152,6 +155,15 @@ async def conectar(cano: dict, *, esperar: float = 0.0) -> tuple[AppServerClient
         if isinstance(msg, dict) and msg.get("id") is not None and "method" in msg:
             client.server_requests[msg["id"]] = msg
             client._notifications.put_nowait(msg)
+    for thread_id, prefix in ((snap.get("inflight") or {}).get("codex") or {}).items():
+        if prefix.get("complete") and prefix.get("text"):
+            client._notifications.put_nowait({"method": "turn/started", "params": {
+                "threadId": thread_id, "turn": {"id": prefix.get("turnId")}}})
+            client._notifications.put_nowait({"method": "item/agentMessage/delta", "params": {
+                "threadId": thread_id, "turnId": prefix.get("turnId"),
+                "itemId": prefix.get("itemId"), "delta": prefix["text"]}})
+    # Snapshot antes do leitor: notification nova nunca é substituída por uma pendência velha.
+    client._attach(lig.stdout, lig.stdin)
     return client, snap
 
 

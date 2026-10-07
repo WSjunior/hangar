@@ -302,6 +302,37 @@ def _strip_meta_blocks(text: str) -> str:
     return _PASTED_RE.sub(r"\2", _META_BLOCK_RE.sub("", text)).strip()
 
 
+_PATCH_MAX_LINES = 2000
+_PATCH_MAX_START = 2**32 - 1
+
+
+def _patch_hunks(obj: dict) -> Optional[list[dict]]:
+    """Trechos do `structuredPatch` gravado ao lado do resultado. O arquivo inteiro fica para trás."""
+    tur = obj.get("toolUseResult")
+    raw = tur.get("structuredPatch") if isinstance(tur, dict) else None
+    if not isinstance(raw, list) or not raw:
+        return None
+    hunks, total = [], 0
+    for h in raw:
+        if not isinstance(h, dict):
+            return None
+        starts = (h.get("oldStart"), h.get("newStart"))
+        lines = h.get("lines")
+        # bool é int em Python; um `true` no lugar do número não é posição de linha.
+        if not all(isinstance(s, int) and not isinstance(s, bool) for s in starts):
+            return None
+        # Sem negativo, e com o teto do u32 do tipo compartilhado do Rust: os dois parsers recusam igual.
+        if not all(0 <= s <= _PATCH_MAX_START for s in starts):
+            return None
+        if not isinstance(lines, list) or not all(isinstance(text, str) for text in lines):
+            return None
+        total += len(lines)
+        if total > _PATCH_MAX_LINES:
+            return None
+        hunks.append({"old_start": starts[0], "new_start": starts[1], "lines": lines})
+    return hunks
+
+
 def parse_line(line: str) -> list[ChatEvent]:
     line = line.strip()
     if not line:
@@ -553,11 +584,14 @@ def parse_obj(obj: dict) -> list[ChatEvent]:
                     res = tr.get("content")
                     if isinstance(res, list):
                         res = " ".join(str(b.get("text", "")) for b in res if isinstance(b, dict))
+                    failed = bool(tr.get("is_error", False))
                     out.append(ChatEvent(
                         kind="tool_result", id=_sub_id(uid, k),
                         tool_use_id=tr.get("tool_use_id"),
                         result=str(res) if res is not None else None,
-                        is_error=bool(tr.get("is_error", False)), ts=_ts(obj),
+                        is_error=failed, ts=_ts(obj),
+                        # O `toolUseResult` é um por linha: com dois resultados não dá para saber de quem é.
+                        patch=_patch_hunks(obj) if len(trs) == 1 and not failed else None,
                     ))
                 return out
             # Imagens coladas no terminal: contar os blocos `image` -> o front busca cada uma lazy.
@@ -998,3 +1032,10 @@ class TranscriptTailer:
                 _log.warning("transcript %s: a pasta %s sumiu debaixo do watch — esperando ela "
                              "voltar", self.path.name, self.path.parent)
                 continue
+
+
+from app.git_ops import GitError as _WorkspaceError
+from app.workspace_bridge import delegate as _workspace_delegate, text_rows as _text_rows
+
+citation_cwds = _workspace_delegate("citation_cwds", _WorkspaceError, prepare=_text_rows)(citation_cwds)
+cited_elsewhere = _workspace_delegate("cited_elsewhere", _WorkspaceError, prepare=_text_rows)(cited_elsewhere)

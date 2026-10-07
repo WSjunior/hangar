@@ -21,6 +21,20 @@ const problemLabels: Record<string, () => string> = {
   headless_processo_caiu: m.problema_headless_processo_caiu,
   headless_turno_erro: m.problema_headless_turno_erro,
   headless_sem_login: m.problema_headless_sem_login,
+  runtime_falhou: m.problema_runtime_falhou,
+  terminal_observacao_falhou: m.problema_terminal_observacao_falhou,
+  state_facts_unavailable: m.problema_state_facts_unavailable,
+  permission_observe_failed: m.problema_permission_observe_failed,
+  terminal_input_composer_busy: m.problema_terminal_input_composer_busy,
+  terminal_input_composer_unreadable: m.problema_terminal_input_composer_unreadable,
+  terminal_input_capture_failed: m.problema_terminal_input_capture_failed,
+  terminal_input_stalled: m.problema_terminal_input_stalled,
+  terminal_clear_not_applied: m.problema_terminal_clear_not_applied,
+  list_capture_failed: m.problema_list_capture_failed,
+  list_runtime_unavailable: m.problema_list_runtime_unavailable,
+  list_runtime_absent: m.problema_list_runtime_absent,
+  list_facts_unavailable: m.problema_list_facts_unavailable,
+  list_orq_unavailable: m.problema_list_orq_unavailable,
 };
 
 export function SessionProblem({ problem, detail }: Props) {
@@ -34,12 +48,15 @@ export function SessionProblem({ problem, detail }: Props) {
   const exitCode = match ? Number(match[1]) : NaN;
   const hasDetail = Number.isSafeInteger(exitCode);
   const label = problem && Object.hasOwn(problemLabels, problem) ? problemLabels[problem]() : m.session_problem_unknown();
+  // Runtime e observação mandam código e frase fixa do Rust, sem texto da conversa: pode ir à tela.
+  const runtimeDetail = problem === 'runtime_falhou' || problem === 'terminal_observacao_falhou' || problem === 'terminal_input_stalled' ? detail?.split('\n')[0] : null;
 
   if (!problem) return null;
 
   return (
     <View style={styles.wrap}>
       <Text style={styles.message} accessibilityRole="alert" accessibilityLiveRegion="polite">{label}</Text>
+      {runtimeDetail ? <Text style={styles.detail} selectable>{runtimeDetail}</Text> : null}
       {hasDetail ? (
         <Pressable
           onPress={() => setExpanded((value) => !value)}

@@ -11,7 +11,7 @@ use super::accounts::ModelChoice;
 use super::device::Remote;
 use super::machines::{FocusOnClick, enter_to_focused};
 use super::settings::Disclosure;
-use super::sidebar::Target;
+use super::sidebar::{Target, wrap_step};
 use gpui_kit::component::{IndexPath, WindowExt, select::{Select, SelectEvent, SelectState}, searchable_list::{SearchableListItem, SearchableVec}};
 use super::chrome::Skeleton;
 use serde::Deserialize;
@@ -48,6 +48,14 @@ pub(super) struct Entry {
 
 /// Uma pasta lida: as subpastas, ou o motivo de não haver lista (código do backend já em texto).
 pub(super) struct Scan { pub(super) entries: Vec<Entry>, pub(super) error: Option<String> }
+
+struct RootScan { root: Root, scan: Remote<Scan> }
+enum FolderIndex { Current(usize), Root(usize, usize) }
+
+fn next_root(current: usize, count: usize, reverse: bool) -> Option<usize> {
+    if count == 0 { return None; }
+    Some(if reverse { (current + count - 1) % count } else { (current + 1) % count })
+}
 
 #[derive(Clone, Debug, Deserialize)]
 struct Probe { disponivel: bool, #[serde(default)] default: bool }
@@ -214,6 +222,7 @@ pub(super) enum CreateReply {
     Roots(u64, Result<Value, Failure>, Option<String>),
     /// A pasta já convertida na tarefa do tokio: a lista grande não é lida na thread da janela.
     Scan(u64, Result<Scan, String>),
+    RootScan(u64, String, u64, Result<Scan, String>),
     Branches(u64, Result<Option<Checkout>, String>),
     Sessions(u64, Result<Vec<SessionInfo>, Failure>),
     Providers(u64, Result<Value, Failure>),
@@ -396,7 +405,13 @@ pub(in crate::app) struct NewSession {
     dir: String,
     scan: Remote<Scan>,
     /// Pastas da leitura que casam com a busca, na ordem da lista: refeito quando a busca ou a leitura mudam, não a cada quadro.
-    folders: Vec<usize>,
+    folders: Vec<FolderIndex>,
+    /// A pasta realçada pelas setas, guardada pelo caminho: a lista refeita (leitura que chega, busca) não a troca de linha.
+    folder_active: Option<String>,
+    folder_scroll: UniformListScrollHandle,
+    root_scans: Vec<RootScan>,
+    search_all: bool,
+    search_error: Option<String>,
     query: Entity<InputState>,
     /// A pasta escolhida: é ela que o formulário configura.
     picked: Option<String>,
@@ -453,6 +468,7 @@ pub(in crate::app) struct NewSession {
     /// A conta escolhida à mão no menu da tela sem sessão: a troca por cota esgotada não passa por cima dela.
     account_touched: bool,
     effort: String,
+    service_tier: Option<String>,
     permission: String,
     /// O padrão marcado do harness, como foi lido na última leitura do catálogo.
     saved_default: Option<(String, String, String)>,
@@ -521,7 +537,11 @@ impl NewSession {
         let new_branch_name = cx.new(|cx| InputState::new(window, cx).placeholder(tr_shared("worktree_nome_branch", &[])));
         // O Enter no Nome não cria: no web o campo não está num formulário.
         let subscriptions = vec![
-            cx.subscribe(&query, |this: &mut Self, _, event: &InputEvent, cx| if matches!(event, InputEvent::Change) { this.refilter(cx); cx.notify() }),
+            cx.subscribe_in(&query, window, |this: &mut Self, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => { this.refilter(cx); cx.notify() }
+                InputEvent::PressEnter { .. } => this.pick_active_folder(window, cx),
+                _ => {}
+            }),
             cx.subscribe(&name, |_, _, event: &InputEvent, cx| if matches!(event, InputEvent::Change) { cx.notify() }),
             // Digitar depois de escolher uma branch existente volta a ser branch nova com o nome digitado.
             cx.subscribe(&new_branch_name, |this: &mut Self, input, event: &InputEvent, cx| if matches!(event, InputEvent::Change) {
@@ -545,16 +565,21 @@ impl NewSession {
                 _ => {}
             }),
         ];
+        let (search_all, search_error) = match appearance::search_all_folders() {
+            Ok(value) => (value, None),
+            Err(error) => (true, Some(format!("{} {error}", tr("create_search_preference_failed")))),
+        };
         Self {
             link, purpose: SessionDialogPurpose::Create, transfer_blocked: false, compact: false, menu: Default::default(), menu_query, servers: Remote::default(),
-            roots: Remote::default(), root: None, dir: String::new(), scan: Remote::default(), folders: Vec::new(), query, picked: None,
+            roots: Remote::default(), root: None, dir: String::new(), scan: Remote::default(), folders: Vec::new(),
+            folder_active: None, folder_scroll: UniformListScrollHandle::new(), root_scans: Vec::new(), search_all, search_error, query, picked: None,
             checkout: Remote::default(), branch: String::new(), worktrees: Remote::default(), existing: None, switching: false, base_open: false,
             preset: None, new_branch: false, base: String::new(), new_branch_name,
             git: Default::default(), git_name,
             sessions: Remote::default(), same_folder: false, name, provider: "claude", provider_touched: false, providers: Remote::default(), configs: Remote::default(),
             config: None, config_pick: None, codex: Remote::default(), codex_account: String::new(), codex_pick: None, headless: true, headless_owner: None, headless_touched: false, headless_saving: false,
             difference: false, manual_open: false, manual, choosing: false, choose_error: None, create_seq: 0, creating: false, started: None,
-            step: String::new(), error: None, clock: None, models: Remote::default(), model: String::new(), model_choice_touched: false, account_touched: false, effort: String::new(),
+            step: String::new(), error: None, clock: None, models: Remote::default(), model: String::new(), model_choice_touched: false, account_touched: false, effort: String::new(), service_tier: None,
             permission: "bypassPermissions".into(), saved_default: None, permission_touched: false, subagent: String::new(), engine: String::new(), engine_account: String::new(), engine_account_pick: None, model_pick: None, effort_pick: None,
             permission_pick: None, subagent_pick: None, engine_pick: None, engines: Remote::default(), jev: Remote::default(), jev_on: false,
             more: false, omp, quotas: Remote::default(), reopen_config: None, reopen_default: false, asking: false, confirming: false, account_busy: false, account_seq: 0, account_name,
@@ -708,12 +733,14 @@ impl NewSession {
         self.headless_saving = false;
         self.dir.clear();
         self.folders.clear();
+        self.folder_active = None;
         self.branch.clear();
         (self.new_branch, self.base) = (false, String::new());
         (self.existing, self.switching, self.preset) = (None, false, None);
         self.worktrees.reset();
         self.new_branch_name.update(cx, |input, cx| input.set_value("", window, cx));
         self.roots.reset();
+        self.root_scans.clear();
         self.scan.reset();
         self.checkout.reset();
         self.sessions.reset();
@@ -722,11 +749,14 @@ impl NewSession {
         self.configs.reset();
         self.engines.reset();
         self.engine.clear();
+        self.model.clear();
+        self.effort.clear();
         self.engine_account.clear();
         self.engine_pick = None;
         self.engine_account_pick = None;
         // O catálogo da outra máquina não vale aqui; o novo vem depois das contas.
         self.models.reset();
+        self.service_tier = None;
         self.before = None;
         self.load_target(cx);
         // O arquivo da pasta volta vazio até a pasta nova.
@@ -828,8 +858,20 @@ impl NewSession {
         if self.compact { self.picked = Some(path.clone()); self.reset_git(); self.load_branches(window, cx); }
         let remember = path.clone();
         self.link.runtime.spawn_blocking(move || crate::appearance::remember_root(&remember));
-        self.query.update(cx, |input, cx| input.set_value("", window, cx));
         self.scan_dir(path, cx);
+    }
+
+    pub(super) fn root_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let key = &event.keystroke;
+        if self.compact || self.is_transfer() || key.key != "tab" || !key.modifiers.control || key.modifiers.alt || key.modifiers.platform { return false; }
+        if self.creating || self.headless_saving { return true; }
+        let Some(roots) = self.roots.ok() else { return true; };
+        let current = roots.iter().position(|root| self.root.as_ref().is_some_and(|r| r.path == root.path)).unwrap_or(0);
+        if let Some(index) = next_root(current, roots.len(), key.modifiers.shift) {
+            let root = roots[index].clone();
+            self.select_root(root, window, cx);
+        }
+        true
     }
 
     fn scan_dir(&mut self, path: String, cx: &mut Context<Self>) {
@@ -898,6 +940,8 @@ impl NewSession {
         self.provider_touched = true;
         if provider == self.provider { return; }
         (self.provider, self.error) = (provider, None);
+        self.model.clear();
+        self.effort.clear();
         self.permission = match provider { "codex" => "Full Access".into(), "claude" => "bypassPermissions".into(), _ => String::new() };
         self.permission_touched = false;
         if provider == "codex" { self.load_codex(cx); self.load_context(cx); } else { self.drop_context(); self.drop_codex(); }
@@ -1049,10 +1093,12 @@ impl NewSession {
                 // O motor exporta o próprio modelo de subagente: com ele, o campo nem aparece.
                 if self.engine.is_empty() && !self.subagent.is_empty() { body["subagent_model"] = json!(self.subagent); }
             }
-            "codex" => body["codex_account"] = json!(self.codex_account),
+            "codex" => { body["codex_account"] = json!(self.codex_account); },
             "omp" => { let profile = self.omp.read(cx).value().trim().to_owned(); if !profile.is_empty() { body["omp_profile"] = json!(profile); } }
             _ => {}
         }
+        // Escolha incompatível não bloqueia a criação nem vai para outro harness.
+        if let Some(tier) = self.service_tier_for_creation() { body["service_tier"] = json!(tier); }
         if matches!(provider, "claude" | "codex") && !self.headless_inherited() {
             body["headless"] = json!(self.headless);
             if provider == "codex" && self.headless { body["permission_mode"] = text(&self.permission); }
@@ -1163,8 +1209,10 @@ impl NewSession {
                     .and_then(|v| serde_json::from_value::<Vec<Root>>(v).map_err(|_| tr("invalid_response")));
                 if !self.roots.finish(seq, roots) { return None; }
                 let list = self.roots.ok().cloned().unwrap_or_default();
+                self.root_scans = list.iter().cloned().map(|root| RootScan { root, scan: Remote::default() }).collect();
                 if let Some(root) = list.iter().find(|r| Some(&r.path) == last.as_ref()).or(list.first()).cloned() { self.select_root(root, window, cx); }
                 self.apply_preset(window, cx);
+                self.refilter(cx);
             }
             CreateReply::Worktrees(seq, result) => {
                 if seq != self.worktrees.seq { return None; }
@@ -1172,6 +1220,12 @@ impl NewSession {
                 self.worktrees.finish(seq, list);
             }
             CreateReply::Scan(seq, result) => { if self.scan.finish(seq, result) { self.refilter(cx); } }
+            CreateReply::RootScan(epoch, path, seq, result) => {
+                if epoch != self.roots.seq { return None; }
+                if let Some(cached) = self.root_scans.iter_mut().find(|s| s.root.path == path) {
+                    if cached.scan.finish(seq, result) { self.refilter(cx); }
+                }
+            }
             CreateReply::Branches(seq, result) => {
                 if !self.compact || !self.checkout.finish(seq, result) { return None; }
                 // A base padrão da branch nova é a branch atual da pasta; com HEAD solto, a primeira local.
@@ -1477,18 +1531,22 @@ impl NewSession {
 
     fn render_rows(&self, cx: &mut Context<Self>) -> AnyElement {
         if self.root.is_none() { return div().into_any_element(); }
-        if self.scan.loading || self.scan.value.is_none() {
+        let global = self.global_search(cx);
+        let loading = if global { self.root_scans.iter().any(|s| s.scan.loading) } else { self.scan.loading || self.scan.value.is_none() };
+        if loading && (!global || self.folders.is_empty()) {
             // Esqueletos são marcadores de posição, sem item de domínio: a posição é a identidade deles.
             return div().flex().flex_col().gap(px(6.)).children((0..5usize).map(|i| div().flex().flex_col().gap(px(6.)).px(px(10.)).py(px(8.))
                 .child(Skeleton::new(("create-row-skeleton", i)).w(px(160.)).h(px(12.)))
                 .child(Skeleton::new(("create-row-skeleton-detail", i)).secondary().w(px(240.)).h(px(10.))))).into_any_element();
         }
-        let scan = match self.scan.value.as_ref() {
-            Some(Err(error)) => return alert("create-scan-error", error.clone()).into_any_element(),
-            Some(Ok(scan)) => scan,
-            None => return div().into_any_element(),
-        };
-        if let Some(error) = scan.error.clone() { return muted(error).into_any_element(); }
+        if !global {
+            let scan = match self.scan.value.as_ref() {
+                Some(Err(error)) => return alert("create-scan-error", error.clone()).into_any_element(),
+                Some(Ok(scan)) => scan,
+                None => return div().into_any_element(),
+            };
+            if let Some(error) = scan.error.clone() { return muted(error).into_any_element(); }
+        }
         if self.folders.is_empty() {
             let searching = !self.query.read(cx).value().trim().is_empty();
             return muted(tr(if searching { "create_no_results" } else { "create_no_subfolders" })).into_any_element();
@@ -1496,23 +1554,142 @@ impl NewSession {
         // Só as linhas visíveis são montadas; todas têm a mesma altura, e o espaço entre elas vai dentro de cada uma.
         uniform_list("create-folder-list", self.folders.len(), cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
             range.filter_map(|ix| this.folder_row(ix, cx)).collect::<Vec<_>>()
-        })).size_full().into_any_element()
+        })).track_scroll(&self.folder_scroll).size_full().into_any_element()
     }
 
-    fn refilter(&mut self, cx: &App) {
+    fn folder_at(&self, ix: usize) -> Option<(&Root, &Entry)> {
+        match self.folders.get(ix)? {
+            FolderIndex::Current(ei) => Some((self.root.as_ref()?, self.scan.ok()?.entries.get(*ei)?)),
+            FolderIndex::Root(ri, ei) => { let s = self.root_scans.get(*ri)?; Some((&s.root, s.scan.ok()?.entries.get(*ei)?)) }
+        }
+    }
+
+    fn active_folder_index(&self) -> Option<usize> {
+        let path = self.folder_active.as_deref()?;
+        (0..self.folders.len()).find(|ix| self.folder_at(*ix).is_some_and(|(_, e)| e.path == path))
+    }
+
+    /// ↑/↓ no campo de busca andam o realce pela lista, dando a volta nas pontas como a busca de conversas.
+    fn move_folder(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.creating { return; }
+        let Some(next) = wrap_step(self.active_folder_index(), self.folders.len(), delta) else { return };
+        self.folder_active = self.folder_at(next).map(|(_, e)| e.path.clone());
+        self.folder_scroll.scroll_to_item(next, ScrollStrategy::Nearest);
+        cx.notify();
+    }
+
+    /// Enter no campo de busca escolhe a realçada; sem realce, com algo digitado, a primeira que casou.
+    fn pick_active_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let typed = !self.query.read(cx).value().trim().is_empty();
+        let Some(ix) = self.active_folder_index().or_else(|| typed.then_some(0)) else { return };
+        let Some((root, entry)) = self.folder_at(ix).map(|(r, e)| (r.clone(), e.path.clone())) else { return };
+        self.pick_folder(root, entry, window, cx);
+    }
+
+    /// A linha de uma busca em todas as raízes pode ser de outra raiz: ela passa a ser a navegada.
+    fn enter_root(&mut self, root: Root, window: &mut Window, cx: &mut Context<Self>) {
+        if self.root.as_ref().is_none_or(|r| r.path != root.path) { self.select_root(root, window, cx); }
+    }
+
+    fn pick_folder(&mut self, root: Root, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.enter_root(root, window, cx);
+        self.folder_active = Some(path.clone());
+        self.pick(path, window, cx);
+    }
+
+    /// Busca, "em todas as pastas" e o aviso dela, iguais no diálogo e no menu de pasta da tela sem sessão; as setas do
+    /// campo andam pela lista.
+    fn folder_search(&self, input: Input, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        vec![
+            div().w_full()
+                .capture_action(cx.listener(|this, _: &MoveUp, _, cx| { this.move_folder(-1, cx); cx.stop_propagation(); }))
+                .capture_action(cx.listener(|this, _: &MoveDown, _, cx| { this.move_folder(1, cx); cx.stop_propagation(); }))
+                .child(input.disabled(self.creating).aria_label(tr("create_search")))
+                .into_any_element(),
+            Checkbox::new(if self.compact { "new-chat-search-all" } else { "create-search-all" }).label(tr("create_search_all"))
+                .checked(self.search_all).disabled(self.creating)
+                .on_click(cx.listener(|this, checked: &bool, _, cx| this.set_search_all(*checked, cx)))
+                .into_any_element(),
+            self.search_feedback(cx),
+        ]
+    }
+
+    // A busca atravessa as raízes e sobrevive à troca de raiz, no diálogo e no menu da tela sem sessão.
+    fn global_search(&self, cx: &App) -> bool { self.search_all && !self.query.read(cx).value().trim().is_empty() }
+
+    fn refilter(&mut self, cx: &mut Context<Self>) {
         let query = self.query.read(cx).value().to_string();
-        let root = self.root.as_ref().map(|r| r.path.as_str()).unwrap_or("");
-        self.folders = match self.scan.ok() {
-            Some(scan) => scan.entries.iter().enumerate().filter(|(_, e)| shown(&query, root, e)).map(|(ix, _)| ix).collect(),
-            None => Vec::new(),
-        };
+        if self.global_search(cx) {
+            let epoch = self.roots.seq;
+            let pending: Vec<_> = self.root_scans.iter_mut().filter(|s| s.scan.value.is_none() && !s.scan.loading)
+                .map(|s| (s.root.path.clone(), s.scan.start())).collect();
+            for (path, seq) in pending {
+                self.request(cx, move |api, send| Box::pin(async move {
+                    let result = scan_of(api.server_read(&["fs", "scan"], &[("root", path.as_str())], 15).await);
+                    send(CreateReply::RootScan(epoch, path, seq, result)).await;
+                }));
+            }
+            let mut seen = HashSet::new();
+            let mut folders = Vec::new();
+            for (root_index, root_scan) in self.root_scans.iter().enumerate() {
+                let Some(scan) = root_scan.scan.ok() else { continue; };
+                for (entry_index, entry) in scan.entries.iter().enumerate() {
+                    if shown(&query, &root_scan.root.path, entry) && seen.insert(entry.path.clone()) {
+                        folders.push(FolderIndex::Root(root_index, entry_index));
+                    }
+                }
+            }
+            self.folders = folders;
+        } else {
+            let root = self.root.as_ref().map(|r| r.path.as_str()).unwrap_or("");
+            self.folders = self.scan.ok().into_iter().flat_map(|scan| scan.entries.iter().enumerate())
+                .filter(|(_, e)| shown(&query, root, e)).map(|(ix, _)| FolderIndex::Current(ix)).collect();
+        }
+    }
+
+    fn set_search_all(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.creating { return; }
+        self.search_all = on;
+        self.search_error = appearance::set_search_all_folders(on).err().map(|error| format!("{} {error}", tr("create_search_preference_failed")));
+        self.refilter(cx);
+        cx.notify();
+    }
+
+    fn search_feedback(&self, cx: &mut Context<Self>) -> AnyElement {
+        let mut feedback = div().flex().flex_col().gap(px(4.)).children(self.search_error.clone().map(|error| alert("create-search-preference-error", error)));
+        if self.global_search(cx) {
+            let errors: Vec<_> = self.root_scans.iter().filter_map(|root_scan| {
+                let error = match root_scan.scan.value.as_ref()? {
+                    Err(error) => error.as_str(),
+                    Ok(scan) => scan.error.as_deref()?,
+                };
+                Some(format!("{}: {error}", root_scan.root.name))
+            }).collect();
+            if self.root_scans.iter().any(|s| s.scan.loading) { feedback = feedback.child(muted(tr("loading"))); }
+            if !errors.is_empty() {
+                feedback = feedback.child(alert("create-search-roots-errors", errors.join("\n")))
+                    .child(Button::new("create-search-retry").ghost().small().label(tr("create_try_again")).disabled(self.creating)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            for s in &mut this.root_scans {
+                                if matches!(s.scan.value, Some(Err(_))) || s.scan.ok().is_some_and(|scan| scan.error.is_some()) { s.scan.reset(); }
+                            }
+                            this.refilter(cx); cx.notify();
+                        })));
+            }
+        }
+        feedback.into_any_element()
     }
 
     fn folder_row(&self, ix: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let root = self.root.as_ref()?;
-        let entry = self.scan.ok()?.entries.get(*self.folders.get(ix)?)?;
+        let (root, entry) = self.folder_at(ix)?;
+        let pick_root = root.clone();
+        let open_root = root.clone();
         let on = self.picked.as_deref() == Some(entry.path.as_str());
+        let active = !on && self.folder_active.as_deref() == Some(entry.path.as_str());
+        let hover_path = entry.path.clone();
         let (pick, open) = (entry.path.clone(), entry.path.clone());
+        let relative_path = rel_path(&root.path, &entry.path);
+        let display_path = if self.global_search(cx) { format!("{} · {relative_path}", root.name) } else { relative_path };
         // No diálogo, linha sem borda com o ícone da pasta à frente e etiquetas apagadas; o menu da tela sem sessão fica como estava.
         let soft = !self.compact;
         let badge = |text: &str| div().px(px(6.)).rounded(px(if soft { 5. } else { 4. })).text_size(px(10.5)).font_family(theme::MONO)
@@ -1521,8 +1698,12 @@ impl NewSession {
         let id = SharedString::from(format!("create-folder-{}", entry.path));
         let row = if soft { soft_choice(id, on, theme::text(), cx).py(px(8.)).rounded(px(10.)) } else { choice(id, on, cx).py(px(6.)).rounded(px(8.)) };
         // A linha da lista virtual não estica sozinha como o filho da coluna esticava.
+        // O ponteiro que passa leva o realce: teclado e mouse nunca acendem duas linhas.
         Some(div().w_full().flex().items_center().gap(px(4.)).pb(px(2.))
-            .child(row.disabled(self.creating).flex_1().min_w_0().h_auto().px(px(10.)).accessibility_label(entry.name.clone()).selected(on)
+            .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
+                if this.folder_active.as_deref() != Some(hover_path.as_str()) { this.folder_active = Some(hover_path.clone()); cx.notify(); }
+            }))
+            .child(row.when(active, |el| el.bg(theme::hover())).disabled(self.creating).flex_1().min_w_0().h_auto().px(px(10.)).accessibility_label(entry.name.clone()).selected(on)
                 .child(div().w_full().min_w_0().flex().items_center().gap(px(12.))
                 .when(soft, |el| el.child(div().size(px(32.)).flex_shrink_0().rounded(px(8.)).bg(if on { theme::accent_dim() } else { theme::hover() })
                     .flex().items_center().justify_center()
@@ -1531,19 +1712,22 @@ impl NewSession {
                     .child(div().w_full().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(entry.name.clone()))
                     .child(div().w_full().flex().items_center().gap(px(6.))
                         .child(div().flex_1().min_w_0().truncate().font_family(theme::MONO).text_size(px(11.)).text_color(theme::muted())
-                            .child(rel_path(&root.path, &entry.path)))
+                            .child(display_path))
                         .when(entry.is_git, |el| el.child(badge("git")))
                         .when(entry.has_claude_md, |el| el.child(badge("CLAUDE.md")))
                         .when_some(entry.mtime, |el, t| el.child(div().flex_shrink_0().text_size(px(11.)).text_color(theme::faint()).child(folder_time(t)))))))
-                .on_click(cx.listener(move |this, _, window, cx| this.pick(pick.clone(), window, cx))))
+                .on_click(cx.listener(move |this, _, window, cx| this.pick_folder(pick_root.clone(), pick.clone(), window, cx))))
             .child(Button::new(SharedString::from(format!("create-open-{}", entry.path))).ghost().small().flex_shrink_0().disabled(self.creating)
                 .icon(IconName::ChevronRight).accessibility_label(tr("create_open").replace("{nome}", &entry.name))
-                .on_click(cx.listener(move |this, _, window, cx| this.drill(open.clone(), window, cx))))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.enter_root(open_root.clone(), window, cx);
+                    this.drill(open.clone(), window, cx);
+                })))
             .into_any_element())
     }
 
     fn render_left(&self, cx: &mut Context<Self>) -> Div {
-        let drilled = self.root.as_ref().filter(|r| r.path != self.dir);
+        let drilled = self.root.as_ref().filter(|r| r.path != self.dir && !self.global_search(cx));
         let path_row = drilled.map(|root| div().flex().flex_col().gap(px(8.))
             .child(div().id("create-crumbs").aria_label(tr("create_path")).flex().flex_wrap().items_center().gap(px(2.))
                 .children(crumbs(root, &self.dir).into_iter().enumerate().map(|(n, (text, path))| div().flex().items_center().gap(px(2.))
@@ -1580,8 +1764,8 @@ impl NewSession {
         column
             .children(self.render_machines(cx))
             .child(self.render_roots(cx))
-            .when(self.root.is_some(), |el| el.child(Input::new(&self.query).rounded(px(10.)).cleanable(true).prefix(chrome::small_icon(IconName::Search, 14., theme::muted()))
-                .aria_label(tr("create_search"))))
+            .children(self.folder_search(Input::new(&self.query).rounded(px(10.)).cleanable(true)
+                .prefix(chrome::small_icon(IconName::Search, 14., theme::muted())), cx))
             .children(path_row)
             // A lista de pastas rola sozinha; carregando, vazia ou com erro, a caixa é que rola.
             .child(div().id("create-folders").flex_1().min_h_0().flex().flex_col()
@@ -1693,6 +1877,8 @@ impl NewSession {
         ];
         let agent = [
             (fresh || self.proxy_accounts().is_some()).then(|| self.render_trio(!fresh)).flatten().map(IntoElement::into_any_element),
+            fresh.then(|| self.render_fast_choice(cx)).flatten().map(IntoElement::into_any_element),
+            self.render_engine_context(cx).map(IntoElement::into_any_element),
             fresh.then(|| self.render_default_check(cx)).flatten().map(IntoElement::into_any_element),
             (fresh && self.provider == "codex").then(|| self.render_context(cx).into_any_element()),
             self.render_more(cx).map(IntoElement::into_any_element),
@@ -2155,9 +2341,10 @@ impl NewSession {
     pub(super) fn render_compact_folders(&self, cx: &mut Context<Self>) -> Div {
         div().w(rems(28.)).max_w_full().flex().flex_col().gap_3()
             .child(self.render_roots(cx))
-            .child(Input::new(&self.query).small().cleanable(true).aria_label(tr("create_search"))
-                .prefix(chrome::small_icon(IconName::Search, 14., theme::faint())))
-            .children(self.root.as_ref().map(|root| div().flex().flex_wrap().gap_1()
+            .children(self.folder_search(Input::new(&self.query).small().cleanable(true)
+                .prefix(chrome::small_icon(IconName::Search, 14., theme::faint())), cx))
+            // Buscando em todas as raízes, o caminho navegado não diz de onde vêm as linhas.
+            .children(self.root.as_ref().filter(|_| !self.global_search(cx)).map(|root| div().flex().flex_wrap().gap_1()
                 .children(crumbs(root, &self.dir).into_iter().map(|(text, path)|
                     Button::new(SharedString::from(format!("new-chat-crumb-{path}"))).ghost().small().label(text)
                         .on_click(cx.listener(move |this, _, window, cx| this.drill(path.clone(), window, cx)))))))
@@ -2375,7 +2562,10 @@ impl Hangar {
                 cx.defer_in(window, |view, window, cx| view.load(window, cx));
                 view
             }));
-            cx.observe(self.new_chat.as_ref().unwrap(), |this, _, cx| this.redraw(panes::Area::Bottom, cx)).detach();
+            cx.observe(self.new_chat.as_ref().unwrap(), |this, _, cx| {
+                this.check_dictation_owner(cx);
+                this.redraw(panes::Area::Bottom, cx);
+            }).detach();
         }
         self.new_chat.clone().unwrap()
     }
@@ -2393,6 +2583,7 @@ impl Hangar {
         let link = Link { api, runtime: self.runtime.clone(), tx: self.tx.clone(), connection: self.connection,
             servers: self.server_choices(), servers_rev: self.servers_rev };
         let dialog = cx.new(|cx| NewSession::new(link, baton, window, cx));
+        let query = dialog.read(cx).query.clone();
         dialog.update(cx, |d, cx| d.load(window, cx));
         self.new_session = Some(dialog.clone());
         let weak = cx.entity().downgrade();
@@ -2407,6 +2598,7 @@ impl Hangar {
                     if this.new_session.as_ref().is_some_and(|d| d.entity_id() == me) { this.new_session = None; }
                 }); })
         });
+        query.update(cx, |input, cx| input.focus(window, cx));
     }
 
     pub(super) fn receive_create(&mut self, dialog: EntityId, reply: CreateReply, window: &mut Window, cx: &mut Context<Self>) {
@@ -2535,6 +2727,26 @@ mod tests {
         assert_eq!(super::choose_codex_account(&[], Some("account-b")), None);
     }
 
+    #[test]
+    fn root_shortcut_wraps_in_both_directions() {
+        assert_eq!(super::next_root(0, 0, false), None);
+        assert_eq!(super::next_root(0, 1, true), Some(0));
+        assert_eq!(super::next_root(0, 3, false), Some(1));
+        assert_eq!(super::next_root(2, 3, false), Some(0));
+        assert_eq!(super::next_root(0, 3, true), Some(2));
+        assert_eq!(super::next_root(2, 3, true), Some(1));
+    }
+
+    #[test]
+    fn new_codex_session_prefers_connected_account_over_disconnected_default() {
+        let accounts: Vec<super::CodexAccount> = serde_json::from_value(json!([
+            {"id":"old", "name":"Old", "is_default":true, "auth":{"status":"disconnected"}},
+            {"id":"ready", "name":"Ready", "auth":{"status":"connected"}}
+        ])).unwrap();
+        assert_eq!(super::choose_codex_account(&accounts, None), Some(1));
+        assert_eq!(super::choose_codex_account(&accounts, Some("old")), Some(0));
+    }
+
     fn transfer_request() -> super::TransferRequest {
         super::TransferRequest { target: super::Target::new("server-a", "same-name"), source_life: "k:original".into(),
             source_jsonl: "/original.jsonl".into(), credential_id: "codex:/registered".into(), model: None, effort: None, seq: 1 }
@@ -2566,7 +2778,7 @@ mod tests {
     #[test]
     fn transfer_errors_keep_recovery_code_and_backend_reason() {
         for code in ["session_transfer_restore_failed", "session_transfer_source_changed"] {
-            let error = Failure { status: Some(409), detail: format!("{code}: backend reason"), retry_after: None, uncertain: false };
+            let error = Failure { status: Some(409), detail: format!("{code}: backend reason"), retry_after: None, uncertain: false, code: None };
             let text = super::transfer_failure(&error);
             assert!(text.starts_with(&tr(code)));
             assert!(text.ends_with("backend reason"));
@@ -2658,7 +2870,7 @@ mod tests {
 
     #[test]
     fn checkout_hides_only_unsupported_or_non_git_and_rejects_old_folders() {
-        let failure = |status, detail: &str| Err(Failure { status: Some(status), detail: detail.into(), retry_after: None, uncertain: false });
+        let failure = |status, detail: &str| Err(Failure { status: Some(status), detail: detail.into(), retry_after: None, uncertain: false, code: None });
         assert!(super::checkout_of(failure(404, "Not Found")).unwrap().is_none());
         assert!(super::checkout_of(failure(409, "fatal: not a git repository (or any of the parent directories): .git")).unwrap().is_none());
         assert_eq!(super::checkout_of(failure(409, "fatal: bad config")).unwrap_err(), "fatal: bad config");
@@ -2717,7 +2929,7 @@ mod tests {
 
     #[test]
     fn scan_refusals_become_the_reason_and_not_a_list() {
-        let refused = |status| Err(Failure { status: Some(status), detail: "x".into(), retry_after: None, uncertain: false });
+        let refused = |status| Err(Failure { status: Some(status), detail: "x".into(), retry_after: None, uncertain: false, code: None });
         for (status, key) in [(400, "create_scan_invalid"), (403, "create_scan_root"), (404, "create_scan_missing"), (500, "create_scan_failed")] {
             let scan = scan_of(refused(status)).ok().unwrap();
             assert!(scan.entries.is_empty());

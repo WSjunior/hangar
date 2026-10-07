@@ -67,6 +67,109 @@ def test_locate_claude_worktree_gone(tmp_path):
     assert loc.worktree_gone and loc.worktree_path == str(tmp_path / "repo-sumiu")
 
 
+def _claude_line(cwd, *tools):
+    """Linha de assistente do Claude com as chamadas `(nome, input)` dadas."""
+    content = [{"type": "tool_use", "name": n, "input": i} for n, i in tools]
+    return json.dumps({"type": "assistant", "cwd": cwd, "message": {"content": content}})
+
+
+def test_locate_claude_sibling_worktree_by_cd_without_cwd_change(tmp_path):
+    # O Claude Code devolve o shell à pasta de abertura: o `cwd` do transcript nunca sai da principal.
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    f = tmp_path / "s.jsonl"
+    f.write_text(_claude_line(main, ("Bash", {"command": f"cd {wt} && git status"})) + "\n")
+    loc = worktrees.locate("claude", main, str(f))
+    assert (loc.branch, loc.worktree_path, loc.git_cwd) == ("x", wt, wt)
+
+
+def test_locate_claude_edit_in_worktree_and_main_note_keeps_worktree(tmp_path):
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    (tmp_path / "repo-x" / "a.py").write_text("")
+    (tmp_path / "repo" / "nota.md").write_text("")
+    f = tmp_path / "s.jsonl"
+    f.write_text("\n".join([
+        _claude_line(main, ("Edit", {"file_path": wt + "/a.py"})),
+        _claude_line(main, ("Write", {"file_path": main + "/nota.md"})),
+    ]) + "\n")
+    loc = worktrees.locate("claude", main, str(f))
+    assert loc.git_cwd == wt and loc.branch == "x"
+
+
+def test_locate_claude_cd_to_main_to_look_keeps_the_worktree(tmp_path):
+    # Consultar a principal é rotina: se o `cd` para ela contasse, o rótulo alternaria a cada comando.
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    f = tmp_path / "s.jsonl"
+    f.write_text("\n".join([
+        _claude_line(main, ("Bash", {"command": f"git -C {wt} log -1"})),
+        _claude_line(main, ("Bash", {"command": f"cd {wt}; ls; cd {main} && git status"})),
+    ]) + "\n")
+    loc = worktrees.locate("claude", main, str(f))
+    assert (loc.branch, loc.worktree_path, loc.git_cwd) == ("x", wt, wt)
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+def test_locate_session_born_in_worktree_stays_there(tmp_path, provider):
+    # A criação com "Nova worktree" abre a sessão já dentro dela: os sinais do transcript não a tiram.
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    wy = _wt(main, tmp_path / "repo-y", "y")
+    f = tmp_path / "s.jsonl"
+    if provider == "claude":
+        f.write_text(_claude_line(wt, ("Bash", {"command": f"cd {wy} && ls"})) + "\n")
+    else:
+        call = {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command",
+                "arguments": json.dumps({"cmd": f"cd {main} && ls"})}}
+        f.write_text(json.dumps(call) + "\n")
+    loc = worktrees.locate(provider, wt, str(f))
+    assert (loc.branch, loc.worktree_path, loc.git_cwd) == ("x", wt, None)
+
+
+def test_locate_claude_cd_into_another_worktree_moves(tmp_path):
+    main = _repo(tmp_path / "repo")
+    _wt(main, tmp_path / "repo-x", "x")
+    wy = _wt(main, tmp_path / "repo-y", "y")
+    f = tmp_path / "s.jsonl"
+    f.write_text("\n".join([
+        _claude_line(main, ("Bash", {"command": f"cd {tmp_path / 'repo-x'} && ls"})),
+        _claude_line(main, ("Bash", {"command": f"git -C {wy} status"})),
+    ]) + "\n")
+    assert worktrees.locate("claude", main, str(f)).git_cwd == wy
+
+
+def test_locate_claude_calls_before_the_last_cwd_change_do_not_count(tmp_path):
+    # ExitWorktree: o `cwd` voltou à principal; o `cd` de antes era da worktree.
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    f = tmp_path / "s.jsonl"
+    f.write_text("\n".join([
+        _claude_line(wt, ("Bash", {"command": f"cd {wt} && ls"})),
+        json.dumps({"type": "user", "cwd": main}),
+    ]) + "\n")
+    loc = worktrees.locate("claude", main, str(f))
+    assert (loc.branch, loc.git_cwd) == ("main", None)
+
+
+def test_locate_claude_relative_missing_cd_is_not_a_removed_worktree(tmp_path):
+    main = _repo(tmp_path / "repo")
+    f = tmp_path / "s.jsonl"
+    f.write_text(_claude_line(main, ("Bash", {"command": "W=/x; cd $W && cd - && cd build"})) + "\n")
+    loc = worktrees.locate("claude", main, str(f))
+    assert (loc.branch, loc.worktree_gone, loc.git_cwd) == ("main", False, None)
+
+
+def test_locate_claude_removed_sibling_worktree_is_gone(tmp_path):
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    assert git_ops._run(main, "worktree", "remove", wt).returncode == 0
+    f = tmp_path / "s.jsonl"
+    f.write_text(_claude_line(main, ("Bash", {"command": f"cd {wt} && ls"})) + "\n")
+    loc = worktrees.locate("claude", main, str(f))
+    assert loc.worktree_gone and loc.worktree_path == wt and loc.git_cwd is None
+
+
 def test_locate_codex_uses_last_workdir_of_same_repo(tmp_path):
     main = _repo(tmp_path / "repo")
     wt = _wt(main, tmp_path / "repo-x", "x")
@@ -220,7 +323,7 @@ def test_status_merged_by_ancestor(tmp_path):
     assert worktrees.status(wt)["merged"] is True
 
 
-def test_merged_when_upstream_gone(tmp_path):
+def test_deleted_upstream_does_not_prove_merge(tmp_path):
     remote = _repo(tmp_path / "remote")
     git_ops._run(remote, "branch", "x")
     main = str(tmp_path / "clone")
@@ -228,12 +331,12 @@ def test_merged_when_upstream_gone(tmp_path):
     git_ops._run(main, "config", "user.email", "t@t")
     git_ops._run(main, "config", "user.name", "t")
     git_ops._run(main, "switch", "-q", "x")
-    _commit(tmp_path / "clone", "a.txt")            # squash do servidor: não é ancestral
+    _commit(tmp_path / "clone", "a.txt")            # A alteração nunca entrou na base.
     git_ops._run(main, "switch", "-q", "main")
     assert worktrees.is_merged(main, "x", "main") is False
     git_ops._run(remote, "branch", "-D", "x")
     git_ops._run(main, "fetch", "-q", "--prune")
-    assert worktrees.is_merged(main, "x", "main") is True
+    assert worktrees.is_merged(main, "x", "main") is False
 
 
 def test_status_missing_folder(tmp_path):
@@ -367,19 +470,17 @@ def test_status_survives_git_timeout(tmp_path, monkeypatch):
     assert st["dirty"] == 0 and st["degraded"] is True and st["merged"] is False
 
 
-def test_upstream_timeout_is_not_merged(tmp_path, monkeypatch):
+def test_merge_check_timeout_is_not_merged(tmp_path, monkeypatch):
     main = _repo(tmp_path / "repo")
     wt = _wt(main, tmp_path / "repo-x", "x")
     _commit(tmp_path / "repo-x", "a.txt")
-    # Branch que já teve upstream e ele não existe mais: a regra do squash lê como mesclada.
-    git_ops._run(wt, "config", "branch.x.remote", "origin")
-    git_ops._run(wt, "config", "branch.x.merge", "refs/heads/x")
+    git_ops._run(main, "merge", "--no-ff", "-m", "Integração", "x")
     st = worktrees.status(wt)
     assert st["merged"] is True and st["degraded"] is False
     real_run = worktrees._run
 
     def slow(cwd, *args, **kw):
-        if args[:2] == ("rev-parse", "--abbrev-ref"):
+        if args[:2] == ("merge-base", "--is-ancestor"):
             raise git_ops.GitError(504, "git timeout")
         return real_run(cwd, *args, **kw)
     monkeypatch.setattr(worktrees, "_run", slow)

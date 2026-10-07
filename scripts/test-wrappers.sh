@@ -185,6 +185,15 @@ HOME_BARE="$TMP/home-bare"
 mkdir -p "$HOME_PLUGIN/.hangar" "$HOME_PLUGIN_GONE/.hangar" "$HOME_BARE"
 printf '%s\n' "$PLUGIN_DIR" > "$HOME_PLUGIN/.hangar/plugin-dir"
 printf '%s\n' "$TMP/nao-existe" > "$HOME_PLUGIN_GONE/.hangar/plugin-dir"
+# Lista do backend com mais de um mod: o do Hangar primeiro, uma pasta que sumiu no meio (fica de
+# fora, sem levar os outros) e a última linha sem quebra no fim. O arquivo de uma linha acima é o
+# formato antigo e continua valendo.
+PLUGIN_DIR2="$TMP/plug in/outro mod"
+mkdir -p "$PLUGIN_DIR2"
+printf -v PLUGIN_DIR2_Q '%q' "$PLUGIN_DIR2"
+HOME_PLUGINS="$TMP/home-plugins"
+mkdir -p "$HOME_PLUGINS/.hangar"
+printf '%s\n%s\n%s' "$PLUGIN_DIR" "$TMP/nao-existe" "$PLUGIN_DIR2" > "$HOME_PLUGINS/.hangar/plugin-dir"
 
 # $1=descrição  $2=arquivo de saída  $3=regex (ERE) que a linha ARGV inteira tem que casar
 check_argv() {
@@ -210,8 +219,9 @@ plugin_dir_cases() {
     local label="$1" out
     shift
     # O regex escapa o caminho citado: as contrabarras do %q são literais na linha ARGV.
-    local q_re
+    local q_re q2_re
     q_re=$(printf '%s' "$PLUGIN_DIR_Q" | sed 's#[][\.*^$+?(){}|]#\\&#g')
+    q2_re=$(printf '%s' "$PLUGIN_DIR2_Q" | sed 's#[][\.*^$+?(){}|]#\\&#g')
 
     out=$(CASE_HOME="$HOME_PLUGIN" "$@" "")
     check_argv "$label sessão nova leva --plugin-dir" "$out" \
@@ -222,6 +232,14 @@ plugin_dir_cases() {
 
     out=$(CASE_HOME="$HOME_PLUGIN" "$@" probe -c)
     check_argv "$label motor + -c leva --plugin-dir" "$out" "^ARGV: --plugin-dir $q_re -c\$"
+
+    out=$(CASE_HOME="$HOME_PLUGINS" "$@" "")
+    check_argv "$label lista de mods, o do Hangar primeiro" "$out" \
+        "^ARGV: --session-id [0-9a-fA-F-]+ --plugin-dir $q_re --plugin-dir $q2_re\$"
+
+    out=$(CASE_HOME="$HOME_PLUGINS" "$@" probe --resume abc)
+    check_argv "$label lista de mods + motor + --resume" "$out" \
+        "^ARGV: --plugin-dir $q_re --plugin-dir $q2_re --resume abc\$"
 
     out=$(CASE_HOME="$HOME_PLUGIN" "$@" "" --print)
     check_argv_no_plugin "$label --print fica sem --plugin-dir" "$out"

@@ -211,7 +211,7 @@ impl Side {
     }
 
     // Largura efetiva: nunca tira da conversa menos que CHAT_MIN; sem espaço, o painel não aparece.
-    // Com as abas no topo não há barra lateral ocupando a esquerda.
+    // Com abas não há barra lateral ocupando a esquerda.
     pub(super) fn fitted(&self, viewport: f32, floating: bool, sidebar_width: f32, browser: bool) -> Option<f32> {
         let room = Self::room(viewport, floating, sidebar_width);
         (room >= MIN_WIDTH).then(|| if browser {
@@ -300,7 +300,8 @@ pub(super) fn stats_cells(stats: &Stats) -> Vec<(String, String)> {
     let mut cells = vec![
         (tr("ctx_card_turns"), stats.turns.to_string()),
         (tr("ctx_card_calls"), stats.steps.to_string()),
-        (tr("ctx_card_in"), format!("{} tok", tokens(stats.in_tok as f64))),
+        // Entrada só com o que não veio do cache: o lido do cache aparece na linha Cache.
+        (tr("ctx_card_in"), format!("{} tok", tokens(stats.in_tok.saturating_sub(stats.cache_read_tok) as f64))),
         (tr("ctx_card_out"), format!("{} tok", tokens(stats.out_tok as f64))),
     ];
     if let Some(ms) = stats.llm_ms.filter(|v| *v > 0.) {
@@ -313,7 +314,10 @@ pub(super) fn stats_cells(stats: &Stats) -> Vec<(String, String)> {
     if let Some(v) = stats.tok_s_now.filter(|v| *v > 0.) { cells.push((tr("ctx_card_rate_now"), rate(v))); }
     if let Some(v) = stats.tok_s_recent.filter(|v| *v > 0.) { cells.push((tr("ctx_card_rate_recent"), rate(v))); }
     if let Some(ms) = stats.ttft_ms.filter(|v| *v > 0.) { cells.push((tr("ctx_card_ttft"), format!("~{}", duration(ms)))); }
-    if let Some(cache) = stats.cache_pct { cells.push((tr("ctx_card_cache"), format!("{}%", cache.round()))); }
+    if let Some(cache) = stats.cache_pct {
+        let value = if stats.cache_read_tok > 0 { format!("{} tok · {}%", tokens(stats.cache_read_tok as f64), cache.round()) } else { format!("{}%", cache.round()) };
+        cells.push((tr("ctx_card_cache"), value));
+    }
     cells
 }
 
@@ -711,7 +715,8 @@ impl Hangar {
     }
 
     fn render_limits(&self, status: Option<&StatusFields>) -> Option<AnyElement> {
-        let limited = self.chat.state.limited.or(self.selected.as_ref().and_then(|s| s.limited)) == Some(true);
+        // Antes do primeiro `state` da conversa vale o que a lista de sessões diz.
+        let limited = if self.chat.state.state.is_empty() { self.selected.as_ref().and_then(|s| s.limited) == Some(true) } else { self.chat.state.limited };
         let reset = self.chat.state.limit_reset.clone().or_else(|| self.selected.as_ref().and_then(|s| s.limit_reset.clone()));
         let windows: Vec<(String, f64, Option<String>)> = status.map(|s| [
             (tr("limit_5h"), s.five_hour_pct, s.five_hour_reset.clone()),

@@ -15,6 +15,20 @@ export function textoProblema(codigo: string | null | undefined): string | null 
     case 'headless_processo_caiu': return m.problema_headless_processo_caiu();
     case 'headless_turno_erro': return m.problema_headless_turno_erro();
     case 'headless_sem_login': return m.problema_headless_sem_login();
+    case 'runtime_falhou': return m.problema_runtime_falhou();
+    case 'terminal_observacao_falhou': return m.problema_terminal_observacao_falhou();
+    case 'state_facts_unavailable': return m.problema_state_facts_unavailable();
+    case 'permission_observe_failed': return m.problema_permission_observe_failed();
+    case 'terminal_input_composer_busy': return m.problema_terminal_input_composer_busy();
+    case 'terminal_input_composer_unreadable': return m.problema_terminal_input_composer_unreadable();
+    case 'terminal_input_capture_failed': return m.problema_terminal_input_capture_failed();
+    case 'terminal_input_stalled': return m.problema_terminal_input_stalled();
+    case 'terminal_clear_not_applied': return m.problema_terminal_clear_not_applied();
+    case 'list_capture_failed': return m.problema_list_capture_failed();
+    case 'list_runtime_unavailable': return m.problema_list_runtime_unavailable();
+    case 'list_runtime_absent': return m.problema_list_runtime_absent();
+    case 'list_facts_unavailable': return m.problema_list_facts_unavailable();
+    case 'list_orq_unavailable': return m.problema_list_orq_unavailable();
     default: return null;
   }
 }

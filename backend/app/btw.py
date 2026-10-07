@@ -375,3 +375,6 @@ def historico(name: str) -> list[dict]:
         except ValueError:
             continue
     return itens[-MAX_HISTORICO:]
+
+from app.runtime_terminal import wrap_driver as _wrap_terminal_driver
+perguntar = _wrap_terminal_driver(perguntar, admin=True)

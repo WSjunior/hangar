@@ -17,8 +17,8 @@ from app import plugin_bridge
 from app import tmux
 from app.models import scrub_surrogates
 from app.pqueue import PromptQueue, _transcript_start_ts
-from app.state import (_live_spinner, classify, cursor_sem_numero, is_overlay, menu_codex, omp_box,
-                       aprovacao_kimi_no_pane)
+from app.state import (_live_spinner, classify, cursor_sem_numero, foco_no_rodape, is_overlay, menu_codex,
+                       omp_box, aprovacao_kimi_no_pane)
 from app.tmux import send_keys
 
 _log = logging.getLogger("hangar.terminal_input")
@@ -232,6 +232,9 @@ _OCUPADO_DEFER_COUNT: dict[str, int] = {}
 # vira todo envio em adiamento silencioso pra sempre, e o usuario so descobre olhando o terminal.
 _INDISPONIVEL_WARNED: set[str] = set()
 _INDISPONIVEL_DEFER_COUNT: dict[str, int] = {}
+# Idem pro foco no rodapé do Claude Code que o Esc não devolveu ao composer.
+_FOCO_WARNED: set[str] = set()
+_FOCO_DEFER_COUNT: dict[str, int] = {}
 # Quantas vezes SEGUIDAS uma sessao pode ficar deferred (por composer ocupado OU por indisponivel)
 # antes do log virar ERRO, em vez do WARNING unico de praxe (_OCUPADO_WARNED/_INDISPONIVEL_WARNED),
 # que cala depois da primeira vez. Medido 02/08/2026: com o aviso de subagente do Pi contando como
@@ -1476,6 +1479,20 @@ def _texto_composer_claude(name: str) -> str | None:
     return _sem_espaco(miolo.replace(_GLIFO_COMPOSER_CLAUDE, ""))
 
 
+def _devolver_foco_ao_composer(name: str) -> bool:
+    """Com o foco no rodapé do Claude Code (painel de agentes, pílula de tarefas) o texto digitado
+    some e o `x` para um subagente. Um Esc lá só devolve o foco ao composer, sem interromper o turno.
+    False = o foco continua fora: quem chama adia sem digitar."""
+    if not foco_no_rodape(_capture(name)):
+        return True
+    send_keys(name, "Escape")
+    for _ in range(6):
+        time.sleep(0.1)
+        if not foco_no_rodape(_capture(name)):
+            return True
+    return False
+
+
 def _esvaziar_composer_claude(name: str) -> bool:
     """Apaga o que estiver parado no composer do Claude antes de digitar. True = confirmado vazio.
 
@@ -1555,6 +1572,7 @@ def _partial(name: str, motivo: str, texto: str, pastes_antes: set[str] | None =
     Uma funcao so para os seis sites porque o conserto e o mesmo em todos — limpar em cada caller
     daria seis chances de esquecer um, e foi assim que o residuo sobreviveu ate agora.
     """
+    _ULTIMA_LIMPEZA.stage = etapa
     pane = _capture(name)
     _log.error("envio PARCIAL name=%s: %s — %s", name, motivo,
                _diag_composer(pane, texto, name, pastes_antes))
@@ -1709,6 +1727,7 @@ class TerminalInput:
                     # review 02/08/2026.
                     _limpa_deferred(name, _OCUPADO_WARNED, _OCUPADO_DEFER_COUNT)
                     _limpa_deferred(name, _INDISPONIVEL_WARNED, _INDISPONIVEL_DEFER_COUNT)
+                    _limpa_deferred(name, _FOCO_WARNED, _FOCO_DEFER_COUNT)
                     return "deferred"
                 # Sessao viva mas indisponivel AGORA (overlay/menu aberto, ou awaiting_input — ver
                 # `deliverable`). Ate a review 02/08/2026 este era o UNICO deferred do arquivo sem
@@ -1737,6 +1756,11 @@ class TerminalInput:
             # manda tudo grudado e o reconcile reentrega. ANTES da foto dos placeholders abaixo, pra
             # um `[Pasted text #N]` velho sair junto e nao confundir a prova de entrega.
             if provider == "claude":
+                if not _devolver_foco_ao_composer(name):
+                    _avisa_deferred(name, "foco no rodapé do Claude Code (painel de agentes)",
+                                    _FOCO_WARNED, _FOCO_DEFER_COUNT, _diag_composer(_capture(name), text, name, None))
+                    return "deferred"
+                _limpa_deferred(name, _FOCO_WARNED, _FOCO_DEFER_COUNT)
                 _esvaziar_composer_claude(name)
             if "\n" in text or _exige_clipboard(text, provider):
                 # Foto dos placeholders de paste ANTES do nosso: so um numero NOVO conta como
@@ -1822,12 +1846,14 @@ class TerminalInput:
                 # tempo do menu renderizar, o Enter corre com o redraw e e ENGOLIDO pelo menu (o comando
                 # fica digitado mas NAO executa -> "o slash nao chega no terminal"). Espera o menu
                 # acomodar, Enter pra executar; um 2o Enter cobre o caso do 1o so ter selecionado a
-                # sugestao (o comando ja rodou e o prompt esta vazio -> o 2o Enter e no-op inofensivo).
+                # sugestao. No Claude, só com um comando ainda no composer (ou a tela ilegível): o que já
+                # rodou pode ter trocado a conversa (/clear), e o Enter seguinte cairia na nova.
                 send_keys(name, text, literal=True)
                 time.sleep(_SLASH_SETTLE)
                 send_keys(name, "Enter")
                 time.sleep(_SLASH_SETTLE)
-                send_keys(name, "Enter")
+                if provider != "claude" or (parado := _texto_composer_claude(name)) is None or parado.startswith("/"):
+                    send_keys(name, "Enter")
             else:
                 # Foto dos placeholders de paste ANTES do nosso, igual ao ramo multi-linha (ver
                 # comentario la em cima e _composer_residuo). SEM ela a evidencia por placeholder fica
@@ -2034,6 +2060,10 @@ class TerminalInput:
         # o proximo envio digitava EM CIMA do residuo -> concatenava. clear=True manda um 2o Esc: com o
         # input nao-vazio (garantido pelo caller — so passa clear quando havia msg pendente) o Esc-Esc
         # limpa o draft. NUNCA mandar o 2o Esc as cegas: input vazio + Esc-Esc abre o menu de rewind.
+        # Com o foco no rodapé, o primeiro Esc só o devolve ao composer: o seguinte interrompe.
+        if foco_no_rodape(_capture(name)):
+            send_keys(name, "Escape")
+            time.sleep(_SETTLE)
         send_keys(name, "Escape")
         if clear:
             time.sleep(_SETTLE)  # deixa o interrupt assentar e o texto voltar pro input antes de limpar
@@ -2592,3 +2622,14 @@ class TerminalInput:
 
     def _abort(self, name: str) -> None:
         send_keys(name, "Escape")
+
+# A posse cobre o driver inteiro; a guarda do tmux confere cada efeito da reserva.
+from app.runtime_terminal import wrap_driver as _wrap_terminal_driver
+drain = _wrap_terminal_driver(drain, control='drain')
+answer_questions = _wrap_terminal_driver(answer_questions, control='answer_questions')
+steer_now = _wrap_terminal_driver(steer_now, control='steer')
+for _method, _control in {'send_prompt':'submit', 'send_key':'navigation_key', 'send_term_key':'interactive_key',
+        'send_text':'terminal_input', 'select':'select', 'submeter_multipla':'submit_selected', 'interrupt':'interrupt'}.items():
+    setattr(TerminalInput, _method, _wrap_terminal_driver(getattr(TerminalInput, _method), control=_control))
+for _method in ('set_model_effort', 'list_model_options', 'set_engine_model'):
+    setattr(TerminalInput, _method, _wrap_terminal_driver(getattr(TerminalInput, _method), admin=True))

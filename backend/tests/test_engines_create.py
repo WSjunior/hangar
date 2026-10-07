@@ -92,13 +92,63 @@ def test_fixed_account_is_in_terminal_command_and_headless_sidecar(tmp_path, mon
     assert "--account default --account-home /tmp/codex --account-base-url http://127.0.0.1:8317 --model fixed/gpt-5.5" in registry._comando_terminal(meta, resume=True)
 
 
+@pytest.mark.parametrize("tier", ["default", "priority"])
+@pytest.mark.parametrize("headless", [False, True])
+def test_create_claude_service_tier_transport(tmp_path, monkeypatch, tier, headless):
+    from app import cliproxy
+    from app.adapters.claude_headless import sessions
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path / "hl")
+    _fixed_proxy(monkeypatch)
+    monkeypatch.setattr(cliproxy, "supports_fast", lambda engine, model=None: engine == "proxy")
+    seen = {}
+    registry = _reg(tmp_path, monkeypatch, seen)
+    info = registry.create("fast", str(tmp_path), engine="proxy", model="gpt-5.5",
+                           service_tier=tier, headless=headless)
+    if headless:
+        meta = sessions.load(info.name)
+        assert meta["service_tier"] == tier
+        assert f"--service-tier {tier} -- claude" in registry._comando_terminal(meta, resume=True)
+    else:
+        assert f"--service-tier {tier} -- claude" in seen["command"]
+
+
+@pytest.mark.parametrize("tier", ["default", "priority"])
+def test_create_incompatible_service_tier_has_no_effects(tmp_path, monkeypatch, tier):
+    from app import cliproxy
+    monkeypatch.setattr(cliproxy, "supports_fast", lambda *a: False)
+    monkeypatch.setattr(reg, "_pretrust_cwd", lambda *a: pytest.fail("não pode preparar conta"))
+    monkeypatch.setattr(reg.tmux, "new_session", lambda *a, **k: pytest.fail("não pode abrir pane"))
+    with pytest.raises(ValueError, match="service_tier"):
+        reg.SessionRegistry(tmp_path).create("fast", str(tmp_path), service_tier=tier)
+
+
+@pytest.mark.parametrize("tier", ["default", "priority"])
+def test_rebuild_incompatible_service_tier(tmp_path, monkeypatch, tier):
+    from app import cliproxy
+    _motor()
+    monkeypatch.setattr(cliproxy, "supports_fast", lambda *a: False)
+    meta = {"session_id": "11111111-1111-1111-1111-111111111111", "engine": "kimi", "model": "k3", "service_tier": tier}
+    if tier == "priority":
+        with pytest.raises(ValueError, match="service_tier"):
+            reg.SessionRegistry._comando_terminal(meta, resume=True)
+    else:
+        assert "--service-tier" not in reg.SessionRegistry._comando_terminal(meta, resume=True)
+
+
 def test_terminal_proof_requires_ready_claude_identity(tmp_path, monkeypatch):
     from app import terminal_input
     sid = "11111111-1111-1111-1111-111111111111"
     registry = reg.SessionRegistry(tmp_path)
     monkeypatch.setattr(registry, "_pane_of", lambda name: {"pid": 42})
-    monkeypatch.setattr(reg, "_pid_do_agente", lambda pid: 43)
-    monkeypatch.setattr(reg, "_cmdline", lambda pid: f"claude --resume {sid}")
+    launched = iter([("claude", None), ("claude", 43)])
+    monkeypatch.setattr(reg, "agente_do_pane", lambda pid: next(launched, ("claude", 43)))
+    monkeypatch.setattr(reg, "_pid_do_agente", lambda pid: 42)
+    monkeypatch.setattr(reg.tmux, "has_session", lambda name: True)
+    monkeypatch.setattr(reg.time, "sleep", lambda seconds: None)
+    def cmdline(pid):
+        assert pid == 43
+        return f"claude --resume {sid}"
+    monkeypatch.setattr(reg, "_cmdline", cmdline)
     monkeypatch.setattr(reg, "_config_dir_of", lambda pid: tmp_path)
     monkeypatch.setattr(reg, "_engine_of", lambda pid: "proxy")
     monkeypatch.setattr(procinfo, "pid_vivo", lambda pid: True)
@@ -114,6 +164,17 @@ def test_terminal_proof_requires_ready_claude_identity(tmp_path, monkeypatch):
     monkeypatch.setattr(reg, "_engine_of", lambda pid: None)
     with pytest.raises(ValueError, match="identidade"):
         registry.wait_for_claude("fixed", meta)
+    from app import cliproxy
+    monkeypatch.setattr(cliproxy, "supports_fast", lambda *a: True)
+    monkeypatch.setattr(reg, "_engine_of", lambda pid: "proxy")
+    monkeypatch.setattr(terminal_input, "_wait_input_ready", lambda *a, **k: True)
+    meta["service_tier"] = "priority"
+    with pytest.raises(ValueError, match="identidade"):
+        registry.wait_for_claude("fixed", meta)
+    monkeypatch.setattr(procinfo, "_env_var_of", lambda pid, name: {
+        "CP_ENGINE_ACCOUNT": "default", "CP_ENGINE_CREDENTIAL_ID": "codex:/tmp/codex",
+        "CP_ENGINE_SERVICE_TIER": "priority"}.get(name))
+    registry.wait_for_claude("fixed", meta)
 
 
 def test_automatic_headless_resume_rejects_subagent_missing_from_catalog(tmp_path, monkeypatch):
@@ -228,12 +289,101 @@ def _prep_resume(tmp_path, monkeypatch, visto, motor):
     monkeypatch.setattr(reg, "sanitize_cwd", lambda cwd: "-tmp")
     monkeypatch.setattr(reg.tmux, "kill_session", lambda n: None)
     monkeypatch.setattr(reg.tmux, "new_session", _fake_new)
+    # O cache é da classe: sem zerar, o "s" de um teste anterior sobrevive até aqui.
+    monkeypatch.setattr(reg.SessionRegistry, "_jsonl_cache", {})
     r = reg.SessionRegistry(projects_dir=tmp_path / "projects")
     monkeypatch.setattr(r, "_pane_of", lambda name: {"cwd": "/tmp", "pid": 4242})
     monkeypatch.setattr(r, "_forget", lambda name: None)
     # Sem isto a busca do `claude` dentro do pane leria o /proc real, onde o pid 4242 pode existir.
     monkeypatch.setattr(reg, "agente_do_pane", lambda pid, children=None: ("claude", None))
     return r, sid
+
+
+@pytest.mark.parametrize("tier", ["default", "priority"])
+@pytest.mark.parametrize("ready", [False, True])
+def test_resume_preserves_service_tier_before_kill(tmp_path, monkeypatch, tier, ready):
+    from app import cliproxy
+    _fixed_proxy(monkeypatch)
+    monkeypatch.setattr(cliproxy, "supports_fast", lambda *a: True)
+    monkeypatch.setenv("CLAUDE_CODE_EXTRA_BODY", "{}")
+    seen = {}
+    registry, sid = _prep_resume(tmp_path, monkeypatch, seen, "proxy")
+    monkeypatch.setattr(registry, "_pane_of", lambda name: {"cwd": str(tmp_path), "pid": 4242})
+    monkeypatch.setattr(reg, "_config_dir_of", lambda pid: tmp_path)
+    monkeypatch.setattr(reg, "agente_do_pane", lambda pid, children=None: ("claude", 4243))
+    monkeypatch.setattr(procinfo, "_model_of", lambda pid: ("gpt-5.5", "high"))
+    stopped = []
+    def read(pid, name):
+        assert not stopped
+        return tier if name == "CP_ENGINE_SERVICE_TIER" else None
+    def confirm(name, meta):
+        assert stopped == [name]
+        assert "command" in seen
+        assert meta == {
+            "session_id": sid, "config_dir": str(tmp_path), "engine": "proxy",
+            "model": "gpt-5.5", "service_tier": tier, "engine_account": None,
+            "engine_credential_id": None, "engine_account_base_url": None,
+        }
+        if not ready:
+            raise ValueError("o Claude saiu durante a reabertura")
+    monkeypatch.setattr(procinfo, "_env_var_of", read)
+    monkeypatch.setattr(reg.tmux, "kill_session", lambda name: stopped.append(name))
+    monkeypatch.setattr(registry, "wait_for_claude", confirm)
+    if ready:
+        registry.resume("s", sid)
+        assert registry._jsonl_cache["s"].endswith(f"{sid}.jsonl")
+    else:
+        with pytest.raises(ValueError, match="saiu durante a reabertura"):
+            registry.resume("s", sid)
+        assert "s" not in registry._jsonl_cache
+    assert f"--service-tier {tier} -- claude" in seen["command"]
+    assert stopped == ["s"]
+
+
+@pytest.mark.parametrize("source", ["shell", "user", "project", "local"])
+def test_resume_invalid_fast_body_preserves_terminal(tmp_path, monkeypatch, source):
+    from app import cliproxy
+    _fixed_proxy(monkeypatch)
+    monkeypatch.setattr(cliproxy, "supports_fast", lambda *a: True)
+    monkeypatch.setenv("CLAUDE_CODE_EXTRA_BODY", "broken" if source == "shell" else "{}")
+    seen = {}
+    registry, sid = _prep_resume(tmp_path, monkeypatch, seen, "proxy")
+    monkeypatch.setattr(registry, "_pane_of", lambda name: {"cwd": str(tmp_path), "pid": 4242})
+    monkeypatch.setattr(reg, "_config_dir_of", lambda pid: tmp_path)
+    monkeypatch.setattr(reg, "agente_do_pane", lambda pid, children=None: ("claude", 4243))
+    monkeypatch.setattr(procinfo, "_model_of", lambda pid: ("gpt-5.5", None))
+    monkeypatch.setattr(procinfo, "_env_var_of", lambda pid, name: "priority" if name == "CP_ENGINE_SERVICE_TIER" else None)
+    if source != "shell":
+        folder = tmp_path if source == "user" else tmp_path / ".claude"
+        folder.mkdir(exist_ok=True)
+        filename = "settings.local.json" if source == "local" else "settings.json"
+        (folder / filename).write_text('{"env":{"CLAUDE_CODE_EXTRA_BODY":"broken"}}', encoding="utf-8")
+    monkeypatch.setattr(reg.tmux, "kill_session", lambda name: pytest.fail("a origem deve continuar viva"))
+    monkeypatch.setattr(registry, "wait_for_claude", lambda *a: pytest.fail("não pode tentar reabrir"))
+    with pytest.raises(ValueError, match="CLAUDE_CODE_EXTRA_BODY: JSON inválido"):
+        registry.resume("s", sid)
+    assert "command" not in seen
+
+
+@pytest.mark.parametrize("removed", [False, True])
+def test_resume_incompatible_priority_refuses_or_clears_removed_engine(tmp_path, monkeypatch, removed):
+    from app import cliproxy
+    _motor()
+    monkeypatch.setattr(cliproxy, "supports_fast", lambda *a: False)
+    seen = {}
+    registry, sid = _prep_resume(tmp_path, monkeypatch, seen, "removed" if removed else "kimi")
+    monkeypatch.setattr(reg, "agente_do_pane", lambda pid, children=None: ("claude", 4243))
+    monkeypatch.setattr(procinfo, "_model_of", lambda pid: ("k3", None))
+    monkeypatch.setattr(procinfo, "_env_var_of", lambda pid, name: "priority" if name == "CP_ENGINE_SERVICE_TIER" else None)
+    stopped = []
+    monkeypatch.setattr(reg.tmux, "kill_session", lambda name: stopped.append(name))
+    if removed:
+        registry.resume("s", sid)
+        assert seen["command"] == f"claude --resume {sid}"
+    else:
+        with pytest.raises(ValueError, match="service_tier"):
+            registry.resume("s", sid)
+        assert not stopped and not seen
 
 
 def test_resume_de_pane_vivo_preserva_o_motor(tmp_path, monkeypatch):

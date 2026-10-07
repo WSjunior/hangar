@@ -23,19 +23,21 @@ function claude {
     $modoPrint = $false
     foreach ($a in $args) { if ($a -eq '-p' -or $a -eq '--print') { $modoPrint = $true } }
 
-    # Plugin do Hangar por --plugin-dir, igual as sessoes que o backend abre: so assim ele fica por
-    # fora dos plugins do marketplace e espelha no app a faixa que os mods desenham. O caminho vem
-    # do arquivo que o backend grava (este wrapper nao sabe onde o repositorio mora); o backend so
-    # o grava quando o claude aceita a flag. Modo -p nao tem faixa e segue como estava.
+    # Plugins do Hangar por --plugin-dir, igual as sessoes que o backend abre: so assim ficam por
+    # fora dos plugins do marketplace e o do Hangar espelha no app a faixa que os mods desenham. Os
+    # caminhos vem do arquivo que o backend grava, um por linha e o do Hangar primeiro (este wrapper
+    # nao sabe onde o repositorio mora); o backend so o grava quando o claude aceita a flag. Modo
+    # -p nao tem faixa e segue como estava.
     $plug = @()
     $plugFile = Join-Path $HOME '.hangar\plugin-dir'
     if (-not $modoPrint -and (Test-Path -LiteralPath $plugFile -PathType Leaf)) {
-        $plugDir = [string](Get-Content -LiteralPath $plugFile -TotalCount 1 -Encoding UTF8)
-        $plugDir = $plugDir.Trim()
-        if ($plugDir -and (Test-Path -LiteralPath $plugDir -PathType Container)) {
-            $plug = @('--plugin-dir', $plugDir)
-        } elseif ($plugDir) {
-            [Console]::Error.WriteLine("hangar: plugin-dir '$plugDir' nao existe; a faixa dos mods nao vai para o app")
+        foreach ($linha in @(Get-Content -LiteralPath $plugFile -Encoding UTF8)) {
+            $plugDir = ([string]$linha).Trim()
+            if ($plugDir -and (Test-Path -LiteralPath $plugDir -PathType Container)) {
+                $plug += @('--plugin-dir', $plugDir)
+            } elseif ($plugDir) {
+                [Console]::Error.WriteLine("hangar: plugin-dir '$plugDir' nao existe; a faixa dos mods nao vai para o app")
+            }
         }
     }
 

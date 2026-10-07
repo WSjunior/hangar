@@ -120,6 +120,53 @@ def known_non_plan(name: str) -> str | None:
         return _ultimos_nao_plan.get(name)
 
 
+# Os fatos do terminal perguntam a cada tique enquanto há recado na fila; a varredura chega a 8 MB.
+_transcript_modes: dict[str, tuple[tuple[int, int], str | None]] = {}
+
+
+def transcript_non_plan_mode(jsonl: str) -> str | None:
+    """`permissionMode` mais recente fora de `plan` que o próprio CLI gravou no transcript. `plan`
+    é pulado porque o Claude Code conta plan vindo de bypass como bypass."""
+    from app.worktrees import reversed_lines
+
+    try:
+        st = Path(jsonl).stat()
+    except OSError:
+        return None
+    version = (st.st_size, st.st_mtime_ns)
+    cached = _transcript_modes.get(jsonl)
+    if cached is not None and cached[0] == version:
+        return cached[1]
+    found = None
+    try:
+        for raw in reversed_lines(jsonl):
+            if b'"permissionMode"' not in raw:
+                continue
+            try:
+                modo = json.loads(raw).get("permissionMode")
+            except ValueError:
+                continue
+            if isinstance(modo, str) and modo not in ("", "plan"):
+                found = modo
+                break
+    except OSError:
+        return None
+    if len(_transcript_modes) >= 256:
+        _transcript_modes.clear()
+    _transcript_modes[jsonl] = (version, found)
+    return found
+
+
+def session_non_plan_mode(jsonl: str | None) -> str | None:
+    """Modo fora de `plan` da sessão Claude do transcript `jsonl`: o que o pane mostrou (a memória é
+    gravada pelo session-id, o stem do jsonl, como o monitor faz) ou, sem ele, o do transcript.
+    A memória vem antes porque um Shift+Tab só chega ao transcript na fala seguinte; e só ela não
+    basta, porque existe apenas para sessão com monitor aberto desde o último restart."""
+    if not jsonl:
+        return None
+    return known_non_plan(Path(jsonl).stem) or transcript_non_plan_mode(jsonl)
+
+
 def observar_pane(name: str, pane: str, sessao: str | None = None) -> str | None:
     """Atualiza a memória a partir de uma captura já feita e devolve o modo confirmado."""
     modo = parse_permission_mode(pane)
@@ -131,8 +178,10 @@ def observar_pane(name: str, pane: str, sessao: str | None = None) -> str | None
 @contextmanager
 def operacao_controlada(sessao: str):
     """Impede que o monitor registre os modos intermediários de uma sequência de BTab."""
+    from app import state_facts
     with _mem_lock:
         _operacoes_controladas[sessao] = _operacoes_controladas.get(sessao, 0) + 1
+    state_facts.notify(sessao)
     try:
         yield
     finally:
@@ -142,6 +191,12 @@ def operacao_controlada(sessao: str):
                 _operacoes_controladas[sessao] = restantes
             else:
                 _operacoes_controladas.pop(sessao, None)
+        state_facts.notify(sessao)
+
+
+def operacao_em_curso(sessao: str) -> bool:
+    with _mem_lock:
+        return sessao in _operacoes_controladas
 
 
 def executar_controlado(sessao: str, func: Callable[..., _T], *args) -> _T:
@@ -320,3 +375,7 @@ def listar_modos(name: str) -> tuple[str, list[str]]:
                     break
         # bloqueador 3: devolver o que FICOU, não o de antes
         return cur, vistos
+
+from app.runtime_terminal import wrap_driver as _wrap_terminal_driver
+trocar_modo = _wrap_terminal_driver(trocar_modo, admin=True)
+listar_modos = _wrap_terminal_driver(listar_modos, admin=True)

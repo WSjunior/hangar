@@ -1,4 +1,5 @@
-//! Atualização do próprio app pela release fixa `native-latest`, reescrita pelo CI a cada push na main.
+//! Atualização do próprio app pela release fixa `native-latest`, reescrita pelo CI a cada push na main. Com o servidor
+//! desta máquina num canal de testes (`pre_voo.alvo` fora da main), a release é a `native-<branch>` dessa branch.
 //! Lê só o manifesto (pelo endereço de download, que não gasta a cota da API do GitHub), ao abrir e a cada 6 h.
 //! Atualizar baixa o binário da plataforma, confere o sha256 do manifesto e troca o arquivo guardando o anterior em
 //! `<exe>.old` (no Windows, `<exe>.old-<horário>` se o `.old` ainda estiver preso). O processo velho continua de pé
@@ -11,15 +12,25 @@ use serde_json::Value;
 use std::{collections::HashMap, ffi::OsString, path::{Path, PathBuf}, sync::Arc, time::Duration};
 use tokio::runtime::Runtime;
 
-const RELEASE: &str = "https://github.com/jeffer1312/hangar/releases/download/native-latest";
+const RELEASES: &str = "https://github.com/jeffer1312/hangar/releases/download";
+/// Branch que o CI compilou (native.yml). Build local não sabe a dele: só versão mais nova o troca.
+const BUILT_CHANNEL: Option<&str> = option_env!("HANGAR_NATIVE_CHANNEL");
 const EVERY: Duration = Duration::from_secs(6 * 3600);
 /// Janela GPUI fria num disco lento leva segundos; 30 s cobre com folga sem deixar o usuário esperando à toa.
 const ALIVE_WAIT: Duration = Duration::from_secs(30);
 const ALIVE_ENV: &str = "HANGAR_NATIVE_ALIVE";
 pub const CURRENT: &str = env!("HANGAR_NATIVE_RELEASE");
 
+/// Mesma limpeza do passo de publicação do native.yml: mudar uma exige mudar a outra.
+fn release_tag(channel: &str) -> String {
+    if channel == "main" { return "native-latest".into(); }
+    format!("native-{}", channel.chars().map(|c| if c.is_ascii_alphanumeric() || "._-".contains(c) { c } else { '-' }).collect::<String>())
+}
+
 /// Só para provas: HANGAR_NATIVE_UPDATE_URL aponta para uma release falsa local.
-fn base() -> String { std::env::var("HANGAR_NATIVE_UPDATE_URL").unwrap_or_else(|_| RELEASE.to_owned()) }
+fn base(channel: &str) -> String {
+    std::env::var("HANGAR_NATIVE_UPDATE_URL").unwrap_or_else(|_| format!("{RELEASES}/{}", release_tag(channel)))
+}
 
 /// Nome do binário cru desta plataforma na release. Plataforma sem build no CI não procura nada.
 fn asset() -> Option<&'static str> {
@@ -37,6 +48,18 @@ fn newer(remote: &str, local: &str) -> bool {
     matches!((parse(remote), parse(local)), (Some(r), Some(l)) if r > l)
 }
 
+/// Versão mais nova da mesma release, ou qualquer versão de outra: trocar de canal (inclusive a volta para a main, que
+/// costuma ter menos commits que a branch de teste) não pode esperar a contagem passar a do app instalado. Compara pela
+/// release, não pelo nome: `a/b` e `a-b` publicam na mesma e não podem se oferecer uma à outra para sempre.
+fn offered(remote: &str, channel: &str, current: &str, built: Option<&str>) -> bool {
+    newer(remote, current) || (newer(remote, "0") && built.is_some_and(|built| release_tag(built) != release_tag(channel)))
+}
+
+/// Branch que o servidor segue. Sem o campo (servidor anterior ao canal, checkout ilegível), a main, como o backend.
+pub(crate) fn alvo(state: &Value) -> String {
+    state["pre_voo"]["alvo"].as_str().filter(|alvo| !alvo.is_empty()).unwrap_or("main").to_owned()
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     ring::digest::digest(&ring::digest::SHA256, bytes).as_ref().iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -45,16 +68,34 @@ fn sha256_hex(bytes: &[u8]) -> String {
 struct Manifest { version: String, files: HashMap<String, String> }
 
 #[derive(Clone)]
-struct Offer { version: String, url: String, sha256: String }
+struct Offer { version: String, url: String, sha256: String, channel: String }
 
-async fn check(client: &reqwest::Client) -> Result<Option<Offer>, String> {
+/// Por que a procura não achou o que oferecer: a rede falhou, ou a máquina respondeu e a branch não tem o app.
+#[derive(Clone, Debug, PartialEq)]
+enum CheckFail { Network(String), NoRelease(String) }
+
+impl std::fmt::Display for CheckFail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self { CheckFail::Network(text) | CheckFail::NoRelease(text) => f.write_str(text) }
+    }
+}
+
+async fn check(client: &reqwest::Client, channel: &str) -> Result<Option<Offer>, CheckFail> {
+    let network = |e: reqwest::Error| CheckFail::Network(e.to_string());
+    let missing = || if channel == "main" { Ok(None) }
+        else { Err(CheckFail::NoRelease(tr("app_update_channel_missing").replace("{branch}", channel))) };
     let Some(name) = asset() else { return Ok(None) };
-    let response = client.get(format!("{}/native-latest.json", base())).send().await.map_err(|e| e.to_string())?;
-    // Sem release ainda (ou repositório sem ela): nada a oferecer, não é erro.
-    if response.status() == reqwest::StatusCode::NOT_FOUND { return Ok(None); }
-    let manifest: Manifest = response.error_for_status().map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
-    let Some(sha256) = manifest.files.get(name) else { return Ok(None) };
-    Ok(newer(&manifest.version, CURRENT).then(|| Offer { version: manifest.version, url: format!("{}/{name}", base()), sha256: sha256.to_lowercase() }))
+    let base = base(channel);
+    let response = client.get(format!("{base}/native-latest.json")).send().await.map_err(network)?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        // Sem a release da main: nada a oferecer. Sem a da branch: avisa e fica, nunca oferece a da main no lugar.
+        return missing();
+    }
+    let manifest: Manifest = response.error_for_status().map_err(network)?.json().await.map_err(network)?;
+    // Branch cujo build desta plataforma falhou: avisa como a release ausente, em vez de dizer "em dia".
+    let Some(sha256) = manifest.files.get(name) else { return missing() };
+    Ok(offered(&manifest.version, channel, CURRENT, BUILT_CHANNEL).then(|| Offer { version: manifest.version,
+        url: format!("{base}/{name}"), sha256: sha256.to_lowercase(), channel: channel.to_owned() }))
 }
 
 fn sibling(exe: &Path, suffix: &str) -> PathBuf {
@@ -129,52 +170,66 @@ fn rollback(exe: &Path, old: &Path) -> std::io::Result<()> {
 }
 
 /// O novo processo prova que subiu gravando o próprio pid; pid e não "arquivo existe", para um resto antigo não enganar.
-async fn alive(child: &mut std::process::Child, path: &Path) -> bool {
-    let deadline = tokio::time::Instant::now() + ALIVE_WAIT;
+async fn alive(child: &mut std::process::Child, path: &Path, wait: Duration) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + wait;
     while tokio::time::Instant::now() < deadline {
-        if std::fs::read_to_string(path).is_ok_and(|pid| pid.trim() == child.id().to_string()) { return true; }
-        if !matches!(child.try_wait(), Ok(None)) { return false; }
+        if std::fs::read_to_string(path).is_ok_and(|pid| pid.trim() == child.id().to_string()) { return Ok(()); }
+        match child.try_wait() {
+            Ok(None) => {}
+            Ok(Some(status)) => return Err(format!("o processo novo saiu sem prova de vida ({status})")),
+            Err(error) => { let _ = child.kill(); return Err(format!("o processo novo não pôde ser acompanhado: {error}")); }
+        }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     let _ = child.kill();
     let _ = child.wait();
-    false
+    Err(format!("o processo novo não deu prova de vida em {} s", wait.as_secs()))
+}
+
+fn spawn_child(exe: &Path, signal: &Path) -> Result<std::process::Child, String> {
+    std::process::Command::new(exe).args(std::env::args_os().skip(1)).env(ALIVE_ENV, signal).spawn()
+        .map_err(|error| format!("não abriu {}: {error}", exe.display()))
 }
 
 /// Sobe o binário que está no caminho do app e espera a prova de vida. Sem ela, a janela única volta para este processo.
-async fn relaunch(exe: &Path) -> bool {
+async fn relaunch(exe: &Path) -> Result<(), String> {
     let signal = sibling(exe, ".alive");
     let _ = std::fs::remove_file(&signal);
     // A versão nova assume o arquivo da janela única antes de provar que subiu.
     let own_address = crate::single_instance::snapshot();
-    let started = std::process::Command::new(exe).args(std::env::args_os().skip(1)).env(ALIVE_ENV, &signal).spawn();
-    let up = match started { Ok(mut child) => alive(&mut child, &signal).await, Err(_) => false };
+    let up = match spawn_child(exe, &signal) { Ok(mut child) => alive(&mut child, &signal, ALIVE_WAIT).await, Err(error) => Err(error) };
     let _ = std::fs::remove_file(&signal);
-    if !up { if let Some(address) = own_address { crate::single_instance::restore(address); } }
+    if let Err(reason) = &up {
+        crate::log_line(&format!("relançar o app falhou: {reason}"));
+        if let Some(address) = own_address { crate::single_instance::restore(address); }
+    }
     up
 }
 
+/// O motivo técnico vai junto da frase da tela: sem ele, quem lê o erro não tem o que procurar no log.
+fn with_reason(text: String, reason: &str) -> String { format!("{text} ({reason})") }
+
 async fn install(client: reqwest::Client, exe: Option<PathBuf>, offer: Offer) -> Result<(), String> {
     // A oferta pode ter horas e a release é republicada a cada push: o sha que vale é o do manifesto de agora.
-    let offer = check(&client).await.ok().flatten().unwrap_or(offer);
+    let offer = check(&client, &offer.channel).await.ok().flatten().unwrap_or(offer);
     let exe = exe.ok_or_else(|| tr("app_update_swap_failed").replace("{reason}", "current_exe"))?;
     // O instalador pode ter posto esta versão no caminho do app com ele aberto: não há o que baixar nem trocar.
     let (disk, wanted) = (exe.clone(), offer.sha256.clone());
     let placed = tokio::task::spawn_blocking(move || std::fs::read(&disk).is_ok_and(|bytes| sha256_hex(&bytes) == wanted));
     if placed.await.unwrap_or(false) {
-        return if relaunch(&exe).await { Ok(()) } else { Err(tr("app_update_relaunch_failed")) };
+        return relaunch(&exe).await.map_err(|reason| with_reason(tr("app_update_relaunch_failed"), &reason));
     }
     let bytes = client.get(&offer.url).send().await.and_then(reqwest::Response::error_for_status).map_err(|e| e.to_string())?
         .bytes().await.map_err(|e| e.to_string())?;
     // O CI sobe os binários antes do manifesto: no meio da publicação o binário já é o novo e o sha ainda o antigo.
     let sha256 = if sha256_hex(&bytes) == offer.sha256 { offer.sha256 }
-        else { check(&client).await.ok().flatten().map_or(offer.sha256, |fresh| fresh.sha256) };
+        else { check(&client, &offer.channel).await.ok().flatten().map_or(offer.sha256, |fresh| fresh.sha256) };
     // Dezenas de MB conferidos, gravados e copiados: fora das duas threads do runtime.
     let target = exe.clone();
     let old = tokio::task::spawn_blocking(move || swap(&target, &bytes, &sha256)).await.map_err(|e| e.to_string())??;
-    if relaunch(&exe).await { return Ok(()); }
+    let Err(reason) = relaunch(&exe).await else { return Ok(()) };
     rollback(&exe, &old).map_err(|e| tr("app_update_rollback_failed").replace("{reason}", &e.to_string()))?;
-    Err(tr("app_update_rolled_back"))
+    Err(with_reason(tr("app_update_rolled_back"), &reason))
 }
 
 pub fn relaunched() -> bool { std::env::var_os(ALIVE_ENV).is_some() }
@@ -299,8 +354,19 @@ enum Run {
     Searching,
     Server { step: u64, total: u64, text: String },
     Restarting,
+    DesktopRestart,
     App,
     Failed(String),
+}
+
+impl Run {
+    fn busy(&self) -> bool { !matches!(self, Self::Idle | Self::Failed(_)) }
+
+    fn begin_server_search(&mut self) -> bool {
+        if self.busy() { return false; }
+        *self = Self::Searching;
+        true
+    }
 }
 
 pub struct Updater {
@@ -320,12 +386,28 @@ pub struct Updater {
     run: Run,
     /// Procura do app em andamento e o desfecho da última, para a página Sobre.
     checking: bool,
-    checked: Option<Result<(), String>>,
+    checked: Option<Result<(), CheckFail>>,
+    /// Branch da última procura que terminou: o canal do servidor mudar depois dela pede outra.
+    checked_channel: Option<String>,
+    /// Último `pre_voo.alvo` lido do servidor desta máquina: leitura que falha não muda o canal.
+    known_channel: Option<String>,
     channel_blocked: Option<String>,
 }
 
+/// Linha "Canal de testes" da página Sobre: a main não mostra nada.
+pub fn test_channel(branch: &str) -> Option<String> {
+    (!branch.is_empty() && branch != "main").then(|| tr("about_test_channel").replace("{branch}", branch))
+}
+
+/// Canal do app na página Sobre: a branch do build e, quando a procura já segue outra, a próxima.
+pub fn app_channel(built: Option<&str>, following: &str) -> Vec<String> {
+    let built = built.filter(|built| !built.is_empty()).unwrap_or("main");
+    let next = (release_tag(following) != release_tag(built)).then(|| tr("about_following_channel").replace("{branch}", following));
+    test_channel(built).into_iter().chain(next).collect()
+}
+
 /// O que a página Sobre mostra na linha do app.
-pub enum AppCheck { Never, Checking, UpToDate, Available(String), Failed(String) }
+pub enum AppCheck { Never, Checking, UpToDate, Available(String), Failed(String), NoRelease(String) }
 
 pub struct Handle(pub Entity<Updater>);
 impl Global for Handle {}
@@ -335,7 +417,7 @@ pub fn start(runtime: Arc<Runtime>, cx: &mut App) {
     let client = reqwest::Client::builder().timeout(Duration::from_secs(300)).user_agent(concat!("hangar-native/", env!("HANGAR_NATIVE_RELEASE")))
         .build().unwrap_or_default();
     let entity = cx.new(|_| Updater { runtime, client, exe: std::env::current_exe().ok(), offer: None, local: None, server: None,
-        server_seq: 0, active: None, active_state: None, active_seq: 0, run: Run::Idle, checking: false, checked: None, channel_blocked: None });
+        server_seq: 0, active: None, active_state: None, active_seq: 0, run: Run::Idle, checking: false, checked: None, checked_channel: None, known_channel: None, channel_blocked: None });
     let weak = entity.downgrade();
     cx.spawn(async move |cx| loop {
         let Ok(()) = weak.update(cx, |this, cx| {
@@ -364,8 +446,27 @@ impl Updater {
         self.local.as_ref().is_some_and(|api| self.channel_blocked.as_deref() == Some(api.identity().as_str()))
     }
 
+    /// Branch que o app segue: a última lida do servidor desta máquina. Antes da primeira leitura, a branch em que este app
+    /// foi compilado (servidor fora do ar não troca de canal); sem servidor local, a main.
+    fn channel(&self) -> String {
+        if self.local.is_none() { return "main".into(); }
+        self.known_channel.clone().unwrap_or_else(|| BUILT_CHANNEL.unwrap_or("main").to_owned())
+    }
+
+    /// Todo estado lido do servidor desta máquina passa por aqui: canal trocado fora deste app (celular, web, `.env`)
+    /// refaz a procura da release, e a oferta da branch anterior deixa de valer.
+    fn receive_server(&mut self, state: Option<Value>, cx: &mut Context<Self>) {
+        if let Some(state) = &state { self.known_channel = Some(alvo(state)); }
+        self.server = state;
+        if self.checked_channel.as_ref().is_some_and(|checked| *checked != self.channel()) { self.check_app(cx); }
+    }
+
+    /// O canal de testes do servidor mudou pela tela: relê o estado e, com ele, a release do app.
+    pub fn refresh(&mut self, cx: &mut Context<Self>) { self.refresh_server(cx) }
+
     /// A lista de servidores ou o servidor ativo mudou: relê o estado dos dois.
     pub fn set_servers(&mut self, local: Option<Api>, active: Option<Api>, cx: &mut Context<Self>) {
+        if self.local.as_ref().map(Api::identity) != local.as_ref().map(Api::identity) { self.known_channel = None; }
         self.local = local;
         self.active = active;
         self.refresh_server(cx);
@@ -377,22 +478,29 @@ impl Updater {
         if self.checking { return; }
         self.checking = true;
         cx.notify();
-        let client = self.client.clone();
-        let task = self.runtime.spawn(async move { check(&client).await });
+        let (client, channel) = (self.client.clone(), self.channel());
+        let task = { let channel = channel.clone(); self.runtime.spawn(async move { check(&client, &channel).await }) };
         cx.spawn(async move |this, cx| {
-            let result = task.await.unwrap_or_else(|e| Err(e.to_string()));
+            let result = task.await.unwrap_or_else(|e| Err(CheckFail::Network(e.to_string())));
             let _ = this.update(cx, |this, cx| {
                 this.checking = false;
+                // O canal mudou durante a procura: a resposta é de outra release.
+                if this.channel() != channel { return this.check_app(cx); }
+                // `Failed` também: o "Tentar de novo" instala a oferta guardada.
+                let idle = !this.busy();
                 match result {
                     Ok(found) => {
-                        if matches!(this.run, Run::Idle) { this.offer = found; }
+                        if idle { this.offer = found; }
                         this.checked = Some(Ok(()));
                     }
                     Err(error) => {
                         eprintln!("procura de atualização do app falhou: {error}");
+                        // A oferta de outro canal não vale mais: o Atualizar instalaria o app da branch errada.
+                        if idle { this.offer.take_if(|offer| offer.channel != channel); }
                         this.checked = Some(Err(error));
                     }
                 }
+                this.checked_channel = Some(channel);
                 cx.notify();
             });
         }).detach();
@@ -403,7 +511,8 @@ impl Updater {
             (Some(offer), false, _) => AppCheck::Available(offer.version.clone()),
             (_, true, _) => AppCheck::Checking,
             (None, _, Some(Ok(()))) => AppCheck::UpToDate,
-            (None, _, Some(Err(error))) => AppCheck::Failed(error.clone()),
+            (None, _, Some(Err(CheckFail::Network(error)))) => AppCheck::Failed(error.clone()),
+            (None, _, Some(Err(CheckFail::NoRelease(text)))) => AppCheck::NoRelease(text.clone()),
             (None, _, None) => AppCheck::Never,
         }
     }
@@ -412,6 +521,21 @@ impl Updater {
     pub fn start_update(&mut self, window: &mut Window, cx: &mut Context<Self>) { self.run(window, cx) }
 
     pub fn is_busy(&self) -> bool { self.busy() }
+
+    pub fn restart_desktop(&mut self, cx: &mut Context<Self>) -> Result<tokio::task::JoinHandle<Result<(), String>>, String> {
+        if self.busy() { return Err(tr("app_restart_busy")); }
+        let exe = self.exe.clone().ok_or_else(|| tr("app_restart_failed"))?;
+        self.run = Run::DesktopRestart;
+        cx.notify();
+        Ok(self.runtime.spawn(async move { relaunch(&exe).await }))
+    }
+
+    pub fn finish_desktop_restart(&mut self, cx: &mut Context<Self>) {
+        // Falha manual não é falha de instalação: nunca oferece download no botão de tentar de novo.
+        if matches!(self.run, Run::DesktopRestart) { self.run = Run::Idle; cx.notify(); }
+    }
+
+    pub fn channel_lines(&self) -> Vec<String> { app_channel(BUILT_CHANNEL, &self.channel()) }
 
     pub fn server_outdated(&self) -> bool { self.active_state.as_ref().is_some_and(|state| outdated(state, CURRENT)) }
 
@@ -437,7 +561,7 @@ impl Updater {
         }).detach();
     }
 
-    fn busy(&self) -> bool { !matches!(self.run, Run::Idle | Run::Failed(_)) }
+    fn busy(&self) -> bool { self.run.busy() }
 
     fn plan(&self) -> Plan {
         if self.is_channel_blocked() { return Plan { server: ServerStep::Held(Hold::ChannelDraft), app: self.offer.is_some() }; }
@@ -456,7 +580,7 @@ impl Updater {
             let _ = this.update(cx, |this, cx| {
                 if this.server_seq != seq { return; }
                 // Servidor local fora do ar: sem ele o botão cuida só do app.
-                this.server = result.map_err(|e| eprintln!("estado do servidor desta máquina: {}", e.detail)).ok();
+                this.receive_server(result.map_err(|e| eprintln!("estado do servidor desta máquina: {}", e.detail)).ok(), cx);
                 cx.notify();
             });
         }).detach();
@@ -479,16 +603,37 @@ impl Updater {
                 crate::app::chrome::confirm_alert(window, cx, tr(title), tr(desc), tr("update_confirm_ok"), ButtonVariant::Primary,
                     move |window, cx| { let _ = this.update(cx, |this, cx| this.search_server(window, cx)); true });
             }
-            _ if plan.app => self.install_app(window, cx),
+            _ if plan.app => self.confirm_channel(window, cx),
             _ => {}
         }
+    }
+
+    /// O canal pode ter mudado no servidor depois da última leitura (até 6 h): relê antes de instalar o app.
+    fn confirm_channel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(api) = self.local.clone() else { return self.install_app(window, cx) };
+        self.run = Run::Searching;
+        cx.notify();
+        let task = read_state(&self.runtime, &api, &[], 20);
+        let handle = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            let result = task.await.unwrap_or_else(|e| Err(Failure::local(e.to_string())));
+            let _ = handle.update(cx, |_, window, cx| { let _ = this.update(cx, |this, cx| {
+                this.run = Run::Idle;
+                // Sem resposta vale o último canal lido; a oferta de outro canal é barrada no `install_app`.
+                if let Ok(state) = result { this.receive_server(Some(state), cx); }
+                this.install_app(window, cx);
+            }); });
+        }).detach();
     }
 
     /// No clique a versão vem da rede: o `origin/main` do servidor só é renovado a cada 30 min, e a release do app sai logo
     /// depois do push. Com o estado novo, o plano é refeito antes de pedir qualquer coisa.
     fn search_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(api) = self.local.clone() else { return };
-        self.run = Run::Searching;
+        if !self.run.begin_server_search() {
+            window.push_notification(Notification::error(tr("app_restart_busy")), cx);
+            return;
+        }
         cx.notify();
         let task = read_state(&self.runtime, &api, &[("procurar", "1")], 150);
         let handle = window.window_handle();
@@ -497,8 +642,8 @@ impl Updater {
             let _ = handle.update(cx, |_, window, cx| { let _ = this.update(cx, |this, cx| match result {
                 Err(error) => this.fail(tr("update_failed").replace("{reason}", error.detail.trim_end_matches('.')), cx),
                 Ok(state) => {
-                    this.server = Some(state);
                     this.run = Run::Idle;
+                    this.receive_server(Some(state), cx);
                     let plan = this.plan();
                     match &plan.server {
                         ServerStep::Update => this.start_server(api, window, cx),
@@ -537,8 +682,8 @@ impl Updater {
         cx.spawn(async move |this, cx| {
             let result = task.await.unwrap_or_else(|e| Err(Failure::local(e.to_string())));
             let _ = handle.update(cx, |_, window, cx| { let _ = this.update(cx, |this, cx| {
-                this.server = result.ok();
                 this.run = Run::Idle;
+                this.receive_server(result.ok(), cx);
                 match this.plan() {
                     Plan { server: ServerStep::Held(hold), app: true } if !hold.stops() => this.install_app(window, cx),
                     _ => this.fail(tr("update_refused").replace("{reason}", &detail), cx),
@@ -563,7 +708,7 @@ impl Updater {
                 };
                 if matches!(step, Some(Follow::Running { .. })) { saw = true; }
                 let finished = handle.update(cx, |_, window, cx| this.update(cx, |this, cx| {
-                    if let Ok(value) = &read { this.server = Some(value.clone()); }
+                    if let Ok(value) = &read { this.receive_server(Some(value.clone()), cx); }
                     match step {
                         Some(Follow::Running { step, total, text }) => { this.run = Run::Server { step, total, text }; cx.notify(); false }
                         None if saw => { this.run = Run::Restarting; cx.notify(); false }
@@ -596,6 +741,12 @@ impl Updater {
 
     fn install_app(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(offer) = self.offer.clone() else { self.run = Run::Idle; cx.notify(); return };
+        // Canal trocado depois da procura: a oferta é da branch anterior; procura de novo em vez de instalá-la.
+        if offer.channel != self.channel() {
+            self.offer = None;
+            self.run = Run::Idle;
+            return self.check_app(cx);
+        }
         self.run = Run::App;
         cx.notify();
         let task = self.runtime.spawn(install(self.client.clone(), self.exe.clone(), offer));
@@ -639,6 +790,7 @@ impl Render for Updater {
                 tr("update_step").replace("{step}", &step.to_string()).replace("{total}", &total.to_string()).replace("{text}", text), theme::accent()),
             Run::Server { .. } => ("topbar-update", tr("update_running"), tr("update_running"), theme::accent()),
             Run::Restarting => ("topbar-update", tr("app_update_server_restarting"), tr("update_restarting"), theme::accent()),
+            Run::DesktopRestart => ("topbar-update", tr("app_restarting"), tr("app_restarting"), theme::accent()),
             Run::App => ("topbar-update", tr("app_update_running"), tr("app_update_running"), theme::accent()),
             Run::Failed(reason) => ("topbar-update-retry", tr("app_update_retry"), reason.clone(), theme::danger()),
         };
@@ -660,13 +812,77 @@ mod tests {
     use core::prelude::v1::test;
 
     #[test]
+    fn relaunch_spawn_failure_keeps_the_reason() {
+        let missing = std::env::temp_dir().join(format!("hangar-missing-exe-{}", std::process::id()));
+        let error = spawn_child(&missing, &missing.with_extension("alive")).unwrap_err();
+        assert!(error.contains(&missing.display().to_string()), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relaunch_names_why_the_child_gave_no_sign_of_life() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let signal = std::env::temp_dir().join(format!("hangar-alive-test-{}", std::process::id()));
+        let mut exited = std::process::Command::new("sh").args(["-c", "exit 3"]).spawn().unwrap();
+        let error = runtime.block_on(alive(&mut exited, &signal, Duration::from_secs(5))).unwrap_err();
+        assert!(error.contains("saiu") && error.contains('3'), "{error}");
+        let mut silent = std::process::Command::new("sleep").arg("5").spawn().unwrap();
+        let error = runtime.block_on(alive(&mut silent, &signal, Duration::from_millis(300))).unwrap_err();
+        assert!(error.contains("prova de vida"), "{error}");
+        assert!(silent.try_wait().unwrap().is_some(), "o filho sem sinal é encerrado");
+    }
+
+    #[test]
+    fn restart_and_installation_share_the_same_busy_gate() {
+        assert!(!Run::Idle.busy());
+        assert!(!Run::Failed("installation failed".into()).busy());
+        for run in [Run::Searching, Run::Server { step: 0, total: 0, text: String::new() },
+            Run::Restarting, Run::DesktopRestart, Run::App] {
+            assert!(run.busy());
+        }
+    }
+
+    #[test]
+    fn pending_update_confirmation_cannot_overwrite_a_desktop_restart() {
+        let mut run = Run::DesktopRestart;
+        assert!(!run.begin_server_search());
+        assert!(matches!(run, Run::DesktopRestart));
+        let mut run = Run::Idle;
+        assert!(run.begin_server_search());
+        assert!(matches!(run, Run::Searching));
+        assert!(!run.begin_server_search());
+        let mut run = Run::Failed("failed".into());
+        assert!(run.begin_server_search());
+    }
+
+    #[test]
+    fn about_shows_test_channel_only_off_main() {
+        assert_eq!(test_channel("main"), None);
+        assert_eq!(test_channel(""), None);
+        assert!(test_channel("feat/x").is_some_and(|text| text.contains("feat/x")));
+        assert!(app_channel(None, "main").is_empty());
+        assert!(app_channel(Some("main"), "main").is_empty());
+        assert!(app_channel(Some(""), "main").is_empty());
+        let same = app_channel(Some("feat/x"), "feat/x");
+        assert_eq!(same.len(), 1);
+        assert!(same[0].contains("feat/x"));
+        // `a/b` e `a-b` publicam na mesma release: não é outro canal.
+        assert_eq!(app_channel(Some("feat/x"), "feat-x").len(), 1);
+        let back = app_channel(Some("feat/x"), "main");
+        assert!(back[0].contains("feat/x") && back[1].contains("main"));
+        let local = app_channel(None, "feat/y");
+        assert_eq!(local.len(), 1);
+        assert!(local[0].contains("feat/y"));
+    }
+
+    #[test]
     fn update_channel_draft_holds_only_its_local_server_update() {
         let local = Api::new("http://127.0.0.1:8765", "synthetic-token").unwrap();
         let mut updater = Updater { runtime: Arc::new(Runtime::new().unwrap()), client: reqwest::Client::new(), exe: None,
-            offer: Some(Offer { version: "9999.0.0.0".into(), url: String::new(), sha256: String::new() }),
+            offer: Some(Offer { version: "9999.0.0.0".into(), url: String::new(), sha256: String::new(), channel: "main".into() }),
             local: Some(local.clone()), server: Some(server(serde_json::json!({"atualizacao_disponivel": true}))),
             server_seq: 0, active: None, active_state: None, active_seq: 0, run: Run::Idle, checking: false, checked: None,
-            channel_blocked: Some(local.identity()) };
+            checked_channel: None, known_channel: None, channel_blocked: Some(local.identity()) };
         assert_eq!(updater.plan(), Plan { server: ServerStep::Held(Hold::ChannelDraft), app: true });
         assert!(!Hold::ChannelDraft.stops());
         updater.channel_blocked = Some("http://other-machine:8765".into());
@@ -690,6 +906,46 @@ mod tests {
         assert!(!newer("0.1.0.2500", "0.1.0.2533"));
         assert!(!newer("lixo", "0.1.0.1"));
         assert!(!newer("0.1.0.1", "2026.09.27-abc"));
+    }
+
+    #[test]
+    fn release_tag_matches_the_workflow_cleanup() {
+        assert_eq!(release_tag("main"), "native-latest");
+        assert_eq!(release_tag("hangar-server-parte1"), "native-hangar-server-parte1");
+        assert_eq!(release_tag("feat/native-test-channel"), "native-feat-native-test-channel");
+        assert_eq!(release_tag("a+b_c.d"), "native-a-b_c.d");
+    }
+
+    #[test]
+    fn offered_takes_a_newer_version_or_any_version_of_another_channel() {
+        assert!(offered("0.1.0.110", "main", APP, Some("main")));
+        assert!(!offered("0.1.0.90", "main", APP, Some("main")), "mesma branch, versão velha");
+        assert!(offered("0.1.0.90", "main", APP, Some("hangar-server-parte1")), "canal desligado volta para a main");
+        assert!(offered("0.1.0.90", "hangar-server-parte1", APP, Some("main")), "canal ligado troca mesmo com contagem menor");
+        assert!(!offered("0.1.0.100", "hangar-server-parte1", APP, Some("hangar-server-parte1")));
+        assert!(!offered("0.1.0.90", "hangar-server-parte1", APP, None), "build local: só a versão decide");
+        assert!(!offered("0.1.0.90", "feat/x", APP, Some("feat-x")), "mesma release com outro nome não troca");
+        assert!(!offered("lixo", "main", APP, Some("hangar-server-parte1")), "texto que não é versão nunca é oferecido");
+    }
+
+    #[test]
+    fn channel_follows_the_last_state_read_from_the_local_server() {
+        let mut updater = Updater { runtime: Arc::new(Runtime::new().unwrap()), client: reqwest::Client::new(), exe: None, offer: None,
+            local: None, server: None, server_seq: 0, active: None, active_state: None, active_seq: 0, run: Run::Idle, checking: false,
+            checked: None, checked_channel: None, known_channel: Some("hangar-server-parte1".into()), channel_blocked: None };
+        assert_eq!(updater.channel(), "main", "sem servidor local não há canal");
+        updater.local = Some(Api::new("http://127.0.0.1:8765", "synthetic-token").unwrap());
+        assert_eq!(updater.channel(), "hangar-server-parte1", "leitura que falhou mantém o último canal");
+        updater.known_channel = None;
+        assert_eq!(updater.channel(), BUILT_CHANNEL.unwrap_or("main"), "antes da primeira leitura, o canal do build");
+    }
+
+    #[test]
+    fn alvo_defaults_to_main_like_the_backend() {
+        assert_eq!(alvo(&server(serde_json::json!({"pre_voo": {"alvo": "hangar-server-parte1"}}))), "hangar-server-parte1");
+        assert_eq!(alvo(&server(serde_json::json!({}))), "main", "o server() de teste não traz alvo");
+        assert_eq!(alvo(&serde_json::json!({"pre_voo": {"pode": false, "erro": "nao_e_repo"}})), "main");
+        assert_eq!(alvo(&serde_json::json!({"versoes": {}})), "main", "servidor anterior ao canal");
     }
 
     fn server(extra: Value) -> Value {

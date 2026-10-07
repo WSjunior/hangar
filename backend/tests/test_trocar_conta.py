@@ -90,6 +90,123 @@ def test_fixed_proxy_can_return_to_claude_in_same_config_dir(contas, tmp_path):
     hl.parar.assert_awaited_once()
 
 
+@pytest.mark.parametrize("tier", ["default", "priority"])
+@pytest.mark.parametrize("fixed", [False, True])
+def test_proxy_fast_reopens_without_changing_identity(contas, tmp_path, tier, fixed):
+    import app.api as api_mod
+    a, _ = contas
+    meta = S.save("hl", str(tmp_path), SID, config_dir=a, engine="proxy", model="fixed/gpt-5.5" if fixed else "gpt-5.5",
+                  engine_account="default" if fixed else None, permission_mode="acceptEdits",
+                  context_window=400000, effort="high")
+    source = _conversa(a, str(tmp_path))
+    info = SessionInfo(name="hl", provider="claude", headless=True, engine="proxy",
+                       engine_account=meta.get("engine_account"))
+    hl = _hl([])
+    with patch("app.api._cached_info", AsyncMock(return_value=info)), \
+         patch("app.api._headless", return_value=True), \
+         patch("app.api._motivo_ocupada", AsyncMock(return_value=None)), \
+         patch("app.api.get_adapter", return_value=hl), \
+         patch("app.api.cliproxy.supports_fast", return_value=True), \
+         patch.object(api_mod.registry, "_forget"), \
+         patch("app.api.move_conversation", AsyncMock()) as move:
+        response = TestClient(api_mod.app).post("/api/sessions/hl/service-tier", headers=_H,
+                                               json={"service_tier": tier})
+    assert response.status_code == 200, response.text
+    assert response.json() == {"ok": True, "service_tier": tier}
+    assert S.load("hl") == {**meta, "service_tier": tier, "problema": None}
+    assert source.exists()
+    move.assert_not_awaited()
+    hl.parar.assert_awaited_once()
+    hl.ensure_running.assert_awaited_once()
+
+
+def test_proxy_fast_reopen_failure_restores_previous_tier(contas, tmp_path):
+    import app.api as api_mod
+    a, _ = contas
+    S.save("hl", str(tmp_path), SID, config_dir=a, engine="proxy", model="gpt-5.5")
+    S.update("hl", service_tier="default")
+    source = _conversa(a, str(tmp_path))
+    info = SessionInfo(name="hl", provider="claude", headless=True, engine="proxy")
+    hl = _hl([])
+    hl.ensure_running.side_effect = [RuntimeError("failed spawn"), MagicMock()]
+    with patch("app.api._cached_info", AsyncMock(return_value=info)), \
+         patch("app.api._headless", return_value=True), \
+         patch("app.api._motivo_ocupada", AsyncMock(return_value=None)), \
+         patch("app.api.get_adapter", return_value=hl), \
+         patch("app.api.cliproxy.supports_fast", return_value=True), \
+         patch.object(api_mod.registry, "_forget"):
+        response = TestClient(api_mod.app).post("/api/sessions/hl/service-tier", headers=_H,
+                                               json={"service_tier": "priority"})
+    assert response.status_code == 409, response.text
+    assert S.load("hl")["service_tier"] == "default"
+    assert source.exists()
+    assert hl.ensure_running.await_count == 2
+
+
+@pytest.mark.parametrize("reason", ["erro_sessao_trabalhando", "erro_fila_pendente"])
+def test_proxy_fast_does_not_restart_busy_session(contas, tmp_path, reason):
+    import app.api as api_mod
+    a, _ = contas
+    S.save("hl", str(tmp_path), SID, config_dir=a, engine="proxy", model="gpt-5.5")
+    info = SessionInfo(name="hl", provider="claude", headless=True, engine="proxy")
+    hl = _hl([])
+    with patch("app.api._cached_info", AsyncMock(return_value=info)), \
+         patch("app.api._headless", return_value=True), \
+         patch("app.api._motivo_ocupada", AsyncMock(return_value=reason)), \
+         patch("app.api.get_adapter", return_value=hl), \
+         patch("app.api.cliproxy.supports_fast", return_value=True):
+        response = TestClient(api_mod.app).post("/api/sessions/hl/service-tier", headers=_H,
+                                               json={"service_tier": "priority"})
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == reason
+    hl.parar.assert_not_awaited()
+    assert S.load("hl").get("service_tier") is None
+
+
+@pytest.mark.parametrize("state,flags,queue,valid,reason", [
+    ("working", {"in_progress": True}, [], True, "erro_sessao_trabalhando"),
+    ("awaiting_input", {"pending": {}}, [], True, "erro_sessao_esperando_resposta"),
+    ("idle", {}, [{"delivered": False, "confirmed": True}], True, "erro_fila_pendente"),
+    ("idle", {}, [{"delivered": True, "confirmed": False}], True, "erro_fila_pendente"),
+    (None, {}, [], True, "erro_sessao_iniciando"),
+    ("idle", {}, [], False, "erro_sessao_iniciando"),
+    ("idle", {}, [], True, None),
+])
+def test_proxy_fast_checks_preserved_rust_view_after_owner_change(tmp_path, state, flags, queue, valid, reason):
+    import asyncio
+    import app.api as api_mod
+    from app.runtime_adapter import runtime_data
+    from app.runtime_coordinator import Binding, Phase, RuntimeCoordinator, Slot
+
+    binding = Binding(name="hl", key=SID, provider="claude", headless=True, meta={}, jsonl="",
+                      projection_dir=tmp_path, state_path=tmp_path / "state.json",
+                      lock_path=tmp_path / "lock", generation=1)
+    coordinator = RuntimeCoordinator()
+    coordinator.names["hl"] = SID
+    coordinator.slots[SID] = Slot(binding=binding, phase=Phase.Python, change_from_rust=True,
+                                  cache_valid=valid, view={"view": {
+                                      "initialized": True, "public_state": {"state": state}, **flags,
+                                  }})
+    with patch("app.runtime_coordinator.current", return_value=coordinator), \
+         patch("app.api.PromptQueue") as queues:
+        queues.return_value.load.return_value = queue
+        assert runtime_data("hl") is None
+        assert asyncio.run(api_mod._motivo_ocupada("hl", True)) == reason
+
+
+@pytest.mark.parametrize("current,expected", [("gpt-6.1-sol", "gpt-6.1-sol"), (None, "gpt-5.5")])
+def test_proxy_fast_selection_uses_current_terminal_model(contas, current, expected):
+    import app.api as api_mod
+    with patch.object(api_mod.registry, "_pane_of", return_value={"pid": 11, "cwd": "/tmp"}), \
+         patch.object(api_mod.registry, "resolve_tracked", return_value=(f"/tmp/{SID}.jsonl", True)), \
+         patch("app.registry._pid_do_agente", return_value=12), \
+         patch("app.procinfo._model_of", return_value=("gpt-5.5", "high")), \
+         patch("app.procinfo._env_var_of", return_value="priority"), \
+         patch("app.registry._escolhas_status", return_value=(current, "high")), \
+         patch("app.registry._claude_reading", side_effect=AssertionError("modelo histórico não é escolha atual")):
+        assert api_mod._engine_fast_selection("terminal") == (expected, "priority")
+
+
 def test_proxy_account_move_preserves_storage_permission_and_conversation(contas, tmp_path):
     import app.api as api_mod
     a, _ = contas

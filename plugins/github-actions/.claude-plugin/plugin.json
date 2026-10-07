@@ -1,0 +1,6 @@
+{
+  "name": "github-actions",
+  "version": "0.1.0",
+  "description": "Faixa acima do prompt com os GitHub Actions e o PR da branch da sessão.",
+  "types": "./types/index.d.ts"
+}

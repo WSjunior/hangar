@@ -255,6 +255,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_sessao_opcao_nao_enviada: () => m.erro_sessao_opcao_nao_enviada(),
   erro_opcao_nao_convergiu: (p) => m.erro_opcao_nao_convergiu({ detalhe: String(p.detalhe) }),
   erro_opcao_fora_da_lista: () => m.erro_opcao_fora_da_lista(),
+  erro_lista_indisponivel: (p) => m.erro_lista_indisponivel({ detalhe: String(p.detalhe) }),
   erro_mux_indisponivel: (p) => m.erro_mux_indisponivel({ detalhe: String(p.detalhe) }),
   erro_workflow_inexistente: () => m.erro_workflow_inexistente(),
   erro_agente_inexistente: () => m.erro_agente_inexistente(),
@@ -295,6 +296,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_fila_nao_entregue: () => m.erro_fila_nao_entregue(),
   erro_envio_falhou_desconhecida: () => m.erro_envio_falhou_desconhecida(),
   erro_envio_falhou: (p) => m.erro_envio_falhou({ erro: fmtParam(p.erro) }),
+  erro_comando_nao_executado: (p) => m.erro_comando_nao_executado({ comando: fmtParam(p.comando), motivo: fmtParam(p.motivo) }),
   erro_group_message_slash: () => m.erro_group_message_slash(),
   erro_group_message_resposta: () => m.erro_group_message_resposta(),
   erro_group_message_tempestade: (p) => m.erro_group_message_tempestade({ max: fmtParam(p.max), janela: fmtParam(p.janela) }),
@@ -316,6 +318,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
 
   // Estado errado: terminal aberto, sessao trabalhando, loop ativo
   erro_terminal_aberto: () => m.erro_terminal_aberto(),
+  erro_terminal_indisponivel: (p) => m.erro_terminal_indisponivel({ detalhe: String(p.detalhe) }),
   erro_btw_so_claude: () => m.erro_btw_so_claude(),
   erro_btw_sem_conversa: () => m.erro_btw_sem_conversa(),
   erro_btw_fork_falhou: () => m.erro_btw_fork_falhou(),
@@ -383,6 +386,23 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_arq_nao_e_repo_git: () => m.erro_arq_nao_e_repo_git(),
   erro_arq_busca_vazia: () => m.erro_arq_busca_vazia(),
   erro_arq_busca_falhou: (p) => m.erro_arq_busca_falhou({ msg: String(p.msg) }),
+  // Git/arquivos que o Rust não rodou: 503 com o motivo, nunca repassado ao Python.
+  workspace_busy: () => m.workspace_busy(),
+  workspace_context: (p) => m.workspace_context({ motivo: String(p.motivo ?? '') }),
+  workspace_unavailable: (p) => m.workspace_unavailable({ motivo: String(p.motivo ?? '') }),
+  internal_info: () => m.history_internal_info(),
+  costs_no_scopes: () => m.costs_no_scopes(),
+  costs_no_disk: () => m.costs_no_disk(),
+  costs_reader_panic: () => m.costs_reader_panic(),
+  costs_sqlite: () => m.costs_sqlite(),
+  costs_json: () => m.costs_json(),
+  costs_worker_join: () => m.costs_worker_join(),
+  costs_io: () => m.costs_io(),
+  costs_non_finite: () => m.costs_non_finite(),
+  history_io: () => m.history_io(),
+  history_panic: () => m.history_panic(),
+  workspace_request_too_large: () => m.workspace_request_too_large(),
+  workspace_invalid_request: () => m.workspace_invalid_request(),
   erro_arq_modo_invalido: () => m.erro_arq_modo_invalido(),
   erro_git_diff: (p) => m.erro_git_diff({ msg: String(p.msg) }),
 
@@ -479,7 +499,24 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_mod_clique_sem_resposta: () => m.erro_mod_clique_sem_resposta(),
   erro_mod_botao_inexistente: () => m.erro_mod_botao_inexistente(),
   erro_mod_terminal_em_modo: () => m.erro_mod_terminal_em_modo(),
+  erro_mod_sem_digitacao: () => m.erro_mod_sem_digitacao(),
+  erro_mod_desenho_vencido: () => m.erro_mod_desenho_vencido(),
+  erro_mod_dialogo_aberto: () => m.erro_mod_dialogo_aberto(),
+  erro_mod_rascunho_no_prompt: () => m.erro_mod_rascunho_no_prompt(),
+  erro_mod_painel_nao_alcancavel: () => m.erro_mod_painel_nao_alcancavel(),
+  erro_mod_fechar_recusado: () => m.erro_mod_fechar_recusado(),
+  erro_mod_guarda_indisponivel: () => m.erro_mod_guarda_indisponivel(),
+  erro_mod_painel_inexistente: () => m.erro_mod_painel_inexistente(),
+  erro_mod_convidado: () => m.erro_mod_convidado(),
+  // Troca de agente em curso: o Python recusa com este código, e o Rust o repassa nas rotas dos mods.
+  session_transfer_busy: () => m.session_transfer_busy(),
 };
+
+// Falha com código do servidor (503 do dono único): a frase traduzida já está no `message`.
+// Erro sem código (rede, HTTP sem envelope) fica com a frase genérica de quem chama.
+export function motivoDoServidor(e: unknown): string | null {
+  return e instanceof Error && typeof (e as { code?: unknown }).code === 'string' && e.message ? e.message : null;
+}
 
 export function mensagemDeErro(code: string, params: Parametros = {}): string | undefined {
   // Propriedade PROPRIA, nunca a leitura crua: nome herdado do prototipo (toString, constructor,

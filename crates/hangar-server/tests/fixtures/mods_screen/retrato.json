@@ -1,0 +1,3588 @@
+[
+  {
+    "name": "tmux-01-tres-paineis-150",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "dock",
+      "border": 89,
+      "box": null,
+      "tab_row": 0,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 90,
+          "end": 99,
+          "active": false
+        },
+        {
+          "index": 1,
+          "start": 101,
+          "end": 107,
+          "active": false
+        },
+        {
+          "index": 2,
+          "start": 109,
+          "end": 117,
+          "active": true
+        }
+      ],
+      "active": 2,
+      "close": [
+        0,
+        148
+      ],
+      "body": {
+        "rows": [
+          1,
+          40
+        ],
+        "lo": 90,
+        "hi": 150
+      },
+      "band": {
+        "rows": [
+          38,
+          40
+        ],
+        "lo": 0,
+        "hi": 89
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "prompt",
+      "draft": ""
+    },
+    "cells": [
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150
+    ]
+  },
+  {
+    "name": "tmux-02-apos-clicar-mr-150",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "dock",
+      "border": 89,
+      "box": null,
+      "tab_row": 0,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 90,
+          "end": 99,
+          "active": false
+        },
+        {
+          "index": 1,
+          "start": 101,
+          "end": 107,
+          "active": true
+        },
+        {
+          "index": 2,
+          "start": 109,
+          "end": 117,
+          "active": false
+        }
+      ],
+      "active": 1,
+      "close": [
+        0,
+        148
+      ],
+      "body": {
+        "rows": [
+          1,
+          40
+        ],
+        "lo": 90,
+        "hi": 150
+      },
+      "band": {
+        "rows": [
+          38,
+          40
+        ],
+        "lo": 0,
+        "hi": 89
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "prompt",
+      "draft": ""
+    },
+    "cells": [
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150
+    ]
+  },
+  {
+    "name": "tmux-05-antes-de-fechar-150",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "dock",
+      "border": 89,
+      "box": null,
+      "tab_row": 0,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 90,
+          "end": 99,
+          "active": true
+        },
+        {
+          "index": 1,
+          "start": 101,
+          "end": 107,
+          "active": false
+        },
+        {
+          "index": 2,
+          "start": 109,
+          "end": 117,
+          "active": false
+        }
+      ],
+      "active": 0,
+      "close": [
+        0,
+        148
+      ],
+      "body": {
+        "rows": [
+          1,
+          40
+        ],
+        "lo": 90,
+        "hi": 150
+      },
+      "band": {
+        "rows": [
+          38,
+          40
+        ],
+        "lo": 0,
+        "hi": 89
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "prompt",
+      "draft": ""
+    },
+    "cells": [
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150
+    ]
+  },
+  {
+    "name": "tmux-06-apos-clicar-fechar-150",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": null,
+      "border": null,
+      "box": null,
+      "tab_row": null,
+      "tabs": [],
+      "active": null,
+      "close": null,
+      "body": null,
+      "band": {
+        "rows": [
+          38,
+          40
+        ],
+        "lo": 0,
+        "hi": 150
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "prompt",
+      "draft": ""
+    },
+    "cells": [
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150
+    ]
+  },
+  {
+    "name": "tmux-132-um-painel-150",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "dock",
+      "border": 89,
+      "box": null,
+      "tab_row": 0,
+      "tabs": [],
+      "active": 0,
+      "close": [
+        0,
+        148
+      ],
+      "body": {
+        "rows": [
+          1,
+          40
+        ],
+        "lo": 90,
+        "hi": 150
+      },
+      "band": {
+        "rows": [
+          38,
+          40
+        ],
+        "lo": 0,
+        "hi": 89
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "prompt",
+      "draft": ""
+    },
+    "cells": [
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150
+    ]
+  },
+  {
+    "name": "tmux-100-caixa-100",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "inline",
+      "border": null,
+      "box": [
+        23,
+        37
+      ],
+      "tab_row": 24,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 2,
+          "end": 11,
+          "active": true
+        },
+        {
+          "index": 1,
+          "start": 13,
+          "end": 19,
+          "active": false
+        },
+        {
+          "index": 2,
+          "start": 21,
+          "end": 29,
+          "active": false
+        }
+      ],
+      "active": 0,
+      "close": [
+        23,
+        97
+      ],
+      "body": {
+        "rows": [
+          25,
+          37
+        ],
+        "lo": 1,
+        "hi": 99
+      },
+      "band": {
+        "rows": [
+          38,
+          40
+        ],
+        "lo": 0,
+        "hi": 100
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "prompt",
+      "draft": ""
+    },
+    "cells": [
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100
+    ]
+  },
+  {
+    "name": "tmux-133-um-painel-caixa-100",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "inline",
+      "border": null,
+      "box": [
+        23,
+        37
+      ],
+      "tab_row": 24,
+      "tabs": [],
+      "active": 0,
+      "close": [
+        23,
+        97
+      ],
+      "body": {
+        "rows": [
+          24,
+          37
+        ],
+        "lo": 1,
+        "hi": 99
+      },
+      "band": {
+        "rows": [
+          38,
+          40
+        ],
+        "lo": 0,
+        "hi": 100
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "prompt",
+      "draft": ""
+    },
+    "cells": [
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100
+    ]
+  },
+  {
+    "name": "tmux-102-caixa-focada-100",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "inline",
+      "border": null,
+      "box": [
+        23,
+        37
+      ],
+      "tab_row": 24,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 2,
+          "end": 11,
+          "active": true
+        },
+        {
+          "index": 1,
+          "start": 13,
+          "end": 19,
+          "active": false
+        },
+        {
+          "index": 2,
+          "start": 21,
+          "end": 29,
+          "active": false
+        }
+      ],
+      "active": 0,
+      "close": [
+        23,
+        97
+      ],
+      "body": {
+        "rows": [
+          25,
+          37
+        ],
+        "lo": 1,
+        "hi": 99
+      },
+      "band": {
+        "rows": [
+          38,
+          40
+        ],
+        "lo": 0,
+        "hi": 100
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "pane",
+      "draft": ""
+    },
+    "cells": [
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100
+    ]
+  },
+  {
+    "name": "tmux-20-painel-focado-150",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "dock",
+      "border": 89,
+      "box": null,
+      "tab_row": 0,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 90,
+          "end": 99,
+          "active": true
+        },
+        {
+          "index": 1,
+          "start": 101,
+          "end": 107,
+          "active": false
+        },
+        {
+          "index": 2,
+          "start": 109,
+          "end": 117,
+          "active": false
+        }
+      ],
+      "active": 0,
+      "close": [
+        0,
+        148
+      ],
+      "body": {
+        "rows": [
+          1,
+          40
+        ],
+        "lo": 90,
+        "hi": 150
+      },
+      "band": {
+        "rows": [
+          38,
+          40
+        ],
+        "lo": 0,
+        "hi": 89
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "pane",
+      "draft": ""
+    },
+    "cells": [
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150
+    ]
+  },
+  {
+    "name": "tmux-21-anel-em-aba-inativa-150",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "dock",
+      "border": 89,
+      "box": null,
+      "tab_row": 0,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 90,
+          "end": 99,
+          "active": true
+        },
+        {
+          "index": 1,
+          "start": 101,
+          "end": 107,
+          "active": false
+        },
+        {
+          "index": 2,
+          "start": 109,
+          "end": 117,
+          "active": false
+        }
+      ],
+      "active": 0,
+      "close": [
+        0,
+        148
+      ],
+      "body": {
+        "rows": [
+          1,
+          40
+        ],
+        "lo": 90,
+        "hi": 150
+      },
+      "band": {
+        "rows": [
+          38,
+          40
+        ],
+        "lo": 0,
+        "hi": 89
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "pane",
+      "draft": ""
+    },
+    "cells": [
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150
+    ]
+  },
+  {
+    "name": "tmux-140-faixa-recolhida-150",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "dock",
+      "border": 89,
+      "box": null,
+      "tab_row": 0,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 90,
+          "end": 99,
+          "active": true
+        },
+        {
+          "index": 1,
+          "start": 101,
+          "end": 107,
+          "active": false
+        },
+        {
+          "index": 2,
+          "start": 109,
+          "end": 117,
+          "active": false
+        }
+      ],
+      "active": 0,
+      "close": [
+        0,
+        148
+      ],
+      "body": {
+        "rows": [
+          1,
+          40
+        ],
+        "lo": 90,
+        "hi": 150
+      },
+      "band": {
+        "rows": [
+          38,
+          39
+        ],
+        "lo": 0,
+        "hi": 89
+      },
+      "band_state": "collapsed",
+      "collapsed_row": 38,
+      "focus": "prompt",
+      "draft": ""
+    },
+    "cells": [
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150
+    ]
+  },
+  {
+    "name": "tmux-452-faixa-expandida-150",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "dock",
+      "border": 89,
+      "box": null,
+      "tab_row": 0,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 90,
+          "end": 99,
+          "active": true
+        },
+        {
+          "index": 1,
+          "start": 101,
+          "end": 107,
+          "active": false
+        },
+        {
+          "index": 2,
+          "start": 109,
+          "end": 117,
+          "active": false
+        }
+      ],
+      "active": 0,
+      "close": [
+        0,
+        148
+      ],
+      "body": {
+        "rows": [
+          1,
+          40
+        ],
+        "lo": 90,
+        "hi": 150
+      },
+      "band": {
+        "rows": [
+          34,
+          40
+        ],
+        "lo": 0,
+        "hi": 89
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "prompt",
+      "draft": ""
+    },
+    "cells": [
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150
+    ]
+  },
+  {
+    "name": "tmux-240-caixa-104",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "inline",
+      "border": null,
+      "box": [
+        23,
+        37
+      ],
+      "tab_row": 24,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 2,
+          "end": 8,
+          "active": false
+        },
+        {
+          "index": 1,
+          "start": 10,
+          "end": 17,
+          "active": false
+        },
+        {
+          "index": 2,
+          "start": 19,
+          "end": 25,
+          "active": true
+        }
+      ],
+      "active": 2,
+      "close": [
+        23,
+        101
+      ],
+      "body": {
+        "rows": [
+          25,
+          37
+        ],
+        "lo": 1,
+        "hi": 103
+      },
+      "band": {
+        "rows": [
+          38,
+          39
+        ],
+        "lo": 0,
+        "hi": 104
+      },
+      "band_state": "shrunk",
+      "collapsed_row": null,
+      "focus": "prompt",
+      "draft": ""
+    },
+    "cells": [
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104,
+      104
+    ]
+  },
+  {
+    "name": "tmux-240-ao-lado-110",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "dock",
+      "border": 70,
+      "box": null,
+      "tab_row": 0,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 71,
+          "end": 77,
+          "active": false
+        },
+        {
+          "index": 1,
+          "start": 79,
+          "end": 86,
+          "active": false
+        },
+        {
+          "index": 2,
+          "start": 88,
+          "end": 94,
+          "active": true
+        }
+      ],
+      "active": 2,
+      "close": [
+        0,
+        108
+      ],
+      "body": {
+        "rows": [
+          1,
+          40
+        ],
+        "lo": 71,
+        "hi": 110
+      },
+      "band": {
+        "rows": [
+          38,
+          40
+        ],
+        "lo": 0,
+        "hi": 70
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "prompt",
+      "draft": ""
+    },
+    "cells": [
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110
+    ]
+  },
+  {
+    "name": "tmux-240-caixa-109",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "inline",
+      "border": null,
+      "box": [
+        23,
+        37
+      ],
+      "tab_row": 24,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 2,
+          "end": 8,
+          "active": false
+        },
+        {
+          "index": 1,
+          "start": 10,
+          "end": 17,
+          "active": false
+        },
+        {
+          "index": 2,
+          "start": 19,
+          "end": 25,
+          "active": true
+        }
+      ],
+      "active": 2,
+      "close": [
+        23,
+        106
+      ],
+      "body": {
+        "rows": [
+          25,
+          37
+        ],
+        "lo": 1,
+        "hi": 108
+      },
+      "band": {
+        "rows": [
+          38,
+          39
+        ],
+        "lo": 0,
+        "hi": 109
+      },
+      "band_state": "shrunk",
+      "collapsed_row": null,
+      "focus": "prompt",
+      "draft": ""
+    },
+    "cells": [
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109,
+      109
+    ]
+  },
+  {
+    "name": "tmux-262-abas-transbordando-150",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "dock",
+      "border": 83,
+      "box": null,
+      "tab_row": 0,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 84,
+          "end": 90,
+          "active": false
+        },
+        {
+          "index": 1,
+          "start": 92,
+          "end": 99,
+          "active": false
+        },
+        {
+          "index": 2,
+          "start": 101,
+          "end": 107,
+          "active": true
+        },
+        {
+          "index": 3,
+          "start": 109,
+          "end": 115,
+          "active": false
+        },
+        {
+          "index": 4,
+          "start": 117,
+          "end": 126,
+          "active": false
+        },
+        {
+          "index": 5,
+          "start": 128,
+          "end": 137,
+          "active": false
+        },
+        {
+          "index": 6,
+          "start": 139,
+          "end": 145,
+          "active": false
+        }
+      ],
+      "active": 2,
+      "close": [
+        0,
+        148
+      ],
+      "body": {
+        "rows": [
+          1,
+          40
+        ],
+        "lo": 84,
+        "hi": 150
+      },
+      "band": {
+        "rows": [
+          38,
+          40
+        ],
+        "lo": 0,
+        "hi": 83
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "prompt",
+      "draft": ""
+    },
+    "cells": [
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150
+    ]
+  },
+  {
+    "name": "tmux-510-dialogo-150",
+    "screen": {
+      "prompt": null,
+      "dialog": true,
+      "survey": false,
+      "placement": "dock",
+      "border": 89,
+      "box": null,
+      "tab_row": 0,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 90,
+          "end": 99,
+          "active": true
+        },
+        {
+          "index": 1,
+          "start": 101,
+          "end": 107,
+          "active": false
+        },
+        {
+          "index": 2,
+          "start": 109,
+          "end": 117,
+          "active": false
+        }
+      ],
+      "active": 0,
+      "close": [
+        0,
+        148
+      ],
+      "body": {
+        "rows": [
+          1,
+          45
+        ],
+        "lo": 90,
+        "hi": 150
+      },
+      "band": null,
+      "band_state": "absent",
+      "collapsed_row": null,
+      "focus": null,
+      "draft": ""
+    },
+    "cells": [
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150
+    ]
+  },
+  {
+    "name": "tmux-122-sem-tela-cheia-150",
+    "screen": {
+      "prompt": 21,
+      "dialog": false,
+      "survey": false,
+      "placement": "inline",
+      "border": null,
+      "box": [
+        4,
+        18
+      ],
+      "tab_row": 5,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 2,
+          "end": 11,
+          "active": false
+        },
+        {
+          "index": 1,
+          "start": 13,
+          "end": 19,
+          "active": false
+        },
+        {
+          "index": 2,
+          "start": 21,
+          "end": 29,
+          "active": true
+        }
+      ],
+      "active": 2,
+      "close": [
+        4,
+        147
+      ],
+      "body": {
+        "rows": [
+          6,
+          18
+        ],
+        "lo": 1,
+        "hi": 149
+      },
+      "band": {
+        "rows": [
+          19,
+          21
+        ],
+        "lo": 0,
+        "hi": 150
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "band",
+      "draft": ""
+    },
+    "cells": [
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150
+    ]
+  },
+  {
+    "name": "tmux-400-vitrine-abas-150",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "dock",
+      "border": 83,
+      "box": null,
+      "tab_row": 0,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 84,
+          "end": 90,
+          "active": false
+        },
+        {
+          "index": 1,
+          "start": 92,
+          "end": 99,
+          "active": false
+        },
+        {
+          "index": 2,
+          "start": 101,
+          "end": 107,
+          "active": true
+        }
+      ],
+      "active": 2,
+      "close": [
+        0,
+        148
+      ],
+      "body": {
+        "rows": [
+          1,
+          40
+        ],
+        "lo": 84,
+        "hi": 150
+      },
+      "band": {
+        "rows": [
+          34,
+          40
+        ],
+        "lo": 0,
+        "hi": 83
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "prompt",
+      "draft": ""
+    },
+    "cells": [
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150
+    ]
+  },
+  {
+    "name": "tmux-402-vitrine-texto-150",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "dock",
+      "border": 83,
+      "box": null,
+      "tab_row": 0,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 84,
+          "end": 90,
+          "active": true
+        },
+        {
+          "index": 1,
+          "start": 92,
+          "end": 99,
+          "active": false
+        },
+        {
+          "index": 2,
+          "start": 101,
+          "end": 107,
+          "active": false
+        }
+      ],
+      "active": 0,
+      "close": [
+        0,
+        148
+      ],
+      "body": {
+        "rows": [
+          1,
+          40
+        ],
+        "lo": 84,
+        "hi": 150
+      },
+      "band": {
+        "rows": [
+          34,
+          40
+        ],
+        "lo": 0,
+        "hi": 83
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "prompt",
+      "draft": ""
+    },
+    "cells": [
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150
+    ]
+  },
+  {
+    "name": "tmux-14-ciclo-4-prompt",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "dock",
+      "border": 89,
+      "box": null,
+      "tab_row": 0,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 90,
+          "end": 99,
+          "active": false
+        },
+        {
+          "index": 1,
+          "start": 101,
+          "end": 107,
+          "active": false
+        },
+        {
+          "index": 2,
+          "start": 109,
+          "end": 117,
+          "active": true
+        }
+      ],
+      "active": 2,
+      "close": [
+        0,
+        148
+      ],
+      "body": {
+        "rows": [
+          1,
+          40
+        ],
+        "lo": 90,
+        "hi": 150
+      },
+      "band": {
+        "rows": [
+          38,
+          40
+        ],
+        "lo": 0,
+        "hi": 89
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "prompt",
+      "draft": ""
+    },
+    "cells": [
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150
+    ]
+  },
+  {
+    "name": "tmux-14-ciclo-5-faixa",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "dock",
+      "border": 89,
+      "box": null,
+      "tab_row": 0,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 90,
+          "end": 99,
+          "active": false
+        },
+        {
+          "index": 1,
+          "start": 101,
+          "end": 107,
+          "active": false
+        },
+        {
+          "index": 2,
+          "start": 109,
+          "end": 117,
+          "active": true
+        }
+      ],
+      "active": 2,
+      "close": [
+        0,
+        148
+      ],
+      "body": {
+        "rows": [
+          1,
+          40
+        ],
+        "lo": 90,
+        "hi": 150
+      },
+      "band": {
+        "rows": [
+          38,
+          40
+        ],
+        "lo": 0,
+        "hi": 89
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "band",
+      "draft": ""
+    },
+    "cells": [
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150
+    ]
+  },
+  {
+    "name": "tmux-14-ciclo-6-painel-1",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "dock",
+      "border": 89,
+      "box": null,
+      "tab_row": 0,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 90,
+          "end": 99,
+          "active": true
+        },
+        {
+          "index": 1,
+          "start": 101,
+          "end": 107,
+          "active": false
+        },
+        {
+          "index": 2,
+          "start": 109,
+          "end": 117,
+          "active": false
+        }
+      ],
+      "active": 0,
+      "close": [
+        0,
+        148
+      ],
+      "body": {
+        "rows": [
+          1,
+          40
+        ],
+        "lo": 90,
+        "hi": 150
+      },
+      "band": {
+        "rows": [
+          38,
+          40
+        ],
+        "lo": 0,
+        "hi": 89
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "pane",
+      "draft": ""
+    },
+    "cells": [
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150
+    ]
+  },
+  {
+    "name": "tmux-14-ciclo-7-painel-2",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "dock",
+      "border": 89,
+      "box": null,
+      "tab_row": 0,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 90,
+          "end": 99,
+          "active": false
+        },
+        {
+          "index": 1,
+          "start": 101,
+          "end": 107,
+          "active": true
+        },
+        {
+          "index": 2,
+          "start": 109,
+          "end": 117,
+          "active": false
+        }
+      ],
+      "active": 1,
+      "close": [
+        0,
+        148
+      ],
+      "body": {
+        "rows": [
+          1,
+          40
+        ],
+        "lo": 90,
+        "hi": 150
+      },
+      "band": {
+        "rows": [
+          38,
+          40
+        ],
+        "lo": 0,
+        "hi": 89
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "pane",
+      "draft": ""
+    },
+    "cells": [
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150
+    ]
+  },
+  {
+    "name": "tmux-14-ciclo-8-painel-3",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "dock",
+      "border": 89,
+      "box": null,
+      "tab_row": 0,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 90,
+          "end": 99,
+          "active": false
+        },
+        {
+          "index": 1,
+          "start": 101,
+          "end": 107,
+          "active": false
+        },
+        {
+          "index": 2,
+          "start": 109,
+          "end": 117,
+          "active": true
+        }
+      ],
+      "active": 2,
+      "close": [
+        0,
+        148
+      ],
+      "body": {
+        "rows": [
+          1,
+          40
+        ],
+        "lo": 90,
+        "hi": 150
+      },
+      "band": {
+        "rows": [
+          38,
+          40
+        ],
+        "lo": 0,
+        "hi": 89
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "pane",
+      "draft": ""
+    },
+    "cells": [
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150
+    ]
+  },
+  {
+    "name": "tmux-14-ciclo-9-prompt",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "dock",
+      "border": 89,
+      "box": null,
+      "tab_row": 0,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 90,
+          "end": 99,
+          "active": false
+        },
+        {
+          "index": 1,
+          "start": 101,
+          "end": 107,
+          "active": false
+        },
+        {
+          "index": 2,
+          "start": 109,
+          "end": 117,
+          "active": true
+        }
+      ],
+      "active": 2,
+      "close": [
+        0,
+        148
+      ],
+      "body": {
+        "rows": [
+          1,
+          40
+        ],
+        "lo": 90,
+        "hi": 150
+      },
+      "band": {
+        "rows": [
+          38,
+          40
+        ],
+        "lo": 0,
+        "hi": 89
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "prompt",
+      "draft": ""
+    },
+    "cells": [
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150
+    ]
+  },
+  {
+    "name": "tmux-440-rascunho-150",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "dock",
+      "border": 89,
+      "box": null,
+      "tab_row": 0,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 90,
+          "end": 99,
+          "active": false
+        },
+        {
+          "index": 1,
+          "start": 101,
+          "end": 107,
+          "active": false
+        },
+        {
+          "index": 2,
+          "start": 109,
+          "end": 117,
+          "active": true
+        }
+      ],
+      "active": 2,
+      "close": [
+        0,
+        148
+      ],
+      "body": {
+        "rows": [
+          1,
+          40
+        ],
+        "lo": 90,
+        "hi": 150
+      },
+      "band": {
+        "rows": [
+          34,
+          40
+        ],
+        "lo": 0,
+        "hi": 89
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "prompt",
+      "draft": "rascunho de teste"
+    },
+    "cells": [
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150
+    ]
+  },
+  {
+    "name": "tmux-230-longo-topo-150",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "dock",
+      "border": 79,
+      "box": null,
+      "tab_row": 0,
+      "tabs": [],
+      "active": 0,
+      "close": [
+        0,
+        148
+      ],
+      "body": {
+        "rows": [
+          1,
+          40
+        ],
+        "lo": 80,
+        "hi": 150
+      },
+      "band": {
+        "rows": [
+          38,
+          40
+        ],
+        "lo": 0,
+        "hi": 79
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "prompt",
+      "draft": ""
+    },
+    "cells": [
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150
+    ]
+  },
+  {
+    "name": "tmux-232-longo-meio-150",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "dock",
+      "border": 79,
+      "box": null,
+      "tab_row": 0,
+      "tabs": [],
+      "active": 0,
+      "close": [
+        0,
+        148
+      ],
+      "body": {
+        "rows": [
+          1,
+          40
+        ],
+        "lo": 80,
+        "hi": 150
+      },
+      "band": {
+        "rows": [
+          38,
+          40
+        ],
+        "lo": 0,
+        "hi": 79
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "prompt",
+      "draft": ""
+    },
+    "cells": [
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150
+    ]
+  },
+  {
+    "name": "psmux-01-tres-paineis-150",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "dock",
+      "border": 89,
+      "box": null,
+      "tab_row": 0,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 90,
+          "end": 99,
+          "active": false
+        },
+        {
+          "index": 1,
+          "start": 101,
+          "end": 107,
+          "active": false
+        },
+        {
+          "index": 2,
+          "start": 109,
+          "end": 117,
+          "active": true
+        }
+      ],
+      "active": 2,
+      "close": [
+        0,
+        148
+      ],
+      "body": {
+        "rows": [
+          1,
+          40
+        ],
+        "lo": 90,
+        "hi": 150
+      },
+      "band": {
+        "rows": [
+          38,
+          40
+        ],
+        "lo": 0,
+        "hi": 89
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "prompt",
+      "draft": ""
+    },
+    "cells": [
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150
+    ]
+  },
+  {
+    "name": "psmux-100-caixa-100",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "inline",
+      "border": null,
+      "box": [
+        23,
+        37
+      ],
+      "tab_row": 24,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 2,
+          "end": 11,
+          "active": true
+        },
+        {
+          "index": 1,
+          "start": 13,
+          "end": 19,
+          "active": false
+        },
+        {
+          "index": 2,
+          "start": 21,
+          "end": 29,
+          "active": false
+        }
+      ],
+      "active": 0,
+      "close": [
+        23,
+        97
+      ],
+      "body": {
+        "rows": [
+          25,
+          37
+        ],
+        "lo": 1,
+        "hi": 99
+      },
+      "band": {
+        "rows": [
+          38,
+          40
+        ],
+        "lo": 0,
+        "hi": 100
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "prompt",
+      "draft": ""
+    },
+    "cells": [
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100
+    ]
+  },
+  {
+    "name": "psmux-700-dialogo-com-caixa-100",
+    "screen": {
+      "prompt": null,
+      "dialog": true,
+      "survey": false,
+      "placement": null,
+      "border": null,
+      "box": null,
+      "tab_row": null,
+      "tabs": [],
+      "active": null,
+      "close": null,
+      "body": null,
+      "band": null,
+      "band_state": "absent",
+      "collapsed_row": null,
+      "focus": null,
+      "draft": ""
+    },
+    "cells": [
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100
+    ]
+  },
+  {
+    "name": "psmux-710-pesquisa-150",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": true,
+      "placement": "dock",
+      "border": 89,
+      "box": null,
+      "tab_row": 0,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 90,
+          "end": 99,
+          "active": true
+        },
+        {
+          "index": 1,
+          "start": 101,
+          "end": 107,
+          "active": false
+        },
+        {
+          "index": 2,
+          "start": 109,
+          "end": 117,
+          "active": false
+        }
+      ],
+      "active": 0,
+      "close": [
+        0,
+        148
+      ],
+      "body": {
+        "rows": [
+          1,
+          40
+        ],
+        "lo": 90,
+        "hi": 150
+      },
+      "band": null,
+      "band_state": "absent",
+      "collapsed_row": null,
+      "focus": "prompt",
+      "draft": ""
+    },
+    "cells": [
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150
+    ]
+  },
+  {
+    "name": "psmux-240-vitrine-110",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "dock",
+      "border": 70,
+      "box": null,
+      "tab_row": 0,
+      "tabs": [
+        {
+          "index": 0,
+          "start": 71,
+          "end": 77,
+          "active": false
+        },
+        {
+          "index": 1,
+          "start": 79,
+          "end": 86,
+          "active": false
+        },
+        {
+          "index": 2,
+          "start": 88,
+          "end": 94,
+          "active": true
+        }
+      ],
+      "active": 2,
+      "close": [
+        0,
+        108
+      ],
+      "body": {
+        "rows": [
+          1,
+          40
+        ],
+        "lo": 71,
+        "hi": 110
+      },
+      "band": {
+        "rows": [
+          34,
+          40
+        ],
+        "lo": 0,
+        "hi": 70
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "prompt",
+      "draft": ""
+    },
+    "cells": [
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110,
+      110
+    ]
+  },
+  {
+    "name": "tmux-160-sessao-com-nome-150",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": null,
+      "border": null,
+      "box": null,
+      "tab_row": null,
+      "tabs": [],
+      "active": null,
+      "close": null,
+      "body": null,
+      "band": {
+        "rows": [
+          38,
+          40
+        ],
+        "lo": 0,
+        "hi": 150
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "prompt",
+      "draft": ""
+    },
+    "cells": [
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150
+    ]
+  },
+  {
+    "name": "tmux-161-sessao-com-nome-painel-150",
+    "screen": {
+      "prompt": 40,
+      "dialog": false,
+      "survey": false,
+      "placement": "dock",
+      "border": 89,
+      "box": null,
+      "tab_row": 0,
+      "tabs": [],
+      "active": 0,
+      "close": [
+        0,
+        148
+      ],
+      "body": {
+        "rows": [
+          1,
+          40
+        ],
+        "lo": 90,
+        "hi": 150
+      },
+      "band": {
+        "rows": [
+          38,
+          40
+        ],
+        "lo": 0,
+        "hi": 89
+      },
+      "band_state": "full",
+      "collapsed_row": null,
+      "focus": "prompt",
+      "draft": ""
+    },
+    "cells": [
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150,
+      150
+    ]
+  }
+]

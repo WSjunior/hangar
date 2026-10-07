@@ -10,9 +10,10 @@ GET /control/palette?status=<200|403|404>&escuro=<true|false>&delay=<s> sets wha
 each request keeps the values it saw on arrival, so a slow old answer can land after a fast new one.
 GET /control/wallpaper?status=<200|403|404>&path=<image file> sets what GET /api/desktop/wallpaper answers.
 GET /control/r4?rate=<n|none>&rate_status=<200|500>&rate_delay=<s>&diag=<ok|empty|404|500>&diag_delay=<s>
-&update=<ok|fail|409|drop>&behind=<n>&about_delay=<s>&diag_file=<200|500> sets the Geral/Diário/Sobre routes (only the given keys change).
+&update=<ok|fail|avisos|409|drop>&behind=<n>&about_delay=<s>&diag_file=<200|500> sets the Geral/Diário/Sobre routes (only the given keys change).
 POST /api/atualizacao/iniciar is FAKE: it only walks a synthetic state (5 steps, a 4 s "restart" in which
-GET /api/atualizacao drops the connection, then the outcome). Nothing is updated or restarted anywhere.
+GET /api/atualizacao drops the connection, then the outcome with `pid` 0, the one the start answers; update=avisos ends
+ok with the warnings the real engine leaves in `avisos`). Nothing is updated or restarted anywhere.
 Contas e modelos (Task 12 R5) moram em parity_accounts_fixture.py; GET /control/r5 muda como elas respondem.
 GET /control/r6?load=<ok|500|drop>&load_delay=<s>&save=<ok|422|500|drop>&save_delay=<s>&shortcuts=<fixture|json|>
 muda a config de atalhos (Task 12 R6): POST /api/config {"shortcuts"} grava na memória, null apaga o override.
@@ -69,11 +70,12 @@ DIAG_LINES = [
      for m in range(59, 43, -1)]
 
 
-def update_walk(fail):
+def update_walk(fail, warnings=False):
     """Estado sintético da atualização; o "reinício" derruba as leituras por 4 s."""
     for n, text in enumerate(UPDATE_STEPS, 1):
         with LOCK:
-            UPDATE["estado"] = {"fase": "rodando", "passo": n, "total": len(UPDATE_STEPS), "texto": text, "ts": time.strftime("%Y-%m-%dT%H:%M:%S-03:00")}
+            UPDATE["estado"] = {"fase": "rodando", "passo": n, "total": len(UPDATE_STEPS), "texto": text, "pid": 0,
+                                "ts": time.strftime("%Y-%m-%dT%H:%M:%S-03:00")}
         time.sleep(1.2)
     with LOCK:
         R4["offline_until"] = time.time() + 4
@@ -81,11 +83,13 @@ def update_walk(fail):
     with LOCK:
         now = time.strftime("%Y-%m-%dT%H:%M:%S-03:00")
         if fail:
-            UPDATE["estado"] = {"fase": "pronto", "ok": False, "erro": "npm ci falhou (sintético)", "voltou": True, "ts": now}
+            UPDATE["estado"] = {"fase": "pronto", "ok": False, "erro": "npm ci falhou (sintético)", "voltou": True, "pid": 0, "ts": now}
         else:
             UPDATE["backend"] = UPDATE["repo"] = "2026.09.24-def5678"
             R4["behind"] = 0
-            UPDATE["estado"] = {"fase": "pronto", "ok": True, "texto": "Atualizado", "ts": now}
+            UPDATE["estado"] = {"fase": "pronto", "ok": True, "texto": "Atualizado", "pid": 0, "ts": now,
+                                "avisos": ["versão mais nova ainda sem binário do Rust para este sistema (compilando, ou o "
+                                           "build falhou); atualizado até 63c42f8f"] if warnings else []}
 PALETTE_DARK = {"background": "#15121b", "surface": "#15121b", "surfaceContainerLow": "#1d1a24", "surfaceContainer": "#221e28",
                 "surfaceContainerHigh": "#2c2833", "onSurface": "#e8e0ec", "onSurfaceVariant": "#cbc3d1", "outline": "#958e9b",
                 "outlineVariant": "#4a4550", "primary": "#d4bbff", "onPrimary": "#3b255f"}
@@ -349,10 +353,10 @@ def build():
             # Duas perguntas assíncronas do Codex pendentes: a aba mostra "? 2".
             "info": info("p5-codex", "codex", branch="fix/cost", git_added=5, git_removed=2, git_dirty=1, limited=True, limit_reset="15:30",
                          pending_questions=2),
-            "state": state("idle", status_line="🤖 gpt-6-astra (high) │ 💬 ctx 41k/400k │ ⚡5h:98% ↺12m", codex_mode="default", limited=True, limit_reset="15:30"),
+            "state": state("idle", status_line="🤖 gpt-6-astra (high) │ 💬 ctx 41k/400k │ ⚡5h:98% ↺12m", codex_mode="default", codex_service_tier="default", limited=True, limit_reset="15:30"),
             "events": [msg("user_msg", "c1", "Quanto custou?"), msg("assistant_msg", "c2", "Veja o painel.")],
             "stats": {"turns": 1, "steps": 1, "in_tok": 41000, "out_tok": 700}, "permission": "Full Access",
-            "codex": {"model": "gpt-6-astra", "effort": "high", "mode": "default"},
+            "codex": {"model": "gpt-6-astra", "effort": "high", "mode": "default", "service_tier": "default"},
         },
         "p5-pre": {
             "info": info("p5-pre", "codex", jsonl=False, state="awaiting_input", question="Aprovar os hooks deste projeto?",
@@ -732,6 +736,17 @@ class Handler(BaseHTTPRequestHandler):
         parts = [unquote(p) for p in path.strip("/").split("/")]
         name = parts[2] if len(parts) > 2 else None
         action = "/".join(parts[3:])
+        if path == "/api/providers":
+            self.send_json({p: {"disponivel": True, "motivo": None} for p in ("claude", "codex", "pi", "kimi", "omp")})
+            return
+        if path == "/api/model-options" and query.get("provider", [""])[0] == "codex":
+            # Catálogo como o de criação: só o Astra anuncia o tier priority.
+            self.send_json({"kind": "codex", "reduced": False, "models": [
+                {"id": "gpt-6-astra", "name": "GPT-6-Astra", "desc": "", "efforts": ["low", "medium", "high"], "default_effort": "medium",
+                 "service_tiers": [{"id": "priority", "name": "Fast"}], "default_service_tier": None, "additional_speed_tiers": []},
+                {"id": "gpt-6-luna", "name": "GPT-6-Luna", "desc": "", "efforts": ["low", "medium"], "default_effort": "low",
+                 "service_tiers": [], "default_service_tier": None, "additional_speed_tiers": []}]})
+            return
         if path == "/api/sessions":
             with LOCK:
                 self.send_json([s["info"] for s in SESSIONS.values()])
@@ -799,6 +814,7 @@ class Handler(BaseHTTPRequestHandler):
             c = s["codex"]
             return self.send_json({"models": [
                 {"model": "gpt-6-astra", "displayName": "GPT-6 Astra", "description": "Padrão", "defaultEffort": "medium",
+                 "serviceTiers": [{"id": "priority", "name": "Fast"}], "defaultServiceTier": "default",
                  "efforts": [{"value": v, "description": ""} for v in ("low", "medium", "high")]},
                 {"model": "gpt-6-luna", "displayName": "GPT-6 Luna", "description": "Rápido", "defaultEffort": "low",
                  "efforts": [{"value": v, "description": ""} for v in ("low", "medium")]}], "current": dict(c)})
@@ -1088,7 +1104,7 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 UPDATE["estado"] = {"fase": "rodando", "passo": 0, "total": len(UPDATE_STEPS), "texto": "Preparando",
                                     "ts": time.strftime("%Y-%m-%dT%H:%M:%S-03:00")}
-            threading.Thread(target=update_walk, args=(mode == "fail",), daemon=True).start()
+            threading.Thread(target=update_walk, args=(mode == "fail", mode == "avisos"), daemon=True).start()
             if mode == "drop":
                 # Pedido aceito, resposta perdida: o app não sabe se começou.
                 self.close_connection = True
@@ -1164,6 +1180,13 @@ class Handler(BaseHTTPRequestHandler):
         if action == "model":
             s["codex"].update(model=body["model"], effort=body.get("effort", s["codex"]["effort"]))
             return 200, {"ok": True}
+        if action == "service-tier":
+            tier = body.get("service_tier")
+            if tier not in ("default", "priority") or (tier == "priority" and s["codex"]["model"] != "gpt-6-astra"):
+                return 409, fail("erro_codex_controle", "Fast indisponível")
+            s["codex"]["service_tier"] = st["codex_service_tier"] = tier
+            s["info"]["codex_service_tier"] = tier
+            return 200, {"ok": True, "service_tier": tier}
         if action == "codex/mode":
             s["codex"]["mode"] = body["mode"]
             st["codex_mode"] = body["mode"]

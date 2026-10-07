@@ -205,6 +205,10 @@ def test_clipboard_exports_real_failure_stage(monkeypatch, stage):
     # os.name altera também pathlib; a pasta do diário já é um Path do host real.
     base = diag._base()
     monkeypatch.setattr(diag, "_base", lambda: base)
+    # A trava do clipboard também mora numa pasta do host: resolvida antes de fingir Windows.
+    from app import runtime_terminal
+    lock = runtime_terminal._clipboard_lock_path()
+    monkeypatch.setattr(runtime_terminal, "_clipboard_lock_path", lambda: lock)
     with monkeypatch.context() as win:
         win.setattr(tmux.os, "name", "nt")
         assert tmux.paste_via_clipboard("sessao", "segredo") is False
@@ -234,6 +238,24 @@ def test_http_failure_exports_server_duration_and_safe_route():
     assert row["sessao"] == "sessao"
     assert diag.req_atual.get() == ""
     assert "segredo" not in diag.ler_tudo()
+
+
+@pytest.mark.parametrize("status", [200, 409])
+def test_plugin_long_poll_logs_only_failures(status):
+    from app.api import _correlaciona_diag
+    from starlette.requests import Request
+    from starlette.responses import Response
+
+    request = Request({"type": "http", "method": "POST", "path": "/api/plugin/pull",
+                       "query_string": b"", "headers": [],
+                       "route": SimpleNamespace(path="/api/plugin/pull")})
+
+    async def respond(req):
+        return Response("", status_code=status)
+
+    asyncio.run(_correlaciona_diag(request, respond))
+    rows = [r for r in events() if r["evento"] == "api.servidor"]
+    assert [r["codigo"] for r in rows] == ([] if status == 200 else ["409"])
 
 
 @pytest.mark.parametrize("failure", [RuntimeError("segredo"), asyncio.CancelledError()])

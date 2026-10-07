@@ -59,7 +59,20 @@ def test_parse_normaliza_para_o_formato_da_tela():
         "desc": "Latest frontier agentic coding model.",
         "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
         "default_effort": "low",
+        "service_tiers": [], "default_service_tier": None, "additional_speed_tiers": [],
     }
+
+
+def test_parse_preserves_announced_service_tiers_and_filters_hidden():
+    priority = {"id": "priority", "name": "Fast", "description": "Faster responses"}
+    model = {**RESPOSTA["data"][0], "serviceTiers": [priority, {"id": "hidden", "hidden": True}],
+             "defaultServiceTier": "default", "additionalSpeedTiers": ["fast"]}
+    parsed = cm.parse({"data": [model]})[0]
+    assert parsed["service_tiers"] == [priority]
+    assert parsed["default_service_tier"] == "default"
+    assert parsed["additional_speed_tiers"] == ["fast"]
+    legacy = cm.parse({"data": [{**RESPOSTA["data"][0], "additionalSpeedTiers": ["fast"]}]})[0]
+    assert legacy["service_tiers"] == []
 
 
 def test_modelo_escondido_nao_entra():
@@ -352,6 +365,61 @@ def test_listar_usa_o_http_antes_do_app_server(monkeypatch, tmp_path):
     monkeypatch.setattr(cm, "_listar_http", lambda raiz: [{"id": "x"}])
     monkeypatch.setattr(cx, "perguntar", lambda *a, **kw: pytest.fail("app-server chamado"))
     assert cm.listar(fresco=True, codex_home=tmp_path) == [{"id": "x"}]
+
+
+def test_http_transports_service_tier_fields(monkeypatch, tmp_path):
+    priority = {"id": "priority", "name": "Fast", "description": "Faster responses"}
+    model = {**_HTTP_MODELOS["models"][2], "service_tiers": [priority],
+             "default_service_tier": "default", "additional_speed_tiers": ["fast"]}
+    _http(monkeypatch, tmp_path, corpo={"models": [model]})
+    parsed = _LISTAR_HTTP(tmp_path)[0]
+    assert parsed["service_tiers"] == [priority]
+    assert parsed["default_service_tier"] == "default"
+    assert parsed["additional_speed_tiers"] == ["fast"]
+
+
+@pytest.mark.parametrize("config,enabled", [
+    ("", True),
+    ("[features]\nfast_mode = false\n", False),
+    ('profile = "work"\n[features]\nfast_mode = true\n[profiles.work.features]\nfast_mode = false\n', False),
+    ('profile = "work"\n[features]\nfast_mode = false\n[profiles.work.features]\nfast_mode = true\n', True),
+])
+@pytest.mark.parametrize("source", ["http", "rpc"])
+def test_catalog_priority_respects_effective_account_profile(monkeypatch, tmp_path, config, enabled, source):
+    priority = {"id": "priority", "name": "Fast", "description": "Faster responses"}
+    model = {**_HTTP_MODELOS["models"][2], "service_tiers": [priority],
+             "additional_speed_tiers": ["fast"]}
+    _http(monkeypatch, tmp_path, corpo={"models": [model]}, config=config)
+    if source == "http":
+        monkeypatch.setattr(cm, "_listar_http", _LISTAR_HTTP)
+        monkeypatch.setattr(cx, "perguntar", lambda *a, **kw: pytest.fail("HTTP deve continuar primeiro"))
+    else:
+        monkeypatch.setattr(cx, "perguntar", lambda *a, **kw: {"data": [
+            {**RESPOSTA["data"][0], "serviceTiers": [priority], "additionalSpeedTiers": ["fast"]}]})
+    cm._cache.clear()
+    parsed = cm.listar(fresco=True, codex_home=tmp_path)[0]
+    assert parsed["service_tiers"] == ([priority] if enabled else [])
+    assert parsed["additional_speed_tiers"] == ["fast"]
+    if enabled:
+        cm.checar_escolha(parsed["id"], None, codex_home=tmp_path, service_tier="priority")
+    else:
+        with pytest.raises(ValueError, match="priority"):
+            cm.checar_escolha(parsed["id"], None, codex_home=tmp_path, service_tier="priority")
+
+
+@pytest.mark.parametrize("tiers", [[], [{"id": "default"}]])
+def test_priority_requires_explicit_model_and_announced_capability(monkeypatch, tiers):
+    monkeypatch.setattr(cm, "listar", lambda **kw: [
+        {"id": "gpt-5.6-sol", "efforts": [], "service_tiers": tiers, "additional_speed_tiers": ["fast"]}])
+    with pytest.raises(ValueError, match="modelo"):
+        cm.checar_escolha(None, None, service_tier="priority")
+    with pytest.raises(ValueError, match="priority"):
+        cm.checar_escolha("gpt-5.6-sol", None, service_tier="priority")
+
+
+def test_default_without_model_does_not_require_catalog(monkeypatch):
+    monkeypatch.setattr(cm, "listar", lambda **kw: pytest.fail("Standard não depende de capacidade"))
+    cm.checar_escolha(None, None, service_tier="default")
 
 
 def test_raw_catalog_is_separate_from_ui_and_scoped_to_account_version_config(tmp_path, monkeypatch):

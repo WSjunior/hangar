@@ -1,4 +1,5 @@
 import asyncio
+import collections
 import json
 import logging
 import os
@@ -55,6 +56,53 @@ _UNSET = object()
 
 _log = logging.getLogger("hangar.registry")
 
+# Vezes que a descoberta Python rodou, por caminho. Com o Rust dono fica zerada: é a prova de que
+# nenhum caminho a chama (`tests/test_list_consumers.py`).
+PYTHON_DISCOVERY: collections.Counter[str] = collections.Counter()
+
+
+def rust_owns_list() -> bool:
+    """Com o Rust dono, a descoberta e o cache de resolução do transcript são dele (`list_bridge`).
+    `pending` espera o desfecho até `PENDING_WAIT_S`; no próprio laço não há como esperar. Sem
+    desfecho, levanta com código: a lista nunca passa ao Python por isso."""
+    from app import list_bridge, runtime_coordinator
+    owner = runtime_coordinator.current()
+    if owner is None:
+        return False
+    if owner.mode == "pending" and not runtime_coordinator._mode_bypass.get():
+        from app.runtime_adapter import run_sync
+        try:
+            run_sync(owner.await_mode, owner.loop)
+        except (runtime_coordinator.RuntimeStarting, TimeoutError) as e:
+            raise list_bridge.ListBridgeError("list_runtime_starting") from e
+        except RuntimeError as e:
+            # Chamada de dentro do laço: esperar ali travaria o próprio desfecho.
+            raise list_bridge.ListBridgeError("list_wait_on_loop") from e
+    # Ainda `pending` depois da espera = adoção das sessões no Rust que acabou de subir (o
+    # bypass da espera): ele já está de pé e a descoberta é dele.
+    return owner.mode != "python"
+
+
+async def rust_owns_list_async() -> bool:
+    from app import list_bridge, runtime_coordinator
+    owner = runtime_coordinator.current()
+    if owner is None:
+        return False
+    if owner.mode == "pending" and not runtime_coordinator._mode_bypass.get():
+        try:
+            await owner.await_mode()
+        except runtime_coordinator.RuntimeStarting as e:
+            raise list_bridge.ListBridgeError("list_runtime_starting") from e
+    return owner.mode != "python"
+
+
+def _rust_caches() -> bool:
+    """Semear, esquecer e invalidar só valem com o Rust de pé: em `pending` o próximo Rust nasce
+    com os caches vazios, e esperar por ele aqui só atrasaria a criação."""
+    from app import runtime_coordinator
+    owner = runtime_coordinator.current()
+    return owner is not None and owner.mode == "rust"
+
 
 # Idade minima de um marcador awaiting_input pra que um pane raspado SEM menu o rebaixe pra idle
 # (hook_state.demote_awaiting). O grace cobre a janela Notification->menu renderizado: raspar nesse
@@ -75,6 +123,11 @@ _git_ultimo: dict[str, tuple[dict | None, dict | None]] = {}
 _git_em_voo: set[str] = set()
 # Pool próprio: git lento não pode deixar na fila a captura do tmux e o resto do pool padrão.
 _git_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="hangar-git")
+
+
+def _git_dir(info) -> str | None:
+    """Onde o git da sessão roda (`SessionInfo.git_dir`), aceitando os objetos mínimos da lista."""
+    return getattr(info, "git_cwd", None) or info.cwd
 
 
 async def _atualizar_git(cwd: str) -> None:
@@ -240,6 +293,19 @@ def _chave_trust(cwd: str, windows: bool = os.name == "nt") -> str:
     escreve uma chave que ninguem le, e a sessao nova nascia presa no "trust this folder?" mesmo
     com o pre-trust rodando."""
     return cwd.replace("\\", "/") if windows else cwd
+
+
+def _claude_service_tier(engine: str | None, model: str | None, tier: str | None) -> str | None:
+    if tier is None:
+        return None
+    if tier not in ("default", "priority"):
+        raise ValueError("service_tier: use default ou priority")
+    from app import cliproxy
+    if cliproxy.supports_fast(engine, model):
+        return tier
+    if tier == "priority":
+        raise ValueError("service_tier exige Claude com motor GPT no CLIProxyAPI local")
+    return None
 
 
 def _env_sessao(modelo: str | None, jev: bool, provider: str = "claude",
@@ -929,6 +995,15 @@ class KillFailed(Exception):
         self.name = name
 
 
+def _retire_waiting_runtime(name: str) -> None:
+    """Vida antiga do mesmo nome, ainda esperando identidade no runtime, não segura o nome novo."""
+    from app import runtime_coordinator
+    from app.runtime_adapter import run_sync
+    owner = runtime_coordinator.current()
+    if owner is not None and owner.loop is not None and owner.managed_queue(name):
+        run_sync(lambda: owner.retire_waiting(name), owner.loop)
+
+
 class SessionRegistry:
     # Cache name -> ultimo jsonl resolvido por sinal CONFIAVEL (cmdline --session-id / fd). De classe
     # (compartilhado entre instancias: api.registry e sse._registry). Estabiliza a resolucao quando o
@@ -1049,6 +1124,10 @@ class SessionRegistry:
 
     def resolve_tracked(self, name: str, cwd: str, pid=_UNSET,
                         children: Optional[dict[int, list[int]]] = None) -> tuple[Optional[str], bool]:
+        if rust_owns_list():
+            from app import list_bridge
+            return list_bridge.resolve(name, cwd, None if pid is _UNSET else pid)
+        PYTHON_DISCOVERY["resolve_tracked"] += 1
         jsonl, tracked = self._resolve_tracked_impl(name, cwd, pid, children)
         self._log_change(name, jsonl, tracked)
         return jsonl, tracked
@@ -1175,7 +1254,45 @@ class SessionRegistry:
         proj = (cdir / "projects") if cdir else self.projects_dir
         return self.resolve_jsonl(cwd, proj), False
 
-    def _forget(self, name: str) -> None:
+    def _seed(self, name: str, jsonl: str, required: bool = False) -> None:
+        """Transcript da sessão que acabou de nascer ou trocar de modo: vale antes de o agente
+        escrevê-lo. A sessão já existe; se a ponte falhar, a falha já está no diário (`lista.ponte`)
+        e o Rust resolve pelo `--session-id` ou pelo sidecar dela. `required`: transferência, em
+        que o transcript não se deduz do processo; aí a falha levanta."""
+        self._jsonl_cache[name] = jsonl
+        if _rust_caches():
+            from app import list_bridge
+            try:
+                list_bridge.seed(name, jsonl)
+            except (list_bridge.ListBridgeError, tmux.MuxIndisponivel):
+                if required:
+                    raise
+
+    def _rename_rust(self, old: str, new: str) -> None:
+        """O rename já aconteceu: falha da ponte fica no diário (`lista.ponte`), e o nome velho é
+        esquecido de novo antes de qualquer sessão nascer com ele (`_forget` na criação)."""
+        if _rust_caches():
+            from app import list_bridge
+            try:
+                list_bridge.rename(old, new)
+            except (list_bridge.ListBridgeError, tmux.MuxIndisponivel):
+                pass
+
+    def _forget(self, name: str, required: bool = False) -> None:
+        """Esquece o nome aqui e no Rust. `required`: criação, antes de qualquer efeito; a falha
+        levanta, porque o nome reusado herdaria o cache e abriria a conversa da morta. Nos demais
+        a sessão já morreu ou trocou: a falha fica no diário (`lista.ponte`) e a criação seguinte
+        do mesmo nome esquece de novo."""
+        if _rust_caches():
+            from app import list_bridge
+            try:
+                list_bridge.forget(name)
+            except (list_bridge.ListBridgeError, tmux.MuxIndisponivel):
+                if required:
+                    raise
+        self._forget_local(name)
+
+    def _forget_local(self, name: str) -> None:
         self._jsonl_cache.pop(name, None)
         self._fd_locked.discard(name)
         # Nome pode ser reusado por outra sessao: sem isto a nova herdaria a statusline da morta
@@ -1282,7 +1399,13 @@ class SessionRegistry:
                              "caindo no pane ATIVO", name, len(panes))
         return next((p for p in panes if p["active"]), panes[0])
 
-    def list(self) -> list[SessionInfo]:
+    def list(self, newer_than: float | None = None) -> list[SessionInfo]:
+        # `newer_than` (época): sessão criada há menos de 1 s, só vale descoberta começada depois.
+        # No Python quem garante isso é o `_guardar_snap(forcar=True)`, que relê os processos.
+        if rust_owns_list():
+            from app import list_bridge
+            return list_bridge.discover(newer_than)
+        PYTHON_DISCOVERY["list"] += 1
         # Resolucao de jsonl/tracked de todas as sessoes. Otimizado: UM mapa /proc + UMA chamada tmux
         # (pane_pid em lote) reusados por sessao -> O(P + S·descendentes) em vez de O(S·P). NAO calcula
         # state (sai 'idle' default): este caminho so resolve transcript; quem quer state usa
@@ -1366,7 +1489,7 @@ class SessionRegistry:
             info = SessionInfo(name=p["name"], cwd=p["cwd"], jsonl=jsonl, tracked=tracked,
                                lifecycle_id=session_life(p["name"], meta=None, birth=p.get("session_created")),
                                branch=loc.branch, worktree=loc.worktree,
-                               worktree_path=loc.worktree_path, worktree_gone=loc.worktree_gone,
+                               worktree_path=loc.worktree_path, worktree_gone=loc.worktree_gone, git_cwd=loc.git_cwd,
                                then_target=link.get("target") if link else None,
                                pair_peers=pair.get("peers") if pair else None,
                                pair_external=_pair_external(p["name"], pair.get("peers") if pair else None),
@@ -1431,8 +1554,9 @@ class SessionRegistry:
                 lifecycle_id=session_life(meta["name"], meta=meta, birth=terminal_births.get(meta["name"])),
                 provider="codex", tracked=True, conta=f"codex:{codex_home}",
                 codex_home=codex_home, headless=bool(meta.get("headless")),
+                codex_service_tier=meta.get("service_tier"),
                 branch=loc.branch, worktree=loc.worktree,
-                worktree_path=loc.worktree_path, worktree_gone=loc.worktree_gone,
+                worktree_path=loc.worktree_path, worktree_gone=loc.worktree_gone, git_cwd=loc.git_cwd,
                 then_target=(ThenLink(meta["name"]).get() or {}).get("target"),
                 pair_peers=(PairLink(meta["name"]).get() or {}).get("peers"),
                 pair_external=_pair_external(meta["name"], (PairLink(meta["name"]).get() or {}).get("peers")),
@@ -1457,7 +1581,7 @@ class SessionRegistry:
                        f"chave:{meta['engine']}" if meta.get("engine") else
                        f"claude:{Path(cdir or Path.home() / '.claude').resolve()}"),
                 branch=loc.branch, worktree=loc.worktree,
-                worktree_path=loc.worktree_path, worktree_gone=loc.worktree_gone,
+                worktree_path=loc.worktree_path, worktree_gone=loc.worktree_gone, git_cwd=loc.git_cwd,
                 then_target=(ThenLink(meta["name"]).get() or {}).get("target"),
                 pair_peers=(PairLink(meta["name"]).get() or {}).get("peers"),
                 pair_external=_pair_external(meta["name"], (PairLink(meta["name"]).get() or {}).get("peers")),
@@ -1476,10 +1600,6 @@ class SessionRegistry:
                 name=run["name"], cwd=run["repo"], jsonl=run["timeline"], provider="orq",
                 tracked=True, pair_gid=run["gid"], orq_arbiter=run["arbiter"]))
         _decorate_transfers(out)
-        try:
-            self._varrer_pares_mortos({i.name for i in out})
-        except Exception as e:
-            _log.warning("varredura de pares falhou (lista segue): %r", e)
         return out
 
     async def _radar_de_limite(self, infos: list[SessionInfo], raspadas: set[str]) -> None:
@@ -1507,10 +1627,21 @@ class SessionRegistry:
             i.limit_reset = self._limit_cache.get(i.name, (0.0, None))[1]
             i.limited = i.limit_reset is not None
 
-    async def list_with_state(self, infos: Optional[list[SessionInfo]] = None) -> list[SessionInfo]:
+    async def list_with_state(self, infos: Optional[list[SessionInfo]] = None,
+                              state_only: bool = False) -> list[SessionInfo]:
         # Listagem COM estado vivo por sessao (pro /api/sessions). Faz a resolucao otimizada (sync, num
         # thread) e por cima classifica o pane de cada sessao concorrentemente. `infos` opcional: um
         # snapshot ja resolvido (ex: cache compartilhado dos pollers do SSE) pula a re-resolucao.
+        # `state_only`: só o estado (fatos da lista, `list_facts`); a decoração é do Rust.
+        if not state_only:
+            if await rust_owns_list_async():
+                from app import list_bridge
+                rows = await asyncio.to_thread(list_bridge.snapshot)
+                if infos is not None:
+                    wanted = {i.name for i in infos}
+                    rows = [r for r in rows if r.name in wanted]
+                return rows
+            PYTHON_DISCOVERY["list_with_state"] += 1
         if infos is None:
             infos = await asyncio.to_thread(self.list)
         # Orquestrador: sem pane, hook, statusline nem git próprio. O estado sai só da atividade da
@@ -1598,8 +1729,9 @@ class SessionRegistry:
             if getattr(info, "provider", "claude") == "codex":
                 info.last_activity = _jsonl_mtime(info.jsonl)
                 if not info.jsonl:
-                    # Sem thread, nenhum cache de uma sessão anterior pertence a esta abertura.
-                    self._forget(info.name)
+                    # Sem thread, nenhum cache de uma sessão anterior pertence a esta abertura. Só
+                    # o daqui: isto roda nos fatos que o Rust pediu, dentro do laço.
+                    self._forget_local(info.name)
                     # Janela entre o pane nascer e o lancador gravar o sidecar: nao ha rollout, e
                     # tanto a chave do marcador quanto a leitura do turno EXIGEM um caminho
                     # (session_key(None) levanta TypeError). Sem esta saida, uma sessao Codex
@@ -1619,6 +1751,7 @@ class SessionRegistry:
                 marker = hook_state.get_state(_sid(info.jsonl))
                 if snapshot is not None:
                     info.state, info.label = snapshot.state, snapshot.label
+                    info.codex_service_tier = snapshot.codex_service_tier
                 elif marker and marker[0] != "awaiting_input":
                     # awaiting_input nao existe no Codex (o evento equivalente nao existe la); se
                     # aparecer, e marcador de outra coisa e nao vale mais que o default.
@@ -1660,6 +1793,10 @@ class SessionRegistry:
                 if prob:
                     info.problema = prob[0]
                 continue
+            if getattr(info, "provider", None) == "claude" and not getattr(info, "problema", None):
+                from app.runtime_adapter import runtime_problem
+                if problem := runtime_problem(info.name):
+                    info.problema = problem[0]
             aprov = aprovacoes.get(info.name)
             if aprov is not None:
                 # Wire manda: o painel de aprovacao esta na tela AGORA. Nao entra no `pending` (nao
@@ -1898,6 +2035,8 @@ class SessionRegistry:
                 and (now - info.last_activity) > runtime_config.get("stall_seconds")
             )
         await self._radar_de_limite(infos, raspadas={i.name for i in pending})
+        if state_only:
+            return infos
         # Última resposta para a linha parada da lista. Usa o mesmo tail-read provider-aware do
         # /history e roda fora do event loop; working/awaiting continuam mostrando o sinal vivo.
         def _decorate_replies() -> None:
@@ -1933,8 +2072,9 @@ class SessionRegistry:
         # O git NAO segura a lista: ela sai com o ultimo numero conhecido por cwd e o git atualiza
         # em segundo plano, um por repositorio (single-flight). Em serie, um repositorio lento
         # atrasava o card de TODAS as sessoes — inclusive as que acabaram de mudar de estado.
+        # O git é o de onde o agente trabalha: numa worktree, a pasta de abertura não diz nada.
         for info in infos:
-            summary, diffstat = _git_ultimo.get(info.cwd, (None, None))
+            summary, diffstat = _git_ultimo.get(_git_dir(info), (None, None))
             if summary is not None:
                 info.git_dirty = summary["dirty"]
                 info.git_ahead = summary["ahead"]
@@ -1942,7 +2082,7 @@ class SessionRegistry:
             if diffstat is not None:
                 info.git_added = diffstat["added"]
                 info.git_removed = diffstat["removed"]
-        for cwd in {i.cwd for i in infos if i.cwd}:
+        for cwd in {d for d in map(_git_dir, infos) if d}:
             if cwd not in _git_em_voo:
                 _git_em_voo.add(cwd)
                 asyncio.create_task(_atualizar_git(cwd))
@@ -1974,7 +2114,15 @@ class SessionRegistry:
                jev: bool = False, transfer_id: str | None = None,
                tool_output_token_limit: int | None = None,
                transfer_rollout_path: str | None = None,
-               engine_account: str | None = None, engine_models: list[dict] | None = None) -> SessionInfo:
+               engine_account: str | None = None, engine_models: list[dict] | None = None,
+               service_tier: str | None = None) -> SessionInfo:
+        if service_tier is not None:
+            if service_tier not in ("default", "priority"):
+                raise ValueError("service_tier: use default ou priority")
+            if provider != "codex":
+                from app import cliproxy
+                if provider != "claude" or not cliproxy.supports_fast(engine, model):
+                    raise ValueError("service_tier exige Codex ou Claude com motor GPT no CLIProxyAPI local")
         # Nome tmux nao aceita "."/":"/espaco -> sanitiza igual ao rename. Varias sessoes na MESMA
         # pasta sao permitidas: cada uma tem nome unico + --session-id proprio -> jsonl proprio.
         name = sanitize_session_name(name)
@@ -2030,12 +2178,14 @@ class SessionRegistry:
                     raise ValueError("motor so vale para provider claude")
                 return self._create_codex_headless(name, cwd, resume_session_id, model, effort,
                                                    permission_mode, codex_account, jev,
-                                                   transfer_id, tool_output_token_limit, transfer_rollout_path)
+                                                   transfer_id, tool_output_token_limit, transfer_rollout_path,
+                                                   service_tier=service_tier)
             return self._create_headless(name, cwd, config_dir, resume_session_id, engine, model,
                                          effort, context_window, permission_mode, subagent_model,
                                          jev, engine_account,
                                          fixed_account["credential_id"] if fixed_account else None,
-                                         fixed_account["base_url"] if fixed_account else None)
+                                         fixed_account["base_url"] if fixed_account else None,
+                                         service_tier=service_tier)
         codex_home = None
         if provider == "codex":
             try:
@@ -2139,7 +2289,8 @@ class SessionRegistry:
                                                        codex_home=codex_home,
                                                        codex_account=account.id,
                                                        model=model, effort=effort,
-                                                       tool_output_token_limit=tool_output_token_limit))
+                                                       tool_output_token_limit=tool_output_token_limit,
+                                                       **({"service_tier": service_tier} if service_tier is not None else {})))
             elif provider == "omp":
                 # Retoma por CAMINHO: o id interno do omp nao e o do nome do arquivo, e spawn e
                 # resume sao verbos diferentes — reusar o spawn abriria conversa nova.
@@ -2184,6 +2335,8 @@ class SessionRegistry:
             if provider == "codex":
                 extra["codex_home"] = codex_home
                 extra["codex_account"] = account.id
+                if service_tier is not None:
+                    extra["service_tier"] = service_tier
             if provider == "omp" and omp_profile:
                 extra["perfil"] = omp_profile
             cmd = tmux.join_cmd(get_adapter(provider).spawn_command(
@@ -2208,6 +2361,8 @@ class SessionRegistry:
                 pre += ["--model", model]
                 if context_window:
                     pre += ["--context", str(context_window)]
+            if service_tier is not None:
+                pre += ["--service-tier", service_tier]
             cmd = tmux.join_cmd(pre + ["--"]) + " " + cmd
         base = (Path(config_dir) / "projects") if config_dir else self.projects_dir
         # Pi tem layout PROPRIO (~/.pi/agent/sessions/<slug>/<ts>_<uuid>.jsonl) e o arquivo so nasce
@@ -2242,7 +2397,13 @@ class SessionRegistry:
         if protected_prefix:
             cmd = tmux.join_cmd([*protected_prefix, "/bin/sh", "-c", cmd])
         diag.registrar("sessao.criar_etapa", sessao=name, provider=provider, etapa="criar_terminal")
-        self._forget(name)
+        self._forget(name, required=True)
+        # Sessao NOVA = sid novo = transcript fresco. A fila duravel e keyed pelo NOME (sobrevive ao
+        # fim da sessao antiga), entao entradas remanescentes de uma sessao morta de mesmo nome
+        # fantasmariam aqui via merged_history. Limpa ANTES do pane: depois dele o runtime ja adota
+        # a sessao nova, e a limpeza esbarrava na posse em transferencia.
+        _retire_waiting_runtime(name)
+        PromptQueue(name).clear()
         env_pane = _env_sessao(subagent_model, jev, provider, nome=name)
         if transfer_id is not None:
             key = uuid.uuid4().hex
@@ -2261,12 +2422,7 @@ class SessionRegistry:
                            detalhe="terminal_nao_criado")
             raise ValueError("falha ao criar sessao no tmux")
         diag.registrar("sessao.criar_etapa", sessao=name, provider=provider, etapa="limpar_estado_anterior")
-        # Sessao NOVA = sid novo = transcript fresco. A fila duravel e keyed pelo NOME (sobrevive ao
-        # fim da sessao antiga), entao entradas remanescentes de uma sessao morta de mesmo nome
-        # fantasmariam aqui via merged_history. Limpa igual o /clear faz. Seguro: a sessao nova ainda
-        # nem aceitou input, nao ha fila legitima a preservar.
-        PromptQueue(name).clear()
-        # Mesmo motivo, pro vinculo 'then' (feature #12): nome reusado nao deve herdar um encadeamento
+        # Mesmo motivo da fila, pro vinculo 'then' (feature #12): nome reusado nao deve herdar um encadeamento
         # de uma sessao antiga e ja morta.
         ThenLink(name).clear()
         # E pro PAREAMENTO, pelo mesmo motivo: o kill() ja tira a sessao do grupo, mas quem morre
@@ -2279,7 +2435,7 @@ class SessionRegistry:
         # escrever o arquivo, evitando o fallback newest-by-mtime pescar um jsonl ja existente da pasta.
         # Pi (jsonl=None) nao entra no cache — nao ha path a fixar, e a resolucao dele nem passa por aqui.
         if jsonl is not None:
-            self._jsonl_cache[name] = jsonl
+            self._seed(name, jsonl)
         diag.registrar("sessao.criada", sessao=name, provider=provider, etapa="terminal_criado")
         return SessionInfo(name=name, cwd=cwd, jsonl=jsonl, tracked=jsonl is not None,
                            provider=provider, engine=engine, engine_account=engine_account,
@@ -2292,7 +2448,8 @@ class SessionRegistry:
                          permission_mode: str | None, subagent_model: str | None = None,
                          jev: bool = False, engine_account: str | None = None,
                          engine_credential_id: str | None = None,
-                         engine_account_base_url: str | None = None) -> SessionInfo:
+                         engine_account_base_url: str | None = None,
+                         service_tier: str | None = None) -> SessionInfo:
         """Sessão Claude SEM terminal: criar é gravar o sidecar. O processo `claude` sobe no
         primeiro prompt (e de novo, com --resume, depois de um restart do backend) — abrir a
         sessão não custa um processo, e nada aqui depende de tmux."""
@@ -2317,7 +2474,10 @@ class SessionRegistry:
         model_args.validar("claude", model, effort, permission_mode)
         diag.registrar("sessao.criar_etapa", sessao=name, provider="claude", etapa="confiar_pasta")
         _pretrust_cwd(cwd, config_dir)
-        self._forget(name)
+        self._forget(name, required=True)
+        # Antes do sidecar: depois dele o runtime pode adotar a sessão nova no meio da limpeza.
+        _retire_waiting_runtime(name)
+        PromptQueue(name).clear()
         # Nascer JÁ no plano deixaria a sessão sem modo de base: é ele que diz pra onde
         # "Implementar o plano" volta e se o plano precisa perguntar por ferramenta.
         anterior = modo_permissao.modo_da_conta(config_dir) if permission_mode == "plan" else None
@@ -2327,14 +2487,14 @@ class SessionRegistry:
                                       subagent_model=subagent_model, jev=jev,
                                       engine_account=engine_account,
                                       engine_credential_id=engine_credential_id,
-                                      engine_account_base_url=engine_account_base_url)
-        PromptQueue(name).clear()
+                                      engine_account_base_url=engine_account_base_url,
+                                      service_tier=service_tier)
         ThenLink(name).clear()
         # Nome reusado não herda o par externo da sessão antiga.
         _encerrar_pares_externos(name)
         self._clear_pair(name)
         jsonl = get_adapter(CLAUDE_HEADLESS).transcript_path_de(meta)
-        self._jsonl_cache[name] = jsonl
+        self._seed(name, jsonl)
         diag.registrar("sessao.criada", sessao=name, provider="claude", etapa="sidecar_gravado")
         return SessionInfo(name=name, cwd=cwd, jsonl=jsonl, tracked=True, provider="claude",
                            headless=True, engine=engine, engine_account=engine_account,
@@ -2345,7 +2505,8 @@ class SessionRegistry:
                                codex_account: str | None, jev: bool = False,
                                transfer_id: str | None = None,
                                tool_output_token_limit: int | None = None,
-                               transfer_rollout_path: str | None = None) -> SessionInfo:
+                               transfer_rollout_path: str | None = None,
+                               service_tier: str | None = None) -> SessionInfo:
         """Sessão Codex SEM terminal: grava o sidecar; o app-server sobe no cano logo em seguida
         pelo `watch_sessions` do adapter (aquece na criação, não no primeiro prompt)."""
         from app.adapters.codex import sem_terminal
@@ -2365,19 +2526,21 @@ class SessionRegistry:
         diag.registrar("sessao.criar_etapa", sessao=name, provider="codex", etapa="confiar_pasta")
         if transfer_id is None:
             codex_sessions.pretrust_cwd(cwd, codex_home=codex_home)
-        self._forget(name)
+        self._forget(name, required=True)
         target = {}
         if transfer_id:
             from app.conversation_transfer import load_transfer
             target = load_transfer(transfer_id).destination_meta
         rollout = transfer_rollout_path or target.get("rollout_path") or (sem_terminal.rollout_de(resume_thread_id, codex_home) if resume_thread_id else "")
+        # Antes do sidecar: depois dele o runtime pode adotar a sessão nova no meio da limpeza.
+        _retire_waiting_runtime(name)
+        PromptQueue(name).clear()
         codex_sessions.save(name, resume_thread_id, rollout, cwd, model=model, effort=effort,
                             codex_home=codex_home, codex_account=codex_account,
                             headless=True, key=sem_terminal.nova_chave(), permission_mode=permission_mode,
                             jev=jev, transfer_id=transfer_id,
                             tool_output_token_limit=tool_output_token_limit,
-                            previous_non_plan=target.get("previous_non_plan"))
-        PromptQueue(name).clear()
+                            previous_non_plan=target.get("previous_non_plan"), service_tier=service_tier)
         ThenLink(name).clear()
         # Nome reusado não herda o par externo da sessão antiga.
         _encerrar_pares_externos(name)
@@ -2421,7 +2584,7 @@ class SessionRegistry:
                                 **_env_sessao(meta.get("subagent_model"), bool(meta.get("jev")))):
             headless_sessions.restaurar(meta)
             raise ValueError("falha ao criar o terminal; a sessao segue sem terminal")
-        self._jsonl_cache[name] = jsonl
+        self._seed(name, jsonl)
         return SessionInfo(name=name, cwd=meta["cwd"], jsonl=jsonl, tracked=True,
                            provider="claude", engine=meta.get("engine"),
                            engine_account=meta.get("engine_account"),
@@ -2429,16 +2592,18 @@ class SessionRegistry:
 
     def wait_for_claude(self, name: str, meta: dict, timeout: float = 20.0) -> None:
         from app.terminal_input import _wait_input_ready
+        service_tier = _claude_service_tier(meta.get("engine"), meta.get("model"), meta.get("service_tier"))
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             procinfo._invalidar_children_map()
             pane = self._pane_of(name)
-            agent = _pid_do_agente((pane or {}).get("pid"))
-            if agent and procinfo.pid_vivo(agent):
+            provider, agent = agente_do_pane((pane or {}).get("pid"))
+            if provider == "claude" and agent and procinfo.pid_vivo(agent):
                 if _session_id_from_cmdline(_cmdline(agent)) == meta["session_id"]:
                     expected_config = Path(meta.get("config_dir") or Path.home() / ".claude").resolve()
                     actual_config = Path(_config_dir_of(agent) or Path.home() / ".claude").resolve()
                     if (_engine_of(agent) != meta.get("engine") or actual_config != expected_config
+                            or procinfo._env_var_of(agent, "CP_ENGINE_SERVICE_TIER") != service_tier
                             or procinfo._env_var_of(agent, "CP_ENGINE_ACCOUNT") != meta.get("engine_account")
                             or (meta.get("engine_account") and procinfo._env_var_of(agent, "CP_ENGINE_CREDENTIAL_ID")
                                 != meta.get("engine_credential_id"))
@@ -2461,15 +2626,23 @@ class SessionRegistry:
         uuid.UUID(sid)
         # Modo de permissão vai junto: sem a flag a TUI nasce no defaultMode da conta.
         model = meta.get("model")
+        if model and not meta.get("engine"):
+            from app import default_model
+            # Na conta Anthropic, id de motor herdado do processo antigo derruba cada turno.
+            if not default_model.anthropic(model):
+                model_args.validar("claude", model, None)  # valor malformado continua recusado
+                _log.warning("modelo %r não é da Anthropic; sessão relançada no padrão da conta", model)
+                model = None
         if meta.get("engine_account"):
             from app import cliproxy, engines
             binding = cliproxy.engine_env(meta["engine"], model, meta.get("context_window"), meta["engine_account"],
                                           home=(meta.get("engine_credential_id") or "").removeprefix("codex:"),
                                           expected_base=meta.get("engine_account_base_url"), models=engine_models)
             model = binding["ANTHROPIC_MODEL"]
-        cmd = tmux.join_cmd(["claude", "--resume" if resume else "--session-id", sid]
-                            + model_args.args_de("claude", model, meta.get("effort"),
-                                                 meta.get("permission_mode")))
+        service_tier = _claude_service_tier(meta.get("engine"), model, meta.get("service_tier"))
+        argv = ["claude", "--resume" if resume else "--session-id", sid] + model_args.args_de(
+            "claude", model, meta.get("effort"), meta.get("permission_mode"))
+        cmd = tmux.join_cmd(argv)
         if meta.get("engine"):
             from app import engines
             if meta["engine"] not in engines.listar():
@@ -2484,6 +2657,11 @@ class SessionRegistry:
                 pre += ["--model", model]
                 if meta.get("context_window"):
                     pre += ["--context", str(meta["context_window"])]
+            if service_tier is not None:
+                # O lançador e o pré-voo leem as mesmas fontes antes de encerrar a origem.
+                env = {**os.environ, "CLAUDE_CONFIG_DIR": meta.get("config_dir") or str(Path.home() / ".claude")}
+                engines.service_tier_settings(argv, env, service_tier, cwd=meta["cwd"])
+                pre += ["--service-tier", service_tier]
             cmd = tmux.join_cmd(pre + ["--"]) + " " + cmd
         return cmd
 
@@ -2510,6 +2688,7 @@ class SessionRegistry:
         engine_account = procinfo._env_var_of(ag, "CP_ENGINE_ACCOUNT") if ag and motor else None
         engine_credential_id = procinfo._env_var_of(ag, "CP_ENGINE_CREDENTIAL_ID") if engine_account else None
         engine_account_base_url = procinfo._env_var_of(ag, "CP_ENGINE_ACCOUNT_BASE_URL") if engine_account else None
+        service_tier = procinfo._env_var_of(ag, "CP_ENGINE_SERVICE_TIER") if ag and motor else None
         modelo, esforco = procinfo._model_of(ag) if ag else (None, None)
         janela = procinfo._env_var_of(ag, "CLAUDE_CODE_MAX_CONTEXT_TOKENS") if ag else None
         # Com motor a variável é do motor (engines.env_de); sem motor veio do `-e` da criação.
@@ -2521,7 +2700,12 @@ class SessionRegistry:
                 if engine_account:
                     raise ValueError("motor da conta ChatGPT fixa indisponível")
                 # Mesmo fallback do resume(): escolha de motor apagado não vale na conta Anthropic.
-                motor = modelo = esforco = janela = None
+                motor = modelo = esforco = janela = service_tier = None
+            else:
+                # /model não altera argv; retomar o modelo do boot desfaria a escolha em uso.
+                live_model, live_effort = _escolhas_status(sid)
+                modelo = live_model or modelo
+                esforco = _esforco_de_abertura(live_effort) or esforco
         else:
             # O cmdline só sabe o modelo do boot; `/model` na TUI, ou sessão aberta sem `--model`,
             # só aparecem no que a statusline recebeu. Com `[1m]` no id, a janela vai junto.
@@ -2533,6 +2717,10 @@ class SessionRegistry:
                                           home=(engine_credential_id or "").removeprefix("codex:"),
                                           expected_base=engine_account_base_url)
             modelo = binding["ANTHROPIC_MODEL"]
+        if not for_account_move:
+            service_tier = _claude_service_tier(motor, modelo, service_tier)
+        elif service_tier not in (None, "default", "priority"):
+            raise ValueError("service_tier: use default ou priority")
         model_args.validar("claude", modelo, esforco, permission_mode)
         if transfer_meta and (sid != transfer_meta["session_id"] or cwd != transfer_meta["cwd"]
                               or pid != transfer_meta.get("pane_pid")):
@@ -2545,30 +2733,35 @@ class SessionRegistry:
         _esperar_saida(filhos)
         self._forget(name)
         try:
+            from app import runtime_coordinator
+            coordinator = runtime_coordinator.current()
+            owner_key = coordinator.slot(name).binding.key if coordinator is not None and coordinator.managed_queue(name) else None
             meta = headless_sessions.save(name, cwd, sid, config_dir=str(cdir) if cdir else None,
+                                          key=owner_key,
                                           engine=motor, model=modelo, effort=esforco,
                                           engine_account=engine_account,
                                           engine_credential_id=engine_credential_id,
                                           engine_account_base_url=engine_account_base_url,
+                                          service_tier=service_tier,
                                           context_window=int(janela) if janela and janela.isdigit() else None,
                                           permission_mode=permission_mode, subagent_model=subagente,
                                           jev=jev,
                                           **({"key": transfer_meta["key"], "transfer_id": transfer_meta["transfer_id"]}
                                              if transfer_meta else {}),
-                                          previous_non_plan=(modo_permissao.ultimo_nao_plan(
-                                              name, modo_permissao.modo_da_conta(str(cdir) if cdir else None))
+                                          previous_non_plan=((modo_permissao.session_non_plan_mode(jsonl)
+                                              or modo_permissao.modo_da_conta(str(cdir) if cdir else None))
                                               if permission_mode == "plan" else None))
         except OSError:
             meta = {"name": name, "cwd": cwd, "session_id": sid, "config_dir": str(cdir) if cdir else None,
                     "engine": motor, "model": modelo, "effort": esforco, "permission_mode": permission_mode,
                     "engine_account": engine_account, "engine_credential_id": engine_credential_id,
-                    "engine_account_base_url": engine_account_base_url}
+                    "engine_account_base_url": engine_account_base_url, "service_tier": service_tier}
             if not tmux.new_session(name, cwd, self._comando_terminal(meta, resume=Path(jsonl).exists()),
                                     meta["config_dir"], provider="claude",
                                     **_env_sessao(subagente, jev)):
                 _log.error("troca para sem terminal: sidecar e pane falharam, sessao %s ficou sem nada", name)
             raise
-        self._jsonl_cache[name] = jsonl
+        self._seed(name, jsonl)
         return meta
 
     def transfer_origin(self, info: SessionInfo) -> tuple[dict, dict]:
@@ -2597,7 +2790,7 @@ class SessionRegistry:
             meta = {"name": info.name, "cwd": info.cwd, "session_id": Path(info.jsonl).stem,
                     "config_dir": cdir or str(Path.home() / ".claude"), "provider": "claude", "headless": False,
                     "model": model, "effort": _esforco_de_abertura(effort), "permission_mode": mode,
-                    "previous_non_plan": modo_permissao.known_non_plan(info.name)
+                    "previous_non_plan": modo_permissao.session_non_plan_mode(info.jsonl)
                                          if mode == "plan" else None,
                     "pane_pid": root, "pane_id": pane.get("pane_id"),
                     "subagent_model": procinfo._env_var_of(agent, "CLAUDE_CODE_SUBAGENT_MODEL") if agent else None,
@@ -2650,8 +2843,9 @@ class SessionRegistry:
                 raise TransferError("session_transfer_source_changed")
             headless_sessions.delete(record.name)
         get_adapter(CLAUDE_HEADLESS)._sessions.pop(record.name, None)
-        self._forget(record.name)
-        self._jsonl_cache[record.name] = record.boundary.rollout_path
+        # Fora do laço: com o Rust dono, esquecer e semear são chamadas à ponte.
+        await asyncio.to_thread(self._forget, record.name)
+        await asyncio.to_thread(self._seed, record.name, record.boundary.rollout_path, True)
 
     async def restore_transfer_source(self, record, private: dict) -> None:
         from app.conversation_transfer import _processes_stopped, TransferError
@@ -2671,6 +2865,12 @@ class SessionRegistry:
             from app.conversation_transfer import _check_source_idle
             await _check_source_idle(self, record.name, meta)
             if meta["headless"]:
+                from app.conversation_transfer import _runtime_source_view
+                view = _runtime_source_view(record.name)
+                if view is not None:
+                    if not view.get("alive") or view.get("iniciando"):
+                        raise TransferError("session_transfer_source_not_stopped")
+                    return
                 sess = get_adapter(CLAUDE_HEADLESS)._sessions.get(record.name)
                 if not sess or not sess.vivo or sess.iniciando:
                     raise TransferError("session_transfer_source_not_stopped")
@@ -2693,9 +2893,25 @@ class SessionRegistry:
                 headless_sessions.restaurar(restored)
             hl = get_adapter(CLAUDE_HEADLESS)
             hl._subidas.pop(record.name, None)
-            sess = await hl.ensure_running(record.name, transfer_id=record.id)
-            if not sess or not sess.vivo or sess.iniciando or sess.sid != meta["session_id"]:
-                raise TransferError("session_transfer_restore_failed")
+            from app import runtime_coordinator
+            coordinator = runtime_coordinator.current()
+            if (coordinator is not None and getattr(coordinator, "transport", None) is not None
+                    and coordinator.managed_queue(record.name)):
+                # Com o Rust de pé a origem volta nele: o processo sobe sem cliente Python.
+                try:
+                    slot = await coordinator.reopen_in_change(record.name, wait_initialized=True)
+                except Exception as exc:
+                    from app import diag
+                    diag.registrar("runtime.transfer_restore_failed", "erro", sessao=record.name,
+                                   **runtime_coordinator.failure_reason(exc))
+                    raise TransferError("session_transfer_restore_failed") from exc
+                view = slot.view.get("view") or {}
+                if not view.get("alive") or view.get("conversation") != meta["session_id"]:
+                    raise TransferError("session_transfer_restore_failed")
+            else:
+                sess = await hl.ensure_running(record.name, transfer_id=record.id)
+                if not sess or not sess.vivo or sess.iniciando or sess.sid != meta["session_id"]:
+                    raise TransferError("session_transfer_restore_failed")
         else:
             from app.conversation_transfer import _processes, _process_identity, _runtime_path, _write_json
             command = self._comando_terminal(meta, resume=True)
@@ -2732,8 +2948,8 @@ class SessionRegistry:
             if not loaded:
                 raise TransferError("session_transfer_restore_failed")
             headless_sessions.delete(record.name)
-        self._forget(record.name)
-        self._jsonl_cache[record.name] = meta["jsonl"]
+        await asyncio.to_thread(self._forget, record.name)
+        await asyncio.to_thread(self._seed, record.name, meta["jsonl"], True)
 
     def rename(self, old: str, new: str) -> None:
         from app.conversation_transfer import require_available
@@ -2750,6 +2966,7 @@ class SessionRegistry:
             headless_sessions.rename(old, new)
             get_adapter(CLAUDE_HEADLESS).rename(old, new)
             self._jsonl_cache.pop(old, None)
+            self._rename_rust(old, new)
             PromptQueue(old).rename(new)
             ThenLink(old).rename(new)
             rename_pair(old, new)
@@ -2779,6 +2996,7 @@ class SessionRegistry:
             self._limit_cache[new] = self._limit_cache.pop(old)
         if old in self._reply_cache:
             self._reply_cache[new] = self._reply_cache.pop(old)
+        self._rename_rust(old, new)
         # A fila duravel tambem e keyed por NOME -> move junto, senao a sessao renomeada perde as
         # entradas nao-drenadas e elas ficam orfas no nome velho (fantasma se reusarem `old`).
         PromptQueue(old).rename(new)
@@ -2911,12 +3129,18 @@ class SessionRegistry:
             # fora do kill), e a falha aparecia no log como se fosse de um encerramento.
             _log.warning("_clear_pair(%s): falha ao sair do grupo de pareamento: %r", name, e)
 
+    def sweep_pairs(self, list_fn: Callable[[], list[SessionInfo]], agora: float | None = None) -> None:
+        """Lista que falha levanta antes de varrer: vazia por erro dissolveria grupos vivos. Sem
+        nenhum pareado, nem pergunta a lista."""
+        vivos = {i.name for i in list_fn()} if pair.referenciados_locais() else set()
+        self._varrer_pares_mortos(vivos, agora)
+
     def _varrer_pares_mortos(self, vivos: set[str], agora: float | None = None) -> None:
         """Membro de grupo cuja sessão morreu FORA do app (Ctrl-C, crash, reboot): ninguém chamou
         leave, o sidecar apontava pra um fantasma pra sempre. Morto = ausente da lista viva numa
-        varredura anterior E há pelo menos _PAIR_AUSENCIA_MIN_S — kill() e rename() chamam list()
-        numa janela em que o nome está ausente de propósito, e só o tempo separa isso de morte.
-        O aviso vai pela fila durável, nunca send-keys: isto roda dentro do list(), no tick do SSE."""
+        varredura anterior E há pelo menos _PAIR_AUSENCIA_MIN_S — kill() e rename() deixam o nome
+        ausente de propósito por um instante, e só o tempo separa isso de morte. Roda no laço
+        `pair_sweep_loop`, fora da descoberta."""
         try:
             sozinhos = pair.dissolve_lone_orq()
         except Exception as e:
@@ -3041,6 +3265,7 @@ class SessionRegistry:
         engine_account = procinfo._env_var_of(ag, "CP_ENGINE_ACCOUNT") if ag and motor else None
         engine_credential_id = procinfo._env_var_of(ag, "CP_ENGINE_CREDENTIAL_ID") if engine_account else None
         engine_account_base_url = procinfo._env_var_of(ag, "CP_ENGINE_ACCOUNT_BASE_URL") if engine_account else None
+        service_tier = procinfo._env_var_of(ag, "CP_ENGINE_SERVICE_TIER") if ag and motor else None
         motor_sumiu = False
         if motor:
             from app import engines
@@ -3069,7 +3294,14 @@ class SessionRegistry:
                                           expected_base=engine_account_base_url)
             modelo = binding["ANTHROPIC_MODEL"]
         if motor_sumiu:
-            modelo = esforco = janela = None
+            modelo = esforco = janela = service_tier = None
+        if modelo and not motor:
+            from app import default_model
+            if not default_model.anthropic(modelo):
+                model_args.validar("claude", modelo, None)  # malformado: recusa antes do kill
+                _log.warning("resume %s: modelo %r não é da Anthropic; volta no padrão da conta", name, modelo)
+                modelo = None
+        service_tier = _claude_service_tier(motor, modelo, service_tier)
         # Sem motor, a variável veio do `-e` da criação e sumiria no relançamento; com motor, é dele.
         subagente = (procinfo._env_var_of(ag, "CLAUDE_CODE_SUBAGENT_MODEL")
                      if ag and not motor and not motor_sumiu else None)
@@ -3086,8 +3318,8 @@ class SessionRegistry:
         # anexa ao nome. Nada aqui toca o tmux.
         # "claude" literal: esta funcao ja recusa provider nao-Claude acima
         # (_refuse_non_claude_resume), e nao ha variavel `provider` neste escopo.
-        cmd = tmux.join_cmd(["claude", "--resume", session_id]
-                         + model_args.args_de("claude", modelo, esforco))
+        argv = ["claude", "--resume", session_id] + model_args.args_de("claude", modelo, esforco)
+        cmd = tmux.join_cmd(argv)
         if motor:
             # Prefixo remontado JUNTO com a escolha: preservar so a flag deixaria a sessao
             # ressuscitada com a flag num modelo e o AMBIENTE noutro (as cinco chaves ANTHROPIC_*,
@@ -3105,14 +3337,30 @@ class SessionRegistry:
                 pre += ["--model", modelo]
                 if janela:
                     pre += ["--context", janela]
+            if service_tier is not None:
+                env = {**os.environ, "CLAUDE_CONFIG_DIR": str(cdir or Path.home() / ".claude")}
+                engines.service_tier_settings(argv, env, service_tier, cwd=cwd)
+                pre += ["--service-tier", service_tier]
             cmd = tmux.join_cmd(pre + ["--"]) + " " + cmd
         tmux.kill_session(name)
         self._forget(name)
         env_pane = _env_sessao(subagente, jev)
         if not tmux.new_session(name, cwd, cmd, str(cdir) if cdir else None, **env_pane):
             raise ValueError("falha ao relançar a sessao")
+        if service_tier is not None:
+            self.wait_for_claude(name, {
+                "session_id": session_id, "config_dir": str(cdir) if cdir else None,
+                "engine": motor, "model": modelo, "service_tier": service_tier,
+                "engine_account": engine_account, "engine_credential_id": engine_credential_id,
+                "engine_account_base_url": engine_account_base_url,
+            })
         # Fixa o transcript resumido no cache: resolve() ja o devolveria (o --resume esta no cmdline),
         # mas semear evita a janela onde o pane ainda esta subindo e cairia no fallback por mtime.
         self._jsonl_cache[name] = str(jsonl)
         return SessionInfo(name=name, cwd=cwd, jsonl=str(jsonl), tracked=True, engine=motor,
                            engine_account=engine_account, conta=engine_credential_id)
+
+
+from app.runtime_adapter import registry_method as _runtime_registry_method
+for _method_name in ("kill", "rename", "para_terminal", "para_headless"):
+    setattr(SessionRegistry, _method_name, _runtime_registry_method(getattr(SessionRegistry, _method_name)))

@@ -60,15 +60,23 @@ pub struct Failure {
     pub detail: String,
     pub retry_after: Option<u64>,
     pub uncertain: bool,
+    /// O código do envelope `{code, params, msg}` da resposta, quando veio: quem precisa decidir pela recusa
+    /// (e não pelo status) olha aqui, porque o `detail` já é a frase traduzida.
+    pub code: Option<String>,
 }
 
 impl Failure {
     pub fn local(detail: impl Into<String>) -> Self {
-        Self { status: None, detail: detail.into(), retry_after: None, uncertain: false }
+        Self { status: None, detail: detail.into(), retry_after: None, uncertain: false, code: None }
     }
     fn transport(post: bool) -> Self {
         Self { uncertain: post, ..Self::local(if post { "delivery_uncertain" } else { "network_error" }) }
     }
+}
+
+/// O `code` do envelope `{"detail": {code, params, msg}}`; `detail` em texto ou em lista não tem código.
+fn envelope_code(body: Option<&Value>) -> Option<String> {
+    body?.get("detail")?.get("code")?.as_str().map(str::to_owned)
 }
 
 fn failure_detail(body: Option<Value>, status: u16) -> String {
@@ -102,6 +110,12 @@ fn failure_detail(body: Option<Value>, status: u16) -> String {
                 let params = fields.get("params").and_then(Value::as_object).map(|p| p.iter()
                     .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_owned))).collect()).unwrap_or_default();
                 if let Some(message) = crate::i18n::tr_web(code, &params) { return Some(message); }
+            }
+            // Custos e uso no Rust (503 do dono único): a frase do web pelo código, que já traz o código.
+            if let Some(code) = fields.get("code").and_then(Value::as_str).filter(|code| code.starts_with("costs_") || *code == "internal_info") {
+                // `internal_info` é o mesmo código do histórico, com a frase de lá.
+                let key = if code == "internal_info" { "history_internal_info" } else { code };
+                if let Some(message) = crate::i18n::tr_web(key, &std::collections::HashMap::new()) { return Some(message); }
             }
             // Atalhos do projeto: a frase do web pelo código, com o motivo (`params.detalhe`) dentro; sem a frase, o `msg`.
             if let Some(code @ ("erro_project_shortcuts" | "erro_project_shortcuts_projeto" | "erro_project_shortcuts_arquivo" | "erro_shortcut_pasta")) = fields.get("code").and_then(Value::as_str) {
@@ -161,8 +175,9 @@ impl Api {
         let status = response.status().as_u16();
         let retry_after = response.headers().get(header::RETRY_AFTER).and_then(|s| s.to_str().ok()).and_then(|s| s.parse().ok());
         let body = response.json::<Value>().await.ok();
+        let code = envelope_code(body.as_ref());
         let detail = failure_detail(body, status);
-        Err(Failure { status: Some(status), detail: detail.chars().take(500).collect(), retry_after, uncertain: post && status >= 500 })
+        Err(Failure { status: Some(status), detail: detail.chars().take(500).collect(), retry_after, uncertain: post && status >= 500, code })
     }
 
     pub async fn sessions(&self) -> Result<Vec<SessionInfo>, Failure> {
@@ -222,15 +237,17 @@ impl Api {
     }
 
     /// Sem `name` (nova conversa, antes de a sessão existir) só transcreve, sem guardar o áudio numa sessão.
-    pub async fn transcribe(&self, name: Option<&str>, bytes: Vec<u8>, style: Option<&str>) -> Result<Value, Failure> {
+    pub async fn transcribe(&self, name: Option<&str>, filename: &str, bytes: Vec<u8>, clean: bool, style: Option<&str>) -> Result<Value, Failure> {
         if bytes.len() as u64 > MAX_BYTES { return Err(Failure::local("attach_too_big")); }
         let mut url = match name {
             Some(name) => self.endpoint(Some(name), Some("transcribe")),
             None => self.server_url(&["dictation", "transcribe"], &[]),
         };
-        url.query_pairs_mut().append_pair("limpar", "1");
-        if let Some(style) = style.filter(|style| !style.is_empty()) { url.query_pairs_mut().append_pair("estilo", style); }
-        let r = self.client.post(url).header(header::CONTENT_TYPE, "audio/wav").header("X-Filename", "ditado.wav")
+        url.query_pairs_mut().append_pair("limpar", if clean { "1" } else { "0" });
+        if let Some(style) = style.filter(|style| clean && !style.is_empty()) { url.query_pairs_mut().append_pair("estilo", style); }
+        let filename = if filename.is_empty() { "audio.wav" } else { filename };
+        let r = self.client.post(url).header(header::CONTENT_TYPE, crate::composer::mime_for(filename))
+            .header("X-Filename", crate::composer::encode_component(filename))
             .body(bytes).timeout(Duration::from_secs(300)).send().await.map_err(|_| Failure::transport(true))?;
         Self::checked(r, true).await?.json().await.map_err(|_| Failure::local("invalid_response"))
     }
@@ -265,7 +282,7 @@ impl Api {
         // Erro de terceiro não tem o corpo lido: nem memória, nem texto escolhido por ele na tela.
         if matches!(source, Source::Remote(_)) && !r.status().is_success() {
             let status = r.status().as_u16();
-            return Err(Failure { status: Some(status), detail: failure_detail(None, status), retry_after: None, uncertain: false });
+            return Err(Failure { status: Some(status), detail: failure_detail(None, status), retry_after: None, uncertain: false, code: None });
         }
         let r = Self::checked(r, false).await?;
         if r.content_length().is_some_and(|n| n > MAX_BYTES) { return Err(Failure::local("attach_too_big")); }
@@ -331,7 +348,7 @@ impl Api {
         if r.status() == StatusCode::CONFLICT {
             let body = r.json::<Value>().await.unwrap_or(Value::Null);
             if let Some(prereqs) = share_blocked(&body) { return Err(ShareFailure::Blocked(prereqs)); }
-            return Err(ShareFailure::Other(Failure { status: Some(409), detail: failure_detail(Some(body), 409), retry_after: None, uncertain: false }));
+            return Err(ShareFailure::Other(Failure { status: Some(409), detail: failure_detail(Some(body), 409), retry_after: None, uncertain: false, code: None }));
         }
         Self::checked(r, true).await.map_err(ShareFailure::Other)?.json().await.map_err(|_| ShareFailure::Other(Failure::transport(true)))
     }
@@ -467,7 +484,7 @@ impl Api {
             let live = body.as_ref().and_then(|b| b.get("detail")).filter(|d| d.get("code").and_then(Value::as_str) == Some("erro_conversa_viva"))
                 .and_then(|d| d.pointer("/params/sessao")).and_then(Value::as_str).filter(|name| !name.is_empty()).map(str::to_owned);
             if let Some(name) = live { return Ok(Resumed::Live(name)); }
-            return Err(Failure { status: Some(409), detail: failure_detail(body, 409).chars().take(500).collect(), retry_after: None, uncertain: false });
+            return Err(Failure { status: Some(409), detail: failure_detail(body, 409).chars().take(500).collect(), retry_after: None, uncertain: false, code: None });
         }
         let session = Self::checked(r, true).await?.json().await.map_err(|_| Failure::local("invalid_response"))?;
         Ok(Resumed::New(session))
@@ -534,7 +551,7 @@ impl Api {
                     Some("error") => {
                         let status = event.get("status").and_then(Value::as_u64).unwrap_or(500) as u16;
                         let detail = failure_detail(Some(json!({"detail": event.get("detail")})), status);
-                        return Err(Failure { status: Some(status), detail: detail.chars().take(500).collect(), retry_after: None, uncertain: false });
+                        return Err(Failure { status: Some(status), detail: detail.chars().take(500).collect(), retry_after: None, uncertain: false, code: None });
                     }
                     _ => {}
                 }
@@ -690,6 +707,17 @@ mod tests {
     }
 
     #[test]
+    fn costs_failure_shows_the_translated_reason_with_its_code() {
+        let message = failure_detail(Some(json!({"ok": false, "error_code": "costs_no_disk", "message": "índice de custos indisponível",
+            "detail": {"code": "costs_no_disk", "params": {"motivo": "índice de custos indisponível"},
+                "msg": "índice de custos indisponível — costs_no_disk"}})), 503);
+        assert_eq!(message, crate::i18n::tr_web("costs_no_disk", &Default::default()).unwrap());
+        assert!(message.contains("(costs_no_disk)"), "{message}");
+        let info = failure_detail(Some(json!({"detail": {"code": "internal_info", "params": {}, "msg": "x — internal_info"}})), 503);
+        assert_eq!(info, crate::i18n::tr_web("history_internal_info", &Default::default()).unwrap());
+    }
+
+    #[test]
     fn backend_error_detail_keeps_string_and_object_messages() {
         assert_eq!(failure_detail(Some(json!({"detail": "plain rejection"})), 400), "plain rejection");
         assert_eq!(failure_detail(Some(json!({"detail": {"code": "turn_missing", "params": {}, "msg": "Nenhum turno ativo"}})), 409), "Nenhum turno ativo");
@@ -719,6 +747,7 @@ mod tests {
             ("session_transfer_invalid_model_choice", "catálogo", "catalog"),
             ("session_transfer_queue_pending", "mensagens na fila", "Messages are queued"),
             ("session_transfer_source_busy", "permissão pendente", "pending question or approval"),
+            ("session_transfer_busy", "trocando de agente", "switching agents"),
         ] {
             let text = failure_detail(Some(json!({"detail": {"code": code,
                 "msg": "private-payload", "params": {"model": "chosen", "estimated": 123, "limit": 100}}})), 409);
@@ -735,6 +764,25 @@ mod tests {
     fn mod_press_refusals_use_the_web_sentence() {
         let text = failure_detail(Some(json!({"detail": {"code": "erro_mod_botao_ambiguo", "params": {"rotulo": "fechar"}, "msg": "x"}})), 409);
         assert!(text != "erro_mod_botao_ambiguo" && text.contains("fechar"), "{text}");
+    }
+
+    #[test]
+    fn the_envelope_code_goes_into_the_failure() {
+        let guard = json!({"ok": false, "detail": {"code": "erro_mod_guarda_indisponivel", "params": {"motivo": "x"}, "msg": "x"}});
+        assert_eq!(envelope_code(Some(&guard)).as_deref(), Some("erro_mod_guarda_indisponivel"));
+        assert_eq!(envelope_code(Some(&json!({"detail": "texto"}))), None);
+        assert_eq!(envelope_code(Some(&json!({"detail": [{"msg": "campo"}]}))), None);
+        assert_eq!(envelope_code(None), None);
+    }
+
+    #[test]
+    fn new_mod_refusals_use_the_web_sentence() {
+        for code in ["erro_mod_sem_digitacao", "erro_mod_desenho_vencido", "erro_mod_dialogo_aberto",
+            "erro_mod_rascunho_no_prompt", "erro_mod_painel_nao_alcancavel", "erro_mod_fechar_recusado",
+            "erro_mod_guarda_indisponivel", "erro_mod_painel_inexistente", "erro_mod_convidado"] {
+            let text = failure_detail(Some(json!({"detail": {"code": code, "params": {}, "msg": "texto-do-servidor"}})), 409);
+            assert!(text != code && text != "texto-do-servidor", "{code}: {text}");
+        }
     }
 
     #[test]

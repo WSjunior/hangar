@@ -1002,7 +1002,7 @@ def test_texto_normal_nao_usa_placeholder(monkeypatch):
 def test_session_created_ok():
     with patch.object(tmux, "RUN", return_value=MagicMock(returncode=0, stdout="1753970000\n")) as run:
         assert tmux.session_created("cc") == 1753970000.0
-    assert run.call_args[0][0] == ["tmux", "display-message", "-p", "-t", "=cc", "#{session_created}"]
+    assert run.call_args[0][0] == ["tmux", "display-message", "-p", "-t", "=cc:", "#{session_created}"]
 
 
 def test_session_created_falha_vira_zero():
@@ -1044,7 +1044,8 @@ def test_paste_text_usa_load_buffer_pela_stdin():
     with patch("app.tmux._run", side_effect=fake_run), \
          patch("app.tmux.buffer_trunca_no_newline", return_value=False):
         assert tmux.paste_text("cc", grande) is True
-    assert chamadas[0][0][:4] == ["tmux", "load-buffer", "-b", "cp-prompt"]
+    assert chamadas[0][0][:3] == ["tmux", "load-buffer", "-b"]
+    assert chamadas[0][0][3].startswith("cp-prompt-")
     assert chamadas[0][0][4] == "-"
     assert chamadas[0][1] == grande.encode()
     assert "set-buffer" not in " ".join(chamadas[0][0])

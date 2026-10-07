@@ -4,6 +4,7 @@ import logging
 import subprocess
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from app import diag
@@ -241,7 +242,8 @@ def _pane_target(name: str) -> str:
 # escrita ate o fim da prova de entrega (senao outra sessao sobrescreve o clipboard entre a escrita e
 # o Alt+V), e `paste_via_clipboard` o segura tambem, pra ser segura quando chamada sozinha. Com um
 # Lock simples isso e deadlock imediato no caminho de envio do Windows.
-_CLIP_LOCK = threading.RLock()
+from app.runtime_terminal import ClipboardLock
+_CLIP_LOCK = ClipboardLock()
 
 # Escreve o clipboard do Windows lendo o texto da STDIN. Duas escolhas medidas na winboat em
 # 08/08/2026 (docs/medicoes-2026-08-08-windows.md):
@@ -291,6 +293,8 @@ def paste_via_clipboard(name: str, text: str) -> bool:
     clipboard. O lock daqui existe pra funcao ser segura quando chamada sozinha — e por isso ele e
     RLock: com o caller ja segurando, este `with` e no-op em vez de deadlock.
     """
+    from app.runtime_terminal import assert_writer
+    assert_writer(name)
     if os.name != "nt":
         return False
     # Texto vazio: o PowerShell converte a string vazia em null ao casar o parametro e o
@@ -541,7 +545,8 @@ def session_created(name: str) -> float:
     # ser entregue — sessao morreu devendo, a divida morre junto (regra do dono). O ts do transcript
     # sozinho nao cobre o resume (`pi -c`): transcript velho, tmux novo. 0.0 = nao sei (sessao
     # sumida/erro) -> sem poda extra, comportamento de hoje.
-    cp = _run(["tmux", "display-message", "-p", "-t", f"={name}", "#{session_created}"])
+    # `=NAME` sem `:` não resolve no display-message: sai vazio com código 0.
+    cp = _run(["tmux", "display-message", "-p", "-t", f"={name}:", "#{session_created}"])
     if cp.returncode != 0:
         return 0.0
     try:
@@ -1065,6 +1070,8 @@ def _send_literal(target: str, text: str) -> bool:
 def send_keys(name: str, keys: str, literal: bool = False) -> bool:
     """False só no caso de envio literal que parou no meio (ver _send_literal). Quem ignora o retorno
     fica com o comportamento de antes."""
+    from app.runtime_terminal import assert_writer
+    assert_writer(name)
     if literal:
         return _send_literal(_pane_target(name), keys)
     if os.name == "nt" and keys in ("Escape", "Esc"):
@@ -1138,9 +1145,11 @@ def paste_text(name: str, text: str) -> bool:
     mentindo (entrega truncado ou nada), e confiar nesse rc foi o que manteve o fallback DESLIGADO
     no Windows justamente onde ele era necessario. Ver buffer_trunca_no_newline.
     """
+    from app.runtime_terminal import assert_writer
+    assert_writer(name)
     if buffer_trunca_no_newline():
         return _paste_linha_a_linha(name, text)
-    buf = "cp-prompt"
+    buf = "cp-prompt-" + uuid.uuid4().hex
     # `load-buffer -` (texto pela STDIN), nao `set-buffer -- <texto>` (texto no argv): o teto de
     # 16344 bytes e do COMPRIMENTO DO COMANDO, e era o set-buffer que o pagava. Medido 08/08/2026:
     # load-buffer aceitou 1,088 MB e o paste-buffer entregou em 0,32s, byte a byte identico e com os

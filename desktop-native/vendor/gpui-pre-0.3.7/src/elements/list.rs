@@ -1,3 +1,4 @@
+// Modified for Hangar: `ListState::hold_tail` keeps the visible rows still when the tail shrinks (see MODIFICADO.md).
 //! A list element that can be used to render a large number of differently sized elements
 //! efficiently. Clients of this API need to ensure that elements outside of the scrolled
 //! area do not change their height for this element to function correctly. If your elements
@@ -17,6 +18,8 @@ use collections::VecDeque;
 use refineable::Refineable as _;
 use std::{cell::RefCell, ops::Range, rc::Rc};
 use sum_tree::{Bias, Dimensions, SumTree};
+#[path = "list_tail.rs"]
+mod tail;
 
 type RenderItemFn = dyn FnMut(usize, &mut Window, &mut App) -> AnyElement + 'static;
 
@@ -49,6 +52,11 @@ impl List {
     }
 }
 
+/// Hangar: altura das linhas antes de `ix`, a régua da folga do fim.
+fn height_before(items: &SumTree<ListItem>, ix: usize) -> Pixels {
+    items.find::<ListItemSummary, _>((), &Count(ix), Bias::Right).0.height
+}
+
 /// The list state that views must hold on behalf of the list element.
 #[derive(Clone)]
 pub struct ListState(Rc<RefCell<StateInner>>);
@@ -73,6 +81,13 @@ struct StateInner {
     measuring_behavior: ListMeasuringBehavior,
     pending_scroll: Option<PendingScroll>,
     follow_state: FollowState,
+    /// Hangar: com o teto da folga, o que encolhe no fim vira espaço embaixo em vez de puxar o resto para baixo.
+    hold_tail: Option<Pixels>,
+    tail_slack: Pixels,
+    /// Primeira linha à vista no último layout e a altura dela até o fim: a régua do que cresceu ou encolheu.
+    tail_ref: Option<(usize, Pixels)>,
+    /// O fim estava à vista no último layout: só então o que muda nele mexeria no que está na tela.
+    tail_visible: bool,
 }
 
 /// Deferred scroll adjustment applied after the scroll-top item has been remeasured.
@@ -325,9 +340,21 @@ impl ListState {
             measuring_behavior: ListMeasuringBehavior::default(),
             pending_scroll: None,
             follow_state: FollowState::default(),
+            hold_tail: None,
+            tail_slack: px(0.),
+            tail_ref: None,
+            tail_visible: false,
         })));
         this.splice(0..0, item_count);
         this
+    }
+
+    /// Hangar: ancorada no fim, uma linha do fim que encolhe deixa folga embaixo, como o terminal, e a próxima que
+    /// cresce a consome antes de empurrar o resto. O que já estava à vista não sobe e desce a cada troca no fim.
+    /// `max` é o teto da folga: um bloco grande recolhido perto do fim não deixa um vão do tamanho dele.
+    pub fn hold_tail(self, max: Pixels) -> Self {
+        self.0.borrow_mut().hold_tail = Some(max);
+        self
     }
 
     /// Set the list to measure all items in the list in the first layout phase.
@@ -360,6 +387,7 @@ impl ListState {
             state.logical_scroll_top = None;
             state.pending_scroll = None;
             state.scrollbar_drag_start_height = None;
+            (state.tail_slack, state.tail_ref) = (px(0.), None);
             state.items.summary().count
         };
 
@@ -515,6 +543,10 @@ impl ListState {
     ) {
         let state = &mut *self.0.borrow_mut();
 
+        // A régua da folga acompanha a troca: linhas antes dela a deslocam; trocada a própria, ela recua para o começo
+        // da troca, somando a altura das linhas que saíram entre os dois (lida antes de elas saírem).
+        let tail_ref = state.tail_ref.map(|(ix, tail)| (ix, tail, height_before(&state.items, ix) - height_before(&state.items, old_range.start)));
+
         let mut old_items = state.items.cursor::<Count>(());
         let mut new_items = old_items.slice(&Count(old_range.start), Bias::Right);
         old_items.seek_forward(&Count(old_range.end), Bias::Right);
@@ -533,6 +565,12 @@ impl ListState {
         new_items.append(old_items.suffix(), ());
         drop(old_items);
         state.items = new_items;
+
+        state.tail_ref = tail_ref.map(|(ix, tail, between)| {
+            if old_range.end <= ix { (ix - old_range.len() + spliced_count, tail) }
+            else if old_range.start <= ix { (old_range.start, tail + between) }
+            else { (ix, tail) }
+        });
 
         if let Some(ListOffset {
             item_ix,
@@ -1025,6 +1063,38 @@ impl StateInner {
     }
 
     fn layout_items(
+        &mut self,
+        available_width: Option<Pixels>,
+        available_height: Pixels,
+        padding: &Edges<Pixels>,
+        render_item: &mut RenderItemFn,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> LayoutItemsResponse {
+        let Some(max) = self.hold_tail else {
+            return self.layout_items_once(available_width, available_height, padding, render_item, window, cx);
+        };
+        let held = |slack: Pixels| Edges { bottom: padding.bottom + slack, ..*padding };
+        let mut response = self.layout_items_once(available_width, available_height, &held(self.tail_slack), render_item, window, cx);
+        let tail_from = |items: &SumTree<ListItem>, ix: usize| items.summary().height - height_before(items, ix);
+        // Com o fim à vista no último layout (colado nele ou pousado logo acima pela mola de quem acompanha), o trecho da
+        // régua até o fim que cresceu ou encolheu vai para a folga, e quem estava à vista fica onde estava.
+        if let Some((ix, before)) = self.tail_ref.filter(|(ix, _)| self.tail_visible && *ix < self.items.summary().count) {
+            let slack = px(tail::held_slack(self.tail_slack.0, before.0, tail_from(&self.items, ix).0, max.0));
+            if (slack - self.tail_slack).abs() >= px(0.5) {
+                self.tail_slack = slack;
+                response = self.layout_items_once(available_width, available_height, &held(slack), render_item, window, cx);
+            }
+        }
+        let top = response.scroll_top.item_ix.min(self.items.summary().count);
+        self.tail_ref = Some((top, tail_from(&self.items, top)));
+        let shown_until = self.scroll_top(&response.scroll_top) + available_height;
+        // Folga de 2 px: a mola pousa um pixel acima do fim de propósito.
+        self.tail_visible = shown_until + px(2.) >= self.items.summary().height + padding.bottom + self.tail_slack;
+        response
+    }
+
+    fn layout_items_once(
         &mut self,
         available_width: Option<Pixels>,
         available_height: Pixels,
@@ -1540,6 +1610,13 @@ impl Element for List {
 
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
 
+        // Reflow não é redução de conteúdo: a régua e a folga só valem na geometria em que foram medidas.
+        if tail::geometry_changed(state.last_layout_bounds.map(|last| last.size), bounds.size) {
+            state.tail_slack = px(0.);
+            state.tail_ref = None;
+            state.tail_visible = false;
+        }
+
         // If the width of the list has changed, invalidate all cached item heights
         if state
             .last_layout_bounds
@@ -1572,7 +1649,8 @@ impl Element for List {
             };
 
         state.last_layout_bounds = Some(bounds);
-        state.last_padding = Some(padding);
+        // A folga é espaço da lista: a rolagem e a volta ao fim a contam.
+        state.last_padding = Some(Edges { bottom: padding.bottom + state.tail_slack, ..padding });
         ListPrepaintState { hitbox, layout }
     }
 

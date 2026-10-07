@@ -4,6 +4,7 @@ Não importa nada do app: `stats` e os adapters se importam em ciclo.
 """
 from __future__ import annotations
 
+import math
 import time
 from collections import deque
 from collections.abc import Sequence
@@ -14,6 +15,27 @@ RECENT_CALLS = 10
 MIN_GEN_S = 0.2
 # Transcript com resposta mais nova que a última medida por esta folga: a fonte parou de medir.
 _STALE_S = 30.0
+
+
+def rate_report(data) -> tuple[int, float, str] | None:
+    """Medida vinda do runtime Rust: (tokens, segundos, conversa), ou None se malformada."""
+    if not isinstance(data, dict):
+        return None
+    tokens, seconds, conversation = data.get("tokens"), data.get("seconds"), data.get("conversation")
+    if (type(tokens) is not int or type(seconds) not in (int, float) or not math.isfinite(seconds)
+            or seconds < 0 or not isinstance(conversation, str) or not conversation):
+        return None
+    return tokens, float(seconds), conversation
+
+
+def first_response_report(data) -> tuple[float, str] | None:
+    if not isinstance(data, dict) or data.get("first_response") is not True:
+        return None
+    seconds, conversation = data.get("seconds"), data.get("conversation")
+    if (type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds < 0
+            or not isinstance(conversation, str) or not conversation):
+        return None
+    return float(seconds), conversation
 
 
 def rates(calls: Sequence[tuple[int, float]]) -> dict:
@@ -32,19 +54,27 @@ class LiveRate:
     def __init__(self) -> None:
         # (tokens, segundos, conversa, relógio de parede do fim)
         self._calls: deque[tuple[int, float, str, float]] = deque(maxlen=RECENT_CALLS)
+        self._first_responses: dict[str, tuple[float, int]] = {}
 
     def close(self, tokens: int, seconds: float, conversation: str) -> None:
         if tokens > 0 and seconds >= MIN_GEN_S:
             self._calls.append((tokens, seconds, conversation, time.time()))
 
+    def first_response(self, seconds: float, conversation: str) -> None:
+        total, count = self._first_responses.get(conversation, (0.0, 0))
+        self._first_responses[conversation] = (total + seconds, count + 1)
+
     def snapshot(self, conversation: str, transcript_call_ts: float | None) -> dict:
         # Só a conversa mostrada: /clear e sessão nova com o mesmo nome trocam o id.
+        out = {}
+        if sample := self._first_responses.get(conversation):
+            out["ttft_ms"] = int(sample[0] * 1000.0 / sample[1])
         calls = [c for c in self._calls if c[2] == conversation]
         if not calls:
-            return {}
+            return out
         if transcript_call_ts is not None and transcript_call_ts > calls[-1][3] + _STALE_S:
-            return {}
-        out = rates([(t, s) for t, s, _, _ in calls])
+            return out
+        out.update(rates([(t, s) for t, s, _, _ in calls]))
         out["tok_s_exact"] = True
         return out
 

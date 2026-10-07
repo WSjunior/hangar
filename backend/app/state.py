@@ -345,6 +345,34 @@ def menu_codex(pane_text: str) -> Optional[tuple[Optional[str], list[str]]]:
 # default permission mode?"): as opções vêm sem número e o `_CURSOR_RE` não o enxerga. Sem isto a
 # sessão parecia ociosa e o envio digitava em cima da pergunta.
 _CURSOR_SEM_NUMERO_RE = re.compile(r"^(\s*❯\s+)\S")
+# Dicas que o Claude Code põe no rodapé quando o foco está nele, no lugar de "↓ to manage".
+_FOCO_NO_RODAPE_RE = re.compile(r"Enter to view|↑/↓ to select")
+# O cursor do painel de agentes: só na frente de um agente, para uma statusline com `❯` não contar.
+_CURSOR_DO_PAINEL_RE = re.compile(r"^\s*❯\s+[●◯]")
+
+
+def _fim_do_composer(lines: list[str], ate: Optional[int] = None) -> Optional[int]:
+    """A régua de baixo da última caixa do composer (régua, `❯`, régua) antes de `ate`, ou None.
+    Abaixo dela mora o rodapé do Claude Code."""
+    regras = [j for j, ln in enumerate(lines[:ate]) if _RULE_RE.match(ln)]
+    if len(regras) < 2 or not any(ln.lstrip().startswith("❯") for ln in lines[regras[-2] + 1:regras[-1]]):
+        return None
+    return regras[-1]
+
+
+def _painel_de_agentes(lines: list[str], top: int, options: list[str]) -> bool:
+    # O painel de agentes ("← for agents": ● principal, ◯ subagente) com foco põe o `❯` num agente e
+    # parece um menu sem número; responder ao cartão dele navegava no painel.
+    return all(o[:1] and o[0] in "●◯" for o in options) and _fim_do_composer(lines, top) is not None
+
+
+def foco_no_rodape(pane_text: str) -> bool:
+    """O teclado está no rodapé do Claude Code (painel de agentes ou pílula de tarefas), não no
+    composer: o que se digita some, e o `x` do painel para um subagente."""
+    lines = pane_text.splitlines()
+    fim = _fim_do_composer(lines)
+    return fim is not None and any(_CURSOR_DO_PAINEL_RE.match(ln) or _FOCO_NO_RODAPE_RE.search(ln)
+                                   for ln in lines[fim + 1:])
 
 
 def _menu_sem_numero(lines: list[str]) -> Optional[tuple[Optional[str], list[str], int]]:
@@ -371,7 +399,7 @@ def _menu_sem_numero(lines: list[str]) -> Optional[tuple[Optional[str], list[str
     while bot < len(lines) and na_coluna(lines[bot]):
         bot += 1
     options = [lines[i][col:].strip() for i in range(top, bot)]
-    if len(options) < 2:
+    if len(options) < 2 or _painel_de_agentes(lines, top, options):
         return None
     # A pergunta é o título: primeira linha com texto depois da régua que abre o diálogo.
     inicio = max((i for i in range(top) if _RULE_RE.match(lines[i])), default=-1) + 1
@@ -721,47 +749,74 @@ async def run_tmux(fn, *args):
 _frames: dict[str, tuple[float, str]] = {}
 # nome -> (início, captura em voo)
 _frames_inflight: dict[str, tuple[float, asyncio.Future]] = {}
+_frame_tags: dict[str, tuple] = {}
+_inflight_tags: dict[str, tuple] = {}
 # Sessão que morre fora do monitor (kill por outra rota, sumiço do tmux) não passa por forget_frame.
 _FRAME_EVICT_AGE = 60.0
 
 
 async def _capture_and_store(name: str, started: float) -> str:
+    from app import terminal_observer
+    tag = terminal_observer.stamp(name)
     # Idade conta do INÍCIO da captura: o quadro pode ser até isso mais velho, nunca mais novo.
     # Um argumento só, como antes: há dublê de teste com essa assinatura.
-    pane = await run_tmux(tmux.capture_pane, name)
+    try:
+        result = await terminal_observer.capture(name, started)
+    except terminal_observer.ObservationFailed:
+        if tag != terminal_observer.stamp(name):
+            return ""
+        raise
+    if tag != terminal_observer.stamp(name):
+        return ""
+    # `None` só quando o Rust não é o dono (ponte desligada, Windows, nome ou provider fora dele).
+    pane = result["text"] if result is not None else await run_tmux(tmux.capture_pane, name)
+    if tag != terminal_observer.stamp(name):
+        return ""
     if pane:
         prev = _frames.get(name)
         if prev is None or prev[0] <= started:   # captura antiga que terminou depois não sobrescreve
             _frames[name] = (started, pane)
+            _frame_tags[name] = tag
         for n in [n for n, (t, _) in _frames.items() if started - t > _FRAME_EVICT_AGE]:
+            # Expirar cache de outra sessão não troca a época do transcript dela.
             _frames.pop(n, None)
+            _frame_tags.pop(n, None)
+            terminal_observer._analysis.pop(n, None)
     return pane
 
 
 async def shared_capture(name: str, max_age: float) -> str:
     """Quadro do pane com no máximo `max_age` s; senão captura (ou espera a captura em voo)."""
     now = time.monotonic()
+    from app import terminal_observer
+    tag = terminal_observer.stamp(name)
     hit = _frames.get(name)
-    if hit is not None and now - hit[0] <= max_age:
+    if hit is not None and _frame_tags.get(name) == tag and now - hit[0] <= max_age:
         return hit[1]
     inflight = _frames_inflight.get(name)
     # Captura em voo que começou antes da janela pedida (max_age=0 depois de um wake do plugin)
     # traria o pane de antes do evento: começa outra.
-    if (inflight is None or inflight[0] < now - max_age or inflight[1].done()
+    if (inflight is None or _inflight_tags.get(name) != tag or inflight[0] < now - max_age or inflight[1].done()
             or inflight[1].get_loop() is not asyncio.get_running_loop()):
         fut = asyncio.ensure_future(_capture_and_store(name, now))
         _frames_inflight[name] = (now, fut)
+        _inflight_tags[name] = tag
         fut.add_done_callback(
             lambda f: _frames_inflight.pop(name, None)
             if (_frames_inflight.get(name) or (0, None))[1] is f else None)
     else:
         fut = inflight[1]
     # shield: quem desiste (conexão caiu) não cancela a captura que o outro consumidor espera.
-    return await asyncio.shield(fut)
+    pane = await asyncio.shield(fut)
+    return pane if tag == terminal_observer.stamp(name) else ""
 
 
 def forget_frame(name: str) -> None:
     _frames.pop(name, None)
+    _frame_tags.pop(name, None)
+    _inflight_tags.pop(name, None)
+    from app import terminal_observer
+    terminal_observer.forget(name)
 
 
 class StateMonitor:
@@ -783,7 +838,7 @@ class StateMonitor:
                  sid_get: Optional[Callable[[], Optional[str]]] = None,
                  hook_grace: Optional[int] = HOOK_WORKING_GRACE,
                  transcript_get: Optional[Callable[[], Optional[str]]] = None,
-                 observe_permission: bool = False):
+                 observe_permission: bool = False, provider: Optional[str] = None):
         self.name = name
         self.poll = poll
         # hook_grace: apos quantos polls SEM SPINNER o marcador "working" deixa de valer. None =
@@ -802,6 +857,7 @@ class StateMonitor:
         # um turno vindo da fila da TUI (ver a docstring da funcao). None = comportamento de sempre.
         self.transcript_get = transcript_get
         self.observe_permission = observe_permission
+        self.provider = provider
 
     def _marcador(self):
         """Marcador do hook, ja corrigido quando ha transcript pra contradizer um idle velho."""
@@ -811,7 +867,25 @@ class StateMonitor:
         return corrige_ocioso_kimi(m, self.transcript_get())
 
     async def stream(self) -> AsyncIterator[StateEvent]:
+        from app import terminal_observer
+        source = terminal_observer.lease(self.name, self.provider, self.sid_get or (lambda: None))
+        inner = self._stream()
+        try:
+            await source.start()
+            while True:
+                with terminal_observer.use(source):
+                    try:
+                        event = await anext(inner)
+                    except StopAsyncIteration:
+                        return
+                yield event
+        finally:
+            await inner.aclose()
+            await source.close()
+
+    async def _stream(self) -> AsyncIterator[StateEvent]:
         last_key = object()
+        last_event: StateEvent | None = None
         prev_spinner = None
         frozen = 0          # polls com o mesmo spinner (congelado = turn acabou)
         no_spinner = 0      # polls consecutivos sem spinner (filtra redraw transiente)
@@ -821,11 +895,24 @@ class StateMonitor:
         permission_mode = None
         previous_non_plan = None
         max_age = self.FRAME_MAX_AGE
+        from app import terminal_observer
         while True:
+            if terminal_observer.retired(self.name):
+                # As conexões SSE podem reconhecer o /clear em rodadas diferentes.
+                await asyncio.sleep(self.poll)
+                continue
             # Um spawn por tick, nao dois: o capture-pane de uma sessao sumida devolve "" (rc != 0),
             # e so ai vale pagar o has-session pra separar "morreu" de "pane em branco". No psmux
             # cada comando custa ~50ms (medido na VM), e isto roda a 0,75s por chat aberto.
-            pane = await shared_capture(self.name, max_age)
+            frame_tag = terminal_observer.stamp(self.name)
+            failed = None
+            try:
+                pane = await shared_capture(self.name, max_age)
+            except terminal_observer.ObservationFailed as exc:
+                failed, pane = exc.code, ""
+            if frame_tag != terminal_observer.stamp(self.name) or terminal_observer.retired(self.name):
+                await asyncio.sleep(self.poll)
+                continue
             if not pane:
                 # None = tmux nao respondeu: nao e morte (o watcher do Codex ja matou app-servers
                 # vivos lendo timeout como sessao sumida); espera o proximo tick.
@@ -839,6 +926,23 @@ class StateMonitor:
                     forget_frame(self.name)
                     yield StateEvent(session=self.name, state="dead")
                     return
+            if failed is not None:
+                # O Rust é o dono da observação: o estado fica no último quadro, o erro aparece e a
+                # rodada seguinte pergunta a ele de novo (a pausa entre tentativas é dele).
+                if last_event is None or last_event.problema_detalhe != failed:
+                    if last_event is None:
+                        # Sem quadro anterior, o estado sai das âncoras que não dependem do pane.
+                        anchor = plugin_bridge.estado_recente(self.name)
+                        if anchor is None and self.sid_get is not None:
+                            anchor = await asyncio.to_thread(self._marcador)
+                        last_event = StateEvent(session=self.name, state=(
+                            anchor[0] if anchor is not None and anchor[0] in ("working", "idle") else held_state))
+                    last_event = last_event.model_copy(
+                        update={"problema": "terminal_observacao_falhou", "problema_detalhe": failed})
+                    last_key = object()
+                    yield last_event
+                await asyncio.sleep(self.poll)
+                continue
             if self.observe_permission:
                 from app.permission_mode import observar_ou_confirmado, parse_permission_mode
                 permission_key = self.sid_get() or self.name
@@ -979,10 +1083,12 @@ class StateMonitor:
             key = (state, label, question, tuple(options or ()), status, overlay, login,
                    limited, limit_reset, loop_status, loop_iter, loop_max,
                    permission_mode, previous_non_plan, tuple(s["pid"] for s in shells))
+            if frame_tag != terminal_observer.stamp(self.name):
+                continue
             if key != last_key:
                 last_key = key
                 held_state, held_label = state, label
-                yield StateEvent(session=self.name, state=state, label=label,
+                last_event = StateEvent(session=self.name, state=state, label=label,
                                  question=question, options=options, status_line=status,
                                  overlay=overlay, login=login,
                                  limited=limited, limit_reset=limit_reset,
@@ -990,6 +1096,7 @@ class StateMonitor:
                                  claude_permission_mode=permission_mode,
                                  claude_previous_non_plan=previous_non_plan,
                                  shells=shells)
+                yield last_event
             # Com o plugin vivo, aviso dele (turno, pergunta, fim) acorda o laço na hora; o tique
             # do pane segue igual por baixo. Sem plugin é o sleep de sempre.
             if plugin_bridge.vivo(self.name):

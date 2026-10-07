@@ -89,7 +89,7 @@ impl Hangar {
             return;
         };
         let (connection, period) = (self.connection, self.home_usage.period);
-        let task = self.runtime.spawn(async move { api.server_read(&["costs"], &[("period", period.key())], 120).await });
+        let task = self.runtime.spawn(async move { api.server_read(&["costs"], &[("period", period.key()), ("view", "summary")], 120).await });
         cx.spawn(async move |this, cx| {
             let result = match task.await {
                 Ok(result) => result.map_err(|error| Self::failure(&error)),

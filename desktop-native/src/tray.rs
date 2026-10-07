@@ -15,6 +15,7 @@ pub enum TrayEvent {
     /// Clique no ícone.
     Toggle,
     Show,
+    Restart,
     Quit,
     /// A bandeja do sistema apareceu (`true`) ou sumiu (`false`).
     Host(bool),

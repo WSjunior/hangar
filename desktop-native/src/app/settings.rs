@@ -13,7 +13,7 @@ mod appearance_page;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Page {
-    General, Appearance, Diary, About,
+    General, Appearance, Diary, About, Migration,
     Servers, Sync, Connect, SharedConfig, Accounts, Orchestration, Harnesses, Voice, Jev, Windows, Notifications, Shortcuts, Attachments, Advanced,
 }
 
@@ -24,7 +24,7 @@ impl Page {
 
     fn key(self) -> &'static str {
         match self {
-            Page::General => "general", Page::Appearance => "appearance", Page::Diary => "diary", Page::About => "about",
+            Page::General => "general", Page::Appearance => "appearance", Page::Diary => "diary", Page::About => "about", Page::Migration => "migration",
             Page::Servers => "servers", Page::Sync => "sync", Page::Connect => "connect", Page::SharedConfig => "shared_config", Page::Accounts => "accounts", Page::Orchestration => "orchestration",
             Page::Harnesses => "harnesses", Page::Voice => "voice", Page::Jev => "jev", Page::Windows => "windows", Page::Notifications => "notifications",
             Page::Shortcuts => "shortcuts", Page::Attachments => "attachments", Page::Advanced => "advanced",
@@ -34,7 +34,7 @@ impl Page {
     fn icon(self) -> IconName {
         match self {
             Page::General => IconName::Globe, Page::Appearance => IconName::Palette, Page::Diary => IconName::FileText,
-            Page::About => IconName::Info, Page::Servers => IconName::Server, Page::Sync => IconName::RefreshCw, Page::Connect => IconName::Globe, Page::SharedConfig => IconName::Layers,
+            Page::About => IconName::Info, Page::Migration => IconName::Activity, Page::Servers => IconName::Server, Page::Sync => IconName::RefreshCw, Page::Connect => IconName::Globe, Page::SharedConfig => IconName::Layers,
             Page::Accounts => IconName::User, Page::Orchestration => IconName::Users, Page::Harnesses => IconName::Activity,
             Page::Voice => IconName::Mic, Page::Jev => IconName::Zap, Page::Windows => IconName::Monitor, Page::Notifications => IconName::Bell,
             Page::Shortcuts => IconName::Keyboard, Page::Attachments => IconName::Paperclip, Page::Advanced => IconName::SlidersHorizontal,
@@ -45,6 +45,7 @@ impl Page {
         // O nome é o do web: uma frase, um dicionário.
         if self == Page::Jev { return tr_shared("jev_title", &[]); }
         if self == Page::SharedConfig { return tr_shared("shared_config_title", &[]); }
+        if self == Page::Migration { return tr_shared("migration_title", &[]); }
         tr(&format!("settings_page_{}", self.key()))
     }
 }
@@ -81,7 +82,7 @@ const PAGE_ROWS: &[(Page, &[(&str, Option<&str>)])] = &[
     (Page::Connect, &[("connect_code", Some("connect_code_help"))]),
     (Page::Appearance, &APPEARANCE_ROWS),
     (Page::General, &[("settings_language", Some("settings_language_desc")), ("settings_currency", Some("settings_currency_search")),
-        ("settings_tray", Some("settings_tray_desc"))]),
+        ("settings_tray", Some("settings_tray_desc")), ("settings_chrome_autofill", Some("settings_chrome_autofill_desc"))]),
     (Page::Diary, &[("settings_diary_rules", Some("settings_diary_rule_private")), ("settings_diary_download", Some("settings_diary_rule_local")),
         ("settings_diary_recent", None)]),
     (Page::About, &[("settings_about_app", None), ("settings_about_server", None), ("settings_about_update", Some("settings_about_update_desc")),
@@ -147,6 +148,7 @@ fn find(query: &str) -> Vec<Found> {
     let rows = PAGE_ROWS.iter().flat_map(|&(page, rows)| rows.iter()
         // Sem bandeja no sistema a linha não é desenhada.
         .filter(|(title, _)| crate::tray::SUPPORTED || *title != "settings_tray")
+        .filter(|(title, _)| cfg!(target_os = "linux") || *title != "settings_chrome_autofill")
         .map(move |&(title, desc)| (Found { page, row: Some(title) }, tr(title), desc.map(tr).unwrap_or_default())));
     // Páginas que ainda não têm linhas continuam achadas pelo nome e abrem no aviso delas.
     let pages = Page::DEVICE.into_iter().chain(Page::SERVER).map(|page| (Found { page, row: None }, page.title(), String::new()));
@@ -796,6 +798,7 @@ impl Hangar {
             Page::General => self.render_general(cx),
             Page::Diary => self.render_diary(cx),
             Page::About => self.render_about(cx),
+            Page::Migration => self.render_migration(cx),
             Page::Accounts => self.render_accounts(accounts_wide, window, cx),
             Page::Orchestration => self.render_orchestration(cx),
             Page::Shortcuts => self.render_shortcuts_page(cx),

@@ -21,7 +21,7 @@ pytestmark = pytest.mark.skipif(os.name == "nt", reason="socket unix")
 # `codex app-server --stdio` de mentira: initialize (uma vez), thread/start, turn/start que pede
 # aprovação de comando, thread/read.
 _CODEX_FALSO = r'''#!/usr/bin/env python3
-import json, sys
+import json, os, sys
 with open("server-starts.jsonl", "a") as recorded:
     recorded.write(json.dumps(sys.argv[1:]) + "\n")
 def out(o):
@@ -29,6 +29,10 @@ def out(o):
 iniciado = False
 status = "idle"
 effort = None
+service_tier = next((json.loads(arg.split("=", 1)[1]) for arg in sys.argv[1:]
+                     if arg.startswith("service_tier=")), None)
+if os.environ.get("FAKE_TIER_REFUSED"):
+    service_tier = "default"
 for linha in sys.stdin:
     ev = json.loads(linha)
     m = ev.get("method")
@@ -39,13 +43,13 @@ for linha in sys.stdin:
             iniciado = True
             out({"jsonrpc": "2.0", "id": ev["id"], "result": {"userAgent": "falso"}})
     elif m == "thread/start":
-        out({"jsonrpc": "2.0", "id": ev["id"], "result": {"thread": {"id": "th-1", "path": ""}, "model": "gpt-falso"}})
+        out({"jsonrpc": "2.0", "id": ev["id"], "result": {"thread": {"id": "th-1", "path": ""}, "model": "gpt-falso", "serviceTier": service_tier}})
     elif m == "thread/resume":
         with open("resume.txt", "w") as f:
             f.write(json.dumps(ev["params"]))
         with open("resume-history.jsonl", "a") as f:
             f.write(json.dumps(ev["params"]) + "\n")
-        out({"jsonrpc": "2.0", "id": ev["id"], "result": {"thread": {"id": ev["params"]["threadId"]}, "model": "gpt-falso"}})
+        out({"jsonrpc": "2.0", "id": ev["id"], "result": {"thread": {"id": ev["params"]["threadId"]}, "model": "gpt-falso", "serviceTier": service_tier}})
     elif m == "thread/settings/update":
         # O modo colaborativo também carrega o esforço; ajuste sem o campo não o apaga.
         mode = (ev["params"].get("collaborationMode") or {}).get("settings") or {}
@@ -55,7 +59,10 @@ for linha in sys.stdin:
         if ev["params"].get("effort") == "recusado":
             out({"jsonrpc": "2.0", "id": ev["id"], "error": {"code": -32602, "message": "effort invalido"}})
         else:
+            service_tier = ev["params"].get("serviceTier", service_tier)
             out({"jsonrpc": "2.0", "id": ev["id"], "result": {}})
+            out({"jsonrpc": "2.0", "method": "thread/settings/updated", "params": {
+                "threadId": "th-1", "threadSettings": {"serviceTier": service_tier}}})
     elif m == "thread/read":
         out({"jsonrpc": "2.0", "id": ev["id"], "result": {"thread": {"id": "th-1", "model": "gpt-falso", "reasoningEffort": effort, "status": {"type": status}, "turns": []}}})
     elif m == "turn/start":
@@ -121,8 +128,48 @@ def test_esforco_escolhido_chega_na_thread(ambiente):
         assert await ad.ensure_running("cx-esforco") is not None
         ajuste = json.loads((ambiente / "settings.txt").read_text())
         assert ajuste == {"threadId": "th-1", "model": "gpt-6-astra", "effort": "high"}
-        ad.close_sync("cx-esforco")
+        await asyncio.to_thread(ad.close_sync, "cx-esforco")
     asyncio.run(corpo())
+
+
+@pytest.mark.parametrize("tier", ["priority", "default"])
+def test_service_tier_restored_on_new_server_and_read_from_live_resume(ambiente, tier):
+    async def body():
+        adapter = CodexAdapter()
+        _sidecar("cx-tier", ambiente, service_tier=tier)
+        client = await adapter.ensure_running("cx-tier")
+        try:
+            assert adapter.current_model("cx-tier")["service_tier"] == tier
+            starts = [json.loads(line) for line in (ambiente / "server-starts.jsonl").read_text().splitlines()]
+            assert f'service_tier="{tier}"' in starts[-1]
+            # A escolha mudou enquanto o backend estava fora; o sidecar antigo não deve reaplicá-la.
+            adapter._sessions["cx-tier"]["bomba"].cancel()
+            await asyncio.gather(adapter._sessions["cx-tier"]["bomba"], return_exceptions=True)
+            other = "default" if tier == "priority" else "priority"
+            await client.request("thread/settings/update", {"threadId": "th-1", "serviceTier": other})
+            await client.close()
+            adapter._sessions.pop("cx-tier")
+            assert await adapter.ensure_running("cx-tier") is not None
+            assert adapter.current_model("cx-tier")["service_tier"] == other
+            assert codex_sessions.load("cx-tier")["service_tier"] == other
+            resumed = json.loads((ambiente / "resume-history.jsonl").read_text().splitlines()[-1])
+            assert resumed == {"threadId": "th-1"}
+            assert len((ambiente / "server-starts.jsonl").read_text().splitlines()) == 1
+        finally:
+            await asyncio.to_thread(adapter.close_sync, "cx-tier")
+    asyncio.run(body())
+
+
+def test_recreated_server_refusing_durable_fast_is_visible(ambiente, monkeypatch):
+    monkeypatch.setenv("FAKE_TIER_REFUSED", "1")
+    async def body():
+        adapter = CodexAdapter()
+        _sidecar("cx-tier-refused", ambiente, service_tier="priority")
+        with pytest.raises(RuntimeError, match="Fast"):
+            await adapter.ensure_running("cx-tier-refused")
+        assert codex_sessions.load("cx-tier-refused")["service_tier"] == "priority"
+        assert adapter.problema_de("cx-tier-refused") == "codex_headless_nao_subiu"
+    asyncio.run(body())
 
 
 def test_esforco_recusado_deixa_a_sessao_de_pe_e_o_problema_visivel(ambiente):
@@ -134,7 +181,7 @@ def test_esforco_recusado_deixa_a_sessao_de_pe_e_o_problema_visivel(ambiente):
         assert codex_sessions.load("cx-esforco-ruim")["thread_id"] == "th-1"
         assert ad.problema_de("cx-esforco-ruim") == "codex_esforco_nao_aplicado"
         assert "effort invalido" in ad._problemas["cx-esforco-ruim"][1]
-        ad.close_sync("cx-esforco-ruim")
+        await asyncio.to_thread(ad.close_sync, "cx-esforco-ruim")
     asyncio.run(corpo())
 
 
@@ -148,6 +195,7 @@ def test_ambiente_identifica_a_sessao_headless_para_os_scripts(ambiente, monkeyp
     assert env["CP_SESSION_NAME"] == "cx-identidade"
     assert env["CP_SESSION_KEY"] == meta["key"]
     assert env["HANGAR_CANO_KEY"] == meta["key"]
+    assert env["HANGAR_CANO_OWNER"] == str(Path.home())
     assert "TMUX" not in env and "TMUX_PANE" not in env
 
 
@@ -242,7 +290,7 @@ def test_sobe_no_cano_abre_thread_e_religa_com_aprovacao_pendente(ambiente):
         notas = [e for e in PromptQueue("cx-sem-terminal").load() if e.get("papel") == "assistant"]
         assert notas and "mcpServer/elicitation/request" in notas[-1]["text"]
         assert await ad.select("cx-sem-terminal", 1) is False    # nada mais pendente
-        ad.close_sync("cx-sem-terminal")
+        await asyncio.to_thread(ad.close_sync, "cx-sem-terminal")
         for _ in range(50):
             if not Path(f"/proc/{pid_cano}").exists():
                 break
@@ -287,10 +335,10 @@ def test_modo_de_permissao_vai_no_turno_e_troca_de_sandbox_reabre_o_servidor(amb
         assert not Path(f"/proc/{pid1}").exists()
         resume = json.loads((ambiente / "resume.txt").read_text())
         assert resume == {"threadId": "th-1", "cwd": str(ambiente), "approvalPolicy": "never",
-                          "sandbox": "danger-full-access"}
+                          "sandbox": "danger-full-access", "serviceTier": "default"}
         with pytest.raises(ValueError):
             await ad.set_permission_mode_sem_terminal("cx-modo", "yolo")
-        ad.close_sync("cx-modo")
+        await asyncio.to_thread(ad.close_sync, "cx-modo")
     asyncio.run(corpo())
 
 
@@ -347,7 +395,7 @@ def test_troca_de_sandbox_apos_restart_preserva_turno_vivo(ambiente, estado):
                     await asyncio.sleep(0.05)
                 assert (ambiente / "elicitacao.txt").exists()
         finally:
-            ad.close_sync("cx-reinicio")
+            await asyncio.to_thread(ad.close_sync, "cx-reinicio")
     asyncio.run(corpo())
 
 
@@ -366,7 +414,7 @@ def test_binario_ausente_para_no_teto_de_subidas(ambiente, monkeypatch):
         ev = [e async for e in ad._state_stream("cx-sem-codex")]
         assert ev[-1].state == "dead" and ev[-1].problema == "codex_headless_nao_subiu"
         assert "codex" in (ev[-1].problema_detalhe or "")
-        ad.close_sync("cx-sem-codex")
+        await asyncio.to_thread(ad.close_sync, "cx-sem-codex")
         assert ad.problema_de("cx-sem-codex") is None
     asyncio.run(corpo())
 
@@ -427,7 +475,9 @@ def test_transferred_stdio_budget_survives_restart_and_resume(ambiente, monkeypa
             assert transfers.load_transfer(transfer_id).phase == transfers.TransferPhase.COMPLETE
             assert not (ambiente / "turno.txt").exists()
         finally:
-            adapter.close_sync("imported")
+            # Fora do laço, como nos outros testes: o encerramento espera o cano sair de fato, e o
+            # laço preso aqui não recolheria o processo filho.
+            await asyncio.to_thread(adapter.close_sync, "imported")
     asyncio.run(body())
 
 

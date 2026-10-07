@@ -3522,6 +3522,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "hangar-api"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "hangar-native"
 version = "0.1.0"
 dependencies = [
@@ -3537,6 +3545,8 @@ dependencies = [
  "futures",
  "gpui-kit",
  "gpui-pre-wgpu",
+ "hangar-api",
+ "hangar-workspace",
  "image",
  "ksni",
  "libc",
@@ -3560,6 +3570,22 @@ dependencies = [
  "windows 0.61.3",
  "wry",
  "zbus",
+]
+
+[[package]]
+name = "hangar-workspace"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hangar-api",
+ "libc",
+ "regex",
+ "ring",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

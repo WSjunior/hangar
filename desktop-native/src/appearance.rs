@@ -65,12 +65,15 @@ pub enum SidebarHeight { Full, Content }
 /// Onde ficam as sessões e como as linhas da barra lateral são apresentadas.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Navigation { Tabs, Conversations, #[serde(other)] Sidebar }
+pub enum Navigation { Tabs, BottomTabs, Conversations, #[serde(other)] Sidebar }
 
 impl Navigation {
     pub fn sidebar_width(self) -> f32 {
-        match self { Self::Sidebar => 284., Self::Tabs => 0., Self::Conversations => 256. }
+        match self { Self::Sidebar => 284., Self::Tabs | Self::BottomTabs => 0., Self::Conversations => 256. }
     }
+
+    /// As sessões numa faixa de abas, em cima ou embaixo da janela, sem barra lateral.
+    pub fn tabs(self) -> bool { matches!(self, Self::Tabs | Self::BottomTabs) }
 }
 
 /// Limites do arrasto da borda da barra, os mesmos do web.
@@ -124,11 +127,11 @@ pub enum SurfaceMaterial { Glass, Opaque }
 #[serde(rename_all = "snake_case")]
 pub enum Reading { Auto, None, Text, Sheet }
 
-/// Como a chamada de ferramenta aparece na conversa: linha com nome e resumo, verbo e chip, ou árvore com o
-/// raciocínio dentro do grupo.
+/// Como a chamada de ferramenta aparece na conversa: linha com nome e resumo, verbo e chip, árvore com o
+/// raciocínio dentro do grupo, ou o desenho do terminal do Claude Code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ToolLook { Classic, Chips, Tree }
+pub enum ToolLook { Classic, Chips, Tree, Terminal }
 
 /// Que chamadas feitas no meio do raciocínio ficam dentro do bloco do pensamento.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,6 +259,9 @@ pub struct Appearance {
     pub code_size: u16,
     /// Geral: fechar a janela esconde o app na bandeja em vez de encerrar.
     pub keep_in_tray: bool,
+    /// Geral: o navegador embutido preenche sozinho as senhas salvas no Chrome. Nasce desligado: é senha indo para
+    /// página sem a pessoa pedir.
+    pub chrome_autofill: bool,
 }
 
 const DEFAULT: Appearance = Appearance { panels: Panels::Attached, theme: ThemeMode::Dark, palette: Palette::Classic,
@@ -266,7 +272,7 @@ const DEFAULT: Appearance = Appearance { panels: Panels::Attached, theme: ThemeM
     side_width: 300., side_browser_width: None, terminal_height: 260.,
     tool_look: ToolLook::Classic, task_list: false, thinking_tools: ThinkingTools::Search, table_chart: false, ask_highlight: AskHighlight::Accent,
     language: Language::System, currency: Currency::Usd, hands_free: false, skip_chat_confirmations: false, accounts_compact: false, sidebar_group: SidebarGroup::None, side_tab: SideTab::Context,
-    terminal_font: CodeFont::JetBrainsMono, terminal_size: 12, code_font: CodeFont::JetBrainsMono, code_size: 25, keep_in_tray: false };
+    terminal_font: CodeFont::JetBrainsMono, terminal_size: 12, code_font: CodeFont::JetBrainsMono, code_size: 25, keep_in_tray: false, chrome_autofill: false };
 
 impl Default for Appearance {
     fn default() -> Self { DEFAULT }
@@ -288,7 +294,7 @@ impl Appearance {
             thinking_tools: self.thinking_tools, table_chart: self.table_chart, navigation: self.navigation, sidebar_width: self.sidebar_width, sidebar_compact: self.sidebar_compact, live_corner: self.live_corner,
             side_width: self.side_width, side_browser_width: self.side_browser_width, terminal_height: self.terminal_height,
             language: self.language, currency: self.currency, hands_free: self.hands_free, skip_chat_confirmations: self.skip_chat_confirmations, accounts_compact: self.accounts_compact, sidebar_group: self.sidebar_group, side_tab: self.side_tab,
-            code_font: self.code_font, terminal_font: self.terminal_font, keep_in_tray: self.keep_in_tray,
+            code_font: self.code_font, terminal_font: self.terminal_font, keep_in_tray: self.keep_in_tray, chrome_autofill: self.chrome_autofill,
             ..Self::default() }
     }
 
@@ -304,10 +310,10 @@ impl Appearance {
         }
     }
 
-    /// Largura da barra cheia em vigor: com abas no topo não há barra; valor torto no arquivo volta para a escala.
+    /// Largura da barra cheia em vigor: com abas não há barra; valor torto no arquivo volta para a escala.
     pub fn full_sidebar_width(&self) -> f32 {
         match (self.navigation, self.sidebar_width) {
-            (Navigation::Tabs, _) => 0.,
+            (navigation, _) if navigation.tabs() => 0.,
             (_, Some(width)) if width.is_finite() => width.clamp(SIDEBAR_MIN, SIDEBAR_MAX),
             (navigation, _) => navigation.sidebar_width(),
         }
@@ -389,6 +395,31 @@ pub fn remember_root(path: &str) {
     if let Some(dir) = dir() { let _ = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join("last-root"), path)); }
 }
 
+pub fn search_all_folders() -> Result<bool, String> {
+    let file = dir().ok_or_else(|| "sem pasta de configuração".to_owned())?.join("create-search-all.json");
+    read_search_all(&file)
+}
+
+fn read_search_all(file: &std::path::Path) -> Result<bool, String> {
+    match std::fs::read(file) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| format!("{}: {error}", file.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(format!("{}: {error}", file.display())),
+    }
+}
+
+pub fn set_search_all_folders(value: bool) -> Result<(), String> {
+    let dir = dir().ok_or_else(|| "sem pasta de configuração".to_owned())?;
+    write_search_all(&dir.join("create-search-all.json"), value)
+}
+
+fn write_search_all(file: &std::path::Path, value: bool) -> Result<(), String> {
+    let dir = file.parent().ok_or_else(|| "sem pasta de configuração".to_owned())?;
+    let tmp = file.with_extension("json.tmp");
+    std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&tmp, if value { "true\n" } else { "false\n" }))
+        .and_then(|_| std::fs::rename(&tmp, &file)).map_err(|error| format!("{}: {error}", file.display()))
+}
+
 /// Último modelo e esforço escolhidos na criação, pela chave servidor:provider:conta/motor (`cp_last_model` do web).
 pub fn last_model(key: &str) -> (String, String) {
     let saved: HashMap<String, (String, String)> = dir().and_then(|d| std::fs::read(d.join("last-models.json")).ok())
@@ -465,6 +496,24 @@ mod tests {
     use core::prelude::v1::test;
 
     #[test]
+    fn search_all_defaults_on_and_persists_without_creating_a_session() {
+        let dir = std::env::temp_dir().join(format!("hangar-search-all-{}", std::process::id()));
+        let file = dir.join("preference.json");
+        assert!(!dir.exists());
+        assert_eq!(read_search_all(&file), Ok(true));
+        write_search_all(&file, false).unwrap();
+        assert_eq!(read_search_all(&file), Ok(false));
+        write_search_all(&file, true).unwrap();
+        assert_eq!(read_search_all(&file), Ok(true));
+        std::fs::write(&file, "invalid").unwrap();
+        assert!(read_search_all(&file).is_err());
+        std::fs::create_dir(file.with_extension("json.tmp")).unwrap();
+        assert!(write_search_all(&file, false).is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "invalid");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn file_from_before_the_tray_option_opens_with_it_off() {
         let old: Appearance = serde_json::from_str("{}").unwrap();
         assert!(!old.keep_in_tray);
@@ -472,6 +521,13 @@ mod tests {
         assert!(on.keep_in_tray);
         // É de Geral: o "Voltar ao padrão" da Aparência não desliga.
         assert!(on.reset_keeping_choices().keep_in_tray);
+    }
+
+    #[test]
+    fn chrome_autofill_starts_off_and_survives_the_appearance_reset() {
+        assert!(!serde_json::from_str::<Appearance>("{}").unwrap().chrome_autofill);
+        let on: Appearance = serde_json::from_str(r#"{"chrome_autofill": true}"#).unwrap();
+        assert!(on.reset_keeping_choices().chrome_autofill);
     }
 
     #[test]
@@ -493,7 +549,7 @@ mod tests {
 
     #[test]
     fn sidebar_navigation_keeps_old_files_and_round_trips_both_densities() {
-        for (value, expected) in [("sidebar", Navigation::Sidebar), ("tabs", Navigation::Tabs), ("unknown", Navigation::Sidebar)] {
+        for (value, expected) in [("sidebar", Navigation::Sidebar), ("tabs", Navigation::Tabs), ("bottom_tabs", Navigation::BottomTabs), ("unknown", Navigation::Sidebar)] {
             let old: Appearance = serde_json::from_value(serde_json::json!({"navigation": value})).unwrap();
             assert_eq!((old.navigation, old.sidebar_compact), (expected, false));
         }
@@ -621,7 +677,7 @@ mod tests {
         assert_eq!(width(Navigation::Conversations, Some(330.)), 330.);
         assert_eq!((width(Navigation::Sidebar, Some(90.)), width(Navigation::Sidebar, Some(900.))), (SIDEBAR_MIN, SIDEBAR_MAX));
         assert_eq!(width(Navigation::Sidebar, Some(f32::NAN)), 284.);
-        assert_eq!(width(Navigation::Tabs, Some(330.)), 0.);
+        assert_eq!((width(Navigation::Tabs, Some(330.)), width(Navigation::BottomTabs, Some(330.))), (0., 0.));
         let custom = Appearance { sidebar_width: Some(330.), ..Appearance::default() };
         assert_eq!(custom.reset_keeping_choices().sidebar_width, Some(330.));
         // Arquivo de antes do campo continua abrindo.
@@ -642,6 +698,8 @@ mod tests {
         assert_eq!((reset.tool_look, reset.task_list, reset.thinking_tools, reset.table_chart), (ToolLook::Chips, true, ThinkingTools::All, true));
         let parsed: Appearance = serde_json::from_str(r#"{"tool_look":"chips","thinking_tools":"none"}"#).unwrap();
         assert_eq!((parsed.tool_look, parsed.thinking_tools), (ToolLook::Chips, ThinkingTools::None));
+        let terminal: Appearance = serde_json::from_str(r#"{"tool_look":"terminal"}"#).unwrap();
+        assert_eq!(terminal.tool_look, ToolLook::Terminal);
     }
 
     #[test]

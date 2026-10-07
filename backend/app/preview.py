@@ -296,6 +296,16 @@ def _pi_bloco_de_tool(lines: list[str], i: int, corpo: str) -> bool:
     return False
 
 
+# Chamada em voo do Claude Code: a 1ª linha é a descrição do modelo, não "Bash(", e o ● dela pisca. O que
+# a separa da prosa é a forma: o parágrafo que começa depois de `i` termina colado no `⎿`.
+def _cabecalho_de_ferramenta(lines: list[str], i: int) -> bool:
+    for j in range(i + 1, len(lines)):
+        ln = lines[j]
+        if not ln.strip() or _is_boundary(ln):
+            return ln.lstrip().startswith("⎿")
+    return False
+
+
 def extract_assistant_text(pane: str, provider: str = "claude", band_anchor: str | None = None) -> str:
     """Texto do ÚLTIMO bloco de PROSA do assistente (●) do pane, VERBATIM (sem reflow — núcleo seguro).
 
@@ -360,6 +370,7 @@ def extract_assistant_text(pane: str, provider: str = "claude", band_anchor: str
                 and not _AGENT_FINISHED_RE.match(corpo)
                 and not _TODO_PANEL_RE.match(ln)
                 and not _painel_de_subagente(lines, i, corpo)
+                and not _cabecalho_de_ferramenta(lines, i)
                 and not (provider == "kimi" and _KIMI_USED_RE.match(corpo))
                 and not (provider == "kimi" and _kimi_linha_de_todo(lines, i))
                 and not (provider in ("pi", "omp") and _pi_bloco_de_tool(lines, i, corpo))):
@@ -370,7 +381,7 @@ def extract_assistant_text(pane: str, provider: str = "claude", band_anchor: str
     first = lines[start].lstrip()
     first = first[1:].lstrip() if first[:1] == _ASSISTANT_GLYPH else first
     out = [first.rstrip()]
-    for ln in lines[start + 1:]:
+    for j, ln in enumerate(lines[start + 1:], start + 1):
         # Chrome = limite inferior do bloco. _is_boundary pega ●/⎿/spinner (lstrip já tira indent
         # das linhas de continuação da prosa, então elas NÃO disparam aqui). _TOOL_BLOCK_RE corta
         # tb a linha de status de tool ("Running/Ran N shell command") que renderiza 1 frame SEM o
@@ -380,7 +391,9 @@ def extract_assistant_text(pane: str, provider: str = "claude", band_anchor: str
                 or _TOOL_BLOCK_RE.match(s) or _MCP_CALL_RE.match(s)
                 or _TODO_PANEL_RE.match(ln) or _ASCII_SPINNER_RE.match(s)
                 or (provider == "kimi" and _KIMI_USED_RE.match(s))
-                or _ACTIVITY_SUMMARY_RE.search(s)):
+                or _ACTIVITY_SUMMARY_RE.search(s)
+                # Só no começo de parágrafo: as linhas do mesmo parágrafo dão a mesma resposta.
+                or (s and not lines[j - 1].strip() and _cabecalho_de_ferramenta(lines, j - 1))):
             break
         if any(r.match(ln) for r in stops):
             break
@@ -600,18 +613,42 @@ class PreviewBroker:
         self.md = False
         self.full = False
         self._gen += 1
+        from app.state import forget_frame
+        forget_frame(self.name)
 
     async def _loop(self) -> None:
+        from app import terminal_observer
+        async with terminal_observer.lease(self.name, self.provider if self.provider == "claude" else None,
+                                           lambda: self.stem_get() if self.stem_get is not None else None) as source:
+            heartbeat = asyncio.create_task(source.watch()) if self.provider == "claude" else None
+            try:
+                await self._observe_loop()
+            finally:
+                if heartbeat is not None:
+                    heartbeat.cancel()
+                    try:
+                        await heartbeat
+                    except asyncio.CancelledError:
+                        if asyncio.current_task().cancelling():
+                            raise
+
+    async def _observe_loop(self) -> None:
         # SEMPRE extrai o último bloco ● (NÃO gateia por spinner): a detecção de spinner pisca falso
         # por 1 frame durante o redraw, e gatear nisso fazia o broker emitir "" -> a bolha SUMIA e
         # voltava toda hora (flicker). O front limpa o preview por reconcile (coberto pelo .jsonl) /
         # idle. O spinner serve só pra CADÊNCIA: rápido trabalhando, devagar ocioso. Diff-gate (só
         # notifica em mudança) evita spam.
         working = False
+        from app import terminal_observer
         while True:
+            if terminal_observer.retired(self.name):
+                # As conexões SSE podem reconhecer o /clear em rodadas diferentes.
+                await asyncio.sleep(0.75)
+                continue
             # Epoca do poll: se o reset() (/clear) cair no MEIO desta iteracao, o frame capturado
             # e da conversa apagada — o publish la embaixo confere e descarta.
             gen = self._gen
+            frame_tag = terminal_observer.stamp(self.name)
             # Kimi: pane COM cor, porque so o italico separa raciocinio de resposta (ver
             # sem_pensamento_kimi). Os outros seguem no texto puro de sempre — `-e` ali seria
             # custo e risco por nada.
@@ -640,6 +677,11 @@ class PreviewBroker:
                     # idade máxima fica abaixo da cadência pra prévia não andar mais devagar.
                     pane = await (run_tmux(tmux.capture_pane, self.name, 200, True) if kimi
                                   else shared_capture(self.name, 0.1 if working else 0.5))
+                except terminal_observer.ObservationFailed:
+                    # Falha do Rust não troca de fonte nem apaga a bolha: o monitor de estado mostra
+                    # o erro, e a prévia espera a próxima rodada com o texto que tinha.
+                    await asyncio.sleep(0.75)
+                    continue
                 except Exception:
                     # Sem log isto congela a previa do Kimi no ultimo texto com full=True,
                     # indistinguivel de "geracao longa em andamento" (achado da review — o
@@ -650,9 +692,13 @@ class PreviewBroker:
                     pane = sem_pensamento_kimi(pane)
                 if self.provider == "claude":
                     pane = crop_to_transcript(self.name, pane)
-                working = _live_spinner(pane) is not None
-                text = (extract_assistant_text(pane, self.provider, plugin_bridge.band_anchor(self.name))
-                        if self.provider == "claude" else extract_assistant_text(pane, self.provider))
+                analysis = terminal_observer.frame_analysis(self.name, pane) if self.provider == "claude" else None
+                working = (analysis["spinner"] if analysis is not None else _live_spinner(pane)) is not None
+                # A análise do Rust não conhece a faixa dos mods: com ela na tela, quem corta é o Python.
+                anchor = plugin_bridge.band_anchor(self.name) if self.provider == "claude" else None
+                text = (analysis["preview"] if analysis is not None and not anchor
+                        else extract_assistant_text(pane, self.provider, anchor) if self.provider == "claude"
+                        else extract_assistant_text(pane, self.provider))
                 if kimi:
                     if not text and self._kimi_acum:
                         # O bloco estourou a janela e o ● subiu junto (medido nos quadros de
@@ -676,7 +722,7 @@ class PreviewBroker:
                                    self.name, len(acum_antes))
                 else:
                     full = False
-            if self._gen != gen:
+            if self._gen != gen or frame_tag != terminal_observer.stamp(self.name):
                 # reset() caiu no MEIO deste poll: o frame capturado e da conversa APAGADA —
                 # nem publica, nem deixa o acumulado renascer com ela (achado da review).
                 # Cobre SO o frame em voo: um pane velho ainda nao redesenhado na iteracao
@@ -706,7 +752,7 @@ class PreviewBroker:
         o trio calado, e a bolha renderizaria markdown de uma leitura com o texto de outra."""
         async with self._cond:
             self._subs += 1
-            if self._task is None:
+            if self._task is None or self._task.done():
                 self._task = asyncio.create_task(self._loop())
         last = -1
         try:

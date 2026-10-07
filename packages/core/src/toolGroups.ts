@@ -42,6 +42,9 @@ export function agruparConversa(eventos: ChatEvent[], opts: OpcoesAgrupar): Item
     // normal, senao sumiria numa linha que nao explica nada.
     if (pens.length && ev.kind === 'tool_use' && opts.entraNoPensamento(ev.tool_name)) { pens.push(ev); continue; }
     flushPens();
+    // O agente fica fora do grupo, como no nativo: o cartão dele abre a conversa própria, e dentro de
+    // um grupo fechado o que ainda roda ficaria escondido.
+    if (ev.kind === 'tool_use' && ev.tool_name === 'Agent') { flush(); items.push({ type: 'tool', id: ev.id, ev }); continue; }
     if (ev.kind === 'tool_use') { run.push(ev); continue; }
     flush();
     items.push({ type: 'event', id: ev.id, ev });

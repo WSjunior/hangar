@@ -5,6 +5,22 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 
 ## Regras vigentes
 
+- **Observação terminal tem uma captura canônica por rodada, sem grade auxiliar.** O controle
+  tmux confere sessão/pane a cada leitura; a análise acompanha esse quadro. Em Claude com
+  terminal e o Rust de pé, o estado temporal é do `Monitor` do Rust, que pega o quadro do pool em
+  processo; nos provedores que o Python observa (Pi, omp, Kimi), permanece no Python, sem outro
+  HTTP. O cliente da ponte do observador usa somente HTTP sem proxy/redirect
+  e não carrega certificados por pedido (a ponte ficou sem consumidor desde a parte 4; vale se
+  voltar a ser usada). Medição:
+  [custo da observação terminal](#custo-da-observação-terminal).
+
+- **Deltas Claude/Codex acumulam antes de publicar.** Prévia, pensamento e input em voo têm
+  buffer por sessão/geração: primeiro imediato, intermediários em 150 ms e último por timer/flush.
+  Limpeza autoritativa cancela timers, aguarda publicação em voo e reconfere a sessão antes de
+  limpar a fonte. Estado, permissões e fila continuam imediatos. Snapshot completo custa seu
+  tamanho; não reconstruir ou parsear por delta. Medição:
+  [coalescimento dos deltas](#deltas-claudecodex-acumular-antes-de-publicar).
+
 - **Provedor omitido usa a última abertura humana do servidor.** A memória só muda após a
   criação confirmada; convidado e criação automatizada não a escrevem. Sem preferência válida,
   conta conectada vence CLI apenas instalado. A seleção inicial respeita a escolha feita à
@@ -15,9 +31,12 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   de hooks, o primeiro plugin carregado fica por fora: `--plugin-dir` vem antes do marketplace,
   e a pasta de skills vem depois. A faixa dos mods (`plugins/hangar/hooks/ui.ts`) só recebe por
   `next(e)` o que os plugins de dentro desenham, e um mod que responde a faixa sem chamar
-  `next` esconde tudo dos que estão por dentro dele. O wrapper do `claude` no shell passa o
-  mesmo `--plugin-dir`, lido de `~/.hangar/plugin-dir`, que o backend grava só quando o CLI
-  aceita a flag; `claude` cru (`command claude`) carrega só pela pasta de skills e não espelha a
+  `next` esconde tudo dos que estão por dentro dele. Os outros mods do repositório
+  (`plugins/<nome>/` com `.claude-plugin/plugin.json`) entram pelo mesmo caminho, um
+  `--plugin-dir` cada, sempre DEPOIS de `plugins/hangar`, sem pergunta do CLI e sem marketplace.
+  O wrapper do `claude` no shell passa a mesma lista, lida de `~/.hangar/plugin-dir` (uma pasta
+  por linha, a do Hangar primeiro; o arquivo antigo de uma linha continua valendo), que o
+  backend grava só quando o CLI aceita a flag; `claude` cru (`command claude`) carrega só pela pasta de skills e não espelha a
   faixa dos mods do marketplace. Ver
   [faixa dos mods](#faixa-dos-mods-ordem-na-cadeia-medida-03102026).
 
@@ -54,6 +73,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **A prévia corta cada linha na largura da conversa quando há painel ancorado.** A largura é o
   `bodyColumns` da faixa + 5; sem o corte, a borda `│` do painel vira texto da prévia.
 
+- **Na prévia do pane, bloco cujo parágrafo termina colado no `⎿` é chamada de ferramenta, não
+  prosa.** Vale com o `●` aceso ou apagado, no Python (`preview.py`) e no Rust
+  (`terminal_state.rs`). Medição em [prévia da chamada em voo](#prévia-da-chamada-em-voo-o--pisca).
+
 - **tok/s "agora" é medido no stream da resposta, nunca no transcript.** Do `message_start`
   ao fim da resposta, com o `output_tokens` real: sem terminal pelo `stream_event`; com
   terminal pelo `turn.step` do plugin (`rate.ts` → `POST /api/plugin/rate`). Nunca a partir
@@ -61,6 +84,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   principal entra. Medida de outro transcript ou mais velha que a última resposta do
   transcript não vale; aí a reserva sai do jsonl e leva "~", porque inclui a espera pelo
   primeiro token. Ver [velocidade de geração](#velocidade-de-geração-tok-s).
+  No Codex, "agora" e "últimas 10" usam essa reserva, com os deltas do uso oficial e os
+  intervalos atribuídos ao modelo, sem o tempo de ferramentas. "1ª resposta" usa a média
+  dos turnos observados até o primeiro delta de texto; sem essa medida, mantém a reserva.
 
 - **Modo de abertura omitido herda a preferência do servidor.** `headless_default` nasce
   ligado para Claude/Codex; a escolha humana do dono na criação passa a ser o padrão.
@@ -84,9 +110,13 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **A lista de modelos NUNCA é constante.** Conta Anthropic lê o picker ao vivo (cache de 1h,
   porque ler dirige o terminal); sessão de motor usa `/v1/models` do provedor. `/model <id>`
   grava default global — reponha o valor anterior.
-- **Antes de digitar no composer do Claude, ESVAZIE ele** (`C-u` enquanto o conteúdo diminui):
-  digitar por cima gruda as mensagens num Enter só e o reconcile reentrega. No Claude a decisão é
-  apagar, não adiar como no Pi — rascunho sendo escrito no terminal some junto.
+- **Antes de digitar no composer do Claude, ESVAZIE ele, e o rascunho do dono volta:** digitar por
+  cima gruda as mensagens num Enter só e o reconcile reentrega. O escritor Rust guarda o rascunho
+  com o Ctrl+S do próprio Claude (`› stashed`), que o devolve sozinho no envio; sem envio, devolve
+  com outro Ctrl+S só sobre composer vazio, e com envio incerto não aperta nada. Guardado já
+  ocupado adia: um segundo Ctrl+S jogaria fora o que está lá. Nunca redigitar o rascunho lido da
+  tela. O Python de reserva ainda apaga com `C-u`. Ver
+  [rascunho do dono](#rascunho-do-dono-no-guardado-do-claude-05102026).
 - **Antes de digitar no composer do Pi, PERGUNTE a ele** (`getEditorText`): a tela não distingue
   aviso de extensão de rascunho da pessoa, e comparar duas capturas não resolve.
 - **Statusline e prévia vêm de sidecar do agente, não do pane.** O pane corta na largura da
@@ -96,6 +126,11 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   existe e o pid vive**; marcador de hook e pane são o fallback. `idle`/`busy`/`waiting` são o
   estado da TUI escrito por ela mesma; `waiting` inclui diálogo aberto (`/model`), que o pane
   rebaixa. Nunca escrever nesse arquivo.
+- **Permissão segurada para o app não aparece no pane nem no registro nativo: lista e `Monitor`
+  leem a pergunta segurada.** Com o app aberto, o hook `perm.ts` segura a permissão: a TUI fica em
+  "running PreToolUse hooks" sem cartão e o registro segue `busy`. O `Monitor` a lê dos fatos
+  empurrados (`question`); a lista, do `held` dos fatos da lista. Ver
+  [cartão de permissão segurado](#cartão-de-permissão-segurado-pelo-hook).
 - **O `wire.jsonl` do Kimi não é bem-comportado**: nem toda escrita é turno (`config.update` com
   a sessão parada), e o main fica mudo quando delega. Quem decide é a fronteira de turno, não o
   mtime. `tool.result` não tem `uuid` — id é `res:<toolCallId>`.
@@ -113,6 +148,11 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   Só `on-request` e `never` existem (`untrusted` morreu); o sandbox vai no `-c` da subida e trocar
   de modo reabre o servidor ocioso. Pedido do servidor sem tela recebe `-32601` + nota, nunca
   sucesso vazio. Um cliente por cano.
+- **A rota do terminal Claude só recebe sessão Claude.** `route_sync`, `run_admin` e
+  `answer_sync` abrem `prepare_session(name, "claude")`, que suspende a escrita sem vínculo
+  Claude nem pane. Rota que atende outros provedores filtra pelo provedor antes (`/answer`,
+  `/select`); erro que ainda escapar dela sai com código, nunca 500. Ver
+  [cartão do Codex sem terminal](#select-do-codex-sem-terminal-não-passa-pela-rota-do-terminal-claude).
 - **Nada no Hangar desvia a conversa da sessão para um proxy.** O `ANTHROPIC_BASE_URL` e o
   `model_provider` do Codex são do motor e do provedor, e o Hangar não os aponta para mais nada.
   Ligar o Jev numa sessão é só a chave no ambiente, para o `hangar-preview objetivo`. Por que o
@@ -155,7 +195,8 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   Ver [cliente somente de leitura](#cliente-tmux-somente-de-leitura-não-bloqueia-envios-ao-pane).
 - **Pedido de permissão só fica com o plugin com alguém no app E ninguém no terminal**: `tool.check`
   roda antes do diálogo, e segurar esconde o pedido de quem olha o terminal. Na dúvida (tmux mudo,
-  Windows), não segura.
+  Windows), não segura. Com o rodapé em modo auto ou dontAsk também não: ali o `ask` vai ao
+  classificador (ou é recusado), e segurar troca essa decisão por um cartão de aprovação no app.
 - **A ponte do plugin só atende a conversa que o Hangar acompanha na sessão** (a mesma do chat e
   das teclas): outro `claude` na sessão recebe 409 e a entrega não passa por ele.
 - **Steer no Claude é só pelo botão**: `ctrl+x ctrl+s` INTERROMPE o turno em curso. Colado num
@@ -169,8 +210,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **Codex sem terminal: `thread/start` leva o modelo, o esforço não** — não existe campo pra ele
   ali. Sem um `thread/settings/update` depois, o nível escolhido some no `model_reasoning_effort`
   do `config.toml`.
-- **Claude sem terminal: o `claude` é filho do CANO, nunca do backend.** `cano.py` é stdlib, um
-  por sessão, escuta em socket local, nasce no escopo transiente do systemd e sintetiza um
+- **Claude sem terminal: o `claude` é filho do CANO, nunca do backend.** O cano é o binário
+  `hangar-cano` quando o `rust_bins.find_bin` o acha (`CP_RUST_CANO_BIN`, `crates/target/release`,
+  `~/.hangar/bin`), com o `cano.py` (stdlib) de reserva; os dois falam o mesmo protocolo. Um por
+  sessão, escuta em socket local, nasce no escopo transiente do systemd e sintetiza um
   snapshot do que está em aberto; o backend só reconecta. O adapter (que muda sempre) fica no
   backend. Leitura do socket com `limit=16 MB` e embrulhada — leitor pendurado é sessão presa.
   Órfão é cano sem sidecar, não cano de backend anterior.
@@ -279,14 +322,145 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   de 95% de cota a tela pede confirmação com aviso, e a partir de 99% a conta não aceita.**
   `POST /api/sessions/{name}/conta` espera os pids do cano e filhos antes do `move_conversation`;
   sem saída, recusa e religa na origem. A lista e a recusa saem de `_account_targets`
-  (`ACCOUNT_LOW_PCT`, `ACCOUNT_FULL_PCT`). Ver
+  (`ACCOUNT_LOW_PCT`, `ACCOUNT_FULL_PCT`). Na sessão com terminal o pane que reabre é outra vida
+  de terminal da MESMA sessão: o runtime herda a chave pela prova da vida nova
+  (`reborn_binding`), e só conversa nova esvazia a fila. Ver
   [Continuar a mesma conversa noutra conta](#continuar-a-mesma-conversa-noutra-conta).
+
+- **Só é incerta a entrada terminal que começou a escrever.** O ator Rust abre o despacho de
+  entrada como `staged`, e o escritor grava `MarkWriting` antes do primeiro efeito que pode
+  entregar (socket nativo, plugin, digitação, colagem). No `Recover` (Rust e Python, que roda
+  primeiro no boot) a tentativa só com despacho `staged` volta à fila (`interrupted_before_write`)
+  sem trava. Despacho comum (`dispatching`) continua virando incerto. Ver
+  [Reinício no meio de um adiamento](#reinício-no-meio-de-um-adiamento).
+- **Entrada terminal recusada sem escrita não espera calada.** O ator Rust conta a série de
+  adiamentos do escritor com `stage` (fora `question_open`, `not_ready`, `overlay`,
+  `input_unavailable`). A espera entre as tentativas dobra a partir do tique até 8 s, a série é da
+  linha (linha que sai da fila não passa a espera adiante) e o composer lido vazio libera a
+  tentativa na hora; o log ganha
+  uma linha por série; passados 30 s, `view.input_stalled` leva o código, o Python mostra
+  `problema=terminal_input_*` e grava um `terminal.input_stalled` no diário. A fila continua
+  tentando. Ver [Entrada terminal parada sem aviso](#entrada-terminal-parada-sem-aviso).
 
 - **Transferência Claude → Codex não está aceita só porque a importação persistiu.** A prova
   precisa conferir os itens enviados pelo CLI após retomada, incluindo resultados completos.
   Na captura stdio 0.159.3, manter `tool_output_token_limit` da sessão conservou 144.000
   caracteres após reinício. Essa captura simulada não comprova interface, modelo real ou
   restauração física. Ver [transferência em validação](#transferência-claude--codex-captura-nativa-em-validação).
+
+- **Painel de agentes do Claude Code não é menu, e o escritor não digita com o foco nele.** Abaixo
+  do composer, o `❯` na frente de `●`/`◯` é o foco no painel de agentes; com o foco no rodapé
+  (painel ou pílula "Enter to view tasks") o texto digitado some e o `x` para um subagente. Antes
+  de digitar, Rust e Python dão um Esc, que só devolve o foco ao composer, e adiam se ele não
+  voltar (no Rust, no máximo dois por linha da fila). O foco conta só com `❯` na frente de `●`/`◯`
+  ou as dicas do próprio rodapé. Interromper com o foco lá manda esse Esc antes do que interrompe.
+  Ver [o /clear e o rodapé do Claude Code](#o-clear-e-o-rodapé-do-claude-code).
+
+- **A trava do `/clear` só sobe se o Enter pode ter saído e sempre tem saída.** Aceito, ou incerto
+  nas etapas do Enter (`submit`, `submit_proof`; no Python, `*.submeter`). Incerto antes do Enter
+  é entrega incerta comum. Passado o prazo com a sessão parada e sem conversa nova (nem no vínculo
+  nem transcript nascido depois do despacho começando por `<command-name>/clear`, prova que vale
+  60 s e que, ilegível, segura a trava), a trava sai, a operação fica
+  recusada (`clear_not_applied`, a reabertura não a ergue de novo), a fila segue e a vista avisa.
+  O `/clear` nunca é reenviado sozinho. Com o Claude trabalhando ele espera na fila do Claude
+  Code, e a trava espera o turno.
+
+- **Comando de barra adiado é erro na tela, nunca 200.** Ele não tem linha na fila e não roda
+  depois sozinho (`erro_comando_nao_executado`).
+
+- **Depois do Enter de um comando de barra, só o mesmo comando parado no composer ganha outro
+  Enter.** O comando que rodou pode ter trocado a conversa (`/clear`): no Python o Enter às cegas
+  caía na conversa nova e a reserva acusava vínculo mudado. A limpeza da fila que segue o `/clear`
+  só acontece com a trava erguida (Enter pode ter saído); vínculo já trocado nela é o esperado, e a
+  troca do vínculo esvazia a fila.
+
+- **Pergunta do plugin interrompida pelo app sai na hora.** O Esc fecha o diálogo e o hook morre
+  sem `/ask-fim`, deixando o long-poll aberto até a janela fechar. Só a pergunta lida antes do Esc
+  é marcada; hook que ainda pergunta 2 s depois sobreviveu e ela volta a contar. Sem long-poll por
+  mais de 3 s (Esc digitado no terminal), a pergunta também deixa de contar.
+
+- **A régua da caixa de digitar do Claude Code pode trazer o nome da sessão, e há uma regra só para
+  ela.** Com `claude --name` ou `/rename`, a régua de cima vira `──── nome ─`. No Rust, estado,
+  prévia, foco no rodapé e tela dos mods leem a régua por `terminal_state::is_rule`; não criar
+  outra regex de régua. O Python (`state.py`, `preview.py`, `plugin_screen.py`) segue com a régua
+  pura: é limite da reserva sem Rust e do Windows. Ver
+  [régua com o nome da sessão](#régua-com-o-nome-da-sessão-06102026).
+
+## O /clear e o rodapé do Claude Code
+
+Medido em 06/10/2026, Claude Code 2.1.291, Haiku, backend isolado (issues #84 e #85, item 16 da
+coordenação da migração).
+
+**Rodapé.** Com agentes em segundo plano, abaixo do composer aparece `● main` / `◯ <subagente>`.
+`↓` (o "↓ to manage") leva o foco à pílula ("Enter to view tasks") e, de novo, ao painel
+(`↑/↓ to select`, depois `❯ ◯ … Enter to view · x to stop`). Com o foco lá, `/clear` digitado
+não aparece no composer; o `x` para o subagente. O `←` com shells rodando abre outro diálogo,
+"Background this session?", que é menu de verdade. Um Esc com o foco no painel ou na pílula só
+devolve o foco ao composer: com o Claude trabalhando o turno continuou (o contador seguiu).
+Telas em `backend/tests/fixtures/pane_agents_*.txt`, no contrato Python/Rust.
+
+**Trava presa (#84).** O `/clear` digitado no painel não chegava ao composer: `prove_input`
+falhava, a limpeza não se provava e a entrega voltava `unknown` em `input_proof`, sem Enter.
+`Accepted | Unknown` erguia a `clear_barrier`; como a conversa não mudava, toda mensagem seguinte
+voltava 503 `runtime_clear_barrier`, e o Recover a reerguia depois de reiniciar.
+
+**Prazo.** O transcript novo nasce em menos de 1 s depois do Enter do `/clear`, e começa pelo
+registro `<command-name>/clear</command-name>`. Com o Claude trabalhando, o `/clear` digitado fica
+na fila do Claude Code e só rodou 21 s depois, no fim do turno: por isso a saída da trava exige a
+sessão parada. Prazo de 10 s.
+
+**Item 16.** Interromper o AskUserQuestion pelo app (Esc) mata o hook do plugin sem `/ask-fim`,
+e o long-poll dele ficou aberto até a janela de 25 s fechar: `pergunta_pendente` dizia "aberta"
+por até 35 s depois do Esc. O `/clear` mandado nesse intervalo era adiado (`question_open`) e,
+sem linha na fila, sumia com 200; a mensagem seguinte não chegou em 60 s. Nos modos Rust e
+Python. Depois da correção: `/clear` aplicado na hora e a mensagem seguinte entregue uma vez.
+
+Fica de fora: no modo Python um `/clear` bem-sucedido volta 400 "resultado terminal incerto"
+(a troca da conversa acusa vínculo mudado depois do Enter), também antes desta correção.
+
+## Cartão de permissão segurado pelo hook
+
+(06/10/2026, parte 4 da migração, Task 6; Claude Code 2.1.291, Haiku, modo manual, backend
+isolado.) Sintoma: depois de pedir um `Bash`, a lista ficava `working` enquanto o chat mostrava o
+cartão. Reproduzido duas vezes: com a lista do dono aberta (`app_presente`), o hook `perm.ts`
+segura o `tool.check` em long-poll (`/api/plugin/ask`, janela de 5 s) e a TUI fica em
+"running PreToolUse hooks… 6/10" sem desenhar cartão nenhum; o registro nativo segue `busy` e o
+marcador `working` durante toda a espera (45 s). O `Monitor` já via a pergunta pelos fatos
+empurrados (`question` com `perm:`); a lista não tinha fonte: confiava no registro e não
+capturava. O Python de reserva (`registry.list_with_state`) tem o mesmo defeito.
+
+Conserto: o `POST /internal/list/facts` leva `held` (`pergunta_pendente` das linhas Claude com
+terminal, contrato 32), e a lista a mostra como o `Monitor` (`terminal_state::held_question`:
+"ferramenta: resumo", Yes/No). Sequência gravada em `gen_terminal.py`
+(`permission_card_after_bash`); `contract_terminal::permission_card_after_bash` confere lista e
+`Monitor` rodada a rodada.
+
+Com o `Monitor` vivo, a lista lê o último `state` dele (`state/published.rs`, por nome e session
+id, limpo quando o `Monitor` acaba ou publica `dead`) e não captura o pane da sessão: nem a
+classificação, nem a statusline, nem o radar de limite. Com 5 chats de 20 sessões sem marcador,
+13 → 9,75 capturas por segundo e o Rust de 39 para 30,5 ms/s parado
+(`docs/migracao-rust/parte4/medicao.md`, Task 6).
+
+Aberto: depois do Esc o hook é cancelado sem `/ask-fim`, e a pergunta segurada vale até vencer
+(35 s depois do último poll); o chat (e agora a lista) mostra o cartão nesse intervalo.
+
+## Prévia da chamada em voo: o ● pisca
+
+Medido em 05/10/2026, Claude Code 2.1.289. Com um comando rodando, a TUI desenha a chamada como
+`● <descrição que o modelo escreveu> · 2s` e, embaixo, `⎿  $ comando (3s)`. Ao terminar, o bloco
+vira `Ran 1 shell command`. A primeira linha não começa por `Bash(` nem por um verbo da lista, e o
+`●` dela pisca: em quadros alternados ele some e a linha fica só recuada.
+
+A prévia elegia a descrição como prosa nos quadros com `●`. Nos quadros sem ele, a varredura caía
+no bloco de prosa anterior, e a descrição grudava nele como continuação. A prévia trocava a cada
+piscada, e a pele Terminal subia e descia o tempo todo. Uma sessão real com dois `sleep 6`
+registrou 36 trocas de prévia; com a regra, 4 (vazio, as duas frases e o "Pronto.").
+
+A regra olha a forma, não o vocabulário: o parágrafo da chamada termina colado no `⎿`, e o da
+prosa termina em linha em branco ou no próximo `●`. Os dois quadros reais estão em
+`backend/tests/fixtures/pane_ferramenta_em_voo_*.txt`, cobertos pelo teste da prévia e pelo
+contrato Python/Rust. Efeito colateral aceito: um aviso do sistema seguido de `⎿` (o limite de
+uso em `pane_limite_uso.txt`) também deixa de virar prévia, e ele nunca foi texto da resposta.
 
 ## Cliente tmux somente de leitura não bloqueia envios ao pane
 
@@ -404,6 +578,17 @@ anteriores (sem terminal e com terminal).
 Os limites de 95% e 99% foram escolha do usuário: continuar reenvia o contexto inteiro no primeiro
 turno, então a 99% a conta acaba nele; entre 95% e 98% ela ainda serve, mas quem escolhe precisa
 confirmar sabendo disso. Contar a janela mais cheia, como o `sugerir_claude`.
+
+Medido em 04/10/2026 (commit `584e65c5`, servidor Rust na frente), em duas sessões descartáveis
+com terminal: `POST /conta` respondia 500 com e sem mensagem na conversa, e a conta trocava mesmo
+assim. A troca mata o pane e abre outro dentro de uma ação só do `coordinator.change`; o vínculo
+resolvido depois tinha outra impressão digital, e o `change` recusava a chave nova (`mudança de
+modo não pode trocar a chave durável`) ou, com o agente ainda fora de vista, a espera dos
+escritores estourava `BindingChanged (sem vida atual)`. O slot ficava com o vínculo velho, e a
+lista e o SSE da sessão passavam a estourar `BindingChanged`. Com tmux e `claude` reais e o
+coordenador isolado do backend, a mesma sequência falhou sem o conserto e, com ele, manteve a
+chave e validou o vínculo novo. O `clear` da fila comparava o caminho do transcript, que muda com
+a conta; passou a comparar a conversa.
 
 ## Confirmação de entrega sem reler o transcript
 
@@ -1266,6 +1451,40 @@ nova, que é montada pelo `sem_terminal` de hoje.
   `_limpar_composer` (envio parcial, só apaga o que é NOSSO) mantém a regra antiga: são caminhos
   diferentes.
 
+## Rascunho do dono no guardado do Claude (05/10/2026)
+
+Na prova da VM Windows o rascunho `rascunho do dono`, parado no composer de uma sessão com
+terminal, sumiu quando o app mandou uma mensagem: o escritor Rust o apagava com `C-u`
+(`initial_composer`). Nova decisão do dono: **guardar e devolver**, igual, sem Enter.
+
+Redigitar o que a tela mostra não devolve igual. Medido no Claude Code 2.1.289 (pane de 100
+colunas): uma linha longa quebra na palavra (`… com` / `folga, sim`) e o espaço da quebra some, então
+quebra da tela e Enter do dono ficam iguais na captura; colagem aparece como `[Pasted text #1 +5
+lines]`, sem o conteúdo. O Claude tem guardado próprio no Ctrl+S, medido no mesmo pane:
+
+- com texto, guarda e esvazia o composer; a linha de dicas acima da régua passa a terminar em
+  `› stashed` (sozinha ou depois de `ctrl+g to edit in VS Code ·` / `Ctrl+Y to paste deleted text ·`)
+  e fica ali enquanto houver algo guardado;
+- com o composer vazio, devolve o guardado e a marca some;
+- **qualquer envio devolve o guardado ao composer**, já na primeira leitura 0,5 s depois do Enter,
+  inclusive `/clear`; o rascunho de várias linhas voltou idêntico, com acento, aspas, `$HOME` e
+  `\`, e o conteúdo colado voltou junto do marcador (enviado depois, saíram as 5 linhas);
+- é **uma vaga só**: guardar `rascunho A`, digitar `texto novo` e apertar Ctrl+S guarda o texto
+  novo e perde o A.
+
+Daí as regras do escritor (`stash_draft`/`settle_draft`/`submit` em
+`crates/hangar-server/src/terminal_input.rs`): rascunho com marca de guardado já presente adia
+com `composer_busy` sem tecla nenhuma; Ctrl+S sem efeito (CLI sem guardado) também adia, com o
+rascunho intacto. Depois do Enter o composer não fica vazio (o rascunho volta na hora): prova o
+envio a marca sumir com o composer igual ao rascunho guardado; com guardado alheio, de conteúdo
+desconhecido, a marca sumir sem o nosso texto no composer. Sem envio (`deferred`), o escritor
+aperta Ctrl+S só com o composer vazio e a marca presente; com envio incerto, só espera a devolução
+nativa. O desfecho (`returned`/`stashed`/`unverified`) vai no resultado da entrega (`draft`,
+mantido no diário da fila) e, quando não é `returned`, num aviso do log; o texto, nunca. O envio
+pelo plugin em modo `user` não passa pelo composer e não devolve o guardado (medido na prova
+isolada: `plugin_accepted`, marca ainda presente), então com algo guardado o escritor usa o modo
+`fill`. O Python (`_esvaziar_composer_claude`) continua apagando: é a reserva.
+
 ## Contas Codex adicionais têm origem própria
 
 (`app/codex_contas*.py`, 10/09/2026): a padrão usa
@@ -1388,7 +1607,9 @@ Contrato em `hook_state.py`: o registro vence o marcador enquanto `pid_vivo(pid)
 pid morto ou status desconhecido, vale o marcador e depois o pane, como antes. `waiting` vira
 `awaiting_input`, e o pane continua dono da pergunta e das opções (a lista raspa quem está
 `awaiting`) e do rebaixamento quando não há menu (`demote_awaiting`, só em memória — o arquivo é
-do Claude e nunca é escrito por nós). Marcador de hook não gera transição enquanto o registro
+do Claude e nunca é escrito por nós). No Rust (parte 4, Task 2) o rebaixamento que a lista decide
+vale também num mapa da própria ponte (`state/demote.rs`), lido pela lista e pelo `Monitor` e
+desfeito quando o `statusUpdatedAt` do registro muda; o aviso ao Python continua. Marcador de hook não gera transição enquanto o registro
 manda pela mesma sessão, senão o drain e o push disparariam duas vezes pelo mesmo evento.
 
 Em 19/09/2026, a reprodução com registro `idle` seguido de JSON parcial, status desconhecido
@@ -1432,8 +1653,8 @@ atravessa `import` — cada arquivo lê o ambiente e chama `$.http.fetch` sozinh
 | token | sorteado em memória, todo restart do backend deixava a sessão viva em 403 para sempre. É HMAC do segredo do servidor + nome: refaz igual |
 | `AskUserQuestion` (`ask.ts`) | hook de `tool.call`; os argumentos vêm direto em `e` (`e.questions`), não em `e.input`. `next(e)` abre o diálogo do terminal e corre contra o app: devolver `{ result: { questions, answers } }` antes fecha o diálogo. Resposta pelo app em 16 ms, inclusive com o painel de terminal aberto (onde a tecla responde 409). O resultado gravado tem a mesma forma do respondido no terminal. Backend reiniciado no meio: o hook volta a bater e a pergunta segue respondível |
 | hook que lança | o engine pula o hook, escreve uma linha (`hangar: tool.call hook skipped: threw …`) e o diálogo abre normal |
-| `classic.*` | Stop, Notification e PermissionRequest NÃO são entregues a plugin de `--plugin-dir`. Registrar não dá erro; o hook só nunca roda. Fim de turno é `turn.complete` (traz `reason`: answer/aborted/refusal/error) |
-| permissão (`perm.ts`) | só `tool.check` alcança o pedido, e ele roda ANTES do diálogo: enquanto o hook segura o `ask`, o terminal não mostra nada (12 s segurados = 12 s sem diálogo). Aprovar pelo app: 8–11 ms, sem tecla. Por isso o backend só manda segurar com SSE do app aberto E nenhum cliente tmux preso, reperguntado a cada 5 s: prender um terminal no meio devolveu o diálogo a ele em 4 s, e o card do app trocou sozinho para o menu real. `AskUserQuestion`, `ExitPlanMode` e `EnterPlanMode` ficam FORA: o `ask` deles é o próprio diálogo, e segurá-lo escondeu a pergunta do terminal e do `ask.ts` (a resposta do app esperou 5 s por um aviso que não vinha) |
+| `classic.*` | Stop, Notification e PermissionRequest NÃO são entregues a plugin de `--plugin-dir`. Registrar não dá erro; o hook só nunca roda. `classic.PreToolUse` chega (2.1.291), mas com o envelope do `tool.call` (`tool`, argumentos, `tool_use_id`), sem os campos do hook clássico. Fim de turno é `turn.complete` (traz `reason`: answer/aborted/refusal/error) |
+| permissão (`perm.ts`) | só `tool.check` alcança o pedido, e ele roda ANTES do diálogo: enquanto o hook segura o `ask`, o terminal não mostra nada (12 s segurados = 12 s sem diálogo). Aprovar pelo app: 8–11 ms, sem tecla. Por isso o backend só manda segurar com SSE do app aberto E nenhum cliente tmux preso, reperguntado a cada 5 s: prender um terminal no meio devolveu o diálogo a ele em 4 s, e o card do app trocou sozinho para o menu real. `AskUserQuestion`, `ExitPlanMode` e `EnterPlanMode` ficam FORA: o `ask` deles é o próprio diálogo, e segurá-lo escondeu a pergunta do terminal e do `ask.ts` (a resposta do app esperou 5 s por um aviso que não vinha). Modo auto (06/10/2026, Claude Code 2.1.291): o `next(e)` do `tool.check` devolve `ask` ("This command requires approval") também no modo auto, porque o classificador só decide DEPOIS do hook. Solto, o comando rodou sem diálogo em ~1 s; segurado, virou cartão "Escolha uma opção" no app para um subagente em background, sem nada no terminal, até alguém clicar. O plugin não enxerga o modo atual: o `classic.PreToolUse` traz só o envelope do `tool.call` (sem `permission_mode`) e o `permissionMode` do `$.config.list()` é o padrão das configurações ("default" com a sessão em auto). Por isso quem decide é o backend, pelo rodapé do pane (`permission_mode.ler_modo`) |
 | estado (`state.ts`) | aviso do plugin ACORDA o `StateMonitor`: `awaiting_input` em 90 ms (o pane viu o menu 0,9 s depois), `dead` 41 ms depois do `kill-session`. `session.end` não dispara em `kill -9` e dispara em `/clear`, então quem declara a morte continua sendo o tmux. A âncora `working`/`idle` do plugin NÃO chega à tela: o marcador de hook logo abaixo dela vence — e o registro nativo (entrada anterior) já cobre esse estado |
 | sugestão (`suggest.ts`) | `prompt.suggest` com `origin.kind = suggestion` traz a frase cinza do composer. Não vem todo turno (só quando o modelo consegue inferir o próximo pedido) e não há evento de descarte: quem apaga é o começo do turno seguinte |
 | steer | o marcador real é `ctrl+x ctrl+s to send now`. No Claude o acorde INTERROMPE o turno em curso (`Interrupted · What should Claude do instead?`, o comando rodando morre); no Kimi o `ctrl-s` injeta sem parar nada |
@@ -1525,8 +1746,103 @@ sessão, então painel baixo cai nesse corte. Não tem relação com `--plugin-d
 Sem terminal o caminho é outro e não depende de ordem: o backend entra como superfície remota
 (`control_request` `ui_attach`, depois `ui_render` do `AbovePrompt`) e o CLI avisa a mudança
 com `system`/`ui_invalidate`. Medido num `claude -p` stream-json: a resposta traz a árvore da
-superfície pedida (`desktop`/`mobile`: a barra vem como `Svg`, não `Raster`). Fica para depois da
-migração do runtime sem terminal para o Rust.
+superfície pedida (`desktop`/`mobile`: a barra vem como `Svg`, não `Raster`).
+
+Feito na fase 2 dos mods, toda no `hangar-server`: a sessão Claude sem terminal atendida pelo Rust
+liga a superfície `desktop` depois do `initialize` (ou ao religar ao cano), com `client_id`
+`hangar`, viewport 120x40 em tela cheia e `answers: ["ui_copy"]`. Os pedidos `ui_*` saem fora do
+diário da fila e por um canal próprio e pequeno, que dá prioridade à conversa: uma rajada de
+efêmeros não atrasa mensagem nem permissão, e o efêmero que não cabe é descartado, porque a
+superfície tem prazo e se refaz. O `plugin_ui` sai pelo hub dos aparelhos com `shown_id`,
+`columns` (o `bodyColumns` de cada lugar) e `source: "surface"`, e o do Python é ignorado nessas
+sessões. Clique, troca de aba e digitação vão por `ui_press`, `ui_pane_show` e `ui_input`, com uma
+nova tentativa quando o `handle` vence; aviso e cópia chegam pelo canal (`ui_toast`, `ui_copy`), e
+a cópia só volta ao aparelho de quem clicou quando vem do mod do botão.
+
+Prazos: cada pedido de app (press, show, close, input e o redesenho que ele dispara) tem 3 s, o
+pior caminho soma 6 s e o teto no ator é 7 s; a rota do servidor mede desde a entrada e trabalha
+com 7,5 s, abaixo do corte de 8 s dos apps. O prazo da rota vai junto com o pedido até a
+superfície (o do ator é o menor entre ele e os 7 s): a espera pela vez da sessão e a guarda já
+gastaram parte dele. O ator descarta, sem executar, o pedido que venceu na caixa, e a superfície
+só manda `ui_press`, `ui_input`, `ui_pane_show` ou `ui_close`, inclusive na nova tentativa depois
+de um redesenho, quando ainda restam os 3 s do prazo do pedido; com menos, responde
+`erro_mod_clique_sem_resposta` sem chamar o mod. Assim a ação não sai depois de a rota ter
+desistido. O que fica é o mod lento: um `onPress` que leva mais que os 3 s responde sem resposta
+com o clique já rodando. Os desenhos de fundo continuam com 10 s.
+
+O `plugin_ui` leva a vista inteira dos mods (a árvore grande da vitrine tem ~398 KB) e, no hub dos
+aparelhos, vale só o mais novo, em todas as sessões, com e sem terminal: o canal do hub leva um
+marcador de versão, e cada conexão lê a vista do retrato só quando pode escrever, como o
+`band_pump` do Python. Aparelho lento pula as vistas intermediárias em vez de guardá-las (antes,
+até 1024 quadros por hub e 64 por conexão); os outros eventos seguem todos, na ordem, e a faixa
+sai no lugar do último marcador dela. O evento e o formato que os apps recebem não mudaram.
+
+O `claude -p` sobe com o plugin do Hangar (`--plugin-dir`) e as variáveis da ponte
+(`HANGAR_PLUGIN_URL`, `HANGAR_PLUGIN_TOKEN`), exceção explícita à regra de não acrescentar nada ao
+Python (S7, no lançador do `adapter.py`): a URL que um mod abre num clique do app (`xdg-open`) vai
+ao aparelho de quem clicou pelo `press-start` e pelo `opened`, que o Rust atende; nesse processo o
+aviso e a cópia não passam pela ponte, para não chegarem em dobro. Com os mods desligados, o
+filho nunca herda `HANGAR_PLUGIN_*` do ambiente do backend.
+
+Antes de cada operação de mod, o Rust pergunta ao Python se a troca de agente está em curso
+(`/internal/sessions/{name}/transfer`, contrato interno 28) e devolve a recusa dele
+(`session_transfer_busy`); sem resposta, recusa com `erro_mod_guarda_indisponivel`. Essa guarda
+reaproveita a proteção que já existe no Python, em vez de portar a leitura do registro para o
+Rust.
+
+Códigos de erro novos ou revistos, todos com texto em pt e en, no `ERROS` do core e nas listas de
+teste de recusa do web e do nativo: `erro_mod_fechar_recusado`, `erro_mod_painel_inexistente`
+(o show de um painel que não está mais na frente, em vez da frase de botão, que seria falsa para
+uma aba), `erro_mod_guarda_indisponivel`, e as frases genéricas de `erro_mod_botao_inexistente`,
+`erro_mod_clique_sem_resposta` e `erro_mod_sem_digitacao` (esta vale também para a sessão que
+não atende como superfície). Nos dois apps, falha de show ou de input com código conhecido usa a
+frase do código mesmo num 5xx; só sem código cai na frase genérica. No celular, a faixa dos mods
+ganhou o botão "Ocultar", que desliga os mods na hora (a mesma preferência do menu).
+
+Limites conhecidos:
+
+- a guarda é perguntada uma vez, na entrada da operação, enquanto a rota do Python segura o
+  ingresso até o fim; uma troca que comece entre a resposta e o `ui_*` não é vista;
+- cada `change` de um campo paga uma ida ao Python (a guarda), com a falha dela virando
+  `erro_mod_guarda_indisponivel`;
+- o convidado não digita em campo de mod nas sessões sem terminal, e também não vê a faixa nem os painéis delas: o `/events` do convidado vai ao Python, que não tem a interface dos mods das sessões que o Rust atende (servir o `plugin_ui` ao convidado pelo hub fica para outra decisão);
+- o `opened` com bind de LAN é limite antigo da ponte, que continua valendo;
+- a sessão sem terminal renomeada continua com o mesmo `claude -p`, que manda à ponte o nome com que nasceu (`CP_SESSION_NAME`) e o token desse nome. O renomear fecha e reabre a sessão no Rust no mesmo processo (chave durável e cano), e a reabertura herda o nome de nascimento; com isso `press-start` e `opened` acham a sessão. Se o `hangar-server` reiniciar depois do renomear, ele não conhece o nome antigo, e a URL de um clique do app abre na máquina do servidor até o processo ser relançado;
+- o token da ponte é o HMAC só do nome, como no Python: dois processos que nasceram com o mesmo nome (uma sessão renomeada e outra criada depois com o nome antigo) têm o mesmo token, e o servidor não os distingue. Com as duas vivas no Rust, a ponte não atende nenhuma (a URL de um clique do app abre no servidor), para um processo não tomar o clique nem mandar URL ao aparelho da outra. Quando o nome antigo é hoje o de uma sessão fora do Rust (com terminal, ou atendida pelo Python), o Rust pergunta ao Python, sem cache, se a sessão existe; existindo, ou sem resposta, `press-start` e `opened` vão ao Python, que atende essa sessão, e a renomeada perde o efeito do clique do app (a URL abre no servidor) enquanto as duas viverem. Na interface, cada vida de ator tem identificador próprio, e uma sessão nova com o nome antigo não herda faixa, avisos nem clique. Fechar o limite pede um token por processo (o nome de nascimento e a chave no sidecar e no HMAC, no Python e no plugin), fora da exceção S7;
+- a sessão com terminal que o Rust atende, inclusive no Windows (onde o terminal já nasce no Rust), não é superfície remota: a fonte da interface dos mods dela é o plugin do Hangar no terminal, e desde a fase 3 a ponte dela e o clique do app são do Rust (parágrafos seguintes).
+- o aparelho que acompanha recebe a vista inteira a cada mudança da faixa, sem gzip (SSE): a barra de progresso de um mod, que redesenha a 1 Hz com um painel grande aberto, custa ~400 KB/s por aparelho. Cortar isso pede mudança de contrato com os apps (um evento só da faixa, ou revisão por painel com a árvore omitida quando não mudou, com anúncio de capacidade no `/events` para os apps atrasados), fora deste trabalho.
+
+Feito na fase 3 dos mods, com terminal, no `hangar-server` (`mods/screen.rs`, `mods/click.rs`, `mods/terminal.rs`, `mods/bridge.rs`, `runtime/terminal.rs`), em Linux, macOS e Windows (psmux). O plugin do Hangar continua sendo a fonte da interface: manda a faixa e os painéis com o `bodyColumns` ao lado do `columns` (que soma as 5 colunas do `[-]` e é o que o Python usa para cortar a prévia), registra o painel já no `ui.open` colocado, informa o último painel desenhado (`shown`) e repassa `ui.scroll` e `ui.focus`. O Rust não lê a árvore do terminal: lê a tela.
+
+- **Leitura da tela (`mods/screen.rs`).** O `capture-pane -e` vira uma grade de células com o estado absoluto do SGR (o psmux escreve `ESC[0;1;7;48;2;…m`, lido parâmetro a parâmetro). Dela saem a faixa (cheia, recolhida ou encolhida), o painel na frente e a região dele, a linha de abas, a aba ativa, a célula do `✕`, quem tem o foco (painel, faixa ou prompt) pela cor da borda e pelo inverso da faixa, e diálogo ou pesquisa de satisfação na tela. O servidor publica `shown_id` lido da linha de abas, em janelas de 300 ms, e `source: "terminal"`. A leitura é conferida contra 34 capturas reais do Claude Code (tmux e psmux), guardadas como dados de teste sem link de sessão, e-mail nem caminho pessoal.
+- **Operações do driver (tmux e psmux).** Ler formatos, ler clientes, capturar a tela, mouse SGR, roda, teclas de uma lista fechada e redimensionar. O sinal de mouse ligado é `#{mouse_sgr_flag}` no tmux e `#{alternate_on}` no psmux; formato vazio nunca vale 0. Clientes de controle do próprio Hangar não contam como terminal ligado (no tmux, `list-clients -F` sem `control-mode`; no Windows, `#{session_attached}`). Todo redimensionamento devolve `window-size latest`.
+- **Executor (`runtime/terminal.rs`).** As operações de mod são mensagens do mesmo executor da entrada de texto, seriais com ela e fora do diário da fila. Cada uma leva um `start_by`: a que chega à vez depois dele não age e volta recusada, para que uma tecla esquecida na caixa não saia depois de o app ouvir que o clique falhou. `Hold` reserva o pane ao clique (teto de 10 s, vence sozinho se a tarefa sumir) e `Release` solta sempre, mesmo atrasado: com a reserva, comandos e pedidos de drenagem ficam guardados e saem na ordem depois dela. Fora da reserva, a escrita da entrada também adia (`mods_focus`) quando a tela mostra o foco num painel ou na faixa do mod, porque o `Enter` da mensagem apertaria um botão; só conta o foco dentro de painel ou faixa reconhecidos, para o realce do próprio Claude Code acima do prompt nunca atrasar a mensagem da pessoa. A guarda só roda quando a entrega vai apertar tecla (o modo `Fill` do plugin e a digitação sem plugin): no modo `User` e na entrega nativa a mensagem entra sem tecla, e a guarda só custaria duas leituras do multiplexador e atraso. A entrada adiada assim não espera para sempre: com o foco num mod há mais de 10 s, contados da primeira vez que a linha o viu, e nenhum clique em curso (a limpeza que desistiu, ou a pessoa que levou o foco a um painel e saiu), o executor devolve o teclado ao prompt por `ctrl+x tab`, lendo a tela antes de cada tecla e parando num diálogo, e só então escreve. Cada passo é a tecla e uma leitura repetida até a tela mudar (até 300 ms), com o pane conferido e o tamanho lido uma vez: na VM a volta andava a 0,5 s por passo e a mensagem saía em 15,8 a 21 s. Cada linha tenta duas devoluções, a segunda 20 s depois da primeira; depois só registra. A contagem é da linha: a seguinte começa do zero. Com só a faixa na tela (nenhum painel), o `ctrl+x tab` gira dentro dela e nunca chega ao prompt (medição (i) do tmux): nenhuma tecla é mandada, e a entrada espera a pessoa. A faixa inteira é reconhecida pela âncora do mod (o começo do primeiro texto dela), que o `Mods` entrega ao elo a cada `/ui` e o elo grava numa âncora compartilhada com o executor, criada junto com ele no `open_terminal`; a recolhida e a encolhida, pela própria linha. Com o teclado emprestado ao Python, a operação de mod é recusada.
+- **Clique por mouse.** O pedido inteiro cabe nos 7,5 s da fase 2, medidos desde a entrada da rota: cada ação no mod (clique, roda, tecla, redimensionamento) só sai com tempo para a confirmação do clique final (2 s) e uma folga de 300 ms, e a roda vai até 4 s. O clique lê a tela antes de cada passo, ativa a aba pelo meio do título, procura o rótulo só na região do alvo, confere que a célula não andou e que a aba continua na frente, e confirma pelo `press` do plugin, sem repetir às cegas. Botão fora da área visível é alcançado esticando a janela a 250 linhas (só sem terminal de verdade ligado) ou pela roda, acompanhando o `offset` do `ui.scroll`, nunca uma conta de linhas. Cada evento espaçado da roda rola uma linha no tmux e três no psmux (a rajada acelera sem conta previsível), então um botão a dezenas de linhas não cabe no prazo. A escolha entre o mouse e o teclado é feita antes de ativar a aba: o que a reserva por teclado precisa é um passo de até 0,2 s por parada do anel até o painel (os botões da faixa só quando estão no anel, nenhum com ela recolhida, e os sem desenho também a 0,2 s, porque o passo termina no `ui.focus` deles e não na espera da tela), o `Tab`, a espera do foco e a confirmação. Se ativar a aba já não deixa esse tempo, o clique vai direto ao teclado, que traz a aba pelo anel; senão a roda vai até o teto dela ou até a hora em que o teclado ainda cabe, e passa a ele, cujo `Tab` rola o painel sozinho até o botão. Um painel que a roda não rola nas duas direções também passa ao teclado. Se o teclado não cabe nem no começo, o mouse fica com o prazo inteiro (provas de 06/10/2026: a roda parava na linha ~20 de 200; o anel pagava 0,3 s de espera da tela por botão invisível da faixa e chegava ao painel sem prazo; com outra aba na frente, a ativação comia o tempo do teclado). Rótulo repetido na árvore do mod (botão homônimo fora da área visível ou substring de outro) não é único: vai ao teclado em vez de arriscar o botão errado. O `close` relê a aba ativa logo antes de clicar o `✕` e o clica pela célula exata. Dois cliques de mouse no mesmo pane saem com 550 ms entre eles sempre que o prazo comporta, também de um pedido para o seguinte; com o prazo curto, 350 ms bastam para um clique a mais de duas células do anterior, e o vizinho não sai sem os 550 ms. Mais perto que isso, o Claude Code os toma por duplo clique, engole o segundo e às vezes copia a palavra clicada para o buffer do multiplexador (medido no tmux em 06/10/2026: a duas células ou mais, até 250 ms o segundo some e a partir de 300 ms vale; a até uma célula, como o botão logo abaixo do título da aba, some até 450 ms e vale a partir de 500 ms). A espera entra na conta do prazo: sem tempo para ela, o clique não sai. Cada passo confere a vida da sessão que pediu: a leitura, a escrita e a espera só valem no registro dessa vida, e um clique da sessão substituída não escreve na nova.
+- **Limpeza garantida.** O pedido roda numa tarefa própria, que a rota não cancela. A resposta vai ao app assim que o resultado existe; depois, com prazo próprio de 2 s, a limpeza devolve a altura da janela, volta o teclado ao prompt, desarma o alvo do foco e solta o pane, também quando o pedido foi cortado no meio. Cada item entra no registro de desfazer antes da ação que o pede. A volta ao prompt tem prazo próprio, de 0,45 s por parada do anel e mais uma, entre 2 s e 9 s: no psmux cada passo custava 0,4 s, e com doze botões na faixa e dez painéis (23 paradas) os 2 s de antes desistiam com o teclado num painel (prova na VM, 06/10/2026). A limpeza renova a reserva para cobrir esse prazo, e a volta que falha segue tentando por até 10 s com o pane ainda reservado, porque `Escape` está proibido (age no Claude, e no psmux nem devolve o foco).
+- **Reserva por teclado.** Só fora da tela cheia e só nos casos medidos: rótulo repetido no mesmo painel, título de aba fora da linha e o `ctrl+x tab` que traz o painel ou o botão da faixa. Exige o prompt na tela e vazio, cada passo confirmado pelo `ui.focus` do plugin e a volta por `ctrl+x tab`. O `Enter` só sai depois de ler a tela e conferir que o último foco visto é o do alvo, no lugar pedido, e que nenhum foco mais novo o levou a outro elemento; com o alvo já focado pela primeira tecla, o `Tab` seguinte não é dado. Com diálogo na tela só valem o botão do painel já mostrado ao lado da conversa e o fechar dele. Cada passo do anel custa a tecla e uma leitura da tela, sem reler o tamanho, e a leitura depois da tecla se repete até ver a tela mudar (até 300 ms; a tecla aparece em 50 a 60 ms): no psmux cada operação é um processo, e com a conferência do pane e o tamanho relidos a cada passo um anel de doze botões na faixa custava 0,4 s por passo e estourava o prazo (prova na VM, 06/10/2026). Dentro da reserva do pane o executor confere a identidade do pane uma vez só. A espera por uma reescrita já no `ctrl+x tab` de entrada no painel é a da tela, não a do foco: nas provas ela vem no `Tab`.
+- **Vigia do tamanho (`mods/terminal.rs`).** Sem terminal de verdade ligado, o Hangar mantém a janela em 144 colunas por 40 linhas. O vigia ouve os avisos de cliente e de janela do multiplexador e repõe o mínimo; se um clique está em curso, espera a vez pelo orçamento da rota mais a limpeza mais longa, porque o terminal que se desliga no meio do clique não avisa de novo. No Windows o vigia recusa (o psmux não avisa, e o Hangar não liga cliente de controle lá): o mínimo volta no preparo de cada operação de mod.
+- **Elo e posse no gateway.** `TerminalLink` é a ligação da sessão com o `Mods`: leva os pedidos dos apps ao clique, lê o painel na frente e encerra o vigia ao sair de escopo. O gateway cria uma vida única por abertura (`new_life`), grava-a na entrada, e `attach_terminal` registra o processo (chave durável, pane e criação, que o renomear mantém). Antes de ligar, `unstretch` devolve a janela que um clique cortado pelo fim do servidor deixou com 250 linhas (só sem cliente ligado), e o vigia sobe depois do `attach`, para não derrubar o próprio elo. A reabertura da mesma vida só religa o elo quando o nome saiu do `Mods` (`mods.life(name)` é `None`); nome que já tem outra vida fica com ela, porque é uma sessão mais nova e viva, e tomá-lo a deixaria sem dono e sem o nome de nascimento. O `close` esquece a entrada pela vida dela.
+- **Ponte com terminal (`mods/bridge.rs`).** O plugin que roda no terminal usa todas as rotas: faixa e painéis (`ui`), avisos, `press`, cópia, URL, foco da reserva por teclado e rolagem; sessão que o Rust não atende segue ao Python com o mesmo corpo. A cópia do `/ui` no formato de hoje segue ao Python, para a prévia e o campo `faixa` do `/pull`, que continuam lá; vai com o nome atual da sessão e o token dele, porque o cache do Python é pelo nome de agora, e o plugin de uma sessão renomeada continua mandando o nome de nascimento.
+- **Digitação.** Com terminal não há por onde digitar no campo do mod: `input` é recusado com `no_typing`, sem reservar o pane, e o `ui.input` do app responde `erro_mod_sem_digitacao`.
+- **Convidado.** O Rust não autentica convidado (convite ou usuário convidado). Por decisão do dono do projeto, e sendo a exceção à regra de não acrescentar nada ao Python, o Python recusa o convidado com 403 `erro_mod_convidado` quando o terminal da sessão é do Rust, em duas camadas. A rápida é a dependência do `plugin_press`, que lê uma fotografia da posse (`terminal_in_rust`). Ela não basta: sem slot (primeira operação depois de reiniciar o backend) ou no meio de um open/detach, a fotografia mostra o terminal fora do Rust, e o próprio clique abriria a sessão no Rust e receberia o teclado emprestado. A que vale é a recusa refeita no `_borrow_keyboard`, sob a barreira da sessão e com a posse do Rust já conferida: o handler põe a marca de convidado num `ContextVar` (`guest_admin`), o `_click` a copia até a thread do driver, o `wrap_driver` a passa ao `run_admin`, e o `_borrow_keyboard` levanta `GuestRefused` (de propósito não é `RuntimeError`, para quem trata falha de escrita como "sem resposta" não engolir a recusa), que o `plugin_press` devolve como o mesmo 403. O Rust deixou de tentar reconhecer o formato de pedido de convidado: repassa ao Python todo pedido que não é do dono, que recusa o convidado ou responde 401 ou 429 e conta a falha. Sem isso, o convidado chegaria ao `plugin_click.py`, que dirigiria o pane do executor do Rust.
+
+Limites conhecidos da fase 3:
+
+- a faixa inteira focada só é reconhecida com a âncora do último `/ui` do plugin: um mod que muda o primeiro texto da faixa entre um desenho e a leitura da tela (antes de o `/ui` seguinte chegar) deixa a faixa sem reconhecimento por esse intervalo, e a mensagem pode sair com o botão focado;
+- a reserva por teclado tem uma janela residual: com dois eventos de foco atrasados (o do `ctrl+x tab` de entrada e o do `Tab`), o `Enter` pode sair com o foco em outro botão; as conferências (tela lida antes do `Enter` e último foco visto no alvo) a estreitam, e a limpeza do clique fica como a proteção principal;
+- terminal que se desliga durante um clique, sem a janela esticada, deixa a janela abaixo do mínimo até o vigia poder agir: ele espera a vez do pane pelo pedido e pela limpeza mais longa;
+- quem lê um painel de mod no próprio terminal enquanto uma mensagem do app que aperta tecla (`Fill` ou digitação) espera perde o foco para o prompt depois de 10 s; a guarda decide pelo modo previsto com os fatos da sessão, antes de ler o rascunho: com um rascunho guardado o plugin passa a `Fill`, e a entrega nativa que não escreve cai na digitação, as duas sem a guarda;
+- com o foco na faixa de um mod e nenhum painel aberto, a entrada que aperta tecla espera a pessoa tirar o foco de lá (o `Escape` devolveria, mas é proibido); depois de duas devoluções que falham, também;
+- a devolução do foco por `ctrl+x tab` percorre o anel: cada painel seguinte vem à frente no caminho, e a pessoa perde também a aba que via. Ela para no primeiro ponto que a leitura não reconhece como mod; com a âncora da faixa defasada (o mod mudou o primeiro texto e o `/ui` ainda não chegou), esse ponto pode ser um botão da faixa, e a entrada é escrita com o foco nele. O `Escape` devolveria sem mexer na aba, mas é proibido (age no Claude, e no psmux só o formato Win32 funciona). A medição mostra outro caminho, o clique numa célula da conversa, que devolve o teclado sem trocar de aba (tmux e psmux); ele não foi adotado porque só vale em tela cheia e uma célula da conversa pode ser link ou linha de ferramenta que abre com o clique, e escolher uma célula segura pede leitura própria da conversa;
+- no Windows o vigia não roda e a contagem de clientes usa `#{session_attached}` (o psmux conta um cliente em modo controle, mas o Hangar não liga um lá);
+- com o processo inteiro sem Rust, o clique de mod com terminal é o de antes (`plugin_click.py`), sem abas seguindo o terminal, sem reserva por teclado e sem controle de tamanho;
+- o convidado não aciona nem vê os mods de sessão com terminal do Rust pelo app; a recusa vale por dois lados (Rust e Python) para fechar a diferença de leitura de cabeçalho entre eles.
+- convidado que pede `show` ou `input` numa sessão com terminal do Rust recebe 405 do Python, que só tem a rota `plugin/press`, em vez do 403 `erro_mod_convidado` do `press`: nada é acionado, mas o app mostra um erro genérico. Fechar pede as duas rotas no Python ou a recusa do convidado no Rust;
+- a publicação da vista é montada fora da trava e conferida sob ela pela versão, mas entregue aos aparelhos depois de soltá-la: numa corrida entre dois `/ui` (ou um `/ui` e a leitura da tela), a vista mais velha pode chegar por último. O próximo `/ui` ou a próxima leitura da tela corrige (T11-a);
+- a limpeza renova a reserva do pane no começo e de novo antes de devolver a altura, mas entre a última renovação e o `Release` a reserva ainda pode vencer alguns milissegundos antes do fim quando a operação no executor demora: a fila só entrega com o teclado já no prompt, então a mensagem não aperta botão, só pode sair um instante antes de a altura voltar (T13-a);
+- o pedido do app diz o lugar e a `key` do controle, não o mod: com dois mods desenhando um controle de mesma `key` no mesmo lugar (faixa ou painel), nenhum é acionado e o app ouve que o item não está mais na tela (com e sem terminal). Levar o mod no contrato dos apps, para acionar o certo, fica para depois;
+- dentro dos 3 s depois de um foco armado, o plugin pergunta ao backend se o alvo ainda está armado antes de derrubar um envio do composer, e só derruba com a confirmação; sem resposta em 2 s (sessão renomeada com o Python lento ou fora do ar), o envio passa, e uma letra que a pessoa digitasse no meio da reserva, com o `Enter` do clique, poderia ir ao modelo. A reserva recusa já de início com rascunho no prompt. Responder `Deferred` pelo aviso do plugin na tela foi tentado e revertido: o texto do aviso pode estar na tela por outra razão, e a linha seria digitada de novo;
+- o hook de `ui.focus` do plugin espera o `focus-target` sem prazo próprio antes de seguir; numa sessão renomeada cada movimento do anel paga também a pergunta ao Python sobre o nome antigo (até 1 s). O hook tem o teto de 10 s do engine.
 
 ### Mods: painel, clique e o que acontece no aparelho (04/10/2026)
 
@@ -1575,6 +1891,26 @@ mod chama `$.ui.toast(texto, { timeoutMs: 15000 })` a cada 20 s, sem turno nenhu
 
 O aviso preso por um painel aberto com `holdToasts` espera no terminal e sai na hora no app: o
 `ui.toast` passa pelo hook quando o mod chama, não quando o terminal desenha.
+
+### Régua com o nome da sessão (06/10/2026)
+
+Claude Code 2.1.292 (Linux, tmux, tela cheia). Uma sessão aberta com `--name sessao-de-prova`
+desenha a caixa de digitar assim, com o nome no fim da régua de cima e a de baixo pura:
+
+```
+──────────────────────────────────── sessao-de-prova ─
+❯ Try "…"
+──────────────────────────────────────────────────────
+```
+
+Com a régua exigindo só `─` e espaços, a tela não tinha caixa de digitar. Os mods davam diálogo
+aberto em todo clique ("Há uma pergunta aberta no terminal da sessão"). No `terminal_state`, o
+`composer_end` deixava de achar o par de réguas. Com o painel de agentes em foco, a análise virava
+`awaiting_input` com a pergunta "Enter to view · x to stop" (o defeito do #85 de volta), e a
+prévia em voo descartava o `❯` da caixa como se fosse mensagem do usuário. As capturas
+`tmux-160`/`tmux-161` em `crates/hangar-server/tests/fixtures/mods_screen` e o teste
+`terminal_state_session_name_in_the_rule_reads_the_same` cobrem os dois lados. O rótulo é
+`[^─│]+`: um `│` no meio é borda de painel, não nome.
 
 ## O `wire.jsonl` do Kimi não é um transcript bem-comportado
 
@@ -2040,7 +2376,9 @@ Armadilhas que custaram tempo:
 - **Órfão mudou de sentido.** Antes, todo claude de backend anterior era órfão (marcador com o pid
   do pai). Agora órfão é só o cano cuja `HANGAR_CANO_KEY` não tem sidecar — os outros são de
   propósito, e o backend religa em todos na subida (`reconectar_todas`), senão a lista mostraria
-  "ociosa" uma sessão parada numa permissão.
+  "ociosa" uma sessão parada numa permissão. Com o `hangar-server` de pé (dono único, 04/10/2026)
+  quem abre os canos vivos é o Rust, ao entrar no modo `rust`; o `reconectar_todas` fica para o
+  Python dono da porta (sem binário ou depois da desistência).
 - **`makefile()` segura o socket**: fechar só o socket não entrega EOF ao outro lado. Cano e
   cliente de teste fecham os dois.
 - **Cano de outra versão** (`versao` no snapshot): com a sessão ociosa o adapter reabre na hora;
@@ -2142,6 +2480,19 @@ do transcript. `fonte_pensamento` e `fonte_ferramenta` (a chamada cujo pedido o 
 escreve, com o input parcial) são fontes `PushPreviewSource` à parte, com eventos SSE `pensamento`
 e `ferramenta`. O servidor limpa quando o bloco cai no `.jsonl`; o front espera o evento real do
 transcript pra tirar de cena, com 3s de carência, senão abria um buraco entre os dois.
+
+## Claude sem terminal: segundo `initialize` no mesmo processo (04/10/2026, CLI 2.1.289)
+
+O Rust que abre um cano já inicializado reenvia o `initialize`, porque o snapshot do cano não
+marca `initialized` (só reaplica o `system/init`). Medido com o CLI real (`claude -p` em
+stream-json com `--permission-prompt-tool stdio`, Haiku, conta `.claude-02-200`, sem cano nem
+backend): o segundo `initialize` responde `success` com o mesmo corpo do primeiro (244
+comandos), tanto logo depois do primeiro quanto depois de um turno completo, e o turno seguinte
+sai normal. Diferente do Codex, que recusa com `-32600 "Already initialized"`. Então a reabertura
+no Rust não precisa de tratamento especial: a resposta marca a sessão entregável como no
+primeiro. Se uma versão futura recusar, o sintoma é `headless_nao_subiu` com a frase do CLI na
+faixa (`claude.rs`, ramo `initialize` rejeitado). Teste de regressão:
+`reopen_of_initialized_cano_becomes_deliverable`.
 
 ## Codex sem terminal: o app-server é do cano (14/09/2026, codex-cli 0.154.0)
 
@@ -2326,6 +2677,147 @@ sidecar para um nome que nunca responde. A recusa vive num ponto só (`_recusa_o
 O estado da linha sai da atividade: trabalhando com `advance.lock` preso (lido em `/proc/locks`,
 sem pegar a trava) ou com a linha do tempo/trava mexida nos últimos 2 min.
 
+
+### Deltas Claude/Codex: acumular antes de publicar
+
+**03/10/2026 — parte 2A.** Base Python `aa8eec36`, consumidores finais `7149f6d9`;
+Linux/CachyOS, CPython 3.14.6, mesma máquina e venv preexistente. Sem serviço, instalação,
+credencial ou CLI real. Nenhum runtime foi portado para Rust nesta entrega; protocolo e cano
+continuam na versão 1.
+
+O buffer compartilhado usa StringIO, publica primeiro imediatamente e coalesce intermediários
+em 150 ms. Timer entrega a cauda sem outro delta; flush entrega o último no fim de bloco.
+Limpeza cancela timers e aguarda publicação em voo. Claude mantém texto, pensamento e input
+de ferramenta separados; o input parcial e seu rótulo continuam visíveis até o transcript.
+`_input_parcial` permanece idêntico à base. Codex resolve a fonte na publicação e separa
+preâmbulo/resposta. Estado, uso, pergunta, permissão e fim de turno/drain conservam o caminho
+imediato. A limpeza de uma sessão antiga reconfere a identidade depois de esperar o descarte,
+para não apagar os canais de outra sessão criada com o mesmo nome.
+
+**Método.** Consumidores Claude reais `_Sessao`/`_on_stream` da base e da entrega, carregados
+no mesmo interpretador; eventos stream-json sintéticos. JSON compacto UTF-8: Write com
+`file_path=/tmp/ação-😀\synthetic` e content ASCII de 64/128/200 KiB, ou campo prompt ASCII de
+200 KiB. Pedaços medidos em bytes, decoder incremental preservando Unicode. Três repetições
+por combinação; as tabelas mostram medianas. Rajada sem espera entre eventos, usando o relógio
+normal do loop, sem avançá-lo artificialmente. Cada execução confirma o input final completo;
+a instrumentação retém só primeiro/último texto e conta parse/publicação. O frame `{}` do
+início da ferramenta fica fora das contagens abaixo. Sem assinante e com uma assinatura real
+de PushPreviewSource, sem HTTP/SSE/rede. Assinante pode observar só o último frame da rajada:
+isso é a semântica existente de substituição completa, não perda de conteúdo final.
+
+Parede: perf_counter do primeiro delta até block-stop. CPU: process_time no mesmo trecho,
+incluindo parser/serializer/push/rótulo e instrumentação, sem filhos. Maior publicação: máximo
+de cada execução e mediana desses máximos; antes mede o delta inteiro (concatenação, parser,
+push e rótulo), depois o callback de publicação (parser, push e rótulo). A diferença de escopo
+é explícita: não comparar esses máximos como operações idênticas. Atraso do loop: heartbeat
+com sleep de 1 ms, maior excesso sobre esse prazo, mediana dos máximos. Não é CPU do backend
+vivo nem de vários aparelhos. Primeiro frame permaneceu imediato nos dois caminhos.
+
+**Rajadas — antes → depois, tempos em ms.** Parse e publicação têm a mesma contagem em cada
+linha. O conjunto contém 60 execuções (cinco inputs × dois modos de assinatura × duas versões
+× três repetições), com conteúdo final exato em todas.
+
+| Assinante | Input / pedaço | Bytes / pedaços | Parede | CPU | Parse/publicações | Maior publicação | Atraso do loop |
+|---|---|---:|---:|---:|---:|---:|---:|
+| não | Write 64 KiB / 128 B | 65592 / 513 | 19,602 → 2,049 | 19,552 → 2,041 | 513 → 2 | 0,148 → 0,260 | 18,712 → 1,245 |
+| não | Write 128 KiB / 128 B | 131128 / 1025 | 73,710 → 1,724 | 73,578 → 1,718 | 1025 → 2 | 0,319 → 0,268 | 72,911 → 0,910 |
+| não | Write 200 KiB / 128 B | 204856 / 1601 | 163,671 → 2,709 | 163,305 → 2,697 | 1601 → 2 | 0,473 → 0,435 | 162,970 → 2,067 |
+| não | prompt 200 KiB / 128 B | 204813 / 1601 | 5487,248 → 2,116 | 5473,232 → 2,108 | 1601 → 2 | 10,218 → 0,444 | 5486,547 → 1,364 |
+| não | prompt 200 KiB / 32 B | 204813 / 6401 | 21994,111 → 6,758 | 21947,474 → 6,746 | 6401 → 2 | 11,653 → 0,456 | 21993,396 → 6,026 |
+| sim | Write 64 KiB / 128 B | 65592 / 513 | 18,753 → 0,769 | 18,726 → 0,765 | 513 → 2 | 0,141 → 0,152 | 17,866 → 0,938 |
+| sim | Write 128 KiB / 128 B | 131128 / 1025 | 66,450 → 1,464 | 66,351 → 1,458 | 1025 → 2 | 0,277 → 0,278 | 65,650 → 0,639 |
+| sim | Write 200 KiB / 128 B | 204856 / 1601 | 165,035 → 2,232 | 164,725 → 2,224 | 1601 → 2 | 0,448 → 0,411 | 164,340 → 1,487 |
+| sim | prompt 200 KiB / 128 B | 204813 / 1601 | 5508,786 → 2,160 | 5495,128 → 2,155 | 1601 → 2 | 9,971 → 0,448 | 5508,332 → 1,432 |
+| sim | prompt 200 KiB / 32 B | 204813 / 6401 | 21852,820 → 6,821 | 21801,570 → 6,812 | 6401 → 2 | 10,908 → 0,451 | 21852,125 → 6,090 |
+
+
+**Fluxo espaçado.** Prompt de 1 KiB, envelope de 1037 bytes, nove pedaços de 128 B, chegada
+nominal a cada 40 ms, produção com intervalo de 150 ms. Depois do último delta, o consumidor
+novo espera o timer completar a cauda antes de enviar block-stop: o EOS não fabrica essa prova.
+Doze execuções (dois modos × duas versões × três repetições), input final exato em todas.
+Tempos abaixo são medianas; instantes da prévia são de uma repetição representativa (a segunda).
+Parede inclui as esperas de chegada/cauda; a janela da cauda pode aumentar a parede apesar
+de reduzir o processamento. Não apresentar esse tempo como latência de controle.
+Neste input pequeno a CPU total não caiu; a conta inclui temporizadores e heartbeat durante
+a espera mais longa. A cauda é aguardada por Event, sem polling de conteúdo. Não extrapolar
+a redução de publicações da rajada para ganho uniforme de CPU em fluxos pequenos.
+
+| Assinante | Parede antes → depois (ms) | CPU antes → depois (ms) | Publicações antes → depois | Instantes depois (ms) | Atraso do loop antes → depois (ms) |
+|---|---:|---:|---:|---|---:|
+| não | 366,920 → 452,223 | 8,395 → 8,523 | 9 → 4 | 0,042 / 150,635 / 301,181 / 452,175 | 0,221 → 0,180 |
+| sim | 367,690 → 452,229 | 8,238 → 8,844 | 9 → 4 | 0,041 / 151,091 / 302,058 / 452,181 | 0,245 → 0,240 |
+
+
+**Conferência e limites.** 200 testes focados passaram: test_stream_buffer,
+test_claude_headless, test_codex_adapter e test_preview_push. Cobrem primeiro/periódico/cauda,
+Unicode/escapes, publicação bloqueada, erro de timer, EOS/result/assistant, reset/interrupção,
+EOF antigo durante substituição, rename de outra thread, fonte recriada por unsubscribe,
+separação de agentMessage, geração substituída, preserve_preview e controles/permissão/pergunta/
+drain com prévia pendente. Revisão independente apontou a limpeza pelo EOF antigo; regressão
+falhou antes e passou após reconferir identidade nos três canais.
+
+Uso real no app, dois aparelhos, Claude terminal, Codex nos dois modos com CLI real e Windows
+não foram conferidos: a Task 4, Step 2 permanece pendente para o canal de testes do dono.
+Nenhum serviço foi iniciado/reiniciado/parado. A medição cobre processamento Python sintético,
+não transporte cano, API, UI, rede ou produção. A rajada reduz milhares de prefixos a primeiro
+e final; o fluxo espaçado mantém atualizações intermediárias. Snapshot full-replace continua
+custando seu tamanho. Não afirmar linearidade de todo o pipeline nem usar decode-final-only
+como ganho equivalente de UI. A versão anterior também pode publicar em cada chegada quando
+os pedaços são lentos; o ganho depende da cadência, tamanho e campo do input.
+
+## Custo da observação terminal
+
+(03/10/2026, Linux 7.1.3, i5-13400F, Python 3.14.6, tmux 3.7b, Rust release.) A 2C original
+`d21a445b` fazia 12 comandos tmux e dois HTTP por captura; a grade analisava o mesmo texto
+que o capture. O estado temporal foi devolvido ao Python, sem outro RPC; o observador usa
+`no-output`, confere sessão/pane a cada rodada e captura uma vez, sem grade/checkpoint ANSI.
+A captura e sua conferência mantêm as duas molduras de nonce: seis comandos tmux por rodada.
+
+O maior excesso estava em `_http`: `build_opener()` incluía HTTPS e carregava certificados
+por pedido, mesmo em HTTP loopback. Mil construções consumiram 3,386 ms CPU/construção;
+cProfile de 100 chamadas atribuiu 0,315 de 0,354 s à criação do contexto HTTPS. O opener
+final é reutilizado e monta somente os handlers HTTP, sem proxy ou redirect.
+
+| Chats simultâneos | Python anterior, CPU/chat/rodada | 2C original, CPU/chat/rodada | Final, CPU/chat/rodada | Redução contra Python reexecutado |
+|---:|---:|---:|---:|---:|
+| 1 | 2,803 ms | 10,404 ms | 1,668 ms | 40,50% |
+| 4 | 2,745 ms | 15,327 ms | 1,784 ms | 35,02% |
+
+Método: quatro lotes independentes de 700 capturas/chat por caminho, ordem alternada,
+20 rodadas de aquecimento excluídas; mesmos panes sintéticos 100×40, 180 linhas e spinner
+congelado, mesmos classificador e valores de hook/plugin/sidecar. O `StateMonitor.stream`
+Python e a rota Rust de produção rodaram completos; nenhum backend/provedor/conversa real.
+Fixture HTTP de loopback com segredo sintético e tmux privado `-S`, configuração `/dev/null`.
+O poll/cache foi acelerado para cobrar uma captura por rodada. Todos os lotes finais
+exigiram zero fallback, exatamente um HTTP capture por rodada e paridade exata dos eventos.
+
+CPU = delta `utime+stime` de `/proc` do Python produtor, Rust, servidor tmux, clientes
+residentes e panes + `RUSAGE_CHILDREN` dos clientes tmux encerrados. Dividido por 700×chats;
+ticks de 10 ms, lotes com segundos de CPU. Com um chat, Python/Rust/tmux finais custam
+1,261/0,200/0,207 ms por captura; quatro chats, 1,347/0,229/0,207 ms. Clientes vivos/panes
+ficaram abaixo de um tick. O Python anterior cria um processo por captura; final cria zero
+durante o lote e conserva um cliente de controle por chat aberto, mais o Rust já existente.
+A fixture inicia um Rust por lote, contabilizado separadamente.
+
+A contagem separada do protocolo provou dez capturas = 63 comandos (três iniciais +
+seis por captura), um cliente criado, attach `no-output`; CPU sem o wrapper de contagem.
+Sessenta ciclos acquire+release custaram 2,000 ms CPU/ciclo (inclui filhos encerrados),
+120 HTTP e 60 observadores; não entram nas médias contínuas. Amortizado em 700 rodadas,
+é 1/700 criação de cliente por chat/rodada, contra um subprocesso a cada rodada Python.
+
+Parede por rodada: um chat, Python 2,803 ms/final 1,655 ms; quatro chats, Python 4,804 ms/
+final 5,072 ms. O ganho medido é de CPU e processos novos; a rodada concorrente ficou
+0,268 ms mais longa. Intervalos entre os quatro lotes finais: 1,629–1,700 ms com um chat
+e 1,779–1,789 ms/chat com quatro, sem sobreposição aos lotes Python. Redução =
+1 − CPU final ÷ CPU Python reexecutado no mesmo ensaio.
+
+Agregados por lote e fontes de reprodução ficam em
+`.superpowers/sdd/2026-10-03-hangar-server-parte2c-revision/perf-baseline.md` e nos auxiliares
+`perf-final-*.py` do mesmo diretório. Os snapshots/binários/socket privados foram temporários;
+o relatório não contém conversa real. O cálculo puro Rust segue conferido pelas fixtures
+Python. Remover a operação privada `reduce` sobe ambos os protocolos para 3; a coordenação
+com `rust-parte2` reservou 4 ao contrato posterior da 2B.
+
 ## Velocidade de geração (tok/s)
 
 O `tok_s` da faixa (média da sessão) somava os `output_tokens` e dividia pelo intervalo entre a
@@ -2350,6 +2842,20 @@ com `claude -p --include-partial-messages --thinking-display summarized` (Opus 5
 `message_start` em 5,04 s, primeiro `thinking_delta` em 7,31 s, fim em 11,00 s com 431 tokens.
 Partindo do primeiro pedaço daria 117 tok/s; partindo do `message_start`, 72. Os tokens do
 pensamento foram gerados antes de o resumo dele chegar.
+
+### Velocidade recente e primeira resposta do Codex (06/10/2026)
+
+O acumulador Codex não preenchia as chamadas recentes. Passa a usar cada avanço do contador
+oficial de saída e o tempo de modelo acumulado desde o avanço anterior; contador repetido não
+cria chamada. "Agora" e "últimas 10" permanecem aproximados e incluem espera/processamento
+inicial. Os totais e a média da sessão permanecem com o mesmo cálculo.
+
+A primeira resposta é medida de `turn/started` até o primeiro `item/agentMessage/delta`
+não vazio da mesma thread e turno, antes do agrupamento da prévia, nos adapters Python e Rust.
+A média usa os turnos observados desde a conexão do consumidor; turnos anteriores conservam
+a reserva do transcript quando não existe medida ao vivo. A identidade da mescla usa
+`session_key`, porque o nome do rollout Codex inclui data e hora antes do UUID.
+O evento privado `rate` ganhou a medida de primeira resposta; protocolo Python/Rust 36.
 
 ## Contexto e cota sem a statusline do Hangar (03/10/2026)
 
@@ -2385,6 +2891,31 @@ dado" o tempo todo, embora a informação existisse.
 Medição (03/10/2026, sessão Claude com barra própria, Opus em `[1m]`): o transcript deu 539.351
 tokens contra 489k a 510k da barra minutos antes (a conversa crescendo entre uma e outra); no
 nativo os anéis passaram de "sem dado" para Contexto 54% e a conta 100% (semanal).
+
+## Entrada terminal parada sem aviso
+
+(05/10/2026, DELPHI-02, `hangar-server-parte1`.) A sugestão esmaecida lida como rascunho
+(`docs/decisoes/windows.md`, "O psmux entende `capture-pane -e`") gerou 35 `composer_busy` em
+54 s, uma linha `info` por tentativa, e o app mostrou "Na fila" sem motivo. O escritor devolve
+`Deferred` com `cleanup: not_needed`, e `finalize_terminal` só conta tentativa quando a limpeza
+foi provada: o teto de duas tentativas nunca chegava. A série agora espaça as tentativas e
+aparece na tela depois de 30 s, sem desistir da entrada: rascunho do dono continua sendo do dono.
+
+Na revisão do mesmo dia: com teto de 30 s e nada zerando a série, o dono que enviava um rascunho
+longo deixava a mensagem do app parada até 30 s com o terminal livre, e a linha seguinte herdava a
+espera de uma linha apagada. O teto caiu para 8 s, a série guarda o id da linha e, durante a
+espera, uma captura só de leitura (`composer_free`) libera a tentativa quando o composer está
+vazio. O lado Python só traduz `view.input_stalled`; não há espera espelhada lá.
+
+## Reinício no meio de um adiamento
+
+(05/10/2026, DELPHI-02.) Com o composer ocupado, cada tentativa abre despacho, lê a tela e devolve
+`composer_busy` sem escrever nada. O Atualizar reiniciou o backend no meio de uma dessas
+tentativas: o `Recover` do boot transformou o despacho em incerto, a trava de escrita segurou a
+fila e a mensagem nunca mais saiu (sessões `Crack` às 09:09 e `Desktop` às 11:31). O despacho
+sozinho não diz se algo chegou ao terminal; daí o estado `staged` até o escritor avisar a escrita.
+Python antigo lendo `staged` continua conservador (incerta), e Rust antigo nunca grava `staged`:
+nenhuma combinação reenvia o que foi escrito.
 
 ## Provedor padrão da abertura
 
@@ -2426,3 +2957,22 @@ leitura de `/providers`, além da confirmação do provedor já selecionado. Fal
 aparece no mobile e requer uma escolha explícita. Avisos da gravação seguem pela resposta
 de criação e do bastão até as interfaces; falha ao mostrar um aviso não torna a criação uma
 falha nem provoca repetição. No nativo, a abertura por worktree também conserva esses avisos.
+
+## /select do Codex sem terminal não passa pela rota do terminal Claude
+
+Achado pela prova da parte 4 da migração Rust (Step 27, 06/10/2026): o cartão de aprovação do
+Codex sem terminal (gpt-6-luna em "Ask for approval") aparecia na lista e no chat, e
+`POST /select` respondia 500. Desde `bead8a454` (03/10) o `/select` chamava `route_sync` antes
+de olhar o provedor; `route_sync` abre `prepare_session(name, "claude")`, que sem vínculo Claude
+e sem pane levanta `RuntimeError("vínculo gerenciado indisponível; escrita suspensa")`. O ramo
+do Codex sem terminal (`adapter.select`), que já respondia o cartão, nunca era alcançado.
+Reproduzido em `test_select_on_headless_codex_answers_the_approval_without_the_claude_terminal_route`
+com o coordenador real. O `/answer` já filtrava pelo provedor; nas outras rotas que passam por
+`wrap_driver`, o Codex sem terminal é desviado antes (`/interrupt`) ou a rota é só de Claude/pane.
+
+O erro que ainda escapar da rota no `/select` sai com código: `TerminalOutcomeUnknown` (a tecla
+pode ter chegado) é 409 `erro_sem_confirmacao_resposta`, para ninguém repetir; o resto, anterior à
+entrega, é 503 `erro_opcao_nao_convergiu`.
+
+Prova real depois do conserto (`scripts/prova-parte4.py --casos 27`, backend isolado): Codex sem
+terminal com cartão → `/select` 200 e a sessão sai do cartão; Claude sem terminal segue 200.

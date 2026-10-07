@@ -1,4 +1,7 @@
 """Parser do rodapé do modo de permissão — puro, sem tmux real."""
+import json
+from collections import OrderedDict
+
 import app.permission_mode as pm
 
 
@@ -107,3 +110,42 @@ def test_listar_modos_devolve_ficou_nao_orig(monkeypatch):
     assert cur == "manual"
     assert "plan" in modos
     assert "manual" in modos
+
+
+def _transcript(tmp_path, nome, modos):
+    p = tmp_path / f"{nome}.jsonl"
+    p.write_text("".join(json.dumps({"type": "user", "permissionMode": m}) + "\n" for m in modos))
+    return str(p)
+
+
+def test_transcript_non_plan_mode_pula_plan(tmp_path):
+    assert pm.transcript_non_plan_mode(_transcript(tmp_path, "a", ["default", "bypassPermissions", "plan"])) \
+        == "bypassPermissions"
+    assert pm.transcript_non_plan_mode(_transcript(tmp_path, "b", ["plan"])) is None
+    assert pm.transcript_non_plan_mode(str(tmp_path / "sumiu.jsonl")) is None
+
+
+def test_transcript_non_plan_mode_nao_rele_o_mesmo_transcript(tmp_path, monkeypatch):
+    import app.worktrees as wt
+
+    leituras = []
+    original = wt.reversed_lines
+    monkeypatch.setattr(wt, "reversed_lines", lambda path: leituras.append(path) or original(path))
+    caminho = _transcript(tmp_path, "c", ["default", "acceptEdits"])
+    assert pm.transcript_non_plan_mode(caminho) == "acceptEdits"
+    assert pm.transcript_non_plan_mode(caminho) == "acceptEdits"
+    assert len(leituras) == 1
+    with open(caminho, "a") as f:
+        f.write(json.dumps({"type": "user", "permissionMode": "bypassPermissions"}) + "\n")
+    assert pm.transcript_non_plan_mode(caminho) == "bypassPermissions"
+    assert len(leituras) == 2
+
+
+def test_session_non_plan_mode_le_a_memoria_pelo_session_id(tmp_path, monkeypatch):
+    # O monitor grava a memória pelo session-id (stem do jsonl); pelo nome da sessão ela não vale.
+    monkeypatch.setattr(pm, "_ultimos_nao_plan", OrderedDict({"sess": "acceptEdits"}))
+    jsonl = _transcript(tmp_path, "sid-1", ["bypassPermissions"])
+    assert pm.session_non_plan_mode(jsonl) == "bypassPermissions"
+    monkeypatch.setattr(pm, "_ultimos_nao_plan", OrderedDict({"sid-1": "acceptEdits"}))
+    assert pm.session_non_plan_mode(jsonl) == "acceptEdits"
+    assert pm.session_non_plan_mode(None) is None

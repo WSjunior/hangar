@@ -144,7 +144,7 @@ def test_kimi_usage_llm_e_tool(tmp_path):
     snap = Accumulator("kimi", str(p)).collect()
     assert snap == {"turns": 1, "steps": 1, "in_tok": 400, "out_tok": 50,
                     "llm_ms": 8000, "tok_s": 6.2, "tool_ms": 4000,
-                    "cache_pct": 75, "ttft_ms": 2000}
+                    "cache_pct": 75, "cache_read_tok": 300, "ttft_ms": 2000}
 
 
 # -- Codex --------------------------------------------------------------------
@@ -257,7 +257,28 @@ def test_codex_fixture_de_rollout_real():
     assert snap["ttft_ms"] > 0 and snap["llm_ms"] > 0
 
 
+def test_codex_recent_rates_exclude_tools_and_repeated_usage(tmp_path):
+    p = tmp_path / "codex.jsonl"
+    _w(p, [
+        _codex_item("2026-10-06T12:00:00Z", {"type": "message", "role": "user",
+                                            "content": [{"text": "check"}]}),
+        _codex_item("2026-10-06T12:00:03Z", {"type": "function_call", "call_id": "c"}),
+        _codex_item("2026-10-06T12:00:08Z", {"type": "function_call_output", "call_id": "c"}),
+        _codex_token_count("2026-10-06T12:00:08Z", 100, 0, 60),
+        _codex_token_count("2026-10-06T12:00:09Z", 100, 0, 60),
+        _codex_item("2026-10-06T12:00:10Z", {"type": "message", "role": "assistant"}),
+        _codex_token_count("2026-10-06T12:00:10Z", 200, 0, 140),
+    ])
+    snap = Accumulator("codex", str(p)).collect()
+    assert snap["steps"] == 2 and snap["out_tok"] == 140
+    assert snap["tool_ms"] == 5000 and snap["llm_ms"] == 5000
+    assert snap["tok_s_now"] == 40.0
+    assert snap["tok_s_recent"] == 28.0
+    assert "tok_s_exact" not in snap
+
+
 # -- Pi -----------------------------------------------------------------------
+
 
 def test_pi_usage_e_toolresult(tmp_path):
     p = tmp_path / "session.jsonl"

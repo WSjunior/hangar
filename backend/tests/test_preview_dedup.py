@@ -121,6 +121,18 @@ def test_status_de_ferramenta_mcp_nao_entra_no_preview():
     assert "Pondering" not in out
 
 
+def test_chamada_em_voo_com_o_ponto_aceso_ou_apagado_da_a_mesma_previa():
+    """O ● da chamada em voo pisca, e a 1ª linha dela é a descrição, não "Bash(".
+
+    Aceso, a descrição era eleita prosa; apagado, grudava na prosa de cima. A prévia trocava a cada
+    piscada e o bloco crescia e encolhia. Os dois quadros são capturas reais do Claude Code.
+    """
+    fx = Path(__file__).parent / "fixtures"
+    esperado = "Primeiro comando concluído.\n\n  Aguardando o segundo..."
+    for nome in ("pane_ferramenta_em_voo_acesa.txt", "pane_ferramenta_em_voo_apagada.txt"):
+        assert extract_assistant_text((fx / nome).read_text(encoding="utf-8")) == esperado, nome
+
+
 def test_prosa_comecando_com_calling_nao_e_confundida_com_tool():
     """"Calling" solto é início de frase comum — não pode descartar o bloco.
 

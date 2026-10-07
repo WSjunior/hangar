@@ -27,13 +27,15 @@ from app.adapters.codex import sessions as codex_sessions
 from app.adapters.codex.appserver import AppServerClient
 from app.adapters.codex.async_questions import AsyncQuestions
 from app.adapters.codex.lancador import (APPROVAL, CLIENT_INFO, SANDBOX,
-                                          comando_do_lancador)
+                                          comando_do_lancador, service_tier_override)
 from app.hook_state import hook_state
 from app.models import session_key
+from app.live_rate import live_rate
 from app.procinfo import pid_vivo
 from app.adapters.preview_push import PushPreviewSource
+from app.adapters.stream_buffer import StreamBuffer, error_frames
 from app.adapters.codex.rollout import parse_rollout_line
-from app import codex_contas
+from app import codex_contas, diag
 from app import tmux
 from app.pqueue import PromptQueue
 from app.send_executor import send_thread
@@ -75,11 +77,19 @@ def _effort_da_thread(result: dict) -> str | None:
     return result.get("reasoningEffort") or result.get("effort")
 
 
+def _service_tier_of(result: dict, meta: dict) -> str | None:
+    # null do Codex é o padrão; sem o -c explícito a TUI cairia no service_tier global.
+    if "serviceTier" in result:
+        return result["serviceTier"] or "default"
+    return meta.get("service_tier")
+
+
 def ensure_tmux_tui(name: str, cwd: str, thread_id: str | None, endpoint: str,
                     *, replace: bool = False, initial_prompt: str | None = None,
                     model: str | None = None, effort: str | None = None,
                     codex_home: str | None = None,
-                    codex_account: str | None = None) -> None:
+                    codex_account: str | None = None,
+                    service_tier: str | None = None) -> None:
     """Garante uma TUI Codex anexavel no tmux, ligada ao app-server do backend.
 
     ``replace`` e usado no resume lazy apos restart do backend: uma pane antiga aponta para o
@@ -95,6 +105,7 @@ def ensure_tmux_tui(name: str, cwd: str, thread_id: str | None, endpoint: str,
             argv += ["--model", model]
         if effort:
             argv += ["--config", f'model_reasoning_effort="{effort}"']
+        argv += service_tier_override(service_tier)
         argv.append(thread_id)
     else:
         # Na criacao, a TUI precisa ser a dona do thread/start: um thread aberto pelo cliente JSON-
@@ -457,6 +468,7 @@ class CodexAdapter:
             sub = self._subscribers.pop(name, None)
             if sub is not None:
                 sub.cancel()
+            self._invalidate_preview(sess)
             bomba = sess.get("bomba")
             if bomba is not None:
                 bomba.cancel()
@@ -519,6 +531,7 @@ class CodexAdapter:
             if sess.get("subscribed"):
                 return
             revision = sess.get("state_revision", 0)
+            settings_revision = sess.get("settings_revision", 0)
             try:
                 # Assinar eventos não pode sobrescrever as permissões escolhidas na sessão.
                 meta = codex_sessions.load(name) or {}
@@ -547,14 +560,18 @@ class CodexAdapter:
                 await asyncio.sleep(delay)
                 delay = min(delay * 1.5, self.SUBSCRIBE_RETRY_MAX)
                 continue
+            if self._sessions.get(name) is not sess:
+                return
             sess["subscribed"] = True
             sess["async_questions"].hydrate(result.get("thread") or {})
             sess.pop("subscribe_error", None)
             # O resume tambem devolve o default da THREAD -> alimenta o display (pill/statusline).
             # `or` e nao setdefault: o attach() ja criou as chaves com None, entao setdefault nunca
             # sobrescreveria e o 🤖 sumia da statusline (visto na verificacao ao vivo).
-            sess["default_model"] = sess.get("default_model") or result.get("model")
-            sess["default_effort"] = _effort_da_thread(result)
+            if settings_revision == sess.get("settings_revision", 0):
+                sess["default_model"] = sess.get("default_model") or result.get("model")
+                sess["default_effort"] = _effort_da_thread(result)
+                self._restore_service_tier(name, sess, result, settings_revision)
             if revision == sess.get("state_revision", 0):
                 self._restore_turn(sess, result.get("thread") or {})
             for fila in sess.get("ouvintes", []):
@@ -580,7 +597,8 @@ class CodexAdapter:
     def attach(self, name: str, client: AppServerClient, thread_id: str,
                model: Optional[str] = None, effort: Optional[str] = None,
                default_model: Optional[str] = None, default_effort: Optional[str] = None,
-               *, watch_tmux: bool = False, subscribed: bool = False) -> None:
+               *, watch_tmux: bool = False, subscribed: bool = False,
+               service_tier: str | None = None) -> None:
         """Liga uma sessao (por nome) a um AppServerClient + threadId ja vivos. Chamado pelo
         registry.create_codex (spawn novo, sem model/effort ainda -- sessao nova) e por
         ensure_running (resume pos-restart, passando model/effort lidos do sidecar -- Task C:
@@ -599,11 +617,12 @@ class CodexAdapter:
         except RuntimeError:
             pass
         anterior = self._sessions.get(name)
+        self._invalidate_preview(anterior)
         if anterior is not None and anterior.get("bomba") is not None:
             anterior["bomba"].cancel()
         sess = {"client": client, "thread_id": thread_id,
                 "state": "idle", "in_progress": False,
-                "model": model, "effort": effort,
+                "model": model, "effort": effort, "service_tier": service_tier,
                 "default_model": default_model, "default_effort": default_effort,
                 "subscribed": subscribed, "ouvintes": [],
                 "async_questions": AsyncQuestions(
@@ -654,7 +673,7 @@ class CodexAdapter:
             _log.warning("codex: não foi possível recuperar o turno de %s", name, exc_info=True)
         # Publicar a sessão antes da leitura liberaria envios concorrentes como se estivesse ociosa.
         self.attach(name, client, meta["thread_id"], model=meta.get("model"),
-                    effort=meta.get("effort"), watch_tmux=True)
+                    effort=meta.get("effort"), service_tier=meta.get("service_tier"), watch_tmux=True)
         self._sessions[name].update(endpoint=meta["endpoint"], app_pid=meta["app_pid"])
         self._restore_turn(self._sessions[name], thread, include_turns=False)
         self.start_subscription(name, meta.get("cwd") or ".")
@@ -704,6 +723,7 @@ class CodexAdapter:
                 return await self._ligar_sem_terminal(name, meta)
             if sess is not None:
                 # A TUI trocou de conversa; só a conexão antiga termina, nunca o app-server do pane.
+                self._invalidate_preview(sess)
                 self._sessions.pop(name, None)
                 tasks = [self._tmux_watchers.pop(name, None), self._subscribers.pop(name, None), sess.get("bomba")]
                 tasks = [task for task in tasks if task is not None and task is not asyncio.current_task()]
@@ -748,7 +768,11 @@ class CodexAdapter:
                     "cwd": meta.get("cwd"),
                     "sandbox": sandbox,
                     "approvalPolicy": approval,
+                    **({"serviceTier": meta["service_tier"]} if meta.get("service_tier") is not None else {}),
                 })
+                if (meta.get("service_tier") is not None and "serviceTier" in result
+                        and ("default" if result["serviceTier"] is None else result["serviceTier"]) != meta["service_tier"]):
+                    raise RuntimeError("O Codex não preservou a escolha Fast ao retomar")
                 if meta.get("transfer_id"):
                     await client.request("thread/settings/update", {
                         "threadId": meta["thread_id"], "model": meta.get("model"),
@@ -770,6 +794,7 @@ class CodexAdapter:
                 ensure_tmux_tui(
                     name, meta.get("cwd") or ".", thread_id, endpoint, replace=True,
                     model=meta.get("model"), effort=meta.get("effort"),
+                    service_tier=_service_tier_of(result, meta),
                     **home_kw,
                 )
             except Exception:
@@ -784,7 +809,9 @@ class CodexAdapter:
             # existe, entao ele cola de primeira) -> nao precisa da task de retry.
             self.attach(name, client, thread_id, model=meta.get("model"), effort=meta.get("effort"),
                         default_model=result.get("model"), default_effort=_effort_da_thread(result),
-                        watch_tmux=True, subscribed=True)
+                        watch_tmux=True, subscribed=True,
+                        service_tier=_service_tier_of(result, meta))
+            self._restore_service_tier(name, self._sessions[name], result, 0)
             self._sessions[name]["async_questions"].hydrate(result.get("thread") or {})
             self._restore_turn(self._sessions[name], result.get("thread") or {})
             _log.info("codex ensure_running: resumed thread=%s name=%s", thread_id, name)
@@ -805,11 +832,14 @@ class CodexAdapter:
 
     async def _ligar_sem_terminal(self, name: str, meta: dict, *, reabrir: bool = True) -> Optional[AppServerClient]:
         """Religa no cano vivo da sessão sem terminal; sem cano (ou cano morto), sobe outro."""
+        from app.runtime_adapter import assert_legacy, bind_client
+        assert_legacy(name)
         cano = meta.get("cano") or {}
         if cano:
             ligado = await sem_terminal.conectar(cano)
             if ligado is not None:
                 client, snap = ligado
+                bind_client(name, client)
                 if snap.get("saiu") is None:
                     try:
                         await sem_terminal.initialize(client)
@@ -827,9 +857,31 @@ class CodexAdapter:
                         _log.warning("codex sem terminal: religação no cano falhou name=%s", name, exc_info=True)
                         return await self._subir_sem_terminal(name, meta)
                     self.attach(name, client, meta.get("thread_id") or "", model=meta.get("model"),
-                                effort=meta.get("effort"), subscribed=True)
-                    self._sessions[name].update(headless=True, cano=cano)
-                    self._restore_turn(self._sessions[name], thread, include_turns=False)
+                                effort=meta.get("effort"), service_tier=meta.get("service_tier"), subscribed=True)
+                    sess = self._sessions[name]
+                    sess.update(headless=True, cano=cano)
+                    self._restore_turn(sess, thread, include_turns=False)
+                    # `thread/resume` só com a thread parada: religar num cano vivo não mexe em turno em
+                    # andamento. Fora disso o modo rápido fica o do sidecar.
+                    if meta.get("thread_id") and (thread.get("status") or {}).get("type") != "idle":
+                        _log.info("codex sem terminal: religado sem resume (thread %s), Fast do sidecar name=%s",
+                                  (thread.get("status") or {}).get("type"), name)
+                    elif meta.get("thread_id"):
+                        revision = sess.get("settings_revision", 0)
+                        try:
+                            result = await client.request("thread/resume", {"threadId": meta["thread_id"]})
+                        except BaseException as exc:
+                            # Antes do primeiro turno não há rollout; a escolha continua no sidecar.
+                            if isinstance(exc, RuntimeError) and "no rollout found" in str(exc):
+                                _log.info("codex sem terminal: thread sem rollout, Fast do sidecar name=%s", name)
+                            else:
+                                sess["bomba"].cancel()
+                                if self._sessions.get(name) is sess:
+                                    self._sessions.pop(name, None)
+                                await client.close()
+                                raise
+                        else:
+                            self._restore_service_tier(name, sess, result, revision)
                     _log.info("codex sem terminal: religado name=%s cano=%s", name, cano.get("pid"))
                     return client
                 await client.close()
@@ -840,6 +892,8 @@ class CodexAdapter:
         return await self._subir_sem_terminal(name, meta)
 
     async def _subir_sem_terminal(self, name: str, meta: dict) -> Optional[AppServerClient]:
+        from app.runtime_adapter import assert_legacy, bind_client
+        assert_legacy(name)
         esforco_recusado = None
         falhas = self._falhas_subida.get(name, 0)
         if falhas >= self.TETO_SUBIDAS:
@@ -853,13 +907,15 @@ class CodexAdapter:
             if ligado is None:
                 raise RuntimeError("cano não escutou em 10s")
             client, _ = ligado
+            bind_client(name, client)
             try:
                 await sem_terminal.initialize(client)
                 approval, sandbox = sem_terminal.politica(meta.get("permission_mode"))
                 result = None
                 if meta.get("thread_id"):
                     retomada = {"threadId": meta["thread_id"], "cwd": meta.get("cwd"),
-                                "approvalPolicy": approval, "sandbox": sandbox}
+                                "approvalPolicy": approval, "sandbox": sandbox,
+                                **({"serviceTier": meta["service_tier"]} if meta.get("service_tier") is not None else {})}
                     try:
                         try:
                             result = await client.request("thread/resume", retomada)
@@ -879,10 +935,14 @@ class CodexAdapter:
                         _log.info("codex sem terminal: thread %s sem rollout — abrindo outra name=%s",
                                   meta["thread_id"], name)
                 if result is None:
-                    params: dict = {"cwd": meta.get("cwd"), "approvalPolicy": approval, "sandbox": sandbox}
+                    params: dict = {"cwd": meta.get("cwd"), "approvalPolicy": approval, "sandbox": sandbox,
+                                    **({"serviceTier": meta["service_tier"]} if meta.get("service_tier") is not None else {})}
                     if meta.get("model"):
                         params["model"] = meta["model"]
                     result = await client.request("thread/start", params)
+                if (meta.get("service_tier") is not None and "serviceTier" in result
+                        and ("default" if result["serviceTier"] is None else result["serviceTier"]) != meta["service_tier"]):
+                    raise RuntimeError("O Codex não preservou a escolha Fast ao retomar")
                 if meta.get("effort") or meta.get("transfer_id"):
                     # `thread/start` aceita `model`, mas não tem campo de esforço: sem este update
                     # o nível escolhido na tela cai calado no `model_reasoning_effort` do
@@ -945,7 +1005,8 @@ class CodexAdapter:
         meta = codex_sessions.update(name, thread_id=thread_id, rollout_path=rollout) or meta
         self.attach(name, client, thread_id, model=meta.get("model"), effort=meta.get("effort"),
                     default_model=result.get("model"), default_effort=_effort_da_thread(result),
-                    subscribed=True)
+                    service_tier=_service_tier_of(result, meta), subscribed=True)
+        self._restore_service_tier(name, self._sessions[name], result, 0)
         self._sessions[name].update(headless=True, cano=meta.get("cano"))
         if meta.get("transfer_id"):
             self._sessions[name]["mode"] = "plan" if meta.get("previous_non_plan") else "default"
@@ -1200,7 +1261,8 @@ class CodexAdapter:
                 raise ValueError("A conta Codex mudou; a conversa não foi transferida.")
             if await asyncio.to_thread(tmux.has_session, name):
                 raise ValueError("Já existe um terminal com este nome.")
-            meta = {**meta, "model": current["model"], "effort": current["effort"]}
+            meta = {**meta, "model": current["model"], "effort": current["effort"],
+                    "service_tier": sess.get("service_tier", current.get("service_tier"))}
             approval, sandbox = sem_terminal.politica(meta.get("permission_mode"))
             command = tmux.join_cmd(comando_do_lancador(
                 meta["cwd"], thread_id=meta["thread_id"], model=meta["model"], effort=meta["effort"],
@@ -1213,7 +1275,7 @@ class CodexAdapter:
             cano_pid = (meta.get("cano") or {}).get("pid")
             pids = ([int(cano_pid), *await asyncio.to_thread(_descendant_pids, int(cano_pid))]
                     if cano_pid else [])
-            self.close_sync(name, preserve_preview=True)
+            await asyncio.to_thread(self.close_sync, name, preserve_preview=True)
             await sess["client"].close()
             await asyncio.to_thread(_esperar_saida, pids)
             if any(pid_vivo(pid) for pid in pids):
@@ -1223,7 +1285,8 @@ class CodexAdapter:
             launcher_pid = None
             try:
                 codex_sessions.update(name, headless=False, cano=None, endpoint=None, app_pid=None,
-                                      tui_pid=None, model=meta["model"], effort=meta["effort"])
+                                      tui_pid=None, model=meta["model"], effort=meta["effort"],
+                                      service_tier=meta.get("service_tier"))
                 created = await asyncio.to_thread(tmux.new_session, name, meta["cwd"], command,
                                                   provider="codex", env=env)
                 if not created:
@@ -1244,7 +1307,7 @@ class CodexAdapter:
                     if not await asyncio.to_thread(tmux.kill_session, name):
                         raise RuntimeError("Não consegui fechar o terminal; não abri outro processo.") from exc
                 failed_session = self._sessions.get(name)
-                self.close_sync(name, preserve_preview=True)
+                await asyncio.to_thread(self.close_sync, name, preserve_preview=True)
                 if failed_session:
                     await failed_session["client"].close()
                 await asyncio.to_thread(_esperar_saida, new_pids)
@@ -1309,7 +1372,9 @@ class CodexAdapter:
             if str(account.home.expanduser().absolute()) != meta.get("codex_home"):
                 raise ValueError("A conta Codex mudou; a conversa não foi transferida.")
             # O sidecar guarda a abertura, não uma mudança posterior pelo /permissions da TUI.
+            revision = sess.get("settings_revision", 0)
             snapshot = await sess["client"].request("thread/resume", {"threadId": meta["thread_id"]})
+            self._restore_service_tier(name, sess, snapshot, revision)
             sandbox = {"readOnly": "read-only", "workspaceWrite": "workspace-write",
                        "dangerFullAccess": "danger-full-access"}.get((snapshot.get("sandbox") or {}).get("type"))
             approval = snapshot.get("approvalPolicy")
@@ -1324,6 +1389,7 @@ class CodexAdapter:
             pane_pid = await asyncio.to_thread(tmux.pane_pid, name)
             meta = {**meta, "model": snapshot.get("model") or current["model"],
                     "effort": _effort_da_thread(snapshot) or current["effort"],
+                    "service_tier": sess.get("service_tier", current.get("service_tier")),
                     "permission_mode": permission, "key": meta.get("key") or sem_terminal.nova_chave(),
                     "jev": await asyncio.to_thread(_jev_do_processo, meta.get("app_pid") or pane_pid)
                            if meta.get("app_pid") or pane_pid else bool(meta.get("jev"))}
@@ -1346,7 +1412,7 @@ class CodexAdapter:
                 codex_sessions.update(name, app_pid=meta.get("app_pid"))
                 self._start_tmux_watcher(name)
                 raise RuntimeError("Não foi possível fechar o terminal; o modo foi mantido.")
-            self.close_sync(name, preserve_preview=True)
+            await asyncio.to_thread(self.close_sync, name, preserve_preview=True)
             await sess["client"].close()
             await asyncio.to_thread(_esperar_saida, pids)
             if any(pid_vivo(pid) for pid in pids):
@@ -1373,7 +1439,7 @@ class CodexAdapter:
                 cano_pid = ((codex_sessions.load(name) or {}).get("cano") or {}).get("pid")
                 new_pids = ([int(cano_pid), *await asyncio.to_thread(_descendant_pids, int(cano_pid))]
                             if cano_pid else [])
-                self.close_sync(name, preserve_preview=True)
+                await asyncio.to_thread(self.close_sync, name, preserve_preview=True)
                 if failed:
                     await failed["client"].close()
                 await asyncio.to_thread(_esperar_saida, new_pids)
@@ -1428,11 +1494,20 @@ class CodexAdapter:
 
         O SIGTERM vai pelo PID do sidecar: desde o lancador unico o servidor nao e filho do backend,
         entao `client.terminate()` sozinho seria um no-op e o servidor sobreviveria ao encerrar."""
+        meta = codex_sessions.load(name) or {}
+        cano_pid = (meta.get("cano") or {}).get("pid") if meta.get("headless") else None
+        from app.registry import _descendant_pids, _esperar_saida
+        pids = [cano_pid, *_descendant_pids(cano_pid)] if cano_pid else []
         matar_app_server(name)
-        sem_terminal.matar(codex_sessions.load(name))
+        sem_terminal.matar(meta)
+        if pids:
+            _esperar_saida(pids)
+            if any(pid_vivo(pid) for pid in pids):
+                raise RuntimeError("o processo antigo continua vivo; sidecar e fila conservados")
         self._falhas_subida.pop(name, None)
         self._problemas.pop(name, None)
         sess = self._sessions.pop(name, None)
+        self._invalidate_preview(sess)
         watcher = self._tmux_watchers.pop(name, None)
         if watcher is not None:
             watcher.cancel()
@@ -1450,6 +1525,22 @@ class CodexAdapter:
         if callable(term):
             term()
 
+    def _invalidate_preview(self, sess: dict | None) -> None:
+        buffer = sess.get("preview_buffer") if sess is not None else None
+        if buffer is None:
+            return
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            return
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            buffer.invalidate()
+        else:
+            loop.call_soon_threadsafe(buffer.invalidate)
+
     def delivery_lock(self, name: str) -> asyncio.Lock:
         return self._delivery_locks.setdefault(name, asyncio.Lock())
 
@@ -1460,6 +1551,7 @@ class CodexAdapter:
                     task.cancel()
             PushPreviewSource._sources.pop(old, None)
             sess = self._sessions.pop(old, None)
+            self._invalidate_preview(sess)
             lock = self._locks.pop(old, None)
             if lock is not None:
                 self._locks[new] = lock
@@ -1521,10 +1613,14 @@ class CodexAdapter:
     async def state_monitor(self, name: str, sid_get: Callable[[], str]) -> AsyncIterator[StateEvent]:
         while True:
             client = (self._sessions.get(name) or {}).get("client")
-            async for event in self._state_stream(name):
-                if client is None:
-                    client = (self._sessions.get(name) or {}).get("client")
-                yield event
+            source = self._state_stream(name)
+            try:
+                async for event in source:
+                    if client is None:
+                        client = (self._sessions.get(name) or {}).get("client")
+                    yield event
+            finally:
+                await source.aclose()
             lock = self._locks.get(name)
             current = self._sessions.get(name)
             # Trocar o transporte encerra a fonte antiga; os ouvintes continuam na mesma sessão.
@@ -1556,6 +1652,7 @@ class CodexAdapter:
                           problema=problema[0], problema_detalhe=problema[1],
                           status_line=self._status_line(sess), codex_mode=sess.get("mode"),
                           codex_buffering=sess.get("codex_buffering", False),
+                          codex_service_tier=sess.get("service_tier"),
                           codex_question=question, headless=bool(sess.get("headless")),
                           question=sem_terminal.texto_da_aprovacao(aprovacao) if aprovacao else None,
                           options=list(sem_terminal.OPCOES_APROVACAO) if aprovacao else None)
@@ -1624,6 +1721,7 @@ class CodexAdapter:
             meta = codex_sessions.update(name, permission_mode=nome) or meta
             sess = self._sessions.pop(name, None)
             if sess is not None:
+                self._invalidate_preview(sess)
                 bomba = sess.get("bomba")
                 if bomba is not None:
                     bomba.cancel()
@@ -1781,168 +1879,218 @@ class CodexAdapter:
             _log.exception("codex bomba quebrou name=%s", name)
             espalhar(exc)
         finally:
+            waiter = sess.get("service_tier_waiter")
+            if waiter is not None and not waiter.done():
+                waiter.set_result(None)
             espalhar(None)
 
     async def _consumir(self, name: str, client: AppServerClient, sess: dict, espalhar) -> None:
-        # Buffer do turno em voo (deltas sao INCREMENTAIS -- concatena; ver docs/codex-app-server-
-        # contract.md).
-        buf = ""
-        async for notif in client.notifications():
-            if self._sessions.get(name) is not sess:
-                return
-            params = notif.get("params") or {}
-            if notif.get("method") == "thread/started" and sess.get("app_pid"):
-                thread = params.get("thread") or {}
-                if thread.get("id") != sess["thread_id"]:
-                    await asyncio.to_thread(codex_sessions.switch_thread, name, thread, sess["thread_id"],
-                                            endpoint=sess["endpoint"], app_pid=sess["app_pid"])
-            # O app-server também publica estados de outras threads, inclusive subagentes.
-            if params.get("threadId") is not None and params["threadId"] != sess["thread_id"]:
-                continue
-            if sess.get("voice_events") is not None:
-                from app.codex_voice import forward
-                forward(sess, notif)
-            if sess.get("headless") and notif.get("id") is not None:
-                # Pedido do servidor: na TUI quem responde é ela; aqui é o cartão do app.
-                if notif["method"] in sem_terminal.APROVACOES:
-                    espalhar(self._question_state(name, sess))
-                    continue
-                if notif["method"] != "item/tool/requestUserInput":
-                    await self._recusar_pedido(name, client, notif)
-                    continue
-            mapped = map_state(notif)
-            method = notif.get("method")
-            compact_updated = method in {"item/started", "item/completed"} and \
-                (params.get("item") or {}).get("type") == "contextCompaction"
-            if compact_updated:
-                sess["compacting"] = method == "item/started"
-            elif method == "turn/completed":
-                sess.pop("compacting", None)
-            current_turn = not sess.get("turn_id") or params.get("turnId") in (None, sess["turn_id"])
-            response_started = current_turn and (bool(mapped.preview_delta) or (
-                method == "item/completed" and (params.get("item") or {}).get("type") == "agentMessage"
-                and bool((params.get("item") or {}).get("text"))
-            ))
-            if method == "turn/started" or mapped.state == "idle":
-                sess.pop("codex_response_started", None)
-            elif response_started:
-                sess["codex_response_started"] = True
-            buffering_updated = False
-            if mapped.buffering is not None:
-                if params.get("threadId") != sess["thread_id"] or not sess["in_progress"] or sess.get("codex_response_started"):
-                    continue
-                if sess.get("turn_id") and params.get("turnId") != sess["turn_id"]:
-                    continue
-                buffering_updated = sess.get("codex_buffering", False) != mapped.buffering
-                sess["codex_buffering"] = mapped.buffering
-            elif method == "turn/started" or mapped.state == "idle" or response_started:
-                buffering_updated = bool(sess.pop("codex_buffering", False))
-            async_updated = method in {"item/started", "item/completed"} and \
-                sess["async_questions"].observe(params.get("item") or {})
-            if mapped.state is not None:
-                sess["state_revision"] = sess.get("state_revision", 0) + 1
-            settings_updated = method == "thread/settings/updated"
-            if settings_updated:
-                if params.get("threadId") != sess["thread_id"]:
-                    continue
-                settings = params.get("threadSettings") or {}
-                sess["model"] = settings.get("model")
-                sess["effort"] = sess["default_effort"] = settings.get("effort")
-                sess["mode"] = (settings.get("collaborationMode") or {}).get("mode", "default")
-                sess["settings_revision"] = sess.get("settings_revision", 0) + 1
-                if "collaborationMode" in settings and sess["mode"] in {"plan", "default"}:
-                    meta = codex_sessions.load(name) or {}
-                    if meta.get("transfer_id") and meta.get("thread_id") == sess["thread_id"]:
-                        codex_sessions.update(name, previous_non_plan=meta["permission_mode"]
-                                              if sess["mode"] == "plan" else None)
-            turn_problem = _turn_problem(notif) if current_turn else None
-            problem_updated = False
-            if turn_problem is not None:
-                problem_updated = sess.get("turn_problem") != turn_problem
-                sess["turn_problem"] = turn_problem
-            elif method == "turn/started" or response_started or \
-                    (current_turn and method == "item/started"
-                     and (params.get("item") or {}).get("type") != "userMessage") or \
-                    (method == "turn/completed" and sess.get("turn_problem", ("",))[0] == "codex_sem_conexao"):
-                # Reconectou (chegou resposta ou qualquer item novo, inclusive só ferramenta) ou o
-                # turno fechou sem erro: o aviso não vale mais.
-                problem_updated = sess.pop("turn_problem", None) is not None
-            if method == "turn/started":
-                buf = ""  # novo turno -- zera pra nao vazar o texto do turno anterior
-                # guarda o turnId do turno em voo (turn/interrupt exige threadId+turnId).
-                turn_id = ((notif.get("params") or {}).get("turn") or {}).get("id")
-                if turn_id:
-                    sess["turn_id"] = turn_id
-            elif mapped.preview_delta is not None:
-                buf += mapped.preview_delta
-                await PushPreviewSource.get(name).push(buf)
-            elif method in ("item/started", "item/completed") and \
-                    ((notif.get("params") or {}).get("item") or {}).get("type") == "agentMessage":
-                # Um turno pode ter varios agentMessage (preambulo "Vou conferir…" + resposta). O
-                # completado vira bolha propria pelo rollout; se ficasse no buffer, a previa
-                # mostrava "Vou conferir.Resposta" ate o turno fechar.
-                buf = ""
-                await PushPreviewSource.get(name).push("")
-            elif method == "turn/completed":
-                # o texto final ja caiu no rollout -> vira ChatEvent autoritativo via
-                # transcript_stream; o sse.py tambem suprime via _already_committed. Limpa aqui pra
-                # nao deixar o ultimo delta pendurado ate o proximo turno.
-                await PushPreviewSource.get(name).push("")
-                # Marca idle ANTES de drenar (nao depender do thread/status/changed idle ter chegado
-                # antes -- a ordem das notifications do app-server nao e garantida). A drain chama
-                # send_prompt -> deliverable(), que le in_progress: se ficasse True aqui, deliverable
-                # daria False, send_prompt viraria "deferred", a drain reverteria e a entrada
-                # enfileirada ficaria presa pra sempre (perda silenciosa). Tambem zera o turn_id: o
-                # turno morreu -> interrupt vira no-op em vez de mandar turn/interrupt de turno morto.
-                sess["state"] = "idle"
-                sess["in_progress"] = False
-                sess["turn_id"] = None
-                # Turno terminou: a bomba única e permanente entrega a fila mesmo sem SSE aberto.
-                # Best-effort: falha aqui nunca derruba o consumidor do app-server.
-                try:
-                    await self.drain(name, "")
-                except Exception:
-                    _log.exception("codex drain-on-complete falhou name=%s", name)
+        async def publish(text: str) -> None:
+            if self._sessions.get(name) is sess and sess.get("client") is client:
+                await PushPreviewSource.get(name).push(text)
+
+        def failed(exc: Exception) -> None:
+            if self._sessions.get(name) is sess:
+                _log.warning("codex: publicação da prévia falhou name=%s tipo=%s frames=%s",
+                             name, type(exc).__name__, error_frames(exc))
+                diag.registrar("codex.previa_falhou", "erro", sessao=name,
+                               provider="codex", **diag.erro_campos(exc))
+                espalhar(self._question_state(name, sess))
+
+        buffer = StreamBuffer(publish, on_error=failed)
+        sess["preview_buffer"] = buffer
+        try:
+            async for notif in client.notifications():
+                received_at = time.monotonic()
                 if self._sessions.get(name) is not sess:
                     return
-            if mapped.state is not None:
-                sess["state"] = mapped.state
-                was = sess["in_progress"]
-                sess["in_progress"] = mapped.state == "working"
-                sess["turn_state_known"] = not sess["in_progress"] or bool(sess.get("turn_id"))
-                # Carimba QUANDO o turno comecou. O TTL de deliverable() mede a partir daqui; sem
-                # isto um in_progress vindo do stream (nao do send_prompt) ficava com marco 0 e
-                # expirava de imediato, liberando envio no meio de um turno vivo.
-                if sess["in_progress"] and not was:
-                    sess["in_progress_since"] = time.monotonic()
-            # Task D: acumula tokenUsage/rateLimits por sessao (snapshot mais recente de cada) --
-            # sao notifications esparsas, nao vem toda hora, entao guarda no dict quente pra
-            # sobreviver ate o proximo StateEvent emitido (mesmo que seja por outro motivo, tipo
-            # turn/started).
-            if mapped.token_usage is not None:
-                sess["token_usage"] = mapped.token_usage
-            if mapped.rate_limits is not None:
-                sess["rate_limits"] = mapped.rate_limits
-            question_updated = async_updated or method in ("item/tool/requestUserInput", "serverRequest/resolved")
-            if mapped.state is None and mapped.token_usage is None and mapped.rate_limits is None and not settings_updated and not question_updated and not buffering_updated and not problem_updated and not compact_updated:
-                # Neutro (method desconhecido) ou so preview_delta: StateEvent nao tem campo de
-                # preview -> nada a emitir aqui (o preview ja foi empurrado acima, fora do
-                # StateEvent -- efeito colateral adicional, nao substitui).
-                continue
-            # status_line SEMPRE montado com o que ha de mais recente acumulado (model/effort do
-            # dict quente + token_usage/rate_limits guardados acima) -- nao so quando ESTE notif
-            # trouxe token/limite novo, senao o front perderia contexto/limites em StateEvents de
-            # working/idle puros (a maioria).
-            espalhar(self._question_state(name, sess))
-        # notifications() terminou = EOF do app-server (o read loop empurra o sentinela ao morrer).
-        # Dead-detection (backlog T4-m2): emite dead pra o front + limpa a sessao da memoria (o
-        # sidecar duravel fica; ensure_running reabre num acesso futuro). getattr: um client FAKE de
-        # teste sem `closed` termina o stream sem simular morte -> nao emite dead.
-        if getattr(client, "closed", False) and self._sessions.get(name) is sess:
-            sess["state"] = "dead"
-            self._sessions.pop(name, None)
-            PushPreviewSource._sources.pop(name, None)
-            espalhar(StateEvent(session=name, state="dead"))
+                params = notif.get("params") or {}
+                if notif.get("method") == "thread/started" and sess.get("app_pid"):
+                    thread = params.get("thread") or {}
+                    if thread.get("id") != sess["thread_id"]:
+                        await buffer.discard()
+                        await publish("")
+                        await asyncio.to_thread(codex_sessions.switch_thread, name, thread, sess["thread_id"],
+                                                endpoint=sess["endpoint"], app_pid=sess["app_pid"])
+                # O app-server também publica estados de outras threads, inclusive subagentes.
+                if params.get("threadId") is not None and params["threadId"] != sess["thread_id"]:
+                    continue
+                if sess.get("voice_events") is not None:
+                    from app.codex_voice import forward
+                    forward(sess, notif)
+                if sess.get("headless") and notif.get("id") is not None:
+                    # Pedido do servidor: na TUI quem responde é ela; aqui é o cartão do app.
+                    if notif["method"] in sem_terminal.APROVACOES:
+                        espalhar(self._question_state(name, sess))
+                        continue
+                    if notif["method"] != "item/tool/requestUserInput":
+                        await self._recusar_pedido(name, client, notif)
+                        continue
+                mapped = map_state(notif)
+                method = notif.get("method")
+                compact_updated = method in {"item/started", "item/completed"} and \
+                    (params.get("item") or {}).get("type") == "contextCompaction"
+                if compact_updated:
+                    sess["compacting"] = method == "item/started"
+                elif method == "turn/completed":
+                    sess.pop("compacting", None)
+                current_turn = not sess.get("turn_id") or params.get("turnId") in (None, sess["turn_id"])
+                response_started = current_turn and (bool(mapped.preview_delta) or (
+                    method == "item/completed" and (params.get("item") or {}).get("type") == "agentMessage"
+                    and bool((params.get("item") or {}).get("text"))
+                ))
+                if method == "turn/started":
+                    sess["first_response_start"] = ((params.get("turn") or {}).get("id"), received_at)
+                elif current_turn and bool(mapped.preview_delta):
+                    started = sess.get("first_response_start")
+                    if started is not None and started[0] == params.get("turnId"):
+                        sess.pop("first_response_start")
+                        live_rate(name).first_response(received_at - started[1], sess["thread_id"])
+                elif method == "turn/completed" and current_turn:
+                    sess.pop("first_response_start", None)
+                if method == "turn/started" or mapped.state == "idle":
+                    sess.pop("codex_response_started", None)
+                elif response_started:
+                    sess["codex_response_started"] = True
+                buffering_updated = False
+                if mapped.buffering is not None:
+                    if params.get("threadId") != sess["thread_id"] or not sess["in_progress"] or sess.get("codex_response_started"):
+                        continue
+                    if sess.get("turn_id") and params.get("turnId") != sess["turn_id"]:
+                        continue
+                    buffering_updated = sess.get("codex_buffering", False) != mapped.buffering
+                    sess["codex_buffering"] = mapped.buffering
+                elif method == "turn/started" or mapped.state == "idle" or response_started:
+                    buffering_updated = bool(sess.pop("codex_buffering", False))
+                async_updated = method in {"item/started", "item/completed"} and \
+                    sess["async_questions"].observe(params.get("item") or {})
+                if mapped.state is not None:
+                    sess["state_revision"] = sess.get("state_revision", 0) + 1
+                settings_updated = method == "thread/settings/updated"
+                if settings_updated:
+                    if params.get("threadId") != sess["thread_id"]:
+                        continue
+                    settings = params.get("threadSettings") or {}
+                    tier = None
+                    if "serviceTier" in settings:
+                        candidate = "default" if settings["serviceTier"] is None else settings["serviceTier"]
+                        # Sidecar de outra conversa recusa só o Fast; modelo, esforço e modo ainda valem.
+                        if codex_sessions.update_service_tier(name, sess["thread_id"], candidate):
+                            tier = sess["service_tier"] = candidate
+                    if "model" in settings:
+                        sess["model"] = settings["model"]
+                    if "effort" in settings:
+                        sess["effort"] = sess["default_effort"] = settings["effort"]
+                    if "collaborationMode" in settings:
+                        sess["mode"] = (settings["collaborationMode"] or {}).get("mode", "default")
+                    sess["settings_revision"] = sess.get("settings_revision", 0) + 1
+                    waiter = sess.get("service_tier_waiter")
+                    if (tier is not None and tier == sess.get("service_tier_requested")
+                            and waiter is not None and not waiter.done()):
+                        waiter.set_result(tier)
+                    if "collaborationMode" in settings and sess["mode"] in {"plan", "default"}:
+                        meta = codex_sessions.load(name) or {}
+                        if meta.get("transfer_id") and meta.get("thread_id") == sess["thread_id"]:
+                            codex_sessions.update(name, previous_non_plan=meta["permission_mode"]
+                                                  if sess["mode"] == "plan" else None)
+                turn_problem = _turn_problem(notif) if current_turn else None
+                problem_updated = False
+                if turn_problem is not None:
+                    problem_updated = sess.get("turn_problem") != turn_problem
+                    sess["turn_problem"] = turn_problem
+                elif method == "turn/started" or response_started or \
+                        (current_turn and method == "item/started"
+                         and (params.get("item") or {}).get("type") != "userMessage") or \
+                        (method == "turn/completed" and sess.get("turn_problem", ("",))[0] == "codex_sem_conexao"):
+                    # Reconectou (chegou resposta ou qualquer item novo, inclusive só ferramenta) ou o
+                    # turno fechou sem erro: o aviso não vale mais.
+                    problem_updated = sess.pop("turn_problem", None) is not None
+                if method == "turn/started":
+                    await buffer.reset()
+                    await publish("")
+                    # guarda o turnId do turno em voo (turn/interrupt exige threadId+turnId).
+                    turn_id = ((notif.get("params") or {}).get("turn") or {}).get("id")
+                    if turn_id:
+                        sess["turn_id"] = turn_id
+                elif mapped.preview_delta is not None:
+                    await buffer.append(mapped.preview_delta)
+                elif method in ("item/started", "item/completed") and \
+                        ((notif.get("params") or {}).get("item") or {}).get("type") == "agentMessage":
+                    # Um turno pode ter varios agentMessage (preambulo "Vou conferir…" + resposta). O
+                    # completado vira bolha propria pelo rollout; se ficasse no buffer, a previa
+                    # mostrava "Vou conferir.Resposta" ate o turno fechar.
+                    await buffer.discard()
+                    await publish("")
+                elif method == "turn/completed":
+                    # o texto final ja caiu no rollout -> vira ChatEvent autoritativo via
+                    # transcript_stream; o sse.py tambem suprime via _already_committed. Limpa aqui pra
+                    # nao deixar o ultimo delta pendurado ate o proximo turno.
+                    await buffer.discard()
+                    await publish("")
+                    # Marca idle ANTES de drenar (nao depender do thread/status/changed idle ter chegado
+                    # antes -- a ordem das notifications do app-server nao e garantida). A drain chama
+                    # send_prompt -> deliverable(), que le in_progress: se ficasse True aqui, deliverable
+                    # daria False, send_prompt viraria "deferred", a drain reverteria e a entrada
+                    # enfileirada ficaria presa pra sempre (perda silenciosa). Tambem zera o turn_id: o
+                    # turno morreu -> interrupt vira no-op em vez de mandar turn/interrupt de turno morto.
+                    sess["state"] = "idle"
+                    sess["in_progress"] = False
+                    sess["turn_id"] = None
+                    # Turno terminou: a bomba única e permanente entrega a fila mesmo sem SSE aberto.
+                    # Best-effort: falha aqui nunca derruba o consumidor do app-server.
+                    try:
+                        await self.drain(name, "")
+                    except Exception:
+                        _log.exception("codex drain-on-complete falhou name=%s", name)
+                    if self._sessions.get(name) is not sess:
+                        return
+                if mapped.state is not None:
+                    sess["state"] = mapped.state
+                    was = sess["in_progress"]
+                    sess["in_progress"] = mapped.state == "working"
+                    sess["turn_state_known"] = not sess["in_progress"] or bool(sess.get("turn_id"))
+                    # Carimba QUANDO o turno comecou. O TTL de deliverable() mede a partir daqui; sem
+                    # isto um in_progress vindo do stream (nao do send_prompt) ficava com marco 0 e
+                    # expirava de imediato, liberando envio no meio de um turno vivo.
+                    if sess["in_progress"] and not was:
+                        sess["in_progress_since"] = time.monotonic()
+                # Task D: acumula tokenUsage/rateLimits por sessao (snapshot mais recente de cada) --
+                # sao notifications esparsas, nao vem toda hora, entao guarda no dict quente pra
+                # sobreviver ate o proximo StateEvent emitido (mesmo que seja por outro motivo, tipo
+                # turn/started).
+                if mapped.token_usage is not None:
+                    sess["token_usage"] = mapped.token_usage
+                if mapped.rate_limits is not None:
+                    sess["rate_limits"] = mapped.rate_limits
+                question_updated = async_updated or method in ("item/tool/requestUserInput", "serverRequest/resolved")
+                if mapped.state is None and mapped.token_usage is None and mapped.rate_limits is None and not settings_updated and not question_updated and not buffering_updated and not problem_updated and not compact_updated:
+                    # Neutro (method desconhecido) ou so preview_delta: StateEvent nao tem campo de
+                    # preview -> nada a emitir aqui (o preview ja foi empurrado acima, fora do
+                    # StateEvent -- efeito colateral adicional, nao substitui).
+                    continue
+                # status_line SEMPRE montado com o que ha de mais recente acumulado (model/effort do
+                # dict quente + token_usage/rate_limits guardados acima) -- nao so quando ESTE notif
+                # trouxe token/limite novo, senao o front perderia contexto/limites em StateEvents de
+                # working/idle puros (a maioria).
+                espalhar(self._question_state(name, sess))
+            # notifications() terminou = EOF do app-server (o read loop empurra o sentinela ao morrer).
+            # Dead-detection (backlog T4-m2): emite dead pra o front + limpa a sessao da memoria (o
+            # sidecar duravel fica; ensure_running reabre num acesso futuro). getattr: um client FAKE de
+            # teste sem `closed` termina o stream sem simular morte -> nao emite dead.
+            if getattr(client, "closed", False) and self._sessions.get(name) is sess:
+                await buffer.discard()
+                await publish("")
+                sess["state"] = "dead"
+                self._sessions.pop(name, None)
+                PushPreviewSource._sources.pop(name, None)
+                espalhar(StateEvent(session=name, state="dead"))
+
+            elif self._sessions.get(name) is sess:
+                await buffer.flush()
+        finally:
+            await buffer.discard()
+            if sess.get("preview_buffer") is buffer:
+                sess.pop("preview_buffer", None)
 
     async def send_prompt(self, name: str, text: str) -> str:
         from app.conversation_transfer import transfer_active
@@ -2161,6 +2309,8 @@ class CodexAdapter:
                     for e in (m.get("supportedReasoningEfforts") or [])
                 ],
                 "defaultEffort": m.get("defaultReasoningEffort"),
+                "serviceTiers": m.get("serviceTiers") or [],
+                "defaultServiceTier": m.get("defaultServiceTier"),
             }
             for m in (result.get("data") or [])
             if not m.get("hidden")
@@ -2178,6 +2328,114 @@ class CodexAdapter:
         sess["model"], sess["effort"] = model, effort
         sess["default_effort"] = effort
         codex_sessions.update_model(name, model, effort)
+
+    SERVICE_TIER_TIMEOUT = 10.0
+
+    async def set_service_tier(self, name: str, service_tier: str) -> str:
+        if service_tier not in {"default", "priority"}:
+            raise ValueError("Escolha Fast inválida")
+        try:
+            async with asyncio.timeout(self.SERVICE_TIER_TIMEOUT):
+                return await self._apply_service_tier(name, service_tier)
+        except TimeoutError:
+            raise RuntimeError("O Codex não confirmou a escolha Fast no prazo") from None
+
+    async def _apply_service_tier(self, name: str, service_tier: str) -> str:
+        client = await self.ensure_running(name)
+        if client is None:
+            raise RuntimeError("Sessão Codex indisponível")
+        sess = self._sessions[name]
+        thread_id = sess["thread_id"]
+        waiter = None
+
+        def still_current() -> bool:
+            meta = codex_sessions.load(name)
+            return (self._sessions.get(name) is sess and sess["thread_id"] == thread_id
+                    and sess.get("client") is client and not getattr(client, "closed", False)
+                    and (meta is None or meta.get("thread_id") == thread_id))
+
+        async with self._locks.setdefault(name, asyncio.Lock()):
+            if not still_current():
+                raise RuntimeError("A sessão mudou antes de alterar Fast")
+            # Sem mudança o Codex não avisa nada, e esperar o aviso só daria prazo estourado.
+            # None é "ainda não lido" (o -c global pode ser priority), então segue o fluxo inteiro.
+            if sess.get("service_tier") == service_tier:
+                return service_tier
+            try:
+                async with asyncio.timeout(self.SERVICE_TIER_TIMEOUT):
+                    subscriber = self._subscribers.get(name)
+                    if subscriber is not None and not subscriber.done():
+                        try:
+                            await asyncio.shield(subscriber)
+                        except asyncio.CancelledError:
+                            if asyncio.current_task().cancelling():
+                                raise
+                            raise RuntimeError("A sessão mudou antes de alterar Fast") from None
+                    if not still_current():
+                        raise RuntimeError("A sessão mudou antes de alterar Fast")
+                    if service_tier == "priority":
+                        await self.read_settings(name)
+                        if not still_current():
+                            raise RuntimeError("A sessão mudou antes de alterar Fast")
+                        current_model = self.current_model(name)["model"]
+                        catalog = await self.list_models(name)
+                        model = next((model for model in catalog if model["model"] == current_model), {})
+                        if (not still_current() or self.current_model(name)["model"] != current_model
+                                or not any(tier.get("id") == "priority" and not tier.get("hidden")
+                                           for tier in model.get("serviceTiers", []))):
+                            raise RuntimeError("Fast não está disponível para o modelo atual")
+                    if not still_current():
+                        raise RuntimeError("A sessão mudou antes de alterar Fast")
+                    # Só a bomba consome eventos; {} do RPC não prova que a escolha foi aplicada.
+                    waiter = asyncio.get_running_loop().create_future()
+                    sess["service_tier_waiter"] = waiter
+                    sess["service_tier_requested"] = service_tier
+                    await client.request("thread/settings/update", {"threadId": thread_id, "serviceTier": service_tier})
+                    while True:
+                        applied = await waiter
+                        if not still_current() or applied != service_tier:
+                            raise RuntimeError("O Codex não confirmou a escolha Fast")
+                        # Capture a próxima candidata antes da consulta, sem outro consumidor da fila.
+                        waiter = asyncio.get_running_loop().create_future()
+                        sess["service_tier_waiter"] = waiter
+                        revision = sess.get("settings_revision", 0)
+                        try:
+                            snapshot = await client.request("thread/resume", {"threadId": thread_id})
+                        except RuntimeError as exc:
+                            if "no rollout found" not in str(exc):
+                                raise
+                            # Thread sem turno ainda não tem rollout: vale o aviso da própria thread.
+                            _log.info("codex Fast confirmado pelo aviso da thread (sem rollout) name=%s tier=%s",
+                                      name, applied)
+                            snapshot = {"thread": {"id": thread_id}, "serviceTier": applied}
+                        if not still_current() or (snapshot.get("thread") or {}).get("id") != thread_id:
+                            raise RuntimeError("A sessão mudou antes de confirmar Fast")
+                        previous_tier = sess.get("service_tier")
+                        self._restore_service_tier(name, sess, snapshot, revision)
+                        if sess.get("service_tier") != previous_tier:
+                            for listener in sess.get("ouvintes", []):
+                                listener.put_nowait(self._question_state(name, sess))
+                        if ("serviceTier" in snapshot and revision == sess.get("settings_revision", 0)
+                                and ("default" if snapshot["serviceTier"] is None else snapshot["serviceTier"]) == service_tier
+                                and sess.get("service_tier") == service_tier):
+                            return service_tier
+            except TimeoutError:
+                raise RuntimeError("O Codex não confirmou a escolha Fast no prazo") from None
+            finally:
+                if waiter is not None:
+                    if not waiter.done():
+                        waiter.cancel()
+                    if sess.get("service_tier_waiter") is waiter:
+                        sess.pop("service_tier_waiter", None)
+                        sess.pop("service_tier_requested", None)
+
+    def _restore_service_tier(self, name: str, sess: dict, result: dict, revision: int) -> None:
+        if (self._sessions.get(name) is not sess or revision != sess.get("settings_revision", 0)
+                or "serviceTier" not in result):
+            return
+        tier = "default" if result["serviceTier"] is None else result["serviceTier"]
+        if codex_sessions.update_service_tier(name, sess["thread_id"], tier):
+            sess["service_tier"] = tier
 
     @staticmethod
     def _restore_turn(sess: dict, thread: dict, *, include_turns: bool = True) -> None:
@@ -2327,21 +2585,23 @@ class CodexAdapter:
         prioridade; sem escolha, cai pro default da thread (dict quente, populado no attach) --
         so entao {model: None, effort: None} pra sessao nunca vista."""
         sess = self._sessions.get(name)
-        if sess is not None and (sess.get("model") or sess.get("effort")
+        if sess is not None and (sess.get("model") or sess.get("effort") or sess.get("service_tier")
                                   or sess.get("default_model") or sess.get("default_effort")):
             return {"model": sess.get("model") or sess.get("default_model"),
-                    "effort": sess.get("effort") or sess.get("default_effort")}
+                    "effort": sess.get("effort") or sess.get("default_effort"),
+                    "service_tier": sess.get("service_tier")}
         meta = codex_sessions.load(name)
         if meta is not None:
-            return {"model": meta.get("model"), "effort": meta.get("effort")}
-        return {"model": None, "effort": None}
+            return {"model": meta.get("model"), "effort": meta.get("effort"), "service_tier": meta.get("service_tier")}
+        return {"model": None, "effort": None, "service_tier": None}
 
     def spawn_command(self, cwd: str, session_id: str,
                       model: str | None = None, effort: str | None = None,
                       permission_mode: str | None = None,
                       initial_prompt: str | None = None,
                       codex_home: str | None = None,
-                      codex_account: str | None = None) -> list[str]:
+                      codex_account: str | None = None,
+                      service_tier: str | None = None) -> list[str]:
         # Sessao Codex nasce como as outras: um comando no pane. O comando e o lancador, que sobe o
         # app-server e a TUI juntos (ver comando_do_lancador).
         # session_id nao entra: a identidade da conversa e o threadId, que so existe depois que a
@@ -2353,9 +2613,14 @@ class CodexAdapter:
         from app import model_args
         model, effort = model_args.validar("codex", model, effort)
         return comando_do_lancador(cwd, initial_prompt, model=model, effort=effort,
-                                   codex_home=codex_home, codex_account=codex_account)
+                                   codex_home=codex_home, codex_account=codex_account,
+                                   service_tier=service_tier)
 
     def transcript_path(self, cwd: str, session_id: str) -> str:
         # O rollout path vem do thread/start (result.thread.path), gravado no sidecar -- nao ha como
         # derivar do cwd+id como no Claude. Nunca chamado no caminho Codex.
         raise NotImplementedError("Codex obtem o rollout path via thread/start, nao por derivacao")
+
+
+from app.runtime_adapter import install_adapter as _install_runtime_adapter
+_install_runtime_adapter(CodexAdapter, "codex")

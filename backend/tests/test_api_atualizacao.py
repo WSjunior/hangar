@@ -189,7 +189,7 @@ import subprocess
 from datetime import datetime, timedelta
 
 
-def _auto_gate(checar=None, estado=None, sha_dist="abc123", sha_alvo="abc123"):
+def _auto_gate(checar=None, estado=None, sha_dist="abc123", sha_alvo="abc123", ate="origin/main"):
     """Roda `_auto_update_motivo` com git/estado/dist do CI mockados. Devolve o motivo de NÃO atualizar (None = dispara)."""
     from app import api
     pre = {"pode": True, "behind": 2, "ahead": 0, "divergiu": False, "sujo": 0, "branch_de_trabalho": False}
@@ -205,6 +205,7 @@ def _auto_gate(checar=None, estado=None, sha_dist="abc123", sha_alvo="abc123"):
          patch("app.api.atualizar.estado", return_value=estado or {}), \
          patch("app.api.atualizar.estado_para_tela", return_value=estado or {}), \
          patch("app.api.urllib.request.urlopen", return_value=_Sha()), \
+         patch("app.api.atualizar.pinned_target", return_value=(ate, None)), \
          patch("app.api.atualizar._git",
                return_value=subprocess.CompletedProcess([], 0, stdout=sha_alvo, stderr="")):
         return api._auto_update_motivo()
@@ -245,6 +246,15 @@ def test_auto_update_ts_invalido_abre_com_log(caplog):
 def test_auto_update_divergiu_vem_antes_de_ahead():
     """divergiu = ahead>0 AND behind>0: o motivo logado tem que ser o mais preciso."""
     assert _auto_gate(checar={"ahead": 2, "behind": 2, "divergiu": True}) == "checkout divergiu de origin/main"
+
+
+def test_auto_update_espera_o_binario_do_topo():
+    """Parar antes do topo é só no botão: o automático espera o topo inteiro publicado."""
+    assert _auto_gate(ate="abc999") == "binario do Rust do topo ainda nao publicado para este sistema"
+
+
+def test_auto_update_sem_conferir_o_binario_espera():
+    assert _auto_gate(ate=None) == "nao deu pra conferir o binario do Rust publicado"
 
 
 def test_auto_update_rev_parse_falhou():

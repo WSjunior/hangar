@@ -15,11 +15,18 @@ from app import plugin_bridge as pb
 # Conversa que o Hangar acompanha em toda sessão dos testes; o plugin certo manda este id.
 UUID = "0b6e5c1a-1111-4222-8333-444455556666"
 _REAL_TRACKED = pb.tracked_session_id
+_REAL_MODO_SEM_DIALOGO = pb.modo_sem_dialogo
+
+
+async def _com_dialogo(name: str) -> bool:
+    return False
 
 
 @pytest.fixture(autouse=True)
 def _limpa(monkeypatch):
     monkeypatch.setattr(pb, "tracked_session_id", lambda name: UUID)
+    # Sem isto, cada pedido de permissão dos testes capturaria um pane de verdade.
+    monkeypatch.setattr(pb, "modo_sem_dialogo", _com_dialogo)
     yield
     for d in (pb._perguntas, pb._waiters, pb._estados, pb._batidas, pb._eventos, pb._fechadas,
               pb._donos, pb._recusas):
@@ -49,6 +56,69 @@ def test_permissao_com_terminal_preso_volta_pro_terminal(monkeypatch):
     monkeypatch.setattr(pb, "terminal_preso", lambda name: True)
     pb.app_entrou()
     assert asyncio.run(pb.ask(_corpo("perm:t1", tool="Bash"))) == {"soltar": True}
+
+
+@pytest.mark.parametrize("rodape,segura", [
+    ("⏵⏵ auto mode on (shift+tab to cycle) · ← for agents", False),
+    ("⏵⏵ don't ask on (shift+tab to cycle)", False),
+    ("⏸ manual mode on · ← for agents", True),
+    ("⏵⏵ accept edits on (shift+tab to cycle)", True),
+    ("", True),
+])
+def test_permissao_so_vai_ao_app_quando_o_modo_pergunta(monkeypatch, rodape, segura):
+    from app import state
+
+    async def quadro(name, max_age):
+        return f"❯ \n{rodape}\n"
+
+    monkeypatch.setattr(pb, "modo_sem_dialogo", _REAL_MODO_SEM_DIALOGO)
+    monkeypatch.setattr(state, "shared_capture", quadro)
+    monkeypatch.setattr(pb, "terminal_preso", lambda name: False)
+    pb.app_entrou()
+    resposta = asyncio.run(pb.ask(_corpo("perm:t1", tool="Bash", janela_ms=50)))
+    assert resposta == ({"answers": None} if segura else {"soltar": True})
+    assert (pb.pergunta_pendente("s1") is not None) is segura
+
+
+def test_pergunta_do_hook_morto_sai_sem_esperar_o_teto_do_long_poll(monkeypatch):
+    # Item 16: o Esc no terminal interrompe o AskUserQuestion e o hook morre sem o `/ask-fim`. A
+    # pergunta seguia "aberta" por 35 s e o /clear do app era adiado nesse intervalo.
+    monkeypatch.setattr(pb, "terminal_preso", lambda name: False)
+    pb.app_entrou()
+    asyncio.run(pb.ask(_corpo("ask:t1", questions=[{"question": "A ou B?"}], janela_ms=20)))
+    assert pb.pergunta_pendente("s1") is not None
+    pb._perguntas["s1"]["visto"] -= pb.SEM_POLL_S + 1
+    assert pb.pergunta_pendente("s1") is None
+    # Com o long-poll aberto a pergunta vale até o teto de sempre.
+    pb._perguntas["s1"]["fila"] = asyncio.Queue()
+    assert pb.pergunta_pendente("s1") is not None
+
+
+def test_interrupcao_pelo_app_solta_a_pergunta_na_hora_e_acorda_o_long_poll(monkeypatch):
+    # O /interrupt do app é o Esc que fecha o diálogo; o long-poll do hook morto ficava aberto até a
+    # janela de 25 s fechar, segurando a pergunta.
+    monkeypatch.setattr(pb, "terminal_preso", lambda name: False)
+    pb.app_entrou()
+
+    async def cena():
+        espera = asyncio.create_task(pb.ask(_corpo("ask:t1", questions=[{"question": "A ou B?"}])))
+        while pb.pergunta_pendente("s1") is None:
+            await asyncio.sleep(0.01)
+        pb.interrompeu("s1", "ask:t1")
+        assert pb.pergunta_pendente("s1") is None
+        return await asyncio.wait_for(espera, 2)
+
+    assert asyncio.run(cena()) == {"answers": None}
+    # O hook que refaz o poll logo depois do Esc ainda pode estar morrendo: não volta.
+    asyncio.run(pb.ask(_corpo("ask:t1", questions=[{"question": "A ou B?"}], janela_ms=20)))
+    assert pb.pergunta_pendente("s1") is None
+    # Ainda perguntando depois de HOOK_VIVO_S, ele sobreviveu ao Esc: a pergunta volta a contar.
+    pb._perguntas["s1"]["interrompida"] -= pb.HOOK_VIVO_S + 1
+    asyncio.run(pb.ask(_corpo("ask:t1", questions=[{"question": "A ou B?"}], janela_ms=20)))
+    assert pb.pergunta_pendente("s1") is not None
+    # Interrupção de outra pergunta (lida antes do Esc) não marca a que abriu depois.
+    pb.interrompeu("s1", "ask:t0")
+    assert pb.pergunta_pendente("s1") is not None
 
 
 def test_resposta_do_app_chega_ao_hook_e_so_vale_com_o_aviso_dele(monkeypatch):
@@ -84,7 +154,8 @@ def test_portao_desligado_nao_poe_nada_na_sessao_e_ligado_poe_o_plugin(monkeypat
     assert get_adapter("claude").spawn_command("/tmp/p", "sid") == ["claude", "--session-id", "sid"]
 
     monkeypatch.setattr(pb, "ligado", lambda: True)
-    (raiz,) = pb.raizes_dos_plugins()
+    # Os outros mods do repo vêm depois; a ordem completa é do teste com pasta temporária.
+    raiz = pb.raizes_dos_plugins()[0]
     assert Path(raiz).parts[-2:] == ("plugins", "hangar")
     assert get_adapter("claude").spawn_command("/tmp/p", "sid")[:5] == [
         "claude", "--session-id", "sid", "--plugin-dir", raiz]
@@ -141,7 +212,30 @@ def test_plugin_entra_por_plugin_dir_mesmo_com_mods_por_padrao(monkeypatch):
     monkeypatch.setattr(pb, "ligado", lambda: True)
     for mods in (True, False):
         monkeypatch.setattr(pb, "mods_by_default", lambda mods=mods: mods)
-        assert pb.raizes_dos_plugins() == [str(pb.PLUGIN_SRC)]
+        assert pb.raizes_dos_plugins()[0] == str(pb.PLUGIN_SRC)
+
+
+def test_hangar_abre_a_lista_dos_mods_e_pasta_sem_manifesto_fica_fora(tmp_path, monkeypatch):
+    # O do Hangar fica por fora na cadeia e repassa a faixa ao app: "aaa" vem antes dele no
+    # alfabeto e ainda assim entra depois.
+    for nome in ("zzz", "aaa", "hangar"):
+        (tmp_path / nome / ".claude-plugin").mkdir(parents=True)
+        (tmp_path / nome / ".claude-plugin" / "plugin.json").write_text("{}")
+    (tmp_path / "sem-manifesto" / "hooks").mkdir(parents=True)
+    monkeypatch.setattr(pb, "PLUGINS_ROOT", tmp_path)
+    monkeypatch.setattr(pb, "PLUGIN_SRC", tmp_path / "hangar")
+    monkeypatch.setattr(pb, "ligado", lambda: True)
+    raizes = [str(tmp_path / n) for n in ("hangar", "aaa", "zzz")]
+    assert pb.raizes_dos_plugins() == raizes
+
+    from app.adapters import get_adapter
+    argv = get_adapter("claude").spawn_command("/tmp/p", "sid")
+    assert argv[:9] == ["claude", "--session-id", "sid",
+                        "--plugin-dir", raizes[0], "--plugin-dir", raizes[1], "--plugin-dir", raizes[2]]
+
+    home = tmp_path / "home"
+    pb._publish_plugin_dir(home)
+    assert pb.plugin_dir_file(home).read_text(encoding="utf-8") == "".join(f"{r}\n" for r in raizes)
 
 
 def test_interruptor_desligado_tira_o_plugin_mesmo_com_mods_por_padrao(monkeypatch):
@@ -525,6 +619,44 @@ def test_recusa_loga_uma_vez_por_instancia_mesmo_com_o_dono_puxando(monkeypatch,
     assert sum("pull recusado" in r.getMessage() for r in caplog.records) == 1
 
 
+@pytest.mark.parametrize("stdout,returncode,expected", [
+    ("", 0, False),
+    ("1\t\n", 0, False),
+    ("1\t\n1\t\n", 0, False),
+    ("0\t/dev/pts/7\n", 0, True),
+    ("1\t\n0\t/dev/pts/7\n", 0, True),
+    ("\t/dev/pts/7\n", 0, True),
+    ("\t\n", 0, True),
+    ("#{client_control_mode}\t\n", 0, True),
+    ("1\n", 0, True),
+    ("", 1, True),
+])
+def test_terminal_presenca_filtra_somente_controle_comprovado(monkeypatch, stdout, returncode, expected):
+    from app import tmux
+    from types import SimpleNamespace
+    def run(args):
+        assert args == ["tmux", "list-clients", "-t", "=s1", "-F", "#{client_control_mode}\t#{client_tty}"]
+        return SimpleNamespace(stdout=stdout, returncode=returncode)
+    monkeypatch.setattr(tmux, "_run", run)
+    assert pb.terminal_preso("s1") is expected
+
+
+def test_terminal_presenca_erro_do_multiplexador_e_conservador(monkeypatch):
+    from app import tmux
+    def run(args):
+        raise OSError("fixture")
+    monkeypatch.setattr(tmux, "_run", run)
+    assert pb.terminal_preso("s1") is True
+
+
+@pytest.mark.parametrize("stdout,expected", [(b"1\t\n", False), (b"\xff\t\n", True), (None, True), ("\n", True), ("1\t\textra\n", True)])
+def test_terminal_presenca_bytes_e_formato_invalido(monkeypatch, stdout, expected):
+    from app import tmux
+    from types import SimpleNamespace
+    monkeypatch.setattr(tmux, "_run", lambda args: SimpleNamespace(stdout=stdout, returncode=0))
+    assert pb.terminal_preso("s1") is expected
+
+
 # Faixa, painéis e confirmações de clique dos mods.
 
 def _ponte(sessao, **extra):
@@ -733,3 +865,153 @@ def test_pull_diz_se_o_backend_tem_a_faixa(monkeypatch):
         assert asyncio.run(pb.pull(_pull(instance="a")))["faixa"] is True
     finally:
         pb.esquecer("s1")
+
+
+def test_parada_solta_as_esperas_longas_na_hora(monkeypatch):
+    # O uvicorn espera cada pedido aberto antes do lifespan: uma espera de 25 s passava do teto do
+    # systemd e o backend saía por SIGKILL.
+    monkeypatch.setattr(pb, "terminal_preso", lambda name: False)
+    monkeypatch.setattr(pb, "_stopping", False)
+    pb.app_entrou()
+
+    async def cena():
+        pull = asyncio.create_task(pb.pull(_pull(instance="a")))
+        ask = asyncio.create_task(pb.ask(_corpo("ask:q1")))
+        while "s1" not in pb._waiters or not pb._perguntas.get("s1", {}).get("fila"):
+            await asyncio.sleep(0)
+        inicio = time.monotonic()
+        pb.stop_waits()
+        assert (await pull)["text"] is None
+        assert await ask == {"answers": None}
+        assert time.monotonic() - inicio < 1
+        # Pedido que chega já na parada também não espera.
+        assert (await asyncio.wait_for(pb.pull(_pull(instance="a")), 1))["text"] is None
+
+    try:
+        asyncio.run(cena())
+    finally:
+        pb.esquecer("s1")
+
+
+def test_sinal_de_parada_avisa_as_esperas(monkeypatch):
+    import uvicorn
+    from app import rust_server
+    chamadas = []
+    monkeypatch.setattr(pb, "stop_waits", lambda: chamadas.append("stop"))
+    # A classe-mãe de verdade ligaria a parada global do sse-starlette para os testes seguintes.
+    monkeypatch.setattr(uvicorn.Server, "handle_exit", lambda self, sig, frame: chamadas.append("uvicorn"))
+    rust_server.Server(uvicorn.Config(lambda *a: None)).handle_exit(15, None)
+    assert chamadas == ["stop", "uvicorn"]
+
+
+def test_texto_que_chega_junto_com_a_parada_ainda_e_entregue(monkeypatch):
+    monkeypatch.setattr(pb, "_stopping", False)
+
+    async def cena():
+        pull = asyncio.create_task(pb.pull(_pull(instance="a")))
+        while "s1" not in pb._waiters:
+            await asyncio.sleep(0)
+        fila = pb._waiters["s1"]
+        fila.put_nowait(pb._STOP)
+        fila.put_nowait({"text": "chegou junto", "modo": "fill"})
+        assert (await pull)["text"] == "chegou junto"
+        pb.stop_waits()
+        # Depois do sinal a entrega não vai para uma espera que vai fechar: o chamador usa o pane.
+        assert pb._entregar("s1", "depois", "fill") is False
+
+    try:
+        asyncio.run(cena())
+    finally:
+        pb.esquecer("s1")
+
+
+def test_pull_drops_its_wait_when_the_proxy_connection_dies(monkeypatch):
+    # O Rust que repassava a espera morreu: sem soltar, o Rust novo publicava nela e a confirmação
+    # nunca vinha (entrega incerta no terminal depois de uma queda).
+    monkeypatch.setattr(pb, "ESPERA_S", 30)
+
+    class Proxy:
+        def __init__(self):
+            self.gone = asyncio.Event()
+
+        async def receive(self):
+            await self.gone.wait()
+            return {"type": "http.disconnect"}
+
+    async def cena():
+        proxy = Proxy()
+        espera = asyncio.create_task(pb.pull(_pull(), proxy))
+        await asyncio.wait_for(_ate(lambda: pb.aguardando("s1")), 5)
+        proxy.gone.set()
+        resposta = await asyncio.wait_for(espera, 2)
+        assert resposta["text"] is None
+        assert not pb.aguardando("s1"), "a espera morta não pode receber publicação"
+
+    asyncio.run(cena())
+
+
+def test_publication_racing_the_proxy_drop_is_not_written(monkeypatch):
+    # Publicação que chegou junto com a queda: o plugin nunca a recebeu, então volta `not_written`
+    # (o Rust digita pelo teclado), nunca `unknown` (que travaria a fila como entrega incerta).
+    monkeypatch.setattr(pb, "ESPERA_S", 30)
+    monkeypatch.setattr(pb, "PUBLICA_S", 5)
+    monkeypatch.setattr(pb, "tracked_session_id", lambda name: UUID)
+
+    class Proxy:
+        def __init__(self):
+            self.gone = asyncio.Event()
+
+        async def receive(self):
+            await self.gone.wait()
+            return {"type": "http.disconnect"}
+
+    async def cena():
+        proxy = Proxy()
+        espera = asyncio.create_task(pb.pull(_pull(modos=("fill", "receipt_v2")), proxy))
+        await asyncio.wait_for(_ate(lambda: pb.aguardando("s1")), 5)
+        fila = pb._waiters["s1"]
+        original = fila.put_nowait
+        def put_and_drop(item):
+            original(item)
+            proxy.gone.set()        # a conexão cai no mesmo instante da publicação
+        fila.put_nowait = put_and_drop
+        resultado = await asyncio.to_thread(pb.publish_terminal, "s1", UUID, 1,
+            {"id":"pub-1", "mode":"fill", "text":"oi"}, lambda: None)
+        await asyncio.wait_for(espera, 2)
+        return resultado
+
+    assert asyncio.run(cena()) == "not_written"
+
+
+def test_user_publication_waits_for_ack_after_slow_prompt_hooks(monkeypatch):
+    # O aviso do modo `user` sai depois dos hooks do UserPromptSubmit: com a máquina ocupada ele
+    # passa do prazo do rascunho, e a entrega que chegou não pode voltar como incerta.
+    monkeypatch.setattr(pb, "CONFIRMA_S", .05)
+
+    async def cena():
+        pb._loop = asyncio.get_running_loop()
+        fila = pb._waiters["s1"] = asyncio.Queue()
+        pb._donos["s1"] = ("i", {"fill", "user", "receipt_v2"}, time.monotonic())
+        envio = asyncio.create_task(asyncio.to_thread(pb.publish_terminal, "s1", UUID, 1,
+            {"id": "pub-1", "mode": "user", "text": "oi"}, lambda: None))
+        await asyncio.wait_for(fila.get(), 1)
+        await asyncio.sleep(.3)         # hooks lentos antes do `/submitted`
+        assert pb._terminal_ack(pb.SubmittedBody(sessao="s1", token="t", ok=True,
+            publication_id="pub-1", generation=1, session_id=UUID), "user")
+        return await envio
+
+    try:
+        assert asyncio.run(cena()) == "accepted"
+    finally:
+        pb._publications.clear()
+
+
+def test_publication_wait_stays_below_rust_policy_timeout():
+    # Se o Rust desistir antes do Python, o aviso que chega no intervalo vira entrega incerta.
+    import re
+    actor = (Path(__file__).resolve().parents[2] / "crates/hangar-server/src/runtime/actor.rs").read_text()
+    rust_s = int(re.search(r"PUBLISH_POLICY_TIMEOUT:Duration=Duration::from_secs\((\d+)\)", actor).group(1))
+    assert pb.CONFIRMA_S < pb.PUBLICA_S < rust_s - 5
+    # O `op` do Python espera a entrada inteira no Rust: fatos (15 s) mais a publicação.
+    from app import rust_server
+    assert rust_server.OP_TIMEOUT_S > rust_s + 15

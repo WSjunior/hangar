@@ -1,6 +1,6 @@
 <script lang="ts">
   import { useSessionServer } from '../lib/sessionServer';
-  import { computeEditDiff, extractEdits, extractFilePath, pseudoCaminhoPorConteudo, type ChatEvent } from '@hangar/core';
+  import { computeEditDiff, extractEdits, extractEditPaths, diffFromPatch, diffFromEdits, extractFilePath, pseudoCaminhoPorConteudo, type ChatEvent } from '@hangar/core';
   import * as m from '../paraglide/messages';
   import { parseFilePaths, summarizeToolInput, summarizeToolResult, toolPhase, toolVerbo } from '@hangar/core';
   import { getBashOutput, getToolProgress, nomeFerramenta, separarComando, type EtapaFerramenta } from '@hangar/core';
@@ -15,6 +15,8 @@
   import HangarCommandCard from './HangarCommandCard.svelte';
   import FileAttachment from './FileAttachment.svelte';
   import EditDiff from './EditDiff.svelte';
+  import TerminalDiff from './TerminalDiff.svelte';
+  import { EDIT_SHOWN, WRITE_SHOWN, fileName } from '../lib/terminalDiff';
   import ReadView from './ReadView.svelte';
   import ToolGlyph from './ToolGlyph.svelte';
   import { rotaDoAlvo } from '../lib/alvoSessao';
@@ -150,6 +152,48 @@
     const p = editPath || String((event.tool_input as Record<string, unknown> | null)?.['notebook_path'] ?? '');
     return p.split(/[\\/]/).filter(Boolean).pop() ?? '';
   });
+  // Pele 'terminal': Edit/MultiEdit/patch aparecem como "Update"; as ferramentas de arquivo mostram o nome dele.
+  const TERM_UPDATE_TOOLS = ['edit', 'multiedit', 'notebookedit', 'apply_patch'];
+  const TERM_FILE_TOOLS = ['read', 'notebookread', 'write', ...TERM_UPDATE_TOOLS];
+  // Pele 'terminal': o argumento do cabeçalho segue a regra do nativo (`FILE_TOOLS`): nome do arquivo nas
+  // ferramentas de arquivo, o resumo nas demais. Derivado próprio: o `arquivo` acima é da pele chips.
+  const termArg = $derived.by(() => {
+    if (!TERM_FILE_TOOLS.includes((event.tool_name ?? '').toLowerCase())) return summary;
+    const p = extractFilePath(event.tool_input) || String((event.tool_input as Record<string, unknown> | null)?.['notebook_path'] ?? '');
+    return p ? fileName(p, summary) : summary;
+  });
+  // Pele 'terminal': Edit e MultiEdit aparecem como "Update", o nome que o terminal usa.
+  const termName = $derived(
+    TERM_UPDATE_TOOLS.includes((event.tool_name ?? '').toLowerCase())
+      ? 'Update' : nomeFerramenta(event.tool_name),
+  );
+  // Os caminhos só servem quando o resultado não trouxe patch (mesma regra do `numberedDiff`).
+  const termDiff = $derived.by(() => {
+    if (!showDiff || !editEdits) return null;
+    const fromPatch = result?.patch?.length ? diffFromPatch(result.patch) : null;
+    return fromPatch && fromPatch.hunks.length ? fromPatch : diffFromEdits(editEdits, extractEditPaths(event.tool_name, event.tool_input) ?? undefined);
+  });
+  // Arquivo novo: tudo adição, numerado a partir de 1, e o resultado não trouxe patch.
+  const termCreated = $derived(
+    (event.tool_name ?? '').toLowerCase() === 'write' && !result?.patch?.length && !!termDiff && termDiff.del === 0,
+  );
+  // Erro de edição já está na linha do ⎿: o detalhe com o mesmo texto só abre quando a pessoa toca.
+  let termTocado = $state(false);
+  const termOpen = $derived(termTocado ? expanded : expanded && !(editEdits && phase === 'error'));
+  function aoClicarTerm() {
+    expanded = !termOpen;
+    termTocado = true;
+  }
+  const termSummary = $derived.by(() => {
+    if (!termDiff || !result) return statusLinha;
+    const { add, del } = termDiff;
+    if (termCreated) return add === 1 ? m.term_gravou_1({ arquivo }) : m.term_gravou_n({ n: add, arquivo });
+    const added = add === 1 ? m.term_adicionadas_1() : m.term_adicionadas_n({ n: add });
+    if (!add && !del) return m.editdiff_sem_mudanca();
+    if (!del) return added;
+    if (!add) return del === 1 ? m.term_so_removidas_1() : m.term_so_removidas_n({ n: del });
+    return `${added}, ${del === 1 ? m.term_removidas_1() : m.term_removidas_n({ n: del })}`;
+  });
   const totaisEdicao = $derived.by(() => {
     if (!editEdits) return null;
     let add = 0, del = 0;
@@ -245,6 +289,11 @@
 
 <!-- O DETALHE e identico nas duas peles: e o mesmo dado, so a moldura muda. Snippet pra existir uma
      vez so — duplicar estas tres pontas era o jeito de a pele nova perder o diff ou o erro. -->
+{#snippet termHead()}
+  <span class="tr-dot" class:pending={phase === 'pending'} data-phase={phase} aria-hidden="true"></span>
+  <span class="tt-call"><b>{termName}</b>({termArg})</span>
+{/snippet}
+
 {#snippet detalhe()}
   {#if comandoInteiro}
     <div class="bloco">
@@ -384,6 +433,28 @@
         </div>
       </div>
     </div>
+  </div>
+{:else if toolLook.look === 'terminal'}
+  <!-- Pele 'terminal': "● Update(arquivo)" / "⎿ resumo" / diff. Edição mostra o diff sempre; o resto
+       abre o mesmo detalhe das outras peles no toque. -->
+  <div class="tt" class:noanim={!animate} class:tt--error={phase === 'error'}>
+    {#if termDiff}
+      <!-- Com o diff à mostra o cabeçalho não abre nada: fica texto, sem papel de botão nem parada de Tab. -->
+      <div class="tt-head tt-head--static" title={editPath || undefined}>{@render termHead()}</div>
+    {:else}
+      <button type="button" class="tt-head" aria-expanded={termOpen} title={editPath || undefined} onclick={aoClicarTerm}>
+        {@render termHead()}
+      </button>
+    {/if}
+    <div class="tt-out">
+      <span class="tt-elbow" aria-hidden="true">⎿</span>
+      <span class="tt-outcome">{termSummary}</span>
+    </div>
+    {#if termDiff}
+      <div class="tt-body"><TerminalDiff diff={termDiff} path={editPath} limit={termCreated ? WRITE_SHOWN : EDIT_SHOWN} /></div>
+    {:else if termOpen}
+      <div class="tt-body">{@render detalhe()}</div>
+    {/if}
   </div>
 {:else}
 <!-- Bloco de DUAS linhas (layout do Pi): "● Bash <arg>" / "└ Pronto (38 linhas) • toque para ver".
@@ -600,6 +671,26 @@
 
   /* Historico remontado (paginacao/janela): entra parado. */
   .tool-row.noanim { animation: none; }
+
+  /* ─── pele 'terminal' ───────────────────────────────────────────────────── */
+  .tt { margin-bottom: var(--space-2); animation: bubble-in 180ms ease-out both; font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.55; }
+  .tt.noanim { animation: none; }
+  .tt-head {
+    display: flex; align-items: baseline; justify-content: flex-start; gap: 8px;
+    width: 100%; min-height: 24px; min-width: 0; padding: 0; border: 0; background: transparent;
+    font: inherit; color: var(--text-primary); text-align: left; cursor: pointer;
+  }
+  .tt-head--static { cursor: default; }
+  .tt-call { min-width: 0; overflow-wrap: anywhere; }
+  .tt-call b { font-weight: 700; }
+  .tt-out { display: flex; gap: 8px; padding-left: 14px; color: var(--text-muted); }
+  .tt-elbow { flex: 0 0 auto; }
+  .tt-outcome { min-width: 0; overflow-wrap: anywhere; color: var(--text-primary); }
+  .tt--error .tt-outcome { color: var(--error); }
+  .tt-body { padding-left: 30px; margin-top: 2px; }
+  .tt-body :global(.bloco), .tt-body :global(.row-result) { margin-left: 0; }
+  /* A bolinha da pele clássica é reaproveitada; aqui ela acompanha a primeira linha do cabeçalho. */
+  .tt-head .tr-dot { align-self: center; }
 
   /* Linha 1: bolinha + nome + argumento. */
   .tr-call {

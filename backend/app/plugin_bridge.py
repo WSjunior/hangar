@@ -31,7 +31,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app import atomico
+from app import atomico, state_facts
 from app.auth import require_loopback
 from app.live_rate import live_rate
 
@@ -42,14 +42,118 @@ plugin_router = APIRouter(prefix="/api/plugin")
 # Quanto o backend segura o long-poll antes de responder 204. Curto o bastante
 # para a morte da sessão aparecer, longo o bastante para a espera não virar poll.
 ESPERA_S = 25.0
+# Entre dois long-polls o hook volta em milissegundos (2 s se o backend falhar). Sem long-poll aberto
+# por mais que isto, o hook morreu: o Esc no terminal interrompe a ferramenta sem o `/ask-fim`.
+SEM_POLL_S = 5.0
+# O hook que ainda faz long-poll depois disso sobreviveu ao Esc do app (o diálogo ficou).
+HOOK_VIVO_S = 2.0
 
 _lock = threading.Lock()
 _waiters: dict[str, asyncio.Queue] = {}
 _loop: asyncio.AbstractEventLoop | None = None
+# Backend parando: o uvicorn espera cada pedido aberto antes do lifespan, e uma espera de 25 s
+# passava do teto do systemd (SIGKILL). As esperas respondem vazio, como na janela que fecha.
+_stopping = False
+_STOP = object()
+
+
+def stop_waits() -> None:
+    """Chamado do tratador de sinal: só agenda, porque o sinal pode chegar com `_lock` tomado."""
+    global _stopping
+    _stopping = True        # já aqui: entrega nova cai no pane em vez de numa espera que vai fechar
+    loop = _loop
+    if loop is not None:
+        try:
+            loop.call_soon_threadsafe(_release_waits)
+        except RuntimeError:
+            pass        # loop já fechado: não há espera viva
+
+
+def _after_stop(queue: asyncio.Queue):
+    """O que chegou junto com a parada ainda é entregue; senão, a espera responde vazio."""
+    while not queue.empty():
+        item = queue.get_nowait()
+        if item is not _STOP:
+            return item
+    return _STOP
+
+
+def _release_waits() -> None:
+    with _lock:
+        queues = [*_waiters.values(), *(p["fila"] for p in _perguntas.values() if p.get("fila"))]
+    for queue in queues:
+        queue.put_nowait(_STOP)
 
 # Dono do long-poll por sessão: (instância, modos declarados, última batida). Um segundo `claude` com
 # o mesmo nome ou pane não pode tomar a fila do primeiro.
 _donos: dict[str, tuple[str, set[str], float]] = {}
+_publications: dict[str, dict] = {}
+
+
+def publish_terminal(name, conversation, generation, publication, validate):
+    """Publica uma vez; aviso perdido conserva a possibilidade de escrita."""
+    if publication.get("mode") not in {"fill", "user"} or not isinstance(publication.get("text"), str):
+        raise ValueError("publicação inválida")
+    validate()
+    if tracked_session_id(name) != conversation:
+        return "not_written"
+    with _lock:
+        queue, loop = _waiters.get(name), _loop
+        modes = (_donos.get(name) or (None, set(), 0))[1]
+        if queue is not None and "receipt_v2" not in modes:
+            return "not_written"
+        if queue is None or loop is None:
+            return "unavailable"
+        if name in _publications:
+            if _publications[name]['conversation'] == conversation:
+                return "unknown"
+            del _publications[name]
+        pending = {"id":publication["id"], "conversation":conversation, "generation":generation,
+            "mode":publication["mode"], "event":threading.Event(), "result":"unknown"}
+        _publications[name] = pending
+    def enqueue():
+        try:
+            validate()
+            if tracked_session_id(name) != conversation:
+                raise RuntimeError("conversa mudou antes da publicação")
+            with _lock:
+                if _waiters.get(name) is not queue:
+                    # A espera saiu (queda de quem a repassava, ou o prazo) entre a escolha e agora.
+                    raise RuntimeError("espera do plugin encerrada antes da publicação")
+            queue.put_nowait({"text":publication["text"], "modo":publication["mode"],
+                "publication_id":publication["id"], "generation":generation, "session_id":conversation})
+        except Exception:
+            pending["result"] = "not_written"
+            pending["event"].set()
+    try:
+        try:
+            loop.call_soon_threadsafe(enqueue)
+        except RuntimeError:
+            return "not_written"
+        pending["event"].wait(PUBLICA_S)
+        return pending["result"]
+    finally:
+        with _lock:
+            if _publications.get(name) is pending:
+                if pending["result"] != "unknown":
+                    del _publications[name]
+                else:
+                    pending["returned"] = True
+
+
+def _terminal_ack(body, mode):
+    with _lock:
+        pending = _publications.get(body.sessao)
+        if pending is None:
+            return body.publication_id is not None
+        if (body.publication_id == pending["id"] and body.generation == pending["generation"]
+                and body.session_id == pending["conversation"] and mode == pending["mode"]):
+            pending["result"] = ("filled" if mode == "fill" else "accepted") if body.ok else "unknown"
+            pending["event"].set()
+            # Aviso tardio só tira a publicação de voo; a entrada segue incerta na fila até o transcript.
+            if pending.get("returned"):
+                del _publications[body.sessao]
+        return True
 
 
 def declared_modes(name: str) -> set[str]:
@@ -66,7 +170,8 @@ _TTL_CAPACIDADE_S = 600.0
 _capacidade: tuple[float, bool] | None = None
 # Mods ligados por padrão no CLI daqui em diante; a variável do acesso antecipado é ignorada.
 MODS_BY_DEFAULT = (2, 1, 287)
-PLUGIN_SRC = Path(__file__).resolve().parents[2] / "plugins" / "hangar"
+PLUGINS_ROOT = Path(__file__).resolve().parents[2] / "plugins"
+PLUGIN_SRC = PLUGINS_ROOT / "hangar"
 _versao: tuple[float, tuple[int, ...] | None] | None = None
 
 
@@ -137,14 +242,21 @@ def ligado() -> bool:
 
 
 def raizes_dos_plugins() -> list[str]:
-    """`--plugin-dir` sempre, mesmo com o plugin na pasta de skills da conta.
+    """Um `--plugin-dir` por mod de `plugins/`, com `plugins/hangar` sempre primeiro.
 
     Só o plugin de `--plugin-dir` fica POR FORA dos instalados pelo marketplace na cadeia de hooks,
-    e a faixa dos mods (`ui.ts`) só enxerga o que os plugins abaixo dele desenham. Com o mesmo nome
-    nos dois lugares, o CLI carrega só o de `--plugin-dir`."""
+    e a faixa dos mods (`ui.ts`) só enxerga o que os plugins depois dele desenham: por isso o do
+    Hangar abre a lista. Com o mesmo nome nos dois lugares, o CLI carrega só o de `--plugin-dir`."""
     if not ligado():
         return []
-    return [str(PLUGIN_SRC)]
+    try:
+        outros = sorted(p for p in PLUGINS_ROOT.iterdir()
+                        if p != PLUGIN_SRC and (p / ".claude-plugin" / "plugin.json").is_file())
+    except OSError as e:
+        # Mod que não deu para listar fica de fora; a sessão nasce com o do Hangar.
+        _log.warning("plugin: não deu para listar %s: %r", PLUGINS_ROOT, e)
+        outros = []
+    return [str(PLUGIN_SRC), *map(str, outros)]
 
 
 def env_da_sessao(name: str) -> dict[str, str]:
@@ -208,7 +320,7 @@ def plugin_dir_file(home: Path | None = None) -> Path:
 
 
 def _publish_plugin_dir(home: Path | None = None) -> None:
-    """Caminho do plugin para o wrapper do shell, que não sabe onde o repositório mora.
+    """Caminhos dos plugins para o wrapper do shell, que não sabe onde o repositório mora.
 
     Sessão aberta no terminal precisa do mesmo `--plugin-dir` das que o backend abre: só pela pasta
     de skills o plugin fica por dentro do marketplace e não enxerga a faixa dos mods. Sem
@@ -220,8 +332,8 @@ def _publish_plugin_dir(home: Path | None = None) -> None:
         return
     alvo.parent.mkdir(parents=True, exist_ok=True)
     tmp = alvo.with_name(alvo.name + ".tmp")
-    # Uma linha, texto puro: quem lê é shell (bash, zsh, fish, PowerShell), sem parser de JSON.
-    tmp.write_text(raizes[0] + "\n", encoding="utf-8", newline="\n")
+    # Uma pasta por linha, texto puro: quem lê é shell (bash, zsh, fish, PowerShell), sem JSON.
+    tmp.write_text("".join(r + "\n" for r in raizes), encoding="utf-8", newline="\n")
     atomico.substituir(tmp, alvo)
 
 
@@ -306,6 +418,7 @@ def esquecer(name: str) -> None:
     _press_wakers.pop(name, None)
     for chave in [c for c in list(_recusas) if c[0] == name]:
         _recusas.pop(chave, None)
+    state_facts.notify(name)
 
 
 def _confere(name: str, token: str) -> None:
@@ -393,6 +506,10 @@ def _prova_user(aviso: threading.Event, texto: str, jsonl: str | None, antes: se
 # é enviado: apertar Enter num composer que não recebeu o texto submete o que
 # estiver lá — ou nada.
 CONFIRMA_S = 5.0
+# Espera do aviso de uma publicação do Rust no terminal. No modo `user` o aviso só sai depois dos
+# hooks do UserPromptSubmit, que com a máquina ocupada passam de 5 s. Fica abaixo do teto da
+# política `terminal_publish` no Rust (`PUBLISH_POLICY_TIMEOUT`).
+PUBLICA_S = 30.0
 
 _confirmacoes: dict[str, threading.Event] = {}
 _preenchido: dict[str, bool] = {}
@@ -464,6 +581,8 @@ def _guardar_faixa(name: str, above: dict | None, columns: int | None, panes: li
         _band_seq += 1
         _bands[name] = (_band_seq, dados, json.dumps({"above": above, "panes": panes}, ensure_ascii=False))
     _acordar_todos(_band_wakers, name)
+    # Largura e âncora da prévia saem da faixa.
+    state_facts.notify(name)
 
 
 def band(name: str) -> tuple[int, dict]:
@@ -648,6 +767,10 @@ VALIDADE_ESTADO_S = 90.0
 # Quantos SSE do app (lista ou conversa) estão abertos agora. Pedido de permissão só é segurado
 # pelo plugin com alguém no app para responder.
 _apps_abertos = 0
+# Listas do dono abertas no Rust, pela contagem do pedido de fatos (`list_facts`). Vence sozinha:
+# Rust que parou de perguntar não pode deixar a permissão presa num app que ninguém vê.
+_apps_remotos = (0, 0.0)
+_APP_REMOTO_TTL_S = 10.0
 
 
 def app_entrou() -> None:
@@ -662,9 +785,16 @@ def app_saiu() -> None:
         _apps_abertos = max(0, _apps_abertos - 1)
 
 
+def app_remoto(count: int) -> None:
+    global _apps_remotos
+    with _lock:
+        _apps_remotos = (count, time.monotonic())
+
+
 def app_presente() -> bool:
     with _lock:
-        return _apps_abertos > 0
+        count, at = _apps_remotos
+        return _apps_abertos > 0 or (count > 0 and time.monotonic() - at <= _APP_REMOTO_TTL_S)
 
 
 def terminal_preso(name: str) -> bool:
@@ -674,12 +804,39 @@ def terminal_preso(name: str) -> bool:
     para o não esconderia o pedido de permissão de quem está olhando o terminal."""
     from app import tmux
     try:
-        cp = tmux._run(["tmux", "list-clients", "-t", f"={name}", "-F", "#{client_tty}"])
+        cp = tmux._run(["tmux", "list-clients", "-t", f"={name}", "-F", "#{client_control_mode}\t#{client_tty}"])
     except Exception:
         return True
     if cp.returncode != 0:
         return True
-    return bool((cp.stdout or b"").strip())
+    raw = cp.stdout
+    if isinstance(raw, bytes):
+        try:
+            raw = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return True
+    if not isinstance(raw, str):
+        return True
+    for line in raw.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 2 or fields[0] != "1":
+            return True
+    return False
+
+
+# Modos em que o `ask` do `tool.check` não vira diálogo: o classificador (auto) aprova ou recusa,
+# e o dontAsk recusa. Segurar ali trocaria essa decisão por uma aprovação manual no app.
+_MODOS_SEM_DIALOGO = frozenset({"auto", "dontAsk"})
+
+
+async def modo_sem_dialogo(name: str) -> bool:
+    """O modo de permissão que o rodapé da sessão mostra decide o `ask` sem perguntar a ninguém?"""
+    from app import permission_mode, state
+    try:
+        pane = await state.shared_capture(name, 1.0)
+    except Exception:
+        return False
+    return permission_mode.parse_permission_mode(pane) in _MODOS_SEM_DIALOGO
 
 
 # Última batida do long-poll de entrada, por sessão: é o pulso que diz que o plugin está vivo.
@@ -714,6 +871,31 @@ def _acordar(name: str) -> None:
         ev.set()
 
 
+def plugin_facts(name: str) -> dict:
+    """O que o plugin disse desta sessão, para o `Monitor` do Rust, sem as validades: elas vão como
+    idade em ms e o Rust as aplica com o relógio dele (`state_facts`)."""
+    agora = time.monotonic()
+
+    def idade(quando: float) -> int:
+        return max(0, round((agora - quando) * 1000))
+
+    with _lock:
+        hit = _estados.get(name)
+        batida = _batidas.get(name)
+        p = _perguntas.get(name)
+        out = {
+            "plugin_state": None if hit is None else {"state": hit[1], "reason": hit[2], "age_ms": idade(hit[0])},
+            "waiter_open": name in _waiters,
+            "heartbeat_age_ms": None if batida is None else idade(batida),
+            "question": None if p is None else {"id": p["id"], "questions": p["questions"], "tool": p.get("tool"),
+                                                "resumo": p.get("resumo"), "seen_age_ms": idade(p["visto"])},
+            "suggestion": _sugestoes.get(name, ""),
+        }
+    out["body_columns"] = transcript_columns(name)
+    out["band_anchor"] = band_anchor(name)
+    return out
+
+
 def estado_recente(name: str) -> tuple[str, str | None] | None:
     """O estado anunciado pelo plugin, se ainda válido. None = o pane que decida."""
     with _lock:
@@ -742,6 +924,8 @@ def entregar(name: str, texto: str, modo: str = MODO_PADRAO, jsonl: str | None =
     from app.conversation_transfer import transfer_active
     if transfer_active(name):
         return False
+    from app.runtime_terminal import assert_writer
+    assert_writer(name)
     with terminal_input._send_lock(name):
         if transfer_active(name):
             return False
@@ -752,7 +936,7 @@ def _entregar(name: str, texto: str, modo: str, jsonl: str | None = None):
     with _lock:
         fila = _waiters.get(name)
         loop = _loop
-    if fila is None or loop is None:
+    if fila is None or loop is None or _stopping:
         return False
     aviso = threading.Event()
     if modo in ("fill", "user"):
@@ -917,8 +1101,27 @@ async def _whoami(body: WhoamiBody) -> tuple[str | None, str]:
         return None, "nome"
 
 
+async def _disconnected(request) -> None:
+    """Termina quando o cliente da espera cai: o corpo já foi lido, o que vier é a desconexão."""
+    while (await request.receive())["type"] != "http.disconnect":
+        pass
+
+
+def _undelivered(name: str, item) -> None:
+    """Publicação que chegou junto com a queda do cliente: o plugin nunca a recebeu."""
+    if not isinstance(item, dict) or item.get("publication_id") is None:
+        if item is not _STOP:
+            _log.warning("plugin: entrega perdida com a queda da espera sessao=%s", name)
+        return
+    with _lock:
+        pending = _publications.get(name)
+        if pending is not None and pending["id"] == item["publication_id"]:
+            pending["result"] = "not_written"
+            pending["event"].set()
+
+
 @plugin_router.post("/pull")
-async def pull(body: PullBody):
+async def pull(body: PullBody, request: Request = None):
     """Long-poll do plugin. Sempre 200: com o texto, ou `{"text": null}` quando a janela fecha vazia.
 
     Sem `Depends(require_auth)`: quem chama é o pane, que não tem o bearer do
@@ -942,6 +1145,11 @@ async def pull(body: PullBody):
         dono = _donos.get(body.sessao)
         if dono and dono[0] != body.instance and agora - dono[2] < ESPERA_S + 10:
             raise HTTPException(409, detail="outra instância do plugin já atende esta sessão")
+        retida = _publications.get(body.sessao)
+        if (not dono or dono[0] != body.instance) and retida and retida.get("returned"):
+            # Instância nova: a que podia escrever a publicação incerta não atende mais, e a trava
+            # da fila continua segurando a entrada até o transcript.
+            del _publications[body.sessao]
         _donos[body.sessao] = (body.instance, set(body.modos) or {"fill"}, agora)
         # Só semeia: com entrada do `/state`, quem manda é ela.
         if body.estado and body.sessao not in _estados:
@@ -952,11 +1160,33 @@ async def pull(body: PullBody):
         _loop = asyncio.get_running_loop()
         _waiters[body.sessao] = fila
         _batidas[body.sessao] = time.monotonic()
+    state_facts.notify(body.sessao)
     # `faixa`: o backend tem a faixa dos mods desta sessão? Reiniciado, não tem, e o plugin reenvia.
+    gone = False
     try:
-        entrega = await asyncio.wait_for(fila.get(), timeout=ESPERA_S)
-    except asyncio.TimeoutError:
-        return {"text": None, "faixa": body.sessao in _bands}
+        if _stopping:
+            entrega = _STOP
+        else:
+            # A espera chega pelo hangar-server: se ele morre, a conexão cai e a espera tem que sair,
+            # senão o próximo publica nela e a confirmação nunca vem.
+            proximo = asyncio.ensure_future(fila.get())
+            queda = asyncio.ensure_future(_disconnected(request)) if request is not None else None
+            try:
+                feitos, _ = await asyncio.wait({proximo, *([queda] if queda else [])}, timeout=ESPERA_S,
+                                               return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for tarefa in (proximo, queda):
+                    if tarefa is not None and not tarefa.done():
+                        tarefa.cancel()
+            gone = queda is not None and queda in feitos
+            entrega = proximo.result() if proximo in feitos else _STOP
+        if entrega is _STOP:
+            entrega = _after_stop(fila)
+        if gone:
+            _undelivered(body.sessao, entrega)
+            while not fila.empty():
+                _undelivered(body.sessao, fila.get_nowait())
+            entrega = _STOP
     finally:
         with _lock:
             # Só renova o próprio dono: um `esquecer` ou outra instância no meio não é desfeito.
@@ -966,6 +1196,9 @@ async def pull(body: PullBody):
             _batidas[body.sessao] = time.monotonic()
             if _waiters.get(body.sessao) is fila:
                 del _waiters[body.sessao]
+        state_facts.notify(body.sessao)
+    if entrega is _STOP:
+        return {"text": None, "faixa": body.sessao in _bands}
     return {**entrega, "faixa": body.sessao in _bands}
 
 
@@ -987,6 +1220,7 @@ async def suggest(body: SuggestBody):
         # `mostrada=False` é proposta que a TUI não pôs na caixa (diálogo aberto, headless): mostrar
         # no app o que nem o terminal mostrou seria inventar estado.
         _sugestoes[body.sessao] = body.texto if body.mostrada else ""
+    state_facts.notify(body.sessao)
     return {"ok": True}
 
 
@@ -1106,13 +1340,29 @@ async def opened(body: OpenedBody):
 _perguntas: dict[str, dict] = {}
 
 
+def interrompeu(name: str, id: str | None) -> None:
+    """O Esc do app fecha o diálogo `id` (lido antes do Esc) no terminal, e o hook morre sem
+    `/ask-fim` deixando o long-poll aberto até a janela fechar. A pergunta interrompida deixa de
+    contar na hora e o long-poll é acordado para terminar; hook que ainda pergunta depois de
+    `HOOK_VIVO_S` sobreviveu ao Esc e a pergunta volta a contar."""
+    with _lock:
+        p = _perguntas.get(name)
+        if p is None or id is None or p["id"] != id:
+            return
+        p["interrompida"] = time.monotonic()
+        fila = p.get("fila")
+    if fila is not None:
+        fila.put_nowait({"answers": None})
+
+
 def pergunta_pendente(name: str) -> dict | None:
     """A pergunta que o plugin segura agora (`id`, `questions`), ou None.
 
     Só vale com o long-poll batendo: hook que morreu não pode segurar a resposta do app."""
     with _lock:
         p = _perguntas.get(name)
-        if p is None or time.monotonic() - p["visto"] > ESPERA_S + 10:
+        idade = time.monotonic() - p["visto"] if p is not None else 0
+        if p is None or p.get("interrompida") or idade > ESPERA_S + 10 or not p.get("fila") and idade > SEM_POLL_S:
             return None
         return {"id": p["id"], "questions": p["questions"], "tool": p.get("tool"),
                 "resumo": p.get("resumo")}
@@ -1123,7 +1373,7 @@ def pergunta_pendente(name: str) -> dict | None:
 _fechadas: dict[str, tuple[str, str]] = {}
 
 
-def responder_pergunta(name: str, corpo: dict, id: str | None = None) -> bool:
+def responder_pergunta(name: str, corpo: dict, id: str | None = None, receipt: dict | None = None) -> bool:
     """Entrega a resposta do app ao hook. False = ele não pegou; quem chama cai na tecla.
 
     `id` é a pergunta que quem chama leu em `pergunta_pendente`: outra pergunta no lugar não recebe
@@ -1132,7 +1382,12 @@ def responder_pergunta(name: str, corpo: dict, id: str | None = None) -> bool:
         p = _perguntas.get(name)
         loop = _loop
         if p is None or loop is None or (id is not None and p["id"] != id):
-            return id is not None and _fechadas.get(name) == (id, "app")
+            return receipt is None and id is not None and _fechadas.get(name) == (id, "app")
+        if receipt is not None:
+            if p.get("publication") is not None and p["publication"] != receipt:
+                return False
+            p["publication"] = dict(receipt)
+            corpo = {**corpo, **receipt}
         aviso = p.get("aviso")
         primeiro = aviso is None
         fila = None
@@ -1177,14 +1432,16 @@ async def ask(body: AskBody):
     global _loop
     # Permissão só fica com o plugin enquanto há alguém no app E ninguém no terminal: segurar
     # esconde o diálogo do terminal. Reavaliado a cada poll do hook, então prender um terminal no
-    # meio da espera devolve o diálogo a ele em poucos segundos.
+    # meio da espera devolve o diálogo a ele em poucos segundos. Em modo sem diálogo, nunca segura.
     if body.id.startswith("perm:") and (
-            not app_presente() or await asyncio.to_thread(terminal_preso, body.sessao)):
+            not app_presente() or await modo_sem_dialogo(body.sessao)
+            or await asyncio.to_thread(terminal_preso, body.sessao)):
         with _lock:
             p = _perguntas.get(body.sessao)
             if p is not None and p["id"] == body.id:
                 del _perguntas[body.sessao]
         _acordar(body.sessao)
+        state_facts.notify(body.sessao)
         return {"soltar": True}
     fila: asyncio.Queue = asyncio.Queue()
     with _lock:
@@ -1194,15 +1451,22 @@ async def ask(body: AskBody):
             p = _perguntas[body.sessao] = {"id": body.id, "questions": body.questions or [],
                                            "tool": body.tool, "resumo": body.resumo}
         p["visto"] = time.monotonic()
+        if p.get("interrompida") and p["visto"] - p["interrompida"] > HOOK_VIVO_S:
+            p.pop("interrompida")
         guardada = p.pop("resposta", None)
         if guardada is None:
             p["fila"] = fila
     _acordar(body.sessao)
+    # Cada poll do hook renova o `visto`: pergunta nova sai na hora, a renovação no máximo a cada 25 s.
+    state_facts.notify(body.sessao, state_facts.REFRESH)
     if guardada is not None:
         return guardada
     espera = min(ESPERA_S, body.janela_ms / 1000) if body.janela_ms else ESPERA_S
     try:
-        return await asyncio.wait_for(fila.get(), timeout=espera)
+        resposta = _STOP if _stopping else await asyncio.wait_for(fila.get(), timeout=espera)
+        if resposta is _STOP:
+            resposta = _after_stop(fila)
+        return {"answers": None} if resposta is _STOP else resposta
     except asyncio.TimeoutError:
         return {"answers": None}
     finally:
@@ -1218,6 +1482,9 @@ class AskFimBody(BaseModel):
     token: str
     id: str
     vencedor: str
+    publication_id: str | None = None
+    generation: int | None = None
+    session_id: str | None = None
 
 
 @plugin_router.post("/ask-fim")
@@ -1228,6 +1495,9 @@ async def ask_fim(body: AskFimBody):
         p = _perguntas.get(body.sessao)
         if p is None or p["id"] != body.id:
             return {"ok": True}
+        if p.get("publication") is not None and p["publication"] != {
+                "publication_id":body.publication_id, "generation":body.generation, "session_id":body.session_id}:
+            return {"ok": True}
         del _perguntas[body.sessao]
         _fechadas[body.sessao] = (body.id, body.vencedor)
         fila, aviso = p.get("fila"), p.get("aviso")
@@ -1236,6 +1506,7 @@ async def ask_fim(body: AskFimBody):
     if aviso is not None and body.vencedor == "app":
         aviso.set()
     _acordar(body.sessao)
+    state_facts.notify(body.sessao)
     _log.info("plugin pergunta sessao=%s fechou por %s", body.sessao, body.vencedor)
     return {"ok": True}
 
@@ -1244,6 +1515,9 @@ class FilledBody(BaseModel):
     sessao: str
     token: str
     ok: bool
+    publication_id: str | None = None
+    generation: int | None = None
+    session_id: str | None = None
 
 
 @plugin_router.post("/filled")
@@ -1252,6 +1526,8 @@ async def filled(body: FilledBody):
 
     É o que libera o Enter: sem esse aviso o Hangar não aperta tecla nenhuma."""
     _confere(body.sessao, body.token)
+    if _terminal_ack(body, "fill"):
+        return {"ok": True}
     with _lock:
         aviso = _confirmacoes.get(body.sessao)
         _preenchido[body.sessao] = body.ok
@@ -1264,12 +1540,17 @@ class SubmittedBody(BaseModel):
     sessao: str
     token: str
     ok: bool
+    publication_id: str | None = None
+    generation: int | None = None
+    session_id: str | None = None
 
 
 @plugin_router.post("/submitted", dependencies=[Depends(require_loopback)])
 async def submitted(body: SubmittedBody):
     """O plugin avisa se o `$.prompt.submit` do modo `user` foi aceito."""
     _confere(body.sessao, body.token)
+    if _terminal_ack(body, "user"):
+        return {"ok": True}
     with _lock:
         aviso = _confirmacoes.get(body.sessao)
         _preenchido[body.sessao] = body.ok
@@ -1294,6 +1575,7 @@ async def state(body: StateBody, request: Request):
             # que o engine não dá.
             _sugestoes.pop(body.sessao, None)
     _acordar(body.sessao)
+    state_facts.notify(body.sessao, state_facts.FORCE)
     _log.debug("plugin estado sessao=%s estado=%s motivo=%s", body.sessao, body.estado, body.motivo)
     return {"ok": True}
 

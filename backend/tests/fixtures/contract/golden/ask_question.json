@@ -1,0 +1,963 @@
+[
+ {
+  "name": "match",
+  "state": "awaiting_input",
+  "options": [
+   "A",
+   "B",
+   "Type something."
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "Cor",
+      "question": "Escolha",
+      "multiSelect": true,
+      "options": [
+       {
+        "label": "A",
+        "description": "sobre A",
+        "preview": ""
+       },
+       {
+        "label": "B",
+        "description": "sobre B",
+        "preview": ""
+       }
+      ]
+     },
+     {
+      "header": "Fruta",
+      "question": "Escolha fruta",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "X",
+        "description": "sobre X",
+        "preview": ""
+       },
+       {
+        "label": "Y",
+        "description": "sobre Y",
+        "preview": ""
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": {
+   "questions": [
+    {
+     "header": "Cor",
+     "question": "Escolha",
+     "multiSelect": true,
+     "options": [
+      {
+       "label": "A",
+       "description": "sobre A",
+       "preview": ""
+      },
+      {
+       "label": "B",
+       "description": "sobre B",
+       "preview": ""
+      }
+     ]
+    },
+    {
+     "header": "Fruta",
+     "question": "Escolha fruta",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "X",
+       "description": "sobre X",
+       "preview": ""
+      },
+      {
+       "label": "Y",
+       "description": "sobre Y",
+       "preview": ""
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "working",
+  "state": "working",
+  "options": [
+   "A",
+   "B"
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "Cor",
+      "question": "Escolha",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "A",
+        "description": "sobre A",
+        "preview": ""
+       },
+       {
+        "label": "B",
+        "description": "sobre B",
+        "preview": ""
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": null
+ },
+ {
+  "name": "mismatch",
+  "state": "awaiting_input",
+  "options": [
+   "Sim",
+   "Nao"
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "Cor",
+      "question": "Escolha",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "A",
+        "description": "sobre A",
+        "preview": ""
+       },
+       {
+        "label": "B",
+        "description": "sobre B",
+        "preview": ""
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": null
+ },
+ {
+  "name": "extra_real_option",
+  "state": "awaiting_input",
+  "options": [
+   "Cancelar",
+   "Sim",
+   "Nao"
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "Confirma",
+      "question": "Vai?",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "Sim",
+        "description": "sobre Sim",
+        "preview": ""
+       },
+       {
+        "label": "Nao",
+        "description": "sobre Nao",
+        "preview": ""
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": null
+ },
+ {
+  "name": "tui_extras",
+  "state": "awaiting_input",
+  "options": [
+   "A",
+   "B",
+   "Type something.",
+   "Chat about this"
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "Cor",
+      "question": "Escolha",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "A",
+        "description": "sobre A",
+        "preview": ""
+       },
+       {
+        "label": "B",
+        "description": "sobre B",
+        "preview": ""
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": {
+   "questions": [
+    {
+     "header": "Cor",
+     "question": "Escolha",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "A",
+       "description": "sobre A",
+       "preview": ""
+      },
+      {
+       "label": "B",
+       "description": "sobre B",
+       "preview": ""
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "single",
+  "state": "awaiting_input",
+  "options": [
+   "A"
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "Cor",
+      "question": "Escolha",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "A",
+        "description": "sobre A",
+        "preview": ""
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": {
+   "questions": [
+    {
+     "header": "Cor",
+     "question": "Escolha",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "A",
+       "description": "sobre A",
+       "preview": ""
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "no_options",
+  "state": "awaiting_input",
+  "options": null,
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "Cor",
+      "question": "Escolha",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "A",
+        "description": "sobre A",
+        "preview": ""
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": null
+ },
+ {
+  "name": "empty_first",
+  "state": "awaiting_input",
+  "options": [
+   "A"
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "Cor",
+      "question": "Escolha",
+      "multiSelect": false,
+      "options": []
+     }
+    ]
+   }
+  },
+  "expected": null
+ },
+ {
+  "name": "preview_truncated",
+  "state": "awaiting_input",
+  "options": [
+   "System no topo (igual aos",
+   "Alfab\u00e9tico (obedece",
+   "Type something.",
+   "Chat about this"
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "Ordem",
+      "question": "Como deixo?",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "System no topo (igual aos irm\u00e3os)",
+        "description": "sobre System no topo (igual aos irm\u00e3os)",
+        "preview": "using System.Reflection;"
+       },
+       {
+        "label": "Alfab\u00e9tico (obedece .editorconfig)",
+        "description": "sobre Alfab\u00e9tico (obedece .editorconfig)",
+        "preview": ""
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": {
+   "questions": [
+    {
+     "header": "Ordem",
+     "question": "Como deixo?",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "System no topo (igual aos irm\u00e3os)",
+       "description": "sobre System no topo (igual aos irm\u00e3os)",
+       "preview": "using System.Reflection;"
+      },
+      {
+       "label": "Alfab\u00e9tico (obedece .editorconfig)",
+       "description": "sobre Alfab\u00e9tico (obedece .editorconfig)",
+       "preview": ""
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "preview_count_differs",
+  "state": "awaiting_input",
+  "options": [
+   "System no topo (igual aos"
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "Ordem",
+      "question": "Como deixo?",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "System no topo (igual aos irm\u00e3os)",
+        "description": "sobre System no topo (igual aos irm\u00e3os)",
+        "preview": "using System.Reflection;"
+       },
+       {
+        "label": "Alfab\u00e9tico (obedece .editorconfig)",
+        "description": "sobre Alfab\u00e9tico (obedece .editorconfig)",
+        "preview": ""
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": null
+ },
+ {
+  "name": "preview_pane_prefix_ok",
+  "state": "awaiting_input",
+  "options": [
+   "Yes",
+   "No"
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "P",
+      "question": "Q",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "Yes, and bypass",
+        "description": "sobre Yes, and bypass",
+        "preview": ""
+       },
+       {
+        "label": "No",
+        "description": "sobre No",
+        "preview": "x"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": {
+   "questions": [
+    {
+     "header": "P",
+     "question": "Q",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "Yes, and bypass",
+       "description": "sobre Yes, and bypass",
+       "preview": ""
+      },
+      {
+       "label": "No",
+       "description": "sobre No",
+       "preview": "x"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "preview_sidecar_short_no_cross",
+  "state": "awaiting_input",
+  "options": [
+   "Yes, and bypass",
+   "No"
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "P",
+      "question": "Q",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "Yes",
+        "description": "sobre Yes",
+        "preview": ""
+       },
+       {
+        "label": "No",
+        "description": "sobre No",
+        "preview": "x"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": null
+ },
+ {
+  "name": "preview_same_count_not_prefix",
+  "state": "awaiting_input",
+  "options": [
+   "Alfa",
+   "Bravo"
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "P",
+      "question": "Q",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "Xis",
+        "description": "sobre Xis",
+        "preview": "x"
+       },
+       {
+        "label": "Bravo",
+        "description": "sobre Bravo",
+        "preview": ""
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": null
+ },
+ {
+  "name": "preview_only_second_question",
+  "state": "awaiting_input",
+  "options": [
+   "A trunc",
+   "B"
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "P",
+      "question": "Q",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "A truncado",
+        "description": "sobre A truncado",
+        "preview": ""
+       },
+       {
+        "label": "B",
+        "description": "sobre B",
+        "preview": ""
+       }
+      ]
+     },
+     {
+      "header": "R",
+      "question": "S",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "C",
+        "description": "sobre C",
+        "preview": "x"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": {
+   "questions": [
+    {
+     "header": "P",
+     "question": "Q",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "A truncado",
+       "description": "sobre A truncado",
+       "preview": ""
+      },
+      {
+       "label": "B",
+       "description": "sobre B",
+       "preview": ""
+      }
+     ]
+    },
+    {
+     "header": "R",
+     "question": "S",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "C",
+       "description": "sobre C",
+       "preview": "x"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "only_tui_extras",
+  "state": "awaiting_input",
+  "options": [
+   "Type something.",
+   "Chat about this"
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "Cor",
+      "question": "Escolha",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "A",
+        "description": "sobre A",
+        "preview": ""
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": null
+ },
+ {
+  "name": "extra_box_and_period",
+  "state": "awaiting_input",
+  "options": [
+   "[ ] A",
+   "[ ] Type something."
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "Cor",
+      "question": "Escolha",
+      "multiSelect": true,
+      "options": [
+       {
+        "label": "A",
+        "description": "sobre A",
+        "preview": ""
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": {
+   "questions": [
+    {
+     "header": "Cor",
+     "question": "Escolha",
+     "multiSelect": true,
+     "options": [
+      {
+       "label": "A",
+       "description": "sobre A",
+       "preview": ""
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "options_empty_list",
+  "state": "awaiting_input",
+  "options": [],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "Cor",
+      "question": "Escolha",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "A",
+        "description": "sobre A",
+        "preview": ""
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": null
+ },
+ {
+  "name": "preview_empty_pane_label",
+  "state": "awaiting_input",
+  "options": [
+   "",
+   "B"
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "P",
+      "question": "Q",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "A",
+        "description": "sobre A",
+        "preview": "x"
+       },
+       {
+        "label": "B",
+        "description": "sobre B",
+        "preview": ""
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": null
+ },
+ {
+  "name": "pane_preview",
+  "pane": "   Como deixo o meu?\n\n \u276f 1. System no topo (igual aos     \u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\n      irm\u00e3os)                        \u2502 using System.Reflection;     \u2502\n   2. Alfab\u00e9tico (obedece           \u2502 using Xunit;                 \u2502\n      .editorconfig)                 \u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\n   3. Type something.\n",
+  "state": "awaiting_input",
+  "options": [
+   "System no topo (igual aos",
+   "Alfab\u00e9tico (obedece",
+   "Type something."
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "Ordem",
+      "question": "Como deixo?",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "System no topo (igual aos irm\u00e3os)",
+        "description": "sobre System no topo (igual aos irm\u00e3os)",
+        "preview": "using System.Reflection;"
+       },
+       {
+        "label": "Alfab\u00e9tico (obedece .editorconfig)",
+        "description": "sobre Alfab\u00e9tico (obedece .editorconfig)",
+        "preview": ""
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": {
+   "questions": [
+    {
+     "header": "Ordem",
+     "question": "Como deixo?",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "System no topo (igual aos irm\u00e3os)",
+       "description": "sobre System no topo (igual aos irm\u00e3os)",
+       "preview": "using System.Reflection;"
+      },
+      {
+       "label": "Alfab\u00e9tico (obedece .editorconfig)",
+       "description": "sobre Alfab\u00e9tico (obedece .editorconfig)",
+       "preview": ""
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "pane_multi_box",
+  "pane": "   Quais cores?\n\n \u276f 1. [ ] Alfa\n   2. [x] Bravo\n   3. [ ] Type something\n   4. Chat about this\n",
+  "state": "awaiting_input",
+  "options": [
+   "[ ] Alfa",
+   "[x] Bravo",
+   "[ ] Type something",
+   "Chat about this"
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "Cores",
+      "question": "Quais cores?",
+      "multiSelect": true,
+      "options": [
+       {
+        "label": "Alfa",
+        "description": "sobre Alfa",
+        "preview": ""
+       },
+       {
+        "label": "Bravo",
+        "description": "sobre Bravo",
+        "preview": ""
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": {
+   "questions": [
+    {
+     "header": "Cores",
+     "question": "Quais cores?",
+     "multiSelect": true,
+     "options": [
+      {
+       "label": "Alfa",
+       "description": "sobre Alfa",
+       "preview": ""
+      },
+      {
+       "label": "Bravo",
+       "description": "sobre Bravo",
+       "preview": ""
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "no_sidecar",
+  "state": "awaiting_input",
+  "options": [
+   "A"
+  ],
+  "sidecar": null,
+  "expected": null
+ },
+ {
+  "name": "malformed_no_header",
+  "state": "awaiting_input",
+  "options": [
+   "A"
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "question": "Q",
+      "options": [
+       {
+        "label": "A"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": null
+ },
+ {
+  "name": "malformed_not_json",
+  "state": "awaiting_input",
+  "options": [
+   "A"
+  ],
+  "sidecar": "{",
+  "expected": null
+ },
+ {
+  "name": "malformed_no_tool_input",
+  "state": "awaiting_input",
+  "options": [
+   "A"
+  ],
+  "sidecar": {
+   "questions": []
+  },
+  "expected": null
+ },
+ {
+  "name": "malformed_questions_not_list",
+  "state": "awaiting_input",
+  "options": [
+   "A"
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": {
+     "a": 1
+    }
+   }
+  },
+  "expected": null
+ },
+ {
+  "name": "malformed_option_no_label",
+  "state": "awaiting_input",
+  "options": [
+   "A"
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "H",
+      "question": "Q",
+      "options": [
+       {
+        "description": "d"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": null
+ },
+ {
+  "name": "minimal_fields",
+  "state": "awaiting_input",
+  "options": [
+   "A"
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "H",
+      "question": "Q",
+      "options": [
+       {
+        "label": "A"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": {
+   "questions": [
+    {
+     "header": "H",
+     "question": "Q",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "A",
+       "description": "",
+       "preview": ""
+      }
+     ]
+    }
+   ]
+  }
+ }
+]

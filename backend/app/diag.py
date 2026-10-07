@@ -22,7 +22,8 @@ Por que um arquivo por DIA e não um só que rotaciona por tamanho: a pergunta r
 tem data ("aconteceu hoje, e tinha acontecido sábado também" — o relato que originou isto). Cortar
 por tamanho embaralha justamente esse limite, e um dia movimentado apaga a semana inteira. Assim
 cada dia é um arquivo, guardam-se sete, e o mais velho sai sozinho. O teto POR DIA continua
-existindo como rede contra laço maluco — ele para de gravar aquele dia em vez de encher o disco.
+existindo como rede contra laço maluco — ele para de gravar sucesso naquele dia, e falha só para no
+teto rígido, em vez de encher o disco.
 """
 import contextvars
 import hashlib
@@ -58,9 +59,11 @@ _operacao_atual: contextvars.ContextVar[str] = contextvars.ContextVar("hangar_op
 
 DIAS_GUARDADOS = 7
 # Teto por DIA. Não é pra economizar disco — é pra o arquivo continuar mandável por chat, que é o
-# único caminho dele até quem analisa. Estourou, aquele dia para de receber (com uma última linha
-# dizendo isso), e os outros seguem normais.
+# único caminho dele até quem analisa. Estourou, aquele dia para de receber SUCESSO (com uma linha
+# dizendo isso); aviso e erro seguem até o teto rígido, que só existe para um laço de falhas não
+# encher o disco. Sucesso nunca pode calar a falha: ela é o motivo do arquivo.
 _TETO_DIA = 4 * 1024 * 1024
+_TETO_RIGIDO = 8 * 1024 * 1024
 _NOME = re.compile(r"^uso-(\d{4}-\d{2}-\d{2})\.jsonl$")
 
 # Campos aceitos numa linha vinda da tela. Ver a regra de conteúdo no topo do módulo.
@@ -117,6 +120,8 @@ _CAMPOS: dict[str, type] = {
     "tentativa": int,
     "quantidade": int,
     "espera_ms": int,
+    "commit": str,      # hash do manifesto da release do hangar-server
+    "tag": str,         # release do hangar-server (server-latest ou server-<branch>)
 }
 
 
@@ -412,22 +417,27 @@ def _escrever(linhas: list[dict[str, Any]]) -> int:
     # com ele; quem não trouxe — os eventos do próprio backend — herda o do envio, que pra eles é o
     # mesmo instante.
     agora = datetime.now().astimezone().isoformat(timespec="milliseconds")
-    texto = "".join(
-        json.dumps({"ts": agora, **linha}, ensure_ascii=False) + "\n" for linha in linhas
-    )
     with _LOCK:
         try:
             tamanho = arq.stat().st_size if arq.exists() else 0
         except OSError:
             tamanho = 0
-        if tamanho > _TETO_DIA:
+        if tamanho >= _TETO_RIGIDO:
             return 0
-        if tamanho + len(texto.encode()) > _TETO_DIA:
-            # Última linha do dia diz que parou — um arquivo que simplesmente cessa parece máquina
-            # desligada, e é a leitura errada.
-            texto += json.dumps({"ts": agora, "evento": "diag.teto", "nivel": "aviso",
-                                 "origem": "servidor",
-                                 "detalhe": f"teto de {_TETO_DIA} bytes no dia"}) + "\n"
+        if tamanho >= _TETO_DIA:
+            linhas = [linha for linha in linhas if linha.get("nivel") != "ok"]
+            if not linhas:
+                return 0
+        texto = "".join(
+            json.dumps({"ts": agora, **linha}, ensure_ascii=False) + "\n" for linha in linhas
+        )
+        for teto, o_que in ((_TETO_DIA, "sucesso"), (_TETO_RIGIDO, "tudo")):
+            if tamanho < teto <= tamanho + len(texto.encode()):
+                # Linha que diz que parou — um arquivo que simplesmente cessa parece máquina
+                # desligada, e é a leitura errada.
+                texto += json.dumps({"ts": agora, "evento": "diag.teto", "nivel": "aviso",
+                                     "origem": "servidor", "etapa": o_que,
+                                     "detalhe": f"teto de {teto} bytes no dia"}) + "\n"
         # Append direto, sem tmp+rename: a escrita é SEMPRE no fim e nunca reescreve o que já está
         # lá, então o padrão da casa (que protege quem substitui o arquivo inteiro) só faria
         # reescrever megabytes a cada evento. Uma linha cabe folgada no buffer do sistema.

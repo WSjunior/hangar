@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use crate::{api::dto::ChatEvent, appearance::ThinkingTools};
 
 /// One visible row. Holds indices into `Chat::events`, never the row's own position in the list.
@@ -16,12 +16,13 @@ pub enum Item {
 }
 
 /// Escolhas de Aparência que mudam quais linhas a conversa tem. `merge_thinking` (visual Árvore): raciocínio e
-/// chamadas seguidas viram um grupo só, de qualquer tamanho, e o `thinking` deixa de valer.
+/// chamadas seguidas viram um grupo só, de qualquer tamanho, e o `thinking` deixa de valer. `every_run_groups` (visual
+/// Terminal): chamadas seguidas viram grupo de qualquer tamanho, para a linha dobrada somá-las como o Claude Code.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct View { pub thinking: ThinkingTools, pub tasks: bool, pub merge_thinking: bool }
+pub struct View { pub thinking: ThinkingTools, pub tasks: bool, pub merge_thinking: bool, pub every_run_groups: bool }
 
 impl Default for View {
-    fn default() -> Self { Self { thinking: ThinkingTools::Search, tasks: false, merge_thinking: false } }
+    fn default() -> Self { Self { thinking: ThinkingTools::Search, tasks: false, merge_thinking: false, every_run_groups: false } }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -89,7 +90,7 @@ pub fn build(events: &[ChatEvent], view: View, pinned: &HashSet<usize>) -> Vec<I
     // Posição e id do bloco de tarefas: onde estava a última chamada de tarefa, com o id da primeira.
     let mut tasks: Option<(usize, String)> = None;
     let flush_run = |run: &mut Vec<Tool>, items: &mut Vec<Item>| {
-        if run.len() >= GROUP_MIN || view.merge_thinking && !run.is_empty() {
+        if run.len() >= GROUP_MIN || (view.merge_thinking || view.every_run_groups) && !run.is_empty() {
             let id = format!("g-{}", events[run[0].call].id);
             items.push(Item::Group { id, tools: std::mem::take(run) });
         } else { items.extend(run.drain(..).map(Item::Tool)); }
@@ -233,13 +234,13 @@ fn task_status(value: Option<&Value>) -> Option<TaskStatus> {
 }
 
 /// O `String(x ?? y ?? '')` do web para ids que chegam como texto ou número.
-fn loose_id(input: Option<&Value>, keys: &[&str]) -> String {
+fn loose_id(input: Option<&Map<String, Value>>, keys: &[&str]) -> String {
     let value = keys.iter().find_map(|key| input.and_then(|v| v.get(*key)).filter(|v| !v.is_null()));
     match value { Some(Value::String(s)) => s.clone(), Some(other) => other.to_string(), None => String::new() }
 }
 
 /// Lista inteira de um TodoWrite (`todos[].content`) ou `update_plan` (`plan[].step`); `None` quando o campo não é lista.
-fn whole_list(input: Option<&Value>, list: &str, title: &str) -> Option<Vec<(ActivityTask, bool)>> {
+fn whole_list(input: Option<&Map<String, Value>>, list: &str, title: &str) -> Option<Vec<(ActivityTask, bool)>> {
     let raw = input.and_then(|v| v.get(list))?;
     let parsed = raw.as_str().and_then(|s| serde_json::from_str::<Value>(s).ok());
     let items = parsed.as_ref().unwrap_or(raw).as_array()?;
@@ -475,8 +476,8 @@ pub fn one_line(text: &str, max: usize) -> String {
     cut
 }
 
-pub fn summarize_input(name: Option<&str>, input: Option<&Value>) -> String {
-    let Some(Value::Object(map)) = input else { return String::new(); };
+pub fn summarize_input(name: Option<&str>, input: Option<&Map<String, Value>>) -> String {
+    let Some(map) = input else { return String::new(); };
     let text = |key: &str| match map.get(key) {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Null) | None => String::new(),
@@ -508,11 +509,10 @@ pub fn summarize_input(name: Option<&str>, input: Option<&Value>) -> String {
     one_line(&found, SUMMARY_MAX)
 }
 
-pub fn pretty_input(input: Option<&Value>) -> String {
+pub fn pretty_input(input: Option<&Map<String, Value>>) -> String {
     match input {
-        None | Some(Value::Null) => String::new(),
-        Some(Value::Object(map)) if map.is_empty() => String::new(),
-        Some(value) => serde_json::to_string_pretty(value).unwrap_or_default(),
+        Some(map) if !map.is_empty() => serde_json::to_string_pretty(map).unwrap_or_default(),
+        _ => String::new(),
     }
 }
 
@@ -557,7 +557,7 @@ mod tests {
     fn result(id: &str, tool: &str) -> ChatEvent { ChatEvent { tool_use_id: Some(tool.into()), ..ev("tool_result", id) } }
     // Os testes antigos valem para o padrão da Aparência.
     fn build(events: &[ChatEvent]) -> Vec<Item> { super::build(events, View::default(), &HashSet::new()) }
-    fn with_input(mut event: ChatEvent, input: Value) -> ChatEvent { event.tool_input = Some(input); event }
+    fn with_input(mut event: ChatEvent, input: Value) -> ChatEvent { event.tool_input = input.as_object().cloned(); event }
     fn answered(id: &str, tool: &str, text: &str) -> ChatEvent { ChatEvent { result: Some(text.into()), ..result(id, tool) } }
 
     #[test]
@@ -584,6 +584,18 @@ mod tests {
             Item::Group { id: "g-t".into(), tools: vec![tool(0, None), tool(1, Some(2))] }, Item::Event(3),
             Item::Group { id: "g-b".into(), tools: vec![tool(4, None)] }, Item::Tool(tool(5, None)),
             Item::Group { id: "g-t2".into(), tools: vec![tool(6, None)] },
+        ]);
+    }
+
+    #[test]
+    fn terminal_groups_runs_of_any_size_but_thinking_still_splits_them() {
+        let events = vec![call("a", "1", "Bash"), call("b", "2", "Read"), ev("thinking", "t"), call("c", "3", "Bash")];
+        let tool = |call| Tool { call, result: None };
+        let view = View { every_run_groups: true, ..View::default() };
+        assert_eq!(super::build(&events, view, &HashSet::new()), vec![
+            Item::Group { id: "g-a".into(), tools: vec![tool(0), tool(1)] },
+            Item::Thinking { id: "p-t".into(), parts: vec![2] },
+            Item::Group { id: "g-c".into(), tools: vec![tool(3)] },
         ]);
     }
 
@@ -717,9 +729,9 @@ mod tests {
 
     #[test]
     fn summaries_pick_salient_field() {
-        assert_eq!(summarize_input(Some("Bash"), Some(&json!({"command": "ls   -la\n/tmp"}))), "ls -la /tmp");
-        assert_eq!(summarize_input(Some("Grep"), Some(&json!({"pattern": "foo", "path": "src"}))), "\"foo\" src");
-        assert_eq!(summarize_input(Some("mcp_x"), Some(&json!({"other": 3}))), "3");
+        assert_eq!(summarize_input(Some("Bash"), json!({"command": "ls   -la\n/tmp"}).as_object()), "ls -la /tmp");
+        assert_eq!(summarize_input(Some("Grep"), json!({"pattern": "foo", "path": "src"}).as_object()), "\"foo\" src");
+        assert_eq!(summarize_input(Some("mcp_x"), json!({"other": 3}).as_object()), "3");
     }
 
     fn agent(id: &str, tool: &str, input: Value) -> ChatEvent { with_input(call(id, tool, "Agent"), input) }

@@ -31,6 +31,9 @@ export function registerInput(on: On) {
     } else {
       $.clock.after(REARM_MS, () => void discover($));
     }
+    // Recarregado (atualização do plugin), o módulo começa sem a faixa e os painéis, e o engine não
+    // redesenha o que já está na tela: o ui.ts só os vê de novo com o desenho pedido.
+    $.ui.invalidate("ui.render");
     return next(e);
   });
 }
@@ -80,7 +83,7 @@ async function pull($: EngineInterface, ponte: Bridge) {
       // A conversa vai a cada poll: o `/clear` troca o id sem `session.start`, e o backend só
       // entrega à conversa que ele acompanha (um segundo `claude` no mesmo pane recebe 409).
       body: JSON.stringify({
-        sessao: ponte.sessao, token: ponte.token, instance: instance(), modos: ["fill", "user"], estado: lastState(),
+        sessao: ponte.sessao, token: ponte.token, instance: instance(), modos: ["fill", "user", "receipt_v2"], estado: lastState(),
         session_id: await $.session.id(),
       }),
     });
@@ -89,12 +92,17 @@ async function pull($: EngineInterface, ponte: Bridge) {
     if (r.status === 409) clearBridge();
     else if (r.status === 200) setBridge(ponte);
     if (r.status === 200) {
-      const { text, modo, faixa } = JSON.parse(r.text) as { text?: string | null; modo?: string; faixa?: boolean };
+      const { text, modo, faixa, publication_id, generation, session_id } = JSON.parse(r.text) as {
+        text?: string | null; modo?: string; faixa?: boolean; publication_id?: string; generation?: number; session_id?: string;
+      };
       if (faixa === false) askResend();
+      const receipt = { publication_id, generation };
       if (text && modo === "fill") {
         let isFilled = false;
         try {
-          ({ isFilled } = await $.prompt.fill({ text, mode: "replace" }));
+          if (!session_id || await $.session.id() === session_id) {
+            ({ isFilled } = await $.prompt.fill({ text, mode: "replace" }));
+          }
         } catch (err) {
           // Engine recusou o rascunho: avisa `ok: false` na hora, em vez de deixar o backend
           // esperar o prazo inteiro sem saber se foi a rede ou o composer.
@@ -103,23 +111,27 @@ async function pull($: EngineInterface, ponte: Bridge) {
         await $.http.fetch(`${ponte.url}/filled`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, ok: isFilled }),
+          body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, ok: isFilled,
+            ...receipt, session_id: await $.session.id() }),
         });
       } else if (text && modo === "user") {
         let ok = false;
         try {
-          await $.prompt.submit({ text, asUser: true });
-          ok = true;
+          if (!session_id || await $.session.id() === session_id) {
+            await $.prompt.submit({ text, asUser: true });
+            ok = true;
+          }
         } catch (err) {
           $.ui.log(`hangar: prompt.submit falhou: ${String(err)}`, { to: "debug" });
         }
         await $.http.fetch(`${ponte.url}/submitted`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, ok }),
+          body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, ok,
+            ...receipt, session_id: await $.session.id() }),
         });
       } else if (text) {
-        await $.prompt.submit({ text });
+        if (!session_id || await $.session.id() === session_id) await $.prompt.submit({ text });
       }
     } else {
       // 403 é token de outra vida da sessão: insistir de 50 ms bateria no

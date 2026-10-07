@@ -349,3 +349,19 @@ def test_environment_without_identity_override_preserves_legacy_defaults(monkeyp
     assert environment["CP_SESSION_NAME"] == "legacy"
     assert environment["CP_SESSION_KEY"] == "legacy-key"
     assert environment["TMUX_PANE"] == "%legacy"
+
+
+async def test_reserve_client_sends_the_same_id_it_waits_for():
+    # Cliente da reserva do runtime: a resposta volta pelo id `reserve:...`; enviado com o número
+    # cru, ela chegava órfã e todo pedido esperava o prazo inteiro.
+    client = AppServerClient()
+    client._writer = object()
+    client.runtime_owner = ("sessao", "chave", 3)
+    sent = []
+    async def send_frame(frame):
+        sent.append(frame)
+        client._pending[frame["id"]].set_result({"id": frame["id"], "result": {"ok": True}})
+    client._send_frame = send_frame
+    assert json.loads(client.request_bytes("thread/read", {}))["id"] == f"reserve:chave:3:{client.runtime_nonce}:1"
+    assert await client.request("thread/read", {}, timeout=1) == {"ok": True}
+    assert sent[0]["id"] == f"reserve:chave:3:{client.runtime_nonce}:1"

@@ -26,6 +26,8 @@ class Location:
     worktree: bool
     worktree_path: str | None
     worktree_gone: bool
+    # Raiz do repositório onde o agente trabalha, quando não é a da pasta de abertura.
+    git_cwd: str | None = None
 
 
 def repo_root_of(path: str | None) -> str | None:
@@ -101,21 +103,118 @@ def _tail_lines(path: str) -> list[bytes]:
     return lines[1:] if size > _TAIL else lines   # a primeira veio cortada
 
 
-def claude_cwd(jsonl: str) -> str | None:
-    """`cwd` da última linha que o tem: o Claude grava a pasta em cada linha, e ela muda no
-    `EnterWorktree` e no `cd`."""
-    def read(p: str) -> str | None:
-        for raw in reversed(_tail_lines(p)):
-            if b'"cwd"' not in raw:
+_DEEP_TAIL = 8 * 1024 * 1024
+
+
+def reversed_lines(path: str):
+    """Linhas do fim para o começo, em blocos de `_TAIL`, até `_DEEP_TAIL` bytes. Imagem lida pela
+    sessão entra no transcript em base64 e enche sozinha os últimos 256 KB."""
+    with open(path, "rb") as fh:
+        end = pos = fh.seek(0, os.SEEK_END)
+        rest: list[bytes] = []   # pedaços da linha ainda cortada; juntar só no `\n` não recopia megas
+        while pos > 0 and end - pos < _DEEP_TAIL:
+            step = min(_TAIL, pos)
+            pos -= step
+            fh.seek(pos)
+            block = fh.read(step)
+            if b"\n" not in block:
+                rest.insert(0, block)
+                continue
+            lines = (block + b"".join(rest)).split(b"\n")
+            rest = [lines[0]]
+            yield from reversed(lines[1:])
+        if pos == 0:
+            yield b"".join(rest)
+
+
+# `cd X` no início de um comando, ou `git -C X`: o comando roda em X.
+_SHELL_DIR_RE = re.compile(r'(?:(?:^|[\n;&|(])\s*cd|\bgit\s+-C)\s+(["\']?)([^\s;&|"\')]+)\1')
+_EDIT_TOOLS = {"Edit": "file_path", "MultiEdit": "file_path", "Write": "file_path",
+               "NotebookEdit": "notebook_path"}
+
+
+def _tool_paths(block: dict) -> list[tuple[str, bool]]:
+    """(caminho, é `cd`?) de uma chamada, do último citado para o primeiro."""
+    args = block.get("input")
+    name = block.get("name")
+    if not isinstance(args, dict):
+        return []
+    if name == "Bash" and isinstance(args.get("command"), str):
+        return [(m.group(2), True) for m in reversed(list(_SHELL_DIR_RE.finditer(args["command"])))]
+    target = args.get(_EDIT_TOOLS[name]) if name in _EDIT_TOOLS else None
+    return [(target, False)] if isinstance(target, str) else []
+
+
+def _claude_tail(jsonl: str) -> tuple[str | None, list[tuple[str, bool, str | None]]]:
+    """(último `cwd`, caminhos citados pelas ferramentas como (caminho, é `cd`?, `cwd` da linha)),
+    do mais recente para o mais antigo. Uma leitura só: o cache é por arquivo."""
+    def read(p: str):
+        last: str | None = None
+        hits: list[tuple[str, bool, str | None]] = []
+        for raw in reversed_lines(p):
+            has_tool = b'"tool_use"' in raw
+            # Achado o último `cwd`, só interessa linha com chamada: o resto pode ser imagem de megas.
+            if not has_tool and (last or b'"cwd"' not in raw):
                 continue
             try:
-                cwd = json.loads(raw).get("cwd")
-            except (ValueError, AttributeError):
+                line = json.loads(raw)
+            except ValueError:
                 continue
-            if isinstance(cwd, str) and cwd:
-                return cwd
+            if not isinstance(line, dict):
+                continue
+            cwd = line.get("cwd")
+            cwd = cwd if isinstance(cwd, str) and cwd else None
+            last = last or cwd   # a varredura vem do fim: o primeiro achado é o mais recente
+            content = (line.get("message") or {}).get("content") if has_tool else None
+            for block in reversed(content) if isinstance(content, list) else ():
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    hits.extend((path, is_cd, cwd) for path, is_cd in _tool_paths(block))
+            if len(hits) >= 20:
+                break
+        return last, hits
+    return _cached(jsonl, read) or (None, [])
+
+
+def claude_cwd(jsonl: str) -> str | None:
+    """`cwd` da última linha que o tem: o Claude grava a pasta em cada linha, e ela muda no
+    `EnterWorktree` e no `cd` dentro do projeto."""
+    return _claude_tail(jsonl)[0]
+
+
+def _repo_candidates(path: str | None) -> tuple[str, list[str], list[str]] | None:
+    """(principal, worktrees removidas, todas as pastas do repo) de quem contém `path`."""
+    root = repo_root_of(path)
+    if not root:
         return None
-    return _cached(jsonl, read)
+    main = main_repo_of(root)
+    gone = [k for k, v in removed().items() if v == main]
+    return main, gone, [main, *worktree_paths(main), *gone]
+
+
+def claude_worktree(cwd: str | None, jsonl: str) -> str | None:
+    """A pasta do mesmo repo onde o Claude trabalha. Numa worktree irmã o `cwd` do transcript nunca
+    sai da pasta de abertura: o sinal é `cd X`/`git -C X` e o arquivo editado. Nada na principal
+    (`cd` ou edição) tira a sessão da worktree: consultar a principal é rotina e faria o rótulo
+    alternar a cada comando."""
+    last, hits = _claude_tail(jsonl)
+    base = last or cwd
+    repo = _repo_candidates(base)
+    if not base or not repo:
+        return last
+    main, gone, candidates = repo
+    home = _owner(base, candidates)
+    for raw, is_cd, line_cwd in hits:
+        if line_cwd and _owner(line_cwd, candidates) != home:
+            break   # chamada anterior à última troca de `cwd` (EnterWorktree/ExitWorktree)
+        p = os.path.normpath(os.path.join(line_cwd or base, os.path.expanduser(raw)))
+        if os.path.exists(p):
+            owner = _owner(p, candidates)
+            if owner and owner != main:
+                return owner
+        elif is_cd and raw.startswith(("/", "~")) and _of_this_repo(p, main, gone):
+            # Pasta absoluta que sumiu: a worktree foi removida. `cd -` e `cd $W` não dizem nada.
+            return _owner(p, gone) or p
+    return last
 
 
 _WORKDIR_RE = re.compile(r'"?workdir"?\s*:\s*"(/[^"]+)"')
@@ -163,12 +262,10 @@ def _owner(path: str, candidates: list[str]) -> str | None:
 
 def codex_cwd(cwd: str, rollout: str) -> str | None:
     """A worktree (ou a principal) do MESMO repo onde o último comando rodou; outro repo não conta."""
-    root = repo_root_of(cwd)
-    if not root:
+    repo = _repo_candidates(cwd)
+    if not repo:
         return None
-    main = main_repo_of(root)
-    gone = [k for k, v in removed().items() if v == main]
-    candidates = [main, *worktree_paths(main), *gone]
+    main, gone, candidates = repo
     for p, is_dir in _codex_paths(rollout):
         if os.path.exists(p):
             owner = _owner(p, candidates)
@@ -203,9 +300,14 @@ def removed() -> dict[str, str]:
 
 def locate(provider: str, cwd: str | None, jsonl: str | None) -> Location:
     real = None
+    # Sessão que nasceu numa worktree (opção "Nova worktree" da criação, ou o agente aberto nela)
+    # fica nela: os sinais do transcript só valem para worktree criada no meio da conversa.
+    born_in_worktree = head_info(repo_root_of(cwd))[1]
     try:
-        if jsonl and provider == "claude":
-            real = claude_cwd(jsonl)
+        if born_in_worktree:
+            pass
+        elif jsonl and provider == "claude":
+            real = claude_worktree(cwd, jsonl)
         elif jsonl and provider == "codex" and cwd:
             real = codex_cwd(cwd, jsonl)
     except Exception as e:   # transcript torto nunca derruba a listagem inteira
@@ -218,9 +320,11 @@ def locate(provider: str, cwd: str | None, jsonl: str | None) -> Location:
         # comum apagada também cairia aqui. Afinar só se aparecer falso positivo.
         gone = real != cwd or real in removed()
         return Location(None, False, real if gone else None, gone)
-    root = repo_root_of(real) or real
-    branch, wt = head_info(root)
-    return Location(branch, wt, root if wt else None, False)
+    root = repo_root_of(real)
+    branch, wt = head_info(root or real)
+    # Só quando o agente saiu do repositório de abertura: sem isso, o git da sessão é o do `cwd`.
+    moved = root is not None and root != repo_root_of(cwd)
+    return Location(branch, wt, (root or real) if wt else None, False, root if moved else None)
 
 
 def _git(cwd: str, *args: str, failed: list) -> subprocess.CompletedProcess:
@@ -234,33 +338,89 @@ def _git(cwd: str, *args: str, failed: list) -> subprocess.CompletedProcess:
         return subprocess.CompletedProcess(args, 1, "", e.detail)
 
 
+def _published_base(cwd: str, base: str, refs: dict[str, str], remotes: list[str],
+                    failed: list) -> str:
+    matches = [ref for ref in (f"refs/heads/{base}", f"refs/remotes/{base}") if ref in refs]
+    if len(matches) > 1:
+        failed.append("base")
+        return base
+    ref = matches[0] if matches else base
+    if not matches and any(base.startswith(remote + "/") for remote in remotes):
+        ref = f"refs/remotes/{base}"
+    if ref.startswith("refs/heads/") and ref in refs:
+        upstream = refs[ref]
+        if upstream.startswith("refs/remotes/"):
+            ref = upstream
+        else:
+            name = ref.removeprefix("refs/heads/")
+            candidates = [f"refs/remotes/{remote}/{name}" for remote in remotes
+                          if f"refs/remotes/{remote}/{name}" in refs]
+            if len(candidates) == 1:
+                ref = candidates[0]
+            elif len(candidates) > 1:
+                failed.append("base")
+    if ref not in refs:
+        p = _git(cwd, "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}",
+                 failed=failed)
+        if p.returncode != 0:
+            failed.append("base")
+    short = next((ref[len(prefix):] for prefix in ("refs/heads/", "refs/remotes/")
+                  if ref.startswith(prefix)), ref)
+    # Tags têm precedência sobre branches; a abreviação não pode trocar a referência escolhida.
+    if f"refs/tags/{short}" in refs or (ref.startswith("refs/remotes/")
+                                      and f"refs/heads/{short}" in refs):
+        return ref
+    return short
+
+
 def _base_of(path: str, branch: str, main: str, failed: list) -> str | None:
-    p = _git(path if os.path.isdir(path) else main, "config", "--get", f"branch.{branch}.hangar-base",
-             failed=failed)
-    if p.returncode == 0 and p.stdout.strip():
-        return p.stdout.strip()
-    # Worktree criada fora do Hangar: compara com a branch da pasta principal.
-    return head_info(main)[0]
+    cwd = path if os.path.isdir(path) else main
+    p = _git(cwd, "config", "--get", f"branch.{branch}.hangar-base", failed=failed)
+    if p.returncode not in (0, 1):
+        failed.append("base")
+    base = p.stdout.strip() if p.returncode == 0 else ""
+    p = _git(cwd, "for-each-ref", "--format=%(refname)%00%(upstream)",
+             "refs/heads/", "refs/remotes/", "refs/tags/", failed=failed)
+    refs = dict(line.split("\0", 1) for line in p.stdout.splitlines() if "\0" in line)
+    if p.returncode != 0:
+        failed.append("base")
+    p = _git(cwd, "remote", failed=failed)
+    remotes = p.stdout.splitlines() if p.returncode == 0 else []
+    if p.returncode != 0:
+        failed.append("base")
+    if not base:
+        p = _git(cwd, "reflog", "show", "--format=%gs", f"refs/heads/{branch}", failed=failed)
+        if p.returncode != 0:
+            failed.append("base")
+        source = next((line.removeprefix("branch: Created from ")
+                       for line in reversed(p.stdout.splitlines())
+                       if line.startswith("branch: Created from ")), "")
+        own = {branch, f"refs/heads/{branch}"}
+        own.update(f"{remote}/{branch}" for remote in remotes)
+        own.update(f"refs/remotes/{remote}/{branch}" for remote in remotes)
+        named = (source.startswith(("refs/heads/", "refs/remotes/"))
+                 or f"refs/heads/{source}" in refs
+                 or any(source.startswith(remote + "/") for remote in remotes))
+        # HEAD e hashes não registram qual branch era o destino; o remoto homônimo é a própria
+        # branch publicada. O upstream não entra: `worktree add -b x ../w origin/release` rastreia a base.
+        if named and source not in own and f"refs/remotes/{source}" not in own:
+            base = source
+        else:
+            base = head_info(main)[0]
+    return _published_base(cwd, base, refs, remotes, failed) if base else None
 
 
 def is_merged(cwd: str, branch: str, base: str, failed: list | None = None) -> bool:
     failed = [] if failed is None else failed
     start = len(failed)
-    # Worktree recém-criada aponta pro mesmo commit da base: ancestral trivial, não mesclada.
-    # ponytail: branch sem uso cuja base andou lê como mesclada (apagar não perde nada), e merge
-    # local por fast-forward só lê como mesclada depois que a base anda.
+    # Pontas iguais também podem ser uma worktree recém-criada; upstream apagado não prova merge.
     tips = _git(cwd, "rev-parse", branch, base, failed=failed)
-    same = tips.returncode == 0 and len(set(tips.stdout.split())) == 1
-    if len(failed) == start and not same and _git(
-            cwd, "merge-base", "--is-ancestor", branch, base, failed=failed).returncode == 0:
-        return True
-    # Squash do GitLab não deixa ancestral; o sinal é a branch ter tido upstream e ele ter sumido
-    # do servidor (apagado no merge do MR), visto após `fetch --prune`.
-    if _git(cwd, "config", "--get", f"branch.{branch}.merge", failed=failed).returncode != 0:
+    if tips.returncode != 0:
+        failed.append("merged")
         return False
-    gone = _git(cwd, "rev-parse", "--abbrev-ref", f"{branch}@{{upstream}}", failed=failed).returncode != 0
-    # Timeout não é upstream sumido: na dúvida, não mesclada.
-    return gone and len(failed) == start
+    same = len(set(tips.stdout.split())) == 1
+    return (not same and _git(cwd, "merge-base", "--is-ancestor", branch, base,
+                             failed=failed).returncode == 0 and len(failed) == start)
 
 
 def _gitdir_branch(main: str, path: str) -> str | None:
@@ -324,24 +484,26 @@ def status(path: str, sessions=(), main: str | None = None, measure: bool = True
     failed: list = []   # por chamada: a listagem roda status em threads diferentes
     base = _base_of(path, branch, main, failed) if branch else None
     cwd = path if exists else main
+    # Nome curto perde para uma tag homônima, e o commit dela pareceria já mesclado.
+    ref = f"refs/heads/{branch}" if branch else "HEAD"
     ahead = 0
     if branch and base:
-        c = _git(cwd, "rev-list", "--count", f"{base}..{branch}", failed=failed)
+        c = _git(cwd, "rev-list", "--count", f"{base}..{ref}", failed=failed)
         ahead = int(c.stdout.strip() or 0) if c.returncode == 0 else 0
     behind = 0
     commits: list[dict] = []
     if branch and base and branch != base:
-        c = _git(cwd, "rev-list", "--count", f"{branch}..{base}", failed=failed)
+        c = _git(cwd, "rev-list", "--count", f"{ref}..{base}", failed=failed)
         behind = int(c.stdout.strip() or 0) if c.returncode == 0 else 0
-        commits = _log_commits(cwd, f"{base}..{branch}", 3, failed)
-    last = _log_commits(cwd, branch or "HEAD", 1, failed) if exists or branch else []
+        commits = _log_commits(cwd, f"{base}..{ref}", 3, failed)
+    last = _log_commits(cwd, ref, 1, failed) if exists or branch else []
     dirty_files: list[dict] = []
     if exists:
         s = _git(path, "status", "--porcelain", failed=failed)
         if s.returncode == 0:
             dirty_files = [{"code": line[:2].strip() or "?", "path": line[3:]}
                            for line in s.stdout.splitlines() if line.strip()]
-    merged = bool(branch and base and branch != base and is_merged(cwd, branch, base, failed))
+    merged = bool(branch and base and branch != base and is_merged(cwd, ref, base, failed))
     ignored = _ignored_lost(path, main, failed) if exists else []
     real = os.path.realpath(path)
     inside = [s for s in sessions if _inside(s, real)]

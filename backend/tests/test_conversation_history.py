@@ -232,6 +232,10 @@ def test_historical_image_and_file_get_write_keep_authorization_and_digest(joine
                             digest=hashlib.sha256(joined.snapshot.read_bytes()).hexdigest()))
     monkeypatch.setattr(history, "transfer_for_session", lambda *args, **kwargs: joined.record)
     client, headers = client_for(joined, monkeypatch)
+    # O núcleo Rust lê só o transcript atual: o arquivo citado antes da troca ele recusaria.
+    from app import workspace_bridge
+    monkeypatch.setattr(workspace_bridge, "request", lambda op, args, **kw: {"ok": False, "error": {
+        "status": 403, "code": "erro_arquivo_nao_citado", "detail": "x"}} if op == "resolve_cited" else None)
     event_id = compose(joined)[0].id
     picture = client.get(f"/api/sessions/s/transcript-image/{event_id}/0", headers=headers)
     assert picture.status_code == 200

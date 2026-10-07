@@ -55,6 +55,8 @@ export interface SessionInfo {
   worktree_path?: string | null;
   /** Estava numa worktree que já foi apagada. */
   worktree_gone?: boolean;
+  /** Raiz do repositório onde o agente trabalha quando saiu do da pasta de abertura; o git da sessão é lido ali. */
+  git_cwd?: string | null;
   // Linhas adicionadas/removidas no working tree vs HEAD (git diff --numstat, staged+unstaged;
   // untracked não conta). null = cwd sem repo ou repo sem commit nenhum -> sem badge.
   git_added?: number | null;
@@ -161,6 +163,9 @@ export interface ResumeCandidate {
 // Resposta do /resume: ou a sessão já religada, ou (caso ambíguo) os candidatos pra confirmar.
 export type ResumeResult = SessionInfo | { ambiguous: true; candidates: ResumeCandidate[] };
 
+/** Trecho de um Edit/Write como o Claude Code gravou: posição real no arquivo e linhas em formato de diff. */
+export interface PatchHunk { old_start: number; new_start: number; lines: string[] }
+
 export interface ChatEvent {
   queued_delivered?: boolean | null;
   queued_confirmed?: boolean | null;
@@ -180,6 +185,8 @@ export interface ChatEvent {
   tool_use_id?: string | null;
   result?: string | null;
   is_error?: boolean | null;
+  /** Só em tool_result de Edit/Write do Claude. Ausente nos outros providers e em arquivo novo. */
+  patch?: PatchHunk[] | null;
   ts?: number | null;
   // Cache de prompt (só em assistant_msg): tokens lidos do cache + janela de expiração em segundos.
   // O TTL vem medido do usage do transcript (1h ou 5min), não suposto.
@@ -1020,4 +1027,48 @@ export interface Atualizacao {
   passos: AtualizacaoPasso[];
   pre_voo: AtualizacaoPreVoo;
   estado: AtualizacaoEstado;
+}
+
+/** Tela temporária "Migração para Rust" (sai na parte 7): `GET /api/migration/status`. */
+export interface MigrationProcess {
+  pid: number;
+  rss_bytes: number;
+  cpu_seconds: number;
+  /** Média entre esta leitura e a anterior; `null` na primeira. */
+  cpu_percent: number | null;
+}
+
+export interface MigrationPython {
+  mode: 'pending' | 'rust' | 'python';
+  /** Por que o Python atende sozinho (código do Supervisor); `null` com o Rust na porta. */
+  reason: string | null;
+  protocol: number;
+  port: number | null;
+  version: string;
+  branch: string | null;
+  update_branch: string | null;
+  binary: { path: string; mtime: number | null } | null;
+  processes: {
+    python: MigrationProcess | null;
+    rust: MigrationProcess | null;
+    cano: { count: number; rss_bytes: number; cpu_percent: number | null };
+  };
+}
+
+export interface MigrationArea {
+  key: string;
+  routes: { method: string; path: string; rust: boolean }[];
+  /** Pedidos na janela: respondidos pelo Rust × repassados ao Python. */
+  rust: number;
+  python: number;
+}
+
+export interface MigrationStatus {
+  served_by: 'rust' | 'python';
+  python: MigrationPython | null;
+  python_error?: string | null;
+  rust: { version: string; commit: string | null; protocol: number; pid: number } | null;
+  window_minutes?: number;
+  areas: MigrationArea[] | null;
+  private: { key: string; rust: number }[] | null;
 }

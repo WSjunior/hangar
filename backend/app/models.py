@@ -90,6 +90,7 @@ class SessionInfo(BaseModel):
     # Raiz Codex resolvida para esta sessão. Só existe para o provider Codex; o cliente usa-a para
     # conservar a origem em operações posteriores, enquanto `conta` continua sendo o ID de cota.
     codex_home: Optional[str] = None
+    codex_service_tier: str | None = None
     # Conta da sessão como ID do /api/cotas ("claude:<config_dir>", "chave:<motor>",
     # "kimi:<provider do default_model>") — a pílula de cota do topo mostra o uso da conta da
     # sessão ATIVA a partir daqui. None quando não dá pra saber (pi, ou kimi sem provider com
@@ -112,6 +113,9 @@ class SessionInfo(BaseModel):
     # fora de worktree. `worktree_gone`: ele estava numa worktree que não existe mais.
     worktree_path: Optional[str] = None
     worktree_gone: bool = False
+    # Raiz do repositório onde o agente trabalha quando ele saiu do da pasta de abertura (worktree
+    # irmã por `cd`/caminho absoluto, `EnterWorktree`). É onde o git da sessão é lido; None = o cwd.
+    git_cwd: Optional[str] = None
     # Estado de git do cwd, decorado em list_with_state (git_summary, cacheado). dirty = arquivos
     # não-commitados; ahead = commits não-pushados (None sem upstream real); behind idem. Non-repo
     # -> tudo None (sem badge no painel).
@@ -201,6 +205,21 @@ class SessionInfo(BaseModel):
     # ha plan_name — este campo e o que o mantem na tela pra dar o caminho de volta.
     plan_hidden: Optional[bool] = None
 
+    @property
+    def git_dir(self) -> Optional[str]:
+        """Onde o git da sessão roda: a worktree do agente, ou o cwd."""
+        return self.git_cwd or self.cwd
+
+
+
+class CreatedSessionInfo(SessionInfo):
+    """Resposta do POST /api/sessions. Fora do `SessionInfo` porque ele é o contrato da lista com o
+    Rust: a conta em que a sessão nasceu (None = a padrão) e de onde ela veio, "inherited" (da
+    sessão criadora) ou "quota" (a herdada ou a padrão estava acabando e ela nasceu na de mais
+    folga); None = conta pedida ou a padrão."""
+    config_dir: Optional[str] = None
+    account_source: Optional[str] = None
+
 
 class ChatEvent(BaseModel):
     kind: ChatKind
@@ -211,6 +230,9 @@ class ChatEvent(BaseModel):
     tool_use_id: Optional[str] = None
     result: Optional[str] = None
     is_error: Optional[bool] = None
+    # Só em tool_result de Edit/Write do Claude: os trechos que o próprio Claude Code calculou, com
+    # a linha real do arquivo. Sem isto o app só sabe numerar a partir do trecho trocado.
+    patch: Optional[list[dict]] = None
     ts: Optional[float] = None
     # Cache de prompt (só em assistant_msg): quantos tokens o turno LEU do cache e qual a janela
     # de expiração em segundos. O TTL não é chute — o usage do transcript separa
@@ -271,6 +293,7 @@ class StateEvent(BaseModel):
     codex_mode: Optional[Literal["default", "plan"]] = None
     codex_question: dict | None = None
     codex_buffering: bool = False
+    codex_service_tier: str | None = None
     claude_permission_mode: Optional[str] = None
     claude_previous_non_plan: Optional[str] = None
     # Claude sem terminal com `ExitPlanMode` aguardando aprovação: {plan, path, tool_use_id}.

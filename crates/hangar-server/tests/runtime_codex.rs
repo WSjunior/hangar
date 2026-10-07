@@ -1,0 +1,424 @@
+use hangar_server::runtime::{codex::Engine,protocol::*};
+use serde_json::{Value,json};
+
+fn clock(seconds:f64) -> ClockSample { ClockSample { monotonic_s:seconds,epoch_s:1_800_000_000.0 + seconds } }
+fn engine() -> Engine { Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true,"model":"gpt-6","initialized":true,"ready":true}),1,clock(10.0)) }
+fn frames(effects:&[Effect]) -> Vec<Value> { effects.iter().filter_map(|e|match e { Effect::Write { frame,.. }=>Some(frame.clone()),_=>None }).collect() }
+fn command(kind:OperationKind,payload:Value) -> RuntimeCommand { RuntimeCommand { operation_id:"op-1".into(),kind,payload } }
+fn line(engine:&mut Engine,value:Value,time:f64) -> Vec<Effect> { engine.apply(EngineInput::Line(value),clock(time)).unwrap() }
+
+#[test]
+fn initialize_then_resume() {
+    let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true}),1,clock(10.0));
+    let effects = engine.bootstrap(true,"boot".into()).unwrap();
+    let initialize = frames(&effects)[0].clone();
+    assert_eq!(initialize["method"],"initialize");
+    let effects = line(&mut engine,json!({"id":initialize["id"],"result":{}}),11.0);
+    let requests = frames(&effects);
+    assert_eq!(requests[0]["method"],"initialized");
+    assert_eq!(requests[1]["method"],"thread/resume");
+    assert_eq!(requests[1]["params"]["threadId"],"thread-1");
+}
+
+#[test]
+fn takeover_restores_async_question_before_ready() {
+    let question = json!({"provider":"codex", "request_id":"async:thread-1:item:0", "is_async":true,
+        "questions":[{"id":"answer", "question":"Qual opção?", "options":[]}]});
+    let engine = Engine::new(json!({"name":"session", "thread_id":"thread-1", "initialized":true, "ready":true,
+        "async_questions":[["async:thread-1:item:0",question]], "async_seen":["item"]}),1,clock(10.0));
+    assert_eq!(engine.view()["state"], "awaiting_input");
+    assert_eq!(engine.view()["codex_question"]["request_id"], "async:thread-1:item:0");
+    assert_eq!(engine.control_view()["deliverable"], false);
+}
+
+#[test]
+fn reply_ids_and_generations() {
+    let mut engine = engine();
+    let effects = engine.command(command(OperationKind::ListModels,json!({})),clock(10.0)).unwrap();
+    let id = frames(&effects)[0]["id"].clone();
+    assert!(id.as_str().unwrap().starts_with("hangar:1:"));
+    let old = line(&mut engine,json!({"id":"hangar:0:1","result":{"data":[]}}),11.0);
+    assert!(!old.iter().any(|e|matches!(e,Effect::Reply { .. })));
+    let current = line(&mut engine,json!({"id":id,"result":{"data":[]}}),12.0);
+    assert!(current.iter().any(|e|matches!(e,Effect::Reply { disposition:Disposition::Accepted,.. })));
+}
+
+#[test]
+fn rpc_timeout_keeps_pending() {
+    let mut engine = engine();
+    let effects = engine.command(command(OperationKind::Input,json!({"text":"Olá"})),clock(10.0)).unwrap();
+    let id = frames(&effects)[0]["id"].clone();
+    let timeout = engine.apply(EngineInput::Tick,clock(40.0)).unwrap();
+    assert!(timeout.iter().any(|e|matches!(e,Effect::Reply { disposition:Disposition::Unknown,.. })));
+    let reply = line(&mut engine,json!({"id":id,"result":{"turn":{"id":"turn-1"}}}),41.0);
+    assert!(reply.iter().any(|e|matches!(e,Effect::Reply { disposition:Disposition::Accepted,.. })));
+    assert!(frames(&reply).is_empty());
+}
+
+#[test]
+fn server_request_once() {
+    let mut engine = engine();
+    let request = json!({"id":1,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-1","command":"pwd"}});
+    line(&mut engine,request.clone(),10.0);
+    let response = engine.command(command(OperationKind::Select,json!({"option":1})),clock(10.0)).unwrap();
+    assert_eq!(frames(&response)[0]["id"],1);
+    assert!(engine.command(command(OperationKind::Select,json!({"option":1})),clock(10.0)).is_err());
+    let effects = line(&mut engine,json!({"id":"unknown","method":"future/request","params":{"threadId":"thread-1"}}),11.0);
+    assert_eq!(frames(&effects)[0]["error"]["code"],-32601);
+}
+
+#[test]
+fn turn_end_idle_before_drain() {
+    let mut engine = engine();
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),10.0);
+    let effects = line(&mut engine,json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}),11.0);
+    assert_eq!(engine.view()["state"],"idle");
+    let state = effects.iter().position(|e|matches!(e,Effect::StateChanged)).unwrap();
+    let drain = effects.iter().position(|e|matches!(e,Effect::WakeQueue)).unwrap();
+    assert!(state < drain);
+}
+
+#[test]
+fn first_response_times_only_the_first_nonempty_delta_of_the_current_turn() {
+    let mut engine = engine();
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),10.0);
+    for (thread,turn,text) in [("other","turn-1","text"),("thread-1","old","text"),("thread-1","turn-1","")] {
+        let effects = line(&mut engine,json!({"method":"item/agentMessage/delta",
+            "params":{"threadId":thread,"turnId":turn,"delta":text}}),11.0);
+        assert!(!effects.iter().any(|effect|matches!(effect,Effect::Publish { channel,.. } if channel == "rate")));
+    }
+    let effects = line(&mut engine,json!({"method":"item/agentMessage/delta",
+        "params":{"threadId":"thread-1","turnId":"turn-1","delta":"text"}}),12.0);
+    assert!(effects.iter().any(|effect|matches!(effect,Effect::Publish { channel,data }
+        if channel == "rate" && data == &json!({"first_response":true,"seconds":2.0,"conversation":"thread-1"}))));
+    let effects = line(&mut engine,json!({"method":"item/agentMessage/delta",
+        "params":{"threadId":"thread-1","turnId":"turn-1","delta":"more"}}),13.0);
+    assert!(!effects.iter().any(|effect|matches!(effect,Effect::Publish { channel,.. } if channel == "rate")));
+}
+
+#[test]
+fn thread_switch_clears_old_preview_and_foreign_deltas_are_ignored() {
+    let mut engine = engine();
+    let effects = line(&mut engine,json!({"method":"item/agentMessage/delta","params":{"threadId":"other","delta":"filho"}}),10.0);
+    assert!(!effects.iter().any(|e|matches!(e,Effect::Publish { .. })));
+}
+
+#[test]
+fn sandbox_requires_idle() {
+    let mut engine = engine();
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),10.0);
+    assert!(engine.command(command(OperationKind::SetPermissionMode,json!({"mode":"Ask for approval"})),clock(10.0)).is_err());
+}
+
+#[test]
+fn terminal_adapter_untouched() {
+    let mut engine = Engine::new(json!({"name":"session","headless":false}),1,clock(10.0));
+    assert!(engine.bootstrap(true,"boot".into()).is_err());
+}
+
+#[test]
+fn question_hydrate_merges_notifications() {
+    let mut engine = engine();
+    let read = engine.command(command(OperationKind::ReadSettings,json!({"include_turns":true})),clock(10.0)).unwrap();
+    let id = frames(&read)[0]["id"].clone();
+    line(&mut engine,json!({"method":"item/completed","params":{"threadId":"thread-1","item":{
+        "id":"question-new","type":"agentMessage","delivery":"async","questions":[{"title":"Nova pergunta","options":["A","B"]}]}}}),11.0);
+    line(&mut engine,json!({"id":id,"result":{"thread":{"id":"thread-1","status":{"type":"idle"},"turns":[]}}}),12.0);
+    assert_eq!(engine.view()["codex_question"]["questions"][0]["question"],"Nova pergunta");
+    line(&mut engine,json!({"method":"item/completed","params":{"threadId":"thread-1","item":{
+        "id":"ordinary-user","type":"userMessage","content":[{"type":"text","text":"> Nova pergunta\n\nA"}]}}}),13.0);
+    assert_eq!(engine.view()["codex_question"]["questions"][0]["question"],"Nova pergunta");
+}
+
+#[test]
+fn preview_full_prefix_on_takeover() {
+    let mut engine = engine();
+    let snapshot = CanoSnapshot::parse(json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,
+        "aberto":false,"pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,
+        "inflight":{"codex":{"thread-1":{"complete":true,"text":"Olá 🌎","itemId":"item-1","turnId":"turn-1"}}}})).unwrap();
+    let effects = engine.hydrate(snapshot).unwrap();
+    let text = effects.into_iter().find_map(|e|match e { Effect::Publish { channel,data } if channel == "preview"=>Some(data["text"].clone()),_=>None }).unwrap();
+    assert_eq!(text,"Olá 🌎");
+    assert_eq!(engine.control_view()["turn_id"],"turn-1");
+}
+
+#[test]
+fn late_reply_does_not_reopen_a_completed_turn() {
+    let mut engine = engine();
+    let effects = engine.command(command(OperationKind::Input,json!({"text":"Olá"})),clock(10.0)).unwrap();
+    let id = frames(&effects)[0]["id"].clone();
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),11.0);
+    line(&mut engine,json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}),12.0);
+    line(&mut engine,json!({"id":id,"result":{"turn":{"id":"turn-1"}}}),13.0);
+    assert_eq!(engine.view()["state"],"idle");
+    assert_eq!(engine.control_view()["in_progress"],false);
+}
+
+#[test]
+fn late_ack_does_not_remove_reused_server_request() {
+    let mut engine = engine();
+    let approval = json!({"id":1,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-1","command":"pwd"}});
+    line(&mut engine,approval.clone(),10.0);
+    engine.command(command(OperationKind::Select,json!({"option":1})),clock(10.0)).unwrap();
+    line(&mut engine,json!({"method":"serverRequest/resolved","params":{"threadId":"thread-1","requestId":1}}),11.0);
+    line(&mut engine,approval,12.0);
+    engine.apply(EngineInput::WriteAck { operation_id:"op-1".into(),outcome:WriteOutcome::Written },clock(13.0)).unwrap();
+    assert_eq!(engine.control_view()["pending"].as_array().unwrap().len(),1);
+}
+
+#[test]
+fn voice_organizer_uses_same_writer_without_changing_target_thread() {
+    let mut engine = engine();
+    engine.command(RuntimeCommand { operation_id:"voice-open".into(),kind:OperationKind::VoiceOpen,payload:json!({"call_id":"call-1"}) },clock(10.0)).unwrap();
+    let effects = engine.command(RuntimeCommand { operation_id:"voice-thread".into(),kind:OperationKind::VoiceRpc,
+        payload:json!({"call_id":"call-1","method":"thread/start","params":{"ephemeral":true,"sandbox":"read-only","approvalPolicy":"never"}}) },clock(11.0)).unwrap();
+    let id = frames(&effects)[0]["id"].clone();
+    line(&mut engine,json!({"id":id,"result":{"thread":{"id":"organizer-1"}}}),12.0);
+    assert_eq!(engine.control_view()["thread_id"],"thread-1");
+    let effects = line(&mut engine,json!({"id":7,"method":"item/tool/call","params":{"threadId":"organizer-1","name":"draft"}}),13.0);
+    assert!(effects.iter().any(|effect|matches!(effect,Effect::Publish { channel,data } if channel == "voice" && data["call_id"] == "call-1")));
+    assert!(!effects.iter().any(|effect|matches!(effect,Effect::Write { .. })));
+    assert!(engine.control_view()["pending"].as_array().unwrap().is_empty());
+    assert!(engine.command(RuntimeCommand { operation_id:"wrong-id".into(),kind:OperationKind::VoiceRespond,
+        payload:json!({"call_id":"call-1","request_id":"7","result":{}}) },clock(14.0)).is_err());
+    assert!(engine.command(RuntimeCommand { operation_id:"wrong-thread".into(),kind:OperationKind::VoiceRpc,
+        payload:json!({"call_id":"call-1","method":"turn/start","params":{"threadId":"thread-1","input":[]}}) },clock(15.0)).is_err());
+}
+
+#[test]
+fn voice_initialize_is_virtual_and_never_sends_another_initialize() {
+    let mut engine = engine();
+    engine.command(RuntimeCommand { operation_id:"open".into(),kind:OperationKind::VoiceOpen,payload:json!({"call_id":"call"}) },clock(10.0)).unwrap();
+    let effects = engine.command(RuntimeCommand { operation_id:"init".into(),kind:OperationKind::VoiceRpc,
+        payload:json!({"call_id":"call","method":"initialize","params":{}}) },clock(11.0)).unwrap();
+    assert!(frames(&effects).is_empty());
+    assert!(effects.iter().any(|effect|matches!(effect,Effect::Reply { disposition:Disposition::Accepted,.. })));
+}
+
+#[test]
+fn slash_skill_waits_for_catalog_before_starting_turn() {
+    let mut engine = engine();
+    let effects = engine.command(command(OperationKind::Input,json!({"text":"/skill Olá", "skill_name":"skill",
+        "input":[{"type":"text","text":"/skill Olá"}]})),clock(10.0)).unwrap();
+    let read = frames(&effects)[0].clone();
+    assert_eq!(read["method"],"skills/list");
+    let effects = line(&mut engine,json!({"id":read["id"],"result":{"data":[]}}),11.0);
+    let (request_id,_) = effects.iter().find_map(|effect|match effect {
+        Effect::Policy { kind,request_id,payload } if kind == "skill_catalog"=>Some((request_id.clone(),payload.clone())),_=>None }).unwrap();
+    assert!(frames(&effects).is_empty());
+    let effects = engine.apply(EngineInput::PolicyResult { request_id,payload:json!({"skill":{"native_name":"skill","path":"/fake/skill"}}) },clock(12.0)).unwrap();
+    let input = frames(&effects)[0].clone();
+    assert_eq!(input["method"],"turn/start");
+    assert_eq!(input["params"]["input"][1],json!({"type":"skill","name":"skill","path":"/fake/skill"}));
+}
+
+#[test]
+fn organizer_request_before_thread_reply_is_preserved_once() {
+    let mut engine = engine();
+    engine.command(RuntimeCommand { operation_id:"open".into(),kind:OperationKind::VoiceOpen,payload:json!({"call_id":"call"}) },clock(10.0)).unwrap();
+    let effects = engine.command(RuntimeCommand { operation_id:"start".into(),kind:OperationKind::VoiceRpc,
+        payload:json!({"call_id":"call","method":"thread/start","params":{"ephemeral":true,"sandbox":"read-only","approvalPolicy":"never"}}) },clock(11.0)).unwrap();
+    let id = frames(&effects)[0]["id"].clone();
+    let request = json!({"id":7,"method":"item/tool/call","params":{"threadId":"organizer","name":"draft"}});
+    assert!(frames(&line(&mut engine,request.clone(),11.1)).is_empty());
+    let effects = line(&mut engine,json!({"id":id,"result":{"thread":{"id":"organizer"}}}),12.0);
+    assert_eq!(effects.iter().filter(|effect|matches!(effect,Effect::Publish { channel,.. } if channel == "voice")).count(),1);
+    let duplicate = line(&mut engine,request,12.1);
+    assert!(!duplicate.iter().any(|effect|matches!(effect,Effect::Publish { channel,.. } if channel == "voice")));
+}
+
+fn tier_notification(engine:&mut Engine,thread:&str,tier:Value,time:f64) -> Vec<Effect> {
+    line(engine,json!({"method":"thread/settings/updated","params":{"threadId":thread,"threadSettings":{"serviceTier":tier}}}),time)
+}
+fn tier_accepted(effects:&[Effect]) -> bool {
+    effects.iter().any(|effect|matches!(effect,Effect::Reply { operation_id,disposition:Disposition::Accepted,payload }
+        if operation_id == "op-1" && payload["service_tier"].is_string()))
+}
+fn tier_update(engine:&mut Engine,tier:&str) -> Value {
+    let effects = engine.command(command(OperationKind::SetServiceTier,json!({"service_tier":tier})),clock(10.0)).unwrap();
+    let mut request = frames(&effects)[0].clone();
+    if tier == "priority" {
+        assert_eq!(request["method"],"model/list");
+        request = frames(&line(engine,json!({"id":request["id"],"result":{"data":[{"model":"gpt-6","serviceTiers":[{"id":"priority"}]}]}}),10.1))[0].clone();
+    }
+    assert_eq!(request["method"],"thread/settings/update");
+    assert_eq!(request["params"],json!({"threadId":"thread-1","serviceTier":tier}));
+    request
+}
+
+#[test]
+fn expired_service_tier_writes_cannot_reach_the_transport() {
+    for tier in ["default","priority"] {
+        let mut engine = engine();
+        let effects = engine.command(command(OperationKind::SetServiceTier,json!({"service_tier":tier})),clock(10.0)).unwrap();
+        let writes:Vec<_> = effects.iter().filter_map(|effect|match effect {
+            Effect::Write { operation_id:Some(id),.. }=>Some(id.clone()),_=>None,
+        }).collect();
+        assert!(!writes.is_empty());
+        assert!(writes.iter().all(|id|engine.write_is_current(id)));
+        engine.apply(EngineInput::Tick,clock(20.1)).unwrap();
+        assert!(writes.iter().all(|id|!engine.write_is_current(id)));
+    }
+}
+
+#[test]
+fn service_tier_already_active_is_accepted_without_waiting() {
+    for tier in ["default","priority"] {
+        let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true,"model":"gpt-6",
+            "initialized":true,"ready":true,"service_tier":tier}),1,clock(10.0));
+        assert_eq!(engine.control_view()["service_tier"],tier);
+        let effects = engine.command(command(OperationKind::SetServiceTier,json!({"service_tier":tier})),clock(10.0)).unwrap();
+        assert!(tier_accepted(&effects));
+        assert!(frames(&effects).is_empty());
+    }
+}
+
+#[test]
+fn service_tier_control_is_strict_and_catalog_keeps_tiers() {
+    assert_eq!(serde_json::to_value(OperationKind::SetServiceTier).unwrap(),"set_service_tier");
+    let mut engine = engine();
+    for payload in [json!({"service_tier":"fast"}),json!({"service_tier":null}),json!({"service_tier":"default","model":"other"})] {
+        assert!(engine.command(command(OperationKind::SetServiceTier,payload),clock(10.0)).is_err());
+    }
+    let request = frames(&engine.command(command(OperationKind::ListModels,json!({})),clock(10.0)).unwrap())[0].clone();
+    let effects = line(&mut engine,json!({"id":request["id"],"result":{"data":[{"model":"gpt-6","serviceTiers":[{"id":"priority"}],"defaultServiceTier":"default"}]}}),10.1);
+    let catalog = effects.iter().find_map(|effect|match effect { Effect::Reply { payload,.. }=>Some(payload),_=>None }).unwrap();
+    assert_eq!(catalog[0]["serviceTiers"],json!([{"id":"priority"}]));
+    assert_eq!(catalog[0]["defaultServiceTier"],"default");
+}
+
+#[test]
+fn priority_requires_visible_live_support_and_unchanged_model() {
+    for model in [json!({"model":"gpt-6","serviceTiers":[]}),json!({"model":"gpt-6","hidden":true,"serviceTiers":[{"id":"priority"}]}),
+        json!({"model":"gpt-6","serviceTiers":[{"id":"priority","hidden":true}]})] {
+        let mut engine = engine();
+        let request = frames(&engine.command(command(OperationKind::SetServiceTier,json!({"service_tier":"priority"})),clock(10.0)).unwrap())[0].clone();
+        let effects = line(&mut engine,json!({"id":request["id"],"result":{"data":[model]}}),10.1);
+        assert!(frames(&effects).is_empty());
+        assert!(effects.iter().any(|effect|matches!(effect,Effect::Reply { operation_id,disposition:Disposition::Rejected,.. } if operation_id == "op-1")));
+    }
+    let mut engine = engine();
+    let request = frames(&engine.command(command(OperationKind::SetServiceTier,json!({"service_tier":"priority"})),clock(10.0)).unwrap())[0].clone();
+    line(&mut engine,json!({"method":"thread/settings/updated","params":{"threadId":"thread-1","threadSettings":{"model":"other"}}}),10.1);
+    let effects = line(&mut engine,json!({"id":request["id"],"result":{"data":[{"model":"gpt-6","serviceTiers":[{"id":"priority"}]}]}}),10.2);
+    assert!(frames(&effects).is_empty());
+    assert!(!tier_accepted(&effects));
+}
+
+#[test]
+fn service_tier_needs_ack_notification_and_authoritative_snapshot_in_either_order() {
+    for tier in ["priority","default"] { for before_ack in [false,true] {
+        let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true,"ready":true,
+            "model":"gpt-6","effort":"high","mode":"plan"}),1,clock(10.0));
+        let update = tier_update(&mut engine,tier);
+        assert!(engine.command(RuntimeCommand { operation_id:"second".into(),kind:OperationKind::SetServiceTier,payload:json!({"service_tier":"default"}) },clock(10.2)).is_err());
+        assert!(tier_notification(&mut engine,"other",json!(tier),10.3).is_empty());
+        let effects = if before_ack {
+            assert!(frames(&tier_notification(&mut engine,"thread-1",json!(tier),10.4)).is_empty());
+            line(&mut engine,json!({"id":update["id"],"result":{}}),10.5)
+        } else {
+            let ack = line(&mut engine,json!({"id":update["id"],"result":{}}),10.4);
+            assert!(!tier_accepted(&ack)); assert!(frames(&ack).is_empty());
+            tier_notification(&mut engine,"thread-1",json!(tier),10.5)
+        };
+        assert!(!tier_accepted(&effects));
+        let read = frames(&effects)[0].clone();
+        assert_eq!(read["method"],"thread/resume"); assert_eq!(read["params"],json!({"threadId":"thread-1"}));
+        let confirmed = line(&mut engine,json!({"id":read["id"],"result":{"thread":{"id":"thread-1"},"serviceTier":tier}}),10.6);
+        assert!(tier_accepted(&confirmed));
+        assert_eq!(engine.view()["codex_service_tier"],tier);
+        assert_eq!(engine.control_view()["service_tier"],tier);
+        assert_eq!(engine.control_view()["model"],"gpt-6"); assert_eq!(engine.control_view()["effort"],"high"); assert_eq!(engine.control_view()["mode"],"plan");
+    } }
+}
+
+#[test]
+fn old_candidate_waits_for_new_event_and_does_not_poll() {
+    let mut engine = engine(); let update = tier_update(&mut engine,"priority");
+    line(&mut engine,json!({"id":update["id"],"result":{}}),10.2);
+    assert!(frames(&tier_notification(&mut engine,"thread-1",json!("default"),10.3)).is_empty());
+    let read = frames(&tier_notification(&mut engine,"thread-1",json!("priority"),10.4))[0].clone();
+    let stale = line(&mut engine,json!({"id":read["id"],"result":{"thread":{"id":"thread-1"},"serviceTier":"default"}}),10.5);
+    assert!(!tier_accepted(&stale)); assert!(frames(&stale).is_empty());
+    let read = frames(&tier_notification(&mut engine,"thread-1",json!("priority"),10.6))[0].clone();
+    tier_notification(&mut engine,"thread-1",json!("priority"),10.7);
+    let during = line(&mut engine,json!({"id":read["id"],"result":{"thread":{"id":"thread-1"},"serviceTier":"default"}}),10.8);
+    assert!(!tier_accepted(&during));
+    let read = frames(&during)[0].clone();
+    let confirmed = line(&mut engine,json!({"id":read["id"],"result":{"thread":{"id":"thread-1"},"serviceTier":"priority"}}),10.9);
+    assert!(tier_accepted(&confirmed));
+}
+
+#[test]
+fn service_tier_errors_expiry_disconnect_and_recovery_never_accept() {
+    for failure in ["rpc","timeout","eof","foreign_snapshot","write"] {
+        let mut engine = engine(); let update = tier_update(&mut engine,"default");
+        let effects = match failure {
+            "rpc"=>line(&mut engine,json!({"id":update["id"],"error":{"message":"refused"}}),11.0),
+            "timeout"=>engine.apply(EngineInput::Tick,clock(20.1)).unwrap(),
+            "eof"=>line(&mut engine,json!({"type":"cano_saiu"}),11.0),
+            "write"=>engine.apply(EngineInput::WriteAck { operation_id:"op-1".into(),outcome:WriteOutcome::Unknown },clock(11.0)).unwrap(),
+            _=>{
+                line(&mut engine,json!({"id":update["id"],"result":{}}),10.2);
+                let read = frames(&tier_notification(&mut engine,"thread-1",json!("default"),10.3))[0].clone();
+                line(&mut engine,json!({"id":read["id"],"result":{"thread":{"id":"other"},"serviceTier":"default"}}),11.0)
+            },
+        };
+        assert!(effects.iter().any(|effect|matches!(effect,Effect::Reply { operation_id,disposition:Disposition::Rejected | Disposition::Unknown,.. } if operation_id == "op-1")));
+        assert!(!tier_accepted(&effects));
+        assert!(!tier_accepted(&line(&mut engine,json!({"id":update["id"],"result":{}}),21.0)));
+    }
+    let mut engine = engine();
+    let frame = json!({"id":"hangar:1:50","method":"thread/settings/update","params":{"threadId":"thread-1","serviceTier":"priority"}});
+    engine.restore_rpc("op-1".into(),&frame,0,0);
+    let recovered = line(&mut engine,json!({"id":frame["id"],"result":{}}),11.0);
+    assert!(!recovered.iter().any(|effect|matches!(effect,Effect::Reply { disposition:Disposition::Accepted,.. })));
+    assert!(frames(&recovered).is_empty());
+    assert!(engine.control_view()["service_tier"].is_null());
+}
+
+#[test]
+fn read_preserves_tier_and_resume_cannot_overwrite_newer_settings() {
+    let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true,"ready":true,
+        "service_tier":"priority","model":"gpt-6","effort":"high"}),1,clock(10.0));
+    let read = frames(&engine.command(command(OperationKind::ReadSettings,json!({})),clock(10.0)).unwrap())[0].clone();
+    line(&mut engine,json!({"id":read["id"],"result":{"thread":{"id":"thread-1"}}}),10.1);
+    assert_eq!(engine.control_view()["service_tier"],"priority");
+    let resume = json!({"id":"hangar:1:50","method":"thread/resume","params":{"threadId":"thread-1"}});
+    engine.restore_rpc("resume".into(),&resume,0,0);
+    tier_notification(&mut engine,"thread-1",json!("priority"),10.2);
+    line(&mut engine,json!({"id":resume["id"],"result":{"thread":{"id":"thread-1"},"serviceTier":null,"model":"old","reasoningEffort":"low"}}),10.3);
+    assert_eq!(engine.control_view()["service_tier"],"priority"); assert_eq!(engine.control_view()["model"],"gpt-6");
+    let read = frames(&engine.command(command(OperationKind::SetServiceTier,json!({"service_tier":"default"})),clock(11.0)).unwrap())[0].clone();
+    line(&mut engine,json!({"id":read["id"],"result":{}}),11.1);
+    let resume = frames(&tier_notification(&mut engine,"thread-1",Value::Null,11.2))[0].clone();
+    assert!(tier_accepted(&line(&mut engine,json!({"id":resume["id"],"result":{"thread":{"id":"thread-1"},"serviceTier":null}}),11.3)));
+}
+
+#[test]
+fn resume_uses_external_tier_and_thread_change_cancels_pending_choice() {
+    for (wire_tier,effective) in [(json!("priority"),"priority"),(Value::Null,"default")] {
+        let mut engine = engine();
+        let resume = json!({"id":"hangar:1:50","method":"thread/resume","params":{"threadId":"thread-1"}});
+        engine.restore_rpc("resume".into(),&resume,0,0);
+        line(&mut engine,json!({"id":resume["id"],"result":{"thread":{"id":"thread-1","serviceTier":"wrong"},"serviceTier":wire_tier}}),10.1);
+        assert_eq!(engine.control_view()["service_tier"],effective);
+    }
+    let mut engine = engine(); let update = tier_update(&mut engine,"default");
+    let resume = json!({"id":"hangar:1:50","method":"thread/resume","params":{"threadId":"thread-1"}});
+    engine.restore_rpc("resume".into(),&resume,0,0);
+    let effects = line(&mut engine,json!({"id":resume["id"],"result":{"thread":{"id":"other"},"serviceTier":"priority"}}),10.2);
+    assert!(effects.iter().any(|effect|matches!(effect,Effect::Reply { operation_id,disposition:Disposition::Unknown,.. } if operation_id == "op-1")));
+    assert!(!tier_accepted(&line(&mut engine,json!({"id":update["id"],"result":{}}),10.3)));
+}
+
+#[test]
+fn bootstrap_new_process_preserves_tier_but_live_resume_does_not_override() {
+    for reconnect in [false,true] {
+        let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true,"service_tier":"priority"}),1,clock(10.0));
+        let init = frames(&engine.bootstrap(reconnect,"boot".into()).unwrap())[0].clone();
+        let requests = frames(&line(&mut engine,json!({"id":init["id"],"result":{}}),10.1));
+        if reconnect { assert!(requests[1]["params"].get("serviceTier").is_none()); }
+        else { assert_eq!(requests[1]["params"]["serviceTier"],"priority"); }
+    }
+}

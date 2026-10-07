@@ -1,5 +1,7 @@
 import asyncio
 import difflib
+import functools
+import inspect
 import json
 import logging
 import os
@@ -488,7 +490,10 @@ class _CommittedIndex:
                         for event in parse(obj):
                             if event.kind == "user_msg" and event.text:
                                 self.lines.update(_chaves_de_commit(event.text))
-                    current = os.stat(path)
+                    # fstat dos dois lados: no Windows o st_ctime_ns do stat pelo caminho nunca
+                    # bate com o do handle, e a confirmação falhava sempre.
+                    with open(path, "rb") as again:
+                        current = os.fstat(again.fileno())
                     if ((current.st_dev, current.st_ino) != signature[:2]
                             or current.st_size < stat.st_size
                             or current.st_size == stat.st_size and (
@@ -582,6 +587,21 @@ def linha_mais_parecida(texto: str, committed: set[str]) -> str | None:
     return perto[0] if perto else None
 
 
+def _queue_method(method):
+    signature = inspect.signature(method)
+
+    @functools.wraps(method)
+    def routed(self, *args, **kwargs):
+        from app.runtime_queue import route_queue
+        bound = signature.bind(self, *args, **kwargs)
+        bound.apply_defaults()
+        managed, result = route_queue(self, method.__name__, {k: v for k, v in bound.arguments.items() if k != "self"})
+        if managed:
+            return result
+        return method(self, *args, **kwargs)
+    return routed
+
+
 class PromptQueue:
     """Fila duravel de prompts por sessao (sidecar JSONL). Registra cada envio pra que msgs
     enfileiradas (mandadas com o Claude trabalhando) — que o Claude Code NEM sempre grava no
@@ -589,8 +609,10 @@ class PromptQueue:
     contra o transcript: quando o Claude Code grava o prompt real, a entrada da fila some."""
 
     def __init__(self, name: str):
+        self.name = name
         self.path = _queue_dir() / f"{_sanitize(name)}.jsonl"
 
+    @_queue_method
     def _write_atomic(self, rows: list[dict]) -> None:
         # Escrita atomica (tmp + replace) pra um reader nunca pegar o arquivo pela metade.
         tmp = self.path.with_suffix(".jsonl.tmp")
@@ -599,6 +621,7 @@ class PromptQueue:
         tmp.write_text("".join(dumps_safe(r) + "\n" for r in rows), encoding="utf-8")
         atomico.substituir(tmp, self.path)
 
+    @_queue_method
     def append(self, text: str, delivered: bool = False, ts: float | None = None,
                pre_transcript: bool = False) -> dict:
         # delivered=False por padrao = enfileirada mas NAO digitada na TUI (o /input passa True quando
@@ -630,6 +653,7 @@ class PromptQueue:
             self._write_atomic(rows)
         return entry
 
+    @_queue_method
     def append_saida_local(self, text: str) -> dict:
         """Texto do AGENTE que nao entra no transcript (ver _saida_local). Entregue e confirmada
         de nascenca: nunca e drenada, redigitada nem reconciliada."""
@@ -643,6 +667,7 @@ class PromptQueue:
             self._write_atomic(rows)
         return entry
 
+    @_queue_method
     def claim_undelivered(self, min_ts: float = 0.0, limit: int | None = None,
                           *, entry_id: str | None = None) -> list[dict]:
         """Reivindica (atomicamente) entradas ainda nao entregues: vira delivered=True e devolve as
@@ -664,6 +689,7 @@ class PromptQueue:
                 self._write_atomic(rows)
             return claimed
 
+    @_queue_method
     def set_delivered(self, entry_id: str, value: bool, *, steered: bool = False) -> None:
         """Marca UMA entrada (por id) como delivered=value e reescreve atomico. Usado pra reverter um
         claim quando o envio nao chegou a tocar a TUI (provadamente pre-envio)."""
@@ -681,6 +707,7 @@ class PromptQueue:
                 return
             self._write_atomic(rows)
 
+    @_queue_method
     def desistir(self, entry_id: str) -> None:
         """Marca UMA entrada reivindicada como perdida sem passar pelo reconcile: o envio nem
         pôde ser tentado (sessão que não sobe). Mesmos campos do desfecho `desistiu` de lá."""
@@ -694,6 +721,7 @@ class PromptQueue:
                     self._write_atomic(rows)
                     return
 
+    @_queue_method
     def bump_attempts(self, entry_id: str) -> int:
         """Incrementa `attempts` de UMA entrada e devolve o novo total (0 = entrada nao existe).
 
@@ -710,6 +738,7 @@ class PromptQueue:
                     return int(r["attempts"])
         return 0
 
+    @_queue_method
     def entry_delivered(self, entry_id: str) -> bool | None:
         """delivered? de UMA entrada por id. None = entrada nao existe (prunada/sumiu com /clear).
         Ancora do loop runner: so tica depois do goal constar entregue na TUI."""
@@ -720,6 +749,7 @@ class PromptQueue:
                 return bool(r.get("delivered"))
         return None
 
+    @_queue_method
     def confirm_delivered(self, apenas: Callable[[dict], bool] | None = None) -> int:
         """Carimba `confirmed` em TODA entrada delivered ainda não confirmada. Devolve quantas.
 
@@ -743,6 +773,7 @@ class PromptQueue:
                 self._write_atomic(rows)
             return n
 
+    @_queue_method
     def prune_before(self, min_ts: float) -> int:
         # Entradas de sessao ANTERIOR (ts < inicio do transcript atual) nunca mais casam nem drenam
         # — so acumulavam lixo e mantinham o cheap-check do drain quente pra sempre. Remove.
@@ -757,6 +788,7 @@ class PromptQueue:
                 self._write_atomic(kept)
             return len(rows) - len(kept)
 
+    @_queue_method
     def reconcile_delivered(self, committed: set[str], min_ts: float, now: float,
                             grace: float = 8.0, max_attempts: int = 2,
                             confirm_only: bool = False,
@@ -883,6 +915,7 @@ class PromptQueue:
                 self._write_atomic(rows)
             return requeued
 
+    @_queue_method
     def remove(self, entry_id: str) -> bool:
         """Tira UMA entrada DESISTIDA da fila pelo id (o botao "descartar" da bolha perdida).
         True = existia e saiu. Entrada ainda por entregar ou ja confirmada nao sai por aqui: o id
@@ -895,6 +928,7 @@ class PromptQueue:
             self._write_atomic(restantes)
             return True
 
+    @_queue_method
     def clear(self) -> None:
         # Remove o sidecar inteiro. Usado quando /clear reinicia a sessao do Claude Code: as entradas
         # pertencem ao transcript ANTIGO e nao devem reaparecer como bubble no transcript novo (a fila
@@ -902,6 +936,7 @@ class PromptQueue:
         self.path.unlink(missing_ok=True)
         self.path.with_suffix(".jsonl.tmp").unlink(missing_ok=True)
 
+    @_queue_method
     def rename(self, new_name: str) -> None:
         # Move o sidecar pro nome novo, preservando entradas nao-drenadas (a fila e keyed pelo NOME;
         # sem mover, a sessao renomeada perderia a fila e ela viraria orfa no nome velho). Move atomico
@@ -910,6 +945,7 @@ class PromptQueue:
         if self.path.exists():
             atomico.substituir(self.path, _queue_dir() / f"{_sanitize(new_name)}.jsonl")
 
+    @_queue_method
     def load(self) -> list[dict]:
         if not self.path.exists():
             return []

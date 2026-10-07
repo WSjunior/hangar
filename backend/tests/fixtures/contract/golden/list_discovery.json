@@ -1,0 +1,3146 @@
+{
+ "about": "registry.list(): só descoberta e resolução do transcript (estado padrão).",
+ "conventions": [
+  "⟦ROOT⟧ é a pasta do caso; ⟦ROOT_SAN⟧ é sanitize_cwd(⟦ROOT⟧); a pasta do Pi é '-' + ela + o resto + '--'.",
+  "Cada caso começa com todos os caches vazios e um registro só, que atravessa os tiques.",
+  "Tique: aplica `fs` (write grava texto e mtime, padrão `at`; rm; mkdir; touch), fixa o relógio em `at` (monotonic = at - mono_off), aplica `ops`, relê do disco os marcadores e o registro nativo e roda.",
+  "ops: seed = _jsonl_cache[name] = jsonl; forget = _forget(name); rename = move jsonl, fd_locked, statusline, label, limite e última resposta para o nome novo; fresh = invalida o mapa de filhos.",
+  "`procs` é o /proc do tique; o mapa pai→filhos tem cache de 3 s no relógio (processo que nasce some dele até vencer ou até `fresh`), em ordem crescente de pid; a descida é em pilha (o último filho primeiro). O pid raiz do pane entra sempre, mesmo fora do mapa. pid vivo = está em `procs`.",
+  "`panes` é a saída de list-panes -a já separada; `tmux_down` faz list-panes levantar MuxIndisponivel.",
+  "`captures`: cada captura do nome consome o primeiro quadro; o último se repete; nome sem quadro captura ''.",
+  "`facts`: headless_snapshot (estado do runtime sem terminal), headless_problem e runtime_problem (código em lista); ausente = None. O Codex vivo devolve sempre nada (vem dos fatos do Python).",
+  "`expected.rows` omite campo igual ao de `defaults`. `tmux` e `proc_reads` são informativos (detalhe do Python, não contrato). Caches `[idade em s, valor]`, idade arredondada em 3 casas. `effects` é o que o Python fez fora da lista (demote_awaiting), ordenado.",
+  "asyncio.sleep avança o relógio. Git, varredura de pares mortos, orq e transferências ficam fora (vêm de fatos ou de outro laço). O rebaixamento só em memória do registro nativo não atravessa tiques."
+ ],
+ "t0": 1800000000.0,
+ "mono_off": 1700000000.0,
+ "defaults": {
+  "lifecycle_id": null,
+  "transfer_id": null,
+  "transfer_phase": null,
+  "cwd": null,
+  "jsonl": null,
+  "provider": "claude",
+  "headless": false,
+  "engine": null,
+  "engine_account": null,
+  "codex_home": null,
+  "codex_service_tier": null,
+  "conta": null,
+  "state": "idle",
+  "last_activity": null,
+  "last_reply": null,
+  "last_reply_at": null,
+  "tracked": true,
+  "branch": null,
+  "worktree": false,
+  "worktree_path": null,
+  "worktree_gone": false,
+  "git_cwd": null,
+  "git_dirty": null,
+  "git_ahead": null,
+  "git_behind": null,
+  "git_added": null,
+  "git_removed": null,
+  "avisos": [],
+  "label": null,
+  "startup_steps": [],
+  "question": null,
+  "pending_questions": 0,
+  "options": null,
+  "stalled": false,
+  "problema": null,
+  "limited": false,
+  "limit_reset": null,
+  "shared": false,
+  "guest_kind": null,
+  "owner": null,
+  "then_target": null,
+  "status_line": null,
+  "context": null,
+  "model": null,
+  "pair_peers": null,
+  "pair_external": null,
+  "pair_gid": null,
+  "pair_task": null,
+  "orq_arbiter": null,
+  "loop_status": null,
+  "loop_iter": null,
+  "loop_max": null,
+  "plan_name": null,
+  "plan_task": null,
+  "plan_task_total": null,
+  "plan_done": null,
+  "plan_total": null,
+  "plan_complete": null,
+  "plan_tasks": null,
+  "plan_hidden": null
+ },
+ "cases": [
+  {
+   "name": "claude_fd_open_then_locked",
+   "ticks": [
+    {
+     "at": 1800000000.0,
+     "fs": [
+      {
+       "op": "mkdir",
+       "path": "⟦ROOT⟧/work/a"
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-a/aaaa.jsonl",
+       "text": "{\"type\": \"user\", \"message\": {\"role\": \"user\", \"content\": \"um\"}, \"cwd\": \"⟦ROOT⟧/work/a\", \"timestamp\": \"2027-01-15T08:00:00.000Z\", \"uuid\": \"u-um\"}\n",
+       "mtime": 1799999995.0
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-a/11111111-1111-4111-8111-111111111111.jsonl",
+       "text": "{\"type\": \"user\", \"message\": {\"role\": \"user\", \"content\": \"boot\"}, \"cwd\": \"⟦ROOT⟧/work/a\", \"timestamp\": \"2027-01-15T08:00:00.000Z\", \"uuid\": \"u-boot\"}\n",
+       "mtime": 1799999950.0
+      }
+     ],
+     "procs": [
+      {
+       "pid": 100,
+       "ppid": 1,
+       "argv": [
+        "/bin/bash"
+       ],
+       "cwd": "⟦ROOT⟧/work/a",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      },
+      {
+       "pid": 101,
+       "ppid": 100,
+       "argv": [
+        "claude",
+        "--session-id",
+        "11111111-1111-4111-8111-111111111111"
+       ],
+       "cwd": "⟦ROOT⟧/work/a",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": [
+        "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-a/aaaa.jsonl"
+       ]
+      }
+     ],
+     "panes": [
+      {
+       "name": "s",
+       "pid": 100,
+       "cwd": "⟦ROOT⟧/work/a",
+       "pane_id": "%1",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "s",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/a",
+        "jsonl": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-a/aaaa.jsonl",
+        "conta": "claude:⟦ROOT⟧/home/.claude"
+       }
+      ],
+      "jsonl_cache": {
+       "s": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-a/aaaa.jsonl"
+      },
+      "fd_locked": [
+       "s"
+      ],
+      "tmux": [
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 100",
+       "cmdline 101",
+       "environ 101",
+       "fd 101",
+       "scan"
+      ]
+     }
+    },
+    {
+     "at": 1800000002.0,
+     "fs": [
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-a/bbbb.jsonl",
+       "text": "{\"type\": \"user\", \"message\": {\"role\": \"user\", \"content\": \"outra\"}, \"cwd\": \"⟦ROOT⟧/work/a\", \"timestamp\": \"2027-01-15T08:00:00.000Z\", \"uuid\": \"u-outra\"}\n",
+       "mtime": 1800000002.0
+      }
+     ],
+     "procs": [
+      {
+       "pid": 100,
+       "ppid": 1,
+       "argv": [
+        "/bin/bash"
+       ],
+       "cwd": "⟦ROOT⟧/work/a",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      },
+      {
+       "pid": 101,
+       "ppid": 100,
+       "argv": [
+        "claude",
+        "--session-id",
+        "11111111-1111-4111-8111-111111111111"
+       ],
+       "cwd": "⟦ROOT⟧/work/a",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "s",
+       "pid": 100,
+       "cwd": "⟦ROOT⟧/work/a",
+       "pane_id": "%1",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "s",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/a",
+        "jsonl": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-a/aaaa.jsonl",
+        "conta": "claude:⟦ROOT⟧/home/.claude"
+       }
+      ],
+      "jsonl_cache": {
+       "s": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-a/aaaa.jsonl"
+      },
+      "fd_locked": [
+       "s"
+      ],
+      "tmux": [
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 100",
+       "cmdline 101",
+       "environ 101",
+       "fd 101"
+      ]
+     }
+    },
+    {
+     "at": 1800000004.0,
+     "fs": [
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/.hangar-active/11111111-1111-4111-8111-111111111111.json",
+       "text": "{\"jsonl\": \"⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-a/bbbb.jsonl\"}",
+       "mtime": null
+      }
+     ],
+     "procs": [
+      {
+       "pid": 100,
+       "ppid": 1,
+       "argv": [
+        "/bin/bash"
+       ],
+       "cwd": "⟦ROOT⟧/work/a",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      },
+      {
+       "pid": 101,
+       "ppid": 100,
+       "argv": [
+        "claude",
+        "--session-id",
+        "11111111-1111-4111-8111-111111111111"
+       ],
+       "cwd": "⟦ROOT⟧/work/a",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "s",
+       "pid": 100,
+       "cwd": "⟦ROOT⟧/work/a",
+       "pane_id": "%1",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "s",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/a",
+        "jsonl": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-a/bbbb.jsonl",
+        "conta": "claude:⟦ROOT⟧/home/.claude"
+       }
+      ],
+      "jsonl_cache": {
+       "s": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-a/bbbb.jsonl"
+      },
+      "fd_locked": [],
+      "tmux": [
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 100",
+       "cmdline 101",
+       "environ 101",
+       "fd 101",
+       "scan"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "claude_fd_aux_ignored",
+   "ticks": [
+    {
+     "at": 1800000000.0,
+     "fs": [
+      {
+       "op": "mkdir",
+       "path": "⟦ROOT⟧/work/a"
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-a/11111111-1111-4111-8111-111111111111.jsonl",
+       "text": "{\"type\": \"user\", \"message\": {\"role\": \"user\", \"content\": \"um\"}, \"cwd\": \"⟦ROOT⟧/work/a\", \"timestamp\": \"2027-01-15T08:00:00.000Z\", \"uuid\": \"u-um\"}\n",
+       "mtime": 1799999950.0
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-a/sub.jsonl",
+       "text": "{\"type\": \"user\", \"message\": {\"role\": \"user\", \"content\": \"sub\"}, \"cwd\": \"⟦ROOT⟧/work/a\", \"timestamp\": \"2027-01-15T08:00:00.000Z\", \"uuid\": \"u-sub\"}\n",
+       "mtime": 1799999999.0
+      }
+     ],
+     "procs": [
+      {
+       "pid": 100,
+       "ppid": 1,
+       "argv": [
+        "/bin/bash"
+       ],
+       "cwd": "⟦ROOT⟧/work/a",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      },
+      {
+       "pid": 101,
+       "ppid": 100,
+       "argv": [
+        "claude",
+        "--session-id",
+        "11111111-1111-4111-8111-111111111111"
+       ],
+       "cwd": "⟦ROOT⟧/work/a",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      },
+      {
+       "pid": 102,
+       "ppid": 101,
+       "argv": [
+        "claude",
+        "--agent",
+        "x",
+        "--session-id",
+        "22222222-2222-4222-8222-222222222222"
+       ],
+       "cwd": "⟦ROOT⟧/work/a",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": [
+        "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-a/sub.jsonl"
+       ]
+      },
+      {
+       "pid": 103,
+       "ppid": 101,
+       "argv": [
+        "node",
+        "mcp.js"
+       ],
+       "cwd": "⟦ROOT⟧/work/a",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": [
+        "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-a/sub.jsonl"
+       ]
+      }
+     ],
+     "panes": [
+      {
+       "name": "s",
+       "pid": 100,
+       "cwd": "⟦ROOT⟧/work/a",
+       "pane_id": "%1",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "s",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/a",
+        "jsonl": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-a/11111111-1111-4111-8111-111111111111.jsonl",
+        "conta": "claude:⟦ROOT⟧/home/.claude"
+       }
+      ],
+      "jsonl_cache": {
+       "s": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-a/11111111-1111-4111-8111-111111111111.jsonl"
+      },
+      "fd_locked": [],
+      "tmux": [
+       "list-panes",
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 100",
+       "cmdline 101",
+       "cmdline 102",
+       "cmdline 103",
+       "environ 101",
+       "environ 102",
+       "fd 101",
+       "fd 102",
+       "scan"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "claude_session_id_then_clear",
+   "ticks": [
+    {
+     "at": 1800000000.0,
+     "fs": [
+      {
+       "op": "mkdir",
+       "path": "⟦ROOT⟧/work/b"
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-b/velho.jsonl",
+       "text": "{\"type\": \"user\", \"message\": {\"role\": \"user\", \"content\": \"velho\"}, \"cwd\": \"⟦ROOT⟧/work/b\", \"timestamp\": \"2027-01-15T08:00:00.000Z\", \"uuid\": \"u-velho\"}\n",
+       "mtime": 1799999100.0
+      }
+     ],
+     "procs": [
+      {
+       "pid": 200,
+       "ppid": 1,
+       "argv": [
+        "claude",
+        "--session-id",
+        "33333333-3333-4333-8333-333333333333"
+       ],
+       "cwd": "⟦ROOT⟧/work/b",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "b",
+       "pid": 200,
+       "cwd": "⟦ROOT⟧/work/b",
+       "pane_id": "%1",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "b",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/b",
+        "jsonl": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-b/33333333-3333-4333-8333-333333333333.jsonl",
+        "conta": "claude:⟦ROOT⟧/home/.claude"
+       }
+      ],
+      "jsonl_cache": {
+       "b": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-b/33333333-3333-4333-8333-333333333333.jsonl"
+      },
+      "fd_locked": [],
+      "tmux": [
+       "list-panes",
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 200",
+       "environ 200",
+       "fd 200",
+       "scan"
+      ]
+     }
+    },
+    {
+     "at": 1800000002.0,
+     "fs": [
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-b/33333333-3333-4333-8333-333333333333.jsonl",
+       "text": "{\"type\": \"user\", \"message\": {\"role\": \"user\", \"content\": \"boot\"}, \"cwd\": \"⟦ROOT⟧/work/b\", \"timestamp\": \"2027-01-15T08:00:00.000Z\", \"uuid\": \"u-boot\"}\n",
+       "mtime": 1800000001.0
+      }
+     ],
+     "procs": [
+      {
+       "pid": 200,
+       "ppid": 1,
+       "argv": [
+        "claude",
+        "--session-id",
+        "33333333-3333-4333-8333-333333333333"
+       ],
+       "cwd": "⟦ROOT⟧/work/b",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "b",
+       "pid": 200,
+       "cwd": "⟦ROOT⟧/work/b",
+       "pane_id": "%1",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "b",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/b",
+        "jsonl": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-b/33333333-3333-4333-8333-333333333333.jsonl",
+        "conta": "claude:⟦ROOT⟧/home/.claude"
+       }
+      ],
+      "jsonl_cache": {
+       "b": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-b/33333333-3333-4333-8333-333333333333.jsonl"
+      },
+      "fd_locked": [],
+      "tmux": [
+       "list-panes",
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 200",
+       "environ 200",
+       "fd 200"
+      ]
+     }
+    },
+    {
+     "at": 1800000004.0,
+     "fs": [
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-b/posclear.jsonl",
+       "text": "{\"type\": \"user\", \"message\": {\"role\": \"user\", \"content\": \"depois\"}, \"cwd\": \"⟦ROOT⟧/work/b\", \"timestamp\": \"2027-01-15T08:00:00.000Z\", \"uuid\": \"u-depois\"}\n",
+       "mtime": 1800000003.0
+      }
+     ],
+     "procs": [
+      {
+       "pid": 200,
+       "ppid": 1,
+       "argv": [
+        "claude",
+        "--session-id",
+        "33333333-3333-4333-8333-333333333333"
+       ],
+       "cwd": "⟦ROOT⟧/work/b",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "b",
+       "pid": 200,
+       "cwd": "⟦ROOT⟧/work/b",
+       "pane_id": "%1",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "b",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/b",
+        "jsonl": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-b/posclear.jsonl",
+        "conta": "claude:⟦ROOT⟧/home/.claude"
+       }
+      ],
+      "jsonl_cache": {
+       "b": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-b/posclear.jsonl"
+      },
+      "fd_locked": [],
+      "tmux": [
+       "list-panes",
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 200",
+       "environ 200",
+       "fd 200",
+       "scan"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "claude_session_id_with_sibling",
+   "ticks": [
+    {
+     "at": 1800000000.0,
+     "fs": [
+      {
+       "op": "mkdir",
+       "path": "⟦ROOT⟧/work/b"
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-b/44444444-4444-4444-8444-444444444444.jsonl",
+       "text": "{\"type\": \"user\", \"message\": {\"role\": \"user\", \"content\": \"x\"}, \"cwd\": \"⟦ROOT⟧/work/b\", \"timestamp\": \"2027-01-15T08:00:00.000Z\", \"uuid\": \"u-x\"}\n",
+       "mtime": 1799999990.0
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-b/55555555-5555-4555-8555-555555555555.jsonl",
+       "text": "{\"type\": \"user\", \"message\": {\"role\": \"user\", \"content\": \"y\"}, \"cwd\": \"⟦ROOT⟧/work/b\", \"timestamp\": \"2027-01-15T08:00:00.000Z\", \"uuid\": \"u-y\"}\n",
+       "mtime": 1799999980.0
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-b/novo.jsonl",
+       "text": "{\"type\": \"user\", \"message\": {\"role\": \"user\", \"content\": \"z\"}, \"cwd\": \"⟦ROOT⟧/work/b\", \"timestamp\": \"2027-01-15T08:00:00.000Z\", \"uuid\": \"u-z\"}\n",
+       "mtime": 1799999999.0
+      }
+     ],
+     "procs": [
+      {
+       "pid": 300,
+       "ppid": 1,
+       "argv": [
+        "claude",
+        "--session-id",
+        "44444444-4444-4444-8444-444444444444"
+       ],
+       "cwd": "⟦ROOT⟧/work/b",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      },
+      {
+       "pid": 310,
+       "ppid": 1,
+       "argv": [
+        "claude",
+        "--session-id",
+        "55555555-5555-4555-8555-555555555555"
+       ],
+       "cwd": "⟦ROOT⟧/work/b",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "x",
+       "pid": 300,
+       "cwd": "⟦ROOT⟧/work/b",
+       "pane_id": "%3",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      },
+      {
+       "name": "y",
+       "pid": 310,
+       "cwd": "⟦ROOT⟧/work/b",
+       "pane_id": "%4",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      },
+      {
+       "name": "escondida",
+       "pid": 320,
+       "cwd": "⟦ROOT⟧/work/b",
+       "pane_id": "%5",
+       "active": true,
+       "hidden": true,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "x",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/b",
+        "jsonl": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-b/44444444-4444-4444-8444-444444444444.jsonl",
+        "conta": "claude:⟦ROOT⟧/home/.claude"
+       },
+       {
+        "name": "y",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/b",
+        "jsonl": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-b/55555555-5555-4555-8555-555555555555.jsonl",
+        "conta": "claude:⟦ROOT⟧/home/.claude"
+       }
+      ],
+      "jsonl_cache": {
+       "x": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-b/44444444-4444-4444-8444-444444444444.jsonl",
+       "y": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-b/55555555-5555-4555-8555-555555555555.jsonl"
+      },
+      "fd_locked": [],
+      "tmux": [
+       "list-panes",
+       "list-panes",
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 300",
+       "cmdline 310",
+       "environ 300",
+       "environ 310",
+       "fd 300",
+       "fd 310",
+       "scan"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "claude_marker_by_pid_cache_newest",
+   "ticks": [
+    {
+     "at": 1800000000.0,
+     "fs": [
+      {
+       "op": "mkdir",
+       "path": "⟦ROOT⟧/work/c"
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-c/m1.jsonl",
+       "text": "{}\n",
+       "mtime": 1799999970.0
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-c/m2.jsonl",
+       "text": "{}\n",
+       "mtime": 1799999980.0
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/.hangar-active/boot1.json",
+       "text": "{\"jsonl\": \"⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-c/m1.jsonl\", \"pid\": 401, \"ts\": 1799999970.0}",
+       "mtime": null
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/.hangar-active/boot2.json",
+       "text": "{\"jsonl\": \"⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-c/m2.jsonl\", \"pid\": 401, \"ts\": 1799999990.0}",
+       "mtime": null
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/.hangar-active/boot3.json",
+       "text": "{\"jsonl\": \"⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-c/m1.jsonl\", \"pid\": 999, \"ts\": 1800000000.0}",
+       "mtime": null
+      }
+     ],
+     "procs": [
+      {
+       "pid": 400,
+       "ppid": 1,
+       "argv": [
+        "/bin/bash"
+       ],
+       "cwd": "⟦ROOT⟧/work/c",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      },
+      {
+       "pid": 401,
+       "ppid": 400,
+       "argv": [
+        "claude"
+       ],
+       "cwd": "⟦ROOT⟧/work/c",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "c",
+       "pid": 400,
+       "cwd": "⟦ROOT⟧/work/c",
+       "pane_id": "%1",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "c",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/c",
+        "jsonl": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-c/m2.jsonl",
+        "conta": "claude:⟦ROOT⟧/home/.claude"
+       }
+      ],
+      "jsonl_cache": {
+       "c": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-c/m2.jsonl"
+      },
+      "fd_locked": [],
+      "tmux": [
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 400",
+       "cmdline 401",
+       "environ 400",
+       "environ 401",
+       "fd 401",
+       "scan"
+      ]
+     }
+    },
+    {
+     "at": 1800000002.0,
+     "fs": [
+      {
+       "op": "rm",
+       "path": "⟦ROOT⟧/home/.claude/.hangar-active/boot1.json"
+      },
+      {
+       "op": "rm",
+       "path": "⟦ROOT⟧/home/.claude/.hangar-active/boot2.json"
+      }
+     ],
+     "procs": [
+      {
+       "pid": 400,
+       "ppid": 1,
+       "argv": [
+        "/bin/bash"
+       ],
+       "cwd": "⟦ROOT⟧/work/c",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "c",
+       "pid": 400,
+       "cwd": "⟦ROOT⟧/work/c",
+       "pane_id": "%1",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "c",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/c",
+        "jsonl": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-c/m2.jsonl",
+        "conta": "claude:⟦ROOT⟧/home/.claude"
+       }
+      ],
+      "jsonl_cache": {
+       "c": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-c/m2.jsonl"
+      },
+      "fd_locked": [],
+      "tmux": [
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 400",
+       "cmdline 401",
+       "environ 400"
+      ]
+     }
+    },
+    {
+     "at": 1800000004.0,
+     "ops": [
+      {
+       "op": "forget",
+       "name": "c"
+      }
+     ],
+     "procs": [
+      {
+       "pid": 400,
+       "ppid": 1,
+       "argv": [
+        "/bin/bash"
+       ],
+       "cwd": "⟦ROOT⟧/work/c",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "c",
+       "pid": 400,
+       "cwd": "⟦ROOT⟧/work/c",
+       "pane_id": "%1",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "c",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/c",
+        "jsonl": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-c/m2.jsonl",
+        "conta": "claude:⟦ROOT⟧/home/.claude",
+        "tracked": false
+       }
+      ],
+      "jsonl_cache": {},
+      "fd_locked": [],
+      "tmux": [
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 400",
+       "environ 400",
+       "scan"
+      ]
+     }
+    },
+    {
+     "at": 1800000006.0,
+     "procs": [],
+     "panes": [
+      {
+       "name": "c",
+       "pid": null,
+       "cwd": "⟦ROOT⟧/work/c",
+       "pane_id": "%1",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "c",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/c",
+        "jsonl": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-c/m2.jsonl",
+        "conta": "claude:⟦ROOT⟧/home/.claude",
+        "tracked": false
+       }
+      ],
+      "jsonl_cache": {},
+      "fd_locked": [],
+      "tmux": [
+       "list-panes"
+      ],
+      "proc_reads": []
+     }
+    }
+   ]
+  },
+  {
+   "name": "claude_marker_by_session_id",
+   "ticks": [
+    {
+     "at": 1800000000.0,
+     "fs": [
+      {
+       "op": "mkdir",
+       "path": "⟦ROOT⟧/work/d"
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-d/retomada.jsonl",
+       "text": "{}\n",
+       "mtime": 1799999960.0
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-d/outra.jsonl",
+       "text": "{}\n",
+       "mtime": 1799999999.0
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/.hangar-active/66666666-6666-4666-8666-666666666666.json",
+       "text": "{\"jsonl\": \"⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-d/retomada.jsonl\"}",
+       "mtime": null
+      }
+     ],
+     "procs": [
+      {
+       "pid": 500,
+       "ppid": 1,
+       "argv": [
+        "claude",
+        "--session-id",
+        "66666666-6666-4666-8666-666666666666"
+       ],
+       "cwd": "⟦ROOT⟧/work/d",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "d",
+       "pid": 500,
+       "cwd": "⟦ROOT⟧/work/d",
+       "pane_id": "%1",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "d",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/d",
+        "jsonl": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-d/retomada.jsonl",
+        "conta": "claude:⟦ROOT⟧/home/.claude"
+       }
+      ],
+      "jsonl_cache": {
+       "d": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-d/retomada.jsonl"
+      },
+      "fd_locked": [],
+      "tmux": [
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 500",
+       "environ 500",
+       "fd 500",
+       "scan"
+      ]
+     }
+    },
+    {
+     "at": 1800000002.0,
+     "fs": [
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/.hangar-active/66666666-6666-4666-8666-666666666666.json",
+       "text": "{\"jsonl\": \"⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-d/sumiu.jsonl\"}",
+       "mtime": null
+      }
+     ],
+     "procs": [
+      {
+       "pid": 500,
+       "ppid": 1,
+       "argv": [
+        "claude",
+        "--session-id",
+        "66666666-6666-4666-8666-666666666666"
+       ],
+       "cwd": "⟦ROOT⟧/work/d",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "d",
+       "pid": 500,
+       "cwd": "⟦ROOT⟧/work/d",
+       "pane_id": "%1",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "d",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/d",
+        "jsonl": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-d/66666666-6666-4666-8666-666666666666.jsonl",
+        "conta": "claude:⟦ROOT⟧/home/.claude"
+       }
+      ],
+      "jsonl_cache": {
+       "d": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-d/66666666-6666-4666-8666-666666666666.jsonl"
+      },
+      "fd_locked": [],
+      "tmux": [
+       "list-panes",
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 500",
+       "environ 500",
+       "fd 500"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "seed_rename_forget",
+   "ticks": [
+    {
+     "at": 1800000000.0,
+     "fs": [
+      {
+       "op": "mkdir",
+       "path": "⟦ROOT⟧/work/e"
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-e/antigo.jsonl",
+       "text": "{}\n",
+       "mtime": 1799999900.0
+      }
+     ],
+     "ops": [
+      {
+       "op": "seed",
+       "name": "nova",
+       "jsonl": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-e/fixo.jsonl"
+      }
+     ],
+     "procs": [
+      {
+       "pid": 600,
+       "ppid": 1,
+       "argv": [
+        "/bin/bash"
+       ],
+       "cwd": "⟦ROOT⟧/work/e",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "nova",
+       "pid": 600,
+       "cwd": "⟦ROOT⟧/work/e",
+       "pane_id": "%1",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "nova",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/e",
+        "jsonl": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-e/fixo.jsonl",
+        "conta": "claude:⟦ROOT⟧/home/.claude"
+       }
+      ],
+      "jsonl_cache": {
+       "nova": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-e/fixo.jsonl"
+      },
+      "fd_locked": [],
+      "tmux": [
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 600",
+       "environ 600",
+       "scan"
+      ]
+     }
+    },
+    {
+     "at": 1800000002.0,
+     "ops": [
+      {
+       "op": "rename",
+       "old": "nova",
+       "new": "renomeada"
+      }
+     ],
+     "procs": [
+      {
+       "pid": 600,
+       "ppid": 1,
+       "argv": [
+        "/bin/bash"
+       ],
+       "cwd": "⟦ROOT⟧/work/e",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "renomeada",
+       "pid": 600,
+       "cwd": "⟦ROOT⟧/work/e",
+       "pane_id": "%1",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "renomeada",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/e",
+        "jsonl": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-e/fixo.jsonl",
+        "conta": "claude:⟦ROOT⟧/home/.claude"
+       }
+      ],
+      "jsonl_cache": {
+       "renomeada": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-e/fixo.jsonl"
+      },
+      "fd_locked": [],
+      "tmux": [
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 600",
+       "environ 600"
+      ]
+     }
+    },
+    {
+     "at": 1800000004.0,
+     "ops": [
+      {
+       "op": "forget",
+       "name": "renomeada"
+      }
+     ],
+     "procs": [
+      {
+       "pid": 600,
+       "ppid": 1,
+       "argv": [
+        "/bin/bash"
+       ],
+       "cwd": "⟦ROOT⟧/work/e",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "renomeada",
+       "pid": 600,
+       "cwd": "⟦ROOT⟧/work/e",
+       "pane_id": "%1",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "renomeada",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/e",
+        "jsonl": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-e/antigo.jsonl",
+        "conta": "claude:⟦ROOT⟧/home/.claude",
+        "tracked": false
+       }
+      ],
+      "jsonl_cache": {},
+      "fd_locked": [],
+      "tmux": [
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 600",
+       "environ 600",
+       "scan"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "created_under_one_second",
+   "ticks": [
+    {
+     "at": 1800000000.0,
+     "fs": [
+      {
+       "op": "mkdir",
+       "path": "⟦ROOT⟧/work/f"
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-f/velho.jsonl",
+       "text": "{}\n",
+       "mtime": 1799999900.0
+      }
+     ],
+     "procs": [],
+     "panes": [],
+     "expected": {
+      "rows": [],
+      "jsonl_cache": {},
+      "fd_locked": [],
+      "tmux": [
+       "list-panes"
+      ],
+      "proc_reads": [
+       "scan"
+      ]
+     }
+    },
+    {
+     "at": 1800000001.5,
+     "procs": [
+      {
+       "pid": 700,
+       "ppid": 1,
+       "argv": [
+        "/bin/bash"
+       ],
+       "cwd": "⟦ROOT⟧/work/f",
+       "env": {},
+       "start": 1800000001.0,
+       "fds": []
+      },
+      {
+       "pid": 701,
+       "ppid": 700,
+       "argv": [
+        "claude",
+        "--session-id",
+        "77777777-7777-4777-8777-777777777777"
+       ],
+       "cwd": "⟦ROOT⟧/work/f",
+       "env": {},
+       "start": 1800000001.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "f",
+       "pid": 700,
+       "cwd": "⟦ROOT⟧/work/f",
+       "pane_id": "%1",
+       "active": true,
+       "hidden": false,
+       "provider": "claude",
+       "session_created": 1800000001
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "f",
+        "lifecycle_id": "t:1800000001",
+        "cwd": "⟦ROOT⟧/work/f",
+        "jsonl": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-f/velho.jsonl",
+        "conta": "claude:⟦ROOT⟧/home/.claude",
+        "tracked": false
+       }
+      ],
+      "jsonl_cache": {},
+      "fd_locked": [],
+      "tmux": [
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 700",
+       "environ 700"
+      ]
+     }
+    },
+    {
+     "at": 1800000001.75,
+     "ops": [
+      {
+       "op": "fresh"
+      }
+     ],
+     "procs": [
+      {
+       "pid": 700,
+       "ppid": 1,
+       "argv": [
+        "/bin/bash"
+       ],
+       "cwd": "⟦ROOT⟧/work/f",
+       "env": {},
+       "start": 1800000001.0,
+       "fds": []
+      },
+      {
+       "pid": 701,
+       "ppid": 700,
+       "argv": [
+        "claude",
+        "--session-id",
+        "77777777-7777-4777-8777-777777777777"
+       ],
+       "cwd": "⟦ROOT⟧/work/f",
+       "env": {},
+       "start": 1800000001.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "f",
+       "pid": 700,
+       "cwd": "⟦ROOT⟧/work/f",
+       "pane_id": "%1",
+       "active": true,
+       "hidden": false,
+       "provider": "claude",
+       "session_created": 1800000001
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "f",
+        "lifecycle_id": "t:1800000001",
+        "cwd": "⟦ROOT⟧/work/f",
+        "jsonl": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-f/77777777-7777-4777-8777-777777777777.jsonl",
+        "conta": "claude:⟦ROOT⟧/home/.claude"
+       }
+      ],
+      "jsonl_cache": {
+       "f": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-f/77777777-7777-4777-8777-777777777777.jsonl"
+      },
+      "fd_locked": [],
+      "tmux": [
+       "list-panes",
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 700",
+       "cmdline 701",
+       "environ 701",
+       "fd 701",
+       "scan"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "mux_unavailable",
+   "ticks": [
+    {
+     "at": 1800000000.0,
+     "fs": [
+      {
+       "op": "mkdir",
+       "path": "⟦ROOT⟧/work/f"
+      }
+     ],
+     "procs": [
+      {
+       "pid": 700,
+       "ppid": 1,
+       "argv": [
+        "/bin/bash"
+       ],
+       "cwd": "⟦ROOT⟧/work/f",
+       "env": {},
+       "start": 1800000001.0,
+       "fds": []
+      },
+      {
+       "pid": 701,
+       "ppid": 700,
+       "argv": [
+        "claude",
+        "--session-id",
+        "77777777-7777-4777-8777-777777777777"
+       ],
+       "cwd": "⟦ROOT⟧/work/f",
+       "env": {},
+       "start": 1800000001.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "f",
+       "pid": 700,
+       "cwd": "⟦ROOT⟧/work/f",
+       "pane_id": "%1",
+       "active": true,
+       "hidden": false,
+       "provider": "claude",
+       "session_created": 1800000001
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "f",
+        "lifecycle_id": "t:1800000001",
+        "cwd": "⟦ROOT⟧/work/f",
+        "jsonl": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-f/77777777-7777-4777-8777-777777777777.jsonl",
+        "conta": "claude:⟦ROOT⟧/home/.claude"
+       }
+      ],
+      "jsonl_cache": {
+       "f": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-f/77777777-7777-4777-8777-777777777777.jsonl"
+      },
+      "fd_locked": [],
+      "tmux": [
+       "list-panes",
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 700",
+       "cmdline 701",
+       "environ 701",
+       "fd 701",
+       "scan"
+      ]
+     }
+    },
+    {
+     "at": 1800000002.0,
+     "procs": [
+      {
+       "pid": 700,
+       "ppid": 1,
+       "argv": [
+        "/bin/bash"
+       ],
+       "cwd": "⟦ROOT⟧/work/f",
+       "env": {},
+       "start": 1800000001.0,
+       "fds": []
+      },
+      {
+       "pid": 701,
+       "ppid": 700,
+       "argv": [
+        "claude",
+        "--session-id",
+        "77777777-7777-4777-8777-777777777777"
+       ],
+       "cwd": "⟦ROOT⟧/work/f",
+       "env": {},
+       "start": 1800000001.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "f",
+       "pid": 700,
+       "cwd": "⟦ROOT⟧/work/f",
+       "pane_id": "%1",
+       "active": true,
+       "hidden": false,
+       "provider": "claude",
+       "session_created": 1800000001
+      }
+     ],
+     "tmux_down": true,
+     "expected": {
+      "raises": "MuxIndisponivel",
+      "tmux": [
+       "list-panes"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "pi_ticket",
+   "ticks": [
+    {
+     "at": 1800000000.0,
+     "fs": [
+      {
+       "op": "mkdir",
+       "path": "⟦ROOT⟧/work/g"
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.pi/agent/sessions/-⟦ROOT_SAN⟧-work-g--/2027-01-15T08-00-00-000Z_88888888-8888-4888-8888-888888888888.jsonl",
+       "text": "{}\n",
+       "mtime": 1799999950.0
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.pi/agent/sessions/-⟦ROOT_SAN⟧-work-g--/2027-01-15T08-00-00-000Z_88888888-8888-4888-8888-888888888888/44bad0fb/run-2/session.jsonl",
+       "text": "{}\n",
+       "mtime": 1799999960.0
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/.hangar-pi/8.json",
+       "text": "{\"file\": \"⟦ROOT⟧/work/g/declarado.jsonl\", \"ts\": 1799999941.0}",
+       "mtime": null
+      }
+     ],
+     "procs": [
+      {
+       "pid": 800,
+       "ppid": 1,
+       "argv": [
+        "pi"
+       ],
+       "cwd": "⟦ROOT⟧/work/g",
+       "env": {
+        "CP_PI_SESSION": "88888888-8888-4888-8888-888888888888"
+       },
+       "start": 1799999940.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "pi",
+       "pid": 800,
+       "cwd": "⟦ROOT⟧/work/g",
+       "pane_id": "%8",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "pi",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/g",
+        "jsonl": "⟦ROOT⟧/work/g/declarado.jsonl",
+        "provider": "pi"
+       }
+      ],
+      "jsonl_cache": {},
+      "fd_locked": [],
+      "tmux": [
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 800",
+       "environ 800",
+       "scan",
+       "stat 800"
+      ]
+     }
+    },
+    {
+     "at": 1800000002.0,
+     "fs": [
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/.hangar-pi/8.json",
+       "text": "{\"file\": \"⟦ROOT⟧/work/g/declarado.jsonl\", \"ts\": 1799999400.0}",
+       "mtime": null
+      }
+     ],
+     "procs": [
+      {
+       "pid": 800,
+       "ppid": 1,
+       "argv": [
+        "pi"
+       ],
+       "cwd": "⟦ROOT⟧/work/g",
+       "env": {
+        "CP_PI_SESSION": "88888888-8888-4888-8888-888888888888"
+       },
+       "start": 1799999940.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "pi",
+       "pid": 800,
+       "cwd": "⟦ROOT⟧/work/g",
+       "pane_id": "%8",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "pi",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/g",
+        "jsonl": "⟦ROOT⟧/home/.pi/agent/sessions/-⟦ROOT_SAN⟧-work-g--/2027-01-15T08-00-00-000Z_88888888-8888-4888-8888-888888888888.jsonl",
+        "provider": "pi"
+       }
+      ],
+      "jsonl_cache": {},
+      "fd_locked": [],
+      "tmux": [
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 800",
+       "environ 800",
+       "stat 800"
+      ]
+     }
+    },
+    {
+     "at": 1800000004.0,
+     "fs": [
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/.hangar-pi/8.json",
+       "text": "{\"file\": \"⟦ROOT⟧/work/g/declarado.jsonl\"}",
+       "mtime": null
+      }
+     ],
+     "procs": [
+      {
+       "pid": 800,
+       "ppid": 1,
+       "argv": [
+        "pi"
+       ],
+       "cwd": "⟦ROOT⟧/work/g",
+       "env": {
+        "CP_PI_SESSION": "88888888-8888-4888-8888-888888888888"
+       },
+       "start": 1799999940.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "pi",
+       "pid": 800,
+       "cwd": "⟦ROOT⟧/work/g",
+       "pane_id": "%8",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "pi",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/g",
+        "jsonl": "⟦ROOT⟧/home/.pi/agent/sessions/-⟦ROOT_SAN⟧-work-g--/2027-01-15T08-00-00-000Z_88888888-8888-4888-8888-888888888888.jsonl",
+        "provider": "pi"
+       }
+      ],
+      "jsonl_cache": {},
+      "fd_locked": [],
+      "tmux": [
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 800",
+       "environ 800",
+       "scan",
+       "stat 800"
+      ]
+     }
+    },
+    {
+     "at": 1800000006.0,
+     "fs": [
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/.hangar-pi/8.json",
+       "text": "{\"file\": \"⟦ROOT⟧/home/.pi/agent/sessions/-⟦ROOT_SAN⟧-work-g--/2027-01-15T08-00-00-000Z_88888888-8888-4888-8888-888888888888/44bad0fb/run-2/session.jsonl\", \"ts\": 1800000000.0}",
+       "mtime": null
+      }
+     ],
+     "procs": [
+      {
+       "pid": 800,
+       "ppid": 1,
+       "argv": [
+        "pi"
+       ],
+       "cwd": "⟦ROOT⟧/work/g",
+       "env": {
+        "CP_PI_SESSION": "sem-arquivo"
+       },
+       "start": 1799999940.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "pi",
+       "pid": 800,
+       "cwd": "⟦ROOT⟧/work/g",
+       "pane_id": "%8",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "pi",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/g",
+        "jsonl": "⟦ROOT⟧/home/.pi/agent/sessions/-⟦ROOT_SAN⟧-work-g--/2027-01-15T08-00-00-000Z_88888888-8888-4888-8888-888888888888.jsonl",
+        "provider": "pi"
+       }
+      ],
+      "jsonl_cache": {},
+      "fd_locked": [],
+      "tmux": [
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 800",
+       "environ 800",
+       "stat 800"
+      ]
+     }
+    },
+    {
+     "at": 1800000008.0,
+     "fs": [
+      {
+       "op": "rm",
+       "path": "⟦ROOT⟧/home/.claude/.hangar-pi/8.json"
+      }
+     ],
+     "procs": [
+      {
+       "pid": 800,
+       "ppid": 1,
+       "argv": [
+        "pi"
+       ],
+       "cwd": "⟦ROOT⟧/work/g",
+       "env": {},
+       "start": 1799999940.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "pi",
+       "pid": 800,
+       "cwd": "⟦ROOT⟧/work/g",
+       "pane_id": "%8",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "pi",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/g",
+        "provider": "pi",
+        "tracked": false
+       }
+      ],
+      "jsonl_cache": {},
+      "fd_locked": [],
+      "tmux": [
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 800",
+       "environ 800",
+       "scan"
+      ]
+     }
+    },
+    {
+     "at": 1800000010.0,
+     "procs": [
+      {
+       "pid": 810,
+       "ppid": 1,
+       "argv": [
+        "omp"
+       ],
+       "cwd": "⟦ROOT⟧/work/g",
+       "env": {
+        "PSMUX_SESSION": "omp s.1"
+       },
+       "start": 1799999940.0,
+       "fds": []
+      }
+     ],
+     "fs": [
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/.hangar-pi/omp-s.1.json",
+       "text": "{\"file\": \"⟦ROOT⟧/work/g/omp.jsonl\", \"ts\": 1800000000.0}",
+       "mtime": null
+      }
+     ],
+     "panes": [
+      {
+       "name": "omp",
+       "pid": 810,
+       "cwd": "⟦ROOT⟧/work/g",
+       "pane_id": "%1",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "omp",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/g",
+        "jsonl": "⟦ROOT⟧/work/g/omp.jsonl",
+        "provider": "omp"
+       }
+      ],
+      "jsonl_cache": {},
+      "fd_locked": [],
+      "tmux": [
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 810",
+       "environ 810",
+       "stat 810"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "kimi_ticket",
+   "ticks": [
+    {
+     "at": 1800000000.0,
+     "fs": [
+      {
+       "op": "mkdir",
+       "path": "⟦ROOT⟧/work/k"
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.kimi-code/sessions/wd/kimi-sess-1/agents/main/wire.jsonl",
+       "text": "{}\n",
+       "mtime": 1799999970.0
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.kimi-code/session_index.jsonl",
+       "text": "{\"sessionId\": \"kimi-sess-1\", \"sessionDir\": \"⟦ROOT⟧/home/.kimi-code/sessions/wd/kimi-sess-1\"}\n",
+       "mtime": null
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/.hangar-kimi/9.json",
+       "text": "{\"session_id\": \"kimi-sess-1\", \"ts\": 1799999990.0, \"cwd\": \"⟦ROOT⟧/work/k\"}",
+       "mtime": null
+      }
+     ],
+     "procs": [
+      {
+       "pid": 900,
+       "ppid": 1,
+       "argv": [
+        "kimi-code"
+       ],
+       "cwd": "⟦ROOT⟧/work/k",
+       "env": {},
+       "start": 1799999940.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "kimi",
+       "pid": 900,
+       "cwd": "⟦ROOT⟧/work/k",
+       "pane_id": "%9",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "kimi",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/k",
+        "jsonl": "⟦ROOT⟧/home/.kimi-code/sessions/wd/kimi-sess-1/agents/main/wire.jsonl",
+        "provider": "kimi"
+       }
+      ],
+      "jsonl_cache": {},
+      "fd_locked": [],
+      "tmux": [
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 900",
+       "environ 900",
+       "scan",
+       "stat 900"
+      ]
+     }
+    },
+    {
+     "at": 1800000002.0,
+     "fs": [
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/.hangar-kimi/9.json",
+       "text": "{\"session_id\": \"kimi-sess-1\", \"ts\": 1799999400.0}",
+       "mtime": null
+      }
+     ],
+     "procs": [
+      {
+       "pid": 900,
+       "ppid": 1,
+       "argv": [
+        "kimi-code"
+       ],
+       "cwd": "⟦ROOT⟧/work/k",
+       "env": {},
+       "start": 1799999940.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "kimi",
+       "pid": 900,
+       "cwd": "⟦ROOT⟧/work/k",
+       "pane_id": "%9",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "kimi",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/k",
+        "provider": "kimi",
+        "tracked": false
+       }
+      ],
+      "jsonl_cache": {},
+      "fd_locked": [],
+      "tmux": [
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 900",
+       "environ 900",
+       "stat 900"
+      ]
+     }
+    },
+    {
+     "at": 1800000004.0,
+     "fs": [
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/.hangar-kimi/9.json",
+       "text": "null",
+       "mtime": null
+      }
+     ],
+     "procs": [
+      {
+       "pid": 900,
+       "ppid": 1,
+       "argv": [
+        "kimi-code"
+       ],
+       "cwd": "⟦ROOT⟧/work/k",
+       "env": {},
+       "start": 1799999940.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "kimi",
+       "pid": 900,
+       "cwd": "⟦ROOT⟧/work/k",
+       "pane_id": "%9",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "kimi",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/k",
+        "provider": "kimi",
+        "tracked": false
+       }
+      ],
+      "jsonl_cache": {},
+      "fd_locked": [],
+      "tmux": [
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 900",
+       "environ 900",
+       "scan"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "codex_with_and_without_thread",
+   "ticks": [
+    {
+     "at": 1800000000.0,
+     "fs": [
+      {
+       "op": "mkdir",
+       "path": "⟦ROOT⟧/work/x"
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.codex/sessions/2027/01/15/rollout-2027-01-15T08-00-00-0199aaaa-bbbb-7ccc-8ddd-eeeeffff0000.jsonl",
+       "text": "{}\n",
+       "mtime": 1799999980.0
+      },
+      {
+       "op": "mkdir",
+       "path": "⟦ROOT⟧/home/.codex"
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.hangar/codex-sessions/cx.json",
+       "text": "{\"name\": \"cx\", \"cwd\": \"⟦ROOT⟧/work/x\", \"rollout_path\": \"⟦ROOT⟧/home/.codex/sessions/2027/01/15/rollout-2027-01-15T08-00-00-0199aaaa-bbbb-7ccc-8ddd-eeeeffff0000.jsonl\", \"thread_id\": \"t1\", \"codex_home\": \"⟦ROOT⟧/home/.codex\", \"key\": \"k-cx\", \"service_tier\": \"priority\"}",
+       "mtime": null
+      }
+     ],
+     "procs": [
+      {
+       "pid": 1000,
+       "ppid": 1,
+       "argv": [
+        "hangar-codex-tui"
+       ],
+       "cwd": "⟦ROOT⟧/work/x",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      },
+      {
+       "pid": 1010,
+       "ppid": 1,
+       "argv": [
+        "codex"
+       ],
+       "cwd": "⟦ROOT⟧/work/x",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "cx",
+       "pid": 1000,
+       "cwd": "⟦ROOT⟧/work/x",
+       "pane_id": "%10",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      },
+      {
+       "name": "semthread",
+       "pid": 1010,
+       "cwd": "⟦ROOT⟧/work/x",
+       "pane_id": "%11",
+       "active": true,
+       "hidden": false,
+       "provider": "codex",
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "semthread",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/x",
+        "provider": "codex",
+        "codex_home": "⟦ROOT⟧/home/.codex",
+        "conta": "codex:⟦ROOT⟧/home/.codex",
+        "tracked": false
+       },
+       {
+        "name": "cx",
+        "lifecycle_id": "k:k-cx",
+        "cwd": "⟦ROOT⟧/work/x",
+        "jsonl": "⟦ROOT⟧/home/.codex/sessions/2027/01/15/rollout-2027-01-15T08-00-00-0199aaaa-bbbb-7ccc-8ddd-eeeeffff0000.jsonl",
+        "provider": "codex",
+        "codex_home": "⟦ROOT⟧/home/.codex",
+        "codex_service_tier": "priority",
+        "conta": "codex:⟦ROOT⟧/home/.codex"
+       }
+      ],
+      "jsonl_cache": {},
+      "fd_locked": [],
+      "tmux": [
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 1010",
+       "environ 1010",
+       "scan"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "claude_headless",
+   "ticks": [
+    {
+     "at": 1800000000.0,
+     "fs": [
+      {
+       "op": "mkdir",
+       "path": "⟦ROOT⟧/work/h"
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-h/99999999-9999-4999-8999-999999999999.jsonl",
+       "text": "{}\n",
+       "mtime": 1799999995.0
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.hangar/claude-headless/hl.json",
+       "text": "{\"name\": \"hl\", \"provider\": \"claude\", \"headless\": true, \"key\": \"k-hl\", \"cwd\": \"⟦ROOT⟧/work/h\", \"session_id\": \"99999999-9999-4999-8999-999999999999\", \"config_dir\": null}",
+       "mtime": null
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.hangar/claude-headless/hm.json",
+       "text": "{\"name\": \"hm\", \"provider\": \"claude\", \"headless\": true, \"key\": \"k-hm\", \"cwd\": \"⟦ROOT⟧/work/h\", \"session_id\": \"99999999-9999-4999-8999-999999999999\", \"config_dir\": \"⟦ROOT⟧/home/.claude-alt\", \"engine\": \"kimi\", \"engine_account\": \"conta1\", \"engine_credential_id\": \"cred-1\"}",
+       "mtime": null
+      }
+     ],
+     "procs": [],
+     "panes": [],
+     "expected": {
+      "rows": [
+       {
+        "name": "hl",
+        "lifecycle_id": "k:k-hl",
+        "cwd": "⟦ROOT⟧/work/h",
+        "jsonl": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-h/99999999-9999-4999-8999-999999999999.jsonl",
+        "headless": true,
+        "conta": "claude:⟦ROOT⟧/home/.claude"
+       },
+       {
+        "name": "hm",
+        "lifecycle_id": "k:k-hm",
+        "cwd": "⟦ROOT⟧/work/h",
+        "jsonl": "⟦ROOT⟧/home/.claude-alt/projects/⟦ROOT_SAN⟧-work-h/99999999-9999-4999-8999-999999999999.jsonl",
+        "headless": true,
+        "engine": "kimi",
+        "engine_account": "conta1",
+        "conta": "cred-1"
+       }
+      ],
+      "jsonl_cache": {},
+      "fd_locked": [],
+      "tmux": [
+       "list-panes"
+      ],
+      "proc_reads": [
+       "scan"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "links_worktree_engine_account",
+   "ticks": [
+    {
+     "at": 1800000000.0,
+     "fs": [
+      {
+       "op": "mkdir",
+       "path": "⟦ROOT⟧/work/repo/.git"
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/work/repo/.git/HEAD",
+       "text": "ref: refs/heads/main\n",
+       "mtime": null
+      },
+      {
+       "op": "mkdir",
+       "path": "⟦ROOT⟧/work/repo/.git/worktrees/repo-wt"
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/work/repo/.git/worktrees/repo-wt/HEAD",
+       "text": "ref: refs/heads/feat\n",
+       "mtime": null
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/work/repo/.git/worktrees/repo-wt/gitdir",
+       "text": "⟦ROOT⟧/work/repo-wt/.git\n",
+       "mtime": null
+      },
+      {
+       "op": "mkdir",
+       "path": "⟦ROOT⟧/work/repo-wt"
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/work/repo-wt/.git",
+       "text": "gitdir: ⟦ROOT⟧/work/repo/.git/worktrees/repo-wt\n",
+       "mtime": null
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-repo/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl",
+       "text": "{\"type\": \"assistant\", \"cwd\": \"⟦ROOT⟧/work/repo\", \"message\": {\"role\": \"assistant\", \"content\": [{\"type\": \"tool_use\", \"name\": \"Bash\", \"input\": {\"command\": \"cd ⟦ROOT⟧/work/repo-sumida && ls\"}}]}}\n",
+       "mtime": 1799999995.0
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/.hangar-pair/l1.json",
+       "text": "{\"peers\": [\"l2\"], \"gid\": \"g1\", \"task\": \"tarefa\"}",
+       "mtime": null
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/.hangar-pair/l2.json",
+       "text": "{\"peers\": [\"l1\"], \"gid\": \"g1\", \"task\": \"tarefa\"}",
+       "mtime": null
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/.hangar-chain/l1.json",
+       "text": "{\"target\": \"l2\", \"text\": \"segue\"}",
+       "mtime": null
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.hangar/worktrees-removidas.json",
+       "text": "{\"⟦ROOT⟧/work/repo-velha\": \"⟦ROOT⟧/work/repo\"}",
+       "mtime": null
+      }
+     ],
+     "procs": [
+      {
+       "pid": 1100,
+       "ppid": 1,
+       "argv": [
+        "claude",
+        "--session-id",
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+       ],
+       "cwd": "⟦ROOT⟧/work/repo",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      },
+      {
+       "pid": 1110,
+       "ppid": 1,
+       "argv": [
+        "/bin/bash"
+       ],
+       "cwd": "⟦ROOT⟧/work/repo-wt",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      },
+      {
+       "pid": 1111,
+       "ppid": 1110,
+       "argv": [
+        "claude"
+       ],
+       "cwd": "⟦ROOT⟧/work/repo-wt",
+       "env": {
+        "CP_ENGINE": "kimi",
+        "CP_ENGINE_ACCOUNT": "c1",
+        "CP_ENGINE_CREDENTIAL_ID": "cred-9"
+       },
+       "start": 1799999400.0,
+       "fds": []
+      },
+      {
+       "pid": 1120,
+       "ppid": 1,
+       "argv": [
+        "claude"
+       ],
+       "cwd": "⟦ROOT⟧/work/repo-wt",
+       "env": {
+        "CLAUDE_CONFIG_DIR": "⟦ROOT⟧/home/.claude-alt"
+       },
+       "start": 1799999400.0,
+       "fds": []
+      },
+      {
+       "pid": 1130,
+       "ppid": 1,
+       "argv": [
+        "claude"
+       ],
+       "cwd": "⟦ROOT⟧/work/repo-wt",
+       "env": {
+        "CP_ENGINE": "glm"
+       },
+       "start": 1799999400.0,
+       "fds": []
+      },
+      {
+       "pid": 1140,
+       "ppid": 1,
+       "argv": [
+        "claude"
+       ],
+       "cwd": "⟦ROOT⟧/work/repo-velha",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "l1",
+       "pid": 1100,
+       "cwd": "⟦ROOT⟧/work/repo",
+       "pane_id": "%12",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      },
+      {
+       "name": "l2",
+       "pid": 1110,
+       "cwd": "⟦ROOT⟧/work/repo-wt",
+       "pane_id": "%13",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      },
+      {
+       "name": "conta",
+       "pid": 1120,
+       "cwd": "⟦ROOT⟧/work/repo-wt",
+       "pane_id": "%14",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      },
+      {
+       "name": "motor",
+       "pid": 1130,
+       "cwd": "⟦ROOT⟧/work/repo-wt",
+       "pane_id": "%15",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      },
+      {
+       "name": "removida",
+       "pid": 1140,
+       "cwd": "⟦ROOT⟧/work/repo-velha",
+       "pane_id": "%16",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "l1",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/repo",
+        "jsonl": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-repo/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl",
+        "conta": "claude:⟦ROOT⟧/home/.claude",
+        "worktree_path": "⟦ROOT⟧/work/repo-sumida",
+        "worktree_gone": true,
+        "then_target": "l2",
+        "pair_peers": [
+         "l2"
+        ],
+        "pair_gid": "g1",
+        "pair_task": "tarefa"
+       },
+       {
+        "name": "l2",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/repo-wt",
+        "engine": "kimi",
+        "engine_account": "c1",
+        "conta": "cred-9",
+        "tracked": false,
+        "branch": "feat",
+        "worktree": true,
+        "worktree_path": "⟦ROOT⟧/work/repo-wt",
+        "pair_peers": [
+         "l1"
+        ],
+        "pair_gid": "g1",
+        "pair_task": "tarefa"
+       },
+       {
+        "name": "conta",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/repo-wt",
+        "conta": "claude:⟦ROOT⟧/home/.claude-alt",
+        "tracked": false,
+        "branch": "feat",
+        "worktree": true,
+        "worktree_path": "⟦ROOT⟧/work/repo-wt"
+       },
+       {
+        "name": "motor",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/repo-wt",
+        "engine": "glm",
+        "conta": "chave:glm",
+        "tracked": false,
+        "branch": "feat",
+        "worktree": true,
+        "worktree_path": "⟦ROOT⟧/work/repo-wt"
+       },
+       {
+        "name": "removida",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/repo-velha",
+        "conta": "claude:⟦ROOT⟧/home/.claude",
+        "tracked": false,
+        "worktree_path": "⟦ROOT⟧/work/repo-velha",
+        "worktree_gone": true
+       }
+      ],
+      "jsonl_cache": {
+       "l1": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-repo/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl"
+      },
+      "fd_locked": [],
+      "tmux": [
+       "list-panes",
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 1100",
+       "cmdline 1110",
+       "cmdline 1111",
+       "cmdline 1120",
+       "cmdline 1130",
+       "cmdline 1140",
+       "environ 1100",
+       "environ 1110",
+       "environ 1111",
+       "environ 1120",
+       "environ 1130",
+       "environ 1140",
+       "fd 1100",
+       "fd 1111",
+       "fd 1120",
+       "fd 1130",
+       "fd 1140",
+       "scan"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "agent_pane_choice",
+   "ticks": [
+    {
+     "at": 1800000000.0,
+     "fs": [
+      {
+       "op": "mkdir",
+       "path": "⟦ROOT⟧/work/m"
+      },
+      {
+       "op": "mkdir",
+       "path": "⟦ROOT⟧/work/m2"
+      },
+      {
+       "op": "mkdir",
+       "path": "⟦ROOT⟧/work/outra"
+      }
+     ],
+     "procs": [
+      {
+       "pid": 1200,
+       "ppid": 1,
+       "argv": [
+        "/bin/bash"
+       ],
+       "cwd": "⟦ROOT⟧/work/m",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      },
+      {
+       "pid": 1210,
+       "ppid": 1,
+       "argv": [
+        "/bin/bash"
+       ],
+       "cwd": "⟦ROOT⟧/work/m2",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      },
+      {
+       "pid": 1211,
+       "ppid": 1210,
+       "argv": [
+        "claude"
+       ],
+       "cwd": "⟦ROOT⟧/work/m2",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      },
+      {
+       "pid": 1220,
+       "ppid": 1,
+       "argv": [
+        "/bin/bash"
+       ],
+       "cwd": "⟦ROOT⟧/work/m",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      },
+      {
+       "pid": 1230,
+       "ppid": 1,
+       "argv": [
+        "/bin/bash"
+       ],
+       "cwd": "⟦ROOT⟧/work/outra",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "j",
+       "pid": 1200,
+       "cwd": "⟦ROOT⟧/work/m",
+       "pane_id": "%20",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      },
+      {
+       "name": "j",
+       "pid": 1210,
+       "cwd": "⟦ROOT⟧/work/m2",
+       "pane_id": "%21",
+       "active": false,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      },
+      {
+       "name": "so-shell",
+       "pid": 1220,
+       "cwd": "⟦ROOT⟧/work/m",
+       "pane_id": "%22",
+       "active": false,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      },
+      {
+       "name": "so-shell",
+       "pid": 1230,
+       "cwd": "⟦ROOT⟧/work/outra",
+       "pane_id": "%23",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "j",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/m2",
+        "conta": "claude:⟦ROOT⟧/home/.claude",
+        "tracked": false
+       },
+       {
+        "name": "so-shell",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/outra",
+        "conta": "claude:⟦ROOT⟧/home/.claude",
+        "tracked": false
+       }
+      ],
+      "jsonl_cache": {},
+      "fd_locked": [],
+      "tmux": [
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 1200",
+       "cmdline 1210",
+       "cmdline 1211",
+       "cmdline 1220",
+       "cmdline 1230",
+       "environ 1210",
+       "environ 1211",
+       "environ 1230",
+       "fd 1211",
+       "scan"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "collision",
+   "ticks": [
+    {
+     "at": 1800000000.0,
+     "fs": [
+      {
+       "op": "mkdir",
+       "path": "⟦ROOT⟧/work/n"
+      },
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-n/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jsonl",
+       "text": "{}\n",
+       "mtime": 1799999999.0
+      }
+     ],
+     "procs": [
+      {
+       "pid": 1300,
+       "ppid": 1,
+       "argv": [
+        "claude",
+        "--session-id",
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+       ],
+       "cwd": "⟦ROOT⟧/work/n",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      },
+      {
+       "pid": 1310,
+       "ppid": 1,
+       "argv": [
+        "claude"
+       ],
+       "cwd": "⟦ROOT⟧/work/n",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "dona",
+       "pid": 1300,
+       "cwd": "⟦ROOT⟧/work/n",
+       "pane_id": "%30",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      },
+      {
+       "name": "bare",
+       "pid": 1310,
+       "cwd": "⟦ROOT⟧/work/n",
+       "pane_id": "%31",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "dona",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/n",
+        "jsonl": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-n/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jsonl",
+        "conta": "claude:⟦ROOT⟧/home/.claude"
+       },
+       {
+        "name": "bare",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/n",
+        "conta": "claude:⟦ROOT⟧/home/.claude",
+        "tracked": false
+       }
+      ],
+      "jsonl_cache": {
+       "dona": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-n/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jsonl"
+      },
+      "fd_locked": [],
+      "tmux": [
+       "list-panes",
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 1300",
+       "cmdline 1310",
+       "environ 1300",
+       "environ 1310",
+       "fd 1300",
+       "fd 1310",
+       "scan"
+      ]
+     }
+    },
+    {
+     "at": 1800000002.0,
+     "fs": [
+      {
+       "op": "write",
+       "path": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-n/compartilhado.jsonl",
+       "text": "{}\n",
+       "mtime": 1800000002.0
+      }
+     ],
+     "ops": [
+      {
+       "op": "forget",
+       "name": "dona"
+      }
+     ],
+     "procs": [
+      {
+       "pid": 1300,
+       "ppid": 1,
+       "argv": [
+        "claude"
+       ],
+       "cwd": "⟦ROOT⟧/work/n",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": [
+        "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-n/compartilhado.jsonl"
+       ]
+      },
+      {
+       "pid": 1310,
+       "ppid": 1,
+       "argv": [
+        "claude"
+       ],
+       "cwd": "⟦ROOT⟧/work/n",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": []
+      }
+     ],
+     "panes": [
+      {
+       "name": "dona",
+       "pid": 1300,
+       "cwd": "⟦ROOT⟧/work/n",
+       "pane_id": "%30",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      },
+      {
+       "name": "bare",
+       "pid": 1310,
+       "cwd": "⟦ROOT⟧/work/n",
+       "pane_id": "%31",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "dona",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/n",
+        "jsonl": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-n/compartilhado.jsonl",
+        "conta": "claude:⟦ROOT⟧/home/.claude"
+       },
+       {
+        "name": "bare",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/n",
+        "conta": "claude:⟦ROOT⟧/home/.claude",
+        "tracked": false
+       }
+      ],
+      "jsonl_cache": {
+       "dona": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-n/compartilhado.jsonl"
+      },
+      "fd_locked": [
+       "dona"
+      ],
+      "tmux": [
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 1300",
+       "cmdline 1310",
+       "environ 1300",
+       "environ 1310",
+       "fd 1300",
+       "fd 1310"
+      ]
+     }
+    },
+    {
+     "at": 1800000004.0,
+     "procs": [
+      {
+       "pid": 1300,
+       "ppid": 1,
+       "argv": [
+        "claude"
+       ],
+       "cwd": "⟦ROOT⟧/work/n",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": [
+        "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-n/compartilhado.jsonl"
+       ]
+      },
+      {
+       "pid": 1310,
+       "ppid": 1,
+       "argv": [
+        "claude"
+       ],
+       "cwd": "⟦ROOT⟧/work/n",
+       "env": {},
+       "start": 1799999400.0,
+       "fds": [
+        "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-n/compartilhado.jsonl"
+       ]
+      }
+     ],
+     "panes": [
+      {
+       "name": "dona",
+       "pid": 1300,
+       "cwd": "⟦ROOT⟧/work/n",
+       "pane_id": "%30",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      },
+      {
+       "name": "bare",
+       "pid": 1310,
+       "cwd": "⟦ROOT⟧/work/n",
+       "pane_id": "%31",
+       "active": true,
+       "hidden": false,
+       "provider": null,
+       "session_created": 1799999400
+      }
+     ],
+     "expected": {
+      "rows": [
+       {
+        "name": "dona",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/n",
+        "conta": "claude:⟦ROOT⟧/home/.claude",
+        "tracked": false
+       },
+       {
+        "name": "bare",
+        "lifecycle_id": "t:1799999400",
+        "cwd": "⟦ROOT⟧/work/n",
+        "conta": "claude:⟦ROOT⟧/home/.claude",
+        "tracked": false
+       }
+      ],
+      "jsonl_cache": {
+       "bare": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-n/compartilhado.jsonl",
+       "dona": "⟦ROOT⟧/home/.claude/projects/⟦ROOT_SAN⟧-work-n/compartilhado.jsonl"
+      },
+      "fd_locked": [
+       "bare",
+       "dona"
+      ],
+      "tmux": [
+       "list-panes"
+      ],
+      "proc_reads": [
+       "cmdline 1300",
+       "cmdline 1310",
+       "environ 1300",
+       "environ 1310",
+       "fd 1300",
+       "fd 1310",
+       "scan"
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

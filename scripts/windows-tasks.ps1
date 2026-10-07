@@ -67,8 +67,8 @@ function Restart-HangarTask([string]$name, [int]$port, [string]$directory) {
         if (-not $task.Settings.Enabled) { throw "A tarefa $name esta desabilitada" }
         $rows = Get-HangarProcessTable
         $candidates = @(Get-HangarTaskProcesses $rows $name $directory)
-        # O hangar-server (Rust) da versao que esta saindo e filho do backend e segura a porta
-        # publica: sem entrar na parada, voltar de uma versao com Rust para esta trava aqui.
+        # O hangar-server e filho do backend e segura a porta publica: entra na parada depois do
+        # pai (ele sai sozinho quando o cano do stdin fecha; se ainda estiver vivo, cai aqui).
         $candidates = @($candidates) + @($rows | Where-Object {
             $_.Name -eq 'hangar-server.exe' -and [int]$_.ParentProcessId -in @($candidates.ProcessId)
         })

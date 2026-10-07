@@ -362,7 +362,7 @@ def test_engine_context_uses_the_window_from_its_recorded_agent_pid(tmp_path, mo
     monkeypatch.setattr(registry.headless_sessions, "list_all", lambda: [])
     monkeypatch.setattr(registry.orq_runs, "active", lambda: [])
     monkeypatch.setattr(registry.worktrees, "locate", lambda *args: SimpleNamespace(
-        branch=None, worktree=False, worktree_path=None, worktree_gone=False))
+        branch=None, worktree=False, worktree_path=None, worktree_gone=False, git_cwd=None))
     monkeypatch.setattr(reg, "resolve_tracked", lambda *args: (str(transcript), True))
     monkeypatch.setattr(reg, "_repl_sid", lambda *args: _UUID)
 
@@ -1326,3 +1326,14 @@ def test_pretrust_grava_a_chave_que_o_claude_le(tmp_path, monkeypatch):
     projetos = _json.loads(cfg.read_text(encoding="utf-8"))["projects"]
     assert projetos["C:/Users/p/proj"]["hasTrustDialogAccepted"] is True
     assert r"C:\Users\p\proj" not in projetos
+
+
+def test_create_clears_the_old_named_queue_before_the_pane_exists(tmp_path):
+    # Depois do pane o runtime ja adota a sessao nova; limpar a fila ali esbarrava na transferencia.
+    order = []
+    reg = SessionRegistry(projects_dir=tmp_path)
+    with patch.object(registry.tmux, "has_session", return_value=False), \
+         patch.object(registry.PromptQueue, "clear", lambda self: order.append("clear")), \
+         patch.object(registry.tmux, "new_session", side_effect=lambda *a, **k: order.append("pane") or True):
+        reg.create("cc", "/home/u/p")
+    assert order[:2] == ["clear", "pane"]

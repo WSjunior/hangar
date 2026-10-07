@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+import uuid
 from datetime import datetime
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from dataclasses import asdict
@@ -26,7 +27,7 @@ from sse_starlette.sse import EventSourceResponse
 from app import (agentes_sync, atomico, atualizacoes, atualizar, btw, diag, harness_api,
                  loop_monitor, pensamento_pt, permission_mode, plugin_bridge, procinfo, quem_chama, tmux,
                  uds_messaging)
-from app import external_pair_api, external_pairs, update_channel
+from app import external_pair_api, external_pairs, internal_api, list_bridge, migration_status, update_channel
 from app.auth import require_auth, require_loopback
 from app.send_executor import send_thread as _send_thread
 from app import bastao as bastao_mod   # `bastao` sem sufixo é a ROTA GET, mais abaixo neste arquivo
@@ -53,7 +54,7 @@ from app.pi_inbox import INBOX
 from app import registry as registry_mod
 from app.registry import KillFailed, SessionRegistry, sanitize_cwd
 from app.names import sanitize_session_name
-from app.models import (SessionInfo, ChatEvent, CostReport, UsoReport, RunnersResponse, RunBody,
+from app.models import (SessionInfo, CreatedSessionInfo, ChatEvent, CostReport, UsoReport, RunnersResponse, RunBody,
                         RunInfo, Runner, CustomRunnersBody, ProjectStatus, ShortcutShellBody, RunCodeBody,
                         ProjectShortcutsBody, ShortcutAnswerBody, session_key)
 from app import uso_report
@@ -295,6 +296,9 @@ async def _lifespan(app: FastAPI):
     from app import diag_logging
     diag_logging.instalar()
     diag.registrar("backend.inicio", **diag.recursos())
+    from app import runtime_coordinator
+    runtime = runtime_coordinator.ensure()
+    await runtime.start_sessions({"claude":get_adapter(CLAUDE_HEADLESS), "codex":get_adapter("codex")})
     # Uma vez na subida, nunca por request. O Starlette roda cada rota `def` (sao 65 aqui) num
     # anyio.to_thread, cujo limiter default e de 40 tokens — e cada conexao de chat ainda segura
     # DOIS deles PERMANENTEMENTE, num awatch parado (transcript.py:408 e pqueue.py:366). Com ~20
@@ -311,23 +315,7 @@ async def _lifespan(app: FastAPI):
     except OSError:
         _log.warning("plugin: endereço da ponte não gravado; sessão de terminal fica no tmux",
                      exc_info=True)
-    # Claude sem terminal: o processo vive num cano fora do backend e sobrevive ao restart. Só
-    # morre aqui o cano cuja sessão foi encerrada enquanto o backend estava fora; nos outros o
-    # backend religa e recupera o que estava em aberto (turno, permissão pendente).
-    try:
-        from app.adapters.claude_headless.adapter import matar_orfaos
-        mortos = await asyncio.to_thread(matar_orfaos)
-        if mortos:
-            _log.info("claude headless: %d cano(s) de sessão já encerrada finalizado(s)", mortos)
-        religadas = await get_adapter(CLAUDE_HEADLESS).reconectar_todas()
-        if religadas:
-            _log.info("claude headless: %d sessão(ões) religada(s) ao cano", religadas)
-        # A conferência de entrega é um Timer em memória: o restart apagou as agendadas, e a
-        # mensagem que morreu com o processo ficava "entregue" pra sempre.
-        for meta in await asyncio.to_thread(headless_sessions.list_all):
-            get_adapter(CLAUDE_HEADLESS).apos_entrega(meta["name"])
-    except Exception:
-        _log.warning("claude headless: varredura/religação de canos falhou", exc_info=True)
+    await _boot_sessions(runtime)
     _state_dirs =list({Path(c.path) for c in list_config_dirs()} | {_backend_config_base().resolve()})
     hook_state.on_awaiting = _on_awaiting  # transicao -> awaiting_input dispara web push
     hook_state.on_transition = _on_hook_transition  # drain server-side + confirmacao de entrega
@@ -401,6 +389,7 @@ async def _lifespan(app: FastAPI):
 
     # Primeira varredura na subida já religa o túnel se há convite ativo.
     share_task = asyncio.create_task(share_api.sweep_loop(), name="share-sweep")
+    pair_sweep_task = asyncio.create_task(_pair_sweep_loop(), name="pair-sweep")
 
     # Boot-resume dos loops: flags em memoria (tick em voo) morrem no restart; o sidecar e a verdade.
     # Loop ACTIVE cuja sessao existe e esta idle -> reagenda o tick; sessao sumida -> failed.
@@ -420,10 +409,15 @@ async def _lifespan(app: FastAPI):
                 m = hook_state.get_state(session_key(info.jsonl)) if info.jsonl else None
                 if m and m[0] == "idle":
                     loop_mod.schedule_tick(info.name, lambda n=info.name: _loop_ctx(n))
-        except Exception:
+        except Exception as e:
+            # Com o Rust ainda subindo a lista levanta; os loops ativos ficam sem reagendar.
             _log.warning("boot-resume de loops falhou", exc_info=True)
+            diag.registrar("loop.boot_resume_falhou", "erro",
+                           codigo=getattr(e, "code", None) or type(e).__name__)
 
-    await asyncio.to_thread(_boot_resume_loops)
+    # Em segundo plano: com o Rust esperado, a lista espera o desfecho dele (até 30 s), e a subida
+    # do servidor não pode ficar presa nisso.
+    app.state.boot_resume_task = asyncio.create_task(asyncio.to_thread(_boot_resume_loops))
     pricing.atualizar_em_background()  # NUNCA num request: o cliente aborta em 4s
     # Mesmo motivo, outra rede: usd_brl() tem cache de 1h e timeout de 3s, e é chamado DENTRO do
     # montar(). Sem aquecer aqui, o primeiro /api/costs depois de todo restart paga a coleta fria
@@ -442,14 +436,8 @@ async def _lifespan(app: FastAPI):
     # threads (Timer da confirmacao, gatilho de hook). Ver `_drenar`.
     global _loop_servidor
     _loop_servidor = asyncio.get_running_loop()
-    async def recover_pending_transfers():
-        from app.conversation_transfer import list_incomplete, recover_transfer, TransferError
-        for record in await asyncio.to_thread(list_incomplete):
-            try:
-                await _durante_troca(record.name, recover_transfer(registry, record), transfer=True)
-            except TransferError:
-                pass  # A fase durável mantém o erro e a ação Recarregar disponíveis.
-    transfer_recovery_task = asyncio.create_task(recover_pending_transfers())
+    if runtime.mode == "python":
+        _start_transfer_recovery()
     codex_warm_task = asyncio.create_task(get_adapter("codex").watch_sessions())
     from app.codex_integracao import SERVICO as integracao_codex
     codex_contas_login = CodexContasLogin(
@@ -479,12 +467,15 @@ async def _lifespan(app: FastAPI):
             yield
     finally:
         diag.registrar("backend.encerrando")
+        await runtime.shutdown()
+        await runtime.close_events()
         connect_task.cancel()
         await asyncio.gather(connect_task, return_exceptions=True)
         await connect_mod.stop()
         costs_sources.cancelar_aquecimento()
         # Claude sem terminal fica vivo no cano: só fecha a conexão; o próximo backend religa.
-        await asyncio.shield(transfer_recovery_task)
+        if _transfer_recovery is not None:
+            await asyncio.shield(_transfer_recovery)
         get_adapter(CLAUDE_HEADLESS).desligar_todas()
         codex_warm_task.cancel()
         app.state.codex_auth_aquecer.cancel()
@@ -505,6 +496,7 @@ async def _lifespan(app: FastAPI):
         loop_monitor_task.cancel()
         prune_task.cancel()
         share_task.cancel()
+        pair_sweep_task.cancel()
         renova_task.cancel()
         await omp_sync.close()
         try:
@@ -557,6 +549,33 @@ def _transfer_send_error(name: str) -> dict | None:
 
 app = FastAPI(title="hangar", lifespan=_lifespan)
 
+from app.runtime_terminal import TerminalControlError
+
+
+@app.exception_handler(TerminalControlError)
+async def terminal_control_failed(request: Request, exc: TerminalControlError):
+    code = "erro_sem_resposta" if exc.control == "answer_questions" else "erro_opcao_nao_convergiu"
+    return JSONResponse(status_code=409, content={"detail":erro(code, str(exc))})
+
+
+from app.runtime_coordinator import TransferInProgress
+
+
+@app.exception_handler(TransferInProgress)
+async def _ownership_moving(request: Request, exc: TransferInProgress):
+    """Posse passando entre Python e Rust (sessão recém-criada, por exemplo): espera curta, não 500."""
+    return JSONResponse(status_code=409, content={"detail":erro("session_transfer_busy", str(exc))})
+
+
+@app.exception_handler(GitError)
+async def _git_failed(request: Request, exc: GitError):
+    """GitError que escapou da rota (citação, resolver) sai com o status dele, nunca 500 sem corpo.
+
+    Falha da ponte de Git/arquivos traz o código (`workspace_busy`...), que o front traduz."""
+    code = getattr(exc, "code", None)
+    detail = erro(code, exc.detail, motivo=exc.detail) if code else exc.detail
+    return JSONResponse(status_code=exc.status, content={"detail": detail})
+
 
 @app.get("/api/omp/plugin-sync", dependencies=[Depends(require_auth)])
 async def omp_plugin_sync_status(request: Request):
@@ -586,6 +605,15 @@ async def _mux_indisponivel(request: Request, exc: tmux.MuxIndisponivel):
         content={"detail": erro("erro_mux_indisponivel",
                                 "o tmux não respondeu — a lista de sessões está indisponível",
                                 detalhe=str(exc))})
+
+
+@app.exception_handler(list_bridge.ListBridgeError)
+async def _lista_indisponivel(request: Request, exc: list_bridge.ListBridgeError):
+    """Com o Rust dono, a lista vem dele; ponte fora ou Rust ainda subindo é 503 com o código, nunca
+    a lista vazia nem a do Python (`_mux_indisponivel`, pelo mesmo motivo)."""
+    diag.registrar("lista.indisponivel", "erro", codigo=exc.code, detalhe=f"{request.method} {request.url.path}")
+    return JSONResponse(status_code=503, content={"detail": erro(
+        "erro_lista_indisponivel", "a lista de sessões está indisponível", detalhe=exc.code)})
 
 
 @app.middleware("http")
@@ -619,7 +647,10 @@ async def _correlaciona_diag(request: Request, call_next):
         status = response.status_code if response is not None else 500
         # O template da rota não contém query, caminho de arquivo nem corpo do pedido.
         route = getattr(request.scope.get("route"), "path", "(rota desconhecida)")
-        if (response is not None or failure) and not request.url.path.startswith("/api/diag") and (
+        # O long-poll do plugin espera de propósito: sucesso dele seria uma linha "lenta" a cada
+        # janela, e enchia o teto do dia.
+        long_poll_ok = route == "/api/plugin/pull" and status < 400 and not failure
+        if (response is not None or failure) and not long_poll_ok and not request.url.path.startswith("/api/diag") and (
                 failure or status >= 400 or elapsed >= 1000 or request.method in ("POST", "PUT", "PATCH", "DELETE")):
             diag.registrar("api.servidor", "erro" if status >= 500 else "aviso" if status >= 400 else "ok",
                            detalhe=f"{request.method} {route}", codigo=str(status), ms=elapsed,
@@ -673,6 +704,8 @@ app.include_router(config_sync_api.config_sync_router)
 app.include_router(share_api.router)
 app.include_router(share_guest_api.router)
 app.include_router(external_pair_api.router)
+app.include_router(migration_status.router)
+app.include_router(internal_api.router)
 registry = SessionRegistry()
 registry_mod.apos_saida_codex = _codex_lease_released
 registry_mod.apos_renomear_codex = _codex_lease_renamed
@@ -1005,7 +1038,7 @@ _list_lock = threading.Lock()
 
 
 def _guardar_snap(forcar: bool = False) -> list[SessionInfo]:
-    inicio = time.monotonic()
+    inicio, inicio_epoca = time.monotonic(), time.time()
     with _list_lock:
         # Re-checa DENTRO do lock: quem ficou na fila enquanto a primeira varria ja tem snapshot
         # fresco esperando e nao precisa varrer de novo. `forcar` e o miss por nome (sessao criada
@@ -1019,9 +1052,37 @@ def _guardar_snap(forcar: bool = False) -> list[SessionInfo]:
             # Sessao criada ha <1s: o mapa de processos cacheado ainda nao a enxerga, e a varredura
             # nova e justamente o que se quer aqui.
             procinfo._invalidar_children_map()
-        infos = registry.list()
+        infos = registry.list(newer_than=inicio_epoca) if forcar else registry.list()
         _list_snap["snap"] = (time.monotonic(), infos)
         return infos
+
+
+_PAIR_SWEEP_S = 2.0
+
+
+def _pair_sweep_list() -> list[SessionInfo]:
+    """No Rust, o retrato: a descoberta dele não traz as linhas de transferência nem as `orq`
+    (vêm dos fatos), e um nome fora dela seria dado como morto."""
+    return list_bridge.snapshot() if registry_mod.rust_owns_list() else _guardar_snap()
+
+
+async def _pair_sweep_loop() -> None:
+    """Pares mortos fora do app, fora da descoberta (`registry.sweep_pairs`). Lista que falha não
+    vira "ninguém vivo": a rodada não varre, e a falha vai ao diário uma vez por sequência."""
+    failing = None
+    while True:
+        try:
+            await asyncio.to_thread(registry.sweep_pairs, _pair_sweep_list)
+            if failing is not None:
+                diag.registrar("pares.varredura_voltou", codigo=failing)
+            failing = None
+        except Exception as e:
+            code = getattr(e, "code", None) or type(e).__name__
+            if code != failing:
+                _log.warning("varredura de pares: lista indisponível (%s); os grupos ficam", code)
+                diag.registrar("pares.varredura_falhou", "aviso", codigo=code)
+            failing = code
+        await asyncio.sleep(_PAIR_SWEEP_S)
 
 
 def _invalidate_lists() -> None:
@@ -1030,6 +1091,13 @@ def _invalidate_lists() -> None:
     with _list_lock:
         _list_snap["snap"] = None
     invalidate_recent_list()
+    if registry_mod._rust_caches():
+        # A mudança já aconteceu: a falha fica no diário (`lista.ponte`), o retrato do Rust vence
+        # em 2 s e quem procura a sessão nova pede descoberta mais nova (`newer_than`).
+        try:
+            list_bridge.invalidate()
+        except (list_bridge.ListBridgeError, tmux.MuxIndisponivel):
+            pass
 
 
 def _cached_info_sync(name: str) -> SessionInfo | None:
@@ -1205,6 +1273,14 @@ def _drenar(name: str, jsonl: str, provider: str) -> int:
     O Claude sem terminal segue o mesmo caminho: seu provider e "claude", mas nao ha pane — o
     `terminal_input.drain` reivindicava a entrada e falhava ao resolver o pane, e o prompt ficava
     pendente ate alguem abrir o chat (o drain do SSE)."""
+    from app import runtime_coordinator
+    from app.runtime_adapter import run_sync
+    coordinator = runtime_coordinator.current()
+    if coordinator is not None and coordinator.managed_runtime(name):
+        try:
+            return run_sync(lambda: coordinator.op(name, {"kind":"drain"}, uuid.uuid4().hex), coordinator.loop)["sent"]
+        except runtime_coordinator.TransferInProgress:
+            return 0        # o novo dono drena quando a sessão fica entregável
     if provider == "codex":
         chave = "codex"
     elif _headless(name):
@@ -1256,6 +1332,15 @@ def _confirm_and_drain(name: str) -> None:
         if atual is not None and atual[0] is threading.current_thread():
             del _confirm_pend[name]
     try:
+        from app import runtime_coordinator
+        from app.runtime_adapter import run_sync
+        coordinator = runtime_coordinator.current()
+        if coordinator is not None and coordinator.managed_runtime(name):
+            async def confirm():
+                await coordinator.op(name, {"kind":"confirm"}, uuid.uuid4().hex)
+                await coordinator.op(name, {"kind":"drain"}, uuid.uuid4().hex)
+            run_sync(confirm, coordinator.loop)
+            return
         q = PromptQueue(name)
         if not any(r.get("delivered") is True and not r.get("confirmed") for r in q.load()):
             return  # nada a confirmar: nao paga registry nem o scan do transcript
@@ -1517,8 +1602,11 @@ def _on_hook_transition(session_id: str, state: str) -> None:
                         d = link.get()
                         if d and d["status"] == "running":
                             link.update(status="paused_awaiting")
-            except Exception:
-                pass
+            except Exception as e:
+                # Sem a lista o loop segue rodando com a sessão parada na pergunta: a falha aparece.
+                _log.warning("loop: pausa no awaiting de %s falhou: %s", session_id[:8], type(e).__name__)
+                diag.registrar("loop.pausa_falhou", "aviso", sessao=session_id[:8],
+                               codigo=getattr(e, "code", None) or type(e).__name__)
         threading.Thread(target=_pause_loop, daemon=True).start()
         return
     # Inicio do turno lido AQUI, antes de qualquer subprocess: o `drain` la embaixo pode largar um
@@ -1644,6 +1732,7 @@ class CreateBody(_StrictBody):
     # aqui, nunca no front: o valor entra num comando de shell.
     model: str | None = None
     effort: str | None = None
+    service_tier: Literal["default", "priority"] | None = None
     # Modo de permissão do Claude Code. None = padrão da conta (comportamento de hoje).
     permission_mode: str | None = None
     # CLAUDE_CODE_SUBAGENT_MODEL. Só claude sem motor: o motor exporta o dele e ganharia calado.
@@ -1663,6 +1752,9 @@ class CreateBody(_StrictBody):
     # Claude ou Codex SEM terminal roda atrás do cano, sem tmux. O que depende de pane
     # (painel de terminal, espelho) não existe.
     headless: bool | None = Field(default=None, strict=True)
+    # Sessão que pediu a criação (MCP `new_session`, `hangar-send --new`). O que vier omitido
+    # (modo de permissão, sem terminal) herda dela; sem ela, vale o padrão do servidor.
+    creator: str | None = Field(default=None, min_length=1)
 
 
 def _jev_efetivo(pedido: bool | None) -> bool:
@@ -1824,11 +1916,13 @@ async def list_sessions(request: Request):
     # decoracao, e o estado decorado ainda vazaria pro snapshot que `/history` e `/workflows` leem
     # esperando a lista crua. `model_copy` rasa basta: a decoracao ATRIBUI campos, nunca muta em
     # lugar o que ja esta neles.
-    # Com a lista SSE aberta, o refresher já decorou isto há menos de um tique: serve dele.
+    # Com a lista SSE aberta, o refresher já decorou isto há menos de um tique: serve dele. Com o
+    # Rust dono, o retrato é dele (até 2 s, produzido na hora se mais velho).
     from app.sse import recent_list
     guest = guest_of(request)
     viewer = guest_users.current.get()
-    decorated = recent_list(2.0)
+    decorated = (await asyncio.to_thread(list_bridge.snapshot) if await registry_mod.rust_owns_list_async()
+                 else recent_list(2.0))
     if decorated is not None:
         if guest is not None:
             decorated = [i for i in decorated if guest.sees(i.name)]
@@ -2132,26 +2226,89 @@ async def _kill_unclaimed(name: str) -> None:
         await asyncio.to_thread(_invalidate_lists)
 
 
-@app.post("/api/sessions", dependencies=[Depends(require_auth)], response_model=SessionInfo)
-async def create_session(body: CreateBody):
+def _creator_permission_mode(name: str, jsonl: str | None) -> str | None:
+    """Modo fora de `plan` da sessão Claude `name`, no nome que o `--permission-mode` aceita."""
+    meta = headless_sessions.load(name)
+    modo = None
+    if meta:
+        modo = meta.get("permission_mode")
+        if modo == "plan":
+            modo = meta.get("previous_non_plan")
+    modo = modo or permission_mode.session_non_plan_mode(jsonl or _jsonl_atual(name))
+    modo = "manual" if modo == "default" else modo
+    return modo if modo in model_args.MODOS_PERMISSAO_CLAUDE and modo != "plan" else None
+
+
+async def _inherit_from_creator(body: CreateBody) -> tuple[CreateBody, str | None, list[str]]:
+    """Preenche o que veio omitido com o da sessão criadora; devolve também `"inherited"` quando a
+    conta veio dela e os avisos do que não deu para herdar. O modo conta porque o primeiro recado
+    de uma criadora em bypass para uma irmã em Manual fica retido no receptor (`mode-mismatch`)."""
+    # Convidado não herda a conta nem o modo de uma sessão do dono.
+    if not body.creator or guest_users.current.get() is not None:
+        return body, None, []
+    info = await _cached_info(body.creator)
+    if info is None:
+        return body, None, [f"sessão criadora '{body.creator}' não encontrada; nada foi herdado"]
+    update: dict = {}
+    avisos: list[str] = []
+    account_source = None
+    # Perfil do omp já define a conta.
+    if body.config_dir is None and body.provider in ("claude", "pi", "omp") and not body.omp_profile:
+        cfg, confiavel = await asyncio.to_thread(_caller_config_dir, info.name)
+        if not confiavel:
+            # Criar assim nasceria na conta padrão, calado: gasta a cota de quem ninguém escolheu.
+            raise HTTPException(409, detail=erro(
+                "erro_conta_criadora", f"não consegui confirmar a conta da sessão '{info.name}' — "
+                "escolha a conta (`conta` no MCP, `--conta` no hangar-send)"))
+        account_source = "inherited"
+        if cfg:
+            update["config_dir"] = str(cfg)
+    if body.headless is None and body.provider in ("claude", "codex") and not body.read_only:
+        update["headless"] = bool(info.headless)
+    if body.permission_mode is None and body.provider == "claude" and info.provider == "claude":
+        modo = await asyncio.to_thread(_creator_permission_mode, info.name, info.jsonl)
+        if modo:
+            update["permission_mode"] = modo
+        else:
+            avisos.append(f"não consegui ler o modo de permissão de '{info.name}'; vale o padrão da conta")
+    return (body.model_copy(update=update) if update else body), account_source, avisos
+
+
+@app.post("/api/sessions", dependencies=[Depends(require_auth)], response_model=CreatedSessionInfo)
+async def create_session(body: CreateBody) -> CreatedSessionInfo:
     if "provider" not in body.model_fields_set:
         provider = await _default_session_provider(body.config_dir, body.engine, body.codex_account,
                                                    body.omp_profile, body.subagent_model)
         body = body.model_copy(update={"provider": provider})
-    avisos_extra: list[str] = []
+    explicit_account = body.config_dir is not None
+    body, account_source, avisos_extra = await _inherit_from_creator(body)
     # Convidado fica na conta Codex padrão: as outras contas são do dono.
     if body.provider == "codex" and body.codex_account is None and guest_users.current.get() is None:
         connected = await _connected_codex_accounts()
         if connected and not any(account.is_default for account in connected):
             body = body.model_copy(update={"codex_account": connected[0].id})
             avisos_extra.append(f"A conta Codex padrão não está conectada; a sessão usa a conta {connected[0].id}.")
-    if body.config_dir is None and body.provider == "claude" and not body.engine:
-        # Sem conta pedida, a padrão só vale se tiver cota; senão nasce na de mais folga.
+    if not explicit_account and body.provider == "claude" and not body.engine:
+        # Sem conta pedida, a herdada ou a padrão só vale se não estiver acabando; senão nasce na de
+        # mais folga, e a resposta diz que trocou.
         from app import cotas
-        config_dir, aviso = await asyncio.to_thread(cotas.conta_com_cota, None, cotas.cotas_claude())
+        config_dir, aviso = await asyncio.to_thread(cotas.conta_com_cota, body.config_dir, cotas.cotas_claude())
         if aviso:
             _log.warning("create_session %s: %s", body.name, aviso)
             body = body.model_copy(update={"config_dir": config_dir})
+            avisos_extra.append(aviso)
+            account_source = "quota"
+    if body.provider == "claude" and not body.engine and (
+            body.config_dir is None or body.config_dir in {c.path for c in list_config_dirs()}):
+        cfg = Path(body.config_dir) if body.config_dir else None
+        removidos, falhas = await asyncio.to_thread(default_model.drop_foreign, cfg)
+        for valor in removidos:
+            _log.warning("create_session %s: modelo padrão %r não é da Anthropic; removido do settings.json",
+                         body.name, valor)
+            avisos_extra.append(f"O modelo padrão '{valor}' do settings.json não é da Anthropic "
+                                "(provavelmente veio de um /model numa sessão de motor) e foi removido.")
+        avisos_extra += [f"Não consegui tirar do settings.json um modelo que não é da Anthropic: {f}"
+                         for f in falhas]
     with _acompanhar_criacao(body.name):
         worktree: dict = {}
         try:
@@ -2174,6 +2331,8 @@ async def create_session(body: CreateBody):
                 info = info.model_copy(update={"owner": guest.name})
             if avisos_extra:
                 info = info.model_copy(update={"avisos": [*info.avisos, *avisos_extra]})
+            info = CreatedSessionInfo(**info.model_dump(), config_dir=body.config_dir,
+                                      account_source=account_source)
             if (guest is None and body.remember_provider
                     and runtime_config.get("last_session_provider") != info.provider):
                 try:
@@ -2230,6 +2389,9 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
     # ser rejeitado aqui não pode ter reconciliado a conta (deriva movida, memória criada) à toa.
     if body.provider not in ("claude", "codex", "pi", "kimi", "omp"):
         raise HTTPException(400, detail=erro("erro_provider_sessao_invalido", "provider invalido"))
+    if body.service_tier is not None and body.provider != "codex":
+        if body.provider != "claude" or not await asyncio.to_thread(cliproxy.supports_fast, body.engine, body.model):
+            raise HTTPException(400, detail=erro("erro_criacao_sessao", "Fast exige Codex ou Claude com GPT no CLIProxyAPI local"))
     # Antes de qualquer efeito (worktree, registry.create): convidado só abre dentro da pasta dele.
     guest = guest_users.current.get()
     if guest is not None and not guest_users.inside_root(guest, body.cwd):
@@ -2313,15 +2475,20 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
     # O nível do Codex não tem lista fechada em model_args (varia POR MODELO), então quem cruza
     # modelo×nível é o catálogo. Sem isto, `--effort ultra` num `gpt-5.5` sobe a sessão e o binário
     # descarta o nível calado — sucesso reportado sobre escolha que não valeu.
-    if body.provider == "codex" and (body.model or body.effort):
+    if body.provider == "codex" and (body.model or body.effort or body.service_tier is not None):
         try:
             checar_kw = ({"codex_home": codex_account_obj.home}
                          if body.codex_account is not None else {})
+            if body.service_tier is not None:
+                checar_kw["service_tier"] = body.service_tier
             await asyncio.to_thread(codex_models.checar_escolha, body.model, body.effort,
                                     **checar_kw)
         except ValueError as e:
             raise HTTPException(422, detail=erro("erro_codex_escolha_invalida", str(e), erro=str(e))) from None
         except codex_models.CodexIndisponivel as e:
+            if body.service_tier == "priority":
+                raise HTTPException(502, detail=erro("erro_codex_catalogo_invalido",
+                                                     f"Fast não pôde ser conferido: {e}", erro=str(e))) from None
             # Catálogo fora do ar (ou `codex` ausente — o CodexAusente é um RuntimeError) não pode
             # IMPEDIR de abrir sessão: mesma decisão da janela do motor, logo abaixo. A escolha
             # segue pro comando e o CLI decide. A falha não some — fica no log.
@@ -2363,11 +2530,12 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
     # context_length. Com motor mas sem modelo (ou vice-versa), nada a resolver: o env segue o motor.
     janela = None
     if body.engine and body.model:
+        catalog_id = await asyncio.to_thread(engines.catalog_model, body.model)
         try:
             for m in await (_fixed_engine_models(body.engine, body.engine_account)
                             if body.engine_account else _engine_models(body.engine)):
-                if m["id"] == body.model:
-                    janela = m.get("context_length")
+                if m["id"] == catalog_id:
+                    janela = 1_000_000 if catalog_id != body.model else m.get("context_length")
                     break
         except HTTPException:
             # _engine_models devolve 502 quando o cache expirou e o /v1/models não responde, e 409
@@ -2506,6 +2674,8 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
             _kw2["omp_profile"] = body.omp_profile
         if body.codex_account is not None:
             _kw2["codex_account"] = body.codex_account
+        if body.service_tier is not None:
+            _kw2["service_tier"] = body.service_tier
         if body.read_only:
             _kw2["read_only"] = True
         if body.headless:
@@ -2569,6 +2739,28 @@ _OCUPADA = {
 async def _motivo_ocupada(name: str, headless: bool) -> str | None:
     """Código de `_OCUPADA` dizendo por que a sessão não pode trocar de modo (None = ociosa)."""
     if headless:
+        from app.runtime_adapter import runtime_data
+        from app import runtime_coordinator
+        coordinator = runtime_coordinator.current()
+        try:
+            view = coordinator.source_view(name) if coordinator is not None else None
+        except RuntimeError:
+            return "erro_sessao_iniciando"
+        view = view if view is not None else runtime_data(name)
+        if view is not None:
+            state = view.get("public_state") or {}
+            if not view.get("initialized") or view.get("iniciando"):
+                return "erro_sessao_iniciando"
+            if state.get("state") == "awaiting_input" or view.get("pending") or view.get("question"):
+                return "erro_sessao_esperando_resposta"
+            if state.get("state") == "working" or view.get("in_progress"):
+                return "erro_sessao_trabalhando"
+            if state.get("state") not in ("idle", "dead"):
+                return "erro_sessao_iniciando"
+            fila = await asyncio.to_thread(PromptQueue(name).load)
+            return "erro_fila_pendente" if any(
+                (not row.get("delivered") or not row.get("confirmed")) and not row.get("saida_local")
+                for row in fila) else None
         sess = get_adapter(CLAUDE_HEADLESS)._sessions.get(name)
         if sess is not None and sess.vivo:
             if sess.iniciando:
@@ -2653,6 +2845,71 @@ async def modo_execucao(name: str, body: ModoExecucaoBody):
     return await _durante_troca(name, _trocar_modo(name, body))
 
 
+async def _python_owns_headless() -> None:
+    """O Python é o dono das sessões Claude sem terminal: religa os canos vivos e reagenda as
+    conferências de entrega (Timers em memória que o restart apagou)."""
+    try:
+        religadas = await get_adapter(CLAUDE_HEADLESS).reconectar_todas()
+        if religadas:
+            _log.info("claude headless: %d sessão(ões) religada(s) ao cano", religadas)
+        for meta in await asyncio.to_thread(headless_sessions.list_all):
+            get_adapter(CLAUDE_HEADLESS).apos_entrega(meta["name"])
+    except Exception:
+        _log.warning("claude headless: religação de canos falhou", exc_info=True)
+
+
+_transfer_recovery: asyncio.Task | None = None
+
+
+async def _recover_pending_transfers() -> None:
+    from app.conversation_transfer import list_incomplete, recover_transfer, TransferError
+    for record in await asyncio.to_thread(list_incomplete):
+        try:
+            await _durante_troca(record.name, recover_transfer(registry, record), transfer=True)
+        except TransferError:
+            pass  # A fase durável mantém o erro e a ação Recarregar disponíveis.
+        except Exception:
+            _log.exception("recuperação da transferência de %s falhou", record.name)
+
+
+def _start_transfer_recovery() -> None:
+    """Uma vez por processo, depois que alguém é dono das sessões (Python, ou Rust de pé)."""
+    global _transfer_recovery
+    if _transfer_recovery is None:
+        _transfer_recovery = asyncio.create_task(_recover_pending_transfers())
+
+
+async def _boot_sessions(runtime) -> None:
+    """Sessões Claude sem terminal na subida. O cano sobrevive ao restart; só morre aqui o de
+    sessão encerrada com o backend fora. Com o Rust esperado, nada mais roda antes do desfecho
+    dele: o modo `rust` abre as sessões nele, e o `python` (desistência) faz o que vinha aqui."""
+    try:
+        from app.adapters.claude_headless.adapter import matar_orfaos
+        mortos = await asyncio.to_thread(matar_orfaos)
+        if mortos:
+            _log.info("claude headless: %d cano(s) de sessão já encerrada finalizado(s)", mortos)
+    except Exception:
+        _log.warning("claude headless: varredura de canos órfãos falhou", exc_info=True)
+
+    async def after_rust():
+        _start_transfer_recovery()
+
+    async def after_python():
+        # Cada etapa independe das outras: uma falha não deixa canos sem religar nem transferência parada.
+        try:
+            await runtime.register_claude_sessions()
+        except Exception:
+            _log.exception("registro das sessões Claude no Python falhou")
+        await _python_owns_headless()
+        _start_transfer_recovery()
+
+    global _transfer_recovery
+    _transfer_recovery = None       # um lifespan novo no mesmo processo (testes) recupera de novo
+    runtime.mode_hooks.update(rust=after_rust, python=after_python)
+    if runtime.mode == "python":
+        await _python_owns_headless()
+
+
 async def _durante_troca(name: str, troca, *, transfer: bool = False):
     from app.conversation_transfer import session_operation, require_available, TransferError, public_error
     if transfer:
@@ -2660,21 +2917,32 @@ async def _durante_troca(name: str, troca, *, transfer: bool = False):
     try:
         with session_operation(name):
             await asyncio.to_thread(require_available, name)
-            return await _during_transfer_life(name, troca)
+            return await _during_transfer_life(name, troca, require_idle=True)
     except TransferError as exc:
         troca.close()
         raise HTTPException(exc.status, detail=public_error(exc)) from None
 
 
-async def _during_transfer_life(name: str, troca):
+async def _during_transfer_life(name: str, troca, *, require_idle: bool = False):
     # A troca muda a identidade da sessão (sidecar <-> pane tmux); sem atualizar, a varredura
     # revogaria o convite de uma sessão que continua viva. `changing_mode` a segura no meio.
     if name in share_api.changing_mode:
         return await troca
     share_api.changing_mode.add(name)
     try:
+        from app import runtime_coordinator
+        coordinator = runtime_coordinator.current()
+        if coordinator is not None and coordinator.managed_queue(name):
+            async def check_idle():
+                motivo = await _motivo_ocupada(name, _headless(name))
+                if motivo:
+                    raise HTTPException(409, detail=erro(motivo, _OCUPADA[motivo]))
+            if require_idle:
+                return await coordinator.change(name, lambda: troca, preflight=check_idle)
+            return await coordinator.change(name, lambda: troca)
         return await troca
     finally:
+        troca.close()
         # Também na falha: uma troca que morreu no meio pode já ter mudado a identidade.
         try:
             def _move_life():
@@ -2708,7 +2976,8 @@ async def _trocar_modo(name: str, body: ModoExecucaoBody):
                 raise
             except Exception as exc:
                 raise HTTPException(409, detail=erro("erro_troca_modo", f"não troquei de modo: {exc}", erro=str(exc))) from exc
-        registry._forget(name)
+        # Fora do laço: com o Rust dono, esquecer é uma chamada à ponte.
+        await asyncio.to_thread(registry._forget, name)
         return {"ok": True, "terminal": body.terminal}
     if info.provider != "claude":
         raise HTTPException(409, detail=erro("erro_modo_so_claude", "a troca de modo só vale para sessões Claude"))
@@ -2840,9 +3109,35 @@ async def trocar_conta(name: str, body: AccountMoveBody):
     return await _durante_troca(name, _trocar_conta(name, body.config_dir))
 
 
+def _engine_fast_selection(name: str) -> tuple[str | None, str]:
+    meta = headless_sessions.load(name)
+    if meta is not None:
+        from app import runtime_coordinator
+        coordinator = runtime_coordinator.current()
+        try:
+            view = coordinator.source_view(name) if coordinator is not None else None
+        except RuntimeError:
+            raise HTTPException(409, detail=erro("erro_sessao_iniciando", "estado da sessão indisponível; aguarde a reposição")) from None
+        model = (view or {}).get("model")
+        if model is None:
+            model = get_adapter(CLAUDE_HEADLESS).escolhas(name)[0]
+        return model or meta.get("model"), meta.get("service_tier") or "default"
+    pane = registry._pane_of(name)
+    agent = registry_mod._pid_do_agente((pane or {}).get("pid"))
+    if not agent or pane is None:
+        return None, "default"
+    model = procinfo._model_of(agent)[0]
+    jsonl, tracked = registry.resolve_tracked(name, pane["cwd"])
+    if jsonl and tracked:
+        current = registry_mod._escolhas_status(Path(jsonl).stem)[0]
+        model = current or model
+    return model, procinfo._env_var_of(agent, "CP_ENGINE_SERVICE_TIER") or "default"
+
+
 async def _trocar_conta(name: str, destino: str | None, *, engine_account: str | None = None,
                        model: str | None = None, effort: str | None = None,
-                       context_window: int | None = None, engine_models: list[dict] | None = None):
+                       context_window: int | None = None, engine_models: list[dict] | None = None,
+                       service_tier: str | None = None):
     hl = get_adapter(CLAUDE_HEADLESS)
     async with hl.delivery_lock(name):
         # A troca anterior pode ter mudado motor, conta e transporte enquanto este pedido esperava.
@@ -2858,7 +3153,11 @@ async def _trocar_conta(name: str, destino: str | None, *, engine_account: str |
             info = info.model_copy(update={"engine": current_meta.get("engine"),
                                            "engine_account": current_meta.get("engine_account"),
                                            "headless": True})
-        if engine_account is not None:
+        if service_tier is not None:
+            current_model, _ = await asyncio.to_thread(_engine_fast_selection, name)
+            if not await asyncio.to_thread(cliproxy.supports_fast, info.engine, current_model):
+                raise HTTPException(400, detail=erro("erro_fast_indisponivel", "Fast exige GPT no CLIProxyAPI local"))
+        elif engine_account is not None:
             if not info.engine:
                 raise HTTPException(400, detail=erro("erro_cliproxy_conta", "esta sessão não usa o CLIProxyAPI local"))
             if (model is not None or effort is not None) and info.engine_account != engine_account:
@@ -2880,12 +3179,7 @@ async def _trocar_conta(name: str, destino: str | None, *, engine_account: str |
             raise HTTPException(409, detail=erro(motivo, _OCUPADA[motivo]))
         chosen_model = None
         if engine_account is not None:
-            if headless:
-                source_model = (headless_sessions.load(name) or {}).get("model")
-            else:
-                pane = await asyncio.to_thread(registry._pane_of, name)
-                agent = registry_mod._pid_do_agente((pane or {}).get("pid"))
-                source_model = procinfo._model_of(agent)[0] if agent else None
+            source_model, _ = await asyncio.to_thread(_engine_fast_selection, name)
             source_model = model or source_model or engines.listar()[info.engine]["model"]
             base = source_model.split("/", 1)[-1]
             from app.cliproxy_accounts import prefix_model
@@ -2974,7 +3268,12 @@ async def _trocar_conta(name: str, destino: str | None, *, engine_account: str |
                 raise RuntimeError("sessão sem o arquivo de estado")
             original_meta = dict(meta)
             jsonl = Path(hl.transcript_path_de(meta))
-            if engine_account is not None:
+            if service_tier is not None:
+                if current_model is not None:
+                    original_meta["model"] = current_model
+                changes = {"service_tier": service_tier, "problema": None,
+                           **({"model": current_model} if current_model is not None else {})}
+            elif engine_account is not None:
                 changes = {"engine_account": engine_account, "engine_credential_id": account["credential_id"],
                            "engine_account_base_url": account["base_url"],
                            "model": chosen_model, "problema": None}
@@ -2990,7 +3289,7 @@ async def _trocar_conta(name: str, destino: str | None, *, engine_account: str |
                 changes = {"config_dir": destino, "problema": None}
                 if info.engine:
                     changes.update(engine=None, engine_account=None, engine_credential_id=None,
-                                   engine_account_base_url=None, model=None, context_window=None)
+                                   engine_account_base_url=None, model=None, context_window=None, service_tier=None)
                 # Confiança na pasta é por conta: sem isto o terminal (agora ou na troca de modo) abre no aviso, em "No, exit".
                 await asyncio.to_thread(registry_mod._pretrust_cwd, meta["cwd"], destino)
             # O aviso da conta anterior (limite batido, sem login) não vale na nova.
@@ -3035,12 +3334,14 @@ async def _trocar_conta(name: str, destino: str | None, *, engine_account: str |
                 message = "a troca falhou e a sessão anterior não reabriu"
             falha = HTTPException(409, detail=erro("erro_troca_conta", message,
                                                   erro=motivo_terminal, rollback_error=rollback_error))
-        registry._forget(name)
+        await asyncio.to_thread(registry._forget, name)
     if falha:
         raise falha
     if motivo_terminal:
         raise HTTPException(409, detail=erro("erro_troca_conta", f"a conversa foi para a conta nova, mas o terminal não voltou ({motivo_terminal}); ela segue sem terminal",
                                              erro=motivo_terminal))
+    if service_tier is not None:
+        return {"ok": True, "service_tier": service_tier}
     return {"ok": True, "engine_account": engine_account} if engine_account is not None else {"ok": True, "config_dir": destino}
 
 
@@ -3096,6 +3397,14 @@ class RenameBody(_StrictBody):
 @app.post("/api/sessions/{name}/rename", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 async def rename_session(name: str, body: RenameBody):
     # Claim, envio e compensação precisam terminar antes de mover a fila e cancelar a bomba.
+    from app import runtime_coordinator
+    coordinator = runtime_coordinator.current()
+    if coordinator is not None and coordinator.legacy is not None:
+        await coordinator.prepare_session(name, _provider_of(name))
+        if coordinator.managed_queue(name) and coordinator.slot(name).binding.meta.get("terminal"):
+            async def action():
+                return await asyncio.to_thread(_rename_session, name, body)
+            return await coordinator.change(name, action, new_name=sanitize_session_name(body.new), advance=False)
     async with AsyncExitStack() as stack:
         adapter = get_adapter("codex")
         for key in sorted({name, sanitize_session_name(body.new)}):
@@ -3171,9 +3480,7 @@ def _rename_session(name: str, body: RenameBody):
     _rename_guest_claim(name, new)
     from app.pqueue import PromptQueue
     try:
-        oq, nq = PromptQueue(name).path, PromptQueue(new).path
-        if oq.exists():
-            atomico.substituir(oq, nq)
+        PromptQueue(name).rename(new)
         # O dossiê da passagem de bastão é keyed por nome do MESMO jeito que a fila: sem migrar
         # junto, a sucessora renomeada fica com um kick-off apontando pro caminho antigo e o
         # `prune` apaga o arquivo em 7 dias por não achar sessão viva com aquele nome.
@@ -3285,7 +3592,7 @@ def loop_create(name: str, body: LoopCreate):
         cur = link.get()
         if cur and cur["status"] in loop_mod.ACTIVE:
             raise HTTPException(409, detail=erro("erro_loop_ja_ativo", "já existe um loop ativo nesta sessão"))
-        br = branch_of(info.cwd) if info.cwd else None
+        br = branch_of(info.git_dir) if info.git_dir else None
         if body.require_branch and br in ("main", "master"):
             raise HTTPException(409, detail=erro("erro_loop_branch_invalida", f"sessão está na branch {br} — crie uma branch ou desligue 'exigir branch'", br=br))
         d = loop_mod.new_loop(body.goal, body.check_cmd, body.max_iters, body.require_branch)
@@ -3389,6 +3696,18 @@ async def history(request: Request, response: Response, name: str, limit: int | 
     if not info or not info.jsonl:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "session or transcript not found"))
     from app.pqueue import historico_etag, merged_history
+    from app import runtime_coordinator
+    coordinator = runtime_coordinator.current()
+    if coordinator is not None and coordinator.managed_queue(name):
+        try:
+            await coordinator.op(name, {"kind":"ensure_projection"}, uuid.uuid4().hex)
+        except runtime_coordinator.TransferInProgress:
+            # Na passagem ninguém grava: a projeção em disco é a última dos dois donos.
+            diag.registrar("runtime.info_during_transfer", "aviso", sessao=name)
+        except Exception as exc:
+            from app.runtime_coordinator import failure_reason
+            diag.registrar("runtime.history_failed", "erro", sessao=name, **failure_reason(exc))
+            raise HTTPException(503, detail=erro("erro_envio_falhou", "projeção da fila indisponível; tente novamente")) from None
     # Entrar numa sessao e a leitura mais repetida do app, e quase sempre nada mudou desde a
     # ultima: medido em 06/09/2026 na `pr-junior` (transcript de 31,9 MB), a cauda custava 313 KB
     # POR ENTRADA pelo caminho do celular. O validador sai de dois `stat` -- barato aqui e, do lado
@@ -3934,15 +4253,19 @@ def _sessao_claude_de(name: str) -> tuple[Optional[str], Optional[str]]:
     return p.stem, str(p.parent.parent.parent)
 
 
-def _classe_modo(remetente: str, alvo: str, cfg_alvo: Optional[str]) -> str:
+def _classe_modo(remetente: str, alvo: str, cfg_alvo: Optional[str],
+                 jsonl_alvo: Optional[str] = None) -> str:
     """`from-mode` do envelope nativo: a classe (bypass/prompting) do REMETENTE quando conhecida;
-    senão a do alvo, que é o que o caminho pelo tmux sempre fez (sem checagem nenhuma)."""
-    def _modo(n: str) -> str:
+    senão a do alvo, que é o que o caminho pelo tmux sempre fez (sem checagem nenhuma). O modo da
+    conta é o último recurso: errado, ele faz o receptor reter o recado (decisoes/plataforma.md)."""
+    def _modo(n: str, jsonl: Optional[str] = None) -> Optional[str]:
         m = headless_sessions.load(n)
         if m and m.get("permission_mode"):
             return str(m["permission_mode"])
-        return permission_mode.ultimo_nao_plan(n, padrao="")
-    modo = _modo(remetente) or _modo(alvo) or permission_mode.modo_da_conta(cfg_alvo)
+        return permission_mode.session_non_plan_mode(jsonl or _jsonl_atual(n))
+    # Rótulo de aviso do app ([painel: …]) não é sessão; resolvê-lo só gastaria chamadas ao tmux.
+    modo_remetente = _modo(remetente) if sanitize_session_name(remetente) == remetente else None
+    modo = modo_remetente or _modo(alvo, jsonl_alvo) or permission_mode.modo_da_conta(cfg_alvo)
     return "bypass" if "bypass" in modo.lower() else "prompting"
 
 
@@ -3980,6 +4303,13 @@ def _send_native_available(name: str, text: str) -> Optional[str]:
 def _ao_recibo_nativo(mid: str, estado: str, detalhe: str) -> None:
     """Recibo `peer_message_status` do receptor (retido/recusado): avisa a sessão remetente pelo
     caminho normal. Roda na thread do inbox; o envio vai pro loop do servidor."""
+    from app import runtime_coordinator
+    from app.runtime_adapter import run_sync
+    coordinator = runtime_coordinator.current()
+    if coordinator is not None and coordinator.loop is not None:
+        if run_sync(lambda: coordinator.native_receipt(mid, estado), coordinator.loop):
+            diag.registrar("recado.nativo.recibo", "aviso", codigo=estado or "delivered")
+            return
     info = _RECADOS_NATIVOS.pop(mid, None)
     diag.registrar("recado.nativo.recibo", "aviso", sessao=info[1] if info else None,
                    detalhe=f"{estado} {detalhe}".strip())
@@ -4015,7 +4345,7 @@ def _jsonl_atual(name: str) -> str | None:
         _cwd = next((p["cwd"] for p in _tmux.list_panes_active() if p["name"] == name), "")
         return registry.resolve_tracked(name, _cwd)[0] or None
     except Exception:
-        _log.exception("jsonl da sessao %s nao resolvido para a prova do plugin", name)
+        _log.exception("jsonl da sessão %s não resolvido", name)
         return None
 
 
@@ -4042,8 +4372,18 @@ def _send_one_available(name: str, text: str, track_entry: bool = False) -> dict
     # append punha a entrada ~ms apos o proprio commit e o dedup ts-aware do merged_history a
     # mantinha pendente (msg em dobro no historico ate o reconcile). A ordem send->append->drain
     # NAO muda — so o valor gravado, que e o unico dado que o dedup le.
+    from app import runtime_coordinator
+    from app.runtime_adapter import run_sync
+    coordinator = runtime_coordinator.current()
+    if coordinator is not None and coordinator.managed_runtime(name):
+        return run_sync(lambda: _send_managed(name, text, coordinator.slot(name).binding.provider,
+            track_entry=track_entry), coordinator.loop)
     t0 = time.time()
     provider, pane_id = _pane_info(name)
+    if coordinator is not None and provider == "claude" and coordinator.legacy is not None:
+        managed = run_sync(lambda: _send_managed(name, text, provider, track_entry=track_entry), coordinator.loop)
+        if managed is not None:
+            return managed
     stripped = text.lstrip()
     # Pi COM LINHA: cria a entrada da fila ANTES do 1o envio, pra ter um id ESTAVEL pra oferecer
     # como msg_id (achado ALTA da revisao 02/08/2026 — "Porta A"). A extensao chama sendUserMessage
@@ -4275,6 +4615,9 @@ def _pane_info(name: str) -> tuple[str, str | None]:
 
 
 async def _send_one_codex(name: str, text: str, *, track_entry: bool = False) -> dict:
+    managed = await _send_managed(name, text, "codex", track_entry=track_entry)
+    if managed is not None:
+        return managed
     source = await _send_thread(codex_sessions.load, name)
     async with get_adapter("codex").delivery_lock(name):
         if error := _transfer_send_error(name):
@@ -4317,6 +4660,9 @@ async def _send_available(name: str, text: str) -> dict:
 
 async def _send_one_headless(name: str, text: str, *, track_entry: bool = False) -> dict:
     """Mesmo caminho de fila do Codex (adapter em vez de tty), com o adapter do Claude sem terminal."""
+    managed = await _send_managed(name, text, "claude", track_entry=track_entry)
+    if managed is not None:
+        return managed
     adapter = get_adapter(CLAUDE_HEADLESS)
     async with adapter.delivery_lock(name):
         if error := _transfer_send_error(name):
@@ -4347,6 +4693,56 @@ async def _send_one_headless(name: str, text: str, *, track_entry: bool = False)
         # Parada: o prompt já está na fila e a resposta sai agora; a sessão sobe e entrega depois.
         adapter.acordar(name)
     return res
+
+
+async def _send_managed(name: str, text: str, provider: str, *, track_entry: bool = False) -> dict | None:
+    from app import runtime_coordinator
+    coordinator = runtime_coordinator.current()
+    if coordinator is None:
+        return None
+    operation_id = uuid.uuid4().hex
+    try:
+        if not await coordinator.prepare_session(name, provider, launch=True):
+            return None
+        if provider == "codex" and text.strip().split(maxsplit=1)[0:1] == ["/compact"]:
+            if text.strip() != "/compact":
+                raise ValueError("O /compact do Codex não aceita argumentos.")
+            command = {"kind":"control", "control":"compact", "payload":{}}
+        else:
+            command = {"kind":"submit", "text":text}
+        reply = await coordinator.op(name, command, operation_id)
+        disposition = reply.get("disposition")
+        queued = command["kind"] == "submit" and not text.lstrip().startswith("/")
+        # Com terminal, a entrega incerta é confirmada depois pelo transcript (uma vez, sem reenvio).
+        proved_later = (disposition == "unknown" and queued
+                        and isinstance(coordinator.slot(name).binding.meta.get("terminal"), dict))
+        if disposition == "unknown" and (proved_later or (reply.get("payload") or {}).get("transport_lost") is True):
+            # Entrega sem prova (aviso do plugin atrasado, ou o Rust caiu no meio): a mensagem está na
+            # fila durável, que só a confirma pelo transcript e nunca a reenvia; a bolha espera.
+            diag.registrar("runtime.send_uncertain", "aviso", sessao=name,
+                           codigo=str((reply.get("payload") or {}).get("code")
+                                      or ("terminal_delivery_unknown" if proved_later else "transport_lost")))
+            return {"ok":True, "error":None, "delivered":False, "uncertain":True,
+                **({"entry_id":operation_id} if track_entry and queued else {})}
+        if disposition not in {"accepted", "deferred"}:
+            raise RuntimeError("resultado incerto; entrada conservada sem reenvio" if disposition == "unknown" else "entrada recusada pelo runtime")
+        if (disposition == "deferred" and command["kind"] == "submit" and not queued and provider == "claude"
+                and isinstance(coordinator.slot(name).binding.meta.get("terminal"), dict)):
+            # Comando de barra não tem linha na fila: adiado, ele não roda depois sozinho.
+            motivo = str((reply.get("payload") or {}).get("code") or "deferred")
+            comando = text.split()[0]
+            diag.registrar("runtime.command_deferred", "aviso", sessao=name, codigo=motivo[:60])
+            return {"ok":False, "error":erro("erro_comando_nao_executado",
+                f"{comando} não foi executado: o terminal não aceitou agora ({motivo}). Mande de novo.",
+                comando=comando, motivo=motivo)}
+        return {"ok":True, "error":None, "delivered":disposition == "accepted",
+            **({"native":True} if (reply.get("payload") or {}).get("native") is True else {}),
+            **({"entry_id":operation_id} if track_entry and command["kind"] == "submit" and not text.lstrip().startswith("/") else {})}
+    except Exception as exc:
+        from app.runtime_coordinator import failure_reason
+        diag.registrar("runtime.send_failed", "erro", sessao=name, **failure_reason(exc))
+        return {"ok":False, "error":erro("erro_envio_falhou", str(exc), erro=str(exc)),
+            **({"entry_id":operation_id} if track_entry else {})}
 
 
 async def _send_one_codex_locked(name: str, text: str, *, track_entry: bool = False,
@@ -4544,6 +4940,16 @@ async def steer_session(name: str, body: InputBody | None = None):
     provider, _ = await _send_thread(_pane_info, name)
     if provider not in ("kimi", "claude"):
         raise HTTPException(409, "só sessão Kimi ou Claude tem steer pela fila do terminal")
+    if provider == "claude":
+        from app import runtime_coordinator
+        from app.runtime_terminal import route
+        owner = runtime_coordinator.current()
+        if owner is not None and getattr(owner, "legacy", None) is not None:
+            result = await route(owner, name, {"kind":"control", "control":"steer", "payload":{}})
+            if result is not None:
+                confirmed = await owner.op(name, {"kind":"confirm"}, uuid.uuid4().hex)
+                return {"ok":True, "promoted":result["disposition"] == "accepted" and
+                    (result.get("payload") or {}).get("promoted", True), "confirmed":confirmed.get("confirmed", 0)}
     # `is False` e nao `not ...`: o unico produtor de False e o tmux recusando a tecla; um dublê de
     # teste que devolve None nao pode virar erro. Sem esta checagem a rota afirmava entrega de um
     # ctrl-s que nunca saiu (pane morto) — o chip sumia da tela e a msg ficava parada na fila.
@@ -5503,6 +5909,7 @@ def _recusa_se_so_enfileirou(name: str, res: dict) -> None:
 
 
 def _recusa_se_painel_aberto(name: str) -> None:
+    # Com o Rust dono, pergunta pela ponte (HTTP): rota `async` chama por `asyncio.to_thread`.
     # Com o painel anexado, a janela do tmux esta no tamanho DELE (~120x20). Quem conta linha no
     # pane — o seletor de opcao, o stepper do AskUserQuestion (terminal_input.answer_questions /
     # answer_question_pi) e o model_picker (lista e troca de modelo, que dirige o /model contando
@@ -5510,7 +5917,13 @@ def _recusa_se_painel_aberto(name: str) -> None:
     #
     # O termsock NAO importa `pty` no topo justamente pra este import funcionar no Windows.
     from app import termsock
-    if name in termsock.clientes_ativos():
+    try:
+        aberto = termsock.painel_aberto(name)
+    except list_bridge.ListBridgeError as e:
+        # Sem resposta do Rust não dá pra dizer que o painel está fechado; a ponte já foi ao diário.
+        raise HTTPException(status_code=503, detail=erro(
+            "erro_terminal_indisponivel", "nao consegui conferir o painel de terminal", detalhe=e.code))
+    if aberto:
         raise HTTPException(status_code=409,
                             detail=erro("erro_terminal_aberto",
                                         "Terminal aberto nesta sessao. Feche o painel pra responder "
@@ -5519,6 +5932,38 @@ def _recusa_se_painel_aberto(name: str) -> None:
 
 @app.post("/api/sessions/{name}/select", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 def select(name: str, body: SelectBody):
+    from app.runtime_terminal import TerminalOutcomeUnknown, route_sync
+    info = _cached_info_sync(name)
+    # A rota do terminal só conhece o vínculo Claude: para outro provedor (Codex sem terminal
+    # incluído) ela suspendia a escrita antes de chegar ao ramo dele.
+    if getattr(info, "provider", "claude") == "claude":
+        pending = plugin_bridge.pergunta_pendente(name)
+        payload = {"option":body.option}
+        if pending is not None:
+            payload["request_id"] = pending["id"]
+            if str(pending["id"]).startswith("perm:") and body.option not in (1, 2):
+                raise HTTPException(409, detail=erro("erro_opcao_nao_convergiu", "opção fora do pedido de permissão"))
+        if pending is None or not str(pending["id"]).startswith("perm:"):
+            # Pergunta `ask:` pode acabar no teclado da TUI: aí vale a trava do painel e o cursor tem de ser lido.
+            _recusa_se_painel_aberto(name)
+            if pending is not None:
+                payload["require_cursor"] = True
+        try:
+            routed = route_sync(name, {"kind":"control", "control":"select", "payload":payload})
+        except (TerminalControlError, TransferInProgress):
+            raise
+        except TerminalOutcomeUnknown as e:
+            _log.warning("SELECT name=%s resultado incerto no terminal: %s", name, e)
+            raise HTTPException(409, detail=erro("erro_sem_confirmacao_resposta",
+                "resposta enviada, mas nao deu pra confirmar a tempo — "
+                "confira na sessao antes de responder de novo")) from None
+        except RuntimeError as e:
+            # Antes da entrega (vínculo, posse, Rust subindo): nada chegou ao pane.
+            _log.warning("SELECT name=%s rota do terminal falhou: %s", name, e, exc_info=True)
+            raise HTTPException(503, detail=erro("erro_opcao_nao_convergiu",
+                "não consegui responder pelo terminal — opção NÃO enviada", detalhe=str(e))) from None
+        if routed is not None:
+            return {"ok": True}
     # Mesma guarda do /input — e aqui ela é a ÚNICA: a cadeia abaixo não sabe falhar. terminal.select
     # devolve None, send_keys descarta o returncode e tmux._run converte tmux morto/travado
     # (TimeoutExpired/OSError) num CompletedProcess(returncode=1) que ninguém lê. Sem isto, responder
@@ -5543,7 +5988,6 @@ def select(name: str, body: SelectBody):
     # Kimi: os botoes de aprovacao (plano/comando/arquivo) sao desenhados a partir do WIRE, entao a
     # escolha volta pelo wire tambem — tecla numerica + `interaction.resolved` como prova. O drive
     # generico abaixo NAO atende este provider em hipotese nenhuma (ver _select_aprovacao_kimi).
-    info = _cached_info_sync(name)
     if getattr(info, "provider", "claude") == "kimi":
         return _select_aprovacao_kimi(name, info, body.option)
     codex_sem_terminal = getattr(info, "provider", "claude") == "codex" and getattr(info, "headless", False)
@@ -5595,14 +6039,47 @@ class PluginPressBody(_StrictBody):
     key: str = Field(min_length=1, max_length=256)
 
 
-@app.post("/api/sessions/{name}/plugin/press", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
-async def plugin_press(name: str, body: PluginPressBody):
+_MOD_CONVIDADO = erro("erro_mod_convidado",
+    "Só o dono da sessão aciona os mods dela pelo app; quem acompanha como convidado vê, mas não clica.")
+
+
+def _convidado(request: Request) -> bool:
+    from app import guest_users
+    return guest_of(request) is not None or guest_users.current.get() is not None
+
+
+def _recusa_convidado_no_terminal_do_rust(name: str, request: Request) -> None:
+    """Convidado (com login ou de convite) não clica em mod de sessão cujo terminal é do Rust.
+
+    O pane é do executor do Rust: o `plugin_click` daqui o dirigiria por fora dele. O Rust repassa ao
+    Python todo pedido que não é do dono, e o convite chega pela porta 8766 sem passar pelo Rust, por
+    isso a recusa mora aqui, depois da autenticação. Esta é só a recusa rápida, por uma fotografia da
+    posse; a que vale é a do empréstimo do teclado (`runtime_terminal._borrow_keyboard`), sob a
+    barreira da sessão, que alcança também a sessão aberta no Rust pelo próprio clique.
+    """
+    from app import runtime_coordinator
+    if not _convidado(request):
+        return
+    coordinator = runtime_coordinator.current()
+    if coordinator is not None and coordinator.terminal_in_rust(name):
+        raise HTTPException(403, detail=_MOD_CONVIDADO)
+
+
+@app.post("/api/sessions/{name}/plugin/press", dependencies=[Depends(require_auth),
+    Depends(_recusa_convidado_no_terminal_do_rust), Depends(_transfer_guard)])
+async def plugin_press(name: str, body: PluginPressBody, request: Request):
     """Clique num botão que um mod desenhou na faixa ou num painel, pedido pelo app."""
     from app import plugin_click
+    from app.runtime_terminal import GuestRefused, guest_admin
+    marca = guest_admin.set(_convidado(request))
     try:
         return await plugin_click.press(name, body.site, body.key)
     except plugin_click.PressRefused as e:
         raise HTTPException(409, detail=e.detail)
+    except GuestRefused:
+        raise HTTPException(403, detail=_MOD_CONVIDADO) from None
+    finally:
+        guest_admin.reset(marca)
 
 
 @app.post("/api/sessions/{name}/interrupt", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
@@ -5622,7 +6099,9 @@ async def interrupt(name: str, clear: bool = False):
     # clear=True: alem de interromper, limpa o input (2o Esc). So o front com msg pendente passa isso —
     # garante input nao-vazio, evitando que o Esc-Esc abra o menu de rewind num input ja vazio.
     # terminal.interrupt e SYNC (tmux) -> threadpool pra nao bloquear o event loop (handler async agora).
+    pergunta = (plugin_bridge.pergunta_pendente(name) or {}).get("id")
     await asyncio.to_thread(terminal.interrupt, name, clear=clear)
+    plugin_bridge.interrompeu(name, pergunta)
     return {"ok": True}
 
 
@@ -5642,7 +6121,7 @@ async def pergunta_lateral(name: str, body: BtwBody):
     sem_terminal = await _send_thread(_headless, name)
     if not sem_terminal:
         await _send_thread(_exige_claude_de_terminal, name)
-        _recusa_se_painel_aberto(name)
+        await asyncio.to_thread(_recusa_se_painel_aberto, name)
     try:
         perguntar = btw.perguntar_sem_terminal if sem_terminal else btw.perguntar
         item = await asyncio.to_thread(perguntar, name, body.question)
@@ -5778,6 +6257,33 @@ async def set_codex_model(name: str, body: CodexModelBody):
     return {"ok": True}
 
 
+class CodexServiceTierBody(_StrictBody):
+    service_tier: Literal["default", "priority"]
+
+
+@app.post("/api/sessions/{name}/service-tier", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+async def set_codex_service_tier(name: str, body: CodexServiceTierBody):
+    if _provider_of(name) == "claude":
+        info = await _cached_info(name)
+        model, _ = await asyncio.to_thread(_engine_fast_selection, name)
+        if not info or not await asyncio.to_thread(cliproxy.supports_fast, info.engine, model):
+            raise HTTPException(400, detail=erro("erro_fast_indisponivel", "Fast exige GPT no CLIProxyAPI local"))
+        _recusa_se_painel_aberto(name)
+        operation = asyncio.create_task(_durante_troca(name, _trocar_conta(name, None, service_tier=body.service_tier)))
+        try:
+            return await asyncio.shield(operation)
+        except asyncio.CancelledError:
+            await operation
+            raise
+    if _provider_of(name) != "codex":
+        raise HTTPException(400, detail=erro("erro_fast_indisponivel", "Fast exige Codex ou Claude com GPT no CLIProxyAPI local"))
+    try:
+        tier = await get_adapter("codex").set_service_tier(name, body.service_tier)
+    except (RuntimeError, ValueError, TimeoutError):
+        raise HTTPException(409, detail=erro("erro_codex_controle", "O Codex não aceitou a alteração; atualize a sessão e tente novamente.")) from None
+    return {"ok": True, "service_tier": tier}
+
+
 class CodexPermissionBody(_StrictBody):
     mode: str
 
@@ -5798,7 +6304,7 @@ async def _guard_permissao_codex(name: str) -> None:
     if _provider_of(name) != "codex":
         raise HTTPException(400, detail=erro("erro_permissao_so_codex",
                                              "este modo de permissao so vale para sessoes Codex"))
-    _recusa_se_painel_aberto(name)
+    await asyncio.to_thread(_recusa_se_painel_aberto, name)
     if not await get_adapter("codex").deliverable(name):
         raise HTTPException(409, detail=erro("erro_permissao_ocupada",
                                              "a sessao esta trabalhando — espere ela terminar"))
@@ -6170,6 +6676,12 @@ def _auto_update_motivo() -> Optional[str]:
             idade = _AUTO_UPDATE_FALHA_JANELA_S
         if idade < _AUTO_UPDATE_FALHA_JANELA_S:
             return "ultima atualizacao falhou"
+    # Como o dist: o automático espera o topo inteiro publicado; parar antes dele é só no botão.
+    ate = atualizar.pinned_target("main")[0]
+    if ate is None:
+        return "nao deu pra conferir o binario do Rust publicado"
+    if ate != "origin/main":
+        return "binario do Rust do topo ainda nao publicado para este sistema"
     try:
         with urllib.request.urlopen(_DIST_SHA_URL, timeout=15) as r:
             sha_dist = r.read().decode().strip()
@@ -6669,9 +7181,8 @@ async def transcribe_audio(name: str, request: Request, limpar: bool = False, es
 
 
 @app.post("/api/dictation/transcribe", dependencies=[Depends(require_auth)])
-async def transcribe_dictation(request: Request, estilo: str | None = None):
-    # Sem sessão: a tela de nova conversa dita antes de a sessão existir. Não há pasta onde guardar o
-    # áudio, então ele só é transcrito e limpo, como o microfone faz com `limpar=1`.
+async def transcribe_dictation(request: Request, estilo: str | None = None, limpar: bool = True):
+    # Antes de existir uma sessão, o áudio não tem uma pasta onde ser guardado.
     clen = request.headers.get("content-length")
     if clen and clen.isdigit() and int(clen) > 100 * 1024 * 1024:
         raise HTTPException(413, detail=erro("erro_arquivo_grande", "arquivo maior que 100 MiB"))
@@ -6681,6 +7192,8 @@ async def transcribe_dictation(request: Request, estilo: str | None = None):
         text = await asyncio.to_thread(transcribe, data, filename)
     except TranscribeError as e:
         raise HTTPException(e.status, e.detail)
+    if not limpar:
+        return {"text": text}
     return await _cleaned_dictation(text, estilo)
 
 
@@ -6802,12 +7315,21 @@ class GitCommitBody(_StrictBody):
     new_branch: str | None = None
 
 
-def _session_cwd(name: str) -> str:
-    # cwd da sessao tmux (mesmo lookup do upload). 404 se a sessao/cwd nao existe.
+def _session_info_with_cwd(name: str):
+    # Mesmo lookup do upload. 404 se a sessão ou o cwd não existe.
     info = _cached_info_sync(name)
     if info is None or not info.cwd:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessao nao encontrada"))
-    return info.cwd
+    return info
+
+
+def _session_cwd(name: str) -> str:
+    return _session_info_with_cwd(name).cwd
+
+
+def _session_git_cwd(name: str) -> str:
+    """O git segue o agente até a worktree; arquivos, uploads e execução ficam no cwd."""
+    return _session_info_with_cwd(name).git_dir
 
 
 @app.get("/api/sessions/{name}/plan", dependencies=[Depends(require_auth)])
@@ -6988,7 +7510,7 @@ async def session_plan_archive(name: str, body: PlanArchiveBody):
 @app.get("/api/sessions/{name}/branches", dependencies=[Depends(require_auth)])
 def branches(name: str):
     try:
-        return list_branches(_session_cwd(name))
+        return list_branches(_session_git_cwd(name))
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -6996,7 +7518,7 @@ def branches(name: str):
 @app.post("/api/sessions/{name}/checkout", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 def checkout(name: str, body: CheckoutBody):
     try:
-        return switch_branch(_session_cwd(name), body.branch)
+        return switch_branch(_session_git_cwd(name), body.branch)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7004,7 +7526,7 @@ def checkout(name: str, body: CheckoutBody):
 @app.post("/api/sessions/{name}/git", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 def git(name: str, body: GitActionBody):
     try:
-        return git_action(_session_cwd(name), body.action)
+        return git_action(_session_git_cwd(name), body.action)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7012,7 +7534,7 @@ def git(name: str, body: GitActionBody):
 @app.get("/api/sessions/{name}/git/files", dependencies=[Depends(require_auth)])
 def git_files(name: str):
     try:
-        cwd = _session_cwd(name)
+        cwd = _session_git_cwd(name)
         # sequencer: revert/cherry-pick em andamento (conflito) — o front deriva o botao de abort
         # DAQUI, nao de memoria de sessao (ver gitStore.svelte.ts:pendingAbort).
         return {"files": changed_files(cwd), "sequencer": sequencer_state(cwd)}
@@ -7023,7 +7545,7 @@ def git_files(name: str):
 @app.get("/api/sessions/{name}/git/log", dependencies=[Depends(require_auth)])
 def git_log_route(name: str, q: str | None = None, n: int = 50):
     try:
-        cwd = _session_cwd(name)
+        cwd = _session_git_cwd(name)
         # `n` vem do "carregar mais" da coluna: a lista pede o dobro a cada vez. Teto de 2000 pra
         # uma URL forjada não fazer o git montar o histórico inteiro de um repo grande.
         commits = git_log(cwd, n=max(1, min(n, 2000)), grep=q)
@@ -7039,7 +7561,7 @@ def git_log_route(name: str, q: str | None = None, n: int = 50):
 @app.post("/api/sessions/{name}/git/diff", dependencies=[Depends(require_auth), Depends(_transfer_check)])
 def git_diff(name: str, body: GitPathBody):
     try:
-        return file_diff(_session_cwd(name), body.path)
+        return file_diff(_session_git_cwd(name), body.path)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7047,7 +7569,7 @@ def git_diff(name: str, body: GitPathBody):
 @app.post("/api/sessions/{name}/git/discard", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 def git_discard(name: str, body: GitPathBody):
     try:
-        return discard_file(_session_cwd(name), body.path)
+        return discard_file(_session_git_cwd(name), body.path)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7055,7 +7577,7 @@ def git_discard(name: str, body: GitPathBody):
 @app.post("/api/sessions/{name}/git/commit", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 def git_commit(name: str, body: GitCommitBody):
     try:
-        return commit(_session_cwd(name), body.message, body.paths, body.amend, body.new_branch)
+        return commit(_session_git_cwd(name), body.message, body.paths, body.amend, body.new_branch)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7063,7 +7585,7 @@ def git_commit(name: str, body: GitCommitBody):
 @app.get("/api/sessions/{name}/git/last-message", dependencies=[Depends(require_auth)])
 def git_last_message(name: str):
     try:
-        return last_commit_message(_session_cwd(name))
+        return last_commit_message(_session_git_cwd(name))
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7071,7 +7593,7 @@ def git_last_message(name: str):
 @app.get("/api/sessions/{name}/git/commit/{sha}/files", dependencies=[Depends(require_auth)])
 def git_commit_files(name: str, sha: str):
     try:
-        return {"files": commit_files(_session_cwd(name), sha)}
+        return {"files": commit_files(_session_git_cwd(name), sha)}
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7079,7 +7601,7 @@ def git_commit_files(name: str, sha: str):
 @app.get("/api/sessions/{name}/git/commit/{sha}/diff", dependencies=[Depends(require_auth)])
 def git_commit_diff(name: str, sha: str, path: str):
     try:
-        return commit_file_diff(_session_cwd(name), sha, path)
+        return commit_file_diff(_session_git_cwd(name), sha, path)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7108,7 +7630,7 @@ class GitTagBody(_StrictBody):
 @app.get("/api/sessions/{name}/git/commit/{sha}/diff-full", dependencies=[Depends(require_auth)])
 def git_commit_diff_full(name: str, sha: str):
     try:
-        return commit_diff(_session_cwd(name), sha)
+        return commit_diff(_session_git_cwd(name), sha)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7116,7 +7638,7 @@ def git_commit_diff_full(name: str, sha: str):
 @app.post("/api/sessions/{name}/git/revert", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 def git_revert(name: str, body: GitShaBody):
     try:
-        return revert_commit(_session_cwd(name), body.sha)
+        return revert_commit(_session_git_cwd(name), body.sha)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7124,7 +7646,7 @@ def git_revert(name: str, body: GitShaBody):
 @app.post("/api/sessions/{name}/git/cherry-pick", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 def git_cherry_pick(name: str, body: GitShaBody):
     try:
-        return cherry_pick(_session_cwd(name), body.sha)
+        return cherry_pick(_session_git_cwd(name), body.sha)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7132,7 +7654,7 @@ def git_cherry_pick(name: str, body: GitShaBody):
 @app.post("/api/sessions/{name}/git/push", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 def git_push(name: str):
     try:
-        return push_branch(_session_cwd(name))
+        return push_branch(_session_git_cwd(name))
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7140,7 +7662,7 @@ def git_push(name: str):
 @app.post("/api/sessions/{name}/git/reset", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 def git_reset(name: str, body: GitResetBody):
     try:
-        return reset_to(_session_cwd(name), body.sha, body.mode)
+        return reset_to(_session_git_cwd(name), body.sha, body.mode)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7148,7 +7670,7 @@ def git_reset(name: str, body: GitResetBody):
 @app.post("/api/sessions/{name}/git/branch", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 def git_branch_create(name: str, body: GitBranchBody):
     try:
-        return create_branch_at(_session_cwd(name), body.name, body.sha, body.switch_after)
+        return create_branch_at(_session_git_cwd(name), body.name, body.sha, body.switch_after)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7156,7 +7678,7 @@ def git_branch_create(name: str, body: GitBranchBody):
 @app.post("/api/sessions/{name}/git/tag", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 def git_tag_create(name: str, body: GitTagBody):
     try:
-        return create_tag(_session_cwd(name), body.name, body.sha, body.message)
+        return create_tag(_session_git_cwd(name), body.name, body.sha, body.message)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7164,7 +7686,7 @@ def git_tag_create(name: str, body: GitTagBody):
 @app.get("/api/sessions/{name}/git/commit/{sha}/diff-worktree", dependencies=[Depends(require_auth)])
 def git_commit_diff_worktree(name: str, sha: str):
     try:
-        return diff_vs_worktree(_session_cwd(name), sha)
+        return diff_vs_worktree(_session_git_cwd(name), sha)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7172,7 +7694,7 @@ def git_commit_diff_worktree(name: str, sha: str):
 @app.get("/api/sessions/{name}/git/commit/{sha}/branches", dependencies=[Depends(require_auth)])
 def git_commit_branches(name: str, sha: str):
     try:
-        return branches_containing(_session_cwd(name), sha)
+        return branches_containing(_session_git_cwd(name), sha)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7182,9 +7704,9 @@ def git_commit_branches(name: str, sha: str):
 # a API exporia segredo. O detalhe vai SO para o log, passando pelo _scrub (redige
 # userinfo de remote). O front mostra a chave traduzida; o `msg` do envelope e a rede
 # quando o front nao conhece o code — e ele tambem e fixo, por isso.
-_MSG_ARQ = "Nao deu pra acessar esse arquivo ou pasta."
-_MSG_BUSCA = "Nao deu pra completar a busca."
-_MSG_DIFF = "Nao deu pra montar o diff."
+_MSG_ARQ = "Não deu para acessar esse arquivo ou pasta."
+_MSG_BUSCA = "Não deu para completar a busca."
+_MSG_DIFF = "Não deu para montar o diff."
 
 
 def _erro_arq(e: FileError | SearchError) -> HTTPException:
@@ -7192,7 +7714,7 @@ def _erro_arq(e: FileError | SearchError) -> HTTPException:
     # funcao do paraglide exige o argumento — sem ele o front renderiza `undefined` ou
     # nem compila. O `erro()` tem `msg` como parametro nomeado, entao o valor entra no
     # dict de params DEPOIS, por chave.
-    fixo = _MSG_BUSCA if isinstance(e, SearchError) else _MSG_ARQ
+    fixo = e.msg if e.code.startswith("workspace_") else (_MSG_BUSCA if isinstance(e, SearchError) else _MSG_ARQ)
     _log.warning("files: %s", git_ops._scrub(e.msg))
     d = erro(e.code, fixo)
     d["params"]["msg"] = fixo
@@ -7292,7 +7814,7 @@ def files_resolver(name: str, body: ResolverBody):
 @app.post("/api/sessions/{name}/git/path-diff", dependencies=[Depends(require_auth), Depends(_transfer_check)])
 def git_path_diff(name: str, body: GitPathDiffBody):
     try:
-        return git_ops.path_diff(_session_cwd(name), body.path, body.escopo)
+        return git_ops.path_diff(_session_git_cwd(name), body.path, body.escopo)
     except GitError as e:
         _log.warning("path-diff: %s", git_ops._scrub(str(e)))
         d = erro("erro_git_diff", _MSG_DIFF)
@@ -8099,7 +8621,8 @@ def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = Re
             raise HTTPException(400, detail=erro("erro_cliproxy_conta", str(exc))) from None
         except RuntimeError:
             raise HTTPException(502, detail=erro("erro_cliproxy_conta", "catálogo do CLIProxyAPI indisponível")) from None
-        if not any(m["id"] == fixed_model for m in models):
+        catalog_id = engines.catalog_model(fixed_model)
+        if not any(m["id"] == catalog_id for m in models):
             raise HTTPException(422, detail=erro("erro_modelo_fora_catalogo", "modelo indisponível nesta conta ChatGPT"))
     elif body.model is not None:
         try:
@@ -8367,6 +8890,10 @@ def _conversation_rows(info):
         raise HTTPException(409, detail=erro("session_transfer_history_invalid", "histórico da transferência indisponível")) from exc
 
 
+from app.workspace_bridge import delegate as _workspace_delegate, text_rows as _text_rows
+_cited_elsewhere = _workspace_delegate("find_elsewhere", GitError, prepare=_text_rows)(_cited_elsewhere)
+
+
 def _resolver_citado(name: str, path: str, *, write: bool = False) -> str:
     """Devolve o caminho REAL de um arquivo citado no transcript desta sessao.
 
@@ -8380,8 +8907,21 @@ def _resolver_citado(name: str, path: str, *, write: bool = False) -> str:
     info = _cached_info_sync(name)
     if info is None or not info.jsonl:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "session or transcript not found"))
-    from app.transcript import citation_cwds
+    from app import workspace_bridge
     rows = _conversation_rows(info)
+    # Sessão Codex transferida: a conversa inclui o histórico de antes da troca, que o Rust não lê.
+    if rows is None and (info.cwd or os.path.isabs(os.path.expanduser(path))):
+        result = workspace_bridge.request("resolve_cited", {"cwd": info.cwd or "", "jsonl": info.jsonl,
+            "path": path, "write": write})
+        if result is not None:
+            if result["ok"]:
+                return result["result"]
+            failure = result["error"]
+            detail = failure["detail"]
+            if failure.get("code"):
+                detail = erro(failure["code"], str(detail), motivo=str(detail))
+            raise HTTPException(failure["status"], detail=detail)
+    from app.transcript import citation_cwds
     cited = citation_cwds(info.jsonl, [path], rows=rows)
     if path not in cited:
         raise HTTPException(403, detail=erro("erro_arquivo_nao_citado", "file not referenced in this conversation"))
@@ -8593,6 +9133,20 @@ def answer(name: str, body: AnswerBody):
     from app import terminal_input
     answers = [a.model_dump() for a in body.answers]
     info = _cached_info_sync(name)
+    if getattr(info, "provider", "claude") == "claude" and not _headless(name):
+        from app.runtime_terminal import answer_sync
+        pending = plugin_bridge.pergunta_pendente(name)
+        if pending is None:
+            _recusa_se_painel_aberto(name)
+        try:
+            result = answer_sync(name, answers, body.request_id or (pending or {}).get("id"),
+                getattr(info, "jsonl", None))
+        except ValueError as exc:
+            raise HTTPException(409, detail=erro("erro_sem_resposta", str(exc))) from exc
+        if result is not None:
+            if getattr(info, "jsonl", None):
+                clear_pending_askq(info.jsonl)
+            return {"ok": True, "fallback":False}
     if getattr(info, "provider", "claude") == "codex":
         if _loop_servidor is None or not _loop_servidor.is_running():
             raise HTTPException(503, detail=erro("erro_codex_resposta_envio", "Não foi possível confirmar o envio da resposta ao Codex."))
@@ -8802,7 +9356,7 @@ async def model_effort(name: str, body: ModelEffortBody):
         except Exception as e:
             raise HTTPException(409, detail=erro("erro_modelo_indisponivel", f"não consegui trocar: {e}"))
         return {"ok": True, "scope": "session", "result": None}
-    _recusa_se_painel_aberto(name)
+    await asyncio.to_thread(_recusa_se_painel_aberto, name)
     try:
         return await asyncio.to_thread(terminal.set_model_effort, name, body.model, body.effort, body.scope)
     except PickerError as e:
@@ -8871,13 +9425,17 @@ async def permission_modes(name: str, sondar: bool = False):
         # Sem rodapé pra ler: o modo é o que o processo confirmou (ou o do sidecar, parada), e a
         # lista é a fechada da CLI — `set_permission_mode` aceita qualquer um, sem sondar.
         hl = get_adapter(CLAUDE_HEADLESS)
+        from app.runtime_adapter import runtime_data
+        if (view := runtime_data(name)) is not None:
+            return {"current":view.get("permission_mode"), "modes":list(model_args.MODOS_PERMISSAO_CLAUDE),
+                "sondavel":False, "previous_non_plan":view.get("previous_non_plan")}
         vivo = hl._sessions.get(name)
         meta = headless_sessions.load(name) or {}
         atual = (vivo.permission_mode if vivo and vivo.vivo else None) or meta.get("permission_mode")
         anterior = (vivo.modo_nao_plan if vivo and vivo.vivo else None) or meta.get("previous_non_plan")
         return {"current": atual, "modes": list(model_args.MODOS_PERMISSAO_CLAUDE), "sondavel": False,
                 "previous_non_plan": anterior}
-    _guard_perm(name, info)
+    await asyncio.to_thread(_guard_perm, name, info)
     key = _cache_key_perm(name, info)
     # leitura do atual sem tecla (bloqueador 1)
     try:
@@ -8961,14 +9519,16 @@ async def permission_mode_set(name: str, body: PermissionModeBody):
             _log.warning("permissão: %s recusou bypass sem reiniciar (%s); reabrindo em bypass", name, e)
             ficou = None
         if alvo == "bypassPermissions" and ficou != alvo:
-            return await _durante_troca(name, _reabrir_em_bypass(name, info))
+            return await _bypass_reopen(name, info)
         vivo = hl._sessions.get(name)
         await asyncio.to_thread(_invalidate_lists)
+        from app.runtime_adapter import runtime_data
+        view = runtime_data(name)
         return {"mode": ficou, "current": ficou,
-                "previous_non_plan": vivo.modo_nao_plan if vivo else None}
-    _guard_perm(name, info)
+                "previous_non_plan":view.get("previous_non_plan") if view is not None else vivo.modo_nao_plan if vivo else None}
+    await asyncio.to_thread(_guard_perm, name, info)
     if alvo == "bypassPermissions" and not await asyncio.to_thread(_bypass_no_ciclo, name):
-        return await _durante_troca(name, _reabrir_em_bypass(name, info))
+        return await _bypass_reopen(name, info)
     tracking_key = _tracking_key_perm(name, info)
     try:
         inicial = await asyncio.to_thread(perm_mode.ler_modo, name)
@@ -9009,6 +9569,15 @@ def _bypass_no_ciclo(name: str) -> bool:
     return any(f in cmd for f in _FLAGS_BYPASS)
 
 
+async def _bypass_reopen(name: str, info):
+    # Com o Rust dono, dentro da barreira a sessão já foi fechada e a vista dele (trabalhando,
+    # pergunta pendente) não é mais lida: a ociosidade se confere antes de fechar.
+    motivo = await _motivo_ocupada(name, _headless(name))
+    if motivo:
+        raise HTTPException(409, detail=erro(motivo, "para entrar em bypass a sessão reinicia: " + _OCUPADA[motivo]))
+    return await _durante_troca(name, _reabrir_em_bypass(name, info))
+
+
 async def _reabrir_em_bypass(name: str, info):
     """Reabre a mesma conversa (`--resume`) já em bypass, como a troca de conta. Só ociosa."""
     hl = get_adapter(CLAUDE_HEADLESS)
@@ -9031,6 +9600,16 @@ async def _reabrir_em_bypass(name: str, info):
                 await hl.ensure_running(name, require_initialize=True)
             except Exception as e:
                 _log.exception("permissão: %s não reabriu em bypass; voltando ao modo de antes", name)
+                # O processo pode ter subido em bypass e seguir vivo (initialize recusado): sem
+                # parar, ele continua em bypass com o arquivo dizendo outro modo.
+                try:
+                    await hl.parar(name)
+                except Exception as stop_error:
+                    # Processo talvez vivo em bypass: o arquivo segue dizendo bypass, não o modo de antes.
+                    _log.exception("permissão: %s não parou depois de falhar em bypass", name)
+                    raise HTTPException(409, detail=erro("erro_permissao_reabrir",
+                        f"a sessão não reabriu em bypass ({e}) e não parou ({stop_error}); ela pode seguir em bypass",
+                        erro=str(e), stop_error=str(stop_error))) from e
                 headless_sessions.update(name, permission_mode=antes.get("permission_mode"),
                                          previous_non_plan=antes.get("previous_non_plan"))
                 hl.acordar(name)
@@ -9194,6 +9773,12 @@ async def _engine_models(nome: str, fresco: bool = False) -> list[dict]:
     return modelos
 
 
+def _engine_picker_models(engine: str, models: list[dict]) -> list[dict]:
+    return [{"id": model["id"], "context_length": model.get("context_length"),
+             "vision": model.get("vision"), "supports_fast": cliproxy.supports_fast(engine, model["id"])}
+            for model in models]
+
+
 @app.get("/api/sessions/{name}/model/options", dependencies=[Depends(require_auth)])
 async def model_options(name: str):
     """Modelos que ESTA sessao pode escolher. `kind` diz de onde vieram e como aplicar."""
@@ -9207,9 +9792,14 @@ async def model_options(name: str):
         # nao depende do tamanho da janela. A guarda so vale pro ramo abaixo (le o picker).
         modelos = await (_fixed_engine_models(info.engine, info.engine_account)
                          if info.engine_account else _engine_models(info.engine))
-        return {"kind": "engine", "engine": info.engine,
-                "models": [{"id": m["id"], "context_length": m.get("context_length"),
-                            "vision": m.get("vision")} for m in modelos]}
+        models = await asyncio.to_thread(_engine_picker_models, info.engine, modelos)
+        result = {"kind": "engine", "engine": info.engine, "models": models}
+        if any(model["supports_fast"] for model in models):
+            model, tier = await asyncio.to_thread(_engine_fast_selection, name)
+            model = model or engines.listar()[info.engine].get("model")
+            result.update(supports_fast=True,
+                          current={"model": model.rsplit("/", 1)[-1] if model else None, "service_tier": tier})
+        return result
     if _headless(name):
         # Sem terminal: a lista vem do `control_request list_models` do próprio processo — sem
         # picker, sem rastro no scrollback e sem cache de 1h.
@@ -9219,12 +9809,12 @@ async def model_options(name: str):
         except Exception as e:
             raise HTTPException(503, detail=erro("erro_modelos_indisponiveis", f"não consegui listar os modelos: {e}"))
         meta = headless_sessions.load(name) or {}
-        atual = (hl._sessions.get(name).model if hl._sessions.get(name) else None) or meta.get("model")
+        atual = hl.escolhas(name)[0] or meta.get("model")
         return {"kind": "claude", "engine": None, "effort": meta.get("effort"),
                 "models": claude_models.para_tela(modelos, atual)}
     # Conta Anthropic: le o picker de verdade. Abre e fecha um overlay — nao vai pro scrollback,
     # nao entra no transcript e nao gasta token.
-    _recusa_se_painel_aberto(name)
+    await asyncio.to_thread(_recusa_se_painel_aberto, name)
     chave = _chave_config(_session_config_dir(name))
     cacheado = _models_cache_get(chave)
     if cacheado is not None:
@@ -9310,9 +9900,9 @@ async def model_options_sem_sessao(provider: str = "claude", engine: str = "",
     if engine:
         modelos = await (_fixed_engine_models(engine, engine_account)
                          if engine_account is not None else _engine_models(engine))
-        return {"kind": "engine", "reduced": False,
-                "models": [{"id": m["id"], "context_length": m.get("context_length"),
-                            "vision": m.get("vision")} for m in modelos]}
+        models = await asyncio.to_thread(_engine_picker_models, engine, modelos)
+        return {"kind": "engine", "reduced": False, "models": models,
+                "supports_fast": any(model["supports_fast"] for model in models)}
     chave = _chave_config(config_dir)
     cacheado = _models_cache_get(chave)
     if cacheado is not None:
@@ -9343,7 +9933,7 @@ async def engine_model_set(name: str, body: EngineModelBody):
     settings.json e capturado antes e reposto depois: a troca vale onde foi pedida e em lugar nenhum
     mais. Ver app/default_model.py.
     """
-    _recusa_se_painel_aberto(name)
+    await asyncio.to_thread(_recusa_se_painel_aberto, name)
     info = await _cached_info(name)
     if not info:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessao nao encontrada"))
@@ -9357,16 +9947,22 @@ async def engine_model_set(name: str, body: EngineModelBody):
         from app.cliproxy_accounts import models_for
         account = await asyncio.to_thread(_fixed_engine_account, info.engine, info.engine_account)
         modelos = models_for(account_models, account["prefix"])
-    if not any(m["id"] == body.model for m in modelos):
+    catalog_id = await asyncio.to_thread(engines.catalog_model, body.model)
+    if not any(m["id"] == catalog_id for m in modelos):
         # Recusar aqui em vez de digitar: o CC aceitaria o id, a sessao passaria a mandar request
         # pra um modelo que o provedor nao tem, e a falha apareceria so no proximo turno.
         raise HTTPException(422, detail=erro("erro_modelo_fora_catalogo", f"modelo fora do catalogo do motor {info.engine!r}: {body.model}", motor=info.engine, modelo=body.model))
 
+    _, tier = await asyncio.to_thread(_engine_fast_selection, name)
+    if tier == "priority" and not await asyncio.to_thread(cliproxy.supports_fast, info.engine, body.model):
+        raise HTTPException(409, detail=erro("erro_fast_indisponivel", "Desligue Fast antes de escolher um modelo que não o suporta"))
+
     if info.engine_account:
-        selected = next(m for m in modelos if m["id"] == body.model)
+        selected = next(m for m in modelos if m["id"] == catalog_id)
+        window = 1_000_000 if catalog_id != body.model else selected.get("context_length")
         await _durante_troca(name, _trocar_conta(name, None, engine_account=info.engine_account,
                                                model=body.model, effort=body.effort,
-                                               context_window=selected.get("context_length"), engine_models=account_models))
+                                               context_window=window, engine_models=account_models))
         return {"ok": True, "model": body.model}
     if _headless(name):
         # Sem pane: `set_model` por control_request, que (medido) NÃO grava o default global —
@@ -9611,7 +10207,7 @@ async def kimi_models_list(name: str):
 @app.post("/api/sessions/{name}/kimi/model", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 async def kimi_model_set(name: str, body: KimiModelBody):
     info = await _kimi_info(name)
-    _recusa_se_painel_aberto(name)
+    await asyncio.to_thread(_recusa_se_painel_aberto, name)
     # Sessão TRABALHANDO: o `/model` digitado cairia no composer e o Enter o enfileiraria como
     # MENSAGEM — a troca viraria um "/model" pro modelo ler. No Claude o _require_drivable cobre
     # isso pelo spinner; o do Kimi são fases de lua, fora do que ele detecta, então a guarda é o
@@ -9724,16 +10320,24 @@ def _registered_in_allowed_repo(path: str) -> bool:
     return any(p == path or os.path.realpath(p) == real for p in worktrees.worktree_paths(main))
 
 
-@app.get("/api/worktrees", dependencies=[Depends(require_auth)])
-async def worktrees_list(repo: str | None = None, sizes: bool = True):
-    """`repo`: só as desse repositório; `sizes=false`: não agenda medir o espaço (menu de branch)."""
-    _no_guest()
+async def _worktree_inputs():
+    """Sessões, pastas dentro das raízes (vivas + com conversa nos últimos 30 dias) e raízes: o que
+    a lista de worktrees lê aqui e o hangar-server recebe por `/internal/worktrees/context`."""
     sessions = await asyncio.to_thread(registry.list)
     corte = time.time() - 30 * 86400
     folders = await asyncio.to_thread(list_folders)
     cwds = [s.cwd for s in sessions] + [f.cwd for f in folders if f.cwd and f.mtime >= corte]
     roots = allowed_roots()
-    allowed = [c for c in cwds if c and any(Path(os.path.realpath(c)).is_relative_to(r) for r in roots)]
+    allowed = await asyncio.to_thread(
+        lambda: [c for c in cwds if c and any(Path(os.path.realpath(c)).is_relative_to(r) for r in roots)])
+    return sessions, allowed, roots
+
+
+@app.get("/api/worktrees", dependencies=[Depends(require_auth)])
+async def worktrees_list(repo: str | None = None, sizes: bool = True):
+    """`repo`: só as desse repositório; `sizes=false`: não agenda medir o espaço (menu de branch)."""
+    _no_guest()
+    sessions, allowed, roots = await _worktree_inputs()
     if repo is not None:
         repo = await asyncio.to_thread(_allowed_repo, repo)
     return {"repos": await asyncio.to_thread(worktrees.list_all, allowed, sessions, roots, repo, sizes)}

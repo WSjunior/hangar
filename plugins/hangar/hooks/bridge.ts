@@ -34,6 +34,20 @@ export function bridge(): Bridge | null {
   return atual;
 }
 
+// Ponte do clique do app pela superfície remota `desktop`, gravada só no `claude -p` pelo ui.ts. Ela não
+// liga os outros hooks: lá o aviso e a cópia já chegam ao Hangar pelo canal da superfície (`ui_toast`,
+// `ui_copy`), e sobra ao plugin só levar ao aparelho de quem clicou a URL que um mod abriria no servidor.
+// Um `claude -p` filho que herde o ambiente não fala pela sessão: só o Hangar liga a superfície `desktop`.
+let superficie: Bridge | null = null;
+
+export function setSurfaceBridge(b: Bridge | null): void {
+  superficie = b;
+}
+
+export function surfaceBridge(): Bridge | null {
+  return superficie;
+}
+
 export function setLastState(estado: string): void {
   ultimoEstado = estado;
 }
