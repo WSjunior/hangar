@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hangar-relatorio",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-06",
+  // Só a rota do site: sem subdomínio workers.dev aberto a robô.
+  "workers_dev": false,
+  "routes": [{ "pattern": "hangar.dev.br/api/relatorio", "zone_name": "hangar.dev.br" }],
+  "kv_namespaces": [{ "binding": "REPORTS", "id": "trocar-pelo-id-do-kv-na-task-9" }],
+  // O binding só aceita períodos de 10 ou 60 s: 3 envios por minuto por IP.
+  "ratelimits": [{ "name": "LIMITER", "namespace_id": "1001", "simple": { "limit": 3, "period": 60 } }],
+  // Destinatário no segredo REPORT_TO: o repositório é público.
+  "send_email": [{ "name": "MAILER" }],
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "head_sampling_rate": 1 },
+    "traces": { "enabled": true, "head_sampling_rate": 0.1 }
+  }
+}
