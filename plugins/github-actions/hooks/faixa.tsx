@@ -1,4 +1,5 @@
 import type { Elements, RenderSurface } from 'claude-code'
+import { emAndamento } from './gh'
 import type { GhView, Job, Pr, Situacao, Workflow } from './gh'
 import type { Checks } from '../types'
 
@@ -154,7 +155,11 @@ export function duracao(d: number): string {
 export function progresso(ws: readonly Workflow[], agora: number): string {
   const js = ws.flatMap(w => w.jobs)
   const feitos = js.filter(j => j.situacao !== 'rodando' && j.situacao !== 'esperando').length
-  const tempos = ws.flatMap(w => (w.inicio ? [(w.fim ?? agora) - w.inicio] : []))
+  // Só o que ainda roda conta até agora; terminado sem data de fim fica sem tempo.
+  const tempos = ws.flatMap(w => {
+    const fim = w.fim ?? (emAndamento(w.situacao) ? agora : null)
+    return w.inicio && fim !== null ? [fim - w.inicio] : []
+  })
   const tempo = tempos.length ? ` · ${duracao(Math.max(...tempos))}` : ''
   return js.length ? `${feitos}/${js.length} jobs${tempo}` : tempo.slice(3)
 }
@@ -175,9 +180,13 @@ export function desenharFaixa(t: Tabela, v: GhView, o: Opcoes, acoes: Acoes): JS
   const Svg = o.superficie !== 'terminal' && 'Svg' in t ? t.Svg : null
   const pinta = (s: Situacao, texto: string, bold = false) =>
     COR[s] ? <Text color={COR[s]} bold={bold}>{texto}</Text> : <Text dimColor bold={bold}>{texto}</Text>
-  const desenhaBarra = (js: readonly Job[], colunas: number, alt: string) => Svg
-    ? <Svg source={svgBarra(js, colunas)} alt={alt} width={colunas * PX_POR_COLUNA} height={ALTURA_PX} />
-    : <Box flexDirection="row" flexShrink={0}>{barra(js, colunas).map(tr => pinta(tr.s, tr.texto))}</Box>
+  // Ao menos uma coluna por job: menos que isso, os últimos segmentos ficariam de fora da barra.
+  const desenhaBarra = (js: readonly Job[], largura: number, alt: string) => {
+    const colunas = Math.max(largura, js.length)
+    return Svg
+      ? <Svg source={svgBarra(js, colunas)} alt={alt} width={colunas * PX_POR_COLUNA} height={ALTURA_PX} />
+      : <Box flexDirection="row" flexShrink={0}>{barra(js, colunas).map(tr => pinta(tr.s, tr.texto))}</Box>
+  }
   const contagem = (c: Checks) => (
     <Box flexDirection="row" columnGap={1} flexShrink={0}>
       {c.falhou ? <Text color={VERMELHO} bold>{`✕${c.falhou}`}</Text> : null}
@@ -201,7 +210,9 @@ export function desenharFaixa(t: Tabela, v: GhView, o: Opcoes, acoes: Acoes): JS
         {p ? <Box flexShrink={1}><Text dimColor wrap="truncate-end">{p.titulo}</Text></Box> : null}
         {temTotal ? contagem(total) : null}
         {rev ? (rev.cor ? <Text color={rev.cor}>{rev.texto}</Text> : <Text dimColor>{rev.texto}</Text>) : null}
-        {v.aviso && o.recolhida ? <Text color={AMBAR} bold>⚠</Text> : null}
+        {v.aviso && o.recolhida
+          ? <Box flexShrink={1}><Text color={AMBAR} wrap="truncate-end">{`⚠ ${v.aviso}`}</Text></Box>
+          : null}
       </Box>
       <Box flexDirection="row" alignItems="center" columnGap={1} flexShrink={0}>
         {o.recolhida && todos.length ? desenhaBarra(todos, BARRA_RECOLHIDA, percentual(todos)) : null}

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { checks, classificarFalha, piorErro, textoAviso, disparaRun, ehGithub, ehPush, jobs, lembrarCommit, ms, precisaConsultar, runsVisiveis, situacao } from './gh'
+import { checks, classificarFalha, piorErro, textoAviso, disparaRun, ehGithub, ehPush, iso, jobs, lembrarCommit, ms, precisaConsultar, runsVisiveis, situacao } from './gh'
 import type { GhView, RunGh, Situacao } from './gh'
 import { barra, contar, duracao, nomeJob, passoCurto, progresso, rotulosAnteriores, separarPorCommit } from './faixa'
 
@@ -81,6 +81,10 @@ describe('gh', () => {
     expect(ms('0001-01-01T00:00:00Z')).toBe(null)
     const wf = { id: 1, nome: 'CI', sha: 'a', situacao: 'rodando' as const, url: '', jobs: [j('ok'), j('rodando')], inicio: 1_000, fim: null }
     expect(progresso([wf], 61_000)).toBe('1/2 jobs · 1m 00s')
+    // Terminado sem data de fim: sem tempo, não um relógio andando.
+    expect(progresso([{ ...wf, situacao: 'ok' as const, jobs: [j('ok')] }], 61_000)).toBe('1/1 jobs')
+    // Leitura gravada antes de existirem as datas.
+    expect(iso(undefined)).toBe(undefined)
   })
 
   test('rótulo de run anterior nunca se repete', () => {

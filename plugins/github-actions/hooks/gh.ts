@@ -55,7 +55,8 @@ export function ms(iso: string | undefined): number | null {
 }
 
 /** Volta de ms à data do gh, para remontar o run de um commit que não respondeu. */
-export const iso = (t: number | null) => (t === null ? undefined : new Date(t).toISOString())
+// `undefined`: leitura gravada pela versão que ainda não guardava as datas.
+export const iso = (t: number | null | undefined) => (t == null ? undefined : new Date(t).toISOString())
 
 /** Runs a mostrar, de listas por commit do mais novo para o mais velho (cada uma como o `gh` lista,
  *  do run mais novo): o último de cada workflow e, além dele, todo run que ainda não terminou. */
