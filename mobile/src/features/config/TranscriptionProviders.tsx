@@ -113,7 +113,7 @@ export function TranscriptionProviders({ cfg }: { cfg: ServerConfig }) {
               <Labeled label={m.native_voice_provider_key()}>
                 {/* Como o ConfigRow: mostra só o digitado; apagar volta à máscara, que mantém a chave guardada. */}
                 <TextInput {...input} accessibilityLabel={`${m.native_voice_provider_key()}, ${title}`} secureTextEntry
-                  autoCapitalize="none" autoCorrect={false} textContentType="password" autoComplete="off"
+                  autoCapitalize="none" autoCorrect={false} textContentType="none" autoComplete="off"
                   placeholder={mask ? m.native_server_secret_paste_new() : m.native_server_secret_paste()}
                   value={p.api_key === mask ? '' : p.api_key} onChangeText={(t) => edit(i, editTranscriptionProviderKey(p, t, keeps ? mask : undefined))} />
               </Labeled>

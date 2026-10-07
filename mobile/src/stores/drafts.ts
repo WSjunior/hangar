@@ -142,7 +142,8 @@ export function writeDictation(serverId: string, name: string, value: DictationD
   // Outro POST desta conversa ainda no ar: gravar por cima perderia o áudio e o resultado dele.
   if (validated.status === 'pending') {
     let current: DictationDraft | null = null;
-    try { current = readDictation(serverId, name); } catch { /* guardado ilegível: o novo grava por cima, como no rascunho */ }
+    // Guardado ilegível: o novo grava por cima, como no rascunho, mas deixa rastro.
+    try { current = readDictation(serverId, name); } catch (e) { console.warn('dictation: unreadable stored dictation overwritten', e); }
     if (current?.status === 'pending' && current.id !== validated.id) throw new Error(m.composer_aguarde_transcricao());
   }
   try { prefs.set(dictationKeyOf(serverId, name), JSON.stringify(validated)); } catch { throw new Error(m.draft_write_error()); }

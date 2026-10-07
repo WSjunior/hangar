@@ -13,7 +13,7 @@ import { useServers } from '../../../../src/stores/servers';
 import { superficie } from '../../../../src/theme/superficie';
 import { AudioChip } from '../../../../src/chat/AudioChip';
 import { DocumentViewer, type DocumentItem } from '../../../../src/features/attachments/DocumentViewer';
-import { dictateUpload } from '../../../../src/features/ditado/dictationRun';
+import { DictationError, dictateUpload } from '../../../../src/features/ditado/dictationRun';
 import { useDitadoEstiloStore } from '../../../../src/features/ditado/ditadoEstiloStore';
 import { useSessions } from '../../../../src/stores/sessions';
 import { toast } from '../../../../src/ui/Toast';
@@ -102,8 +102,12 @@ export default function AttachmentsSheet() {
       toast.erro(e instanceof Error ? e.message : m.composer_falha_transcricao());
       return;
     }
-    // A falha já fica no aviso do ditado da conversa; um toast aqui a mostraria duas vezes.
-    run.catch(() => {});
+    // A falha guardada já fica no aviso do ditado da conversa; só a que não foi guardada vira toast.
+    run.catch((e) => {
+      if (e instanceof DictationError && (e.lost || e.storageIssue)) {
+        toast.erro(e.storageIssue ? `${e.message} (${e.storageIssue})` : e.message);
+      }
+    });
     router.back();
   }, [serverId, sessionName, router]);
 
@@ -216,7 +220,7 @@ export default function AttachmentsSheet() {
           {audios.map((f) => (
             <View key={f.filename} style={styles.audioRow}>
               <AudioChip uri={uploadUrlNative(sessionName, f.filename)} headers={fileAuthHeader()} name={f.filename} />
-              <Pressable onPress={() => retranscribe(f)} style={[styles.retryBtn, { borderColor: theme.tokens.border.subtle }]}
+              <Pressable onPress={() => retranscribe(f)} hitSlop={8} style={[styles.retryBtn, { borderColor: theme.tokens.border.subtle }]}
                 accessibilityRole="button" accessibilityLabel={`${m.composer_transcrever_de_novo()}: ${f.filename}`}>
                 <Text style={[styles.retryText, { color: theme.tokens.accent.base }]}>{m.composer_transcrever_de_novo()}</Text>
               </Pressable>

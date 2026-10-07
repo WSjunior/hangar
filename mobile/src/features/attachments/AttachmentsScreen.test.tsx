@@ -27,7 +27,12 @@ vi.mock('../../stores/sessions', () => {
   return { useSessions: Object.assign((select: (s: typeof state) => unknown) => select(state), { getState: () => state }) };
 });
 vi.mock('../ditado/ditadoEstiloStore', () => ({ useDitadoEstiloStore: { getState: () => ({ pronto: true, valor: 'prosa' }) } }));
-vi.mock('../ditado/dictationRun', () => ({ dictateUpload: h.dictate }));
+vi.mock('../ditado/dictationRun', () => ({
+  dictateUpload: h.dictate,
+  DictationError: class extends Error {
+    constructor(message: string, readonly lost: boolean, readonly storageIssue: string) { super(message); }
+  },
+}));
 vi.mock('../../chat/AudioChip', () => ({ AudioChip: ({ name }: { name: string }) => createElement('span', null, `audio:${name}`) }));
 vi.mock('./AttachmentCard', () => ({
   AttachmentCard: ({ file, onPress }: { file: UploadFile; onPress: () => void }) =>
@@ -85,6 +90,24 @@ describe('galeria de anexos', () => {
     await act(async () => byLabel(container, 'composer_transcrever_de_novo: ditado-1.m4a')!.click());
     expect(h.dictate).toHaveBeenCalledExactlyOnceWith({ id: 's1' }, 's1', 'sess', '/t/a.jsonl', 'ditado-1.m4a', 'prosa');
     expect(h.back).toHaveBeenCalledTimes(1);
+    act(() => root.unmount());
+  });
+
+  it('falha que não ficou guardada na conversa vira toast; a guardada não', async () => {
+    const { DictationError } = await import('../ditado/dictationRun');
+    h.list.mockResolvedValue({ files: [file('ditado-1.m4a')] });
+    h.dictate
+      .mockReturnValueOnce(Promise.reject(new DictationError('502: fora', false, '')))
+      .mockReturnValueOnce(Promise.reject(new DictationError('502: fora', true, '')))
+      .mockReturnValueOnce(Promise.reject(new DictationError('502: fora', false, 'disco cheio')));
+    const { container, root } = await render();
+    const botao = () => byLabel(container, 'composer_transcrever_de_novo: ditado-1.m4a')!;
+    await act(async () => botao().click());
+    expect(h.toast).not.toHaveBeenCalled();
+    await act(async () => botao().click());
+    expect(h.toast).toHaveBeenLastCalledWith('502: fora');
+    await act(async () => botao().click());
+    expect(h.toast).toHaveBeenLastCalledWith('502: fora (disco cheio)');
     act(() => root.unmount());
   });
 

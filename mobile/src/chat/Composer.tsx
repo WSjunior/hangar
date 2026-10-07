@@ -1338,7 +1338,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
                 })}
               </>
             ) : null}
-            {barPlayer ? <AudioChip uri={barPlayer.uri} headers={barPlayer.headers} name={barPlayer.name} /> : null}
+            {barPlayer ? <AudioChip key={barPlayer.uri} uri={barPlayer.uri} headers={barPlayer.headers} name={barPlayer.name} /> : null}
           </View>
         ) : null}
 
@@ -1349,7 +1349,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
                 : dictation.text ? m.composer_ditado_recuperavel({ text: dictation.text.slice(0, 80) })
                 : dictation.issue || m.composer_ditado_interrompido()}
             </Text>
-            {dictationPlayer ? <AudioChip uri={dictationPlayer.uri} headers={dictationPlayer.headers} name={dictationPlayer.name} /> : null}
+            {dictationPlayer ? <AudioChip key={dictationPlayer.uri} uri={dictationPlayer.uri} headers={dictationPlayer.headers} name={dictationPlayer.name} /> : null}
             {dictation.status === 'applied' ? null : dictation.text ? (
               <Pressable onPress={handleRecoverDictation} style={[styles.undoBtn, { borderColor: theme.tokens.border.subtle }]} accessibilityRole="button">
                 <Text style={[styles.undoText, { color: theme.tokens.accent.base }]}>{m.composer_draft_recover()}</Text>
