@@ -112,6 +112,20 @@ def test_listar_modos_devolve_ficou_nao_orig(monkeypatch):
     assert "manual" in modos
 
 
+def test_troca_acompanha_o_rodape_sem_pausa_fixa(monkeypatch):
+    """O rodapé muda logo depois do BTab: três teclas levam dezenas de ms, não meio segundo cada."""
+    import time
+    ciclo = ["manual", "acceptEdits", "plan", "auto"]
+    pos = [0]
+    monkeypatch.setattr(pm, "ler_modo", lambda name: ciclo[pos[0] % len(ciclo)])
+    monkeypatch.setattr(pm.tmux, "send_keys", lambda name, keys: pos.__setitem__(0, pos[0] + 1) or True)
+    inicio = time.monotonic()
+    assert pm.trocar_modo("sess", "auto") == "auto"
+    # Folga larga para máquina lenta de CI; com a pausa antiga de 0,5 s por tecla seriam 1,5 s.
+    assert time.monotonic() - inicio < 0.6
+    assert pos[0] == 3
+
+
 def _transcript(tmp_path, nome, modos):
     p = tmp_path / f"{nome}.jsonl"
     p.write_text("".join(json.dumps({"type": "user", "permissionMode": m}) + "\n" for m in modos))

@@ -203,6 +203,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   recado (`steer:true`), abortaria o trabalho da sessão que recebe — o automático é só do Kimi.
 - **Modo de permissão troca COM a sessão trabalhando** — é tecla, não texto. O guard de "está
   trabalhando" existe para o `/model`, que é texto.
+- **Depois do BTab, o rodapé é lido na hora, sem pausa fixa** (intervalo de 20 ms, teto de 2 s por
+  tecla): a pausa de 0,3 s + leitura a cada 0,2 s fazia cada modo custar meio segundo e a sonda,
+  2,6 s. No app, o Shift+Tab mostra o modo pedido na hora e acumula as teclas num alvo só.
 - **"Padrão" na tela de criação vira o modo da conta AINDA na criação**, e `bypassPermissions`
   quando a conta não define nenhum: campo nulo virava flag ausente, e a sessão nascia no que a
   máquina tivesse. **Em plano, sessão cuja base é bypass não pergunta por ferramenta** — só o
@@ -975,6 +978,17 @@ Sem a ponte, cada um mantinha uma fazenda de symlinks à mão apontando pro
   pílula ser aberta uma vez (0 POSTs em 7 dias de log). Ctrl+L foca o campo de qualquer lugar.
   Ciclo: sessão nascida em bypass tem 5 posições (bypass → auto → manual → acceptEdits → plan);
   as outras, 4 — bypass nunca é alcançável de fora, e `dontAsk` não tem volta.
+
+  **Tempo da troca (07/10/2026, Claude Code 2.1.292, issue #101).** O rodapé mostra o modo novo
+  15 a 27 ms depois do `send-keys BTab` (6 trocas medidas num tmux isolado). O `trocar_modo` dormia
+  0,3 s antes de ler e lia a cada 0,2 s: chamando `trocar_modo`/`listar_modos` contra um Claude
+  real, sem backend, a troca de um modo levava 505 ms, a de três 1,5 s e a sonda 2,6 s. Sem a pausa
+  e lendo a cada 20 ms: 25 ms, 71 ms e 285 ms. O teto de 2 s por tecla continua cobrindo pane
+  lento. Ajuste feito no Python porque a rota ainda não migrou para o Rust; sai junto quando migrar.
+  No app nativo o Shift+Tab mostra o modo pedido na pílula na hora (`mode_target` em
+  `controls.rs`); teclas que chegam com a troca em voo, ou durante a sonda, andam o alvo e viram um
+  pedido só, e a pílula segura o modo novo até o SSE trazê-lo (3 s no máximo). Antes elas eram
+  descartadas enquanto a troca anterior não voltava.
 
 ## Plano sem terminal: a permissão vem do modo de BASE, não do plano
 
