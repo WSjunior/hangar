@@ -459,7 +459,8 @@ def test_retire_old_rust_life_before_new_name_binding(monkeypatch,tmp_path):
         assert await owner.prepare_session('session','claude')
         assert owner.slot('session') is not slot
         assert slot.lease is None and slot.phase==Phase.RecoveringPython
-        assert gateway.calls==['open','close','open']
+        # O freeze da retirada fecha a porta antes do `close` e a reabre antes da nova vida abrir.
+        assert gateway.calls==['open','ingress','close','ingress','open']
         await owner.detach('session')
     asyncio.run(flow())
 
@@ -1086,7 +1087,8 @@ def test_rust_account_move_reborn_terminal_reopens_with_key(monkeypatch, tmp_pat
             facts['now'] = {**collected, 'pane': '%7', 'created': 456, 'namespace': 'mux-novo', 'session_proof': 'p2',
                 'jsonl': str(tmp_path / 'outra-conta' / 'sid.jsonl'), 'config_dir': str(tmp_path / 'outra-conta')}
         await owner.change('session', move)
-        assert gateway.calls == ['open', 'snapshot', 'close', 'open']
+        # A porta fica fechada durante a troca inteira e só reabre depois da nova abertura.
+        assert gateway.calls == ['open', 'ingress', 'snapshot', 'close', 'open', 'ingress']
         assert slot.phase == Phase.Rust and slot.lease is None
         assert slot.binding.key == key and slot.binding.generation == 2 and slot.binding.meta['terminal']['pane'] == '%7'
         await owner.change('session', lambda: asyncio.sleep(0), remove=True)
@@ -1411,7 +1413,8 @@ def test_rust_bypass_reopen_of_terminal_closes_and_reopens_in_rust(monkeypatch, 
         result = await api._durante_troca('session', api._reabrir_em_bypass('session', info))
         assert result['reopened'] is True
         assert calls == [('para_headless', 'session', 'bypassPermissions'), ('para_terminal', 'session')]
-        assert gateway.calls == ['open', 'snapshot', 'close', 'open']
+        # Duas portas aninhadas: a da troca (`transfer_operation`) por fora e a do `change` por dentro.
+        assert gateway.calls == ['open', 'ingress', 'ingress', 'snapshot', 'close', 'open', 'ingress', 'ingress']
         assert slot.phase == Phase.Rust and slot.lease is None and slot.binding.meta['terminal']['pane'] == '%7'
     asyncio.run(flow())
 
