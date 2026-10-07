@@ -115,7 +115,13 @@ impl ClientRequest {
 
 wire!(pub struct InitializeResponse { pub user_agent:String });
 wire!(pub struct TurnError { pub message:String, pub additional_details:Option<String>, pub codex_error_info:Option<Value> });
-wire!(pub struct Turn { pub id:String, pub status:String, pub error:Option<TurnError>, pub items:Vec<ThreadItem> });
+/// Item fora do formato vira `Unknown`: um item ruim no histórico não derruba o turno inteiro.
+fn lenient_items<'de,D:Deserializer<'de>>(d:D) -> Result<Vec<ThreadItem>,D::Error> {
+    Ok(Vec::<Value>::deserialize(d)?.iter().map(|item|ThreadItem::deserialize(item).unwrap_or(ThreadItem::Unknown)).collect())
+}
+
+wire!(pub struct Turn { pub id:String, pub status:String, pub error:Option<TurnError>,
+    #[serde(deserialize_with = "lenient_items")] pub items:Vec<ThreadItem> });
 
 #[derive(Clone,Debug,Default,PartialEq,Serialize,Deserialize)]
 #[cfg_attr(test,derive(schemars::JsonSchema))]
@@ -354,6 +360,15 @@ mod tests {
         assert!(matches!(item,ThreadItem::AgentMessage { questions:None,delivery:None,.. }));
         let n = ServerNotification::decode("turn/completed",&json!({"threadId":"t","turn":{"id":"u","status":"completed","items":[message]}})).unwrap();
         assert!(matches!(n,ServerNotification::TurnCompleted(n) if matches!(n.turn.items[..],[ThreadItem::AgentMessage { .. }])));
+    }
+
+    #[test]
+    fn malformed_item_does_not_sink_the_turn() {
+        let response:ThreadReadResponse = serde_json::from_value(json!({"thread":{"id":"t","turns":[{"id":"u","status":"completed",
+            "items":[{"type":"agentMessage","text":5},{"type":"agentMessage","id":"a","text":"ok"}]}]}})).unwrap();
+        let items = &response.thread.turns[0].items;
+        assert!(matches!(items[0],ThreadItem::Unknown));
+        assert!(matches!(&items[1],ThreadItem::AgentMessage { text,.. } if text == "ok"));
     }
 
     #[test]

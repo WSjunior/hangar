@@ -186,9 +186,6 @@ fn decode_code(method:&str) -> String {
     method.chars().map(|c|if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' }).take(64).collect()
 }
 
-/// Resposta lida pelo tipo sem copiar a linha; formato inesperado vira o padrão (campos vazios).
-fn decode<T:for<'de> Deserialize<'de> + Default>(value:&Value) -> T { T::deserialize(value).unwrap_or_default() }
-
 /// Texto de entrada da pessoa: a lista que o `prepare_prompt` montou, ou só o texto.
 fn input_of(payload:&Value,text:&str) -> Vec<Value> {
     payload["input"].as_array().cloned().unwrap_or_else(||vec![json!({"type":"text","text":text})])
@@ -317,6 +314,19 @@ impl Engine {
         if self.format_gate.due(&payload,self.clock.monotonic_s) { self.policy("format_status",payload,effects); }
     }
 
+    /// Resposta lida pelo tipo sem copiar a linha; fora do formato vai ao diário e segue com o padrão.
+    fn decode_reply<T:for<'de> Deserialize<'de> + Default>(&mut self,method:&str,result:&Value,effects:&mut Vec<Effect>) -> T {
+        match T::deserialize(result) {
+            Ok(response) => response,
+            Err(failure) => {
+                tracing::warn!(session=%self.state.session,method,error=wire::error_kind(&failure),"resposta do Codex fora do formato");
+                effects.push(Effect::Diag { event:DiagEvent::CodexDecode,code:decode_code(method) });
+                self.policy("unknown_private",json!({"kind":format!("decode:{method}"),"event":result}),effects);
+                T::default()
+            }
+        }
+    }
+
     fn send(&mut self,operation_id:String,request:ClientRequest,continuation:Option<Value>,effects:&mut Vec<Effect>) {
         let (method,params) = request.into_parts();
         self.rpc(operation_id,method,params,continuation,effects);
@@ -402,8 +412,9 @@ impl Engine {
         let result = &line["result"];
         match next["kind"].as_str() {
             Some("service_tier_catalog") => {
+                let catalog:wire::ModelListResponse = self.decode_reply("model/list",result,effects);
                 let pending = self.service_tier_pending.as_ref().unwrap();
-                let supported = pending.model == self.model && self.model.is_some() && decode::<wire::ModelListResponse>(result).data.iter()
+                let supported = pending.model == self.model && self.model.is_some() && catalog.data.iter()
                     .any(|model|Some(model.model.as_str()) == self.model.as_deref() && !model.hidden
                         && model.service_tiers.as_ref().is_some_and(|tiers|tiers.iter().any(|tier|tier["id"] == "priority" && tier["hidden"] != true)));
                 if !supported { self.finish_service_tier(Disposition::Rejected,json!({"error":"Fast não está disponível para o modelo atual"}),effects); }
@@ -790,7 +801,7 @@ impl Engine {
         match rpc.method.as_str() {
             "initialize" => {
                 self.initialized = true;
-                let response:wire::InitializeResponse = decode(&result);
+                let response:wire::InitializeResponse = self.decode_reply(&rpc.method,&result,effects);
                 if let Some(installed) = hangar_codex::version::from_user_agent(&response.user_agent) {
                     if hangar_codex::version::differs(installed) {
                         effects.push(Effect::Diag { event:DiagEvent::CodexVersion,code:hangar_codex::version::diag_code(installed) });
@@ -800,7 +811,7 @@ impl Engine {
                 }
             }
             "thread/resume" | "thread/start" => {
-                let response:wire::ThreadStartResponse = decode(&result);
+                let response:wire::ThreadStartResponse = self.decode_reply(&rpc.method,&result,effects);
                 if !response.thread.id.is_empty() && response.thread.id != self.thread_id {
                     self.finish_service_tier(Disposition::Unknown,json!({"error":"A conversa mudou antes de confirmar Fast"}),effects);
                     self.clear_preview(effects); self.thread_id = response.thread.id.clone();
@@ -816,7 +827,7 @@ impl Engine {
             }
             "turn/start" => {
                 if rpc.state_revision == self.state_revision {
-                    let response:wire::TurnStartResponse = decode(&result);
+                    let response:wire::TurnStartResponse = self.decode_reply(&rpc.method,&result,effects);
                     self.turn_id = Some(response.turn.id).filter(|id|!id.is_empty()); self.in_progress = true; self.state_revision += 1;
                 }
             }
@@ -824,7 +835,7 @@ impl Engine {
                 if rpc.state_revision == self.state_revision { self.in_progress = true; self.compacting = true; self.state_revision += 1; }
             }
             "thread/read" => {
-                let response:wire::ThreadReadResponse = decode(&result);
+                let response:wire::ThreadReadResponse = self.decode_reply(&rpc.method,&result,effects);
                 self.restore_thread(&response.thread,&rpc);
                 if rpc.params["includeTurns"] == true { self.async_questions.hydrate(&self.thread_id,&result["thread"]); }
             }
@@ -838,7 +849,7 @@ impl Engine {
                 }
             }
             "account/rateLimits/read" => {
-                let response:wire::GetAccountRateLimitsResponse = decode(&result);
+                let response:wire::GetAccountRateLimitsResponse = self.decode_reply(&rpc.method,&result,effects);
                 if response.rate_limits.limit_id.as_deref().is_none_or(|id|id == "codex") { self.rate_limits = result["rateLimits"].clone(); }
             }
             _ => {},
@@ -911,7 +922,7 @@ impl Engine {
                     }
                 }
                 Some("cut_check") => {
-                    let thread = decode::<wire::ThreadReadResponse>(&result).thread;
+                    let thread = self.decode_reply::<wire::ThreadReadResponse>(&rpc.method,&result,effects).thread;
                     if thread.status == wire::ThreadStatus::Idle && thread.turns.last().is_some_and(|turn|turn.status == "interrupted") {
                         self.state.problema = Some("codex_turno_cortado".into()); self.state.problema_detalhe = None;
                     }
@@ -932,7 +943,7 @@ impl Engine {
             }
         }
         let payload = if rpc.method == "model/list" {
-            json!(decode::<wire::ModelListResponse>(&result).data.into_iter().filter(|model|!model.hidden).map(|model|json!({
+            json!(self.decode_reply::<wire::ModelListResponse>(&rpc.method,&result,effects).data.into_iter().filter(|model|!model.hidden).map(|model|json!({
                 "model":model.model,"displayName":model.display_name,"description":model.description,
                 "efforts":model.supported_reasoning_efforts.into_iter().map(|e|json!({"value":e.reasoning_effort,"description":e.description})).collect::<Vec<_>>(),
                 "defaultEffort":model.default_reasoning_effort,"serviceTiers":model.service_tiers.unwrap_or_default(),

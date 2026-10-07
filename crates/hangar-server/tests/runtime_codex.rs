@@ -560,3 +560,16 @@ fn unknown_server_request_still_gets_method_not_found() {
     assert_eq!(reply["error"]["code"],-32601);
     assert!(reply["error"]["message"].as_str().unwrap().contains("foo/bar"));
 }
+
+#[test]
+fn reply_with_wrong_type_is_reported_and_engine_stays_usable() {
+    let mut engine = engine();
+    let request = frames(&engine.command(command(OperationKind::ReadSettings,json!({})),clock(10.0)).unwrap())[0].clone();
+    assert_eq!(request["method"],"thread/read");
+    let effects = line(&mut engine,json!({"id":request["id"],"result":{"thread":"x"}}),11.0);
+    assert_eq!(diags(&effects),vec![(DiagEvent::CodexDecode,"thread_read".into())]);
+    assert!(effects.iter().any(|e|matches!(e,Effect::Policy { kind,payload,.. } if kind == "unknown_private" && payload["kind"] == "decode:thread/read")));
+    assert!(effects.iter().any(|e|matches!(e,Effect::Reply { disposition:Disposition::Accepted,.. })));
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),12.0);
+    assert_eq!(engine.view()["state"],"working");
+}
