@@ -1024,8 +1024,15 @@ impl SetupWizard {
 
     pub(super) fn ask_agent(&mut self, agent: Agent, cx: &mut Context<Self>) {
         // Um agente por falha; nunca durante a recuperação de um conserto interrompido (ela apaga a anotação no fim).
-        if self.agent.is_some() || self.refreshing || self.recovering || self.failure.is_none() { return; }
-        let (Some(report), Some(state_dir)) = (self.report.clone(), run::state_dir()) else { return };
+        if self.agent.is_some() || self.refreshing || self.recovering || self.failure.is_none() {
+            crate::log_line(&format!("setup: pedido de ajuda recusado (agente={:?} atualizando={} recuperando={} falha={})",
+                self.agent.as_ref().map(|run| &run.phase), self.refreshing, self.recovering, self.failure.is_some()));
+            return;
+        }
+        let (Some(report), Some(state_dir)) = (self.report.clone(), run::state_dir()) else {
+            crate::log_line(&format!("setup: pedido de ajuda recusado (relatório pronto={})", self.report.is_some()));
+            return;
+        };
         // O relatório desta falha já saiu por um botão da frase: o do conserto sai de novo, com o que o agente fez.
         if self.report_about.is_none() { self.report_about = self.failure.clone(); }
         self.agent_runs += 1;

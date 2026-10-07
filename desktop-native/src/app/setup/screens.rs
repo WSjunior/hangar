@@ -334,8 +334,9 @@ impl SetupWizard {
         // O envio continua visível depois de sair da falha, até sair ou a pessoa fechar o aviso.
         let outbox = failure::outbox_lines(&self.outbox, self.failure_handler(cx));
         let recovered = self.recovered_notice(cx);
-        div().flex().flex_col().gap_6().child(head).children(recovered).children(failure).children(after).children(rechecking)
-            .children(outbox).children(login).child(body)
+        // O envio fica no alto: depois de "Tentar de novo" a falha nova pode ser idêntica, e a linha é o sinal de que algo saiu.
+        div().flex().flex_col().gap_6().child(head).children(outbox).children(recovered).children(failure).children(after)
+            .children(rechecking).children(login).child(body)
     }
 
     fn agent_tile(&self, id: &'static str, name: &'static str, cx: &mut Context<Self>) -> Button {
