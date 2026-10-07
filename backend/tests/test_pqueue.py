@@ -177,6 +177,14 @@ def test_merged_history_dedup_ts_race(tmp_path, monkeypatch):
     assert not any(e.id.startswith("queued-") for e in hist)  # entrada absorvida pelo user_msg real
 
 
+def test_comando_digitado_casa_com_a_forma_dele_no_transcript():
+    skill = ("<command-message>acme:deploy</command-message>\n"
+             "<command-name>/acme:deploy</command-name>")
+    assert "/acme:deploy" in pqueue._chaves_de_commit(skill)
+    com_args = "<command-name>/btw</command-name>\n<command-args>qual a cor do céu</command-args>"
+    assert "/btw qual a cor do céu" in pqueue._chaves_de_commit(com_args)
+
+
 def test_saida_local_confirma_o_comando_que_nao_vai_ao_transcript(tmp_path):
     q = PromptQueue("s")
     palavra = q.append("btw", delivered=True)
