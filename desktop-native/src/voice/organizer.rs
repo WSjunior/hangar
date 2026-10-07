@@ -86,7 +86,8 @@ pub fn spoken_input(text: &str) -> &str {
 pub fn session_context(name: &str, events: &[(String, String)]) -> String {
     let body: String = events.iter().map(|(kind, text)| {
         let label = if kind == "user_msg" { "Usuário" } else { "Sessão" };
-        format!("{label}: {}\n", spoken_input(text))
+        let content = if kind == "user_msg" { spoken_input(text) } else { text.as_str() };
+        format!("{label}: {}\n", content)
     }).collect();
     let tail_start = body.len().saturating_sub(16_000);
     let tail_start = (tail_start..body.len()).find(|i| body.is_char_boundary(*i)).unwrap_or(body.len());
@@ -121,6 +122,7 @@ impl Results {
     pub fn turn_completed(&mut self) -> Option<Value> { self.busy = false; self.flush() }
     /// `turn/start` recusado: com o organizador ocupado, volta para a frente da fila; ocioso, nenhum
     /// `turn/completed` virá, então o texto sai para ser falado direto e a fila destrava.
+    /// Ocioso: quem chama fala o texto e depois chama `turn_completed()` para soltar o próximo da fila.
     pub fn turn_start_failed(&mut self, organizer_busy: bool) -> Option<String> {
         let item = self.last.take()?;
         if organizer_busy { self.queue.push_front(item); self.busy = true; None } else { self.busy = false; Some(item.1) }
@@ -211,6 +213,13 @@ mod tests {
     }
 
     #[test]
+    fn context_keeps_assistant_text_with_input_tags() {
+        let events = vec![("assistant_msg".into(), "use <input>x</input> aqui".into())];
+        let context = session_context("hangar-5", &events);
+        assert!(context.contains("use <input>x</input> aqui"));
+    }
+
+    #[test]
     fn results_wait_for_idle_and_flush_once() {
         let mut results = Results::default();
         results.turn_started();
@@ -235,6 +244,16 @@ mod tests {
         assert!(results.push("s".into(), "feito".into()).is_some());
         assert_eq!(results.turn_start_failed(false).as_deref(), Some("feito"));
         assert!(results.push("s".into(), "outro".into()).is_some(), "a fila não ficou travada");
+    }
+
+    #[test]
+    fn released_summary_leaves_queue_drainable() {
+        let mut results = Results::default();
+        assert!(results.push("s".into(), "A".into()).is_some());
+        assert!(results.push("s".into(), "B".into()).is_none(), "fila");
+        assert_eq!(results.turn_start_failed(false).as_deref(), Some("A"));
+        let drained = results.turn_completed().expect("sai quando o organizador fica livre");
+        assert!(drained["input"][0]["text"].as_str().unwrap().contains("B"));
     }
 
     #[test]
