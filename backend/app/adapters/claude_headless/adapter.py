@@ -2448,11 +2448,21 @@ def _hora_local(epoch) -> str | None:
 def _e_cano(pid: int) -> bool:
     """O pid ainda é um cano? Depois de reiniciar a máquina o número pode ser de outro processo."""
     argv = _argv(pid)
+    if not argv and _zumbi(pid):
+        return True   # cano morto sem ser colhido: o `claude` do grupo dele pode seguir vivo
     try:
         log = argv[argv.index("--log") + 1]
     except (ValueError, IndexError):
         return False
     return "--escuta" in argv and Path(log).name.startswith("cano-")
+
+
+def _zumbi(pid: int) -> bool:
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            return fh.read().rsplit(")", 1)[1].split()[0] == "Z"
+    except (OSError, IndexError):
+        return False
 
 
 def _matar_grupo(pid: int, name: str) -> None:

@@ -1035,8 +1035,9 @@ class CodexAdapter:
             self._sessions[name]["mode"] = "plan" if meta.get("previous_non_plan") else "default"
         self._sessions[name]["async_questions"].hydrate(thread)
         self._restore_turn(self._sessions[name], thread)
-        if name in self._cortados and (thread.get("status") or {}).get("type") == "idle":
-            self._cortados.discard(name)
+        cortado = name in self._cortados
+        self._cortados.discard(name)
+        if cortado and (thread.get("status") or {}).get("type") == "idle":
             try:
                 lido = (await client.request("thread/read", {"threadId": thread_id, "includeTurns": True})).get("thread") or {}
                 turnos = lido.get("turns") or []
@@ -2151,6 +2152,8 @@ class CodexAdapter:
             if getattr(client, "closed", False) and self._sessions.get(name) is sess:
                 await buffer.discard()
                 await publish("")
+                if pensamento.value:
+                    await limpar_pensamento()
                 if sess.get("headless") and sess.get("in_progress"):
                     self._cortados.add(name)
                 sess["state"] = "dead"
