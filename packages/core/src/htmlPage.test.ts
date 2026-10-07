@@ -30,6 +30,13 @@ describe('htmlPage', () => {
     expect(read({ id: 'a', title: 'T', own_theme: 'sim' })?.ownTheme).toBe(false);
   });
 
+  it('página de site leva a url; endereço que não é http(s) fica de fora', () => {
+    const read = (page: object) => htmlPageFromResult('mcp__hangar__html_render', JSON.stringify({ hangar_page: page }));
+    expect(read({ id: 'a', title: 'T', height: 640, url: 'http://localhost:3000/cidades' })?.url).toBe('http://localhost:3000/cidades');
+    expect(read({ id: 'a', title: 'T' })?.url).toBeUndefined();
+    expect(read({ id: 'a', title: 'T', url: 'javascript:alert(1)' })?.url).toBeUndefined();
+  });
+
   it('lê a referência quando o resultado vem como lista de blocos de texto', () => {
     const text = JSON.stringify({ hangar_page: ref, message: 'x' });
     const blocks = JSON.stringify([{ type: 'text', text: text.slice(0, 10) }, { type: 'image' }, { type: 'text', text: text.slice(10) }]);

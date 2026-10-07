@@ -40,7 +40,25 @@ const onlyInitial = (r: { url: string }) => r.url === 'about:blank' || r.url.sta
 // sem moldura nem título, só a página sobre o papel de parede; carregando ocupa a altura reservada,
 // erro e expirada viram uma linha de texto apagado. A mensagem da página é do agente, não confiável:
 // só altura finita e link http(s) passam.
-export const HtmlPageCard = memo(function HtmlPageCard({ page, sessionName, serverId }: {
+export const HtmlPageCard = memo(function HtmlPageCard(props: { page: HtmlPageRef; sessionName: string; serverId?: string }) {
+  return props.page.url ? <SiteCard title={props.page.title} url={props.page.url} /> : <LivePageCard {...props} />;
+});
+
+// Site de verdade só vive no app desktop; aqui o cartão só abre o endereço.
+function SiteCard({ title, url }: { title: string; url: string }) {
+  const open = () => { Linking.openURL(url).catch((err: unknown) => toast.erro(err instanceof Error ? err.message : String(err))); };
+  return (
+    <View style={styles.site}>
+      <Text style={styles.siteTitle} selectable>{title}</Text>
+      <Text style={styles.note} selectable numberOfLines={2}>{url}</Text>
+      <Pressable onPress={open} style={styles.retry} accessibilityRole="link" hitSlop={8}>
+        <Text style={styles.retryText}>{m.page_open_browser()}</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+function LivePageCard({ page, sessionName, serverId }: {
   page: HtmlPageRef;
   sessionName: string;
   serverId?: string;
@@ -153,7 +171,7 @@ export const HtmlPageCard = memo(function HtmlPageCard({ page, sessionName, serv
       )}
     </View>
   );
-});
+}
 
 const styles = StyleSheet.create((theme) => ({
   page: { width: '100%', borderRadius: 8, borderCurve: 'continuous', overflow: 'hidden', backgroundColor: 'transparent' },
@@ -163,5 +181,7 @@ const styles = StyleSheet.create((theme) => ({
   errorRow: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2] },
   errorText: { flexShrink: 1 },
   retry: { minHeight: 44, justifyContent: 'center', paddingHorizontal: theme.base.space[1] },
+  site: { alignItems: 'flex-start', paddingTop: theme.base.space[2] },
+  siteTitle: { fontSize: theme.base.text.sm, fontWeight: '600', color: theme.tokens.text.primary },
   retryText: { fontSize: theme.base.text.xs, fontWeight: '600', color: theme.tokens.accent.base },
 }));

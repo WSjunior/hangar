@@ -1,6 +1,7 @@
 // Página publicada pelo agente (tool html_render do MCP hangar), desenhada no lugar da chamada.
 // `ownTheme`: a página leva as próprias cores e o app não lhe passa o tema.
-export type HtmlPageRef = { id: string; title: string; height: number | null; heights: Record<string, number>; ownTheme: boolean };
+// `url`: site de verdade (modo URL); não há HTML para buscar, o app abre o endereço.
+export type HtmlPageRef = { id: string; title: string; height: number | null; heights: Record<string, number>; ownTheme: boolean; url?: string };
 export type PageFetchState = 'loading' | 'ready' | 'error' | 'expired';
 
 const MIN = 80;
@@ -29,8 +30,11 @@ export function htmlPageFromResult(toolName: string | null | undefined, result: 
     }
     const page = data?.hangar_page;
     if (!page || typeof page.id !== 'string' || typeof page.title !== 'string') return null;
-    return { id: page.id, title: page.title, height: typeof page.height === 'number' ? page.height : null, heights: page.heights ?? {},
-      ownTheme: page.own_theme === true };
+    const ref: HtmlPageRef = { id: page.id, title: page.title, height: typeof page.height === 'number' ? page.height : null,
+      heights: page.heights ?? {}, ownTheme: page.own_theme === true };
+    // Só http(s): o app abre esse endereço direto.
+    if (typeof page.url === 'string' && /^https?:\/\//i.test(page.url)) ref.url = page.url;
+    return ref;
   } catch {
     return null;
   }

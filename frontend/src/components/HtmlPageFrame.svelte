@@ -90,7 +90,8 @@
   });
 
   onMount(() => {
-    void load();
+    // Site de verdade só vive no app desktop; aqui o cartão só abre o endereço.
+    if (!page.url) void load();
     const ro = new ResizeObserver(([e]) => (width = e.contentRect.width));
     if (box) ro.observe(box);
     const mo = new MutationObserver(() => (scheme = readScheme()));
@@ -101,6 +102,14 @@
 
 <svelte:window onmessage={onMessage} />
 
+{#if page.url}
+  <div class="site">
+    <span class="site-title">{page.title}</span>
+    <span class="site-url">{page.url}</span>
+    <button type="button" class="link" onclick={() => window.open(page.url, '_blank', 'noopener,noreferrer')}>
+      {m.page_open_browser()}</button>
+  </div>
+{:else}
 <!-- A altura reservada só vale para a página (e enquanto ela carrega); aviso de erro fica do tamanho do texto. -->
 <div class="page" bind:this={box} style:height={status === 'ready' || status === 'loading' ? `${height}px` : undefined}
   aria-busy={status === 'loading'}>
@@ -117,10 +126,15 @@
       <button type="button" class="link" onclick={load}>{m.page_retry()}</button></p>
   {/if}
 </div>
+{/if}
 
 <style>
   .page { position: relative; width: 100%; margin-bottom: var(--space-1); background: transparent; }
   iframe { display: block; width: 100%; height: 100%; border: 0; background: transparent; }
+  .site { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 8px 0; margin-bottom: var(--space-1); }
+  .site-title { color: var(--text-primary); font-size: var(--text-sm); font-weight: 600; }
+  .site-url { color: var(--text-muted); font-size: var(--text-xs); overflow-wrap: anywhere; }
+  .site .link { margin-left: 0; }
   .note { margin: 0; padding: 12px 0; color: var(--text-muted); font-size: var(--text-sm); }
   .link {
     min-height: 0; min-width: 0; margin-left: 8px; padding: 0; border: 0; background: none;
