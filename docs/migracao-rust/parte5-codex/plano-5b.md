@@ -36,41 +36,48 @@
 
 ## Desenho do módulo comum de processo (`crates/hangar-server/src/runtime/process.rs`)
 
-Para conferência da metade Claude antes da Task 3.
+Conferido pela metade Claude (07/10, 11 pontos incorporados abaixo).
 
 ```rust
-/// O que o Python entrega (política `launch_env`) e o Rust completa.
+/// O que o Python entrega pela política `launch_env` (os dois provedores).
 pub struct LaunchSpec {
     pub provider: Provider,          // Claude | Codex (o da tabela da 5-0)
     pub key: String,                 // chave da sessão (16 primeiros chars no nome do socket/log)
-    pub name: String,
     pub cwd: PathBuf,
-    pub program: Vec<String>,        // o que roda dentro do cano: ["/abs/codex","app-server","--stdio",...]
-    pub env: Vec<(String, String)>,  // ambiente COMPLETO, já com TMUX/TMUX_PANE removidos e CP_*/HANGAR_* postos
-    pub sidecar: PathBuf,            // arquivo da sessão onde o `cano` é gravado (trava `<sidecar>.lock`)
+    pub program: Vec<String>,        // comando PRONTO dentro do cano (Codex: app-server com os -c do modo;
+                                     // Claude: hangar-engine --exec … claude -p …, .CMD no Windows)
+    pub env: Vec<(String, String)>,  // ambiente COMPLETO (TMUX removido, CP_*/HANGAR_CANO_* postos)
+    pub cano_extra: Map<String, Value>, // campos que vão dentro de `cano` além dos do Rust (Claude: config_marca)
+    pub sidecar_dir: PathBuf,        // pasta do arquivo da sessão (socket e log moram nela)
 }
 
-pub struct Cano { pub pid: u32, pub escuta: String, pub token: String, pub ts: f64, pub versao: u32 }
+pub struct Cano { pub pid: u32, pub escuta: String, pub token: String, pub ts: f64, pub versao: u32,
+                  pub extra: Map<String, Value> }
 
-/// Sobe `hangar-cano --escuta … --log … --cwd … --token … -- <program>` num escopo próprio
-/// (Linux: `systemd-run --user --scope --collect -q --` quando o probe passa; Windows:
-/// CREATE_NEW_PROCESS_GROUP|CREATE_NO_WINDOW), grava `cano` no arquivo da sessão e devolve.
-pub async fn spawn(spec: &LaunchSpec) -> Result<Cano, ProcessError>;
+pub enum Liveness { Dead, Ours, Foreign }   // pelo pid E pela identidade (`--log …cano-<key16>.log`)
+pub fn liveness(pid: u32, key: &str) -> Liveness;
 
-/// SIGTERM no grupo (Windows: taskkill /T /F), espera até 5 s; conferindo a identidade antes
-/// (o cmdline do pid tem `--log …cano-<key16>.log`), para nunca matar pid reaproveitado.
-pub async fn kill(cano: &Cano, key: &str) -> Result<(), ProcessError>;
-
-/// Linux, uma vez ao subir o Rust: mata processos do usuário com `HANGAR_CANO_KEY` fora do
-/// conjunto vivo (chaves dos arquivos de sessão Claude e Codex) e `HANGAR_CANO_OWNER == $HOME`.
-pub fn kill_orphans(live: &HashSet<String>) -> usize;
+pub async fn spawn(spec: &LaunchSpec) -> Result<Cano, ProcessError>;   // não grava nada no arquivo da sessão
+pub async fn kill(cano: &Cano, key: &str) -> Result<(), ProcessError>;  // só se `liveness == Ours`
+pub fn kill_orphans(live: &HashSet<String>) -> usize;                    // uma vez, ao subir o Rust
+pub fn cano_binary() -> Result<PathBuf, ProcessError>;                  // sonda: sem args sai com 2
 ```
 
-- **Binário do cano:** `CP_RUST_CANO_BIN`, senão a pasta do próprio executável do `hangar-server`, senão `~/.hangar/bin/`. Ausente → `ProcessError::NoCano` (código `cano_ausente`), sem cair em `cano.py` (o Python inteiro é a reserva).
-- **Escuta e token:** Unix: `unix:<dir do sidecar>/cano-<key16>-<rand4>.sock` se couber em 100 bytes; senão (e no Windows) `tcp:127.0.0.1:<porta livre>`. Token: 32 hex aleatórios. Log: `<dir do sidecar>/cano-<key16>.log`.
-- **Arquivo da sessão:** leitura → troca só do campo `cano` (e `cano=None` em falha) → gravação atômica (tmp + rename) sob a trava `<sidecar>.lock` (`flock` exclusivo no Unix; `LockFileEx` no byte 0 no Windows, o mesmo que o `msvcrt.locking` do Python). `versao` = versão do protocolo do cano (2).
-- **Probe do escopo:** `systemd-run --user --scope --collect -q -- true` uma vez por processo; falha → sem escopo e uma linha `warn` (mesma regra do Python).
-- **O que a metade Claude pluga depois:** `LaunchSpec` com `provider: Claude` e o `program` do `claude -p …` (montado hoje por `_argv` do adapter Claude), `kill` no lugar do `_matar_grupo`, `kill_orphans` no lugar do `matar_orfaos` (o conjunto vivo já inclui as duas pastas), e o teto de subidas da Task 5 (`Respawn`) no lugar do do adapter.
+Regras do módulo (cada uma de um ponto da conferência):
+
+1. **Nunca dois processos para a mesma sessão.** Antes de subir: `liveness(cano.pid)` — `Ours` → conecta e nunca sobe outro (mesmo com `versao` ausente: o `cano.py`/`hangar-cano` vivos já falam a versão 2); `Foreign` ou `Dead` → pode subir. Vale para a subida da Task 4 e a religação da Task 5.
+2. **Quem grava o arquivo da sessão é o Python** (`session.patch_meta`, já existente; o catálogo `_PATCH` ganha `cano` para os dois provedores). O sidecar do Claude não tem trava de arquivo e o Python grava nele em vida; com o Rust gravando direto, gravações cruzadas se perdiam. Até a parte 6, o Rust só pede.
+3. **Apagar o `cano`** é a política `session.clear_cano {pid}`: só zera se o `cano.pid` gravado ainda for o mesmo, e nunca recria arquivo de sessão apagado (`sessions.update` devolve `None`).
+4. **`cano_extra`** vem do `launch_env` e é gravado dentro de `cano` junto com `pid/escuta/token/ts/versao` (Claude: `config_marca`, que o `reload_stamp` lê).
+5. **Subiu e não escutou em 10 s** → `kill` + `session.clear_cano` + `NotListening` (como o `_subir_cano` do Claude). `open` que falha por erro de conexão descarta só o cano subido nesta chamada (`_CONNECT_CODES` do coordenador).
+6. **Teto esgotado não sobrescreve o problema** que a última subida deixou.
+7. **O comando é sempre do Python** (`launch_env.program`): o Rust não monta argv de nenhum provedor.
+8. `launch_env` pode gravar a `key` se faltar (comportamento atual do Claude); para o Codex a `key` já existe desde a criação.
+9. **Binário do cano:** `CP_RUST_CANO_BIN`, senão a pasta do executável do `hangar-server`, senão `~/.hangar/bin/`; sondado uma vez (sem args sai com 2). Ausente → `cano_ausente` (com o Rust de pé não há `cano.py` de reserva: a reserva é o Python inteiro).
+10. **Órfãos têm um dono só:** com o Rust de pé (modo `rust`/`pending`), a varredura é do Rust, uma vez ao subir, nunca a cada religada; o `matar_orfaos` do Python só roda no modo `python`. Mantida a reserva do `HOME` para cano antigo sem `HANGAR_CANO_OWNER`. Conjunto vivo: chaves de `~/.hangar/claude-headless/` e de `~/.hangar/codex-sessions/` (headless).
+11. **`Cano.pid` é o pid do próprio cano:** `systemd-run --user --scope --collect -q --` faz `exec` (nunca `--unit`), e o Python lê esse pid em vários lugares (`runtime_coordinator.py:149`, `registry.py:271-278`, `api.py:3206`, …).
+
+Fica no Python até a parte 6: o argv do Claude (`--resume`/`--session-id`, plugin-dir, `model_args`), `engine_env`/cliproxy, o ambiente e `_marca_config`.
 
 ---
 
@@ -311,7 +318,7 @@ Commit: `feat(codex): answer permission and MCP form/link requests, keep subagen
 - Test: `crates/hangar-server/tests/runtime_process.rs`
 
 **Interfaces:**
-- Produces: `LaunchSpec`, `Cano`, `ProcessError { NoCano, Spawn(String), NotListening, StillAlive, Sidecar(String) }` com `code()` (`cano_ausente`, `cano_nao_subiu`, `cano_nao_escutou`, `cano_continua_vivo`, `sidecar_invalido`), `spawn`, `kill`, `kill_orphans`, `cano_binary() -> Option<PathBuf>`, `write_cano(sidecar:&Path, cano:Option<&Cano>) -> Result<(),ProcessError>` — assinaturas no desenho acima.
+- Produces: `LaunchSpec`, `Cano`, `Liveness`, `ProcessError { NoCano, Spawn(String), NotListening, StillAlive }` com `code()` (`cano_ausente`, `cano_nao_subiu`, `cano_nao_escutou`, `cano_continua_vivo`), `liveness`, `spawn`, `kill`, `kill_orphans`, `cano_binary` — assinaturas e regras no desenho acima. O módulo não grava o arquivo da sessão.
 
 - [ ] **Step 1: Testes (falham)**
 
@@ -330,28 +337,35 @@ fn fake_cano(dir:&std::path::Path) -> std::path::PathBuf {
 }
 
 #[tokio::test]
-async fn spawn_writes_cano_into_the_sidecar_and_kill_ends_the_group() {
+async fn spawn_listens_and_kill_ends_the_group() {
     let dir = tempfile::tempdir().unwrap();
-    let sidecar = dir.path().join("s.json");
-    std::fs::write(&sidecar,r#"{"name":"s","key":"0123456789abcdef0123","keep":1}"#).unwrap();
     unsafe { std::env::set_var("CP_RUST_CANO_BIN",env!("CARGO_BIN_EXE_hangar-cano")); }
-    let spec = LaunchSpec { provider:Provider::Codex, key:"0123456789abcdef0123".into(), name:"s".into(), cwd:dir.path().into(),
-        program:vec!["/bin/sleep".into(),"300".into()], env:std::env::vars().collect(), sidecar:sidecar.clone() };
+    let spec = LaunchSpec { provider:Provider::Codex, key:"0123456789abcdef0123".into(), cwd:dir.path().into(),
+        program:vec!["/bin/sleep".into(),"300".into()], env:std::env::vars().collect(),
+        cano_extra:serde_json::Map::from_iter([("config_marca".into(),serde_json::json!("m1"))]), sidecar_dir:dir.path().into() };
     let cano = spawn(&spec).await.unwrap();
-    let saved:serde_json::Value = serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap();
-    assert_eq!(saved["keep"],1);
-    assert_eq!(saved["cano"]["pid"],cano.pid);
-    assert_eq!(saved["cano"]["versao"],2);
-    assert!(saved["cano"]["escuta"].as_str().unwrap().starts_with("unix:"));
+    assert_eq!(cano.versao,2);
+    assert_eq!(cano.extra["config_marca"],"m1");
+    assert!(cano.escuta.starts_with("unix:"));
+    assert!(matches!(liveness(cano.pid,&spec.key),Liveness::Ours));
+    assert!(dir.path().join("cano-0123456789abcdef.log").exists());
     kill(&cano,&spec.key).await.unwrap();
-    assert!(!std::path::Path::new(&format!("/proc/{}",cano.pid)).exists());
+    assert!(matches!(liveness(cano.pid,&spec.key),Liveness::Dead));
+    assert!(!dir.path().join("cano-0123456789abcdef.log").exists());
+}
+
+#[test]
+fn a_live_pid_of_another_program_is_foreign() {
+    let mut other = std::process::Command::new("/bin/sleep").arg("300").spawn().unwrap();
+    assert!(matches!(liveness(other.id(),"0123456789abcdef0123"),Liveness::Foreign));
+    other.kill().unwrap();
 }
 
 #[tokio::test]
 async fn kill_refuses_a_reused_pid() {
     let other = std::process::Command::new("/bin/sleep").arg("300").spawn().unwrap();
     let cano = Cano { pid:other.id(), escuta:"unix:/x".into(), token:"t".into(), ts:0.0, versao:2 };
-    assert!(kill(&cano,"0123456789abcdef0123").await.is_ok());   // não é cano desta chave: não mata
+    assert!(kill(&cano,"0123456789abcdef0123").await.is_ok());   // `Foreign`: não mata
     assert!(std::path::Path::new(&format!("/proc/{}",other.id())).exists());
     unsafe { libc::kill(other.id() as i32,libc::SIGKILL); }
 }
@@ -375,11 +389,11 @@ Expected: FAIL de compilação (`process` não existe).
 - [ ] **Step 3: Implementar `process.rs`**
 
 Seguir o desenho acima. Pontos que valem cada um uma regra vigente:
-- `spawn` não devolve antes de o cano escutar: tenta conectar (`runtime::cano::connect`, já existente) por até 10 s; sem escuta → mata o que subiu, grava `cano: null` e devolve `NotListening`.
+- `spawn` não devolve antes de o cano escutar: tenta conectar (`runtime::cano::connect`, já existente) por até 10 s; sem escuta → mata o que subiu e devolve `NotListening` (o ator zera o `cano` pela política).
 - Identidade antes de matar: Linux lê `/proc/<pid>/cmdline` e exige `cano-<key16>.log`; Windows compara o caminho do executável com o binário do cano (via `sysinfo`, já dependência fora do Linux). Pid de outro dono → `Ok(())` sem matar e `warn` (o arquivo da sessão já não aponta para processo vivo).
 - `kill` apaga `cano-<key16>*` (socket e log) depois de confirmar a saída; processo que não sai em 5 s → `StillAlive`, arquivos conservados.
 - `kill_orphans` lê `/proc/*/environ` só dos processos do mesmo `uid`; manda `SIGTERM` por pid (não por grupo), como o Python; conta e loga os "alheios" (marca sem prova de dono).
-- Gravação do arquivo da sessão: ler, trocar `cano`, gravar em `<sidecar>.tmp-<rand>` e renomear, sob a trava; `fsync` fora da trava não se aplica (rename já é o ponto de troca).
+- O módulo não grava o arquivo da sessão (regra 2 do desenho): quem grava é o ator, pela política `session.patch_meta {cano}` / `session.clear_cano {pid}` (Task 4).
 
 - [ ] **Step 4: Rodar e ver passar; commit**
 
@@ -401,11 +415,11 @@ Commit: `feat(runtime): shared cano process module (spawn, kill with identity, o
 
 **Interfaces:**
 - Consumes: `process::{spawn,LaunchSpec}` (Task 3); motor da Task 1.
-- Produces: política `launch_env` → `{"env": {k: v}, "codex": "/abs/codex"}` (Codex) — só ambiente e caminho do binário; descriptor do `open` aceita `"launch": true` (sobe se não houver cano vivo); `table::decide(_, Provider::Codex, false, true) == Owner::Rust` para as rotas de escrita.
+- Produces: política `launch_env` → `{"program": [...], "env": {k: v}, "cano_extra": {...}}` (os dois provedores; Codex: `sem_terminal.argv(meta)` com o caminho resolvido do `codex`); políticas `session.patch_meta {cano}` e `session.clear_cano {pid}`; descriptor do `open` aceita `"launch": true` (sobe só se o processo gravado não for `Ours`); `table::decide(_, Provider::Codex, false, true) == Owner::Rust` para as rotas de escrita.
 
 - [ ] **Step 1: Testes (falham)**
 
-Python, `test_runtime_policy`: `launch_env` para uma sessão Codex devolve `env` com `CODEX_HOME` da conta, `CP_SESSION_KEY`, `HANGAR_CANO_KEY`, `HANGAR_CANO_OWNER`, sem `TMUX`/`TMUX_PANE`, e `codex` com o caminho resolvido; nunca grava nada no arquivo da sessão.
+Python, `test_runtime_policy`: `launch_env` para uma sessão Codex devolve `program` (app-server com os `-c` do modo, `codex` com caminho resolvido) e `env` com `CODEX_HOME` da conta, `CP_SESSION_KEY`, `HANGAR_CANO_KEY`, `HANGAR_CANO_OWNER`, sem `TMUX`/`TMUX_PANE`; `session.clear_cano` só zera com o pid igual e não recria arquivo apagado.
 
 ```python
 def test_launch_env_da_sessao_codex(monkeypatch, tmp_path):
@@ -416,7 +430,7 @@ def test_launch_env_da_sessao_codex(monkeypatch, tmp_path):
     assert env["CP_SESSION_KEY"] == env["HANGAR_CANO_KEY"] == "k" * 32
     assert env["HANGAR_CANO_OWNER"] == str(Path.home())
     assert "TMUX" not in env and "CODEX_HOME" in env
-    assert Path(out["codex"]).name.startswith("codex")
+    assert Path(out["program"][0]).name.startswith("codex") and out["program"][1:3] == ["app-server", "--stdio"]
 ```
 
 Python, `test_runtime_routing`: com transporte de pé e `owns` incluindo `("codex", True)`, `ensure_open("cx")` de uma sessão Codex sem terminal sem `cano` manda `open` com `launch: True` e não chama `sem_terminal.subir`; `warm_sessions` não chama `ensure_running` para ela.
@@ -431,9 +445,9 @@ Run: `cd backend && uv run pytest tests/test_runtime_policy.py tests/test_runtim
 
 - [ ] **Step 3: Implementar**
 
-- `launch_env` (Python, `runtime_policy.run`): reaproveita `sem_terminal._ambiente(meta)` e `shutil.which("codex")`; devolve só `{"env": dict, "codex": str}`. Sem binário → erro `codex_ausente`.
-- Rust, `codex.rs`: `pub fn program(codex:&str, meta:&Value) -> Vec<String>` monta `[codex, "app-server", "--stdio", "-c", sandbox_mode=…, "-c", approval_policy=…, (tool_output_token_limit), (service_tier)]` com a mesma tabela de modos (`approval`/`sandbox`, já no arquivo) e as mesmas validações de `lancador.py` (`tool_output_token_limit` inteiro > 0; `service_tier` JSON-quoted).
-- Rust, `gateway.rs`/`actor.rs`: `open` headless Codex com `launch: true` e `meta.cano` ausente, morto ou com `versao` diferente de 2 → `launch_env` → `process::spawn(LaunchSpec{ provider:Codex, program: codex::program(...), env, cwd, sidecar: <caminho do arquivo da sessão vindo no descriptor> ... })` → segue o `open` normal com o cano novo. Descriptor ganha `sidecar_path` (Python manda `codex_sessions._path(name)`).
+- `launch_env` (Python, `runtime_policy.run`): Codex → `program = sem_terminal.argv(meta)` com `argv[0]` resolvido (`shutil.which`), `env = sem_terminal._ambiente(meta)`, `cano_extra = {}`; sem binário → erro `codex_ausente`. (O lado Claude pluga depois devolvendo o argv do adapter Claude e `cano_extra = {config_marca}`.)
+- `session.patch_meta` aceita `cano` nos dois provedores; `session.clear_cano {pid}` zera só se o `cano.pid` gravado for o mesmo e nunca recria arquivo apagado.
+- Rust, `gateway.rs`/`actor.rs`: `open` headless Codex com `launch: true` → `process::liveness(meta.cano.pid)`: `Ours` → conecta (mesmo sem `versao`); `Dead`/`Foreign`/sem cano → `launch_env` → `process::spawn(LaunchSpec{ provider:Codex, program, env, cano_extra, cwd, sidecar_dir })` → `session.patch_meta {cano}` → segue o `open` normal com o cano novo. `NotListening` → `session.clear_cano` e erro com código. Descriptor ganha `sidecar_dir`.
 - Coordenador: os pontos que hoje só aceitam `"claude"` (`ensure_open`, `prepare_session`, `_release_python_slot`, `_launch_and_open`, `_reopen`, `_reopen_registered`, `_reopen_after_change`, `reopen_in_change`, `start_sessions`, embrulhos `ensure_running`/`acordar`) passam a usar o provedor da sessão; para Codex sem terminal, "lançar" = `open` com `launch: True` (o Python não sobe processo). `_release_python_slot` para Codex fecha o cliente Python se houver (`adapter._sessions`).
 - `warm_sessions`/`watch_sessions`: pulam sessão cujo provedor+modo o Rust é dono (`coordinator.rust_owns("codex", True)` e sidecar `headless`).
 - `start_sessions` roda antes do primeiro `configure_transport` com o `owns` padrão (só Claude): quando o `owns` chega e inclui o Codex, registrar as sessões Codex sem terminal no Rust (pendência da 5-0).
@@ -475,7 +489,8 @@ Python (`test_runtime_routing.py`): `DELETE` de sessão Codex sem terminal com o
 - Ator: na saída do cano de sessão Codex sem terminal, se não foi pedida (`close`/`kill`), agenda nova subida pelo `Respawn` (sem laço: um timer por sessão). Subida = `launch_env` + `spawn` + reconexão do motor (`bootstrap(true)`).
 - Motor: `Restart`/`Reload` ociosos → efeito novo `Effect::Respawn { reason }` (o ator mata e sobe); `SetPermissionMode` → mesmo sandbox: `session.patch_meta {permission_mode}`; outro sandbox: ocioso → `patch_meta` + `Respawn`; ocupado → `RuntimeError("erro_permissao_ocupada", …)`. Nome de modo desconhecido → `erro_modo_desconhecido`.
 - `close` com `kill: true`: para o ator, `process::kill`, apaga os arquivos do cano. O Python (`registry.kill`) continua apagando o arquivo da sessão e a fila depois.
-- Órfãos: ao subir o Rust (antes de abrir sessões), `kill_orphans` com o conjunto vivo das duas pastas; Python continua com o dele no modo `python`.
+- Órfãos: ao subir o Rust (antes de abrir sessões), `kill_orphans` com o conjunto vivo das duas pastas, uma vez; o `matar_orfaos` do `_boot_sessions` só roda quando o modo é `python` (regra 10 do desenho). Teste Python: com o Rust esperado, `_boot_sessions` não chama `matar_orfaos`.
+- Teto esgotado (`Respawn` na terceira falha) mantém o problema da última subida (regra 6).
 
 - [ ] **Step 4: Rodar e ver passar; commit**
 
