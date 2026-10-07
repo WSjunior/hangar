@@ -749,7 +749,8 @@ def session_write_rows() -> tuple[list, list]:
 #   possível confirmar o controle…" sem `detalhe`, que o app mostrava como "(undefined)");
 # - /select/submit com terminal: `rejected` -> 409 "não consegui enviar as opções marcadas…" com
 #   `detalhe` e diário `opcao.envio_falhou`;
-# - /select sem terminal: ator recusou -> 409 "nenhum pedido de permissão pendente" (antes: 503);
+# - /select sem terminal: ator sem permissão pendente (erro `no_pending_permission`) -> 409 "nenhum
+#   pedido de permissão pendente" (antes: 503); recusa, adiamento ou incerteza seguem 503 com o motivo;
 # - falha do runtime em /keys, /term-input, /select/submit, /interrupt com terminal e DELETE …/queue
 #   -> 502 `erro_envio_falhou` (antes: 500);
 # - /interrupt sem terminal: ator recusou, incerto ou falhou -> 409 `erro_sem_turno` com o motivo (antes: 500).
@@ -773,7 +774,8 @@ CONTROL_CASES = [
     _c("select_runtime_error", "select", args={"option": 1}, reply="!erro: runtime_closed: ator saiu"),
     _c("select_refused", "select", args={"option": 1}, reply=("rejected", {"code": "cursor"})),
     _c("select_headless_accepted", "select", terminal=False, args={"option": 1}),
-    _c("select_headless_no_permission", "select", terminal=False, args={"option": 1}, reply=("rejected", {})),
+    _c("select_headless_no_permission", "select", terminal=False, args={"option": 1}, reply="!no_pending"),
+    _c("select_headless_rejected", "select", terminal=False, args={"option": 1}, reply=("rejected", {"error": "opção inválida"})),
     _c("select_headless_deferred", "select", terminal=False, args={"option": 1}, reply=("deferred", {})),
     _c("select_headless_unknown", "select", terminal=False, args={"option": 1}, reply=("unknown", {})),
     _c("select_headless_error", "select", terminal=False, args={"option": 1}, reply="!erro: runtime_closed: ator saiu"),
@@ -824,6 +826,7 @@ def control_rows() -> list:
 
     from fastapi import HTTPException
     from app import api, runtime_coordinator, termsock
+    from app.rust_server import RustOpError
     from app.runtime_adapter import RuntimeAdapter, RuntimeView
 
     loop = asyncio.new_event_loop()
@@ -849,6 +852,8 @@ def control_rows() -> list:
         async def op(self, name, command, operation_id):
             if command["kind"] == "control":
                 sent.append({"control": command["control"], "payload": command["payload"]})
+            if self.reply == "!no_pending":
+                raise RustOpError("IPC recusou a operação (400: no_pending_permission)", 400, "no_pending_permission")
             if isinstance(self.reply, str):
                 raise RuntimeError(self.reply.removeprefix("!erro: "))
             return {"operation_id": operation_id, "disposition": self.reply[0], "payload": self.reply[1]}

@@ -406,10 +406,7 @@
   },
   "pending": null,
   "panel_open": false,
-  "reply": {
-   "disposition": "rejected",
-   "payload": {}
-  },
+  "reply": "!no_pending",
   "rust_reply": null,
   "expect": {
    "status": 409,
@@ -418,6 +415,43 @@
      "code": "erro_opcao_nao_convergiu",
      "params": {},
      "msg": "nenhum pedido de permiss\u00e3o pendente"
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "select",
+    "payload": {
+     "option": 1
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "select_headless_rejected",
+  "route": "select",
+  "terminal": false,
+  "args": {
+   "option": 1
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "rejected",
+   "payload": {
+    "error": "op\u00e7\u00e3o inv\u00e1lida"
+   }
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 503,
+   "body": {
+    "detail": {
+     "code": "erro_opcao_nao_convergiu",
+     "params": {},
+     "msg": "n\u00e3o consegui responder: op\u00e7\u00e3o inv\u00e1lida"
     }
    }
   },
@@ -447,12 +481,12 @@
   },
   "rust_reply": null,
   "expect": {
-   "status": 409,
+   "status": 503,
    "body": {
     "detail": {
      "code": "erro_opcao_nao_convergiu",
      "params": {},
-     "msg": "nenhum pedido de permiss\u00e3o pendente"
+     "msg": "n\u00e3o consegui responder: opera\u00e7\u00e3o recusada pelo runtime"
     }
    }
   },

@@ -95,8 +95,9 @@ pub fn select_headless_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answ
         Err(error) => not_answered(&error.to_string()),
         Ok(reply) => match reply.disposition {
             Disposition::Accepted => ok(),
-            Disposition::Rejected | Disposition::Deferred => failure("erro_opcao_nao_convergiu", MSG_NO_PERMISSION, json!({})),
             Disposition::Unknown => not_answered("resultado incerto; a operação foi conservada sem reenvio"),
+            Disposition::Rejected => not_answered(reply.payload["error"].as_str().filter(|e| !e.is_empty()).unwrap_or(MSG_STEER_REFUSED)),
+            Disposition::Deferred => not_answered(MSG_STEER_REFUSED),
         },
     }
 }

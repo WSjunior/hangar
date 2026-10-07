@@ -29,6 +29,7 @@ fn golden() -> Vec<Value> {
 /// `!erro: codigo: mensagem` (falha do runtime antes da entrega).
 fn reply(v: &Value) -> Result<RuntimeReply, RuntimeError> {
     let text = v.as_str();
+    if text == Some("!no_pending") { return Err(RuntimeError::new("no_pending_permission", "nenhuma permissão pendente")); }
     if text == Some("!unknown") {
         return Ok(RuntimeReply { operation_id: OP.into(), disposition: Disposition::Unknown, payload: json!({}) });
     }
@@ -202,16 +203,16 @@ async fn cano(sink: Arc<std::sync::Mutex<Vec<Value>>>) -> String {
     format!("tcp:{address}")
 }
 
-/// Quantas vezes o ator pediu o serviço de plugin ao Python (a permissão segurada vai por ele).
-static POLICY_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-async fn policy() -> std::net::SocketAddr {
+/// `calls` conta quantas vezes o ator pediu o serviço de plugin ao Python (a permissão segurada vai
+/// por ele); um contador por política, para os testes em paralelo não se contarem.
+async fn policy(calls: Arc<std::sync::atomic::AtomicUsize>) -> std::net::SocketAddr {
     use tokio::io::AsyncReadExt;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else { return };
+            let calls = calls.clone();
             tokio::spawn(async move {
                 let mut reader = BufReader::new(stream);
                 loop {
@@ -230,7 +231,7 @@ async fn policy() -> std::net::SocketAddr {
                         Some("terminal_facts") => json!({"binding": request["payload"]["binding"], "ready": true, "idle": true,
                             "open_question": false, "plugin_live": false, "plugin_user": false, "native": null}),
                         Some("terminal_plugin_control") => {
-                            POLICY_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                             json!({"disposition": "accepted"})
                         }
                         _ => json!({}),
@@ -245,8 +246,11 @@ async fn policy() -> std::net::SocketAddr {
     address
 }
 
-async fn registry() -> Arc<RuntimeRegistry> {
-    Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()))
+async fn registry() -> Arc<RuntimeRegistry> { registry_counting().await.0 }
+
+async fn registry_counting() -> (Arc<RuntimeRegistry>, Arc<std::sync::atomic::AtomicUsize>) {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    (Arc::new(RuntimeRegistry::new(policy(calls.clone()).await, "secret-test".into(), "instance-test".into())), calls)
 }
 
 async fn open_headless(registry: &RuntimeRegistry, dir: &Path, name: &str) -> Arc<std::sync::Mutex<Vec<Value>>> {
@@ -370,11 +374,11 @@ async fn queue_discard_of_an_entry_that_is_not_there_is_404() {
 
 #[tokio::test]
 async fn permission_held_by_the_plugin_refuses_option_3_and_the_actor_receives_nothing() {
-    let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
+    let (dir, (registry, counter)) = (tempfile::tempdir().unwrap(), registry_counting().await);
     let log = open_terminal(&registry, dir.path(), "t").await;
     let (python, server) = serve(registry).await;
     python.set_plugin_pending(json!({"id": "perm:1", "questions": []}));
-    let calls = || POLICY_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+    let calls = || counter.load(std::sync::atomic::Ordering::SeqCst);
     let (keys_before, policy_before) = (keys_sent(&log), calls());
     let (status, body) = send(server, "POST", "t/select", r#"{"option":3}"#).await;
     assert_eq!((status, body["detail"]["code"].as_str(), body["detail"]["msg"].as_str()),
