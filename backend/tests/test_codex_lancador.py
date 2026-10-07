@@ -984,3 +984,52 @@ def test_confia_so_nos_hooks_do_usuario_e_de_plugin(capsys, resposta):
     else:
         assert "2 hooks sincronizados pelo Hangar foram aceitos: user:Stop:0, plugin:x:Stop:0" in err
         assert "1 hooks de outra origem" in err
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a trava usa fcntl")
+def test_falha_fora_da_consulta_grava_nova_tentativa_em_5_min(monkeypatch, tmp_path, capsys):
+    import errno
+    import fcntl
+    atualizar, chamadas = _atualizacao(monkeypatch, tmp_path)
+
+    def falha(*_):
+        raise OSError(errno.EIO, "io")
+    monkeypatch.setattr(fcntl, "flock", falha)
+    atualizar()
+    assert "não deu para preparar a atualização do Codex" in capsys.readouterr().err
+    proxima = json.loads((tmp_path / ".hangar" / "codex-atualizacao.json").read_text())["proxima_em"]
+    assert 0 < proxima - time.time() <= 300
+    assert chamadas == []
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="permissão de pasta POSIX")
+def test_pasta_sem_escrita_ainda_atualiza_e_avisa(monkeypatch, tmp_path, capsys):
+    atualizar, chamadas = _atualizacao(monkeypatch, tmp_path)
+    pasta = tmp_path / ".hangar"
+    pasta.mkdir()
+    pasta.chmod(0o500)
+    try:
+        atualizar()
+    finally:
+        pasta.chmod(0o700)
+    assert ["install", "-g", "@openai/codex@0.161.0"] in chamadas
+    assert "não deu para criar a trava da atualização do Codex" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("conteudo", ['{"proxima_em": NaN}', '{"proxima_em": 1e999}',
+                                      '{"proxima_em": 99999999999}'])
+def test_prazo_absurdo_no_cache_nao_desliga_a_atualizacao(monkeypatch, tmp_path, conteudo):
+    atualizar, chamadas = _atualizacao(monkeypatch, tmp_path, publicada="0.159.3")
+    (tmp_path / ".hangar").mkdir()
+    (tmp_path / ".hangar" / "codex-atualizacao.json").write_text(conteudo)
+    atualizar()
+    assert ["view", "@openai/codex", "version"] in chamadas
+
+
+@pytest.mark.parametrize("publicada", ["0.161.0 --foo", "9.9.9.9", "v0.161.0", "0.161.0\x1b[2J"])
+def test_versao_publicada_malformada_nao_e_instalada(monkeypatch, tmp_path, capsys, publicada):
+    atualizar, chamadas = _atualizacao(monkeypatch, tmp_path, publicada=publicada)
+    atualizar()
+    assert not any(c[0] == "install" for c in chamadas)
+    err = capsys.readouterr().err
+    assert "tenta de novo em 5 min" in err and "\x1b" not in err
