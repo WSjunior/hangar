@@ -16,8 +16,13 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   [plataforma.md](plataforma.md#rede-local-antes-do-tailscale-baseurl-é-identidade-a-rota-é-baseof)).
   Nunca `auto`: tira o loopback de que o `tailscale serve` depende. Firewall do Windows no
   `-Update` só sem UAC (já admin); senão vira pendência com o comando.
-- **Instalador guiado: duas perguntas, o resto é padrão.** Sem terminal, tudo é NÃO. O log nunca
-  carrega o token.
+- **Instalador guiado: duas perguntas, o resto é padrão.** Sem terminal, tudo é NÃO — exceto no
+  `--app`/`-App` (assistente do app nativo), que responde pelas telas: `ask` e `ask_senha` sim,
+  `ask_extra` não, Tailscale pela opção, nada espera teclado. O log nunca carrega o token, e no
+  `--app` nem a saída: a senha chega por `HANGAR_TOKEN`. O portão do 1/8 do `install.ps1` só barra
+  pendência sem código; as com código são extras e vão ao portão do fim. A senha do celular recusa
+  `#`, `$`, aspas, `\` e espaço nas pontas (o `.env` é lido pelo python-dotenv). Ver
+  [a entrada](#modo---app-o-assistente-responde-pelas-telas).
 - **O instalador exige UM agente de código, não o Claude Code.** Usa os que já existem; nenhum →
   instala o Claude Code (o padrão). `--agentes=`/`-Agentes` e o `--avancado` escolhem; o comando
   dos que não são o Claude sai de `app/harness_commands.py`, a mesma tabela do painel de
@@ -471,12 +476,47 @@ No `sudo-rs`, auxiliar cancelado ou ausente sai com o mesmo texto da senha errad
 saída do auxiliar separa os casos.
 
 Decisão: no `--app`, todo `sudo` do `install.sh` passa pela função `app_sudo`. Ela tenta `sudo -n`
-(a credencial que o sistema já guardou) e, sem ela, roda `"$HANGAR_ASKPASS" "<motivo>" | sudo -S
--p '' <comando>`: a senha só existe no cano entre os dois, nunca em variável, argv ou saída. Senha
-recusada pede de novo com `"$HANGAR_ASKPASS" "<motivo>" --retry`, até 3 vezes. O script da
+(a credencial que o sistema já guardou) e, sem ela, só autentica: `"$HANGAR_ASKPASS" "<motivo>" |
+sudo -S -p '' -v`. A senha só existe no cano entre os dois, nunca em variável, argv ou saída. Senha
+recusada pede de novo com `"$HANGAR_ASKPASS" "<motivo>" --retry`, até 3 vezes. O comando roda
+depois com `sudo -n <comando>`, sem a senha no stdin: com `sudo -S <comando>`, uma regra `NOPASSWD`
+deixaria a senha na entrada do comando, e a saída dele se confundiria com a do `sudo`. Se o `-v`
+passou e o `sudo -n` ainda pede senha (`timestamp_timeout=0`), a `app_sudo` para com a frase
+`SUDO_NO_CACHE` e o código `sem-sudo`. O script da
 Tailscale, que chama `sudo` por dentro, roda inteiro como administrador
 (`sh -c 'curl … | sh'` pela `app_sudo`). A causa da falha sai do texto: fora do sudoers →
 `sem-sudo`; auxiliar saiu ≠ 0 ou três senhas erradas → `senha-cancelada`; `apt` sem o pacote →
 `pacotes-desatualizados`. Sem `HANGAR_ASKPASS` (o `--app` rodado à mão) a `app_sudo` nem chama o
 `sudo -S`, e a falha fica sem código. Nunca `SUDO_ASKPASS`, `sudo -A` nem `pkexec` (pede a cada
 comando e, sem agente de polkit rodando, a janela nem aparece).
+
+## Modo `--app`: o assistente responde pelas telas
+
+(06/10/2026, spec `docs/superpowers/specs/2026-10-06-instalador-grafico-design.md`, bloco 1.) O
+assistente do app nativo instala pelos mesmos `install.sh`/`install.ps1`, sem terminal, lendo
+marcas na saída. A regra "sem terminal, tudo é NÃO" continua valendo para CI, ssh e `curl | bash`;
+o `--app`/`-App` é a exceção declarada, porque a pessoa já respondeu nas telas: `ask` sim,
+`ask_senha` sim, `ask_extra` não, Tailscale por `--tailscale=sim|nao` (`nao` vale mesmo com ela
+instalada). A senha de administrador vem da janela do app: no Linux todo `sudo` passa pela
+`app_sudo`, que pede a senha ao auxiliar do app (`HANGAR_ASKPASS`) e a entrega ao `sudo -S` pelo
+cano; no Windows o `Eleva-E-Roda` pede o UAC mesmo sem terminal. Nada espera
+teclado: o login da Tailscale vira `##HANGAR-LINK## tailscale-login` e o HTTPS desligado vira a
+pendência `tailscale-https`, e quem roda de novo é o app. A senha do celular chega por
+`HANGAR_TOKEN` (nunca argv nem saída) e sai do ambiente antes de qualquer instalador de terceiro;
+token já gravado é mantido. Ela recusa `#`, `$`, aspas, `\` e espaço nas pontas: o backend lê o
+`.env` pelo python-dotenv, que corta o valor em ` #`, expande `${VAR}` e tira aspas, e a senha
+gravada sem aspas não chegaria inteira. O `--app` não abre o app nem o navegador no fim, não
+imprime o token, e no Windows escreve em UTF-8. No `install.ps1`, o portão do 1/8 só barra
+pendência sem código: as que levam código (`Add-AppPending`) são extras, e o app as mostra no fim.
+
+Marcas, uma por linha: `##HANGAR-PROTOCOLO## 1` (primeira), `##HANGAR-PASSO## <etapa> <estado>`,
+`##HANGAR-ITEM## <id> <estado> <texto>`, `##HANGAR-LINK## tailscale-login <url>`,
+`##HANGAR-ERRO## <código>` (logo antes da falha essencial, também fora do `--app`),
+`##HANGAR-PENDENCIA## <código> <texto>` e `##HANGAR-FIM## ok|pendente|falhou` (última, de um
+`trap EXIT` no bash e do `finally` no PowerShell). `##HANGAR-FALHA##` e `##HANGAR-AVISO##` seguem
+como estão (`atualizar.py`). Mudou alguma marca: sobe o número do `##HANGAR-PROTOCOLO##` nos dois
+instaladores e no app.
+
+Sudo sem terminal, medido em [O `sudo` sem terminal: `sudo -S`, não `SUDO_ASKPASS`](#o-sudo-sem-terminal-sudo--s-não-sudo_askpass):
+a senha entra pelo `sudo -S`, porque o `sudo-rs` do Ubuntu não aceita `-A` nem lê `SUDO_ASKPASS`, e
+o script da Tailscale roda inteiro como administrador dentro de `sh -c`.
