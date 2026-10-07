@@ -1475,15 +1475,42 @@ class RuntimeCoordinator:
     @asynccontextmanager
     async def _ingress_closed(self, *names):
         """Cada fechamento é contado no Rust: abre exatamente os que este bloco fechou."""
-        closed = []
+        closed, failure, ok = [], None, False
         try:
             for name in names:
-                await self.ingress(name, True)
+                await self.close_ingress(name)
                 closed.append(name)
             yield
+            ok = True
         finally:
+            # Cada reabertura na sua tentativa: uma falha não deixa as outras portas fechadas.
             for name in closed:
-                await self.ingress(name, False)
+                try:
+                    await self.ingress(name, False)
+                except Exception as exc:
+                    from app import diag
+                    diag.registrar("runtime.ingress_reopen_failed", "erro", sessao=name, **failure_reason(exc))
+                    failure = failure or exc
+            if ok and failure is not None:
+                raise failure
+
+    async def close_ingress(self, name):
+        """Fecha a porta; se quem espera for cancelado, o pedido já enviado termina (o transporte o
+        protege) e o fechamento que ninguém vai abrir é desfeito."""
+        task = asyncio.ensure_future(self.ingress(name, True))
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            try:
+                await task
+            except Exception:
+                pass            # o fechamento não chegou ao Rust: nada a desfazer
+            else:
+                try:
+                    await self.ingress(name, False)
+                except Exception:
+                    _log.warning("porta do Rust ficou fechada após cancelamento de %s", name, exc_info=True)
+            raise
 
     @asynccontextmanager
     async def freeze(self, name, *, also=()):

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -19,6 +20,9 @@ from pathlib import Path
 
 from app import atomico
 from app.share_life import session_life
+
+
+_log = logging.getLogger("hangar.transfer")
 
 
 class TransferError(ValueError):
@@ -474,11 +478,17 @@ def release_gate(name: str) -> None:
     with _lock:
         if name not in _gate_held:
             return
-        _gate_held.discard(name)
     from app import runtime_coordinator
     coordinator = runtime_coordinator.current()
-    if coordinator is not None:
-        coordinator.ingress_sync(name, False)
+    try:
+        if coordinator is not None:
+            coordinator.ingress_sync(name, False)
+    except Exception:
+        # O Rust segue fechado: o nome fica retido para a próxima chance de reabrir.
+        _log.warning("porta do Rust não reabriu ao fim da troca de %s", name, exc_info=True)
+        return
+    with _lock:
+        _gate_held.discard(name)
 
 
 @asynccontextmanager
@@ -491,16 +501,32 @@ async def transfer_operation(name: str):
         coordinator = runtime_coordinator.current()
         own = False
         if coordinator is not None and coordinator.transport is not None and name not in _gate_held:
-            await coordinator.ingress(name, True)
+            try:
+                await coordinator.close_ingress(name)
+            except Exception:
+                _log.warning("porta do Rust não fechou para a troca de %s", name, exc_info=True)
+                raise TransferError("session_transfer_gate_unavailable", status=503) from None
             own = True
+        ok = False
         try:
             yield
+            ok = True
         finally:
             if own:
-                if await asyncio.to_thread(transfer_active, name):
+                try:
+                    active = await asyncio.to_thread(transfer_active, name)
+                except Exception:
+                    active = True       # sem ler a fase não dá para soltar: a troca retém a porta
+                if active:
                     hold_gate(name)
                 else:
-                    await coordinator.ingress(name, False)
+                    try:
+                        await coordinator.ingress(name, False)
+                    except Exception:
+                        _log.warning("porta do Rust não reabriu para %s", name, exc_info=True)
+                        hold_gate(name)
+                        if ok:
+                            raise TransferError("session_transfer_gate_unavailable", status=503) from None
 
 
 @contextmanager
@@ -535,6 +561,7 @@ def public_error(error: TransferError) -> dict:
         "session_transfer_source_changed": "A conversa mudou; abra a seleção de conta novamente.",
         "session_transfer_restore_failed": "A troca falhou e o Claude não voltou. Use Recarregar para tentar recuperar.",
         "session_transfer_busy": "A sessão está trocando de agente; tente novamente quando terminar.",
+        "session_transfer_gate_unavailable": "A sessão está terminando uma escrita; tente de novo em instantes.",
         "session_transfer_context_budget_exceeded": "O histórico completo excede a capacidade disponível do modelo escolhido. Escolha outro modelo.",
         "session_transfer_model_capacity_unknown": "Não foi possível confirmar a capacidade de contexto do modelo escolhido.",
         "session_transfer_model_media_unsupported": "O modelo escolhido não aceita as imagens presentes na conversa.",

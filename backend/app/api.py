@@ -2923,6 +2923,9 @@ async def _durante_troca(name: str, troca, *, transfer: bool = False):
     except TransferError as exc:
         troca.close()
         raise HTTPException(exc.status, detail=public_error(exc)) from None
+    except BaseException:
+        troca.close()       # corrotina que nunca rodou não pode ficar sem await
+        raise
 
 
 async def _during_transfer_life(name: str, troca, *, require_idle: bool = False):

@@ -289,3 +289,166 @@ def test_available_without_rust_binding_is_an_error(monkeypatch):
         return await asyncio.to_thread(api._send_one_available, "s", "oi")
     result = asyncio.run(scenario())
     assert result["ok"] is False and result["delivered"] is False
+    assert "vínculo no Rust" in str(result["error"])
+
+
+# --- rodada de correção --------------------------------------------------------------------
+
+def test_cancelled_close_is_undone_once_the_request_lands(tmp_path):
+    release = asyncio.Event()
+    transport = Transport()
+    original = transport.op
+    async def slow(descriptor, command, operation_id, clock):
+        if command["closed"]:
+            await release.wait()
+        return await original(descriptor, command, operation_id, clock)
+    transport.op = slow
+    coordinator, _ = coordinator_with(tmp_path, transport)
+    async def flow():
+        task = asyncio.create_task(coordinator.close_ingress("session"))
+        await asyncio.sleep(0.01)
+        task.cancel()
+        await asyncio.sleep(0.01)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    asyncio.run(flow())
+    assert transport.ingress() == [("session", True), ("session", False)]
+    coordinator.close_python_leases()
+
+
+def test_failed_reopen_does_not_stop_the_others_and_surfaces_when_block_ok(tmp_path):
+    transport = Transport()
+    coordinator, _ = coordinator_with(tmp_path, transport)
+    original = transport.op
+    async def op(descriptor, command, operation_id, clock):
+        if command["name"] == "session" and not command["closed"]:
+            raise RustOpError("x", 503, "queue_io")
+        return await original(descriptor, command, operation_id, clock)
+    transport.op = op
+    async def ok_block():
+        async with coordinator._ingress_closed("session", "novo"):
+            pass
+    async def bad_block():
+        async with coordinator._ingress_closed("session", "novo"):
+            raise ValueError("corpo")
+    with pytest.raises(RustOpError):
+        asyncio.run(ok_block())
+    assert ("novo", False) in transport.ingress()
+    with pytest.raises(ValueError):                 # a falha do corpo não é mascarada
+        asyncio.run(bad_block())
+    coordinator.close_python_leases()
+
+
+def test_release_gate_failure_keeps_the_name_held(monkeypatch):
+    class Broken:
+        def ingress_sync(self, name, closed):
+            raise RuntimeError("loop fora")
+    monkeypatch.setattr(runtime_coordinator, "_current", Broken())
+    monkeypatch.setattr(ct, "_gate_held", {"s"})
+    ct.release_gate("s")
+    assert ct._gate_held == {"s"}
+
+
+def test_unreadable_transfer_phase_holds_the_gate(transfer_env, monkeypatch):
+    transport, _, _ = transfer_env
+    def boom(name):
+        raise OSError("disco")
+    monkeypatch.setattr(ct, "transfer_active", boom)
+    async def flow():
+        async with ct.transfer_operation("s"):
+            pass
+    asyncio.run(flow())
+    assert transport.ingress() == [("s", True)] and "s" in ct._gate_held
+
+
+def test_transfer_operation_close_failure_is_a_503_transfer_error(transfer_env):
+    transport, _, _ = transfer_env
+    transport.busy = True
+    async def flow():
+        async with ct.transfer_operation("s"):
+            pytest.fail("não entra com a porta aberta")
+    with pytest.raises(ct.TransferError) as caught:
+        asyncio.run(flow())
+    assert caught.value.status == 503
+    assert "escrita" in ct.public_error(caught.value)["msg"]
+
+
+# Rotas e funções reais da troca: o gate fecha antes do corpo e abre na saída.
+
+def test_reload_route_wraps_the_reload_with_the_gate(transfer_env, monkeypatch):
+    transport, _, _ = transfer_env
+    monkeypatch.setattr(ct, "transfer_for_session", lambda name: None)
+    monkeypatch.setattr(ct, "require_available", lambda name: None)
+    seen = []
+    async def reload(name):
+        seen.append(list(transport.ingress()))
+        return {"ok": True}
+    monkeypatch.setattr(api, "_reload_session", reload)
+    assert asyncio.run(api.recarregar_sessao("s")) == {"ok": True}
+    assert seen == [[("s", True)]] and transport.ingress() == [("s", True), ("s", False)]
+
+
+def test_reload_route_answers_503_when_the_gate_is_busy(transfer_env, monkeypatch):
+    transport, _, _ = transfer_env
+    transport.busy = True
+    monkeypatch.setattr(ct, "transfer_for_session", lambda name: None)
+    monkeypatch.setattr(api, "_reload_session", lambda name: pytest.fail("não recarrega"))
+    with pytest.raises(api.HTTPException) as caught:
+        asyncio.run(api.recarregar_sessao("s"))
+    assert caught.value.status_code == 503
+
+
+def test_agent_switch_gate_and_closed_coroutine_on_busy(transfer_env, monkeypatch):
+    import inspect
+    transport, _, _ = transfer_env
+    monkeypatch.setattr(ct, "require_available", lambda name: None)
+    async def life(name, troca, **kw):
+        return await troca
+    monkeypatch.setattr(api, "_during_transfer_life", life)
+    async def troca():
+        return "feito"
+    assert asyncio.run(api._durante_troca("s", troca())) == "feito"
+    assert transport.ingress() == [("s", True), ("s", False)]
+    transport.busy = True
+    pending = troca()
+    with pytest.raises(api.HTTPException) as caught:
+        asyncio.run(api._durante_troca("s", pending))
+    assert caught.value.status_code == 503
+    assert inspect.getcoroutinestate(pending) == inspect.CORO_CLOSED
+
+
+def test_agent_switch_closes_the_coroutine_on_any_error(transfer_env, monkeypatch):
+    import inspect
+    def boom(name):
+        raise RuntimeError("x")
+    monkeypatch.setattr(ct, "require_available", boom)
+    async def troca():
+        return None
+    pending = troca()
+    with pytest.raises(RuntimeError):
+        asyncio.run(api._durante_troca("s", pending))
+    assert inspect.getcoroutinestate(pending) == inspect.CORO_CLOSED
+
+
+def test_transfer_claude_to_codex_uses_the_gate(transfer_env, monkeypatch):
+    transport, _, _ = transfer_env
+    monkeypatch.setattr(ct, "require_available", lambda name: None)
+    def source(*a):
+        raise ct.TransferError("session_transfer_source_changed")
+    monkeypatch.setattr(ct, "_source_info", source)
+    with pytest.raises(ct.TransferError):
+        asyncio.run(ct.transfer_claude_to_codex(None, "s", "c", "life", None, None, source_jsonl="j"))
+    assert transport.ingress() == [("s", True), ("s", False)]
+
+
+def test_recover_transfer_uses_the_gate(transfer_env, monkeypatch):
+    transport, _, _ = transfer_env
+    class Adapter:
+        def delivery_lock(self, name):
+            raise ct.TransferError("session_transfer_busy")
+    from app import adapters
+    monkeypatch.setattr(adapters, "get_adapter", lambda *a: Adapter())
+    with pytest.raises(ct.TransferError):
+        asyncio.run(ct.recover_transfer(None, SimpleNamespace(name="s")))
+    assert transport.ingress() == [("s", True), ("s", False)]
