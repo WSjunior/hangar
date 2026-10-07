@@ -193,13 +193,20 @@ impl Config {
     /// não pode invalidar a configuração inteira. Na edição o conflito continua sendo erro.
     fn yield_defaults(&mut self) {
         for command in Command::ALL {
-            if self.overrides.contains_key(&command) { continue; }
-            let Ok(default) = canonical_key(command.default_key()) else { continue; };
-            let same = |key: &str| canonical_key(key).is_ok_and(|key| key == default);
-            let taken = self.overrides.iter().any(|(other, key)| other.context() == command.context() && same(key))
-                || (command.context() == "!Terminal" && self.shortcuts.iter().any(|shortcut| same(&shortcut.key)));
-            if taken { self.yielded.insert(command); }
+            if !self.overrides.contains_key(&command) && self.default_taken(&command) { self.yielded.insert(command); }
         }
+    }
+
+    /// Ao salvar, o cedido cujo conflito saiu volta a ter o padrão; nenhum padrão novo é cedido fora da leitura.
+    fn release_yielded(&mut self) {
+        self.yielded = self.yielded.iter().filter(|command| self.default_taken(command)).cloned().collect();
+    }
+
+    fn default_taken(&self, command: &Command) -> bool {
+        let Ok(default) = canonical_key(command.default_key()) else { return false; };
+        let same = |key: &str| canonical_key(key).is_ok_and(|key| key == default);
+        self.overrides.iter().any(|(other, key)| other != command && other.context() == command.context() && same(key))
+            || (command.context() == "!Terminal" && self.shortcuts.iter().any(|shortcut| same(&shortcut.key)))
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -487,6 +494,7 @@ impl Hangar {
     fn save_keyboard(&mut self, mut config: Config, window: &mut Window, cx: &mut Context<Self>) {
         if self.keyboard.busy() { return; }
         config.prune_physical();
+        config.release_yielded();
         if let Err(error) = config.validate_runtime(cx) { self.keyboard.save_error = Some(error); cx.notify(); return; }
         self.keyboard.saving = true;
         self.keyboard.save_error = None;
@@ -706,7 +714,7 @@ impl Hangar {
 
     fn keyboard_row(&self, target: Target, label: String, hint: Option<String>, cx: &mut Context<Self>) -> AnyElement {
         let (id, keys, changed) = match &target {
-            Target::Command(command) => (format!("command-{command:?}"), self.keyboard.config.keys(command).iter().map(|key| self.keyboard.key_label(key, cx)).collect::<Vec<_>>(), self.keyboard.config.overrides.contains_key(command)),
+            Target::Command(command) => (format!("command-{command:?}"), self.keyboard.config.keys(command).iter().map(|key| self.keyboard.key_label(key, cx)).collect::<Vec<_>>(), self.keyboard.config.overrides.contains_key(command) || self.keyboard.config.yielded.contains(command)),
             Target::Shortcut(shortcut) => {
                 let saved = self.keyboard.config.shortcuts.iter().find(|item| item.same_target(shortcut));
                 (format!("shortcut-{}-{}-{}", shortcut.server, shortcut.project.as_deref().unwrap_or(""), shortcut.id), saved.map(|item| vec![self.keyboard.key_label(&item.key, cx)]).unwrap_or_default(), saved.is_some())
@@ -903,6 +911,13 @@ mod tests {
         // O cedido não vai para o arquivo: sem o conflito, o padrão volta na próxima leitura.
         let saved: Config = serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
         assert!(!saved.overrides.contains_key(&Command::NewSession) && saved.yielded.is_empty());
+        // Na mesma sessão: com o conflito ainda lá o cedido fica; trocada a tecla da pessoa, o padrão volta ao salvar.
+        config.release_yielded();
+        assert!(config.keys(&Command::NewSession).is_empty());
+        config.overrides.insert(Command::Costs, "ctrl-alt-c".into());
+        config.release_yielded();
+        assert!(!config.keys(&Command::NewSession).is_empty());
+        assert!(config.validate().is_ok());
         // Sem conflito nada muda; a tecla escolhida pela pessoa para o próprio comando não é tocada.
         let mut config = Config::default();
         config.overrides.insert(Command::NewSession, "ctrl-alt-t".into());
