@@ -102,6 +102,11 @@ fi
 APP_TOKEN=''
 [ "$APP" = 1 ] && APP_TOKEN=${HANGAR_TOKEN-}
 unset HANGAR_TOKEN
+# O auxiliar da senha de administrador (posto pelo app) e o código dele também saem do ambiente:
+# só a app_sudo os repassa, e só ao próprio auxiliar.
+APP_ASKPASS=${HANGAR_ASKPASS-}
+APP_ASKPASS_CODE=${HANGAR_ASKPASS_CODE-}
+unset HANGAR_ASKPASS HANGAR_ASKPASS_CODE
 mark_item() { [ "$APP" = 1 ] || return 0; echo "##HANGAR-ITEM## $1 $2 $3"; }
 # Item de uma parte inteira: pendente quando ela somou problema desde a contagem `antes`.
 mark_item_since() { # mark_item_since <id> <antes> <texto>
@@ -118,6 +123,61 @@ fail_with() { # fail_with <código ou vazio> <mensagem>
 net_code() {
   command -v curl >/dev/null || return 0
   curl -fsS --max-time 10 -o /dev/null https://github.com 2>/dev/null || echo sem-internet
+}
+# Textos que dizem a causa de uma falha com sudo: sudo clássico, sudo-rs e apt, medidos em
+# docs/decisoes/instalacao.md ("O `sudo` sem terminal: `sudo -S`, não `SUDO_ASKPASS`").
+SUDO_DENIED_RE='not in the sudoers|not allowed to (run|execute)|may not run sudo|afraid I can.t do that'
+SUDO_WRONG_RE='Sorry, try again|incorrect password attempt|Authentication failed|incorrect authentication attempt'
+PKG_STALE_RE='Unable to locate package|Unable to fetch some archives|Failed to fetch'
+# Escrita pela app_sudo quando a pessoa não deu a senha (fechou a janela ou errou três vezes).
+SUDO_NO_PASSWORD='hangar: a senha de administrador não foi informada'
+
+# Todo sudo do instalador passa por aqui. No --app a senha vem da janela do app: o auxiliar do
+# HANGAR_ASKPASS a imprime e ela vai pelo cano direto ao `sudo -S`, nunca para variável, argv ou
+# saída (o sudo-rs do Ubuntu não aceita -A nem lê SUDO_ASKPASS). Fora do --app, o sudo de sempre.
+app_sudo() { # app_sudo <motivo> <comando…>
+  local reason=$1 retry='' err try
+  local -a st
+  shift
+  [ "$APP" = 1 ] || { sudo "$@"; return; }
+  # Credencial que o sudo guardou num pedido anterior deste processo: não pergunta de novo.
+  if sudo -n true 2>/dev/null; then sudo -n "$@"; return; fi
+  # --app rodado à mão: sem o app ninguém dá a senha, e isso não é senha cancelada nem falta de sudo.
+  if [ ! -x "$APP_ASKPASS" ]; then
+    echo "hangar: sem HANGAR_ASKPASS, o --app não tem como pedir a senha de administrador" >&2
+    return 1
+  fi
+  err=$(mktemp)
+  # Sudo recusado é resposta, não erro do instalador: sem isto o `set -e` sairia antes de ler a causa
+  # quando a app_sudo roda dentro de um cano (subshell). O `local -` devolve o -e na saída.
+  local -; set +e
+  for try in 1 2 3; do
+    # O stderr do sudo e do comando vai à saída e ao arquivo: é dele que sai a causa da falha.
+    { HANGAR_ASKPASS_CODE=$APP_ASKPASS_CODE "$APP_ASKPASS" "$reason" ${retry:+"$retry"} \
+        | sudo -S -p '' "$@" 2>&1 1>&4 | tee "$err" >&2; st=("${PIPESTATUS[@]}"); } 4>&1
+    [ "${st[1]}" = 0 ] && break
+    # O auxiliar saiu sem senha: a pessoa fechou a janela.
+    [ "${st[0]}" = 0 ] || { echo "$SUDO_NO_PASSWORD" >&2; break; }
+    grep -qiE "$SUDO_DENIED_RE" "$err" && break
+    # Só senha recusada pede de novo; o --retry faz o app descartar a guardada.
+    grep -qiE "$SUDO_WRONG_RE" "$err" || break
+    [ "$try" = 3 ] && echo "$SUDO_NO_PASSWORD" >&2
+    retry=--retry
+  done
+  rm -f "$err"
+  return "${st[1]}"
+}
+# Causa de uma falha com sudo, pela saída do comando; vazio = desconhecida.
+sudo_error_code() { # sudo_error_code <arquivo com a saída>
+  if grep -qiE "$SUDO_DENIED_RE" "$1"; then
+    echo sem-sudo
+  elif grep -qF "$SUDO_NO_PASSWORD" "$1"; then
+    echo senha-cancelada
+  elif grep -qiE "$PKG_STALE_RE" "$1"; then
+    echo pacotes-desatualizados
+  elif grep -qiE "$SUDO_WRONG_RE" "$1"; then
+    echo senha-cancelada
+  fi
 }
 
 # Duas gravidades, e a diferença é o que acontece com os passos seguintes:
@@ -205,7 +265,8 @@ detecta_pkg() {
   for p in pacman apt-get dnf zypper apk brew; do
     command -v "$p" >/dev/null || continue
     case "$p" in
-      pacman)  echo "sudo pacman -S --needed" ;;
+      # No --app ninguém responde ao [S/n] do pacman.
+      pacman)  if [ "$APP" = 1 ]; then echo "sudo pacman -S --needed --noconfirm"; else echo "sudo pacman -S --needed"; fi ;;
       apt-get) echo "sudo apt-get install -y" ;;
       dnf)     echo "sudo dnf install -y" ;;
       zypper)  echo "sudo zypper install -y" ;;
@@ -361,7 +422,16 @@ precisa_root() { # precisa_root <rótulo> <cmd> <pacote> <pra quê>
   if [ "$UPDATE" = 1 ]; then erro "$rotulo faltando (--update não instala dependência)"; PENDENTE+=("$rotulo"); return 1; fi
   if ask_senha "Rodar esse comando?"; then
     mark_item "$cmd" fazendo "$rotulo"
-    eval "$PKG $pacote" && { ok "$rotulo instalado"; mark_item "$cmd" ok "$rotulo"; return 0; }
+    # O sudo do gerenciador passa pela app_sudo. A saída também vai para um arquivo: é dela que sai
+    # o código da falha para o app.
+    local instala=$PKG saida
+    [ "${PKG%% *}" = sudo ] && instala="app_sudo 'instalar o $rotulo' ${PKG#sudo }"
+    saida=$(mktemp)
+    if eval "$instala $pacote" 2>&1 | tee "$saida"; then
+      rm -f "$saida"; ok "$rotulo instalado"; mark_item "$cmd" ok "$rotulo"; return 0
+    fi
+    DEPS_ERROR=${DEPS_ERROR:-$(sudo_error_code "$saida")}
+    rm -f "$saida"
   fi
   erro "$rotulo continua faltando"; mark_item "$cmd" falhou "$rotulo"; PENDENTE+=("$rotulo"); return 1
 }
@@ -428,20 +498,56 @@ else falta "git ausente — o painel de git e o chip de branch ficam vazios"; ma
 # `UPDATE = 0` nos dois: o --update é o hook do `git pull` e nada ali pode parar pedindo senha.
 # O app liga cada item à última etapa que começou: a Tailscale abre a dela e devolve a vez.
 [ -n "$TS_STATE" ] && mark_step tailscale fazendo
+# No --app o script da Tailscale, que chama sudo por dentro, roda inteiro como administrador: o
+# sudo de dentro já é root e não pede nada. No terminal, como sempre.
+ts_install() {
+  if [ "$APP" = 1 ]; then app_sudo "instalar a Tailscale" sh -c 'curl -fsSL https://tailscale.com/install.sh | sh'
+  else curl -fsSL https://tailscale.com/install.sh | sh; fi
+}
+# O link do login sai no stderr do `tailscale up`; no --app ele vira marca e o app abre o navegador.
+tailscale_up() {
+  app_sudo "entrar na conta Tailscale" timeout 300 tailscale up 2>&1 | while IFS= read -r linha; do
+    printf '%s\n' "$linha"
+    case $linha in
+      *https://login.tailscale.com/*)
+        if [ "$APP" = 1 ]; then
+          echo "##HANGAR-LINK## tailscale-login $(printf '%s\n' "$linha" | grep -o 'https://login\.tailscale\.com/[^[:space:]]*')"
+        fi ;;
+    esac
+  done
+  return "${PIPESTATUS[0]}"
+}
+if [ "$UPDATE" = 0 ] && [ "$QUER_TAILSCALE" = 1 ] && command -v tailscale >/dev/null; then
+  mark_item tailscale ok Tailscale
+fi
 if [ "$UPDATE" = 0 ] && [ "$QUER_TAILSCALE" = 1 ] && ! command -v tailscale >/dev/null; then
   nota "Tailscale: instalação do sistema."
   if ask_senha "Instalar o Tailscale agora (vai pedir a senha)?"; then
-    curl -fsSL https://tailscale.com/install.sh | sh && command -v tailscale >/dev/null \
-      && ok "Tailscale instalado" \
-      || { anota_problema "instalação do Tailscale falhou"; QUER_TAILSCALE=0; TS_STATE=pendente; }
+    mark_item tailscale fazendo Tailscale
+    if ts_install && command -v tailscale >/dev/null; then
+      ok "Tailscale instalado"; mark_item tailscale ok Tailscale
+    else
+      anota_problema "instalação do Tailscale falhou"; QUER_TAILSCALE=0; TS_STATE=pendente
+      mark_item tailscale falhou Tailscale
+    fi
   else
     QUER_TAILSCALE=0; nota "pulado — o celular entra só pelo Wi-Fi do PC"
   fi
 fi
-if [ "$UPDATE" = 0 ] && [ "$QUER_TAILSCALE" = 1 ] && ! tailscale status >/dev/null 2>&1; then
-  echo "  Falta entrar no Tailscale: vai abrir um link, faça login no navegador (até 5 min)."
-  if ask_senha "Entrar agora (vai pedir a senha)?"; then
-    timeout 300 sudo tailscale up || { anota_problema "login no Tailscale não concluiu — depois: sudo tailscale up e ./install.sh"; TS_STATE=pendente; }
+if [ "$UPDATE" = 0 ] && [ "$QUER_TAILSCALE" = 1 ]; then
+  if tailscale status >/dev/null 2>&1; then
+    mark_item tailscale-conta ok "conta Tailscale"
+  else
+    echo "  Falta entrar no Tailscale: vai abrir um link, faça login no navegador (até 5 min)."
+    if ask_senha "Entrar agora (vai pedir a senha)?"; then
+      mark_item tailscale-conta fazendo "conta Tailscale"
+      if tailscale_up; then
+        mark_item tailscale-conta ok "conta Tailscale"
+      else
+        anota_problema "login no Tailscale não concluiu — depois: sudo tailscale up e ./install.sh" tailscale-login
+        TS_STATE=pendente; mark_item tailscale-conta pendente "conta Tailscale"
+      fi
+    fi
   fi
 fi
 [ -n "$TS_STATE" ] && mark_step preparar fazendo
@@ -696,7 +802,7 @@ if command -v ufw >/dev/null || command -v firewall-cmd >/dev/null; then
     for p in "${PORTAS[@]}"; do nota "    sudo ./scripts/lan-setup.sh $p"; done
     if ask_senha "Liberar a(s) porta(s) $LISTA agora (vai pedir a senha)?"; then
       OK_FW=1
-      for p in "${PORTAS[@]}"; do sudo ./scripts/lan-setup.sh "$p" || OK_FW=0; done
+      for p in "${PORTAS[@]}"; do app_sudo "liberar a porta $p no firewall" ./scripts/lan-setup.sh "$p" || OK_FW=0; done
       if [ "$OK_FW" = 1 ]; then ok "portas liberadas"; mark_item firewall ok "porta do Wi-Fi liberada"
       else anota_problema "liberar portas no firewall falhou"; mark_item firewall pendente "porta do Wi-Fi liberada"; fi
     fi
@@ -707,18 +813,24 @@ fi
 [ "${#PROBLEMAS[@]}" -gt "$CEL_N" ] && mark_step celular pendente || mark_step celular ok
 
 publica_tailscale() { # grava CP_PUBLIC_URL com o https do tailnet; o serve precisa de root (ou operator)
-  local nome
+  local nome saida_serve teto='' codigo=outro
   nome=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null || true)
   [ -n "$nome" ] || { falta "Tailscale sem login — sudo tailscale up e ./install.sh de novo"; TS_STATE=pendente; return 1; }
   nota "Publicar o Hangar no Tailscale precisa da senha (tailscale serve)."
   ask_senha "Publicar agora (vai pedir a senha)?" || { nota "pulado — depois: ./install.sh"; return 1; }
-  if sudo tailscale serve --bg "$PORTA_FIM" >/dev/null 2>&1 && tailscale serve status --json 2>/dev/null | grep -q '"443"'; then
+  # No --app ninguém responde ao convite que o serve imprime com o HTTPS desligado: o teto devolve a
+  # vez ao app, que mostra a pendência com "Conferir de novo".
+  [ "$APP" = 1 ] && teto='timeout 60'
+  if saida_serve=$(app_sudo "publicar o Hangar na Tailscale" $teto tailscale serve --bg "$PORTA_FIM" 2>&1) \
+     && tailscale serve status --json 2>/dev/null | grep -q '"443"'; then
     grep -q '^CP_PUBLIC_URL=' backend/.env 2>/dev/null && sed -i.bak '/^CP_PUBLIC_URL=/d' backend/.env && rm -f backend/.env.bak
     printf 'CP_PUBLIC_URL=https://%s\n' "$nome" >> backend/.env
     ok "publicado no Tailscale: https://$nome"
+    mark_item tailscale-https ok "endereço seguro (HTTPS)"
   else
-    anota_problema "tailscale serve falhou — HTTPS do tailnet desligado? Habilite em https://login.tailscale.com/admin/dns (HTTPS Certificates) e rode ./install.sh de novo"
-    TS_STATE=pendente
+    printf '%s\n' "$saida_serve" | grep -qiE 'https|not enabled' && codigo=tailscale-https
+    anota_problema "tailscale serve falhou — HTTPS do tailnet desligado? Habilite em https://login.tailscale.com/admin/dns (HTTPS Certificates) e rode ./install.sh de novo" "$codigo"
+    TS_STATE=pendente; mark_item tailscale-https pendente "endereço seguro (HTTPS)"
     return 1
   fi
 }
@@ -729,7 +841,7 @@ operador_tailscale() {
   command -v tailscale >/dev/null || return 0
   sudo -n true 2>/dev/null || ask_senha "Liberar o Funnel para compartilhar sessão (vai pedir a senha)?" \
     || { nota "pulado — para compartilhar sessão: sudo tailscale set --operator=$u"; return 0; }
-  if sudo tailscale set --operator="$u" >/dev/null 2>&1; then ok "Tailscale: $u pode ligar o Funnel (compartilhar sessão)"
+  if app_sudo "liberar o compartilhamento de sessão" tailscale set --operator="$u" >/dev/null 2>&1; then ok "Tailscale: $u pode ligar o Funnel (compartilhar sessão)"
   else anota_problema "tailscale set --operator falhou — compartilhar sessão vai pedir: sudo tailscale set --operator=$u"; TS_STATE=pendente; fi
 }
 if [ -n "$TS_STATE" ]; then

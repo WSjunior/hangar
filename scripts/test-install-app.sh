@@ -48,10 +48,12 @@ new_sandbox() {
 }
 
 # run_install <saída> [args]: sem terminal (setsid), stdin nulo, teto de tempo; TEST_TOKEN vira
-# HANGAR_TOKEN. O `| cat` só termina quando o tee do log do install.sh fecha a saída.
+# HANGAR_TOKEN e TEST_ASKPASS vira HANGAR_ASKPASS (vazio = rodado à mão, sem o app). O `| cat` só
+# termina quando o tee do log do install.sh fecha a saída.
 run_install() {
   local out=$1; shift
   ( cd "$R" && env -i HOME="$S/home" PATH="$B:$S/sys" HANGAR_TOKEN="${TEST_TOKEN-}" \
+      HANGAR_ASKPASS="${TEST_ASKPASS-}" HANGAR_ASKPASS_CODE=c0de-do-teste \
       timeout 120 setsid -w "$BASH_BIN" ./install.sh "$@" </dev/null 2>&1 ) | cat > "$out"
   return "${PIPESTATUS[0]}"
 }
@@ -69,6 +71,36 @@ before() {
   local a b
   a=$(grep -nE -m1 -- "$2" "$1" | cut -d: -f1); b=$(grep -nE -m1 -- "$3" "$1" | cut -d: -f1)
   [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]
+}
+
+# sudo falso que aceita tudo, inclusive -n (credencial já guardada), e executa o comando. Sem
+# `exec`: o `true` do `sudo -n true` é o builtin do sh (a sandbox não tem /usr/bin/true no PATH).
+SUDO_EXEC='while [ $# -gt 0 ]; do case $1 in -n|-S|-v|-k) shift ;; -p) shift 2 ;; *) break ;; esac; done; [ $# -eq 0 ] && exit 0; "$@"'
+# sudo falso do --app: nenhuma credencial guardada (-n falha); com -S lê a senha da entrada e só
+# roda o comando com "s3nha-certa", respondendo como o sudo clássico quando ela vem errada
+SUDO_APP='n=0; s=0
+while [ $# -gt 0 ]; do case $1 in -n) n=1; shift ;; -S) s=1; shift ;; -p) shift 2 ;; *) break ;; esac; done
+if [ $n = 1 ]; then echo "sudo: a password is required" >&2; exit 1; fi
+if [ $s = 1 ]; then
+  IFS= read -r pw || pw=
+  if [ "$pw" != s3nha-certa ]; then echo "Sorry, try again." >&2; echo "sudo: 1 incorrect password attempt" >&2; exit 1; fi
+fi
+[ $# -eq 0 ] && exit 0
+"$@"'
+# apt_installs_tmux: apt-get falso que "instala" o tmux falso
+apt_installs_tmux() {
+  cat > "$B/apt-get" <<EOF
+#!/bin/sh
+echo "apt-get \$*" >> "$S/log/calls"
+printf '#!/bin/sh\nexit 0\n' > "$B/tmux"; chmod +x "$B/tmux"
+EOF
+  chmod +x "$B/apt-get"
+}
+# askpass_says <corpo sh>: auxiliar falso do app em $B/askpass; sem o código desta instalação no
+# ambiente ele sai 3, como o app que recusa o pedido
+askpass_says() {
+  fake askpass "[ \"\$HANGAR_ASKPASS_CODE\" = c0de-do-teste ] || exit 3
+$1"
 }
 
 [ "$LIB_ONLY" = 1 ] && return 0
@@ -239,6 +271,118 @@ rm -f "$B/systemctl"
 run_install "$S/out" "${APP_ARGS[@]}"
 expect_line "sem-systemd: código" "$S/out" '^##HANGAR-ERRO## sem-systemd$'
 expect_eq "sem-systemd: FIM falhou" "$(last_line "$S/out")" '##HANGAR-FIM## falhou'
+
+# --- Caso: no --app a senha vai do auxiliar do app ao sudo -S ---
+new_sandbox sudo-app
+rm -f "$B/tmux"; apt_installs_tmux; fake sudo "$SUDO_APP"; askpass_says 'echo s3nha-certa'
+fake uv "env | grep '^HANGAR_ASKPASS' >> '$S/log/vazou'; exit 0"
+TEST_ASKPASS="$B/askpass" run_install "$S/out" "${APP_ARGS[@]}"
+expect_line "sudo-app: tenta a credencial guardada antes" "$S/log/calls" '^sudo -n true$'
+expect_line "sudo-app: o auxiliar recebe o motivo" "$S/log/calls" '^askpass instalar o tmux$'
+expect_line "sudo-app: pacote pelo sudo -S" "$S/log/calls" '^sudo -S -p +apt-get install -y tmux$'
+expect_line "sudo-app: tmux instalado" "$S/out" '^##HANGAR-ITEM## tmux ok tmux$'
+expect_no "sudo-app: a senha fica fora da saída" "$S/out" 's3nha-certa'
+expect_no "sudo-app: auxiliar e código fora do ambiente dos outros programas" "$S/log/vazou" 'HANGAR_ASKPASS'
+expect_eq "sudo-app: FIM ok" "$(last_line "$S/out")" '##HANGAR-FIM## ok'
+
+# --- Caso: senha errada → o auxiliar é chamado de novo com --retry ---
+new_sandbox senha-errada
+rm -f "$B/tmux"; apt_installs_tmux; fake sudo "$SUDO_APP"
+askpass_says 'case "$*" in *--retry*) echo s3nha-certa ;; *) echo errada ;; esac'
+TEST_ASKPASS="$B/askpass" run_install "$S/out" "${APP_ARGS[@]}"
+expect_line "senha-errada: pede de novo marcando a recusa" "$S/log/calls" '^askpass instalar o tmux --retry$'
+expect_line "senha-errada: tmux instalado na segunda" "$S/out" '^##HANGAR-ITEM## tmux ok tmux$'
+
+# --- Caso: três senhas erradas ---
+new_sandbox tres-erradas
+rm -f "$B/tmux"; fake apt-get 'exit 0'; fake sudo "$SUDO_APP"; askpass_says 'echo errada'
+TEST_ASKPASS="$B/askpass" run_install "$S/out" "${APP_ARGS[@]}"
+expect_eq "tres-erradas: três pedidos" "$(grep -c '^askpass ' "$S/log/calls")" 3
+if before "$S/out" '^##HANGAR-ERRO## senha-cancelada$' '^##HANGAR-FALHA## faltam: tmux'; then pass "tres-erradas: ERRO antes da FALHA"; else flunk "tres-erradas: ERRO antes da FALHA" "$S/out"; fi
+
+# --- Caso: a pessoa fechou a janela de senha ---
+new_sandbox senha-cancelada
+rm -f "$B/tmux"; fake apt-get 'exit 0'; fake sudo "$SUDO_APP"; askpass_says 'exit 1'
+TEST_ASKPASS="$B/askpass" run_install "$S/out" "${APP_ARGS[@]}"
+expect_eq "senha-cancelada: um pedido só" "$(grep -c '^askpass ' "$S/log/calls")" 1
+expect_line "senha-cancelada: código" "$S/out" '^##HANGAR-ERRO## senha-cancelada$'
+
+# --- Caso: usuário sem permissão de sudo ---
+new_sandbox sem-sudo
+rm -f "$B/tmux"; fake apt-get 'exit 0'; askpass_says 'echo s3nha-certa'
+fake sudo '[ "$1" = -n ] && exit 1; echo "maria is not in the sudoers file." >&2; exit 1'
+TEST_ASKPASS="$B/askpass" run_install "$S/out" "${APP_ARGS[@]}"
+expect_eq "sem-sudo: não pede a senha de novo" "$(grep -c '^askpass ' "$S/log/calls")" 1
+if before "$S/out" '^##HANGAR-ERRO## sem-sudo$' '^##HANGAR-FALHA## faltam: tmux'; then pass "sem-sudo: ERRO antes da FALHA"; else flunk "sem-sudo: ERRO antes da FALHA" "$S/out"; fi
+
+# --- Caso: lista de pacotes velha ---
+new_sandbox pacotes
+rm -f "$B/tmux"; fake sudo "$SUDO_APP"; askpass_says 'echo s3nha-certa'
+fake apt-get 'echo "E: Unable to locate package tmux" >&2; exit 100'
+TEST_ASKPASS="$B/askpass" run_install "$S/out" "${APP_ARGS[@]}"
+expect_line "pacotes: código" "$S/out" '^##HANGAR-ERRO## pacotes-desatualizados$'
+
+# --- Caso: --app rodado à mão, sem HANGAR_ASKPASS: não é senha cancelada ---
+new_sandbox sem-askpass
+rm -f "$B/tmux"; fake apt-get 'exit 0'; fake sudo "$SUDO_APP"
+run_install "$S/out" "${APP_ARGS[@]}"
+expect_no "sem-askpass: o sudo -S nem é chamado" "$S/log/calls" '^sudo -S'
+expect_no "sem-askpass: nenhum código de senha" "$S/out" '^##HANGAR-ERRO## (senha-cancelada|sem-sudo)'
+expect_eq "sem-askpass: FIM falhou" "$(last_line "$S/out")" '##HANGAR-FIM## falhou'
+
+# --- Caso: credencial já guardada: o auxiliar nem é chamado ---
+new_sandbox credencial
+rm -f "$B/tmux"; apt_installs_tmux; fake sudo "$SUDO_EXEC"; askpass_says 'echo s3nha-certa'
+TEST_ASKPASS="$B/askpass" run_install "$S/out" "${APP_ARGS[@]}"
+expect_line "credencial: o pacote vai pelo sudo -n" "$S/log/calls" '^sudo -n apt-get install -y tmux$'
+expect_no "credencial: sem pedido de senha" "$S/log/calls" '^askpass '
+
+# --- Caso: fora do --app o sudo é o de sempre ---
+new_sandbox sudo-terminal
+rm -f "$B/tmux"; apt_installs_tmux; fake sudo "$SUDO_EXEC"; askpass_says 'echo s3nha-certa'
+TEST_ASKPASS="$B/askpass" run_install "$S/out" --yes --tailscale=nao --no-frontend
+expect_line "sudo-terminal: sudo direto" "$S/log/calls" '^sudo apt-get install -y tmux$'
+expect_no "sudo-terminal: sem auxiliar" "$S/log/calls" '^askpass '
+
+# --- Caso: Tailscale — login pela app_sudo, link do login e HTTPS desligado ---
+new_sandbox tailscale
+fake sudo "$SUDO_APP"; askpass_says 'echo s3nha-certa'
+cat > "$B/tailscale" <<EOF
+#!/bin/sh
+echo "tailscale \$*" >> "$S/log/calls"
+case "\$1" in
+  status)
+    if [ "\$2" = --json ]; then echo '{"Self":{"DNSName":"pc.tail1.ts.net."}}'; exit 0; fi
+    [ -f "$S/ts-logado" ] && exit 0
+    exit 1 ;;
+  up)
+    echo 'To authenticate, visit:' >&2
+    printf '\n\thttps://login.tailscale.com/a/abc123\n\n' >&2
+    touch "$S/ts-logado"; exit 0 ;;
+  serve)
+    echo 'Serve is not enabled on your tailnet. HTTPS certificates are disabled.' >&2
+    exit 1 ;;
+esac
+exit 0
+EOF
+chmod +x "$B/tailscale"
+TEST_ASKPASS="$B/askpass" run_install "$S/out" --app --tailscale=sim --sem-nativo --no-frontend
+expect_line "tailscale: link do login" "$S/out" '^##HANGAR-LINK## tailscale-login https://login\.tailscale\.com/a/abc123$'
+expect_line "tailscale: motivo do login" "$S/log/calls" '^askpass entrar na conta Tailscale$'
+expect_line "tailscale: login pelo sudo -S" "$S/log/calls" '^sudo -S -p +timeout 300 tailscale up$'
+expect_line "tailscale: conta conectada" "$S/out" '^##HANGAR-ITEM## tailscale-conta ok '
+expect_line "tailscale: HTTPS vira pendência" "$S/out" '^##HANGAR-PENDENCIA## tailscale-https '
+expect_line "tailscale: etapa pendente" "$S/out" '^##HANGAR-PASSO## tailscale pendente$'
+expect_eq "tailscale: FIM pendente" "$(last_line "$S/out")" '##HANGAR-FIM## pendente'
+
+# --- Caso: o script da Tailscale roda inteiro como administrador ---
+new_sandbox ts-instala
+fake sudo "$SUDO_APP"; askpass_says 'echo s3nha-certa'
+fake curl 'echo "echo instalador-da-tailscale"'
+TEST_ASKPASS="$B/askpass" run_install "$S/out" --app --tailscale=sim --sem-nativo --no-frontend
+expect_line "ts-instala: sh -c pelo sudo -S" "$S/log/calls" '^sudo -S -p +sh -c curl -fsSL https://tailscale\.com/install\.sh \| sh$'
+expect_line "ts-instala: o script rodou" "$S/out" '^instalador-da-tailscale$'
+expect_line "ts-instala: sem o comando, item falhou" "$S/out" '^##HANGAR-ITEM## tailscale falhou Tailscale$'
 
 # --- fim dos casos ---
 if [ "$fail" = 0 ]; then echo "tudo ok"; else echo "houve falha"; fi
