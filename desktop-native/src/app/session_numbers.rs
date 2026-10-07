@@ -22,6 +22,12 @@ pub(super) fn digit_for_key(key: &str, layout: &str) -> Option<char> {
     }
 }
 
+/// O dígito de uma tecla com os modificadores de segurar: a posição física vale em qualquer layout; sem ela, o símbolo
+/// é traduzido pela tabela dos layouts conhecidos.
+pub(super) fn event_digit(physical: Option<char>, key: &str, layouts: [&str; 2]) -> Option<char> {
+    physical.or_else(|| layouts.into_iter().find_map(|layout| digit_for_key(key, layout)))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Entry {
     pub(super) target: Target,
@@ -137,6 +143,15 @@ mod tests {
         selection.push_digit('1', now);
         selection.confirm();
         assert!(!selection.claims_edit_keys());
+    }
+
+    #[test]
+    fn physical_digit_wins_on_layouts_outside_the_table() {
+        let intl = "English (US, intl., with dead keys)";
+        assert_eq!(super::event_digit(Some('2'), "@", [intl, intl]), Some('2'));
+        assert_eq!(super::event_digit(Some('6'), "dead_circumflex", [intl, intl]), Some('6'));
+        assert_eq!(super::event_digit(None, "@", [intl, intl]), None);
+        assert_eq!(super::event_digit(None, "@", ["English (US)", "English (US)"]), Some('2'));
     }
 
     #[test]

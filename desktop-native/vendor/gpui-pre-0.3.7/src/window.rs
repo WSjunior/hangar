@@ -5533,6 +5533,7 @@ impl Window {
                 keystroke: keystroke.clone(),
                 is_held: false,
                 prefer_character_input: false,
+                physical_digit: None,
             }),
             cx,
         );
@@ -6386,6 +6387,7 @@ impl Window {
                 keystroke: replay.keystroke.clone(),
                 is_held: false,
                 prefer_character_input: true,
+                physical_digit: None,
             };
 
             cx.propagate_event = true;
@@ -7915,7 +7917,7 @@ mod tests {
             window.draw(cx).clear(cx);
             for (is_held, prefer_character_input) in [(false, false), (true, false), (false, true)] {
                 window.dispatch_event(PlatformInput::KeyDown(KeyDownEvent {
-                    keystroke: Keystroke::parse("ctrl-alt-r").unwrap(), is_held, prefer_character_input,
+                    keystroke: Keystroke::parse("ctrl-alt-r").unwrap(), is_held, prefer_character_input, physical_digit: None,
                 }), cx);
                 assert!(window.current_key_down_event().is_none());
             }
@@ -8559,6 +8561,7 @@ mod tests {
                     keystroke: Keystroke::parse("down").expect("valid keystroke"),
                     is_held: false,
                     prefer_character_input: false,
+                    physical_digit: None,
                 }),
                 cx,
             );

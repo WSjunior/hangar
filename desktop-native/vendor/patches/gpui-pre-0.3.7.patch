@@ -1,7 +1,7 @@
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-0.3.7/MODIFICADO.md gpui-pre-0.3.7/MODIFICADO.md
 --- gpui-pre-0.3.7/MODIFICADO.md
 +++ gpui-pre-0.3.7/MODIFICADO.md
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,49 @@
 +# Cópia modificada do gpui-pre 0.3.7
 +
 +Origem: crate `gpui-pre` 0.3.7 do crates.io, licença Apache-2.0 (`LICENSE-APACHE`).
@@ -46,6 +46,11 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 +antes de remedir as linhas. Alturas de geometrias diferentes não contam como conteúdo que encolheu. A âncora do
 +histórico e os handles permanecem; a compensação continua valendo quando só o conteúdo muda. As decisões puras
 +ficam em `src/elements/list_tail.rs`, incluído também na suíte do app sem duplicar a fórmula.
++
++Tecla física da fileira de números: `KeyDownEvent::physical_digit` (`src/interactive.rs`) leva o dígito pela posição
++da tecla, seja qual for o layout, preenchido pelas cópias de gpui-pre-linux, gpui-pre-windows e gpui-pre-macos. Com
++Shift a tecla chega como símbolo, e o Hangar escolhe a sessão por Ctrl+Shift+número em qualquer layout. Os
++construtores de `KeyDownEvent` daqui (`window.rs`, `elements/div.rs`) passam `None`.
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-0.3.7/src/element.rs gpui-pre-0.3.7/src/element.rs
 --- gpui-pre-0.3.7/src/element.rs
 +++ gpui-pre-0.3.7/src/element.rs
@@ -71,6 +76,17 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
                  let mut pushed_a11y_node = false;
                  if window.a11y.is_active() {
                      if let Some(global_id) = global_id.as_ref() {
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-0.3.7/src/elements/div.rs gpui-pre-0.3.7/src/elements/div.rs
+--- gpui-pre-0.3.7/src/elements/div.rs
++++ gpui-pre-0.3.7/src/elements/div.rs
+@@ -5357,6 +5357,7 @@
+                     keystroke,
+                     is_held: false,
+                     prefer_character_input: false,
++                    physical_digit: None,
+                 }
+                 .to_platform_input(),
+                 cx,
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-0.3.7/src/elements/list.rs gpui-pre-0.3.7/src/elements/list.rs
 --- gpui-pre-0.3.7/src/elements/list.rs
 +++ gpui-pre-0.3.7/src/elements/list.rs
@@ -288,6 +304,21 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
  pub use shared_uri::*;
  use std::{any::Any, future::Future};
  pub use style::*;
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-0.3.7/src/interactive.rs gpui-pre-0.3.7/src/interactive.rs
+--- gpui-pre-0.3.7/src/interactive.rs
++++ gpui-pre-0.3.7/src/interactive.rs
+@@ -32,6 +32,11 @@
+     /// Whether to prefer character input over keybindings for this keystroke.
+     /// In some cases, like AltGr on Windows, modifiers are significant for character input.
+     pub prefer_character_input: bool,
++
++    /// Hangar: o dígito da fileira de números pela posição física da tecla, seja qual for o layout. Com Shift a tecla
++    /// chega como símbolo (`!`, `@`, tecla morta), e só a posição diz qual número foi. `None` fora da fileira e onde a
++    /// plataforma não informa a tecla física.
++    pub physical_digit: Option<char>,
+ }
+ 
+ impl Sealed for KeyDownEvent {}
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-0.3.7/src/path_builder.rs gpui-pre-0.3.7/src/path_builder.rs
 --- gpui-pre-0.3.7/src/path_builder.rs
 +++ gpui-pre-0.3.7/src/path_builder.rs
@@ -1996,7 +2027,15 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      /// Removes an image from the sprite atlas.
      pub fn drop_image(&mut self, data: Arc<RenderImage>) -> Result<()> {
          for frame_index in 0..data.frame_count() {
-@@ -5408,6 +5572,8 @@
+@@ -5369,6 +5533,7 @@
+                 keystroke: keystroke.clone(),
+                 is_held: false,
+                 prefer_character_input: false,
++                physical_digit: None,
+             }),
+             cx,
+         );
+@@ -5408,6 +5573,8 @@
          #[cfg(feature = "profiler")]
          self.window_profiler.begin_input(event.kind_name());
          let update_count_before = self.invalidator.update_count();
@@ -2005,7 +2044,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          // Track input modality for focus-visible styling and hover suppression.
          // Hover is suppressed during keyboard modality so that keyboard navigation
          // doesn't show hover highlights on the item under the mouse cursor.
-@@ -5567,6 +5733,7 @@
+@@ -5567,6 +5734,7 @@
          }
          #[cfg(feature = "profiler")]
          self.window_profiler.end_input(caused_invalidation);
@@ -2013,7 +2052,15 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
  
          DispatchEventResult {
              propagate: cx.propagate_event,
-@@ -6424,6 +6591,11 @@
+@@ -6219,6 +6387,7 @@
+                 keystroke: replay.keystroke.clone(),
+                 is_held: false,
+                 prefer_character_input: true,
++                physical_digit: None,
+             };
+ 
+             cx.propagate_event = true;
+@@ -6424,6 +6593,11 @@
          self.platform_window.minimize();
      }
  
@@ -2025,7 +2072,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      /// Toggle full screen status on the current window at the platform level.
      pub fn toggle_fullscreen(&self) {
          self.platform_window.toggle_fullscreen();
-@@ -7724,6 +7896,42 @@
+@@ -7724,6 +7898,42 @@
      }
  
      #[gpui::test]
@@ -2048,7 +2095,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 +            window.draw(cx).clear(cx);
 +            for (is_held, prefer_character_input) in [(false, false), (true, false), (false, true)] {
 +                window.dispatch_event(PlatformInput::KeyDown(KeyDownEvent {
-+                    keystroke: Keystroke::parse("ctrl-alt-r").unwrap(), is_held, prefer_character_input,
++                    keystroke: Keystroke::parse("ctrl-alt-r").unwrap(), is_held, prefer_character_input, physical_digit: None,
 +                }), cx);
 +                assert!(window.current_key_down_event().is_none());
 +            }
@@ -2068,3 +2115,11 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      fn test_fully_visible_bounds_preserve_layout_viewport(cx: &mut TestAppContext) {
          let window = cx.add_window(|_, _| EmptyView);
          let mut platform_window = cx.test_window(window.into());
+@@ -8351,6 +8561,7 @@
+                     keystroke: Keystroke::parse("down").expect("valid keystroke"),
+                     is_held: false,
+                     prefer_character_input: false,
++                    physical_digit: None,
+                 }),
+                 cx,
+             );

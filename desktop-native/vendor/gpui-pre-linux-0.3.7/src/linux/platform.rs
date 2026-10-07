@@ -1070,6 +1070,17 @@ pub(super) fn log_cursor_icon_warning(message: impl std::fmt::Display) {
     }
 }
 
+/// Hangar: a fileira de números tem os códigos xkb 10 a 19 (evdev + 8) em qualquer layout; ver
+/// `KeyDownEvent::physical_digit`.
+#[cfg(any(feature = "wayland", feature = "x11"))]
+pub(super) fn physical_digit(keycode: Keycode) -> Option<char> {
+    match keycode.raw() {
+        10..=18 => char::from_digit(keycode.raw() - 9, 10),
+        19 => Some('0'),
+        _ => None,
+    }
+}
+
 #[cfg(any(feature = "wayland", feature = "x11"))]
 fn guess_ascii(keycode: Keycode, shift: bool) -> Option<char> {
     let c = match (keycode.raw(), shift) {
@@ -1423,6 +1434,15 @@ async fn await_idle_sleep_prevention(
 mod tests {
     use super::*;
     use gpui::{Point, px};
+
+    #[cfg(any(feature = "wayland", feature = "x11"))]
+    #[test]
+    fn number_row_digit_comes_from_the_key_position() {
+        let digits: Vec<_> = (10..=19).map(|code| physical_digit(Keycode::new(code))).collect();
+        assert_eq!(digits, "1234567890".chars().map(Some).collect::<Vec<_>>());
+        assert_eq!(physical_digit(Keycode::new(9)), None);
+        assert_eq!(physical_digit(Keycode::new(20)), None);
+    }
 
     #[cfg(any(feature = "wayland", feature = "x11"))]
     #[test]

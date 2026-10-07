@@ -22,3 +22,6 @@ macOS e o Windows já fazem; sem texto do dono, os caminhos um por linha. A sele
 arrastar não muda. Leitura das linhas e montagem do item em `parse_uri_list` e `file_list_item`
 (`src/linux/platform.rs`). No X11 o `Inner::read` foi dividido em `targets` + `read_from` para o colar consultar o
 TARGETS uma vez só e escolher dele o uri-list e o texto.
+
+Tecla física: `physical_digit(keycode)` (`src/linux/platform.rs`) mapeia os códigos xkb 10 a 19 da fileira de números
+para `KeyDownEvent::physical_digit`, no Wayland (tecla e repetição) e no X11. O commit do IME passa `None`.

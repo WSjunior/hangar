@@ -84,8 +84,7 @@ impl Hangar {
         }
         let stroke = KeybindingKeystroke::new_with_mapper(event.keystroke.clone(), false, cx.keyboard_mapper().as_ref());
         let layout = cx.keyboard_layout();
-        let digit = super::session_numbers::digit_for_key(stroke.key(), layout.id())
-            .or_else(|| super::session_numbers::digit_for_key(stroke.key(), layout.name()));
+        let digit = super::session_numbers::event_digit(event.physical_digit, stroke.key(), [layout.id(), layout.name()]);
         let Some(digit) = digit else { return false; };
         if !event.is_held && self.session_picker.selection.push_digit(digit, Instant::now()) {
             self.schedule_session_number(cx, window);

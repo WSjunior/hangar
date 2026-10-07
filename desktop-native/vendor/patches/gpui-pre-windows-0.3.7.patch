@@ -13,7 +13,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-windows-0.3.7/MODIFICADO.md gpui-pre-windows-0.3.7/MODIFICADO.md
 --- gpui-pre-windows-0.3.7/MODIFICADO.md
 +++ gpui-pre-windows-0.3.7/MODIFICADO.md
-@@ -0,0 +1,24 @@
+@@ -0,0 +1,27 @@
 +# Cópia do gpui-pre-windows 0.3.7
 +
 +Origem: crate `gpui-pre-windows` 0.3.7 do crates.io, checksum `f05592a6f9e3e6bb7a9f2a0d4779271cf747a948db1c07b02448de777ffff8f3`, licença Apache-2.0.
@@ -38,6 +38,9 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 +Em 0.3.7 `DirectXAtlas::get_texture_view` passou a devolver `Option`; o desfoque não usa o atlas, então nada mudou aqui.
 +
 +Bandeja: `PlatformWindow::set_hidden` em `src/window.rs`, com `ShowWindowAsync` (`SW_HIDE`/`SW_SHOW`).
++
++Tecla física: `physical_digit(lparam)` (`src/events.rs`) mapeia os códigos de varredura 0x02 a 0x0B (sem o bit de
++tecla estendida) para `KeyDownEvent::physical_digit`.
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-windows-0.3.7/NOTICE gpui-pre-windows-0.3.7/NOTICE
 --- gpui-pre-windows-0.3.7/NOTICE
 +++ gpui-pre-windows-0.3.7/NOTICE
@@ -606,6 +609,34 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
                  ShaderModule::Quad => "quad",
                  ShaderModule::Shadow => "shadow",
                  ShaderModule::Underline => "underline",
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-windows-0.3.7/src/events.rs gpui-pre-windows-0.3.7/src/events.rs
+--- gpui-pre-windows-0.3.7/src/events.rs
++++ gpui-pre-windows-0.3.7/src/events.rs
+@@ -440,6 +440,7 @@
+                     keystroke,
+                     is_held: lparam.0 & (0x1 << 30) > 0,
+                     prefer_character_input,
++                    physical_digit: physical_digit(lparam),
+                 })
+             },
+         ) else {
+@@ -1590,6 +1591,16 @@
+     )
+ }
+ 
++/// Hangar: a fileira de números tem os códigos de varredura 0x02 a 0x0B em qualquer layout; tecla estendida (bit 8)
++/// não é dela. Ver `KeyDownEvent::physical_digit`.
++fn physical_digit(lparam: LPARAM) -> Option<char> {
++    match lparam.hiword() & 0x1FF {
++        code @ 0x02..=0x0A => char::from_digit(code as u32 - 1, 10),
++        0x0B => Some('0'),
++        _ => None,
++    }
++}
++
+ fn parse_normal_key(
+     vkey: VIRTUAL_KEY,
+     lparam: LPARAM,
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-windows-0.3.7/src/shaders.hlsl gpui-pre-windows-0.3.7/src/shaders.hlsl
 --- gpui-pre-windows-0.3.7/src/shaders.hlsl
 +++ gpui-pre-windows-0.3.7/src/shaders.hlsl

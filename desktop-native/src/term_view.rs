@@ -519,7 +519,7 @@ mod tests {
 
     fn key(name: &str, ch: Option<&str>, modifiers: Modifiers) -> KeyDownEvent {
         KeyDownEvent { keystroke: Keystroke { key: name.into(), key_char: ch.map(str::to_string), modifiers },
-            is_held: false, prefer_character_input: false }
+            is_held: false, prefer_character_input: false, physical_digit: None }
     }
 
     #[test]

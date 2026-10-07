@@ -440,6 +440,7 @@ impl WindowsWindowInner {
                     keystroke,
                     is_held: lparam.0 & (0x1 << 30) > 0,
                     prefer_character_input,
+                    physical_digit: physical_digit(lparam),
                 })
             },
         ) else {
@@ -1588,6 +1589,16 @@ fn parse_immutable(vkey: VIRTUAL_KEY) -> Option<String> {
         }
         .to_string(),
     )
+}
+
+/// Hangar: a fileira de números tem os códigos de varredura 0x02 a 0x0B em qualquer layout; tecla estendida (bit 8)
+/// não é dela. Ver `KeyDownEvent::physical_digit`.
+fn physical_digit(lparam: LPARAM) -> Option<char> {
+    match lparam.hiword() & 0x1FF {
+        code @ 0x02..=0x0A => char::from_digit(code as u32 - 1, 10),
+        0x0B => Some('0'),
+        _ => None,
+    }
 }
 
 fn parse_normal_key(

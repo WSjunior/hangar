@@ -132,6 +132,7 @@ pub(crate) unsafe fn platform_input_from_native(
                 keystroke: parse_keystroke(native_event),
                 is_held: native_event.isARepeat() == YES,
                 prefer_character_input: false,
+                physical_digit: physical_digit(native_event.keyCode()),
             })),
             NSEventType::NSKeyUp => Some(PlatformInput::KeyUp(KeyUpEvent {
                 keystroke: parse_keystroke(native_event),
@@ -333,6 +334,16 @@ pub(crate) unsafe fn platform_input_from_native(
             _ => None,
         }
     }
+}
+
+/// Hangar: o código virtual da tecla é a posição física (`kVK_ANSI_1` a `kVK_ANSI_0`), seja qual for o layout. Ver
+/// `KeyDownEvent::physical_digit`.
+fn physical_digit(key_code: u16) -> Option<char> {
+    Some(match key_code {
+        0x12 => '1', 0x13 => '2', 0x14 => '3', 0x15 => '4', 0x17 => '5',
+        0x16 => '6', 0x1A => '7', 0x1C => '8', 0x19 => '9', 0x1D => '0',
+        _ => return None,
+    })
 }
 
 unsafe fn parse_keystroke(native_event: id) -> Keystroke {
