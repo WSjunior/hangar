@@ -44,7 +44,7 @@ impl Hangar {
         let events = &self.chat.events;
         // Recado de outra sessão não é pergunta sua. Trocando de sessão, o chat zera antes das linhas serem
         // refeitas: índice que não existe mais é linha da sessão anterior.
-        let rows: Vec<(usize, usize)> = self.items.iter().enumerate().filter_map(|(row, item)| match item {
+        let rows: Vec<(usize, usize)> = self.conversation.items.iter().enumerate().filter_map(|(row, item)| match item {
             Item::Event(i) => events.get(*i).filter(|e| e.kind == "user_msg" && peer_of(e).is_none()).map(|_| (row, *i)),
             _ => None,
         }).collect();
