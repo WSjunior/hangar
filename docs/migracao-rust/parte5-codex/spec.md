@@ -118,9 +118,9 @@ com um `userAgent` falso de outra versão.
 
   Pedido de outra thread (subagente) entra no mesmo ramo: o filtro de thread só vale para
   notificação, nunca descarta pedido.
-- **Rotas do Codex sem terminal no Rust:** as genéricas já reivindicadas pela 5-0 (`/input`,
-  `/steer`, `/interrupt`, `/select`, `/answer`, `DELETE …/queue/{id}`, `/rename`, `DELETE`,
-  `/recarregar`) viram `Rust` na tabela de despacho para Codex sem terminal; as só do Codex
+- **Rotas do Codex sem terminal no Rust:** as genéricas reivindicadas pela 5-0 (`/input`,
+  `/steer`, `/interrupt`, `/select`, `/answer`, `DELETE …/queue/{id}`) viram `Rust` na tabela de
+  despacho para Codex sem terminal; `/rename`, `DELETE` e `/recarregar` com Codex, as só do Codex
   (`/question/skip`, `/models`, `/model`, `/service-tier`, `/codex/mode`, `/limits`) e
   `/commands` entram aqui. Com terminal tudo continua repassado ao Python até 5C.
 
