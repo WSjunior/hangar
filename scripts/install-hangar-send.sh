@@ -71,42 +71,20 @@ for skill in "$REPO"/skills/*/; do
     fi
 done
 
-# Plugin do Hangar (mods do Claude Code): pasta com .claude-plugin/plugin.json na pasta de skills
-# carrega em toda sessão. No Git Bash do Windows o `ln -s` copia e devolve 0; a junção acompanha o
-# git pull, a cópia não. O MSYS mostra a junção como link (`-L`).
-plugin_src="$REPO/plugins/hangar"
+# Plugin do Hangar: entra só por `--plugin-dir` (backend e wrapper do `claude`). O link antigo na
+# pasta de skills sai, porque o mesmo nome nos dois lugares deixa um erro em todo `/plugin`.
 plugin_dst="$HOME/.claude/skills/hangar"
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) msys=1 ;; *) msys= ;; esac
-# `-ef` compara o arquivo, não a grafia: no MSYS o REPO pode vir `/C/…` e a junção resolver `/c/…`.
-if [ "$plugin_dst" -ef "$plugin_src" ]; then
-    echo "ok: ~/.claude/skills/hangar -> $plugin_src (plugin, ja linkado)"
-elif [ ! -L "$plugin_dst" ] && [ -e "$plugin_dst" ] \
-        && ! grep -qs '"name": *"hangar"' "$plugin_dst/.claude-plugin/plugin.json"; then
-    # Pasta real só sai quando é cópia antiga do plugin: a de outra pessoa não é nossa para apagar.
-    echo "aviso: ~/.claude/skills/hangar existe e nao e o plugin do Hangar; plugin NAO linkado" >&2
+# Pasta `hangar` que não é o plugin é de outra pessoa e fica.
+if ! grep -qs '"name": *"hangar"' "$plugin_dst/.claude-plugin/plugin.json"; then
+    :
+elif [ -L "$plugin_dst" ]; then
+    # Só o link sai: `rm -rf` atravessaria a junção e apagaria o destino dela.
+    if [ -n "$msys" ]; then cmd //c rmdir "$(cygpath -w "$plugin_dst")"; else rm -f "$plugin_dst"; fi
+    echo "ok: ~/.claude/skills/hangar removido (plugin vem por --plugin-dir)"
 else
-    if [ -L "$plugin_dst" ]; then
-        # Só o link sai: `rm -rf` atravessaria a junção e apagaria o destino dela.
-        if [ -n "$msys" ]; then cmd //c rmdir "$(cygpath -w "$plugin_dst")"; else rm -f "$plugin_dst"; fi
-    elif [ -e "$plugin_dst" ]; then
-        rm -rf "$plugin_dst"
-    fi
-    if [ -z "$msys" ]; then
-        ln -sn "$plugin_src" "$plugin_dst"
-        echo "ok: ~/.claude/skills/hangar -> $plugin_src (plugin)"
-    else
-        # `//J`: o MSYS converte `/J` em caminho (`J:/`) e o mklink recusa. Quem decide é o disco,
-        # não o código de saída; e o `cp -r` só roda sem destino, senão copia para dentro da junção.
-        cmd //c mklink //J "$(cygpath -w "$plugin_dst")" "$(cygpath -w "$plugin_src")" >/dev/null 2>&1 || true
-        if [ -r "$plugin_dst/.claude-plugin/plugin.json" ]; then
-            echo "ok: ~/.claude/skills/hangar -> $plugin_src (plugin, juncao)"
-        elif [ ! -e "$plugin_dst" ] && [ ! -L "$plugin_dst" ]; then
-            cp -r "$plugin_src" "$plugin_dst"
-            echo "ok: ~/.claude/skills/hangar (COPIA do plugin — re-rode apos git pull)"
-        else
-            echo "aviso: ~/.claude/skills/hangar ficou num estado inesperado; plugin NAO linkado" >&2
-        fi
-    fi
+    rm -rf "$plugin_dst"
+    echo "ok: copia antiga do plugin em ~/.claude/skills/hangar removida"
 fi
 
 # Agentes das skills (ex.: preparar-plano da orquestrar): link no Claude, .toml em cada home do Codex.

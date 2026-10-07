@@ -27,7 +27,7 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   mão enquanto carrega; conta Codex padrão deslogada cede a uma adicional conectada.
   Ver [provedor padrão da abertura](#provedor-padrão-da-abertura).
 
-- **O plugin do Hangar entra por `--plugin-dir` mesmo estando na pasta de skills.** Na cadeia
+- **O plugin do Hangar entra só por `--plugin-dir`, nunca pela pasta de skills.** Na cadeia
   de hooks, o primeiro plugin carregado fica por fora: `--plugin-dir` vem antes do marketplace,
   e a pasta de skills vem depois. A faixa dos mods (`plugins/hangar/hooks/ui.ts`) só recebe por
   `next(e)` o que os plugins de dentro desenham, e um mod que responde a faixa sem chamar
@@ -36,8 +36,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `--plugin-dir` cada, sempre DEPOIS de `plugins/hangar`, sem pergunta do CLI e sem marketplace.
   O wrapper do `claude` no shell passa a mesma lista, lida de `~/.hangar/plugin-dir` (uma pasta
   por linha, a do Hangar primeiro; o arquivo antigo de uma linha continua valendo), que o
-  backend grava só quando o CLI aceita a flag; `claude` cru (`command claude`) carrega só pela pasta de skills e não espelha a
-  faixa dos mods do marketplace. Ver
+  backend grava só quando o CLI aceita a flag; `claude` cru (`command claude`) fica sem o plugin. O
+  link antigo em `~/.claude/skills/hangar` sai no instalador: o mesmo nome nos dois lugares carrega
+  um só, mas deixa erro em todo `/plugin` (medido em B, abaixo). Ver
   [faixa dos mods](#faixa-dos-mods-ordem-na-cadeia-medida-03102026).
 
 - **Faixa e painéis dos mods saem no SSE por fonte própria, nunca na carona do `state`.** O

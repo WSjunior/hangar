@@ -246,7 +246,7 @@ def raizes_dos_plugins() -> list[str]:
 
     Só o plugin de `--plugin-dir` fica POR FORA dos instalados pelo marketplace na cadeia de hooks,
     e a faixa dos mods (`ui.ts`) só enxerga o que os plugins depois dele desenham: por isso o do
-    Hangar abre a lista. Com o mesmo nome nos dois lugares, o CLI carrega só o de `--plugin-dir`."""
+    Hangar abre a lista."""
     if not ligado():
         return []
     try:
@@ -322,8 +322,8 @@ def plugin_dir_file(home: Path | None = None) -> Path:
 def _publish_plugin_dir(home: Path | None = None) -> None:
     """Caminhos dos plugins para o wrapper do shell, que não sabe onde o repositório mora.
 
-    Sessão aberta no terminal precisa do mesmo `--plugin-dir` das que o backend abre: só pela pasta
-    de skills o plugin fica por dentro do marketplace e não enxerga a faixa dos mods. Sem
+    Sessão aberta no terminal precisa do mesmo `--plugin-dir` das que o backend abre: é o único
+    caminho do plugin, e o que o põe por fora do marketplace para enxergar a faixa dos mods. Sem
     `raizes_dos_plugins()` o arquivo sai, porque flag que o CLI não conhece mata a sessão ao nascer."""
     alvo = plugin_dir_file(home)
     raizes = raizes_dos_plugins()

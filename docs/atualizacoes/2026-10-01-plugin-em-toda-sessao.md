@@ -3,7 +3,7 @@ id: 2026-10-01-plugin-em-toda-sessao
 titulo: O plugin do Hangar passa a carregar em toda sessão do Claude, inclusive a aberta no terminal
 comando_posix: ./scripts/install-hangar-send.sh
 comando_windows: powershell -ExecutionPolicy Bypass -File install.ps1 -Update
-prova: ~/.claude/skills/hangar/.claude-plugin/plugin.json
+prova: ~/.local/bin/hangar-send
 destrutivo: false
 ---
 
