@@ -294,7 +294,8 @@ fn status_line(lines: &[&str]) -> Option<String> {
     if chrome.is_empty() { None } else { Some(chrome.join("\n")) }
 }
 
-const CODEX_FOOTERS: [&str; 2] = ["press enter to confirm", "press enter to continue"];
+// A TUI mais nova encurtou o rodapé para "enter continue · esc skip"; as duas formas valem.
+const CODEX_FOOTERS: [&str; 4] = ["enter to confirm", "enter to continue", "enter confirm", "enter continue"];
 fn codex_menu(lines: &[&str]) -> Option<TerminalQuestion> {
     if !CODEX_FOOTERS.iter().any(|f| tail(lines, 8).to_lowercase().contains(f)) { return None; }
     let mut options: Vec<String> = Vec::new();

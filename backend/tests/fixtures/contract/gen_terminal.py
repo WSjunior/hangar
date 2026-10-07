@@ -113,6 +113,7 @@ def main():
         "overlay_old": "Esc to cancel\n" + "texto\n" * 12,
         "limit_old": "Usage limit reached resets 9:10pm\n" + "texto\n" * 12,
         "codex_wrap": "Aprovar?\n› 1. Opção ação\n     continua 🐍\n  2. Outra\nPress enter to confirm\n\n",
+        "codex_short_footer": "  Update available · 0.159.3 → 0.160.0\n› 1. Update now\n  2. Skip\n\n  enter continue · esc skip\n\n\n",
         "codex_invalid": "Aprovar?\n› 1. Um\n  3. Três\nPress enter to confirm",
         "subagent_prose": "● Subagent reviewer pode ajudar\n  explique",
         "prose_box": "● Texto\n╭────────╮\n│ exemplo │\n╰────────╯",

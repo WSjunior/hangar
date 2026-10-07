@@ -1,0 +1,17 @@
+[package]
+name = "hangar-codex"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "io-util", "process", "sync", "time", "net"] }
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+schemars = "=1.2.2"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
