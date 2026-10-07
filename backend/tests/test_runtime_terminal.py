@@ -1267,17 +1267,17 @@ def test_closed_terminal_state_is_not_a_registration_error_at_boot(monkeypatch, 
     monkeypatch.setattr(tmux, 'sessao_existe', lambda name: panes.get(name, False))
     fresh = RuntimeCoordinator()
     async def flow():
-        await fresh._register_durable_terminals(claude=None)
+        await fresh._register_durable_terminals(owned=None)
     asyncio.run(flow())
     assert ('runtime.registration_failed', 'terminal_binding') not in events
     assert fresh.slot('session').awaiting_identity, 'o registro em espera continua'
     panes['session'] = True      # há sessão com o nome e o vínculo não se prova: aí é erro
     other = RuntimeCoordinator()
-    asyncio.run(other._register_durable_terminals(claude=None))
+    asyncio.run(other._register_durable_terminals(owned=None))
     assert ('runtime.registration_failed', 'terminal_binding') in events
     events.clear()
     panes['session'] = None      # tmux sem resposta: não dá para dizer que fechou
-    asyncio.run(RuntimeCoordinator()._register_durable_terminals(claude=None))
+    asyncio.run(RuntimeCoordinator()._register_durable_terminals(owned=None))
     assert ('runtime.registration_failed', 'terminal_binding') in events
 
 

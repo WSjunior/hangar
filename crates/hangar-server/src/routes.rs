@@ -273,8 +273,11 @@ pub fn router(state: Arc<AppState>) -> Router {
 }
 
 async fn health(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let owns: Vec<_> = crate::session_write::table::owned_modes().into_iter()
+        .map(|(provider, headless)| serde_json::json!({"provider": provider.name(), "headless": headless})).collect();
     let body = serde_json::json!({"ok": true, "version": env!("CARGO_PKG_VERSION"),
         "protocol": crate::INTERNAL_PROTOCOL,
+        "owns": owns,
         // O painel de terminal real é do Rust em todas as plataformas.
         "terminal_panel": true,
         "terminal_address": st.terminal_address.map(|a| a.to_string())}).to_string();

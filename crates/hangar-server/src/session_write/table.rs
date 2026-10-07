@@ -33,6 +33,22 @@ pub fn decide(route: WriteRoute, provider: Provider, terminal: bool, healthy: bo
     }
 }
 
+impl Provider {
+    pub fn name(self) -> &'static str { match self { Provider::Claude => "claude", Provider::Codex => "codex" } }
+}
+
+/// Provedor+modo (`true` = sem terminal) que a tabela entrega ao Rust na entrada de texto: é o que a
+/// saúde anuncia, para o Python não guardar a mesma lista.
+pub fn owned_modes() -> Vec<(Provider, bool)> {
+    let mut owned = Vec::new();
+    for provider in [Provider::Claude, Provider::Codex] {
+        for headless in [true, false] {
+            if decide(WriteRoute::Input, provider, !headless, true) == Owner::Rust { owned.push((provider, headless)); }
+        }
+    }
+    owned
+}
+
 /// O corpo tem a forma mínima que a rota espera? Só a forma: campo a mais ou de tipo errado é do
 /// FastAPI, que o recusa quando o pedido é repassado.
 pub(crate) fn body_ok(route: WriteRoute, body: &Bytes) -> bool {
@@ -77,6 +93,11 @@ mod tests {
         for route in ALL { for terminal in [true, false] {
             assert_eq!(decide(route, Provider::Codex, terminal, true), Owner::Python, "{route:?}");
         } }
+    }
+
+    #[test]
+    fn owned_modes_come_from_the_table() {
+        assert_eq!(owned_modes(), vec![(Provider::Claude, true), (Provider::Claude, false)]);
     }
 
     #[test]

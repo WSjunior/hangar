@@ -251,6 +251,11 @@ class RuntimeCoordinator:
         self._hooks_ran = set()
         self._settling = False      # entrando num modo: as sessões ainda abrindo ou voltando
         self._mode_event = None
+        # Antes da saúde do Rust vale o que se espera dele; depois, o que ele anuncia.
+        self._owns = {("claude", True), ("claude", False)}
+
+    def rust_owns(self, provider, headless):
+        return (provider, headless) in self._owns
 
     def _set_mode(self, mode, *, settling=False):
         self.mode, self._settling = mode, settling
@@ -524,8 +529,8 @@ class RuntimeCoordinator:
             lease.close()
 
     def _born_in_rust(self, binding):
-        # Codex sem terminal fica no Python (provedor não migrado); terminal tem caminho próprio.
-        return self.transport is not None and binding.provider == "claude" and binding.headless
+        # Sem terminal só; o terminal tem caminho próprio mesmo quando o Rust é dono dele.
+        return self.transport is not None and binding.headless and self.rust_owns(binding.provider, True)
 
     async def ensure_open(self, name, *, engine_models=None, wait_initialized=False):
         """Sessão Claude sem terminal aberta no Rust: o Python só lança o processo do cano e grava
@@ -643,13 +648,14 @@ class RuntimeCoordinator:
         self.loop = asyncio.get_running_loop()
         self.legacy = LegacyBridge(self, adapters)
         # Com o Rust esperado as sessões Claude esperam por ele: nada de trava, fila ou cliente
-        # Python antes do desfecho. O Codex sem terminal é sempre do Python (provedor não migrado).
+        # Python antes do desfecho. O que o Rust não anuncia como dele fica com o Python.
         if self.mode == "python":
             await self.register_claude_sessions()
         else:
-            await self._register_durable_terminals(claude=False)
-        from app.adapters.codex import sessions as codex_sessions
-        await self._prepare_listed("codex", await asyncio.to_thread(codex_sessions.list_all))
+            await self._register_durable_terminals(owned=False)
+        if self.mode == "python" or not self.rust_owns("codex", True):
+            from app.adapters.codex import sessions as codex_sessions
+            await self._prepare_listed("codex", await asyncio.to_thread(codex_sessions.list_all))
 
     async def _prepare_listed(self, provider, metas):
         for meta in metas:
@@ -664,7 +670,7 @@ class RuntimeCoordinator:
         os canos vivos e os mortos com entrada não entregue (o resto fica parado até o próximo
         envio); o terminal registra e segue pela adoção até a Task 6."""
         from app.pqueue import _queue_dir
-        terminals = await self._register_durable_terminals(claude=None if self.transport is None else True)
+        terminals = await self._register_durable_terminals(owned=None if self.transport is None else True)
         from app.adapters.claude_headless import sessions as claude_sessions
         metas = await asyncio.to_thread(claude_sessions.list_all)
         if self.transport is None:
@@ -685,9 +691,9 @@ class RuntimeCoordinator:
         await asyncio.gather(*(open_listed(meta) for meta in metas
             if meta.get("headless") and not self.managed_queue(meta["name"])))
 
-    async def _register_durable_terminals(self, *, claude):
-        """Registros de terminal do estado durável da fila: `claude` True só os do Claude, False só
-        os do Codex (sempre do Python), None todos."""
+    async def _register_durable_terminals(self, *, owned):
+        """Registros de terminal do estado durável da fila: `owned` True só os de provedor que o Rust
+        atende, False só os do Python, None todos."""
         from app.pqueue import _queue_dir
         terminals = []
         for path in (_queue_dir() / "runtime").glob("*.json"):
@@ -697,7 +703,7 @@ class RuntimeCoordinator:
                 _registration_failed("runtime.registration_failed", path.stem, exc)
                 continue
             descriptor = state.get("runtime_state", {}).get("_binding")
-            if (claude is not None and descriptor and (descriptor.get("provider") == "claude") != claude):
+            if owned is not None and descriptor and self.rust_owns(descriptor.get("provider"), False) != owned:
                 continue
             if descriptor and not descriptor.get("headless") and descriptor.get("key") not in self.slots:
                 values = {**descriptor, "generation":state["generation"]}
@@ -766,9 +772,11 @@ class RuntimeCoordinator:
                 return True
         return False
 
-    def configure_transport(self, transport):
+    def configure_transport(self, transport, owns=None):
         if self.events_task is not None and not self.events_task.done():
             raise RuntimeError("leitor privado anterior ainda ativo")
+        if owns is not None:
+            self._owns = {(item["provider"], item["headless"]) for item in owns}
         self.transport, self.instance = transport, transport.instance
         self.loop = asyncio.get_running_loop()
         self.events_task = self.loop.create_task(self._events(transport, transport.instance))
@@ -1035,13 +1043,13 @@ class RuntimeCoordinator:
     def settle_before_queue(self, name):
         """Fila síncrona (thread) de sessão Claude espera o desfecho do Rust ANTES do portão: com o
         `slot.active` preso nessa espera, a passagem ao Rust, que espera o `active` zerar, nunca
-        acontece. Codex é sempre do Python; a escrita da reserva e a administração já passaram por ele."""
+        acontece. O que o Rust não atende é do Python; a escrita da reserva e a administração já passaram por ele."""
         if self.mode != "pending" and not self._settling or _mode_bypass.get() or self.loop is None:
             return
         slot = self.slots.get(self.names.get(name, ""))
         from app.runtime_terminal import _writer
         # Dentro da barreira (renomear, fechar) quem fecha o modo espera a mesma barreira.
-        if slot is None or slot.binding.provider != "claude" or _writer.get() is not None or self.in_lifecycle(slot):
+        if slot is None or not self.rust_owns(slot.binding.provider, slot.binding.headless) or _writer.get() is not None or self.in_lifecycle(slot):
             return
         try:
             if asyncio.get_running_loop() is self.loop:
@@ -1262,8 +1270,9 @@ class RuntimeCoordinator:
         a entrada pode estar na fila durável."""
         self.loop = asyncio.get_running_loop()
         owner = self.slots.get(self.names.get(name, ""))
-        if (self.mode == "pending" or self._settling) and (owner.binding.provider == "claude" if owner is not None
-                else not await asyncio.to_thread(_codex_session, name)):     # o Codex é sempre do Python
+        if (self.mode == "pending" or self._settling) and (
+                self.rust_owns(owner.binding.provider, owner.binding.headless) if owner is not None
+                else self.rust_owns("codex", True) or not await asyncio.to_thread(_codex_session, name)):
             await self.await_mode()
         if self.legacy is not None and self.managed_queue(name):
             slot = self.slot(name)
