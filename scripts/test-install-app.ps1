@@ -18,7 +18,7 @@ function Write-Host { param([Parameter(Position = 0)]$Object, $ForegroundColor, 
 function Read-Host { throw 'Read-Host chamado: o -App nao pode esperar teclado' }
 function Limpa { $script:saida.Clear() }
 
-foreach ($name in @('Nota', 'Ok', 'Falta', 'Erro', 'Pergunte-Mesmo', 'Pergunte', 'Eleva-E-Roda', 'Mark-Step')) {
+foreach ($name in @('Nota', 'Ok', 'Falta', 'Erro', 'Pergunte-Mesmo', 'Pergunte', 'Eleva-E-Roda', 'Mark-Step', 'Add-AppPending')) {
     $def = $ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)
     if (-not $def) { throw "Funcao ausente: $name" }
     . ([scriptblock]::Create($def.Extent.Text))
@@ -117,6 +117,7 @@ $script:psmuxSessoes = 2
 $App = $true
 foreach ($caso in @(@{ roda = $false; esperado = 0 }, @{ roda = $true; esperado = 1 })) {
     $ConsertarRoda = $caso.roda; $script:conptyCalls = 0; $script:faltaRodaPsmux = $false; Limpa
+    $script:pendencias = @(); $script:pendingCodes = @{}
     $script:psmuxConsole = 'perguntar'
     . ([scriptblock]::Create($askIf.Extent.Text))
     . ([scriptblock]::Create($runIf.Extent.Text))
@@ -164,6 +165,132 @@ if ($segurou) {
     [Console]::WriteLine('skip trava ocupada: ha uma instalacao de verdade rodando')
 }
 $mutex.Dispose()
+
+# --- Itens, codigos, pendencias e link ---
+foreach ($name in @('Mark-Item', 'Mark-ItemSince', 'Add-AppPending', 'Send-TailscaleLink', 'Policy-Locked', 'Instale')) {
+    $def = $ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)
+    if (-not $def) { throw "Funcao ausente: $name" }
+    . ([scriptblock]::Create($def.Extent.Text))
+}
+$App = $true; Limpa
+Mark-Item 'psmux' 'fila' 'psmux (multiplexador)'
+Assert ($script:saida[0] -eq '##HANGAR-ITEM## psmux fila psmux (multiplexador)') 'ITEM na sintaxe do contrato'
+$App = $false; Limpa; Mark-Item 'psmux' 'ok' 'psmux'
+Assert ($script:saida.Count -eq 0) 'sem -App: nenhum ITEM'
+$App = $true
+
+Limpa
+Send-TailscaleLink 'To authenticate, visit: https://login.tailscale.com/a/abc123'
+Send-TailscaleLink 'Success.'
+Assert (($script:saida -join '|') -eq '##HANGAR-LINK## tailscale-login https://login.tailscale.com/a/abc123') 'LINK do login sai so da linha com o link'
+
+$script:pendencias = @(); $script:pendingCodes = @{}
+Add-AppPending 'tailscale serve' 'tailscale-https'
+Assert (($script:pendencias -contains 'tailscale serve') -and $script:pendingCodes['tailscale serve'] -eq 'tailscale-https') 'pendencia guarda o codigo'
+Limpa; Mark-ItemSince 'servicos' 0 'inicio automatico'
+Assert ($script:saida[0] -eq '##HANGAR-ITEM## servicos pendente inicio automatico') 'parte que somou pendencia fica pendente'
+Limpa; Mark-ItemSince 'servicos' 1 'inicio automatico'
+Assert ($script:saida[0] -eq '##HANGAR-ITEM## servicos ok inicio automatico') 'parte sem pendencia nova fica ok'
+
+function Get-ExecutionPolicy { param($Scope) if ($Scope -eq 'MachinePolicy') { return 'AllSigned' } return 'Undefined' }
+Assert (Policy-Locked) 'regra da TI (AllSigned na maquina) conta como travada'
+function Get-ExecutionPolicy { param($Scope) return 'Undefined' }
+Assert (-not (Policy-Locked)) 'sem regra da TI nao esta travada'
+
+function Tem($cmd) { return $false }
+function Nativo { return 1 }
+function Atualiza-Path { }
+function Test-Internet { return $false }
+$SoChecar = $false; $Update = $false; $script:depsError = ''; $script:pendencias = @(); Limpa
+[void](Instale 'psmux (multiplexador)' 'psmux' 'marlocarlo.psmux' 'sem ele nao existe sessao')
+Assert ($script:depsError -eq 'sem-internet') 'Instale sem internet guarda sem-internet'
+$itens = @($script:saida | Where-Object { $_ -like '##HANGAR-ITEM## psmux *' })
+Assert (($itens -join '|') -eq '##HANGAR-ITEM## psmux fazendo psmux (multiplexador)|##HANGAR-ITEM## psmux falhou psmux (multiplexador)') 'Instale marca fazendo e falhou'
+$SoChecar = $true; Limpa
+[void](Instale 'uv' 'uv' 'astral-sh.uv' 'gerencia o venv do backend')
+Assert ($script:saida -contains '##HANGAR-ITEM## uv fila uv') 'no -SoChecar o que falta fica na fila'
+$SoChecar = $false
+
+$pare = $ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Pare' }, $true).Extent.Text
+$iErro = $pare.IndexOf('##HANGAR-ERRO##'); $iMsg = $pare.IndexOf('Erro $mensagem')
+Assert ($iErro -ge 0 -and $iErro -lt $iMsg) 'Pare imprime o codigo antes da mensagem'
+$falha = $ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Falha' }, $true).Extent.Text
+Assert ($falha.Contains('Write-Host "##HANGAR-FALHA## ${rotulo}: $motivo"')) '##HANGAR-FALHA## com o texto de sempre (atualizar.py)'
+Assert ($texto.Contains("Write-Host '##HANGAR-ERRO## sem-winget'")) 'sem winget sai com codigo'
+
+# --- Portao do 1/8: extra com codigo segue ate o fim; dependencia essencial para ---
+# Roda num processo filho: o portao e o fim chamam exit. Trechos reais do install.ps1, dubles no resto.
+function Get-Def($name) { $ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true).Extent.Text }
+function Get-If($cond, $contains) {
+    $ast.Find({ param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Clauses[0].Item1.Extent.Text -eq $cond -and $n.Extent.Text.Contains($contains) }, $true).Extent.Text
+}
+$gate1 = Get-If '$essenciais.Count -gt 0' 'faltam:'
+$gateEnd = Get-If '$pendencias.Count -gt 0' 'NAO terminou'
+$devModeIf = Get-If '$script:faltaDevMode' 'modo-desenvolvedor'
+$rodaFailIf = Get-If '$script:faltaRodaPsmux' 'roda do mouse'
+$iEss = $texto.IndexOf('$essenciais = @(')
+$essLine = $texto.Substring($iEss, $texto.IndexOf("`n", $iEss) - $iEss).TrimEnd("`r")
+Assert (-not (Get-Def 'Instale').Contains('Add-AppPending') -and -not (Get-Def 'Instale-ClaudeCode').Contains('Add-AppPending')) 'dependencia essencial do 1/8 nao ganha codigo de pendencia'
+$defs = (@('Nota', 'Ok', 'Falta', 'Erro', 'Titulo', 'Mark-Step', 'Mark-Item', 'Add-AppPending', 'Send-TailscaleLink', 'Instale', 'Loga-Tailscale', 'Pergunte-Mesmo') | ForEach-Object { Get-Def $_ }) -join "`n"
+$preamble = @'
+$ErrorActionPreference = 'Stop'
+$App = $true; $Sim = $false; $SoChecar = $false; $Update = $false; $script:Interativo = $false
+$script:pendencias = @(); $script:pendingCodes = @{}; $script:falhasMarcadas = @(); $script:depsError = ''
+$script:currentStep = ''; $script:finalState = 'falhou'
+function Pausa-Log { }
+function Pausa-Fim { }
+function FakePowerShell { $global:LASTEXITCODE = 1 }
+$PowerShellExe = 'FakePowerShell'; $raiz = 'C:\hangar-falso'; $script:psmuxSessoes = 2
+'@
+function Run-Gate($caso, $corpo) {
+    $child = Join-Path $env:TEMP ("hangar-test-" + [guid]::NewGuid().ToString('N') + '.ps1')
+    $out = "$child.txt"
+    $script1 = $preamble + "`n" + $defs + "`n" + $caso + "`ntry {`nMark-Step 'preparar' 'fazendo'`n" + $corpo + "`n" + $essLine + "`n" + $gate1 + "`n" +
+        $devModeIf + "`n" + $rodaFailIf + "`nWrite-Host 'PASSOU-PORTAO'`n" + $gateEnd + "`n`$script:finalState = 'ok'`n} finally {`n" +
+        "if (`$script:finalState -eq 'falhou' -and `$script:currentStep) { Write-Host `"##HANGAR-PASSO## `$(`$script:currentStep) falhou`" }`n" +
+        "Write-Host `"##HANGAR-FIM## `$(`$script:finalState)`"`n}`n"
+    [IO.File]::WriteAllText($child, $script1, (New-Object Text.UTF8Encoding $true))
+    try {
+        & cmd /c "powershell -NoProfile -ExecutionPolicy Bypass -File `"$child`" > `"$out`" 2>&1 < NUL"
+        return @(Get-Content $out | Where-Object { $_.Trim() })
+    } finally { Remove-Item $child, $out -ErrorAction SilentlyContinue }
+}
+$askIf = $ast.Find({ param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Clauses[0].Item1.Extent.Text -eq "`$script:psmuxConsole -eq 'perguntar'" }, $true).Extent.Text
+$runIf = $ast.Find({ param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Clauses[0].Item1.Extent.Text -eq "`$script:psmuxConsole -eq 'pular'" }, $true).Extent.Text
+$rodaCorpo = "`$script:psmuxConsole = 'perguntar'`n" + $askIf + "`n" + $runIf
+
+# (1) roda do mouse
+$l = Run-Gate '$ConsertarRoda = $false' $rodaCorpo
+Assert ($l -contains '##HANGAR-PENDENCIA## roda-do-mouse roda do mouse (psmux)') '-App sem -ConsertarRoda: pendencia roda-do-mouse'
+Assert (($l -contains 'PASSOU-PORTAO') -and $l[-1] -eq '##HANGAR-FIM## pendente') "-App sem -ConsertarRoda: nao para no 1/8 e termina pendente (ultima: $($l[-1]))"
+$l = Run-Gate '$ConsertarRoda = $true' $rodaCorpo
+Assert (-not @($l | Where-Object { $_ -like '##HANGAR-PENDENCIA## roda-do-mouse *' }).Count) '-App -ConsertarRoda: sem pendencia roda-do-mouse'
+
+# (2) login da Tailscale que nao conclui no 1/8 (o relogio pula 10 min a cada leitura)
+$tsCaso = @'
+$script:relogio = [datetime]'2026-01-01'
+function Get-Date { $script:relogio = $script:relogio.AddMinutes(10); return $script:relogio }
+function Start-Job { param($ScriptBlock) return [pscustomobject]@{ State = 'Running' } }
+function Receive-Job { param($Job) 'To authenticate, visit: https://login.tailscale.com/a/teste1' }
+function Stop-Job { param($Job, $ErrorAction) }
+function Remove-Job { param($Job, [switch]$Force, $ErrorAction) }
+function Start-Sleep { param($Milliseconds) }
+'@
+$l = Run-Gate $tsCaso 'Loga-Tailscale'
+Assert ($l -contains '##HANGAR-LINK## tailscale-login https://login.tailscale.com/a/teste1') 'login da Tailscale: LINK sai'
+Assert ($l -contains '##HANGAR-PENDENCIA## tailscale-login login do Tailscale') 'login da Tailscale sem concluir: pendencia tailscale-login'
+Assert (($l -contains 'PASSOU-PORTAO') -and $l[-1] -eq '##HANGAR-FIM## pendente') "login da Tailscale sem concluir: nao para no 1/8 (ultima: $($l[-1]))"
+
+# (3) dependencia essencial faltando continua parando no 1/8
+$depCaso = @'
+function Tem($cmd) { return $false }
+function Nativo { return 1 }
+function Atualiza-Path { }
+function Test-Internet { return $false }
+'@
+$l = Run-Gate $depCaso "[void](Instale 'psmux (multiplexador)' 'psmux' 'marlocarlo.psmux' 'sem ele nao existe sessao')"
+Assert (-not ($l -contains 'PASSOU-PORTAO') -and ($l -contains '##HANGAR-ERRO## sem-internet')) 'dependencia essencial faltando: para no 1/8 com o codigo'
+Assert ($l[-2] -eq '##HANGAR-PASSO## preparar falhou' -and $l[-1] -eq '##HANGAR-FIM## falhou') "dependencia essencial faltando: FIM falhou (ultima: $($l[-1]))"
 
 # --- fim dos casos ---
 if ($script:falhas) { [Console]::WriteLine("$($script:falhas) falha(s)"); exit 1 }
