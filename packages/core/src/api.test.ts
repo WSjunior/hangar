@@ -1085,6 +1085,44 @@ it.each([404, 405])('plugin/show num servidor sem a rota rejeita com status %i, 
   expect(isMissingRoute(erro)).toBe(true);
 });
 
+describe('servidor de antes de o pedido levar o mod', () => {
+  const corpos = (fetchMock: { mock: { calls: unknown[][] } }) =>
+    fetchMock.mock.calls.map(([url, init]) => [String(url).replace(/^.*\/plugin\//, ''), JSON.parse(String((init as RequestInit).body))]);
+
+  it.each([undefined, server])('press e input recusados com 422 repetem uma vez sem o mod (servidor %#)', async (s) => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) =>
+      String((init as RequestInit).body).includes('"plugin"')
+        ? new Response(JSON.stringify({ detail: [{ type: 'extra_forbidden' }] }), { status: 422 })
+        : new Response('{"ok":true}'));
+    expect(await pressPluginButton('sessao', 'above-prompt', { plugin: 'pm-mock', key: 'abrir' }, s)).toEqual({ ok: true });
+    expect(await inputPluginField('sessao', 'painel', CAMPO, 'change', 'a', s)).toEqual({ ok: true });
+    expect(corpos(fetchMock)).toEqual([
+      ['press', { site: 'above-prompt', plugin: 'pm-mock', key: 'abrir' }], ['press', { site: 'above-prompt', key: 'abrir' }],
+      ['input', { site: 'painel', plugin: CAMPO.plugin, key: CAMPO.key, kind: 'change', value: 'a' }],
+      ['input', { site: 'painel', key: CAMPO.key, kind: 'change', value: 'a' }]]);
+  });
+
+  it('a segunda recusa sobe ao app, sem outra tentativa', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{"detail":"x"}', { status: 422 }));
+    const erro = await pressPluginButton('sessao', 'above-prompt', { plugin: 'pm-mock', key: 'abrir' }, server).catch((e: unknown) => e);
+    expect(erro).toMatchObject({ status: 422 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([404, 405])('close sem a rota (%i) fecha pelo press com a key reservada', async (status) => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) =>
+      String(url).endsWith('/plugin/close') ? new Response('{"detail":"Not Found"}', { status }) : new Response('{"ok":true}'));
+    expect(await closePluginPane('sessao', 'painel', server)).toEqual({ ok: true });
+    expect(corpos(fetchMock)).toEqual([['close', { site: 'painel' }], ['press', { site: 'painel', key: '__close__' }]]);
+  });
+
+  it('recusa do close que não é falta da rota não vira press', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{"detail":"x"}', { status: 409 }));
+    await expect(closePluginPane('sessao', 'painel', server)).rejects.toMatchObject({ status: 409 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
 it('plugin/press, plugin/close, plugin/show e plugin/input com servidor explícito levam o código do servidor no erro', async () => {
   const envelope = { ok: false, error_code: 'erro_mod_guarda_indisponivel', message: 'motivo',
     detail: { code: 'erro_mod_guarda_indisponivel', params: { motivo: 'motivo' }, msg: 'motivo — erro_mod_guarda_indisponivel' } };

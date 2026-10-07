@@ -180,6 +180,21 @@ pub fn input_request(source: Option<UiSource>, read_only: bool, site: &str, fiel
     accepts_typing(source, read_only).then(|| json!({"site": site, "plugin": field.plugin, "key": field.key, "kind": kind, "value": value}))
 }
 
+/// A nova tentativa com um servidor de antes destas rotas: sem a rota `close` (404 ou 405), o `✕` vai pelo `press` com
+/// a `key` reservada; com o corpo estrito que recusa o mod (422), `press` e `input` vão uma vez sem ele, e o servidor
+/// acha o mod pela `key`, como antes. `None`: a falha é do pedido, não da versão.
+pub fn older_server_retry(action: &'static str, body: &Value, status: Option<u16>) -> Option<(&'static str, Value)> {
+    match (action, status) {
+        ("close", Some(404 | 405)) => Some(("press", json!({"site": body["site"], "key": "__close__"}))),
+        ("press" | "input", Some(422)) if body.get("plugin").is_some() => {
+            let mut older = body.clone();
+            older.as_object_mut()?.remove("plugin");
+            Some((action, older))
+        }
+        _ => None,
+    }
+}
+
 /// O que o app passa para desenhar a faixa e os painéis: quem atende o clique e a troca de aba, a largura da faixa
 /// (`columns`) e o hover: quem avisa o app do ponteiro e os trechos com o ponteiro em cima. Sem `press`, botão é só
 /// rótulo e não há `✕`. `columns` é a largura, em colunas, para a qual a faixa foi desenhada.
@@ -955,7 +970,7 @@ fn unmark(text: &str) -> String {
 mod tests {
     // Importação explícita: `super::*` traz o `test` do gpui_kit, e o `#[test]` passaria a ser o dele.
     use super::{accepts_typing, active_pane, box_background, button_control, cell_color, color, field_id, fields, FieldSync, fills_place, follow_local, follows_server,
-        hover_props, input_kind, input_request, is_empty, keep_hovered, keyless_text, Outbox, pane_ids, tab_scroll_target, TabScroll, plain_deep, raster_row, raster_runs, safe_href,
+        hover_props, input_kind, input_request, is_empty, older_server_retry, keep_hovered, keyless_text, Outbox, pane_ids, tab_scroll_target, TabScroll, plain_deep, raster_row, raster_runs, safe_href,
         scope_active, surfaces, text_row, toast, wants_hover, Control, FieldSpec, Surfaces, Toast, UiSource};
     use gpui_kit::component::input::InputEvent;
     use gpui_kit::{rgb, Hsla};
@@ -1232,6 +1247,23 @@ mod tests {
         assert_eq!(keyless_text(&json!({"placeholder": "p", "value": "v"})), ("v".to_owned(), false));
         assert_eq!(keyless_text(&json!({"placeholder": "p", "value": ""})), ("p".to_owned(), true));
         assert_eq!(keyless_text(&json!({})), (String::new(), true));
+    }
+
+    #[test]
+    fn an_older_server_gets_one_retry_in_its_own_contract() {
+        let press = json!({"site": "faixa", "plugin": "m", "key": "k"});
+        assert_eq!(older_server_retry("press", &press, Some(422)), Some(("press", json!({"site": "faixa", "key": "k"}))));
+        let input = json!({"site": "p", "plugin": "m", "key": "k", "kind": "change", "value": "a"});
+        assert_eq!(older_server_retry("input", &input, Some(422)), Some(("input", json!({"site": "p", "key": "k", "kind": "change", "value": "a"}))));
+        for status in [404, 405] {
+            assert_eq!(older_server_retry("close", &json!({"site": "p"}), Some(status)), Some(("press", json!({"site": "p", "key": "__close__"}))));
+        }
+        // A segunda tentativa já vai sem o mod, e uma recusa de verdade (409, sem resposta) não é versão.
+        assert_eq!(older_server_retry("press", &json!({"site": "faixa", "key": "k"}), Some(422)), None);
+        assert_eq!(older_server_retry("press", &press, Some(409)), None);
+        assert_eq!(older_server_retry("close", &json!({"site": "p"}), Some(409)), None);
+        assert_eq!(older_server_retry("show", &json!({"site": "p"}), Some(404)), None);
+        assert_eq!(older_server_retry("press", &press, None), None);
     }
 
     #[test]

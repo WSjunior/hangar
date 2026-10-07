@@ -15,7 +15,7 @@ import {
 import type { CotaContaResumo } from './cotaResumo';
 import type { Shortcut, ProjectShortcut, ProjectShortcuts } from './shortcuts';
 import type { UsoFiltros, UsoReport } from './uso';
-import type { PluginControl } from './pluginUi';
+import { isMissingRoute, type PluginControl } from './pluginUi';
 import type { ConfigSyncItem, ConfigSyncManifest, ConfigSyncProgress, ConfigSyncReport } from './configSync';
 import type {
   Atualizacao,
@@ -2621,10 +2621,25 @@ export async function interrupt(name: string, clear = false, server?: Server): P
 export async function pressPluginButton(
   name: string, site: string, button: PluginControl, server?: Server,
 ): Promise<{ ok: boolean; copied?: string; opened?: string }> {
+  return retryWithoutMod((withMod) => postPluginPress(name, withMod ? { site, ...button } : { site, key: button.key }, server));
+}
+
+function postPluginPress(name: string, body: Record<string, string>, server?: Server): Promise<{ ok: boolean; copied?: string; opened?: string }> {
   const path = `/api/sessions/${encodeURIComponent(name)}/plugin/press`;
-  const init = { method: 'POST', body: JSON.stringify({ site, ...button }) };
+  const init = { method: 'POST', body: JSON.stringify(body) };
   return server ? apiFetchForServer<{ ok: boolean; copied?: string; opened?: string }>(server, path, init, 8000, true)
                 : apiFetch<{ ok: boolean; copied?: string; opened?: string }>(path, init);
+}
+
+/** Servidor de antes de o pedido levar o mod recusa o campo desconhecido com 422: repete uma vez sem ele, e
+ *  o servidor acha o mod pela `key`, como antes. */
+async function retryWithoutMod<T>(send: (withMod: boolean) => Promise<T>): Promise<T> {
+  try {
+    return await send(true);
+  } catch (err) {
+    if ((err as { status?: unknown } | null)?.status !== 422) throw err;
+    return send(false);
+  }
 }
 
 /** Rota de mod que só fala de um painel (`{ site }`). */
@@ -2636,7 +2651,13 @@ function postPluginPane(action: 'close' | 'show', name: string, site: string, se
 
 /** Fecha o painel de mod `site`, como o ✕ do cabeçalho dele (`plugin/close`). */
 export async function closePluginPane(name: string, site: string, server?: Server): Promise<{ ok: boolean }> {
-  return postPluginPane('close', name, site, server);
+  try {
+    return await postPluginPane('close', name, site, server);
+  } catch (err) {
+    // Servidor de antes da rota `close`: o ✕ ia pelo `press` com a `key` reservada.
+    if (!isMissingRoute(err)) throw err;
+    return postPluginPress(name, { site, key: '__close__' }, server);
+  }
 }
 
 /** Traz um painel de mod para a frente (`plugin/show`). Servidor sem a rota responde 404 ou 405 (`isMissingRoute`). */
@@ -2653,9 +2674,11 @@ export async function inputPluginField(
   name: string, site: string, field: PluginControl, kind: PluginInputKind, value: string, server?: Server,
 ): Promise<{ ok: boolean }> {
   const path = `/api/sessions/${encodeURIComponent(name)}/plugin/input`;
-  const init = { method: 'POST', body: JSON.stringify({ site, plugin: field.plugin, key: field.key, kind, value }) };
-  return server ? apiFetchForServer<{ ok: boolean }>(server, path, init, 8000, true)
-                : apiFetch<{ ok: boolean }>(path, { ...init, signal: AbortSignal.timeout(8000) });
+  return retryWithoutMod((withMod) => {
+    const init = { method: 'POST', body: JSON.stringify(withMod ? { site, plugin: field.plugin, key: field.key, kind, value } : { site, key: field.key, kind, value }) };
+    return server ? apiFetchForServer<{ ok: boolean }>(server, path, init, 8000, true)
+                  : apiFetch<{ ok: boolean }>(path, { ...init, signal: AbortSignal.timeout(8000) });
+  });
 }
 
 // Pergunta lateral (/btw do Claude Code): o backend dirige o overlay da TUI e devolve a resposta.

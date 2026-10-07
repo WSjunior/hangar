@@ -5767,7 +5767,11 @@ impl Hangar {
         let (Some(api), Some(session)) = (self.session_api(), self.selected.clone()) else { return };
         let (connection, selection, tx) = (self.connection, self.selection, self.tx.clone());
         self.runtime.spawn(async move {
-            let result = api.act(&session.name, &["plugin", action], Some(body), false, 10).await;
+            let mut result = api.act(&session.name, &["plugin", action], Some(body.clone()), false, 10).await;
+            if let Err(error) = &result
+                && let Some((retry, older)) = crate::plugin_ui::older_server_retry(action, &body, error.status) {
+                result = api.act(&session.name, &["plugin", retry], Some(older), false, 10).await;
+            }
             let _ = tx.send(Envelope { connection, selection: Some(selection), payload: wrap(result) }).await;
         });
     }

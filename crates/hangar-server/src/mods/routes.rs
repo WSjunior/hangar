@@ -51,10 +51,10 @@ const EFFECT_WAIT: Duration = Duration::from_millis(300);
 const VALUE_MAX: usize = 16384;
 const TRANSFER_REASON: &str = "o backend não confirmou que a sessão está livre da troca de agente";
 
-/// `plugin`: o mod do botão; a `key` só é única dentro dele.
+/// `plugin`: o mod do controle; a `key` só é única dentro dele. O app de antes desta versão não o manda.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PressBody { site: String, plugin: String, key: String }
+struct PressBody { site: String, #[serde(default)] plugin: Option<String>, key: String }
 
 /// Corpo de `show` e `close`: só o painel.
 #[derive(Deserialize)]
@@ -63,7 +63,7 @@ struct SiteBody { site: String }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct InputBody { site: String, plugin: String, key: String, kind: String, value: String }
+struct InputBody { site: String, #[serde(default)] plugin: Option<String>, key: String, kind: String, value: String }
 
 fn refused(headers: &HeaderMap, error: &ModsError) -> Response {
     reply(Some(headers), StatusCode::CONFLICT, json!({"detail": error.detail()}))
@@ -168,10 +168,23 @@ pub async fn press(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
     let deadline = Instant::now() + REQUEST_BUDGET;
     let (name, headers, raw) = match owned(&st, peer, path, req, None).await { Ok(parts) => parts, Err(response) => return *response };
     let request: PressBody = match body(&headers, raw).await { Ok(request) => request, Err(response) => return *response };
-    if !fits(&request.site, 64) || !fits(&request.plugin, PLUGIN_MAX) || !fits(&request.key, 256) {
+    if !fits(&request.site, 64) || !plugin_fits(request.plugin.as_deref()) || !fits(&request.key, 256) {
         return invalid(Some(&headers));
     }
-    run(&st, &headers, &name, ModsCall::Press { site: request.site, plugin: request.plugin, key: request.key }, deadline).await
+    // O app de antes da rota `close` fechava o painel pelo `press` com a `key` reservada.
+    if request.plugin.is_none() && request.key == CLOSE_KEY {
+        return run(&st, &headers, &name, ModsCall::Close { site: request.site }, deadline).await;
+    }
+    let Some(plugin) = plugin_or_only(&st, &name, &request.site, request.plugin, &request.key, "Button")
+        else { return refused(&headers, &missing()) };
+    run(&st, &headers, &name, ModsCall::Press { site: request.site, plugin, key: request.key }, deadline).await
+}
+
+fn plugin_fits(plugin: Option<&str>) -> bool { plugin.is_none_or(|plugin| fits(plugin, PLUGIN_MAX)) }
+
+/// O mod do pedido; sem ele (app de antes desta versão), o único mod com a `key` no lugar, como antes.
+fn plugin_or_only(st: &AppState, name: &str, site: &str, plugin: Option<String>, key: &str, kind: &str) -> Option<String> {
+    plugin.or_else(|| st.mods.plugin_of(name, site, key, &[kind]))
 }
 
 /// Fechar o painel `site` (o `✕` do cabeçalho).
@@ -209,10 +222,12 @@ pub async fn input(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
         return refused(&headers, &no_typing());
     }
     let request: InputBody = match body(&headers, raw).await { Ok(request) => request, Err(response) => return *response };
-    if !fits(&request.site, 64) || !fits(&request.plugin, PLUGIN_MAX) || !fits(&request.key, 256) || !matches!(request.kind.as_str(), "change" | "submit")
+    if !fits(&request.site, 64) || !plugin_fits(request.plugin.as_deref()) || !fits(&request.key, 256) || !matches!(request.kind.as_str(), "change" | "submit")
         || request.value.chars().count() > VALUE_MAX {
         return invalid(Some(&headers));
     }
-    let call = ModsCall::Input { site: request.site, plugin: request.plugin, key: request.key, submit: request.kind == "submit", value: request.value };
+    let Some(plugin) = plugin_or_only(&st, &name, &request.site, request.plugin, &request.key, "Input")
+        else { return refused(&headers, &missing()) };
+    let call = ModsCall::Input { site: request.site, plugin, key: request.key, submit: request.kind == "submit", value: request.value };
     run(&st, &headers, &name, call, deadline).await
 }

@@ -15,6 +15,8 @@ from app.plugin_screen import anchor_row, band_start, find_label, prompt_top
 from app.state import run_tmux
 
 BAND_SITE = "above-prompt"
+# A `key` com que o app de antes da rota `close` fecha o painel pelo `press`.
+CLOSE_KEY = "__close__"
 CLOSE_LABEL = "✕"
 CONFIRM_S = 2.0
 # O `onPress` do mod costuma copiar ou abrir sem `await`: o efeito pode chegar logo depois do press.
@@ -29,8 +31,12 @@ class PressRefused(Exception):
         self.detail = erro(code, msg, **params)
 
 
-def button_label(tree, key: str, plugin: str) -> str | None:
-    """O rótulo do `Button` de `key` do mod `plugin`: `label`, ou o texto dos filhos."""
+def button_label(tree, key: str, plugin: str | None) -> str | None:
+    """O rótulo do `Button` de `key` do mod `plugin`: `label`, ou o texto dos filhos.
+
+    Sem o mod (app de antes desta versão), vale o único `Button` com a `key`: em mais de um mod, não há
+    como saber de qual é, e nenhum é acionado, como o Rust."""
+    rotulos = []
     pilha = [tree]
     while pilha:
         no = pilha.pop()
@@ -38,11 +44,14 @@ def button_label(tree, key: str, plugin: str) -> str | None:
             continue
         props = no.get("props") or {}
         if (no.get("type") == "Button" and props.get("key") == key
-                and (no.get("press") or {}).get("plugin") == plugin):
+                and (plugin is None or (no.get("press") or {}).get("plugin") == plugin)):
             texto = props.get("label") or "".join(c for c in no.get("children") or [] if isinstance(c, str))
-            return texto.strip() or None
+            if plugin is not None:
+                return texto.strip() or None
+            rotulos.append(texto.strip() or None)
+            continue
         pilha.extend(no.get("children") or [])
-    return None
+    return rotulos[0] if len(rotulos) == 1 else None
 
 
 def _tmux_format(name: str, fmt: str) -> str:
@@ -144,7 +153,7 @@ async def close(name: str, site: str) -> dict:
         return {"ok": True}
 
 
-async def press(name: str, site: str, key: str, plugin: str) -> dict:
+async def press(name: str, site: str, key: str, plugin: str | None) -> dict:
     async with _locks.setdefault(name, asyncio.Lock()):
         tree, placement = _site(name, site)
         rotulo = button_label(tree, key, plugin)

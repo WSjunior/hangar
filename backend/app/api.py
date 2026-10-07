@@ -6038,8 +6038,8 @@ def select_submit(name: str):
 
 class PluginPressBody(_StrictBody):
     site: str = Field(min_length=1, max_length=64)
-    # O mod do botão: a `key` só é única dentro de um mod.
-    plugin: str = Field(min_length=1, max_length=256)
+    # O mod do botão: a `key` só é única dentro de um mod. O app de antes desta versão não o manda.
+    plugin: str | None = Field(default=None, min_length=1, max_length=256)
     key: str = Field(min_length=1, max_length=256)
 
 
@@ -6078,6 +6078,9 @@ def _recusa_convidado_no_terminal_do_rust(name: str, request: Request) -> None:
 async def plugin_press(name: str, body: PluginPressBody, request: Request):
     """Clique num botão que um mod desenhou na faixa ou num painel, pedido pelo app."""
     from app import plugin_click
+    # O app de antes da rota `close` fechava o painel pelo `press` com a `key` reservada.
+    if body.plugin is None and body.key == plugin_click.CLOSE_KEY:
+        return await _acao_de_mod(request, plugin_click.close(name, body.site))
     return await _acao_de_mod(request, plugin_click.press(name, body.site, body.key, body.plugin))
 
 

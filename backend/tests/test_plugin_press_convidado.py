@@ -155,12 +155,14 @@ def test_refusal_under_the_barrier_reaches_the_app_as_the_guest_code(env, monkey
     assert marks == [True, True, False]
 
 
-def test_the_button_comes_with_its_mod(env):
-    # A `key` só é única dentro de um mod: sem ele o pedido não diz qual botão é.
+def test_an_app_without_the_mod_is_still_served(env):
+    # O app de antes desta versão não manda o mod: o clique segue sem ele (o `plugin_click` acha o único
+    # botão com a `key`), e o `press` com `__close__` continua fechando o painel.
     _, _, pressed = env
-    for body in ({"site": "above-prompt", "key": "mr-a"}, {"site": "above-prompt", "key": "mr-a", "plugin": ""}):
-        assert _press(OWNER, body=body).status_code == 422
-    assert pressed == []
+    assert _press(OWNER, body={"site": "above-prompt", "key": "mr-a", "plugin": ""}).status_code == 422
+    assert _press(OWNER, body={"site": "above-prompt", "key": "mr-a"}).status_code == 200
+    assert _press(OWNER, body={"site": "pm-mock-mr", "key": "__close__"}).status_code == 200
+    assert pressed == [("t", "above-prompt", "mr-a", None), ("close", "t", "pm-mock-mr")]
 
 
 def test_closing_a_pane_has_its_own_route_and_the_same_guest_refusal(env, tmp_path):

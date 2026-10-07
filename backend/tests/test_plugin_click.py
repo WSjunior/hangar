@@ -54,6 +54,9 @@ def test_rotulo_e_o_do_botao_do_mod_pedido():
     assert pc.button_label(dois, "k", "outro") == "do outro"
     assert pc.button_label(dois, "k", "um") == "do um"
     assert pc.button_label(dois, "k", "terceiro") is None
+    # Sem o mod (app de antes desta versão): a `key` em dois mods não diz qual é; a de um só, sim.
+    assert pc.button_label(dois, "k", None) is None
+    assert pc.button_label(PAINEL, "cp-1", None) == "[ copiar link ]"
 
 
 @pytest.mark.asyncio

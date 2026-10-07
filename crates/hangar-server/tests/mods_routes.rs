@@ -211,12 +211,10 @@ async fn show_and_input_validate_and_answer() {
                 json!({"site": "p", "plugin": "vitrine", "key": "k", "kind": "change", "value": "x".repeat(16385)}),
                 json!({"site": "p", "plugin": "vitrine", "key": "k", "kind": "change", "value": "", "extra": 1}),
                 json!({"site": "", "plugin": "vitrine", "key": "k", "kind": "change", "value": ""}),
-                json!({"site": "p", "key": "k", "kind": "change", "value": ""}),
                 json!({"site": "p", "plugin": "", "key": "k", "kind": "change", "value": ""})] {
         assert_eq!(post(server, "s", "input", bad, Some(OWNER)).await.0, 422);
     }
-    // O botão vem sempre com o mod que o desenhou; fechar o painel tem rota própria, só com o painel.
-    for bad in [json!({"site": "p", "key": "k"}), json!({"site": "p", "plugin": "", "key": "k"}), json!({"site": "p", "key": "__close__"})] {
+    for bad in [json!({"site": "p", "plugin": "", "key": "k"}), json!({"site": "p", "key": "k", "extra": 1})] {
         assert_eq!(post(server, "s", "press", bad, Some(OWNER)).await.0, 422);
     }
     for bad in [json!({"site": ""}), json!({"site": "p", "key": "k"})] {
@@ -227,6 +225,27 @@ async fn show_and_input_validate_and_answer() {
     assert_eq!(*link.calls.lock().unwrap(), vec![
         ModsCall::Show { site: "painel".into() },
         ModsCall::Input { site: "painel".into(), plugin: "vitrine".into(), key: "V18-campo".into(), submit: true, value: "olá".into() }]);
+}
+
+#[tokio::test]
+async fn an_app_without_the_mod_is_still_served() {
+    // O app de antes desta versão não manda o mod: o servidor acha o único mod com a `key` no lugar, recusa a
+    // `key` de dois mods como antes, e o `press` com `__close__` continua fechando o painel.
+    let (_python, server, mods, link) = setup(FakeLink::default()).await;
+    let button = |key: &str, plugin: &str| json!({"type": "Button", "props": {"key": key, "label": key}, "press": {"plugin": plugin, "handle": 1}});
+    let field = |key: &str, plugin: &str| json!({"type": "Input", "props": {"key": key}, "press": {"plugin": plugin, "handle": 2}});
+    mods.publish_ui("s", 1, json!({"above": {"type": "Box", "children": [button("so-um", "vitrine"), button("dois", "vitrine"), button("dois", "outro")]},
+        "panes": [{"id": "painel", "tree": {"type": "Box", "children": [field("campo", "vitrine")]}}],
+        "shown_id": "painel", "columns": 110, "source": "surface"}));
+    assert_eq!(post(server, "s", "press", json!({"site": "above-prompt", "key": "so-um"}), Some(OWNER)).await, (200, json!({"ok": true})));
+    let (status, body) = post(server, "s", "press", json!({"site": "above-prompt", "key": "dois"}), Some(OWNER)).await;
+    assert_eq!((status, body["detail"]["code"].as_str()), (409, Some("erro_mod_botao_inexistente")));
+    assert_eq!(post(server, "s", "press", json!({"site": "painel", "key": "__close__"}), Some(OWNER)).await.0, 200);
+    assert_eq!(post(server, "s", "input", json!({"site": "painel", "key": "campo", "kind": "change", "value": "a"}), Some(OWNER)).await.0, 200);
+    assert_eq!(*link.calls.lock().unwrap(), vec![
+        ModsCall::Press { site: "above-prompt".into(), plugin: "vitrine".into(), key: "so-um".into() },
+        ModsCall::Close { site: "painel".into() },
+        ModsCall::Input { site: "painel".into(), plugin: "vitrine".into(), key: "campo".into(), submit: false, value: "a".into() }]);
 }
 
 #[tokio::test]

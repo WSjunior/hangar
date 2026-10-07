@@ -1883,18 +1883,23 @@ mod e `key`, com e sem terminal. Medido no Claude Code 2.1.292: a árvore que o 
 plugin do Hangar já traz `press: {plugin, handle}` em cada botão, então o clique pela tela filtra
 o rótulo pelo mod como a superfície remota filtra o `handle`.
 
-- `plugin/press` e `plugin/input` levam `plugin` sempre; sem ele, a rota responde 422, no Rust e no
-  Python. Fechar painel (o `✕`) tem rota própria, `plugin/close` com só o `site`, em vez da `key`
-  reservada `__close__` no `press`: era ela que deixava o mod opcional no clique. `plugin/show` não
-  muda: o id do painel já é único.
+- Os apps mandam `plugin` em `plugin/press` e `plugin/input`. Fechar painel (o `✕`) tem rota
+  própria, `plugin/close` com só o `site`, em vez da `key` reservada `__close__` no `press`.
+  `plugin/show` não muda: o id do painel já é único.
+- Ponte entre versões, nos dois sentidos. Servidor novo, app velho: sem `plugin`, o Rust e o Python
+  acham o único mod com a `key` no lugar, como antes, e recusam a `key` de mais de um mod
+  (`erro_mod_botao_inexistente`); `press` com `__close__` e sem `plugin` continua fechando o painel.
+  App novo, servidor velho: `plugin/close` com 404/405 vira `press` com `__close__`, e `press`/`input`
+  com 422 (o corpo estrito recusa o campo novo) vão de novo, uma vez, sem `plugin`.
 - Controle sem `press.plugin` (ou sem `key`) é só rótulo nos apps: não há como o servidor achá-lo.
 - O campo do app (`Input`) é identificado por lugar, mod e `key`, no web e no nativo. Medido no
   2.1.292: o engine recusa a faixa inteira quando dois mods desenham `Input` com a mesma `key` no
   mesmo lugar ("Input "campo" is drawn twice; each takes its own key") e desenha a dele; dois
   `Button` com a mesma `key` passam. O mod no `input` segue o do `press`, e não depende dessa recusa.
-- O plugin do Hangar manda o mod no `press-start` e no `pressed`, e o servidor só casa o press com
-  o clique do mesmo mod. Sem o campo (plugin já carregado numa sessão viva antes desta versão), o
-  casamento continua por lugar e `key`.
+- O plugin do Hangar manda o mod no `press-start`, no `pressed` e no `focused`, e o servidor só casa
+  o press, e confirma o foco do clique pelo teclado, no mod pedido. Sem o campo (plugin já carregado
+  numa sessão viva antes desta versão), o casamento continua por lugar e `key`, e o foco sem mod
+  numa `key` de mais de um mod no lugar recusa o clique, sem `Enter`.
 - O mesmo mod com a mesma `key` duas vezes no lugar continua recusado: não há como saber qual.
 
 ### Aviso de mod medido (04/10/2026)
