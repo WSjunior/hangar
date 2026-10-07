@@ -75,11 +75,15 @@ Saída publicada (texto JSON no `tool_result`, que é o que os apps leem):
 Saída de rascunho:
 
 ```json
-{"draft": {"id": "<uuid>", "url": "http://.../api/sessions/<s>/pages/<id>?token=...",
+{"draft": {"id": "<uuid>", "url": "/api/sessions/<s>/pages/<id>",
            "shot": "/home/.../.hangar/paginas/<chave>/<id>.dark.728.png",
            "heights": {...}, "console": [{"level": "error", "text": "..."}],
            "missing_images": ["/abs/x.png"], "browser": "ok"}}
 ```
+
+A `url` é relativa e nunca leva o token: o resultado da tool fica no transcript, que o histórico e
+o convidado de uma sessão compartilhada leem. O `browser_open` completa base e token do lado do
+servidor.
 
 `browser` é `ok`, `ausente` (sem Chromium no servidor: sem print, sem altura, sem console) ou
 `falhou` (com o motivo). Rascunho não gera cartão na conversa: o resultado não tem `hangar_page`.
@@ -116,12 +120,13 @@ tema, e as duas formas de conferir.
 
 - Cada pasta guarda, num arquivo `jsonl`, o caminho do transcript da sessão no momento da
   publicação (campo `jsonl` do `info` interno).
-- Um mecanismo só, a varredura: a cada rodada do produtor da lista (`list/bridge.rs`, ao lado do
-  `prune_gone`), pasta cujo `jsonl` não aparece em nenhuma linha viva há 60 s é apagada. Cobre
-  fechar pelo app, sessão morta por fora, `/clear` (transcript novo) e backend reiniciado com
-  sessões já mortas. Os 60 s evitam apagar por uma rodada em que a linha sumiu (pane ilegível).
-- Sem lista aberta o produtor não roda; a varredura também roda uma vez na subida do servidor e
-  a cada publicação, para não depender de alguém olhar a lista.
+- Um mecanismo só, a varredura: a rodada da lista (`list/bridge.rs`, ao lado do `prune_gone`)
+  publica o conjunto de transcripts vivos; uma tarefa do servidor, a cada 30 s e fora da thread
+  async, apaga a pasta cujo `jsonl` não está nesse conjunto há 60 s. Cobre fechar pelo app, sessão
+  morta por fora, `/clear` (transcript novo) e backend reiniciado com sessões já mortas.
+- Conjunto incerto não apaga nada: rodada em que os fatos falharam, linha com `jsonl` ainda não
+  resolvido ou lista nunca aberta pulam a varredura. Caminhos comparados já canonicalizados
+  (`~/.claude-<conta>` é link do `~/.claude`).
 - Mensagem antiga que aponta para página apagada mostra o estado "página expirou" nos apps (404 da
   rota), nunca erro genérico.
 
@@ -130,7 +135,7 @@ tema, e as duas formas de conferir.
 | rota | quem | o que faz |
 |---|---|---|
 | `POST /__hangar_server/pages` (privada, loopback + segredo) | MCP Python | publica ou faz rascunho; corpo `{session, html, title, height?, draft?}` |
-| `GET /api/sessions/{name}/pages/{id}` | dono | página isolada (casca com iframe `data:`), para "abrir no navegador" e para o `browser_open` do rascunho |
+| `GET /api/sessions/{name}/pages/{id}` | dono | página isolada (casca com iframe `blob:`), para "abrir no navegador" e para o `browser_open` do rascunho |
 | `GET /api/sessions/{name}/pages/{id}?raw=1` | dono | HTML cru como `text/plain` + `Content-Security-Policy: sandbox`; apps montam o documento isolado por conta própria |
 | `GET /api/sessions/{name}/pages/{id}/shot?theme=dark\|light&width=N` | dono | PNG estático (gera e guarda na primeira vez; `width` arredondada para a largura medida mais próxima) |
 
@@ -141,9 +146,12 @@ tema, e as duas formas de conferir.
 - No modo `python` (Rust fora) não há fallback: a tool responde `erro_paginas_sem_servidor_rust`
   com a frase "páginas precisam do hangar-server de pé". Motivo: regra "feature nova nasce no
   Rust"; duplicar no Python é o que a migração tenta acabar.
-- A casca isolada reaproveita o `serve_file` de `workspace_routes.rs` (já tem a casca `data:` com
-  `sandbox="allow-scripts allow-popups"` e `Referrer-Policy: no-referrer`), extraída para uma
-  função `pub(crate)` que recebe bytes em vez de caminho.
+- A casca isolada embute a página como JSON e a abre por URL `blob:` num iframe
+  `sandbox="allow-scripts allow-popups"` com `Referrer-Policy: no-referrer`. Não é a casca `data:`
+  do `serve_file` porque o Chromium limita URL em 2 MB (página com foto abriria em branco), nem
+  `srcdoc`, porque o documento `srcdoc` herda o `baseURI` da casca, que tem `?token=`. A página
+  fica em origem opaca com `baseURI` = URL `blob:`.
+- Falha ao perguntar ao Python quem é a sessão é 503 com código, nunca "expirou".
 
 ### Tema injetado
 
@@ -266,7 +274,8 @@ Texto de tela em `m.<chave>()` (PWA/Expo) e no catálogo do nativo, `messages/pt
 ### Nativo macOS (e Windows até a prova)
 
 Cartão com o PNG de `/shot` na largura da coluna e no tema atual, o título e o botão
-"abrir no navegador" (`cx.open_url` na casca isolada). Sem Chromium no servidor (404 do `/shot`
+"abrir no navegador" (o app baixa a casca isolada com o cabeçalho do token, grava num arquivo
+temporário e abre esse arquivo: o nativo nunca põe token em URL). Sem Chromium no servidor (404 do `/shot`
 com código `erro_pagina_sem_imagem`): só título e botão.
 
 ### Nativo Windows (depois da prova)
