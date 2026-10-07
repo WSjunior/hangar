@@ -155,6 +155,34 @@ async def test_turno_que_falha_fica_marcado_ate_o_proximo_turno(watching):
     assert (await asyncio.wait_for(anext(stream), 1)).problema is None
 
 
+async def test_cota_estourada_nao_vira_sem_conexao(watching):
+    _, queue, stream = watching
+    await queue.put({"method": "error", "params": {"threadId": "thread", "turnId": "turn", "willRetry": True, "error": {
+        "message": "Rate limit reached", "codexErrorInfo": "rateLimitExceeded"}}})
+    assert (await asyncio.wait_for(anext(stream), 1)).problema == "codex_limite_uso"
+
+
+async def test_causa_do_erro_sobrevive_ao_turno_falho_sem_detalhe(watching):
+    _, queue, stream = watching
+    await queue.put({"method": "error", "params": {"threadId": "thread", "turnId": "turn", "willRetry": False, "error": {
+        "message": "You've hit your usage limit. Try again at 5:12 PM.", "codexErrorInfo": "usageLimitExceeded"}}})
+    assert (await asyncio.wait_for(anext(stream), 1)).problema == "codex_limite_uso"
+    await queue.put({"method": "turn/completed", "params": {"threadId": "thread", "turn": {
+        "id": "turn", "status": "failed", "error": {"message": "turn failed"}}}})
+    state = await asyncio.wait_for(anext(stream), 1)
+    assert (state.state, state.problema) == ("idle", "codex_limite_uso")
+    assert state.problema_detalhe == "You've hit your usage limit. Try again at 5:12 PM."
+
+
+@pytest.mark.parametrize("info", ["unauthorized", {"httpConnectionFailed": {"httpStatusCode": 401}}])
+async def test_login_recusado_tem_codigo_proprio(watching, info):
+    _, queue, stream = watching
+    await queue.put({"method": "turn/completed", "params": {"threadId": "thread", "turn": {
+        "id": "turn", "status": "failed", "error": {"message": "401", "codexErrorInfo": info}}}})
+    esperado = "codex_sem_login" if info == "unauthorized" else "headless_turno_erro"
+    assert (await asyncio.wait_for(anext(stream), 1)).problema == esperado
+
+
 async def test_hook_que_barra_o_prompt_fica_visivel_depois_do_turno_vazio(watching):
     _, queue, stream = watching
     await queue.put({"method": "hook/completed", "params": {"threadId": "thread", "turnId": "turn", "run": {

@@ -451,7 +451,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // e o swap atomico do assistant_msg. O timer so vence se o bloco nunca vier (turno so de
   // ferramentas / interrompido) — a previa orfa nao pode ficar congelada pra sempre.
   let previewDropTimer: ReturnType<typeof setTimeout> | undefined;
-  // Raciocínio em voo (SSE 'pensamento', só Claude sem terminal). O "" do servidor chega antes do
+  // Raciocínio em voo (SSE 'pensamento': Claude sem terminal e Codex). O "" do servidor chega antes do
   // bloco pelo tail do .jsonl: apagar na hora abriria um buraco. Quem apaga é o `thinking` real;
   // o timer só vence se ele nunca vier (interrupção).
   let pensamentoVivo = $state('');

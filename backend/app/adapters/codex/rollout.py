@@ -357,7 +357,13 @@ def parse_rollout_obj(obj: dict) -> list[ChatEvent]:
             result=result, is_error=failed,
         )]
 
-    # reasoning: encrypted_content opaco no rollout -> ignora no v1 (texto legivel so ao vivo).
+    if ptype == "reasoning":
+        # Só o resumo é legível (e só existe quando o turno pede `summary`); o resto vem cifrado.
+        partes = [b["text"] for b in payload.get("summary") or []
+                  if isinstance(b, dict) and b.get("type") == "summary_text"
+                  and isinstance(b.get("text"), str) and b["text"].strip()]
+        return [ChatEvent(kind="thinking", id=_event_id(obj), text="\n\n".join(partes))] if partes else []
+
     return []
 
 

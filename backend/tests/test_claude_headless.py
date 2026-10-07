@@ -198,6 +198,7 @@ def test_windows_termination_failure_is_reported(monkeypatch, failure):
     monkeypatch.setattr(A, "os", SimpleNamespace(name="nt"))
     monkeypatch.setattr(A.shutil, "which", lambda exe: "taskkill")
     monkeypatch.setattr(A, "pid_vivo", lambda pid: True)
+    monkeypatch.setattr(A, "_e_cano", lambda pid: True)
     def kill(*args, **kwargs):
         if failure == "timeout":
             raise subprocess.TimeoutExpired("taskkill", 10)
@@ -207,6 +208,22 @@ def test_windows_termination_failure_is_reported(monkeypatch, failure):
     monkeypatch.setattr(A.time, "monotonic", lambda: next(clock))
     with pytest.raises(RuntimeError):
         A._matar_grupo(4242, "s1")
+
+
+def test_kill_ignores_reused_pid(monkeypatch):
+    """Depois de reiniciar a máquina o pid do sidecar pode ser de outro processo vivo."""
+    monkeypatch.setattr(A, "_argv", lambda pid: ["/usr/bin/firefox"])
+    monkeypatch.setattr(A, "pid_vivo", lambda pid: True)
+    monkeypatch.setattr(A.os, "killpg", lambda *args: pytest.fail("matou processo alheio"), raising=False)
+    A._matar_grupo(4242, "s1")
+
+
+def test_cano_identity_comes_from_its_argv(monkeypatch):
+    monkeypatch.setattr(A, "_argv", lambda pid: ["/x/hangar-cano", "--escuta", "/run/e.sock", "--log",
+                                                 "/l/cano-abc.log", "--cwd", "/w", "--", "claude"])
+    assert A._e_cano(1)
+    monkeypatch.setattr(A, "_argv", lambda pid: ["/usr/bin/python3", "app.py", "--log", "/l/app.log"])
+    assert not A._e_cano(1)
 
 
 def test_prompt_vai_pro_stdin_e_turno_fecha_no_result(adapter):
