@@ -422,3 +422,86 @@ fn bootstrap_new_process_preserves_tier_but_live_resume_does_not_override() {
         else { assert_eq!(requests[1]["params"]["serviceTier"],"priority"); }
     }
 }
+
+fn published(effects:&[Effect],name:&str) -> Vec<String> {
+    effects.iter().filter_map(|e|match e { Effect::Publish { channel,data } if channel == name=>data["text"].as_str().map(str::to_owned),_=>None }).collect()
+}
+
+#[test]
+fn stop_terminates_the_commands_the_interrupted_turn_was_running() {
+    let mut engine = engine();
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),10.0);
+    line(&mut engine,json!({"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-1",
+        "item":{"type":"commandExecution","id":"exec-1","processId":"43041","command":"sleep 300"}}}),10.5);
+    line(&mut engine,json!({"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-1",
+        "item":{"type":"commandExecution","id":"exec-2","processId":"43042","command":"true"}}}),10.6);
+    line(&mut engine,json!({"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1",
+        "item":{"type":"commandExecution","id":"exec-2","processId":"43042"}}}),10.7);
+    let interrupt = frames(&engine.command(command(OperationKind::Interrupt,json!({})),clock(11.0)).unwrap())[0].clone();
+    assert_eq!(interrupt["method"],"turn/interrupt");
+    let effects = line(&mut engine,json!({"id":interrupt["id"],"result":{}}),11.1);
+    let terminate:Vec<_> = frames(&effects).into_iter().filter(|f|f["method"] == "thread/backgroundTerminals/terminate").collect();
+    assert_eq!(terminate.len(),1);
+    assert_eq!(terminate[0]["params"],json!({"threadId":"thread-1","processId":"43041"}));
+    assert!(effects.iter().any(|e|matches!(e,Effect::Reply { operation_id,disposition:Disposition::Accepted,.. } if operation_id == "op-1")));
+}
+
+#[test]
+fn usage_limit_has_its_own_problem_and_survives_the_failed_turn() {
+    let mut engine = engine();
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),10.0);
+    line(&mut engine,json!({"method":"error","params":{"threadId":"thread-1","turnId":"turn-1","willRetry":true,
+        "error":{"message":"Rate limit reached","codexErrorInfo":"rateLimitExceeded"}}}),10.5);
+    assert_eq!(engine.view()["problema"],"codex_limite_uso");
+    line(&mut engine,json!({"method":"error","params":{"threadId":"thread-1","turnId":"turn-1","willRetry":false,
+        "error":{"message":"You've hit your usage limit.","codexErrorInfo":"usageLimitExceeded"}}}),11.0);
+    line(&mut engine,json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"failed",
+        "error":{"message":"turn failed"}}}}),11.5);
+    assert_eq!(engine.view()["problema"],"codex_limite_uso");
+    assert_eq!(engine.view()["problema_detalhe"],"You've hit your usage limit.");
+}
+
+#[test]
+fn reasoning_summary_streams_on_the_thinking_channel_and_input_asks_for_it() {
+    let mut engine = engine();
+    let start = frames(&engine.command(command(OperationKind::Input,json!({"text":"oi"})),clock(9.0)).unwrap())[0].clone();
+    assert_eq!(start["params"]["summary"],"detailed");
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),10.0);
+    let first = line(&mut engine,json!({"method":"item/reasoning/summaryTextDelta","params":{"threadId":"thread-1","turnId":"turn-1",
+        "itemId":"rs-1","summaryIndex":0,"delta":"**Plano**"}}),10.1);
+    assert_eq!(published(&first,"thinking"),vec!["**Plano**"]);
+    line(&mut engine,json!({"method":"item/reasoning/summaryPartAdded","params":{"threadId":"thread-1","turnId":"turn-1",
+        "itemId":"rs-1","summaryIndex":1}}),11.0);
+    let second = line(&mut engine,json!({"method":"item/reasoning/summaryTextDelta","params":{"threadId":"thread-1","turnId":"turn-1",
+        "itemId":"rs-1","summaryIndex":1,"delta":"Depois"}}),11.3);
+    assert_eq!(published(&second,"thinking"),vec!["**Plano**\n\nDepois"]);
+    let answer = line(&mut engine,json!({"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-1",
+        "item":{"type":"agentMessage","id":"msg-1","text":""}}}),12.0);
+    assert_eq!(published(&answer,"thinking"),vec![""]);
+}
+
+#[test]
+fn turn_cut_by_a_dead_app_server_is_reported_after_reconnect() {
+    let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true,"in_progress":true,"turn_id":"turn-1"}),2,clock(10.0));
+    let init = frames(&engine.bootstrap(true,"boot".into()).unwrap())[0].clone();
+    let resume = frames(&line(&mut engine,json!({"id":init["id"],"result":{}}),10.1))[1].clone();
+    assert_eq!(resume["method"],"thread/resume");
+    let effects = line(&mut engine,json!({"id":resume["id"],"result":{"thread":{"id":"thread-1","status":{"type":"idle"}}}}),10.2);
+    let read = frames(&effects).into_iter().find(|f|f["method"] == "thread/read").unwrap();
+    assert_eq!(read["params"]["includeTurns"],true);
+    line(&mut engine,json!({"id":read["id"],"result":{"thread":{"id":"thread-1","status":{"type":"idle"},
+        "turns":[{"id":"turn-1","status":"interrupted"}]}}}),10.3);
+    assert_eq!(engine.view()["problema"],"codex_turno_cortado");
+}
+
+#[test]
+fn finished_turn_after_reconnect_is_not_reported_as_cut() {
+    let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true,"in_progress":true}),2,clock(10.0));
+    let init = frames(&engine.bootstrap(true,"boot".into()).unwrap())[0].clone();
+    let resume = frames(&line(&mut engine,json!({"id":init["id"],"result":{}}),10.1))[1].clone();
+    let effects = line(&mut engine,json!({"id":resume["id"],"result":{"thread":{"id":"thread-1","status":{"type":"idle"}}}}),10.2);
+    let read = frames(&effects).into_iter().find(|f|f["method"] == "thread/read").unwrap();
+    line(&mut engine,json!({"id":read["id"],"result":{"thread":{"id":"thread-1","status":{"type":"idle"},
+        "turns":[{"id":"turn-1","status":"completed"}]}}}),10.3);
+    assert!(engine.view()["problema"].is_null());
+}

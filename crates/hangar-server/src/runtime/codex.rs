@@ -139,6 +139,11 @@ pub struct Engine {
     response_started:bool,
     first_response_start:Option<(String,f64)>,
     compacting:bool,
+    /// item → (turno, `processId`) dos comandos ainda rodando; o Stop os encerra.
+    running_commands:BTreeMap<String,(String,String)>,
+    thinking:LiveBuffer,
+    /// A vida anterior desta sessão estava no meio de um turno.
+    was_working:bool,
     rpc:BTreeMap<RequestId,Rpc>,
     server_requests:Vec<(RequestId,Value)>,
     request_epochs:BTreeMap<RequestId,u64>,
@@ -163,6 +168,14 @@ fn service_tier(value:&Value) -> Option<String> {
 }
 fn approval(mode:&str) -> &str { if mode == "Full Access" { "never" } else { "on-request" } }
 fn sandbox(mode:&str) -> &str { match mode { "Ask for approval"=>"read-only","Approve for me"=>"workspace-write",_=>"danger-full-access" } }
+
+/// Código do problema pelo `codexErrorInfo` (texto, ou objeto de chave única); None = sem classe própria.
+fn error_class(error:&Value) -> Option<&'static str> {
+    let info = &error["codexErrorInfo"];
+    let info = info.as_str().or_else(||info.as_object().and_then(|fields|fields.keys().next()).map(String::as_str))?;
+    match info { "usageLimitExceeded" | "rateLimitExceeded"=>Some("codex_limite_uso"),"unauthorized"=>Some("codex_sem_login"),_=>None }
+}
+fn retry_problem(problem:Option<&str>) -> bool { matches!(problem,Some("codex_sem_conexao" | "codex_limite_uso")) }
 
 fn unsupported_notice(request:&Value) -> Option<String> {
     let method = request["method"].as_str()?;
@@ -199,7 +212,9 @@ impl Engine {
             model:string(&metadata["model"]),effort:string(&metadata["effort"]),mode:string(&metadata["mode"]),
             service_tier:metadata.get("service_tier").and_then(service_tier),service_tier_pending:None,
             permission_mode:metadata["permission_mode"].as_str().unwrap_or("Full Access").into(),token_usage:Value::Null,rate_limits:Value::Null,
-            preview:LiveBuffer::default(),response_started:false,first_response_start:None,compacting:false,rpc:BTreeMap::new(),server_requests:Vec::new(),
+            preview:LiveBuffer::default(),response_started:false,first_response_start:None,compacting:false,
+            running_commands:BTreeMap::new(),thinking:LiveBuffer::default(),was_working:metadata["in_progress"] == true,
+            rpc:BTreeMap::new(),server_requests:Vec::new(),
             request_epochs:BTreeMap::new(),answering:BTreeSet::new(),wires:BTreeMap::new(),policies:BTreeMap::new(),last_format_request:None,format_gate:FormatGate::default(),async_questions,voices,voice_wires:BTreeMap::new(),skill_preparations:BTreeMap::new(),early_voice:BTreeMap::new(),early_voice_bytes:0,metadata }
     }
 
@@ -439,12 +454,20 @@ impl Engine {
         Ok(effects)
     }
 
-    fn publish(&self,text:String,effects:&mut Vec<Effect>) {
-        effects.push(Effect::Publish { channel:"preview".into(),data:json!({"session":self.state.session,"text":text,"md":true,"full":true,"vivo":true}) });
+    fn publish(&self,text:String,effects:&mut Vec<Effect>) { self.publish_on("preview",text,effects); }
+
+    fn publish_on(&self,channel:&str,text:String,effects:&mut Vec<Effect>) {
+        effects.push(Effect::Publish { channel:channel.into(),data:json!({"session":self.state.session,"text":text,"md":true,"full":true,"vivo":true}) });
     }
 
     fn clear_preview(&mut self,effects:&mut Vec<Effect>) {
         if let Some(text) = self.preview.clear() { self.publish(text,effects); }
+        if let Some(text) = self.thinking.clear() { self.publish_on("thinking",text,effects); }
+    }
+
+    fn terminate_after(&self,turn:&str) -> Option<Value> {
+        let processes:Vec<_> = self.running_commands.values().filter(|(owner,_)|owner == turn).map(|(_,process)|process.clone()).collect();
+        (!processes.is_empty()).then(||json!({"kind":"terminate_after","processes":processes}))
     }
 
     pub fn command(&mut self,command:RuntimeCommand,clock:ClockSample) -> Result<Vec<Effect>,RuntimeError> {
@@ -466,7 +489,8 @@ impl Engine {
                     return Ok(effects);
                 }
                 let text = payload["text"].as_str().ok_or_else(||error("mensagem sem texto"))?;
-                self.rpc(id,"turn/start",json!({"threadId":self.thread_id,"approvalPolicy":approval(&self.permission_mode),
+                // Sem `summary` o pensamento sai cifrado no rollout e não há o que mostrar.
+                self.rpc(id,"turn/start",json!({"threadId":self.thread_id,"approvalPolicy":approval(&self.permission_mode),"summary":"detailed",
                     "input":payload.get("input").cloned().unwrap_or_else(||json!([{"type":"text","text":text}]))}),None,&mut effects);
             }
             OperationKind::Steer => {
@@ -483,8 +507,9 @@ impl Engine {
                     "input":payload.get("input").cloned().unwrap_or_else(||json!([{"type":"text","text":text}]))}),None,&mut effects);
             }
             OperationKind::Interrupt => {
-                if let Some(turn) = &self.turn_id {
-                    self.rpc(id,"turn/interrupt",json!({"threadId":self.thread_id,"turnId":turn}),None,&mut effects);
+                if let Some(turn) = self.turn_id.clone() {
+                    let next = self.terminate_after(&turn);
+                    self.rpc(id,"turn/interrupt",json!({"threadId":self.thread_id,"turnId":turn}),next,&mut effects);
                 } else {
                     self.rpc(format!("{id}:read"),"thread/read",json!({"threadId":self.thread_id,"includeTurns":true}),
                         Some(json!({"kind":"interrupt","parent":id})),&mut effects);
@@ -630,6 +655,7 @@ impl Engine {
             }
             EngineInput::Tick => {
                 if let Some(text) = self.preview.tick(clock.monotonic_s) { self.publish(text,&mut effects); }
+                if let Some(text) = self.thinking.tick(clock.monotonic_s) { self.publish_on("thinking",text,&mut effects); }
                 for rpc in self.rpc.values_mut() {
                     if !rpc.timed_out && clock.monotonic_s >= rpc.deadline {
                         rpc.timed_out = true;
@@ -770,6 +796,13 @@ impl Engine {
                 }
                 Some("bootstrap_thread") => {
                     let parent = next["parent"].as_str().unwrap_or("");
+                    if self.reconnect && std::mem::take(&mut self.was_working) {
+                        // A vida anterior estava no meio de um turno: se ele voltou `interrupted`, foi cortado.
+                        self.counter += 1;
+                        let operation_id = format!("cut-check:{}:{}",self.generation,self.counter);
+                        self.rpc(operation_id,"thread/read",json!({"threadId":self.thread_id,"includeTurns":true}),
+                            Some(json!({"kind":"cut_check"})),effects);
+                    }
                     if let Some(effort) = self.metadata["effort"].as_str().map(str::to_owned) {
                         self.rpc(format!("{parent}:effort"),"thread/settings/update",json!({"threadId":self.thread_id,"effort":effort}),
                             Some(json!({"kind":"bootstrap_ready","parent":parent})),effects);
@@ -787,8 +820,26 @@ impl Engine {
                 }
                 Some("interrupt") => {
                     let parent = next["parent"].as_str().unwrap_or("");
-                    if let Some(turn) = &self.turn_id { self.rpc(parent.into(),"turn/interrupt",json!({"threadId":self.thread_id,"turnId":turn}),None,effects); }
+                    if let Some(turn) = self.turn_id.clone() {
+                        let after = self.terminate_after(&turn);
+                        self.rpc(parent.into(),"turn/interrupt",json!({"threadId":self.thread_id,"turnId":turn}),after,effects);
+                    }
                     else { effects.push(Effect::Reply { operation_id:parent.into(),disposition:Disposition::Accepted,payload:json!({"interrupted":false}) }); }
+                }
+                Some("terminate_after") => {
+                    // O interrupt fecha o turno mas deixa vivo o comando que ele rodava.
+                    for process in next["processes"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                        self.running_commands.retain(|_,(_,running)|running != process);
+                        self.counter += 1;
+                        let operation_id = format!("terminate:{}:{}",self.generation,self.counter);
+                        self.rpc(operation_id,"thread/backgroundTerminals/terminate",json!({"threadId":self.thread_id,"processId":process}),None,effects);
+                    }
+                }
+                Some("cut_check") => {
+                    let last = result["thread"]["turns"].as_array().and_then(|turns|turns.last());
+                    if result["thread"]["status"]["type"] == "idle" && last.is_some_and(|turn|turn["status"] == "interrupted") {
+                        self.state.problema = Some("codex_turno_cortado".into()); self.state.problema_detalhe = None;
+                    }
                 }
                 Some("async_answer") => self.async_questions.record_answer(next["request_id"].as_str().unwrap_or(""),next["text"].as_str().unwrap_or("")),
                 Some("skill_lookup") => {
@@ -984,6 +1035,7 @@ impl Engine {
                 self.first_response_start = self.turn_id.clone().map(|id|(id,self.clock.monotonic_s));
                 self.response_started = false; self.state.codex_buffering = false; self.clear_preview(effects);
                 self.state.problema = None; self.state.problema_detalhe = None;
+                self.running_commands.clear();
             }
             "turn/completed" => {
                 if params["turn"]["id"].as_str().is_some_and(|id|self.turn_id.as_deref().is_some_and(|current|current != id)) { return Ok(()); }
@@ -992,9 +1044,13 @@ impl Engine {
                 self.state.codex_buffering = false; self.response_started = false; self.clear_preview(effects);
                 self.server_requests.clear(); self.answering.clear(); self.request_epochs.clear();
                 if params["turn"]["status"] == "failed" {
-                    self.state.problema = Some("headless_turno_erro".into());
-                    self.state.problema_detalhe = string(&params["turn"]["error"]["message"]);
-                } else if self.state.problema.as_deref() == Some("codex_sem_conexao") { self.state.problema = None; self.state.problema_detalhe = None; }
+                    let class = error_class(&params["turn"]["error"]);
+                    // O `turn.error` pode vir sem `codexErrorInfo`; a causa já veio no `error` anterior.
+                    if class.is_some() || !matches!(self.state.problema.as_deref(),Some("codex_limite_uso" | "codex_sem_login")) {
+                        self.state.problema = Some(class.unwrap_or("headless_turno_erro").into());
+                        self.state.problema_detalhe = string(&params["turn"]["error"]["message"]);
+                    }
+                } else if retry_problem(self.state.problema.as_deref()) { self.state.problema = None; self.state.problema_detalhe = None; }
                 self.changed(effects,true); effects.push(Effect::WakeQueue); return Ok(());
             }
             "thread/status/changed" => {
@@ -1034,12 +1090,34 @@ impl Engine {
                 if let Some(text) = self.preview.append(params["delta"].as_str().unwrap_or(""),self.clock.monotonic_s) { self.publish(text,effects); }
                 return Ok(());
             }
+            "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" | "item/reasoning/summaryPartAdded" => {
+                if params["turnId"].as_str().is_some_and(|id|self.turn_id.as_deref().is_some_and(|current|current != id)) { return Ok(()); }
+                let piece = if method == "item/reasoning/summaryPartAdded" {
+                    if params["summaryIndex"].as_u64().unwrap_or(0) > 0 { "\n\n" } else { "" }
+                } else { params["delta"].as_str().unwrap_or("") };
+                if let Some(text) = self.thinking.append(piece,self.clock.monotonic_s) { self.publish_on("thinking",text,effects); }
+                return Ok(());
+            }
+            "model/rerouted" => {
+                if params["threadId"] != self.thread_id { return Ok(()); }
+                self.model = string(&params["toModel"]).or(self.model.clone());
+            }
             "item/started" | "item/completed" => {
                 let item = &params["item"];
                 self.async_questions.observe(&self.thread_id,item);
                 if item["type"] == "contextCompaction" { self.compacting = method == "item/started"; }
                 if item["type"] == "agentMessage" { self.clear_preview(effects); }
-                if item["type"] != "userMessage" && self.state.problema.as_deref() == Some("codex_sem_conexao") {
+                if item["type"] == "reasoning" && method == "item/started" {
+                    if let Some(text) = self.thinking.clear() { self.publish_on("thinking",text,effects); }
+                }
+                if item["type"] == "commandExecution" {
+                    let id = item["id"].as_str().unwrap_or("").to_owned();
+                    match (method,item["processId"].as_str(),params["turnId"].as_str()) {
+                        ("item/started",Some(process),Some(turn)) => { self.running_commands.insert(id,(turn.into(),process.into())); }
+                        _ => { self.running_commands.remove(&id); }
+                    }
+                }
+                if item["type"] != "userMessage" && retry_problem(self.state.problema.as_deref()) {
                     self.state.problema = None; self.state.problema_detalhe = None;
                 }
             }
@@ -1054,7 +1132,8 @@ impl Engine {
                 else { return Ok(()); }
             }
             "error" => {
-                self.state.problema = Some(if params["willRetry"] == true { "codex_sem_conexao" } else { "headless_turno_erro" }.into());
+                self.state.problema = Some(error_class(&params["error"])
+                    .unwrap_or(if params["willRetry"] == true { "codex_sem_conexao" } else { "headless_turno_erro" }).into());
                 self.state.problema_detalhe = string(&params["error"]["message"]);
             }
             "hook/completed" if params["run"]["eventName"] == "userPromptSubmit"
@@ -1077,7 +1156,7 @@ impl Engine {
     }
 
     pub fn next_deadline(&self) -> Option<f64> {
-        self.preview.deadline().into_iter().chain(self.rpc.values().filter(|rpc|!rpc.timed_out).map(|rpc|rpc.deadline))
+        self.preview.deadline().into_iter().chain(self.thinking.deadline()).chain(self.rpc.values().filter(|rpc|!rpc.timed_out).map(|rpc|rpc.deadline))
             .chain(self.service_tier_pending.as_ref().map(|pending|pending.deadline)).min_by(f64::total_cmp)
     }
 

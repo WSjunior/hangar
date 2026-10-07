@@ -31,8 +31,8 @@ from app.adapters.codex.lancador import (APPROVAL, CLIENT_INFO, SANDBOX,
 from app.hook_state import hook_state
 from app.models import session_key
 from app.live_rate import live_rate
-from app.procinfo import pid_vivo
-from app.adapters.preview_push import PushPreviewSource
+from app.procinfo import _argv, pid_vivo
+from app.adapters.preview_push import PushPreviewSource, fonte_pensamento
 from app.adapters.stream_buffer import StreamBuffer, error_frames
 from app.adapters.codex.rollout import parse_rollout_line
 from app import codex_contas, diag
@@ -57,6 +57,12 @@ def matar_app_server(name: str) -> None:
     meta = codex_sessions.load(name) or {}
     pid = meta.get("app_pid")
     if not isinstance(pid, int) or not pid_vivo(pid):
+        return
+    argv = _argv(pid)
+    endpoint = meta.get("endpoint")
+    if "app-server" not in argv or (endpoint and endpoint not in argv):
+        # Depois de reiniciar a máquina o número pode ser de outro processo.
+        _log.warning("codex: pid %s do sidecar não é mais o app-server da sessão name=%s; não matei", pid, name)
         return
     try:
         os.kill(pid, signal.SIGTERM)
@@ -212,6 +218,21 @@ def map_state(notif: dict) -> MappedState:
     return MappedState()
 
 
+_RETRY_PROBLEMS = {"codex_sem_conexao", "codex_limite_uso"}
+
+
+def _error_class(erro: dict) -> Optional[str]:
+    """Código do problema pelo `codexErrorInfo` (string, ou objeto de chave única); None = sem classe própria."""
+    info = erro.get("codexErrorInfo")
+    if isinstance(info, dict):
+        info = next(iter(info), None)
+    if info in ("usageLimitExceeded", "rateLimitExceeded"):
+        return "codex_limite_uso"
+    if info == "unauthorized":
+        return "codex_sem_login"
+    return None
+
+
 def _turn_problem(notif: dict) -> Optional[tuple[str, str]]:
     """(código, detalhe) quando a notification diz que o turno não anda: `error` com nova
     tentativa, ou turno fechado como `failed`. Sem isto a sessão fica "trabalhando" calada."""
@@ -228,10 +249,10 @@ def _turn_problem(notif: dict) -> Optional[tuple[str, str]]:
         return "codex_prompt_bloqueado", f"{origem}: {motivo}".strip(": ")[:300]
     if method == "error":
         erro = params.get("error") or {}
-        codigo = "codex_sem_conexao" if params.get("willRetry") else "headless_turno_erro"
+        codigo = _error_class(erro) or ("codex_sem_conexao" if params.get("willRetry") else "headless_turno_erro")
     elif method == "turn/completed" and (params.get("turn") or {}).get("status") == "failed":
         erro = (params.get("turn") or {}).get("error") or {}
-        codigo = "headless_turno_erro"
+        codigo = _error_class(erro) or "headless_turno_erro"
     else:
         return None
     # O detalhe pode ser a página HTML de erro do provedor: só a primeira linha serve na faixa.
@@ -437,6 +458,8 @@ class CodexAdapter:
         # Sessão sem terminal que não sobe: (código, detalhe) que a lista e o StateEvent mostram —
         # senão o card só vira "dead" sem pista.
         self._problemas: dict[str, tuple[str, str | None]] = {}
+        # Sessões cujo app-server morreu com turno no ar: a próxima subida confere se ele foi cortado.
+        self._cortados: set[str] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
 
     def _start_tmux_watcher(self, name: str) -> None:
@@ -1012,6 +1035,15 @@ class CodexAdapter:
             self._sessions[name]["mode"] = "plan" if meta.get("previous_non_plan") else "default"
         self._sessions[name]["async_questions"].hydrate(thread)
         self._restore_turn(self._sessions[name], thread)
+        if name in self._cortados and (thread.get("status") or {}).get("type") == "idle":
+            self._cortados.discard(name)
+            try:
+                lido = (await client.request("thread/read", {"threadId": thread_id, "includeTurns": True})).get("thread") or {}
+                turnos = lido.get("turns") or []
+                if turnos and turnos[-1].get("status") == "interrupted":
+                    self._sessions[name]["turn_problem"] = ("codex_turno_cortado", "")
+            except Exception:
+                _log.warning("codex sem terminal: não deu para conferir o turno cortado name=%s", name, exc_info=True)
         _log.info("codex sem terminal: subiu name=%s thread=%s cano=%s", name, thread_id,
                   (meta.get("cano") or {}).get("pid"))
         return client
@@ -1897,7 +1929,16 @@ class CodexAdapter:
                                provider="codex", **diag.erro_campos(exc))
                 espalhar(self._question_state(name, sess))
 
+        async def publish_pensamento(text: str) -> None:
+            if self._sessions.get(name) is sess and sess.get("client") is client:
+                await fonte_pensamento(name).push(text)
+
+        async def limpar_pensamento() -> None:
+            await pensamento.discard()
+            await publish_pensamento("")
+
         buffer = StreamBuffer(publish, on_error=failed)
+        pensamento = StreamBuffer(publish_pensamento, on_error=failed)
         sess["preview_buffer"] = buffer
         try:
             async for notif in client.notifications():
@@ -1928,6 +1969,15 @@ class CodexAdapter:
                         continue
                 mapped = map_state(notif)
                 method = notif.get("method")
+                item = params.get("item") or {}
+                if method == "turn/started":
+                    sess["running_commands"] = {}
+                elif item.get("type") == "commandExecution" and method in ("item/started", "item/completed"):
+                    rodando = sess.setdefault("running_commands", {})
+                    if method == "item/started" and item.get("processId"):
+                        rodando[item.get("id")] = (params.get("turnId"), str(item["processId"]))
+                    else:
+                        rodando.pop(item.get("id"), None)
                 compact_updated = method in {"item/started", "item/completed"} and \
                     (params.get("item") or {}).get("type") == "contextCompaction"
                 if compact_updated:
@@ -1993,18 +2043,39 @@ class CodexAdapter:
                         if meta.get("transfer_id") and meta.get("thread_id") == sess["thread_id"]:
                             codex_sessions.update(name, previous_non_plan=meta["permission_mode"]
                                                   if sess["mode"] == "plan" else None)
+                if method == "model/rerouted" and params.get("toModel"):
+                    sess["model"] = params["toModel"]
+                    settings_updated = True
                 turn_problem = _turn_problem(notif) if current_turn else None
                 problem_updated = False
-                if turn_problem is not None:
+                anterior = sess.get("turn_problem", ("",))[0]
+                if turn_problem is not None and turn_problem[0] == "headless_turno_erro" and \
+                        method == "turn/completed" and anterior in ("codex_limite_uso", "codex_sem_login"):
+                    pass  # o `turn.error` pode vir sem `codexErrorInfo`; a causa já veio no `error` anterior
+                elif turn_problem is not None:
                     problem_updated = sess.get("turn_problem") != turn_problem
                     sess["turn_problem"] = turn_problem
                 elif method == "turn/started" or response_started or \
                         (current_turn and method == "item/started"
                          and (params.get("item") or {}).get("type") != "userMessage") or \
-                        (method == "turn/completed" and sess.get("turn_problem", ("",))[0] == "codex_sem_conexao"):
+                        (method == "turn/completed" and anterior in _RETRY_PROBLEMS):
                     # Reconectou (chegou resposta ou qualquer item novo, inclusive só ferramenta) ou o
                     # turno fechou sem erro: o aviso não vale mais.
                     problem_updated = sess.pop("turn_problem", None) is not None
+                if method in ("item/reasoning/summaryTextDelta", "item/reasoning/textDelta",
+                              "item/reasoning/summaryPartAdded"):
+                    if current_turn:
+                        if method == "item/reasoning/summaryPartAdded":
+                            pedaco = "\n\n" if (params.get("summaryIndex") or 0) > 0 else ""
+                        else:
+                            pedaco = params.get("delta") or ""
+                        if pedaco:
+                            await pensamento.append(pedaco)
+                    continue
+                if pensamento.value and (method in ("turn/started", "turn/completed") or (
+                        method == "item/started" and item.get("type") in ("reasoning", "agentMessage"))):
+                    # Pensamento novo começa do zero; resposta ou fim do turno encerram o anterior.
+                    await limpar_pensamento()
                 if method == "turn/started":
                     await buffer.reset()
                     await publish("")
@@ -2080,6 +2151,8 @@ class CodexAdapter:
             if getattr(client, "closed", False) and self._sessions.get(name) is sess:
                 await buffer.discard()
                 await publish("")
+                if sess.get("headless") and sess.get("in_progress"):
+                    self._cortados.add(name)
                 sess["state"] = "dead"
                 self._sessions.pop(name, None)
                 PushPreviewSource._sources.pop(name, None)
@@ -2089,6 +2162,7 @@ class CodexAdapter:
                 await buffer.flush()
         finally:
             await buffer.discard()
+            await pensamento.discard()
             if sess.get("preview_buffer") is buffer:
                 sess.pop("preview_buffer", None)
 
@@ -2119,6 +2193,8 @@ class CodexAdapter:
             # único eixo que o turn/start aplica de verdade; o sandbox é do processo).
             meta = await asyncio.to_thread(codex_sessions.load, name) or {}
             params["approvalPolicy"] = sem_terminal.politica(meta.get("permission_mode"))[0]
+            # Sem `summary` o pensamento sai cifrado no rollout e não há o que mostrar.
+            params["summary"] = "detailed"
         try:
             result = await client.request("turn/start", params)
             sess["turn_id"] = (result.get("turn") or {}).get("id")
@@ -2155,12 +2231,25 @@ class CodexAdapter:
         sess = self._sessions.get(name)
         if sess is None or not turn_id:
             return False
+        client, thread_id = sess["client"], sess["thread_id"]
+        rodando = sess.get("running_commands") or {}
+        alvos = [(item_id, pid) for item_id, (turno, pid) in rodando.items() if turno == turn_id]
         try:
-            await sess["client"].request("turn/interrupt",
-                                          {"threadId": sess["thread_id"], "turnId": turn_id})
+            await client.request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
         except Exception:
             _log.exception("codex turn/interrupt falhou name=%s", name)
             return False
+        # O interrupt fecha o turno mas deixa vivo o comando que ele rodava.
+        for item_id, pid in alvos:
+            try:
+                await client.request("thread/backgroundTerminals/terminate",
+                                     {"threadId": thread_id, "processId": pid})
+                rodando.pop(item_id, None)
+            except Exception as exc:
+                _log.warning("codex: comando do turno interrompido segue vivo name=%s processo=%s erro=%s",
+                             name, pid, exc)
+                diag.registrar("codex.comando_nao_encerrado", "erro", sessao=name, provider="codex",
+                               **diag.erro_campos(exc))
         return True
 
     def _marcador_diz_ocioso(self, name: str) -> bool:
