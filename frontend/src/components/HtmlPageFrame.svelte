@@ -39,10 +39,14 @@
     return themeVariables((name) => cs.getPropertyValue(MAP[name] ?? name));
   }
 
+  // A tag vai partida: escrita inteira dentro do <script>, o pré-processador do Svelte a toma por um bloco de estilo.
+  const TAG = 'style';
+  const THEME_BLOCK = new RegExp(`(<${TAG} id="hangar-theme" data-base="([^"]*)">)[\\s\\S]*?(</${TAG}>)`);
+
   function themed(html: string) {
     const css = `:root{color-scheme:${scheme};${Object.entries(vars()).map(([k, v]) => `${k}:${v}`).join(';')}}`;
     // Troca só o conteúdo do bloco de tema injetado pelo servidor; o data-base fica para as trocas seguintes.
-    return html.replace(/(<style id="hangar-theme" data-base="([^"]*)">)[\s\S]*?(<\/style>)/,
+    return html.replace(THEME_BLOCK,
       (_all, open: string, base: string, close: string) => `${open}${css}${base.replaceAll('&quot;', '"')}${close}`);
   }
 
