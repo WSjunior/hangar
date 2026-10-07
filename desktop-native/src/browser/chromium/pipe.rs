@@ -16,15 +16,18 @@ use std::{
     time::Duration,
 };
 
-use gpui_kit::{ForegroundExecutor, Task};
+use futures::future::{FutureExt, LocalBoxFuture, Shared};
+use gpui_kit::{BackgroundExecutor, ForegroundExecutor, Task};
 use serde_json::{Value, json};
 
 use super::launch;
 
 type Reply = Result<Value, String>;
 type Handler = Rc<RefCell<dyn FnMut(Value)>>;
-/// Consome um evento na própria thread de leitura (o quadro do painel, decodificado fora da interface).
-pub type Sink = Box<dyn Fn(&Value) + Send>;
+/// Consome um evento na própria thread de leitura (o quadro do painel, entregue sem passar pela interface).
+pub type Sink = Box<dyn Fn(Value) + Send>;
+type Ready = Shared<LocalBoxFuture<'static, Result<(), String>>>;
+const LAUNCH_WAIT: Duration = Duration::from_secs(10);
 
 /// O lado que qualquer thread usa: escrever e casar respostas.
 struct Wire {
@@ -79,6 +82,8 @@ pub struct Browser {
     /// Páginas que os navegadores do app abriram; qualquer outra é janela que a página abriu.
     owned: RefCell<HashSet<String>>,
     alive: std::cell::Cell<bool>,
+    /// Aperto de mão do processo que nasceu sem travar a interface; `None` quando já respondeu.
+    ready: RefCell<Option<Ready>>,
     _drain: RefCell<Option<Task<()>>>,
 }
 
@@ -89,15 +94,84 @@ thread_local! {
 impl Browser {
     /// O Chromium em uso, ou um novo. Nasce com a escala da janela que abriu o primeiro navegador.
     pub fn shared(executor: &ForegroundExecutor, scale: f32) -> Result<Rc<Browser>, String> {
-        if let Some(browser) = SHARED.with(|s| s.borrow().upgrade()).filter(|b| b.alive.get()) { return Ok(browser); }
+        if let Some(browser) = Self::current() { return Ok(browser); }
         let bin = launch::find()?;
-        let profile = crate::appearance::dir().map(|d| d.join("chromium")).ok_or("sem pasta de configuracao do app")?;
-        let browser = Self::launch(bin, &profile, scale, executor)?;
+        let browser = Self::launch(bin, &Self::profile()?, scale, executor)?;
         SHARED.with(|s| *s.borrow_mut() = Rc::downgrade(&browser));
         Ok(browser)
     }
 
+    /// Como `shared`, sem esperar o processo responder: o aperto de mão corre sozinho e `ready` o espera. Para a
+    /// interface não congelar enquanto o Chromium nasce.
+    pub fn shared_async(executor: &ForegroundExecutor, background: &BackgroundExecutor, scale: f32) -> Result<Rc<Browser>, String> {
+        if let Some(browser) = Self::current() { return Ok(browser); }
+        let bin = launch::find()?;
+        let browser = Self::spawn(bin, &Self::profile()?, scale, executor)?;
+        let handshake = browser.handshake(bin, background).boxed_local().shared();
+        // Corre mesmo sem ninguém esperar: quem só aquece o processo não fica olhando.
+        executor.spawn(handshake.clone()).detach();
+        *browser.ready.borrow_mut() = Some(handshake);
+        SHARED.with(|s| *s.borrow_mut() = Rc::downgrade(&browser));
+        Ok(browser)
+    }
+
+    /// Resolve quando o processo já respondeu ao aperto de mão (na hora, se nasceu bloqueando).
+    pub fn ready(&self) -> impl Future<Output = Result<(), String>> + use<> {
+        let pending = self.ready.borrow().clone();
+        async move { match pending { Some(ready) => ready.await, None => Ok(()) } }
+    }
+
+    fn current() -> Option<Rc<Browser>> { SHARED.with(|s| s.borrow().upgrade()).filter(|b| b.alive.get()) }
+
+    fn profile() -> Result<std::path::PathBuf, String> {
+        crate::appearance::dir().map(|d| d.join("chromium")).ok_or_else(|| "sem pasta de configuracao do app".into())
+    }
+
+    /// As chamadas saem já, nesta ordem: o `getTargets` chega antes de qualquer `createTarget` de quem vier depois, e
+    /// as abas iniciais continuam sendo só as do nascimento.
+    fn handshake(self: &Rc<Self>, bin: &Path, background: &BackgroundExecutor) -> impl Future<Output = Result<(), String>> + use<> {
+        let version = self.call(None, "Browser.getVersion", json!({}));
+        let discover = self.call(None, "Target.setDiscoverTargets", json!({"discover": true}));
+        let targets = self.call(None, "Target.getTargets", json!({}));
+        let (weak, timer, bin) = (Rc::downgrade(self), background.timer(LAUNCH_WAIT), bin.display().to_string());
+        async move {
+            let answers = async { Ok::<_, String>((version.await?, discover.await?, targets.await?)) };
+            let answers = match futures::future::select(std::pin::pin!(answers), std::pin::pin!(timer)).await {
+                futures::future::Either::Left((answers, _)) => answers,
+                futures::future::Either::Right(_) => Err("tempo esgotado".into()),
+            };
+            let Some(browser) = weak.upgrade() else { return Err("o Chromium fechou".into()) };
+            match answers {
+                Ok((_, _, targets)) => {
+                    *browser.initial.borrow_mut() = targets["targetInfos"].as_array().into_iter().flatten()
+                        .filter(|t| t["type"] == "page").filter_map(|t| t["targetId"].as_str().map(str::to_owned)).collect();
+                    drop(browser.call(None, "Browser.setDownloadBehavior", json!({"behavior": "deny"})));
+                    Ok(())
+                }
+                Err(e) => {
+                    // Processo mudo não fica como o compartilhado: o próximo pedido sobe outro.
+                    browser.alive.set(false);
+                    Err(format!("o Chromium ({bin}) nao respondeu: {e}"))
+                }
+            }
+        }
+    }
+
     fn launch(bin: &Path, profile: &Path, scale: f32, executor: &ForegroundExecutor) -> Result<Rc<Browser>, String> {
+        let browser = Self::spawn(bin, profile, scale, executor)?;
+        browser.call_blocking(None, "Browser.getVersion", json!({}), Duration::from_secs(10))
+            .map_err(|e| format!("o Chromium ({}) nao respondeu: {e}", bin.display()))?;
+        // Títulos e endereços das páginas, e janelas abertas por `window.open`.
+        browser.call_blocking(None, "Target.setDiscoverTargets", json!({"discover": true}), Duration::from_secs(5))?;
+        let targets = browser.call_blocking(None, "Target.getTargets", json!({}), Duration::from_secs(5))?;
+        *browser.initial.borrow_mut() = targets["targetInfos"].as_array().into_iter().flatten()
+            .filter(|t| t["type"] == "page").filter_map(|t| t["targetId"].as_str().map(str::to_owned)).collect();
+        drop(browser.call(None, "Browser.setDownloadBehavior", json!({"behavior": "deny"})));
+        Ok(browser)
+    }
+
+    /// Processo, thread de leitura e entrega dos eventos; nenhuma espera pelo CDP.
+    fn spawn(bin: &Path, profile: &Path, scale: f32, executor: &ForegroundExecutor) -> Result<Rc<Browser>, String> {
         let launched = launch::spawn(bin, profile, scale).map_err(|e| format!("o Chromium ({}) nao abriu: {e}", bin.display()))?;
         let wire = Arc::new(Wire {
             writer: Mutex::new(launched.writer),
@@ -112,7 +186,8 @@ impl Browser {
             .map_err(|e| e.to_string())?;
         let browser = Rc::new(Browser {
             wire, child: RefCell::new(launched.child), handlers: RefCell::default(), watchers: RefCell::default(),
-            initial: RefCell::default(), owned: RefCell::default(), alive: std::cell::Cell::new(true), _drain: RefCell::new(None),
+            initial: RefCell::default(), owned: RefCell::default(), alive: std::cell::Cell::new(true), ready: RefCell::new(None),
+            _drain: RefCell::new(None),
         });
         let weak = Rc::downgrade(&browser);
         *browser._drain.borrow_mut() = Some(executor.spawn(async move {
@@ -122,14 +197,6 @@ impl Browser {
             }
             if let Some(browser) = weak.upgrade() { browser.closed(); }
         }));
-        browser.call_blocking(None, "Browser.getVersion", json!({}), Duration::from_secs(10))
-            .map_err(|e| format!("o Chromium ({}) nao respondeu: {e}", bin.display()))?;
-        // Títulos e endereços das páginas, e janelas abertas por `window.open`.
-        browser.call_blocking(None, "Target.setDiscoverTargets", json!({"discover": true}), Duration::from_secs(5))?;
-        let targets = browser.call_blocking(None, "Target.getTargets", json!({}), Duration::from_secs(5))?;
-        *browser.initial.borrow_mut() = targets["targetInfos"].as_array().into_iter().flatten()
-            .filter(|t| t["type"] == "page").filter_map(|t| t["targetId"].as_str().map(str::to_owned)).collect();
-        drop(browser.call(None, "Browser.setDownloadBehavior", json!({"behavior": "deny"})));
         Ok(browser)
     }
 
@@ -235,18 +302,21 @@ fn read(reader: std::io::PipeReader, wire: &Wire, events: &async_channel::Sender
     events.close();
 }
 
-fn route(message: Value, wire: &Wire, events: &async_channel::Sender<Value>) {
+fn route(mut message: Value, wire: &Wire, events: &async_channel::Sender<Value>) {
     if let Some(id) = message["id"].as_u64() {
         if let Some((_, done)) = lock(&wire.pending).remove(&id) { done(reply_of(&message)); }
         return;
     }
     if message["method"] == "Page.screencastFrame"
-        && let Some(session) = message["sessionId"].as_str()
-        && let Some(sink) = lock(&wire.sinks).get(session)
+        && let Some(session) = message["sessionId"].as_str().map(str::to_owned)
+        && lock(&wire.sinks).contains_key(&session)
     {
-        sink(&message["params"]);
+        // Os parâmetros vão inteiros ao dono, sem copiar o quadro.
+        let params = message["params"].take();
+        let ack = json!({"sessionId": params["sessionId"]});
+        if let Some(sink) = lock(&wire.sinks).get(&session) { sink(params); }
         // Sem o ack o Chromium para de mandar quadros.
-        wire.send(Some(session), "Page.screencastFrameAck", json!({"sessionId": message["params"]["sessionId"]}), None);
+        wire.send(Some(&session), "Page.screencastFrameAck", ack, None);
         return;
     }
     let _ = events.try_send(message);
@@ -263,6 +333,15 @@ impl Session {
         let attached = browser.call_blocking(None, "Target.attachToTarget", json!({"targetId": target, "flatten": true}), Duration::from_secs(5))?;
         let id = attached["sessionId"].as_str().ok_or("attachToTarget sem sessionId")?.to_owned();
         Ok(Session { browser: browser.clone(), id })
+    }
+
+    /// `attach` sem travar a interface.
+    pub fn attach_async(browser: &Rc<Browser>, target: &str) -> impl Future<Output = Result<Session, String>> + use<> {
+        let (call, browser) = (browser.call(None, "Target.attachToTarget", json!({"targetId": target, "flatten": true})), browser.clone());
+        async move {
+            let id = call.await?["sessionId"].as_str().ok_or("attachToTarget sem sessionId")?.to_owned();
+            Ok(Session { browser, id })
+        }
     }
 
     pub fn id(&self) -> &str { &self.id }
@@ -383,7 +462,7 @@ mod tests {
         let shot = decode(call(s, "Page.captureScreenshot", json!({"format": "png"}))["data"].as_str().unwrap());
         eprintln!("captureScreenshot {:?}: canto {:?}, caixa {:?}", shot.dimensions(), shot.get_pixel(5, 5), shot.get_pixel(100, 100));
         let (tx, rx) = mpsc::channel();
-        lock(&wire.sinks).insert(session.clone(), Box::new(move |p: &Value| { let _ = tx.send(p["data"].as_str().unwrap_or("").to_owned()); }));
+        lock(&wire.sinks).insert(session.clone(), Box::new(move |p: Value| { let _ = tx.send(p["data"].as_str().unwrap_or("").to_owned()); }));
         call(s, "Page.startScreencast", json!({"format": "png", "maxWidth": 400, "maxHeight": 300, "everyNthFrame": 1}));
         let pixels = decode(&rx.recv_timeout(Duration::from_secs(15)).unwrap());
         eprintln!("screencast {:?}: canto {:?}, caixa {:?}", pixels.dimensions(), pixels.get_pixel(5, 5), pixels.get_pixel(100, 100));
@@ -399,7 +478,7 @@ mod tests {
         let (wire, reader) = wire();
         let (events, received) = async_channel::unbounded();
         let (tx, rx) = mpsc::channel();
-        lock(&wire.sinks).insert("P".into(), Box::new(move |p: &Value| tx.send(p["data"].clone()).unwrap()));
+        lock(&wire.sinks).insert("P".into(), Box::new(move |p: Value| tx.send(p["data"].clone()).unwrap()));
         route(json!({"method": "Page.screencastFrame", "sessionId": "P", "params": {"data": "QQ==", "sessionId": 9}}), &wire, &events);
         route(json!({"method": "Page.screencastFrame", "sessionId": "V", "params": {"data": "Qg==", "sessionId": 3}}), &wire, &events);
         assert_eq!(rx.recv().unwrap(), "QQ==");

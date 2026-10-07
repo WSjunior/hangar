@@ -177,12 +177,35 @@ pub struct Pages {
     /// Largura do cartão no último desenho: escolhe a altura medida mais próxima e a imagem.
     width: Rc<Cell<f32>>,
     live: bool,
+    /// Chromium já de pé para a conversa aberta, que tem página.
+    #[cfg(target_os = "linux")]
+    warm: Option<crate::browser::Warm>,
 }
 
 impl Pages {
     pub fn new(window: AnyWindowHandle) -> Self {
         let live = cfg!(target_os = "linux") && Engine::available().is_ok();
-        Self { views: HashMap::new(), budget: Budget::default(), paint: Rc::default(), window, width: Rc::new(Cell::new(COLUMN)), live }
+        Self {
+            views: HashMap::new(), budget: Budget::default(), paint: Rc::default(), window, width: Rc::new(Cell::new(COLUMN)), live,
+            #[cfg(target_os = "linux")]
+            warm: None,
+        }
+    }
+
+    /// Conversa com página: o Chromium sobe já, em paralelo ao resto, e não no primeiro desenho do cartão (que pode nem
+    /// estar à vista). Sem página, ele é solto e nada sobe.
+    pub fn warm(&mut self, wanted: bool, window: &Window, cx: &App) {
+        #[cfg(target_os = "linux")]
+        {
+            if !wanted || !self.live { self.warm = None; return; }
+            if self.warm.is_some() { return; }
+            match Engine::warm(window, cx) {
+                Ok(warm) => self.warm = Some(warm),
+                Err(error) => eprintln!("[pagina] Chromium não subiu antes da página: {error}"),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = (wanted, window, cx);
     }
 
     /// Conversa trocada ou recarregada: nada da anterior é reaproveitado (a página pode ter expirado). Os motores caem
@@ -330,7 +353,8 @@ impl Hangar {
         }).detach();
     }
 
-    /// Abre o motor da página. Bloqueia como o do painel (fora do `update`); falhou, a página cai para a imagem.
+    /// Abre o motor da página sem travar a janela: o cartão mostra o carregando, na altura reservada, até ele chegar.
+    /// Falhou, a página cai para a imagem.
     #[cfg(target_os = "linux")]
     fn start_page_engine(&mut self, id: &str, cx: &mut Context<Self>) {
         let (handle, width) = (self.pages.window, self.pages.width.get());
@@ -344,11 +368,13 @@ impl Hangar {
         cx.spawn(async move |this, cx| {
             // Sem limite: o motor manda com `try_send` e quadro perdido não volta.
             let (events, received) = async_channel::unbounded();
-            let engine = handle.update(cx, |_, window, cx| Engine::prepare(window, cx)).map_err(|e| e.to_string()).and_then(|r| r)
-                .and_then(|starter| match &url {
-                    Some(url) => starter.start_url(url, events),
-                    None => starter.start_page(html.as_deref().unwrap_or_default(), width, background, events),
-                }).map(Rc::new);
+            let starter = handle.update(cx, |_, window, cx| Engine::prepare(window, cx)).map_err(|e| e.to_string()).and_then(|r| r);
+            let engine = match (starter, url) {
+                (Ok(starter), Some(url)) => starter.start_url(url, events).await,
+                (Ok(starter), None) => starter.start_page(html.unwrap_or_else(|| "".into()), width, background, events).await,
+                (Err(error), _) => Err(error),
+            }.map(Rc::new);
+            // Cartão que saiu ou recolheu no meio: o motor cai em `page_engine_ready` e fecha alvo e contexto.
             let _ = this.update(cx, |this, cx| this.page_engine_ready(id, engine, received, cx));
         }).detach();
     }
@@ -411,14 +437,23 @@ impl Hangar {
         let Some(view) = self.pages.views.get_mut(id) else { return };
         match event {
             crate::browser::Event::Frame => {
-                if let Some(running) = &mut view.running { running.framed = true; }
-                cx.notify();
+                let Some(running) = &mut view.running else { return };
+                let first = !std::mem::replace(&mut running.framed, true);
+                let replaced = running.engine.texture_replaced();
+                // Visto só quando a janela desenhar: quadro que chega antes espera, e só o último é decodificado.
+                let engine = Rc::downgrade(&running.engine);
+                let _ = cx.update_window(self.pages.window, move |_, window, _| {
+                    window.on_next_frame(move |_, _| if let Some(engine) = engine.upgrade() { engine.frame_seen() });
+                });
+                // Mesma textura, com o conteúdo novo: a cópia guardada da conversa já a pinta, basta a raiz redesenhar.
+                // Textura nova (primeiro quadro, outro tamanho) ou sem relógio na raiz: a conversa redesenha.
+                if first || replaced || !crate::motion::tick_root(cx) { self.redraw(panes::Area::Conversation, cx); }
             }
             crate::browser::Event::Host(raw) => match parse_host(&raw) {
                 Some(HostMsg::Height(height)) if view.reported != Some(height) => {
                     view.reported = Some(height);
                     self.remeasure_page(id);
-                    cx.notify();
+                    self.redraw(panes::Area::Conversation, cx);
                 }
                 // Só logo depois de um clique ou tecla na página: sozinha ela não abre o navegador.
                 Some(HostMsg::Link(url)) if view.gesture.take().is_some_and(|at| at.elapsed() < GESTURE) => cx.open_url(&url),
@@ -427,7 +462,7 @@ impl Hangar {
             // Endereço atual do site, para a faixa do cartão.
             crate::browser::Event::State(state) => if let Some(running) = &mut view.running && running.at != state.url {
                 running.at = state.url;
-                cx.notify();
+                self.redraw(panes::Area::Conversation, cx);
             },
         }
     }

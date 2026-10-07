@@ -1603,6 +1603,8 @@ impl Hangar {
                                 self.clear_visible_preview();
                             }
                         }
+                        let has_pages = self.chat.events.iter().any(|event| conversation::is_page_call(event.tool_name.as_deref()));
+                        self.pages.warm(has_pages, window, cx);
                         let first = !self.history_installed;
                         // A janela inteira que veio por baixo da primeira página.
                         keep_end = !first && limit == HISTORY_PAGE;

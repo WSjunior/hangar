@@ -3,15 +3,18 @@
 use std::{
     cell::{Cell, RefCell},
     collections::HashSet,
+    future::Future,
+    pin::pin,
     rc::Rc,
     sync::{
-        Arc, Mutex, PoisonError,
+        Arc, Condvar, Mutex, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
 
 use base64::Engine as _;
+use futures::future::{Either, select};
 use gpui_kit::*;
 use gpui_wgpu::wgpu;
 use serde_json::{Value, json};
@@ -28,29 +31,92 @@ struct Shown {
     device: wgpu::Device,
 }
 
-/// Dividido com a thread de leitura do pipe, que decodifica o quadro sem passar pela interface.
+/// Dividido com a thread de leitura do pipe, que só guarda o quadro, e com a que o decodifica: nada passa pela interface.
 struct Surface {
     shown: Mutex<Option<Shown>>,
-    /// Há um `Event::Frame` não pintado: não manda outro.
-    pending: AtomicBool,
+    slot: Mutex<Slot>,
+    wake: Condvar,
+    /// A textura foi recriada (primeiro quadro, outro tamanho): um desenho guardado ainda aponta para a antiga.
+    replaced: AtomicBool,
     events: async_channel::Sender<Event>,
-    /// JPEG no painel, PNG na página da conversa.
+    /// JPEG no painel, PNG nas páginas da conversa.
     format: image::ImageFormat,
 }
 
+#[derive(Default)]
+struct Slot {
+    /// Último quadro chegado, ainda em base64: o que chega antes de ele ser decodificado o substitui.
+    data: Option<String>,
+    /// Há um `Event::Frame` que a tela ainda não desenhou: o próximo quadro espera, sem decodificar à toa.
+    unseen: bool,
+    closed: bool,
+}
+
+impl Slot {
+    /// O quadro a decodificar agora: só o mais recente, e só depois de a tela ter desenhado o anterior.
+    fn next(&mut self) -> Option<String> { if self.unseen { None } else { self.data.take() } }
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> { m.lock().unwrap_or_else(PoisonError::into_inner) }
+
 impl Surface {
-    fn frame(&self, params: &Value) {
-        if let Err(e) = self.upload(params) { eprintln!("[nav] quadro do Chromium descartado: {e}"); }
+    fn new(events: async_channel::Sender<Event>, format: image::ImageFormat) -> Arc<Self> {
+        let surface = Arc::new(Surface {
+            shown: Mutex::new(None), slot: Mutex::default(), wake: Condvar::new(), replaced: AtomicBool::new(false), events, format,
+        });
+        let worker = surface.clone();
+        if let Err(e) = std::thread::Builder::new().name("chromium-frames".into()).spawn(move || worker.decode_loop()) {
+            eprintln!("[nav] sem thread para os quadros: {e}");
+        }
+        surface
     }
 
-    fn upload(&self, params: &Value) -> Result<(), String> {
-        let bytes = base64::engine::general_purpose::STANDARD.decode(params["data"].as_str().unwrap_or("")).map_err(|e| e.to_string())?;
+    /// Na thread de leitura do pipe: guarda e acorda quem decodifica.
+    fn frame(&self, mut params: Value) {
+        let Some(Value::String(data)) = params.get_mut("data").map(Value::take) else { return };
+        lock(&self.slot).data = Some(data);
+        self.wake.notify_one();
+    }
+
+    fn decode_loop(&self) {
+        loop {
+            let data = {
+                let mut slot = lock(&self.slot);
+                loop {
+                    if slot.closed { return; }
+                    if let Some(data) = slot.next() { break data; }
+                    slot = self.wake.wait(slot).unwrap_or_else(PoisonError::into_inner);
+                }
+            };
+            match self.upload(&data) {
+                Ok(()) => {
+                    lock(&self.slot).unseen = true;
+                    let _ = self.events.try_send(Event::Frame);
+                }
+                Err(e) => eprintln!("[nav] quadro do Chromium descartado: {e}"),
+            }
+        }
+    }
+
+    fn seen(&self) {
+        lock(&self.slot).unseen = false;
+        self.wake.notify_one();
+    }
+
+    fn close(&self) {
+        lock(&self.slot).closed = true;
+        self.wake.notify_one();
+    }
+
+    fn upload(&self, data: &str) -> Result<(), String> {
+        let bytes = base64::engine::general_purpose::STANDARD.decode(data).map_err(|e| e.to_string())?;
         let pixels = image::load_from_memory_with_format(&bytes, self.format).map_err(|e| e.to_string())?.into_rgba8();
         let (width, height) = pixels.dimensions();
         let (device, queue) = gpui_wgpu::WgpuContext::shared_device().ok_or("a GPUI não expôs o device wgpu")?;
-        let mut shown = self.shown.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut shown = lock(&self.shown);
         // Mesma textura enquanto o tamanho e o device não mudam: a fila do wgpu ordena a escrita depois do último desenho.
         let reuse = shown.as_ref().filter(|s| s.device == device && s.texture.width() == width && s.texture.height() == height);
+        if reuse.is_none() { self.replaced.store(true, Ordering::SeqCst); }
         let texture = match reuse {
             Some(s) => s.texture.clone(),
             None => device.create_texture(&wgpu::TextureDescriptor {
@@ -71,17 +137,31 @@ impl Surface {
             wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         );
         *shown = Some(Shown { texture, device });
-        drop(shown);
-        if !self.pending.swap(true, Ordering::SeqCst) { let _ = self.events.try_send(Event::Frame); }
         Ok(())
     }
 }
 
-/// A janela da GPUI não entra: o Chromium não tem janela. Guarda o executor para os eventos do pipe.
+/// A janela da GPUI não entra: o Chromium não tem janela. Guarda os executores para os eventos do pipe e os prazos.
 pub struct Starter {
     executor: ForegroundExecutor,
+    background: BackgroundExecutor,
     scale: f32,
 }
+
+/// Mantém o Chromium compartilhado de pé enquanto existir, para a primeira página não esperar o processo nascer.
+pub struct Warm { _browser: Rc<Browser> }
+
+/// Resposta do CDP sem travar a interface, com o prazo das chamadas que bloqueavam.
+async fn answer<T>(background: &BackgroundExecutor, method: &str, call: impl Future<Output = Result<T, String>>) -> Result<T, String> {
+    let timer = background.timer(Duration::from_secs(10));
+    match select(pin!(call), pin!(timer)).await {
+        Either::Left((reply, _)) => reply,
+        Either::Right(_) => Err(format!("{method}: o Chromium nao respondeu")),
+    }
+}
+
+/// Documento do agente posto direto na página: HTML, largura da coluna e fundo opaco (tema próprio).
+type Document = (Rc<str>, f32, Option<(u8, u8, u8)>);
 
 type Publish = Rc<dyn Fn(&dyn Fn(&mut model::PageState))>;
 
@@ -100,7 +180,7 @@ pub struct Engine {
     pressed: Cell<bool>,
     /// A página caiu ou se soltou com o Chromium vivo.
     dead: Rc<Cell<bool>>,
-    /// Página da conversa: screencast em PNG.
+    /// Página ou site da conversa: screencast em PNG.
     png: bool,
     /// Desenhada no dobro da tela (página e site da conversa).
     double: bool,
@@ -112,7 +192,12 @@ impl Engine {
     pub fn available() -> Result<(), String> { launch::find().map(|_| ()) }
 
     pub fn prepare(window: &Window, cx: &App) -> Result<Starter, String> {
-        Ok(Starter { executor: cx.foreground_executor().clone(), scale: window.scale_factor() })
+        Ok(Starter { executor: cx.foreground_executor().clone(), background: cx.background_executor().clone(), scale: window.scale_factor() })
+    }
+
+    /// Sobe o Chromium agora, sem esperar ele responder.
+    pub fn warm(window: &Window, cx: &App) -> Result<Warm, String> {
+        Browser::shared_async(cx.foreground_executor(), cx.background_executor(), window.scale_factor()).map(|browser| Warm { _browser: browser })
     }
 }
 
@@ -140,9 +225,7 @@ impl Starter {
         let measured = session.call_blocking("Runtime.evaluate", json!({"expression": "outerHeight-innerHeight", "returnByValue": true}))?;
         let decoration = measured["result"]["value"].as_f64().unwrap_or(0.).max(0.) as f32;
         let state = Rc::new(RefCell::new(model::PageState::default()));
-        let surface = Arc::new(Surface {
-            shown: Mutex::new(None), pending: AtomicBool::new(false), events: events.clone(), format: image::ImageFormat::Jpeg,
-        });
+        let surface = Surface::new(events.clone(), image::ImageFormat::Jpeg);
         let sink = surface.clone();
         browser.sink(session.id(), Box::new(move |params| sink.frame(params)));
         let dead = Rc::new(Cell::new(false));
@@ -154,70 +237,115 @@ impl Starter {
     }
 
     /// Site de verdade na conversa: o mesmo perfil do painel (cookies e login), navegação livre dentro do site e popup
-    /// no próprio alvo, como o painel. Quadros em JPEG como o painel: o site tem fundo próprio, sem alfa a preservar, e
-    /// rola e anima mais que a página do agente.
-    pub fn start_url(self, url: &str, events: async_channel::Sender<Event>) -> Result<Engine, String> {
-        let mut engine = self.start(events)?;
-        engine.double = true;
-        engine.load(url);
-        Ok(engine)
+    /// no próprio alvo, como o painel. Nasce sem travar a interface.
+    pub fn start_url(self, url: String, events: async_channel::Sender<Event>) -> impl Future<Output = Result<Engine, String>> + use<> {
+        async move {
+            let browser = self.browser().await?;
+            let engine = self.open(&browser, None, None, events).await?;
+            engine.load(&url);
+            Ok(engine)
+        }
     }
 
-    /// Página da conversa: alvo num contexto próprio (sem os cookies do painel), documento posto direto e quadros
-    /// em PNG, para o alfa chegar à GPUI. Sem `background` o fundo é transparente; com ele, opaco nessa cor.
-    pub fn start_page(self, html: &str, width: f32, background: Option<(u8, u8, u8)>, events: async_channel::Sender<Event>) -> Result<Engine, String> {
-        let browser = Browser::shared(&self.executor, self.scale)?;
-        let long = Duration::from_secs(10);
-        let context = browser.call_blocking(None, "Target.createBrowserContext", json!({"disposeOnDetach": true}), long)?["browserContextId"]
-            .as_str().ok_or("createBrowserContext sem id")?.to_owned();
-        let opened = self.open_page(&browser, &context, html, width, background, events);
-        // Falhou no meio: fechar o contexto fecha junto o alvo que já tenha nascido nele.
-        if opened.is_err() { drop(browser.call(None, "Target.disposeBrowserContext", json!({"browserContextId": context}))); }
-        opened
+    /// Página da conversa: alvo num contexto próprio (sem os cookies do painel) e documento posto direto, sem travar a
+    /// interface. Sem `background` o fundo é transparente; com ele, opaco nessa cor.
+    pub fn start_page(self, html: Rc<str>, width: f32, background: Option<(u8, u8, u8)>, events: async_channel::Sender<Event>)
+        -> impl Future<Output = Result<Engine, String>> + use<> {
+        async move {
+            let browser = self.browser().await?;
+            let created = self.browser_call(&browser, "Target.createBrowserContext", json!({"disposeOnDetach": true})).await?;
+            let context = created["browserContextId"].as_str().ok_or("createBrowserContext sem id")?.to_owned();
+            let opened = self.open(&browser, Some(context.clone()), Some((html, width, background)), events).await;
+            // Falhou no meio: fechar o contexto fecha junto o alvo que já tenha nascido nele.
+            if opened.is_err() { drop(browser.call(None, "Target.disposeBrowserContext", json!({"browserContextId": context}))); }
+            opened
+        }
     }
 
-    fn open_page(
-        self, browser: &Rc<Browser>, context: &str, html: &str, width: f32, background: Option<(u8, u8, u8)>, events: async_channel::Sender<Event>,
-    ) -> Result<Engine, String> {
-        let long = Duration::from_secs(10);
-        let created = browser.call_blocking(None, "Target.createTarget",
-            json!({"url": "about:blank", "newWindow": true, "browserContextId": context}), long)?;
+    async fn browser(&self) -> Result<Rc<Browser>, String> {
+        let browser = Browser::shared_async(&self.executor, &self.background, self.scale)?;
+        browser.ready().await?;
+        Ok(browser)
+    }
+
+    async fn browser_call(&self, browser: &Browser, method: &str, params: Value) -> Result<Value, String> {
+        answer(&self.background, method, browser.call(None, method, params)).await
+    }
+
+    async fn page_call(&self, session: &Session, method: &str, params: Value) -> Result<Value, String> {
+        answer(&self.background, method, session.call(method, params)).await
+    }
+
+    /// Alvo da página da conversa. Falhou depois de nascer: o alvo fecha aqui, que ninguém mais o conhece.
+    async fn open(&self, browser: &Rc<Browser>, context: Option<String>, document: Option<Document>, events: async_channel::Sender<Event>)
+        -> Result<Engine, String> {
+        let mut create = json!({"url": "about:blank", "newWindow": true});
+        if let Some(context) = &context { create["browserContextId"] = context.as_str().into(); }
+        let created = self.browser_call(browser, "Target.createTarget", create).await?;
         let target = created["targetId"].as_str().ok_or("createTarget sem targetId")?.to_owned();
         browser.own(&target, true);
         browser.close_initial();
-        let session = Rc::new(Session::attach(browser, &target)?);
-        let window = browser.call_blocking(None, "Browser.getWindowForTarget", json!({"targetId": target}), long)?["windowId"]
-            .as_i64().ok_or("getWindowForTarget sem windowId")?;
-        session.call_blocking("Page.enable", json!({}))?;
-        session.call_blocking("Inspector.enable", json!({}))?;
-        session.call_blocking("Runtime.enable", json!({}))?;
-        session.call_blocking("Runtime.addBinding", json!({"name": "hangarHost"}))?;
-        let (r, g, b, a) = background.map_or((0, 0, 0, 0), |(r, g, b)| (r, g, b, 1));
-        session.call_blocking("Emulation.setDefaultBackgroundColorOverride", json!({"color": {"r": r, "g": g, "b": b, "a": a}}))?;
-        // Várias páginas abertas não disputam o foco: `focus`/`release_focus` contam com isto.
-        session.call_blocking("Emulation.setFocusEmulationEnabled", json!({"enabled": true}))?;
-        session.call_blocking("Fetch.enable", json!({"patterns": [{"resourceType": "Document", "requestStage": "Request"}]}))?;
-        browser.call_blocking(None, "Browser.setWindowBounds", json!({"windowId": window, "bounds": {"width": width.round() as i64, "height": 600}}), long)?;
-        let measured = session.call_blocking("Runtime.evaluate", json!({"expression": "outerHeight-innerHeight", "returnByValue": true}))?;
-        let decoration = measured["result"]["value"].as_f64().unwrap_or(0.).max(0.) as f32;
-        let frame = session.call_blocking("Page.getFrameTree", json!({}))?["frameTree"]["frame"]["id"].as_str().unwrap_or_default().to_owned();
-        session.call_blocking("Page.setDocumentContent", json!({"frameId": frame, "html": html}))?;
+        let opened = self.open_target(browser, &target, context, document, events).await;
+        if opened.is_err() {
+            browser.own(&target, false);
+            drop(browser.call(None, "Target.closeTarget", json!({"targetId": target})));
+        }
+        opened
+    }
+
+    async fn open_target(
+        &self, browser: &Rc<Browser>, target: &str, context: Option<String>, document: Option<Document>, events: async_channel::Sender<Event>,
+    ) -> Result<Engine, String> {
+        let session = Rc::new(answer(&self.background, "Target.attachToTarget", Session::attach_async(browser, target)).await?);
+        // Ouvintes antes de qualquer espera: a interface segue rodando, e o que a página mandar enquanto nasce (a altura,
+        // um pedido pausado) não pode chegar sem dono.
         let state = Rc::new(RefCell::new(model::PageState::default()));
-        let surface = Arc::new(Surface {
-            shown: Mutex::new(None), pending: AtomicBool::new(false), events: events.clone(), format: image::ImageFormat::Png,
-        });
+        // PNG nas duas formas: o texto da conversa ao lado pede a nitidez que o JPEG perde.
+        let surface = Surface::new(events.clone(), image::ImageFormat::Png);
         let sink = surface.clone();
         browser.sink(session.id(), Box::new(move |params| sink.frame(params)));
         let dead = Rc::new(Cell::new(false));
-        let publish = listen(&session, &target, &state, &events, &self.executor, &dead, true);
+        let publish = listen(&session, target, &state, &events, &self.executor, &dead, document.is_some());
         let host = events.clone();
         let _ = session.on("Runtime.bindingCalled", move |params| {
             if params["name"] == "hangarHost" { let _ = host.try_send(Event::Host(params["payload"].as_str().unwrap_or("").to_owned())); }
         });
-        Ok(Engine {
-            session, publish, target, window, decoration, executor: self.executor, surface, dead, png: true, double: true, context: Some(context.to_owned()),
-            placed: Cell::new(None), visible: Cell::new(false), pressed: Cell::new(false),
-        })
+        match self.setup_target(browser, &session, target, &document).await {
+            Ok((window, decoration)) => Ok(Engine {
+                session, publish, target: target.to_owned(), window, decoration, executor: self.executor.clone(), surface, dead, png: true, double: true,
+                context, placed: Cell::new(None), visible: Cell::new(false), pressed: Cell::new(false),
+            }),
+            Err(e) => { surface.close(); Err(e) }
+        }
+    }
+
+    /// Janela, domínios e documento do alvo; devolve a janela e o desconto da barra.
+    async fn setup_target(&self, browser: &Rc<Browser>, session: &Session, target: &str, document: &Option<Document>) -> Result<(i64, f32), String> {
+        let window = self.browser_call(browser, "Browser.getWindowForTarget", json!({"targetId": target})).await?["windowId"]
+            .as_i64().ok_or("getWindowForTarget sem windowId")?;
+        self.page_call(session, "Page.enable", json!({})).await?;
+        // Queda do renderer chega só por aqui (`Inspector.targetCrashed`, na sessão da página).
+        self.page_call(session, "Inspector.enable", json!({})).await?;
+        if let Some((_, _, background)) = &document {
+            self.page_call(session, "Runtime.enable", json!({})).await?;
+            self.page_call(session, "Runtime.addBinding", json!({"name": "hangarHost"})).await?;
+            let (r, g, b, a) = background.map_or((0, 0, 0, 0), |(r, g, b)| (r, g, b, 1));
+            self.page_call(session, "Emulation.setDefaultBackgroundColorOverride", json!({"color": {"r": r, "g": g, "b": b, "a": a}})).await?;
+        }
+        // Várias páginas abertas não disputam o foco: `focus`/`release_focus` contam com isto.
+        self.page_call(session, "Emulation.setFocusEmulationEnabled", json!({"enabled": true})).await?;
+        // Mesma regra de endereço do painel: só web (http/https sem usuário e senha); o resto não carrega.
+        self.page_call(session, "Fetch.enable", json!({"patterns": [{"resourceType": "Document", "requestStage": "Request"}]})).await?;
+        let (width, height) = document.as_ref().map_or((1280, 800), |(_, width, _)| (width.round() as i64, 600));
+        self.browser_call(browser, "Browser.setWindowBounds", json!({"windowId": window, "bounds": {"width": width, "height": height}})).await?;
+        let measured = self.page_call(session, "Runtime.evaluate", json!({"expression": "outerHeight-innerHeight", "returnByValue": true})).await?;
+        let decoration = measured["result"]["value"].as_f64().unwrap_or(0.).max(0.) as f32;
+        if let Some((html, _, _)) = &document {
+            let tree = self.page_call(session, "Page.getFrameTree", json!({})).await?;
+            let frame = tree["frameTree"]["frame"]["id"].as_str().unwrap_or_default().to_owned();
+            self.page_call(session, "Page.setDocumentContent", json!({"frameId": frame, "html": &**html})).await?;
+        }
+        Ok((window, decoration))
     }
 }
 
@@ -413,17 +541,23 @@ impl Engine {
             if self.png { params["format"] = "png".into(); params.as_object_mut().map(|p| p.remove("quality")); }
             self.send("Page.startScreencast", params);
         }
-        // Zera antes de ler: um quadro que chegue no meio ainda avisa a tela.
-        self.surface.pending.store(false, Ordering::SeqCst);
+        // Antes de ler: um quadro que chegue no meio ainda avisa a tela.
+        self.surface.seen();
         let device = gpui_wgpu::WgpuContext::shared_device().map(|(device, _)| device);
         let shown = {
-            let mut latest = self.surface.shown.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut latest = lock(&self.surface.shown);
             if latest.as_ref().is_some_and(|s| Some(&s.device) != device.as_ref()) { *latest = None; }
             latest.as_ref().map(|s| s.texture.clone())
         };
         // Esticado até o painel: durante um resize o quadro do tamanho antigo cobre tudo até chegar o do novo.
         if let Some(texture) = shown { window.paint_surface(pixel_aligned(bounds, &texture, scale, frame_scale), Arc::new(texture)); }
     }
+
+    /// A tela desenhou o último quadro: o próximo já pode ser decodificado.
+    pub fn frame_seen(&self) { self.surface.seen(); }
+
+    /// A textura mudou desde a última pergunta: um desenho guardado ainda mostraria a antiga.
+    pub fn texture_replaced(&self) -> bool { self.surface.replaced.swap(false, Ordering::SeqCst) }
 
     /// Página fora da tela: sem screencast. O controlador cuida do tamanho dela para o `shot`.
     pub fn hide(&self) {
@@ -476,6 +610,7 @@ fn pixel_aligned(bounds: Bounds<Pixels>, texture: &wgpu::Texture, scale: f32, fr
 
 impl Drop for Engine {
     fn drop(&mut self) {
+        self.surface.close();
         self.session.browser().own(&self.target, false);
         drop(self.session.browser().call(None, "Target.closeTarget", json!({"targetId": self.target})));
         if let Some(context) = &self.context {
@@ -531,8 +666,23 @@ fn single_char(text: &str) -> Option<char> {
 #[cfg(test)]
 mod tests {
     // Sem `super::*`: o glob da gpui_kit traz um `test` próprio que sombreia o `#[test]` da std.
-    use super::{Keystroke, Modifiers, key_event};
+    use super::{Keystroke, Modifiers, Slot, key_event};
     use serde_json::json;
+
+    #[test]
+    fn only_the_latest_frame_is_decoded_after_the_last_one_was_drawn() {
+        let mut slot = Slot::default();
+        slot.data = Some("a".into());
+        slot.data = Some("b".into());
+        assert_eq!(slot.next().as_deref(), Some("b"), "o quadro trocado antes de decodificar não volta");
+        slot.unseen = true;
+        slot.data = Some("c".into());
+        slot.data = Some("d".into());
+        assert_eq!(slot.next(), None, "quadro anterior ainda não desenhado: espera");
+        slot.unseen = false;
+        assert_eq!(slot.next().as_deref(), Some("d"));
+        assert_eq!(slot.next(), None);
+    }
 
     fn stroke(key: &str, key_char: Option<&str>, control: bool, shift: bool) -> Keystroke {
         Keystroke { modifiers: Modifiers { control, shift, ..Default::default() }, key: key.into(), key_char: key_char.map(Into::into) }

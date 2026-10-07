@@ -22,7 +22,7 @@ pub mod cdp {
 #[cfg(target_os = "linux")]
 mod chromium;
 #[cfg(target_os = "linux")]
-pub use chromium::Engine;
+pub use chromium::{Engine, Warm};
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod wry_engine;
