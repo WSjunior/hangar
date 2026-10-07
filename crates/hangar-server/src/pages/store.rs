@@ -72,8 +72,10 @@ impl Store {
     }
 
     /// Apaga a pasta cujo transcript não está vivo há `GONE_AFTER`, e rascunhos com mais de `DRAFT_TTL`.
+    /// Os dois lados são comparados canonicalizados: `~/.claude-<conta>` é link do `~/.claude`.
     pub fn sweep(&self, live_jsonl: &HashSet<String>, now: SystemTime) {
         let Ok(entries) = std::fs::read_dir(&self.root) else { return };
+        let live: HashSet<String> = live_jsonl.iter().map(|p| canonical(p)).collect();
         let mut absent = self.absent_since.lock().unwrap_or_else(|e| e.into_inner());
         let mut seen = HashSet::new();
         for entry in entries.flatten() {
@@ -81,7 +83,7 @@ impl Store {
             let dir = entry.path();
             let owner = std::fs::read_to_string(dir.join("jsonl")).unwrap_or_default();
             seen.insert(key.clone());
-            if live_jsonl.contains(owner.trim()) { absent.remove(&key); self.drop_old_drafts(&dir, now); continue; }
+            if live.contains(&canonical(owner.trim())) { absent.remove(&key); self.drop_old_drafts(&dir, now); continue; }
             let since = *absent.entry(key.clone()).or_insert(now);
             if now.duration_since(since).unwrap_or_default() >= GONE_AFTER {
                 if let Err(e) = std::fs::remove_dir_all(&dir) { tracing::warn!(key = %key, "páginas da sessão não apagadas: {e}"); }
@@ -106,6 +108,14 @@ impl Store {
             }
         }
     }
+}
+
+/// Transcript que ainda não existe resolve pela pasta; nada resolvível fica com o texto cru.
+fn canonical(path: &str) -> String {
+    let p = std::path::Path::new(path);
+    std::fs::canonicalize(p).ok()
+        .or_else(|| Some(std::fs::canonicalize(p.parent()?).ok()?.join(p.file_name()?)))
+        .map_or_else(|| path.to_owned(), |c| c.to_string_lossy().into_owned())
 }
 
 pub(crate) fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
@@ -159,5 +169,22 @@ mod tests {
         s.sweep(&live, t0);
         s.sweep(&live, t0 + GONE_AFTER * 2);
         assert!(dir.path().join("k").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sweep_matches_owner_through_symlinked_account_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("claude");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("k.jsonl"), "").unwrap();
+        std::os::unix::fs::symlink(&real, dir.path().join("claude-conta")).unwrap();
+        let s = Store::new(dir.path().join("paginas"));
+        s.save("k", dir.path().join("claude-conta/k.jsonl").to_str().unwrap(), &page()).unwrap();
+        let live: HashSet<String> = [real.join("k.jsonl").to_string_lossy().into_owned()].into();
+        let t0 = SystemTime::now();
+        s.sweep(&live, t0);
+        s.sweep(&live, t0 + GONE_AFTER * 2);
+        assert!(dir.path().join("paginas/k").exists());
     }
 }

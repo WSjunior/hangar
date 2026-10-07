@@ -27,7 +27,7 @@ pub const AREAS: [&str; 22] = [
 ];
 
 /// Trabalho que o Python pede ao Rust por trás (porta privada e canal do runtime).
-pub const PRIVATE: [&str; 5] = ["send_headless", "send_terminal", "terminal_observe", "workspace_bridge", "list_bridge"];
+pub const PRIVATE: [&str; 6] = ["send_headless", "send_terminal", "terminal_observe", "workspace_bridge", "list_bridge", "pages_bridge"];
 
 const WINDOW_MINUTES: u64 = 10;
 const FACTS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -102,7 +102,7 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
         }
         let tail = path.strip_prefix("/api/sessions/").and_then(|r| r.split_once('/')).map(|(_, t)| t);
         // `term`: o painel do dono abre no Rust; o resto (convidado, Connect) passa pelo Python e liga ao PTY dele.
-        if matches!(tail, Some("history" | "events" | "cost" | "term")) {
+        if matches!(tail, Some("history" | "events" | "cost" | "term")) || tail.is_some_and(|t| t.starts_with("pages/")) {
             return true;
         }
         if path.strip_prefix("/api/hangar-terminals/").is_some_and(|r| r.ends_with("/term")) {
@@ -193,6 +193,7 @@ pub async fn count_bridge(req: Request, next: Next) -> Response {
         "/__hangar_server/terminal" => "terminal_observe",
         "/__hangar_server/workspace" => "workspace_bridge",
         "/__hangar_server/list" => "list_bridge",
+        "/__hangar_server/pages" => "pages_bridge",
         _ => "",
     };
     count_private(key);
@@ -311,6 +312,7 @@ mod tests {
         let get = |p| rust_route(&Method::GET, p);
         assert!(get("/api/sessions/a/history") && get("/api/sessions") && get("/api/uso"));
         assert!(get("/api/sessions/a/git/log") && get("/api/worktrees"), "Git e worktrees vêm dos matches");
+        assert!(get("/api/sessions/a/pages/p1") && get("/api/sessions/a/pages/p1/shot") && !get("/api/sessions/a/pages"));
         assert!(!rust_route(&Method::POST, "/api/sessions/a/input") && !get("/api/cotas") && !rust_route(&Method::POST, "/api/worktrees/create"));
         assert_eq!(AREAS[area_of("/api/sessions/a/git/commit/abc/files")], "workspace");
         assert_eq!(AREAS[area_of("/api/sessions-x")], "other", "prefixo só casa por segmento inteiro");

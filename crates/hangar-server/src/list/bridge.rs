@@ -1,7 +1,7 @@
 //! Ponte privada `list.*` (Python → Rust): com o Rust de pé, a descoberta, o cache de resolução do
 //! transcript e o retrato da lista são dele; o Python pergunta por aqui (`list_bridge.py`), na porta
 //! privada, com o mesmo segredo da ponte de Git/arquivos. Falha volta com código, nunca lista vazia.
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -39,6 +39,8 @@ pub const DISCOVER_TTL: Duration = Duration::from_secs(1);
 pub const SNAPSHOT_TTL: Duration = Duration::from_secs(2);
 /// Sessão fora da lista por este tempo perde os caches por nome.
 const FORGET_AFTER: Duration = Duration::from_secs(10);
+/// Rodada da lista mais velha que isto não serve à limpeza das páginas: são vários tiques sem rodada.
+const LIVE_FRESH: Duration = Duration::from_secs(15);
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
 const CONFIG_DIRS_TTL: Duration = Duration::from_secs(30);
 const MAX_BODY: usize = 64 * 1024;
@@ -206,6 +208,8 @@ pub struct ListBridge {
     pub demoted: Arc<crate::state::demote::Demoted>,
     /// Último estado de cada `Monitor` vivo: a lista o lê em vez de capturar o pane.
     pub published: Arc<crate::state::published::Published>,
+    /// Transcripts da última rodada do dono, para a limpeza das páginas; `None` = rodada incerta.
+    live_jsonl: Mutex<Option<(Instant, HashSet<String>)>>,
 }
 
 /// Tarefa bloqueante que entrou em pânico: o hook já registrou onde; aqui fica qual operação.
@@ -227,7 +231,7 @@ impl ListBridge {
             discovery: tokio::sync::Mutex::new(None),
             snapshot: tokio::sync::Mutex::new(None), git_running: Arc::default(),
             git_slots: Arc::new(tokio::sync::Semaphore::new(GIT_SLOTS)), epoch: AtomicU64::new(0),
-            state_facts: Arc::default(), demoted, published: Arc::default() }
+            state_facts: Arc::default(), demoted, published: Arc::default(), live_jsonl: Mutex::default() }
     }
 
     /// Rebaixamentos da rodada: valem já aqui (lista e `Monitor`), e os session ids vão ao Python.
@@ -462,6 +466,10 @@ impl ListBridge {
         list_facts::mark_stale(&mut rows, &fetched.facts, fetched.ok);
         if !input.shadow {
             self.prune_gone(&rows, Instant::now());
+            // Fatos que falharam ou linha sem transcript: não dá para dizer quem morreu.
+            let live = (fetched.ok && rows.iter().all(|r| r.jsonl.is_some()))
+                .then(|| (Instant::now(), rows.iter().filter_map(|r| r.jsonl.clone()).collect()));
+            *lock(&self.live_jsonl) = live;
         }
         let round = keep.then(|| Arc::new(Round { inputs, pre }));
         Ok((Produced { rows: Arc::new(rows), facts: fetched.facts, facts_ok: fetched.ok }, round))
@@ -542,6 +550,12 @@ impl ListBridge {
             seen.remove(&name);
             self.forget(&name);
         }
+    }
+
+    /// Transcripts vivos pela última rodada do dono. Rodada velha também é `None`: com a lista
+    /// fechada, sessão criada depois dela pareceria morta.
+    pub fn live_jsonl(&self) -> Option<HashSet<String>> {
+        lock(&self.live_jsonl).as_ref().filter(|(at, _)| at.elapsed() < LIVE_FRESH).map(|(_, set)| set.clone())
     }
 
     /// Não espera a rodada em curso: entra na fila e vale antes da próxima leitura do cache.
@@ -912,6 +926,20 @@ mod tests {
         assert_eq!(cached(), ["a", "b"], "uma rodada fora não esquece");
         bridge.prune_gone(&[row("b")], t0 + FORGET_AFTER + Duration::from_secs(1));
         assert_eq!(cached(), ["b"]);
+    }
+
+    #[test]
+    fn live_jsonl_only_from_a_recent_round() {
+        let bridge = ListBridge::new(ListEnv { mux: Mux::default(), capture_program: "tmux".into(),
+            procs: Arc::new(procs::SystemProcs::default()), dirs: None }, FactsClient::new("127.0.0.1:9".parse().unwrap(), "s".into()));
+        assert!(bridge.live_jsonl().is_none(), "lista nunca aberta");
+        let set: HashSet<String> = ["/t/k.jsonl".to_owned()].into();
+        *lock(&bridge.live_jsonl) = Some((Instant::now(), set.clone()));
+        assert_eq!(bridge.live_jsonl(), Some(set.clone()));
+        if let Some(old) = Instant::now().checked_sub(LIVE_FRESH + Duration::from_secs(1)) {
+            *lock(&bridge.live_jsonl) = Some((old, set));
+            assert!(bridge.live_jsonl().is_none(), "rodada velha não vale");
+        }
     }
 
     #[tokio::test]
