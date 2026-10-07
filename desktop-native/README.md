@@ -20,6 +20,9 @@ O assistente (Linux e Windows) roda os scripts do repositório. Para ver as tela
 - `HANGAR_SETUP_DEST=<pasta>` troca a pasta da instalação (nada é escrito nela pelo dublê).
 - `HANGAR_SETUP_DEMO=1` abre o assistente ao iniciar; `HANGAR_SETUP_DEMO=start` também aperta "Começar instalação" quando a conferência passa (`start-fora` escolhe "também fora de casa" antes).
 - `XDG_CONFIG_HOME=<pasta>` isola a configuração e a instância única do app instalado.
+- `FAKE_SCENARIO=erro FAKE_CODE=<código>` falha na etapa instalar com o código (`nenhum` = falha não prevista sem código); `FAKE_SCENARIO=pendencia FAKE_CODE=<código>` termina com a pendência; `FAKE_LEAK=1` imprime token, caminho, IP e nome `.ts.net` para provar a limpeza do relatório; com `FAKE_FIXED=<arquivo>`, o cenário `erro` passa quando o arquivo existe.
+- `HANGAR_SETUP_FAKE_CLAUDE=desktop-native/tools/setup-fake-agent.sh` (e `HANGAR_SETUP_FAKE_CODEX`) troca o agente pelo dublê; `FAKE_AGENT_MODE=fora|dentro|trava`, `FAKE_AGENT_PROMPT=<arquivo>` guarda o prompt recebido. `HANGAR_SETUP_DEMO_AGENT=1` pede ajuda ao primeiro agente assim que o relatório fica pronto.
+- `HANGAR_REPORT_URL=<url>` manda o relatório para outro endereço (um receptor local) em vez do Worker.
 
 ## Ambiente
 

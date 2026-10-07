@@ -2,7 +2,10 @@
 # Dublê do bootstrap para provar as telas do assistente sem instalar nada:
 #   HANGAR_SETUP_BOOTSTRAP=desktop-native/tools/setup-fake-bootstrap.sh hangar-native
 # Imprime as marcas do contrato (spec "Marcas na saída") com pausas. Não escreve em pasta nenhuma.
-# FAKE_SCENARIO: ok (padrão) | falha | tailscale | protocolo | askpass | interrompe. FAKE_PAUSE: segundos entre marcas (1).
+# FAKE_SCENARIO: ok (padrão) | falha | tailscale | protocolo | askpass | interrompe | erro | pendencia.
+# erro: falha na etapa instalar com FAKE_CODE (padrão sem-systemd; "nenhum" = sem ##HANGAR-ERRO##); passa se FAKE_FIXED existe.
+# pendencia: termina com ##HANGAR-PENDENCIA## FAKE_CODE. FAKE_LEAK=1 imprime token, caminho, IP e nome .ts.net (prova da limpeza).
+# FAKE_PAUSE: segundos entre marcas (1).
 set -u
 cenario=${FAKE_SCENARIO:-ok}
 pausa=${FAKE_PAUSE:-1}
@@ -71,6 +74,20 @@ if [ "$cenario" = falha ]; then
   exit 1
 fi
 if [ "$cenario" = interrompe ]; then echo "dublê: saindo sem FIM"; exit 1; fi
+if [ "$cenario" = erro ] && { [ -z "${FAKE_FIXED:-}" ] || [ ! -e "$FAKE_FIXED" ]; }; then
+  if [ "${FAKE_LEAK:-0}" = 1 ]; then
+    token=$(sed -n 's/^CP_AUTH_TOKEN=//p' "$1/backend/.env" 2>/dev/null)
+    echo "dublê: CP_AUTH_TOKEN=$token"
+    echo "dublê: abra http://100.64.0.2:5173/?token=$token"
+    echo "dublê: venv em $HOME/hangar/backend/.venv"
+    echo "dublê: https://minha-maquina.tail1234.ts.net"
+  fi
+  [ "${FAKE_CODE:-sem-systemd}" != nenhum ] && m "##HANGAR-ERRO## ${FAKE_CODE:-sem-systemd}"
+  m "##HANGAR-FALHA## falha provocada pelo dublê (${FAKE_CODE:-sem-systemd})"
+  m "##HANGAR-PASSO## instalar falhou"
+  m "##HANGAR-FIM## falhou"
+  exit 1
+fi
 m "##HANGAR-ITEM## inicio ok Iniciar com o computador"
 # O celular vem antes do fim da instalação, com ou sem Tailscale (install.sh:768-827).
 m "##HANGAR-PASSO## celular fazendo"
@@ -97,4 +114,8 @@ m "##HANGAR-PASSO## final fazendo"
 m "##HANGAR-ITEM## servidor-responde ok Servidor respondendo"
 m "##HANGAR-ITEM## agentes ok Agentes prontos"
 m "##HANGAR-PASSO## final ok"
+if [ "$cenario" = pendencia ]; then
+  m "##HANGAR-PENDENCIA## ${FAKE_CODE:-politica-travada} pendência provocada pelo dublê"
+  pendencia=1
+fi
 m "##HANGAR-FIM## $([ $pendencia = 1 ] && echo pendente || echo ok)"
