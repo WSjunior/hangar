@@ -50,7 +50,12 @@ def env(tmp_path, monkeypatch):
         pressed.append((name, site, key, plugin))
         return {"ok": True}
 
+    async def close(name, site):
+        pressed.append(("close", name, site))
+        return {"ok": True}
+
     monkeypatch.setattr(plugin_click, "press", press)
+    monkeypatch.setattr(plugin_click, "close", close)
     api.app.dependency_overrides[api._transfer_guard] = lambda: None
     coordinator = RuntimeCoordinator()
     coordinator.instance = "instance-1"
@@ -60,9 +65,9 @@ def env(tmp_path, monkeypatch):
     guest_users._reset()
 
 
-def _press(token, *, invite_port=False):
+def _press(token, *, invite_port=False, route="press", body=BODY):
     base = f"http://testserver:{GUEST_PORT}" if invite_port else "http://testserver"
-    return TestClient(api.app, base_url=base).post("/api/sessions/t/plugin/press", json=BODY,
+    return TestClient(api.app, base_url=base).post(f"/api/sessions/t/plugin/{route}", json=body,
                                                    headers={"Authorization": f"Bearer {token}"})
 
 
@@ -150,14 +155,21 @@ def test_refusal_under_the_barrier_reaches_the_app_as_the_guest_code(env, monkey
     assert marks == [True, True, False]
 
 
-def test_the_button_comes_with_its_mod_and_closing_does_not_need_one(env):
-    # A `key` só é única dentro de um mod: sem ele o pedido não diz qual botão é. Fechar o painel dispensa.
+def test_the_button_comes_with_its_mod(env):
+    # A `key` só é única dentro de um mod: sem ele o pedido não diz qual botão é.
     _, _, pressed = env
-    client = TestClient(api.app)
-    auth = {"Authorization": f"Bearer {OWNER}"}
     for body in ({"site": "above-prompt", "key": "mr-a"}, {"site": "above-prompt", "key": "mr-a", "plugin": ""}):
-        assert client.post("/api/sessions/t/plugin/press", json=body, headers=auth).status_code == 422
+        assert _press(OWNER, body=body).status_code == 422
     assert pressed == []
-    close = {"site": "pm-mock-mr", "key": plugin_click.CLOSE_KEY}
-    assert client.post("/api/sessions/t/plugin/press", json=close, headers=auth).status_code == 200
-    assert pressed == [("t", "pm-mock-mr", plugin_click.CLOSE_KEY, None)]
+
+
+def test_closing_a_pane_has_its_own_route_and_the_same_guest_refusal(env, tmp_path):
+    coordinator, guest_token, pressed = env
+    close = {"site": "pm-mock-mr"}
+    assert _press(OWNER, route="close", body=close).status_code == 200
+    assert _press(OWNER, route="close", body={"site": "pm-mock-mr", "key": "x"}).status_code == 422
+    assert pressed == [("close", "t", "pm-mock-mr")]
+    _register(coordinator, tmp_path, headless=False).phase = Phase.Rust
+    assert _refused(_press(guest_token, route="close", body=close))
+    assert _refused(_press(INVITE, invite_port=True, route="close", body=close))
+    assert pressed == [("close", "t", "pm-mock-mr")]

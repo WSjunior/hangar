@@ -15,7 +15,7 @@ import {
 import type { CotaContaResumo } from './cotaResumo';
 import type { Shortcut, ProjectShortcut, ProjectShortcuts } from './shortcuts';
 import type { UsoFiltros, UsoReport } from './uso';
-import { PANE_CLOSE_KEY, type PluginControl } from './pluginUi';
+import type { PluginControl } from './pluginUi';
 import type { ConfigSyncItem, ConfigSyncManifest, ConfigSyncProgress, ConfigSyncReport } from './configSync';
 import type {
   Atualizacao,
@@ -2616,23 +2616,32 @@ export async function interrupt(name: string, clear = false, server?: Server): P
                 : apiFetch<{ ok: boolean }>(path, init));
 }
 
-/** Clique num botão que um mod desenhou na faixa ou num painel; `null` é o ✕, que fecha o painel `site`.
- *  `copied` e `opened` são o que o mod copiou ou mandou abrir, para quem clicou fazer no próprio aparelho.
- *  Recusa vem como erro `erro_mod_*`. */
+/** Clique num botão que um mod desenhou na faixa ou num painel. `copied` e `opened` são o que o mod
+ *  copiou ou mandou abrir, para quem clicou fazer no próprio aparelho. Recusa vem como erro `erro_mod_*`. */
 export async function pressPluginButton(
-  name: string, site: string, button: PluginControl | null, server?: Server,
+  name: string, site: string, button: PluginControl, server?: Server,
 ): Promise<{ ok: boolean; copied?: string; opened?: string }> {
   const path = `/api/sessions/${encodeURIComponent(name)}/plugin/press`;
-  const init = { method: 'POST', body: JSON.stringify(button ? { site, ...button } : { site, key: PANE_CLOSE_KEY }) };
+  const init = { method: 'POST', body: JSON.stringify({ site, ...button }) };
   return server ? apiFetchForServer<{ ok: boolean; copied?: string; opened?: string }>(server, path, init, 8000, true)
                 : apiFetch<{ ok: boolean; copied?: string; opened?: string }>(path, init);
 }
 
-/** Traz um painel de mod para a frente (`plugin/show`). Servidor sem a rota responde 404 ou 405 (`isMissingRoute`). */
-export async function showPluginPane(name: string, site: string, server?: Server): Promise<{ ok: boolean }> {
-  const path = `/api/sessions/${encodeURIComponent(name)}/plugin/show`;
+/** Rota de mod que só fala de um painel (`{ site }`). */
+function postPluginPane(action: 'close' | 'show', name: string, site: string, server?: Server): Promise<{ ok: boolean }> {
+  const path = `/api/sessions/${encodeURIComponent(name)}/plugin/${action}`;
   const init = { method: 'POST', body: JSON.stringify({ site }) };
   return server ? apiFetchForServer<{ ok: boolean }>(server, path, init, 8000, true) : apiFetch<{ ok: boolean }>(path, init);
+}
+
+/** Fecha o painel de mod `site`, como o ✕ do cabeçalho dele (`plugin/close`). */
+export async function closePluginPane(name: string, site: string, server?: Server): Promise<{ ok: boolean }> {
+  return postPluginPane('close', name, site, server);
+}
+
+/** Traz um painel de mod para a frente (`plugin/show`). Servidor sem a rota responde 404 ou 405 (`isMissingRoute`). */
+export async function showPluginPane(name: string, site: string, server?: Server): Promise<{ ok: boolean }> {
+  return postPluginPane('show', name, site, server);
 }
 
 export type PluginInputKind = 'change' | 'submit';

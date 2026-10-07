@@ -1837,7 +1837,7 @@ Limites conhecidos da fase 3:
 - no Windows o vigia não roda e a contagem de clientes usa `#{session_attached}` (o psmux conta um cliente em modo controle, mas o Hangar não liga um lá);
 - com o processo inteiro sem Rust, o clique de mod com terminal é o de antes (`plugin_click.py`), sem abas seguindo o terminal, sem reserva por teclado e sem controle de tamanho;
 - o convidado não aciona nem vê os mods de sessão com terminal do Rust pelo app; a recusa vale por dois lados (Rust e Python) para fechar a diferença de leitura de cabeçalho entre eles.
-- convidado que pede `show` ou `input` numa sessão com terminal do Rust recebe 405 do Python, que só tem a rota `plugin/press`, em vez do 403 `erro_mod_convidado` do `press`: nada é acionado, mas o app mostra um erro genérico. Fechar pede as duas rotas no Python ou a recusa do convidado no Rust;
+- convidado que pede `show` ou `input` numa sessão com terminal do Rust recebe 405 do Python, que só tem as rotas `plugin/press` e `plugin/close`, em vez do 403 `erro_mod_convidado` delas: nada é acionado, mas o app mostra um erro genérico. Fechar pede as duas rotas no Python ou a recusa do convidado no Rust;
 - a publicação da vista é montada fora da trava e conferida sob ela pela versão, mas entregue aos aparelhos depois de soltá-la: numa corrida entre dois `/ui` (ou um `/ui` e a leitura da tela), a vista mais velha pode chegar por último. O próximo `/ui` ou a próxima leitura da tela corrige (T11-a);
 - a limpeza renova a reserva do pane no começo e de novo antes de devolver a altura, mas entre a última renovação e o `Release` a reserva ainda pode vencer alguns milissegundos antes do fim quando a operação no executor demora: a fila só entrega com o teclado já no prompt, então a mensagem não aperta botão, só pode sair um instante antes de a altura voltar (T13-a);
 - dentro dos 3 s depois de um foco armado, o plugin pergunta ao backend se o alvo ainda está armado antes de derrubar um envio do composer, e só derruba com a confirmação; sem resposta em 2 s (sessão renomeada com o Python lento ou fora do ar), o envio passa, e uma letra que a pessoa digitasse no meio da reserva, com o `Enter` do clique, poderia ir ao modelo. A reserva recusa já de início com rascunho no prompt. Responder `Deferred` pelo aviso do plugin na tela foi tentado e revertido: o texto do aviso pode estar na tela por outra razão, e a linha seria digitada de novo;
@@ -1883,9 +1883,10 @@ mod e `key`, com e sem terminal. Medido no Claude Code 2.1.292: a árvore que o 
 plugin do Hangar já traz `press: {plugin, handle}` em cada botão, então o clique pela tela filtra
 o rótulo pelo mod como a superfície remota filtra o `handle`.
 
-- `plugin/press` leva `plugin`; só o fechar painel (`key: "__close__"`) vai sem ele. `plugin/input`
-  leva `plugin` sempre. Sem o mod, a rota responde 422, no Rust e no Python. `plugin/show` não muda:
-  o id do painel já é único.
+- `plugin/press` e `plugin/input` levam `plugin` sempre; sem ele, a rota responde 422, no Rust e no
+  Python. Fechar painel (o `✕`) tem rota própria, `plugin/close` com só o `site`, em vez da `key`
+  reservada `__close__` no `press`: era ela que deixava o mod opcional no clique. `plugin/show` não
+  muda: o id do painel já é único.
 - Controle sem `press.plugin` (ou sem `key`) é só rótulo nos apps: não há como o servidor achá-lo.
 - O campo do app (`Input`) é identificado por lugar, mod e `key`, no web e no nativo. Medido no
   2.1.292: o engine recusa a faixa inteira quando dois mods desenham `Input` com a mesma `key` no

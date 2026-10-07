@@ -18,18 +18,21 @@ const TEXT_PX: f32 = 12.;
 /// Faixa sem nada para mostrar: ninguém desenhou, ou só o marcador do próprio engine.
 pub fn is_empty(tree: &Value) -> bool { !tree.is_object() || tree["type"] == "engine" }
 
-/// Clique num botão de mod: (site, botão). O site é `above-prompt` ou o id do painel; `None` é o `✕`, que fecha o painel.
-pub type Press = Rc<dyn Fn(&str, Option<&Control>, &mut Window, &mut App)>;
+/// Clique num botão de mod: (site, botão). O site é `above-prompt` ou o id do painel.
+pub type Press = Rc<dyn Fn(&str, &Control, &mut Window, &mut App)>;
+
+/// Uma ação sobre o painel de id dado: trocar de aba (`Show`) ou fechar pelo `✕` (`Close`).
+pub type PaneAction = Rc<dyn Fn(&str, &mut Window, &mut App)>;
+pub type Close = PaneAction;
 
 /// O que o app manda ao backend para achar um botão ou um campo de mod: o mod que o desenhou e a `key`, que só é
 /// única dentro do mod.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Control { pub plugin: String, pub key: String }
 pub const BAND_SITE: &str = "above-prompt";
-pub const PANE_CLOSE_KEY: &str = "__close__";
 
 /// Troca de aba pedida no app: o id do painel.
-pub type Show = Rc<dyn Fn(&str, &mut Window, &mut App)>;
+pub type Show = PaneAction;
 
 /// O ponteiro entrou (`true`) ou saiu de um escopo de hover ou de um cartão absoluto; o id é o lugar e o caminho.
 pub type Hover = Rc<dyn Fn(&str, bool, &mut Window, &mut App)>;
@@ -182,6 +185,8 @@ pub fn input_request(source: Option<UiSource>, read_only: bool, site: &str, fiel
 /// rótulo e não há `✕`. `columns` é a largura, em colunas, para a qual a faixa foi desenhada.
 pub struct View<'a> {
     pub press: Option<Press>,
+    /// Sem ele (sessão só leitura), o painel não tem `✕`.
+    pub close: Option<Close>,
     pub show: Show,
     /// Rolagem da fileira de abas: o app manda rolar até a aba ativa quando ela muda.
     pub tabs_scroll: &'a ScrollHandle,
@@ -471,11 +476,11 @@ pub fn band(tree: &Value, view: &View) -> Option<AnyElement> {
 
 /// O `✕` do lugar: fecha o painel da frente, como a marca do engine no terminal.
 fn close_mark(site: &str, view: &View) -> Option<AnyElement> {
-    let press = view.press.clone()?;
+    let close = view.close.clone()?;
     let site = site.to_owned();
     Some(div().id(SharedString::from(format!("plg-close-{site}"))).flex_shrink_0().cursor_pointer().px(px(4.))
         .text_color(theme::muted()).child("✕")
-        .on_click(move |_, window, cx| press(&site, None, window, cx)).into_any_element())
+        .on_click(move |_, window, cx| close(&site, window, cx)).into_any_element())
 }
 
 /// Largura máxima de uma aba, em células: título maior que isso sai cortado com reticências.
@@ -587,7 +592,7 @@ fn element(v: &Value, c: &Ctx, at: &Spot) -> AnyElement {
                     let site = c.site.to_owned();
                     base.id(SharedString::from(format!("plg-{site}-{}-{}", button.plugin, button.key))).cursor_pointer()
                         .hover(|el| el.underline())
-                        .on_click(move |_, window, cx| press(&site, Some(&button), window, cx))
+                        .on_click(move |_, window, cx| press(&site, &button, window, cx))
                         .child(label).into_any_element()
                 }
                 _ => base.child(label).into_any_element(),

@@ -115,8 +115,6 @@ export function textOf(children: PluginNode[] | undefined): string {
 
 /** Site da faixa acima do prompt, como o engine chama (`requestId` do `AbovePrompt`). */
 export const BAND_SITE = 'above-prompt';
-/** Pedido de fechar um painel: clica no ✕ que o engine desenha no quadro dele. */
-export const PANE_CLOSE_KEY = '__close__';
 
 /** Painel que um mod abriu e o terminal desenhou; `placement` é onde o terminal o pôs. */
 export interface PluginPane {

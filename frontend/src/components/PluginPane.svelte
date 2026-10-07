@@ -8,14 +8,15 @@
     pane: PluginPane;
     /** Todos os painéis abertos; com mais de um, viram abas e só `pane` é desenhado, como no terminal. */
     tabs?: PluginPane[];
-    /** Clique num botão de mod; `null` é o ✕, que fecha o painel. */
-    onPress?: (site: string, button: PluginControl | null) => void;
+    onPress?: (site: string, button: PluginControl) => void;
+    /** O ✕ do cabeçalho: fecha o painel. */
+    onClose?: (site: string) => void;
     /** Troca de aba: quem chama decide se ela muda na hora ou espera o `shown_id` do servidor. */
     onShow?: (site: string) => void;
     /** Digitação num `Input` do painel; só sem terminal. */
     onInput?: (site: string, field: PluginControl, kind: PluginInputKind, value: string) => void;
   }
-  let { pane, tabs = [], onPress, onShow, onInput }: Props = $props();
+  let { pane, tabs = [], onPress, onClose, onShow, onInput }: Props = $props();
   const tabbed = $derived(tabs.length > 1);
 </script>
 
@@ -32,10 +33,10 @@
     {:else}
       <span class="title">{pane.title}</span>
     {/if}
-    {#if onPress}
+    {#if onClose}
       <!-- Um ✕ só: fecha o painel da frente, como a marca do engine no terminal. -->
       <button type="button" class="close" aria-label={m.plugin_painel_fechar()}
-              onclick={() => onPress(pane.id, null)}>✕</button>
+              onclick={() => onClose(pane.id)}>✕</button>
     {/if}
   </header>
   <div class="body" role={tabbed ? 'tabpanel' : undefined}>

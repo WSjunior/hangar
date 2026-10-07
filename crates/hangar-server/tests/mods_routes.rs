@@ -73,7 +73,7 @@ async fn post(server: std::net::SocketAddr, name: &str, route: &str, body: Value
 async fn press_and_close_go_to_the_surface() {
     let (python, server, _mods, link) = setup(FakeLink::default()).await;
     assert_eq!(post(server, "s", "press", json!({"site": "above-prompt", "plugin": "vitrine", "key": "abrir"}), Some(OWNER)).await, (200, json!({"ok": true})));
-    assert_eq!(post(server, "s", "press", json!({"site": "painel", "key": "__close__"}), Some(OWNER)).await.0, 200);
+    assert_eq!(post(server, "s", "close", json!({"site": "painel"}), Some(OWNER)).await.0, 200);
     assert_eq!(*link.calls.lock().unwrap(), vec![
         ModsCall::Press { site: "above-prompt".into(), plugin: "vitrine".into(), key: "abrir".into() },
         ModsCall::Close { site: "painel".into() }]);
@@ -96,6 +96,8 @@ async fn other_session_or_guest_goes_to_python() {
     assert_eq!(post(server, "outra", "press", json!({"site": "x", "plugin": "vitrine", "key": "y"}), Some(OWNER)).await.1, "from-python");
     assert_eq!(python.hits_to("/api/sessions/outra/plugin/press"), 1);
     assert_eq!(post(server, "outra", "show", json!({"site": "x"}), Some(OWNER)).await.1, "from-python");
+    assert_eq!(post(server, "outra", "close", json!({"site": "x"}), Some(OWNER)).await.1, "from-python");
+    assert_eq!(python.hits_to("/api/sessions/outra/plugin/close"), 1);
     assert_eq!(post(server, "s", "input", json!({"site": "x", "plugin": "vitrine", "key": "y", "kind": "change", "value": ""}), Some("errado")).await.1, "from-python");
     assert!(link.calls.lock().unwrap().is_empty());
     assert_eq!(python.transfer_calls(), 0, "o que segue ao Python passa pela guarda dele, não pela do Rust");
@@ -213,9 +215,12 @@ async fn show_and_input_validate_and_answer() {
                 json!({"site": "p", "plugin": "", "key": "k", "kind": "change", "value": ""})] {
         assert_eq!(post(server, "s", "input", bad, Some(OWNER)).await.0, 422);
     }
-    // O botão vem com o mod que o desenhou; só fechar o painel dispensa.
-    for bad in [json!({"site": "p", "key": "k"}), json!({"site": "p", "plugin": "", "key": "k"})] {
+    // O botão vem sempre com o mod que o desenhou; fechar o painel tem rota própria, só com o painel.
+    for bad in [json!({"site": "p", "key": "k"}), json!({"site": "p", "plugin": "", "key": "k"}), json!({"site": "p", "key": "__close__"})] {
         assert_eq!(post(server, "s", "press", bad, Some(OWNER)).await.0, 422);
+    }
+    for bad in [json!({"site": ""}), json!({"site": "p", "key": "k"})] {
+        assert_eq!(post(server, "s", "close", bad, Some(OWNER)).await.0, 422);
     }
     // Corpo inválido é recusado antes da vez e da guarda: só os dois pedidos válidos a consultaram.
     assert_eq!(python.transfer_calls(), 2);

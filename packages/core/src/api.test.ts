@@ -16,7 +16,7 @@ import { mensagemDeErro, formataErro } from './errosApi';
 import { passarBastao, getSyncSetupForServer, setupSyncForServer, disableSyncForServer } from './api';
 import { probeServerResponse } from './api';
 import { scanDir, scanDirForServer, listClaudeConfigs, listClaudeConfigsForServer } from './api';
-import { answerQuestions, inputPluginField, interrupt, openEventStreamForServer, pressPluginButton, sendInputForServer, showPluginPane, skipQuestion } from './api';
+import { answerQuestions, closePluginPane, inputPluginField, interrupt, openEventStreamForServer, pressPluginButton, sendInputForServer, showPluginPane, skipQuestion } from './api';
 import { discardFile, fileAuthHeader, fileUrlNative, getPairContract, getPlans, listFiles, pathDiff, readFile, searchFiles, setPlanPin, unpairSession, writeFile } from './api';
 import type { Server } from './servers';
 import { exportShortcuts } from './api';
@@ -351,7 +351,7 @@ describe('contratos de conversa com servidor explícito', () => {
     { path: '/interrupt', body: {}, run: (s?: Server) => interrupt('mesma/sessão', false, s) },
     { path: '/interrupt?clear=true', body: {}, run: (s?: Server) => interrupt('mesma/sessão', true, s) },
     { path: '/plugin/press', body: { site: 'above-prompt', key: 'rv-1', plugin: 'pm-review' }, run: (s?: Server) => pressPluginButton('mesma/sessão', 'above-prompt', { plugin: 'pm-review', key: 'rv-1' }, s) },
-    { path: '/plugin/press', body: { site: 'pm-mock-mr', key: '__close__' }, run: (s?: Server) => pressPluginButton('mesma/sessão', 'pm-mock-mr', null, s) },
+    { path: '/plugin/close', body: { site: 'pm-mock-mr' }, run: (s?: Server) => closePluginPane('mesma/sessão', 'pm-mock-mr', s) },
     { path: '/plugin/show', body: { site: 'pm-mock-mr' }, run: (s?: Server) => showPluginPane('mesma/sessão', 'pm-mock-mr', s) },
     { path: '/plugin/input', body: { site: 'vitrine-campos', plugin: 'vitrine', key: 'V18-campo', kind: 'change', value: 'oi' }, run: (s?: Server) => inputPluginField('mesma/sessão', 'vitrine-campos', CAMPO, 'change', 'oi', s) },
     { path: '/answer', body: { answers: [], request_id: 0 }, run: (s?: Server) => answerQuestions('mesma/sessão', [], 0, s) },
@@ -1085,11 +1085,12 @@ it.each([404, 405])('plugin/show num servidor sem a rota rejeita com status %i, 
   expect(isMissingRoute(erro)).toBe(true);
 });
 
-it('plugin/press, plugin/show e plugin/input com servidor explícito levam o código do servidor no erro', async () => {
+it('plugin/press, plugin/close, plugin/show e plugin/input com servidor explícito levam o código do servidor no erro', async () => {
   const envelope = { ok: false, error_code: 'erro_mod_guarda_indisponivel', message: 'motivo',
     detail: { code: 'erro_mod_guarda_indisponivel', params: { motivo: 'motivo' }, msg: 'motivo — erro_mod_guarda_indisponivel' } };
   vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify(envelope), { status: 503 }));
   for (const chamada of [() => pressPluginButton('sessao', 'above-prompt', { plugin: 'pm-mock', key: 'abrir' }, server),
+                         () => closePluginPane('sessao', 'painel', server),
                          () => showPluginPane('sessao', 'painel', server),
                          () => inputPluginField('sessao', 'painel', CAMPO, 'change', 'a', server)]) {
     const erro = await chamada().catch((e: unknown) => e);

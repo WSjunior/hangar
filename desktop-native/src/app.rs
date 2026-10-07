@@ -221,6 +221,7 @@ enum Payload {
     PluginPressed(Result<Value, Failure>),
     // Troca de aba de mod: só a falha interessa; a aba nova chega pelo `shown_id`.
     PluginShown(Result<Value, Failure>),
+    PluginClosed(Result<Value, Failure>),
     // Digitação num campo de mod: o lugar, a `key` e a identidade do campo que mandou; a volta libera o próximo pedido
     // da fila dele, e só a falha aparece.
     PluginInput(String, crate::plugin_ui::Control, EntityId, Result<Value, Failure>),
@@ -984,6 +985,16 @@ impl Hangar {
         Self::plugin_failure(error, || tr_shared("plugin_clique_falhou", &[]))
     }
 
+    /// Aviso de falha de uma ação de mod; um novo substitui o anterior (`PluginFailure`).
+    fn notify_plugin_failure(text: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = text { window.push_notification(Notification::warning(text).id::<PluginFailure>(), cx); }
+    }
+
+    /// Painel de mod que não fechou: a frase genérica é a mesma do web.
+    fn close_failure(error: &Failure) -> String {
+        Self::plugin_failure(error, || tr_shared("plugin_fechar_falhou", &[]))
+    }
+
     /// Digitação num campo de mod que não chegou: a frase genérica é a mesma do web.
     fn input_failure(error: &Failure) -> String {
         Self::plugin_failure(error, || tr_shared("plugin_input_falhou", &[]))
@@ -1653,16 +1664,16 @@ impl Hangar {
             Payload::Create(dialog, reply) => { self.receive_create(dialog, reply, window, cx); return; }
             Payload::Transfer(dialog, reply) => { self.receive_agent_transfer(dialog, reply, window, cx); return; }
             Payload::PluginPressed(result) => { self.receive_plugin_press(result, window, cx); return; }
+            Payload::PluginClosed(result) => {
+                Self::notify_plugin_failure(result.err().map(|error| Self::close_failure(&error)), window, cx);
+                return;
+            }
             Payload::PluginShown(result) => {
-                if let Some(text) = result.err().and_then(|error| Self::show_failure(&error)) {
-                    window.push_notification(Notification::warning(text).id::<PluginFailure>(), cx);
-                }
+                Self::notify_plugin_failure(result.err().and_then(|error| Self::show_failure(&error)), window, cx);
                 return;
             }
             Payload::PluginInput(site, control, field, result) => {
-                if let Err(error) = result {
-                    window.push_notification(Notification::warning(Self::input_failure(&error)).id::<PluginFailure>(), cx);
-                }
+                Self::notify_plugin_failure(result.err().map(|error| Self::input_failure(&error)), window, cx);
                 // O próximo da fila só sai pelo mesmo campo: um campo recriado com a mesma `key` tem fila própria.
                 let next = self.plugin_fields.get_mut(&crate::plugin_ui::field_id(&site, &control))
                     .filter(|f| f.state.entity_id() == field).and_then(|f| f.outbox.done());
@@ -5735,9 +5746,19 @@ impl Hangar {
     fn plugin_press(&self, cx: &mut Context<Self>) -> Option<crate::plugin_ui::Press> {
         if self.selected.as_ref().is_some_and(|s| s.read_only()) { return None; }
         let view = cx.entity().downgrade();
-        Some(std::rc::Rc::new(move |site: &str, button: Option<&crate::plugin_ui::Control>, _: &mut Window, cx: &mut App| {
-            let (site, button) = (site.to_owned(), button.cloned());
+        Some(std::rc::Rc::new(move |site: &str, button: &crate::plugin_ui::Control, _: &mut Window, cx: &mut App| {
+            let (site, button) = (site.to_owned(), button.clone());
             let _ = view.update(cx, |this, cx| this.press_plugin(site, button, cx));
+        }))
+    }
+
+    /// Quem atende o `✕` de um painel de mod; sessão só leitura fica sem ele.
+    fn plugin_close(&self, cx: &mut Context<Self>) -> Option<crate::plugin_ui::Close> {
+        if self.selected.as_ref().is_some_and(|s| s.read_only()) { return None; }
+        let view = cx.entity().downgrade();
+        Some(std::rc::Rc::new(move |site: &str, _: &mut Window, cx: &mut App| {
+            let site = site.to_owned();
+            let _ = view.update(cx, |this, cx| this.close_plugin(site, cx));
         }))
     }
 
@@ -5751,17 +5772,15 @@ impl Hangar {
         });
     }
 
-    /// `button`: o botão do mod; `None` é o `✕`, que fecha o painel `site`.
-    fn press_plugin(&mut self, site: String, button: Option<crate::plugin_ui::Control>, cx: &mut Context<Self>) {
-        let body = match button {
-            Some(button) => json!({"site": site, "plugin": button.plugin, "key": button.key}),
-            None => {
-                // O `✕` tira o painel da tela: o hover dele sai junto, sem esperar o evento que confirma o fechamento.
-                self.keep_plugin_hovered_without(Some(&site));
-                json!({"site": site, "key": crate::plugin_ui::PANE_CLOSE_KEY})
-            }
-        };
-        self.spawn_plugin("press", body, Payload::PluginPressed);
+    fn press_plugin(&mut self, site: String, button: crate::plugin_ui::Control, cx: &mut Context<Self>) {
+        self.spawn_plugin("press", json!({"site": site, "plugin": button.plugin, "key": button.key}), Payload::PluginPressed);
+        cx.notify();
+    }
+
+    fn close_plugin(&mut self, site: String, cx: &mut Context<Self>) {
+        // O `✕` tira o painel da tela: o hover dele sai junto, sem esperar o evento que confirma o fechamento.
+        self.keep_plugin_hovered_without(Some(&site));
+        self.spawn_plugin("close", json!({"site": site}), Payload::PluginClosed);
         cx.notify();
     }
 
@@ -5883,7 +5902,7 @@ impl Hangar {
                 let _ = entity.update(cx, |this, cx| this.submit_plugin_field(&site, &control, cx));
             })
         });
-        crate::plugin_ui::View { press: self.plugin_press(cx), show, tabs_scroll: &self.plugin_tabs_scroll, columns: self.plugin_columns,
+        crate::plugin_ui::View { press: self.plugin_press(cx), close: (!self.plugin_panes.is_empty()).then(|| self.plugin_close(cx)).flatten(), show, tabs_scroll: &self.plugin_tabs_scroll, columns: self.plugin_columns,
             hover: Some(self.plugin_hover(cx)), hovered: &self.plugin_hovered, fields: &self.plugin_fields, submit }
     }
 
@@ -6460,6 +6479,8 @@ mod tests {
         assert_eq!(Hangar::show_failure(&bare), Some(tr_shared("plugin_aba_falhou", &[])));
         assert_eq!(Hangar::input_failure(&bare), tr_shared("plugin_input_falhou", &[]));
         assert_eq!(Hangar::press_failure(&bare), tr_shared("plugin_clique_falhou", &[]));
+        assert_eq!(Hangar::close_failure(&bare), tr_shared("plugin_fechar_falhou", &[]));
+        assert_ne!(tr_shared("plugin_fechar_falhou", &[]), "plugin_fechar_falhou");
         // Código que o app não conhece não vale como frase: 5xx com ele segue a genérica.
         let unknown = Failure { code: Some("internal_info".into()), ..bare };
         assert_eq!(Hangar::show_failure(&unknown), Some(tr_shared("plugin_aba_falhou", &[])));

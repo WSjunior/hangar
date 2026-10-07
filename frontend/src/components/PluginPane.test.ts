@@ -43,12 +43,12 @@ describe('PluginPane com vários painéis', () => {
   });
 
   it('um ✕ só, que fecha o painel ativo', async () => {
-    const onPress = vi.fn();
-    const el = await montar({ pane: tres[1], tabs: tres, onPress, onShow: vi.fn() });
+    const onClose = vi.fn();
+    const el = await montar({ pane: tres[1], tabs: tres, onPress: vi.fn(), onClose, onShow: vi.fn() });
     const fechar = el.querySelectorAll<HTMLButtonElement>('button.close');
     expect(fechar).toHaveLength(1);
     fechar[0].click();
-    expect(onPress).toHaveBeenCalledWith('pm-mock-mr', null);
+    expect(onClose).toHaveBeenCalledWith('pm-mock-mr');
   });
 
   it('com um painel só, o cabeçalho de sempre, sem fileira de abas', async () => {

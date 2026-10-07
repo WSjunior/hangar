@@ -5,8 +5,6 @@ use serde_json::{Value, json};
 
 /// O `requestId` da faixa nos dois modos; nos painéis é o id do painel.
 pub const BAND_SITE: &str = "above-prompt";
-/// A `key` com que o app pede para fechar o painel `site`.
-pub const CLOSE_KEY: &str = "__close__";
 /// Um cliente só para todos os aparelhos ligados à sessão (G2). Sem `client_id`, o Claude Code cria
 /// um cliente padrão que não sai mais pelo canal (E4).
 pub const CLIENT_ID: &str = "hangar";

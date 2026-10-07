@@ -1,11 +1,11 @@
 //! Rotas dos apps para a interface dos mods de uma sessão sem terminal que o Rust atende como
-//! superfície remota: clique (`press`), troca de aba (`show`) e digitação (`input`). Sessão que o Rust
-//! não atende assim, ou pedido de convidado, segue para o Python, que é o dono, como no `/events`; a
-//! digitação, que o Python não tem, é recusada aqui.
+//! superfície remota: clique (`press`), fechar painel (`close`), troca de aba (`show`) e digitação
+//! (`input`). Sessão que o Rust não atende assim, ou pedido de convidado, segue para o Python, que é o
+//! dono, como no `/events`; a digitação, que o Python não tem, é recusada aqui.
 //!
 //! A sessão com terminal que o Rust atende (fase 3) usa as mesmas rotas, com o clique pela tela. O pedido
 //! que não é do dono segue ao Python como nas outras: quem recusa o convidado ali (`erro_mod_convidado`) é
-//! o `plugin_press` dele, que vê também o convite da porta 8766, que nunca passa por aqui. A digitação é
+//! o `plugin_press` e o `plugin_close` dele, que veem também o convite da porta 8766, que nunca passa por aqui. A digitação é
 //! recusada logo na entrada, sem esperar a vez da sessão nem consultar a guarda da troca de agente.
 //!
 //! Antes de cada operação a rota pergunta ao Python se a troca de agente está em curso
@@ -51,14 +51,15 @@ const EFFECT_WAIT: Duration = Duration::from_millis(300);
 const VALUE_MAX: usize = 16384;
 const TRANSFER_REASON: &str = "o backend não confirmou que a sessão está livre da troca de agente";
 
-/// `plugin`: o mod do botão. Fechar o painel (`key: "__close__"`) não fala de botão e dispensa.
+/// `plugin`: o mod do botão; a `key` só é única dentro dele.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PressBody { site: String, key: String, #[serde(default)] plugin: Option<String> }
+struct PressBody { site: String, plugin: String, key: String }
 
+/// Corpo de `show` e `close`: só o painel.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ShowBody { site: String }
+struct SiteBody { site: String }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -161,33 +162,40 @@ async fn run(st: &AppState, headers: &HeaderMap, name: &str, call: ModsCall, dea
     }
 }
 
-/// Clique num botão de mod; `key: "__close__"` fecha o painel `site`.
+/// Clique num botão de mod.
 pub async fn press(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>,
     path: Result<Path<String>, PathRejection>, req: Request) -> Response {
     let deadline = Instant::now() + REQUEST_BUDGET;
     let (name, headers, raw) = match owned(&st, peer, path, req, None).await { Ok(parts) => parts, Err(response) => return *response };
     let request: PressBody = match body(&headers, raw).await { Ok(request) => request, Err(response) => return *response };
-    if !fits(&request.site, 64) || !fits(&request.key, 256) || request.plugin.as_deref().is_some_and(|plugin| !fits(plugin, PLUGIN_MAX)) {
+    if !fits(&request.site, 64) || !fits(&request.plugin, PLUGIN_MAX) || !fits(&request.key, 256) {
         return invalid(Some(&headers));
     }
-    let call = match request.plugin {
-        _ if request.key == CLOSE_KEY => ModsCall::Close { site: request.site },
-        Some(plugin) => ModsCall::Press { site: request.site, plugin, key: request.key },
-        None => return invalid(Some(&headers)),
-    };
-    run(&st, &headers, &name, call, deadline).await
+    run(&st, &headers, &name, ModsCall::Press { site: request.site, plugin: request.plugin, key: request.key }, deadline).await
+}
+
+/// Fechar o painel `site` (o `✕` do cabeçalho).
+pub async fn close(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    path: Result<Path<String>, PathRejection>, req: Request) -> Response {
+    pane_route(&st, peer, path, req, |site| ModsCall::Close { site }).await
 }
 
 /// Troca de aba: o painel `site` vai para a frente (`ui_pane_show`).
 pub async fn show(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>,
     path: Result<Path<String>, PathRejection>, req: Request) -> Response {
+    pane_route(&st, peer, path, req, |site| ModsCall::Show { site }).await
+}
+
+/// Rota que só fala de um painel (`{site}`): `close` e `show`.
+async fn pane_route(st: &Arc<AppState>, peer: SocketAddr, path: Result<Path<String>, PathRejection>, req: Request,
+    call: fn(String) -> ModsCall) -> Response {
     let deadline = Instant::now() + REQUEST_BUDGET;
-    let (name, headers, raw) = match owned(&st, peer, path, req, None).await { Ok(parts) => parts, Err(response) => return *response };
-    let request: ShowBody = match body(&headers, raw).await { Ok(request) => request, Err(response) => return *response };
+    let (name, headers, raw) = match owned(st, peer, path, req, None).await { Ok(parts) => parts, Err(response) => return *response };
+    let request: SiteBody = match body(&headers, raw).await { Ok(request) => request, Err(response) => return *response };
     if !fits(&request.site, 64) {
         return invalid(Some(&headers));
     }
-    run(&st, &headers, &name, ModsCall::Show { site: request.site }, deadline).await
+    run(st, &headers, &name, call(request.site), deadline).await
 }
 
 /// Digitação num `Input` de mod: `change` a cada mudança, `submit` no Enter.

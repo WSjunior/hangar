@@ -49,7 +49,7 @@ async fn apps_reach_the_terminal_through_the_link() {
     assert_eq!(post_as(server, "show", json!({"site": "pm-mock-mr"}), OWNER).await, (200, json!({"ok": true, "shown_id": "pm-mock-mr"})));
     let (status, body) = post_as(server, "input", json!({"site": "pm-mock-mr", "plugin": "pm-mock", "key": "k", "kind": "submit", "value": "x"}), OWNER).await;
     assert_eq!((status, body["detail"]["code"].as_str()), (409, Some("erro_mod_sem_digitacao")));
-    assert_eq!(post_as(server, "press", json!({"site": "pm-mock-mr", "key": "__close__"}), OWNER).await, (200, json!({"ok": true})));
+    assert_eq!(post_as(server, "close", json!({"site": "pm-mock-mr"}), OWNER).await, (200, json!({"ok": true})));
     assert_eq!(pane.actions(), ["click 0 104", "click 0 148"]);
 }
 
@@ -75,12 +75,13 @@ async fn requests_not_from_the_owner_go_to_python() {
     let guest = format!("{}-_", "g".repeat(41));
     for token in [guest.as_str(), "errado"] {
         for (route, body) in [("press", json!({"site": "pm-mock-mr", "plugin": "pm-mock", "key": "mr-a"})), ("show", json!({"site": "pm-mock-mr"})),
+            ("close", json!({"site": "pm-mock-mr"})),
             ("input", json!({"site": "pm-mock-mr", "plugin": "pm-mock", "key": "k", "kind": "submit", "value": "x"}))] {
             assert_eq!(post_as(server, route, body, token).await.1, "from-python", "{route} {token}");
         }
     }
     assert_eq!(python.hits_to("/api/sessions/t/plugin/press") + python.hits_to("/api/sessions/t/plugin/show")
-        + python.hits_to("/api/sessions/t/plugin/input"), 6);
+        + python.hits_to("/api/sessions/t/plugin/close") + python.hits_to("/api/sessions/t/plugin/input"), 8);
     assert!(pane.actions().is_empty());
 }
 
