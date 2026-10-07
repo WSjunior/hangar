@@ -37,10 +37,16 @@ pub fn page_from_result(tool_name: &str, result: &str) -> Option<PageRef> {
     if !conversation::is_page_call(Some(tool_name)) { return None; }
     #[derive(Deserialize)]
     struct Out { hangar_page: PageRef }
+    let mut page = serde_json::from_value::<Out>(result_value(result)?).ok()?.hangar_page;
+    page.url = page.url.filter(|u| u.starts_with("http://") || u.starts_with("https://"));
+    Some(page)
+}
+
+fn result_value(result: &str) -> Option<Value> {
     let join = |blocks: &[Value]| serde_json::from_str::<Value>(&blocks.iter()
         .filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect::<String>()).ok();
     let value: Value = serde_json::from_str(result).ok()?;
-    let value = match value {
+    Some(match value {
         Value::Array(blocks) => join(&blocks)?,
         Value::Object(ref o) if o.get("hangar_page").is_none() && o.get("content").is_some_and(Value::is_array) => {
             match o.get("structuredContent") {
@@ -49,10 +55,16 @@ pub fn page_from_result(tool_name: &str, result: &str) -> Option<PageRef> {
             }
         }
         other => other,
-    };
-    let mut page = serde_json::from_value::<Out>(value).ok()?.hangar_page;
-    page.url = page.url.filter(|u| u.starts_with("http://") || u.starts_with("https://"));
-    Some(page)
+    })
+}
+
+/// Chamada de página que terminou sem `hangar_page` (erro da tool, formato desconhecido): o texto recebido,
+/// cortado, para o cartão mostrar. Rascunho não é falha: segue como chamada comum.
+pub fn page_failure(tool_name: &str, result: &str) -> Option<String> {
+    if !conversation::is_page_call(Some(tool_name)) || page_from_result(tool_name, result).is_some() { return None; }
+    if result_value(result).is_some_and(|v| v.get("draft").is_some()) { return None; }
+    let (text, cut) = conversation::clip(result.trim(), 300);
+    Some(if cut { format!("{text}…") } else { text.to_owned() })
 }
 
 fn natural(page: &PageRef, width: f32, reported: Option<f32>) -> f32 {
@@ -275,6 +287,19 @@ impl Hangar {
         page_from_result(call.tool_name.as_deref()?, self.chat.events[tool.result?].result.as_deref()?)
     }
 
+    /// Chamada de página já respondida sem página: aviso visível com o que veio, nunca a chamada genérica calada.
+    /// Ainda rodando (sem resultado) fica com o cartão comum.
+    pub(super) fn render_page_failure(&self, tool: Tool) -> Option<AnyElement> {
+        let call = &self.chat.events[tool.call];
+        let result = self.chat.events[tool.result?].result.clone().unwrap_or_default();
+        let received = page_failure(call.tool_name.as_deref()?, &result)?;
+        let title = call.tool_input.as_ref().and_then(|i| i.get("title")).and_then(Value::as_str).unwrap_or_default().to_owned();
+        Some(v_flex().id(SharedString::from(format!("page-failed-{}", call.id))).py(px(12.)).gap_1().role(Role::Alert)
+            .child(div().text_size(px(13.)).text_color(theme::warning()).whitespace_normal().child(tr_shared("page_error", &[("title", &title)])))
+            .child(div().text_size(px(12.)).text_color(theme::muted()).whitespace_normal().child(received))
+            .into_any_element())
+    }
+
     fn remeasure_page(&mut self, id: &str) {
         let Some(row) = self.pages.views.get(id).map(|v| v.row.clone()) else { return };
         if let Some(i) = self.row_ids.iter().position(|r| *r == row) { self.list_state.remeasure_items(i..i + 1); }
@@ -285,7 +310,7 @@ impl Hangar {
         view.busy = false;
         match (error.status, error.code.as_deref()) {
             (Some(404), Some("erro_pagina_sem_imagem")) => { view.no_image = true; view.state = ViewState::Ready; }
-            (Some(404), _) => view.state = ViewState::Expired,
+            (Some(404), Some("erro_pagina_expirou")) => view.state = ViewState::Expired,
             _ => { eprintln!("[pagina] {id}: {}", error.detail); view.state = ViewState::Error; }
         }
     }
@@ -709,7 +734,17 @@ fn toggle_button(id: &str, collapsed: bool, cx: &mut Context<Hangar>) -> Button 
 #[cfg(test)]
 mod tests {
     // Sem `super::*`: o glob da gpui_kit traz um `test` próprio que sombreia o `#[test]` da std.
-    use super::{Budget, HostMsg, PageRef, frame_height, page_from_result, parse_host, scrolls_inside};
+    use super::{Budget, HostMsg, PageRef, frame_height, page_failure, page_from_result, parse_host, scrolls_inside};
+
+    #[test]
+    fn answered_call_without_page_is_a_visible_failure() {
+        let name = "mcp__hangar__html_render";
+        assert_eq!(page_failure(name, "erro_paginas_indisponivel: OSError").as_deref(), Some("erro_paginas_indisponivel: OSError"));
+        assert_eq!(page_failure(name, &"x".repeat(400)).unwrap().chars().count(), 301, "cortado com reticências");
+        assert!(page_failure(name, r#"{"hangar_page":{"id":"a","title":"T"}}"#).is_none());
+        assert!(page_failure(name, r#"{"draft":{"id":"b"}}"#).is_none(), "rascunho segue como chamada comum");
+        assert!(page_failure("Read", "erro").is_none());
+    }
 
     #[test]
     fn reads_only_hangar_page() {
