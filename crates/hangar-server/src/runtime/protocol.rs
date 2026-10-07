@@ -37,12 +37,7 @@ impl FormatGate {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum RequestId {
-    Integer(i64),
-    String(String),
-}
+pub use hangar_codex::proto::RequestId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
