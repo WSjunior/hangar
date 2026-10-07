@@ -16,7 +16,12 @@ const IP: &str = "<ip>";
 const TAILNET_HOST: &str = "<maquina>";
 /// Senha mais curta que isto não é procurada no texto: trocaria letras soltas no relatório inteiro.
 const MIN_SECRET: usize = 4;
-const SECRET_KEYS: [&str; 3] = ["token=", "password=", "bearer "];
+/// Nome seguido de `=` ou `:` (também JSON, `"token": "x"`): o valor depois dele é senha.
+const SECRET_NAMES: [&str; 3] = ["token", "password", "passwd"];
+/// Teto de cada pedaço do começo do relatório: o log, que é o que mais ajuda, fica com o resto do orçamento.
+const TEXT_MAX: usize = 8 * 1024;
+const DOCTOR_MAX: usize = 24 * 1024;
+const DOCTOR_TIMEOUT: Duration = Duration::from_secs(40);
 
 pub(crate) struct Secrets { pub values: Vec<String>, pub home: Option<String>, pub users: Vec<String> }
 
@@ -39,13 +44,16 @@ pub(crate) fn scrub(text: &str, secrets: &Secrets) -> String {
     values.sort_by_key(|v| std::cmp::Reverse(v.len()));
     for value in values { out = out.replace(value, SECRET); }
     out = scrub_assignments(&out);
-    if let Some(home) = &secrets.home {
+    // Pasta pessoal vazia ou "/" casaria com toda barra do texto.
+    if let Some(home) = secrets.home.as_ref().filter(|h| !h.trim_matches(['/', '\\']).is_empty()) {
         out = replace_path(&out, home, "~");
         out = replace_path(&out, &home.replace('\\', "/"), "~");
     }
+    // Só o segmento de pasta pessoal: "/<usuario>" solto trocaria "/dev/null" para quem se chama "dev".
     for user in &secrets.users {
-        out = replace_path(&out, &format!("/{user}"), &format!("/{USER}"));
-        out = replace_path(&out, &format!("\\{user}"), &format!("\\{USER}"));
+        for dir in ["/home/", "/Users/", "\\Users\\"] {
+            out = replace_path(&out, &format!("{dir}{user}"), &format!("{dir}{USER}"));
+        }
     }
     scrub_ips(&scrub_tailnet(&out))
 }
@@ -58,7 +66,7 @@ fn replace_path(text: &str, needle: &str, with: &str) -> String {
     let mut last = 0;
     for (at, _) in lower.match_indices(&pattern) {
         let end = at + needle.len();
-        if text[end..].chars().next().is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.')) { continue; }
+        if text[end..].chars().next().is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | '-')) { continue; }
         out.push_str(&text[last..at]);
         out.push_str(with);
         last = end;
@@ -67,18 +75,43 @@ fn replace_path(text: &str, needle: &str, with: &str) -> String {
     out
 }
 
-/// `token=…`, `password=…` e `Bearer …`: senha que o app não conhecia (outra URL de pareamento, um cabeçalho).
+/// O valor que começa em `from` (depois de espaços): entre aspas até a aspa que fecha, senão até um separador.
+/// `to_eol`: o cabeçalho `Authorization: Basic xxx` vai até o fim da linha (esquema + credencial).
+fn value_range(text: &str, from: usize, to_eol: bool) -> Option<(usize, usize)> {
+    let start = from + text[from..].len() - text[from..].trim_start_matches([' ', '\t']).len();
+    let quote = text[start..].chars().next().filter(|c| matches!(c, '"' | '\''));
+    let (start, end) = match quote {
+        Some(q) => (start + 1, text[start + 1..].find([q, '\n']).map_or(text.len(), |n| start + 1 + n)),
+        None if to_eol => (start, text[start..].find(['\n', '"', '\'']).map_or(text.len(), |n| start + n)),
+        None => (start, text[start..].find(|c: char| c.is_whitespace() || matches!(c, '&' | '"' | '\'' | ',' | ';' | ')' | '<' | '}'))
+            .map_or(text.len(), |n| start + n)),
+    };
+    (end > start).then_some((start, end))
+}
+
+/// `token=…`, `"password": "…"`, `Authorization: …` e `Bearer …`: senha que o app não conhecia (outra URL de pareamento, um cabeçalho).
 fn scrub_assignments(text: &str) -> String {
     let lower = text.to_ascii_lowercase();
-    let mut starts: Vec<usize> = SECRET_KEYS.iter().flat_map(|k| lower.match_indices(k).map(move |(at, _)| at + k.len())).collect();
-    starts.sort_unstable();
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for (names, to_eol) in [(&SECRET_NAMES[..], false), (&["authorization"][..], true)] {
+        for name in names {
+            for (at, _) in lower.match_indices(name) {
+                // Nome, aspa opcional (JSON), espaços, `=` ou `:`.
+                let mut at = at + name.len();
+                if matches!(lower.as_bytes().get(at), Some(b'"' | b'\'')) { at += 1; }
+                at += lower[at..].len() - lower[at..].trim_start_matches([' ', '\t']).len();
+                if matches!(lower.as_bytes().get(at), Some(b'=' | b':')) {
+                    ranges.extend(value_range(text, at + 1, to_eol));
+                }
+            }
+        }
+    }
+    ranges.extend(lower.match_indices("bearer ").filter_map(|(at, k)| value_range(text, at + k.len(), false)));
+    ranges.sort_unstable();
     let mut out = String::with_capacity(text.len());
     let mut last = 0;
-    for start in starts {
+    for (start, end) in ranges {
         if start < last { continue; }
-        let end = text[start..].find(|c: char| c.is_whitespace() || matches!(c, '&' | '"' | '\'' | ',' | ';' | ')' | '<'))
-            .map_or(text.len(), |n| start + n);
-        if end == start { continue; }
         out.push_str(&text[last..start]);
         out.push_str(SECRET);
         last = end;
@@ -111,8 +144,11 @@ fn scrub_ips(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let (mut i, mut last) = (0, 0);
     while i < bytes.len() {
-        let boundary = i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || matches!(bytes[i - 1], b'.' | b'_' | b':'));
-        if boundary && let Some(len) = ipv4_at(&bytes[i..]).or_else(|| ipv6_at(&bytes[i..])) {
+        // IPv4 pode vir depois de ":" ("addr:10.0.0.5"); IPv6 não, ou pegaria o meio de outro endereço.
+        let boundary4 = i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || matches!(bytes[i - 1], b'.' | b'_'));
+        let boundary6 = boundary4 && (i == 0 || bytes[i - 1] != b':');
+        let found = if boundary4 { ipv4_at(&bytes[i..]) } else { None }.or_else(|| if boundary6 { ipv6_at(&bytes[i..]) } else { None });
+        if let Some(len) = found {
             out.push_str(&text[last..i]);
             out.push_str(IP);
             i += len;
@@ -126,6 +162,13 @@ fn scrub_ips(text: &str) -> String {
 }
 
 fn ipv4_at(b: &[u8]) -> Option<usize> {
+    let (at, octets) = ipv4_parse(b)?;
+    // Loopback e "qualquer endereço" não identificam ninguém e ajudam a ler o log.
+    if octets[0] == 127 || octets == [0, 0, 0, 0] { return None; }
+    Some(at)
+}
+
+fn ipv4_parse(b: &[u8]) -> Option<(usize, [u32; 4])> {
     let (mut at, mut octets) = (0, [0u32; 4]);
     for (n, slot) in octets.iter_mut().enumerate() {
         if n > 0 {
@@ -142,9 +185,7 @@ fn ipv4_at(b: &[u8]) -> Option<usize> {
     if b.get(at).is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_') || (b.get(at) == Some(&b'.') && b.get(at + 1).is_some_and(u8::is_ascii_digit)) {
         return None;
     }
-    // Loopback e "qualquer endereço" não identificam ninguém e ajudam a ler o log.
-    if octets[0] == 127 || octets == [0, 0, 0, 0] { return None; }
-    Some(at)
+    Some((at, octets))
 }
 
 fn ipv6_at(b: &[u8]) -> Option<usize> {
@@ -153,6 +194,12 @@ fn ipv6_at(b: &[u8]) -> Option<usize> {
     let colons = run.iter().filter(|c| **c == b':').count();
     // Hora ("12:34:56") tem dois-pontos mas não tem "::" nem cinco separadores.
     if len - colons < 2 || colons < 2 || !(run.windows(2).any(|w| w == b"::") || colons >= 5) { return None; }
+    // "::ffff:192.168.0.5": o final é um IPv4, e o endereço inteiro sai junto (ou fica, se for loopback).
+    if b.get(len) == Some(&b'.') {
+        let tail = run.iter().rposition(|c| *c == b':')? + 1;
+        let (v4, octets) = ipv4_parse(&b[tail..])?;
+        return (octets[0] != 127 && octets != [0, 0, 0, 0]).then_some(tail + v4);
+    }
     if b.get(len).is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_') { return None; }
     Some(len)
 }
@@ -188,10 +235,10 @@ pub(crate) fn screen_slug(screen: Screen) -> &'static str {
 pub(crate) fn compose(f: &Facts, secrets: &Secrets) -> String {
     let code = match &f.code { Some(code) => tr("setup_failure_code").replace("{code}", code), None => tr("setup_failure_unexpected") };
     let mut head = format!("# {}\n\n{}\n{}\n{}\n{}\n{}\n\n## {}\n\n", tr("setup_report_heading"),
-        tr("setup_report_step").replace("{step}", screen_slug(f.step)), code, scrub(&f.text, secrets),
-        tr("setup_report_system").replace("{system}", &scrub(&f.system, secrets)), tr("setup_report_app").replace("{app}", &f.app),
+        tr("setup_report_step").replace("{step}", screen_slug(f.step)), code, tail(&scrub(&f.text, secrets), TEXT_MAX),
+        tr("setup_report_system").replace("{system}", &tail(&scrub(&f.system, secrets), 1024)), tr("setup_report_app").replace("{app}", &f.app),
         tr("setup_report_doctor"));
-    head.push_str(&match &f.doctor { Some(text) => scrub(text, secrets), None => tr("setup_report_doctor_missing") });
+    head.push_str(&match &f.doctor { Some(text) => tail(&scrub(text, secrets), DOCTOR_MAX), None => tr("setup_report_doctor_missing") });
     let logs: String = f.logs.iter().map(|(run, text)| format!("\n\n## {}\n\n{}", tr("setup_report_log").replace("{run}", run), scrub(text, secrets))).collect();
     let budget = BASE_MAX.saturating_sub(head.len() + 256);
     format!("{head}{}\n", tail(&logs, budget))
@@ -247,12 +294,45 @@ pub(crate) fn doctor(dest: &Path) -> Option<String> {
     let python = venv_python(dest);
     if !python.is_file() { return None; }
     // `--qr` imprimiria a URL com o token; sem ele o doctor só lista itens.
-    let out = hidden(&mut Command::new(python)).args(["-m", "app.doctor"]).current_dir(dest.join("backend"))
-        .env("PATH", refreshed_path()).env("PYTHONIOENCODING", "utf-8").stdin(Stdio::null()).output();
-    Some(match out {
-        Ok(out) => format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
-        Err(error) => format!("doctor: {error}"),
-    })
+    let mut command = Command::new(python);
+    hidden(&mut command).args(["-m", "app.doctor"]).current_dir(dest.join("backend"))
+        .env("PATH", refreshed_path()).env("PYTHONIOENCODING", "utf-8");
+    Some(run_with_timeout(command, DOCTOR_TIMEOUT))
+}
+
+/// Saída (stdout + stderr) do comando; passou de `limit`, ele é morto e o relatório diz isso, em vez de travar o envio.
+fn run_with_timeout(mut command: Command, limit: Duration) -> String {
+    use std::io::Read;
+    let mut child = match command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+        Ok(child) => child,
+        Err(error) => return format!("doctor: {error}"),
+    };
+    // Um fio por cano: encher um deles sem ninguém ler travaria o filho antes do prazo.
+    fn drain(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<String> {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe { let _ = pipe.read_to_end(&mut bytes); }
+            String::from_utf8_lossy(&bytes).into_owned()
+        })
+    }
+    let (out, err) = (drain(child.stdout.take()), drain(child.stderr.take()));
+    let deadline = std::time::Instant::now() + limit;
+    let mut timed_out = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => break,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                timed_out = true;
+                let _ = child.kill();
+                let _ = child.wait();
+                break;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
+    let mut text = format!("{}{}", out.join().unwrap_or_default(), err.join().unwrap_or_default());
+    if timed_out { text.push_str(&format!("\ndoctor: timeout after {}s, stopped\n", limit.as_secs_f32().ceil())); }
+    text
 }
 
 pub(crate) fn read_log(path: &Path) -> String {
@@ -314,9 +394,21 @@ pub(crate) async fn send(payload: Payload) -> Result<(), String> {
 }
 
 pub(crate) async fn send_to(url: &str, payload: Payload) -> Result<(), String> {
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(20)).build().map_err(|e| e.to_string())?;
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(20)).build().map_err(|e| describe(&e))?;
     client.post(url).header("X-Hangar-Stamp", stamp()).json(&payload).send().await
-        .and_then(reqwest::Response::error_for_status).map(|_| ()).map_err(|e| e.to_string())
+        .and_then(reqwest::Response::error_for_status).map(|_| ()).map_err(|e| describe(&e))
+}
+
+/// A mensagem de topo do reqwest ("error sending request") não diz a causa; ela está na cadeia de origens.
+fn describe(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
 }
 
 #[cfg(test)]
@@ -357,7 +449,8 @@ mod tests {
             https://pc-da-maria.tail1234.ts.net:8443\nip 100.64.0.2 e 127.0.0.1 e 0.0.0.0:8765 e fe80::1c2b:3a4d e ::1\n\
             versão 1.2.3 e 10.0.19045.1 e 12:34:56 e app::doctor\n", &s);
         assert!(out.contains("venv em ~/hangar/.venv"), "{out}");
-        assert!(out.contains("/srv/<usuario>/x"), "{out}");
+        // Só segmento de pasta pessoal; "/srv/maria" solto não é trocado (um usuário "dev" estragaria "/dev/null").
+        assert!(out.contains("/srv/maria/x"), "{out}");
         // Nome inteiro, nunca pedaço: "/home/mariana" é outra pessoa.
         assert!(out.contains("/home/mariana/y"), "{out}");
         assert!(out.contains("https://<maquina>.ts.net:8443"), "{out}");
@@ -368,8 +461,8 @@ mod tests {
     #[test]
     fn scrub_handles_windows_paths_in_any_case() {
         let s = Secrets { values: vec![], home: Some(r"C:\Users\Maria".into()), users: vec!["Maria".into()] };
-        let out = scrub(r"C:\Users\Maria\hangar e c:/users/maria/x e D:\Dados\maria\y", &s);
-        assert_eq!(out, r"~\hangar e ~/x e D:\Dados\<usuario>\y");
+        let out = scrub(r"C:\Users\Maria\hangar e c:/users/maria/x e D:\Users\maria\y", &s);
+        assert_eq!(out, r"~\hangar e ~/x e D:\Users\<usuario>\y");
     }
 
     fn facts(log: String) -> Facts {
@@ -429,10 +522,69 @@ mod tests {
 
     #[test]
     fn send_error_names_the_cause() {
-        // Porta 9 sem ninguém: o envio falha com o motivo, nunca em silêncio.
+        // Porta fechada (aberta e solta agora): o envio falha com o motivo, nunca em silêncio.
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let p = payload(Screen::Install, None, Outcome::Aberto, None, "t".into());
-        let error = runtime.block_on(send_to("http://127.0.0.1:9/api/relatorio", p)).unwrap_err();
-        assert!(!error.is_empty());
+        let error = runtime.block_on(send_to(&format!("http://127.0.0.1:{port}/api/relatorio"), p)).unwrap_err();
+        // A mensagem de topo do reqwest só diz "error sending request"; a causa vem na cadeia (`Connect`/recusada).
+        assert!(error.to_lowercase().contains("connect"), "{error}");
+        assert!(error.contains(": "), "{error}");
+    }
+
+    #[test]
+    fn scrub_handles_quoted_json_and_authorization_values() {
+        let s = Secrets { values: vec![], home: None, users: vec![] };
+        let out = scrub("a password=\"com espaco\" b token='outro seg' c token=cru&x=1\n\
+            {\"token\": \"jsonsecret\", \"auth_token\":\"j2\", \"password\" : \"j3\"}\n\
+            Authorization: Basic dXNlcjpwYXNz\nAuthorization: Bearer eyJabc.def\n", &s);
+        for leaked in ["com espaco", "outro seg", "cru", "jsonsecret", "j2", "j3", "dXNlcjpwYXNz", "eyJabc.def"] {
+            assert!(!out.contains(leaked), "{leaked} vazou: {out}");
+        }
+        assert!(out.contains("password=\"<senha>\""), "{out}");
+        assert!(out.contains("token='<senha>'"), "{out}");
+        assert!(out.contains("token=<senha>&x=1"), "{out}");
+        assert!(out.contains("\"token\": \"<senha>\""), "{out}");
+    }
+
+    #[test]
+    fn scrub_replaces_ipv4_after_a_colon_and_inside_mapped_ipv6() {
+        let s = Secrets { values: vec![], home: None, users: vec![] };
+        let out = scrub("inet addr:192.168.0.5 IP:100.64.0.2 ::ffff:192.168.0.5 e ::ffff:127.0.0.1 e addr:127.0.0.1 e 0.0.0.0:8765", &s);
+        assert_eq!(out, "inet addr:<ip> IP:<ip> <ip> e ::ffff:127.0.0.1 e addr:127.0.0.1 e 0.0.0.0:8765");
+    }
+
+    #[test]
+    fn scrub_user_only_in_home_segments_never_bare() {
+        let s = Secrets { values: vec![], home: Some("/home/maria".into()), users: vec!["maria".into(), "dev".into()] };
+        let out = scrub("/home/maria.old/x /dev/null /mnt/c/Users/dev/y /home/dev/z /usr/lib", &s);
+        assert_eq!(out, "~.old/x /dev/null /mnt/c/Users/<usuario>/y /home/<usuario>/z /usr/lib");
+        // HOME vazio ou "/" não vira "troque toda barra".
+        let root = Secrets { values: vec![], home: Some("/".into()), users: vec![] };
+        assert_eq!(scrub("/usr/bin/x", &root), "/usr/bin/x");
+        let empty = Secrets { values: vec![], home: Some(String::new()), users: vec![] };
+        assert_eq!(scrub("/usr/bin/x", &empty), "/usr/bin/x");
+    }
+
+    #[test]
+    fn compose_caps_a_huge_text_and_doctor_and_still_keeps_the_log_end() {
+        let mut f = facts((0..50_000).map(|n| format!("linha {n}\n")).collect());
+        f.text = "erro ".repeat(100_000);
+        f.doctor = Some((0..100_000).map(|n| format!("item {n}\n")).collect());
+        let out = compose(&f, &secrets());
+        assert!(out.len() <= BASE_MAX, "{}", out.len());
+        assert!(out.contains("linha 49999"));
+        assert!(out.contains("item 99999"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_run_is_killed_on_timeout() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "echo antes; exec sleep 30"]);
+        let started = std::time::Instant::now();
+        let out = run_with_timeout(command, Duration::from_millis(300));
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(out.contains("antes") && out.contains("timeout"), "{out}");
     }
 }
