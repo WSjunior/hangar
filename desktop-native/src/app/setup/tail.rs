@@ -26,6 +26,16 @@ impl Tail {
         }
         Ok(lines)
     }
+
+    /// Como `read_new`, mas o pedaço sem `\n` no fim também sai como linha: o processo acabou e nada mais virá.
+    pub(crate) fn read_final(&mut self) -> std::io::Result<Vec<String>> {
+        let mut lines = self.read_new()?;
+        if !self.partial.is_empty() {
+            let rest = std::mem::take(&mut self.partial);
+            lines.push(String::from_utf8_lossy(&rest).trim_end_matches('\r').to_owned());
+        }
+        Ok(lines)
+    }
 }
 
 #[cfg(test)]
@@ -48,6 +58,18 @@ mod tests {
         // Bytes que não são UTF-8 (cp1252 no Windows) viram U+FFFD em vez de derrubar a leitura.
         assert_eq!(tail.read_new().unwrap(), vec!["meia linha".to_owned(), "acentua\u{fffd}\u{fffd}o".to_owned()]);
         assert!(tail.read_new().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn final_read_emits_the_last_line_without_newline() {
+        let dir = std::env::temp_dir().join(format!("hangar-tail-final-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("saida.log");
+        std::fs::write(&path, b"##HANGAR-PASSO## final ok\n##HANGAR-FIM## ok").unwrap();
+        let mut tail = Tail::new(path);
+        assert_eq!(tail.read_final().unwrap(), vec!["##HANGAR-PASSO## final ok".to_owned(), "##HANGAR-FIM## ok".to_owned()]);
+        assert!(tail.read_final().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -68,6 +68,8 @@ pub(crate) struct SetupWizard {
     pub(super) details_open: bool,
     pub(super) phone: Option<PhoneOutcome>,
     pub(super) focus: FocusHandle,
+    /// Para fechar a janela de senha de fora de um update com a janela emprestada (`fail`/`finish`).
+    window: AnyWindowHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -106,7 +108,7 @@ impl SetupWizard {
             git_ready: false, bootstrap: None, token: None, runs: Runs::default(), check_tail: None, install_tail: None, records: (None, None),
             polling: false, finished: false, failure: None, vault: Vault::default(), waiting: Vec::new(), prompt: None, after_password: None,
             opened_link: None, app_copy: None, connection: None, viewing: Screen::Welcome, details_open: false, phone: None,
-            focus: cx.focus_handle(), _subscriptions: subscriptions,
+            focus: cx.focus_handle(), window: window.window_handle(), _subscriptions: subscriptions,
         };
         match origin {
             Origin::Entry(install) => { wizard.apply_install(install); wizard.located = true; }
@@ -146,7 +148,7 @@ impl SetupWizard {
             self.records.1 = Some(record);
         }
         self.bootstrap = run::state_dir().map(|dir| dir.join(run::bootstrap_name(cfg!(windows)))).filter(|p| p.is_file());
-        self.read_tails();
+        self.read_tails(false);
         self.viewing = self.frontier_now();
         suspend_updates(true, cx);
         self.start_poll(window, cx);
@@ -300,14 +302,15 @@ impl SetupWizard {
             askpass: self.askpass_env() };
         match run::spawn(&launch) {
             Ok(pid) => {
-                // A hora de início identifica o processo: sem ela, um pid reaproveitado passaria pelo script.
-                let record = RunRecord { kind, log: log.clone(), pid, started: run::identity(pid).unwrap_or_default() };
+                // A hora de início chega do fundo (`learn_identity`): no Windows ela abre um PowerShell.
+                let record = RunRecord { kind, log: log.clone(), pid, started: String::new() };
                 match kind {
                     Kind::Check => { self.runs.check = Some(Progress::default()); self.check_tail = Some(Tail::new(log)); self.records.0 = Some(record); }
                     Kind::Install => { self.runs.install = Some(Progress::default()); self.install_tail = Some(Tail::new(log)); self.records.1 = Some(record); }
                 }
                 self.preparing = None;
                 self.save_state();
+                self.learn_identity(pid, cx);
                 if !self.polling { self.start_poll(window, cx); }
             }
             Err(why) => self.fail(Failure::app(None, tr("setup_failure_start").replace("{erro}", &why), Screen::Prepare), cx),
@@ -321,18 +324,34 @@ impl SetupWizard {
         if let Err(error) = run::save_state(&state) { crate::log_line(&format!("assistente: state.json não gravado: {error}")); }
     }
 
+    /// Lê a hora de início do processo fora da thread da janela e a grava no registro e no `state.json`.
+    fn learn_identity(&self, pid: u32, cx: &mut Context<Self>) {
+        let task = cx.background_executor().spawn(async move { run::identity(pid) });
+        cx.spawn(async move |this, cx| {
+            if let Some(id) = task.await { let _ = this.update(cx, |w, _| w.set_started(pid, id)); }
+        }).detach();
+    }
+
+    fn set_started(&mut self, pid: u32, started: String) {
+        for record in [self.records.0.as_mut(), self.records.1.as_mut()].into_iter().flatten() {
+            if record.pid == pid { record.started = started.clone(); }
+        }
+        self.save_state();
+    }
+
     /// Pid e hora de início da execução que anda: a instalação, quando já começou.
     fn active_run(&self) -> Option<(u32, String)> {
         self.records.1.as_ref().or(self.records.0.as_ref()).map(|r| (r.pid, r.started.clone()))
     }
 
     /// ponytail: lê na thread da janela; são poucos KB por volta. Mover para o executor de fundo se a saída crescer.
-    fn read_tails(&mut self) -> bool {
+    /// `last`: o processo morreu, então o pedaço sem `\n` no fim do arquivo também é uma linha (um FIM sem quebra).
+    fn read_tails(&mut self, last: bool) -> bool {
         let mut grew = false;
         for (tail, progress) in [(&mut self.check_tail, &mut self.runs.check), (&mut self.install_tail, &mut self.runs.install)] {
             let (Some(tail), Some(progress)) = (tail.as_mut(), progress.as_mut()) else { continue };
             // Arquivo ainda não criado: tenta na próxima volta.
-            if let Ok(lines) = tail.read_new() {
+            if let Ok(lines) = if last { tail.read_final() } else { tail.read_new() } {
                 grew |= !lines.is_empty();
                 for line in &lines { progress.feed(line); }
             }
@@ -354,7 +373,11 @@ impl SetupWizard {
                         quiet += 1;
                         if quiet % QUIET_CHECKS != 0 { continue; }
                         // A identidade lê o /proc (Linux) ou abre o PowerShell (Windows): fora da thread da janela.
-                        let alive = cx.background_executor().spawn(async move { run::alive(pid, &started) }).await;
+                        // Sem identidade conhecida o processo conta como vivo: nunca dar por morto sem prova.
+                        let (alive, learned) = cx.background_executor().spawn(async move {
+                            if started.is_empty() { (true, run::identity(pid)) } else { (run::alive(pid, &started), None) }
+                        }).await;
+                        if let Some(id) = learned && this.update(cx, |w, _| w.set_started(pid, id)).is_err() { return; }
                         if !alive && this.update(cx, |w, cx| w.process_gone(cx)).is_err() { return; }
                     }
                 }
@@ -365,9 +388,15 @@ impl SetupWizard {
     fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Watch {
         if !self.polling { return Watch::Stop; }
         let before = self.frontier_now();
-        let grew = self.read_tails();
+        let grew = self.read_tails(false);
         if self.runs.latest().is_some_and(Progress::mismatch) {
-            if let Some((pid, started)) = self.active_run() { run::stop(pid, &started); }
+            if let Some((pid, started)) = self.active_run() {
+                // `stop` lê a identidade e, no Windows, roda o `taskkill`: fora da thread da janela.
+                cx.background_executor().spawn(async move {
+                    let started = if started.is_empty() { run::identity(pid).unwrap_or_default() } else { started };
+                    run::stop(pid, &started);
+                }).detach();
+            }
             self.fail(Failure::app(Some("versao-diferente"), tr("setup_failure_protocol"), before), cx);
             return Watch::Stop;
         }
@@ -406,7 +435,8 @@ impl SetupWizard {
 
     /// O processo sumiu: lê o que sobrou; sem `##HANGAR-FIM##`, a instalação foi interrompida.
     fn process_gone(&mut self, cx: &mut Context<Self>) {
-        if !self.polling || self.read_tails() { return; }
+        if !self.polling || self.read_tails(false) { return; }
+        self.read_tails(true);
         let ended = self.runs.latest().is_none_or(|p| p.end.is_some());
         if !ended { let screen = self.frontier_now(); self.fail(Failure::app(None, tr("setup_failure_interrupted"), screen), cx); }
     }
@@ -416,15 +446,25 @@ impl SetupWizard {
         self.failure = Some(failure);
         (self.polling, self.preparing) = (false, None);
         self.vault.forget();
+        self.after_password = None;
         for request in self.waiting.drain(..) { let _ = request.reply.send(None); }
+        self.close_prompt(cx);
         suspend_updates(false, cx);
         cx.notify();
+    }
+
+    /// Fecha a janela de senha sem acionar o `on_close` (que cancelaria); adiado porque a janela pode estar emprestada.
+    fn close_prompt(&mut self, cx: &mut Context<Self>) {
+        if self.prompt.take().is_none() { return; }
+        let window = self.window;
+        cx.defer(move |cx| { let _ = window.update(cx, |_, window, cx| window.close_dialog(cx)); });
     }
 
     fn finish(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.polling = false;
         self.vault.forget();
         for request in self.waiting.drain(..) { let _ = request.reply.send(None); }
+        self.close_prompt(cx);
         suspend_updates(false, cx);
         if self.runs.end() == Some(End::Failed) {
             let screen = self.frontier_now();
