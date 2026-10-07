@@ -68,7 +68,7 @@ async def _generate(provider: str, scenarios: list[dict]) -> list[dict]:
         async def write(session, frame):
             emit("write", frame)
 
-        async def note(session, text):
+        async def note(session, text, confirms=None):
             emit("local", {"text": text})
 
         async def drain(*args):

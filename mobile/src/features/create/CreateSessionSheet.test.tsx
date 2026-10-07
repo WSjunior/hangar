@@ -110,8 +110,8 @@ vi.mock('../../stores/prefs', () => ({ prefs: {
   remove: (key: string) => localStorage.removeItem(key),
 } }));
 vi.mock('./ProviderPicker', () => ({ ProviderPicker: ({ onChange }: { onChange: (provider: string) => void }) => createElement('div', null,
-  createElement('button', { onClick: () => onChange('codex') }, 'Codex'),
-  createElement('button', { onClick: () => onChange('claude') }, 'Claude'),
+  createElement('button', { onClick: () => onChange('codex'), 'data-picker': 'codex' }, 'Codex'),
+  createElement('button', { onClick: () => onChange('claude'), 'data-picker': 'claude' }, 'Claude'),
 ) }));
 vi.mock('./CodexContextControl', () => ({ CodexContextControl: () => null }));
 vi.mock('../../ui/Icon', () => ({ Icon: () => null }));
@@ -320,8 +320,8 @@ describe('CreateSessionSheet Codex', () => {
     calls.providers.mockReturnValue(pending.promise);
     const { container, root } = await renderSheet(false, false);
     await act(async () => button(container, 'criar_mais_opcoes')!.click());
-    const options = container.querySelector<HTMLElement>('[data-testid="options-sheet"]')!;
-    await act(async () => button(options, 'Claude')!.click());
+    // O chip do provider também mostra "Claude"; o clique tem de ser no seletor.
+    await act(async () => container.querySelector<HTMLButtonElement>('button[data-picker="claude"]')!.click());
     await act(async () => pending.resolve({ codex: { disponivel: true, default: true } }));
     await send(container);
     expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({ provider: 'claude' }));

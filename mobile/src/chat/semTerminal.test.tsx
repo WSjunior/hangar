@@ -67,7 +67,8 @@ vi.mock('../features/sessions/SessionsDrawer', () => ({ SessionsDrawer: ({ child
 vi.mock('../features/sessions/ServerSheet', () => ({ ServerSheet: () => null }));
 vi.mock('react-native-keyboard-controller', () => ({
   KeyboardAvoidingView: ({ children }: { children: ReactNode }) => createElement('div', null, children),
-  useKeyboardState: (select: (state: { isVisible: boolean }) => unknown) => select({ isVisible: false }),
+  // O KeyboardBar do chat lê o estado do teclado; nestes testes ele está sempre fechado.
+  useKeyboardState: <T,>(select: (s: { isVisible: boolean }) => T) => select({ isVisible: false }),
 }));
 vi.mock('./LoopChip', () => ({ LoopChip: () => null }));
 vi.mock('./OrqFooter', () => ({ OrqFooter: () => null }));

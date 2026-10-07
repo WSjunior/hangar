@@ -9,6 +9,8 @@
 # Saída 0 = ok (ou nada relevante mudou); 1 = mudou algo relevante sem passo novo.
 # Escape deliberado, pra mudança que comprovadamente não muda nada na máquina (comentário, teste):
 #       HANGAR_SEM_PASSO=1 git commit ...
+# e `HANGAR_SEM_PASSO: <por quê>` na mensagem do commit, que é o que o CI enxerga; um commit
+# posterior cobre um anterior com `HANGAR_SEM_PASSO=1 <sha>`.
 set -uo pipefail
 
 if [[ -n "${HANGAR_SEM_PASSO:-}" ]]; then
@@ -16,9 +18,24 @@ if [[ -n "${HANGAR_SEM_PASSO:-}" ]]; then
     exit 0
 fi
 
+# Arquivos dos commits do intervalo sem a marca; merges ficam de fora (trazem o que já foi conferido).
+arquivos_sem_marca() {
+    local intervalo="$1" cobertos c s pula
+    cobertos="$(git log --format=%B "$intervalo" | grep -oE 'HANGAR_SEM_PASSO=1( [0-9a-f]{7,40})+' \
+        | tr ' ' '\n' | grep -Ex '[0-9a-f]{7,40}' || true)"
+    for c in $(git rev-list --no-merges "$intervalo"); do
+        git log -1 --format=%B "$c" | grep -qE '(^|[^A-Za-z_])HANGAR_SEM_PASSO(: +[^ ]|=1 [0-9a-f]{7})' && continue
+        pula=""
+        for s in $cobertos; do [[ "$c" == "$s"* ]] && pula=1; done
+        [[ -n "$pula" ]] && continue
+        git diff-tree --no-commit-id --name-only -r --diff-filter=ACMR "$c"
+    done | sort -u
+}
+
 case "${1:-}" in
     --staged) arquivos="$(git diff --cached --name-only --diff-filter=ACMR)" ;;
-    *..*)     arquivos="$(git diff --name-only --diff-filter=ACMR "$1")" ;;
+    *..*)     git rev-list "$1" >/dev/null || { echo "intervalo inválido: $1" >&2; exit 2; }
+              arquivos="$(arquivos_sem_marca "$1"; git diff --name-only --diff-filter=ACMR "$1" | grep -E '^docs/atualizacoes/')" ;;
     *) echo "uso: $0 --staged | <de>..<para>" >&2; exit 2 ;;
 esac
 [[ -z "$arquivos" ]] && exit 0

@@ -548,8 +548,9 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                     if kind == "local_output" {
                         let queue = queue.clone(); let generation = target.generation; let sample = clock(start);
                         let text = payload["text"].as_str().unwrap_or("").to_owned();
+                        let confirms = payload["source"].as_str().map(str::to_owned);
                         jobs.spawn(async move { Job::Saved(queue.exec(generation,&format!("local:{}",unique()),sample,
-                            Action::AppendLocal { text,entry_id:None }).await.map(|_|()).map_err(io_failure)) });
+                            Action::AppendLocal { text,entry_id:None,confirms }).await.map(|_|()).map_err(io_failure)) });
                         continue;
                     }
                     sequence += 1;

@@ -11,6 +11,9 @@
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -SoChecar  # so diz o que falta
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -Update    # re-aplica o que o git pull nao atualiza
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -Avancado  # volta a perguntar tudo
+#   powershell -ExecutionPolicy Bypass -File install.ps1 -Agentes codex,pi  # claude, codex, pi, omp, kimi
+#   powershell -ExecutionPolicy Bypass -File install.ps1 -App -Tailscale sim -SemNativo  # assistente do app nativo
+#   -ConsertarRoda (so com -App): conserta a roda do mouse reiniciando o psmux, que fecha as sessoes abertas
 #
 # Espelha o install.sh do Linux. Escrito pra Windows PowerShell 5.1 (o que vem no Windows):
 # nada de operador ternario nem API de .NET Core, senao quebra em quem nao instalou o PS 7.
@@ -19,8 +22,52 @@
 # agendada - e nao toca em nada que peca decisao ou elevacao: sem instalar dependencia, sem
 # token, sem firewall, sem Tailscale. Um hook que trava pedindo confirmacao no meio de um pull
 # e pior que hook nenhum.
-param([switch]$Sim, [switch]$SoChecar, [switch]$Update, [switch]$Avancado)
+param([switch]$Sim, [switch]$SoChecar, [switch]$Update, [switch]$Avancado, [string]$Agentes,
+      [switch]$App, [ValidateSet('sim', 'nao')][string]$Tailscale, [switch]$SemNativo, [switch]$ConsertarRoda)
 if ($Update) { $Sim = $true }
+
+# -App: modo do assistente do app nativo. As marcas ##HANGAR-* sao o contrato com ele
+# (docs/superpowers/specs/2026-10-06-instalador-grafico-design.md).
+$HangarProtocol = 1
+# Antes do try: o finally do fim le os dois mesmo quando a falha vem antes de tudo.
+$script:currentStep = ''
+$script:finalState = 'falhou'
+# Os lancadores .cmd vao na codepage do console de quem os roda, nunca na UTF-8 do -App.
+$script:launcherCodePage = [Console]::OutputEncoding.CodePage
+if ($App) {
+    # O console que o app passa pode ja estar em UTF-8; o terminal que roda o .cmd abre na OEM do sistema.
+    try { $script:launcherCodePage = [int](Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Nls\CodePage').OEMCP } catch { }
+    # O app le a saida como UTF-8; sem isto o 5.1 escreveria na codepage OEM do console.
+    try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }
+    $OutputEncoding = New-Object System.Text.UTF8Encoding $false
+    # O mesmo para o Python (app.doctor, uv run), que escreveria em cp1252 no arquivo do app.
+    $env:PYTHONIOENCODING = 'utf-8'
+    Write-Host "##HANGAR-PROTOCOLO## $HangarProtocol"
+}
+# A senha do celular chega pelo ambiente, nunca pelo argv; sai dele ja aqui, para nenhum
+# instalador de terceiro chamado depois herda-la.
+$tokenDoApp = ''
+if ($App) { $tokenDoApp = "$env:HANGAR_TOKEN" }
+Remove-Item Env:HANGAR_TOKEN -ErrorAction SilentlyContinue
+
+# O Hangar pilota agentes de codigo e precisa de pelo menos um; o Claude Code e o padrao, nao o unico.
+$todosAgentes = @('claude', 'codex', 'pi', 'omp', 'kimi')
+$nomesAgentes = @{ claude = 'Claude Code'; codex = 'Codex'; pi = 'Pi'; omp = 'omp'; kimi = 'Kimi Code' }
+function Lista-Agentes($texto) {
+    # Virgula ou espaco: chamado de dentro do PowerShell, `-Agentes codex,pi` chega como "codex pi".
+    $lista = @("$texto" -split '[,\s]+' | Where-Object { $_ })
+    if ($lista.Count -eq 0 -or @($lista | Where-Object { $todosAgentes -notcontains $_ }).Count) { return $null }
+    return ,$lista
+}
+$listaAgentes = @()
+if ($Agentes) {
+    $listaAgentes = Lista-Agentes $Agentes
+    if (-not $listaAgentes) {
+        Write-Host "-Agentes aceita, separados por virgula: $($todosAgentes -join ', ')"
+        if ($App) { Write-Host '##HANGAR-FIM## falhou' }
+        exit 1
+    }
+}
 
 $ErrorActionPreference = 'Stop'
 $raiz = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -102,10 +149,12 @@ function Falha($rotulo, $motivo) {
     Write-Host "##HANGAR-FALHA## ${rotulo}: $motivo"
 }
 
-function Pare($mensagem, $dicas) {
+function Pare($mensagem, $dicas, $codigo) {
     # Parada de passo ESSENCIAL: os passos seguintes dependem deste, e seguir adiante só
     # enterrava a causa. Extra opcional que falhou NÃO passa por aqui — vai pro `$pendencias`
     # e o portão do fim diz "NAO terminou".
+    # O codigo vem antes, tambem no terminal: o app troca a mensagem pela frase e pelo botao dele.
+    if ($codigo) { Write-Host "##HANGAR-ERRO## $codigo" }
     Erro $mensagem
     Write-Host "##HANGAR-FALHA## $mensagem"
     foreach ($d in $dicas) { Nota $d }
@@ -117,6 +166,43 @@ function Pare($mensagem, $dicas) {
     exit 1
 }
 
+# Marcas de etapa do assistente; so no -App. A ##HANGAR-FIM## sai no finally do fim do arquivo.
+function Mark-Step($etapa, $estado) {
+    if (-not $App) { return }
+    if ($estado -eq 'fazendo') { $script:currentStep = $etapa }
+    Write-Host "##HANGAR-PASSO## $etapa $estado"
+}
+$script:pendingCodes = @{}
+$script:depsError = ''
+function Mark-Item($id, $estado, $texto) { if ($App) { Write-Host "##HANGAR-ITEM## $id $estado $texto" } }
+# Item de uma parte inteira: pendente quando ela somou pendencia desde a contagem $antes.
+function Mark-ItemSince($id, [int]$antes, $texto) {
+    $estado = 'ok'
+    if (@($script:pendencias).Count -gt $antes) { $estado = 'pendente' }
+    Mark-Item $id $estado $texto
+}
+# Pendencia com codigo para o app (a frase e o botao saem dele); sem codigo vira 'outro'.
+function Add-AppPending($rotulo, $codigo) {
+    $script:pendencias += $rotulo
+    $script:pendingCodes[$rotulo] = $codigo
+}
+function Test-Internet {
+    # TCP basta para separar "sem rede" de "o programa falhou", sem depender do TLS do 5.1.
+    $c = New-Object Net.Sockets.TcpClient
+    try { return $c.ConnectAsync('github.com', 443).Wait(10000) } catch { return $false } finally { $c.Dispose() }
+}
+function Policy-Locked {
+    # Regra imposta pela TI vence o Set-ExecutionPolicy do usuario e o -ExecutionPolicy da linha de comando.
+    foreach ($escopo in @('MachinePolicy', 'UserPolicy')) {
+        if (@('Restricted', 'AllSigned') -contains [string](Get-ExecutionPolicy -Scope $escopo)) { return $true }
+    }
+    return $false
+}
+function Send-TailscaleLink($linha) {
+    # O app abre o navegador com este link; no terminal ele ja aparece na propria linha.
+    if ($App -and "$linha" -match '(https://login\.tailscale\.com/\S+)') { Write-Host "##HANGAR-LINK## tailscale-login $($Matches[1])" }
+}
+
 # Da pra PERGUNTAR alguma coisa nesta execucao? Medido em 21/08/2026 nesta VM: com o stdin vindo
 # de um pipe — que e o caso de `irm ... | iex` chamado por outro processo, e de qualquer execucao
 # por SSH/tarefa — `[Console]::IsInputRedirected` volta True e o `Read-Host` responde STRING VAZIA
@@ -125,12 +211,14 @@ function Pare($mensagem, $dicas) {
 # instalacao sem a credencial. Ler do console real (CONIN$) nao e caminho: o File.Open recusa o
 # dispositivo ("FileStream foi solicitado a abrir um dispositivo que nao era um arquivo") e a
 # alternativa seria P/Invoke de CreateFile dentro de um instalador.
-$script:Interativo = -not [Console]::IsInputRedirected
+# -App: quem responde e o app; nada aqui espera teclado.
+$script:Interativo = (-not $App) -and (-not [Console]::IsInputRedirected)
 
 # Na instalacao comum, pede UAC apenas para o comando que precisa de admin.
 function Eleva-E-Roda($descricao, $comando) {
     if (-not (EhAdmin)) {
-        if (-not $script:Interativo) { Nota "$descricao - precisa de UAC, e nao ha terminal pra confirmar"; return $false }
+        # No -App a confirmacao do Windows aparece mesmo sem terminal; a tela 2 ja disse quantas virao.
+        if (-not $script:Interativo -and -not $App) { Nota "$descricao - precisa de UAC, e nao ha terminal pra confirmar"; return $false }
         Nota "vai pedir a senha de administrador (UAC) so pra: $descricao"
     }
     try {
@@ -220,12 +308,14 @@ function Symlink-Funciona {
 # Sem entrada interativa a resposta e NAO, alinhado ao install.sh: `irm | iex` chamado por outro
 # processo nao pode instalar terceiro nem mexer no firewall por conta propria.
 function Pergunte-Mesmo($texto) {
+    # -App: a pessoa ja respondeu nas telas do assistente (o ask_senha do Linux: sim).
+    if ($App) { Nota "$texto -> sim (assistente)"; return $true }
     if (-not $script:Interativo) { Nota "$texto -> nao (sem entrada interativa)"; return $false }
     $r = Read-Host "$texto [S/n]"
     return ($r -eq '' -or $r -match '^[SsYy]')
 }
 function Pergunte($texto) {         # padrao SIM sem perguntar; -Avancado pergunta
-    if ($Sim) { return $true }
+    if ($Sim -or $App) { return $true }
     if (-not $script:Interativo) { return (Pergunte-Mesmo $texto) }
     if (-not $Avancado) { Nota "$texto -> sim (padrao; -Avancado pergunta)"; return $true }
     return (Pergunte-Mesmo $texto)
@@ -273,16 +363,24 @@ function Loga-Tailscale {
     try {
         # Em job, pelo timeout - e a saida e mostrada na hora em que chega, porque o link de login
         # e o que a pessoa precisa ver ANTES de o comando terminar.
+        Mark-Item 'tailscale-conta' 'fazendo' 'conta Tailscale'
         $job = Start-Job -ScriptBlock { & tailscale up 2>&1 }
         $fim = (Get-Date).AddMinutes(5)
         while ($job.State -eq 'Running' -and (Get-Date) -lt $fim) {
-            Receive-Job $job | ForEach-Object { Nota "  $_" }
+            Receive-Job $job | ForEach-Object { Nota "  $_"; Send-TailscaleLink $_ }
             Start-Sleep -Milliseconds 500
         }
-        Receive-Job $job | ForEach-Object { Nota "  $_" }
+        Receive-Job $job | ForEach-Object { Nota "  $_"; Send-TailscaleLink $_ }
         if ($job.State -eq 'Running') {
             Stop-Job $job -ErrorAction SilentlyContinue
             Falta 'tailscale up nao concluiu em 5 min - termine o login e rode este instalador de novo'
+            Mark-Item 'tailscale-conta' 'pendente' 'conta Tailscale'
+            # Lido no fim do 5d: a pendencia do 1/8 entra antes da contagem da etapa tailscale.
+            $script:tsLoginPending = $true
+            # No -App ninguem le o amarelo: vira pendencia com o botao "Entrar na Tailscale".
+            if ($App) { Add-AppPending 'login do Tailscale' 'tailscale-login' }
+        } else {
+            Mark-Item 'tailscale-conta' 'ok' 'conta Tailscale'
         }
         Remove-Job $job -Force -ErrorAction SilentlyContinue
     } finally { $ErrorActionPreference = $eapAnt }
@@ -315,7 +413,7 @@ function Escrever-Lancador($caminho, $texto, [ValidateSet('cmd','sh','vbs')][str
       Conteudo 100% ASCII sai byte a byte igual ao de antes nos tres casos.
     #>
     $enc = switch ($Tipo) {
-        'cmd' { [System.Text.Encoding]::GetEncoding([Console]::OutputEncoding.CodePage) }
+        'cmd' { [System.Text.Encoding]::GetEncoding($script:launcherCodePage) }
         'vbs' { New-Object System.Text.UnicodeEncoding $false, $true }   # UTF-16LE + BOM
         'sh'  { New-Object System.Text.UTF8Encoding $false }
     }
@@ -422,20 +520,24 @@ function Set-ShortcutElevation([string]$shortcutPath, [bool]$elevated) {
 }
 
 function Instale($rotulo, $cmd, $id, $porque) {
-    if (Tem $cmd) { Ok $rotulo; return $true }
-    if ($SoChecar) { Falta "$rotulo - $porque"; $script:pendencias += $rotulo; return $false }
+    if (Tem $cmd) { Ok $rotulo; Mark-Item $cmd 'ok' $rotulo; return $true }
+    if ($SoChecar) { Falta "$rotulo - $porque"; Mark-Item $cmd 'fila' $rotulo; $script:pendencias += $rotulo; return $false }
     if ($Update) { Erro "$rotulo faltando (-Update nao instala dependencia)"; $script:pendencias += $rotulo; return $false }
     Write-Host "  .. instalando $rotulo ($id)"
+    Mark-Item $cmd 'fazendo' $rotulo
     Nativo winget install --id $id --exact --silent `
         --accept-package-agreements --accept-source-agreements | Out-Null
     Atualiza-Path
-    if (Tem $cmd) { Ok "$rotulo instalado"; return $true }
+    if (Tem $cmd) { Ok "$rotulo instalado"; Mark-Item $cmd 'ok' $rotulo; return $true }
     Erro "$rotulo nao instalou - procure o id com: winget search $cmd"
+    Mark-Item $cmd 'falhou' $rotulo
+    # Download que nao veio quase sempre e rede; o codigo sai no portao do 1/8.
+    if (-not $script:depsError -and -not (Test-Internet)) { $script:depsError = 'sem-internet' }
     $script:pendencias += $rotulo
     return $false
 }
 
-function Instale-ClaudeCode {
+function Instale-ClaudeCode($porque) {
     # NAO vai por winget. O pacote 'Anthropic.ClaudeCode' de la depende de alguem atualizar o
     # manifesto da comunidade, e fica pra tras das versoes que a Anthropic publica - o usuario
     # instalava e ja nascia velho. O instalador oficial baixa do canal de releases deles, confere
@@ -449,11 +551,12 @@ function Instale-ClaudeCode {
     # resolveria nada. Quem poe no PATH do usuario e este script (mesmo diretorio que o 7b ja usa
     # pro hangar-send).
     $rotulo = 'Claude Code'
-    if (Tem 'claude') { Ok $rotulo; return $true }
-    if ($SoChecar) { Falta "$rotulo - e o que o app pilota"; $script:pendencias += $rotulo; return $false }
+    if (Tem 'claude') { Ok $rotulo; Mark-Item 'claude' 'ok' $rotulo; return $true }
+    if ($SoChecar) { Falta "$rotulo - $porque"; Mark-Item 'claude' 'fila' $rotulo; $script:pendencias += $rotulo; return $false }
     if ($Update)   { Erro "$rotulo faltando (-Update nao instala dependencia)"; $script:pendencias += $rotulo; return $false }
 
     Write-Host '  .. instalando Claude Code (instalador oficial da Anthropic)'
+    Mark-Item 'claude' 'fazendo' $rotulo
     # Em processo FILHO, nao com `iex` aqui dentro: o bootstrap da Anthropic chama `exit 1` nos
     # caminhos de erro dele (Windows 32 bits, download falho, checksum errado). Avaliado no mesmo
     # processo, esse `exit` mataria o install.ps1 inteiro no meio, sem explicacao pro usuario.
@@ -463,6 +566,8 @@ function Instale-ClaudeCode {
     if ($rc -ne 0) {
         Erro "Claude Code nao instalou (exit $rc)"
         Nota 'manual: irm https://claude.ai/install.ps1 | iex'
+        Mark-Item 'claude' 'falhou' $rotulo
+        if (-not $script:depsError) { $script:depsError = if (Test-Internet) { 'agente-nao-instalou' } else { 'sem-internet' } }
         $script:pendencias += $rotulo
         return $false
     }
@@ -475,15 +580,18 @@ function Instale-ClaudeCode {
         }
     }
     Atualiza-Path
-    if (Tem 'claude') { Ok "$rotulo instalado"; return $true }
+    if (Tem 'claude') { Ok "$rotulo instalado"; Mark-Item 'claude' 'ok' $rotulo; return $true }
     Erro "Claude Code instalou mas o comando nao aparece (esperado em $binClaude\claude.exe)"
     Nota 'feche e abra o terminal, e rode o install de novo'
+    Mark-Item 'claude' 'falhou' $rotulo
+    if (-not $script:depsError) { $script:depsError = if (Test-Internet) { 'agente-nao-instalou' } else { 'sem-internet' } }
     $script:pendencias += $rotulo
     return $false
 }
 
 Atualiza-Path
 if (-not (Tem 'winget')) {
+    Write-Host '##HANGAR-ERRO## sem-winget'
     Erro 'winget nao encontrado. Instale o "App Installer" pela Microsoft Store e rode de novo.'
     Pausa-Log
     exit 1
@@ -566,6 +674,10 @@ function Token-Aleatorio {
     (New-Object System.Security.Cryptography.RNGCryptoServiceProvider).GetBytes($bytes)
     return (-join ($bytes | ForEach-Object { $_.ToString('x2') }))
 }
+# O backend le o .env pelo python-dotenv, que corta o valor em " #", expande "${VAR}" e tira
+# aspas: sem aspas no .env, a senha com esses caracteres nao chega inteira e o celular nunca entra.
+$tokenForbiddenText = 'so vale ASCII sem acento; nao vale # $ '' " \ nem espaco no comeco ou no fim'
+function Test-ForbiddenToken($token) { return ($token -match '[^\x20-\x7E]|[#$''"\\]|^[ \t]|[ \t]$') }
 
 function Token-Do-Env {
     # -Encoding UTF8 pelo mesmo motivo do Set-EnvKey: sem ele o Get-Content do PS 5.1 decodifica
@@ -651,6 +763,19 @@ Write-Host '  Se pedir permissao de administrador (UAC) e so pra uma coisa pontu
 Pausa-Log
 if ($temToken) {
     Ok 'backend\.env ja tem CP_AUTH_TOKEN (mantido)'
+} elseif ($App) {
+    # Mesmo piso da pergunta do terminal; vazio = o app pediu a senha gerada.
+    if (-not $tokenDoApp) {
+        $tokenDoApp = Token-Aleatorio
+        Ok 'senha aleatoria gerada (o app a le de backend\.env)'
+    } elseif ($tokenDoApp.Length -lt 8 -or $tokenDoApp -eq 'change-me' -or $tokenDoApp -match '[\r\n]') {
+        Pare 'a senha do celular veio do app invalida (minimo 8 caracteres, sem quebra de linha)' @()
+    } elseif (Test-ForbiddenToken $tokenDoApp) {
+        Pare "a senha do celular veio do app com caractere que o backend nao le inteiro: $tokenForbiddenText" @()
+    } else {
+        Ok 'senha do celular escolhida no app'
+    }
+    Set-EnvKey -Chave 'CP_AUTH_TOKEN' -Valor $tokenDoApp
 } elseif ($Sim) {
     Set-EnvKey -Chave 'CP_AUTH_TOKEN' -Valor (Token-Aleatorio)
     Ok 'CP_AUTH_TOKEN aleatorio gerado (modo -Sim nao pergunta)'
@@ -678,6 +803,7 @@ if ($temToken) {
         # senha curta nao passar batido so porque o backend so barra aquele valor literal.
         if ($token.Length -lt 8) { Erro 'curto demais - no minimo 8 caracteres'; continue }
         if ($token -eq 'change-me') { Erro 'esse valor o backend recusa de proposito'; continue }
+        if (Test-ForbiddenToken $token) { Erro $tokenForbiddenText; continue }
         break
     }
     Set-EnvKey -Chave 'CP_AUTH_TOKEN' -Valor $token
@@ -692,7 +818,9 @@ Nota 'E esse token que voce digita no celular na primeira conexao.'
 # Segunda e ultima pergunta. A resposta decide se o Tailscale entra na lista do 1/8 - instalar
 # terceiro no meio do passo 6 era o que fazia a instalacao parar de novo quase no fim.
 $script:querTailscale = $false
-if (Tem 'tailscale') { $script:querTailscale = $true; Ok 'Tailscale ja instalado - vai ser usado' }
+if ($Tailscale -eq 'nao') { Nota 'Tailscale: nao usar (-Tailscale nao), mesmo se ja estiver instalado' }
+elseif ($Tailscale -eq 'sim') { $script:querTailscale = $true; Ok 'Tailscale: usar fora de casa (-Tailscale sim)' }
+elseif (Tem 'tailscale') { $script:querTailscale = $true; Ok 'Tailscale ja instalado - vai ser usado' }
 else {
     Write-Host '  Voce vai usar o Hangar fora de casa (celular fora do Wi-Fi do PC)?'
     Nota 'Sim = instala o Tailscale, uma rede privada entre PC e celular, sem abrir nada pra internet.'
@@ -703,16 +831,47 @@ $script:psmuxConsole = Psmux-Precisa
 if ($script:psmuxConsole -eq 'perguntar') {
     Write-Host '  Neste Windows a roda do mouse nao rola dentro do Claude. O conserto reinicia o psmux.'
     Nota "Fecha as sessoes de terminal abertas (agora: $script:psmuxSessoes); a conversa de cada uma continua no app (claude --resume)."
-    $script:psmuxConsole = if (Pergunte-Mesmo '  Consertar a roda do mouse agora?') { 'fazer' } else { 'pular' }
+    # -App: reiniciar o psmux fecha as sessoes abertas; so com -ConsertarRoda, que o app manda
+    # depois de a pessoa confirmar que pode fechar as sessoes.
+    $script:psmuxConsole = if ($App) { if ($ConsertarRoda) { 'fazer' } else { 'pular' } } elseif (Pergunte-Mesmo '  Consertar a roda do mouse agora?') { 'fazer' } else { 'pular' }
 }
 }
 # Fora da guarda: no -Update nao ha pergunta, mas quem ja tem Tailscale continua publicando nele.
-if ($Update -and (Tem 'tailscale')) { $script:querTailscale = $true }
+if ($Update -and $Tailscale -ne 'nao' -and (Tem 'tailscale')) { $script:querTailscale = $true }
 
 # -- 1/8 Dependencias obrigatorias -------------------------------------------
+Mark-Step 'preparar' 'fazendo'
 Titulo '1/8 Dependencias'
 Instale 'psmux (multiplexador)' 'psmux'  'marlocarlo.psmux'     'sem ele nao existe sessao' | Out-Null
-Instale-ClaudeCode | Out-Null
+$achados = @($todosAgentes | Where-Object { Tem $_ })
+# So o -Avancado pergunta: o guiado tem duas perguntas e decide o resto pelo que ja esta no disco.
+if (-not $Agentes -and $Avancado -and $script:Interativo -and -not $Update -and -not $SoChecar) {
+    $padrao = if ($achados.Count) { $achados -join ',' } else { 'claude' }
+    Write-Host "  Quais agentes de codigo voce vai usar? ($($todosAgentes -join ', '); separe por virgula)"
+    while ($true) {
+        $r = Read-Host "  Agentes [$padrao]"
+        if (-not $r) { $r = $padrao }
+        $listaAgentes = Lista-Agentes $r
+        if ($listaAgentes) { break }
+        Erro "nao conheco algum desses - use: $($todosAgentes -join ', ')"
+    }
+}
+# Escolhidos que faltam e nao sao o Claude: o comando oficial deles roda no 2/8, com o backend
+# pronto, pela mesma tabela do painel de Harnesses (backend\app\harness_commands.py).
+$script:agentesNovos = @()
+if ($listaAgentes.Count) {
+    foreach ($a in $listaAgentes) {
+        if ($a -eq 'claude') { Instale-ClaudeCode 'agente escolhido' | Out-Null }
+        elseif (Tem $a) { Ok $nomesAgentes[$a]; Mark-Item $a 'ok' $nomesAgentes[$a] }
+        elseif ($SoChecar -or $Update) { Falta "$($nomesAgentes[$a]) - agente escolhido"; Mark-Item $a 'fila' $nomesAgentes[$a]; $script:pendencias += $nomesAgentes[$a] }
+        else { $script:agentesNovos += $a; Mark-Item $a 'fila' $nomesAgentes[$a]; Nota "$($nomesAgentes[$a]): instalado no passo 2/8" }
+    }
+} elseif ($achados.Count) {
+    foreach ($a in $achados) { Ok $nomesAgentes[$a]; Mark-Item $a 'ok' $nomesAgentes[$a] }
+    if (-not (Tem 'claude')) { Nota 'Claude Code nao e obrigatorio; para instalar: install.ps1 -Agentes claude' }
+} else {
+    Instale-ClaudeCode 'nenhum agente de codigo encontrado; o Claude Code e o padrao' | Out-Null
+}
 Instale 'Python'                'py'     'Python.Python.3.14'   'o backend e Python'        | Out-Null
 # 3.14, nao 3.13: backend/pyproject.toml exige >=3.14 (e .python-version = 3.14). Com o 3.13 o
 # `uv sync` ate funcionava - baixava um 3.14 gerenciado por conta propria - mas o Python do winget
@@ -730,10 +889,11 @@ if ((Tem 'psmux') -and -not (Tem 'tmux')) {
 # Git e OPCIONAL: sem ele o app roda, so perde o chip de branch e a aba de git.
 if (-not (Tem 'git')) {
     Falta 'git ausente - o painel de git e o chip de branch ficam vazios (o resto funciona)'
+    Mark-Item 'git' 'pendente' 'git'
     if (-not $SoChecar -and (Pergunte '      Instalar o Git agora?')) {
         Instale 'Git' 'git' 'Git.Git' 'painel de git' | Out-Null
     }
-} else { Ok 'git' }
+} else { Ok 'git'; Mark-Item 'git' 'ok' 'git' }
 
 # ripgrep tambem e OPCIONAL, e o preco de nao ter e ESPECIFICO: quem chama o `rg` e a busca por
 # conteudo entre sessoes (a lupa; backend/app/search.py), e sem o binario ela devolve lista VAZIA -
@@ -744,6 +904,7 @@ if (-not (Tem 'git')) {
 # desproporcional pra uma ferramenta que so a lupa usa.
 if (-not (Tem 'rg')) {
     Falta 'ripgrep ausente - a busca por conteudo entre sessoes (a lupa) volta sempre vazia'
+    Mark-Item 'rg' 'pendente' 'ripgrep'
     # -Update nao pergunta e nao instala nada de terceiro: com $Sim ligado o Pergunte devolve
     # verdadeiro sozinho e o winget rodaria numa atualizacao desassistida.
     if (-not $SoChecar -and -not $Update -and (Pergunte '      Instalar o ripgrep agora?')) {
@@ -751,17 +912,18 @@ if (-not (Tem 'rg')) {
         Nativo winget install --id BurntSushi.ripgrep.MSVC --exact --silent `
             --accept-package-agreements --accept-source-agreements | Out-Null
         Atualiza-Path
-        if (Tem 'rg') { Ok 'ripgrep instalado' }
+        if (Tem 'rg') { Ok 'ripgrep instalado'; Mark-Item 'rg' 'ok' 'ripgrep' }
         else { Erro 'ripgrep nao instalou - so a lupa fica vazia; o resto do app funciona' }
     }
-} else { Ok 'ripgrep' }
+} else { Ok 'ripgrep'; Mark-Item 'rg' 'ok' 'ripgrep' }
 
 # Symlink sem admin: as contas (~\.claude-<nome>) sao pastas reais cheias de atalhos pro ~\.claude,
 # e quem os cria e o BACKEND, como usuario. No Windows isso exige o Modo Desenvolvedor, e a pessoa
 # so descobria ao criar a primeira conta, por um erro de tres linhas. Confere aqui e resolve aqui.
-if (Symlink-Funciona) { Ok 'symlink sem admin (Modo Desenvolvedor)' }
+if (Symlink-Funciona) { Ok 'symlink sem admin (Modo Desenvolvedor)'; Mark-Item 'modo-desenvolvedor' 'ok' 'Modo Desenvolvedor' }
 elseif ($SoChecar -or $Update) {
     Falta 'symlink sem admin nao funciona - ligue o Modo Desenvolvedor (Configuracoes > Sistema > Para desenvolvedores) ou criar conta falha'
+    Mark-Item 'modo-desenvolvedor' 'fila' 'Modo Desenvolvedor'
     if ($SoChecar) { $pendencias += 'modo desenvolvedor' }
 } else {
     Falta 'criar symlink sem admin nao funciona - criar conta no app vai falhar'
@@ -770,32 +932,53 @@ elseif ($SoChecar -or $Update) {
     if (Pergunte-Mesmo '  Ligar o Modo Desenvolvedor agora por mim? (pede a senha de admin uma vez)') {
         $ligou = (Eleva-E-Roda 'ligar o Modo Desenvolvedor' $regDev) -and (Symlink-Funciona)
     }
-    if (-not $ligou) {
+    # No -App quem abre as Configuracoes e o botao da tela do assistente.
+    if (-not $ligou -and -not $App) {
         # Abre a tela certa e espera: sem isso a pessoa fechava o terminal e nunca voltava.
         Nota 'Abrindo Configuracoes > Sistema > Para desenvolvedores. Ligue "Modo de desenvolvedor" e confirme.'
         try { Start-Process 'ms-settings:developers' | Out-Null } catch { }
         $ligou = Espere-Ate 'ligado o Modo de desenvolvedor' { Symlink-Funciona }
     }
-    if ($ligou) { Ok 'Modo Desenvolvedor ligado - symlink funciona' }
-    else { $script:faltaDevMode = $true }   # so criar conta depende disso; nao trava o resto
+    if ($ligou) { Ok 'Modo Desenvolvedor ligado - symlink funciona'; Mark-Item 'modo-desenvolvedor' 'ok' 'Modo Desenvolvedor' }
+    else { $script:faltaDevMode = $true; Mark-Item 'modo-desenvolvedor' 'pendente' 'Modo Desenvolvedor' }   # so criar conta depende disso; nao trava o resto
+}
+
+# Permissao de scripts: o 5/8 a libera para o usuario; so a regra imposta pela TI barra.
+if ($App) {
+    $politicaAtual = [string](& $PowerShellExe -NoProfile -Command 'Get-ExecutionPolicy' 2>$null)
+    $script:policyLocked = Policy-Locked
+    # Item vermelho sempre com a pendencia: sem ela a FIM sairia ok com o perfil barrado.
+    if ($script:policyLocked) {
+        Mark-Item 'politica-scripts' 'falhou' 'permissao de scripts (travada pela TI)'
+        Add-AppPending 'permissao de scripts' 'politica-travada'
+    }
+    elseif ($politicaAtual -eq 'Restricted') { Mark-Item 'politica-scripts' 'fila' 'permissao de scripts' }
+    else { Mark-Item 'politica-scripts' 'ok' 'permissao de scripts' }
 }
 
 # O Tailscale entra AQUI, junto das outras dependencias, e nao no passo 6: quem respondeu "uso fora
 # de casa" no passo 0 nao pode ser parado de novo no fim pra instalar terceiro. O login vem colado
 # na instalacao pelo mesmo motivo - e a mesma decisao, e o passo 5d publica sozinho depois.
 if ($script:querTailscale -and -not (Tem 'tailscale')) {
+    # O app liga cada item a ultima etapa que comecou: a Tailscale abre a dela e devolve a vez.
+    Mark-Step 'tailscale' 'fazendo'
     if (Instale 'Tailscale' 'tailscale' 'Tailscale.Tailscale' 'acesso remoto') {
         Nota 'Instale o Tailscale tambem no celular (mesma conta).'
         Loga-Tailscale
     } else {
+        # Extra, como no Linux: com codigo ele passa pelo portao e o resto segue instalando.
         $script:querTailscale = $false
+        $script:pendingCodes['Tailscale'] = 'outro'
+        Mark-Step 'tailscale' 'pendente'
     }
+    Mark-Step 'preparar' 'fazendo'
 }
 
 # Roda do mouse no Claude em Windows de console antigo: decidido no passo 0.
 if ($script:psmuxConsole -eq 'pular') {
     Falta 'roda do mouse no Claude segue sem funcionar neste Windows (o psmux nao foi reiniciado)'
     Nota 'rode o instalador de novo quando puder fechar as sessoes de terminal'
+    if ($App) { Add-AppPending 'roda do mouse (psmux)' 'roda-do-mouse' }
 } elseif ($script:psmuxConsole -eq 'fazer') {
     # Instala antes de derrubar: falha de download nao pode custar as sessoes.
     & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File "$raiz\scripts\install-psmux-conpty.ps1"
@@ -833,23 +1016,55 @@ if ($SoChecar) {
         Push-Location (Join-Path $raiz 'backend'); & $pyVenvCheck -m app.doctor; $rcDoctor = $LASTEXITCODE; Pop-Location
         if ($rcDoctor -ne 0) { $pendencias += 'doctor' }
     }
-    if ($pendencias.Count -eq 0) { Titulo 'Nada faltando.'; Pausa-Log; exit 0 }
+    if ($pendencias.Count -eq 0) { Mark-Step 'preparar' 'ok'; $script:finalState = 'ok'; Titulo 'Nada faltando.'; Pausa-Log; exit 0 }
+    Mark-Step 'preparar' 'pendente'; $script:finalState = 'pendente'
     Titulo "Faltam: $($pendencias -join ', ')"
     Pausa-Log
     exit 1
 }
-if ($pendencias.Count -gt 0) { Erro "faltam: $($pendencias -join ', ')"; Pausa-Log; exit 1 }
-if ($script:faltaDevMode) { $pendencias += 'modo desenvolvedor' }
+# Pendencia com codigo e extra (o app mostra no fim); so a dependencia sem codigo para aqui.
+$essenciais = @($pendencias | Where-Object { -not $script:pendingCodes.ContainsKey($_) })
+if ($essenciais.Count -gt 0) {
+    if ($script:depsError) { Write-Host "##HANGAR-ERRO## $($script:depsError)" }
+    Erro "faltam: $($essenciais -join ', ')"; Pausa-Log; exit 1
+}
+if ($script:faltaDevMode) { Add-AppPending 'modo desenvolvedor' 'modo-desenvolvedor' }
 if ($script:faltaRodaPsmux) { $pendencias += 'roda do mouse (psmux)' }
+Mark-Step 'preparar' 'ok'
 
 # -- 2/8 Backend -------------------------------------------------------------
+Mark-Step 'instalar' 'fazendo'
 Titulo '2/8 Backend'
 Push-Location "$raiz\backend"
 $rcSync = Nativo uv sync --quiet
-if ($rcSync -ne 0) { Pop-Location; Pare 'uv sync falhou - o backend ficou sem as dependencias' @('rodar na mao:  cd backend ; uv sync') }
+if ($rcSync -ne 0) {
+    Pop-Location
+    $codigoSync = ''
+    if (-not (Test-Internet)) { $codigoSync = 'sem-internet' }
+    Pare 'uv sync falhou - o backend ficou sem as dependencias' @('rodar na mao:  cd backend ; uv sync') $codigoSync
+}
 Ok 'dependencias instaladas'
+Mark-Item 'backend' 'ok' 'servidor do Hangar'
 Nota 'psutil entra aqui: no Windows nao ha /proc pra ler informacao de processo'
+$pyVenvAgentes = Join-Path $raiz 'backend\.venv\Scripts\python.exe'
+foreach ($a in $script:agentesNovos) {
+    $nome = $nomesAgentes[$a]
+    Write-Host "  .. instalando $nome"
+    Mark-Item $a 'fazendo' $nome
+    $rcAgente = Nativo $pyVenvAgentes -m app.harness_commands $a
+    Atualiza-Path
+    if ($rcAgente -eq 0 -and (Tem $a)) { Ok "$nome instalado"; Mark-Item $a 'ok' $nome; continue }
+    if ($rcAgente -eq 0) { Falta "$nome instalou, mas o comando $a nao aparece no PATH - abra outro terminal e rode o instalador de novo" }
+    elseif ($rcAgente -eq 2) { Falta "$nome nao tem instalador conferido para Windows - veja o painel Harnesses do app" }
+    else { Falta "$nome nao instalou (exit $rcAgente) - instale pelo painel Harnesses do app" }
+    Mark-Item $a 'falhou' $nome
+    Add-AppPending $nome 'agente-nao-instalou'
+}
 Pop-Location
+# Prova do minimo: sem nenhum agente o app abre, mas nao tem o que pilotar.
+if (-not @($todosAgentes | Where-Object { Tem $_ }).Count) {
+    Pare 'nenhum agente de codigo instalado - o Hangar precisa de pelo menos um' @('powershell -ExecutionPolicy Bypass -File install.ps1 -Agentes claude') 'sem-agente'
+}
 
 # -- 3/8 Token de acesso -----------------------------------------------------
 Titulo '3/8 Token de acesso'
@@ -857,6 +1072,7 @@ Titulo '3/8 Token de acesso'
 # instalacao com ok verde e o celular levando 401 sem nada explicando.
 if (Token-Do-Env) {
     Ok 'definido no passo 0'
+    Mark-Item 'token' 'ok' 'senha do celular'
 } elseif ($Update) {
     Falta 'backend\.env sem CP_AUTH_TOKEN - rode .\install.ps1 sem -Update para definir'
     $pendencias += 'token'
@@ -865,6 +1081,7 @@ if (Token-Do-Env) {
 }
 
 # -- 4/8 Frontend ------------------------------------------------------------
+$antesFront = @($script:pendencias).Count
 Titulo '4/8 Frontend'
 # So rebuilda quando ha motivo. NAO por data de modificacao: no Windows o git reescreve
 # arquivos no checkout (conversao de fim de linha), entao um `git pull` que nem tocou no front
@@ -1311,19 +1528,28 @@ if ($precisa -and $Update) {
 } else {
     Ok 'frontend ja buildado e atualizado (nada mudou no git desde o ultimo build)'
 }
+Mark-ItemSince 'frontend' $antesFront 'tela do Hangar'
 
 # -- App nativo (desktop-native, release native-latest) ----------------------
 # E a unica janela de desktop instalada. Falhar aqui nao derruba a instalacao: o Hangar segue no navegador.
 $nativoExe = Join-Path $env:LOCALAPPDATA 'Programs\Hangar\Hangar.exe'
-if (-not $SoChecar) {
+if ($SemNativo -and -not $SoChecar) {
+    # O proprio app (assistente) se copia para o lugar de sempre; o install-native.ps1 baixaria a
+    # native-latest por cima do exe aberto.
+    Titulo 'App nativo'
+    Ok 'pulado (-SemNativo): o app ja esta nesta maquina'
+    Mark-Item 'nativo' 'ok' 'app do Hangar'
+} elseif (-not $SoChecar) {
     Titulo 'App nativo'
     & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File "$raiz\scripts\install-native.ps1"
     if ($LASTEXITCODE -eq 0 -and (Test-Path $nativoExe)) {
         Ok 'app nativo instalado (atalho "Hangar")'
+        Mark-Item 'nativo' 'ok' 'app do Hangar'
     } elseif ($LASTEXITCODE -eq 0) {
         Nota 'sem app nativo para esta maquina; use o Hangar pelo navegador'
     } else {
         Falta 'o app nativo nao instalou - use o Hangar pelo navegador (rode scripts\install-native.ps1)'
+        Mark-Item 'nativo' 'pendente' 'app do Hangar'
         $script:pendencias += 'app nativo'
         Write-Host '##HANGAR-AVISO## o app nativo nao instalou; use o Hangar pelo navegador'
     }
@@ -1343,11 +1569,14 @@ if (-not $SoChecar) {
     }
     if ($rcRust -eq 0) {
         Ok 'hangar-server e hangar-cano em ~\.hangar\bin'
+        Mark-Item 'rust' 'ok' 'servidor rapido'
     } elseif ($rcRust -eq 2) {
         Nota 'sem binarios Rust para esta maquina; o backend em Python atende sozinho'
+        Mark-Item 'rust' 'ok' 'servidor rapido (nao ha para esta maquina)'
     } else {
         $motivo = if ($rcRust -eq -1) { 'sem o python do venv' } else { 'download ou conferencia falhou' }
         Falta "binarios Rust nao baixaram ($motivo) - o backend em Python atende sozinho"
+        Mark-Item 'rust' 'pendente' 'servidor rapido'
         $script:pendencias += 'binarios Rust'
         Write-Host '##HANGAR-AVISO## binarios Rust nao baixaram; o backend em Python atende sozinho'
     }
@@ -1364,7 +1593,9 @@ foreach ($pf in $perfis) {
     if ((Test-Path $pf) -and ((Ler-Texto $pf) -match [regex]::Escape($MarcaWrapper))) { $jaTem = $true }
 }
 if ($jaTem -or (Pergunte '  Instalar (recomendado)?')) {
-    [void](Instalar-Wrappers $perfis)
+    $wrappersOk = (@(Instalar-Wrappers $perfis) | Select-Object -Last 1) -eq $true
+    if ($wrappersOk) { Mark-Item 'wrappers' 'ok' 'sessao aberta no terminal aparece no app' }
+    else { Mark-Item 'wrappers' 'pendente' 'sessao aberta no terminal aparece no app' }
 } else {
     Nota 'pulado - sessao aberta no terminal nao vai aparecer no app'
 }
@@ -1476,6 +1707,9 @@ function Publica-Tailscale {
             if (-not $dns) {
                 Nota 'tailscale sem nome de no (nao logado?) - rode `tailscale up` e re-rode este instalador'
             } else {
+                # Instalada e logada: a tela mostra as tres linhas, como no Linux.
+                Mark-Item 'tailscale' 'ok' 'Tailscale'
+                Mark-Item 'tailscale-conta' 'ok' 'conta Tailscale'
                 $proxy443 = Get-Proxy443
                 # Compara PORTA, nao string: o tailscale normaliza o alvo, entao "localhost:8765" e
                 # "http://127.0.0.1:8765" descrevem a mesma coisa e uma comparacao literal diria que
@@ -1484,6 +1718,7 @@ function Publica-Tailscale {
                 if ($proxy443 -match ':(\d+)/?$') { $portaAtual = [int]$Matches[1] }
                 if ($portaAtual -eq $portaBack) {
                     Ok "tailscale ja publica o backend (porta $portaBack)"
+                    Mark-Item 'tailscale-https' 'ok' 'endereco seguro (HTTPS)'
                     $script:cpPublicUrl = "https://$dns"
                 } elseif ($proxy443 -and $portaAtual -ne 5173) {
                     # Handler que NAO fomos nos que criamos: avisa e nao toca. E NUNCA `serve reset`,
@@ -1515,6 +1750,7 @@ function Publica-Tailscale {
                         if ($proxyProva -match ':(\d+)/?$') { $portaProva = [int]$Matches[1] }
                         if ($portaProva -eq $portaBack) {
                             Ok "tailscale publicando o backend (localhost:$portaBack)"
+                            Mark-Item 'tailscale-https' 'ok' 'endereco seguro (HTTPS)'
                             $script:cpPublicUrl = "https://$dns"
                         } elseif ($null -eq $proxyProva) {
                             # Get-Proxy443 engole excecao (catch vazio): nulo aqui pode ser leitura
@@ -1558,7 +1794,10 @@ function Publica-Tailscale {
                             if ($motivo.Length -gt 200) { $motivo = $motivo.Substring(0, 200) + '...' }
                             Write-Host "##HANGAR-AVISO## o backend nao foi publicado no Tailscale: $motivo"
                         } else {
-                            $script:pendencias += 'tailscale serve'
+                            $codigoServe = 'outro'
+                            if ($falha -match '(?i)https') { $codigoServe = 'tailscale-https' }
+                            Add-AppPending 'tailscale serve' $codigoServe
+                            Mark-Item 'tailscale-https' 'pendente' 'endereco seguro (HTTPS)'
                         }
                     }
                   } while ($repetir)
@@ -1584,9 +1823,19 @@ function Publica-Tailscale {
         } finally { $ErrorActionPreference = $eapAnt }
     }
 }
-Publica-Tailscale
+$antesTs = $null
+if ($Tailscale -eq 'nao') {
+    Nota 'Tailscale: nao usar (-Tailscale nao), mesmo se ja estiver instalado'
+} else {
+    if ($script:querTailscale -or (Tem 'tailscale')) {
+        Mark-Step 'tailscale' 'fazendo'
+        $antesTs = @($script:pendencias).Count
+    }
+    Publica-Tailscale
+}
 
 # -- 6/8 Acesso pelo celular -------------------------------------------------
+Mark-Step 'celular' 'fazendo'
 Titulo '6/8 Acesso pelo celular'
 # Escutar em todas as interfaces e o que deixa os clientes usarem a rede local antes do Tailscale.
 # 0.0.0.0 e nunca 'auto': 'auto' tira o loopback, e o `tailscale serve` fala com localhost. IP
@@ -1602,6 +1851,7 @@ if (-not $SoChecar) {
         Ok 'CP_LAN_BIND_IP=0.0.0.0 gravado - a rede local alcanca o backend (o token continua exigido)'
     }
 }
+Mark-Item 'rede-local' 'ok' 'rede de casa'
 if ($Update) {
     Ok 'Tailscale pulado no -Update (pede elevacao; nada aqui muda com git pull)'
     # Sem terminal nao ha quem aceite UAC: so cria a regra se ja estiver como admin.
@@ -1634,6 +1884,7 @@ $regras = @($portasFw | ForEach-Object {
 })
 if ($regras.Count -eq $portasFw.Count) {
     Ok "porta(s) $listaFw ja liberada(s) no firewall"
+    Mark-Item 'firewall' 'ok' 'porta do Wi-Fi liberada'
 } elseif (Pergunte "  Liberar a(s) porta(s) $listaFw no firewall pra rede LOCAL?") {
     # Profile Private: rede de casa. Em rede Publica (cafe, aeroporto) segue fechado,
     # que e o comportamento que se quer sem precisar lembrar de desligar nada.
@@ -1645,8 +1896,11 @@ if ($regras.Count -eq $portasFw.Count) {
     $regras = @($portasFw | ForEach-Object { Get-NetFirewallRule -DisplayName "hangar $_" -ErrorAction SilentlyContinue })
     if ($liberou -and $regras.Count -eq $portasFw.Count) {
         Ok 'portas liberadas (perfil Private apenas)'
+        Mark-Item 'firewall' 'ok' 'porta do Wi-Fi liberada'
     } else {
         Falta 'firewall nao liberado (UAC recusado?) - num PowerShell como admin rode:'
+        Mark-Item 'firewall' 'pendente' 'porta do Wi-Fi liberada'
+        if ($App) { Add-AppPending 'firewall' 'outro' }
         foreach ($p in $portasFw) {
             Nota "New-NetFirewallRule -DisplayName `"hangar $p`" -Direction Inbound -Action Allow -Protocol TCP -LocalPort $p -Profile Private"
         }
@@ -1660,7 +1914,7 @@ if (-not $script:cpPublicUrl) {
     Write-Host '    [1] So nesta maquina  - o app de desktop. Sem QR (nao ha o que ler do celular).'
     # Rede de casa e o padrao: quem instala isto quer o celular. So o -Avancado ainda pergunta;
     # o -Sim tambem cai no padrao, pra nao ficar parado esperando tecla num modo desatendido.
-    $escolha = if ($Sim -or -not $Avancado) { '2' } else { Read-Host '  1 ou 2 (Enter = 2)' }
+    $escolha = if ($Sim -or $App -or -not $Avancado) { '2' } else { Read-Host '  1 ou 2 (Enter = 2)' }
     if ($escolha -ne '1') {   # Enter em branco vale o padrao, que agora e a rede de casa
         # 0.0.0.0, NUNCA 'auto': resolve_bind_ip (backend/app/config.py:199-201) troca 'auto' pelo
         # IP de LAN detectado e SO, entao o uvicorn passa a escutar SO naquela interface - o
@@ -1706,7 +1960,10 @@ if (-not $script:cpPublicUrl) {
 
 # Instalar e logar acontecem no 1/8; aqui sobra so publicar, e nenhuma pergunta nova - o passo 6 e
 # o fim da instalacao, e parar a pessoa aqui era exatamente o que esta mudanca tirou.
-if (Tem 'tailscale') {
+Mark-Step 'celular' 'ok'
+if ($Tailscale -eq 'nao') {
+    Nota 'Tailscale pulado (-Tailscale nao)'
+} elseif (Tem 'tailscale') {
     Ok 'Tailscale ja instalado'
     if (-not $script:cpPublicUrl) {
         # Unico caso em que ainda se pergunta aqui: o Tailscale JA estava instalado (entao o 1/8 nao
@@ -1727,11 +1984,16 @@ if (Tem 'tailscale') {
         Publica-Tailscale
     }
 }
+if ($null -ne $antesTs) {
+    if (@($script:pendencias).Count -gt $antesTs -or $script:tsLoginPending) { Mark-Step 'tailscale' 'pendente' } else { Mark-Step 'tailscale' 'ok' }
+}
 
 }
 
 # -- 7/8 Subir sozinho no logon ----------------------------------------------
+Mark-Step 'instalar' 'fazendo'
 # A tarefa fica no logon interativo para compartilhar o desktop com os terminais.
+$antesServ = @($script:pendencias).Count
 Titulo '7/8 Subir junto com o Windows'
 # Portas: o Pare-Servico abaixo precisa saber QUEM segurar pra derrubar, e matar por porta ERRADA
 # derruba processo alheio. As duas saem do .env (mesma fonte que o backend usa), com o default do
@@ -2075,6 +2337,9 @@ WScript.Quit CreateObject("WScript.Shell").Run("powershell -NoProfile -Execution
 #   3. rodar o proprio install-hangar-send.sh - e ele quem cria o link, as skills e o bloco de
 #      protocolo no ~/.claude/CLAUDE.md. Duplicar esse texto aqui daria duas fontes da verdade,
 #      e a que diverge silenciosamente e sempre a copia.
+Mark-ItemSince 'servicos' $antesServ 'inicio automatico'
+# As faltas do 7b sao amarelas e nao entram na lista: o item segue esta marca, nao a contagem.
+$sendOk = $true
 Titulo '7b/8 hangar-send (recado e pareamento entre sessoes)'
 $bash = $null
 if (Tem 'git') {
@@ -2085,6 +2350,7 @@ if (Tem 'git') {
 }
 if (-not $bash) {
     Falta 'bash do Git for Windows nao encontrado - hangar-send fica de fora'
+    $sendOk = $false
     Nota 'instale o Git e rode este instalador de novo'
 } else {
     $binUsuario = Join-Path $HOME '.local\bin'
@@ -2108,6 +2374,7 @@ if (-not $bash) {
     }
     if (-not $pyExe) {
         Falta 'nenhum Python real encontrado (so o atalho da Store) - hangar-send ficaria sem JSON'
+        $sendOk = $false
         Nota 'instale com:  winget install --id Python.Python.3.13'
     } else {
         # C:\Windows\py.exe -> /c/Windows/py.exe, que e a forma que o bash do MSYS executa.
@@ -2143,6 +2410,7 @@ if (-not $bash) {
     $lancadorConta = Join-Path $binUsuario 'hangar-conta.cmd'
     if (-not $pyExe) {
         Falta 'hangar-conta.cmd nao criado - precisa de um Python real (ver acima)'
+        $sendOk = $false
     } else {
         $conteudoConta = "@echo off`r`n" +
                          "`"$pyExe`"$arg `"$raiz\scripts\hangar-conta`" %*`r`n"
@@ -2159,6 +2427,7 @@ if (-not $bash) {
         else { Ok 'lancador hangar-doctor.cmd ja atualizado' }
     } else {
         Falta 'hangar-doctor.cmd nao criado - o venv do backend nao existe (passo 2/8 falhou?)'
+        $sendOk = $false
     }
 
     # (2c) lancador pro hangar-engine (motores de modelo). Sem ele o backend monta o comando do pane
@@ -2172,6 +2441,7 @@ if (-not $bash) {
     $lancadorEngine = Join-Path $binUsuario 'hangar-engine.cmd'
     if (-not $pyExe) {
         Falta 'hangar-engine.cmd nao criado - precisa de um Python real (ver acima)'
+        $sendOk = $false
     } else {
         $conteudoEngine = "@echo off`r`n" +
                           "`"$pyExe`"$arg `"$raiz\scripts\hangar-engine`" %*`r`n"
@@ -2229,6 +2499,7 @@ if (-not $bash) {
     if (-not (Test-Path $pyTui)) { $pyTui = $pyExe; $argTui = $arg }
     if (-not $pyExe) {
         Falta 'lancadores do Codex nao criados - precisa de um Python real (ver acima)'
+        $sendOk = $false
     } else {
         foreach ($par in @(@('hangar-codex-tui', $pyTui, $argTui), @('hangar-codex', $pyExe, $arg))) {
             $nome, $py, $a = $par
@@ -2310,9 +2581,16 @@ if (-not $bash) {
         Nota 'teste (em terminal NOVO):  hangar-send --list'
     } else {
         Falta 'install-hangar-send.sh falhou:'
+        $sendOk = $false
         $saida | Select-Object -Last 12 | ForEach-Object { Nota "  $_" }
         Nota "rodar na mao:  & '$bash' -lc 'cd $rota && ./scripts/install-hangar-send.sh'"
     }
+}
+
+if ($sendOk) { Mark-Item 'hangar-send' 'ok' 'sessoes conversam entre si' }
+else {
+    Mark-Item 'hangar-send' 'pendente' 'sessoes conversam entre si'
+    if ($App) { Add-AppPending 'hangar-send' 'outro' }
 }
 
 # -- Passos de atualizacao: marcar como ja feitos ----------------------------
@@ -2400,11 +2678,14 @@ if ($script:psmuxConsole -eq 'fazer' -and -not $script:faltaRodaPsmux -and (Psmu
 # Ate aqui foi tudo instalacao. Este passo separa "instalou" de "funciona": ate pouco tempo o
 # backend nem IMPORTAVA no Windows (um `import fcntl` no topo do projects.py) e um instalador
 # sem esta checagem teria reportado sucesso do mesmo jeito.
+Mark-Step 'instalar' 'ok'
+Mark-Step 'final' 'fazendo'
 Titulo '8/8 Checagem de fumaca'
 Push-Location "$raiz\backend"
 $rc = Nativo uv run python -c "from app import api, registry, procinfo, projects"
 if ($rc -ne 0) { Erro 'o backend nao importa neste Windows'; Pop-Location; exit 1 }
 Ok 'o backend importa'
+Mark-Item 'backend-importa' 'ok' 'o servidor abre'
 
 $rc = Nativo uv run python -c "from app import procinfo; assert not procinfo._TEM_PROC; import psutil; assert psutil.Process().cwd()"
 if ($rc -ne 0) { Erro 'leitura de processo via psutil falhou'; Pop-Location; exit 1 }
@@ -2422,6 +2703,7 @@ if ($rc -ne 0) {
     exit 1
 }
 Ok 'o multiplexador cria sessao'
+Mark-Item 'multiplexador' 'ok' 'sessoes abrem e fecham'
 
 # Matar e testado SEPARADO de criar, porque medido no psmux 3.3.7 eles falham separado: o
 # kill-session responde "session still present after 5s" com um `cmd` interativo no pane, enquanto
@@ -2470,12 +2752,17 @@ if ($jaAgendado -or $registrou) {
         else { Falha 'backend no ar' 'nenhuma tarefa chegou a ser reiniciada; o processo na porta e o ANTERIOR' }
     }
 }
+if ($jaAgendado -or $registrou) {
+    if ($vivo) { Mark-Item 'backend-no-ar' 'ok' 'servidor respondendo' }
+    else { Mark-Item 'backend-no-ar' 'falhou' 'servidor respondendo' }
+}
 
 # O QR saiu daqui: hoje ele e desenhado UMA vez, na tela final, junto do "o que fazer agora".
 # Nunca no -Update: ele roda do hook post-merge, e um `git pull` que abre janela de navegador e
 # hostil. try/catch porque $ErrorActionPreference='Stop' (install.ps1:24) transformaria "sem
 # navegador padrao" em aborto do ultimo passo.
-if ($vivo -and -not $Update) {
+# No -App o proprio app ja esta aberto e conecta sozinho.
+if ($vivo -and -not $Update -and -not $App) {
     # Com o TOKEN na URL, o mesmo mecanismo do QR: o app le o `?token=`, grava a credencial (e o
     # cookie cp_token que o SSE usa) e APAGA o parametro do historico da aba. Sem isto o instalador
     # abria a tela de login e mandava digitar na mao um token de 48 caracteres no proprio PC onde
@@ -2517,6 +2804,14 @@ if ($vivo -and -not $Update) {
 # lugar, inclusive num instalador.
 if ($pendencias.Count -gt 0) {
     Titulo "NAO terminou: $(($pendencias | Select-Object -Unique) -join ', ')"
+    Mark-Step 'final' 'pendente'; $script:finalState = 'pendente'
+    if ($App) {
+        foreach ($p in ($pendencias | Select-Object -Unique)) {
+            $codigoPend = $script:pendingCodes[$p]
+            if (-not $codigoPend) { $codigoPend = 'outro' }
+            Write-Host "##HANGAR-PENDENCIA## $codigoPend $p"
+        }
+    }
     # Pendencia que entrou sem motivo ainda precisa chegar a tela do Atualizar.
     foreach ($p in ($pendencias | Select-Object -Unique)) {
         if ($p -notin $script:falhasMarcadas) { Write-Host "##HANGAR-FALHA## $p" }
@@ -2535,6 +2830,7 @@ if ($pendencias.Count -gt 0) {
     exit 1
 }
 Titulo 'Pronto'
+Mark-Step 'final' 'ok'
 # O passo 7b tambem define $pyVenv, mas ele pode nao ter rodado (-Update parcial, venv ausente):
 # a tela final nao pode depender de um ramo anterior ter executado.
 $pyVenv = Join-Path $raiz 'backend\.venv\Scripts\python.exe'
@@ -2574,10 +2870,12 @@ $urlCel = if ($script:cpPublicUrl) { $script:cpPublicUrl } else { "http://127.0.
 if ($qrMostrado) { $linha2 = "No celular: leia o QR acima (ou abra $urlCel e digite o token)." }
 elseif ($script:cpPublicUrl) { $linha2 = "No celular: abra $urlCel e digite o token." }
 else { $linha2 = "Neste PC: abra $urlCel. Pro celular entrar, veja 'acesso pelo celular' no guia." }
+$primeiroAgente = @($todosAgentes | Where-Object { Tem $_ }) | Select-Object -First 1
+if (-not $primeiroAgente) { $primeiroAgente = 'claude' }
 Write-Host @"
 
   O QUE FAZER AGORA
-   1. No PC: abra um terminal, digite  claude  e faca o login (so na primeira vez).
+   1. No PC: abra um terminal, digite  $primeiroAgente  e faca o login (so na primeira vez).
    2. $linha2
 "@
 if ($script:querTailscale -and -not $Update) { Write-Host '   3. No celular: instale o app Tailscale e entre com a MESMA conta do PC.' }
@@ -2596,7 +2894,10 @@ $tokenFim = Token-Do-Env
 Write-Host ""
 Write-Host "  ---------------------------------------------------------------" -ForegroundColor Cyan
 Write-Host "   RESUMO" -ForegroundColor Cyan
-if ($tokenFim) {
+if ($tokenFim -and $App) {
+    # O app ja conectou com ele; a saida vai para um arquivo que o relatorio de falha le.
+    Write-Host "   token   : (em backend\.env)"
+} elseif ($tokenFim) {
     Pausa-Log   # o token nao entra no install.log; la fica so a linha mascarada abaixo
     Write-Host "   token   : " -NoNewline; Write-Host $tokenFim -ForegroundColor Yellow
     Write-Host "             (e o que voce digita no celular; fica em backend\.env)"
@@ -2615,8 +2916,27 @@ Write-Host ""
 # Pausa SO com console interativo: com o stdin vindo de um pipe (irm|iex chamado por outro
 # processo, SSH, tarefa agendada) o Read-Host voltaria na hora e a pausa nao seguraria nada; e no
 # -Update ela travaria um `git pull` esperando por uma tecla que ninguem vai apertar.
+$script:finalState = 'ok'
 Pausa-Fim
 Pausa-Log
+} catch {
+    # -App: o erro sai antes da FIM, que tem de ser a ultima linha (sem o catch ele sairia depois).
+    if (-not $App) { throw }
+    Write-Host "  X   $($_.Exception.Message)"
+    exit 1
 } finally {
-    Liberar-Instalacao
+    # A trava de outra instalacao falha antes de a funcao existir, e ai nao ha o que liberar.
+    try { if (Get-Command Liberar-Instalacao -ErrorAction SilentlyContinue) { Liberar-Instalacao } }
+    catch {
+        if (-not $App) { throw }
+        Write-Host "  X   $($_.Exception.Message)"
+        $script:finalState = 'falhou'
+    }
+    finally {
+        # Ultima linha no -App: sem ela o app sabe que a instalacao foi interrompida.
+        if ($App) {
+            if ($script:finalState -eq 'falhou' -and $script:currentStep) { Write-Host "##HANGAR-PASSO## $($script:currentStep) falhou" }
+            Write-Host "##HANGAR-FIM## $($script:finalState)"
+        }
+    }
 }

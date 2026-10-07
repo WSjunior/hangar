@@ -367,6 +367,24 @@ def _holds_terminal_write(operation, conversation):
         and (conversation is None or (operation.get("dispatch_cursor") or {}).get("conversation") == conversation))
 
 
+def _confirm_local_command(state, source):
+    """Comando respondido pela própria CLI não vira linha no transcript: a resposta dela é a prova
+    de que a entrada mais antiga com aquele texto chegou."""
+    source = source.strip() if isinstance(source, str) else ""
+    if not source.startswith("/") or len(source) < 2:
+        return
+    alvo = next((r for r in state["rows"] if not r.get("confirmed") and r.get("papel") != "assistant"
+                 and r.get("delivered") and isinstance(r.get("text"), str) and r["text"].strip() == source), None)
+    if alvo is None:
+        return
+    alvo["confirmed"] = True
+    alvo.pop("desistiu", None)
+    for key, operation in state["operations"].items():
+        if not key.startswith(_CALL_PREFIX) and operation.get("entry_id") == alvo["id"]:
+            operation["status"] = "confirmed"
+    _release_terminal_write_barrier(state)
+
+
 def _release_terminal_write_barrier(state):
     """A trava só sai quando a dona deixou de ser incerta e nenhuma outra da conversa resta."""
     barrier = state["runtime_state"].get("terminal_write_barrier")
@@ -463,6 +481,8 @@ def apply_action(state, action, clock, call_id):
                "delivered": action.get("delivered", kind == "append_local")}
         if kind == "append_local":
             row.update(delivered=True, confirmed=True, papel="assistant")
+            if action.get("confirms"):
+                _confirm_local_command(state, action["confirms"])
         elif action.get("pre_transcript"):
             row["pre_transcript"] = True
         overflow = len(rows) + 1 - 1000
@@ -690,6 +710,8 @@ def route_queue(queue, method: str, args: dict):
             payload = dict(args)
             if kind in {"append", "append_local"}:
                 payload["entry_id"] = uuid.uuid4().hex
+            if kind == "append_local" and payload.get("confirms") is None:
+                payload.pop("confirms", None)   # binário Rust anterior recusa campo que não conhece
             if kind == "confirm":
                 rows = _coordinator.queue_rpc(route, uuid.uuid4().hex, _clock(), {"kind": "load"})
                 predicate = payload.pop("apenas", None)

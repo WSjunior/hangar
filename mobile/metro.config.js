@@ -15,5 +15,11 @@ config.resolver.nodeModulesPaths = [
   path.resolve(__dirname, 'node_modules'),
   path.resolve(raiz, 'node_modules'),
 ];
+// O npm deixa o expo-modules-core dentro de expo/node_modules (o reanimated exige um worklets mais
+// novo que o aceito por ele, e o conflito impede subir o pacote), mas expo-audio e outros o importam
+// direto. O mesmo caminho está nos `paths` do tsconfig.
+config.resolver.extraNodeModules = {
+  'expo-modules-core': path.resolve(__dirname, 'node_modules/expo/node_modules/expo-modules-core'),
+};
 
 module.exports = config;

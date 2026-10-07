@@ -69,3 +69,24 @@ site/tools/record/enc.sh <cena> <lang>
 - Variáveis: `HANGAR_RECORD_MONITOR=<nome>` escolhe o monitor (padrão: o focado);
   `HANGAR_RECORD_SIZE`, `HANGAR_RECORD_POS`, `HANGAR_NATIVE_BIN` (padrão: `hangar-native` no
   `PATH`) e `HANGAR_RECORD_OUT` mudam tamanho, posição, binário e pasta de saída.
+
+## Relatórios de falha (`worker/`)
+
+Worker de `hangar.dev.br/api/relatorio`: recebe o relatório do assistente de instalação, guarda no KV por 90 dias e manda
+e-mail. Projeto npm próprio (fora dos workspaces da raiz).
+
+```bash
+cd site/worker && npm ci
+npm test            # só quando pedido
+npm run check
+```
+
+Pré-requisitos para publicar (nada disso está no repositório):
+
+1. Um namespace KV criado na conta; o `id` dele substitui o texto provisório de `kv_namespaces` em `worker/wrangler.jsonc`.
+2. Email Sending/Routing ativo para o domínio `hangar.dev.br`, com o endereço de destino já verificado.
+3. O segredo `REPORT_TO` (endereço de destino, `wrangler secret put REPORT_TO`) e a rota `hangar.dev.br/api/relatorio` na zona.
+
+```bash
+cd site/worker && CLOUDFLARE_ACCOUNT_ID=<id da conta> npx wrangler deploy
+```

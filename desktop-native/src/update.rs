@@ -392,6 +392,8 @@ pub struct Updater {
     /// Último `pre_voo.alvo` lido do servidor desta máquina: leitura que falha não muda o canal.
     known_channel: Option<String>,
     channel_blocked: Option<String>,
+    /// O assistente de instalação está rodando: nem procura nem troca o app no meio (spec "Destacado do app").
+    suspended: bool,
 }
 
 /// Linha "Canal de testes" da página Sobre: a main não mostra nada.
@@ -417,7 +419,7 @@ pub fn start(runtime: Arc<Runtime>, cx: &mut App) {
     let client = reqwest::Client::builder().timeout(Duration::from_secs(300)).user_agent(concat!("hangar-native/", env!("HANGAR_NATIVE_RELEASE")))
         .build().unwrap_or_default();
     let entity = cx.new(|_| Updater { runtime, client, exe: std::env::current_exe().ok(), offer: None, local: None, server: None,
-        server_seq: 0, active: None, active_state: None, active_seq: 0, run: Run::Idle, checking: false, checked: None, checked_channel: None, known_channel: None, channel_blocked: None });
+        server_seq: 0, active: None, active_state: None, active_seq: 0, run: Run::Idle, checking: false, checked: None, checked_channel: None, known_channel: None, channel_blocked: None, suspended: false });
     let weak = entity.downgrade();
     cx.spawn(async move |cx| loop {
         let Ok(()) = weak.update(cx, |this, cx| {
@@ -475,7 +477,7 @@ impl Updater {
 
     /// Procura versão nova do app agora. Falha não vira aviso na tela: fica no stderr e na linha da página Sobre.
     pub fn check_app(&mut self, cx: &mut Context<Self>) {
-        if self.checking { return; }
+        if self.checking || self.suspended { return; }
         self.checking = true;
         cx.notify();
         let (client, channel) = (self.client.clone(), self.channel());
@@ -518,7 +520,15 @@ impl Updater {
     }
 
     /// Mesma ação do botão do topo: atualiza o servidor desta máquina se estiver atrás e depois o app.
-    pub fn start_update(&mut self, window: &mut Window, cx: &mut Context<Self>) { self.run(window, cx) }
+    pub fn start_update(&mut self, window: &mut Window, cx: &mut Context<Self>) { if !self.suspended { self.run(window, cx) } }
+
+    /// Ligado pelo assistente enquanto o script roda; ao desligar, a procura que ficou para trás sai agora.
+    pub fn set_suspended(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.suspended == on { return; }
+        self.suspended = on;
+        if !on { self.check_app(cx); }
+        cx.notify();
+    }
 
     pub fn is_busy(&self) -> bool { self.busy() }
 
@@ -882,7 +892,7 @@ mod tests {
             offer: Some(Offer { version: "9999.0.0.0".into(), url: String::new(), sha256: String::new(), channel: "main".into() }),
             local: Some(local.clone()), server: Some(server(serde_json::json!({"atualizacao_disponivel": true}))),
             server_seq: 0, active: None, active_state: None, active_seq: 0, run: Run::Idle, checking: false, checked: None,
-            checked_channel: None, known_channel: None, channel_blocked: Some(local.identity()) };
+            checked_channel: None, known_channel: None, channel_blocked: Some(local.identity()), suspended: false };
         assert_eq!(updater.plan(), Plan { server: ServerStep::Held(Hold::ChannelDraft), app: true });
         assert!(!Hold::ChannelDraft.stops());
         updater.channel_blocked = Some("http://other-machine:8765".into());
@@ -932,7 +942,7 @@ mod tests {
     fn channel_follows_the_last_state_read_from_the_local_server() {
         let mut updater = Updater { runtime: Arc::new(Runtime::new().unwrap()), client: reqwest::Client::new(), exe: None, offer: None,
             local: None, server: None, server_seq: 0, active: None, active_state: None, active_seq: 0, run: Run::Idle, checking: false,
-            checked: None, checked_channel: None, known_channel: Some("hangar-server-parte1".into()), channel_blocked: None };
+            checked: None, checked_channel: None, known_channel: Some("hangar-server-parte1".into()), channel_blocked: None, suspended: false };
         assert_eq!(updater.channel(), "main", "sem servidor local não há canal");
         updater.local = Some(Api::new("http://127.0.0.1:8765", "synthetic-token").unwrap());
         assert_eq!(updater.channel(), "hangar-server-parte1", "leitura que falhou mantém o último canal");
