@@ -61,12 +61,14 @@ export const HtmlPageCard = memo(function HtmlPageCard({ page, sessionName, serv
     return { theme: scheme, styles: { variables: themeVariables((n) => vars[n] ?? '') } };
   }, [scheme, theme.tokens]);
   const paramsRef = useRef(params);
+  // Tema próprio: a página fica como foi desenhada, sem as cores do app.
+  const own = page.ownTheme;
 
   // Tema mudou com a página aberta: ela recebe as variáveis novas sem recarregar.
   useEffect(() => {
     paramsRef.current = params;
-    web.current?.injectJavaScript(applyScript(params));
-  }, [params]);
+    if (!own) web.current?.injectJavaScript(applyScript(params));
+  }, [params, own]);
 
   const seq = useRef(0);
   const load = useCallback(async () => {
@@ -78,14 +80,15 @@ export const HtmlPageCard = memo(function HtmlPageCard({ page, sessionName, serv
       // O 404 da página vencida traz o código; sem ele (convidado, rota ausente) é erro.
       const code = r.status === 404 ? await r.json().then((b) => b?.detail?.code, () => null) : null;
       const next = pageFetchState(r.status, code);
-      const doc = next === 'ready' ? themed(await r.text(), paramsRef.current) : '';
+      const text = next === 'ready' ? await r.text() : '';
+      const doc = text && !own ? themed(text, paramsRef.current) : text;
       if (n !== seq.current) return;
       setHtml(doc);
       setState(next);
     } catch {
       if (n === seq.current) setState(pageFetchState('network'));
     }
-  }, [server, sessionName, page.id]);
+  }, [server, sessionName, page.id, own]);
 
   useEffect(() => {
     void load();
@@ -138,7 +141,7 @@ export const HtmlPageCard = memo(function HtmlPageCard({ page, sessionName, serv
           // Sem janela nova: o window.open vira navegação no próprio quadro e o filtro barra.
           setSupportMultipleWindows={false}
           onMessage={onMessage}
-          onLoadEnd={() => web.current?.injectJavaScript(applyScript(paramsRef.current))}
+          onLoadEnd={() => { if (!own) web.current?.injectJavaScript(applyScript(paramsRef.current)); }}
           scrollEnabled={inside}
           nestedScrollEnabled={inside}
           bounces={false}

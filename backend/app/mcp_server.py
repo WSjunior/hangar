@@ -284,14 +284,20 @@ _HTML_RENDER = (
     "TEMA: use as variáveis --foreground, --muted-foreground, --surface, --border, --accent, --accent-foreground, "
     "--danger, --warning, --success, --code-background, --chart-1 a --chart-4, --radius, --font-sans, --font-mono; "
     "--background é transparente. Elas seguem o tema claro/escuro do app; seu CSS pode sobrescrever. "
+    "own_theme=true para mock de outro produto/site ou página que precisa das próprias cores: ela leva o próprio "
+    "fundo e paleta, como foi desenhada, e não recebe o tema do app; sem ele, a página segue o tema do app. "
     "height (80-2000) só para limitar a moldura e deixar o resto rolar dentro dela.")
 
 
 @mcp.tool(description=_HTML_RENDER)
-async def html_render(ctx: Context, html: str, title: str, height: int | None = None, draft: bool = False) -> dict[str, Any]:
+async def html_render(ctx: Context, html: str, title: str, height: int | None = None, draft: bool = False,
+                      own_theme: bool = False) -> dict[str, Any]:
     from app import pages_bridge
     eu = await _eu(ctx)
     payload: dict[str, Any] = {"session": eu, "html": html, "title": title, "draft": draft}
+    # Só quando pedido: hangar-server antigo recusa campo desconhecido no corpo.
+    if own_theme:
+        payload["own_theme"] = True
     if height is not None:
         payload["height"] = height
     try:

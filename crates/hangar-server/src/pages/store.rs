@@ -12,9 +12,14 @@ const GONE_AFTER: Duration = Duration::from_secs(60);
 const DRAFT_TTL: Duration = Duration::from_secs(3600);
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct PageMeta { pub title: String, pub height: Option<u32>, pub heights: BTreeMap<u32, u32>, pub created: u64, pub draft: bool }
+pub struct PageMeta {
+    pub title: String, pub height: Option<u32>, pub heights: BTreeMap<u32, u32>, pub created: u64, pub draft: bool,
+    // Página gravada antes do campo segue o tema do app.
+    #[serde(default)]
+    pub own_theme: bool,
+}
 
-pub struct NewPage { pub html: String, pub title: String, pub height: Option<u32>, pub heights: BTreeMap<u32, u32>, pub draft: bool }
+pub struct NewPage { pub html: String, pub title: String, pub height: Option<u32>, pub heights: BTreeMap<u32, u32>, pub draft: bool, pub own_theme: bool }
 
 pub struct Store { root: PathBuf, absent_since: Mutex<HashMap<String, SystemTime>> }
 
@@ -45,7 +50,7 @@ impl Store {
         std::fs::write(dir.join("jsonl"), jsonl)?;
         let id = new_id();
         let created = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-        let meta = PageMeta { title: page.title.clone(), height: page.height, heights: page.heights.clone(), created, draft: page.draft };
+        let meta = PageMeta { title: page.title.clone(), height: page.height, heights: page.heights.clone(), created, draft: page.draft, own_theme: page.own_theme };
         write_atomic(&dir.join(format!("{id}.html")), page.html.as_bytes())?;
         write_atomic(&dir.join(format!("{id}.json")), &serde_json::to_vec(&meta)?)?;
         Ok(id)
@@ -132,7 +137,7 @@ pub(crate) fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> io::Result<(
 mod tests {
     use super::*;
 
-    fn page() -> NewPage { NewPage { html: "<p>x</p>".into(), title: "t".into(), height: None, heights: BTreeMap::new(), draft: false } }
+    fn page() -> NewPage { NewPage { html: "<p>x</p>".into(), title: "t".into(), height: None, heights: BTreeMap::new(), draft: false, own_theme: false } }
 
     #[test]
     fn save_and_read_back() {
@@ -141,6 +146,14 @@ mod tests {
         let id = s.save("abc-1", "/t/abc-1.jsonl", &page()).unwrap();
         assert_eq!(s.html("abc-1", &id).unwrap(), "<p>x</p>");
         assert_eq!(s.meta("abc-1", &id).unwrap().title, "t");
+        let id = s.save("abc-1", "/t/abc-1.jsonl", &NewPage { own_theme: true, ..page() }).unwrap();
+        assert!(s.meta("abc-1", &id).unwrap().own_theme);
+    }
+
+    #[test]
+    fn old_meta_follows_app_theme() {
+        let m: PageMeta = serde_json::from_str(r#"{"title":"t","height":null,"heights":{},"created":1,"draft":false}"#).unwrap();
+        assert!(!m.own_theme);
     }
 
     #[test]

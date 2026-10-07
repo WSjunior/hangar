@@ -79,16 +79,16 @@ fn marker_path(text: &str) -> Option<PathBuf> {
 }
 
 pub async fn render(html: &str, jobs: &[Job]) -> Result<Rendered, ChromeError> {
-    render_with(find(), html, jobs).await
+    render_with(find(), html, jobs, false).await
 }
 
-pub async fn render_with(bin: Option<PathBuf>, html: &str, jobs: &[Job]) -> Result<Rendered, ChromeError> {
+pub async fn render_with(bin: Option<PathBuf>, html: &str, jobs: &[Job], own_theme: bool) -> Result<Rendered, ChromeError> {
     let bin = bin.ok_or(ChromeError::Absent)?;
     let _slot = SLOTS.acquire().await.map_err(|_| ChromeError::Failed("fila do navegador fechada"))?;
-    tokio::time::timeout(DEADLINE, run(&bin, html, jobs)).await.map_err(|_| ChromeError::Failed("navegador do servidor passou do prazo"))?
+    tokio::time::timeout(DEADLINE, run(&bin, html, jobs, own_theme)).await.map_err(|_| ChromeError::Failed("navegador do servidor passou do prazo"))?
 }
 
-async fn run(bin: &Path, html: &str, jobs: &[Job]) -> Result<Rendered, ChromeError> {
+async fn run(bin: &Path, html: &str, jobs: &[Job], own_theme: bool) -> Result<Rendered, ChromeError> {
     let profile = tempfile::tempdir().map_err(|_| ChromeError::Failed("perfil temporário"))?;
     let mut child = tokio::process::Command::new(bin)
         .args(["--headless", "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check", "--hide-scrollbars",
@@ -99,7 +99,7 @@ async fn run(bin: &Path, html: &str, jobs: &[Job]) -> Result<Rendered, ChromeErr
         .kill_on_drop(true)
         .spawn().map_err(|_| ChromeError::Failed("navegador do servidor não subiu"))?;
     let result = match ws_url(profile.path(), &mut child).await {
-        Ok(url) => drive(&url, html, jobs).await,
+        Ok(url) => drive(&url, html, jobs, own_theme).await,
         Err(e) => Err(e),
     };
     let _ = child.kill().await;
@@ -183,7 +183,7 @@ fn arg_text(a: &Value) -> String {
     }
 }
 
-async fn drive(url: &str, html: &str, jobs: &[Job]) -> Result<Rendered, ChromeError> {
+async fn drive(url: &str, html: &str, jobs: &[Job], own_theme: bool) -> Result<Rendered, ChromeError> {
     // Print de página alta em escala 2 passa do limite de quadro padrão do tungstenite.
     let config = WebSocketConfig::default().max_frame_size(None).max_message_size(None);
     let (ws, _) = tokio_tungstenite::connect_async_with_config(url, Some(config), true).await
@@ -195,7 +195,10 @@ async fn drive(url: &str, html: &str, jobs: &[Job]) -> Result<Rendered, ChromeEr
     cdp.call(s, "Page.enable", json!({})).await?;
     cdp.call(s, "Runtime.enable", json!({})).await?;
     cdp.call(s, "Fetch.enable", json!({"patterns": [{"urlPattern": "file:*"}]})).await?;
-    cdp.call(s, "Emulation.setDefaultBackgroundColorOverride", json!({"color": {"r": 0, "g": 0, "b": 0, "a": 0}})).await?;
+    // Tema próprio fica com o branco padrão do Chromium: o print mostra a página como foi desenhada.
+    if !own_theme {
+        cdp.call(s, "Emulation.setDefaultBackgroundColorOverride", json!({"color": {"r": 0, "g": 0, "b": 0, "a": 0}})).await?;
+    }
     let frame = cdp.call(s, "Page.getFrameTree", json!({})).await?["frameTree"]["frame"]["id"].as_str().unwrap_or_default().to_owned();
     cdp.call(s, "Page.setDocumentContent", json!({"frameId": frame, "html": html})).await?;
     cdp.call(s, "Runtime.evaluate", json!({"expression": LOADED, "awaitPromise": true})).await?;
@@ -286,7 +289,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_binary_is_absent() {
-        let r = render_with(None, "<p>x</p>", &[Job { width: 360, theme: Theme::Dark, shot: None }]).await;
+        let r = render_with(None, "<p>x</p>", &[Job { width: 360, theme: Theme::Dark, shot: None }], false).await;
         assert_eq!(r.err().map(|e| e.status()), Some("ausente"));
     }
 
@@ -322,7 +325,7 @@ mod tests {
     async fn measures_real_page() {
         let dir = tempfile::tempdir().unwrap();
         let shot = dir.path().join("s.png");
-        let html = super::super::theme::inject("<!doctype html><div style=\"height:333px\"></div><script>console.error('oi')</script>");
+        let html = super::super::theme::inject("<!doctype html><div style=\"height:333px\"></div><script>console.error('oi')</script>", true);
         dbg!(find());
         let r = render(&html, &[Job { width: 728, theme: Theme::Dark, shot: Some(shot.clone()) }]).await.unwrap();
         dbg!(&r.heights, &r.console, &shot);

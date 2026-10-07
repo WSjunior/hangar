@@ -279,3 +279,13 @@ async def test_new_session_preserves_mode_omission(identidade, monkeypatch, mode
         result = await session.call_tool("new_session", args)
     assert not result.is_error
     assert received == [mode]
+
+
+async def test_html_render_sends_own_theme_only_when_asked(identidade, monkeypatch):
+    from app import pages_bridge
+    sent = []
+    monkeypatch.setattr(pages_bridge, "publish", lambda payload: sent.append(payload) or {"hangar_page": {"id": "a"}})
+    async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
+        assert not (await s.call_tool("html_render", {"html": "<p></p>", "title": "t"})).is_error
+        assert not (await s.call_tool("html_render", {"html": "<p></p>", "title": "t", "own_theme": True})).is_error
+    assert "own_theme" not in sent[0] and sent[1]["own_theme"] is True

@@ -35,6 +35,8 @@ pub struct PublishBody {
     height: Option<i64>,
     #[serde(default)]
     draft: bool,
+    #[serde(default)]
+    own_theme: bool,
 }
 
 fn json_reply(status: StatusCode, value: Value) -> Response {
@@ -75,7 +77,7 @@ async fn publish(st: &AppState, b: PublishBody) -> Value {
         return fail("erro_pagina_sem_transcript", "a sessão ainda não tem transcript");
     };
     let key = info.session_key;
-    let (pages, chromium, draft, html) = (st.pages.clone(), st.chromium, b.draft, b.html);
+    let (pages, chromium, draft, own_theme, html) = (st.pages.clone(), st.chromium, b.draft, b.own_theme, b.html);
     let (key2, title2) = (key.clone(), title.clone());
     // Imagens, tema e gravação leem e escrevem disco: fora da thread do runtime.
     let prepared = tokio::task::spawn_blocking(move || -> Result<Prepared, Value> {
@@ -85,7 +87,7 @@ async fn publish(st: &AppState, b: PublishBody) -> Value {
         } else {
             (images::inline(&html).map_err(too_large)?, Vec::new())
         };
-        let page = NewPage { html: theme::inject(&html), title: title2, height, heights: BTreeMap::new(), draft };
+        let page = NewPage { html: theme::inject(&html, !own_theme), title: title2, height, heights: BTreeMap::new(), draft, own_theme };
         let id = pages.save(&key2, &jsonl, &page).map_err(|e| {
             tracing::warn!(key = %key2, "página não gravada: {e}");
             fail("erro_pagina_nao_gravada", "não foi possível gravar a página")
@@ -104,7 +106,7 @@ async fn publish(st: &AppState, b: PublishBody) -> Value {
     let jobs: Vec<Job> = WIDTHS.iter()
         .map(|w| Job { width: *w, theme: Theme::Dark, shot: if *w == SHOT_WIDTH { shot.clone() } else { None } })
         .collect();
-    let rendered = chrome::render_with(bin, &html, &jobs).await;
+    let rendered = chrome::render_with(bin, &html, &jobs, own_theme).await;
     let (heights, console) = match &rendered {
         Ok(r) => (r.heights.clone(), r.console.clone()),
         Err(_) => (BTreeMap::new(), Vec::new()),
@@ -126,7 +128,7 @@ async fn publish(st: &AppState, b: PublishBody) -> Value {
             "heights": heights, "console": console, "missing_images": missing, "browser": browser,
             "browser_reason": rendered.as_ref().err().map(|e| e.reason())}}});
     }
-    json!({"ok": true, "result": {"hangar_page": {"id": id, "title": title, "height": height, "heights": heights}, "message": MESSAGE}})
+    json!({"ok": true, "result": {"hangar_page": {"id": id, "title": title, "height": height, "heights": heights, "own_theme": own_theme}, "message": MESSAGE}})
 }
 
 /// Leitura do disco que caiu no servidor: não é página expirada.
@@ -217,14 +219,15 @@ pub async fn shot(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
     let (pages, chromium) = (st.pages.clone(), st.chromium);
     let found = tokio::task::spawn_blocking(move || {
         let html = pages.html(&key, &id)?;
+        let own_theme = pages.meta(&key, &id).is_some_and(|m| m.own_theme);
         let path = pages.shot_path(&key, &id, theme, width);
         let ready = path.is_file();
-        Some((html, path, ready, if ready { None } else { chromium() }))
+        Some((html, own_theme, path, ready, if ready { None } else { chromium() }))
     }).await;
     let found = match found { Ok(f) => f, Err(e) => return read_failed(&st, &headers, &name, e) };
-    let Some((html, path, ready, bin)) = found else { return expired(&headers) };
+    let Some((html, own_theme, path, ready, bin)) = found else { return expired(&headers) };
     if !ready {
-        if let Err(e) = chrome::render_with(bin, &html, &[Job { width, theme, shot: Some(path.clone()) }]).await {
+        if let Err(e) = chrome::render_with(bin, &html, &[Job { width, theme, shot: Some(path.clone()) }], own_theme).await {
             let mut r = json_reply(StatusCode::NOT_FOUND, json!({"detail": {"code": "erro_pagina_sem_imagem", "msg": e.reason()}}));
             cors(&headers, r.headers_mut());
             return r;
@@ -289,7 +292,9 @@ mod tests {
     fn unknown_body_field_is_refused() {
         assert!(serde_json::from_str::<PublishBody>(r#"{"session":"s","html":"x","title":"t","base":"http://x"}"#).is_err());
         let b: PublishBody = serde_json::from_str(r#"{"session":"s","html":"x","title":"t"}"#).unwrap();
-        assert!(!b.draft && b.height.is_none());
+        assert!(!b.draft && b.height.is_none() && !b.own_theme);
+        let b: PublishBody = serde_json::from_str(r#"{"session":"s","html":"x","title":"t","own_theme":true}"#).unwrap();
+        assert!(b.own_theme);
         let b: PublishBody = serde_json::from_str(r#"{"session":"s","html":"x","title":"t","height":-5}"#).unwrap();
         assert_eq!(b.height, Some(-5), "negativa passa pelo corpo e cai na mensagem do limite");
     }

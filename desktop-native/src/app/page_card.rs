@@ -21,7 +21,11 @@ const GESTURE: Duration = Duration::from_secs(2);
 const PARK_SHOT: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
-pub struct PageRef { pub id: String, pub title: String, #[serde(default)] pub height: Option<u32>, #[serde(default)] pub heights: BTreeMap<u32, u32> }
+pub struct PageRef {
+    pub id: String, pub title: String, #[serde(default)] pub height: Option<u32>, #[serde(default)] pub heights: BTreeMap<u32, u32>,
+    // A página leva as próprias cores: o app não lhe passa o tema.
+    #[serde(default)] pub own_theme: bool,
+}
 
 /// O resultado de MCP chega como texto, como lista de blocos `{type: "text", text}` ou, no Codex, como o
 /// CallToolResult inteiro (`content` + `structuredContent`): o estruturado vence, senão os blocos são juntados.
@@ -307,13 +311,15 @@ impl Hangar {
         let (handle, width) = (self.pages.window, self.pages.width.get());
         let Some(view) = self.pages.views.get_mut(id) else { return };
         let Some(html) = view.html.clone() else { return };
+        // Tema próprio nasce no branco do navegador, como a página foi desenhada; ela pinta por cima.
+        let background = view.page.own_theme.then_some((255, 255, 255));
         view.busy = true;
         let id = id.to_owned();
         cx.spawn(async move |this, cx| {
             // Sem limite: o motor manda com `try_send` e quadro perdido não volta.
             let (events, received) = async_channel::unbounded();
             let engine = handle.update(cx, |_, window, cx| Engine::prepare(window, cx)).map_err(|e| e.to_string()).and_then(|r| r)
-                .and_then(|starter| starter.start_page(&html, width, None, events)).map(Rc::new);
+                .and_then(|starter| starter.start_page(&html, width, background, events)).map(Rc::new);
             let _ = this.update(cx, |this, cx| this.page_engine_ready(id, engine, received, cx));
         }).detach();
     }
@@ -497,7 +503,8 @@ impl Hangar {
         #[cfg(target_os = "linux")]
         {
             let script = theme_script();
-            if let Some(running) = view.running.as_mut().filter(|r| r.framed && r.theme_sent != script) {
+            let follows = !view.page.own_theme;
+            if let Some(running) = view.running.as_mut().filter(|r| follows && r.framed && r.theme_sent != script) {
                 running.engine.evaluate(&script);
                 running.theme_sent = script;
             }
@@ -578,6 +585,9 @@ mod tests {
     fn reads_only_hangar_page() {
         let ok = r#"{"hangar_page":{"id":"a","title":"T","height":null,"heights":{"728":300}},"message":"x"}"#;
         assert_eq!(page_from_result("mcp__hangar__html_render", ok).unwrap().id, "a");
+        assert!(!page_from_result("mcp__hangar__html_render", ok).unwrap().own_theme, "página antiga segue o tema");
+        let own = r#"{"hangar_page":{"id":"a","title":"T","own_theme":true}}"#;
+        assert!(page_from_result("mcp__hangar__html_render", own).unwrap().own_theme);
         assert!(page_from_result("mcp__hangar__html_render", r#"{"draft":{"id":"b"}}"#).is_none());
         assert!(page_from_result("Read", ok).is_none());
     }
@@ -609,7 +619,7 @@ mod tests {
 
     #[test]
     fn height_rules() {
-        let p = PageRef { id: "a".into(), title: "T".into(), height: Some(300), heights: [(728, 380)].into() };
+        let p = PageRef { id: "a".into(), title: "T".into(), height: Some(300), heights: [(728, 380)].into(), own_theme: false };
         assert_eq!(frame_height(&p, 700., None), 300.);
         assert!(scrolls_inside(&p, 700., None));
         let free = PageRef { height: None, ..p.clone() };

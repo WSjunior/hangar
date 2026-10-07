@@ -32,7 +32,7 @@ describe('foldConversation', () => {
   });
 
   it('página publicada sai do trecho e corta a junção; sem página, segue linha comum', () => {
-    const page = { id: 'pg', title: 'T', height: null, heights: {} };
+    const page = { id: 'pg', title: 'T', height: null, heights: {}, ownTheme: false };
     const render = ev('h1', 'tool_use', { tool_name: 'mcp__hangar__html_render', tool_use_id: 'h1' });
     const eventos = [bash('b1'), render, bash('b2')];
     const items = agruparConversa(eventos, { entraNoPensamento: () => false });

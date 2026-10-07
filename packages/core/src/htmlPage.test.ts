@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { frameHeight, htmlPageFromResult, isHtmlRenderTool, pageFetchState, reservedHeight } from './htmlPage';
 
-const ref = { id: 'a1', title: 'T', height: null, heights: { '360': 500, '728': 380, '1000': 360 } };
+const ref = { id: 'a1', title: 'T', height: null, heights: { '360': 500, '728': 380, '1000': 360 }, ownTheme: false };
 
 describe('htmlPage', () => {
   it('reconhece a tool do hangar e só ela', () => {
@@ -21,6 +21,13 @@ describe('htmlPage', () => {
     expect(htmlPageFromResult('mcp__hangar__html_render', JSON.stringify({ draft: { id: 'b' } }))).toBeNull();
     expect(htmlPageFromResult('mcp__hangar__html_render', 'erro_pagina_invalida: title')).toBeNull();
     expect(htmlPageFromResult('Read', ok)).toBeNull();
+  });
+
+  it('tema próprio só com own_theme true; página antiga segue o tema do app', () => {
+    const read = (page: object) => htmlPageFromResult('mcp__hangar__html_render', JSON.stringify({ hangar_page: page }));
+    expect(read({ id: 'a', title: 'T' })?.ownTheme).toBe(false);
+    expect(read({ id: 'a', title: 'T', own_theme: true })?.ownTheme).toBe(true);
+    expect(read({ id: 'a', title: 'T', own_theme: 'sim' })?.ownTheme).toBe(false);
   });
 
   it('lê a referência quando o resultado vem como lista de blocos de texto', () => {

@@ -1,5 +1,6 @@
 // Página publicada pelo agente (tool html_render do MCP hangar), desenhada no lugar da chamada.
-export type HtmlPageRef = { id: string; title: string; height: number | null; heights: Record<string, number> };
+// `ownTheme`: a página leva as próprias cores e o app não lhe passa o tema.
+export type HtmlPageRef = { id: string; title: string; height: number | null; heights: Record<string, number>; ownTheme: boolean };
 export type PageFetchState = 'loading' | 'ready' | 'error' | 'expired';
 
 const MIN = 80;
@@ -28,7 +29,8 @@ export function htmlPageFromResult(toolName: string | null | undefined, result: 
     }
     const page = data?.hangar_page;
     if (!page || typeof page.id !== 'string' || typeof page.title !== 'string') return null;
-    return { id: page.id, title: page.title, height: typeof page.height === 'number' ? page.height : null, heights: page.heights ?? {} };
+    return { id: page.id, title: page.title, height: typeof page.height === 'number' ? page.height : null, heights: page.heights ?? {},
+      ownTheme: page.own_theme === true };
   } catch {
     return null;
   }

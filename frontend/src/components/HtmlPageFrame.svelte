@@ -55,7 +55,8 @@
       // O 404 da página vencida traz o código; sem ele (convidado, rota ausente) é erro.
       const code = r.status === 404 ? await r.json().then((b) => b?.detail?.code, () => null) : null;
       const next = pageFetchState(r.status, code);
-      if (next === 'ready') doc = themed(await r.text());
+      // Tema próprio: a página fica como foi desenhada, sem as cores do app.
+      if (next === 'ready') { const html = await r.text(); doc = page.ownTheme ? html : themed(html); }
       status = next;
     } catch {
       status = pageFetchState('network');
@@ -83,6 +84,7 @@
   $effect(() => {
     // Tema do app mudou: a página recebe as variáveis novas sem recarregar.
     const theme = scheme;
+    if (page.ownTheme) return;
     frame?.contentWindow?.postMessage({ jsonrpc: '2.0', method: 'ui/notifications/host-context-changed',
       params: { theme, styles: { variables: vars() } } }, '*');
   });
@@ -105,7 +107,7 @@
   {#if status === 'ready'}
     <!-- Sem allow-same-origin: a página roda em origem opaca, longe do token e do localStorage do app. -->
     <iframe bind:this={frame} title={page.title} srcdoc={doc} sandbox="allow-scripts allow-popups"
-      referrerpolicy="no-referrer" style:color-scheme={scheme}></iframe>
+      referrerpolicy="no-referrer" style:color-scheme={page.ownTheme ? 'normal' : scheme}></iframe>
   {:else if status === 'loading'}
     <p class="note">{m.page_loading({ title: page.title })}</p>
   {:else if status === 'expired'}
