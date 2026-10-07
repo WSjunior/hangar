@@ -182,6 +182,8 @@ def _codex() -> str:
 
 
 _CONSULTA_VERSAO_S = 3600
+_NEW_ATTEMPT_S = 300
+_PREFIXO = "hangar-codex-tui:"
 
 
 def _versao(texto: str) -> tuple[int, ...] | None:
@@ -191,53 +193,123 @@ def _versao(texto: str) -> tuple[int, ...] | None:
         return None
 
 
+def _npm_failure_kind(stderr: str) -> str:
+    # O texto do npm não vai à tela: pode trazer caminho, registro e token.
+    if "EACCES" in stderr or "EPERM" in stderr:
+        return "sem permissão para instalar"
+    if any(c in stderr for c in ("ENOTFOUND", "ETIMEDOUT", "ECONNRESET", "EAI_AGAIN")):
+        return "falha de rede"
+    return "outro erro do npm"
+
+
+def _installed_by_npm(codex: str, npm: str) -> bool:
+    if "node_modules" in os.path.realpath(codex).replace("\\", "/"):
+        return True
+    if os.name != "nt":
+        return False
+    # No Windows o shim `codex.cmd` fica fora de node_modules; o pacote é que diz.
+    raiz = subprocess.run([npm, "root", "-g"], capture_output=True, text=True, errors="replace",
+                          timeout=15)
+    return raiz.returncode == 0 and (Path(raiz.stdout.strip()) / "@openai" / "codex").is_dir()
+
+
 def _atualizar_codex() -> None:
     """Atualiza o Codex instalado pelo npm antes de abrir a sessão, mostrando isso na tela.
 
     A TUI sobe com a checagem dela desligada (o aviso travava a abertura); quem atualiza é o
     lançador, aqui, e a tela de abertura do app mostra a espera. A versão publicada é consultada no
-    máximo uma vez por hora. Falha nunca impede a abertura: a sessão segue na versão instalada.
-    Instalação fora do npm (script, brew) não é atualizada: o Hangar não sabe o comando dela.
+    máximo uma vez por hora. Falha nunca impede a abertura: a sessão segue na versão instalada e
+    toda falha vira uma linha fixa na tela, sem a saída crua do npm.
     """
     codex = shutil.which("codex")
+    if not codex:
+        return   # o `_codex()` da abertura já diz o que falta
     npm = shutil.which("npm")
-    if not codex or not npm or "node_modules" not in os.path.realpath(codex).replace("\\", "/"):
-        return
     estado = Path.home() / ".hangar" / "codex-atualizacao.json"
+
+    def vencido() -> bool:
+        try:
+            visto = json.loads(estado.read_text())
+        except (OSError, ValueError):
+            return True
+        proxima = visto.get("proxima_em") if isinstance(visto, dict) else None
+        return not isinstance(proxima, (int, float)) or time.time() >= proxima
+
+    def gravar(segundos: int) -> None:
+        # Sem o controle gravado a consulta só se repete; a atualização segue.
+        try:
+            estado.write_text(json.dumps({"proxima_em": time.time() + segundos}))
+        except OSError:
+            print(f"{_PREFIXO} não deu para gravar o controle de atualização do Codex; "
+                  "a consulta se repete na próxima abertura", file=sys.stderr)
+
+    def rodar(argv: list[str], timeout: int):
+        return subprocess.run(argv, capture_output=True, text=True, errors="replace", timeout=timeout)
+
     trava = None
     try:
+        if not vencido():
+            return
         estado.parent.mkdir(parents=True, exist_ok=True)
         trava = open(estado.with_suffix(".lock"), "w")
         try:
             import fcntl
-            fcntl.flock(trava, fcntl.LOCK_EX)
         except ImportError:
-            pass   # ponytail: sem trava no Windows; dois npm juntos lá só falham e a sessão segue
+            fcntl = None   # ponytail: sem trava no Windows; dois npm juntos lá só falham e a sessão segue
+        if fcntl is not None:
+            try:
+                fcntl.flock(trava, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                # Esperar a trava prenderia esta abertura durante o npm install da outra.
+                print(f"{_PREFIXO} outra sessão está atualizando o Codex; esta abre na versão "
+                      "instalada", file=sys.stderr)
+                return
+        if not vencido():
+            return   # a outra sessão acabou de conferir
+        if not npm or not _installed_by_npm(codex, npm):
+            print(f"{_PREFIXO} atualização automática do Codex indisponível nesta instalação",
+                  file=sys.stderr)
+            gravar(_CONSULTA_VERSAO_S)
+            return
+        print(f"{_PREFIXO} conferindo a versão do Codex…", file=sys.stderr)
         try:
-            visto = json.loads(estado.read_text())
-        except (OSError, ValueError):
-            visto = {}
-        if time.time() - float(visto.get("consultado_em", 0)) < _CONSULTA_VERSAO_S:
+            saida = rodar([codex, "--version"], 15)
+            atual = (saida.stdout.split() or [""])[-1]
+            consulta = rodar([npm, "view", "@openai/codex", "version"], 15)
+            publicada = consulta.stdout.strip()
+            consultou = saida.returncode == 0 and consulta.returncode == 0 \
+                and bool(_versao(publicada) and _versao(atual))
+        except (OSError, subprocess.SubprocessError):
+            consultou = False
+        if not consultou:
+            print(f"{_PREFIXO} não deu para conferir a versão do Codex; a sessão abre na versão "
+                  "instalada e tenta de novo em 5 min", file=sys.stderr)
+            gravar(_NEW_ATTEMPT_S)
             return
-        saida = subprocess.run([codex, "--version"], capture_output=True, text=True, timeout=15)
-        atual = (saida.stdout.split() or [""])[-1]
-        consulta = subprocess.run([npm, "view", "@openai/codex", "version"],
-                                  capture_output=True, text=True, timeout=15)
-        publicada = consulta.stdout.strip()
-        estado.write_text(json.dumps({"consultado_em": time.time()}))
-        if consulta.returncode != 0 or not (_versao(publicada) and _versao(atual)) \
-                or _versao(publicada) <= _versao(atual):
+        gravar(_CONSULTA_VERSAO_S)
+        if _versao(publicada) <= _versao(atual):
             return
-        print(f"hangar-codex-tui: atualizando o Codex {atual} → {publicada}…", file=sys.stderr)
-        feito = subprocess.run([npm, "install", "-g", f"@openai/codex@{publicada}"],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600)
+        print(f"{_PREFIXO} atualizando o Codex {atual} → {publicada}…", file=sys.stderr)
+        try:
+            feito = rodar([npm, "install", "-g", f"@openai/codex@{publicada}"], 600)
+        except subprocess.TimeoutExpired:
+            print(f"{_PREFIXO} a atualização do Codex passou de 10 min e foi interrompida",
+                  file=sys.stderr)
+            try:
+                depois = _versao((rodar([codex, "--version"], 15).stdout.split() or [""])[-1])
+            except (OSError, subprocess.SubprocessError):
+                depois = None
+            if depois is None:
+                print(f"{_PREFIXO} o Codex pode ter ficado incompleto; reinstale com "
+                      "npm install -g @openai/codex", file=sys.stderr)
+            return
         if feito.returncode == 0:
-            print(f"hangar-codex-tui: Codex atualizado para {publicada}", file=sys.stderr)
+            print(f"{_PREFIXO} Codex atualizado para {publicada}", file=sys.stderr)
         else:
-            print(f"hangar-codex-tui: não deu para atualizar o Codex (npm saiu com {feito.returncode}); "
-                  f"a sessão abre na {atual}", file=sys.stderr)
-    except (OSError, subprocess.SubprocessError) as exc:
-        print(f"hangar-codex-tui: não deu para conferir a versão do Codex ({type(exc).__name__}); "
+            print(f"{_PREFIXO} não deu para atualizar o Codex ({_npm_failure_kind(feito.stderr)}); "
+                  f"a sessão abre na {atual} e tenta de novo em 1 h", file=sys.stderr)
+    except Exception as exc:
+        print(f"{_PREFIXO} não deu para conferir a versão do Codex ({type(exc).__name__}); "
               "a sessão abre na versão instalada", file=sys.stderr)
     finally:
         if trava is not None:
@@ -320,44 +392,68 @@ def _esperar_porta(endpoint: str, servidor, erros, teto: float) -> bool:
     return False
 
 
+class _RpcError(Exception):
+    def __init__(self, code) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+_HOOKS_DEADLINE_S = 15
+# Só os hooks que o Hangar sincroniza (~/.codex/hooks.json e plugins); hook de projeto vem de um
+# repositório qualquer e continua passando pela pergunta da TUI.
+_TRUSTED_SOURCES = ("user", "plugin")
+
+
 def _confiar_hooks(endpoint: str, cwd: str) -> None:
-    """Confia nos hooks pendentes antes da TUI subir.
+    """Confia nos hooks pendentes sincronizados pelo Hangar antes da TUI subir.
 
     Os hooks chegam ao Codex pela sincronização do próprio Hangar; sem isto a TUI para em "Hooks
     need review" antes da thread e quem abriu pelo app vê a sessão travada. A confiança é gravada
     pelo escritor do próprio Codex (`config/batchWrite`), com o hash que o `hooks/list` informa.
     Falha aqui não impede a abertura: a TUI pergunta, como antes.
     """
-    from websockets.sync.client import connect
-    from app.adapters.codex.lancador import CLIENT_INFO
-
-    def pedir(ws, ident: int, metodo: str, params: dict):
-        ws.send(json.dumps({"jsonrpc": "2.0", "id": ident, "method": metodo, "params": params}))
-        while True:
-            msg = json.loads(ws.recv(timeout=10))
-            if isinstance(msg, dict) and msg.get("id") == ident and "method" not in msg:
-                if msg.get("error"):
-                    raise RuntimeError(f"{metodo} recusado")
-                return msg.get("result") or {}
-
+    etapa = "conectar"
     try:
+        from websockets.sync.client import connect
+        from app.adapters.codex.lancador import CLIENT_INFO
+
+        limite = time.monotonic() + _HOOKS_DEADLINE_S
+
+        def pedir(ws, ident: int, metodo: str, params: dict):
+            nonlocal etapa
+            etapa = metodo
+            ws.send(json.dumps({"jsonrpc": "2.0", "id": ident, "method": metodo, "params": params}))
+            # Prazo total, não por mensagem: notificações em sequência não podem segurar a abertura.
+            while True:
+                msg = json.loads(ws.recv(timeout=max(0.0, limite - time.monotonic())))
+                if isinstance(msg, dict) and msg.get("id") == ident and "method" not in msg:
+                    if msg.get("error"):
+                        erro = msg["error"]
+                        raise _RpcError(erro.get("code") if isinstance(erro, dict) else None)
+                    return msg.get("result") or {}
+
         with connect(endpoint, open_timeout=5, max_size=None) as ws:
             pedir(ws, 1, "initialize", {"clientInfo": CLIENT_INFO, "capabilities": None})
             dados = pedir(ws, 2, "hooks/list", {"cwds": [cwd]})
-            pendentes = {h["key"]: h["currentHash"] for entrada in dados.get("data") or []
-                         for h in entrada.get("hooks") or []
+            pendentes = [h for entrada in dados.get("data") or [] for h in entrada.get("hooks") or []
                          if h.get("enabled") and h.get("trustStatus") in ("untrusted", "modified")
-                         and isinstance(h.get("key"), str) and isinstance(h.get("currentHash"), str)}
-            if not pendentes:
-                return
-            edicoes = [{"keyPath": ".".join(json.dumps(p) for p in ("hooks", "state", chave, "trusted_hash")),
-                        "value": hash_atual, "mergeStrategy": "replace"}
-                       for chave, hash_atual in pendentes.items()]
-            pedir(ws, 3, "config/batchWrite", {"edits": edicoes, "reloadUserConfig": True})
-            print(f"hangar-codex-tui: {len(pendentes)} hooks sincronizados pelo Hangar foram aceitos",
-                  file=sys.stderr)
+                         and isinstance(h.get("key"), str) and isinstance(h.get("currentHash"), str)]
+            aceitos = {h["key"]: h["currentHash"] for h in pendentes
+                       if h.get("source") in _TRUSTED_SOURCES}
+            restantes = sum(1 for h in pendentes if h.get("source") not in _TRUSTED_SOURCES)
+            if aceitos:
+                edicoes = [{"keyPath": ".".join(json.dumps(p) for p in ("hooks", "state", chave, "trusted_hash")),
+                            "value": hash_atual, "mergeStrategy": "replace"}
+                           for chave, hash_atual in aceitos.items()]
+                pedir(ws, 3, "config/batchWrite", {"edits": edicoes, "reloadUserConfig": True})
+                print(f"{_PREFIXO} {len(aceitos)} hooks sincronizados pelo Hangar foram aceitos: "
+                      + ", ".join(aceitos), file=sys.stderr)
+            if restantes:
+                print(f"{_PREFIXO} {restantes} hooks de outra origem ficam para o Codex perguntar "
+                      "no terminal", file=sys.stderr)
     except Exception as exc:
-        print(f"hangar-codex-tui: não deu para aceitar os hooks ({type(exc).__name__}); "
+        detalhe = f"código {exc.code}" if isinstance(exc, _RpcError) else type(exc).__name__
+        print(f"{_PREFIXO} não deu para aceitar os hooks ({etapa}, {detalhe}); "
               "o Codex vai perguntar no terminal", file=sys.stderr)
 
 
