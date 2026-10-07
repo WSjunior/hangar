@@ -5,14 +5,14 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Command {
-    FocusComposer, OpenSettings, CopyLastReply, Find, NextSession, PreviousSession, NewChat, CloseSession, RenameSession, Costs,
+    FocusComposer, OpenSettings, CopyLastReply, Find, NextSession, PreviousSession, NewChat, NewSession, CloseSession, RenameSession, Costs,
     Search, ProjectFile, ProjectText, Sidebar, Worktrees, Dictation, Permission,
     CloseFile, PreviousFile, NextFile, SaveFile, FindFile, FileLine, CopyTerminal, PasteTerminal,
 }
 
 impl Command {
-    const ALL: [Self; 25] = [Self::FocusComposer, Self::OpenSettings, Self::CopyLastReply, Self::Find,
-        Self::NextSession, Self::PreviousSession, Self::NewChat, Self::CloseSession, Self::RenameSession, Self::Costs, Self::Search, Self::ProjectFile,
+    const ALL: [Self; 26] = [Self::FocusComposer, Self::OpenSettings, Self::CopyLastReply, Self::Find,
+        Self::NextSession, Self::PreviousSession, Self::NewChat, Self::NewSession, Self::CloseSession, Self::RenameSession, Self::Costs, Self::Search, Self::ProjectFile,
         Self::ProjectText, Self::Sidebar, Self::Worktrees, Self::Dictation, Self::Permission,
         Self::CloseFile, Self::PreviousFile, Self::NextFile, Self::SaveFile, Self::FindFile, Self::FileLine,
         Self::CopyTerminal, Self::PasteTerminal];
@@ -21,7 +21,7 @@ impl Command {
         match self {
             Self::FocusComposer => "keyboard_focus_composer", Self::OpenSettings => "keyboard_open_settings",
             Self::CopyLastReply => "keyboard_copy_reply", Self::Find => "keyboard_find", Self::NextSession => "keyboard_next_session",
-            Self::PreviousSession => "keyboard_previous_session", Self::NewChat => "keyboard_new_chat", Self::CloseSession => "keyboard_close_session",
+            Self::PreviousSession => "keyboard_previous_session", Self::NewChat => "keyboard_new_chat", Self::NewSession => "keyboard_new_session", Self::CloseSession => "keyboard_close_session",
             Self::RenameSession => "keyboard_rename_session", Self::Costs => "keyboard_costs",
             Self::Search => "keyboard_search", Self::ProjectFile => "keyboard_project_file", Self::ProjectText => "keyboard_project_text",
             Self::Sidebar => "keyboard_sidebar", Self::Worktrees => "keyboard_worktrees", Self::Dictation => "keyboard_dictation",
@@ -56,7 +56,7 @@ impl Command {
         match self {
             Self::FocusComposer => "secondary-l", Self::OpenSettings => "secondary-,", Self::CopyLastReply => "secondary-shift-c",
             Self::Find => "secondary-f", Self::NextSession => "secondary-down", Self::PreviousSession => "secondary-up",
-            Self::NewChat => "secondary-n", Self::CloseSession => "secondary-w", Self::RenameSession => "f2", Self::Costs => "secondary-alt-c", Self::Search => "secondary-k",
+            Self::NewChat => "secondary-n", Self::NewSession => "secondary-shift-t", Self::CloseSession => "secondary-w", Self::RenameSession => "f2", Self::Costs => "secondary-alt-c", Self::Search => "secondary-k",
             Self::ProjectFile => "secondary-p", Self::ProjectText => "secondary-shift-f", Self::Sidebar => "secondary-b",
             Self::Worktrees => "secondary-alt-w", Self::Dictation => "ctrl-space", Self::Permission => "alt-shift-p",
             Self::CloseFile => "alt-w", Self::PreviousFile => "ctrl-pageup", Self::NextFile => "ctrl-pagedown",
@@ -69,7 +69,7 @@ impl Command {
         match self {
             Self::FocusComposer => Box::new(FocusComposer), Self::OpenSettings => Box::new(OpenSettings),
             Self::CopyLastReply => Box::new(CopyLastReply), Self::Find => Box::new(FocusSettingsSearch),
-            Self::NextSession => Box::new(NextSession), Self::PreviousSession => Box::new(PreviousSession), Self::NewChat => Box::new(NewChat), Self::CloseSession => Box::new(CloseSession),
+            Self::NextSession => Box::new(NextSession), Self::PreviousSession => Box::new(PreviousSession), Self::NewChat => Box::new(NewChat), Self::NewSession => Box::new(OpenNewSession), Self::CloseSession => Box::new(CloseSession),
             Self::RenameSession => Box::new(RenameSession),
             Self::Costs => Box::new(OpenCosts), Self::Search => Box::new(OpenSearch), Self::ProjectFile => Box::new(FindProjectFile),
             Self::ProjectText => Box::new(FindProjectText), Self::Sidebar => Box::new(ToggleSidebar), Self::Worktrees => Box::new(OpenWorktrees),
@@ -366,15 +366,6 @@ fn set_aside_config(path: &std::path::Path, stamp: u64) -> Result<Option<PathBuf
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(format!("{}: {error}", path.display())),
     }
-}
-
-/// No Windows o mapeador devolve a tecla física sem Shift; nos demais só a tabela de layouts sabe.
-fn number_layout_supported(cx: &App) -> bool {
-    let layout = cx.keyboard_layout();
-    if super::session_numbers::known_layout(layout.id()) || super::session_numbers::known_layout(layout.name()) { return true; }
-    cfg!(target_os = "windows") && ('0'..='9').all(|digit| Keystroke::parse(&digit.to_string()).is_ok_and(|key| {
-        KeybindingKeystroke::new_with_mapper(key, false, cx.keyboard_mapper().as_ref()).key() == digit.to_string()
-    }))
 }
 
 fn save_config(config: &Config) -> Result<(), String> {
@@ -744,13 +735,7 @@ impl Hangar {
                     .child(Button::new("keyboard-reset").outline().small().label(tr("keyboard_reset_defaults")).loading(self.keyboard.saving)
                         .on_click(cx.listener(|this, _, window, cx| this.reset_keyboard_config(window, cx))))))).into_any_element();
         }
-        let mut hold = settings_box().child(self.keyboard_row(Target::Hold, tr("keyboard_hold_title"), Some(tr("keyboard_hold_help")), cx));
-        if !number_layout_supported(cx) {
-            hold = hold.child(div().id("keyboard-layout-unsupported").px_4().py_3().border_t_1().border_color(theme::border())
-                .text_sm().text_color(theme::warning_text()).whitespace_normal()
-                .child(tr("keyboard_number_layout_unsupported").replace("{layout}", cx.keyboard_layout().name())));
-        }
-        section = section.child(hold);
+        section = section.child(settings_box().child(self.keyboard_row(Target::Hold, tr("keyboard_hold_title"), Some(tr("keyboard_hold_help")), cx)));
         for (context, title) in [("!Terminal", "keyboard_global"), ("FileViewer", "keyboard_files"), ("Terminal", "keyboard_terminal")] {
             let mut list = settings_box().child(div().px_4().py_3().font_weight(FontWeight::SEMIBOLD).text_sm().child(tr(title)));
             for command in Command::ALL.into_iter().filter(|command| command.context() == context) {
@@ -868,6 +853,21 @@ mod tests {
     }
 
     #[test]
+    fn new_session_is_ctrl_shift_t_outside_the_terminal() {
+        let bindings = Config::default().bindings(&DummyKeyboardMapper).unwrap();
+        let open = bindings.iter().find(|b| b.action().as_any().is::<OpenNewSession>()).unwrap();
+        let expected = if cfg!(target_os = "macos") { "cmd-shift-t" } else { "ctrl-shift-t" };
+        assert_eq!(open.keystrokes().iter().map(|k| k.inner().unparse()).collect::<Vec<_>>(), [expected]);
+        let root = KeyContext::new_with_defaults();
+        let inside = |name: &str| { let mut context = KeyContext::default(); context.add(name); vec![root.clone(), context] };
+        assert!(binding_applies(open, std::slice::from_ref(&root)));
+        assert!(binding_applies(open, &inside("Input")));
+        assert!(!binding_applies(open, &inside("Terminal")));
+        let saved: Config = serde_json::from_str(r#"{"overrides":{"new_session":"ctrl-alt-t"}}"#).unwrap();
+        assert_eq!(saved.overrides.get(&Command::NewSession).map(String::as_str), Some("ctrl-alt-t"));
+    }
+
+    #[test]
     fn rename_session_is_f2_everywhere_but_the_terminal_and_the_browser_page() {
         let bindings = Config::default().bindings(&DummyKeyboardMapper).unwrap();
         let rename = bindings.iter().find(|b| b.action().as_any().is::<RenameSession>()).unwrap();
@@ -949,7 +949,7 @@ mod tests {
 
     #[test]
     fn text_preferred_key_events_are_not_captured_as_shortcuts() {
-        let mut event = KeyDownEvent { keystroke: Keystroke::parse("ctrl-alt-q").unwrap(), is_held: false, prefer_character_input: true };
+        let mut event = KeyDownEvent { keystroke: Keystroke::parse("ctrl-alt-q").unwrap(), is_held: false, prefer_character_input: true, physical_digit: None };
         assert!(captured_stroke(&event, &DummyKeyboardMapper).is_err());
         event.prefer_character_input = false;
         assert!(captured_stroke(&event, &DummyKeyboardMapper).is_ok());

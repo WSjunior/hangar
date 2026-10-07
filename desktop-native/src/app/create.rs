@@ -52,6 +52,19 @@ pub(super) struct Scan { pub(super) entries: Vec<Entry>, pub(super) error: Optio
 struct RootScan { root: Root, scan: Remote<Scan> }
 enum FolderIndex { Current(usize), Root(usize, usize) }
 
+#[derive(Debug, PartialEq, Eq)]
+enum EnterAction { Pick, Submit, Nothing }
+
+/// O que o Enter faz no diálogo. `edited`: só na busca, se o texto mudou desde a escolha da pasta (`None` no Nome). A tela
+/// sem sessão e a transferência têm o próprio botão de seguir, e ali o Enter só escolhe a pasta.
+fn enter_action(locked: bool, picked: bool, edited: Option<bool>) -> EnterAction {
+    match edited {
+        Some(edited) if locked || !picked || edited => EnterAction::Pick,
+        None if locked || !picked => EnterAction::Nothing,
+        _ => EnterAction::Submit,
+    }
+}
+
 fn next_root(current: usize, count: usize, reverse: bool) -> Option<usize> {
     if count == 0 { return None; }
     Some(if reverse { (current + count - 1) % count } else { (current + 1) % count })
@@ -415,6 +428,10 @@ pub(in crate::app) struct NewSession {
     query: Entity<InputState>,
     /// A pasta escolhida: é ela que o formulário configura.
     picked: Option<String>,
+    /// O texto da busca quando a pasta foi escolhida: o Enter com a busca igual começa a sessão, com outra escolhe a pasta.
+    picked_query: String,
+    /// Enter dado enquanto o nome sugerido ainda chegava: a sessão começa quando ele chegar.
+    create_when_ready: bool,
     checkout: Remote<Option<Checkout>>,
     branch: String,
     /// Worktrees do repositório da pasta, para abrir a sessão numa que já existe.
@@ -535,14 +552,18 @@ impl NewSession {
         let menu_query = cx.new(|cx| InputState::new(window, cx).placeholder(tr("ctl_search")));
         let git_name = cx.new(|cx| InputState::new(window, cx).placeholder(tr("folder_git_name")));
         let new_branch_name = cx.new(|cx| InputState::new(window, cx).placeholder(tr_shared("worktree_nome_branch", &[])));
-        // O Enter no Nome não cria: no web o campo não está num formulário.
+        // Com a pasta escolhida e o formulário à vista, o Enter na busca e no Nome começa a sessão, como o botão de baixo.
         let subscriptions = vec![
             cx.subscribe_in(&query, window, |this: &mut Self, _, event: &InputEvent, window, cx| match event {
                 InputEvent::Change => { this.refilter(cx); cx.notify() }
-                InputEvent::PressEnter { .. } => this.pick_active_folder(window, cx),
+                InputEvent::PressEnter { .. } => this.enter_in_search(window, cx),
                 _ => {}
             }),
-            cx.subscribe(&name, |_, _, event: &InputEvent, cx| if matches!(event, InputEvent::Change) { cx.notify() }),
+            cx.subscribe(&name, |this: &mut Self, _, event: &InputEvent, cx| match event {
+                InputEvent::Change => cx.notify(),
+                InputEvent::PressEnter { .. } => this.enter_in_name(cx),
+                _ => {}
+            }),
             // Digitar depois de escolher uma branch existente volta a ser branch nova com o nome digitado.
             cx.subscribe(&new_branch_name, |this: &mut Self, input, event: &InputEvent, cx| if matches!(event, InputEvent::Change) {
                 if !this.branch.is_empty() && input.read(cx).value().trim() != this.branch { this.branch.clear(); this.new_branch = true; }
@@ -572,7 +593,7 @@ impl NewSession {
         Self {
             link, purpose: SessionDialogPurpose::Create, transfer_blocked: false, compact: false, menu: Default::default(), menu_query, servers: Remote::default(),
             roots: Remote::default(), root: None, dir: String::new(), scan: Remote::default(), folders: Vec::new(),
-            folder_active: None, folder_scroll: UniformListScrollHandle::new(), root_scans: Vec::new(), search_all, search_error, query, picked: None,
+            folder_active: None, folder_scroll: UniformListScrollHandle::new(), root_scans: Vec::new(), search_all, search_error, query, picked: None, picked_query: String::new(), create_when_ready: false,
             checkout: Remote::default(), branch: String::new(), worktrees: Remote::default(), existing: None, switching: false, base_open: false,
             preset: None, new_branch: false, base: String::new(), new_branch_name,
             git: Default::default(), git_name,
@@ -895,6 +916,7 @@ impl NewSession {
     fn pick(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
         if self.creating { return; }
         (self.picked, self.error, self.same_folder) = (Some(path), None, false);
+        (self.picked_query, self.create_when_ready) = (self.query.read(cx).value().to_string(), false);
         if self.compact {
             self.menu.set(None);
             self.reset_git();
@@ -1249,6 +1271,7 @@ impl NewSession {
                 };
                 self.sessions.finish(seq, result.map_err(|e| Hangar::fetch_failure(&e)));
                 self.name.update(cx, |input, cx| input.set_value(name, window, cx));
+                if std::mem::take(&mut self.create_when_ready) { self.create(None, cx); }
             }
             CreateReply::Providers(seq, result) => {
                 let probes = result.map_err(|e| Hangar::fetch_failure(&e))
@@ -1576,6 +1599,29 @@ impl NewSession {
         self.folder_active = self.folder_at(next).map(|(_, e)| e.path.clone());
         self.folder_scroll.scroll_to_item(next, ScrollStrategy::Nearest);
         cx.notify();
+    }
+
+    /// Enter na busca: sem pasta escolhida, ou com outra busca digitada depois da escolha, escolhe a pasta; com o
+    /// formulário à vista, começa a sessão.
+    fn enter_in_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let edited = self.query.read(cx).value() != self.picked_query.as_str();
+        match enter_action(self.compact || self.is_transfer(), self.picked.is_some(), Some(edited)) {
+            EnterAction::Pick => self.pick_active_folder(window, cx),
+            EnterAction::Submit => self.submit(cx),
+            EnterAction::Nothing => {}
+        }
+    }
+
+    fn enter_in_name(&mut self, cx: &mut Context<Self>) {
+        if enter_action(self.compact || self.is_transfer(), self.picked.is_some(), None) == EnterAction::Submit { self.submit(cx); }
+    }
+
+    /// O mesmo que o botão do formulário: retoma a conversa escolhida ou cria. Com o nome sugerido ainda chegando, a
+    /// criação espera por ele em vez de o Enter se perder.
+    fn submit(&mut self, cx: &mut Context<Self>) {
+        if self.target().is_some() { return self.resume(cx); }
+        if self.can_create(cx) { self.create(None, cx); }
+        else if self.sessions.loading && !self.creating { self.create_when_ready = true; }
     }
 
     /// Enter no campo de busca escolhe a realçada; sem realce, com algo digitado, a primeira que casou.
@@ -2682,11 +2728,11 @@ impl Hangar {
         let weak = cx.entity().downgrade();
         let button = if tabs {
             Button::new(id).custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::muted()).hover(theme::hover()).active(theme::hover()))
-                .icon(chrome::small_icon(IconName::Plus, 16., theme::muted())).size(px(28.)).rounded(px(6.)).flex_shrink_0().tooltip(tr("create_title"))
+                .icon(chrome::small_icon(IconName::Plus, 16., theme::muted())).size(px(28.)).rounded(px(6.)).flex_shrink_0().tooltip_with_action(tr("create_title"), &super::OpenNewSession, None)
         } else {
             // O `.cta-new` do web: pílula cheia no destaque, com o rótulo curto; o nome inteiro fica no leitor de tela.
             Button::new(id).primary().icon(IconName::Plus).label(super::costs::web("lista_nova_curto")).h(px(36.)).px(px(12.)).rounded_full()
-                .font_weight(FontWeight::SEMIBOLD).flex_shrink_0().tooltip(tr("create_title"))
+                .font_weight(FontWeight::SEMIBOLD).flex_shrink_0().tooltip_with_action(tr("create_title"), &super::OpenNewSession, None)
         };
         FocusOnClick { id: id.into(), button: button.accessibility_label(tr("create_title")).disabled(self.api.is_none()), open: Rc::new(move |window, cx| {
             let _ = weak.update(cx, |this, cx| this.open_new_session(None, window, cx));
@@ -2725,6 +2771,22 @@ mod tests {
         assert_eq!(super::choose_codex_account(&accounts, None), Some(0));
         assert_eq!(super::choose_codex_account(&accounts[1..], None), Some(0));
         assert_eq!(super::choose_codex_account(&[], Some("account-b")), None);
+    }
+
+    #[test]
+    fn enter_starts_the_session_once_the_form_is_shown() {
+        use super::{EnterAction::*, enter_action};
+        // Sem pasta, o Enter da busca escolhe; o do Nome não faz nada.
+        assert_eq!(enter_action(false, false, Some(false)), Pick);
+        assert_eq!(enter_action(false, false, None), Nothing);
+        // Pasta escolhida e busca igual: começa, na busca e no Nome.
+        assert_eq!(enter_action(false, true, Some(false)), Submit);
+        assert_eq!(enter_action(false, true, None), Submit);
+        // Outra busca digitada depois da escolha: escolhe a pasta nova.
+        assert_eq!(enter_action(false, true, Some(true)), Pick);
+        // Tela sem sessão e transferência: o Enter só escolhe a pasta.
+        assert_eq!(enter_action(true, true, Some(false)), Pick);
+        assert_eq!(enter_action(true, true, None), Nothing);
     }
 
     #[test]
