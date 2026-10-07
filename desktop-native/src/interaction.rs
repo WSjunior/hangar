@@ -3,6 +3,85 @@ use serde_json::{Value, json};
 use crate::{api::dto::{AskItem, AskOption, AskPayload, ChatEvent}, delivery::SessionKey};
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct PlanReview {
+    pub tool_id: String,
+    pub plan: String,
+    pub path: Option<String>,
+    pub file_candidates: Vec<String>,
+}
+
+/// A aprovação é da chamada atual, nunca de uma resposta antiga que também mencione um plano.
+pub fn plan_review(events: &[ChatEvent], state: &crate::api::dto::SessionState, provider: &str) -> Option<PlanReview> {
+    if provider != "claude" || state.state != "awaiting_input" || state.question.is_none()
+        || state.options.as_ref().is_none_or(|options| options.is_empty()) { return None; }
+    let pending = state.claude_plan_pending.as_ref();
+    let pending_id = pending.and_then(|p| p.get("tool_use_id")).and_then(Value::as_str).filter(|id| !id.is_empty());
+    let text = |value: Option<&Value>| value.and_then(Value::as_str).filter(|s| !s.trim().is_empty()).map(str::to_owned);
+    if let Some(id) = pending_id {
+        if events.iter().any(|e| e.kind == "tool_result" && e.tool_use_id.as_deref() == Some(id)) { return None; }
+        let matching = events.iter().rposition(|e| e.kind == "tool_use" && e.tool_name.as_deref() == Some("ExitPlanMode") && e.tool_use_id.as_deref() == Some(id));
+        if matching.is_some_and(|at| events[at + 1..].iter().any(|e| e.kind == "user_msg" && !e.id.starts_with("queued-"))) { return None; }
+        let matching = matching.map(|at| &events[at]);
+        return Some(PlanReview { tool_id: id.to_owned(), file_candidates: confirmed_plan_paths(events, id),
+            plan: text(pending.and_then(|p| p.get("plan"))).or_else(|| text(matching.and_then(|e| e.tool_input.as_ref()?.get("plan")))).unwrap_or_default(),
+            path: text(pending.and_then(|p| p.get("path"))).or_else(|| text(matching.and_then(|e| e.tool_input.as_ref()?.get("planFilePath")))) });
+    }
+    let question = state.question.as_deref()?.trim();
+    if pending.is_none() && !(question.starts_with("Claude has written up a plan") || question == "Would you like to proceed?" || question == "Ready to code?") { return None; }
+    let mut answered = HashSet::new();
+    for event in events.iter().rev() {
+        if event.kind == "user_msg" && !event.id.starts_with("queued-") { break; }
+        if event.kind == "tool_result" { if let Some(id) = event.tool_use_id.as_deref() { answered.insert(id); } }
+        if event.kind == "tool_use" && event.tool_name.as_deref() == Some("ExitPlanMode") {
+            let id = event.tool_use_id.as_deref().filter(|id| !id.is_empty() && !answered.contains(id))?;
+            return Some(PlanReview { tool_id: id.to_owned(), file_candidates: confirmed_plan_paths(events, id),
+                plan: text(pending.and_then(|p| p.get("plan"))).or_else(|| text(event.tool_input.as_ref().and_then(|i| i.get("plan")))).unwrap_or_default(),
+                path: text(pending.and_then(|p| p.get("path"))).or_else(|| text(event.tool_input.as_ref().and_then(|i| i.get("planFilePath")))) });
+        }
+    }
+    let pending = pending?;
+    // Sem id nem histórico a fonte de estado ainda é autoritativa; uma chamada antiga conhecida não é reaproveitada.
+    if events.iter().any(|e| e.tool_name.as_deref() == Some("ExitPlanMode")) { return None; }
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(pending).unwrap_or_default().hash(&mut hash);
+    Some(PlanReview { tool_id: format!("pending:{:x}", hash.finish()), plan: text(pending.get("plan")).unwrap_or_default(),
+        path: text(pending.get("path")), file_candidates: Vec::new() })
+}
+
+fn confirmed_plan_paths(events: &[ChatEvent], exit_id: &str) -> Vec<String> {
+    let mut completed = HashSet::new();
+    let mut paths = Vec::new();
+    let mut before_exit = false;
+    for event in events.iter().rev() {
+        if event.kind == "user_msg" && !event.id.starts_with("queued-") { break; }
+        if event.kind == "tool_use" && event.tool_use_id.as_deref() == Some(exit_id) { before_exit = true; continue; }
+        if !before_exit { continue; }
+        if event.kind == "tool_result" && event.is_error != Some(true) {
+            if let Some(id) = event.tool_use_id.as_deref() { completed.insert(id); }
+        }
+        if event.kind == "tool_use" && matches!(event.tool_name.as_deref(), Some("Write" | "Edit"))
+            && event.tool_use_id.as_deref().is_some_and(|id| completed.contains(id)) {
+            if let Some(path) = event.tool_input.as_ref().and_then(|i| i.get("file_path")).and_then(Value::as_str)
+                && path.to_ascii_lowercase().ends_with(".md") && !paths.iter().any(|known| known == path) { paths.push(path.to_owned()); }
+        }
+    }
+    paths
+}
+
+/// Abrevia só as escolhas conhecidas da TUI; o texto completo continua disponível no botão.
+pub fn plan_choice_key(option: &str) -> Option<&'static str> {
+    match option {
+        "Yes, and bypass permissions" | "Yes, and switch to BYPASS PERMISSIONS (no further prompts) for this session" => Some("plan_review_bypass"),
+        "Yes, manually approve edits" => Some("plan_review_manual"),
+        "Yes, and auto-accept edits" => Some("plan_review_auto"),
+        "Tell Claude what to change" => Some("plan_review_changes"),
+        "No, keep planning" => Some("plan_review_keep"),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Pick { Empty, Options(Vec<usize>), Text(String), Chat }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -208,6 +287,95 @@ mod tests {
     // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
     use core::prelude::v1::test;
     use crate::api::dto::AskOption;
+
+    fn plan_state() -> crate::api::dto::SessionState {
+        crate::api::dto::SessionState { state: "awaiting_input".into(),
+            question: Some("Claude has written up a plan and is ready to execute. Would you like to proceed?".into()),
+            options: Some(vec!["Yes, manually approve edits".into(), "Tell Claude what to change".into()]), ..Default::default() }
+    }
+
+    #[test]
+    fn claude_plan_review_accepts_headless_pending_without_a_tool_id() {
+        let state = crate::api::dto::SessionState { question: Some("Aprovar o plano?".into()),
+            claude_plan_pending: json!({"plan":"# Plano", "path":"/plans/p.md"}).as_object().cloned(), ..plan_state() };
+        assert_eq!(plan_review(&[], &state, "claude").unwrap().plan, "# Plano");
+    }
+
+    #[test]
+    fn claude_plan_review_headless_fallback_tracks_confirmed_files() {
+        let state = crate::api::dto::SessionState { claude_plan_pending: json!({"plan":"", "tool_use_id":"p"}).as_object().cloned(), ..plan_state() };
+        let events = vec![tool("tool_use", "w", "Write", json!({"file_path":"/plans/p.md"})),
+            tool("tool_result", "w", "", json!({})), tool("tool_use", "p", "ExitPlanMode", json!({}))];
+        assert_eq!(plan_review(&events, &state, "claude").unwrap().file_candidates, vec!["/plans/p.md"]);
+    }
+
+    #[test]
+    fn claude_plan_review_discards_authoritative_state_when_history_proves_resolution() {
+        let state = crate::api::dto::SessionState { claude_plan_pending: json!({"plan":"# Plano", "tool_use_id":"p"}).as_object().cloned(), ..plan_state() };
+        let mut events = vec![tool("tool_use", "p", "ExitPlanMode", json!({"plan":"# Plano"}))];
+        events.push(tool("tool_result", "p", "", json!({})));
+        assert!(plan_review(&events, &state, "claude").is_none());
+        events.pop();
+        events.push(ChatEvent { kind: "user_msg".into(), id: "u".into(), text: Some("Nova tarefa".into()), ..Default::default() });
+        assert!(plan_review(&events, &state, "claude").is_none());
+    }
+
+    #[test]
+    fn plan_review_labels_preserve_clear_context_and_unknown_choices() {
+        assert_eq!(plan_choice_key("Yes, and bypass permissions"), Some("plan_review_bypass"));
+        assert_eq!(plan_choice_key("Yes, and switch to BYPASS PERMISSIONS (no further prompts) for this session"), Some("plan_review_bypass"));
+        assert_eq!(plan_choice_key("Yes, manually approve edits"), Some("plan_review_manual"));
+        assert_eq!(plan_choice_key("Yes, clear context and bypass permissions"), None);
+        assert_eq!(plan_choice_key("Yes, clear context and auto-accept edits"), None);
+        assert_eq!(plan_choice_key("Yes, and bypass permissions for a different scope"), None);
+    }
+
+    #[test]
+    fn claude_plan_review_file_fallback_requires_a_confirmed_write_in_this_turn() {
+        let exit = tool("tool_use", "p", "ExitPlanMode", json!({}));
+        let write = tool("tool_use", "w", "Write", json!({"file_path":"/plans/p.md"}));
+        let done = tool("tool_result", "w", "", json!({}));
+        assert!(plan_review(&[write.clone(), exit.clone()], &plan_state(), "claude").unwrap().file_candidates.is_empty());
+        assert_eq!(plan_review(&[write.clone(), done.clone(), exit.clone()], &plan_state(), "claude").unwrap().file_candidates, vec!["/plans/p.md"]);
+        let failed = ChatEvent { is_error: Some(true), ..done.clone() };
+        assert!(plan_review(&[write.clone(), failed, exit.clone()], &plan_state(), "claude").unwrap().file_candidates.is_empty());
+        let prompt = ChatEvent { kind: "user_msg".into(), id: "u".into(), text: Some("Outro pedido".into()), ..Default::default() };
+        assert!(plan_review(&[write, done, prompt, exit], &plan_state(), "claude").unwrap().file_candidates.is_empty());
+    }
+
+    #[test]
+    fn claude_plan_review_uses_the_full_pending_tool_input() {
+        let events = vec![tool("tool_use", "p1", "ExitPlanMode", json!({"plan": "# Plano\n\n## Etapas\n- Implementar"}))];
+        let plan = plan_review(&events, &plan_state(), "claude").unwrap();
+        assert_eq!(plan.plan, "# Plano\n\n## Etapas\n- Implementar");
+        assert_eq!(plan.tool_id, "p1");
+    }
+
+    #[test]
+    fn claude_plan_review_rejects_answered_old_and_unrelated_requests() {
+        let event = tool("tool_use", "p1", "ExitPlanMode", json!({"plan": "# Antigo"}));
+        let mut events = vec![event];
+        assert!(plan_review(&events, &plan_state(), "codex").is_none());
+        let unrelated = crate::api::dto::SessionState { question: Some("Allow Edit?".into()), ..plan_state() };
+        assert!(plan_review(&events, &unrelated, "claude").is_none());
+        events.push(tool("tool_result", "p1", "", json!({})));
+        assert!(plan_review(&events, &plan_state(), "claude").is_none());
+        events.pop();
+        events.push(ChatEvent { id: "u1".into(), kind: "user_msg".into(), text: Some("Outra tarefa".into()), ..Default::default() });
+        assert!(plan_review(&events, &plan_state(), "claude").is_none());
+    }
+
+    #[test]
+    fn claude_plan_review_accepts_authoritative_headless_state_before_history() {
+        let state = crate::api::dto::SessionState { claude_plan_pending: json!({"plan":"# Plano", "tool_use_id":"p1", "path":"/plans/p.md"}).as_object().cloned(), ..plan_state() };
+        let plan = plan_review(&[], &state, "claude").unwrap();
+        assert_eq!(plan.plan, "# Plano");
+        assert_eq!(plan.path.as_deref(), Some("/plans/p.md"));
+        let events = vec![tool("tool_use", "other", "ExitPlanMode", json!({"plan":"# Outro"}))];
+        assert_eq!(plan_review(&events, &state, "claude").unwrap().plan, "# Plano");
+        let state = crate::api::dto::SessionState { state: "working".into(), ..state };
+        assert!(plan_review(&events, &state, "claude").is_none());
+    }
 
     fn item(multi: bool, other: bool, labels: &[&str]) -> AskItem {
         AskItem { id: Some("q1".into()), header: "H".into(), question: "Q?".into(), multi_select: multi, is_other: other, is_secret: false,
