@@ -88,7 +88,7 @@
 - Produces: `runtime/codex.rs` com `running_commands`, `thinking`, `error_class`,
   `cut_check`, `terminate_after` — a base que as Tasks 2–5 leem.
 
-- [ ] **Step 1: Conferir se o PR já entrou na `main`**
+- [x] **Step 1: Conferir se o PR já entrou na `main`**
 
 ```bash
 git fetch origin
@@ -97,7 +97,7 @@ git merge-base --is-ancestor origin/fix/codex-hardening origin/main && echo "já
 
 Se imprimir "já na main": `git merge --no-edit origin/main` e pular para o Step 3. Senão, Step 2.
 
-- [ ] **Step 2: Juntar a branch**
+- [x] **Step 2: Juntar a branch**
 
 ```bash
 git merge --no-edit origin/fix/codex-hardening
@@ -106,7 +106,7 @@ git merge --no-edit origin/fix/codex-hardening
 Esperado: sem conflito (esta branch só tem documentos em `docs/migracao-rust/`). Conflito em
 qualquer arquivo de código → parar e avisar.
 
-- [ ] **Step 3: Conferir a base**
+- [x] **Step 3: Conferir a base**
 
 ```bash
 cd crates && CARGO_BUILD_JOBS=4 cargo test -p hangar-server --test runtime_codex --test runtime_contract --test runtime_actor
@@ -134,7 +134,7 @@ anotar o teste e a saída, parar e avisar antes de seguir.
   - `ClientRequest::into_parts(self) -> (&'static str, Value)`
   - `hangar_codex::version::{CHECKED:&str, from_user_agent(&str)->Option<&str>, differs(&str)->bool, diag_code(&str)->String}`
 
-- [ ] **Step 1: Workspace e crate**
+- [x] **Step 1: Workspace e crate**
 
 `crates/Cargo.toml`: acrescentar `"hangar-codex"` em `members` e, em `[workspace.dependencies]`:
 
@@ -185,7 +185,7 @@ mod schema_check;
 Até a Task 5, criar `src/client.rs` vazio (`//! Cliente JSON-RPC (Task 5).`) e, até a Task 3,
 `src/schema_check.rs` vazio.
 
-- [ ] **Step 2: Testes dos tipos (falham sem `proto.rs`)**
+- [x] **Step 2: Testes dos tipos (falham sem `proto.rs`)**
 
 No fim de `crates/hangar-codex/src/proto.rs` (arquivo novo, só o módulo de teste por enquanto):
 
@@ -290,12 +290,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Rodar e ver falhar**
+- [x] **Step 3: Rodar e ver falhar**
 
 Run: `cd crates && CARGO_BUILD_JOBS=4 cargo test -p hangar-codex --lib`
 Expected: FAIL de compilação (`ServerNotification`, `from_user_agent` não existem).
 
-- [ ] **Step 4: Escrever `proto.rs`**
+- [x] **Step 4: Escrever `proto.rs`**
 
 Acima do módulo de testes:
 
@@ -609,7 +609,7 @@ Notas para quem implementa:
   troque por `#[serde(skip_deserializing)]`; o `decode` nunca chega a ela pelo serde.
 - `ThreadStatus::Active` ignora `activeFlags` (o motor não lê).
 
-- [ ] **Step 5: Escrever `version.rs`**
+- [x] **Step 5: Escrever `version.rs`**
 
 Acima dos testes:
 
@@ -645,7 +645,7 @@ pub fn diag_code(installed:&str) -> String {
 }
 ```
 
-- [ ] **Step 6: `RequestId` vem do crate novo**
+- [x] **Step 6: `RequestId` vem do crate novo**
 
 Em `crates/hangar-server/src/runtime/protocol.rs`, trocar o bloco `pub enum RequestId` (linhas
 40-45, com os derives) por:
@@ -654,12 +654,12 @@ Em `crates/hangar-server/src/runtime/protocol.rs`, trocar o bloco `pub enum Requ
 pub use hangar_codex::proto::RequestId;
 ```
 
-- [ ] **Step 7: Rodar e ver passar**
+- [x] **Step 7: Rodar e ver passar**
 
 Run: `cd crates && CARGO_BUILD_JOBS=4 cargo test -p hangar-codex --lib && CARGO_BUILD_JOBS=4 cargo test -p hangar-server --test runtime_codex --test runtime_actor`
 Expected: PASS.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/Cargo.toml crates/Cargo.lock crates/hangar-codex crates/hangar-server/Cargo.toml crates/hangar-server/src/runtime/protocol.rs
@@ -679,7 +679,7 @@ git commit -m "feat(codex): typed app-server protocol crate"
   teste `schema_check::fields_used_exist_in_checked_schema`; regerador
   `schema_check::regenerate_slice` (`#[ignore]`, lê `CODEX_SCHEMA_DIR`).
 
-- [ ] **Step 1: Escrever o teste do recorte**
+- [x] **Step 1: Escrever o teste do recorte**
 
 `crates/hangar-codex/src/schema_check.rs`:
 
@@ -829,12 +829,12 @@ fn regenerate_slice() {
 }
 ```
 
-- [ ] **Step 2: Rodar e ver falhar**
+- [x] **Step 2: Rodar e ver falhar**
 
 Run: `cd crates && CARGO_BUILD_JOBS=4 cargo test -p hangar-codex --lib schema_check`
 Expected: FAIL de compilação (`schema/0.159.3.json` não existe).
 
-- [ ] **Step 3: Script de conferência**
+- [x] **Step 3: Script de conferência**
 
 `scripts/conferir-codex-schema` (executável, `chmod +x`):
 
@@ -857,7 +857,7 @@ codex app-server generate-json-schema --experimental --out "$tmp" >/dev/null
 git -C "$raiz" diff --stat -- crates/hangar-codex/schema
 ```
 
-- [ ] **Step 4: Gerar o recorte**
+- [x] **Step 4: Gerar o recorte**
 
 Run: `scripts/conferir-codex-schema`
 Expected: cria `crates/hangar-codex/schema/0.159.3.json` e o teste passa. Se o teste listar
@@ -867,14 +867,14 @@ deve ficar bem abaixo dos 736 KB do arquivo inteiro; anotar o tamanho na mensage
 Se a máquina tiver outro Codex que não o 0.159.3: o script recusa. Trocar `checked_version!()`
 para a versão instalada, rodar de novo e anotar a troca no commit.
 
-- [ ] **Step 5: Provar que o teste pega rename**
+- [x] **Step 5: Provar que o teste pega rename**
 
 Temporariamente, em `proto.rs`, renomear `pub effort:Option<Option<String>>` de
 `ThreadSettingsUpdateParams` para `pub reasoning_effort:…`. Rodar
 `cargo test -p hangar-codex --lib schema_check` — esperado FAIL listando
 `ThreadSettingsUpdateParams.reasoningEffort`. Desfazer.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/hangar-codex/src/schema_check.rs crates/hangar-codex/schema scripts/conferir-codex-schema
@@ -900,7 +900,7 @@ git commit -m "test(codex): check used protocol fields against the checked schem
   `DiagEvent::event(&self)->&'static str` e `DiagEvent::reason(&self)->&'static str`;
   problema `codex_versao_nao_conferida`.
 
-- [ ] **Step 1: Testes novos do motor (falham)**
+- [x] **Step 1: Testes novos do motor (falham)**
 
 No fim de `crates/hangar-server/tests/runtime_codex.rs`:
 
@@ -963,12 +963,12 @@ fn unknown_server_request_still_gets_method_not_found() {
 
 E no topo do arquivo, acrescentar `DiagEvent` ao `use` de `protocol::*` (já coberto pelo glob).
 
-- [ ] **Step 2: Rodar e ver falhar**
+- [x] **Step 2: Rodar e ver falhar**
 
 Run: `cd crates && CARGO_BUILD_JOBS=4 cargo test -p hangar-server --test runtime_codex`
 Expected: FAIL de compilação (`Effect::Diag`, `DiagEvent`).
 
-- [ ] **Step 3: `Effect::Diag`**
+- [x] **Step 3: `Effect::Diag`**
 
 Em `runtime/protocol.rs`, no `enum Effect`, antes de `Stop`:
 
@@ -995,7 +995,7 @@ impl DiagEvent {
 }
 ```
 
-- [ ] **Step 4: O ator manda ao diário**
+- [x] **Step 4: O ator manda ao diário**
 
 Em `runtime/actor.rs`, no `PolicyClient`: campo `diag:crate::diag::DiagClient`, criado em `new`
 com `crate::diag::DiagClient::new(upstream,secret.clone())`. No laço de efeitos, ao lado de
@@ -1012,7 +1012,7 @@ com `crate::diag::DiagClient::new(upstream,secret.clone())`. No laço de efeitos
 Conferir com `rg -n "match effect|Effect::Stop" crates/hangar-server/src` se há outro `match`
 exaustivo de `Effect`; acrescentar o braço onde houver (teste incluso).
 
-- [ ] **Step 5: Saída tipada no motor**
+- [x] **Step 5: Saída tipada no motor**
 
 Em `runtime/codex.rs`, acrescentar:
 
@@ -1055,7 +1055,7 @@ da Task 2 e os testes do motor conferem). Mapa:
 O `VoiceRpc` continua repassando `method`/`params` crus: é um túnel da voz, e os pedidos dela
 passam pelo filtro de métodos que já existe. A notificação `initialized` continua `json!`.
 
-- [ ] **Step 6: Entrada tipada: notificações**
+- [x] **Step 6: Entrada tipada: notificações**
 
 No começo de `fn notification`, depois do bloco da voz e do desvio de outra thread (que seguem
 lendo `params["threadId"]` cru, porque roteiam linhas inteiras), e depois do ramo de pedidos do
@@ -1231,7 +1231,7 @@ Pontos que mudam de forma, com o mesmo efeito:
   cada item cru com `serde_json::from_value::<wire::ThreadItem>(item.clone()).unwrap_or(wire::ThreadItem::Unknown)`
   e chama `observe(thread,&typed,item)`.
 
-- [ ] **Step 7: Entrada tipada: respostas e aviso de versão**
+- [x] **Step 7: Entrada tipada: respostas e aviso de versão**
 
 Em `fn reply`, no `match rpc.method.as_str()`:
 
@@ -1311,7 +1311,7 @@ catálogo do Fast (`service_tier_catalog`) lê `wire::ModelListResponse`
 (`model.service_tiers` com `id == "priority"` e `hidden != true` — `hidden` do tier é lido do
 `Value` de cada tier).
 
-- [ ] **Step 8: Pedidos do servidor tipados na tela**
+- [x] **Step 8: Pedidos do servidor tipados na tela**
 
 `view()` e `blocking_question()` passam a decodificar o pedido guardado:
 
@@ -1330,7 +1330,7 @@ Na `view`: `wire::ServerRequest::CommandExecutionApproval(p)` monta
 `["item/commandExecution/requestApproval","item/fileChange/requestApproval","item/tool/requestUserInput"]`);
 a 5B troca isso pelos tipos.
 
-- [ ] **Step 9: Aviso na tela**
+- [x] **Step 9: Aviso na tela**
 
 `messages/pt.json`, perto de `problema_codex_sem_conexao`:
 
@@ -1348,13 +1348,13 @@ a 5B troca isso pelos tipos.
 `mobile/src/chat/SessionProblem.tsx`: `codex_versao_nao_conferida: m.problema_codex_versao_nao_conferida,`
 O nativo lê `problema_<código>` das mensagens sozinho (`desktop-native/src/app.rs:146`).
 
-- [ ] **Step 10: Rodar e ver passar**
+- [x] **Step 10: Rodar e ver passar**
 
 Run: `cd crates && CARGO_BUILD_JOBS=4 cargo test -p hangar-server --test runtime_codex --test runtime_contract --test runtime_actor && CARGO_BUILD_JOBS=4 cargo test -p hangar-server --lib diag`
 Expected: PASS, inclusive `codex_public_events_match_the_python_oracle` sem mudar o golden. Front:
 `cd frontend && npx vitest run src/lib/i18nGuard.test.ts`.
 
-- [ ] **Step 11: Regra nova**
+- [x] **Step 11: Regra nova**
 
 Em `docs/decisoes/harnesses.md`, "Regras vigentes", depois da regra "Codex sem terminal: o
 app-server é do CANO":
@@ -1367,7 +1367,7 @@ app-server é do CANO":
   `codex_versao_nao_conferida`. Atualizar a versão conferida: `scripts/conferir-codex-schema`.
 ```
 
-- [ ] **Step 12: Commit**
+- [x] **Step 12: Commit**
 
 ```bash
 git add crates/hangar-server/src/runtime/protocol.rs crates/hangar-server/src/runtime/codex.rs crates/hangar-server/src/runtime/actor.rs crates/hangar-server/tests/runtime_codex.rs messages/pt.json messages/en.json frontend/src/lib/problema.ts mobile/src/chat/SessionProblem.tsx docs/decisoes/harnesses.md
@@ -1402,7 +1402,7 @@ git commit -m "feat(codex): Rust engine reads and writes the typed protocol, war
 Quem recebe o `Receiver<Incoming>` tem de consumi-lo numa tarefa própria: a leitura espera
 quando ele enche (canal com limite), e uma resposta atrás de notificações não lidas espera junto.
 
-- [ ] **Step 1: Testes (falham)**
+- [x] **Step 1: Testes (falham)**
 
 `crates/hangar-codex/tests/client.rs`:
 
@@ -1515,12 +1515,12 @@ async fn websocket_transport() {
 ```
 
 
-- [ ] **Step 2: Rodar e ver falhar**
+- [x] **Step 2: Rodar e ver falhar**
 
 Run: `cd crates && CARGO_BUILD_JOBS=4 cargo test -p hangar-codex --test client`
 Expected: FAIL de compilação (`Client` não existe).
 
-- [ ] **Step 3: Implementar `client.rs`**
+- [x] **Step 3: Implementar `client.rs`**
 
 ```rust
 //! Cliente JSON-RPC do app-server do Codex. O núcleo fala por dois canais de texto (uma mensagem
@@ -1687,18 +1687,18 @@ Nota para quem implementa:
   doc da versão (`cargo doc -p tokio-tungstenite --open` não é preciso: `rg` no
   `~/.cargo/registry/src/*/tokio-tungstenite-0.29.0/src/lib.rs`).
 
-- [ ] **Step 4: Rodar e ver passar**
+- [x] **Step 4: Rodar e ver passar**
 
 Run: `cd crates && CARGO_BUILD_JOBS=4 cargo test -p hangar-codex --test client --lib`
 Expected: PASS (6 testes do cliente + os da Task 2/3).
 
-- [ ] **Step 5: README da migração**
+- [x] **Step 5: README da migração**
 
 Em `docs/migracao-rust/README.md`, linha da parte 5 na tabela "Partes": trocar `—` por
 `**5A feita na hangar-server-parte5-codex** (tipos do protocolo em crates/hangar-codex, motor
 tipado, aviso de versão, cliente stdio/WebSocket); 5B–5I na spec parte5-codex/spec.md`.
 
-- [ ] **Step 6: Commit e limpeza**
+- [x] **Step 6: Commit e limpeza**
 
 ```bash
 git add crates/hangar-codex/src/client.rs crates/hangar-codex/tests/client.rs crates/hangar-codex/Cargo.toml crates/Cargo.lock docs/migracao-rust/README.md
