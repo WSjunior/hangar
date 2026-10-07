@@ -466,6 +466,7 @@ nulo), com usuário comum no grupo de administradores e um auxiliar que imprime 
 | `aux \| sudo -S -p '' sh -c 'sudo id -u'` | o `sudo` de dentro não pede nada: `0` | o `sudo` de dentro não pede nada: `0` |
 | `sudo -S`, senha errada | `sudo: Authentication failed, try again.` (2×) e `sudo-rs: Maximum 3 incorrect authentication attempts`, rc 1 | `Sorry, try again.`, `sudo: no password was provided` e `sudo: 1 incorrect password attempt`, rc 1 |
 | `sudo -n true` logo depois de um `sudo -S` bem-sucedido, mesmo processo-pai | rc 0 | rc 0 |
+| `aux \| sudo -S -p '' -v` e depois `sudo -n true` e `sudo -n <comando>`, sem terminal (direto, segunda chamada, em `$(...)`, em cano) | rc 0 nas quatro | rc 0 nas quatro |
 | usuário fora do sudoers, senha certa dele | `sudo-rs: I'm sorry <usuário>. I'm afraid I can't do that`, rc 0 1 | `<usuário> is not in the sudoers file.`, rc 0 1 (antes dele, o aviso "We trust you have received the usual lecture…", que o `sudo` clássico imprime no primeiro uso de cada usuário) |
 | auxiliar sai ≠ 0 (a pessoa cancelou) | `sudo: Authentication failed, try again.` (2×) e `sudo-rs: Maximum 3 incorrect authentication attempts`, rc 1 1 | `sudo: no password was provided` e `sudo: a password is required`, rc 1 1 |
 | auxiliar ausente (caminho que não existe) | `bash: line 1: /nao/existe/askpass: No such file or directory` e as mesmas linhas da senha errada, rc 127 1 | `bash: line 1: /nao/existe/askpass: No such file or directory`, `sudo: no password was provided` e `sudo: a password is required`, rc 127 1 |
