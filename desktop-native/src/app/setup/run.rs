@@ -111,16 +111,16 @@ fn command_for(launch: &Launch) -> Command {
 
 /// Sessão nova: sem terminal de controle, o script nunca acha o terminal de onde o app foi aberto (`/dev/tty`).
 #[cfg(target_os = "linux")]
-fn detach(command: &mut Command) {
+pub(crate) fn detach(command: &mut Command) {
     use std::os::unix::process::CommandExt;
     unsafe { command.pre_exec(|| { libc::setsid(); Ok(()) }); }
 }
 
 #[cfg(windows)]
-fn detach(command: &mut Command) { super::system::hidden(command); }
+pub(crate) fn detach(command: &mut Command) { super::system::hidden(command); }
 
 #[cfg(not(any(target_os = "linux", windows)))]
-fn detach(_: &mut Command) {}
+pub(crate) fn detach(_: &mut Command) {}
 
 /// Só para provar telas: `HANGAR_SETUP_BOOTSTRAP=<script>` usa este arquivo e o app pula a própria cópia.
 pub(crate) fn test_bootstrap() -> Option<PathBuf> { std::env::var_os("HANGAR_SETUP_BOOTSTRAP").map(PathBuf::from).filter(|p| p.is_file()) }
