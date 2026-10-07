@@ -1,0 +1,123 @@
+//! Rotas de escrita de sessão Claude. O Rust as reivindica na tabela (`table`) e decide por pedido;
+//! enquanto o corpo de cada uma não existe, a decisão `Rust` ainda repassa ao Python (`relay`).
+//!
+//! Ordem fixa de `admit`: dono → corpo → porta (`enter`) → entrada (`writable`) → decisão. A entrada
+//! é procurada DEPOIS da porta: a achada antes de esperar pode ser a que o relançamento parou.
+//! Repasse nunca acontece com o passe na mão: o `freeze` do Python fecha a porta e esperaria o
+//! nosso próprio passe.
+pub mod answer;
+pub mod control;
+pub mod input;
+pub mod table;
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::body::{Body, Bytes, to_bytes};
+use axum::extract::Request;
+use axum::http::request::Parts;
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use percent_encoding::percent_decode_str;
+use serde_json::{Value, json};
+
+use crate::proxy::Forward;
+use crate::routes::{AppState, cors, gate, pass};
+use crate::runtime::gateway::{RuntimeRegistry, WriteTarget};
+use crate::runtime::ingress::{GateClosed, IngressPass};
+pub use table::{Owner, Provider, WriteRoute, decide};
+
+/// Abaixo do `OP_TIMEOUT_S` (75 s) do transporte no Python.
+const GATE_WAIT: Duration = Duration::from_secs(30);
+/// Teto do corpo lido aqui; o proxy não tinha um, então fica folgado.
+const BODY_LIMIT: usize = 64 * 1024 * 1024;
+const BUSY_MSG: &str = "A sessão está trocando de agente; tente novamente quando terminar.";
+
+/// O que a rota precisa para escrever: o passe mantém a porta aberta até o fim da escrita.
+#[allow(dead_code)] // name/target/headers são lidos pelos corpos das Tasks 4 a 6
+pub(crate) struct Ctx {
+    pub(crate) st: Arc<AppState>,
+    pub(crate) name: String,
+    pub(crate) target: WriteTarget,
+    pub(crate) pass: IngressPass,
+    pub(crate) headers: HeaderMap,
+    parts: Parts,
+    fwd: Forward,
+}
+
+/// Envelope do `HTTPException(detail=erro(...))` do Python (`mensagens.py`).
+pub(crate) fn detail(status: StatusCode, code: &str, msg: &str, params: Value) -> Response {
+    let body = json!({"detail": {"code": code, "params": params, "msg": msg}});
+    (status, [(header::CONTENT_TYPE, "application/json")], body.to_string()).into_response()
+}
+
+/// Entra na porta e SÓ ENTÃO procura a entrada; sem entrada o passe volta a sair (solto aqui).
+pub async fn enter_then_find(runtime: &RuntimeRegistry, name: &str, wait: Duration) -> Result<Option<(IngressPass, WriteTarget)>, GateClosed> {
+    let pass = runtime.ingress().enter(name, wait).await?;
+    Ok(runtime.writable(name).await.map(|target| (pass, target)))
+}
+
+/// Nome da sessão em `/api/sessions/{name}/...`, já sem o escape da URL.
+fn session_name(path: &str) -> Option<String> {
+    let raw = path.strip_prefix("/api/sessions/")?.split('/').next().filter(|n| !n.is_empty())?;
+    percent_decode_str(raw).decode_utf8().ok().map(|n| n.into_owned())
+}
+
+async fn forward_whole(st: &AppState, parts: Parts, bytes: Bytes, fwd: &Forward) -> Response {
+    pass(st, Request::from_parts(parts, Body::from(bytes)), fwd).await
+}
+
+/// Decide quem atende. `Ok`: o Rust atende, com o passe na mão e o corpo já lido. `Err`: a resposta
+/// pronta (repasse ao Python com o corpo intacto, ou a recusa da porta fechada).
+pub(crate) async fn admit(st: &Arc<AppState>, peer: SocketAddr, req: Request, route: WriteRoute,
+    early: impl Fn(&Bytes) -> bool) -> Result<(Ctx, Bytes), Response> {
+    let (fwd, owner) = gate(st, peer, &req);
+    let runtime = st.state.runtime.get().cloned();
+    let (Some(runtime), true, Some(name)) = (runtime, owner, session_name(req.uri().path())) else {
+        return Err(pass(st, req, &fwd).await);
+    };
+    let (parts, body) = req.into_parts();
+    let headers = parts.headers.clone();
+    let Ok(bytes) = to_bytes(body, BODY_LIMIT).await else {
+        let mut response = detail(StatusCode::PAYLOAD_TOO_LARGE, "erro_corpo_grande", "corpo grande demais", json!({}));
+        cors(&headers, response.headers_mut());
+        return Err(response);
+    };
+    if !table::body_ok(route, &bytes) || early(&bytes) {
+        return Err(forward_whole(st, parts, bytes, &fwd).await);
+    }
+    let found = match enter_then_find(&runtime, &name, GATE_WAIT).await {
+        Ok(found) => found,
+        Err(GateClosed) => {
+            let mut response = detail(StatusCode::CONFLICT, "session_transfer_busy", BUSY_MSG, json!({}));
+            cors(&headers, response.headers_mut());
+            return Err(response);
+        }
+    };
+    let Some((pass_in, target)) = found else {
+        return Err(forward_whole(st, parts, bytes, &fwd).await);
+    };
+    let rust = Provider::from_str(&target.provider).is_some_and(|p| decide(route, p, target.terminal, target.healthy) == Owner::Rust);
+    if !rust {
+        drop(pass_in);
+        return Err(forward_whole(st, parts, bytes, &fwd).await);
+    }
+    Ok((Ctx { st: st.clone(), name, target, pass: pass_in, headers, parts, fwd }, bytes))
+}
+
+/// Provisório (Tasks 4 a 6 trocam cada rota pelo corpo dela): repassa ao Python o que o Rust já
+/// admitiu, soltando antes o passe.
+pub(crate) async fn relay(ctx: Ctx, bytes: Bytes) -> Response {
+    let Ctx { st, pass: held, parts, fwd, .. } = ctx;
+    drop(held);
+    forward_whole(&st, parts, bytes, &fwd).await
+}
+
+/// Corpo provisório comum dos handlers: admite e repassa.
+pub(crate) async fn through(st: &Arc<AppState>, peer: SocketAddr, req: Request, route: WriteRoute) -> Response {
+    match admit(st, peer, req, route, |_| false).await {
+        Ok((ctx, bytes)) => relay(ctx, bytes).await,
+        Err(response) => response,
+    }
+}

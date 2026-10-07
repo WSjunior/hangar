@@ -57,6 +57,10 @@ pub struct Fake {
     transfer_calls: AtomicUsize,
     /// Corpos que chegaram em `/api/plugin/ui` (a cópia da faixa que o Rust manda).
     plugin_ui: Mutex<Vec<Value>>,
+    /// Corpo cru do último pedido de escrita repassado.
+    last_body: Mutex<Vec<u8>>,
+    /// Enquanto ligado, `/input` só responde depois de `release`.
+    hold_input: std::sync::atomic::AtomicBool,
 }
 
 impl Fake {
@@ -111,6 +115,14 @@ impl Fake {
     pub fn transfer_calls(&self) -> usize {
         self.transfer_calls.load(SeqCst)
     }
+    /// Bytes do corpo do último pedido de escrita repassado.
+    pub fn last_body(&self) -> Vec<u8> {
+        self.last_body.lock().unwrap().clone()
+    }
+    /// `/input` fica preso no Python falso até `release.notify_one()`.
+    pub fn hold_input(&self, on: bool) {
+        self.hold_input.store(on, SeqCst);
+    }
     /// Os corpos que chegaram em `/api/plugin/ui`, na ordem.
     pub fn plugin_ui_bodies(&self) -> Vec<Value> {
         self.plugin_ui.lock().unwrap().clone()
@@ -140,6 +152,8 @@ pub async fn spawn_fake() -> (Arc<Fake>, SocketAddr) {
         transfer_body: Mutex::default(),
         transfer_calls: AtomicUsize::new(0),
         plugin_ui: Mutex::default(),
+        last_body: Mutex::default(),
+        hold_input: std::sync::atomic::AtomicBool::new(false),
     });
     let app = Router::new()
         .route("/internal/sessions/{name}/info", get(fake_info))
@@ -251,6 +265,13 @@ async fn fake_python(State(f): State<Arc<Fake>>, mut req: Request) -> Response {
     if path == "/api/plugin/ui" {
         let bytes = axum::body::to_bytes(std::mem::take(req.body_mut()), 1 << 20).await.unwrap_or_default();
         f.plugin_ui.lock().unwrap().push(serde_json::from_slice(&bytes).unwrap_or(Value::Null));
+    }
+    if req.method() != axum::http::Method::GET && path != "/ws" && path != "/api/plugin/ui" {
+        let bytes = axum::body::to_bytes(std::mem::take(req.body_mut()), 1 << 24).await.unwrap_or_default();
+        *f.last_body.lock().unwrap() = bytes.to_vec();
+    }
+    if path.ends_with("/input") && f.hold_input.load(SeqCst) {
+        f.release.notified().await;
     }
     match path.as_str() {
         "/redirect" => Response::builder().status(302).header("location", "/outro").body(Body::empty()).unwrap(),

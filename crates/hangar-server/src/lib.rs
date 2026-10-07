@@ -11,6 +11,7 @@ pub mod mods;
 pub mod proxy;
 pub mod routes;
 pub mod runtime;
+pub mod session_write;
 pub mod side;
 pub mod state;
 pub mod tail;

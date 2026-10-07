@@ -277,7 +277,8 @@ impl RuntimeRegistry {
     /// `healthy` é a negação do `_rust_failed` do Python; `terminal_facts` conta como doente aqui
     /// (vínculo trocado, só o `prepare_session` refaz), `receipt_scan` não.
     pub async fn writable(&self,name:&str) -> Option<WriteTarget> {
-        let (key,generation,provider,handle) = self.entries.lock().await.iter().find(|(_,e)|e.name==name)
+        // Nome repetido é defeito de quem abriu a entrada; a escrita vai para a geração mais nova.
+        let (key,generation,provider,handle) = self.entries.lock().await.iter().filter(|(_,e)|e.name==name).max_by_key(|(_,e)|e.generation)
             .map(|(key,e)|(key.clone(),e.generation,e.provider.clone(),e.handle.clone()))?;
         let terminal = matches!(&handle,EntryHandle::Terminal {..});
         let healthy = match tokio::time::timeout(Duration::from_secs(1),handle.snapshot()).await {
