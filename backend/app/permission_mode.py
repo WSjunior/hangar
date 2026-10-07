@@ -237,11 +237,14 @@ def ler_modo(name: str) -> str | None:
     return parse_permission_mode(pane)
 
 
-# Teto de teclas por troca e espera por tecla (regras do grupo).
+# Teto de teclas por troca e espera por tecla (regras do grupo). O rodapé muda logo depois do BTab:
+# a primeira leitura sai em 20 ms, sem pausa antes, e é ela que deixa o Shift+Tab do app tão rápido
+# quanto o do terminal. Pane lento ou morto não merece uma captura a cada 20 ms: o intervalo cresce
+# até o de antes.
 TETO_TECLAS = 6
 ESPERA_POR_TECLA = 2.0
-INTERVALO_POLL = 0.2
-SETTLE_ANTES = 0.3
+INTERVALO_POLL = 0.02
+INTERVALO_POLL_MAX = 0.2
 # Teto de tempo da sonda inteira. Ela roda segurando o `_send_lock` da sessão — o MESMO lock de
 # toda entrega de mensagem —, então o pior caso (pane que só confirma a tecla no timeout, 13
 # teclas) deixaria a sessão ~30s sem aceitar nada do usuário. Estourou: para onde estiver e
@@ -253,8 +256,10 @@ def _espera_modo(name: str, anterior: str | None = None, timeout: float = ESPERA
     """Espera até o rodapé refletir um modo (diferente do anterior, se dado) ou timeout."""
     fim = time.monotonic() + timeout
     ultimo: str | None = None
+    intervalo = INTERVALO_POLL
     while time.monotonic() < fim:
-        time.sleep(INTERVALO_POLL)
+        time.sleep(intervalo)
+        intervalo = min(intervalo * 1.5, INTERVALO_POLL_MAX)
         cur = ler_modo(name)
         if cur is None:
             continue
@@ -295,7 +300,6 @@ def trocar_modo(name: str, alvo: str) -> str:
             # manda BTab
             tmux.send_keys(name, "BTab")
             # espera o rodapé refletir (até 2s)
-            time.sleep(SETTLE_ANTES)
             novo = _espera_modo(name, anterior=cur, timeout=ESPERA_POR_TECLA)
             if novo is None:
                 # não leu nada: tenta reler uma vez sem comparar com anterior
@@ -339,7 +343,6 @@ def listar_modos(name: str) -> tuple[str, list[str]]:
             if time.monotonic() > prazo:
                 break
             tmux.send_keys(name, "BTab")
-            time.sleep(SETTLE_ANTES)
             novo = _espera_modo(name, anterior=cur, timeout=ESPERA_POR_TECLA)
             if novo is None:
                 novo = ler_modo(name)
@@ -364,7 +367,6 @@ def listar_modos(name: str) -> tuple[str, list[str]]:
                 if time.monotonic() > prazo:
                     break
                 tmux.send_keys(name, "BTab")
-                time.sleep(SETTLE_ANTES)
                 novo = _espera_modo(name, anterior=cur, timeout=ESPERA_POR_TECLA)
                 if novo is None:
                     novo = ler_modo(name)

@@ -42,3 +42,8 @@ Redimensionamento: `List::prepaint` invalida a régua e a folga do fim quando a 
 antes de remedir as linhas. Alturas de geometrias diferentes não contam como conteúdo que encolheu. A âncora do
 histórico e os handles permanecem; a compensação continua valendo quando só o conteúdo muda. As decisões puras
 ficam em `src/elements/list_tail.rs`, incluído também na suíte do app sem duplicar a fórmula.
+
+Tecla física da fileira de números: `KeyDownEvent::physical_digit` (`src/interactive.rs`) leva o dígito pela posição
+da tecla, seja qual for o layout, preenchido pelas cópias de gpui-pre-linux, gpui-pre-windows e gpui-pre-macos. Com
+Shift a tecla chega como símbolo, e o Hangar escolhe a sessão por Ctrl+Shift+número em qualquer layout. Os
+construtores de `KeyDownEvent` daqui (`window.rs`, `elements/div.rs`) passam `None`.

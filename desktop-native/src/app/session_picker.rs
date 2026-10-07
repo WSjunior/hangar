@@ -20,6 +20,12 @@ impl Hangar {
             && !self.keyboard.is_editing()
     }
 
+    /// Desiste da seleção até os modificadores mudarem: segurar de novo não reabre os números.
+    fn abandon_session_numbers(&mut self, cx: &mut Context<Self>) {
+        self.cancel_session_numbers(cx);
+        self.session_picker.cancelled = true;
+    }
+
     pub(super) fn cancel_session_numbers(&mut self, cx: &mut Context<Self>) {
         let shown = self.session_picker.selection.active();
         self.session_picker.timer = None;
@@ -55,8 +61,7 @@ impl Hangar {
 
     pub(super) fn session_number_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if event.prefer_character_input {
-            self.cancel_session_numbers(cx);
-            self.session_picker.cancelled = true;
+            self.abandon_session_numbers(cx);
             return false;
         }
         self.session_number_modifiers(window.modifiers(), window, cx);
@@ -64,8 +69,7 @@ impl Hangar {
         let key = event.keystroke.key.as_str();
         if matches!(key, "escape" | "enter" | "backspace") && !self.session_picker.selection.claims_edit_keys() { return false; }
         if key == "escape" {
-            self.cancel_session_numbers(cx);
-            self.session_picker.cancelled = true;
+            self.abandon_session_numbers(cx);
             return true;
         }
         if key == "enter" {
@@ -84,9 +88,13 @@ impl Hangar {
         }
         let stroke = KeybindingKeystroke::new_with_mapper(event.keystroke.clone(), false, cx.keyboard_mapper().as_ref());
         let layout = cx.keyboard_layout();
-        let digit = super::session_numbers::digit_for_key(stroke.key(), layout.id())
-            .or_else(|| super::session_numbers::digit_for_key(stroke.key(), layout.name()));
-        let Some(digit) = digit else { return false; };
+        let digit = super::session_numbers::event_digit(event.physical_digit, stroke.key(), [layout.id(), layout.name()]);
+        // Outra tecla com os modificadores presos é atalho (Ctrl+Shift+T abre um diálogo, que não repassa a soltura
+        // dos modificadores à raiz): os números saem da tela agora, em vez de ficarem presos até ele fechar.
+        let Some(digit) = digit else {
+            self.abandon_session_numbers(cx);
+            return false;
+        };
         if !event.is_held && self.session_picker.selection.push_digit(digit, Instant::now()) {
             self.schedule_session_number(cx, window);
         }

@@ -136,6 +136,7 @@ fn controlled_change_callbacks_preserve_activation_and_replace_aliases(cx: &mut 
                         keystroke: keystroke.clone(),
                         is_held: false,
                         prefer_character_input: false,
+                        physical_digit: None,
                     });
                     visual.simulate_event(KeyUpEvent { keystroke });
                 }
@@ -195,6 +196,7 @@ fn owner_applies_requested_value_before_the_next_activation(cx: &mut TestAppCont
         keystroke: keystroke.clone(),
         is_held: false,
         prefer_character_input: false,
+        physical_digit: None,
     });
     visual.simulate_event(KeyUpEvent { keystroke });
     visual.update(|_, cx| {

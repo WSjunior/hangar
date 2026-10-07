@@ -112,6 +112,37 @@ def test_listar_modos_devolve_ficou_nao_orig(monkeypatch):
     assert "manual" in modos
 
 
+def test_troca_acompanha_o_rodape_sem_pausa_fixa(monkeypatch):
+    """O rodapé muda logo depois do BTab: cada tecla espera só a primeira leitura curta, sem pausa fixa."""
+    ciclo = ["manual", "acceptEdits", "plan", "auto"]
+    pos = [0]
+    dormidas = []
+    monkeypatch.setattr(pm.time, "sleep", dormidas.append)
+    monkeypatch.setattr(pm, "ler_modo", lambda name: ciclo[pos[0] % len(ciclo)])
+    monkeypatch.setattr(pm.tmux, "send_keys", lambda name, keys: pos.__setitem__(0, pos[0] + 1) or True)
+    assert pm.trocar_modo("sess", "auto") == "auto"
+    assert pos[0] == 3
+    assert dormidas == [pm.INTERVALO_POLL] * 3
+
+
+def test_espera_de_pane_parado_alonga_o_intervalo(monkeypatch):
+    """Pane que não muda não é lido a cada 20 ms até o teto: o intervalo cresce até o máximo."""
+    agora = [0.0]
+    dormidas = []
+
+    def dormir(segundos):
+        dormidas.append(segundos)
+        agora[0] += segundos
+
+    monkeypatch.setattr(pm.time, "sleep", dormir)
+    monkeypatch.setattr(pm.time, "monotonic", lambda: agora[0])
+    monkeypatch.setattr(pm, "ler_modo", lambda name: "plan")
+    assert pm._espera_modo("sess", anterior="plan") == "plan"
+    assert dormidas[0] == pm.INTERVALO_POLL
+    assert max(dormidas) == pm.INTERVALO_POLL_MAX
+    assert len(dormidas) < 20
+
+
 def _transcript(tmp_path, nome, modos):
     p = tmp_path / f"{nome}.jsonl"
     p.write_text("".join(json.dumps({"type": "user", "permissionMode": m}) + "\n" for m in modos))

@@ -297,6 +297,7 @@ mod tests {
                 keystroke: keystroke.clone(),
                 is_held: false,
                 prefer_character_input: false,
+                physical_digit: None,
             });
             cx.simulate_event(KeyUpEvent { keystroke });
         }

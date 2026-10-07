@@ -79,7 +79,7 @@ mod stats;
 mod search;
 mod topbar;
 
-actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, FindProjectFile, FindProjectText, NextSession, PreviousSession, ToggleDictation, NewChat, CloseSession, RenameSession, OpenCosts, OpenSearch,
+actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, FindProjectFile, FindProjectText, NextSession, PreviousSession, ToggleDictation, NewChat, OpenNewSession, CloseSession, RenameSession, OpenCosts, OpenSearch,
     ToggleSidebar, CyclePermission, OpenWorktrees]);
 
 const LIVE_THINKING: &str = "__thinking__";
@@ -1295,9 +1295,14 @@ impl Hangar {
         cx.notify();
     }
 
+    /// Nova conversa e Nova sessão não abrem sem servidor nem por cima de um diálogo.
+    fn create_blocked(&self, window: &mut Window, cx: &mut App) -> bool {
+        self.api.is_none() || window.has_active_dialog(cx) || self.connection_dialog
+    }
+
     /// Volta à tela sem sessão, a da nova conversa. O rascunho da sessão fica guardado como na troca de sessão.
     pub(super) fn go_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.api.is_none() || window.has_active_dialog(cx) || self.connection_dialog { return; }
+        if self.create_blocked(window, cx) { return; }
         if self.settings.is_some() && !self.settings_live() { self.close_settings(window, cx); }
         self.pending_remote = None;
         // Cada tela tem o próprio texto: o da conversa fechada fica com ela, e a nova conversa volta com o dela.
@@ -4987,8 +4992,9 @@ impl Hangar {
                 .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| this.start_menu(menu_target.clone(), cx)))
                 .context_menu(sidebar::session_menu(weak.clone(), active.clone(), session.clone())))
         }).collect::<Vec<_>>();
-        // A folga lateral deixa o anel de foco da primeira e da última aba fora do recorte da rolagem.
-        let strip = div().id("tabs-strip").flex_1().min_w_0().h_full().px(px(3.)).flex().items_center().gap(px(2.)).overflow_x_scroll().track_scroll(&self.tabs_scroll)
+        // A folga lateral deixa o anel de foco da primeira e da última aba fora do recorte da rolagem. A faixa mede o que
+        // as abas medem e só encolhe (rolando) quando falta espaço, para os botões de criar ficarem logo depois da última.
+        let strip = div().id("tabs-strip").flex_shrink_1().min_w_0().h_full().px(px(3.)).flex().items_center().gap(px(2.)).overflow_x_scroll().track_scroll(&self.tabs_scroll)
             .role(Role::TabList).aria_label(tr("sessions"))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let step = match event.keystroke.key.as_str() { "left" => -1, "right" => 1, _ => return };
@@ -5010,10 +5016,11 @@ impl Hangar {
                 else if appearance::get().navigation == appearance::Navigation::BottomTabs { el.border_t_1() } else { el.border_b_1() })
             .child(div().px(px(6.)).child(chrome::hangar_mark(16., theme::accent())))
             .children(self.render_hangar_chip(hangar_live::Chip::Label, cx))
-            .child(strip)
-            .child(chrome::icon_button("tabs-new-chat", IconName::SquarePen, tr("new_chat_title"), cx).selected(self.new_chat_screen() && self.reopen.is_none())
-                .disabled(self.api.is_none()).on_click(cx.listener(|this, _, window, cx| this.go_home(window, cx))))
-            .child(self.new_session_button(true, cx))
+            .child(div().flex_1().min_w_0().h_full().flex().items_center().gap(px(6.))
+                .child(strip)
+                .child(chrome::icon_button("tabs-new-chat", IconName::SquarePen, tr("new_chat_title"), cx).flex_shrink_0().selected(self.new_chat_screen() && self.reopen.is_none())
+                    .disabled(self.api.is_none()).on_click(cx.listener(|this, _, window, cx| this.go_home(window, cx))))
+                .child(self.new_session_button(true, cx)))
             .when_some(self.list_error.clone(), |el, text| el.child(div().flex_shrink_0().max_w(px(260.)).flex().items_center().gap_1()
                 .child(div().min_w_0().truncate().text_xs().text_color(theme::warning()).child(text))
                 .child(Button::new("reconnect").xsmall().ghost().label(tr("retry")).on_click(cx.listener(|this, _, window, cx| this.connect(window, cx))))))
@@ -6283,6 +6290,9 @@ impl Render for Hangar {
             .on_action(cx.listener(|this, _: &NextSession, window, cx| this.step_session(1, window, cx)))
             .on_action(cx.listener(|this, _: &PreviousSession, window, cx| this.step_session(-1, window, cx)))
             .on_action(cx.listener(|this, _: &NewChat, window, cx| this.go_home(window, cx)))
+            .on_action(cx.listener(|this, _: &OpenNewSession, window, cx| {
+                if !this.create_blocked(window, cx) { this.open_new_session(None, window, cx); }
+            }))
             .on_action(cx.listener(|this, _: &CloseSession, window, cx| this.close_selected(window, cx)))
             .on_action(cx.listener(|this, _: &RenameSession, window, cx| this.rename_selected(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| if !this.connection_dialog { this.toggle_rail(cx) }))

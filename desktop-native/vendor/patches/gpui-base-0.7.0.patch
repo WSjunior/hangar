@@ -1,7 +1,7 @@
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-base-0.7.0/MODIFICADO.md gpui-base-0.7.0/MODIFICADO.md
 --- gpui-base-0.7.0/MODIFICADO.md
 +++ gpui-base-0.7.0/MODIFICADO.md
-@@ -0,0 +1,32 @@
+@@ -0,0 +1,34 @@
 +# Cópia modificada do gpui-base 0.7.0
 +
 +Origem: crate `gpui-base` 0.7.0 do crates.io (repositório `longbridge/gpui-kit`), licença Apache-2.0 (`LICENSE-APACHE`).
@@ -34,6 +34,74 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 +(`text_selection.rs:206-245`), então o arquivo voltou ao original.
 +
 +Ao subir a versão do gpui-kit, reaplicar estas mudanças na versão nova, ou remover a cópia se o kit já trouxer o conserto.
++
++Os testes que montam `KeyDownEvent` passam `physical_digit: None`, o campo novo da cópia de gpui-pre.
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-base-0.7.0/src/button.rs gpui-base-0.7.0/src/button.rs
+--- gpui-base-0.7.0/src/button.rs
++++ gpui-base-0.7.0/src/button.rs
+@@ -359,6 +359,7 @@
+                 keystroke: keystroke.clone(),
+                 is_held: false,
+                 prefer_character_input: false,
++                physical_digit: None,
+             });
+             cx.simulate_event(KeyUpEvent { keystroke });
+         }
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-base-0.7.0/src/checkbox.rs gpui-base-0.7.0/src/checkbox.rs
+--- gpui-base-0.7.0/src/checkbox.rs
++++ gpui-base-0.7.0/src/checkbox.rs
+@@ -537,6 +537,7 @@
+                 keystroke: keystroke.clone(),
+                 is_held: false,
+                 prefer_character_input: false,
++                physical_digit: None,
+             });
+             cx.simulate_event(KeyUpEvent { keystroke });
+         }
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-base-0.7.0/src/dialog.rs gpui-base-0.7.0/src/dialog.rs
+--- gpui-base-0.7.0/src/dialog.rs
++++ gpui-base-0.7.0/src/dialog.rs
+@@ -747,6 +747,7 @@
+             keystroke: keystroke.clone(),
+             is_held: false,
+             prefer_character_input: false,
++            physical_digit: None,
+         });
+         cx.simulate_event(KeyUpEvent { keystroke });
+         cx.run_until_parked();
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-base-0.7.0/src/link.rs gpui-base-0.7.0/src/link.rs
+--- gpui-base-0.7.0/src/link.rs
++++ gpui-base-0.7.0/src/link.rs
+@@ -291,6 +291,7 @@
+             keystroke: keystroke.clone(),
+             is_held: false,
+             prefer_character_input: false,
++            physical_digit: None,
+         });
+         cx.simulate_event(KeyUpEvent { keystroke });
+     }
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-base-0.7.0/src/radio.rs gpui-base-0.7.0/src/radio.rs
+--- gpui-base-0.7.0/src/radio.rs
++++ gpui-base-0.7.0/src/radio.rs
+@@ -362,6 +362,7 @@
+                 keystroke: keystroke.clone(),
+                 is_held: false,
+                 prefer_character_input: false,
++                physical_digit: None,
+             });
+             cx.simulate_event(KeyUpEvent { keystroke });
+         }
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-base-0.7.0/src/switch.rs gpui-base-0.7.0/src/switch.rs
+--- gpui-base-0.7.0/src/switch.rs
++++ gpui-base-0.7.0/src/switch.rs
+@@ -583,6 +583,7 @@
+             keystroke: keystroke.clone(),
+             is_held: false,
+             prefer_character_input: false,
++            physical_digit: None,
+         });
+         cx.simulate_event(KeyUpEvent { keystroke });
+     }
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-base-0.7.0/src/text/node.rs gpui-base-0.7.0/src/text/node.rs
 --- gpui-base-0.7.0/src/text/node.rs
 +++ gpui-base-0.7.0/src/text/node.rs
@@ -374,3 +442,31 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      }
  
      #[test]
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-base-0.7.0/src/text_selection.rs gpui-base-0.7.0/src/text_selection.rs
+--- gpui-base-0.7.0/src/text_selection.rs
++++ gpui-base-0.7.0/src/text_selection.rs
+@@ -2824,6 +2824,13 @@
+                 if state.touch.drag.is_some() {
+                     return;
+                 }
++                // The release can be lost (a system window-move loop, a
++                // compositor grab, focus leaving mid-drag); a move with the
++                // button up must end the gesture, not keep extending it.
++                if event.pressed_button != Some(MouseButton::Left) {
++                    state.end(cx);
++                    return;
++                }
+                 state.update_in_window(event.position, window, cx)
+             });
+             WindowSelectionState::resolve_content_keys(&state, cx);
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-base-0.7.0/src/toggle.rs gpui-base-0.7.0/src/toggle.rs
+--- gpui-base-0.7.0/src/toggle.rs
++++ gpui-base-0.7.0/src/toggle.rs
+@@ -297,6 +297,7 @@
+                 keystroke: keystroke.clone(),
+                 is_held: false,
+                 prefer_character_input: false,
++                physical_digit: None,
+             });
+             cx.simulate_event(KeyUpEvent { keystroke });
+         }

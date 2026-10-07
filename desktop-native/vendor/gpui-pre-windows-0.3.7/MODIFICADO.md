@@ -22,3 +22,6 @@ Não conferido em Windows.
 Em 0.3.7 `DirectXAtlas::get_texture_view` passou a devolver `Option`; o desfoque não usa o atlas, então nada mudou aqui.
 
 Bandeja: `PlatformWindow::set_hidden` em `src/window.rs`, com `ShowWindowAsync` (`SW_HIDE`/`SW_SHOW`).
+
+Tecla física: `physical_digit(lparam)` (`src/events.rs`) mapeia os códigos de varredura 0x02 a 0x0B (sem o bit de
+tecla estendida) para `KeyDownEvent::physical_digit`.

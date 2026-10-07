@@ -479,9 +479,7 @@ pub fn confirm_alert(window: &mut Window, cx: &mut App, title: String, descripti
         let (act, confirm) = (act.clone(), pressed.clone());
         let (press, cancel_from, ok_from) = (pressed.clone(), cancel_from.clone(), ok_from.clone());
         let anchor = |from: &FocusHandle| div().absolute().size_0().track_focus(from);
-        // O kit põe o diálogo a um décimo do topo; a confirmação é curta e fica no meio da janela, pela altura típica dela.
-        let height = window.viewport_size().height;
-        let top = ((height - px(150.)) / 2.).max(height / 10.);
+        let top = super::popup::centered_top(window.viewport_size().height, px(150.));
         super::popup::dialog(dialog).w(px(360.)).close_button(false).margin_top(top)
             .title(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(title.clone()))
             .child(div().text_size(px(13.)).line_height(px(19.)).text_color(theme::muted()).whitespace_normal().child(description.clone()))

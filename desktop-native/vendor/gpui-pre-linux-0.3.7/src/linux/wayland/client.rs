@@ -84,7 +84,7 @@ use crate::linux::{
     DOUBLE_CLICK_INTERVAL, LinuxClient, LinuxCommon, LinuxKeyboardLayout, PIPE_READ_TIMEOUT,
     SCROLL_LINES, capslock_from_xkb, compose_key, cursor_style_to_icon_names, get_xkb_compose_state,
     is_within_click_distance, keystroke_from_xkb, keystroke_underlying_dead_key,
-    modifiers_from_xkb, new_xkb_context, open_uri_internal, read_fd_with_timeout,
+    modifiers_from_xkb, new_xkb_context, physical_digit, open_uri_internal, read_fd_with_timeout,
     reveal_path_internal,
     wayland::{
         clipboard::{Clipboard, DataOffer, FILE_LIST_MIME_TYPE, TEXT_MIME_TYPES},
@@ -2012,6 +2012,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                             keystroke: keystroke.clone(),
                             is_held: false,
                             prefer_character_input: false,
+                            physical_digit: physical_digit(keycode),
                         });
 
                         state.repeat.current_id += 1;
@@ -2027,6 +2028,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                                     keystroke,
                                     is_held: true,
                                     prefer_character_input: false,
+                                    physical_digit: physical_digit(keycode),
                                 });
                                 move |event_timestamp, _metadata, this| {
                                     let client = this.get_client();
@@ -2113,6 +2115,7 @@ impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for WaylandClientStatePtr {
                             },
                             is_held: false,
                             prefer_character_input: false,
+                            physical_digit: None,
                         }));
                     } else {
                         window.handle_ime(ImeInput::InsertText(commit_text));

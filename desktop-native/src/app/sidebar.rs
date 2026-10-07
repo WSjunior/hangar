@@ -731,7 +731,7 @@ impl Hangar {
             self.focus_origin(&target, window, cx);
             let weak = cx.entity().downgrade();
             let owner = target;
-            window.open_dialog(cx, move |dialog, _, cx| {
+            window.open_dialog(cx, move |dialog, window, cx| {
                 let value = input.read(cx).value().trim().to_owned();
                 let (busy, error) = { let s = status.borrow(); (s.sent.is_some(), s.error.clone()) };
                 let (commit, cancel, close, owner) = (weak.clone(), weak.clone(), weak.clone(), owner.clone());
@@ -748,7 +748,9 @@ impl Hangar {
                 // enquanto o erro está à vista (o cursor segue mostrando o foco).
                 let field = Input::new(&input).aria_label(tr("sidebar_new_name"))
                     .when(error.is_some(), |el| el.focus_bordered(false).border_color(theme::danger()));
-                popup::dialog(dialog).w(px(420.)).title(tr("sidebar_rename_title")).child(field)
+                // Curto como as confirmações: no meio da janela, pela altura de título, campo e botões.
+                popup::dialog(dialog).w(px(420.)).margin_top(popup::centered_top(window.viewport_size().height, px(170.)))
+                    .title(tr("sidebar_rename_title")).child(field)
                     .when_some(error, |dialog, error| dialog.child(div().id("rename-error").role(Role::Alert).mt(px(6.)).text_sm().text_color(theme::danger()).child(error)))
                     .footer(div().flex().justify_end().gap_2()
                         .child(Button::new("rename-cancel").label(tr("cancel")).on_click(move |_, window, cx| {
