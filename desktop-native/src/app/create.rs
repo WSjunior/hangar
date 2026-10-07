@@ -65,6 +65,12 @@ fn enter_action(locked: bool, picked: bool, edited: Option<bool>) -> EnterAction
     }
 }
 
+/// A busca saiu da pasta escolhida: outro texto, outra pasta listada (entrou numa subpasta) ou o realce noutra linha, pelas
+/// setas ou pelo ponteiro. Aí o Enter escolhe a realçada em vez de começar a sessão.
+fn search_moved(query: &str, picked_query: &str, dir: &str, picked_dir: &str, active: Option<&str>, picked: Option<&str>) -> bool {
+    query != picked_query || dir != picked_dir || active.is_some_and(|active| Some(active) != picked)
+}
+
 fn next_root(current: usize, count: usize, reverse: bool) -> Option<usize> {
     if count == 0 { return None; }
     Some(if reverse { (current + count - 1) % count } else { (current + 1) % count })
@@ -430,6 +436,10 @@ pub(in crate::app) struct NewSession {
     picked: Option<String>,
     /// O texto da busca quando a pasta foi escolhida: o Enter com a busca igual começa a sessão, com outra escolhe a pasta.
     picked_query: String,
+    /// A pasta listada quando a pasta foi escolhida: entrar numa subpasta troca a lista sem mudar a busca.
+    picked_dir: String,
+    /// O Enter atual é repetição de tecla segurada: só a primeira pressão escolhe ou começa a sessão.
+    enter_repeat: bool,
     /// Enter dado enquanto o nome sugerido ainda chegava: a sessão começa quando ele chegar.
     create_when_ready: bool,
     checkout: Remote<Option<Checkout>>,
@@ -593,7 +603,7 @@ impl NewSession {
         Self {
             link, purpose: SessionDialogPurpose::Create, transfer_blocked: false, compact: false, menu: Default::default(), menu_query, servers: Remote::default(),
             roots: Remote::default(), root: None, dir: String::new(), scan: Remote::default(), folders: Vec::new(),
-            folder_active: None, folder_scroll: UniformListScrollHandle::new(), root_scans: Vec::new(), search_all, search_error, query, picked: None, picked_query: String::new(), create_when_ready: false,
+            folder_active: None, folder_scroll: UniformListScrollHandle::new(), root_scans: Vec::new(), search_all, search_error, query, picked: None, picked_query: String::new(), picked_dir: String::new(), enter_repeat: false, create_when_ready: false,
             checkout: Remote::default(), branch: String::new(), worktrees: Remote::default(), existing: None, switching: false, base_open: false,
             preset: None, new_branch: false, base: String::new(), new_branch_name,
             git: Default::default(), git_name,
@@ -884,6 +894,7 @@ impl NewSession {
 
     pub(super) fn root_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let key = &event.keystroke;
+        self.enter_repeat = event.is_held && key.key == "enter";
         if self.compact || self.is_transfer() || key.key != "tab" || !key.modifiers.control || key.modifiers.alt || key.modifiers.platform { return false; }
         if self.creating || self.headless_saving { return true; }
         let Some(roots) = self.roots.ok() else { return true; };
@@ -915,8 +926,9 @@ impl NewSession {
     /// Escolher a pasta lê as sessões: o nome sugerido não pode repetir, e a pasta com sessão ganha o aviso.
     fn pick(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
         if self.creating { return; }
-        (self.picked, self.error, self.same_folder) = (Some(path), None, false);
-        (self.picked_query, self.create_when_ready) = (self.query.read(cx).value().to_string(), false);
+        // A escolhida vira a realçada: um realce velho de antes da escolha não rouba o Enter seguinte.
+        (self.folder_active, self.picked, self.error, self.same_folder) = (Some(path.clone()), Some(path), None, false);
+        (self.picked_query, self.picked_dir, self.create_when_ready) = (self.query.read(cx).value().to_string(), self.dir.clone(), false);
         if self.compact {
             self.menu.set(None);
             self.reset_git();
@@ -1601,11 +1613,13 @@ impl NewSession {
         cx.notify();
     }
 
-    /// Enter na busca: sem pasta escolhida, ou com outra busca digitada depois da escolha, escolhe a pasta; com o
-    /// formulário à vista, começa a sessão.
+    /// Enter na busca: sem pasta escolhida, ou com a busca fora da escolha, escolhe a pasta; com o formulário à vista e a
+    /// realçada sendo a escolhida, começa a sessão.
     fn enter_in_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let edited = self.query.read(cx).value() != self.picked_query.as_str();
-        match enter_action(self.compact || self.is_transfer(), self.picked.is_some(), Some(edited)) {
+        if self.enter_repeat { return; }
+        let moved = search_moved(&self.query.read(cx).value(), &self.picked_query, &self.dir, &self.picked_dir,
+            self.folder_active.as_deref(), self.picked.as_deref());
+        match enter_action(self.compact || self.is_transfer(), self.picked.is_some(), Some(moved)) {
             EnterAction::Pick => self.pick_active_folder(window, cx),
             EnterAction::Submit => self.submit(cx),
             EnterAction::Nothing => {}
@@ -1613,6 +1627,7 @@ impl NewSession {
     }
 
     fn enter_in_name(&mut self, cx: &mut Context<Self>) {
+        if self.enter_repeat { return; }
         if enter_action(self.compact || self.is_transfer(), self.picked.is_some(), None) == EnterAction::Submit { self.submit(cx); }
     }
 
@@ -1639,7 +1654,6 @@ impl NewSession {
 
     fn pick_folder(&mut self, root: Root, path: String, window: &mut Window, cx: &mut Context<Self>) {
         self.enter_root(root, window, cx);
-        self.folder_active = Some(path.clone());
         self.pick(path, window, cx);
     }
 
@@ -2787,6 +2801,21 @@ mod tests {
         // Tela sem sessão e transferência: o Enter só escolhe a pasta.
         assert_eq!(enter_action(true, true, Some(false)), Pick);
         assert_eq!(enter_action(true, true, None), Nothing);
+    }
+
+    #[test]
+    fn enter_picks_the_highlighted_folder_before_starting() {
+        use super::search_moved;
+        // Escolhida A pela busca "a": Enter de novo, com o realce em A, começa.
+        assert!(!search_moved("a", "a", "/r", "/r", Some("/r/a"), Some("/r/a")));
+        // Sem realce (pasta do computador, caminho digitado): começa.
+        assert!(!search_moved("", "", "/r", "/r", None, Some("/x")));
+        // ↓ ou o ponteiro realçam B: o Enter escolhe B em vez de criar em A.
+        assert!(search_moved("a", "a", "/r", "/r", Some("/r/b"), Some("/r/a")));
+        // Entrou numa subpasta com a busca vazia: a lista é outra, e o Enter escolhe.
+        assert!(search_moved("", "", "/r/a", "/r", Some("/r/a"), Some("/r/a")));
+        // Outra busca digitada: escolhe.
+        assert!(search_moved("b", "a", "/r", "/r", Some("/r/a"), Some("/r/a")));
     }
 
     #[test]

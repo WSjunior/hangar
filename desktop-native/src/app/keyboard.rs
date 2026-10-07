@@ -185,6 +185,19 @@ impl Config {
         keys
     }
 
+    /// Na leitura, o padrão que cai numa tecla que a pessoa já usa no mesmo contexto fica sem tecla: um atalho padrão novo
+    /// não pode invalidar a configuração inteira. Na edição o conflito continua sendo erro.
+    fn yield_defaults(&mut self) {
+        for command in Command::ALL {
+            if self.overrides.contains_key(&command) { continue; }
+            let Ok(default) = canonical_key(command.default_key()) else { continue; };
+            let same = |key: &str| canonical_key(key).is_ok_and(|key| key == default);
+            let taken = self.overrides.iter().any(|(other, key)| other.context() == command.context() && same(key))
+                || (command.context() == "!Terminal" && self.shortcuts.iter().any(|shortcut| same(&shortcut.key)));
+            if taken { self.overrides.insert(command, String::new()); }
+        }
+    }
+
     fn validate(&self) -> Result<(), String> {
         if self.hold.function || self.hold.number_of_modifiers() != 2 { return Err(tr("keyboard_hold_invalid")); }
         let mut seen = HashMap::new();
@@ -347,11 +360,12 @@ fn config_path() -> Result<PathBuf, String> {
 
 fn load_config() -> Result<Config, String> {
     let path = config_path()?;
-    let config: Config = match std::fs::read(&path) {
+    let mut config: Config = match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| format!("{}: {error}", path.display()))?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Config::default(),
         Err(error) => return Err(format!("{}: {error}", path.display())),
     };
+    config.yield_defaults();
     config.validate()?;
     Ok(config)
 }
@@ -862,6 +876,31 @@ mod tests {
         assert!(!binding_applies(open, &inside("Terminal")));
         let saved: Config = serde_json::from_str(r#"{"overrides":{"new_session":"ctrl-alt-t"}}"#).unwrap();
         assert_eq!(saved.overrides.get(&Command::NewSession).map(String::as_str), Some("ctrl-alt-t"));
+    }
+
+    #[test]
+    fn saved_binding_on_a_new_default_key_drops_the_default_on_load() {
+        let mut config = Config::default();
+        config.shortcuts.push(ShortcutBinding { server: "http://host:8765".into(), project: None,
+            id: "custom".into(), label: "custom".into(), key: "secondary-shift-t".into() });
+        assert!(config.validate().is_err());
+        config.yield_defaults();
+        assert!(config.validate().is_ok());
+        assert!(config.keys(&Command::NewSession).is_empty());
+        let bindings = config.bindings(&DummyKeyboardMapper).unwrap();
+        assert!(!bindings.iter().any(|b| b.action().as_any().is::<OpenNewSession>()));
+        assert!(bindings.iter().any(|b| b.action().as_any().is::<RunShortcut>()));
+        let mut config = Config::default();
+        config.overrides.insert(Command::Costs, "secondary-shift-t".into());
+        config.yield_defaults();
+        assert!(config.validate().is_ok());
+        assert!(config.keys(&Command::NewSession).is_empty());
+        assert_eq!(config.keys(&Command::Costs), ["secondary-shift-t"]);
+        // Sem conflito nada muda; a tecla escolhida pela pessoa para o próprio comando não é tocada.
+        let mut config = Config::default();
+        config.overrides.insert(Command::NewSession, "ctrl-alt-t".into());
+        config.yield_defaults();
+        assert_eq!(config, { let mut c = Config::default(); c.overrides.insert(Command::NewSession, "ctrl-alt-t".into()); c });
     }
 
     #[test]

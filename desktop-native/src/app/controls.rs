@@ -86,7 +86,18 @@ pub(super) struct Controls {
     mode_target: HashMap<SessionKey, ModeTarget>,
 }
 
-struct ModeTarget { mode: String, before: Option<String> }
+// `answers`: os modos que as respostas deste alvo já trouxeram.
+struct ModeTarget { mode: String, before: Option<String>, answers: Vec<String> }
+
+impl ModeTarget {
+    /// Se a resposta manda o pedido de novo: só quando o alvo andou com a troca em voo e o backend saiu do lugar. Modo
+    /// que já tinha voltado é recusa, e insistir repetiria o pedido sem fim.
+    fn resend_after(&mut self, answer: &str) -> bool {
+        if self.mode == answer || self.answers.iter().any(|a| a == answer) { return false; }
+        self.answers.push(answer.to_owned());
+        true
+    }
+}
 
 /// O modo `steps` posições à frente de `from` no ciclo; fora do ciclo, conta a partir do primeiro.
 fn mode_ahead(modes: &[String], from: Option<&str>, steps: usize) -> Option<String> {
@@ -488,8 +499,8 @@ impl Hangar {
     fn step_mode(&mut self, key: SessionKey, modes: &[String], steps: usize, cx: &mut Context<Self>) {
         let from = self.ctl_label(Ctl::Mode);
         let Some(mode) = mode_ahead(modes, from.as_deref(), steps).filter(|m| from.as_deref() != Some(m.as_str())) else { return; };
-        let before = match self.controls.mode_target.get(&key) { Some(target) => target.before.clone(), None => self.ctl_live(Ctl::Mode) };
-        self.controls.mode_target.insert(key.clone(), ModeTarget { mode, before });
+        let live = self.ctl_live(Ctl::Mode);
+        self.controls.mode_target.entry(key.clone()).or_insert_with(|| ModeTarget { mode: String::new(), before: live, answers: Vec::new() }).mode = mode;
         if !self.controls.busy.contains_key(&key) { self.send_mode(key, cx); }
         cx.notify();
     }
@@ -719,11 +730,12 @@ impl Hangar {
                             Ctl::Model => value.pointer("/current/name").or_else(|| value.get("model")).and_then(Value::as_str).map(str::to_owned).unwrap_or(label),
                         };
                         if ctl == Ctl::Mode {
-                            let behind = self.controls.mode_target.get(&key).is_some_and(|target| target.mode != label);
+                            let behind = self.controls.mode_target.get_mut(&key).is_some_and(|target| target.resend_after(&label));
                             match (behind, current.is_some()) {
                                 // Teclas que chegaram com a troca em voo: o que falta sai agora, sem aviso no meio do caminho.
                                 (true, true) => { self.send_mode(key, cx); cx.notify(); return; }
                                 (true, false) => { self.controls.mode_target.remove(&key); }
+                                // Chegou ao alvo, ou o backend recusou: a pílula assenta no modo que ficou.
                                 (false, _) => self.settle_mode_target(key.clone(), label.clone(), cx),
                             }
                         }
@@ -1353,7 +1365,19 @@ impl Hangar {
 #[cfg(test)]
 mod tests {
     // Sem glob: o `test` da gpui colide com o atributo padrão.
-    use super::{Choice, claude_effort_current, claude_model_current, codex_fast_state, keep, mode_ahead, only_match, spaced, step_free};
+    use super::{Choice, ModeTarget, claude_effort_current, claude_model_current, codex_fast_state, keep, mode_ahead, only_match, spaced, step_free};
+
+    #[test]
+    fn mode_reply_resends_only_while_the_backend_moves() {
+        let mut target = ModeTarget { mode: "plan".into(), before: Some("manual".into()), answers: Vec::new() };
+        // Teclas em voo: a resposta trouxe o primeiro passo, e o resto sai.
+        assert!(target.resend_after("acceptEdits"));
+        assert!(!target.resend_after("plan"));
+        // Modo recusado: o backend devolve o mesmo modo de novo, e o pedido para em vez de repetir.
+        let mut refused = ModeTarget { mode: "auto".into(), before: Some("manual".into()), answers: Vec::new() };
+        assert!(refused.resend_after("manual"));
+        assert!(!refused.resend_after("manual"));
+    }
 
     #[test]
     fn shift_tab_steps_walk_the_cycle_and_wrap() {
