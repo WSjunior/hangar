@@ -409,7 +409,8 @@ precisa_home() { # precisa_home <rótulo> <cmd> <comando de instalação> <pra q
   if [ "$UPDATE" = 1 ]; then erro "$rotulo faltando (--update não instala dependência)"; PENDENTE+=("$rotulo"); return 1; fi
   if ask "Instalar agora? (vai pro teu \$HOME, sem sudo)"; then
     mark_item "$cmd" fazendo "$rotulo"
-    eval "$instalacao" >/dev/null 2>&1 || true
+    # O erro vai ao log: o relatório de falha precisa da causa. O resultado é conferido logo abaixo.
+    eval "$instalacao" >/dev/null 2>>"$LOG" || true
     # O instalador põe em ~/.local/bin, que pode não estar no PATH DESTE shell.
     export PATH="$HOME/.local/bin:$HOME/.local/share/fnm:$PATH"
     hash -r 2>/dev/null || true
