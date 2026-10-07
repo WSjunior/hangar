@@ -402,7 +402,7 @@ impl Engine {
             latest.as_ref().map(|s| s.texture.clone())
         };
         // Esticado até o painel: durante um resize o quadro do tamanho antigo cobre tudo até chegar o do novo.
-        if let Some(texture) = shown { window.paint_surface(bounds, Arc::new(texture)); }
+        if let Some(texture) = shown { window.paint_surface(pixel_aligned(bounds, &texture, scale), Arc::new(texture)); }
     }
 
     /// Página fora da tela: sem screencast. O controlador cuida do tamanho dela para o `shot`.
@@ -439,6 +439,19 @@ impl Engine {
     /// A página finge estar sempre focada (`setFocusEmulationEnabled`): o foco do painel não precisa ir a ela.
     pub fn focus(&self, _focused: bool) {}
     pub fn release_focus(&self) {}
+}
+
+/// Retângulo em pixels inteiros da tela, do tamanho do quadro: posição ou largura fracionada faz a GPU reamostrar a
+/// textura inteira e o texto da página perde a nitidez.
+fn pixel_aligned(bounds: Bounds<Pixels>, texture: &wgpu::Texture, scale: f32) -> Bounds<Pixels> {
+    let snap = |v: Pixels| px((f32::from(v) * scale).round() / scale);
+    let origin = point(snap(bounds.origin.x), snap(bounds.origin.y));
+    let fits = (texture.width() as f32 - f32::from(bounds.size.width) * scale).abs() <= 2.
+        && (texture.height() as f32 - f32::from(bounds.size.height) * scale).abs() <= 2.;
+    // Durante um resize o quadro antigo ainda tem outro tamanho: aí ele estica até o painel, como antes.
+    let size = if fits { size(px(texture.width() as f32 / scale), px(texture.height() as f32 / scale)) }
+        else { size(snap(bounds.size.width), snap(bounds.size.height)) };
+    Bounds { origin, size }
 }
 
 impl Drop for Engine {
