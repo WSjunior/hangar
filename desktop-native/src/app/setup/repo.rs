@@ -35,6 +35,9 @@ pub(crate) struct Snapshot {
     /// Instante de início do processo do agente: pid reaproveitado nunca é parado (`run::alive/stop`).
     #[serde(default)]
     pub agent_started: String,
+    /// Ignorados pelo git que já existiam antes do agente (pasta termina em `/`): nunca são apagados.
+    #[serde(default)]
+    pub preserved: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -63,6 +66,13 @@ impl Git {
         if out.status.success() { Ok(out.stdout) } else { Err(format!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim())) }
     }
 
+    /// `check-ignore` recusa `GIT_LITERAL_PATHSPECS`; na dúvida (erro) conta como ignorado: nunca apagar.
+    fn ignored(&self, dir: &Path, path: &str) -> bool {
+        let out = hidden(&mut Command::new(&self.exe)).arg("-C").arg(dir).args(["check-ignore", "-q", "--no-index", "--", path])
+            .env("PATH", &self.path).env_remove("GIT_LITERAL_PATHSPECS").stdin(Stdio::null()).output();
+        !matches!(out, Ok(o) if o.status.code() == Some(1))
+    }
+
     fn head(&self, dir: &Path) -> Result<String, String> { Ok(String::from_utf8_lossy(&self.run(dir, &["rev-parse", "HEAD"])?).trim().to_owned()) }
 
     fn status(&self, dir: &Path) -> Result<BTreeMap<String, String>, String> { Ok(parse_status(&self.run(dir, &STATUS)?).into_iter().collect()) }
@@ -85,6 +95,8 @@ pub(crate) fn parse_status(raw: &[u8]) -> Vec<(String, String)> {
 pub(crate) fn snapshot(dir: &Path) -> Result<Snapshot, String> {
     let git = Git::new()?;
     let head = git.head(dir)?;
+    let preserved = String::from_utf8_lossy(&git.run(dir, &["ls-files", "-o", "-i", "--exclude-standard", "--directory", "-z"])?)
+        .split('\0').filter(|p| !p.is_empty()).map(str::to_owned).collect();
     let before = git.status(dir)?.into_iter().map(|(path, status)| {
         let content = std::fs::read(dir.join(&path)).ok().map(|bytes| STANDARD.encode(bytes));
         let index_clean = matches!(status.as_bytes()[0], b' ' | b'?');
@@ -92,7 +104,7 @@ pub(crate) fn snapshot(dir: &Path) -> Result<Snapshot, String> {
         let mode = file_mode(&dir.join(&path));
         (path, Entry { status, content, index_clean, index, mode })
     }).collect();
-    Ok(Snapshot { dir: dir.to_owned(), head, before, agent_pid: None, agent_started: String::new() })
+    Ok(Snapshot { dir: dir.to_owned(), head, before, agent_pid: None, agent_started: String::new(), preserved })
 }
 
 pub(crate) fn restore(s: &Snapshot) -> Restored {
@@ -104,6 +116,8 @@ pub(crate) fn restore(s: &Snapshot) -> Restored {
     let all: BTreeSet<String> = s.before.keys().chain(after.keys()).cloned().collect();
     let rules: Vec<String> = all.into_iter().filter(|p| p.rsplit('/').next() == Some(".gitignore")).collect();
     for path in &rules { undo(&git, s, path, after.get(path).map_or("  ", String::as_str), &mut out); }
+    // Regra que não voltou: sem ela o status engana e apagaria arquivo da pessoa. Para aqui.
+    if !out.errors.is_empty() { return out; }
     if !rules.is_empty() {
         match git.status(&s.dir) { Ok(now) => after = now, Err(e) => { out.errors.push(e); return out; } }
     }
@@ -139,9 +153,11 @@ fn undo(git: &Git, s: &Snapshot, path: &str, now: &str, out: &mut Restored) {
     let mode_ok = entry.is_none_or(|e| e.mode.is_none() || file_mode(&file) == e.mode);
     if current == target && now == then && index_ok && mode_ok { return; }
     // Existia antes do agente e é ignorado: é do instalador (ex.: `backend/.env`), nunca se apaga.
-    let ignored = entry.is_none() && !in_head && git.run(&s.dir, &["check-ignore", "-q", "--no-index", "--", path]).is_ok();
+    let kept = s.preserved.iter().any(|p| p == path || (p.ends_with('/') && path.starts_with(p.as_str())));
+    let ignored = entry.is_none() && !in_head && (kept || git.ignored(&s.dir, path));
     if current != target && !ignored { out.diff.push_str(&diff(git, path, target.as_deref(), current.as_deref())); }
-    out.changed.push(path.to_owned());
+    // Só o índice mudou (ex.: `add -f` num ignorado): o arquivo não foi tocado, não entra na lista.
+    if (current != target && !ignored) || !mode_ok { out.changed.push(path.to_owned()); }
     let index = match entry {
         // Limpo antes: o commit traz modo e fim de linha certos.
         None if in_head => git.run(&s.dir, &["checkout", "-q", &s.head, "--", path]),
@@ -234,7 +250,7 @@ mod tests {
     use super::*;
 
     fn sh(dir: &Path, args: &[&str]) {
-        let out = Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"])
+        let out = Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "-c", "core.autocrlf=false", "-c", "core.excludesFile=/dev/null", "-c", "status.renames=true"])
             .args(args).output().unwrap();
         assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
     }
@@ -348,6 +364,21 @@ mod tests {
             assert_eq!(status(&dir), before);
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    #[test]
+    fn file_that_existed_before_the_agent_is_never_deleted() {
+        let dir = repo("kept");
+        person_edits(&dir);
+        let snap = snapshot(&dir).unwrap();
+        assert!(snap.preserved.iter().any(|p| p == "backend/" || p == "backend/.env"), "{:?}", snap.preserved);
+        // Mesmo com `check-ignore` dizendo que já não é ignorado, o que existia antes fica.
+        std::fs::write(dir.join(".gitignore"), "").unwrap();
+        sh(&dir, &["add", "-f", "backend/.env"]);
+        let restored = restore(&snap);
+        assert_eq!(read(&dir, "backend/.env").as_deref(), Some("CP_PORT=9\n"));
+        assert!(!restored.changed.contains(&"backend/.env".to_owned()), "{:?}", restored.changed);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[cfg(unix)]
