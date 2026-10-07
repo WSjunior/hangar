@@ -751,7 +751,9 @@ class RuntimeAdapter:
         return view
 
     async def list_models(self, name):
-        return await self.control(name, "list_models")
+        payload = await self.control(name, "list_models")
+        # O Claude responde `{"models": [...]}`; o motor Codex já devolve a lista.
+        return list(payload.get("models") or []) if isinstance(payload, dict) else list(payload or [])
 
     def current_model(self, name):
         data = self.view(name).data
