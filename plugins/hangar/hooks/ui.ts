@@ -97,9 +97,10 @@ async function tell($: EngineInterface, path: "pressed" | "copied" | "opened" | 
   return (await post($, path, fields(o), ponte))?.status === 200;
 }
 
-// O press que começou aqui é o clique que o app pediu? O backend responde com a tentativa, uma vez só.
-async function fromApp($: EngineInterface, requestId: string, element: string, ponte: Bridge | null = bridge()): Promise<string | null> {
-  const r = await post($, "press-start", fields({ requestId, element }), ponte);
+// O press que começou aqui é o clique que o app pediu? O backend responde com a tentativa, uma vez só. O mod
+// vai junto: a `key` só é única dentro dele.
+async function fromApp($: EngineInterface, requestId: string, plugin: string, element: string, ponte: Bridge | null = bridge()): Promise<string | null> {
+  const r = await post($, "press-start", fields({ requestId, plugin, element }), ponte);
   if (r?.status !== 200) return null;
   const { attempt } = JSON.parse(r.text) as { attempt?: string | null };
   return typeof attempt === "string" && attempt ? attempt : null;
@@ -218,13 +219,13 @@ export function registerUi(on: On) {
     // `claude -p`. Outra superfície (o app da Anthropic pelo Remote Control) segue sem janela.
     const ponte = e.surface === "terminal" ? bridge() : e.surface === "desktop" ? surfaceBridge() : null;
     if (e.surface === "terminal" || ponte) {
-      const attempt = ponte ? await fromApp($, e.requestId, e.element, ponte) : null;
+      const attempt = ponte ? await fromApp($, e.requestId, e.plugin, e.element, ponte) : null;
       appPress = attempt && ponte ? { until: (await $.clock.now()) + APP_PRESS_MS, plugin: e.plugin, attempt, surface: e.surface, ponte } : null;
     }
     try {
       return await next(e);
     } finally {
-      if (e.surface === "terminal") void tell($, "pressed", { requestId: e.requestId, element: e.element });
+      if (e.surface === "terminal") void tell($, "pressed", { requestId: e.requestId, plugin: e.plugin, element: e.element });
     }
   });
 
@@ -261,7 +262,8 @@ export function registerUi(on: On) {
     holdUntil = (await $.clock.now()) + HOLD_MS;
     const element = focusElement(e, alvo);
     const r = await next(element === e.element ? e : { ...e, element });
-    void tell($, "focused", { attempt: alvo.attempt, requestId: e.requestId, element: element ?? null, denied: Boolean((r as { deny?: unknown } | undefined)?.deny) });
+    // O mod vai junto: dois mods podem ter a mesma `key` no lugar, e o backend só confirma o do alvo.
+    void tell($, "focused", { attempt: alvo.attempt, requestId: e.requestId, plugin: e.plugin ?? null, element: element ?? null, denied: Boolean((r as { deny?: unknown } | undefined)?.deny) });
     return r;
   });
 

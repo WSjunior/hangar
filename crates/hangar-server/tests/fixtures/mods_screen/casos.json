@@ -32,5 +32,7 @@
  {"nome": "psmux-100-caixa-100", "origem": "terminal-psmux/capturas/100-g-100-colunas-paineis-ja-abertos.ansi", "mux": "psmux", "colunas": 100, "linhas": 45, "titulos": ["xx-00000", "MR ●2", "Jenkins"], "ancora": "▸ xx-00000"},
  {"nome": "psmux-700-dialogo-com-caixa-100", "origem": "terminal-psmux/capturas/700-y-dialogo-com-caixa-100.ansi", "mux": "psmux", "colunas": 100, "linhas": 45, "titulos": ["xx-00000", "MR ●2", "Jenkins"], "ancora": "▸ xx-00000"},
  {"nome": "psmux-710-pesquisa-150", "origem": "terminal-psmux/capturas/710-pesquisa-depois-do-turno.ansi", "mux": "psmux", "colunas": 150, "linhas": 45, "titulos": ["xx-00000", "MR ●2", "Jenkins"], "ancora": "▸ xx-00000"},
- {"nome": "psmux-240-vitrine-110", "origem": "terminal-psmux/capturas/240-v-largura-110-vitrine.ansi", "mux": "psmux", "colunas": 110, "linhas": 45, "titulos": ["Texto", "Botões", "Hover"], "ancora": "▸ xx-00000"}
+ {"nome": "psmux-240-vitrine-110", "origem": "terminal-psmux/capturas/240-v-largura-110-vitrine.ansi", "mux": "psmux", "colunas": 110, "linhas": 45, "titulos": ["Texto", "Botões", "Hover"], "ancora": "▸ xx-00000"},
+ {"nome": "tmux-160-sessao-com-nome-150", "origem": "terminal/capturas/160-sessao-com-nome-150.ansi", "mux": "tmux", "colunas": 150, "linhas": 45, "titulos": ["xxxxx !1"], "ancora": "▸ xxxxx !1"},
+ {"nome": "tmux-161-sessao-com-nome-painel-150", "origem": "terminal/capturas/161-sessao-com-nome-painel-150.ansi", "mux": "tmux", "colunas": 150, "linhas": 45, "titulos": ["xxxxx !1"], "ancora": "▸ xxxxx !1"}
 ]

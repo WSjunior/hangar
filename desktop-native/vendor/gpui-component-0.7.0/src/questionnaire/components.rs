@@ -1577,6 +1577,7 @@ mod tests {
             keystroke,
             is_held,
             prefer_character_input: false,
+            physical_digit: None,
         });
     }
 

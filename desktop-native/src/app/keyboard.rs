@@ -1,18 +1,18 @@
 use super::*;
 use super::settings::{section_head, settings_box};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Command {
-    FocusComposer, OpenSettings, CopyLastReply, Find, NextSession, PreviousSession, NewChat, CloseSession, RenameSession, Costs,
+    FocusComposer, OpenSettings, CopyLastReply, Find, NextSession, PreviousSession, NewChat, NewSession, CloseSession, RenameSession, Costs,
     Search, ProjectFile, ProjectText, Sidebar, Worktrees, Dictation, Permission,
     CloseFile, PreviousFile, NextFile, SaveFile, FindFile, FileLine, CopyTerminal, PasteTerminal,
 }
 
 impl Command {
-    const ALL: [Self; 25] = [Self::FocusComposer, Self::OpenSettings, Self::CopyLastReply, Self::Find,
-        Self::NextSession, Self::PreviousSession, Self::NewChat, Self::CloseSession, Self::RenameSession, Self::Costs, Self::Search, Self::ProjectFile,
+    const ALL: [Self; 26] = [Self::FocusComposer, Self::OpenSettings, Self::CopyLastReply, Self::Find,
+        Self::NextSession, Self::PreviousSession, Self::NewChat, Self::NewSession, Self::CloseSession, Self::RenameSession, Self::Costs, Self::Search, Self::ProjectFile,
         Self::ProjectText, Self::Sidebar, Self::Worktrees, Self::Dictation, Self::Permission,
         Self::CloseFile, Self::PreviousFile, Self::NextFile, Self::SaveFile, Self::FindFile, Self::FileLine,
         Self::CopyTerminal, Self::PasteTerminal];
@@ -21,7 +21,7 @@ impl Command {
         match self {
             Self::FocusComposer => "keyboard_focus_composer", Self::OpenSettings => "keyboard_open_settings",
             Self::CopyLastReply => "keyboard_copy_reply", Self::Find => "keyboard_find", Self::NextSession => "keyboard_next_session",
-            Self::PreviousSession => "keyboard_previous_session", Self::NewChat => "keyboard_new_chat", Self::CloseSession => "keyboard_close_session",
+            Self::PreviousSession => "keyboard_previous_session", Self::NewChat => "keyboard_new_chat", Self::NewSession => "keyboard_new_session", Self::CloseSession => "keyboard_close_session",
             Self::RenameSession => "keyboard_rename_session", Self::Costs => "keyboard_costs",
             Self::Search => "keyboard_search", Self::ProjectFile => "keyboard_project_file", Self::ProjectText => "keyboard_project_text",
             Self::Sidebar => "keyboard_sidebar", Self::Worktrees => "keyboard_worktrees", Self::Dictation => "keyboard_dictation",
@@ -56,7 +56,7 @@ impl Command {
         match self {
             Self::FocusComposer => "secondary-l", Self::OpenSettings => "secondary-,", Self::CopyLastReply => "secondary-shift-c",
             Self::Find => "secondary-f", Self::NextSession => "secondary-down", Self::PreviousSession => "secondary-up",
-            Self::NewChat => "secondary-n", Self::CloseSession => "secondary-w", Self::RenameSession => "f2", Self::Costs => "secondary-alt-c", Self::Search => "secondary-k",
+            Self::NewChat => "secondary-n", Self::NewSession => "secondary-shift-t", Self::CloseSession => "secondary-w", Self::RenameSession => "f2", Self::Costs => "secondary-alt-c", Self::Search => "secondary-k",
             Self::ProjectFile => "secondary-p", Self::ProjectText => "secondary-shift-f", Self::Sidebar => "secondary-b",
             Self::Worktrees => "secondary-alt-w", Self::Dictation => "ctrl-space", Self::Permission => "alt-shift-p",
             Self::CloseFile => "alt-w", Self::PreviousFile => "ctrl-pageup", Self::NextFile => "ctrl-pagedown",
@@ -69,7 +69,7 @@ impl Command {
         match self {
             Self::FocusComposer => Box::new(FocusComposer), Self::OpenSettings => Box::new(OpenSettings),
             Self::CopyLastReply => Box::new(CopyLastReply), Self::Find => Box::new(FocusSettingsSearch),
-            Self::NextSession => Box::new(NextSession), Self::PreviousSession => Box::new(PreviousSession), Self::NewChat => Box::new(NewChat), Self::CloseSession => Box::new(CloseSession),
+            Self::NextSession => Box::new(NextSession), Self::PreviousSession => Box::new(PreviousSession), Self::NewChat => Box::new(NewChat), Self::NewSession => Box::new(OpenNewSession), Self::CloseSession => Box::new(CloseSession),
             Self::RenameSession => Box::new(RenameSession),
             Self::Costs => Box::new(OpenCosts), Self::Search => Box::new(OpenSearch), Self::ProjectFile => Box::new(FindProjectFile),
             Self::ProjectText => Box::new(FindProjectText), Self::Sidebar => Box::new(ToggleSidebar), Self::Worktrees => Box::new(OpenWorktrees),
@@ -109,10 +109,14 @@ pub(super) struct RunShortcut { pub(super) server: String, pub(super) project: O
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
-struct Config { overrides: BTreeMap<Command, String>, shortcuts: Vec<ShortcutBinding>, hold: Modifiers, physical: BTreeMap<String, Modifiers> }
+struct Config {
+    overrides: BTreeMap<Command, String>, shortcuts: Vec<ShortcutBinding>, hold: Modifiers, physical: BTreeMap<String, Modifiers>,
+    // Padrões cedidos na leitura: fora do arquivo, para o padrão voltar quando a tecla da pessoa sair.
+    #[serde(skip)] yielded: BTreeSet<Command>,
+}
 
 impl Default for Config {
-    fn default() -> Self { Self { overrides: BTreeMap::new(), shortcuts: Vec::new(), hold: Modifiers { control: true, shift: true, ..Modifiers::none() }, physical: BTreeMap::new() } }
+    fn default() -> Self { Self { overrides: BTreeMap::new(), shortcuts: Vec::new(), hold: Modifiers { control: true, shift: true, ..Modifiers::none() }, physical: BTreeMap::new(), yielded: BTreeSet::new() } }
 }
 
 fn canonical_key(source: &str) -> Result<String, String> {
@@ -133,8 +137,8 @@ fn captured_stroke(event: &KeyDownEvent, mapper: &dyn PlatformKeyboardMapper) ->
 
 fn number_key(key: &str) -> bool { key.len() == 1 && key.as_bytes()[0].is_ascii_digit() }
 
-fn reserved_number_key(key: &str, physical: Modifiers, hold: Modifiers, layout: &str) -> bool {
-    physical == hold && (super::session_numbers::digit_for_key(key, layout).is_some() || matches!(key, "enter" | "escape" | "backspace"))
+fn reserved_number_key(key: &str, physical: Modifiers, hold: Modifiers, layouts: [&str; 2]) -> bool {
+    physical == hold && (super::session_numbers::layout_digit(key, layouts).is_some() || matches!(key, "enter" | "escape" | "backspace"))
 }
 
 fn key_label(source: &str) -> String {
@@ -158,8 +162,7 @@ fn display_key(source: &str, physical: Option<Modifiers>, cx: &App) -> String {
     shown.key = mapped.key().to_owned();
     if shown.modifiers.shift {
         let layout = cx.keyboard_layout();
-        if let Some(digit) = super::session_numbers::digit_for_key(&shown.key, layout.id())
-            .or_else(|| super::session_numbers::digit_for_key(&shown.key, layout.name())) { shown.key = digit.to_string(); }
+        if let Some(digit) = super::session_numbers::layout_digit(&shown.key, [layout.id(), layout.name()]) { shown.key = digit.to_string(); }
     }
     key_label(&shown.unparse())
 }
@@ -178,12 +181,32 @@ impl Config {
 
     fn keys(&self, command: &Command) -> Vec<&str> {
         let key = self.key(command);
-        if key.is_empty() { return Vec::new(); }
+        if key.is_empty() || (!self.overrides.contains_key(command) && self.yielded.contains(command)) { return Vec::new(); }
         let mut keys = vec![key];
         if cfg!(target_os = "macos") && !self.overrides.contains_key(command) {
             match command { Command::CopyTerminal => keys.push("cmd-c"), Command::PasteTerminal => keys.push("cmd-v"), _ => {} }
         }
         keys
+    }
+
+    /// Na leitura, o padrão que cai numa tecla que a pessoa já usa no mesmo contexto fica sem tecla: um atalho padrão novo
+    /// não pode invalidar a configuração inteira. Na edição o conflito continua sendo erro.
+    fn yield_defaults(&mut self) {
+        for command in Command::ALL {
+            if !self.overrides.contains_key(&command) && self.default_taken(&command) { self.yielded.insert(command); }
+        }
+    }
+
+    /// Ao salvar, o cedido cujo conflito saiu volta a ter o padrão; nenhum padrão novo é cedido fora da leitura.
+    fn release_yielded(&mut self) {
+        self.yielded = self.yielded.iter().filter(|command| self.default_taken(command)).cloned().collect();
+    }
+
+    fn default_taken(&self, command: &Command) -> bool {
+        let Ok(default) = canonical_key(command.default_key()) else { return false; };
+        let same = |key: &str| canonical_key(key).is_ok_and(|key| key == default);
+        self.overrides.iter().any(|(other, key)| other != command && other.context() == command.context() && same(key))
+            || (command.context() == "!Terminal" && self.shortcuts.iter().any(|shortcut| same(&shortcut.key)))
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -223,11 +246,10 @@ impl Config {
             let key = KeybindingKeystroke::new_with_mapper(parsed, false, cx.keyboard_mapper().as_ref());
             let physical = self.physical.get(&canonical_key(source)?).copied().unwrap_or_else(|| {
                 let mut modifiers = *key.modifiers();
-                if !number_key(key.key()) && (super::session_numbers::digit_for_key(key.key(), layout.id()).is_some()
-                    || super::session_numbers::digit_for_key(key.key(), layout.name()).is_some()) { modifiers.shift = true; }
+                if !number_key(key.key()) && super::session_numbers::layout_digit(key.key(), [layout.id(), layout.name()]).is_some() { modifiers.shift = true; }
                 modifiers
             });
-            if reserved_number_key(key.key(), physical, self.hold, layout.id()) || reserved_number_key(key.key(), physical, self.hold, layout.name()) {
+            if reserved_number_key(key.key(), physical, self.hold, [layout.id(), layout.name()]) {
                 return Err(tr("keyboard_number_reserved").replace("{key}", &display_key(source, Some(physical), cx)));
             }
             if let Some(previous) = seen.insert((context.to_owned(), key.inner().unparse()), label.clone()) {
@@ -349,11 +371,12 @@ fn config_path() -> Result<PathBuf, String> {
 
 fn load_config() -> Result<Config, String> {
     let path = config_path()?;
-    let config: Config = match std::fs::read(&path) {
+    let mut config: Config = match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| format!("{}: {error}", path.display()))?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Config::default(),
         Err(error) => return Err(format!("{}: {error}", path.display())),
     };
+    config.yield_defaults();
     config.validate()?;
     Ok(config)
 }
@@ -366,15 +389,6 @@ fn set_aside_config(path: &std::path::Path, stamp: u64) -> Result<Option<PathBuf
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(format!("{}: {error}", path.display())),
     }
-}
-
-/// No Windows o mapeador devolve a tecla física sem Shift; nos demais só a tabela de layouts sabe.
-fn number_layout_supported(cx: &App) -> bool {
-    let layout = cx.keyboard_layout();
-    if super::session_numbers::known_layout(layout.id()) || super::session_numbers::known_layout(layout.name()) { return true; }
-    cfg!(target_os = "windows") && ('0'..='9').all(|digit| Keystroke::parse(&digit.to_string()).is_ok_and(|key| {
-        KeybindingKeystroke::new_with_mapper(key, false, cx.keyboard_mapper().as_ref()).key() == digit.to_string()
-    }))
 }
 
 fn save_config(config: &Config) -> Result<(), String> {
@@ -480,6 +494,7 @@ impl Hangar {
     fn save_keyboard(&mut self, mut config: Config, window: &mut Window, cx: &mut Context<Self>) {
         if self.keyboard.busy() { return; }
         config.prune_physical();
+        config.release_yielded();
         if let Err(error) = config.validate_runtime(cx) { self.keyboard.save_error = Some(error); cx.notify(); return; }
         self.keyboard.saving = true;
         self.keyboard.save_error = None;
@@ -541,7 +556,7 @@ impl Hangar {
     fn restore_keyboard_target(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
         let mut config = self.keyboard.config.clone();
         match target {
-            Target::Command(command) => { config.overrides.remove(&command); }
+            Target::Command(command) => { config.yielded.remove(&command); config.overrides.remove(&command); }
             Target::Shortcut(shortcut) => config.shortcuts.retain(|item| !item.same_target(&shortcut)),
             Target::Hold => config.hold = Config::default().hold,
         }
@@ -607,8 +622,7 @@ impl Hangar {
         if matches!(event.keystroke.key.as_str(), "shift" | "control" | "alt" | "platform" | "super" | "cmd" | "win") { return true; }
         let layout = cx.keyboard_layout();
         let physical = window.modifiers();
-        if reserved_number_key(stroke.key(), physical, self.keyboard.config.hold, layout.id())
-            || reserved_number_key(stroke.key(), physical, self.keyboard.config.hold, layout.name()) {
+        if reserved_number_key(stroke.key(), physical, self.keyboard.config.hold, [layout.id(), layout.name()]) {
             edit.key = None;
             edit.physical = None;
             self.keyboard.save_error = Some(tr("keyboard_number_reserved").replace("{key}", &display_key(&stroke.unparse(), Some(physical), cx)));
@@ -700,7 +714,7 @@ impl Hangar {
 
     fn keyboard_row(&self, target: Target, label: String, hint: Option<String>, cx: &mut Context<Self>) -> AnyElement {
         let (id, keys, changed) = match &target {
-            Target::Command(command) => (format!("command-{command:?}"), self.keyboard.config.keys(command).iter().map(|key| self.keyboard.key_label(key, cx)).collect::<Vec<_>>(), self.keyboard.config.overrides.contains_key(command)),
+            Target::Command(command) => (format!("command-{command:?}"), self.keyboard.config.keys(command).iter().map(|key| self.keyboard.key_label(key, cx)).collect::<Vec<_>>(), self.keyboard.config.overrides.contains_key(command) || self.keyboard.config.yielded.contains(command)),
             Target::Shortcut(shortcut) => {
                 let saved = self.keyboard.config.shortcuts.iter().find(|item| item.same_target(shortcut));
                 (format!("shortcut-{}-{}-{}", shortcut.server, shortcut.project.as_deref().unwrap_or(""), shortcut.id), saved.map(|item| vec![self.keyboard.key_label(&item.key, cx)]).unwrap_or_default(), saved.is_some())
@@ -744,13 +758,7 @@ impl Hangar {
                     .child(Button::new("keyboard-reset").outline().small().label(tr("keyboard_reset_defaults")).loading(self.keyboard.saving)
                         .on_click(cx.listener(|this, _, window, cx| this.reset_keyboard_config(window, cx))))))).into_any_element();
         }
-        let mut hold = settings_box().child(self.keyboard_row(Target::Hold, tr("keyboard_hold_title"), Some(tr("keyboard_hold_help")), cx));
-        if !number_layout_supported(cx) {
-            hold = hold.child(div().id("keyboard-layout-unsupported").px_4().py_3().border_t_1().border_color(theme::border())
-                .text_sm().text_color(theme::warning_text()).whitespace_normal()
-                .child(tr("keyboard_number_layout_unsupported").replace("{layout}", cx.keyboard_layout().name())));
-        }
-        section = section.child(hold);
+        section = section.child(settings_box().child(self.keyboard_row(Target::Hold, tr("keyboard_hold_title"), Some(tr("keyboard_hold_help")), cx)));
         for (context, title) in [("!Terminal", "keyboard_global"), ("FileViewer", "keyboard_files"), ("Terminal", "keyboard_terminal")] {
             let mut list = settings_box().child(div().px_4().py_3().font_weight(FontWeight::SEMIBOLD).text_sm().child(tr(title)));
             for command in Command::ALL.into_iter().filter(|command| command.context() == context) {
@@ -868,6 +876,56 @@ mod tests {
     }
 
     #[test]
+    fn new_session_is_ctrl_shift_t_outside_the_terminal() {
+        let bindings = Config::default().bindings(&DummyKeyboardMapper).unwrap();
+        let open = bindings.iter().find(|b| b.action().as_any().is::<OpenNewSession>()).unwrap();
+        let expected = if cfg!(target_os = "macos") { "cmd-shift-t" } else { "ctrl-shift-t" };
+        assert_eq!(open.keystrokes().iter().map(|k| k.inner().unparse()).collect::<Vec<_>>(), [expected]);
+        let root = KeyContext::new_with_defaults();
+        let inside = |name: &str| { let mut context = KeyContext::default(); context.add(name); vec![root.clone(), context] };
+        assert!(binding_applies(open, std::slice::from_ref(&root)));
+        assert!(binding_applies(open, &inside("Input")));
+        assert!(!binding_applies(open, &inside("Terminal")));
+        let saved: Config = serde_json::from_str(r#"{"overrides":{"new_session":"ctrl-alt-t"}}"#).unwrap();
+        assert_eq!(saved.overrides.get(&Command::NewSession).map(String::as_str), Some("ctrl-alt-t"));
+    }
+
+    #[test]
+    fn saved_binding_on_a_new_default_key_drops_the_default_on_load() {
+        let mut config = Config::default();
+        config.shortcuts.push(ShortcutBinding { server: "http://host:8765".into(), project: None,
+            id: "custom".into(), label: "custom".into(), key: "secondary-shift-t".into() });
+        assert!(config.validate().is_err());
+        config.yield_defaults();
+        assert!(config.validate().is_ok());
+        assert!(config.keys(&Command::NewSession).is_empty());
+        let bindings = config.bindings(&DummyKeyboardMapper).unwrap();
+        assert!(!bindings.iter().any(|b| b.action().as_any().is::<OpenNewSession>()));
+        assert!(bindings.iter().any(|b| b.action().as_any().is::<RunShortcut>()));
+        let mut config = Config::default();
+        config.overrides.insert(Command::Costs, "secondary-shift-t".into());
+        config.yield_defaults();
+        assert!(config.validate().is_ok());
+        assert!(config.keys(&Command::NewSession).is_empty());
+        assert_eq!(config.keys(&Command::Costs), ["secondary-shift-t"]);
+        // O cedido não vai para o arquivo: sem o conflito, o padrão volta na próxima leitura.
+        let saved: Config = serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert!(!saved.overrides.contains_key(&Command::NewSession) && saved.yielded.is_empty());
+        // Na mesma sessão: com o conflito ainda lá o cedido fica; trocada a tecla da pessoa, o padrão volta ao salvar.
+        config.release_yielded();
+        assert!(config.keys(&Command::NewSession).is_empty());
+        config.overrides.insert(Command::Costs, "ctrl-alt-c".into());
+        config.release_yielded();
+        assert!(!config.keys(&Command::NewSession).is_empty());
+        assert!(config.validate().is_ok());
+        // Sem conflito nada muda; a tecla escolhida pela pessoa para o próprio comando não é tocada.
+        let mut config = Config::default();
+        config.overrides.insert(Command::NewSession, "ctrl-alt-t".into());
+        config.yield_defaults();
+        assert_eq!(config, { let mut c = Config::default(); c.overrides.insert(Command::NewSession, "ctrl-alt-t".into()); c });
+    }
+
+    #[test]
     fn rename_session_is_f2_everywhere_but_the_terminal_and_the_browser_page() {
         let bindings = Config::default().bindings(&DummyKeyboardMapper).unwrap();
         let rename = bindings.iter().find(|b| b.action().as_any().is::<RenameSession>()).unwrap();
@@ -933,10 +991,10 @@ mod tests {
     #[test]
     fn shifted_number_capture_uses_physical_modifiers_and_known_layout() {
         let hold = Modifiers { control: true, shift: true, ..Modifiers::none() };
-        assert!(reserved_number_key("!", hold, hold, "English (US)"));
-        assert!(reserved_number_key("dead_diaeresis", hold, hold, "Portuguese (Brazil)"));
-        assert!(!reserved_number_key("!", Modifiers::control(), hold, "English (US)"));
-        assert!(!reserved_number_key("&", hold, hold, "German"));
+        assert!(reserved_number_key("!", hold, hold, ["English (US)"; 2]));
+        assert!(reserved_number_key("dead_diaeresis", hold, hold, ["Portuguese (Brazil)"; 2]));
+        assert!(!reserved_number_key("!", Modifiers::control(), hold, ["English (US)"; 2]));
+        assert!(!reserved_number_key("&", hold, hold, ["German"; 2]));
     }
 
     #[test]
@@ -949,7 +1007,7 @@ mod tests {
 
     #[test]
     fn text_preferred_key_events_are_not_captured_as_shortcuts() {
-        let mut event = KeyDownEvent { keystroke: Keystroke::parse("ctrl-alt-q").unwrap(), is_held: false, prefer_character_input: true };
+        let mut event = KeyDownEvent { keystroke: Keystroke::parse("ctrl-alt-q").unwrap(), is_held: false, prefer_character_input: true, physical_digit: None };
         assert!(captured_stroke(&event, &DummyKeyboardMapper).is_err());
         event.prefer_character_input = false;
         assert!(captured_stroke(&event, &DummyKeyboardMapper).is_ok());

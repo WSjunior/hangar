@@ -53,6 +53,10 @@ pub struct AppState {
     pub list: Arc<crate::list::bridge::ListBridge>,
     /// Produtor único da lista do dono; liga com a primeira lista aberta.
     pub hub: Arc<crate::list::hub::ListHub>,
+    /// Painéis de terminal real de todas as portas.
+    pub term: Arc<crate::term::Terms>,
+    /// O que os `Monitor`s de estado compartilham (Claude com terminal).
+    pub state: Arc<crate::state::live::StateEnv>,
     /// Interface dos mods das sessões sem terminal do Rust: o ator publica, as rotas consultam.
     pub mods: crate::mods::state::Mods,
 }
@@ -75,18 +79,23 @@ impl AppState {
                       costs: Arc<crate::costs::collect::Collector>, fx: Arc<crate::costs::fx::Fx>) -> AppState {
         let http = proxy::client();
         let mods = crate::mods::state::Mods::default();
-        let side = SideCtx {
+        let mut side = SideCtx {
             upstream: cfg.upstream,
             secret: cfg.internal_secret.clone(),
             http: http.clone(),
             watchers: Watchers::default(),
             hubs: Hubs::default(),
             infos: Default::default(),
+            monitors: None,
             mods: mods.clone(),
         };
         mods.bind_hubs(side.hubs.downgrade());
         let diag = crate::diag::DiagClient::new(cfg.upstream, cfg.internal_secret.clone());
         let facts = crate::list::facts::FactsClient::new(cfg.upstream, cfg.internal_secret.clone());
+        let list = Arc::new(crate::list::bridge::ListBridge::new(crate::list::bridge::ListEnv::from_env(), facts));
+        let state = Arc::new(crate::state::live::StateEnv::new(terminal.clone(), list.clone(),
+            crate::state::facts::StateFactsClient::new(cfg.upstream, cfg.internal_secret.clone()), diag.clone()));
+        side.monitors = Some(crate::state::live::spawner(state.clone()));
         AppState { auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None, diag,
             workspace_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             workspace_read_slots: Arc::new(tokio::sync::Semaphore::new(8)),
@@ -94,8 +103,9 @@ impl AppState {
             costs, fx, reports: Arc::new(crate::costs::ReportCache::default()),
             origins_home: std::path::PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default()),
             origins: std::sync::Mutex::new(indexmap::IndexMap::new()),
-            list: Arc::new(crate::list::bridge::ListBridge::new(crate::list::bridge::ListEnv::from_env(), facts)),
+            list, state,
             hub: Arc::default(),
+            term: Arc::default(),
             mods }
     }
 
@@ -109,7 +119,7 @@ impl AppState {
 
     /// `info` da sessão com cache curto: várias telas abrindo juntas viram uma consulta só. Só o
     /// `/events` usa, porque o primeiro `info` da conexão interna corrige um valor velho com `reset`.
-    async fn info(&self, name: &str) -> Result<Option<InternalInfo>, InfoFailed> {
+    pub(crate) async fn info(&self, name: &str) -> Result<Option<InternalInfo>, InfoFailed> {
         if let Some((at, v)) = self.side.infos.lock().unwrap().get(name) {
             if at.elapsed() < INFO_TTL {
                 return Ok(v.clone());
@@ -198,20 +208,27 @@ pub async fn serve_with_state(listener: TcpListener, mut state: AppState) -> std
 }
 
 pub fn terminal_router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/__hangar_server/terminal", axum::routing::post(crate::terminal_routes::terminal))
         .route("/__hangar_server/workspace", axum::routing::post(crate::workspace_routes::private))
         .route("/__hangar_server/list", axum::routing::post(crate::list::bridge::private))
-        .layer(axum::middleware::from_fn(crate::migration_status::count_bridge))
+        .layer(axum::middleware::from_fn(crate::migration_status::count_bridge));
+    // Painel e canal do estado ficam fora da contagem: conexões longas, não chamadas da ponte.
+    router.route("/__hangar_server/term", get(crate::term::private_ws))
+        .route("/__hangar_server/state/{name}/events", get(crate::side::private_events))
         .with_state(state)
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
+        .route("/api/sessions/{name}/term", get(crate::term::session_ws).fallback(pass_any))
+        .route("/api/hangar-terminals/{ident}/term", get(crate::term::hangar_ws).fallback(pass_any))
         .route("/__hangar_server/health", get(health))
         .route("/__hangar_server/terminal", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/workspace", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/list", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
+        .route("/__hangar_server/term", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
+        .route("/__hangar_server/state/{name}/events", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         // Outro método nessas rotas (preflight OPTIONS, HEAD) segue ao Python.
         .route("/api/sessions", get(crate::list::hub::list).fallback(pass_any))
         .route("/api/sessions/events", get(crate::list::hub::events).fallback(pass_any))
@@ -219,6 +236,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/sessions/{name}/events", get(events).fallback(pass_any))
         // Interface dos mods: o Rust atende a sessão sem terminal dele; o resto segue ao Python.
         .route("/api/sessions/{name}/plugin/press", axum::routing::post(crate::mods::routes::press).fallback(pass_any))
+        .route("/api/sessions/{name}/plugin/close", axum::routing::post(crate::mods::routes::close).fallback(pass_any))
         .route("/api/sessions/{name}/plugin/show", axum::routing::post(crate::mods::routes::show).fallback(pass_any))
         .route("/api/sessions/{name}/plugin/input", axum::routing::post(crate::mods::routes::input).fallback(pass_any))
         // Ponte do plugin do Hangar (S7): o clique do app numa sessão sem terminal do Rust.
@@ -245,6 +263,8 @@ pub fn router(state: Arc<AppState>) -> Router {
 async fn health(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let body = serde_json::json!({"ok": true, "version": env!("CARGO_PKG_VERSION"),
         "protocol": crate::INTERNAL_PROTOCOL,
+        // O painel de terminal real é do Rust em todas as plataformas.
+        "terminal_panel": true,
         "terminal_address": st.terminal_address.map(|a| a.to_string())}).to_string();
     let mut resp = ([(header::CONTENT_TYPE, "application/json")], body).into_response();
     cors(&headers, resp.headers_mut());
@@ -614,6 +634,7 @@ mod tests {
             watchers: Watchers::default(),
             hubs: Hubs::default(),
             infos: Default::default(),
+            monitors: None,
             mods: Default::default(),
         };
         let jsonl = dir.join("t.jsonl");

@@ -98,7 +98,7 @@ impl Hangar {
         self.command_panel = false;
         self.accounts.card = false;
         self.context_card = false;
-        self.recent = None;
+        self.close_recent();
         open
     }
 
@@ -214,6 +214,12 @@ pub(super) fn row(id: impl Into<ElementId>, selected: bool) -> Button {
         .when(selected, |el| el.bg(theme::accent_dim()))
 }
 
+/// Topo de um diálogo curto no meio da janela, pela altura típica dele. O kit o põe a um décimo do topo; em janela baixa
+/// esse décimo continua sendo o piso.
+pub(super) fn centered_top(viewport: Pixels, height: Pixels) -> Pixels {
+    ((viewport - height) / 2.).max(viewport / 10.)
+}
+
 /// Linhas vazias no lugar da lista enquanto ela carrega.
 pub(super) fn skeleton(id: &str, rows: usize) -> Div {
     div().flex().flex_col().gap(px(6.)).px(px(8.)).py(px(4.))
@@ -223,8 +229,14 @@ pub(super) fn skeleton(id: &str, rows: usize) -> Div {
 #[cfg(test)]
 mod tests {
     // Sem glob: o `test` da gpui colide com o atributo padrão.
-    use super::Presence;
+    use super::{Presence, centered_top, px};
     use crate::motion;
+
+    #[test]
+    fn short_dialog_sits_in_the_middle_with_a_tenth_as_the_floor() {
+        assert_eq!(centered_top(px(800.), px(150.)), px(325.));
+        assert_eq!(centered_top(px(200.), px(170.)), px(20.));
+    }
 
     #[test]
     fn closing_keeps_the_last_copy_until_the_fade_ends() {

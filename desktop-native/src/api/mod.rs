@@ -236,19 +236,48 @@ impl Api {
         Self::checked(r, true).await?.json().await.map_err(|_| Failure::transport(true))
     }
 
+    /// Áudio do ditado nos anexos (`?audio_only=1`): o backend não trata como vídeo (quadros e transcrição de fala).
+    pub async fn upload_audio(&self, name: &str, filename: &str, bytes: Vec<u8>) -> Result<Uploaded, Failure> {
+        let mut url = self.endpoint(Some(name), Some("upload"));
+        url.query_pairs_mut().append_pair("audio_only", "1");
+        let r = self.client.post(url)
+            .header(header::CONTENT_TYPE, crate::composer::mime_for(filename))
+            .header("X-Filename", crate::composer::encode_component(filename))
+            .body(bytes).timeout(Duration::from_secs(UPLOAD_SECONDS))
+            .send().await.map_err(|_| Failure::transport(true))?;
+        Self::checked(r, true).await?.json().await.map_err(|_| Failure::transport(true))
+    }
+
     /// Sem `name` (nova conversa, antes de a sessão existir) só transcreve, sem guardar o áudio numa sessão.
     pub async fn transcribe(&self, name: Option<&str>, filename: &str, bytes: Vec<u8>, clean: bool, style: Option<&str>) -> Result<Value, Failure> {
         if bytes.len() as u64 > MAX_BYTES { return Err(Failure::local("attach_too_big")); }
+        let filename = if filename.is_empty() { "audio.wav" } else { filename };
+        let request = self.client.post(self.transcribe_url(name, None, clean, style))
+            .header(header::CONTENT_TYPE, crate::composer::mime_for(filename))
+            .header("X-Filename", crate::composer::encode_component(filename))
+            .body(bytes);
+        Self::transcribed(request).await
+    }
+
+    /// Transcreve um áudio que já está nos anexos da sessão (`?arquivo=`, nome solto ou o caminho que o servidor
+    /// devolveu): corpo vazio, nada é salvo de novo.
+    pub async fn transcribe_saved(&self, name: &str, filename: &str, clean: bool, style: Option<&str>) -> Result<Value, Failure> {
+        Self::transcribed(self.client.post(self.transcribe_url(Some(name), Some(filename), clean, style))).await
+    }
+
+    fn transcribe_url(&self, name: Option<&str>, saved: Option<&str>, clean: bool, style: Option<&str>) -> Url {
         let mut url = match name {
             Some(name) => self.endpoint(Some(name), Some("transcribe")),
             None => self.server_url(&["dictation", "transcribe"], &[]),
         };
         url.query_pairs_mut().append_pair("limpar", if clean { "1" } else { "0" });
         if let Some(style) = style.filter(|style| clean && !style.is_empty()) { url.query_pairs_mut().append_pair("estilo", style); }
-        let filename = if filename.is_empty() { "audio.wav" } else { filename };
-        let r = self.client.post(url).header(header::CONTENT_TYPE, crate::composer::mime_for(filename))
-            .header("X-Filename", crate::composer::encode_component(filename))
-            .body(bytes).timeout(Duration::from_secs(300)).send().await.map_err(|_| Failure::transport(true))?;
+        if let Some(file) = saved { url.query_pairs_mut().append_pair("arquivo", file); }
+        url
+    }
+
+    async fn transcribed(request: reqwest::RequestBuilder) -> Result<Value, Failure> {
+        let r = request.timeout(Duration::from_secs(300)).send().await.map_err(|_| Failure::transport(true))?;
         Self::checked(r, true).await?.json().await.map_err(|_| Failure::local("invalid_response"))
     }
 
@@ -830,5 +859,20 @@ mod tests {
         }
         assert_eq!(failure_detail(Some(json!({"detail": {"code": "erro_arq_busca_falhou",
             "params": {"msg": "search failed"}, "msg": "search failed"}})), 500), "search failed");
+    }
+
+    #[test]
+    fn saved_audio_is_transcribed_by_name_and_fresh_audio_carries_no_name() {
+        let api = Api::new("http://127.0.0.1:8765", "t").unwrap();
+        let url = api.transcribe_url(Some("minha sessão"), Some("ditado 1.wav"), true, Some("prosa"));
+        assert!(url.path().ends_with("/api/sessions/minha%20sess%C3%A3o/transcribe"), "{url}");
+        let query: Vec<(String, String)> = url.query_pairs().into_owned().collect();
+        assert_eq!(query, [("limpar".to_owned(), "1".to_owned()), ("estilo".to_owned(), "prosa".to_owned()),
+            ("arquivo".to_owned(), "ditado 1.wav".to_owned())]);
+        let absolute = api.transcribe_url(Some("s"), Some("/home/u/.hangar/uploads/p-1a/s1/ditado.wav"), false, None);
+        assert_eq!(absolute.query_pairs().find(|(k, _)| k == "arquivo").map(|(_, v)| v.into_owned()).as_deref(),
+            Some("/home/u/.hangar/uploads/p-1a/s1/ditado.wav"), "o caminho absoluto vai inteiro, para valer depois do /clear");
+        let fresh = api.transcribe_url(Some("s"), None, false, Some("prosa"));
+        assert_eq!(fresh.query(), Some("limpar=0"), "sem limpar o estilo não vai, e áudio novo não leva nome");
     }
 }

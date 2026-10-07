@@ -82,7 +82,7 @@ mod setup;
 /// Variável do ambiente do script com o código de uso único do askpass (`setup::askpass`).
 pub(crate) const ASKPASS_CODE_ENV: &str = "HANGAR_ASKPASS_CODE";
 
-actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, FindProjectFile, FindProjectText, NextSession, PreviousSession, ToggleDictation, NewChat, CloseSession, RenameSession, OpenCosts, OpenSearch,
+actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, FindProjectFile, FindProjectText, NextSession, PreviousSession, ToggleDictation, NewChat, OpenNewSession, CloseSession, RenameSession, OpenCosts, OpenSearch,
     ToggleSidebar, CyclePermission, OpenWorktrees]);
 
 const LIVE_THINKING: &str = "__thinking__";
@@ -224,16 +224,18 @@ enum Payload {
     PluginPressed(Result<Value, Failure>),
     // Troca de aba de mod: só a falha interessa; a aba nova chega pelo `shown_id`.
     PluginShown(Result<Value, Failure>),
+    PluginClosed(Result<Value, Failure>),
     // Digitação num campo de mod: o lugar, a `key` e a identidade do campo que mandou; a volta libera o próximo pedido
     // da fila dele, e só a falha aparece.
-    PluginInput(String, String, EntityId, Result<Value, Failure>),
+    PluginInput(String, crate::plugin_ui::Control, EntityId, Result<Value, Failure>),
     // Lista de outra máquina: a geração dos SSE de lista, a chave do servidor e o que chegou.
     Remote(u64, String, servers::RemoteUpdate),
     HeadlessPlan(SessionKey, controls::PlanOutcome),
     // Barra lateral: prévia, leitura do silenciar e as gravações do menu da sessão.
     Sidebar(sidebar::SidebarReply),
     Terminal(terminal::Reply),
-    Dictation(u64, Result<Value, Failure>),
+    // O caminho do áudio que este pedido guardou nos anexos, também quando a transcrição falhou.
+    Dictation(u64, Option<String>, Result<Value, Failure>),
     // Aba Atividade: a conta de subagentes no disco e a lista da aba.
     Activity(activity::ActivityReply),
     FileView(files::FileReply),
@@ -1016,6 +1018,16 @@ impl Hangar {
         Self::plugin_failure(error, || tr_shared("plugin_clique_falhou", &[]))
     }
 
+    /// Aviso de falha de uma ação de mod; um novo substitui o anterior (`PluginFailure`).
+    fn notify_plugin_failure(text: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = text { window.push_notification(Notification::warning(text).id::<PluginFailure>(), cx); }
+    }
+
+    /// Painel de mod que não fechou: a frase genérica é a mesma do web.
+    fn close_failure(error: &Failure) -> String {
+        Self::plugin_failure(error, || tr_shared("plugin_fechar_falhou", &[]))
+    }
+
     /// Digitação num campo de mod que não chegou: a frase genérica é a mesma do web.
     fn input_failure(error: &Failure) -> String {
         Self::plugin_failure(error, || tr_shared("plugin_input_falhou", &[]))
@@ -1289,7 +1301,7 @@ impl Hangar {
         self.plugin_tabs_seen = None;
         self.plugin_hovered.clear();
         self.plugin_fields.clear();
-        self.recent = None;
+        self.close_recent();
         self.command_panel = false;
         // Os menus são da tela sem sessão: sem isto, o Esc seguinte seria gasto num deles, já fora da tela.
         self.new_chat_folders.set(None);
@@ -1318,9 +1330,14 @@ impl Hangar {
         cx.notify();
     }
 
+    /// Nova conversa e Nova sessão não abrem sem servidor nem por cima de um diálogo.
+    fn create_blocked(&self, window: &mut Window, cx: &mut App) -> bool {
+        self.api.is_none() || window.has_active_dialog(cx) || self.connection_dialog
+    }
+
     /// Volta à tela sem sessão, a da nova conversa. O rascunho da sessão fica guardado como na troca de sessão.
     pub(super) fn go_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.api.is_none() || window.has_active_dialog(cx) || self.connection_dialog { return; }
+        if self.create_blocked(window, cx) { return; }
         if self.settings.is_some() && !self.settings_live() { self.close_settings(window, cx); }
         self.pending_remote = None;
         // Cada tela tem o próprio texto: o da conversa fechada fica com ela, e a nova conversa volta com o dela.
@@ -1687,20 +1704,20 @@ impl Hangar {
             Payload::Create(dialog, reply) => { self.receive_create(dialog, reply, window, cx); return; }
             Payload::Transfer(dialog, reply) => { self.receive_agent_transfer(dialog, reply, window, cx); return; }
             Payload::PluginPressed(result) => { self.receive_plugin_press(result, window, cx); return; }
-            Payload::PluginShown(result) => {
-                if let Some(text) = result.err().and_then(|error| Self::show_failure(&error)) {
-                    window.push_notification(Notification::warning(text).id::<PluginFailure>(), cx);
-                }
+            Payload::PluginClosed(result) => {
+                Self::notify_plugin_failure(result.err().map(|error| Self::close_failure(&error)), window, cx);
                 return;
             }
-            Payload::PluginInput(site, key, field, result) => {
-                if let Err(error) = result {
-                    window.push_notification(Notification::warning(Self::input_failure(&error)).id::<PluginFailure>(), cx);
-                }
+            Payload::PluginShown(result) => {
+                Self::notify_plugin_failure(result.err().and_then(|error| Self::show_failure(&error)), window, cx);
+                return;
+            }
+            Payload::PluginInput(site, control, field, result) => {
+                Self::notify_plugin_failure(result.err().map(|error| Self::input_failure(&error)), window, cx);
                 // O próximo da fila só sai pelo mesmo campo: um campo recriado com a mesma `key` tem fila própria.
-                let next = self.plugin_fields.get_mut(&crate::plugin_ui::field_id(&site, &key))
+                let next = self.plugin_fields.get_mut(&crate::plugin_ui::field_id(&site, &control))
                     .filter(|f| f.state.entity_id() == field).and_then(|f| f.outbox.done());
-                if let Some(next) = next { self.send_plugin_input(&site, &key, next); }
+                if let Some(next) = next { self.send_plugin_input(&site, &control, next); }
                 return;
             }
             Payload::Sidebar(reply) => {
@@ -1709,7 +1726,7 @@ impl Hangar {
                 self.receive_sidebar(reply, window, cx); return;
             }
             Payload::Activity(reply) => { self.receive_activity(reply, cx); return; }
-            Payload::Dictation(seq, result) => { self.receive_dictation(seq, result, window, cx); return; }
+            Payload::Dictation(seq, path, result) => { self.receive_dictation(seq, path, result, window, cx); return; }
             Payload::FileView(reply) => { self.receive_file_view(reply, window, cx); return; }
             Payload::Dossier(key, seq, result) => { self.receive_dossier(key, seq, result, cx); return; }
             Payload::DesktopPalette(seq, result) => { self.receive_desktop_palette(seq, result, window, cx); return; }
@@ -1860,8 +1877,11 @@ impl Hangar {
                     if let Some(from) = moved { self.drafts.remove(&from); }
                 }
                 Some(new) => {
-                    if let Some(key) = self.selected_key() { self.controls.on_session_update(&key, &new); }
+                    let before = self.selected_key();
+                    if let Some(key) = &before { self.controls.on_session_update(key, &new); }
                     self.selected = Some(new);
+                    // Recentes listados para a chave de antes: com outra chave, a lista some da tela mas seguiria aberta.
+                    if self.selected_key() != before { self.close_recent(); }
                 }
                 None => {
                     self.close_terminal(false, window, cx);
@@ -2503,7 +2523,7 @@ impl Hangar {
 
     fn open_recent(&mut self, cx: &mut Context<Self>) {
         let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
-        if self.recent.as_ref().is_some_and(|recent| recent.key == key) { self.recent = None; cx.notify(); return; }
+        if self.recent.as_ref().is_some_and(|recent| recent.key == key) { self.close_recent(); cx.notify(); return; }
         self.command_panel = false;
         self.close_controls();
         self.recent = Some(Recent { key: key.clone(), files: None });
@@ -2520,7 +2540,7 @@ impl Hangar {
         let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
         let generation = self.check_dictation_owner(cx);
         let owner = self.dictation_owner(cx);
-        self.recent = None;
+        self.close_recent();
         let (connection, tx, uploads) = (self.connection, self.tx.clone(), self.uploads_for(&key));
         self.runtime.spawn(async move {
             let result = uploads.fetch(&api, &key.name, &Source::Upload(filename.clone())).await
@@ -2529,6 +2549,26 @@ impl Hangar {
             let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Files(key, owner, generation, vec![result]) }).await;
         });
         cx.notify();
+    }
+
+    /// Áudio da lista de recentes volta ao ditado lido do arquivo que o servidor já tem.
+    fn dictate_recent(&mut self, filename: String, cx: &mut Context<Self>) {
+        let Some(key) = self.selected_key() else { return; };
+        self.close_recent();
+        match self.dictate_upload(filename, cx) {
+            Ok(()) => { self.action_feedback.remove(&key); }
+            Err(problem) => { self.action_feedback.insert(key, (problem, true)); }
+        }
+        cx.notify();
+    }
+
+    /// Toca um áudio da lista de recentes, lido de onde estão os anexos da sessão (disco desta máquina ou backend).
+    fn play_recent(&mut self, filename: String, cx: &mut Context<Self>) {
+        let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
+        let (uploads, source) = (self.uploads_for(&key), Source::Upload(filename.clone()));
+        self.toggle_audio(format!("recent:{filename}"), &filename, async move {
+            uploads.fetch(&api, &key.name, &source).await.map_err(|error| Self::saved_audio_failure(&error))
+        }, cx);
     }
 
     fn ensure_media(&mut self, source: &Source) {
@@ -2638,7 +2678,7 @@ impl Hangar {
     // Preencher o campo com um comando; texto que não é comando pede confirmação antes de ser trocado.
     fn fill_command(&mut self, name: &str, protect: bool, window: &mut Window, cx: &mut Context<Self>) {
         let current = self.composer.read(cx).value().to_string();
-        if protect && !current.trim().is_empty() && composer::slash_query(&current).is_none() {
+        if protect && !current.trim().is_empty() && !composer::only_command(&current) {
             self.confirm = Some(Confirm::Replace(name.to_owned()));
             cx.notify();
             return;
@@ -2656,6 +2696,11 @@ impl Hangar {
     fn pick_command(&mut self, command: CommandInfo, from_panel: bool, window: &mut Window, cx: &mut Context<Self>) {
         let provider = self.provider().0.to_owned();
         self.command_panel = false;
+        // Da lista em linha, só o `/nome` que é a mensagem toda roteia; no meio do texto a escolha só completa o nome.
+        if !from_panel {
+            let whole = self.composer_cursor(cx).and_then(|(text, cursor)| composer::slash_token(&text, cursor).map(|t| t.whole));
+            if whole == Some(false) { self.complete_slash(&command.name, window, cx); return; }
+        }
         if composer::needs_other_surface(&provider, &command) {
             if let Some(key) = self.selected_key() {
                 self.action_feedback.insert(key, (tr("command_other_surface").replace("{cmd}", &format!("/{}", command.name)), true));
@@ -2675,10 +2720,35 @@ impl Hangar {
     }
 
     fn visible_suggestions(&self, cx: &App) -> Vec<CommandInfo> {
-        let text = self.composer.read(cx).value().to_string();
+        let Some((text, cursor)) = self.composer_cursor(cx) else { return Vec::new(); };
         if self.suggest_dismissed.as_deref() == Some(text.as_str()) { return Vec::new(); }
-        let Some(query) = composer::slash_query(&text) else { return Vec::new(); };
-        composer::suggestions(self.command_list(), query).into_iter().cloned().collect()
+        let Some(token) = composer::slash_token(&text, cursor) else { return Vec::new(); };
+        composer::suggestions(self.command_list(), token.query).into_iter().cloned().collect()
+    }
+
+    /// Texto do campo e posição do cursor; com trecho selecionado não há cursor.
+    fn composer_cursor(&self, cx: &App) -> Option<(String, usize)> {
+        let input = self.composer.read(cx);
+        let selected = input.selected_range();
+        selected.is_empty().then(|| (input.value().to_string(), selected.end))
+    }
+
+    /// Troca o `/nome` sob o cursor pelo comando escolhido: o resto da mensagem fica, e nada é enviado.
+    fn complete_slash(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((text, cursor)) = self.composer_cursor(cx) else { return; };
+        let Some(token) = composer::slash_token(&text, cursor) else { return; };
+        let (range, insert) = composer::slash_replacement(&text, &token, name);
+        self.replace_composer(range, insert, window, cx);
+        cx.notify();
+    }
+
+    /// Troca um trecho do campo e devolve o foco a ele.
+    pub(super) fn replace_composer(&mut self, range: std::ops::Range<usize>, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer.update(cx, |input, cx| {
+            input.set_selected_range(range, cx);
+            input.replace(text, window, cx);
+            input.focus(window, cx);
+        });
     }
 
     fn tool_answered(&self, id: &str) -> bool {
@@ -3628,9 +3698,8 @@ impl Hangar {
         let state = &self.chat.state;
         if self.chat.ask.is_some() || state.state != "awaiting_input" { return None; }
         let (question, options) = (state.question.clone()?, state.options.clone().filter(|o| !o.is_empty())?);
-        // Menu do AskUserQuestion no pane: quem responde é o card nativo, que chega pelo `ask_question` (antes dele e
-        // depois de enviar, este seletor piscava por cima).
-        if interaction::ask_picker(&options) { return None; }
+        // Menu do AskUserQuestion no pane: quem responde é o card nativo (depois de enviar, este seletor piscava por cima).
+        if self.chat.ask_pane() { return None; }
         let snapshot = select_snapshot(state);
         let plan = plan_pending(state).filter(|p| !p.plan.trim().is_empty());
         let multi = options.iter().any(|o| interaction::checkbox(o).is_some());
@@ -3874,10 +3943,25 @@ impl Hangar {
             Some(Ok(files)) if files.is_empty() => div().px(px(8.)).text_sm().text_color(theme::muted()).child(tr("recent_empty")).into_any_element(),
             Some(Ok(files)) => div().flex().flex_col().children(files.iter().enumerate().map(|(n, file)| {
                 let name = file.filename.clone();
+                if composer::is_audio(&name) {
+                    // Áudio não volta ao campo como anexo: toca aqui ou volta ao ditado, lido do que o servidor já tem.
+                    // O player fica fora do `popup::row`: a linha é um botão e o play também a dispararia.
+                    let (play, dictate) = (name.clone(), name.clone());
+                    return div().id(SharedString::from(format!("recent-{n}"))).px(px(8.)).py(px(4.)).flex().flex_col().gap_1()
+                        .child(div().flex().items_center().gap_2()
+                            .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+                            .child(div().flex_shrink_0().text_xs().text_color(theme::muted()).child(human_size(file.size)))
+                            .child(Button::new(SharedString::from(format!("recent-dictate-{n}"))).ghost().xsmall()
+                                .label(tr("dictation_again")).accessibility_label(format!("{}: {name}", tr("dictation_again")))
+                                .on_click(cx.listener(move |this, _, _, cx| this.dictate_recent(dictate.clone(), cx)))))
+                        .child(self.audio_controls(&format!("recent:{name}"), move |this, cx| this.play_recent(play.clone(), cx), cx))
+                        .into_any_element();
+                }
                 popup::row(SharedString::from(format!("recent-{n}")), false)
                     .child(div().flex_1().min_w_0().truncate().child(file.filename.clone()))
                     .child(div().flex_shrink_0().text_xs().text_color(theme::muted()).child(human_size(file.size)))
                     .on_click(cx.listener(move |this, _, _, cx| this.reattach(name.clone(), cx)))
+                    .into_any_element()
             })).into_any_element(),
         };
         Some(div().p(px(popup::INSET)).rounded_md().bg(theme::popup_content_fill()).flex().flex_col().gap(px(2.))
@@ -4158,7 +4242,7 @@ impl Hangar {
                 this.command_panel = !this.command_panel;
                 if this.command_panel {
                     this.close_controls();
-                    this.recent = None;
+                    this.close_recent();
                     this.ensure_commands(false);
                     this.command_search.update(cx, |input, cx| { input.set_value("", window, cx); input.focus(window, cx); });
                 }
@@ -4216,7 +4300,7 @@ impl Hangar {
         let suggestions = self.visible_suggestions(cx);
         if let Some(command) = suggestions.get(self.suggest_pick.min(suggestions.len().saturating_sub(1))) {
             let name = command.name.clone();
-            self.fill_command(&name, false, window, cx);
+            self.complete_slash(&name, window, cx);
         } else if self.composer.read(cx).value().is_empty() && !self.terminal_suggestion.is_empty() {
             let text = self.terminal_suggestion.clone();
             self.composer.update(cx, |input, cx| { input.insert(text, window, cx); });
@@ -4943,8 +5027,9 @@ impl Hangar {
                 .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| this.start_menu(menu_target.clone(), cx)))
                 .context_menu(sidebar::session_menu(weak.clone(), active.clone(), session.clone())))
         }).collect::<Vec<_>>();
-        // A folga lateral deixa o anel de foco da primeira e da última aba fora do recorte da rolagem.
-        let strip = div().id("tabs-strip").flex_1().min_w_0().h_full().px(px(3.)).flex().items_center().gap(px(2.)).overflow_x_scroll().track_scroll(&self.tabs_scroll)
+        // A folga lateral deixa o anel de foco da primeira e da última aba fora do recorte da rolagem. A faixa mede o que
+        // as abas medem e só encolhe (rolando) quando falta espaço, para os botões de criar ficarem logo depois da última.
+        let strip = div().id("tabs-strip").flex_shrink_1().min_w_0().h_full().px(px(3.)).flex().items_center().gap(px(2.)).overflow_x_scroll().track_scroll(&self.tabs_scroll)
             .role(Role::TabList).aria_label(tr("sessions"))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let step = match event.keystroke.key.as_str() { "left" => -1, "right" => 1, _ => return };
@@ -4966,10 +5051,11 @@ impl Hangar {
                 else if appearance::get().navigation == appearance::Navigation::BottomTabs { el.border_t_1() } else { el.border_b_1() })
             .child(div().px(px(6.)).child(chrome::hangar_mark(16., theme::accent())))
             .children(self.render_hangar_chip(hangar_live::Chip::Label, cx))
-            .child(strip)
-            .child(chrome::icon_button("tabs-new-chat", IconName::SquarePen, tr("new_chat_title"), cx).selected(self.new_chat_screen() && self.reopen.is_none())
-                .disabled(self.api.is_none()).on_click(cx.listener(|this, _, window, cx| this.go_home(window, cx))))
-            .child(self.new_session_button(true, cx))
+            .child(div().flex_1().min_w_0().h_full().flex().items_center().gap(px(6.))
+                .child(strip)
+                .child(chrome::icon_button("tabs-new-chat", IconName::SquarePen, tr("new_chat_title"), cx).flex_shrink_0().selected(self.new_chat_screen() && self.reopen.is_none())
+                    .disabled(self.api.is_none()).on_click(cx.listener(|this, _, window, cx| this.go_home(window, cx))))
+                .child(self.new_session_button(true, cx)))
             .when_some(self.list_error.clone(), |el, text| el.child(div().flex_shrink_0().max_w(px(260.)).flex().items_center().gap_1()
                 .child(div().min_w_0().truncate().text_xs().text_color(theme::warning()).child(text))
                 .child(Button::new("reconnect").xsmall().ghost().label(tr("retry")).on_click(cx.listener(|this, _, window, cx| this.connect(window, cx))))))
@@ -5702,9 +5788,19 @@ impl Hangar {
     fn plugin_press(&self, cx: &mut Context<Self>) -> Option<crate::plugin_ui::Press> {
         if self.selected.as_ref().is_some_and(|s| s.read_only()) { return None; }
         let view = cx.entity().downgrade();
-        Some(std::rc::Rc::new(move |site: &str, key: &str, _: &mut Window, cx: &mut App| {
-            let (site, key) = (site.to_owned(), key.to_owned());
-            let _ = view.update(cx, |this, cx| this.press_plugin(site, key, cx));
+        Some(std::rc::Rc::new(move |site: &str, button: &crate::plugin_ui::Control, _: &mut Window, cx: &mut App| {
+            let (site, button) = (site.to_owned(), button.clone());
+            let _ = view.update(cx, |this, cx| this.press_plugin(site, button, cx));
+        }))
+    }
+
+    /// Quem atende o `✕` de um painel de mod; sessão só leitura fica sem ele.
+    fn plugin_close(&self, cx: &mut Context<Self>) -> Option<crate::plugin_ui::Close> {
+        if self.selected.as_ref().is_some_and(|s| s.read_only()) { return None; }
+        let view = cx.entity().downgrade();
+        Some(std::rc::Rc::new(move |site: &str, _: &mut Window, cx: &mut App| {
+            let site = site.to_owned();
+            let _ = view.update(cx, |this, cx| this.close_plugin(site, cx));
         }))
     }
 
@@ -5713,15 +5809,24 @@ impl Hangar {
         let (Some(api), Some(session)) = (self.session_api(), self.selected.clone()) else { return };
         let (connection, selection, tx) = (self.connection, self.selection, self.tx.clone());
         self.runtime.spawn(async move {
-            let result = api.act(&session.name, &["plugin", action], Some(body), false, 10).await;
+            let mut result = api.act(&session.name, &["plugin", action], Some(body.clone()), false, 10).await;
+            if let Err(error) = &result
+                && let Some((retry, older)) = crate::plugin_ui::older_server_retry(action, &body, error.status) {
+                result = api.act(&session.name, &["plugin", retry], Some(older), false, 10).await;
+            }
             let _ = tx.send(Envelope { connection, selection: Some(selection), payload: wrap(result) }).await;
         });
     }
 
-    fn press_plugin(&mut self, site: String, key: String, cx: &mut Context<Self>) {
+    fn press_plugin(&mut self, site: String, button: crate::plugin_ui::Control, cx: &mut Context<Self>) {
+        self.spawn_plugin("press", json!({"site": site, "plugin": button.plugin, "key": button.key}), Payload::PluginPressed);
+        cx.notify();
+    }
+
+    fn close_plugin(&mut self, site: String, cx: &mut Context<Self>) {
         // O `✕` tira o painel da tela: o hover dele sai junto, sem esperar o evento que confirma o fechamento.
-        if key == crate::plugin_ui::PANE_CLOSE_KEY { self.keep_plugin_hovered_without(Some(&site)); }
-        self.spawn_plugin("press", json!({"site": site, "key": key}), Payload::PluginPressed);
+        self.keep_plugin_hovered_without(Some(&site));
+        self.spawn_plugin("close", json!({"site": site}), Payload::PluginClosed);
         cx.notify();
     }
 
@@ -5760,7 +5865,7 @@ impl Hangar {
             std::iter::once((crate::plugin_ui::BAND_SITE.to_owned(), &self.plugin_band))
                 .chain(self.plugin_panes.iter().map(|p| (p["id"].as_str().unwrap_or("").to_owned(), &p["tree"])))
                 .flat_map(|(site, tree)| crate::plugin_ui::fields(tree).into_iter()
-                    .map(move |f| (crate::plugin_ui::field_id(&site, &f.key), site.clone(), f)))
+                    .map(move |f| (crate::plugin_ui::field_id(&site, &f.control), site.clone(), f)))
                 .collect();
         self.plugin_fields.retain(|id, _| wanted.iter().any(|(w, _, _)| w == id));
         for (id, site, spec) in wanted {
@@ -5783,13 +5888,13 @@ impl Hangar {
                 continue;
             }
             let state = cx.new(|cx| InputState::new(window, cx).placeholder(spec.placeholder.clone()).default_value(spec.value.clone()));
-            let key = spec.key.clone();
+            let control = spec.control.clone();
             let changes = cx.subscribe_in(&state, window, move |this, input, event: &InputEvent, _, cx| {
                 // A faixa de baixo é uma área guardada: sem redesenho, o valor pendente só entraria no próximo evento.
                 if matches!(event, InputEvent::Blur) { this.redraw(panes::Area::Bottom, cx); return; }
                 let Some(kind) = crate::plugin_ui::input_kind(event) else { return };
                 let value = input.read(cx).value().to_string();
-                this.input_plugin(&site, &key, kind, value);
+                this.input_plugin(&site, &control, kind, value);
             });
             let field = crate::plugin_ui::Field { state, sync: crate::plugin_ui::FieldSync::new(&spec.value), outbox: Default::default(),
                 placeholder: spec.placeholder, seen: self.plugin_draws, _changes: changes };
@@ -5801,30 +5906,30 @@ impl Hangar {
     /// que repõe o valor desenhado não emite `Change`, então o que chega aqui é a pessoa digitando. Sai pela fila do
     /// campo (`Outbox`): um pedido em voo por vez, para as teclas chegarem ao mod na ordem. Sem `notify`: nada do app
     /// muda, e cada tecla redesenharia a janela inteira; o campo se redesenha sozinho e o mod responde por evento.
-    fn input_plugin(&mut self, site: &str, key: &str, kind: &'static str, value: String) {
+    fn input_plugin(&mut self, site: &str, control: &crate::plugin_ui::Control, kind: &'static str, value: String) {
         let read_only = self.selected.as_ref().is_some_and(|s| s.read_only());
         if !crate::plugin_ui::accepts_typing(self.plugin_source, read_only) { return; }
-        let Some(field) = self.plugin_fields.get_mut(&crate::plugin_ui::field_id(site, key)) else { return };
+        let Some(field) = self.plugin_fields.get_mut(&crate::plugin_ui::field_id(site, control)) else { return };
         if kind == "submit" { field.sync.submitted() } else { field.sync.typed(&value) }
-        if let Some(request) = field.outbox.push(kind, value) { self.send_plugin_input(site, key, request); }
+        if let Some(request) = field.outbox.push(kind, value) { self.send_plugin_input(site, control, request); }
     }
 
     /// Manda à rota o pedido que a fila do campo liberou. Se a sessão deixou de aceitar digitação no meio, a fila acaba.
-    fn send_plugin_input(&mut self, site: &str, key: &str, (kind, value): crate::plugin_ui::InputRequest) {
+    fn send_plugin_input(&mut self, site: &str, control: &crate::plugin_ui::Control, (kind, value): crate::plugin_ui::InputRequest) {
         let read_only = self.selected.as_ref().is_some_and(|s| s.read_only());
-        let Some(field) = self.plugin_fields.get_mut(&crate::plugin_ui::field_id(site, key)) else { return };
-        let Some(body) = crate::plugin_ui::input_request(self.plugin_source, read_only, site, key, kind, &value) else {
+        let Some(field) = self.plugin_fields.get_mut(&crate::plugin_ui::field_id(site, control)) else { return };
+        let Some(body) = crate::plugin_ui::input_request(self.plugin_source, read_only, site, control, kind, &value) else {
             field.outbox = Default::default();
             return;
         };
-        let (site, key, id) = (site.to_owned(), key.to_owned(), field.state.entity_id());
-        self.spawn_plugin("input", body, move |result| Payload::PluginInput(site, key, id, result));
+        let (site, control, id) = (site.to_owned(), control.clone(), field.state.entity_id());
+        self.spawn_plugin("input", body, move |result| Payload::PluginInput(site, control, id, result));
     }
 
     /// O rótulo de envio do `Input`: manda o que está no campo.
-    fn submit_plugin_field(&mut self, site: &str, key: &str, cx: &mut Context<Self>) {
-        let Some(value) = self.plugin_fields.get(&crate::plugin_ui::field_id(site, key)).map(|f| f.state.read(cx).value().to_string()) else { return };
-        self.input_plugin(site, key, "submit", value);
+    fn submit_plugin_field(&mut self, site: &str, control: &crate::plugin_ui::Control, cx: &mut Context<Self>) {
+        let Some(value) = self.plugin_fields.get(&crate::plugin_ui::field_id(site, control)).map(|f| f.state.read(cx).value().to_string()) else { return };
+        self.input_plugin(site, control, "submit", value);
     }
 
     /// O que a faixa e os painéis dos mods precisam do app. A digitação só existe na sessão sem terminal e fora do só
@@ -5838,12 +5943,12 @@ impl Hangar {
         });
         let typing = crate::plugin_ui::accepts_typing(self.plugin_source, self.selected.as_ref().is_some_and(|s| s.read_only()));
         let submit = typing.then(|| -> crate::plugin_ui::Submit {
-            std::rc::Rc::new(move |site: &str, key: &str, _: &mut Window, cx: &mut App| {
-                let (site, key) = (site.to_owned(), key.to_owned());
-                let _ = entity.update(cx, |this, cx| this.submit_plugin_field(&site, &key, cx));
+            std::rc::Rc::new(move |site: &str, control: &crate::plugin_ui::Control, _: &mut Window, cx: &mut App| {
+                let (site, control) = (site.to_owned(), control.clone());
+                let _ = entity.update(cx, |this, cx| this.submit_plugin_field(&site, &control, cx));
             })
         });
-        crate::plugin_ui::View { press: self.plugin_press(cx), show, tabs_scroll: &self.plugin_tabs_scroll, columns: self.plugin_columns,
+        crate::plugin_ui::View { press: self.plugin_press(cx), close: (!self.plugin_panes.is_empty()).then(|| self.plugin_close(cx)).flatten(), show, tabs_scroll: &self.plugin_tabs_scroll, columns: self.plugin_columns,
             hover: Some(self.plugin_hover(cx)), hovered: &self.plugin_hovered, fields: &self.plugin_fields, submit }
     }
 
@@ -5960,8 +6065,8 @@ impl Hangar {
         // Pergunta do transcript já respondida espera só o `tool_result`: não é pedido sem resposta.
         let answered = interaction::ask_from_events(&self.chat.events, self.provider().0)
             .and_then(|ask| ask.tool_use_id).is_some_and(|id| self.tool_answered(&id));
-        // Menu do AskUserQuestion sem o card ainda (ou já respondido): o card nativo é quem responde, sem aviso de terminal.
-        let ask_pane = self.chat.state.options.as_deref().is_some_and(interaction::ask_picker);
+        // Menu de uma pergunta nativa aberta ou recém-respondida: o card é quem responde, sem aviso de terminal.
+        let ask_pane = self.chat.ask_pane();
         let pending = card.is_none() && !answered && !ask_pane && !prethread_open && (self.chat.state.state == "awaiting_input" || self.chat.state.login);
         // Faixas e avisos entre a conversa e o compositor ficam na mesma coluna das mensagens.
         content = content
@@ -6230,6 +6335,9 @@ impl Render for Hangar {
             .on_action(cx.listener(|this, _: &NextSession, window, cx| this.step_session(1, window, cx)))
             .on_action(cx.listener(|this, _: &PreviousSession, window, cx| this.step_session(-1, window, cx)))
             .on_action(cx.listener(|this, _: &NewChat, window, cx| this.go_home(window, cx)))
+            .on_action(cx.listener(|this, _: &OpenNewSession, window, cx| {
+                if !this.create_blocked(window, cx) { this.open_new_session(None, window, cx); }
+            }))
             .on_action(cx.listener(|this, _: &CloseSession, window, cx| this.close_selected(window, cx)))
             .on_action(cx.listener(|this, _: &RenameSession, window, cx| this.rename_selected(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| if !this.connection_dialog { this.toggle_rail(cx) }))
@@ -6431,6 +6539,8 @@ mod tests {
         assert_eq!(Hangar::show_failure(&bare), Some(tr_shared("plugin_aba_falhou", &[])));
         assert_eq!(Hangar::input_failure(&bare), tr_shared("plugin_input_falhou", &[]));
         assert_eq!(Hangar::press_failure(&bare), tr_shared("plugin_clique_falhou", &[]));
+        assert_eq!(Hangar::close_failure(&bare), tr_shared("plugin_fechar_falhou", &[]));
+        assert_ne!(tr_shared("plugin_fechar_falhou", &[]), "plugin_fechar_falhou");
         // Código que o app não conhece não vale como frase: 5xx com ele segue a genérica.
         let unknown = Failure { code: Some("internal_info".into()), ..bare };
         assert_eq!(Hangar::show_failure(&unknown), Some(tr_shared("plugin_aba_falhou", &[])));

@@ -147,7 +147,8 @@ fn run_case(doc: &Value, case: &Value) -> usize {
             .collect();
         let alive_fn = |pid: i64| alive.contains(&pid);
         let facts = Facts { hooks: &hooks, alive: &alive_fn, config_dirs: &dirs, headless: Some(&headless),
-                            problems: &problems, stall_seconds: 300.0 };
+                            problems: &problems, stall_seconds: 300.0, held: &BTreeMap::new(),
+                            monitors: &hangar_server::state::published::Published::default() };
         let effects = rt.block_on(classifier.classify(&mut rows, &facts, &fake));
         let claude: HashSet<String> = rows.iter().filter(|r| r.provider == "claude").map(|r| r.name.clone()).collect();
         for (got, want) in rows.iter().zip(&want) {
@@ -168,11 +169,11 @@ fn run_case(doc: &Value, case: &Value) -> usize {
             assert_eq!(got.problema, want.problema, "{ctx} problema");
         }
         let mut got_effects: Vec<Value> = effects.iter()
-            .map(|e| match e { Effect::DemoteAwaiting { sid } => json!(["demote_awaiting", sid]) }).collect();
+            .map(|e| match e { Effect::DemoteAwaiting { sid, .. } => json!(["demote_awaiting", sid]) }).collect();
         got_effects.sort_by_key(|v| v.to_string());
         assert_eq!(Value::Array(got_effects), expected["effects"], "{ctx} effects");
         // Quem executa o efeito é o Python (`hook_state.demote_awaiting`): sidecar idle, ts mantido.
-        for Effect::DemoteAwaiting { sid } in &effects {
+        for Effect::DemoteAwaiting { sid, .. } in &effects {
             let mut rewritten = false;
             for dir in &dirs {
                 let f = dir.join(".hangar-state").join(format!("{sid}.json"));

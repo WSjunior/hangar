@@ -409,3 +409,67 @@ def test_fetch_uses_the_branch_release_and_env_wins(monkeypatch, tmp_path):
     monkeypatch.setenv("HANGAR_SERVER_RELEASE_URL", "http://127.0.0.1:1/x/")
     rust_release.fetch(dest=tmp_path / "bin")
     assert urls[-1] == "http://127.0.0.1:1/x/server-latest.json"
+
+
+def test_fetch_with_a_release_already_read_does_not_reread_the_manifest(release, tmp_path):
+    url, pasta, pedidos = release
+    _publish(pasta, {"hangar-server": SERVER, "hangar-cano": CANO})
+    manifest = json.loads((pasta / "server-latest.json").read_text())
+    (pasta / "server-latest.json").unlink()          # republicada no meio: o lido é o que vale
+    assert rust_release.fetch(dest=tmp_path / "bin", release=(url, "server-x", manifest)) == []
+    assert "/server-latest.json" not in pedidos
+    assert (tmp_path / "bin" / "hangar-server").read_bytes() == SERVER
+
+
+def test_tag_for_and_has_build():
+    assert rust_release.tag_for("main") == rust_release.tag_for("master") == "server-latest"
+    assert rust_release.tag_for("feature/x") == "server-feature-x"
+    files = {f"linux-x86_64/{n}": {} for n in rust_release.NAMES}
+    assert rust_release.has_build({"files": files}, "linux-x86_64")
+    assert not rust_release.has_build({"files": files}, "windows-x86_64")
+    assert not rust_release.has_build({"files": []}, "linux-x86_64")
+
+
+def test_branch_release_without_this_system_falls_back_to_main(release, tmp_path, monkeypatch, events):
+    """1ª rodada de branch nova: o Linux publicou antes do Windows, e o Windows baixa os da main."""
+    url, pasta, pedidos = release
+    for tag, plat in (("server-feature-x", "linux-x86_64"), ("server-latest", "windows-x86_64")):
+        (pasta / tag).mkdir()
+        _publish(pasta / tag, {"hangar-server": SERVER, "hangar-cano": CANO}, plat=plat)
+    monkeypatch.setattr(rust_release, "RELEASES_URL", url)
+    monkeypatch.setattr(rust_release, "platform_key", lambda: "windows-x86_64")
+    monkeypatch.delenv("HANGAR_SERVER_RELEASE_URL", raising=False)
+    _branch(monkeypatch, "feature/x\n")
+    dest = tmp_path / "bin"
+    assert rust_release.fetch(dest=dest) == [
+        "release server-feature-x sem build para windows-x86_64; instalei os da main (hangar-server, hangar-cano)"]
+    assert pedidos[:2] == ["/server-feature-x/server-latest.json", "/server-latest/server-latest.json"]
+    assert (dest / "hangar-server.exe").read_bytes() == SERVER and (dest / "hangar-cano.exe").read_bytes() == CANO
+    assert ("hangar_server.baixar", "aviso",
+            {"codigo": "sem_build_na_branch", "tag": "server-feature-x", "detalhe": "windows-x86_64"}) in events
+
+
+def test_branch_release_with_this_system_does_not_touch_main(release, tmp_path, monkeypatch):
+    url, pasta, pedidos = release
+    (pasta / "server-feature-x").mkdir()
+    _publish(pasta / "server-feature-x", {"hangar-server": SERVER, "hangar-cano": CANO})
+    monkeypatch.setattr(rust_release, "RELEASES_URL", url)
+    monkeypatch.delenv("HANGAR_SERVER_RELEASE_URL", raising=False)
+    _branch(monkeypatch, "feature/x\n")
+    assert rust_release.fetch(dest=tmp_path / "bin") == []
+    assert not any(p.startswith("/server-latest/") for p in pedidos)
+
+
+def test_branch_and_main_without_this_system_say_both(release, tmp_path, monkeypatch):
+    url, pasta, _ = release
+    for tag in ("server-feature-x", "server-latest"):
+        (pasta / tag).mkdir()
+        _publish(pasta / tag, {"hangar-server": SERVER, "hangar-cano": CANO})
+    monkeypatch.setattr(rust_release, "RELEASES_URL", url)
+    monkeypatch.setattr(rust_release, "platform_key", lambda: "windows-x86_64")
+    monkeypatch.delenv("HANGAR_SERVER_RELEASE_URL", raising=False)
+    _branch(monkeypatch, "feature/x\n")
+    avisos = rust_release.fetch(dest=tmp_path / "bin")
+    assert len(avisos) == 2 and all(a.startswith("release server-feature-x sem build para windows-x86_64; da main, ")
+                                    and "não traz build" in a for a in avisos)
+

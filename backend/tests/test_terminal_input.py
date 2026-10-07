@@ -1,3 +1,4 @@
+from pathlib import Path
 from unittest.mock import patch, call
 
 import pytest
@@ -1621,7 +1622,9 @@ def test_send_prompt_claude_esvazia_residuo_antes_de_digitar(monkeypatch):
     # Regressao do caso real: o C-u tem de sair ANTES do texto, senao o Enter gruda as mensagens.
     monkeypatch.setattr(terminal_input, "deliverable", lambda name: True)
     monkeypatch.setattr(terminal_input, "_wait_input_ready", lambda name, provider="claude": True)
-    panes = iter([_pane_claude(["❯ residuo parado no composer"]), _pane_claude(["❯"])])
+    # A primeira leitura é a do foco (`_devolver_foco_ao_composer`).
+    residuo = _pane_claude(["❯ residuo parado no composer"])
+    panes = iter([residuo, residuo, _pane_claude(["❯"])])
     ultimo = [None]
 
     def captura(*_a, **_k):
@@ -1633,6 +1636,67 @@ def test_send_prompt_claude_esvazia_residuo_antes_de_digitar(monkeypatch):
          patch.object(terminal_input, "send_keys") as sk:
         assert TerminalInput().send_prompt("cc", "corrige o bug") == "sent"
     assert sk.call_args_list[:2] == [call("cc", "C-u"), call("cc", "corrige o bug", literal=True)]
+
+
+# #85: com o foco no rodapé do Claude Code (painel de agentes) o texto digitado sumia — foi lá que
+# o /clear do app caiu. Telas reais do Claude Code em backend/tests/fixtures.
+_FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def test_send_prompt_claude_devolve_o_foco_do_painel_de_agentes_antes_de_digitar(monkeypatch):
+    monkeypatch.setattr(terminal_input, "deliverable", lambda name: True)
+    monkeypatch.setattr(terminal_input, "_wait_input_ready", lambda name, provider="claude": True)
+    monkeypatch.setattr(terminal_input.time, "sleep", lambda s: None)
+    panes = iter([(_FIXTURES / "pane_agents_panel_focused.txt").read_text(encoding="utf-8"), _pane_claude(["❯"])])
+    ultimo = [None]
+
+    def captura(*_a, **_k):
+        ultimo[0] = next(panes, ultimo[0])
+        return ultimo[0]
+
+    with patch("app.terminal_input.tmux.capture_pane", side_effect=captura), \
+         patch.object(terminal_input, "_entrou_no_composer", lambda *_a: True), \
+         patch.object(terminal_input, "send_keys") as sk:
+        assert TerminalInput().send_prompt("cc", "/clear") == "sent"
+    assert sk.call_args_list[:2] == [call("cc", "Escape"), call("cc", "/clear", literal=True)]
+
+
+def test_send_prompt_claude_foco_que_nao_volta_adia_sem_digitar(monkeypatch):
+    monkeypatch.setattr(terminal_input, "deliverable", lambda name: True)
+    monkeypatch.setattr(terminal_input, "_wait_input_ready", lambda name, provider="claude": True)
+    monkeypatch.setattr(terminal_input.time, "sleep", lambda s: None)
+    pane = (_FIXTURES / "pane_agents_footer_focused.txt").read_text(encoding="utf-8")
+    with patch.object(terminal_input, "_capture", return_value=pane), \
+         patch.object(terminal_input, "send_keys") as sk:
+        assert TerminalInput().send_prompt("cc", "/clear") == "deferred"
+    assert sk.call_args_list == [call("cc", "Escape")]
+
+
+@pytest.mark.parametrize("depois,enters", [(["❯"], 1), (["❯ /clear"], 2), (["❯ /pmedico:clear"], 2)])
+def test_send_prompt_claude_slash_so_repete_o_enter_com_o_comando_parado(monkeypatch, depois, enters):
+    # O 2o Enter às cegas caía na conversa nova depois do /clear: o vínculo já tinha trocado e a
+    # reserva Python acusava "resultado terminal incerto" com o /clear aplicado. Só repete quando o
+    # 1o Enter apenas selecionou a sugestão e o comando continua no composer (a regra do Rust).
+    monkeypatch.setattr(terminal_input, "deliverable", lambda name: True)
+    monkeypatch.setattr(terminal_input, "_wait_input_ready", lambda name, provider="claude": True)
+    monkeypatch.setattr(terminal_input, "_SLASH_SETTLE", 0)
+    with patch.object(terminal_input, "_capture", return_value=_pane_claude(depois)), \
+         patch.object(terminal_input, "_devolver_foco_ao_composer", lambda name: True), \
+         patch.object(terminal_input, "_esvaziar_composer_claude", lambda name: True), \
+         patch.object(terminal_input, "send_keys") as sk:
+        assert TerminalInput().send_prompt("cc", "/clear") == "sent"
+    assert sk.call_args_list == [call("cc", "/clear", literal=True)] + [call("cc", "Enter")] * enters
+
+
+def test_interrupt_com_foco_no_rodape_devolve_o_foco_antes(monkeypatch):
+    # O 1o Esc só devolve o foco do painel de agentes ao composer: sem o 2o, o turno seguia.
+    monkeypatch.setattr(terminal_input.time, "sleep", lambda s: None)
+    focado = (_FIXTURES / "pane_agents_panel_focused.txt").read_text(encoding="utf-8")
+    for pane, escapes in ((focado, 2), (_pane_claude(["❯"]), 1)):
+        with patch.object(terminal_input, "_capture", return_value=pane), \
+             patch.object(terminal_input, "send_keys") as sk:
+            TerminalInput().interrupt("cc")
+        assert sk.call_args_list == [call("cc", "Escape")] * escapes
 
 
 def test_send_prompt_pi_nao_ganha_a_limpeza_do_claude(monkeypatch):

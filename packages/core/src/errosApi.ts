@@ -296,6 +296,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_fila_nao_entregue: () => m.erro_fila_nao_entregue(),
   erro_envio_falhou_desconhecida: () => m.erro_envio_falhou_desconhecida(),
   erro_envio_falhou: (p) => m.erro_envio_falhou({ erro: fmtParam(p.erro) }),
+  erro_comando_nao_executado: (p) => m.erro_comando_nao_executado({ comando: fmtParam(p.comando), motivo: fmtParam(p.motivo) }),
   erro_group_message_slash: () => m.erro_group_message_slash(),
   erro_group_message_resposta: () => m.erro_group_message_resposta(),
   erro_group_message_tempestade: (p) => m.erro_group_message_tempestade({ max: fmtParam(p.max), janela: fmtParam(p.janela) }),
@@ -317,6 +318,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
 
   // Estado errado: terminal aberto, sessao trabalhando, loop ativo
   erro_terminal_aberto: () => m.erro_terminal_aberto(),
+  erro_terminal_indisponivel: (p) => m.erro_terminal_indisponivel({ detalhe: String(p.detalhe) }),
   erro_btw_so_claude: () => m.erro_btw_so_claude(),
   erro_btw_sem_conversa: () => m.erro_btw_sem_conversa(),
   erro_btw_fork_falhou: () => m.erro_btw_fork_falhou(),
@@ -352,6 +354,8 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_cwd_indisponivel: () => m.erro_cwd_indisponivel(),
   erro_cwd_inexistente: (p) => m.erro_cwd_inexistente({ cwd: String(p.cwd) }),
   erro_arquivo_grande: () => m.erro_arquivo_grande(),
+  erro_upload_inexistente: () => m.erro_upload_inexistente(),
+  erro_arquivo_caminho_convidado: () => m.erro_arquivo_caminho_convidado(),
   erro_sem_plano_ativo: () => m.erro_sem_plano_ativo(),
   erro_sem_pasta_planos: () => m.erro_sem_pasta_planos(),
   erro_nome_plano_invalido: (p) => m.erro_nome_plano_invalido({ nome: String(p.nome) }),
@@ -490,7 +494,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_convidados_ilegivel: () => m.erro_convidados_ilegivel(),
   erro_so_dono: () => m.erro_so_dono(),
   erro_usuario_em_uso: () => m.erro_usuario_em_uso(),
-  // Botões dos mods do Claude Code (/api/sessions/{name}/plugin/press).
+  // Botões e painéis dos mods do Claude Code (/api/sessions/{name}/plugin/press e plugin/close).
   erro_mod_mouse_desligado: () => m.erro_mod_mouse_desligado(),
   erro_mod_botao_nao_achado: (p) => m.erro_mod_botao_nao_achado({ rotulo: String(p.rotulo ?? '') }),
   erro_mod_botao_ambiguo: (p) => m.erro_mod_botao_ambiguo({ rotulo: String(p.rotulo ?? '') }),

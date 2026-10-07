@@ -52,7 +52,7 @@ use crate::linux::{
     DEFAULT_CURSOR_ICON_NAME, LinuxClient, capslock_from_xkb, cursor_style_to_icon_names,
     compose_key, get_xkb_compose_state, is_within_click_distance, keystroke_from_xkb,
     keystroke_underlying_dead_key, log_cursor_icon_warning, modifiers_from_xkb, new_xkb_context,
-    open_uri_internal,
+    open_uri_internal, physical_digit,
     platform::{DOUBLE_CLICK_INTERVAL, SCROLL_LINES},
     reveal_path_internal,
     xdg_desktop_portal::{Event as XDPEvent, XDPEventSource},
@@ -1080,6 +1080,7 @@ impl X11Client {
                 state.modifiers = modifiers;
                 state.pre_key_char_down.take();
                 let key_event_state = xkb_state_for_key_event(&state.xkb, event.state);
+                let digit = physical_digit(event.detail.into());
 
                 let keystroke = {
                     let code = event.detail.into();
@@ -1139,6 +1140,7 @@ impl X11Client {
                     keystroke,
                     is_held: false,
                     prefer_character_input: false,
+                    physical_digit: digit,
                 }));
             }
             Event::KeyRelease(event) => {

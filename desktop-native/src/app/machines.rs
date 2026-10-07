@@ -366,7 +366,13 @@ pub(super) enum PeerWrite { Enabled(bool), Removed }
 
 /// Como o reinício terminou, lido do estado que o motor grava (`fase: pronto`, casado pelo pid do pedido).
 pub(super) enum RestartEnd { Done(Option<String>), Failed(Option<String>), Unconfirmed }
-pub(super) enum UpgradeEnd { Done { ts: Option<String>, manual: bool }, Failed(Option<String>), Unconfirmed }
+pub(super) enum UpgradeEnd { Done { ts: Option<String>, manual: bool, warnings: Vec<String> }, Failed(Option<String>), Unconfirmed }
+
+/// O que a atualização terminou deixando pendente (`avisos` do estado), como o web lista em "algo ficou pendente".
+fn update_warnings(state: &Value) -> Vec<String> {
+    state["avisos"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::trim)
+        .filter(|w| !w.is_empty()).map(str::to_owned).collect()
+}
 
 pub(super) enum MachinesReply {
     Reach(u64, Result<Value, Failure>),
@@ -414,6 +420,7 @@ struct Upgrade {
     step: Option<(u64, u64, String)>,
     at: Option<String>,
     manual: bool,
+    warnings: Vec<String>,
     error: Option<String>,
     task: Option<JoinHandle<()>>,
 }
@@ -793,6 +800,7 @@ impl Hangar {
         let u = &mut self.machines.upgrade;
         u.seq += 1;
         (u.asking, u.step, u.at, u.manual, u.error) = (true, None, None, false, None);
+        u.warnings.clear();
         let (seq, done) = (u.seq, self.machines_send_later());
         self.runtime.spawn(async move { done(MachinesReply::Upgrade(seq, api.server_post(&["atualizacao", "iniciar"], 30).await)).await });
         cx.notify();
@@ -822,7 +830,8 @@ impl Hangar {
                 }
                 if state["pid"].as_i64() != pid || state["fase"].as_str() != Some("pronto") { continue; }
                 break if state["ok"].as_bool() == Some(true) {
-                    UpgradeEnd::Done { ts: text("ts"), manual: state["reiniciar_manual"].as_bool() == Some(true) }
+                    UpgradeEnd::Done { ts: text("ts"), manual: state["reiniciar_manual"].as_bool() == Some(true),
+                        warnings: update_warnings(state) }
                 } else { UpgradeEnd::Failed(text("erro")) };
             };
             done(MachinesReply::UpgradeEnd(seq, end)).await
@@ -934,6 +943,7 @@ impl Hangar {
                 let u = &mut self.machines.upgrade;
                 if seq != u.seq { return; }
                 (u.waiting, u.task, u.step) = (false, None, None);
+                if let UpgradeEnd::Done { warnings, .. } = &end { u.warnings.clone_from(warnings); }
                 match end {
                     UpgradeEnd::Done { manual: true, .. } => u.manual = true,
                     UpgradeEnd::Done { ts, .. } => {
@@ -1716,6 +1726,7 @@ impl Hangar {
         } else if let Some(at) = &u.at { Some((tr("machines_updated").replace("{hora}", at), theme::success())) }
         else if u.manual { Some((tr("update_done_manual"), theme::warning())) } else { None };
         let upgrade_error = u.error.clone();
+        let upgrade_warnings = (!u.busy() && !u.warnings.is_empty()).then(|| u.warnings.clone());
         // A ponte do app do computador só existe no Electron; o web a mostra para o servidor desta máquina, depois de um erro
         // que não é recusa.
         let local = self.address.read(cx).value().trim().parse::<url::Url>().ok()
@@ -1742,6 +1753,13 @@ impl Hangar {
                     .text_color(theme::success()).child(tr("machines_restarted").replace("{hora}", &at)))))
             .when_some(upgrade_status, |el, (text, color)| el.child(div().id("machines-update-status").role(Role::Status)
                 .text_size(px(12.5)).text_color(color).whitespace_normal().child(text)))
+            .when_some(upgrade_warnings, |el, warnings| el.child(div().id("machines-update-warnings").role(Role::Status)
+                .flex().flex_col().gap(px(4.)).text_size(px(12.5)).text_color(theme::warning())
+                .child(div().flex().items_start().gap(px(6.))
+                    .child(div().pt(px(2.)).flex_shrink_0().child(Icon::new(IconName::TriangleAlert).size(px(14.)).text_color(theme::warning())))
+                    .child(div().flex_1().min_w_0().whitespace_normal().child(tr_shared("atualizar_com_avisos", &[]))))
+                .children(warnings.into_iter().map(|w| div().pl(px(20.)).whitespace_normal().text_color(theme::text())
+                    .child(format!("• {w}"))))))
             .when_some(upgrade_error, |el, error| el.child(div().id("machines-update-error").role(Role::Alert).text_size(px(12.5))
                 .text_color(theme::danger()).whitespace_normal().child(error)))
             .when_some(r.error.clone(), |el, error| el.child(div().id("machines-restart-error").role(Role::Alert).text_size(px(12.5))
@@ -1837,9 +1855,17 @@ impl RenderOnce for FocusOnClick {
 #[cfg(test)]
 mod tests {
     use super::{Back, Card, Check, Kind, Light, Line, Peer, Reach, Reason, Row, ServerEntry, card_state, collapsed, host_key, join_lines, parse_going,
-        parse_peers, parse_reach, row_state, valid_id};
+        parse_peers, parse_reach, row_state, update_warnings, valid_id};
     use std::collections::HashMap;
     use crate::i18n::tr;
+
+    #[test]
+    fn update_warnings_are_the_state_avisos_like_the_web() {
+        let state = serde_json::json!({"avisos": ["versão mais nova ainda sem binário", " ", 3, ""]});
+        assert_eq!(update_warnings(&state), ["versão mais nova ainda sem binário"]);
+        assert!(update_warnings(&serde_json::json!({"avisos": null})).is_empty());
+        assert!(update_warnings(&serde_json::json!({})).is_empty());
+    }
 
     fn reach(text: &str) -> Reach { parse_reach(&serde_json::from_str(text).expect("JSON")).expect("formato do /api/alcance") }
 

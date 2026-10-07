@@ -200,6 +200,12 @@ pub struct ListBridge {
     git_running: Arc<Mutex<std::collections::HashSet<String>>>,
     git_slots: Arc<tokio::sync::Semaphore>,
     epoch: AtomicU64,
+    /// Fatos do estado empurrados pelo Python (`state.facts`), lidos pelo `Monitor`.
+    pub state_facts: Arc<crate::state::facts::FactsStore>,
+    /// Registros nativos rebaixados pela lista, lidos também pelo `Monitor`.
+    pub demoted: Arc<crate::state::demote::Demoted>,
+    /// Último estado de cada `Monitor` vivo: a lista o lê em vez de capturar o pane.
+    pub published: Arc<crate::state::published::Published>,
 }
 
 /// Tarefa bloqueante que entrou em pânico: o hook já registrou onde; aqui fica qual operação.
@@ -214,11 +220,22 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> { m.lock().unwrap_or_el
 
 impl ListBridge {
     pub fn new(env: ListEnv, facts: FactsClient) -> Self {
-        Self { env: Arc::new(env), shadow_facts: facts.sibling(), facts, caches: Arc::default(), runtime: std::sync::OnceLock::new(),
+        let (caches, demoted) = (Arc::<Caches>::default(), Arc::<crate::state::demote::Demoted>::default());
+        caches.classify.with(|c| c.hooks.set_demoted(demoted.clone()));
+        Self { env: Arc::new(env), shadow_facts: facts.sibling(), facts, caches, runtime: std::sync::OnceLock::new(),
             owner_clients: AtomicU32::new(0), seen: Mutex::default(),
             discovery: tokio::sync::Mutex::new(None),
             snapshot: tokio::sync::Mutex::new(None), git_running: Arc::default(),
-            git_slots: Arc::new(tokio::sync::Semaphore::new(GIT_SLOTS)), epoch: AtomicU64::new(0) }
+            git_slots: Arc::new(tokio::sync::Semaphore::new(GIT_SLOTS)), epoch: AtomicU64::new(0),
+            state_facts: Arc::default(), demoted, published: Arc::default() }
+    }
+
+    /// Rebaixamentos da rodada: valem já aqui (lista e `Monitor`), e os session ids vão ao Python.
+    fn demote(&self, effects: Vec<Effect>) -> Vec<String> {
+        effects.into_iter().map(|Effect::DemoteAwaiting { sid, ts }| {
+            self.demoted.demote(&sid, ts);
+            sid
+        }).collect()
     }
 
     /// Uma vez, na subida do servidor com o runtime de pé.
@@ -240,6 +257,24 @@ impl ListBridge {
     pub fn watch_dirs(&self) -> Result<Vec<PathBuf>, ListError> {
         let dirs = self.dirs()?;
         Ok(facts_files::state_dirs(&self.caches.config_dirs(&dirs)))
+    }
+
+    pub fn env(&self) -> &Arc<ListEnv> { &self.env }
+
+    /// Pastas das contas e as da lista, para o `Monitor` de estado. Lê disco (as pastas das contas
+    /// ficam guardadas por 30 s): chamar fora do runtime.
+    pub fn state_dirs_blocking(&self) -> Result<(Arc<Vec<PathBuf>>, Dirs), ListError> {
+        let dirs = self.dirs()?;
+        Ok((self.caches.config_dirs(&dirs), dirs))
+    }
+
+    /// Pane do agente da sessão (`agent_pane::resolve`) pela descoberta compartilhada da lista.
+    pub async fn agent_target(&self, name: &str) -> Result<Option<String>, ListError> {
+        let (_, _, panes, children) = self.discovery(None).await?;
+        let mine: Vec<Pane> = panes.iter().filter(|p| p.session == name).cloned().collect();
+        let env = self.env.clone();
+        tokio::task::spawn_blocking(move || crate::state::agent_pane::resolve(&mine, &children, &|pid| env.procs.argv(pid).join(" ")))
+            .await.map_err(|e| joined(e, "pane do agente interrompido"))
     }
 
     /// Mudança de membro ou de modo: a próxima pergunta não serve a lista de antes.
@@ -327,6 +362,7 @@ impl ListBridge {
         };
         let dirs = self.dirs()?;
         let (env, caches, handle) = (self.env.clone(), self.caches.clone(), tokio::runtime::Handle::current());
+        let published = self.published.clone();
         let done = tokio::task::spawn_blocking(move || {
             let config_dirs = caches.config_dirs(&dirs);
             let alive = |pid: i64| pid_alive(&*env.procs, pid);
@@ -343,7 +379,8 @@ impl ListBridge {
                     return None;
                 }
                 let facts = Facts { hooks, alive: &alive, config_dirs: &config_dirs, headless: inp.headless.as_ref(),
-                    problems: &inp.facts.problems, stall_seconds: inp.facts.stall_seconds };
+                    problems: &inp.facts.problems, stall_seconds: inp.facts.stall_seconds, held: &inp.facts.held,
+                    monitors: &published };
                 let effects = handle.block_on(classifier.classify_some(&mut rows, &facts, &io));
                 Some((rows, effects))
             });
@@ -354,7 +391,7 @@ impl ListBridge {
         self.flush_notes();
         let Some((mut changed, effects)) = done else { return Ok(Partial::Unchanged) };
         list_facts::mark_stale(&mut changed, &snap.facts, snap.facts_ok);
-        let demote: Vec<String> = effects.into_iter().map(|Effect::DemoteAwaiting { sid }| sid).collect();
+        let demote = self.demote(effects);
         if !demote.is_empty() {
             self.facts.demote(demote);
         }
@@ -396,7 +433,7 @@ impl ListBridge {
         capped::set_live(rows.len() + aside.len());
         // Classificação e decoração leem arquivo (marcador, transcript, plano) e esperam captura:
         // fora da thread do runtime, que atende todas as conexões.
-        let inp = inputs.clone();
+        let (inp, published) = (inputs.clone(), self.published.clone());
         let (rows, effects, git_dirs, pre) = tokio::task::spawn_blocking(move || {
             let config_dirs = caches.config_dirs(&dirs);
             let alive = |pid: i64| pid_alive(&*env.procs, pid);
@@ -405,7 +442,8 @@ impl ListBridge {
             let effects = caches.classify.with(|Classify { classifier, hooks }| {
                 hooks.refresh(&config_dirs);
                 let facts = Facts { hooks, alive: &alive, config_dirs: &config_dirs,
-                    headless: inp.headless.as_ref(), problems: &inp.facts.problems, stall_seconds: inp.facts.stall_seconds };
+                    headless: inp.headless.as_ref(), problems: &inp.facts.problems, stall_seconds: inp.facts.stall_seconds,
+                    held: &inp.facts.held, monitors: &published };
                 handle.block_on(classifier.classify(&mut rows, &facts, &io))
             });
             let git_dirs = decorate(&env, &caches, &dirs, &config_dirs, &inp, &mut rows, io.wall(), io.mono(), true);
@@ -413,9 +451,11 @@ impl ListBridge {
         }).await.map_err(|e| joined(e, "produção interrompida"))?;
         self.flush_notes();
         self.refresh_git(git_dirs);
-        let demote: Vec<String> = effects.into_iter().map(|Effect::DemoteAwaiting { sid }| sid).collect();
-        if !demote.is_empty() && !input.shadow {
-            self.facts.demote(demote);
+        if !input.shadow {
+            let demote = self.demote(effects);
+            if !demote.is_empty() {
+                self.facts.demote(demote);
+            }
         }
         let mut rows = rows;
         rows.extend(aside);
@@ -632,7 +672,7 @@ fn descends(pid: i64, root: i64, children: &ChildrenMap) -> bool {
     false
 }
 
-fn pid_alive(procs: &dyn ProcessView, pid: i64) -> bool { pid > 0 && procs.start_time(pid).is_some() }
+pub(crate) fn pid_alive(procs: &dyn ProcessView, pid: i64) -> bool { pid > 0 && procs.start_time(pid).is_some() }
 
 fn git_dir(row: &SessionRow) -> &str { row.git_cwd.as_deref().or(row.cwd.as_deref()).unwrap_or("") }
 
@@ -743,6 +783,11 @@ enum Operation {
     Forget { name: String },
     #[serde(rename = "list.rename")]
     Rename { old: String, new: String },
+    #[serde(rename = "state.facts")]
+    StateFacts { name: String, facts: crate::state::facts::StateFacts },
+    /// Painel de terminal real aberto na sessão: o 409 de quem conta linha do pane.
+    #[serde(rename = "term.active")]
+    TermActive { name: String },
 }
 
 async fn execute(bridge: &Arc<ListBridge>, op: Operation) -> Result<Value, ListError> {
@@ -773,7 +818,21 @@ async fn execute(bridge: &Arc<ListBridge>, op: Operation) -> Result<Value, ListE
         Operation::Seed { name, jsonl } => cache(Box::new(move |b| b.seed(&name, &jsonl))).await,
         Operation::Forget { name } => cache(Box::new(move |b| b.forget(&name))).await,
         Operation::Rename { old, new } => cache(Box::new(move |b| b.rename(&old, &new))).await,
+        // Respondido pelo `private`, que tem os painéis.
+        Operation::TermActive { .. } => Err(fail("list_bridge_invalid_request", "term.active fora do private")),
+        Operation::StateFacts { name, facts } => {
+            use crate::state::facts::Push;
+            Ok(match bridge.state_facts.push(&name, facts, Instant::now()) {
+                Push::Accepted { gap } => json!({"accepted": true, "watched": true, "gap": gap}),
+                Push::Dropped => json!({"accepted": false, "watched": true, "gap": false}),
+                Push::Unwatched => json!({"accepted": false, "watched": false, "gap": false}),
+            })
+        }
     }
+}
+
+fn term_active(st: &AppState, name: &str) -> Result<Value, ListError> {
+    Ok(json!({"active": st.term.is_active(name)}))
 }
 
 fn reply(value: Value) -> Response {
@@ -797,7 +856,11 @@ pub async fn private(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connect
     let Ok(op) = serde_json::from_slice::<Operation>(&bytes) else {
         return refused("list_bridge_invalid_request");
     };
-    match execute(&st.list, op).await {
+    let result = match op {
+        Operation::TermActive { name } => term_active(&st, &name),
+        op => execute(&st.list, op).await,
+    };
+    match result {
         Ok(result) => reply(json!({"ok": true, "result": result})),
         Err(e) => {
             if crate::warn_limit::allow(None, e.code) {
@@ -849,6 +912,25 @@ mod tests {
         assert_eq!(cached(), ["a", "b"], "uma rodada fora não esquece");
         bridge.prune_gone(&[row("b")], t0 + FORGET_AFTER + Duration::from_secs(1));
         assert_eq!(cached(), ["b"]);
+    }
+
+    #[tokio::test]
+    async fn state_facts_op_reaches_the_store_and_drops_old_sequences() {
+        let bridge = Arc::new(ListBridge::new(ListEnv { mux: Mux::default(), capture_program: "tmux".into(),
+            procs: Arc::new(procs::SystemProcs::default()), dirs: None }, FactsClient::new("127.0.0.1:9".parse().unwrap(), "s".into())));
+        let op = |seq: u64| serde_json::from_value::<Operation>(json!({"op": "state.facts", "args": {"name": "s1", "facts": {
+            "seq": seq, "plugin_state": {"state": "idle", "reason": null, "age_ms": 0}, "waiter_open": true,
+            "heartbeat_age_ms": 0, "question": null, "suggestion": "", "body_columns": null, "band_anchor": null,
+            "in_transfer_ms": 0, "transfer_active": false, "permission_op": false}}})).unwrap();
+        assert_eq!(execute(&bridge, op(1)).await.unwrap()["watched"], false, "sem Monitor não guarda nada");
+        assert!(bridge.state_facts.get("s1").is_none());
+        bridge.state_facts.watch("s1");
+        assert_eq!(execute(&bridge, op(2)).await.unwrap(), json!({"accepted": true, "watched": true, "gap": false}));
+        assert_eq!(execute(&bridge, op(1)).await.unwrap(), json!({"accepted": false, "watched": true, "gap": false}));
+        assert_eq!(execute(&bridge, op(4)).await.unwrap()["gap"], true);
+        assert_eq!(bridge.state_facts.get("s1").unwrap().facts.seq, 4);
+        assert!(serde_json::from_value::<Operation>(json!({"op": "state.facts", "args": {"name": "s1", "facts": {"seq": 3}}})).is_err(),
+            "fato incompleto é recusado, nunca vazio");
     }
 
     #[test]

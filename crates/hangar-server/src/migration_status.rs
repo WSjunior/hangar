@@ -101,14 +101,18 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
             return true;
         }
         let tail = path.strip_prefix("/api/sessions/").and_then(|r| r.split_once('/')).map(|(_, t)| t);
-        if matches!(tail, Some("history" | "events" | "cost")) {
+        // `term`: o painel do dono abre no Rust; o resto (convidado, Connect) passa pelo Python e liga ao PTY dele.
+        if matches!(tail, Some("history" | "events" | "cost" | "term")) {
+            return true;
+        }
+        if path.strip_prefix("/api/hangar-terminals/").is_some_and(|r| r.ends_with("/term")) {
             return true;
         }
     }
     // Interface dos mods: o Rust atende as sessões dele e repassa as outras (os contadores mostram).
     if *method == Method::POST {
         let tail = path.strip_prefix("/api/sessions/").and_then(|r| r.split_once('/')).map(|(_, t)| t);
-        if matches!(tail, Some("plugin/press" | "plugin/show" | "plugin/input")) || matches!(path.strip_prefix("/api/plugin/"),
+        if matches!(tail, Some("plugin/press" | "plugin/close" | "plugin/show" | "plugin/input")) || matches!(path.strip_prefix("/api/plugin/"),
             Some("press-start" | "opened" | "ui" | "toast" | "pressed" | "copied" | "focus-target" | "focused" | "scroll")) {
             return true;
         }
@@ -138,7 +142,7 @@ const PROBES: &[(&str, &str)] = &[
     ("GET", "/api/atualizacao"), ("GET", "/api/update-channel"),
     ("POST", "/api/sessions/x/upload"),
     ("POST", "/api/dictation/transcribe"),
-    ("POST", "/api/sessions/x/plugin/press"), ("POST", "/api/plugin/ui"), ("POST", "/api/plugin/ask"),
+    ("POST", "/api/sessions/x/plugin/press"), ("POST", "/api/sessions/x/plugin/close"), ("POST", "/api/plugin/ui"), ("POST", "/api/plugin/ask"),
     ("GET", "/"), ("GET", "/assets/index.js"),
     ("GET", "/api/config"),
 ];

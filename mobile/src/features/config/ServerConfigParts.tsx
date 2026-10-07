@@ -43,7 +43,12 @@ export function ServerConfigPage({ title, cfg, children, extra }: { title: strin
       </Pagina>
       {footer ? (
         <View style={[styles.footer, { paddingBottom: 10 + insets.bottom, borderTopColor: c.border, backgroundColor: superficie(theme, 0.95) }]}>
-          {cfg.saveError ? (
+          {/* O motivo do Salvar desligado vem antes de um erro antigo: é o que trava o botão agora. */}
+          {cfg.saveBlocked ? (
+            <Text accessibilityLiveRegion="polite" numberOfLines={3} style={[styles.footerText, { color: theme.tokens.status.warning }]}>
+              {m.native_server_save_blocked_provider_key()}
+            </Text>
+          ) : cfg.saveError ? (
             <Text accessibilityRole="alert" numberOfLines={3} style={[styles.footerText, { color: theme.tokens.status.error }]}>{cfg.saveError}</Text>
           ) : cfg.saved ? (
             <Text accessibilityLiveRegion="polite" style={[styles.footerText, { color: theme.tokens.status.success }]}>{m.native_server_saved()}</Text>
@@ -53,10 +58,10 @@ export function ServerConfigPage({ title, cfg, children, extra }: { title: strin
           {cfg.dirty || cfg.saving ? (
             <Pressable
               onPress={cfg.save}
-              disabled={cfg.saving}
+              disabled={cfg.saving || cfg.saveBlocked}
               accessibilityRole="button"
-              accessibilityState={{ disabled: cfg.saving, busy: cfg.saving }}
-              style={({ pressed }) => [styles.save, { backgroundColor: c.accent, opacity: cfg.saving ? 0.6 : pressed ? 0.8 : 1 }]}
+              accessibilityState={{ disabled: cfg.saving || cfg.saveBlocked, busy: cfg.saving }}
+              style={({ pressed }) => [styles.save, { backgroundColor: c.accent, opacity: cfg.saving || cfg.saveBlocked ? 0.6 : pressed ? 0.8 : 1 }]}
             >
               <Text style={styles.saveText}>{cfg.saving ? m.native_server_saving() : m.native_server_save()}</Text>
             </Pressable>

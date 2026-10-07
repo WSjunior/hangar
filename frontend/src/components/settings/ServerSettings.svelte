@@ -342,8 +342,9 @@
 {#if rodapeVisivel}
   <div class="rodape">
     {#if store.salvo}<span class="ok">{m.config_server_salvo()}</span>{/if}
+    {#if store.salvarBloqueado}<span class="bloqueio" role="status">{m.native_server_save_blocked_provider_key()}</span>{/if}
     {#if store.temMudanca || store.salvando}
-      <button class="btn primario" onclick={store.salvar} disabled={store.salvando}>
+      <button class="btn primario" onclick={store.salvar} disabled={store.salvando || store.salvarBloqueado}>
         {store.salvando ? m.config_motores_salvando() : m.ctx_salvar()}
       </button>
     {/if}
@@ -513,6 +514,7 @@
     margin: 0 calc(-1 * var(--space-4)) calc(-1 * var(--space-4));
   }
   .ok { font-size: var(--text-xs); color: var(--success); animation: st-row-in-ok 200ms var(--ease-out); }
+  .bloqueio { flex: 1 1 auto; min-width: 0; text-align: right; font-size: var(--text-xs); color: var(--warning); }
   @keyframes st-row-in-ok {
     from { opacity: 0; transform: translateY(3px); }
     to   { opacity: 1; transform: translateY(0); }

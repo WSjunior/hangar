@@ -78,8 +78,32 @@ pub(super) struct Controls {
     focus: Option<(FocusHandle, Subscription)>,
     // A lista rola até a linha destacada uma vez por abertura, no primeiro desenho com ela.
     revealed: std::cell::Cell<bool>,
-    // O atalho de permissão pediu o ciclo que ainda não conhecia: a leitura que chegar aplica o próximo modo.
-    cycle_after_read: Option<SessionKey>,
+    // O atalho de permissão pediu o ciclo que ainda não conhecia: a leitura que chegar anda tantos modos quantas
+    // teclas foram dadas enquanto ela não vinha.
+    cycle_after_read: Option<(SessionKey, usize)>,
+    // Shift+Tab: o modo pedido aparece na pílula na hora. Tecla que chega com a troca em voo só anda o alvo, e a
+    // resposta manda o que faltar; aplicado, o rótulo passa ao `applied` até o SSE trazer o modo novo.
+    mode_target: HashMap<SessionKey, ModeTarget>,
+}
+
+// `answers`: os modos que as respostas deste alvo já trouxeram.
+struct ModeTarget { mode: String, before: Option<String>, answers: Vec<String> }
+
+impl ModeTarget {
+    /// Se a resposta manda o pedido de novo: só quando o alvo andou com a troca em voo e o backend saiu do lugar. Modo
+    /// que já tinha voltado é recusa, e insistir repetiria o pedido sem fim.
+    fn resend_after(&mut self, answer: &str) -> bool {
+        if self.mode == answer || self.answers.iter().any(|a| a == answer) { return false; }
+        self.answers.push(answer.to_owned());
+        true
+    }
+}
+
+/// O modo `steps` posições à frente de `from` no ciclo; fora do ciclo, conta a partir do primeiro.
+fn mode_ahead(modes: &[String], from: Option<&str>, steps: usize) -> Option<String> {
+    if steps == 0 { return None; }
+    let at = from.and_then(|f| modes.iter().position(|m| m == f)).unwrap_or(modes.len().saturating_sub(1));
+    super::sidebar::wrap_step(Some(at), modes.len(), steps as isize).map(|ix| modes[ix].clone())
 }
 
 impl Controls {
@@ -328,6 +352,7 @@ impl Hangar {
     fn ctl_label(&self, ctl: Ctl) -> Option<String> {
         let key = self.selected_key()?;
         let live = self.ctl_live(ctl);
+        if ctl == Ctl::Mode && let Some(target) = self.controls.mode_target.get(&key) { return Some(target.mode.clone()); }
         match self.controls.applied.get(&(key, ctl)) {
             Some((applied, before)) if *before == live => Some(applied.clone()),
             _ => live,
@@ -362,7 +387,7 @@ impl Hangar {
         if let Some(session) = self.selected.clone() { self.controls.on_session_update(&key, &session); }
         if !probe && self.controls.open.as_ref().is_some_and(|o| o.key == key && o.ctl == ctl) { self.controls.open = None; cx.notify(); return; }
         self.command_panel = false;
-        self.recent = None;
+        self.close_recent();
         let (provider, headless) = self.provider();
         let provider = provider.to_owned();
         if provider == "claude" && ctl == Ctl::Model && self.controls.busy.contains_key(&key) { return; }
@@ -417,13 +442,18 @@ impl Hangar {
     pub(super) fn cycle_permission(&mut self, cx: &mut Context<Self>) {
         if self.open_read_only() { return; }
         let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
-        if self.provider().0 != "claude" || self.controls.busy.contains_key(&key) || self.controls.cycle_after_read.is_some() { return; }
-        let known = self.controls.known.get(&(key.clone(), Ctl::Mode)).cloned();
-        if known.as_ref().is_some_and(|v| v.get("modes").and_then(Value::as_array).is_some_and(|m| !m.is_empty())) {
-            self.apply_next_mode(key, cx);
+        if self.provider().0 != "claude" { return; }
+        if let Some((reading, steps)) = &mut self.controls.cycle_after_read && *reading == key {
+            *steps += 1;
             return;
         }
-        self.controls.cycle_after_read = Some(key.clone());
+        if self.controls.cycle_after_read.is_some() || self.mode_blocked(&key) { return; }
+        let known = self.controls.known.get(&(key.clone(), Ctl::Mode)).cloned();
+        if known.as_ref().is_some_and(|v| v.get("modes").and_then(Value::as_array).is_some_and(|m| !m.is_empty())) {
+            self.apply_next_mode(key, 1, cx);
+            return;
+        }
+        self.controls.cycle_after_read = Some((key.clone(), 1));
         let (connection, tx) = (self.connection, self.tx.clone());
         self.runtime.spawn(async move {
             let result = api.read(&key.name, &["permission-modes"], &[("sondar", "1")], 60).await;
@@ -432,7 +462,7 @@ impl Hangar {
         cx.notify();
     }
 
-    fn apply_next_mode(&mut self, key: SessionKey, cx: &mut Context<Self>) {
+    fn apply_next_mode(&mut self, key: SessionKey, steps: usize, cx: &mut Context<Self>) {
         let catalog = self.controls.known.get(&(key.clone(), Ctl::Mode)).cloned().unwrap_or(Value::Null);
         let modes: Vec<String> = catalog.get("modes").and_then(Value::as_array).map(|m| m.iter().filter_map(|m| m.as_str().map(str::to_owned)).collect())
             .unwrap_or_default();
@@ -451,18 +481,52 @@ impl Hangar {
             }
             return;
         }
-        let current = self.ctl_label(Ctl::Mode);
-        let at = current.as_ref().and_then(|c| modes.iter().position(|m| m == c));
-        let next = modes[at.map_or(0, |i| (i + 1) % modes.len())].clone();
-        if current.as_deref() == Some(next.as_str()) { return; }
-        self.apply_ctl(Ctl::Mode, vec!["permission-mode"], json!({"mode": next}), next, cx);
+        self.step_mode(key, &modes, steps, cx);
     }
 
     /// Shift+Tab no campo do Codex, como o web: alterna entre o modo padrão e o de plano.
     pub(super) fn toggle_codex_mode(&mut self, cx: &mut Context<Self>) {
         if self.provider().0 != "codex" { return; }
-        let next = if self.ctl_label(Ctl::Mode).as_deref() == Some("plan") { "default" } else { "plan" };
-        self.apply_ctl(Ctl::Mode, vec!["codex", "mode"], json!({"mode": next}), next.into(), cx);
+        let Some(key) = self.selected_key() else { return; };
+        if self.mode_blocked(&key) { return; }
+        self.step_mode(key, &["plan".into(), "default".into()], 1, cx);
+    }
+
+    /// Outra pílula aplicando segura o Shift+Tab; a troca de modo em voo, não: a tecla só anda o alvo.
+    fn mode_blocked(&self, key: &SessionKey) -> bool { self.controls.busy.get(key).is_some_and(|ctl| *ctl != Ctl::Mode) }
+
+    /// Anda `steps` modos a partir do que a pílula mostra. Com a troca em voo só o alvo anda; a resposta manda o resto.
+    fn step_mode(&mut self, key: SessionKey, modes: &[String], steps: usize, cx: &mut Context<Self>) {
+        let from = self.ctl_label(Ctl::Mode);
+        let Some(mode) = mode_ahead(modes, from.as_deref(), steps).filter(|m| from.as_deref() != Some(m.as_str())) else { return; };
+        let live = self.ctl_live(Ctl::Mode);
+        self.controls.mode_target.entry(key.clone()).or_insert_with(|| ModeTarget { mode: String::new(), before: live, answers: Vec::new() }).mode = mode;
+        if !self.controls.busy.contains_key(&key) { self.send_mode(key, cx); }
+        cx.notify();
+    }
+
+    fn send_mode(&mut self, key: SessionKey, cx: &mut Context<Self>) {
+        let Some(mode) = self.controls.mode_target.get(&key).map(|target| target.mode.clone()) else { return; };
+        let path = if self.provider().0 == "codex" { vec!["codex", "mode"] } else { vec!["permission-mode"] };
+        // Sem conexão o pedido não sai: a pílula volta ao modo real.
+        if !self.apply_ctl(Ctl::Mode, path, json!({"mode": mode}), mode, cx) { self.controls.mode_target.remove(&key); }
+    }
+
+    /// Aplicado, o rótulo vai ao `applied` e segura o modo novo enquanto o SSE repete o de antes. Se o SSE nunca mudar
+    /// (o modo voltou ao de antes no terminal), o prazo devolve a pílula à fonte ao vivo.
+    fn settle_mode_target(&mut self, key: SessionKey, mode: String, cx: &mut Context<Self>) {
+        let Some(target) = self.controls.mode_target.remove(&key) else { return; };
+        self.controls.applied.insert((key.clone(), Ctl::Mode), (mode.clone(), target.before));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+            let _ = this.update(cx, |this, cx| {
+                let entry = (key, Ctl::Mode);
+                if this.controls.applied.get(&entry).is_some_and(|(applied, _)| *applied == mode) {
+                    this.controls.applied.remove(&entry);
+                    cx.notify();
+                }
+            });
+        }).detach();
     }
 
     fn choices(&self, ctl: Ctl, catalog: &Value) -> Vec<Choice> {
@@ -568,15 +632,16 @@ impl Hangar {
         }
     }
 
-    fn apply_ctl(&mut self, ctl: Ctl, path: Vec<&'static str>, body: Value, label: String, cx: &mut Context<Self>) {
-        let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
-        if self.controls.busy.contains_key(&key) || !self.chat_online { return; }
+    /// Devolve se o pedido saiu.
+    fn apply_ctl(&mut self, ctl: Ctl, path: Vec<&'static str>, body: Value, label: String, cx: &mut Context<Self>) -> bool {
+        let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return false; };
+        if self.controls.busy.contains_key(&key) || !self.chat_online { return false; }
         if self.provider().0 == "claude" && matches!(ctl, Ctl::Model | Ctl::Fast) {
-            let Some(session) = self.selected.clone() else { return; };
+            let Some(session) = self.selected.clone() else { return false; };
             self.controls.on_session_update(&key, &session);
             let catalog = self.controls.model_catalog(&key, &session);
             if (path.first() == Some(&"engine") && catalog.is_none())
-                || (ctl == Ctl::Fast && !catalog.and_then(claude_fast_state).is_some_and(|(_, available)| available)) { return; }
+                || (ctl == Ctl::Fast && !catalog.and_then(claude_fast_state).is_some_and(|(_, available)| available)) { return false; }
             self.controls.model_reads.remove(&key);
             self.controls.model_actions.insert(key.clone(), Some(ModelIdentity::of(&session)));
         }
@@ -590,6 +655,7 @@ impl Hangar {
             let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Reply(key, Reply::Applied(ctl, label, before), result) }).await;
         });
         cx.notify();
+        true
     }
 
     pub(super) fn receive_control(&mut self, key: SessionKey, reply: Reply, result: Result<Value, Failure>, window: &mut Window, cx: &mut Context<Self>) {
@@ -623,11 +689,11 @@ impl Hangar {
                         self.action_feedback.insert(key.clone(), (tr("mode_probe_not_restored"), true));
                     }
                 }
-                if ctl == Ctl::Mode && self.controls.cycle_after_read.as_ref() == Some(&key) {
-                    self.controls.cycle_after_read = None;
+                if ctl == Ctl::Mode && self.controls.cycle_after_read.as_ref().is_some_and(|(reading, _)| *reading == key) {
+                    let steps = self.controls.cycle_after_read.take().map_or(1, |(_, steps)| steps);
                     match &result {
                         // Outra sessão na tela: o modo calculado pelo ciclo desta não se aplica àquela.
-                        Ok(_) if self.selected_key().as_ref() == Some(&key) => self.apply_next_mode(key.clone(), cx),
+                        Ok(_) if self.selected_key().as_ref() == Some(&key) => self.apply_next_mode(key.clone(), steps, cx),
                         Ok(_) => {}
                         Err(error) => { self.action_feedback.insert(key.clone(), (Self::failure(error), true)); }
                     }
@@ -663,6 +729,16 @@ impl Hangar {
                             Ctl::Fast => value.get("service_tier").and_then(Value::as_str).map(str::to_owned).unwrap_or(label),
                             Ctl::Model => value.pointer("/current/name").or_else(|| value.get("model")).and_then(Value::as_str).map(str::to_owned).unwrap_or(label),
                         };
+                        if ctl == Ctl::Mode {
+                            let behind = self.controls.mode_target.get_mut(&key).is_some_and(|target| target.resend_after(&label));
+                            match (behind, current.is_some()) {
+                                // Teclas que chegaram com a troca em voo: o que falta sai agora, sem aviso no meio do caminho.
+                                (true, true) => { self.send_mode(key, cx); cx.notify(); return; }
+                                (true, false) => { self.controls.mode_target.remove(&key); }
+                                // Chegou ao alvo, ou o backend recusou: a pílula assenta no modo que ficou.
+                                (false, _) => self.settle_mode_target(key.clone(), label.clone(), cx),
+                            }
+                        }
                         let pending = value.get("pending_confirm").is_some_and(|v| !v.is_null());
                         let partial = value.get("effort_error").is_some_and(|v| !v.is_null());
                         if claude_fast && !pending { self.controls.confirm_claude_fast(&key, &label); }
@@ -693,6 +769,7 @@ impl Hangar {
                         };
                         // Não aplicou: o rótulo fica com o valor real, e a leitura do Codex é refeita.
                         self.controls.applied.remove(&(key.clone(), ctl));
+                        if ctl == Ctl::Mode { self.controls.mode_target.remove(&key); }
                         self.action_feedback.insert(key, (text, true));
                     }
                 }
@@ -757,7 +834,9 @@ impl Hangar {
                     }))).into_any_element());
                 continue;
             }
-            let text = if busy == Some(ctl) { tr("ctl_applying").replace("{what}", &name) } else { value.clone().unwrap_or_else(|| name.clone()) };
+            // O modo pedido pelo Shift+Tab já aparece como valor; "aplicando" fica para a troca pelo painel.
+            let shifting = ctl == Ctl::Mode && self.controls.mode_target.contains_key(&key);
+            let text = if busy == Some(ctl) && !shifting { tr("ctl_applying").replace("{what}", &name) } else { value.clone().unwrap_or_else(|| name.clone()) };
             let id = SharedString::from(format!("ctl-{}", ctl.key()));
             let listener = cx.listener(move |this, _, window, cx| {
                 this.open_ctl(ctl, false, cx);
@@ -835,6 +914,11 @@ impl Hangar {
         let Some(choice) = choices.into_iter().nth(n).filter(|c| c.enabled) else { return; };
         self.composer.update(cx, |input, cx| input.focus(window, cx));
         if choice.current { self.close_controls(); cx.notify(); return; }
+        // Escolha no painel vence o rótulo segurado do último Shift+Tab.
+        if ctl == Ctl::Mode && let Some(key) = self.selected_key() {
+            self.controls.applied.remove(&(key.clone(), ctl));
+            self.controls.mode_target.remove(&key);
+        }
         self.apply_ctl(ctl, choice.path, choice.body, choice.label, cx);
     }
 
@@ -1281,7 +1365,38 @@ impl Hangar {
 #[cfg(test)]
 mod tests {
     // Sem glob: o `test` da gpui colide com o atributo padrão.
-    use super::{Choice, claude_effort_current, claude_model_current, codex_fast_state, keep, only_match, spaced, step_free};
+    use super::{Choice, ModeTarget, claude_effort_current, claude_model_current, codex_fast_state, keep, mode_ahead, only_match, spaced, step_free};
+
+    #[test]
+    fn mode_reply_resends_only_while_the_backend_moves() {
+        let mut target = ModeTarget { mode: "plan".into(), before: Some("manual".into()), answers: Vec::new() };
+        // Teclas em voo: a resposta trouxe o primeiro passo, e o resto sai.
+        assert!(target.resend_after("acceptEdits"));
+        assert!(!target.resend_after("plan"));
+        // Modo recusado: o backend devolve o mesmo modo de novo, e o pedido para em vez de repetir.
+        let mut refused = ModeTarget { mode: "auto".into(), before: Some("manual".into()), answers: Vec::new() };
+        assert!(refused.resend_after("manual"));
+        assert!(!refused.resend_after("manual"));
+    }
+
+    #[test]
+    fn shift_tab_steps_walk_the_cycle_and_wrap() {
+        let cycle: Vec<String> = ["manual", "acceptEdits", "plan", "auto"].map(String::from).to_vec();
+        assert_eq!(mode_ahead(&cycle, Some("manual"), 1).as_deref(), Some("acceptEdits"));
+        // Três Shift+Tab rápidos viram um pedido só, três modos à frente.
+        assert_eq!(mode_ahead(&cycle, Some("manual"), 3).as_deref(), Some("auto"));
+        assert_eq!(mode_ahead(&cycle, Some("auto"), 1).as_deref(), Some("manual"));
+        assert_eq!(mode_ahead(&cycle, Some("plan"), 6).as_deref(), Some("manual"));
+        // Modo fora do ciclo (ou desconhecido): o primeiro Shift+Tab vai ao primeiro do ciclo.
+        assert_eq!(mode_ahead(&cycle, None, 1).as_deref(), Some("manual"));
+        assert_eq!(mode_ahead(&cycle, Some("dontAsk"), 2).as_deref(), Some("acceptEdits"));
+        assert_eq!(mode_ahead(&[], Some("plan"), 1), None);
+        // O Codex alterna entre plano e padrão; outro modo vai ao plano, como antes.
+        let codex: Vec<String> = ["plan", "default"].map(String::from).to_vec();
+        assert_eq!(mode_ahead(&codex, Some("plan"), 1).as_deref(), Some("default"));
+        assert_eq!(mode_ahead(&codex, Some("default"), 1).as_deref(), Some("plan"));
+        assert_eq!(mode_ahead(&codex, Some("full-auto"), 1).as_deref(), Some("plan"));
+    }
 
     #[test]
     fn codex_fast_uses_the_selected_models_catalog_and_confirmed_tier() {

@@ -6,7 +6,7 @@ import PluginNode from './PluginNode.svelte';
 
 const V28: Node = { type: 'Box', props: { key: 'V28-escopo', flexDirection: 'row', columnGap: 2, paddingX: 1, borderStyle: 'round' }, hover: { borderColor: '#5aa6ff' }, children: [
   { type: 'Text', hover: { color: '#3fb97a', bold: true }, children: ['texto que muda de cor'] },
-  { type: 'Button', props: { key: 'V28-botao', label: 'Botão no escopo' }, hover: { color: '#e8a33d' } },
+  { type: 'Button', props: { key: 'V28-botao', label: 'Botão no escopo' }, press: { plugin: 'mod', handle: 1 }, hover: { color: '#e8a33d' } },
 ] };
 const V29: Node = { type: 'Box', props: { key: 'V29-escopo', flexDirection: 'row' }, children: [
   { type: 'Text', children: ['passe o ponteiro'] },
@@ -57,7 +57,7 @@ describe('hover nos mods', () => {
 
   it('o Button aplica o conjunto inteiro de estilo do hover, no botão e no rótulo sem onPress', async () => {
     const cheio: Node = { type: 'Box', props: { key: 'k' }, children: [
-      { type: 'Button', props: { key: 'b', label: 'x' }, hover: { color: '#e8a33d', backgroundColor: '#112233', italic: true, underline: true, strikethrough: true, bold: true, dimColor: true } },
+      { type: 'Button', props: { key: 'b', label: 'x' }, press: { plugin: 'mod', handle: 1 }, hover: { color: '#e8a33d', backgroundColor: '#112233', italic: true, underline: true, strikethrough: true, bold: true, dimColor: true } },
     ] };
     for (const onPress of [vi.fn(), undefined]) {
       const el = await montar({ node: cheio, onPress });
@@ -82,9 +82,9 @@ describe('hover nos mods', () => {
 
 // A linha da faixa do mod `pm-mock`: dois botões `plain` e um texto cortado com trechos coloridos dentro.
 const LINHA_PM: Node = { type: 'Box', props: { key: 'pm-linha', flexDirection: 'row', width: 150 }, children: [
-  { type: 'Button', props: { key: 'pm-abrir', plain: true, label: '▸ TAREFA-123' } },
+  { type: 'Button', props: { key: 'pm-abrir', plain: true, label: '▸ TAREFA-123' }, press: { plugin: 'pm-mock', handle: 1 } },
   { type: 'Text', children: [' '] },
-  { type: 'Button', props: { key: 'pm-fechar', plain: true, dimColor: true, label: 'fechar' } },
+  { type: 'Button', props: { key: 'pm-fechar', plain: true, dimColor: true, label: 'fechar' }, press: { plugin: 'pm-mock', handle: 1 } },
   { type: 'Text', props: { wrap: 'truncate-end' }, children: [
     { type: 'Text', props: { dimColor: true }, children: [' · '] },
     { type: 'Text', props: { color: '#3fb97a', wrap: 'wrap' }, children: ['servico_exemplo ● 2 threads abertas'] },

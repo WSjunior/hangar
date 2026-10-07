@@ -184,6 +184,21 @@ async def list_facts(request: Request) -> dict:
         raise HTTPException(400) from None
 
 
+@router.post("/term/origin")
+async def term_origin(request: Request) -> dict:
+    """Origin do painel de terminal que o Rust abre para o dono: a regra e as fontes ficam aqui."""
+    from app import termsock
+    raw = await request.body()
+    try:
+        body = json.loads(raw) if len(raw) <= 8192 else None
+        if (not isinstance(body, dict) or set(body) != {"origin", "host"} or not isinstance(body["origin"], str)
+                or not isinstance(body["host"], (str, type(None)))):
+            raise ValueError("origem inválida")
+    except (ValueError, RecursionError):
+        raise HTTPException(400) from None
+    return {"ok": termsock._origem_aceita(body["origin"], body["host"])}
+
+
 @router.post("/list/demote")
 async def list_demote(request: Request) -> dict:
     """`hooks.demote_awaiting`: o pane que a lista do Rust capturou contradisse o marcador."""
@@ -262,6 +277,35 @@ async def session_info(name: str) -> dict:
             diag.registrar("runtime.history_failed", "erro", sessao=name, **failure_reason(exc))
             raise HTTPException(503) from None
     return info_payload(name, info.provider, info.jsonl)
+
+
+@router.get("/sessions/{name}/state-facts")
+async def state_facts_snapshot(name: str) -> dict:
+    """Retrato dos fatos do estado (`state_facts`); registra o interesse do Rust nesta sessão."""
+    from app import state_facts
+    return await asyncio.to_thread(state_facts.snapshot, name)
+
+
+_STATE_SERVICES = {"permission.observe", "session.dead", "session.deliverable"}
+
+
+@router.post("/sessions/{name}/state-service")
+async def state_service(name: str, request: Request) -> dict:
+    """Serviços do `Monitor` do Rust; falha volta com o tipo, como `runtime_policy.execute`."""
+    from app import runtime_policy
+    raw = await request.body()
+    try:
+        body = json.loads(raw) if len(raw) <= 64 * 1024 else None
+        if (not isinstance(body, dict) or set(body) != {"kind", "payload"}
+                or body["kind"] not in _STATE_SERVICES or not isinstance(body["payload"], dict)):
+            raise ValueError("serviço inválido")
+    except (ValueError, RecursionError):
+        raise HTTPException(400) from None
+    try:
+        return {"ok": True, "data": await runtime_policy.state_service(body["kind"], name, body["payload"])}
+    except Exception as exc:
+        diag.registrar("estado.servico_falhou", "erro", sessao=name, codigo=type(exc).__name__)
+        return {"ok": False, "error_type": type(exc).__name__}
 
 
 @router.get("/migration/status")

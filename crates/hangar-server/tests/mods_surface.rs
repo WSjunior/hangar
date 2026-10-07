@@ -230,7 +230,7 @@ fn invalidate_during_render_waits_for_the_answer() {
 fn invalidate_during_click_refresh_waits_for_it() {
     let mut surface = ready(json!({"type": "Text"}));
     // Botão fora do desenho guardado: pede o desenho de novo antes de tentar (S4).
-    let refresh = request(&app(&mut surface, 1, ModsCall::Press { site: BAND_SITE.into(), key: "x".into() }, 1.0), "ui_render");
+    let refresh = request(&app(&mut surface, 1, ModsCall::Press { site: BAND_SITE.into(), plugin: "vitrine".into(), key: "x".into() }, 1.0), "ui_render");
     let all = json!({"type": "system", "subtype": "ui_invalidate", "event": "ui.render"});
     assert!(writes(&surface.on_notice(&all, 1.5)).is_empty());
     assert!(writes(&surface.tick(1.6)).is_empty(), "a nova tentativa conta como desenho em voo");
@@ -253,18 +253,20 @@ fn invalid_tree_keeps_the_pane_listed() {
 fn button(key: &str, handle: i64) -> Value {
     json!({"type": "Box", "children": [{"type": "Button", "props": {"key": key, "label": "OK"}, "press": {"plugin": "m", "handle": handle}}]})
 }
-fn press(site: &str, key: &str) -> ModsCall { ModsCall::Press { site: site.into(), key: key.into() } }
+fn press(site: &str, key: &str) -> ModsCall { ModsCall::Press { site: site.into(), plugin: "m".into(), key: key.into() } }
+/// Clique nos desenhos gravados da vitrine, que é o mod deles.
+fn recorded_press(site: &str, key: &str) -> ModsCall { ModsCall::Press { site: site.into(), plugin: "vitrine".into(), key: key.into() } }
 fn code(result: Option<Result<Value, ModsError>>) -> String { result.unwrap().unwrap_err().code }
 
 #[test]
 fn recorded_vitrine_click_counts_on_its_pane() {
     let mut drive = Drive::start("vitrine");
-    drive.call(1, press("above-prompt", "abrir-vitrine-botoes"));
+    drive.call(1, recorded_press("above-prompt", "abrir-vitrine-botoes"));
     assert_eq!(drive.reply(1), Some(Ok(json!({"element": "abrir-vitrine-botoes"}))));
     assert_eq!(drive.view()["shown_id"], "vitrine-botoes");
     drive.advance(0.2);
     assert!(drive.pane_text("vitrine-botoes").contains("V15-comum: 0"));
-    drive.call(2, press("vitrine-botoes", "V15-comum"));
+    drive.call(2, recorded_press("vitrine-botoes", "V15-comum"));
     assert_eq!(drive.reply(2), Some(Ok(json!({"element": "V15-comum"}))));
     drive.advance(0.2);
     assert!(drive.pane_text("vitrine-botoes").contains("V15-comum: 1"), "o ui_invalidate com instances redesenhou o painel");
@@ -273,7 +275,7 @@ fn recorded_vitrine_click_counts_on_its_pane() {
 #[test]
 fn recorded_three_panes_follow_the_last_opened() {
     let mut drive = Drive::start("vitrine");
-    drive.call(1, press("above-prompt", "abrir-abas"));
+    drive.call(1, recorded_press("above-prompt", "abrir-abas"));
     assert!(drive.reply(1).unwrap().is_ok());
     let view = drive.view();
     let ids: Vec<&str> = view["panes"].as_array().unwrap().iter().map(|pane| pane["id"].as_str().unwrap()).collect();
@@ -284,11 +286,11 @@ fn recorded_three_panes_follow_the_last_opened() {
 #[test]
 fn recorded_invalid_and_big_trees_pass() {
     let mut drive = Drive::start("vitrine");
-    drive.call(1, press("above-prompt", "abrir-invalida"));
+    drive.call(1, recorded_press("above-prompt", "abrir-invalida"));
     assert!(drive.reply(1).unwrap().is_ok());
     let quebrado = drive.view()["panes"].as_array().unwrap().iter().find(|pane| pane["id"] == "vitrine-quebrado").cloned().unwrap();
     assert_eq!(quebrado["tree"], nth_render("vitrine", "vitrine-quebrado", 0));
-    drive.call(2, press("above-prompt", "abrir-grande"));
+    drive.call(2, recorded_press("above-prompt", "abrir-grande"));
     drive.advance(0.2);
     assert!(drive.reply(2).unwrap().is_ok(), "o segundo clique também é respondido (A18)");
     let grande = drive.view()["panes"].as_array().unwrap().iter().find(|pane| pane["id"] == "vitrine-quebrado").cloned().unwrap();
@@ -340,7 +342,7 @@ fn input_goes_with_key_component_and_instance() {
     let out = surface.on_notice(&panes(json!([{"id": "campos", "title": "Campos", "plugin": "vitrine"}]), "campos"), 1.0);
     let field = json!({"type": "Input", "props": {"key": "V18-campo", "value": ""}, "press": {"plugin": "vitrine", "handle": 9}});
     ok(&mut surface, &request(&out, "ui_render"), json!({"tree": field}), 1.0);
-    let call = ModsCall::Input { site: "campos".into(), key: "V18-campo".into(), submit: true, value: "olá, mundo".into() };
+    let call = ModsCall::Input { site: "campos".into(), plugin: "vitrine".into(), key: "V18-campo".into(), submit: true, value: "olá, mundo".into() };
     let input = request(&app(&mut surface, 4, call, 1.1), "ui_input");
     assert_eq!(input["request"], json!({"subtype": "ui_input", "plugin": "vitrine", "handle": 9, "kind": "submit", "value": "olá, mundo",
         "key": "V18-campo", "component": "Pane", "instance_id": "campos", "surface": "desktop", "client_id": "hangar"}));
@@ -428,7 +430,7 @@ fn no_action_leaves_without_time_for_the_answer_to_come_back() {
     let mut surface = ready(button("ok", 1));
     surface.on_notice(&panes(json!([{"id": "p", "title": "P", "plugin": "m"}]), "p"), 0.5);
     for (token, call) in [(1, press("above-prompt", "ok")), (2, ModsCall::Show { site: "p".into() }), (3, ModsCall::Close { site: "p".into() }),
-                          (4, ModsCall::Input { site: "above-prompt".into(), key: "ok".into(), submit: true, value: "x".into() })] {
+                          (4, ModsCall::Input { site: "above-prompt".into(), plugin: "vitrine".into(), key: "ok".into(), submit: true, value: "x".into() })] {
         let out = surface.call(token, call, 1.0, 3.9);
         assert!(writes(&out).is_empty(), "nenhum pedido ao mod");
         assert_eq!(code(reply_of(&out, token)), "erro_mod_clique_sem_resposta");
@@ -490,19 +492,36 @@ fn only_actions_carry_a_deadline_to_the_writer() {
     assert_eq!(until(&redraw, "ui_render"), None, "o desenho vai sem prazo");
 }
 
-/// Dois mods desenham um controle com a mesma `key` no mesmo lugar: o app não diz de qual mod é, e nenhum é
-/// acionado, nem botão nem campo. A resposta é a do item que não está mais na tela.
+/// Dois mods desenham um controle com a mesma `key` no mesmo lugar: o app diz de qual mod é, e só o dele é
+/// acionado, botão ou campo.
 #[test]
-fn the_same_key_from_two_mods_triggers_neither() {
+fn the_same_key_from_two_mods_reaches_the_one_asked() {
     let two = |kind: &str| json!({"type": "Box", "children": [
         {"type": kind, "props": {"key": "ok", "label": "OK"}, "press": {"plugin": "um", "handle": 1}},
         {"type": kind, "props": {"key": "ok", "label": "OK"}, "press": {"plugin": "outro", "handle": 2}}]});
+    let mut surface = ready(two("Button"));
+    let call = ModsCall::Press { site: "above-prompt".into(), plugin: "outro".into(), key: "ok".into() };
+    let sent = request(&app(&mut surface, 1, call, 0.1), "ui_press");
+    assert_eq!((&sent["request"]["plugin"], &sent["request"]["handle"]), (&json!("outro"), &json!(2)));
+    let mut surface = ready(two("Input"));
+    let typing = ModsCall::Input { site: "above-prompt".into(), plugin: "um".into(), key: "ok".into(), submit: true, value: "x".into() };
+    let sent = request(&app(&mut surface, 2, typing, 0.1), "ui_input");
+    assert_eq!((&sent["request"]["plugin"], &sent["request"]["handle"]), (&json!("um"), &json!(1)));
+}
+
+/// O mesmo mod desenha a mesma `key` duas vezes no lugar: não há como saber qual, e nenhum é acionado, nem
+/// botão nem campo. A resposta é a do item que não está mais na tela.
+#[test]
+fn the_same_key_twice_from_one_mod_triggers_neither() {
+    let two = |kind: &str| json!({"type": "Box", "children": [
+        {"type": kind, "props": {"key": "ok", "label": "OK"}, "press": {"plugin": "m", "handle": 1}},
+        {"type": kind, "props": {"key": "ok", "label": "OK"}, "press": {"plugin": "m", "handle": 2}}]});
     let mut surface = ready(two("Button"));
     let out = app(&mut surface, 1, press("above-prompt", "ok"), 0.1);
     assert!(writes(&out).is_empty(), "nada sai ao mod: {:?}", writes(&out));
     assert_eq!(code(reply_of(&out, 1)), "erro_mod_botao_inexistente");
     let mut surface = ready(two("Input"));
-    let typing = ModsCall::Input { site: "above-prompt".into(), key: "ok".into(), submit: true, value: "x".into() };
+    let typing = ModsCall::Input { site: "above-prompt".into(), plugin: "m".into(), key: "ok".into(), submit: true, value: "x".into() };
     let out = app(&mut surface, 2, typing, 0.1);
     assert!(writes(&out).is_empty());
     assert_eq!(code(reply_of(&out, 2)), "erro_mod_botao_inexistente");

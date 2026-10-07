@@ -41,3 +41,12 @@ describe('recusas novas dos mods', () => {
     expect(texto).not.toBe(code);
   });
 });
+
+describe('transcrição de áudio já enviado', () => {
+  it('traduz o áudio sumido e a recusa do convidado', () => {
+    expect(formataErro({ code: 'erro_upload_inexistente', params: {}, msg: 'x' })).toBe(m.erro_upload_inexistente());
+    expect(formataErro({ code: 'erro_arquivo_caminho_convidado', params: {}, msg: 'x' })).toBe(
+      m.erro_arquivo_caminho_convidado(),
+    );
+  });
+});

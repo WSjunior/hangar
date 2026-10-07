@@ -274,6 +274,45 @@ def test_slash_without_row_clear_blocks_until_generation_change(monkeypatch,tmp_
     asyncio.run(flow())
 
 
+def test_clear_unproved_before_enter_raises_no_barrier(monkeypatch,tmp_path):
+    # #84: o texto do /clear não chegou ao composer e o Enter nunca saiu: entrega incerta comum.
+    from app import terminal_input as ti
+    owner,slot,_ = live_owner(monkeypatch,tmp_path)
+    calls=[]
+    def send(self,name,text):
+        calls.append(text)
+        if text == '/clear':
+            ti._ULTIMA_LIMPEZA.stage='linha.prova'
+            ti._ULTIMA_LIMPEZA.limpou=False
+            return 'partial'
+        return 'sent'
+    monkeypatch.setattr(ti.TerminalInput,'send_prompt',send)
+    async def flow():
+        assert (await owner.op('session',{'kind':'submit','text':'/clear'},'clear'))['disposition'] == 'unknown'
+        assert 'clear_barrier' not in slot.store.state['runtime_state']
+        assert (await owner.op('session',{'kind':'submit','text':'new'},'new'))['disposition'] == 'accepted'
+        assert calls == ['/clear','new']
+    asyncio.run(flow())
+
+
+def test_clear_without_new_conversation_releases_barrier_without_resending(monkeypatch,tmp_path):
+    from app import runtime_terminal as rt, terminal_input as ti
+    owner,slot,_ = live_owner(monkeypatch,tmp_path)
+    calls=[]
+    monkeypatch.setattr(ti.TerminalInput,'send_prompt',lambda self,name,text:calls.append(text) or 'sent')
+    async def flow():
+        assert (await owner.op('session',{'kind':'submit','text':'/clear'},'clear'))['disposition'] == 'accepted'
+        with pytest.raises(RuntimeError): await owner.op('session',{'kind':'submit','text':'blocked'},'blocked')
+        # Passado o prazo, sem conversa nova no vínculo nem no disco: a trava sai.
+        monkeypatch.setattr(rt,'CLEAR_APPLY_WAIT_S',0)
+        assert (await owner.op('session',{'kind':'submit','text':'new'},'new'))['disposition'] == 'accepted'
+        assert 'clear_barrier' not in slot.store.state['runtime_state']
+        op = slot.store.state['operations']['clear']
+        assert op['status'] == 'rejected' and op['result']['payload']['code'] == 'clear_not_applied'
+        assert calls == ['/clear','new']
+    asyncio.run(flow())
+
+
 def test_same_name_new_mux_does_not_import_old_queue(monkeypatch,tmp_path):
     owner,slot,collected=live_owner(monkeypatch,tmp_path)
     slot.store.exec(1,'append',{'monotonic_s':1,'epoch_s':10},
@@ -1374,4 +1413,100 @@ def test_rust_bypass_reopen_of_terminal_closes_and_reopens_in_rust(monkeypatch, 
         assert calls == [('para_headless', 'session', 'bypassPermissions'), ('para_terminal', 'session')]
         assert gateway.calls == ['open', 'snapshot', 'close', 'open']
         assert slot.phase == Phase.Rust and slot.lease is None and slot.binding.meta['terminal']['pane'] == '%7'
+    asyncio.run(flow())
+
+
+def test_clear_on_disk_counts_only_a_transcript_after_the_dispatch(tmp_path):
+    import os
+    from app import runtime_terminal as rt
+    atual = tmp_path / 'atual.jsonl'
+    atual.write_text('<command-name>/clear</command-name>\n')
+    antigo = tmp_path / 'antigo.jsonl'
+    antigo.write_text('{"message":{"content":"<command-name>/clear</command-name>"}}\n')
+    os.utime(antigo, (1000, 1000))
+    assert rt._clear_on_disk(str(atual), 2000) is False
+    (tmp_path / 'novo.jsonl').write_text('{"message":{"content":"<command-name>/clear</command-name>"}}\n')
+    assert rt._clear_on_disk(str(atual), 2000) is True
+
+
+def test_terminal_facts_see_the_open_askuserquestion_sidecar(monkeypatch,tmp_path):
+    # O sidecar do hook mora em <config>/.hangar-askq/<stem>.json: com o caminho inteiro do
+    # transcript ele nunca era achado e os fatos diziam "sem pergunta" com o menu fora da tela.
+    from app import runtime_terminal as terminal, askquestion
+    owner,slot,collected=live_owner(monkeypatch,tmp_path)
+    Path(collected['jsonl']).write_text('{"type":"assistant","timestamp":"2026-09-01T17:27:13.000Z","message":{"content":[{"type":"text","text":"oi"}]}}\n')
+    (tmp_path/'.hangar-askq').mkdir()
+    (tmp_path/'.hangar-askq'/'sid.json').write_text(json.dumps({'transcript_path':collected['jsonl'],
+        'tool_input':{'questions':[{'question':'A ou B?','header':'Opção','multiSelect':False,
+            'options':[{'label':'A','description':'a'},{'label':'B','description':'b'}]}]}}))
+    monkeypatch.setattr(askquestion,'dirs_de_config',lambda:[tmp_path])
+    descriptor=slot.binding.descriptor()
+    metadata={**descriptor['meta'],'descriptor':descriptor,'operation_id':'root','validate':lambda:None}
+    current=terminal.facts({'binding':descriptor['meta']['terminal'],'operation_id':'root','text':''},metadata)
+    assert current['open_question'] is True
+
+
+def test_clear_unknown_after_enter_raises_barrier_and_busy_session_keeps_it(monkeypatch,tmp_path):
+    # Incerto depois do Enter (etapa *.submeter) pode ter trocado a conversa: trava. Com o Claude
+    # trabalhando o /clear espera na fila do Claude Code, e a trava não sai no prazo.
+    from app import runtime_terminal as rt, terminal_input as ti
+    owner,slot,_ = live_owner(monkeypatch,tmp_path)
+    def send(self,name,text):
+        if text == '/clear':
+            ti._ULTIMA_LIMPEZA.stage='linha.submeter'
+            ti._ULTIMA_LIMPEZA.limpou=True
+            return 'partial'
+        return 'sent'
+    monkeypatch.setattr(ti.TerminalInput,'send_prompt',send)
+    async def flow():
+        assert (await owner.op('session',{'kind':'submit','text':'/clear'},'clear'))['disposition'] == 'unknown'
+        assert slot.store.state['runtime_state']['clear_barrier']['operation_id'] == 'clear'
+        monkeypatch.setattr(rt,'CLEAR_APPLY_WAIT_S',0)
+        monkeypatch.setattr(ti,'classify',lambda pane:('working','Pensando',None,None))
+        with pytest.raises(RuntimeError): await owner.op('session',{'kind':'submit','text':'busy'},'busy')
+        assert 'clear_barrier' in slot.store.state['runtime_state']
+    asyncio.run(flow())
+
+
+def test_legacy_clear_barrier_without_time_is_stamped_not_released(monkeypatch,tmp_path):
+    from app import runtime_terminal as rt
+    owner,slot,_ = live_owner(monkeypatch,tmp_path)
+    state = copy.deepcopy(slot.store.state)
+    state['runtime_state']['clear_barrier'] = {'generation':1,'conversation':'sid','operation_id':'old'}
+    slot.store._persist(state)
+    descriptor = slot.binding.descriptor()
+    assert rt._expire_clear(owner, descriptor, 'probe') is False
+    barrier = slot.store.state['runtime_state']['clear_barrier']
+    assert barrier['raised'] > 0 and barrier['since'] == barrier['raised']
+
+
+def test_clear_that_changes_conversation_answers_accepted_in_python(monkeypatch,tmp_path):
+    # O /clear aplicado troca a conversa antes da limpeza da fila que o segue; a limpeza revalidava o
+    # vínculo e o envio voltava 400 "vínculo terminal mudou" com o /clear feito.
+    from app import terminal_input as ti
+    owner,slot,collected = live_owner(monkeypatch,tmp_path)
+    def send(self,name,text):
+        collected['session_id']='after'
+        collected['jsonl']=str(tmp_path / 'after.jsonl')
+        return 'sent'
+    monkeypatch.setattr(ti.TerminalInput,'send_prompt',send)
+    async def flow():
+        assert (await owner.op('session',{'kind':'submit','text':'/clear'},'clear'))['disposition'] == 'accepted'
+    asyncio.run(flow())
+
+
+def test_clear_unproved_before_enter_keeps_the_queue(monkeypatch,tmp_path):
+    # O /clear que parou antes do Enter não rodou: as mensagens na fila não podem sumir com ele.
+    from app import terminal_input as ti
+    owner,slot,_ = live_owner(monkeypatch,tmp_path)
+    slot.store.exec(1,'append',{'monotonic_s':1,'epoch_s':10},
+        {'kind':'append','text':'na fila','delivered':False,'ts':10,'pre_transcript':False,'entry_id':'row'})
+    def send(self,name,text):
+        ti._ULTIMA_LIMPEZA.stage='linha.prova'
+        ti._ULTIMA_LIMPEZA.limpou=False
+        return 'partial'
+    monkeypatch.setattr(ti.TerminalInput,'send_prompt',send)
+    async def flow():
+        assert (await owner.op('session',{'kind':'submit','text':'/clear'},'clear'))['disposition'] == 'unknown'
+        assert [row['id'] for row in slot.store.state['rows']] == ['row']
     asyncio.run(flow())

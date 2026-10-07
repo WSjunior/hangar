@@ -1,7 +1,7 @@
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-component-0.7.0/MODIFICADO.md gpui-component-0.7.0/MODIFICADO.md
 --- gpui-component-0.7.0/MODIFICADO.md
 +++ gpui-component-0.7.0/MODIFICADO.md
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,40 @@
 +# Cópia modificada do gpui-component 0.7.0
 +
 +Origem: crate `gpui-component` 0.7.0 do crates.io (repositório `longbridge/gpui-kit`), licença Apache-2.0 (`LICENSE-APACHE`). Entra pelo `[patch.crates-io]` de `desktop-native/Cargo.toml`.
@@ -40,6 +40,74 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 +
 +Ao atualizar gpui-kit, reaplicar na nova versão com `vendor/rebase.sh` (ver `vendor/PATCHES.md`) ou remover esta cópia
 +quando a API equivalente existir no kit.
++
++Os testes que montam `KeyDownEvent` passam `physical_digit: None`, o campo novo da cópia de gpui-pre.
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-component-0.7.0/src/attachment.rs gpui-component-0.7.0/src/attachment.rs
+--- gpui-component-0.7.0/src/attachment.rs
++++ gpui-component-0.7.0/src/attachment.rs
+@@ -1813,6 +1813,7 @@
+                 keystroke: keystroke.clone(),
+                 is_held: false,
+                 prefer_character_input: false,
++                physical_digit: None,
+             });
+             cx.simulate_event(KeyUpEvent { keystroke });
+             assert_eq!(retries.get(), 2);
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-component-0.7.0/src/button/button_group.rs gpui-component-0.7.0/src/button/button_group.rs
+--- gpui-component-0.7.0/src/button/button_group.rs
++++ gpui-component-0.7.0/src/button/button_group.rs
+@@ -334,6 +334,7 @@
+             keystroke: keystroke.clone(),
+             is_held: false,
+             prefer_character_input: false,
++            physical_digit: None,
+         });
+         cx.simulate_event(KeyUpEvent { keystroke });
+     }
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-component-0.7.0/src/button/button.rs gpui-component-0.7.0/src/button/button.rs
+--- gpui-component-0.7.0/src/button/button.rs
++++ gpui-component-0.7.0/src/button/button.rs
+@@ -1472,6 +1472,7 @@
+                 keystroke: keystroke.clone(),
+                 is_held: false,
+                 prefer_character_input: false,
++                physical_digit: None,
+             });
+             cx.simulate_event(KeyUpEvent { keystroke });
+         }
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-component-0.7.0/src/button/toggle.rs gpui-component-0.7.0/src/button/toggle.rs
+--- gpui-component-0.7.0/src/button/toggle.rs
++++ gpui-component-0.7.0/src/button/toggle.rs
+@@ -464,6 +464,7 @@
+             keystroke: keystroke.clone(),
+             is_held: false,
+             prefer_character_input: false,
++            physical_digit: None,
+         });
+         cx.simulate_event(KeyUpEvent { keystroke });
+     }
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-component-0.7.0/src/carousel/carousel.rs gpui-component-0.7.0/src/carousel/carousel.rs
+--- gpui-component-0.7.0/src/carousel/carousel.rs
++++ gpui-component-0.7.0/src/carousel/carousel.rs
+@@ -1282,6 +1282,7 @@
+             keystroke: keystroke.clone(),
+             is_held: false,
+             prefer_character_input: false,
++            physical_digit: None,
+         });
+         cx.simulate_event(gpui::KeyUpEvent { keystroke });
+         assert_eq!(selected(cx), Some(2));
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-component-0.7.0/src/checkbox.rs gpui-component-0.7.0/src/checkbox.rs
+--- gpui-component-0.7.0/src/checkbox.rs
++++ gpui-component-0.7.0/src/checkbox.rs
+@@ -438,6 +438,7 @@
+             keystroke: keystroke.clone(),
+             is_held: false,
+             prefer_character_input: false,
++            physical_digit: None,
+         });
+         cx.simulate_event(KeyUpEvent { keystroke });
+     }
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-component-0.7.0/src/dialog/dialog.rs gpui-component-0.7.0/src/dialog/dialog.rs
 --- gpui-component-0.7.0/src/dialog/dialog.rs
 +++ gpui-component-0.7.0/src/dialog/dialog.rs
@@ -205,7 +273,21 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
  };
  
  use crate::menu::PopupMenu;
-@@ -193,7 +193,13 @@
+@@ -175,9 +175,12 @@
+ impl DeferredMenu {
+     fn build_menu(&self, window: &mut Window, cx: &mut App) -> AnyElement {
+         // Focus the menu, so that can be handle the action.
++        // Modified for Hangar: never in the middle of prepaint. Elements already painted this frame had claimed the
++        // accessibility focus, and a second claim panics in debug builds ("set_focus called more than once in a single
++        // frame"). The menu is focused when it is built (below); a lost focus comes back after this frame.
+         let focus_handle = self.menu_view.focus_handle(cx);
+         if !focus_handle.contains_focused(window, cx) {
+-            focus_handle.focus(window, cx);
++            window.defer(cx, move |window, cx| focus_handle.focus(window, cx));
+         }
+ 
+         deferred(
+@@ -193,7 +196,13 @@
                              .position(self.position)
                              .snap_to_window_with_margin(px(8.))
                              .anchor(self.anchor)
@@ -220,6 +302,15 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
                      ),
              ),
          )
+@@ -434,6 +443,8 @@
+                                     menu.set_trigger_focus(trigger_focus_handle, cx);
+                                     menu.set_previous_focus(previous_focus_handle, cx);
+                                 });
++                                // Modified for Hangar: focused here, between frames, like the dropdown menu.
++                                menu.focus_handle(cx).focus(window, cx);
+ 
+                                 // Set up the subscription for dismiss handling.
+                                 // Hold a Weak here, not a strong clone: the closure
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-component-0.7.0/src/menu/mod.rs gpui-component-0.7.0/src/menu/mod.rs
 --- gpui-component-0.7.0/src/menu/mod.rs
 +++ gpui-component-0.7.0/src/menu/mod.rs
@@ -664,6 +755,28 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
  }
  
  /// A popover element that can be triggered by a button or any other element.
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-component-0.7.0/src/questionnaire/components.rs gpui-component-0.7.0/src/questionnaire/components.rs
+--- gpui-component-0.7.0/src/questionnaire/components.rs
++++ gpui-component-0.7.0/src/questionnaire/components.rs
+@@ -1577,6 +1577,7 @@
+             keystroke,
+             is_held,
+             prefer_character_input: false,
++            physical_digit: None,
+         });
+     }
+ 
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-component-0.7.0/src/switch.rs gpui-component-0.7.0/src/switch.rs
+--- gpui-component-0.7.0/src/switch.rs
++++ gpui-component-0.7.0/src/switch.rs
+@@ -386,6 +386,7 @@
+             keystroke: keystroke.clone(),
+             is_held: false,
+             prefer_character_input: false,
++            physical_digit: None,
+         });
+         cx.simulate_event(KeyUpEvent { keystroke });
+     }
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-component-0.7.0/src/text/compat.rs gpui-component-0.7.0/src/text/compat.rs
 --- gpui-component-0.7.0/src/text/compat.rs
 +++ gpui-component-0.7.0/src/text/compat.rs
@@ -725,3 +838,22 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      /// Set extra style for the table container.
      ///
      /// Set `overflow_x: scroll` on the refinement for adaptive layout: cells
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-component-0.7.0/tests/controlled_change_callbacks.rs gpui-component-0.7.0/tests/controlled_change_callbacks.rs
+--- gpui-component-0.7.0/tests/controlled_change_callbacks.rs
++++ gpui-component-0.7.0/tests/controlled_change_callbacks.rs
+@@ -136,6 +136,7 @@
+                         keystroke: keystroke.clone(),
+                         is_held: false,
+                         prefer_character_input: false,
++                        physical_digit: None,
+                     });
+                     visual.simulate_event(KeyUpEvent { keystroke });
+                 }
+@@ -195,6 +196,7 @@
+         keystroke: keystroke.clone(),
+         is_held: false,
+         prefer_character_input: false,
++        physical_digit: None,
+     });
+     visual.simulate_event(KeyUpEvent { keystroke });
+     visual.update(|_, cx| {

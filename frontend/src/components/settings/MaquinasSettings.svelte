@@ -868,8 +868,9 @@
         {#if store.temMudanca || store.salvando || store.salvo}
           <div class="id-linha">
             {#if store.salvo}<span class="id-ok">{m.config_server_salvo()}</span>{/if}
+            {#if store.salvarBloqueado}<span class="id-bloqueio" role="status">{m.native_server_save_blocked_provider_key()}</span>{/if}
             {#if store.temMudanca || store.salvando}
-              <button type="button" class="btn primario" onclick={store.salvar} disabled={store.salvando}>
+              <button type="button" class="btn primario" onclick={store.salvar} disabled={store.salvando || store.salvarBloqueado}>
                 {store.salvando ? m.config_motores_salvando() : m.ctx_salvar()}
               </button>
             {/if}
@@ -1163,6 +1164,7 @@
   .id-erro { margin: 0 0 var(--space-2) var(--space-2); font-size: var(--text-xs); color: var(--error); }
   .id-linha { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-3); margin: 0 0 var(--space-3); }
   .id-ok { font-size: var(--text-xs); color: var(--text-secondary); }
+  .id-bloqueio { flex: 1 1 auto; min-width: 0; text-align: right; font-size: var(--text-xs); color: var(--warning); }
   .id-acoes { display: flex; align-items: center; gap: var(--space-2); margin: var(--space-2) 0 var(--space-3); }
   .btn {
     height: 40px; padding: 0 var(--space-4);

@@ -10,18 +10,21 @@ function overwriteGetLocale(fn: () => 'en' | 'pt') {
 }
 import { configureApi } from './apiEnv';
 // `getHistoryDesde` veio da main junto com o histórico condicional (304 + ETag).
-import { getConfig, getConfigForServer, patchConfig, patchConfigForServer, createSession, getHistory, getHistoryDesde, isAbortError, transcribeFile, transcribeFileForServer, getModelOptions, setEngineModel, rotaGenerica, pairSession } from './api';
+import { getConfig, getConfigForServer, patchConfig, patchConfigForServer, createSession, getHistory, getHistoryDesde, isAbortError, transcribeFile, transcribeFileForServer, transcribeUploaded, transcribeUploadedForServer, uploadFile, uploadFileForServer, getModelOptions, setEngineModel, rotaGenerica, pairSession } from './api';
 import { createSessionForServer, getFolderGitForServer, folderGitActionForServer, defaultBase } from './api';
 import { mensagemDeErro, formataErro } from './errosApi';
 import { passarBastao, getSyncSetupForServer, setupSyncForServer, disableSyncForServer } from './api';
 import { probeServerResponse } from './api';
 import { scanDir, scanDirForServer, listClaudeConfigs, listClaudeConfigsForServer } from './api';
-import { answerQuestions, inputPluginField, interrupt, openEventStreamForServer, pressPluginButton, sendInputForServer, showPluginPane, skipQuestion } from './api';
+import { answerQuestions, closePluginPane, inputPluginField, interrupt, openEventStreamForServer, pressPluginButton, sendInputForServer, showPluginPane, skipQuestion } from './api';
 import { discardFile, fileAuthHeader, fileUrlNative, getPairContract, getPlans, listFiles, pathDiff, readFile, searchFiles, setPlanPin, unpairSession, writeFile } from './api';
 import type { Server } from './servers';
 import { exportShortcuts } from './api';
-import { fileUrl, uploadUrl } from './api';
+import { fileUrl, uploadUrl, uploadUrlNative } from './api';
+import { editTranscriptionProviderKey, editTranscriptionProviderTarget, moveTranscriptionProvider, parseTranscriptionProviders, transcriptionProviderKeepsKey, transcriptionProviderLabel, transcriptionProvidersMissingKey } from './api';
 const server = { id: 'a', label: 'Servidor A', baseUrl: 'https://a.test', token: 'token-a' };
+/** O campo `V18-campo` da vitrine, como o `inputControl` o tira da árvore. */
+const CAMPO = { plugin: 'vitrine', key: 'V18-campo' };
 
 it('exportação leva IDs selecionados ao servidor escolhido e distingue seleção vazia', async () => {
   const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}'));
@@ -347,9 +350,10 @@ describe('contratos de conversa com servidor explícito', () => {
   const mutations = [
     { path: '/interrupt', body: {}, run: (s?: Server) => interrupt('mesma/sessão', false, s) },
     { path: '/interrupt?clear=true', body: {}, run: (s?: Server) => interrupt('mesma/sessão', true, s) },
-    { path: '/plugin/press', body: { site: 'above-prompt', key: 'rv-1' }, run: (s?: Server) => pressPluginButton('mesma/sessão', 'above-prompt', 'rv-1', s) },
+    { path: '/plugin/press', body: { site: 'above-prompt', key: 'rv-1', plugin: 'pm-review' }, run: (s?: Server) => pressPluginButton('mesma/sessão', 'above-prompt', { plugin: 'pm-review', key: 'rv-1' }, s) },
+    { path: '/plugin/close', body: { site: 'pm-mock-mr' }, run: (s?: Server) => closePluginPane('mesma/sessão', 'pm-mock-mr', s) },
     { path: '/plugin/show', body: { site: 'pm-mock-mr' }, run: (s?: Server) => showPluginPane('mesma/sessão', 'pm-mock-mr', s) },
-    { path: '/plugin/input', body: { site: 'vitrine-campos', key: 'V18-campo', kind: 'change', value: 'oi' }, run: (s?: Server) => inputPluginField('mesma/sessão', 'vitrine-campos', 'V18-campo', 'change', 'oi', s) },
+    { path: '/plugin/input', body: { site: 'vitrine-campos', plugin: 'vitrine', key: 'V18-campo', kind: 'change', value: 'oi' }, run: (s?: Server) => inputPluginField('mesma/sessão', 'vitrine-campos', CAMPO, 'change', 'oi', s) },
     { path: '/answer', body: { answers: [], request_id: 0 }, run: (s?: Server) => answerQuestions('mesma/sessão', [], 0, s) },
     { path: '/answer', body: { answers: [] }, run: (s?: Server) => answerQuestions('mesma/sessão', [], undefined, s) },
     { path: '/question/skip', body: { request_id: 'req-b' }, run: (s?: Server) => skipQuestion('mesma/sessão', 'req-b', s) },
@@ -652,8 +656,7 @@ describe('mensagemDeErro (parecer task 10)', () => {
   });
 });
 
-// A corrente toggleRecord -> addFiles({ditado:true}) -> transcribeIntoComposer -> transcribeFile
-// so pode acender `limpar=1` no pedido do mic. Este e o elo mais barato de quebrar (um `{ditado:
+// Só o pedido do mic (`limpar: true`) pode acender `limpar=1`. Este e o elo mais barato de quebrar (um `{ditado:
 // true}` esquecido no caminho do anexo manda audio de 10min pro LLM) e o unico sem teste algum.
 describe('transcribeFile', () => {
 
@@ -673,6 +676,61 @@ describe('transcribeFile', () => {
 
     await transcribeFile('sessao', file, {});
     expect(fetchMock.mock.calls[2][0]).toBe('https://a.test/api/sessions/sessao/transcribe');
+  });
+
+  it('?arquivo= vai sem corpo, com a limpeza e o nome escapado', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(JSON.stringify({ path: '/u/gravação 1.webm', text: 't', provider: 'ElevenLabs' }), { status: 200 }),
+    );
+    const r = await transcribeUploaded('sessao', 'gravação 1.webm', { limpar: true });
+    expect(fetchMock.mock.calls[0][0])
+      .toBe('https://a.test/api/sessions/sessao/transcribe?limpar=1&arquivo=grava%C3%A7%C3%A3o%201.webm');
+    expect(fetchMock.mock.calls[0][1]?.body).toBeUndefined();
+    expect(r.provider).toBe('ElevenLabs');
+
+    await transcribeUploaded('sessao', '/home/u/.hangar/uploads/p/velho/a.webm');
+    expect(fetchMock.mock.calls[1][0])
+      .toBe('https://a.test/api/sessions/sessao/transcribe?arquivo=%2Fhome%2Fu%2F.hangar%2Fuploads%2Fp%2Fvelho%2Fa.webm');
+
+    await transcribeUploadedForServer(server, 'sessao', 'a.webm', { limpar: true, estilo: 'prosa' });
+    expect(fetchMock.mock.calls[2][0])
+      .toBe('https://a.test/api/sessions/sessao/transcribe?limpar=1&estilo=prosa&arquivo=a.webm');
+    expect(fetchMock.mock.calls[2][1]?.body).toBeUndefined();
+    expect(JSON.stringify(fetchMock.mock.calls[2][1]?.headers)).not.toContain('application/json');
+  });
+
+  it('upload do ditado pede só áudio; os outros uploads não mudam', async () => {
+    const abertos: string[] = [];
+    vi.stubGlobal('XMLHttpRequest', class {
+      status = 200; responseText = '{"path":"/up/g.webm"}'; upload = {}; timeout = 0;
+      onload?: () => void;
+      open(_m: string, url: string) { abertos.push(url); }
+      setRequestHeader() {}
+      send() { queueMicrotask(() => this.onload?.()); }
+    });
+    await uploadFile('sessao', new File(['a'], 'g.webm'), undefined, null, { audioOnly: true });
+    await uploadFile('sessao', new File(['a'], 'f.png'));
+    expect(abertos).toEqual([
+      'https://a.test/api/sessions/sessao/upload?audio_only=1',
+      'https://a.test/api/sessions/sessao/upload',
+    ]);
+    vi.unstubAllGlobals();
+
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response('{"path":"/up/g.webm"}', { status: 200 }));
+    await uploadFileForServer(server, 'sessao', new File(['a'], 'g.webm'), { audioOnly: true });
+    await uploadFileForServer(server, 'sessao', new File(['a'], 'f.png'));
+    expect(fetchMock.mock.calls.map((c) => c[0])).toEqual([
+      'https://a.test/api/sessions/sessao/upload?audio_only=1',
+      'https://a.test/api/sessions/sessao/upload',
+    ]);
+  });
+
+  it('falha de ?arquivo= leva o status', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(JSON.stringify({ detail: 'provedor fora' }), { status: 502 }));
+    await expect(transcribeUploaded('sessao', 'a.webm')).rejects.toMatchObject({ status: 502, message: 'provedor fora' });
+    await expect(transcribeUploadedForServer(server, 'sessao', 'a.webm')).rejects.toMatchObject({ status: 502 });
   });
 });
 
@@ -1027,13 +1085,52 @@ it.each([404, 405])('plugin/show num servidor sem a rota rejeita com status %i, 
   expect(isMissingRoute(erro)).toBe(true);
 });
 
-it('plugin/press, plugin/show e plugin/input com servidor explícito levam o código do servidor no erro', async () => {
+describe('servidor de antes de o pedido levar o mod', () => {
+  const corpos = (fetchMock: { mock: { calls: unknown[][] } }) =>
+    fetchMock.mock.calls.map(([url, init]) => [String(url).replace(/^.*\/plugin\//, ''), JSON.parse(String((init as RequestInit).body))]);
+
+  it.each([undefined, server])('press e input recusados com 422 repetem uma vez sem o mod (servidor %#)', async (s) => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) =>
+      String((init as RequestInit).body).includes('"plugin"')
+        ? new Response(JSON.stringify({ detail: [{ type: 'extra_forbidden' }] }), { status: 422 })
+        : new Response('{"ok":true}'));
+    expect(await pressPluginButton('sessao', 'above-prompt', { plugin: 'pm-mock', key: 'abrir' }, s)).toEqual({ ok: true });
+    expect(await inputPluginField('sessao', 'painel', CAMPO, 'change', 'a', s)).toEqual({ ok: true });
+    expect(corpos(fetchMock)).toEqual([
+      ['press', { site: 'above-prompt', plugin: 'pm-mock', key: 'abrir' }], ['press', { site: 'above-prompt', key: 'abrir' }],
+      ['input', { site: 'painel', plugin: CAMPO.plugin, key: CAMPO.key, kind: 'change', value: 'a' }],
+      ['input', { site: 'painel', key: CAMPO.key, kind: 'change', value: 'a' }]]);
+  });
+
+  it('a segunda recusa sobe ao app, sem outra tentativa', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{"detail":"x"}', { status: 422 }));
+    const erro = await pressPluginButton('sessao', 'above-prompt', { plugin: 'pm-mock', key: 'abrir' }, server).catch((e: unknown) => e);
+    expect(erro).toMatchObject({ status: 422 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([404, 405])('close sem a rota (%i) fecha pelo press com a key reservada', async (status) => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) =>
+      String(url).endsWith('/plugin/close') ? new Response('{"detail":"Not Found"}', { status }) : new Response('{"ok":true}'));
+    expect(await closePluginPane('sessao', 'painel', server)).toEqual({ ok: true });
+    expect(corpos(fetchMock)).toEqual([['close', { site: 'painel' }], ['press', { site: 'painel', key: '__close__' }]]);
+  });
+
+  it('recusa do close que não é falta da rota não vira press', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{"detail":"x"}', { status: 409 }));
+    await expect(closePluginPane('sessao', 'painel', server)).rejects.toMatchObject({ status: 409 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+it('plugin/press, plugin/close, plugin/show e plugin/input com servidor explícito levam o código do servidor no erro', async () => {
   const envelope = { ok: false, error_code: 'erro_mod_guarda_indisponivel', message: 'motivo',
     detail: { code: 'erro_mod_guarda_indisponivel', params: { motivo: 'motivo' }, msg: 'motivo — erro_mod_guarda_indisponivel' } };
   vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify(envelope), { status: 503 }));
-  for (const chamada of [() => pressPluginButton('sessao', 'above-prompt', 'abrir', server),
+  for (const chamada of [() => pressPluginButton('sessao', 'above-prompt', { plugin: 'pm-mock', key: 'abrir' }, server),
+                         () => closePluginPane('sessao', 'painel', server),
                          () => showPluginPane('sessao', 'painel', server),
-                         () => inputPluginField('sessao', 'painel', 'V18-campo', 'change', 'a', server)]) {
+                         () => inputPluginField('sessao', 'painel', CAMPO, 'change', 'a', server)]) {
     const erro = await chamada().catch((e: unknown) => e);
     expect(erro).toMatchObject({ status: 503, code: 'erro_mod_guarda_indisponivel' });
   }
@@ -1054,7 +1151,7 @@ it('plugin/input sem resposta e sem servidor explícito é cortado em 8 s, e a f
       init?.signal?.addEventListener('abort', () => reject(init.signal!.reason));
     }));
     const errors: unknown[] = [];
-    const input = fieldSender((kind, value) => inputPluginField('sessao', 'vitrine-campos', 'V18-campo', kind, value),
+    const input = fieldSender((kind, value) => inputPluginField('sessao', 'vitrine-campos', CAMPO, kind, value),
       (err) => errors.push(err));
     input('change', 'a');
     input('submit', 'a');
@@ -1068,4 +1165,64 @@ it('plugin/input sem resposta e sem servidor explícito é cortado em 8 s, e a f
   } finally {
     vi.useRealTimers();
   }
+});
+
+describe('lista de serviços de transcrição', () => {
+  const ELEVEN = { id: 'a', kind: 'elevenlabs' as const, name: '', base_url: '', api_key: 'xi_••••', model: '' };
+
+  it('lê só itens válidos e completa campos ausentes', () => {
+    expect(parseTranscriptionProviders('x')).toEqual([]);
+    expect(parseTranscriptionProviders([{ id: 'a', kind: 'elevenlabs', api_key: 'xi_••••' }, { id: 'b', kind: 'outro' }, null]))
+      .toEqual([ELEVEN]);
+  });
+
+  it('rótulo: nome dado, ElevenLabs, ou host · modelo', () => {
+    expect(transcriptionProviderLabel({ kind: 'openai', name: ' Meu ', base_url: '', model: '' })).toBe('Meu');
+    expect(transcriptionProviderLabel({ kind: 'elevenlabs', name: '', base_url: 'https://x', model: '' })).toBe('ElevenLabs');
+    expect(transcriptionProviderLabel({ kind: 'openai', name: '', base_url: 'https://api.groq.com/openai/v1', model: 'whisper-large-v3-turbo' }))
+      .toBe('api.groq.com · whisper-large-v3-turbo');
+    expect(transcriptionProviderLabel({ kind: 'openai', name: '', base_url: 'htt', model: '' })).toBe('htt · whisper-large-v3');
+    expect(transcriptionProviderLabel({ kind: 'openai', name: '', base_url: ' ', model: '' })).toBe('api.groq.com · whisper-large-v3');
+    expect(transcriptionProviderLabel({ kind: 'openai', name: '', base_url: 'http://LocalHost:8000/v1', model: 'm' })).toBe('localhost · m');
+  });
+
+  it('mover troca com o vizinho e não sai da lista na ponta', () => {
+    expect(moveTranscriptionProvider(['a', 'b', 'c'], 0, 1)).toEqual(['b', 'a', 'c']);
+    expect(moveTranscriptionProvider(['a', 'b', 'c'], 2, -1)).toEqual(['a', 'c', 'b']);
+    expect(moveTranscriptionProvider(['a', 'b'], 0, -1)).toEqual(['a', 'b']);
+    expect(moveTranscriptionProvider(['a', 'b'], 1, 1)).toEqual(['a', 'b']);
+    expect(moveTranscriptionProvider(['a', 'b'], 5, -1)).toEqual(['a', 'b']);
+  });
+
+  it('chave apagada volta à máscara; digitada troca', () => {
+    expect(editTranscriptionProviderKey(ELEVEN, 'nova', 'xi_••••').api_key).toBe('nova');
+    expect(editTranscriptionProviderKey({ ...ELEVEN, api_key: 'nova' }, '', 'xi_••••')).toEqual(ELEVEN);
+    expect(editTranscriptionProviderKey({ ...ELEVEN, api_key: 'x' }, '', undefined).api_key).toBe('');
+  });
+
+  it('trocar tipo ou endpoint de item salvo pede a chave de novo; voltar devolve a máscara', () => {
+    const SALVO = { ...ELEVEN, kind: 'openai' as const, base_url: 'https://a/v1' };
+    const outroTipo = editTranscriptionProviderTarget(SALVO, { kind: 'elevenlabs' }, SALVO);
+    expect(outroTipo.api_key).toBe('');
+    expect(transcriptionProvidersMissingKey([outroTipo])).toBe(true);
+    expect(editTranscriptionProviderTarget(outroTipo, { kind: 'openai' }, SALVO)).toEqual(SALVO);
+    expect(editTranscriptionProviderTarget(SALVO, { base_url: 'https://b/v1' }, SALVO).api_key).toBe('');
+    expect(editTranscriptionProviderTarget(SALVO, { base_url: ' https://a/v1 ' }, SALVO).api_key).toBe(SALVO.api_key);
+    // Chave digitada é do serviço novo: fica.
+    expect(editTranscriptionProviderTarget({ ...SALVO, api_key: 'nova' }, { kind: 'elevenlabs' }, SALVO).api_key).toBe('nova');
+    // ElevenLabs não tem endpoint: o texto que sobrou nele não conta.
+    expect(transcriptionProviderKeepsKey({ kind: 'elevenlabs', base_url: 'x' }, { kind: 'elevenlabs', base_url: '' })).toBe(true);
+    // Item novo não tem máscara a perder.
+    expect(editTranscriptionProviderTarget({ ...SALVO, api_key: '' }, { kind: 'elevenlabs' }, undefined).api_key).toBe('');
+  });
+
+  it('falta chave quando algum item está sem chave', () => {
+    expect(transcriptionProvidersMissingKey([])).toBe(false);
+    expect(transcriptionProvidersMissingKey([ELEVEN])).toBe(false);
+    expect(transcriptionProvidersMissingKey([ELEVEN, { ...ELEVEN, id: 'b', api_key: '' }])).toBe(true);
+  });
+});
+
+it('uploadUrlNative usa o servidor da conversa quando recebe um', () => {
+  expect(uploadUrlNative('sessao', 'ditado 1.m4a', server)).toBe('https://a.test/api/sessions/sessao/uploads/ditado%201.m4a');
 });

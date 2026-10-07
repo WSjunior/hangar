@@ -13,7 +13,7 @@
   import { openInNewTab } from '../lib/openTab';
   import { desktop as janela } from '../lib/desktop.svelte';
   import { itemModsCelular, modsCelular, modsNaTela } from '../lib/modsCelular.svelte';
-  import { activePaneId, fieldSender, followLocalTab, inputPluginField, isMissingRoute, parsePluginToast, pluginFailureText, parsePluginUi, pressPluginButton, safeHref, showPluginPane, tabFollowsServer, type PluginInputKind, type PluginSource, type PluginNode as PluginTree, type PluginPane as PluginPaneData, type PluginToast } from '@hangar/core';
+  import { activePaneId, closePluginPane, fieldSender, followLocalTab, inputPluginField, isMissingRoute, parsePluginToast, pluginFailureText, parsePluginUi, pressPluginButton, safeHref, showPluginPane, tabFollowsServer, type PluginControl, type PluginInputKind, type PluginSource, type PluginNode as PluginTree, type PluginPane as PluginPaneData, type PluginToast } from '@hangar/core';
   import SessionSwitcherSheet from '../components/SessionSwitcherSheet.svelte';
   import CreateSessionSheet from '../components/CreateSessionSheet.svelte';
   import UsageSheet from '../components/UsageSheet.svelte';
@@ -81,9 +81,9 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     getPlan,
     getSessionPlanPreview,
     getConfig, getConfigForServer,
-    uploadUrl,
     descartarDaFila,
   } from '@hangar/core';
+  import { dictations, draftStorageKey, parseStoredDraft, readMigrating } from '../lib/dictationStore.svelte';
   import { formataErro } from '@hangar/core';
   import { fmtDur } from '../lib/fmt';
   import { hasSeam, mergeHistoryWithLive } from '@hangar/core';
@@ -405,22 +405,14 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // digitado evaporava (ir buscar algo noutro app = perder o rascunho); trocar de sessao remonta
   // o Chat e zerava tambem. Restaura no mount; enviar limpa o campo -> remove a chave junto.
   // Snapshot do mount de proposito: o App remonta o Chat por {#key sessionName} a cada troca.
+  // Com o servidor na chave: a sessão "hangar" de duas máquinas não divide rascunho. A chave
+  // antiga (só o nome) é lida uma vez e movida.
   // svelte-ignore state_referenced_locally
-  const draftKey = `cp-draft:${sessionName}`;
-  // O rascunho guarda o TRANSCRIPT de quem o escreveu: a chave é o nome, e nome se repete. Uma
-  // sessão morta e recriada com o mesmo nome (a época de recriação só vive com o app aberto) abria
-  // com o texto da anterior. Valor antigo, só texto, vale como "transcript desconhecido".
+  const draftKey = draftStorageKey(chatServerId, sessionName);
+  // O rascunho guarda o TRANSCRIPT de quem o escreveu: nome se repete. Uma sessão morta e recriada
+  // com o mesmo nome (a época de recriação só vive com o app aberto) abria com o texto da anterior.
   function lerRascunho(): { text: string; jsonl: string | null } {
-    let cru: string | null = null;
-    try { cru = localStorage.getItem(draftKey); } catch { return { text: '', jsonl: null }; }
-    if (!cru) return { text: '', jsonl: null };
-    try {
-      const d = JSON.parse(cru);
-      if (d && typeof d === 'object' && typeof d.text === 'string') {
-        return { text: d.text, jsonl: typeof d.jsonl === 'string' ? d.jsonl : null };
-      }
-    } catch { /* texto cru de versão anterior */ }
-    return { text: cru, jsonl: null };
+    return parseStoredDraft(readMigrating(draftKey, `cp-draft:${sessionName}`));
   }
   const rascunhoSalvo = lerRascunho();
   // Com transcript gravado, só restaura depois de conferir que é o desta sessão.
@@ -512,10 +504,10 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   }
   // O clique vira clique de mouse no terminal da sessão; o que o mod copiar ou mandar abrir acontece
   // aqui, no aparelho de quem clicou, e não na máquina do terminal.
-  async function pressPlugin(site: string, key: string) {
+  async function pressPlugin(site: string, button: PluginControl) {
     if (!modsVisiveis) return;
     try {
-      const r = await pressPluginButton(sessionName, site, key, sessionServer());
+      const r = await pressPluginButton(sessionName, site, button, sessionServer());
       const texto = r.copied;
       if (texto) {
         // Depois do `await` o iOS já não conta o toque como gesto: o aviso vira um botão que copia
@@ -535,6 +527,14 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       showPluginNotice(pluginFailureText(err, m.plugin_clique_falhou), true);
     }
   }
+  async function closePlugin(site: string) {
+    if (!modsVisiveis) return;
+    try {
+      await closePluginPane(sessionName, site, sessionServer());
+    } catch (err) {
+      showPluginNotice(pluginFailureText(err, m.plugin_fechar_falhou), true);
+    }
+  }
   // Trocar de aba avisa o servidor. Seguindo o `shown_id`, a aba só muda quando o novo chega; sem ele (servidor
   // antigo), a troca é local, e o 404/405 da rota que ainda não existe não é erro.
   async function showPlugin(site: string) {
@@ -551,13 +551,14 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // Digitação num `Input` de mod: só a sessão sem terminal aceita (o campo nem fica habilitado nas outras). Cada campo
   // tem a sua fila (`fieldSender`): um pedido em voo por vez, para as teclas chegarem ao mod na ordem.
   const pluginFieldSenders = new Map<string, (kind: PluginInputKind, value: string) => void>();
-  function inputPlugin(site: string, key: string, kind: PluginInputKind, value: string) {
+  function inputPlugin(site: string, field: PluginControl, kind: PluginInputKind, value: string) {
     if (!modsVisiveis) return;
-    const id = `${site}\u001f${key}`;
+    // A `key` só é única dentro do mod: dois mods com a mesma no mesmo lugar têm campos distintos.
+    const id = `${site}\u001f${field.plugin}\u001f${field.key}`;
     let sender = pluginFieldSenders.get(id);
     if (!sender) {
       sender = fieldSender(
-        (k, v) => inputPluginField(sessionName, site, key, k, v, sessionServer()),
+        (k, v) => inputPluginField(sessionName, site, field, k, v, sessionServer()),
         // Código conhecido, a frase dele em qualquer status; sem código, a frase do app ou o motivo do 4xx.
         (err) => showPluginNotice(pluginFailureText(err, m.plugin_input_falhou), true),
       );
@@ -877,23 +878,32 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   }
 
   // ── Atalhos de teclado (so desktop) ────────────────────────────────────────
-  let composerRef = $state<{ focus: () => void; ditarArquivo: (f: File) => void;
+  let composerRef = $state<{ focus: () => void; ditarAnexo: (arquivo: string) => void;
                             preencherComando: (n: string) => Promise<boolean>;
                             prefillText: (t: string) => Promise<boolean> } | undefined>();
 
-  // Anexo de audio de volta pro ditado: busca o arquivo que ja esta no servidor e entrega ao
-  // Composer, que transcreve de novo e abre a barra de versoes. O download acontece AQUI porque a
-  // sheet nao conhece o Composer, e o Composer so sabe lidar com File.
-  async function usarAnexoNoDitado(f: UploadFile) {
-    try {
-      const res = await fetch(uploadUrl(sessionName, f.filename, false, sessionServer()));
-      if (!res.ok) throw new Error(`${res.status}`);
-      const blob = await res.blob();
-      composerRef?.ditarArquivo(new File([blob], f.filename, { type: blob.type }));
-    } catch (e) {
-      error = `${m.anexos_erro_listar()} ${e instanceof Error ? e.message : String(e)}`;
-    }
+  // Anexo de audio de volta pro ditado: o Composer transcreve o arquivo que ja esta no servidor
+  // (`?arquivo=`) e abre a barra de versoes. Falha aparece no proprio composer.
+  function usarAnexoNoDitado(f: UploadFile) {
+    composerRef?.ditarAnexo(f.filename);
   }
+
+  // Ditado que chega com o Chat montado e o Composer fora (sessão morta, janela de recriação):
+  // junta ao campo, senão o $effect do rascunho gravaria o campo por cima do texto guardado.
+  // Registrado antes do Composer, que fica por último e recebe quando está montado.
+  // svelte-ignore state_referenced_locally
+  const soltarReceptorDoChat = dictations.receive(chatServerId, sessionName, {
+    accepts: () => !composerRef && rascunhoConferido,
+    deliver: (e) => {
+      const t = e.result!.text.trim();
+      composerText = composerText.trim() ? `${composerText.trimEnd()} ${t}` : t;
+    },
+  });
+  onDestroy(soltarReceptorDoChat);
+  $effect(() => {
+    if (composerRef || !rascunhoConferido) return;
+    queueMicrotask(() => dictations.redeliver(chatServerId, sessionName));
+  });
 
   // No desktop, a Sidebar já mantém esta lista viva por SSE. No celular, onde ela não fica montada
   // junto com o Chat, o poll de 5s alimenta navegação e a pílula "N aguardando".
@@ -3508,7 +3518,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
           <div class="mods-ocultar"><PluginHide onHide={() => (modsCelular.ligado = false)} /></div>
         {/if}
         {#if pluginActivePane}
-          <PluginPane pane={pluginActivePane} tabs={pluginPanes} onPress={pressPlugin} onShow={showPlugin}
+          <PluginPane pane={pluginActivePane} tabs={pluginPanes} onPress={pressPlugin} onClose={closePlugin} onShow={showPlugin}
                       onInput={pluginSource === 'surface' ? inputPlugin : undefined} />
         {/if}
         <PluginBand tree={pluginBand} columns={pluginColumns} onPress={pressPlugin}
@@ -3520,6 +3530,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       <Composer
         bind:this={composerRef}
         {sessionName}
+        {sessionJsonl}
         bind:inputText={composerText}
         estreito={colunaEstreita}
         voiceBeta={codexVoiceBeta}

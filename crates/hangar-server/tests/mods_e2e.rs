@@ -51,7 +51,7 @@ async fn world(swallow: &'static [&'static str]) -> World {
 async fn press(server: SocketAddr, key: &'static str) -> (u16, Value) {
     let response = client().post(format!("http://{server}/api/sessions/session/plugin/press"))
         .header("content-type", "application/json").header("authorization", format!("Bearer {OWNER}"))
-        .body(serde_json::json!({"site": "above-prompt", "key": key}).to_string()).send().await.unwrap();
+        .body(serde_json::json!({"site": "above-prompt", "plugin": "vitrine", "key": key}).to_string()).send().await.unwrap();
     let status = response.status().as_u16();
     let text = response.text().await.unwrap();
     (status, serde_json::from_str(&text).unwrap_or(Value::String(text)))

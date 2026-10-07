@@ -1,6 +1,6 @@
 <script module lang="ts">
   import type { CommandInfo } from '@hangar/core';
-  import { stateColors, abbrevNum, rateLabel } from '@hangar/core';
+  import { stateColors, abbrevNum, rateLabel, replaceSlashToken, slashTokenAt } from '@hangar/core';
   // Cache de comandos por sessao: sobrevive a remontagens do Composer (ex: voltar de
   // awaiting_input) pra buscar a lista so uma vez por sessao.
   const commandCache = new Map<string, CommandInfo[]>();
@@ -63,13 +63,17 @@ import { cachePrazo } from '../lib/cachePrazo';
   import { ditadoEstilo } from '../lib/ditadoEstilo.svelte';
   import { estilosDitado, type EstiloDitado } from '@hangar/core';
   import { desktop } from '../lib/desktop.svelte';
-  import { getCommands, setModelEffort, uploadFile, uploadUrl, listUploads, transcribeFile, relimparDitado, getCodexModels, getCodexPermissions, getPiModels, getKimiModels, getPermissionModes, setPermissionMode, type ModelEffortBody } from '@hangar/core';
+  import { getCommands, setModelEffort, uploadFile, uploadUrl, listUploads, relimparDitado, getCodexModels, getCodexPermissions, getPiModels, getKimiModels, getPermissionModes, setPermissionMode, type ModelEffortBody } from '@hangar/core';
   import type { UploadFile } from '@hangar/core';
   import { aoAquecer } from '../lib/aquecimento';
   import type { Provider, State, StatsEvent } from '@hangar/core';
   import type { StatusFields } from '@hangar/core';
   import { setCodexMode } from '@hangar/core';
   import { ttsPlayer } from '../lib/ttsPlayer.svelte';
+  import {
+    dictations, dictationBarKey, draftStorageKey, parseStoredDraft, readMigrating,
+    type DictationEntry, type DictationOpts,
+  } from '../lib/dictationStore.svelte';
 
   interface Props {
     sessionName: string;
@@ -123,6 +127,9 @@ import { cachePrazo } from '../lib/cachePrazo';
     // do arranjo de celular ali. Sem prop = decide pela janela, como sempre.
     estreito?: boolean;
     voiceBeta?: boolean;
+    // Transcript da sessão: identidade do ditado (sessão recriada com o mesmo nome não recebe o
+    // texto) e da barra guardada em `cp-ditado:<servidor>::<sessão>`.
+    sessionJsonl?: string | null;
   }
   let {
     sessionName, sessionState, status, lastCache = null, onSend, onSteer, onCommand, onInterrupt, onOpenGit,
@@ -141,8 +148,11 @@ import { cachePrazo } from '../lib/cachePrazo';
     stats = null,
     estreito = false,
     voiceBeta = false,
+    sessionJsonl = null,
   }: Props = $props();
   const sessionServer = useSessionServer();
+  // O Composer é remontado por sessão ({#key} do Chat): servidor e nome não mudam nesta instância.
+  const dictationServerId = sessionServer()?.id ?? '';
 
   // OU, não `??`: a janela estreita (celular) manda sozinha, e a coluna estreita no desktop soma.
   const compacto = $derived(estreito || !desktop.atual);
@@ -223,12 +233,11 @@ import { cachePrazo } from '../lib/cachePrazo';
   // Exposto pro pai (atalho de teclado desktop "/" foca o campo).
   export function focus() { textareaEl?.focus(); }
 
-  // Exposto pro pai: um audio que JA esta nos anexos da sessao volta pro ditado (transcreve de novo
-  // e abre a barra de versoes). `autoEnvio: false` porque aqui nao houve gravacao — o motivo do fim
-  // guardado seria o da ultima vez que a pessoa falou, e mandar sozinho por causa dele seria enviar
-  // um texto que ela nem pediu.
-  export function ditarArquivo(file: File) {
-    void transcribeIntoComposer(file, { ditado: true, autoEnvio: false });
+  // Exposto pro pai: um audio que JA esta nos anexos da sessao volta pro ditado. Vai por `?arquivo=`:
+  // o servidor transcreve o que ja tem, sem baixar nem gravar outra copia. `autoEnvio: false` porque
+  // aqui nao houve gravacao — mandar sozinho seria enviar um texto que ela nem pediu.
+  export function ditarAnexo(arquivo: string) {
+    startTranscription({ arquivo }, { ditado: true, autoEnvio: false });
   }
 
   // ── Anexos: lista de arquivos + preview local + estado de upload ────────────
@@ -303,11 +312,17 @@ import { cachePrazo } from '../lib/cachePrazo';
   let sendError = $state('');
   let steeringQueue = $state(false);
   let steerFeedback = $state('');
-  let transcribing = $state(false);   // audio gravado/anexado sendo transcrito pro composer
+  // O ditado em voo/pronto/falho mora no módulo (lib/dictationStore): sobrevive a trocar de
+  // sessão e a recarregar, e o Composer remontado no meio volta a mostrar "transcrevendo".
+  const dictation = $derived(dictations.get(dictationServerId, sessionName));
+  const transcribing = $derived(dictation?.status === 'inflight');
+  const ditadoFalhou = $derived(dictation?.status === 'failed' ? dictation : null);
 
   // ── Gravacao de audio pelo microfone (MediaRecorder) ────────────────────────
   let recording = $state(false);
   let recError = $state('');
+  // Aviso do ditado (reserva, limpeza que desistiu) informa, não acusa erro: mesmo lugar, outro tom.
+  let recAviso = $state('');
   // "cru" nao e um estilo do servidor (nao existe em narrar.ESTILOS_DITADO): e a transcricao como a
   // Whisper devolveu, que o app ja tem na mao e aplica sem rede nenhuma.
   type VersaoDitado = EstiloDitado | 'cru';
@@ -325,9 +340,9 @@ import { cachePrazo } from '../lib/cachePrazo';
   // de novo, mesmo com o audio ja gravado e o texto cru ja na mao.
   //
   // - `url`: objectURL do proprio File que foi gravado (o backend tambem salva em
-  //   .hangar-uploads, mas o blob ja esta na aba -> player sem round-trip). Numa barra RESTAURADA
+  //   ~/.hangar/uploads/<projeto>/<sessao>/, mas o blob ja esta na aba -> player sem round-trip). Numa barra RESTAURADA
   //   o blob nao existe mais e a url e a do upload no servidor (ver restaurarDitado).
-  // - `arquivo`: nome do audio em .hangar-uploads. E o que deixa a barra sobreviver a sair da
+  // - `arquivo`: nome do audio em ~/.hangar/uploads/<projeto>/<sessao>/. E o que deixa a barra sobreviver a sair da
   //   conversa e voltar: o objectURL morre com a aba, o arquivo do servidor nao.
   // - `before`/`after`: texto dos dois lados da insercao, pra trocar so a parte ditada.
   // - `cache`: estilo -> texto ja obtido. Reclicar num estilo por onde ja passou e instantaneo e de
@@ -344,25 +359,30 @@ import { cachePrazo } from '../lib/cachePrazo';
   // Persistida por sessao no localStorage, pelo MESMO motivo do rascunho do campo (Chat.svelte):
   // trocar de sessao remonta o Composer e o iOS mata o PWA em background — e a barra sumia junto,
   // levando o audio e as versoes ja pagas. Guarda so texto + nome do arquivo; o audio fica onde ja
-  // estava (.hangar-uploads no servidor), entao a chave e pequena e o player continua tocando.
+  // estava (~/.hangar/uploads no servidor), entao a chave e pequena e o player continua tocando.
   // svelte-ignore state_referenced_locally
-  const ditadoKey = `cp-ditado:${sessionName}`;
-  function restaurarDitado(): DitadoAtivo | null {
+  const ditadoKey = dictationBarKey(dictationServerId, sessionName);
+  // `jsonl`: transcript de quem gravou a barra. Sessão recriada com o mesmo nome não herda a barra
+  // da anterior (mesma regra do rascunho no Chat). Valor antigo, sem `jsonl`, vale como desconhecido.
+  function lerDitadoSalvo(): { ativo: DitadoAtivo; jsonl: string | null } | null {
     try {
-      const cru = localStorage.getItem(ditadoKey);
+      const cru = readMigrating(ditadoKey, `cp-ditado:${sessionName}`);
       if (!cru) return null;
-      const d = JSON.parse(cru) as Partial<DitadoAtivo>;
+      const d = JSON.parse(cru) as Partial<DitadoAtivo> & { jsonl?: unknown };
       // `arquivo` e `raw` sao o minimo pra barra fazer o que promete (tocar e trocar de versao):
       // sem um deles a barra restaurada seria um player quebrado ou botoes que nao respondem.
       if (!d?.arquivo || typeof d.raw !== 'string') return null;
       return {
-        url: uploadUrl(sessionName, d.arquivo, false, sessionServer()),
-        arquivo: d.arquivo,
-        before: typeof d.before === 'string' ? d.before + (d.after === undefined && d.before ? ' ' : '') : '',
-        after: typeof d.after === 'string' ? d.after : '',
-        raw: d.raw,
-        atual: ehVersao(d.atual) ? d.atual : 'cru',
-        cache: d.cache ?? {},
+        jsonl: typeof d.jsonl === 'string' ? d.jsonl : null,
+        ativo: {
+          url: uploadUrl(sessionName, d.arquivo, false, sessionServer()),
+          arquivo: d.arquivo,
+          before: typeof d.before === 'string' ? d.before + (d.after === undefined && d.before ? ' ' : '') : '',
+          after: typeof d.after === 'string' ? d.after : '',
+          raw: d.raw,
+          atual: ehVersao(d.atual) ? d.atual : 'cru',
+          cache: d.cache ?? {},
+        },
       };
     } catch (e) {
       // Chave corrompida (versao antiga do formato, escrita interrompida): a barra some, e o LOG
@@ -371,20 +391,42 @@ import { cachePrazo } from '../lib/cachePrazo';
       return null;
     }
   }
-  let ditado = $state<DitadoAtivo | null>(restaurarDitado());
+  const ditadoSalvo = lerDitadoSalvo();
+  // svelte-ignore state_referenced_locally
+  const ditadoSalvoVale = ditadoSalvo?.jsonl == null || ditadoSalvo.jsonl === sessionJsonl;
+  let ditadoConferido = $state(ditadoSalvoVale);
+  let ditado = $state<DitadoAtivo | null>(ditadoSalvoVale ? ditadoSalvo?.ativo ?? null : null);
   $effect(() => {
+    if (ditadoConferido || !sessionJsonl) return;
+    ditadoConferido = true;
+    if (ditadoSalvo && sessionJsonl === ditadoSalvo.jsonl) {
+      if (!ditado) ditado = ditadoSalvo.ativo;
+    } else {
+      try { localStorage.removeItem(ditadoKey); } catch { /* sem storage */ }
+    }
+  });
+  $effect(() => {
+    if (!ditadoConferido) return;   // antes de conferir, apagar aqui perderia a barra certa
     if (ditado?.arquivo) {
       const { arquivo, before, after, raw, atual, cache } = ditado;
-      localStorage.setItem(ditadoKey, JSON.stringify({ arquivo, before, after, raw, atual, cache }));
+      localStorage.setItem(ditadoKey, JSON.stringify({ arquivo, before, after, raw, atual, cache, jsonl: sessionJsonl }));
     } else {
       localStorage.removeItem(ditadoKey);
     }
   });
+  // O Chat só restaura o rascunho guardado depois de conferir o transcript. Antes disso, um
+  // resultado inserido aqui calcularia o "antes" da barra sobre um campo que ainda vai mudar.
+  // svelte-ignore state_referenced_locally
+  const rascunhoComJsonl = parseStoredDraft(
+    readMigrating(draftStorageKey(dictationServerId, sessionName), `cp-draft:${sessionName}`)).jsonl !== null;
+  const transcriptConferido = $derived(!rascunhoComJsonl || sessionJsonl !== null);
   let relimpando = $state<VersaoDitado | null>(null);   // versao com troca em voo (spinner no botao)
   let mediaRecorder: MediaRecorder | undefined;
   let recChunks: Blob[] = [];
   let recStream: MediaStream | undefined;
   let recFailed = false;   // marcado no onerror -> onstop nao anexa audio truncado
+  // Trocar de sessão GRAVANDO: a gravação para e vai transcrever para a sessão de origem.
+  let handoff: { recorder: MediaRecorder; jsonl: string | null } | null = null;
   let starting = $state(false);    // guarda reentrancia entre o tap e o await getUserMedia resolver —
                                    // $state porque o hint "preparando microfone…" aparece nesse intervalo
   // Geracao da tentativa de gravacao: cancelar a espera (2o tap) ou uma tentativa nova incrementa —
@@ -1087,6 +1129,36 @@ import { cachePrazo } from '../lib/cachePrazo';
     else claudePopOpen = true;
   }
 
+  // A palavra sob o cursor é um `/nome` sendo digitado (no começo ou no meio do texto). A seleção
+  // guardada só vale para o texto em que foi medida: texto trocado por código (comando preenchido,
+  // rascunho restaurado) põe o cursor no fim, e um cursor velho reabriria a lista.
+  const slashToken = $derived.by(() => {
+    const sel = lastSelection?.value === inputText ? lastSelection : null;
+    const pos = !sel ? inputText.length : sel.start === sel.end ? sel.end : -1;
+    return slashTokenAt(inputText, pos);
+  });
+  // Texto em que o Esc fechou a lista; ela volta quando a pessoa mexe no texto.
+  let slashDismissed = $state<string | null>(null);
+  const slashQuery = $derived(slashToken && inputText !== slashDismissed ? slashToken.query : null);
+
+  // Completar só troca a palavra pelo nome, com o resto da mensagem intacto e nada enviado.
+  async function completeSlashToken(cmd: CommandInfo) {
+    if (!slashToken) return;
+    const next = replaceSlashToken(inputText, slashToken, cmd.name);
+    inputText = next.text;
+    await tick();
+    textareaEl?.focus();
+    textareaEl?.setSelectionRange(next.cursor, next.cursor);
+    rememberSelection();
+    autoGrow();
+  }
+
+  // Escolher roteia o comando só quando a palavra é a mensagem toda; no meio do texto, completa.
+  function pickSlash(cmd: CommandInfo) {
+    if (slashToken?.whole) handleSuggestPick(cmd);
+    else void completeSlashToken(cmd);
+  }
+
   // Toque numa sugestao do strip inline. model/effort abrem a caixa correspondente; comando com
   // argumento (ou destrutivo) preenche pra revisao antes de enviar; o resto envia direto.
   function handleSuggestPick(cmd: CommandInfo) {
@@ -1192,15 +1264,13 @@ import { cachePrazo } from '../lib/cachePrazo';
     );
   }
 
-  // Adiciona arquivos de imagem a lista (do picker ou do paste), cada um com preview local.
-  // ditado=true so na gravacao pelo mic (toggleRecord) -> so ela pede limpeza do texto; arquivo de
-  // audio anexado (picker/paste) nunca passa por limpeza.
-  function addFiles(files: Iterable<File>, opts?: { ditado?: boolean; avisoTeto?: boolean }) {
+  // Adiciona arquivos a lista (do picker, do arrasto ou do colar), cada um com preview local.
+  function addFiles(files: Iterable<File>) {
     for (const f of files) {
-      // audio (gravacao do mic ou arquivo audio/*) NAO vira anexo: transcreve e cai no textarea,
-      // como se o usuario tivesse digitado — ele revisa/edita e envia quando quiser.
+      // audio NAO vira anexo: transcreve e cai no textarea, como se o usuario tivesse digitado.
+      // Arquivo anexado nunca passa por limpeza (`ditado: false`); so o mic pede.
       if (f.type.startsWith('audio/')) {
-        transcribeIntoComposer(f, { ditado: !!opts?.ditado, avisoTeto: !!opts?.avisoTeto });
+        startTranscription({ file: f }, { ditado: false });
         continue;
       }
       const tipo = tipoDoArquivo(f);
@@ -1221,22 +1291,17 @@ import { cachePrazo } from '../lib/cachePrazo';
     attachError = '';
   }
 
-  // Transcreve o audio (Groq) e joga o texto no composer, anexando ao que ja houver — o usuario
-  // revisa e envia. NAO envia sozinho. Transcricao vazia / falha -> avisa em recError, sem sumir.
-  // ditado=true pede `limpar=1`: a resposta ja vem com o texto limpo (`text`), o cru (`raw`, pro
-  // desfazer) e um `aviso` quando a limpeza nao valeu -- sem corrida, a troca acontece ANTES da
-  // resposta chegar na tela.
-  // Ultimo audio que falhou, guardado pra tentar de novo SEM regravar: o audio ja existe (o
-  // navegador gravou, o backend ate salvou no cwd antes de transcrever), e mandar a pessoa repetir
-  // dois minutos de fala por causa de um timeout ou de um 502 do provedor e perder trabalho dela.
-  // So o File — o Blob vive na memoria da aba e nao paga nada; sai da tela no proximo sucesso.
-  let audioFalhou = $state<{ file: File; ditado: boolean; avisoTeto: boolean } | null>(null);
   // O botão do mic tira o foco; a seleção do textarea pode voltar a zero durante o ditado.
-  let lastSelection: { value: string; start: number; end: number } | null = null;
+  // Também diz qual palavra está sob o cursor para as sugestões de `/`.
+  let lastSelection = $state.raw<{ value: string; start: number; end: number } | null>(null);
 
   function rememberSelection() {
     const field = textareaEl;
-    if (field) lastSelection = { value: field.value, start: field.selectionStart, end: field.selectionEnd };
+    if (!field) return;
+    const { value, selectionStart: start, selectionEnd: end } = field;
+    if (lastSelection?.value === value && lastSelection.start === start && lastSelection.end === end) return;
+    lastSelection = { value, start, end };
+    if (value !== slashDismissed) slashDismissed = null;
   }
 
   function rememberFocusedSelection() {
@@ -1261,91 +1326,97 @@ import { cachePrazo } from '../lib/cachePrazo';
       hadDraft: value.trim().length > 0, cursor: start + insert.length };
   }
 
-  async function transcribeIntoComposer(file: File, opts?: { ditado?: boolean; avisoTeto?: boolean; autoEnvio?: boolean }) {
-    // Uma por vez: transcribing e setado SINCRONO antes de qualquer await, entao um segundo audio
-    // (ex: multi-selecao no picker) cai aqui e avisa em vez de correr concorrente e pisar no estado
-    // compartilhado (transcribing/recError/inputText) — que sairia fora de ordem.
-    if (transcribing) { recError = m.composer_aguarde_transcricao(); return; }
-    transcribing = true;
-    recError = '';
-    audioFalhou = null;
-    try {
-      const { path, text, raw, aviso, estilo_aplicado } = await transcribeFile(sessionName, file, {
-        limpar: !!opts?.ditado,
-        // O estilo vai JUNTO, e nao e lido da config no servidor: e este rotulo que a pessoa leu na
-        // pill antes de falar. Ver queryTranscribe em lib/api.ts.
-        estilo: ditadoEstilo.pronto ? ditadoEstilo.valor : undefined,
-      }, sessionServer());
-      const t = text.trim();
-      if (!t) {
-        recError = m.composer_transcricao_vazia();
-        // Ditado do mic: falou, ouviu a gravacao encerrar sozinha e nada vai acontecer -- mesmo
-        // aviso sonoro dos outros motivos de supressao. So ditado (nao anexo de audio pelo 📎).
-        if (opts?.ditado) { somRecusa(); setTimeout(fecharBipes, 400); }
-        return;
-      }
-      // A selecao e lida depois da rede: o campo continua editavel durante a transcricao.
-      const { before, after, hadDraft, cursor } = inserirTranscricao(t);
-      // Barra do ditado: so no mic. Audio ANEXADO pelo 📎 nao passa por limpeza nenhuma (o backend
-      // nem recebe `limpar`), entao nao ha versao pra trocar — e o arquivo e da pessoa, ela ja tem
-      // como ouvir. `cru` cai pro proprio `t` quando o backend nao mandou raw (limpeza desistiu e
-      // devolveu o cru, ou o texto era curto demais pra limpar): o botao "Cru" tem que continuar
-      // devolvendo o que a Whisper ouviu, e nesse caso e exatamente isto.
-      if (opts?.ditado) {
-        // `cru` cai pro proprio `t` quando o backend nao mandou raw: aconteceu quando a limpeza
-        // desistiu (aviso) ou o texto era curto demais pra limpar, e nos dois casos o que esta no
-        // campo JA e o cru — que e o que o botao "Cru" tem que devolver.
-        abrirDitado({ file, path, before, after, cru: raw?.trim() || t, texto: t, aplicado: estilo_aplicado });
-      } else {
-        fecharDitado();
-      }
-      if (aviso) recError = aviso;
-      // Teto (3min sem detectar silencio): diz o motivo provavel em vez de "grave de novo" -- so
-      // quando nao ha aviso da limpeza pra mostrar (esse e mais grave, tem prioridade).
-      else if (opts?.avisoTeto) {
-        recError = m.composer_silencio();
-      }
-      if (opts?.ditado && opts.autoEnvio !== false) {
-        if (podeEnviarSozinho({ motivo: motivoDoFim, texto: t, aviso, rascunhoAntes: hadDraft })) {
-          iniciarContagem();
-        } else {
-          // Envio automatico suprimido (motivo != silencio, aviso da limpeza ou rascunho ja no
-          // campo) -- o texto some calado pra quem esta olhando a tela, mas quem dirige so tem o
-          // ouvido. audioCtx so segue aberto numa gravacao maos-livres (teardownRecording ja fechou
-          // na hora pro ditado normal), entao o bipe() abaixo e um no-op silencioso fora dela.
-          somRecusa();
-          setTimeout(fecharBipes, 400);
+  // Manda transcrever pelo estado de ditado da sessão. `jsonl` vem por parâmetro no caso de a
+  // gravação terminar com o Composer já desmontado (trocou de sessão gravando).
+  function startTranscription(src: { file?: File; arquivo?: string }, opts: DictationOpts,
+                              jsonl: string | null = sessionJsonl ?? null) {
+    const server = sessionServer();
+    const motivo = dictations.start({
+      serverId: dictationServerId, name: sessionName, jsonl, server, ...src,
+      // O estilo vai JUNTO: e o rotulo que a pessoa leu na pill antes de falar.
+      opts: { ...opts, estilo: ditadoEstilo.pronto ? ditadoEstilo.valor : undefined },
+    });
+    // Uma por sessao: um segundo audio (multi-selecao no picker) avisa em vez de correr junto.
+    if (!destroyed) {
+      recError = motivo === 'started' ? ''
+        : motivo === 'onlyOnDevice' ? m.composer_ditado_so_no_aparelho() : m.composer_aguarde_transcricao();
+    }
+    // Gravação recusada não some: fica nos anexos da sessão para transcrever depois.
+    if (motivo !== 'started' && src.file) {
+      uploadFile(sessionName, src.file, undefined, server, { audioOnly: true }).catch((err) => {
+        console.error('dictation: refused recording not kept', err);
+        if (!destroyed) {
+          recError = m.composer_ditado_nao_guardado({ erro: err instanceof Error ? err.message : String(err) });
         }
-      }
-      await tick();
-      autoGrow();
-      textareaEl?.focus();
-      textareaEl?.setSelectionRange(cursor, cursor);
-      rememberSelection();
-    } catch (err) {
-      console.error(m.composer_transcricao_falhou(), err);
-      cancelarContagem();   // erro de transcricao nunca inicia contagem
-      const status = (err as { status?: number } | null)?.status;
-      // Sem o ditado ao vivo, ficar sem chave da Groq passa a significar SEM DITADO NENHUM -> avisa
-      // onde resolver, nao so "falhou".
-      recError = status === 503
-        ? m.composer_groq_chave()
-        : err instanceof Error ? err.message : m.composer_falha_transcricao();
-      // Mesmo aviso sonoro do ditado que termina sem texto -- inclui o 503 de chave da Groq
-      // ausente. So ditado (nao anexo de audio pelo 📎, que nunca teve bipe).
-      if (opts?.ditado) { somRecusa(); setTimeout(fecharBipes, 400); }
-      // O audio fica de pe: a falha aqui e de rede/provedor, nao do que a pessoa falou.
-      audioFalhou = { file, ditado: !!opts?.ditado, avisoTeto: !!opts?.avisoTeto };
-    } finally {
-      transcribing = false;
+      });
     }
   }
 
-  // Reenvia o MESMO audio. Nada de regravar: e o mesmo File que ja estava na mao.
+  // Resultado com a conversa aberta: entra no cursor (ou no fim, se a seleção guardada não vale
+  // mais para o texto de agora), abre a barra e decide o envio do mãos-livres.
+  async function aplicarTranscricao(e: DictationEntry) {
+    const { text, raw, aviso, estilo_aplicado } = e.result!;
+    const t = text.trim();
+    const { before, after, hadDraft, cursor } = inserirTranscricao(t);
+    // `cru` cai pro proprio `t` quando o backend nao mandou raw: nesse caso o que esta no campo JA
+    // e o cru, que e o que o botao "Cru" tem que devolver.
+    if (e.opts.ditado) {
+      abrirDitado({ file: e.file, arquivo: e.arquivo, before, after, cru: raw?.trim() || t, texto: t, aplicado: estilo_aplicado });
+    } else {
+      fecharDitado();
+    }
+    if (aviso) recError = recAviso = aviso;
+    else if (e.opts.avisoTeto) recError = m.composer_silencio();
+    if (e.opts.ditado && e.opts.autoEnvio !== false) {
+      if (podeEnviarSozinho({ motivo: e.opts.motivo ?? null, texto: t, aviso, rascunhoAntes: hadDraft })) {
+        iniciarContagem();
+      } else {
+        // Envio suprimido: quem dirige so tem o ouvido pra saber.
+        somRecusa();
+        setTimeout(fecharBipes, 400);
+      }
+    }
+    await tick();
+    autoGrow();
+    textareaEl?.focus();
+    textareaEl?.setSelectionRange(cursor, cursor);
+    rememberSelection();
+  }
+
+  // Registrado no corpo, não num $effect: o Chat lê o rascunho guardado no mesmo passo síncrono da
+  // montagem, então nenhum resultado cai entre a leitura dele e este registro.
+  // svelte-ignore state_referenced_locally
+  const soltarReceptor = dictations.receive(dictationServerId, sessionName, {
+    accepts: () => transcriptConferido,
+    deliver: (e) => aplicarTranscricao(e),
+    // Já escrito no rascunho com a conversa fechada: só falta mostrar o motivo, se houver.
+    restored: (e) => {
+      if (e.result?.aviso) recError = recAviso = e.result.aviso;
+      else if (e.opts.avisoTeto) recError = m.composer_silencio();
+    },
+  });
+  onDestroy(soltarReceptor);
+  // O resultado que esperou o transcript conferido entra quando ele chega. Microtask: o Chat (pai)
+  // restaura o rascunho no efeito dele antes desta inserção calcular o "antes" da barra.
+  $effect(() => {
+    if (!transcriptConferido) return;
+    queueMicrotask(() => dictations.redeliver(dictationServerId, sessionName));
+  });
+
+  // Falha nunca dispara a contagem, e o mic avisa quem dita sem olhar (anexo de áudio nunca teve bipe).
+  let falhaAvisada = 0;
+  $effect(() => {
+    const e = ditadoFalhou;
+    if (!e || e.id === falhaAvisada) return;
+    falhaAvisada = e.id;
+    cancelarContagem();
+    if (e.opts.ditado) { somRecusa(); setTimeout(fecharBipes, 400); }
+  });
+
+  // Reenvia o MESMO audio: pelo arquivo salvo no servidor quando ele é conhecido, senão o blob da
+  // aba. Pendente relido depois de recarregar não tem servidor: vai o da sessão aberta.
   function tentarTranscreverDeNovo() {
-    const alvo = audioFalhou;
-    if (!alvo || transcribing) return;
-    void transcribeIntoComposer(alvo.file, { ditado: alvo.ditado, avisoTeto: alvo.avisoTeto });
+    dictations.retry(dictationServerId, sessionName, sessionServer(), sessionJsonl ?? null);
   }
 
   // Fecha a barra do ditado e devolve o objectURL. Sem o revoke o blob do audio fica preso na
@@ -1359,12 +1430,16 @@ import { cachePrazo } from '../lib/cachePrazo';
   }
 
   // Abre a barra pro ditado que acabou de cair no campo. Um por vez: o anterior ja saiu do campo.
-  function abrirDitado(d: { file: File; path?: string; before: string; after: string; cru: string; texto: string; aplicado?: string }) {
+  // Sem blob (anexo mandado da galeria, ou resultado de um Composer anterior), toca do servidor.
+  function abrirDitado(d: { file?: File; arquivo?: string; before: string; after: string; cru: string; texto: string; aplicado?: string }) {
     fecharDitado();
+    const url = d.file ? URL.createObjectURL(d.file)
+      : d.arquivo ? uploadUrl(sessionName, d.arquivo, false, sessionServer()) : '';
+    if (!url) return;
     const atual: VersaoDitado = ehVersao(d.aplicado) ? d.aplicado : 'cru';
     ditado = {
-      url: URL.createObjectURL(d.file),
-      arquivo: d.path?.split('/').pop(),
+      url,
+      arquivo: d.arquivo,
       before: d.before,
       after: d.after,
       raw: d.cru,
@@ -1422,7 +1497,7 @@ import { cachePrazo } from '../lib/cachePrazo';
       // A limpeza pode desistir e devolver o cru (LLM fora do ar, travas do narrar). Marcar o botao
       // clicado nesse caso seria dizer que o estilo pegou: quem manda e o que o backend aplicou.
       aplicarVersao(alvo, ehVersao(estilo_aplicado) ? estilo_aplicado : v, t);
-      if (aviso) recError = aviso;
+      if (aviso) recError = recAviso = aviso;
     } catch (err) {
       if (ditado === alvo) {
         recError = err instanceof Error ? err.message : m.composer_falha_transcricao();
@@ -1580,32 +1655,38 @@ import { cachePrazo } from '../lib/cachePrazo';
     }
   }
 
-  // Grava webm/mp4 e transcreve na Groq ao parar -> cai no composer.
+  // Chrome grava webm/opus; iOS Safari grava mp4/aac.
+  function arquivoDaGravacao(recorder: MediaRecorder): File {
+    const type = recorder.mimeType || 'audio/webm';
+    const ext = type.includes('mp4') ? 'm4a' : type.includes('ogg') ? 'ogg' : 'webm';
+    return new File([new Blob(recChunks, { type })], `gravacao-${Date.now()}.${ext}`, { type });
+  }
+
+  // Grava webm/mp4 e, ao parar, manda transcrever pelo estado de ditado da sessão.
   function startMediaRecorder(stream: MediaStream) {
     const recorder = new MediaRecorder(stream);
     mediaRecorder = recorder;
-    recorder.ondataavailable = (e) => { if (mediaRecorder === recorder && e.data.size) recChunks.push(e.data); };
+    recorder.ondataavailable = (e) => {
+      if ((mediaRecorder === recorder || handoff?.recorder === recorder) && e.data.size) recChunks.push(e.data);
+    };
     recorder.onstop = () => {
-      // Componente destruído com gravação no ar: parar as tracks dispara este onstop DEPOIS do
-      // destroy em browser que segue a spec — sem o guard, uma transcrição fantasma rodava na
-      // sessão que o usuário acabou de trocar (revisão do diff).
+      if (handoff?.recorder === recorder) {
+        const { jsonl } = handoff;
+        handoff = null;
+        if (!recFailed && recChunks.length) {
+          startTranscription({ file: arquivoDaGravacao(recorder) }, { ditado: true, motivo: 'botao', autoEnvio: false }, jsonl);
+        }
+        return;
+      }
       if (destroyed || mediaRecorder !== recorder) return;
-      const type = recorder.mimeType || 'audio/webm';
-      // Chrome grava webm/opus; iOS Safari grava mp4/aac. A Groq aceita os dois direto.
-      const ext = type.includes('mp4') ? 'm4a' : type.includes('ogg') ? 'ogg' : 'webm';
       // onerror dispara stop logo depois -> se ja falhou, nao anexa o audio (truncado). Sem chunk
       // nenhum (gravacao rapida demais / driver sem dado) -> avisa, nao some calado.
       if (recFailed) {
         teardownRecording();
       } else if (recChunks.length) {
-        const blob = new Blob(recChunks, { type });
-        // Teto de 3min: transcreve normal, como qualquer ditado -- a regra de silencio nao
-        // sobrevive a ruido de fundo constante (piso de RMS medido abaixo de motor de carro), e o
-        // teto e justamente o caminho provavel de quem dita dirigindo. Nao envia sozinho mesmo
-        // assim (podeEnviarSozinho ja barra por motivo != 'silencio'); avisoTeto troca a mensagem
-        // por uma que diga o motivo provavel em vez de jogar a fala fora.
-        addFiles([new File([blob], `gravacao-${Date.now()}.${ext}`, { type })],
-          { ditado: true, avisoTeto: motivoDoFim === 'teto' });
+        // Teto de 3min: transcreve normal; avisoTeto troca a mensagem pelo motivo provavel.
+        startTranscription({ file: arquivoDaGravacao(recorder) },
+          { ditado: true, avisoTeto: motivoDoFim === 'teto', motivo: motivoDoFim });
         teardownRecording();
       } else {
         recError = m.composer_gravacao_vazia();
@@ -1613,6 +1694,7 @@ import { cachePrazo } from '../lib/cachePrazo';
       }
     };
     recorder.onerror = (e) => {
+      if (handoff?.recorder === recorder) { recFailed = true; return; }
       if (destroyed || mediaRecorder !== recorder) return;
       console.error(m.composer_mediarecorder_erro(), (e as { error?: unknown }).error ?? e);
       recFailed = true;
@@ -1699,6 +1781,10 @@ import { cachePrazo } from '../lib/cachePrazo';
 
   onDestroy(() => {
     destroyed = true;
+    if (recording && mediaRecorder?.state === 'recording') {
+      handoff = { recorder: mediaRecorder, jsonl: sessionJsonl ?? null };
+      mediaRecorder.stop();
+    }
     teardownRecording();
   });
   onDestroy(fecharDitado);   // troca de sessao desmonta o Composer -> revoga o objectURL do audio
@@ -1737,21 +1823,21 @@ import { cachePrazo } from '../lib/cachePrazo';
     if (files && files.length) addFiles(files);
   }
 
-  // Colar imagem(ns) (desktop garante; iOS Safari e instavel). Pega todos os itens de imagem
-  // do clipboard e joga no mesmo fluxo do anexo.
+  // Colar arquivo = mesmo fluxo do arrasto: imagem vira preview, áudio vai pro ditado, o resto vira
+  // chip. Texto continua colando como texto. Navegador no Linux não entrega à página arquivo
+  // copiado no gerenciador de arquivos; Android (Chrome) e iPad entregam.
   function onPaste(e: ClipboardEvent) {
     const items = e.clipboardData?.items;
     if (!items) return;
-    const imgs: File[] = [];
+    const files: File[] = [];
     for (const it of items) {
-      if (it.kind === 'file' && it.type.startsWith('image/')) {
-        const f = it.getAsFile();
-        if (f) imgs.push(f);
-      }
+      if (it.kind !== 'file') continue;
+      const f = it.getAsFile();
+      if (f) files.push(f);
     }
-    if (imgs.length) {
+    if (files.length) {
       e.preventDefault();
-      addFiles(imgs);
+      addFiles(files);
     }
   }
 
@@ -2103,8 +2189,8 @@ import { cachePrazo } from '../lib/cachePrazo';
     {/if}
 
     <SlashSuggest bind:this={slashSuggest} bind:activeOptionId={slashActiveOptionId}
-      {commands} query={inputText} onPick={handleSuggestPick}
-      onComplete={(cmd) => void fillCommand(cmd.name)} listboxId={slashListboxId} />
+      {commands} query={slashQuery} onPick={pickSlash} onComplete={(cmd) => void completeSlashToken(cmd)}
+      onDismiss={() => (slashDismissed = inputText)} listboxId={slashListboxId} />
 
     <textarea
       bind:this={textareaEl}
@@ -2166,7 +2252,8 @@ import { cachePrazo } from '../lib/cachePrazo';
         <!-- Player nativo: controls do proprio navegador, sem componente nenhum. `preload=metadata`
              pra barra ja nascer com a duracao (o blob e local, nao ha download a economizar). -->
         <audio class="ditado-audio" src={ditado.url} controls preload="metadata"
-               aria-label={m.composer_ditado_ouvir()}></audio>
+               aria-label={m.composer_ditado_ouvir()}
+               onerror={() => (recError = m.composer_ditado_audio_indisponivel())}></audio>
         <div class="ditado-versoes" role="group" aria-label={m.composer_ditado_versao()}>
           {#each versoesDitado() as v (v.valor)}
             <button
@@ -2187,13 +2274,22 @@ import { cachePrazo } from '../lib/cachePrazo';
       </div>
     {/if}
     {#if recError}
+      {#if recError === recAviso}
+        <div class="send-error send-error--aviso" role="status"><span>{recError}</span></div>
+      {:else}
+        <div class="send-error" role="alert"><span>{recError}</span></div>
+      {/if}
+    {/if}
+    {#if ditadoFalhou}
       <div class="send-error" role="alert">
-        <span>{recError}</span>
-        {#if audioFalhou && !transcribing}
+        <span>{ditadoFalhou.error}</span>
+        {#if ditadoFalhou.path || ditadoFalhou.arquivo || ditadoFalhou.file}
           <button type="button" class="undo-btn" onclick={tentarTranscreverDeNovo}>
             {m.composer_transcrever_de_novo()}
           </button>
         {/if}
+        <button type="button" class="ditado-fechar" onclick={() => dictations.clear(dictationServerId, sessionName)}
+                aria-label={m.composer_ditado_dispensar()}>✕</button>
       </div>
     {/if}
     {#if sendError}
@@ -2401,7 +2497,7 @@ import { cachePrazo } from '../lib/cachePrazo';
         <button
           class="attach-btn mic-btn"
           class:mic-btn--recording={recording}
-          disabled={voiceBusy}
+          disabled={voiceBusy || transcribing}
           onclick={toggleRecord}
           aria-label={recording ? m.composer_parar_gravacao() : starting ? m.composer_cancelar_prep_mic() : m.composer_gravar_audio()}
         >
@@ -3455,4 +3551,5 @@ import { cachePrazo } from '../lib/cachePrazo';
     color: var(--error);
     padding: 0 var(--space-1);
   }
+  .send-error--aviso { color: var(--warning-text); }
 </style>

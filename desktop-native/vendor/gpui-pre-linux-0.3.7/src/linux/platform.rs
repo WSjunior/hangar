@@ -990,6 +990,40 @@ pub(super) fn read_fd_with_timeout(
     }
 }
 
+// RFC 2483: linha com `#` é comentário; só `file://` é arquivo local (link copiado do navegador também vem aqui).
+#[cfg(any(feature = "wayland", feature = "x11"))]
+pub(super) fn parse_uri_list(list: &str) -> smallvec::SmallVec<[PathBuf; 2]> {
+    list.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| url::Url::parse(line).ok())
+        .filter(|url| url.scheme() == "file")
+        .filter_map(|url| {
+            url.to_file_path()
+                .map_err(|()| log::error!("Failed turn {url:?} into a file path"))
+                .ok()
+        })
+        .collect()
+}
+
+// Sem texto do dono, `ClipboardItem::text` emendaria os caminhos sem separador no terminal; vai um por linha.
+#[cfg(any(feature = "wayland", feature = "x11"))]
+pub(super) fn file_list_item(paths: smallvec::SmallVec<[PathBuf; 2]>, text: Option<String>) -> ClipboardItem {
+    let text = text.filter(|text| !text.is_empty()).unwrap_or_else(|| {
+        paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    });
+    ClipboardItem {
+        entries: vec![
+            gpui::ClipboardEntry::ExternalPaths(gpui::ExternalPaths(paths)),
+            gpui::ClipboardEntry::String(gpui::ClipboardString::new(text)),
+        ],
+    }
+}
+
 #[cfg(any(feature = "wayland", feature = "x11"))]
 pub(super) const DEFAULT_CURSOR_ICON_NAME: &str = "left_ptr";
 
@@ -1033,6 +1067,17 @@ pub(super) fn log_cursor_icon_warning(message: impl std::fmt::Display) {
         );
     } else {
         log::warn!("{:#}", message);
+    }
+}
+
+/// Hangar: a fileira de números tem os códigos xkb 10 a 19 (evdev + 8) em qualquer layout; ver
+/// `KeyDownEvent::physical_digit`.
+#[cfg(any(feature = "wayland", feature = "x11"))]
+pub(super) fn physical_digit(keycode: Keycode) -> Option<char> {
+    match keycode.raw() {
+        10..=18 => char::from_digit(keycode.raw() - 9, 10),
+        19 => Some('0'),
+        _ => None,
     }
 }
 
@@ -1392,6 +1437,15 @@ mod tests {
 
     #[cfg(any(feature = "wayland", feature = "x11"))]
     #[test]
+    fn number_row_digit_comes_from_the_key_position() {
+        let digits: Vec<_> = (10..=19).map(|code| physical_digit(Keycode::new(code))).collect();
+        assert_eq!(digits, "1234567890".chars().map(Some).collect::<Vec<_>>());
+        assert_eq!(physical_digit(Keycode::new(9)), None);
+        assert_eq!(physical_digit(Keycode::new(20)), None);
+    }
+
+    #[cfg(any(feature = "wayland", feature = "x11"))]
+    #[test]
     fn shortcuts_never_start_or_carry_dead_key_composition() {
         let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
         let table = xkb::compose::Table::new_from_buffer(&context,
@@ -1634,6 +1688,75 @@ mod tests {
             let bytes = read_fd_with_timeout(pipe.read, PIPE_READ_TIMEOUT).unwrap();
             writer.join().unwrap();
             assert_eq!(bytes, payload);
+        }
+    }
+
+    #[cfg(any(feature = "wayland", feature = "x11"))]
+    mod parse_uri_list {
+        use super::super::parse_uri_list;
+        use std::path::PathBuf;
+
+        #[test]
+        fn keeps_file_uris_in_order() {
+            let paths = parse_uri_list("file:///tmp/a.txt\nfile:///home/u/b.md\n");
+            assert_eq!(
+                paths.into_vec(),
+                vec![PathBuf::from("/tmp/a.txt"), PathBuf::from("/home/u/b.md")]
+            );
+        }
+
+        #[test]
+        fn decodes_percent_encoding() {
+            let paths = parse_uri_list("file:///tmp/meu%20arquivo%20a%C3%A7%C3%A3o.txt");
+            assert_eq!(paths.into_vec(), vec![PathBuf::from("/tmp/meu arquivo ação.txt")]);
+        }
+
+        #[test]
+        fn skips_comments_blank_lines_and_other_schemes() {
+            let list = "# copied by a file manager\n\nhttps://example.com/x.txt\nsmb://nas/share/y.txt\nfile:///tmp/z.txt\n";
+            assert_eq!(parse_uri_list(list).into_vec(), vec![PathBuf::from("/tmp/z.txt")]);
+        }
+
+        #[test]
+        fn tolerates_crlf() {
+            let paths = parse_uri_list("file:///tmp/a.txt\r\nfile:///tmp/b%20c.txt\r\n");
+            assert_eq!(
+                paths.into_vec(),
+                vec![PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/b c.txt")]
+            );
+        }
+
+        #[test]
+        fn plain_text_is_not_a_file_list() {
+            assert!(parse_uri_list("/tmp/a.txt\nhello world").is_empty());
+            assert!(parse_uri_list("").is_empty());
+        }
+    }
+
+    #[cfg(any(feature = "wayland", feature = "x11"))]
+    mod file_list_item {
+        use super::super::file_list_item;
+        use gpui::ClipboardEntry;
+        use smallvec::smallvec;
+        use std::path::PathBuf;
+
+        #[test]
+        fn paths_first_then_owner_text() {
+            let item = file_list_item(
+                smallvec![PathBuf::from("/tmp/a.txt")],
+                Some("/tmp/a.txt".to_string()),
+            );
+            assert!(matches!(&item.entries[0], ClipboardEntry::ExternalPaths(p) if p.paths() == [PathBuf::from("/tmp/a.txt")]));
+            assert_eq!(item.entries.len(), 2);
+            assert_eq!(item.text().as_deref(), Some("/tmp/a.txt"));
+        }
+
+        #[test]
+        fn without_owner_text_paths_go_one_per_line() {
+            let paths = smallvec![PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/b c.txt")];
+            assert_eq!(file_list_item(paths, None).text().as_deref(), Some("/tmp/a.txt\n/tmp/b c.txt"));
+            let paths = smallvec![PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/b.txt")];
+            assert_eq!(file_list_item(paths, Some(String::new())).text().as_deref(), Some("/tmp/a.txt\n/tmp/b.txt"));
         }
     }
 }

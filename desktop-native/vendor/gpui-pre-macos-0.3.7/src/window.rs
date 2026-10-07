@@ -3470,6 +3470,7 @@ extern "C" fn do_command_by_selector(this: &Object, _: Sel, _: Sel) {
             keystroke,
             is_held: false,
             prefer_character_input: false,
+            physical_digit: None,
         }));
         state.as_ref().lock().do_command_handled = Some(!handled.propagate);
     }

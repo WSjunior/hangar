@@ -1135,6 +1135,31 @@ Anotar valor e unidade, a sessão de cada `/history`, e o que não deu para medi
 | `/history` completo, Claude 300 MB / `limit=200` | |
 | Threads e inotify do Python com 4 chats abertos, contra 0 abertos | |
 
+**Terminal real do dono (parte 4, Task 8, 06/10/2026).** Fora do Windows, o `WS .../term` do
+dono (`?token=` só; Bearer e cookie seguem ao Python, como no `termsock`) abre o PTY no Rust
+(`term/`, `portable-pty`). A Origin continua decidida pelo `_origem_aceita` do Python, perguntada
+uma vez por conexão em `/internal/term/origin` (prazo 1 s; falha = 503 com código no diário).
+Recusa antes do aceite é 403, como o fechamento antes do `accept` do Starlette; multiplexador
+fora e teto de 64 painéis aceitam e fecham com 1013 e o motivo. O tamanho da janela fica na
+opção `@hangar_term_size` da sessão enquanto o painel vive, e o `main.rs` repõe ao subir o das
+sessões que um Rust anterior deixou no tamanho do painel. Medidas em
+`docs/migracao-rust/parte4/medicao.md`. Desde a Task 10 o Windows também abre o painel do dono
+no Rust (ConPTY do `portable-pty`); as regras de lá estão em `windows.md`, "Terminal real do
+dono no Windows é do Rust".
+
+**Porteiro do terminal (parte 4, Task 9, contrato 30).** Com o modo `rust` (ou `pending`, que
+espera o desfecho), o `termsock` não abre PTY em nenhuma plataforma: depois da porta de entrada
+de hoje (convidado de convite, convidado com login, dono pelo Connect) ele liga os bytes a
+`/__hangar_server/term` na porta privada (segredo e loopback; alvo conferido de novo lá, `cols`/`rows`).
+O painel é o mesmo `Terms` da 8765, então dono e convidado se derrubam com 1000 "outra conexao
+assumiu" como dois donos. Revogação pelo `share_gate` cancela o repasse, que fecha o lado do
+Rust; o código de fechamento do Rust chega igual ao cliente, queda sem fechamento vira 1011.
+Ponte desligada, Rust subindo ou recusa do aperto de mão: 1013 (sessão morta: 1008) e
+`terminal.ponte` no diário com o código. O 409 (`_recusa_se_painel_aberto`) pergunta
+`term.active` pela ponte da lista, fora do laço de eventos; erro é 503
+`erro_terminal_indisponivel`. `/api/config.terminal_panel` e `/run-code` leem o `terminal_panel`
+da saúde no modo `rust`; saúde sem o campo booleano é falha de partida.
+
 ## Lista do dono no hangar-server
 
 (05/10/2026, lista-estado Task 17; contrato interno 27, sem mudança.) `GET /api/sessions` e
@@ -1393,7 +1418,48 @@ incerta forçada no terminal e a transferência Claude → Codex. Tabela e achad
 `reopen_failed` intermitente no restart, e o 500 com pilha da política com geração antiga) em
 [`prova-real.md`](../migracao-rust/dono-unico/prova-real.md).
 
+## Estado ao vivo de Claude com terminal no `Monitor` do Rust
+
+(06/10/2026, parte 4 da migração, Task 5.) Com o `hangar-server` de pé (`rust` ou `pending`), o
+estado ao vivo, a prévia, a pergunta nativa, a sugestão e o `problema` de Claude com terminal saem
+de um `Monitor` por hub (`side.rs`, fonte de produção em `state/live.rs`), criado com o primeiro
+assinante e parado com o último. Assinante é o `/events` do dono ou o canal privado
+`GET /__hangar_server/state/{name}/events` (segredo e loopback, HTTP/1.0), que o `merged_events`
+do Python lê para o convidado (8766) e o dono pelo Connect (8768). Assim a sessão nunca tem dois
+donos: captura, `permission.observe` e `session.dead` saem uma vez, de um lugar só.
+
+- O `Monitor` publica pelo retrato do hub (`publish_own`, mesma regra de repetido) e pede a entrega
+  por `session.deliverable` na borda; a conexão interna do Python deixa de rodar `StateMonitor`,
+  `PreviewBroker`, o `tail_pump` (que só servia à supressão da prévia), a sugestão, a pergunta e o
+  `drain`. Se o Python mandar um dos quatro eventos para sessão do Rust, o hub descarta e registra
+  `state_python_leak` uma vez por sessão.
+- `rebind` (`/clear`, troca do filho) acorda o `Monitor` na hora: o retrato perde o estado e o novo
+  sai sem esperar o tique. A captura é recriada na época nova (o pool solta o vínculo velho do
+  mesmo consumidor) e solta ao fim do `Monitor`.
+- A resposta gravada que suprime a prévia vem das linhas do leitor do transcript do hub, semeada
+  pelo fim do arquivo ao ligar (o leitor começa no fim); a gravação acorda o `Monitor` e a prévia
+  repetida sai sem rodada nova.
+- Arquivos da sessão e prévia do hook em `spawn_blocking` com prazo; falha vai ao diário. Retrato
+  dos fatos que falha ou nunca chegou é `problema=state_facts_unavailable`
+  (`state_facts_missing` no detalhe quando não houve resposta nenhuma).
+- O `Sources` não tem corpo padrão em método nenhum: a fonte de produção que esquecer um não
+  compila (a remoção já pegou duas fontes de teste incompletas).
+- Medida (`docs/migracao-rust/parte4/medicao.md`, Task 5): 20 chats trabalhando, Python de 176,5
+  para 29 ms de CPU por segundo e o total de 297,5 para 146; latência marcador → `state` igual à do
+  Python (mediana ~0,45 s), com a cópia dos marcadores relida só quando o observador das pastas vê
+  escrita.
+
 ## Observação terminal Rust: erro visível, sem captura Python
+
+(Parte 4, Tasks 5 e 7, 06/10/2026.) Com o Rust de pé, quem lê a captura de Claude com terminal é o
+`Monitor` do Rust, em processo (`PoolCapture` em `state/monitor.rs`, cliente `-C` do
+`TerminalPool`; no Windows a captura avulsa do psmux em `state/capture.rs`), e a falha dele sai com o mesmo `problema=terminal_observacao_falhou` sobre o último
+evento ([estado ao vivo no `Monitor`](#estado-ao-vivo-de-claude-com-terminal-no-monitor-do-rust)).
+A ponte Python descrita abaixo (`terminal_observer` → `POST /__hangar_server/terminal`) ficou sem
+consumidor: só o `StateMonitor` e o `PreviewBroker` de Claude a alugam, e eles só rodam no modo
+`python`, em que a ponte está desligada; Pi, omp e Kimi nunca a usaram. A porta privada continua,
+com o painel (`/__hangar_server/term`), o canal do estado, a lista e Git/arquivos. O texto abaixo
+vale como história da ponte.
 
 (04/10/2026, dono único, decisão 3 do dono.) Com a ponte ligada, o Rust é o único dono da
 captura de quem tem lease: erro de transporte, resposta torta, quadro inválido, alvo do pane ou

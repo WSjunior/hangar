@@ -77,6 +77,18 @@ def test_unknown_without_transcript_proof_stays_an_error(monkeypatch, text, term
     assert not result["ok"] and len(owner.calls) == 1
 
 
+@pytest.mark.parametrize("text,terminal,ok", [("/clear", True, False), ("Olá", True, True), ("/clear", False, True)])
+def test_deferred_slash_on_terminal_is_an_error_not_queued(monkeypatch, text, terminal, ok):
+    # Item 16: o /clear adiado (pergunta ainda aberta) não tem linha na fila e nunca roda depois; o
+    # 200 "na fila" o fazia sumir calado.
+    owner = Owner("deferred", terminal=terminal)
+    monkeypatch.setattr(runtime_coordinator, "_current", owner)
+    result = asyncio.run(api._send_managed("session", text, "claude"))
+    assert result["ok"] is ok and len(owner.calls) == 1
+    if not ok:
+        assert result["error"]["code"] == "erro_comando_nao_executado" and result["error"]["params"]["comando"] == "/clear"
+
+
 def test_send_without_rust_answer_is_uncertain_not_failed(monkeypatch):
     owner = Owner("unknown")
     async def lost(name, command, operation_id):

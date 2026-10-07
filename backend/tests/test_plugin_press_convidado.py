@@ -18,7 +18,7 @@ INVITE = "token-do-convite"
 SHARE = share_store.Share(
     id="s1", session="t", life="L1", created_at=0.0, code_expires_at=0.0, code_hash="c",
     token_hash="h", device="Pixel", redeemed_at=1.0, revoked_at=None)
-BODY = {"site": "above-prompt", "key": "mr-a"}
+BODY = {"site": "above-prompt", "key": "mr-a", "plugin": "pm-mock"}
 
 
 def _register(coordinator, tmp_path, *, headless):
@@ -46,11 +46,16 @@ def env(tmp_path, monkeypatch):
     share_gate._life_cache.clear()
     pressed = []
 
-    async def press(name, site, key):
-        pressed.append((name, site, key))
+    async def press(name, site, key, plugin):
+        pressed.append((name, site, key, plugin))
+        return {"ok": True}
+
+    async def close(name, site):
+        pressed.append(("close", name, site))
         return {"ok": True}
 
     monkeypatch.setattr(plugin_click, "press", press)
+    monkeypatch.setattr(plugin_click, "close", close)
     api.app.dependency_overrides[api._transfer_guard] = lambda: None
     coordinator = RuntimeCoordinator()
     coordinator.instance = "instance-1"
@@ -60,9 +65,9 @@ def env(tmp_path, monkeypatch):
     guest_users._reset()
 
 
-def _press(token, *, invite_port=False):
+def _press(token, *, invite_port=False, route="press", body=BODY):
     base = f"http://testserver:{GUEST_PORT}" if invite_port else "http://testserver"
-    return TestClient(api.app, base_url=base).post("/api/sessions/t/plugin/press", json=BODY,
+    return TestClient(api.app, base_url=base).post(f"/api/sessions/t/plugin/{route}", json=body,
                                                    headers={"Authorization": f"Bearer {token}"})
 
 
@@ -101,7 +106,7 @@ def test_owner_still_presses_on_a_rust_terminal(env, tmp_path):
     _register(coordinator, tmp_path, headless=False).phase = Phase.Rust
     response = _press(OWNER)
     assert response.status_code == 200, response.text
-    assert pressed == [("t", "above-prompt", "mr-a")]
+    assert pressed == [("t", "above-prompt", "mr-a", "pm-mock")]
 
 
 @pytest.mark.parametrize("headless,phase", [(False, Phase.Python), (True, Phase.Rust)])
@@ -110,14 +115,14 @@ def test_guests_still_press_when_the_terminal_is_not_the_rusts(env, tmp_path, he
     _register(coordinator, tmp_path, headless=headless).phase = phase
     assert _press(guest_token).status_code == 200
     assert _press(INVITE, invite_port=True).status_code == 200
-    assert pressed == [("t", "above-prompt", "mr-a")] * 2
+    assert pressed == [("t", "above-prompt", "mr-a", "pm-mock")] * 2
 
 
 def test_guests_still_press_without_a_runtime_registry(env, monkeypatch):
     _, guest_token, pressed = env
     monkeypatch.setattr(runtime_coordinator, "_current", None)
     assert _press(guest_token).status_code == 200
-    assert pressed == [("t", "above-prompt", "mr-a")]
+    assert pressed == [("t", "above-prompt", "mr-a", "pm-mock")]
 
 
 def test_revoked_invite_never_reaches_the_refusal(env, tmp_path, monkeypatch):
@@ -137,7 +142,7 @@ def test_refusal_under_the_barrier_reaches_the_app_as_the_guest_code(env, monkey
     _, guest_token, _ = env
     marks = []
 
-    async def press(name, site, key):
+    async def press(name, site, key, plugin):
         marks.append(runtime_terminal.guest_admin.get())
         if runtime_terminal.guest_admin.get():
             raise runtime_terminal.GuestRefused("convidado")
@@ -148,3 +153,25 @@ def test_refusal_under_the_barrier_reaches_the_app_as_the_guest_code(env, monkey
     assert _refused(_press(INVITE, invite_port=True))
     assert _press(OWNER).status_code == 200
     assert marks == [True, True, False]
+
+
+def test_an_app_without_the_mod_is_still_served(env):
+    # O app de antes desta versão não manda o mod: o clique segue sem ele (o `plugin_click` acha o único
+    # botão com a `key`), e o `press` com `__close__` continua fechando o painel.
+    _, _, pressed = env
+    assert _press(OWNER, body={"site": "above-prompt", "key": "mr-a", "plugin": ""}).status_code == 422
+    assert _press(OWNER, body={"site": "above-prompt", "key": "mr-a"}).status_code == 200
+    assert _press(OWNER, body={"site": "pm-mock-mr", "key": "__close__"}).status_code == 200
+    assert pressed == [("t", "above-prompt", "mr-a", None), ("close", "t", "pm-mock-mr")]
+
+
+def test_closing_a_pane_has_its_own_route_and_the_same_guest_refusal(env, tmp_path):
+    coordinator, guest_token, pressed = env
+    close = {"site": "pm-mock-mr"}
+    assert _press(OWNER, route="close", body=close).status_code == 200
+    assert _press(OWNER, route="close", body={"site": "pm-mock-mr", "key": "x"}).status_code == 422
+    assert pressed == [("close", "t", "pm-mock-mr")]
+    _register(coordinator, tmp_path, headless=False).phase = Phase.Rust
+    assert _refused(_press(guest_token, route="close", body=close))
+    assert _refused(_press(INVITE, invite_port=True, route="close", body=close))
+    assert pressed == [("close", "t", "pm-mock-mr")]

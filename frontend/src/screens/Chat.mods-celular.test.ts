@@ -152,7 +152,7 @@ function montar() {
 }
 
 const botao = (key: string, label: string) => ({
-  type: 'Button', props: { label, key }, children: [],
+  type: 'Button', props: { label, key }, children: [], press: { plugin: 'mod-a', handle: 1 },
 });
 const FAIXA = { type: 'Box', children: [botao('b1', 'Abrir mod')] };
 const PAINEL = { id: 'p1', title: 'Painel um', placement: 'inline', columns: 40, tree: { type: 'Box', children: [botao('b2', 'No painel')] } };
@@ -210,6 +210,8 @@ it('celular: ligar a preferência desenha a faixa e o painel, e o clique chama a
     abrir.click();
     await tick();
     expect(await chamadasDeMod()).toHaveLength(1);
+    // O clique leva o mod do botão: a `key` só é única dentro dele.
+    expect((await chamadasDeMod())[0].slice(1, 3)).toEqual(['above-prompt', { plugin: 'mod-a', key: 'b1' }]);
     modsCelular.ligado = false;
     await tick();
     expect(t.el.textContent).not.toContain('Abrir mod');
@@ -368,7 +370,7 @@ it('troca de agente em curso: clique, troca de aba e digitação recusados mostr
   const t = montar();
   try {
     await tick();
-    const faixa = { type: 'Box', children: [botao('b1', 'Abrir mod'), { type: 'Input', props: { key: 'campo', label: 'Campo' } }] };
+    const faixa = { type: 'Box', children: [botao('b1', 'Abrir mod'), { type: 'Input', props: { key: 'campo', label: 'Campo' }, press: { plugin: 'mod-a', handle: 2 } }] };
     const segundo = { ...PAINEL, id: 'p2', title: 'Painel dois' };
     sseCtl.handlers.get('plugin_ui')?.({ data: JSON.stringify({ above: faixa, panes: [PAINEL, segundo], shown_id: 'p1', source: 'surface' }) } as MessageEvent);
     await tick();

@@ -32,6 +32,11 @@ pub struct KeyDownEvent {
     /// Whether to prefer character input over keybindings for this keystroke.
     /// In some cases, like AltGr on Windows, modifiers are significant for character input.
     pub prefer_character_input: bool,
+
+    /// Hangar: o dígito da fileira de números pela posição física da tecla, seja qual for o layout. Com Shift a tecla
+    /// chega como símbolo (`!`, `@`, tecla morta), e só a posição diz qual número foi. `None` fora da fileira e onde a
+    /// plataforma não informa a tecla física.
+    pub physical_digit: Option<char>,
 }
 
 impl Sealed for KeyDownEvent {}

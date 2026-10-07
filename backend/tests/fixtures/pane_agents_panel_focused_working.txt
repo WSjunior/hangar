@@ -1,0 +1,22 @@
+
+● The system blocks long foreground sleeps to avoid tying up the session. Would you like me to run it in the background instead, or is there something else
+  you'd like to do?
+
+✻ Cooked for 4s · done 14:34 · 1 shell still running
+
+❯ Run exactly this in the foreground with Bash and timeout 60000: python3 -c "import time; time.sleep(40)" ; then say ok.
+
+  Sleeping 40 seconds via Python · 14s
+  ⎿  $ python3 -c "import time; time.sleep(40)" (15s)
+     (ctrl+b ctrl+b (twice) to run in background)
+
+· Boogieing… (17s · ↓ 262 tokens)
+  ⎿  Tip: Use /config to change your default permission mode (including Plan Mode)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ↑/↓ to select
+
+❯ ● main
+  ◯ general-purpose  Sleep 240 seconds then report done                                                                                    6s · ↓ 22.6k tokens

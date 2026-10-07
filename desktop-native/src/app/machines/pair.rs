@@ -1,6 +1,7 @@
 //! Parear um celular (AcessoSettings.svelte, parte "parear"): o código e o QR vêm prontos do servidor e só aparecem a pedido, porque
 //! quem fotografa a tela entra. O QR embute um endereço que respondeu na medida de agora.
 use super::*;
+use super::super::chrome::OwnFocus;
 
 #[derive(Default)]
 enum Phase {
@@ -35,25 +36,6 @@ impl Focuses {
 impl Reach {
     /// O que pode ir no QR: os endereços que responderam, fora "nesta máquina" (de fora ela não alcança).
     fn pairable(&self) -> Vec<&Address> { self.addresses.iter().filter(|a| a.status == Status::Ok && a.kind != Kind::Here).collect() }
-}
-
-/// O `Button` do kit só usa o foco que ele mesmo guarda no estado com chave pelo id, e não aceita outro. Registrado ali antes do
-/// primeiro desenho dele, o foco do dono vira o do botão; o caminho na árvore é o do `FocusOnClick`.
-#[derive(IntoElement)]
-struct OwnFocus {
-    /// O mesmo id dado ao `Button`.
-    id: ElementId,
-    button: Button,
-    focus: Option<FocusHandle>,
-}
-
-impl RenderOnce for OwnFocus {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        if let Some(focus) = self.focus {
-            window.with_id(std::any::type_name::<Button>(), |window| { window.use_keyed_state(self.id, cx, move |_, _| focus); });
-        }
-        self.button
-    }
 }
 
 impl Hangar {

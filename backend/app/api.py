@@ -74,9 +74,11 @@ from app.adapters.codex import sessions as codex_sessions
 from app.adapters.orq import runs as orq_runs
 from app.sse import invalidate_recent_list, merged_events, nav_confirmar, nav_pendente
 from app.state import corrige_ocioso_kimi, forget_frame, menu_codex
-from app.uploads import save_upload, resolve_upload, prune_old, list_uploads, UploadError, MAX_BYTES
+from app.uploads import (save_upload, resolve_upload, resolve_session_audio, prune_old, list_uploads,
+                         UploadError, MAX_BYTES)
 from app.video import is_video, extract_frames, extract_audio
-from app.transcribe import transcribe, TranscribeError
+from app.transcribe import (transcribe, transcribe_with_provider, providers_status, Transcription,
+                            TranscribeError, DICTATION_LIMITS, FILE_LIMITS)
 from app.config import (list_config_dirs, ConfigDirInfo, _backend_config_base, settings,
                         resolve_scan_roots,
                         automations_enabled, resolve_bind_ip, variaveis_env)
@@ -4726,6 +4728,15 @@ async def _send_managed(name: str, text: str, provider: str, *, track_entry: boo
                 **({"entry_id":operation_id} if track_entry and queued else {})}
         if disposition not in {"accepted", "deferred"}:
             raise RuntimeError("resultado incerto; entrada conservada sem reenvio" if disposition == "unknown" else "entrada recusada pelo runtime")
+        if (disposition == "deferred" and command["kind"] == "submit" and not queued and provider == "claude"
+                and isinstance(coordinator.slot(name).binding.meta.get("terminal"), dict)):
+            # Comando de barra não tem linha na fila: adiado, ele não roda depois sozinho.
+            motivo = str((reply.get("payload") or {}).get("code") or "deferred")
+            comando = text.split()[0]
+            diag.registrar("runtime.command_deferred", "aviso", sessao=name, codigo=motivo[:60])
+            return {"ok":False, "error":erro("erro_comando_nao_executado",
+                f"{comando} não foi executado: o terminal não aceitou agora ({motivo}). Mande de novo.",
+                comando=comando, motivo=motivo)}
         return {"ok":True, "error":None, "delivered":disposition == "accepted",
             **({"native":True} if (reply.get("payload") or {}).get("native") is True else {}),
             **({"entry_id":operation_id} if track_entry and command["kind"] == "submit" and not text.lstrip().startswith("/") else {})}
@@ -5900,6 +5911,7 @@ def _recusa_se_so_enfileirou(name: str, res: dict) -> None:
 
 
 def _recusa_se_painel_aberto(name: str) -> None:
+    # Com o Rust dono, pergunta pela ponte (HTTP): rota `async` chama por `asyncio.to_thread`.
     # Com o painel anexado, a janela do tmux esta no tamanho DELE (~120x20). Quem conta linha no
     # pane — o seletor de opcao, o stepper do AskUserQuestion (terminal_input.answer_questions /
     # answer_question_pi) e o model_picker (lista e troca de modelo, que dirige o /model contando
@@ -5907,7 +5919,13 @@ def _recusa_se_painel_aberto(name: str) -> None:
     #
     # O termsock NAO importa `pty` no topo justamente pra este import funcionar no Windows.
     from app import termsock
-    if name in termsock.clientes_ativos():
+    try:
+        aberto = termsock.painel_aberto(name)
+    except list_bridge.ListBridgeError as e:
+        # Sem resposta do Rust não dá pra dizer que o painel está fechado; a ponte já foi ao diário.
+        raise HTTPException(status_code=503, detail=erro(
+            "erro_terminal_indisponivel", "nao consegui conferir o painel de terminal", detalhe=e.code))
+    if aberto:
         raise HTTPException(status_code=409,
                             detail=erro("erro_terminal_aberto",
                                         "Terminal aberto nesta sessao. Feche o painel pra responder "
@@ -5916,20 +5934,38 @@ def _recusa_se_painel_aberto(name: str) -> None:
 
 @app.post("/api/sessions/{name}/select", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 def select(name: str, body: SelectBody):
-    from app.runtime_terminal import route_sync
-    pending = plugin_bridge.pergunta_pendente(name)
-    payload = {"option":body.option}
-    if pending is not None:
-        payload["request_id"] = pending["id"]
-        if str(pending["id"]).startswith("perm:") and body.option not in (1, 2):
-            raise HTTPException(409, detail=erro("erro_opcao_nao_convergiu", "opção fora do pedido de permissão"))
-    if pending is None or not str(pending["id"]).startswith("perm:"):
-        # Pergunta `ask:` pode acabar no teclado da TUI: aí vale a trava do painel e o cursor tem de ser lido.
-        _recusa_se_painel_aberto(name)
+    from app.runtime_terminal import TerminalOutcomeUnknown, route_sync
+    info = _cached_info_sync(name)
+    # A rota do terminal só conhece o vínculo Claude: para outro provedor (Codex sem terminal
+    # incluído) ela suspendia a escrita antes de chegar ao ramo dele.
+    if getattr(info, "provider", "claude") == "claude":
+        pending = plugin_bridge.pergunta_pendente(name)
+        payload = {"option":body.option}
         if pending is not None:
-            payload["require_cursor"] = True
-    if route_sync(name, {"kind":"control", "control":"select", "payload":payload}) is not None:
-        return {"ok": True}
+            payload["request_id"] = pending["id"]
+            if str(pending["id"]).startswith("perm:") and body.option not in (1, 2):
+                raise HTTPException(409, detail=erro("erro_opcao_nao_convergiu", "opção fora do pedido de permissão"))
+        if pending is None or not str(pending["id"]).startswith("perm:"):
+            # Pergunta `ask:` pode acabar no teclado da TUI: aí vale a trava do painel e o cursor tem de ser lido.
+            _recusa_se_painel_aberto(name)
+            if pending is not None:
+                payload["require_cursor"] = True
+        try:
+            routed = route_sync(name, {"kind":"control", "control":"select", "payload":payload})
+        except (TerminalControlError, TransferInProgress):
+            raise
+        except TerminalOutcomeUnknown as e:
+            _log.warning("SELECT name=%s resultado incerto no terminal: %s", name, e)
+            raise HTTPException(409, detail=erro("erro_sem_confirmacao_resposta",
+                "resposta enviada, mas nao deu pra confirmar a tempo — "
+                "confira na sessao antes de responder de novo")) from None
+        except RuntimeError as e:
+            # Antes da entrega (vínculo, posse, Rust subindo): nada chegou ao pane.
+            _log.warning("SELECT name=%s rota do terminal falhou: %s", name, e, exc_info=True)
+            raise HTTPException(503, detail=erro("erro_opcao_nao_convergiu",
+                "não consegui responder pelo terminal — opção NÃO enviada", detalhe=str(e))) from None
+        if routed is not None:
+            return {"ok": True}
     # Mesma guarda do /input — e aqui ela é a ÚNICA: a cadeia abaixo não sabe falhar. terminal.select
     # devolve None, send_keys descarta o returncode e tmux._run converte tmux morto/travado
     # (TimeoutExpired/OSError) num CompletedProcess(returncode=1) que ninguém lê. Sem isto, responder
@@ -5954,7 +5990,6 @@ def select(name: str, body: SelectBody):
     # Kimi: os botoes de aprovacao (plano/comando/arquivo) sao desenhados a partir do WIRE, entao a
     # escolha volta pelo wire tambem — tecla numerica + `interaction.resolved` como prova. O drive
     # generico abaixo NAO atende este provider em hipotese nenhuma (ver _select_aprovacao_kimi).
-    info = _cached_info_sync(name)
     if getattr(info, "provider", "claude") == "kimi":
         return _select_aprovacao_kimi(name, info, body.option)
     codex_sem_terminal = getattr(info, "provider", "claude") == "codex" and getattr(info, "headless", False)
@@ -6003,7 +6038,13 @@ def select_submit(name: str):
 
 class PluginPressBody(_StrictBody):
     site: str = Field(min_length=1, max_length=64)
+    # O mod do botão: a `key` só é única dentro de um mod. O app de antes desta versão não o manda.
+    plugin: str | None = Field(default=None, min_length=1, max_length=256)
     key: str = Field(min_length=1, max_length=256)
+
+
+class PluginCloseBody(_StrictBody):
+    site: str = Field(min_length=1, max_length=64)
 
 
 _MOD_CONVIDADO = erro("erro_mod_convidado",
@@ -6037,10 +6078,27 @@ def _recusa_convidado_no_terminal_do_rust(name: str, request: Request) -> None:
 async def plugin_press(name: str, body: PluginPressBody, request: Request):
     """Clique num botão que um mod desenhou na faixa ou num painel, pedido pelo app."""
     from app import plugin_click
+    # O app de antes da rota `close` fechava o painel pelo `press` com a `key` reservada.
+    if body.plugin is None and body.key == plugin_click.CLOSE_KEY:
+        return await _acao_de_mod(request, plugin_click.close(name, body.site))
+    return await _acao_de_mod(request, plugin_click.press(name, body.site, body.key, body.plugin))
+
+
+@app.post("/api/sessions/{name}/plugin/close", dependencies=[Depends(require_auth),
+    Depends(_recusa_convidado_no_terminal_do_rust), Depends(_transfer_guard)])
+async def plugin_close(name: str, body: PluginCloseBody, request: Request):
+    """Fecha um painel de mod pelo `✕` do cabeçalho, pedido pelo app."""
+    from app import plugin_click
+    return await _acao_de_mod(request, plugin_click.close(name, body.site))
+
+
+async def _acao_de_mod(request: Request, acao):
+    """Roda o clique pela tela com a marca de convidado e traduz as recusas para o app."""
+    from app import plugin_click
     from app.runtime_terminal import GuestRefused, guest_admin
     marca = guest_admin.set(_convidado(request))
     try:
-        return await plugin_click.press(name, body.site, body.key)
+        return await acao
     except plugin_click.PressRefused as e:
         raise HTTPException(409, detail=e.detail)
     except GuestRefused:
@@ -6066,7 +6124,9 @@ async def interrupt(name: str, clear: bool = False):
     # clear=True: alem de interromper, limpa o input (2o Esc). So o front com msg pendente passa isso —
     # garante input nao-vazio, evitando que o Esc-Esc abra o menu de rewind num input ja vazio.
     # terminal.interrupt e SYNC (tmux) -> threadpool pra nao bloquear o event loop (handler async agora).
+    pergunta = (plugin_bridge.pergunta_pendente(name) or {}).get("id")
     await asyncio.to_thread(terminal.interrupt, name, clear=clear)
+    plugin_bridge.interrompeu(name, pergunta)
     return {"ok": True}
 
 
@@ -6086,7 +6146,7 @@ async def pergunta_lateral(name: str, body: BtwBody):
     sem_terminal = await _send_thread(_headless, name)
     if not sem_terminal:
         await _send_thread(_exige_claude_de_terminal, name)
-        _recusa_se_painel_aberto(name)
+        await asyncio.to_thread(_recusa_se_painel_aberto, name)
     try:
         perguntar = btw.perguntar_sem_terminal if sem_terminal else btw.perguntar
         item = await asyncio.to_thread(perguntar, name, body.question)
@@ -6269,7 +6329,7 @@ async def _guard_permissao_codex(name: str) -> None:
     if _provider_of(name) != "codex":
         raise HTTPException(400, detail=erro("erro_permissao_so_codex",
                                              "este modo de permissao so vale para sessoes Codex"))
-    _recusa_se_painel_aberto(name)
+    await asyncio.to_thread(_recusa_se_painel_aberto, name)
     if not await get_adapter("codex").deliverable(name):
         raise HTTPException(409, detail=erro("erro_permissao_ocupada",
                                              "a sessao esta trabalhando — espere ela terminar"))
@@ -6641,6 +6701,12 @@ def _auto_update_motivo() -> Optional[str]:
             idade = _AUTO_UPDATE_FALHA_JANELA_S
         if idade < _AUTO_UPDATE_FALHA_JANELA_S:
             return "ultima atualizacao falhou"
+    # Como o dist: o automático espera o topo inteiro publicado; parar antes dele é só no botão.
+    ate = atualizar.pinned_target("main")[0]
+    if ate is None:
+        return "nao deu pra conferir o binario do Rust publicado"
+    if ate != "origin/main":
+        return "binario do Rust do topo ainda nao publicado para este sistema"
     try:
         with urllib.request.urlopen(_DIST_SHA_URL, timeout=15) as r:
             sha_dist = r.read().decode().strip()
@@ -7057,7 +7123,7 @@ def _id_upload(info: SessionInfo) -> str:
 
 
 @app.post("/api/sessions/{name}/upload", dependencies=[Depends(require_auth), Depends(_transfer_check)])
-async def upload(name: str, request: Request):
+async def upload(name: str, request: Request, audio_only: bool = False):
     # Resolve o cwd da sessao (registry.list() ja traz cwd via tmux #{pane_current_path}).
     # handler async -> registry.list() (subprocess tmux) no threadpool pra nao bloquear o loop.
     sessions = await asyncio.to_thread(registry.list)
@@ -7091,7 +7157,9 @@ async def upload(name: str, request: Request):
     # audio/sem chave da Groq, devolve o que conseguiu e o upload segue igual.
     frames: list[str] = []
     fala = ""
-    if is_video(path):
+    # `audio_only`: o ditado manda o áudio aqui e transcreve no /transcribe?arquivo=; tratar o webm
+    # como vídeo extrairia quadros e pagaria uma segunda transcrição.
+    if is_video(path) and not audio_only:
         try:
             frames = await asyncio.to_thread(extract_frames, path)
         except Exception:
@@ -7109,34 +7177,51 @@ async def upload(name: str, request: Request):
 
 
 @app.post("/api/sessions/{name}/transcribe", dependencies=[Depends(require_auth), Depends(_transfer_check)])
-async def transcribe_audio(name: str, request: Request, limpar: bool = False, estilo: str | None = None):
-    # Salva o audio (pra anexar o path no chat) E transcreve via Groq num round-trip. Mesmo padrao
-    # de upload (raw body + X-Filename). Devolve {path, text} -> o front monta "texto — 📎 audio: path".
-    # `limpar` so o microfone manda: audio ANEXADO (arquivo de ate 10min) nao pode pagar a limpeza.
-    # Desligado (default), a resposta e byte a byte a de sempre -> quem ja consome nao muda.
+async def transcribe_audio(name: str, request: Request, limpar: bool = False, estilo: str | None = None,
+                           arquivo: str | None = None):
+    # Com corpo: salva o áudio (anexo de áudio/vídeo) e transcreve num round-trip, raw body +
+    # X-Filename. Com `arquivo`: transcreve um áudio já enviado pelo /upload, sem gravar outra cópia
+    # — o ditado faz assim para o cliente ter o caminho antes da transcrição e poder tentar de novo.
+    # `limpar` só o microfone manda: áudio ANEXADO (arquivo de até 10min) não pode pagar a limpeza.
     sessions = await asyncio.to_thread(registry.list)
     info = next((s for s in sessions if s.name == name), None)
     if info is None:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessao nao encontrada"))
     if not info.cwd:
         raise HTTPException(409, detail=erro("erro_cwd_indisponivel", "cwd da sessao indisponivel"))
-    clen = request.headers.get("content-length")
-    if clen and clen.isdigit() and int(clen) > 100 * 1024 * 1024:
-        raise HTTPException(413, detail=erro("erro_arquivo_grande", "arquivo maior que 100 MiB"))
-    data = await request.body()
-    filename = request.headers.get("x-filename") or request.query_params.get("name")
-    try:
-        path = await asyncio.to_thread(save_upload, info.cwd, _id_upload(info), data, filename)
-    except UploadError as e:
-        raise HTTPException(e.status, e.detail)
+    if arquivo:
+        try:
+            path = await asyncio.to_thread(resolve_session_audio, info.cwd, _id_upload(info), arquivo,
+                                           allow_absolute=not _convidado(request))
+        except UploadError as e:
+            if e.status == 404:
+                raise HTTPException(404, detail=erro("erro_upload_inexistente",
+                                                     "audio nao encontrado na pasta da sessao"))
+            if e.status == 403:
+                raise HTTPException(403, detail=erro("erro_arquivo_caminho_convidado",
+                                                     "convidado so transcreve audio da pasta da sessao"))
+            raise HTTPException(e.status, e.detail)
+        data = await asyncio.to_thread(Path(path).read_bytes)
+        filename = Path(path).name
+    else:
+        clen = request.headers.get("content-length")
+        if clen and clen.isdigit() and int(clen) > 100 * 1024 * 1024:
+            raise HTTPException(413, detail=erro("erro_arquivo_grande", "arquivo maior que 100 MiB"))
+        data = await request.body()
+        filename = request.headers.get("x-filename") or request.query_params.get("name")
+        try:
+            path = await asyncio.to_thread(save_upload, info.cwd, _id_upload(info), data, filename)
+        except UploadError as e:
+            raise HTTPException(e.status, e.detail)
+    limits = DICTATION_LIMITS if limpar else FILE_LIMITS
     # Transcricao (chamada de rede bloqueante) no threadpool pra nao travar o loop.
     try:
-        text = await asyncio.to_thread(transcribe, data, filename)
+        t = await asyncio.to_thread(transcribe_with_provider, data, filename, limits)
     except TranscribeError as e:
         raise HTTPException(e.status, e.detail)
     if not limpar:
-        return {"path": path, "text": text}
-    return {"path": path, **await _cleaned_dictation(text, estilo)}
+        return _with_provider({"path": path, "text": t.text}, t)
+    return {"path": path, **_with_provider(await _cleaned_dictation(t.text, estilo), t)}
 
 
 @app.post("/api/dictation/transcribe", dependencies=[Depends(require_auth)])
@@ -7148,12 +7233,22 @@ async def transcribe_dictation(request: Request, estilo: str | None = None, limp
     data = await request.body()
     filename = request.headers.get("x-filename") or request.query_params.get("name")
     try:
-        text = await asyncio.to_thread(transcribe, data, filename)
+        t = await asyncio.to_thread(transcribe_with_provider, data, filename, DICTATION_LIMITS)
     except TranscribeError as e:
         raise HTTPException(e.status, e.detail)
     if not limpar:
-        return {"text": text}
-    return await _cleaned_dictation(text, estilo)
+        return _with_provider({"text": t.text}, t)
+    return _with_provider(await _cleaned_dictation(t.text, estilo), t)
+
+
+def _with_provider(result: dict, t: Transcription) -> dict:
+    """Junta à resposta quem transcreveu. O aviso da reserva vem antes do da limpeza e nenhum dos
+    dois some; `estilo_aplicado` já foi decidido só pelo aviso da limpeza."""
+    out = {**result, "provider": t.provider}
+    avisos = [a for a in (t.aviso, result.get("aviso")) if a]
+    if avisos:
+        out["aviso"] = " · ".join(avisos)
+    return out
 
 
 async def _cleaned_dictation(text: str, estilo: str | None) -> dict:
@@ -7196,6 +7291,13 @@ async def relimpar_ditado(body: RelimparBody):
     texto, aviso = await asyncio.to_thread(narrar.limpar_ditado, body.texto, body.estilo)
     aplicado = "cru" if (aviso or texto == body.texto) else narrar.estilo_efetivo(body.texto, body.estilo)
     return {"text": texto, "aviso": aviso, "estilo_aplicado": aplicado}
+
+
+@app.get("/api/transcription/providers/status", dependencies=[Depends(require_auth)])
+def transcription_providers_status():
+    """Espera por cota de cada serviço de transcrição, para a tela de configuração. `def` e não
+    `async`: lê um arquivo, e o FastAPI já roda isso na threadpool."""
+    return {"providers": providers_status()}
 
 
 class PensamentoPtBody(_StrictBody):
@@ -9315,7 +9417,7 @@ async def model_effort(name: str, body: ModelEffortBody):
         except Exception as e:
             raise HTTPException(409, detail=erro("erro_modelo_indisponivel", f"não consegui trocar: {e}"))
         return {"ok": True, "scope": "session", "result": None}
-    _recusa_se_painel_aberto(name)
+    await asyncio.to_thread(_recusa_se_painel_aberto, name)
     try:
         return await asyncio.to_thread(terminal.set_model_effort, name, body.model, body.effort, body.scope)
     except PickerError as e:
@@ -9394,7 +9496,7 @@ async def permission_modes(name: str, sondar: bool = False):
         anterior = (vivo.modo_nao_plan if vivo and vivo.vivo else None) or meta.get("previous_non_plan")
         return {"current": atual, "modes": list(model_args.MODOS_PERMISSAO_CLAUDE), "sondavel": False,
                 "previous_non_plan": anterior}
-    _guard_perm(name, info)
+    await asyncio.to_thread(_guard_perm, name, info)
     key = _cache_key_perm(name, info)
     # leitura do atual sem tecla (bloqueador 1)
     try:
@@ -9485,7 +9587,7 @@ async def permission_mode_set(name: str, body: PermissionModeBody):
         view = runtime_data(name)
         return {"mode": ficou, "current": ficou,
                 "previous_non_plan":view.get("previous_non_plan") if view is not None else vivo.modo_nao_plan if vivo else None}
-    _guard_perm(name, info)
+    await asyncio.to_thread(_guard_perm, name, info)
     if alvo == "bypassPermissions" and not await asyncio.to_thread(_bypass_no_ciclo, name):
         return await _bypass_reopen(name, info)
     tracking_key = _tracking_key_perm(name, info)
@@ -9773,7 +9875,7 @@ async def model_options(name: str):
                 "models": claude_models.para_tela(modelos, atual)}
     # Conta Anthropic: le o picker de verdade. Abre e fecha um overlay — nao vai pro scrollback,
     # nao entra no transcript e nao gasta token.
-    _recusa_se_painel_aberto(name)
+    await asyncio.to_thread(_recusa_se_painel_aberto, name)
     chave = _chave_config(_session_config_dir(name))
     cacheado = _models_cache_get(chave)
     if cacheado is not None:
@@ -9892,7 +9994,7 @@ async def engine_model_set(name: str, body: EngineModelBody):
     settings.json e capturado antes e reposto depois: a troca vale onde foi pedida e em lugar nenhum
     mais. Ver app/default_model.py.
     """
-    _recusa_se_painel_aberto(name)
+    await asyncio.to_thread(_recusa_se_painel_aberto, name)
     info = await _cached_info(name)
     if not info:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessao nao encontrada"))
@@ -10166,7 +10268,7 @@ async def kimi_models_list(name: str):
 @app.post("/api/sessions/{name}/kimi/model", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 async def kimi_model_set(name: str, body: KimiModelBody):
     info = await _kimi_info(name)
-    _recusa_se_painel_aberto(name)
+    await asyncio.to_thread(_recusa_se_painel_aberto, name)
     # Sessão TRABALHANDO: o `/model` digitado cairia no composer e o Enter o enfileiraria como
     # MENSAGEM — a troca viraria um "/model" pro modelo ler. No Claude o _require_drivable cobre
     # isso pelo spinner; o do Kimi são fases de lua, fora do que ele detecta, então a guarda é o

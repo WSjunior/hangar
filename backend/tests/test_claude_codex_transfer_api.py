@@ -19,6 +19,7 @@ from app.adapters.claude_headless.adapter import ClaudeHeadlessAdapter
 from app.adapters.codex import sessions as cs, transfer as importer
 from app.adapters.codex.adapter import CodexAdapter
 from app.models import SessionInfo
+from app.transcribe import Transcription
 
 
 @pytest.fixture
@@ -678,7 +679,7 @@ async def test_slow_query_does_not_exclude_input_or_interrupt(terminal_ingress, 
         return "resultado"
 
     monkeypatch.setattr(api, "save_upload", lambda *args: str(terminal_ingress.source.parent / "audio.wav"))
-    monkeypatch.setattr(api, "transcribe", slow)
+    monkeypatch.setattr(api, "transcribe_with_provider", lambda *args: Transcription(slow(*args), "p"))
     monkeypatch.setattr(api, "file_diff", slow)
     monkeypatch.setattr(api, "_session_cwd", lambda name: terminal_ingress.info.cwd)
     monkeypatch.setattr(api.terminal, "send_prompt", lambda *args, **kwargs: "deferred")
@@ -742,7 +743,7 @@ async def test_transfer_still_refuses_queries_input_and_interrupt(terminal_ingre
                                   None, {**scenario.meta, "jsonl": str(scenario.source)}, None, None, None)
     store.save_transfer(record)
     never = Mock(side_effect=AssertionError("handler não deve executar durante a transferência"))
-    monkeypatch.setattr(api, "transcribe", never)
+    monkeypatch.setattr(api, "transcribe_with_provider", never)
     monkeypatch.setattr(api, "file_diff", never)
     monkeypatch.setattr(api.terminal, "send_prompt", never)
     monkeypatch.setattr(api.terminal, "interrupt", never)

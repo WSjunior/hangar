@@ -8,7 +8,7 @@ export interface PluginElement {
   children?: PluginNode[];
   /** Estilos que valem com o ponteiro sobre o escopo (Box com `key`); o engine manda fora de `props`. */
   hover?: Record<string, unknown>;
-  /** Endereço do clique no engine (superfície remota); o app manda só a `key` ao servidor. */
+  /** Endereço do clique no engine; o app manda ao servidor o `plugin` daqui e a `key` (`PluginControl`). */
   press?: { plugin?: string; handle?: number };
 }
 
@@ -115,8 +115,6 @@ export function textOf(children: PluginNode[] | undefined): string {
 
 /** Site da faixa acima do prompt, como o engine chama (`requestId` do `AbovePrompt`). */
 export const BAND_SITE = 'above-prompt';
-/** Pedido de fechar um painel: clica no ✕ que o engine desenha no quadro dele. */
-export const PANE_CLOSE_KEY = '__close__';
 
 /** Painel que um mod abriu e o terminal desenhou; `placement` é onde o terminal o pôs. */
 export interface PluginPane {
@@ -242,10 +240,19 @@ export function safeHref(v: unknown): string | null {
   return typeof v === 'string' && /^https?:\/\//i.test(v) ? v : null;
 }
 
-/** A chave de um botão de mod, que é o que o clique manda ao backend. */
-export function buttonKey(el: PluginElement): string | null {
+/** O que um clique ou uma digitação manda ao backend para achar o controle: o mod que o desenhou e a `key`,
+ *  que só é única dentro do mod. */
+export interface PluginControl { plugin: string; key: string }
+
+function controlOf(el: PluginElement, type: string): PluginControl | null {
   const key = el.props?.key;
-  return el.type === 'Button' && typeof key === 'string' && key ? key : null;
+  const plugin = el.press?.plugin;
+  return el.type === type && typeof key === 'string' && key && typeof plugin === 'string' && plugin ? { plugin, key } : null;
+}
+
+/** O botão de mod que o clique aciona; sem `key` ou sem o mod, é só rótulo. */
+export function buttonControl(el: PluginElement): PluginControl | null {
+  return controlOf(el, 'Button');
 }
 
 /** Box com `key` é escopo de hover: o `hover` dele e o dos filhos valem com o ponteiro sobre ele. */
@@ -263,8 +270,7 @@ export function hoverProps(el: PluginElement, lit: boolean): Record<string, unkn
   return { ...base, ...hover };
 }
 
-/** A chave de um campo (`Input`) de mod, que é o que a digitação manda ao backend. */
-export function inputKey(el: PluginElement): string | null {
-  const key = el.props?.key;
-  return el.type === 'Input' && typeof key === 'string' && key ? key : null;
+/** O campo (`Input`) de mod que a digitação alcança; sem `key` ou sem o mod, não há a quem mandar. */
+export function inputControl(el: PluginElement): PluginControl | null {
+  return controlOf(el, 'Input');
 }

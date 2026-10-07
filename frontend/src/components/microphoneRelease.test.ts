@@ -5,8 +5,14 @@ import Composer from './Composer.svelte';
 import BoardCard from './BoardCard.svelte';
 import type { BoardRow } from '../screens/Board.svelte';
 import * as m from '../paraglide/messages';
-import { transcribeFile, transcribeFileForServer } from '@hangar/core';
+import { uploadFile, transcribeFileForServer } from '@hangar/core';
+import { dictations } from '../lib/dictationStore.svelte';
 
+// Nos casos "stop"/"unmount" o upload nunca resolve: o `retain()` real deixaria a lista de sessões
+// assinada entre os testes.
+vi.mock('../lib/sessionsStore.svelte', () => ({
+  sessionsStore: { epoca: () => 0, retain: vi.fn(), release: vi.fn(), sessionsForServer: () => [] },
+}));
 vi.mock('@hangar/core', async (original) => ({
   ...(await original<typeof import('@hangar/core')>()),
   getHistoryTailCached: vi.fn(async () => ({ evs: [], at: 0 })),
@@ -15,7 +21,7 @@ vi.mock('@hangar/core', async (original) => ({
   getPermissionModes: vi.fn(async () => ({ current: 'plan', modes: ['plan'] })),
   getCommands: vi.fn(async () => []),
   getModelOptions: vi.fn(async () => []),
-  transcribeFile: vi.fn(() => new Promise(() => {})),
+  uploadFile: vi.fn(() => new Promise(() => {})),
   transcribeFileForServer: vi.fn(() => new Promise(() => {})),
 }));
 
@@ -62,6 +68,7 @@ const getUserMedia = vi.fn();
 const flush = async () => { await tick(); await new Promise((resolve) => setTimeout(resolve, 0)); await tick(); };
 
 beforeEach(() => {
+  dictations._resetForTests();
   localStorage.clear();
   vi.clearAllMocks();
   FakeRecorder.instances = [];
@@ -120,8 +127,12 @@ describe.each(['Composer', 'BoardCard'] as const)('%s libera o microfone', (kind
     if (ending === 'unmount') await destroy();
     await flush();
     expect(tracks.map((track) => track.readyState)).toEqual(['ended', 'ended']);
-    const transcribe = kind === 'Composer' ? transcribeFile : transcribeFileForServer;
-    expect(transcribe).toHaveBeenCalledTimes(ending === 'stop' ? 1 : 0);
+    // Desmontar o Composer GRAVANDO (trocar de sessão) sobe o áudio pra origem; o card não muda.
+    if (kind === 'Composer') {
+      expect(uploadFile).toHaveBeenCalledTimes(ending === 'stop' || ending === 'unmount' ? 1 : 0);
+    } else {
+      expect(transcribeFileForServer).toHaveBeenCalledTimes(ending === 'stop' ? 1 : 0);
+    }
   });
 
   it.each(['cancel', 'unmount'])('permissão concedida após %s não inicia captura', async (ending) => {

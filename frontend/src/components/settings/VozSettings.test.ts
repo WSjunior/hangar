@@ -7,17 +7,19 @@ import * as m from '../../paraglide/messages';
 import type { ConfigServidorStore } from '../../lib/serverConfig.svelte';
 
 vi.mock('@hangar/core', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@hangar/core')>()), listarVozesTts: vi.fn(async () => []), saldoTts: vi.fn(async () => ({ usados: 0, limite: 0 })), getConfig: vi.fn(async () => ({ campos: {}, somente_leitura: {} })) }));
+  ...(await importOriginal<typeof import('@hangar/core')>()), listarVozesTts: vi.fn(async () => []), saldoTts: vi.fn(async () => ({ usados: 0, limite: 0 })), getConfig: vi.fn(async () => ({ campos: {}, somente_leitura: {} })), getTranscriptionProvidersStatus: vi.fn(async () => ({ providers: [] })) }));
 vi.mock('../../lib/ttsPlayer.svelte', () => ({ ttsPlayer: { tocando: false, parar: vi.fn() } }));
 vi.mock('../../lib/ouvir', () => ({ ouvirAmostra: vi.fn() }));
 
-function montar(campos: Record<string, unknown>) {
+function montar(campos: Record<string, unknown>, extra: { salvarBloqueado?: boolean; rascunho?: Record<string, unknown> } = {}) {
   const alvo = document.createElement('div');
   document.body.appendChild(alvo);
   const store = {
+    get alvo() { return null; }, get salvarBloqueado() { return extra.salvarBloqueado ?? false; },
+    valorBruto: (chave: string) => extra.rascunho && chave in extra.rascunho ? extra.rascunho[chave] : (campos[chave] as { valor?: unknown } | undefined)?.valor,
     get campos() { return campos; }, get leitura() { return {}; },
     get carregando() { return false; }, get salvando() { return false; },
-    get erro() { return ''; }, get salvo() { return false; }, get temMudanca() { return false; },
+    get erro() { return ''; }, get salvo() { return false; }, get temMudanca() { return extra.salvarBloqueado ?? false; },
     valorAtual: (chave: string) => (campos[chave] as { valor?: string } | undefined)?.valor ?? '',
     rascunhoDe: () => '', setRascunho: vi.fn(),
     removerRascunho: vi.fn(), remocaoPendente: () => false, desfazerRascunho: vi.fn(),
@@ -48,6 +50,14 @@ describe('VozSettings', () => {
   it('sem chave de transcrição, avisa que ditar está desligado', () => {
     const { alvo, app } = montar({ groq_api_key: { definido: false } });
     expect(alvo.textContent).toContain(m.voz_transcrever_sem_chave());
+    unmount(app);
+  });
+
+  it('serviço novo sem chave no rascunho não muda o selo: ele mostra o salvo', () => {
+    const novo = { id: 'n', kind: 'openai', name: '', base_url: '', api_key: '', model: '' };
+    const { alvo, app } = montar({ groq_api_key: { definido: true } }, { rascunho: { transcription_providers: [novo] } });
+    expect(alvo.querySelector('.estado')!.textContent).toContain(m.voz_status_ativo());
+    expect(alvo.textContent).not.toContain(m.voz_transcrever_sem_chave());
     unmount(app);
   });
 
@@ -101,6 +111,33 @@ describe('VozSettings', () => {
   it('sem chave de voz, a leitura em voz alta aparece desligada, não some', () => {
     const { alvo, app } = montar({ elevenlabs_api_key: { definido: false } });
     expect(alvo.textContent).toContain(m.voz_ler_sem_chave());
+    unmount(app);
+  });
+
+  it('lista em uso: avisa e abre a seção dos serviços', async () => {
+    const { alvo, app } = montar({
+      groq_api_key: { definido: true },
+      transcription_providers: { valor: [{ id: 'a', kind: 'elevenlabs', name: '', base_url: '', api_key: 'xi_••••', model: '' }], definido: true },
+    });
+    await tick();
+    expect(alvo.textContent).toContain(m.voz_servicos_em_uso());
+    expect(alvo.querySelector<HTMLDetailsElement>('.transcription-services')!.open).toBe(true);
+    unmount(app);
+  });
+
+  it('servidor sem a lista de serviços não mostra a seção (salvar a perderia calado)', async () => {
+    const { alvo, app } = montar({ groq_api_key: { definido: true } });
+    await tick();
+    expect(alvo.querySelector('.transcription-services')).toBeNull();
+    unmount(app);
+  });
+
+  it('serviço sem chave: Salvar desligado com o motivo à vista', async () => {
+    const { alvo, app } = montar({ groq_api_key: { definido: true } }, { salvarBloqueado: true });
+    await tick();
+    expect(alvo.textContent).toContain(m.native_server_save_blocked_provider_key());
+    const salvar = [...alvo.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === m.ctx_salvar());
+    expect(salvar!.disabled).toBe(true);
     unmount(app);
   });
 });

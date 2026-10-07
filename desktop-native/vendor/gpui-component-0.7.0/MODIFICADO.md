@@ -36,3 +36,5 @@ Origem: crate `gpui-component` 0.7.0 do crates.io (repositório `longbridge/gpui
 
 Ao atualizar gpui-kit, reaplicar na nova versão com `vendor/rebase.sh` (ver `vendor/PATCHES.md`) ou remover esta cópia
 quando a API equivalente existir no kit.
+
+Os testes que montam `KeyDownEvent` passam `physical_digit: None`, o campo novo da cópia de gpui-pre.

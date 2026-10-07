@@ -16,8 +16,8 @@
     open: boolean;
     sessionName: string;
     onClose: () => void;
-    // Manda o audio de volta pro ditado (transcreve de novo e abre a barra de versoes no composer).
-    // Quem busca o arquivo e o Chat, que e quem fala com o Composer — aqui so sai o anexo escolhido.
+    // Manda o audio de volta pro ditado: o Composer transcreve o arquivo que ja esta no servidor
+    // (`?arquivo=`, sem baixar nem gravar outra copia) e abre a barra de versoes.
     onUsarNoDitado?: (f: UploadFile) => void;
   }
   let { open, sessionName, onClose, onUsarNoDitado }: Props = $props();

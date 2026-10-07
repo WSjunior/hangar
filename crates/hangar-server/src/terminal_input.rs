@@ -301,12 +301,15 @@ pub struct TerminalDriver {
     serial: Mutex<()>,
     /// A identidade do pane já foi conferida por quem criou o driver: as operações de mod não a refazem.
     pane_checked: bool,
+    /// Sem o Esc que devolve o foco do rodapé ao composer: a linha já tentou o bastante.
+    footer_kept: bool,
 }
 impl TerminalDriver {
-    pub fn new(binding: TerminalBinding, services: Arc<dyn TerminalServices>, io: Arc<dyn TerminalIo>, limits: InputLimits) -> Self { Self { binding, services, io, limits, serial: Mutex::new(()), pane_checked: false } }
+    pub fn new(binding: TerminalBinding, services: Arc<dyn TerminalServices>, io: Arc<dyn TerminalIo>, limits: InputLimits) -> Self { Self { binding, services, io, limits, serial: Mutex::new(()), pane_checked: false, footer_kept: false } }
     /// Driver para as operações de um clique de mod cujo pane já teve a identidade conferida na mesma
     /// reserva (`PaneOp::Hold`): sem a conferência, cada operação é um processo do multiplexador a menos.
     pub fn pane_checked(mut self) -> Self { self.pane_checked = true; self }
+    pub fn footer_kept(mut self) -> Self { self.footer_kept = true; self }
     pub fn binding(&self) -> &TerminalBinding { &self.binding }
     fn request(&self, args: Vec<String>, stdin: Vec<u8>) -> Result<CommandRequest, IoFailure> {
         let (program, prefix) = self.binding.mux_argv.split_first().ok_or(IoFailure { code: "mux_missing", may_have_written: false })?;
@@ -509,9 +512,22 @@ impl TerminalDriver {
     }
     fn composer(screen: &str, typed: &str) -> Result<ComposerSnapshot, IoFailure> {
         if overlay(screen) { return Err(IoFailure { code: "overlay", may_have_written: false }); }
+        if crate::terminal_state::footer_focus(screen) { return Err(IoFailure { code: "footer_focus", may_have_written: false }); }
         let mut snapshot = ComposerSnapshot::parse(typed).ok_or(IoFailure { code: "composer_unreadable", may_have_written: false })?;
         snapshot.stashed = stash_held(screen);
         Ok(snapshot)
+    }
+    /// Com o foco no rodapé do Claude Code (painel de agentes, pílula de tarefas) o texto digitado some
+    /// e o `x` para um subagente. Um Esc lá só devolve o foco ao composer, sem interromper o turno; o
+    /// foco que não volta adia a entrada sem digitar.
+    async fn return_footer_focus(&self) -> Result<ComposerSnapshot, IoFailure> {
+        self.key_inner("Escape").await.map_err(|e| IoFailure { may_have_written: false, ..e })?;
+        let mut last = IoFailure { code: "footer_focus", may_have_written: false };
+        for _ in 0..4 {
+            self.settle().await;
+            match self.snapshot().await { Err(e) if e.code == "footer_focus" => last = e, other => return other }
+        }
+        Err(last)
     }
     async fn refresh_input_guard(&self) -> Result<ComposerSnapshot, IoFailure> {
         let facts = self.verify().await?;
@@ -655,7 +671,11 @@ impl TerminalDriver {
             facts = match self.verify().await { Ok(f) => f, Err(e) => return Self::failed(e, DeliveryStage::Identity) };
         }
         if !facts.ready { return DeliveryResult::new(Disposition::Deferred, DeliveryStage::Ready, "not_ready"); }
-        let draft = match self.snapshot().await { Ok(d) => d, Err(e) => return Self::failed(e, DeliveryStage::Composer) };
+        let draft = match self.snapshot().await {
+            Err(e) if e.code == "footer_focus" && !self.footer_kept => self.return_footer_focus().await,
+            other => other,
+        };
+        let draft = match draft { Ok(d) => d, Err(e) => return Self::failed(e, DeliveryStage::Composer) };
         if draft.is_empty() { return self.deliver(text, id, draft, None).await; }
         // O guardado tem uma vaga só: ocupado, o Ctrl+S jogaria fora o que já estava nele.
         if draft.stashed { return DeliveryResult::new(Disposition::Deferred, DeliveryStage::Composer, "composer_busy"); }
@@ -715,6 +735,15 @@ impl TerminalDriver {
     }
     pub async fn interrupt(&self, clear: bool) -> DeliveryResult {
         let _serial = self.serial.lock().await;
+        // Com o foco no rodapé o primeiro Esc só o devolve ao composer: o segundo interrompe.
+        let focused = match self.composer_capture().await {
+            Ok((screen, _)) => crate::terminal_state::footer_focus(&screen),
+            Err(e) => { tracing::warn!(pane=%self.binding.pane, code=e.code, "tela ilegível antes da interrupção; o foco do rodapé não foi conferido"); false }
+        };
+        if focused {
+            if let Err(e) = self.key_inner("Escape").await { return Self::failed(e, DeliveryStage::Control); }
+            self.settle().await;
+        }
         if let Err(e) = self.key_inner("Escape").await { return Self::failed(e, DeliveryStage::Control); }
         if clear {
             self.settle().await;

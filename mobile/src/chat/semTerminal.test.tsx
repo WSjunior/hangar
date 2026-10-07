@@ -2,7 +2,7 @@
 import { act, createElement, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { FirstConversationAttempt, MotivoFim } from '@hangar/core';
+import { estilosDitado, type FirstConversationAttempt, type MotivoFim } from '@hangar/core';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -11,7 +11,7 @@ vi.mock('react-native', async (original) => ({
   AppState: { currentState: 'active', addEventListener: () => ({ remove: () => {} }) },
   AccessibilityInfo: { sendAccessibilityEvent: vi.fn() },
   Pressable: ({ accessibilityState, accessibilityRole, accessibilityLabel, accessibilityHint, onPress, children, disabled, ref, style }: {
-    accessibilityState?: { disabled?: boolean; busy?: boolean; expanded?: boolean }; accessibilityRole?: string;
+    accessibilityState?: { disabled?: boolean; busy?: boolean; expanded?: boolean; selected?: boolean }; accessibilityRole?: string;
     accessibilityLabel?: string; onPress?: () => void; children: ReactNode; disabled?: boolean;
     accessibilityHint?: string; ref?: import('react').Ref<HTMLButtonElement>; style?: unknown;
   }) => createElement('button', {
@@ -19,7 +19,7 @@ vi.mock('react-native', async (original) => ({
     style: [typeof style === 'function' ? style({ pressed: false }) : style].flat(Infinity)
       .reduce<Record<string, unknown>>((all, part) => (part && typeof part === 'object' ? { ...all, ...part } : all), {}),
     'aria-disabled': accessibilityState?.disabled, 'aria-busy': accessibilityState?.busy,
-    'aria-expanded': accessibilityState?.expanded,
+    'aria-expanded': accessibilityState?.expanded, 'aria-selected': accessibilityState?.selected,
   }, children),
 }));
 
@@ -39,7 +39,8 @@ const nativeNavigation = {
 const routerPush = vi.hoisted(() => vi.fn());
 const navigation = vi.hoisted(() => ({ back: vi.fn(), replace: vi.fn(), canGoBack: true }));
 const route = vi.hoisted(() => ({ params: { server: 's1', name: 'sess' }, segments: ['s'] }));
-const realFirstInput = vi.hoisted(() => ({ enabled: false, send: vi.fn(), history: vi.fn(), transcribe: vi.fn() }));
+const realFirstInput = vi.hoisted(() => ({ enabled: false, send: vi.fn(), history: vi.fn(), transcribe: vi.fn(), relimpar: vi.fn(),
+  upload: vi.fn(async () => ({ path: '/up/sess/ditado-1.m4a' })) }));
 const voiceInput = vi.hoisted(() => ({ onFim: null as null | ((file: File, reason: MotivoFim, uri: string) => Promise<void>) }));
 vi.mock('expo-router', () => ({
   useNavigation: () => nativeNavigation,
@@ -51,7 +52,10 @@ vi.mock('@hangar/core', async (original) => ({
   fetchSessionsForServer: async () => [{ name: 'sess', provider: 'claude' }],
   sendInputForServer: realFirstInput.send,
   getHistory: realFirstInput.history,
-  transcribeFileForServer: realFirstInput.transcribe,
+  transcribeUploadedForServer: realFirstInput.transcribe,
+  // O ditado sobe o áudio por aqui (`audioOnly`) antes de transcrever.
+  uploadFileForServer: realFirstInput.upload,
+  relimparDitado: realFirstInput.relimpar,
 }));
 vi.mock('../stores/servers', () => {
   const state = { ready: true, servers: [{ id: 's1' }, { id: 's2' }], ensureActive: () => true };
@@ -95,8 +99,9 @@ vi.mock('../paraglide/messages', () => Object.fromEntries(
     .concat(' composer_mic_style_hint composer_dictation_style composer_session_settings composer_session_settings_hint ditado_estilo_titulo uso_aria codex_orientar_ajuda')
     .concat(' composer_interromper_claude composer_interromper_msg composer_interromper comum_cancelar')
     .concat(' permissao_pedido comum_cancelar msg_aria_mensagens chat_plan_proposto composer_falha_envio nova_conversa_envio_incerto nova_conversa_resultado_salvar_erro nova_conversa_salvar_erro')
-    .concat(' askq_enviando board_falha_envio board_falha_upload chat_chegou_mas chat_envio_incerto chat_nao_chegou_em chat_servidor_removido codex_orientar_recebido codex_orientar_sem_envio composer_ditado_anterior composer_ditado_aplicado composer_ditado_indisponivel composer_ditado_interrompido composer_ditado_recuperavel composer_draft_read_again composer_draft_recover_attach_busy composer_falha_gravacao composer_falha_transcricao composer_fila_erro composer_sem_acesso_fotos composer_sem_acesso_mic composer_submission_check composer_submission_rejected composer_submission_sending composer_transcrever_de_novo composer_transcricao_vazia')
+    .concat(' askq_enviando board_falha_envio board_falha_upload chat_chegou_mas chat_envio_incerto chat_nao_chegou_em chat_servidor_removido codex_orientar_recebido codex_orientar_sem_envio composer_ditado_anterior composer_ditado_aplicado composer_ditado_indisponivel composer_ditado_interrompido composer_ditado_recuperavel composer_draft_read_again composer_draft_recover_attach_busy composer_falha_gravacao composer_falha_transcricao composer_fila_erro composer_sem_acesso_fotos composer_sem_acesso_mic composer_submission_check composer_submission_rejected composer_submission_sending composer_transcrever_de_novo composer_transcricao_vazia composer_aguarde_transcricao')
     .concat(' draft_read_error draft_invalid draft_write_error draft_clear_error composer_draft_previous composer_draft_recover composer_draft_discard composer_draft_read_again')
+    .concat(' composer_ditado_cru composer_ditado_versao composer_ditado_trocando native_dictation_draft_changed')
     .concat(' sessao_nova nova_conversa_placeholder nova_conversa_sem_destino nova_conversa_opcoes nova_conversa_opcoes_fechar nova_conversa_destino_hint nova_conversa_config_hint nova_conversa_enviar criar_criando')
     .concat(' composer_mensagem_para comandos_titulo native_new_chat_title native_empty_chat_hint')
     .concat(' uso_titulo uso_vazio uso_secao_cota uso_secao_conversa uso_secao_numeros uso_statusline uso_custo uso_tempo_sessao uso_linha_projeto uso_reset composer_modelo ctx_contexto stats_faixa_aria')
@@ -200,7 +205,7 @@ vi.mock('./AssistantBubble', () => ({ AssistantBubble: ({ text }: { text: string
 vi.mock('./UserBubble', () => ({ UserBubble: () => null }));
 // Anexos da bolha puxam módulos nativos (gesture-handler, expo-audio, expo-file-system) que o node não carrega.
 vi.mock('./ImageThumb', () => ({ ImageThumb: () => null }));
-vi.mock('./AudioChip', () => ({ AudioChip: () => null }));
+vi.mock('./AudioChip', () => ({ AudioChip: ({ uri }: { uri: string }) => createElement('span', { 'data-audio': uri }) }));
 vi.mock('../features/attachments/DocumentViewer', () => ({ DocumentViewer: () => null }));
 vi.mock('../features/attachments/mediaCache', () => ({ canShareFile: false, shareFile: async () => {} }));
 vi.mock('../ui/Toast', () => ({ toast: { ok: () => {}, erro: () => {} } }));
@@ -237,6 +242,7 @@ import CreateRoute from '../../app/create';
 import { NewConversation } from '../features/create/NewConversation';
 import { _resetNewConversationForTests, recoverAttempt, restoreAttempt, useNewConversation } from '../stores/newConversation';
 import { AccessibilityInfo, Alert } from 'react-native';
+import { retainDraftAttachment } from './draftAttachments';
 
 async function render(el: ReturnType<typeof createElement>) {
   const container = document.createElement('div');
@@ -992,4 +998,250 @@ it('plano real preserva prosa, links e abertura do arquivo sem tags do protocolo
   act(() => chip!.click());
   expect(routerPush).toHaveBeenCalledExactlyOnceWith('/s/srv/sess/files?path=%2Frepo%2Fdocs%2Fplano.md');
   act(() => root.unmount());
+});
+
+describe('ditado entregue à conversa de origem', () => {
+  const props = { serverId: 's1', name: 'sess' };
+  const type = (container: HTMLElement, value: string) => act(() => {
+    const field = container.querySelector('textarea')!;
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(field, value);
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const mic = (c: HTMLElement) => c.querySelector<HTMLButtonElement>('[aria-label="composer_gravar_audio"]')!;
+  const audio = { uri: 'file:///doc/draft-attachments/1-1.m4a', name: 'ditado.m4a', mime: 'audio/m4a', kind: 'file' };
+  const voiceRecord = (patch: Record<string, unknown> = {}) => ({
+    version: 1, id: 'v1', audio, transcript: '/t/a.jsonl', draftRevision: 2, before: 'antes', motivo: 'botao',
+    status: 'ready', text: 'ditado', raw: 'ditado cru', issue: '', ...patch,
+  });
+  const storeDraft = (patch: Record<string, unknown> = {}) => storage.memory.set('draft.v1:s1::sess', JSON.stringify({
+    version: 1, text: 'antes', revision: 2, transcript: '/t/a.jsonl', attachment: null, submission: null, ...patch,
+  }));
+  beforeEach(() => { sessionsState.rows = [{ serverId: 's1', name: 'sess', jsonl: '/t/a.jsonl' }]; });
+
+  it('ditado pronto com o rascunho intacto entra sozinho no fim ao montar, sem botão de recuperar', async () => {
+    storeDraft();
+    storage.memory.set('draft.v1.dictation:s1::sess', JSON.stringify(voiceRecord()));
+    const { container, root } = await render(createElement(Composer, props));
+    expect(container.querySelector('textarea')!.value).toBe('antes ditado');
+    expect(button(container, 'composer_draft_recover')).toBeUndefined();
+    expect(storage.memory.has('draft.v1.dictation:s1::sess')).toBe(false);
+    act(() => root.unmount());
+  });
+
+  it('rascunho mexido depois da gravação mantém o botão de recuperar e não mexe no campo', async () => {
+    storeDraft({ text: 'antes editado', revision: 3 });
+    storage.memory.set('draft.v1.dictation:s1::sess', JSON.stringify(voiceRecord()));
+    const { container, root } = await render(createElement(Composer, props));
+    expect(container.querySelector('textarea')!.value).toBe('antes editado');
+    expect(button(container, 'composer_draft_recover')).toBeDefined();
+    expect(storage.memory.has('draft.v1.dictation:s1::sess')).toBe(true);
+    act(() => root.unmount());
+  });
+
+  it('sessão recriada com o mesmo nome não recebe o ditado sozinha', async () => {
+    sessionsState.rows = [{ serverId: 's1', name: 'sess', jsonl: '/t/new.jsonl' }];
+    storeDraft();
+    storage.memory.set('draft.v1.dictation:s1::sess', JSON.stringify(voiceRecord()));
+    const { container, root } = await render(createElement(Composer, props));
+    expect(container.querySelector('textarea')!.value).toBe('');
+    expect(container.textContent).toContain('composer_ditado_recuperavel');
+    expect(JSON.parse(storage.memory.get('draft.v1.dictation:s1::sess')!).status).toBe('ready');
+    act(() => root.unmount());
+  });
+
+  it('trocar de conversa logo depois de parar ainda transcreve para a origem, e o texto entra ao voltar', async () => {
+    realFirstInput.transcribe.mockClear().mockResolvedValueOnce({ path: '/up/ditado-1.m4a', text: 'ditado', raw: 'ditado', aviso: null });
+    const first = await render(createElement(Composer, props));
+    type(first.container, 'antes');
+    await act(async () => mic(first.container).click());
+    await act(async () => {
+      const done = voiceInput.onFim!(new File(['a'], 'ditado.m4a', { type: 'audio/m4a' }), 'escondeu', 'file:///cache/ditado.m4a');
+      first.root.unmount();
+      await done;
+    });
+    expect(realFirstInput.transcribe).toHaveBeenCalledTimes(1);
+    const back = await render(createElement(Composer, props));
+    expect(back.container.querySelector('textarea')!.value).toBe('antes ditado');
+    expect(button(back.container, 'composer_draft_recover')).toBeUndefined();
+    act(() => back.root.unmount());
+  });
+
+  it('voltar no meio da transcrição mostra o microfone ocupado; o resultado entra ao voltar de novo', async () => {
+    let finish!: (r: { path: string; text: string; raw: string; aviso: null }) => void;
+    realFirstInput.transcribe.mockClear().mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const first = await render(createElement(Composer, props));
+    type(first.container, 'antes');
+    await act(async () => mic(first.container).click());
+    await act(async () => { void voiceInput.onFim!(new File(['a'], 'ditado.m4a', { type: 'audio/m4a' }), 'botao', 'file:///cache/ditado.m4a'); });
+    act(() => first.root.unmount());
+    const back = await render(createElement(Composer, props));
+    expect(mic(back.container).getAttribute('aria-busy')).toBe('true');
+    expect(button(back.container, 'composer_transcrever_de_novo')).toBeUndefined();
+    await act(async () => finish({ path: '/up/ditado-1.m4a', text: 'ditado', raw: 'ditado', aviso: null }));
+    act(() => back.root.unmount());
+    const again = await render(createElement(Composer, props));
+    expect(again.container.querySelector('textarea')!.value).toBe('antes ditado');
+    expect(realFirstInput.transcribe).toHaveBeenCalledTimes(1);
+    act(() => again.root.unmount());
+  });
+
+  it('remontar durante a cópia do áudio: a cópia antiga não grava por cima do ditado novo no ar', async () => {
+    let copied!: () => void;
+    vi.mocked(retainDraftAttachment).mockImplementationOnce((a) => new Promise((resolve) => { copied = () => resolve(a); }));
+    let finish!: (r: { path: string; text: string; raw: string; aviso: null }) => void;
+    realFirstInput.transcribe.mockClear().mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const first = await render(createElement(Composer, props));
+    await act(async () => mic(first.container).click());
+    await act(async () => { void voiceInput.onFim!(new File(['a'], 'a.m4a', { type: 'audio/m4a' }), 'escondeu', 'file:///cache/a.m4a'); });
+    act(() => first.root.unmount());
+    const second = await render(createElement(Composer, props));
+    await act(async () => mic(second.container).click());
+    await act(async () => { void voiceInput.onFim!(new File(['b'], 'b.m4a', { type: 'audio/m4a' }), 'botao', 'file:///cache/b.m4a'); });
+    await act(async () => copied());
+    expect(JSON.parse(storage.memory.get('draft.v1.dictation:s1::sess')!).audio.uri).toBe('file:///cache/b.m4a');
+    expect(realFirstInput.transcribe).toHaveBeenCalledTimes(1);
+    await act(async () => finish({ path: '/up/sess/b.m4a', text: 'b', raw: 'b', aviso: null }));
+    act(() => second.root.unmount());
+  });
+
+  it('microfone de outra montagem não abre enquanto o POST da conversa está no ar', async () => {
+    let finish!: (r: { path: string; text: string; raw: string; aviso: null }) => void;
+    realFirstInput.transcribe.mockClear().mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    // A segunda montagem nasce antes do ditado e não relê o armazenamento (o mock do chat não avisa).
+    const second = await render(createElement(Composer, props));
+    const first = await render(createElement(Composer, props));
+    await act(async () => mic(first.container).click());
+    await act(async () => { void voiceInput.onFim!(new File(['a'], 'a.m4a', { type: 'audio/m4a' }), 'botao', 'file:///cache/a.m4a'); });
+    await act(async () => mic(second.container).click());
+    expect(second.container.textContent).toContain('composer_aguarde_transcricao');
+    await act(async () => finish({ path: '/up/sess/a.m4a', text: 'a', raw: 'a', aviso: null }));
+    act(() => { first.root.unmount(); second.root.unmount(); });
+  });
+
+  it('"Transcrever de novo" usa o arquivo já enviado pelo nome, sem subir outra cópia', async () => {
+    realFirstInput.upload.mockClear();
+    realFirstInput.transcribe.mockClear().mockResolvedValueOnce({ path: '/up/sess/ditado-1.m4a', text: 'de novo', raw: 'de novo', aviso: null });
+    storeDraft({ text: '', revision: 1 });
+    storage.memory.set('draft.v1.dictation:s1::sess', JSON.stringify(voiceRecord({
+      status: 'failed', text: '', raw: '', issue: '502: groq', draftRevision: 1, before: '', serverPath: '/up/sess/ditado-1.m4a',
+    })));
+    const { container, root } = await render(createElement(Composer, props));
+    await act(async () => button(container, 'composer_transcrever_de_novo')!.click());
+    // Mesma conversa: nome solto, que o convidado também pode usar.
+    expect(realFirstInput.transcribe).toHaveBeenCalledExactlyOnceWith({ id: 's1' }, 'sess', 'ditado-1.m4a', { limpar: true, estilo: undefined });
+    expect(realFirstInput.upload).not.toHaveBeenCalled();
+    expect(container.querySelector('textarea')!.value).toBe('de novo');
+    act(() => root.unmount());
+  });
+
+  it('falha da transcrição deixa o "de novo" apontando para o arquivo já enviado', async () => {
+    realFirstInput.upload.mockClear();
+    realFirstInput.transcribe.mockClear().mockRejectedValueOnce(Object.assign(new Error('502: groq'), { status: 502 }));
+    const { container, root } = await render(createElement(Composer, props));
+    await act(async () => mic(container).click());
+    await act(async () => voiceInput.onFim!(new File(['a'], 'ditado.m4a', { type: 'audio/m4a' }), 'botao', 'file:///cache/ditado.m4a'));
+    expect(realFirstInput.upload).toHaveBeenCalledExactlyOnceWith({ id: 's1' }, 'sess', expect.any(File), { audioOnly: true });
+    expect(JSON.parse(storage.memory.get('draft.v1.dictation:s1::sess')!)).toMatchObject({
+      status: 'failed', serverPath: '/up/sess/ditado-1.m4a', issue: '502: groq',
+    });
+    expect(button(container, 'composer_transcrever_de_novo')).toBeDefined();
+    act(() => root.unmount());
+  });
+
+  it('depois de /clear, o "de novo" pelo caminho absoluto guardado volta com "Recuperar", sem entrar sozinho', async () => {
+    sessionsState.rows = [{ serverId: 's1', name: 'sess', jsonl: '/t/clear.jsonl' }];
+    realFirstInput.upload.mockClear();
+    realFirstInput.transcribe.mockClear().mockResolvedValueOnce({ path: '/up/sess/ditado-1.m4a', text: 'antigo', raw: 'antigo', aviso: null });
+    storeDraft({ text: '', revision: 1, transcript: '/t/clear.jsonl' });
+    storage.memory.set('draft.v1.dictation:s1::sess', JSON.stringify(voiceRecord({
+      status: 'failed', text: '', raw: '', issue: '502: groq', draftRevision: 1, before: '', serverPath: '/up/sess/ditado-1.m4a',
+    })));
+    const { container, root } = await render(createElement(Composer, props));
+    await act(async () => button(container, 'composer_transcrever_de_novo')!.click());
+    expect(realFirstInput.transcribe).toHaveBeenCalledExactlyOnceWith({ id: 's1' }, 'sess', '/up/sess/ditado-1.m4a', { limpar: true, estilo: undefined });
+    expect(realFirstInput.upload).not.toHaveBeenCalled();
+    expect(container.querySelector('textarea')!.value).toBe('');
+    expect(container.textContent).toContain('composer_ditado_recuperavel');
+    expect(button(container, 'composer_draft_recover')).toBeDefined();
+    act(() => root.unmount());
+  });
+
+  it('barra do ditado: cru sem rede, estilo pelo relimpar, edição fora do ditado recusa a troca', async () => {
+    realFirstInput.transcribe.mockClear().mockResolvedValueOnce({
+      path: '/up/sess/ditado-1.m4a', text: 'texto prosa', raw: 'texto cru', aviso: null, estilo_aplicado: 'prosa',
+    });
+    realFirstInput.relimpar.mockClear().mockResolvedValueOnce({ text: 'texto limpo', aviso: null, estilo_aplicado: 'limpar' });
+    const { container, root } = await render(createElement(Composer, props));
+    type(container, 'antes');
+    await act(async () => mic(container).click());
+    await act(async () => voiceInput.onFim!(new File(['a'], 'ditado.m4a', { type: 'audio/m4a' }), 'botao', 'file:///cache/ditado.m4a'));
+    expect(container.querySelector('textarea')!.value).toBe('antes texto prosa');
+    // A barra é só as quatro versões (e o player): sem botão de fechar, como no PC.
+    const labels = ['composer_ditado_cru', ...estilosDitado().map((e) => e.rotulo)];
+    const row = button(container, 'composer_ditado_cru')!.parentElement!;
+    expect([...row.querySelectorAll('button')].map((b) => b.getAttribute('aria-label'))).toEqual(labels);
+    const selected = () => [...row.querySelectorAll('button[aria-selected="true"]')].map((b) => b.getAttribute('aria-label'));
+    const prosa = estilosDitado().find((e) => e.valor === 'prosa')!.rotulo;
+    expect(selected()).toEqual([prosa]);
+    expect(row.querySelector('[data-audio$="/uploads/ditado-1.m4a"]')).not.toBeNull();
+    // O "Cru" faz o papel do desfazer: os dois não aparecem juntos.
+    expect(button(container, 'composer_desfazer_limpeza')).toBeUndefined();
+    await act(async () => button(container, 'composer_ditado_cru')!.click());
+    expect(container.querySelector('textarea')!.value).toBe('antes texto cru');
+    expect(realFirstInput.relimpar).not.toHaveBeenCalled();
+    expect(selected()).toEqual(['composer_ditado_cru']);
+    const limpar = estilosDitado().find((e) => e.valor === 'limpar')!.rotulo;
+    await act(async () => button(container, limpar)!.click());
+    expect(realFirstInput.relimpar).toHaveBeenCalledExactlyOnceWith('texto cru', 'limpar', { id: 's1' });
+    expect(container.querySelector('textarea')!.value).toBe('antes texto limpo');
+    expect(selected()).toEqual([limpar]);
+    // Texto ditado intacto: as versões ficam, mas a troca recusa para não perder a edição.
+    type(container, 'antes texto limpo e mais');
+    await act(async () => button(container, 'composer_ditado_cru')!.click());
+    expect(container.querySelector('textarea')!.value).toBe('antes texto limpo e mais');
+    expect(container.textContent).toContain('native_dictation_draft_changed');
+    // Mexer no próprio texto ditado esconde as versões e o player juntos.
+    type(container, 'antes outro texto');
+    expect(button(container, 'composer_ditado_cru')).toBeUndefined();
+    expect(container.querySelector('[data-audio]')).toBeNull();
+    act(() => root.unmount());
+  });
+
+  it('trocar de versão durante a contagem do envio automático cancela o envio', async () => {
+    vi.useFakeTimers();
+    try {
+      composerChat.send.mockClear();
+      realFirstInput.transcribe.mockClear().mockResolvedValueOnce({
+        path: '/up/sess/ditado-1.m4a', text: 'texto prosa', raw: 'texto cru', aviso: null, estilo_aplicado: 'prosa',
+      });
+      const { container, root } = await render(createElement(Composer, props));
+      await act(async () => mic(container).click());
+      await act(async () => voiceInput.onFim!(new File(['a'], 'ditado.m4a', { type: 'audio/m4a' }), 'silencio', 'file:///cache/ditado.m4a'));
+      expect(container.textContent).toContain('composer_enviando_cancelar');
+      await act(async () => button(container, 'composer_ditado_cru')!.click());
+      expect(container.querySelector('textarea')!.value).toBe('texto cru');
+      expect(container.textContent).not.toContain('composer_enviando_cancelar');
+      await act(async () => vi.advanceTimersByTimeAsync(3250));
+      expect(composerChat.send).not.toHaveBeenCalled();
+      act(() => root.unmount());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('enviar fecha a barra do ditado', async () => {
+    realFirstInput.transcribe.mockClear().mockResolvedValueOnce({
+      path: '/up/sess/ditado-1.m4a', text: 'texto prosa', raw: 'texto cru', aviso: null, estilo_aplicado: 'prosa',
+    });
+    const { container, root } = await render(createElement(Composer, props));
+    await act(async () => mic(container).click());
+    await act(async () => voiceInput.onFim!(new File(['a'], 'ditado.m4a', { type: 'audio/m4a' }), 'botao', 'file:///cache/ditado.m4a'));
+    expect(button(container, 'composer_ditado_cru')).toBeDefined();
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="composer_enviar_mensagem"]')!.click());
+    expect(button(container, 'composer_ditado_cru')).toBeUndefined();
+    // O campo vazio já esconde a barra; só o mesmo texto de volta prova que ela foi solta no envio.
+    type(container, 'texto prosa');
+    expect(button(container, 'composer_ditado_cru')).toBeUndefined();
+    act(() => root.unmount());
+  });
 });

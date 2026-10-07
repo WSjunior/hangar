@@ -184,33 +184,48 @@ pub struct Ctx<'a> {
     pub clicked: &'a Mutex<LastClick>,
 }
 
-/// O que o app pediu, resolvido no espelho que o plugin mandou.
+/// O lugar que o app pediu (faixa ou painel), resolvido no espelho que o plugin mandou.
 struct Target {
     site: String,
-    key: String,
     tree: Value,
     ids: Vec<String>,
     titles: Vec<String>,
     anchor: Option<String>,
     band_buttons: usize,
-    plugin: Option<String>,
+}
+
+/// O botão do clique, no lugar do `Target`; fechar e trocar de aba não têm.
+struct Button {
+    plugin: String,
+    key: String,
+    label: String,
     /// O rótulo aparece mais de uma vez na árvore do painel ou da faixa, visível ou não: o mouse não
     /// distingue um do outro e o clique vai pelo teclado (T5).
     repeated: bool,
+    /// Outro mod usa a mesma `key` no lugar: o foco contado sem o mod não diz de qual é.
+    shared: bool,
 }
 
-fn target_of(view: &TerminalView, site: &str, key: &str, tree: Value) -> Target {
-    let plugin = tree::find(&tree, key, &["Button"]).map(|control| control.plugin);
-    let repeated = tree::label(&tree, key).is_some_and(|label| tree::label_count(&tree, &label) > 1);
-    Target { site: site.into(), key: key.into(), ids: view.ids(), titles: view.titles(), anchor: tree::anchor(&view.above),
-        band_buttons: tree::count_buttons(&view.above), plugin, repeated, tree }
+fn target_of(view: &TerminalView, site: &str, tree: Value) -> Target {
+    Target { site: site.into(), ids: view.ids(), titles: view.titles(), anchor: tree::anchor(&view.above),
+        band_buttons: tree::count_buttons(&view.above), tree }
 }
 
-fn target(ctx: &Ctx<'_>, site: &str, key: &str) -> Result<Target, ModsError> {
+fn target(ctx: &Ctx<'_>, site: &str) -> Result<Target, ModsError> {
     let view = ctx.mods.terminal_view_in(ctx.name, ctx.life).ok_or_else(pane_missing)?;
     let tree = if site == BAND_SITE { view.above.clone() }
         else { view.panes.iter().find(|p| p.id == site).map(|p| p.tree.clone()).ok_or_else(pane_missing)? };
-    Ok(target_of(&view, site, key, tree))
+    Ok(target_of(&view, site, tree))
+}
+
+/// O botão `key` do mod `plugin` no lugar do `t`. O mesmo mod com a mesma `key` duas vezes no lugar não
+/// diz qual é, e nenhum é acionado.
+fn button(t: &Target, plugin: &str, key: &str) -> Result<Button, ModsError> {
+    if tree::ambiguous(&t.tree, Some(plugin), key, &["Button"]) { return Err(missing()); }
+    let label = tree::label(&t.tree, plugin, key).ok_or_else(missing)?;
+    let repeated = tree::label_count(&t.tree, &label) > 1;
+    let shared = tree::ambiguous(&t.tree, None, key, &["Button"]);
+    Ok(Button { plugin: plugin.into(), key: key.into(), label, repeated, shared })
 }
 
 enum Found { Cell((usize, usize)), Keyboard, Clicked }
@@ -409,7 +424,8 @@ async fn in_band(ctx: &Ctx<'_>, t: &Target, label: &str) -> Result<(usize, usize
 /// plugin, sem repetir às cegas. Se o rótulo andou e continua único, confere a célula nova: coordenada
 /// velha cai em célula vazia, no `[-]` ou numa opção de diálogo (achados 1 e 9). No painel, confere também
 /// que a aba dele continua na frente: o mesmo rótulo na mesma célula de outra aba é outro botão.
-async fn click_confirmed(ctx: &Ctx<'_>, t: &Target, label: &str, mut cell: (usize, usize)) -> Result<(), ModsError> {
+async fn click_confirmed(ctx: &Ctx<'_>, t: &Target, b: &Button, mut cell: (usize, usize)) -> Result<(), ModsError> {
+    let label = b.label.as_str();
     for _ in 0..2 {
         let (s, _) = ctx.read(t).await?;
         if t.site == BAND_SITE {
@@ -424,7 +440,7 @@ async fn click_confirmed(ctx: &Ctx<'_>, t: &Target, label: &str, mut cell: (usiz
             [one] if *one == cell => {
                 let since = Instant::now();
                 ctx.click(cell, Duration::ZERO).await?;
-                return if ctx.mods.wait_pressed(ctx.name, ctx.life, &t.site, &t.key, since, ctx.confirm()).await { Ok(()) } else { Err(no_answer()) };
+                return if ctx.mods.wait_pressed(ctx.name, ctx.life, &t.site, &b.plugin, &b.key, since, ctx.confirm()).await { Ok(()) } else { Err(no_answer()) };
             }
             [one] => cell = *one,
             [] => return Err(not_found(label)),
@@ -457,16 +473,16 @@ async fn give_back(ctx: &Ctx<'_>, columns: u16, rows: u16, start_by: Instant) ->
 /// Sem terminal ligado o corpo do painel acompanha a altura da janela ((u), (q)): estica, clica e deixa a
 /// altura de antes para a limpeza. Sem tempo para esticar, assentar e ainda clicar, nem estica. `None`: não
 /// alcançou, segue para a roda com a altura já devolvida.
-async fn stretched(ctx: &Ctx<'_>, t: &Target, label: &str, f: PaneFormats) -> Result<Option<Found>, ModsError> {
+async fn stretched(ctx: &Ctx<'_>, t: &Target, b: &Button, f: PaneFormats) -> Result<Option<Found>, ModsError> {
     if ctx.start_by(ctx.limits.settle_max).is_err() { return Ok(None); }
     // Antes de mandar: a altura volta mesmo se o pedido for cortado logo depois.
     ctx.undo.height(f.columns, f.rows);
     ctx.act(PaneOp::Resize { columns: f.columns, rows: TALL_ROWS }, ctx.limits.settle_max).await?;
     ctx.settle().await;
     let (s, g) = ctx.read(t).await?;
-    let hits = if g.rows == f.rows { Vec::new() } else { s.body.as_ref().map(|b| screen::find_in(&s, label, b)).unwrap_or_default() };
+    let hits = if g.rows == f.rows { Vec::new() } else { s.body.as_ref().map(|body| screen::find_in(&s, &b.label, body)).unwrap_or_default() };
     match hits.as_slice() {
-        [one] => click_confirmed(ctx, t, label, *one).await.map(|()| Some(Found::Clicked)),
+        [one] => click_confirmed(ctx, t, b, *one).await.map(|()| Some(Found::Clicked)),
         found => {
             // Nada a clicar na janela esticada: devolve antes da roda ou do teclado.
             give_back_now(ctx).await;
@@ -475,10 +491,10 @@ async fn stretched(ctx: &Ctx<'_>, t: &Target, label: &str, f: PaneFormats) -> Re
     }
 }
 
-/// Quanto do prazo a reserva por teclado precisa para chegar a `t`, pela tela `s`: um passo do anel por
-/// painel até o dele e mais dois, os botões da faixa que estão no anel (nenhum com a faixa recolhida, e os
-/// sem desenho mais baratos, porque o passo termina no `ui.focus`), o `Tab`, a espera do foco, a
-/// confirmação do `Enter` e a folga.
+/// Quanto do prazo a reserva por teclado precisa para chegar a `t`, pela tela `s`: a leitura que abre o
+/// anel, um passo do anel por painel até o dele e mais dois, os botões da faixa que estão no anel (nenhum com
+/// a faixa recolhida, e os sem desenho mais baratos, porque o passo termina no `ui.focus`), a espera da tela
+/// ao entrar no painel, o `Tab`, a espera do foco, a confirmação do `Enter` e a folga.
 fn keyboard_need(ctx: &Ctx<'_>, t: &Target, s: &Screen) -> Duration {
     let index = t.ids.iter().position(|id| *id == t.site).unwrap_or(t.ids.len());
     let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
@@ -487,7 +503,8 @@ fn keyboard_need(ctx: &Ctx<'_>, t: &Target, s: &Screen) -> Duration {
         "full" => ctx.limits.ring_step.saturating_mul(count(t.band_buttons)),
         _ => ctx.limits.ring_hidden_step.saturating_mul(count(t.band_buttons)),
     };
-    band + ctx.limits.ring_step.saturating_mul(count(index + 2)) + ctx.limits.focus_wait + ctx.limits.confirm + ACTION_MARGIN
+    band + ctx.limits.ring_step.saturating_mul(count(index + 3)) + ctx.limits.key_settle + ctx.limits.focus_wait + ctx.limits.confirm
+        + ACTION_MARGIN
 }
 
 /// Roda com o ponteiro sobre o corpo até o rótulo aparecer. Cada evento espaçado rola pouco (uma linha no
@@ -506,8 +523,14 @@ async fn roll_until(ctx: &Ctx<'_>, t: &Target, label: &str, keyboard_by: Option<
     let (mut seq, mut last) = ctx.mods.last_scroll(ctx.name, ctx.life, &t.site);
     let mut down = true;
     let started = Instant::now();
+    // Uma volta (evento, espera da rolagem, leitura e intervalo) só começa se outra do tamanho da maior até
+    // aqui ainda termina antes de `keyboard_by`: a que passasse dele comeria o tempo do teclado. Antes da
+    // primeira, a volta conta ao menos o intervalo dela.
+    let (mut lap, mut lap_start) = (ctx.limits.wheel_gap, started);
     for _ in 0..ctx.limits.wheel_events {
-        if let Some(by) = keyboard_by && (started.elapsed() >= ctx.limits.wheel_max || Instant::now() >= by) { return Ok(Found::Keyboard); }
+        lap = lap.max(lap_start.elapsed());
+        lap_start = Instant::now();
+        if let Some(by) = keyboard_by && (started.elapsed() >= ctx.limits.wheel_max || Instant::now() + lap >= by) { return Ok(Found::Keyboard); }
         ctx.wheel(pointer, down).await?;
         match ctx.mods.wait_scroll(ctx.name, ctx.life, &t.site, seq, ctx.limits.scroll_wait.min(ctx.left())).await {
             Some((next, offset)) if Some(offset) != last => { seq = next; last = Some(offset); }
@@ -528,12 +551,12 @@ async fn roll_until(ctx: &Ctx<'_>, t: &Target, label: &str, keyboard_by: Option<
     Ok(Found::Keyboard)
 }
 
-async fn in_pane(ctx: &Ctx<'_>, t: &Target, label: &str) -> Result<Found, ModsError> {
+async fn in_pane(ctx: &Ctx<'_>, t: &Target, b: &Button) -> Result<Found, ModsError> {
     let (s, f) = ctx.read(t).await?;
     refuse_dialog_in_pane(t, &s)?;
     if s.placement.is_none() { return Err(unreachable_pane()); }
     // Rótulo repetido na árvore, mesmo fora da tela: nenhuma ação de mouse, direto ao teclado.
-    if t.repeated { return Ok(Found::Keyboard); }
+    if b.repeated { return Ok(Found::Keyboard); }
     // A escolha entre o mouse (ativar a aba, esticar, rolar) e o teclado é feita aqui, antes de ativar: o
     // teclado traz a aba sozinho pelo anel, e precisa do tempo dele reservado. Se ativar a aba já não deixa
     // esse tempo, vai direto ao teclado; se o teclado não cabe nem agora, o mouse fica com o prazo inteiro.
@@ -545,13 +568,13 @@ async fn in_pane(ctx: &Ctx<'_>, t: &Target, label: &str) -> Result<Found, ModsEr
     if fits && ctx.left() < need + activation { return Ok(Found::Keyboard); }
     let keyboard_by = fits.then(|| ctx.until - need);
     let Some(s) = activate(ctx, t, s).await? else { return Ok(Found::Keyboard) };
-    let hits = s.body.as_ref().map(|b| screen::find_in(&s, label, b)).unwrap_or_default();
+    let hits = s.body.as_ref().map(|body| screen::find_in(&s, &b.label, body)).unwrap_or_default();
     match hits.len() { 0 => {}, 1 => return Ok(Found::Cell(hits[0])), _ => return Ok(Found::Keyboard) }   // repetido no painel: teclado
     if ctx.clients().await? == 0
-        && let Some(found) = stretched(ctx, t, label, f).await? {
+        && let Some(found) = stretched(ctx, t, b, f).await? {
         return Ok(found);
     }
-    roll_until(ctx, t, label, keyboard_by).await
+    roll_until(ctx, t, &b.label, keyboard_by).await
 }
 
 /// Conferidas antes da primeira tecla (T5): com um diálogo qualquer tecla mexe nele, e com rascunho o
@@ -595,9 +618,17 @@ fn band_hidden(s: &Screen) -> bool { !matches!(s.band_state, "full" | "collapsed
 /// Tamanho do anel do `ctrl+x tab`: os botões das faixas, os painéis e o prompt.
 fn cap(t: &Target) -> usize { t.band_buttons + t.ids.len() + 1 }
 
-/// O foco visto é o elemento pedido, no lugar pedido, sem recusa.
-fn is_target(seen: &FocusSeen, site: &str, key: &str) -> bool {
-    seen.request_id == site && !seen.denied && seen.element.as_deref() == Some(key)
+/// O foco visto é o botão pedido: no lugar, com a `key` e do mod dele, sem recusa. O plugin do Hangar
+/// carregado numa sessão viva antes de o foco levar o mod não o conta: com a `key` em mais de um mod no
+/// lugar não há como saber de qual é o foco, e o clique é recusado, como antes de o pedido levar o mod.
+fn is_target(seen: Option<&FocusSeen>, site: &str, b: &Button) -> Result<bool, ModsError> {
+    let Some(seen) = seen.filter(|seen| seen.request_id == site && !seen.denied && seen.element.as_deref() == Some(b.key.as_str()))
+        else { return Ok(false) };
+    match seen.plugin.as_deref() {
+        Some(plugin) => Ok(plugin == b.plugin),
+        None if b.shared => Err(missing()),
+        None => Ok(true),
+    }
 }
 
 /// O último foco do alvo depois de `after`: espera até `wait` pelo primeiro e pega também os que chegaram
@@ -637,7 +668,7 @@ async fn reach_pane(ctx: &Ctx<'_>, t: &Target, ring: &mut Ring) -> Result<u64, M
 /// evento do mod do alvo, e a reescrita não atravessa de um mod para outro ((t)). Cada botão da faixa dá
 /// um `ui.focus`: sem ele no prazo, recusa, porque o evento atrasado seria achado na tecla seguinte, com o
 /// foco já adiante. Devolve o `seq` do foco confirmado.
-async fn reach_band_key(ctx: &Ctx<'_>, t: &Target, attempt: &str, ring: &mut Ring) -> Result<u64, ModsError> {
+async fn reach_band_key(ctx: &Ctx<'_>, t: &Target, b: &Button, attempt: &str, ring: &mut Ring) -> Result<u64, ModsError> {
     for _ in 0..cap(t) {
         let seq = ctx.mods.focus_seq(ctx.name, ctx.life);
         ctx.keys(&["C-x", "Tab"], ctx.limits.focus_wait).await?;
@@ -645,7 +676,7 @@ async fn reach_band_key(ctx: &Ctx<'_>, t: &Target, attempt: &str, ring: &mut Rin
         let s = ring.after_key(ctx, t, seq).await?;
         if s.dialog || s.survey { return Err(dialog_open()); }
         match seen {
-            Some(seen) if is_target(&seen, BAND_SITE, &t.key) => return Ok(seen.seq),
+            Some(seen) if is_target(Some(&seen), BAND_SITE, b)? => return Ok(seen.seq),
             None if s.focus == Some("band") => return Err(no_answer()),
             _ => {}
         }
@@ -658,30 +689,31 @@ async fn reach_band_key(ctx: &Ctx<'_>, t: &Target, attempt: &str, ring: &mut Rin
 /// letra no meio teria devolvido o teclado ao prompt ((y), (aa)). O teclado tem de estar na faixa, para
 /// botão da faixa, ou no painel pedido e na frente; e nenhum foco mais novo que o confirmado (`seq`) pode
 /// ter levado o teclado a outro elemento.
-async fn enter_confirmed(ctx: &Ctx<'_>, t: &Target, attempt: &str, seq: u64, ring: &mut Ring) -> Result<(), ModsError> {
+async fn enter_confirmed(ctx: &Ctx<'_>, t: &Target, b: &Button, attempt: &str, seq: u64, ring: &mut Ring) -> Result<(), ModsError> {
     let s = ring.read(ctx, t).await?;
     if s.dialog || s.survey { return Err(dialog_open()); }
     let placed = if t.site == BAND_SITE { s.focus == Some("band") }
         else { s.focus == Some("pane") && s.active.is_some() && s.active == t.ids.iter().position(|id| *id == t.site) };
     if !placed { return Err(no_answer()); }
-    if last_focus(ctx, attempt, seq, Duration::ZERO).await.is_some_and(|newer| !is_target(&newer, &t.site, &t.key)) {
+    let newer = last_focus(ctx, attempt, seq, Duration::ZERO).await;
+    if newer.is_some() && !is_target(newer.as_ref(), &t.site, b)? {
         return Err(no_answer());
     }
     let since = Instant::now();
     ctx.keys(&["Enter"], Duration::ZERO).await?;
-    if ctx.mods.wait_pressed(ctx.name, ctx.life, &t.site, &t.key, since, ctx.confirm()).await { Ok(()) } else { Err(no_answer()) }
+    if ctx.mods.wait_pressed(ctx.name, ctx.life, &t.site, &b.plugin, &b.key, since, ctx.confirm()).await { Ok(()) } else { Err(no_answer()) }
 }
 
 /// Clique pelo teclado (T5), só nos casos medidos e com as travas; uma tecla por operação, com pausa.
 /// Desarmar o alvo e voltar ao prompt ficam com a limpeza, registrados antes da primeira tecla.
-async fn reserve_press(ctx: &Ctx<'_>, t: &Target) -> Result<Value, ModsError> {
+async fn reserve_press(ctx: &Ctx<'_>, t: &Target, b: &Button) -> Result<Value, ModsError> {
     let (mut ring, s) = Ring::start(ctx, t).await?;
     locks(&s)?;
-    let attempt = ctx.mods.arm_focus(ctx.name, ctx.life, &t.site, t.plugin.as_deref(), &t.key);
+    let attempt = ctx.mods.arm_focus(ctx.name, ctx.life, &t.site, Some(&b.plugin), &b.key);
     ctx.undo.focus(&attempt);
     ctx.undo.keyboard(t.titles.clone(), t.anchor.clone(), cap(t));
     let seq = if t.site == BAND_SITE {
-        reach_band_key(ctx, t, &attempt, &mut ring).await?
+        reach_band_key(ctx, t, b, &attempt, &mut ring).await?
     } else {
         let entry = reach_pane(ctx, t, &mut ring).await?;
         // O hook pode reescrever já no `ctrl+x tab` que deu o teclado ao painel: com o alvo focado, o `Tab`
@@ -690,14 +722,15 @@ async fn reserve_press(ctx: &Ctx<'_>, t: &Target) -> Result<Value, ModsError> {
         // custava meio segundo a cada entrada no painel. Um evento que chegue depois do `Tab` não faz sair o
         // `Enter`: vale o último foco visto.
         let mut seen = last_focus(ctx, &attempt, entry, ctx.limits.key_settle.min(ctx.left())).await;
-        if !seen.as_ref().is_some_and(|s| is_target(s, &t.site, &t.key)) {
+        if !is_target(seen.as_ref(), &t.site, b)? {
             let seq = ctx.mods.focus_seq(ctx.name, ctx.life);
             ctx.keys(&["Tab"], ctx.limits.focus_wait).await?;
             seen = last_focus(ctx, &attempt, seq, ctx.limits.focus_wait.min(ctx.left())).await;
         }
-        seen.filter(|s| is_target(s, &t.site, &t.key)).ok_or_else(no_answer)?.seq
+        if !is_target(seen.as_ref(), &t.site, b)? { return Err(no_answer()); }
+        seen.ok_or_else(no_answer)?.seq
     };
-    enter_confirmed(ctx, t, &attempt, seq, &mut ring).await?;
+    enter_confirmed(ctx, t, b, &attempt, seq, &mut ring).await?;
     Ok(json!({}))
 }
 
@@ -712,32 +745,30 @@ async fn reserve_close(ctx: &Ctx<'_>, t: &Target) -> Result<Value, ModsError> {
     if ctx.mods.wait_pane_gone(ctx.name, ctx.life, &t.site, ctx.confirm()).await { Ok(json!({})) } else { Err(no_answer()) }
 }
 
-async fn press_inner(ctx: &Ctx<'_>, site: &str, key: &str) -> Result<Value, ModsError> {
-    let t = target(ctx, site, key)?;
-    // Dois mods com a mesma `key` no mesmo lugar: o app não diz de qual é, e nenhum é acionado.
-    if tree::ambiguous(&t.tree, key, &["Button"]) { return Err(missing()); }
-    let label = tree::label(&t.tree, key).ok_or_else(missing)?;
+async fn press_inner(ctx: &Ctx<'_>, site: &str, plugin: &str, key: &str) -> Result<Value, ModsError> {
+    let t = target(ctx, site)?;
+    let b = button(&t, plugin, key)?;
     let f = prepare(ctx).await?;
     // Sem tela cheia o clique enviado é ignorado (achado 8): vai pelo teclado.
-    if !f.mouse { return reserve_press(ctx, &t).await; }
+    if !f.mouse { return reserve_press(ctx, &t, &b).await; }
     if site == BAND_SITE {
         // Rótulo repetido na faixa, mesmo fora da tela: nenhuma ação de mouse, direto ao teclado.
-        if t.repeated { return reserve_press(ctx, &t).await; }
-        let cell = in_band(ctx, &t, &label).await?;
-        click_confirmed(ctx, &t, &label, cell).await?;
+        if b.repeated { return reserve_press(ctx, &t, &b).await; }
+        let cell = in_band(ctx, &t, &b.label).await?;
+        click_confirmed(ctx, &t, &b, cell).await?;
         return Ok(json!({}));
     }
-    match in_pane(ctx, &t, &label).await? {
-        Found::Cell(cell) => click_confirmed(ctx, &t, &label, cell).await?,
-        Found::Keyboard => return reserve_press(ctx, &t).await,
+    match in_pane(ctx, &t, &b).await? {
+        Found::Cell(cell) => click_confirmed(ctx, &t, &b, cell).await?,
+        Found::Keyboard => return reserve_press(ctx, &t, &b).await,
         Found::Clicked => {}
     }
     Ok(json!({}))
 }
 
 /// Clique num botão de mod pedido pelo app (T4).
-pub async fn press(ctx: &Ctx<'_>, site: &str, key: &str) -> Result<Value, ModsError> {
-    let result = press_inner(ctx, site, key).await;
+pub async fn press(ctx: &Ctx<'_>, site: &str, plugin: &str, key: &str) -> Result<Value, ModsError> {
+    let result = press_inner(ctx, site, plugin, key).await;
     // A aba da frente pode ter mudado sem redesenho (troca para painel já desenhado, (s)).
     ctx.mods.schedule_shown_in(ctx.name, ctx.life);
     result
@@ -747,7 +778,7 @@ pub async fn press(ctx: &Ctx<'_>, site: &str, key: &str) -> Result<Value, ModsEr
 /// fechamentos que o mod faz em seguida não são erro ((e)).
 pub async fn close(ctx: &Ctx<'_>, site: &str) -> Result<Value, ModsError> {
     let result: Result<Value, ModsError> = async {
-        let t = target(ctx, site, CLOSE_KEY)?;
+        let t = target(ctx, site)?;
         let f = prepare(ctx).await?;
         if !f.mouse { return reserve_close(ctx, &t).await; }
         let (s, _) = ctx.read(&t).await?;
@@ -770,7 +801,7 @@ pub async fn close(ctx: &Ctx<'_>, site: &str) -> Result<Value, ModsError> {
 /// Troca de aba pedida pelo app (T2): o clique no título, sozinho. A reserva por teclado não deixa o painel
 /// pedido na frente (a volta por `ctrl+x tab` passa pelos seguintes, (z)): título fora da linha é recusa.
 pub async fn show(ctx: &Ctx<'_>, site: &str) -> Result<Value, ModsError> {
-    let t = target(ctx, site, "")?;
+    let t = target(ctx, site)?;
     let f = prepare(ctx).await?;
     if !f.mouse { return Err(mouse_off()); }
     let (s, _) = ctx.read(&t).await?;
@@ -783,7 +814,7 @@ pub async fn show(ctx: &Ctx<'_>, site: &str) -> Result<Value, ModsError> {
 /// O pedido do app ao clique com terminal.
 pub async fn dispatch(ctx: &Ctx<'_>, call: ModsCall) -> Result<Value, ModsError> {
     match call {
-        ModsCall::Press { site, key } => press(ctx, &site, &key).await,
+        ModsCall::Press { site, plugin, key } => press(ctx, &site, &plugin, &key).await,
         ModsCall::Close { site } => close(ctx, &site).await,
         ModsCall::Show { site } => show(ctx, &site).await,
         // Com terminal não há por onde digitar no campo do mod (fora do escopo desta entrega).
@@ -795,7 +826,7 @@ pub async fn dispatch(ctx: &Ctx<'_>, call: ModsCall) -> Result<Value, ModsError>
 pub async fn read_shown(ctx: &Ctx<'_>) -> Option<String> {
     let view = ctx.mods.terminal_view_in(ctx.name, ctx.life)?;
     if view.panes.is_empty() { return None; }
-    let t = target_of(&view, "", "", Value::Null);
+    let t = target_of(&view, "", Value::Null);
     let (s, _) = ctx.read(&t).await.ok()?;
     s.active.and_then(|index| view.panes.get(index)).map(|p| p.id.clone())
 }

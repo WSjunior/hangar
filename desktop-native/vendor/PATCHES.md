@@ -52,3 +52,15 @@ Não compilados aqui: gpui-pre-windows e gpui-pre-apple/-macos (revisados só po
 | Ajuste | Onde | Por quê |
 |---|---|---|
 | `PlatformWindow::set_hidden` e `Window::set_hidden` | gpui-pre `platform.rs`/`window.rs`, gpui-pre-linux `wayland/window.rs`/`x11/window.rs`, gpui-pre-windows `window.rs` | o upstream não esconde janela; fechar para a bandeja precisa da janela viva, porque a tela do app não sobrevive a fechar e reabrir |
+
+## Colar arquivo
+
+| Ajuste | Onde | Por quê |
+|---|---|---|
+| `read()` do CLIPBOARD devolve `ExternalPaths` + texto quando a oferta tem `text/uri-list` | gpui-pre-linux `platform.rs`, `wayland/clipboard.rs`, `x11/clipboard.rs` (`Inner::read` dividido em `targets` + `read_from`) | o upstream no Linux só lê texto e imagem; arquivo copiado no gerenciador não chegava ao composer. Terminal e navegador seguem pelo texto (`ClipboardItem::text` ignora os caminhos quando há texto) |
+
+## Tecla física
+
+| Ajuste | Onde | Por quê |
+|---|---|---|
+| `KeyDownEvent::physical_digit` | gpui-pre `interactive.rs` (e os construtores), gpui-pre-linux `platform.rs`/`wayland/client.rs`/`x11/client.rs`, gpui-pre-windows `events.rs`, gpui-pre-macos `events.rs`/`window.rs`, testes do gpui-base e do gpui-component | com Shift a tecla de número chega como símbolo, e só a tabela de layouts conhecidos o traduzia de volta; a posição física vale em qualquer layout (Ctrl+Shift+número escolhe a sessão) |

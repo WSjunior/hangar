@@ -11,6 +11,8 @@ indexmap.workspace = true
 hangar-api.workspace = true
 hangar-workspace = { path = "../hangar-workspace" }
 regex.workspace = true
+# Largura em células para cortar o pane na coluna da conversa (`plugin_screen.cell_width`).
+unicode-width = "=0.2.2"
 # Busca de bytes nos transcripts da lista; já vem pelo regex, sem crate novo.
 memchr = "=2.8.3"
 md-5.workspace = true
@@ -40,6 +42,11 @@ base64 = "=0.23.1"
 rusqlite.workspace = true
 rayon.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
+# Painel de terminal real (`term/`): PTY no Unix, ConPTY no Windows.
+portable-pty = "=0.9.0"
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 # Processos fora do Linux; no Linux o leitor é o /proc (`list/procs.rs`).
 [target.'cfg(not(target_os = "linux"))'.dependencies]
@@ -47,6 +54,10 @@ sysinfo = { version = "=0.39.6", default-features = false, features = ["system"]
 
 [dev-dependencies]
 tempfile.workspace = true
+# Relógio pausado: as rodadas do `state::Monitor` contadas sem esperar o tempo real.
+tokio = { workspace = true, features = ["test-util"] }
+# Cliente WebSocket dos testes do painel; mesma versão que o axum puxa.
+tokio-tungstenite = "=0.29.0"
 
 # O leitor `sysinfo` (`list/procs.rs`) também é testado no Linux.
 [target.'cfg(target_os = "linux")'.dev-dependencies]

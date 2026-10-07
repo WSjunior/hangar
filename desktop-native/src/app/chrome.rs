@@ -472,28 +472,30 @@ pub fn confirm_alert(window: &mut Window, cx: &mut App, title: String, descripti
     let pressed = Rc::new(Cell::new(false));
     // Cada botão despacha a partir de um nó dentro dele, como o rodapé do kit: pelo foco, uma superfície que o
     // tomasse deixaria o botão mudo. O nó não entra na ordem do Tab.
-    let (cancel_from, ok_from, cancel_focus) = (cx.focus_handle(), cx.focus_handle(), cx.focus_handle());
+    let (cancel_from, ok_from) = (cx.focus_handle(), cx.focus_handle());
+    let (cancel_focus, ok_focus) = (cx.focus_handle(), cx.focus_handle());
     let initial_focus = cancel_focus.clone();
     window.open_dialog(cx, move |dialog, window, _| {
         let (act, confirm) = (act.clone(), pressed.clone());
         let (press, cancel_from, ok_from) = (pressed.clone(), cancel_from.clone(), ok_from.clone());
         let anchor = |from: &FocusHandle| div().absolute().size_0().track_focus(from);
-        // O kit põe o diálogo a um décimo do topo; a confirmação é curta e fica no meio da janela, pela altura típica dela.
-        let height = window.viewport_size().height;
-        let top = ((height - px(150.)) / 2.).max(height / 10.);
+        let top = super::popup::centered_top(window.viewport_size().height, px(150.));
         super::popup::dialog(dialog).w(px(360.)).close_button(false).margin_top(top)
             .title(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(title.clone()))
             .child(div().text_size(px(13.)).line_height(px(19.)).text_color(theme::muted()).whitespace_normal().child(description.clone()))
             .footer(DialogFooter::new()
-                .child(InitialFocusButton { id: "cancel".into(), focus: cancel_focus.clone(),
+                .child(OwnFocus { id: "cancel".into(), focus: Some(cancel_focus.clone()),
                     button: Button::new("cancel").label(crate::i18n::tr("cancel")).child(anchor(&cancel_from))
+                        .on_key_down(swap_on_arrows(cancel_focus.clone(), ok_focus.clone()))
                         .on_click(move |_, window, cx| cancel_from.dispatch_action(&Cancel, window, cx)) })
-                .child(Button::new("ok").label(ok.clone()).with_variant(variant).child(anchor(&ok_from))
-                    .on_click(move |_, window, cx| {
-                        press.set(true);
-                        ok_from.dispatch_action(&Confirm { secondary: false }, window, cx);
-                        press.set(false);
-                    })))
+                .child(OwnFocus { id: "ok".into(), focus: Some(ok_focus.clone()),
+                    button: Button::new("ok").label(ok.clone()).with_variant(variant).child(anchor(&ok_from))
+                        .on_key_down(swap_on_arrows(cancel_focus.clone(), ok_focus.clone()))
+                        .on_click(move |_, window, cx| {
+                            press.set(true);
+                            ok_from.dispatch_action(&Confirm { secondary: false }, window, cx);
+                            press.set(false);
+                        }) }))
             .on_ok(move |event, window, cx| {
                 if confirm.take() { act(window, cx) } else { super::machines::enter_to_focused(event, window, cx) }
             })
@@ -501,14 +503,31 @@ pub fn confirm_alert(window: &mut Window, cx: &mut App, title: String, descripti
     window.on_next_frame(move |window, cx| initial_focus.focus(window, cx));
 }
 
-#[derive(IntoElement)]
-struct InitialFocusButton { id: ElementId, focus: FocusHandle, button: Button }
+/// As setas trocam o foco entre os dois botões, como o Tab: com dois, ir e voltar dão a mesma volta.
+fn swap_on_arrows(a: FocusHandle, b: FocusHandle) -> impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static {
+    move |event, window, cx| {
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.modified() || !matches!(keystroke.key.as_str(), "left" | "right" | "up" | "down") { return; }
+        if a.is_focused(window) { b.focus(window, cx) } else { a.focus(window, cx) }
+        cx.stop_propagation();
+    }
+}
 
-impl RenderOnce for InitialFocusButton {
+/// O `Button` do kit só usa o foco que ele mesmo guarda no estado com chave pelo id, e não aceita outro. Registrado ali antes do
+/// primeiro desenho dele, o foco do dono vira o do botão; o caminho na árvore é o do `FocusOnClick`.
+#[derive(IntoElement)]
+pub(super) struct OwnFocus {
+    /// O mesmo id dado ao `Button`.
+    pub(super) id: ElementId,
+    pub(super) button: Button,
+    pub(super) focus: Option<FocusHandle>,
+}
+
+impl RenderOnce for OwnFocus {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        window.with_id(std::any::type_name::<Button>(), |window| {
-            window.use_keyed_state(self.id, cx, move |_, _| self.focus);
-        });
+        if let Some(focus) = self.focus {
+            window.with_id(std::any::type_name::<Button>(), |window| { window.use_keyed_state(self.id, cx, move |_, _| focus); });
+        }
         self.button
     }
 }

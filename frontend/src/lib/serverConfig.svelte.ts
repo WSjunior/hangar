@@ -5,13 +5,16 @@
 import * as m from '../paraglide/messages';
 import {
   getConfig, getConfigForServer, patchConfig, patchConfigForServer,
+  parseTranscriptionProviders, transcriptionProvidersMissingKey,
   type CampoConfig, type VariavelEnv,
 } from '@hangar/core';
 import { getActiveId, serverIdentidade, type Server } from './auth';
 import { segredos } from './segredos.svelte';
 
 export type ValorCampo = string | number | boolean;
-type RascunhoCampo = ValorCampo | null;
+// Lista (`transcription_providers`) entra no mesmo rascunho único e vai no mesmo Salvar.
+type RascunhoCampo = ValorCampo | readonly unknown[] | null;
+const PROVIDERS = 'transcription_providers';
 
 // `identidade` (opcional) é a string que identifica o alvo sendo editado. O default deriva do `alvo`,
 // mas quem precisa de precisão (SettingsModal, via App) passa a identidade EXPLÍCITA: no modo global
@@ -73,7 +76,7 @@ export function criarConfigServidor(alvo: () => Server | null, identidade?: () =
 
   async function salvar() {
     if (salvando) return;                 // duplo clique antes da primeira resposta: UM POST
-    if (!Object.keys(rascunho).length) return;
+    if (!Object.keys(rascunho).length || salvarBloqueado()) return;
     const mine = ++geracao;               // invalida load E save anteriores: só o dono atual pinta
     const dono = donoDe();
     ultimoDono = dono;                    // assume ownership do alvo corrente
@@ -131,6 +134,10 @@ export function criarConfigServidor(alvo: () => Server | null, identidade?: () =
   function limparTimerSalvo() {
     if (timerSalvo) { clearTimeout(timerSalvo); timerSalvo = null; }
   }
+  // Serviço novo sem chave: o servidor recusaria o Salvar de todas as telas, porque o rascunho é um só.
+  function salvarBloqueado(): boolean {
+    return PROVIDERS in rascunho && transcriptionProvidersMissingKey(parseTranscriptionProviders(rascunho[PROVIDERS]));
+  }
 
   return {
     get campos() { return campos; },
@@ -141,14 +148,20 @@ export function criarConfigServidor(alvo: () => Server | null, identidade?: () =
     get erro() { return erro; },
     get salvo() { return salvo; },
     get temMudanca() { return Object.keys(rascunho).length > 0; },
+    get salvarBloqueado() { return salvarBloqueado(); },
+    get alvo() { return alvo(); },
     valorAtual(chave: string): ValorCampo {
-      if (chave in rascunho) return rascunho[chave] ?? '';
-      return campos[chave]?.valor ?? '';
+      const v = chave in rascunho ? rascunho[chave] : campos[chave]?.valor;
+      // Lista não é valor de linha: quem a edita lê por `valorBruto`.
+      return Array.isArray(v) ? '' : ((v as ValorCampo | null | undefined) ?? '');
+    },
+    valorBruto(chave: string): unknown {
+      return chave in rascunho ? rascunho[chave] : campos[chave]?.valor;
     },
     // Segredo NUNCA mostra o valor vindo do servidor (e a mascara, gsk_XXXX...): so o que foi
     // digitado nesta sessao. Editar em cima da mascara manda a mascara de volta como override real.
     rascunhoDe(chave: string): string { return (rascunho[chave] as string) ?? ''; },
-    setRascunho(chave: string, valor: ValorCampo) { rascunho[chave] = valor; },
+    setRascunho(chave: string, valor: ValorCampo | readonly unknown[]) { rascunho[chave] = valor; },
     removerRascunho(chave: string) { rascunho[chave] = null; },
     remocaoPendente(chave: string): boolean { return chave in rascunho && rascunho[chave] === null; },
     desfazerRascunho(chave: string) { delete rascunho[chave]; },

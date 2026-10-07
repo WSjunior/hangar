@@ -134,11 +134,11 @@ static SID: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(
 static PYTHON: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"^python(?:\d+(?:\.\d+)*)?(?:\.exe)?$").unwrap());
 
-fn basename(arg: &str) -> &str {
+pub(crate) fn basename(arg: &str) -> &str {
     Path::new(arg).file_name().and_then(|n| n.to_str()).unwrap_or(arg)
 }
 
-fn exec_provider(base: &str) -> Option<&'static str> {
+pub(crate) fn exec_provider(base: &str) -> Option<&'static str> {
     EXEC_PROVIDER.iter().find(|(exe, _)| *exe == base).map(|(_, p)| *p)
 }
 
@@ -168,7 +168,7 @@ pub fn provider_from_argv(argv: &[String]) -> Option<&'static str> {
 }
 
 /// Raiz mais descendentes, em pilha (o último filho primeiro), como `_descendant_pids`.
-fn descendants(root: i64, children: &ChildrenMap) -> Vec<i64> {
+pub(crate) fn descendants(root: i64, children: &ChildrenMap) -> Vec<i64> {
     let (mut out, mut seen, mut stack) = (Vec::new(), HashSet::new(), vec![root]);
     while let Some(p) = stack.pop() {
         // ppid reciclado no Windows fecha anel no mapa.
@@ -182,7 +182,7 @@ fn descendants(root: i64, children: &ChildrenMap) -> Vec<i64> {
 }
 
 /// Processo da árvore que não é o REPL dono: daemon, host de pty e subagente.
-fn is_aux(cmd: &str) -> bool { cmd.contains("daemon") || cmd.contains("--bg-") || cmd.contains("--agent") }
+pub(crate) fn is_aux(cmd: &str) -> bool { cmd.contains("daemon") || cmd.contains("--bg-") || cmd.contains("--agent") }
 
 fn split(cmd: &str) -> Vec<String> { cmd.split_whitespace().map(String::from).collect() }
 
@@ -380,8 +380,10 @@ impl Resolver {
                     continue;
                 }
             };
+            // Mesmo mtime só prova o mesmo conteúdo depois de assentado: duas gravações no mesmo tique do
+            // relógio de arquivos (15 ms no Windows) ganham o mesmo carimbo.
             let hit = match previous.remove(&file) {
-                Some(hit) if hit.mtime == when => hit,
+                Some(hit) if hit.mtime == when && settled(when) => hit,
                 _ => match read_marker(&entry.path(), when) {
                     Some(hit) => hit,
                     // O Python também pula o torto; o mtime guardado o deixa sem reler até mudar.
@@ -754,6 +756,9 @@ mod tests {
         std::fs::write(&jsonl, "").unwrap();
         let marker = active.join("boot.json");
         std::fs::write(&marker, format!(r#"{{"jsonl":{:?},"pid":11,"ts":1}}"#, jsonl.to_str().unwrap())).unwrap();
+        // Carimbo que nunca assenta: o teste não depende de quanto o runner demora entre as chamadas.
+        let stamp = SystemTime::now() + Duration::from_secs(3600);
+        std::fs::File::options().write(true).open(&marker).unwrap().set_modified(stamp).unwrap();
         std::fs::write(active.join("torto.json"), "{").unwrap();
         age(&active, 10);
         let mut r = Resolver::default();
@@ -762,8 +767,10 @@ mod tests {
         assert_eq!(codes(&mut r), ["list_marker_invalid"]);
         // Reescrito no lugar, sem `rename`: a pasta não mudou e o marcador não é relido.
         std::fs::write(&marker, r#"{"jsonl":"/outro.jsonl","pid":99,"ts":2}"#).unwrap();
+        // No mesmo tique do relógio de arquivos (15 ms no Windows) o carimbo não muda.
+        std::fs::File::options().write(true).open(&marker).unwrap().set_modified(stamp).unwrap();
         assert_eq!(r.marker_by_pids(dir.path(), &[11], &none).as_deref(), jsonl.to_str(), "pasta igual, marcador igual");
-        // Pasta mexida (o `rename` do hook): relida.
+        // Pasta mexida (o `rename` do hook): relida, e o marcador de carimbo igual também, por não ter assentado.
         std::fs::write(active.join("novo.json"), "{}").unwrap();
         assert_eq!(r.marker_by_pids(dir.path(), &[11], &none), None);
     }

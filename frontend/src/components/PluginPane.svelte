@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { PANE_CLOSE_KEY, type PluginInputKind, type PluginPane } from '@hangar/core';
+  import type { PluginControl, PluginInputKind, PluginPane } from '@hangar/core';
   import * as m from '../paraglide/messages';
   import PluginNode from './PluginNode.svelte';
 
@@ -8,13 +8,15 @@
     pane: PluginPane;
     /** Todos os painéis abertos; com mais de um, viram abas e só `pane` é desenhado, como no terminal. */
     tabs?: PluginPane[];
-    onPress?: (site: string, key: string) => void;
+    onPress?: (site: string, button: PluginControl) => void;
+    /** O ✕ do cabeçalho: fecha o painel. */
+    onClose?: (site: string) => void;
     /** Troca de aba: quem chama decide se ela muda na hora ou espera o `shown_id` do servidor. */
     onShow?: (site: string) => void;
     /** Digitação num `Input` do painel; só sem terminal. */
-    onInput?: (site: string, key: string, kind: PluginInputKind, value: string) => void;
+    onInput?: (site: string, field: PluginControl, kind: PluginInputKind, value: string) => void;
   }
-  let { pane, tabs = [], onPress, onShow, onInput }: Props = $props();
+  let { pane, tabs = [], onPress, onClose, onShow, onInput }: Props = $props();
   const tabbed = $derived(tabs.length > 1);
 </script>
 
@@ -31,17 +33,17 @@
     {:else}
       <span class="title">{pane.title}</span>
     {/if}
-    {#if onPress}
+    {#if onClose}
       <!-- Um ✕ só: fecha o painel da frente, como a marca do engine no terminal. -->
       <button type="button" class="close" aria-label={m.plugin_painel_fechar()}
-              onclick={() => onPress(pane.id, PANE_CLOSE_KEY)}>✕</button>
+              onclick={() => onClose(pane.id)}>✕</button>
     {/if}
   </header>
   <div class="body" role={tabbed ? 'tabpanel' : undefined}>
     <!-- Trocar de aba remonta o corpo: o hover aceso de um painel não passa para o outro. -->
     {#key pane.id}
-      <PluginNode node={pane.tree} place={pane.columns} onPress={onPress ? (key) => onPress(pane.id, key) : undefined}
-                  onInput={onInput ? (key, kind, value) => onInput(pane.id, key, kind, value) : undefined} />
+      <PluginNode node={pane.tree} place={pane.columns} onPress={onPress ? (button) => onPress(pane.id, button) : undefined}
+                  onInput={onInput ? (field, kind, value) => onInput(pane.id, field, kind, value) : undefined} />
     {/key}
   </div>
 </section>

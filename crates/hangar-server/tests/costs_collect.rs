@@ -12,12 +12,13 @@ struct Fixed {
     peak: AtomicUsize,
     delay: Mutex<Duration>,
     signal: (Mutex<(usize, bool)>, Condvar),
+    first_call: Mutex<Option<Instant>>,
 }
 impl Fixed {
     fn new(value: Result<Scopes, ()>) -> Arc<Self> {
         Arc::new(Self { value: Mutex::new(value), calls: AtomicUsize::new(0),
             active: AtomicUsize::new(0), peak: AtomicUsize::new(0), delay: Mutex::new(Duration::ZERO),
-            signal: (Mutex::new((0, false)), Condvar::new()) })
+            signal: (Mutex::new((0, false)), Condvar::new()), first_call: Mutex::new(None) })
     }
     fn hold(&self) { self.signal.0.lock().unwrap().1 = true; }
     fn release(&self) { self.signal.0.lock().unwrap().1 = false; self.signal.1.notify_all(); }
@@ -31,6 +32,7 @@ impl ScopeSource for Fixed {
     fn fetch(&self) -> Result<Scopes, CollectError> {
         assert_eq!(std::thread::current().name(), Some("custos-scan"));
         assert!(tokio::runtime::Handle::try_current().is_err(), "a varredura roda fora do executor Tokio");
+        self.first_call.lock().unwrap().get_or_insert_with(Instant::now);
         self.calls.fetch_add(1, Ordering::SeqCst);
         let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.peak.fetch_max(active, Ordering::SeqCst);
@@ -55,17 +57,30 @@ fn scopes(base: &Path) -> Scopes {
 fn collector(base: &Path, source: Arc<dyn ScopeSource>) -> Arc<Collector> {
     Arc::new(Collector::new(base.join("../idx"), base.join("pricing"), base.join("../sem-mapa.json"), source))
 }
+/// Só flagra a varredura que não termina: no runner Windows o disco faz uma varredura das amostras
+/// passar de 5 s de vez em quando.
+const SCAN_WAIT: Duration = Duration::from_secs(30);
 fn wait_ready(c: &Arc<Collector>) {
     let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(5) {
+    while start.elapsed() < SCAN_WAIT {
         if matches!(c.prepare(false).unwrap(), Ready::Go) { return; }
         std::thread::sleep(Duration::from_millis(5));
     }
     panic!("a varredura não terminou");
 }
+/// Pedido fresco até a varredura terminar com sucesso. O `prepare(true)` espera no máximo `FRESH_WAIT` (3 s) e
+/// depois devolve `Warming`; no runner Windows a varredura às vezes passa disso, e o pedido seguinte espera a
+/// mesma varredura, sem abrir outra.
+fn fresh_go(c: &Arc<Collector>) {
+    let start = Instant::now();
+    while start.elapsed() < SCAN_WAIT {
+        if matches!(c.prepare(true).unwrap(), Ready::Go) { return; }
+    }
+    panic!("a varredura fresca não terminou");
+}
 fn wait_failed(c: &Arc<Collector>) {
     let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(5) {
+    while start.elapsed() < SCAN_WAIT {
         if c.prepare(false).is_err() { return; }
         std::thread::yield_now();
     }
@@ -197,11 +212,11 @@ fn missing_scopes_propagate_and_last_good_scopes_survive_failure() {
     assert!(matches!(c.prepare(true), Err(CollectError::NoScopes)));
     *source.value.lock().unwrap() = Ok(scopes(&base));
     std::thread::sleep(Duration::from_millis(15));
-    assert!(matches!(c.prepare(true).unwrap(), Ready::Go));
+    fresh_go(&c);
     let before = c.read_costs(None).unwrap();
     *source.value.lock().unwrap() = Err(());
     std::thread::sleep(Duration::from_millis(15));
-    assert!(matches!(c.prepare(true).unwrap(), Ready::Go));
+    fresh_go(&c);
     assert_eq!(before, c.read_costs(None).unwrap());
 }
 #[test]
@@ -229,7 +244,7 @@ fn concurrent_fresh_requests_share_exactly_one_scan_and_sequential_fresh_scans_a
         assert!(matches!(first.join().unwrap(), Ready::Go));
         assert_eq!(source.calls.load(Ordering::SeqCst) - before, 1, "todos compartilham a mesma varredura");
         assert_eq!(source.peak.load(Ordering::SeqCst), 1);
-        assert!(matches!(c.prepare(true).unwrap(), Ready::Go));
+        fresh_go(&c);
         assert_eq!(source.calls.load(Ordering::SeqCst) - before, 2, "fresh posterior à conclusão pede outra coleta");
     }
 }
@@ -301,7 +316,7 @@ fn source_panic_is_an_error_and_can_recover() {
     c.prepare(false).unwrap();
     wait_failed(&c);
     assert!(c.read_costs(None).is_err());
-    assert!(matches!(c.prepare(true).unwrap(), Ready::Go));
+    fresh_go(&c);
 }
 
 #[test]
@@ -354,7 +369,7 @@ fn stale_data_refreshes_behind_the_reader_after_thirty_seconds() {
     assert!(matches!(c.prepare(false).unwrap(), Ready::Go));
     source.wait_calls(2, Duration::from_secs(2));
     assert_eq!(c.read_costs(None).unwrap(), rows);
-    source.release(); assert!(matches!(c.prepare(true).unwrap(), Ready::Go));
+    source.release(); fresh_go(&c);
 }
 
 #[test]
@@ -362,11 +377,13 @@ fn boot_warmup_waits_thirty_seconds_and_keeps_one_scan() {
     let (_d, base) = fixtures_copy();
     let source = Fixed::new(Ok(scopes(&base)));
     let c = collector(&base, source.clone());
+    let scheduled = Instant::now();
     c.schedule_warmup(Duration::from_secs(30));
     c.schedule_warmup(Duration::from_secs(30));
-    std::thread::sleep(Duration::from_secs(29));
-    assert_eq!(source.calls.load(Ordering::SeqCst), 0);
-    source.wait_calls(1, Duration::from_secs(3));
+    // A hora da consulta, e não a contagem aos 29 s: no runner o sono do próprio teste atrasa.
+    source.wait_calls(1, Duration::from_secs(40));
+    let waited = source.first_call.lock().unwrap().unwrap() - scheduled;
+    assert!(waited >= Duration::from_secs(30), "a varredura começou aos {waited:?}");
     wait_ready(&c);
     assert_eq!(source.calls.load(Ordering::SeqCst), 1);
 }
@@ -440,7 +457,7 @@ fn empty_kimi_project_falls_back_and_removed_scope_is_not_read() {
     let before = c.data_version();
     let mut next = scopes(&base); next.claude.clear(); next.codex.clear(); next.pi.clear(); next.kimi = None;
     *source.value.lock().unwrap() = Ok(next);
-    assert!(matches!(c.prepare(true).unwrap(), Ready::Go));
+    fresh_go(&c);
     assert!(c.read_costs(None).unwrap().is_empty());
     assert!(c.data_version() > before);
     assert!(c.labels_key().is_empty());
@@ -464,7 +481,7 @@ fn writer_timestamp_panic_marks_collector_failed_and_recovers_after_partial_comm
     let partial = c.data_version();
     assert!(partial > before, "o commit Codex anterior ao pânico invalida a versão");
     std::fs::write(wire, saved).unwrap();
-    assert!(matches!(c.prepare(true).unwrap(), Ready::Go));
+    fresh_go(&c);
     assert!(c.data_version() >= partial);
     assert!(!c.read_costs(None).unwrap().is_empty());
 }
@@ -538,7 +555,7 @@ fn failed_lazy_index_open_can_recover_on_the_next_scan() {
     c.prepare(false).unwrap(); wait_failed(&c);
     assert!(matches!(c.read_costs(None), Err(CollectError::Index(hangar_server::costs::index::IndexError::NoDisk))));
     std::fs::remove_file(dir).unwrap();
-    assert!(matches!(c.prepare(true).unwrap(), Ready::Go));
+    fresh_go(&c);
     assert!(!c.read_costs(None).unwrap().is_empty());
 }
 
@@ -615,11 +632,11 @@ fn unreadable_folder_keeps_its_rows_and_reports_the_cause() {
     // Uma pasta de projeto do Claude e a pasta de dias do Codex: nas duas, ler falha, nada sumiu.
     let Some(claude) = lock_dir(&base.join("claude/projects/-repo-a")) else { return };
     let Some(codex) = lock_dir(&base.join("codex/sessions/2026")) else { return };
-    assert!(matches!(c.prepare(true).unwrap(), Ready::Go));
+    fresh_go(&c);
     assert_eq!(c.read_costs(None).unwrap(), before);
     assert_eq!(c.unread_issue().as_deref(), Some("costs_dir_permission_denied"));
     drop((claude, codex));
-    assert!(matches!(c.prepare(true).unwrap(), Ready::Go));
+    fresh_go(&c);
     assert_eq!(c.read_costs(None).unwrap(), before);
     assert!(c.unread_issue().is_none());
 }
@@ -638,7 +655,7 @@ fn codex_folder_listed_but_not_searchable_keeps_its_rows() {
     std::fs::set_permissions(&day, std::fs::Permissions::from_mode(0o444)).unwrap();
     let restore = Restore(day.clone());
     if std::fs::canonicalize(day.join("rollout-c1.jsonl")).is_ok() { return; }
-    assert!(matches!(c.prepare(true).unwrap(), Ready::Go));
+    fresh_go(&c);
     assert_eq!(c.read_costs(None).unwrap(), before);
     assert_eq!(c.unread_issue().as_deref(), Some("costs_dir_permission_denied"));
     drop(restore);
