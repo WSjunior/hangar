@@ -1,6 +1,7 @@
 //! Imagem local citada por caminho absoluto vira `data:`; só entra o que for imagem pelos primeiros bytes.
 use base64::Engine as _;
 use regex::{Captures, Regex};
+use std::collections::HashMap;
 use std::sync::LazyLock;
 
 pub const IMAGE_MAX: u64 = 10 * 1024 * 1024;
@@ -25,9 +26,10 @@ impl InlineError {
 
 pub struct Inlined { pub html: String, pub missing: Vec<String> }
 
-// Caminho absoluto inteiro entre aspas, ou em url( ) sem aspas. Extensão de imagem obrigatória.
+// Caminho absoluto inteiro entre aspas, ou em url( ) sem aspas. Extensão de imagem obrigatória;
+// `//host/...` é URL sem protocolo, não caminho local.
 static PATH: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)(?P<q>["'])(?P<p>/[^"'<>\s]+?\.(?:png|jpe?g|gif|webp|avif|svg))["']|url\((?P<u>/[^)"'\s]+?\.(?:png|jpe?g|gif|webp|avif|svg))\)"#).unwrap()
+    Regex::new(r#"(?i)(?P<q>["'])(?P<p>/[^/"'<>\s][^"'<>\s]*?\.(?:png|jpe?g|gif|webp|avif|svg))["']|url\((?P<u>/[^/)"'\s][^)"'\s]*?\.(?:png|jpe?g|gif|webp|avif|svg))\)"#).unwrap()
 });
 
 fn mime(bytes: &[u8]) -> Option<&'static str> {
@@ -52,30 +54,38 @@ fn load(path: &str) -> Result<String, InlineError> {
     Ok(format!("data:{kind};base64,{}", base64::engine::general_purpose::STANDARD.encode(&bytes)))
 }
 
-fn replace(html: &str, mut on_error: impl FnMut(InlineError) -> Option<InlineError>) -> Result<String, InlineError> {
+/// O total é contado a cada imagem: o mesmo arquivo citado milhares de vezes estouraria a memória
+/// antes de uma checagem só no fim. Cada caminho é lido uma vez por chamada.
+fn replace(html: &str, max: usize, mut on_error: impl FnMut(InlineError) -> Option<InlineError>) -> Result<String, InlineError> {
     let mut failed = None;
+    let mut too_large = false;
+    let mut total = html.len();
+    let mut cache: HashMap<String, Option<String>> = HashMap::new();
     let out = PATH.replace_all(html, |c: &Captures| {
+        if failed.is_some() || too_large { return c[0].to_owned(); }
         let (path, quoted) = match (c.name("p"), c.name("u")) { (Some(p), _) => (p.as_str(), true), (_, Some(u)) => (u.as_str(), false), _ => unreachable!() };
-        match load(path) {
-            Ok(data) if quoted => { let q = &c["q"]; format!("{q}{data}{q}") }
-            Ok(data) => format!("url({data})"),
-            Err(e) => { if failed.is_none() { failed = on_error(e); } c[0].to_owned() }
+        if !cache.contains_key(path) {
+            let data = load(path).map_err(|e| failed = on_error(e)).ok();
+            cache.insert(path.to_owned(), data);
         }
+        let Some(data) = cache[path].as_deref() else { return c[0].to_owned() };
+        total += data.len();
+        if total > max { too_large = true; return c[0].to_owned(); }
+        if quoted { let q = &c["q"]; format!("{q}{data}{q}") } else { format!("url({data})") }
     }).into_owned();
     if let Some(e) = failed { return Err(e); }
-    if out.len() > PAGE_MAX { return Err(InlineError::PageTooLarge); }
+    if too_large || out.len() > max { return Err(InlineError::PageTooLarge); }
     Ok(out)
 }
 
 /// Publicação: qualquer imagem que falte ou não seja imagem recusa a página inteira.
-pub fn inline(html: &str) -> Result<String, InlineError> { replace(html, Some) }
+pub fn inline(html: &str) -> Result<String, InlineError> { replace(html, PAGE_MAX, Some) }
 
-/// Rascunho: o que falta vira lista, a página segue.
-pub fn scan(html: &str) -> Inlined {
+/// Rascunho: o que falta vira lista e a página segue; só o tamanho total recusa.
+pub fn scan(html: &str) -> Result<Inlined, InlineError> {
     let mut missing = Vec::new();
-    let html = replace(html, |e| { if let Some(p) = e.path() { missing.push(p.to_owned()); } None })
-        .unwrap_or_else(|_| html.to_owned());
-    Inlined { html, missing }
+    let html = replace(html, PAGE_MAX, |e| { if let Some(p) = e.path() { missing.push(p.to_owned()); } None })?;
+    Ok(Inlined { html, missing })
 }
 
 #[cfg(test)]
@@ -105,13 +115,23 @@ mod tests {
 
     #[test]
     fn scan_reports_missing_without_failing() {
-        let out = scan("<img src=\"/nao/existe.png\">");
+        let out = scan("<img src=\"/nao/existe.png\">").unwrap();
         assert_eq!(out.missing, vec!["/nao/existe.png".to_owned()]);
     }
 
     #[test]
     fn leaves_remote_urls() {
-        let html = "<script src=\"https://cdn.example/x.js\"></script>";
+        let html = "<script src=\"https://cdn.example/x.js\"></script><img src=\"//cdn.example/x.png\">";
         assert_eq!(inline(html).unwrap(), html);
+    }
+
+    #[test]
+    fn repeated_image_stops_at_page_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.png");
+        std::fs::write(&p, PNG_1PX).unwrap();
+        let html = format!("<img src=\"{}\">", p.display()).repeat(10);
+        let err = replace(&html, html.len() + 100, Some).unwrap_err();
+        assert!(matches!(err, InlineError::PageTooLarge));
     }
 }
