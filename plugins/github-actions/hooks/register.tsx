@@ -7,6 +7,7 @@ import { desenharFaixa } from './faixa'
 
 const view = atom({ plugin: 'github-actions', key: 'view' } as const, null as GhView | null)
 const recolhida = atom({ plugin: 'github-actions', key: 'recolhida' } as const, false)
+const abertos = atom({ plugin: 'github-actions', key: 'abertos' } as const, [] as string[])
 
 const INTERVALO_MS = 15_000
 // Depois de um push o run novo leva alguns segundos para aparecer na API.
@@ -310,9 +311,11 @@ export const register: Register = on => {
     const t = $.ui.resolve(e)
     const nosso = desenharFaixa(t, v, {
       superficie: e.surface, colunas: e.props.bodyColumns, recolhida: await read($, recolhida), agora: await $.clock.now(),
+      abertos: await read($, abertos),
     }, {
       abrir: url => void abrir($, url),
       alternar: () => void update($, recolhida, r => !r),
+      alternarItem: chave => void update($, abertos, a => (a.includes(chave) ? a.filter(k => k !== chave) : [...a, chave])),
     })
     const abaixo = await next(e).catch(() => null)
     if (!abaixo) return nosso

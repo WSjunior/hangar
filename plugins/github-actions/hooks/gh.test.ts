@@ -67,7 +67,7 @@ describe('gh', () => {
   })
 
   test('barra: um segmento por job, o que roda enche pelos passos; tempo do run', () => {
-    const j = (situacao: Situacao, feitos = 0, total = 0) => ({ nome: 'x', situacao, passo: null, feitos, total })
+    const j = (situacao: Situacao, feitos = 0, total = 0) => ({ nome: 'x', situacao, passo: null, feitos, total, passos: [] })
     expect(barra([j('ok'), j('rodando', 1, 4), j('esperando')], 14)).toEqual([
       { s: 'ok', texto: '━━━━' }, { s: 'esperando', texto: ' ' },
       { s: 'rodando', texto: '━───' },
@@ -114,6 +114,7 @@ describe('gh', () => {
     expect(nomeJob('build (windows-latest, windows-x86_64, .exe, true)')).toBe('build windows')
     expect(nomeJob('statusline (ubuntu-latest)')).toBe('statusline ubuntu')
     expect(nomeJob('backend')).toBe('backend')
+    expect(nomeJob('build (ubuntu-latest, linux-x86_64, x86_64-unknown-linux-gnu, true, target/x86_64-unknown-linux-g...')).toBe('build ubuntu')
     expect(passoCurto('Run uv run pytest -q')).toBe('uv run pytest -q')
     expect(passoCurto('Run cargo build --locked --release --target x86_64')).toBe('cargo build --locked --releas…')
   })
@@ -138,7 +139,7 @@ describe('gh', () => {
 
   test('consulta segue só enquanto algo roda', () => {
     const v = (s: 'ok' | 'rodando'): GhView => ({ branch: 'x', pr: null, workflows: [
-      { id: 1, nome: 'CI', sha: 'x', situacao: s, url: '', jobs: [{ nome: 'a', situacao: s, passo: null, feitos: 0, total: 0 }], inicio: null, fim: null },
+      { id: 1, nome: 'CI', sha: 'x', situacao: s, url: '', jobs: [{ nome: 'a', situacao: s, passo: null, feitos: 0, total: 0, passos: [] }], inicio: null, fim: null },
     ] })
     expect(precisaConsultar(v('rodando'))).toBe(true)
     expect(precisaConsultar(v('ok'))).toBe(false)

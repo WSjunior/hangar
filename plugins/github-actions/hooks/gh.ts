@@ -44,7 +44,8 @@ export function jobs(lista: readonly JobGh[]): Job[] {
     const s = situacao(j.status, j.conclusion)
     const steps = j.steps ?? []
     const feitos = steps.filter(p => p.status.toLowerCase() === 'completed').length
-    return { nome: j.name, situacao: s, passo: passoDe(j, s), feitos, total: steps.length }
+    const passos = steps.map(p => ({ nome: p.name, situacao: situacao(p.status, p.conclusion) }))
+    return { nome: j.name, situacao: s, passo: passoDe(j, s), feitos, total: steps.length, passos }
   })
 }
 

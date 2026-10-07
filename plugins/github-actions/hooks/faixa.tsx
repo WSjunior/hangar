@@ -34,7 +34,8 @@ export function revisaoDe(p: Pr): { texto: string; cor?: string } | null {
 
 /** Job de matriz vira nome e o primeiro eixo: `build (windows-latest, x86_64, true)` → `build windows`. */
 export function nomeJob(nome: string): string {
-  const m = /^(.+?)\s*\((.+)\)$/.exec(nome)
+  // Sem exigir o `)`: o GitHub corta nome de matriz longo com `...`.
+  const m = /^(.+?)\s*\(([^,)]+)/.exec(nome)
   if (!m) return nome
   const eixo = (m[2] ?? '').split(',')[0]?.trim().replace(/-latest$/, '') ?? ''
   return eixo ? `${m[1]} ${eixo}` : (m[1] ?? nome)
@@ -170,8 +171,16 @@ export function rotulosAnteriores(ws: readonly Workflow[]): string[] {
   return base.map((r, i) => (base.indexOf(r) !== base.lastIndexOf(r) ? `${r} #${ws[i]?.id ?? i}` : r))
 }
 
-type Acoes = { abrir: (url: string) => void; alternar: () => void }
-type Opcoes = { superficie: RenderSurface; colunas: number; recolhida: boolean; agora: number }
+/** Chave de um item que abre e fecha: curta (o escopo de hover vai até 64 caracteres, e nome de job de matriz
+ *  passa disso) e pelo nome, não pelo id do run, para seguir aberto quando chega um run novo. */
+export function chaveDe(tipo: 'wf' | 'job', nome: string): string {
+  let h = 5381
+  for (const c of nome) h = (Math.imul(h, 33) ^ (c.codePointAt(0) ?? 0)) >>> 0
+  return `${tipo}-${h.toString(36)}-${nome.length}`
+}
+
+type Acoes = { abrir: (url: string) => void; alternar: () => void; alternarItem: (chave: string) => void }
+type Opcoes = { superficie: RenderSurface; colunas: number; recolhida: boolean; agora: number; abertos: readonly string[] }
 
 const BARRA_RECOLHIDA = 16
 
@@ -187,6 +196,11 @@ export function desenharFaixa(t: Tabela, v: GhView, o: Opcoes, acoes: Acoes): JS
       ? <Svg source={svgBarra(js, colunas)} alt={alt} width={colunas * PX_POR_COLUNA} height={ALTURA_PX} />
       : <Box flexDirection="row" flexShrink={0}>{barra(js, colunas).map(tr => pinta(tr.s, tr.texto))}</Box>
   }
+  // Abre e fecha o detalhe. A `key` é a chave do item: o mesmo rótulo (`build windows`) pode vir de dois workflows.
+  const alterna = (chave: string, label: string) => (
+    <Button key={chave} label={label} plain hover={{ scope: chave, color: AZUL, underline: true }}
+      onPress={() => acoes.alternarItem(chave)} />
+  )
   const contagem = (c: Checks) => (
     <Box flexDirection="row" columnGap={1} flexShrink={0}>
       {c.falhou ? <Text color={VERMELHO} bold>{`✕${c.falhou}`}</Text> : null}
@@ -238,10 +252,13 @@ export function desenharFaixa(t: Tabela, v: GhView, o: Opcoes, acoes: Acoes): JS
   // o que empurrava para baixo o que viesse ao lado.
   const colunasBarra = Math.max(8, largura - 2)
   for (const w of atual) {
+    const chaveWf = chaveDe('wf', w.nome)
+    const wfAberto = o.abertos.includes(chaveWf)
     corpo.push(
       <Box key={`wf-${w.id}`} flexDirection="row" justifyContent="space-between" width={largura} columnGap={1} marginTop={1}>
         <Box flexDirection="row" flexShrink={1} columnGap={1}>
-          {pinta(w.situacao, `${ICONE[w.situacao]} ${w.nome}`, true)}
+          {pinta(w.situacao, ICONE[w.situacao], true)}
+          {alterna(chaveWf, `${wfAberto ? '▾' : '▸'} ${w.nome}`)}
           <Text dimColor>{w.sha.slice(0, 7)}</Text>
         </Box>
         <Box flexDirection="row" columnGap={2} flexShrink={0}>
@@ -259,7 +276,38 @@ export function desenharFaixa(t: Tabela, v: GhView, o: Opcoes, acoes: Acoes): JS
         </Box>,
       )
     }
-    // Falha com o passo, e o que roda com a etapa atual: o que a barra não diz.
+    if (wfAberto) {
+      // Aberto: todos os jobs, cada um com os passos atrás de outro clique.
+      w.jobs.forEach((j, i) => {
+        const chaveJob = chaveDe('job', `${w.nome}\n${j.nome}`)
+        const jobAberto = o.abertos.includes(chaveJob)
+        const passos = j.passos ?? []
+        const falhou = j.situacao === 'falhou' || j.situacao === 'cancelado'
+        const detalhe = falhou && j.passo ? `falhou em “${passoCurto(j.passo)}”`
+          : j.situacao === 'rodando' && j.passo ? passoCurto(j.passo) : ''
+        corpo.push(
+          <Box key={`j-${w.id}-${i}`} flexDirection="row" paddingLeft={2} width={largura} columnGap={1}>
+            {pinta(j.situacao, ICONE[j.situacao])}
+            {passos.length ? alterna(chaveJob, `${jobAberto ? '▾' : '▸'} ${nomeJob(j.nome)}`) : <Text>{nomeJob(j.nome)}</Text>}
+            {j.total ? <Text dimColor>{`${j.feitos}/${j.total} passos`}</Text> : null}
+            {detalhe ? <Box flexShrink={1}><Text dimColor wrap="truncate-end">{`· ${detalhe}`}</Text></Box> : null}
+          </Box>,
+        )
+        if (!jobAberto) return
+        passos.forEach((p, k) => corpo.push(
+          <Box key={`p-${w.id}-${i}-${k}`} flexDirection="row" paddingLeft={6} width={largura} columnGap={1}>
+            {pinta(p.situacao, ICONE[p.situacao])}
+            <Box flexShrink={1}>
+              {p.situacao === 'esperando' || p.situacao === 'pulado'
+                ? <Text dimColor wrap="truncate-end">{p.nome}</Text>
+                : <Text wrap="truncate-end">{p.nome}</Text>}
+            </Box>
+          </Box>,
+        ))
+      })
+      continue
+    }
+    // Fechado: só a falha com o passo, e o que roda com a etapa atual: o que a barra não diz.
     w.jobs.forEach((j, i) => {
       const falhou = j.situacao === 'falhou' || j.situacao === 'cancelado'
       if (!falhou && j.situacao !== 'rodando') return

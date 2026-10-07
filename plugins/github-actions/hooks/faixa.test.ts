@@ -1,4 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
+import { chaveDe } from './faixa'
+
+const LONGO = 'build (ubuntu-latest, linux-x86_64, x86_64-unknown-linux-gnu, true, target/x86_64-unknown-linux-gnu/release)'
 
 const PR = { number: 103, title: 'feat: instalador', url: 'pr', state: 'OPEN', isDraft: false, reviewDecision: 'REVIEW_REQUIRED',
   statusCheckRollup: [
@@ -15,7 +18,8 @@ const JOBS: Record<string, unknown[]> = {
   3: [{ name: 'backend', status: 'completed', conclusion: 'success' },
     { name: 'passos', status: 'completed', conclusion: 'failure', steps: [{ name: 'Run de=x', status: 'completed', conclusion: 'failure' }] }],
   2: [],
-  1: [{ name: 'build (windows-latest, windows-x86_64, .exe, true)', status: 'in_progress', conclusion: '',
+  1: [{ name: LONGO, status: 'completed', conclusion: 'success', steps: [{ name: 'Set up job', status: 'completed', conclusion: 'success' }] },
+    { name: 'build (windows-latest, windows-x86_64, .exe, true)', status: 'in_progress', conclusion: '',
     steps: [{ name: 'Run cargo build --locked', status: 'in_progress', conclusion: '' }] }],
 }
 
@@ -59,6 +63,20 @@ test('faixa aberta detalha o run mais novo de cada workflow; ▾ recolhe numa li
   expect(aberta).toContain('✕ passos')
   expect(aberta).toContain('● build windows')
   expect(aberta).toContain('○ CI bbbbbbb')
+  expect(aberta).not.toContain('Run cargo build --locked|')
+
+  // Clique no workflow lista os jobs; clique no job, os passos dele.
+  await ui.press({ key: chaveDe('wf', 'Native') })
+  const jobsAbertos = textos(await ui.drawn()).join('|')
+  expect(jobsAbertos).toContain('▾ Native')
+  expect(jobsAbertos).toContain('▸ build windows|0/1 passos')
+  await ui.press({ key: chaveDe('job', 'Native\nbuild (windows-latest, windows-x86_64, .exe, true)') })
+  expect(textos(await ui.drawn()).join('|')).toContain('●|Run cargo build --locked')
+  // Nome de matriz com mais de 64 caracteres: a chave curta não derruba a faixa.
+  await ui.press({ key: chaveDe('job', `Native\n${LONGO}`) })
+  expect(textos(await ui.drawn()).join('|')).toContain('✓|Set up job')
+  await ui.press({ key: chaveDe('wf', 'Native') })
+  expect(textos(await ui.drawn()).join('|')).not.toContain('0/1 passos')
 
   await ui.press({ key: 'alternar' })
   const recolhida = textos(await ui.drawn())
