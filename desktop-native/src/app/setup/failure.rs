@@ -197,7 +197,7 @@ pub(crate) fn agent_block(view: &PanelView, on_action: OnFailureAction) -> Optio
         .into_any_element())
 }
 
-fn report_block(view: &PanelView, on_action: OnFailureAction) -> Div {
+fn report_block(view: &PanelView, on_action: OnFailureAction) -> Stateful<Div> {
     let toggle = on_action;
     // O estado do envio mora em `outbox_lines`, visível em qualquer etapa; aqui só o aviso de quando sai.
     // Com o agente chamado, o relatório espera ele terminar e a caixa não muda até lá.
