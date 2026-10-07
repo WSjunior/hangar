@@ -151,6 +151,13 @@ pub fn finish_request(path: &Path, action: FinishAction, inline: Option<&str>) -
     text
 }
 
+/// A pasta que o organizador lê é fixa na thread: trocar de sessão com outra pasta exige avisá-lo.
+pub fn code_note(thread_cwd: Option<&Path>, now: Option<&Path>) -> Option<String> {
+    if thread_cwd == now { return None; }
+    Some(if now.is_some() { "A pasta de código que você pode ler é a da sessão anterior; não leia código para a sessão atual." }
+        else { "O código da sessão atual não está disponível aqui; não leia código." }.to_owned())
+}
+
 #[derive(Debug, PartialEq)]
 pub enum FinishStep { Arm, Send }
 
@@ -168,12 +175,18 @@ pub fn clean_question(question: &str) -> Result<String, &'static str> {
 
 /// Estado do modo Planejar no laço da chamada.
 #[derive(Default)]
-pub struct Planner { pub mode: Mode, plan: Option<PlanFile>, armed: Option<(FinishAction, String)>, asked: Option<String> }
+pub struct Planner { pub mode: Mode, plan: Option<(PlanFile, String)>, armed: Option<(FinishAction, String)>, asked: Option<String> }
 
 impl Planner {
-    pub fn plan(&mut self, target: &str) -> &PlanFile { self.plan.get_or_insert_with(|| new_plan(target, chrono::Local::now())) }
-    pub fn path(&self) -> Option<&Path> { self.plan.as_ref().map(|p| p.path.as_path()) }
-    pub fn read(&self) -> String { self.plan.as_ref().map(PlanFile::read).unwrap_or_default() }
+    /// O plano nasce para uma sessão e fica com ela, mesmo que a tela mude depois.
+    pub fn plan(&mut self, target: &str) -> &PlanFile {
+        &self.plan.get_or_insert_with(|| (new_plan(target, chrono::Local::now()), target.to_owned())).0
+    }
+    pub fn session(&self) -> Option<&str> { self.plan.as_ref().map(|(_, s)| s.as_str()) }
+    /// Plano alterado: a confirmação dada sobre o resumo anterior não vale mais.
+    pub fn plan_changed(&mut self) { self.armed = None; }
+    pub fn path(&self) -> Option<&Path> { self.plan.as_ref().map(|(p, _)| p.path.as_path()) }
+    pub fn read(&self) -> String { self.plan.as_ref().map(|(p, _)| p.read()).unwrap_or_default() }
     pub fn set_mode(&mut self, mode: Mode, target: &str) -> String {
         self.mode = mode;
         self.armed = None;
@@ -193,8 +206,8 @@ impl Planner {
         self.asked = Some(turn.to_owned());
         Ok(line)
     }
-    /// Plano despachado: volta ao Direto; o arquivo fica no disco.
-    pub fn sent(&mut self) { *self = Self::default(); }
+    /// Plano despachado: volta ao Direto, mas o plano fica (um envio recusado pela tela não pode perdê-lo).
+    pub fn sent(&mut self) { self.mode = Mode::Direct; self.armed = None; self.asked = None; }
 }
 
 pub fn tool_reply(text: impl Into<String>, success: bool) -> Value {
@@ -363,6 +376,15 @@ mod tests {
     }
 
     #[test]
+    fn code_note_only_when_folder_differs() {
+        let (a, b) = (Path::new("/p/a"), Path::new("/p/b"));
+        assert!(code_note(Some(a), Some(a)).is_none());
+        assert!(code_note(None, None).is_none());
+        assert!(code_note(Some(a), Some(b)).unwrap().contains("anterior"));
+        assert!(code_note(Some(a), None).unwrap().contains("não está disponível"));
+    }
+
+    #[test]
     fn ask_session_limits() {
         let mut planner = Planner::default();
         assert!(planner.ask("t1", "Qual banco?").is_err(), "só no Planejar");
@@ -374,13 +396,26 @@ mod tests {
     }
 
     #[test]
-    fn sent_plan_returns_to_direct() {
+    fn sent_plan_returns_to_direct_and_keeps_the_plan() {
         let mut planner = Planner::default();
         planner.set_mode(Mode::Plan, "s");
-        assert!(planner.path().is_some());
+        planner.finish_step(FinishAction::Execute, "t1");
         planner.sent();
         assert_eq!(planner.mode, Mode::Direct);
-        assert!(planner.path().is_none());
+        assert!(planner.path().is_some(), "envio recusado não perde o plano");
+        assert_eq!(planner.session(), Some("s"));
+        assert_eq!(planner.finish_step(FinishAction::Execute, "t2"), FinishStep::Arm, "armado foi zerado");
+    }
+
+    #[test]
+    fn plan_keeps_its_session_and_edit_disarms() {
+        let mut planner = Planner::default();
+        planner.set_mode(Mode::Plan, "a");
+        planner.set_mode(Mode::Plan, "b");
+        assert_eq!(planner.session(), Some("a"), "a sessão é a do nascimento");
+        planner.finish_step(FinishAction::Execute, "t1");
+        planner.plan_changed();
+        assert_eq!(planner.finish_step(FinishAction::Execute, "t2"), FinishStep::Arm, "plano alterado desarma");
     }
 
     #[test]

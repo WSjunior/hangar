@@ -382,10 +382,11 @@ impl Hangar {
             self.voice.reply_pending = Some(key);
             self.arm_reply_wait(cx);
         }
+        let cwd = self.local_session_dir();
         let Some(voice) = &self.voice.call else { return };
         let name = name.unwrap_or_default();
         // O chat novo ainda está vazio aqui; o organizador lê o resto pelo read_session.
-        voice.retarget(name.clone(), format!("A sessão na tela agora é {name}."));
+        voice.retarget(name.clone(), format!("A sessão na tela agora é {name}."), cwd);
     }
 
     pub(super) fn voice_turn_finished(&mut self, state: &str, cx: &mut Context<Self>) {

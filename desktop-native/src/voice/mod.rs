@@ -24,7 +24,7 @@ pub enum VoiceEvent {
 /// `cwd`: pasta da sessão na tela quando é desta máquina (a leitura do código parte dela); `target`: nome dessa sessão.
 pub struct VoiceOptions { pub codex: Codex, pub voice: Option<String>, pub context: String, pub cwd: Option<PathBuf>, pub target: String }
 
-enum Command { Retarget(String, String), Result(String, String), Reply(Value, Value), SetMode(Mode), Answer(String) }
+enum Command { Retarget(String, String, Option<PathBuf>),Result(String, String), Reply(Value, Value), SetMode(Mode), Answer(String) }
 
 pub struct Voice { commands: mpsc::UnboundedSender<Command>, muted: Arc<AtomicBool>, stopped: Arc<AtomicBool>, stop: Arc<Notify> }
 
@@ -36,7 +36,8 @@ impl Voice {
         Voice { commands, muted, stopped, stop }
     }
     pub fn set_muted(&self, muted: bool) { self.muted.store(muted, Ordering::Relaxed); }
-    pub fn retarget(&self, name: String, context: String) { let _ = self.commands.send(Command::Retarget(name, context)); }
+    /// `cwd`: pasta da nova sessão neste disco (`None` se for de outra máquina).
+    pub fn retarget(&self, name: String, context: String, cwd: Option<PathBuf>) { let _ = self.commands.send(Command::Retarget(name, context, cwd)); }
     pub fn session_result(&self, session: String, text: String) { let _ = self.commands.send(Command::Result(session, text)); }
     pub fn reply(&self, call: CallId, reply: Value) { let _ = self.commands.send(Command::Reply(call.0, reply)); }
     pub fn set_mode(&self, mode: Mode) { let _ = self.commands.send(Command::SetMode(mode)); }
@@ -163,6 +164,7 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
     let mut activity = Activity::Idle;
     let mut planner = Planner::default();
     let mut target = options.target.clone();
+    let mut target_cwd = options.cwd.clone();
     let outcome = loop {
         // No Planejar nada sai pelo gate; ao entrar nele o envio pendente já foi cancelado.
         if planner.mode == Mode::Direct && let Some((id, request)) = gate.due(Instant::now()) {
@@ -214,6 +216,7 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                                 Ok(()) => {
                                     log(format!("plan saved bytes={bytes}"));
                                     let _ = rpc.respond(id, tool_reply(format!("Plano salvo em {}.", path.display()), true)).await;
+                                    planner.plan_changed();
                                     let _ = events.send(VoiceEvent::Plan { path, markdown }).await;
                                     "plan-saved"
                                 }
@@ -250,9 +253,10 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                             } else {
                                 let path = planner.path().map(|p| p.to_path_buf()).unwrap_or_default();
                                 // Sessão de outra máquina não lê o arquivo daqui: o conteúdo vai junto.
-                                let text = finish_request(&path, action, options.cwd.is_none().then_some(content.as_str()));
+                                let text = finish_request(&path, action, target_cwd.is_none().then_some(content.as_str()));
                                 log(format!("plan sent bytes={}", text.len()));
-                                let _ = events.send(VoiceEvent::SendPlan { session: target.clone(), text }).await;
+                                let session = planner.session().unwrap_or(&target).to_owned();
+                                let _ = events.send(VoiceEvent::SendPlan { session, text }).await;
                                 let _ = rpc.respond(id, tool_reply("Plano enviado à sessão; o resultado chega depois.", true)).await;
                                 planner.sent();
                                 let _ = events.send(VoiceEvent::Mode(Mode::Direct)).await;
@@ -366,9 +370,14 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                     log(format!("session answer bytes={}", text.len()));
                     if let Some(input) = results.push(String::new(), text) { start_summary(&rpc, &thread, input, &mut results, organizer_busy).await; }
                 }
-                Some(Command::Retarget(name, context)) => {
+                Some(Command::Retarget(name, context, cwd)) => {
                     log("retarget");
                     target = name.clone();
+                    target_cwd = cwd;
+                    // A pasta da thread não muda no meio dela.
+                    if let Some(note) = organizer::code_note(options.cwd.as_deref(), target_cwd.as_deref()) {
+                        let _ = rpc.request("thread/realtime/appendText", json!({"threadId": thread, "role": "developer", "text": note})).await;
+                    }
                     let _ = rpc.request("thread/realtime/appendText", json!({"threadId": thread, "role": "developer", "text": context})).await;
                     let _ = rpc.request("thread/realtime/appendSpeech", json!({"threadId": thread, "text": format!("Agora estou na sessão {name}.")})).await;
                 }
