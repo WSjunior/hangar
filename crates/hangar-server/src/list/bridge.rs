@@ -466,10 +466,7 @@ impl ListBridge {
         list_facts::mark_stale(&mut rows, &fetched.facts, fetched.ok);
         if !input.shadow {
             self.prune_gone(&rows, Instant::now());
-            // Fatos que falharam ou linha sem transcript: não dá para dizer quem morreu.
-            let live = (fetched.ok && rows.iter().all(|r| r.jsonl.is_some()))
-                .then(|| (Instant::now(), rows.iter().filter_map(|r| r.jsonl.clone()).collect()));
-            *lock(&self.live_jsonl) = live;
+            self.record_live(&rows, fetched.ok);
         }
         let round = keep.then(|| Arc::new(Round { inputs, pre }));
         Ok((Produced { rows: Arc::new(rows), facts: fetched.facts, facts_ok: fetched.ok }, round))
@@ -550,6 +547,14 @@ impl ListBridge {
             seen.remove(&name);
             self.forget(&name);
         }
+    }
+
+    /// Fatos que falharam ou sessão que publica página (Claude, Codex) sem transcript: não dá
+    /// para dizer quem morreu. Pi, omp e Kimi não publicam e não travam a limpeza.
+    fn record_live(&self, rows: &[SessionRow], facts_ok: bool) {
+        let unknown = rows.iter().any(|r| r.jsonl.is_none() && matches!(r.provider.as_str(), "claude" | "codex"));
+        let live = (facts_ok && !unknown).then(|| (Instant::now(), rows.iter().filter_map(|r| r.jsonl.clone()).collect()));
+        *lock(&self.live_jsonl) = live;
     }
 
     /// Transcripts vivos pela última rodada do dono. Rodada velha também é `None`: com a lista
@@ -929,15 +934,23 @@ mod tests {
     }
 
     #[test]
-    fn live_jsonl_only_from_a_recent_round() {
+    fn live_jsonl_is_certain_only_when_every_page_publisher_has_a_transcript() {
         let bridge = ListBridge::new(ListEnv { mux: Mux::default(), capture_program: "tmux".into(),
             procs: Arc::new(procs::SystemProcs::default()), dirs: None }, FactsClient::new("127.0.0.1:9".parse().unwrap(), "s".into()));
+        let row = |name: &str, provider: &str, jsonl: Option<&str>|
+            serde_json::from_value::<SessionRow>(json!({"name": name, "provider": provider, "jsonl": jsonl})).unwrap();
         assert!(bridge.live_jsonl().is_none(), "lista nunca aberta");
-        let set: HashSet<String> = ["/t/k.jsonl".to_owned()].into();
-        *lock(&bridge.live_jsonl) = Some((Instant::now(), set.clone()));
-        assert_eq!(bridge.live_jsonl(), Some(set.clone()));
+        bridge.record_live(&[row("a", "claude", Some("/t/a.jsonl")), row("b", "claude", None)], true);
+        assert!(bridge.live_jsonl().is_none(), "Claude sem transcript");
+        bridge.record_live(&[row("c", "codex", None)], true);
+        assert!(bridge.live_jsonl().is_none(), "Codex sem transcript");
+        bridge.record_live(&[row("a", "claude", Some("/t/a.jsonl")), row("p", "pi", None), row("k", "kimi", None)], true);
+        assert_eq!(bridge.live_jsonl(), Some(HashSet::from(["/t/a.jsonl".to_owned()])), "Pi e Kimi não publicam página");
+        bridge.record_live(&[row("a", "claude", Some("/t/a.jsonl"))], false);
+        assert!(bridge.live_jsonl().is_none(), "fatos falharam");
+        bridge.record_live(&[row("a", "claude", Some("/t/a.jsonl"))], true);
         if let Some(old) = Instant::now().checked_sub(LIVE_FRESH + Duration::from_secs(1)) {
-            *lock(&bridge.live_jsonl) = Some((old, set));
+            lock(&bridge.live_jsonl).as_mut().unwrap().0 = old;
             assert!(bridge.live_jsonl().is_none(), "rodada velha não vale");
         }
     }

@@ -68,8 +68,11 @@ async fn publish(st: &AppState, b: PublishBody) -> Value {
         Ok(None) => return fail("erro_sessao_desconhecida", "sessão não encontrada"),
         Err(_) => return fail("erro_pagina_sem_info", INFO_REASON),
     };
+    // Dono vazio nunca casaria com a lista: a limpeza apagaria a página no minuto seguinte.
+    let Some(jsonl) = info.jsonl.as_deref().map(|p| p.to_string_lossy().into_owned()) else {
+        return fail("erro_pagina_sem_transcript", "a sessão ainda não tem transcript");
+    };
     let key = info.session_key;
-    let jsonl = info.jsonl.as_deref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
     let (pages, chromium, draft, height, html) = (st.pages.clone(), st.chromium, b.draft, b.height, b.html);
     let (key2, title2) = (key.clone(), title.clone());
     // Imagens, tema e gravação leem e escrevem disco: fora da thread do runtime.
@@ -124,6 +127,12 @@ async fn publish(st: &AppState, b: PublishBody) -> Value {
     json!({"ok": true, "result": {"hangar_page": {"id": id, "title": title, "height": height, "heights": heights}, "message": MESSAGE}})
 }
 
+/// Leitura do disco que caiu no servidor: não é página expirada.
+fn read_failed(st: &AppState, headers: &HeaderMap, name: &str, e: tokio::task::JoinError) -> Response {
+    tracing::error!(panic = e.is_panic(), "leitura da página interrompida");
+    route_failed(st, headers, "rust.pages_failed", name, "erro_pagina_falhou", "a leitura da página caiu no servidor")
+}
+
 fn expired(req: &HeaderMap) -> Response {
     let mut r = json_reply(StatusCode::NOT_FOUND, json!({"detail": {"code": "erro_pagina_expirou", "msg": "página apagada com a sessão"}}));
     cors(req, r.headers_mut());
@@ -147,7 +156,10 @@ pub async fn page(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
     drop(req);
     let key = match session_key(&st, &headers, &name).await { Ok(k) => k, Err(r) => return r };
     let pages = st.pages.clone();
-    let found = tokio::task::spawn_blocking(move || Some((pages.html(&key, &id)?, pages.meta(&key, &id)?))).await.ok().flatten();
+    let found = match tokio::task::spawn_blocking(move || Some((pages.html(&key, &id)?, pages.meta(&key, &id)?))).await {
+        Ok(f) => f,
+        Err(e) => return read_failed(&st, &headers, &name, e),
+    };
     let Some((html, meta)) = found else { return expired(&headers) };
     let mut r = if raw {
         let mut r = Response::new(Body::from(html));
@@ -200,7 +212,8 @@ pub async fn shot(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
         let path = pages.shot_path(&key, &id, theme, width);
         let ready = path.is_file();
         Some((html, path, ready, if ready { None } else { chromium() }))
-    }).await.ok().flatten();
+    }).await;
+    let found = match found { Ok(f) => f, Err(e) => return read_failed(&st, &headers, &name, e) };
     let Some((html, path, ready, bin)) = found else { return expired(&headers) };
     if !ready {
         if let Err(e) = chrome::render_with(bin, &html, &[Job { width, theme, shot: Some(path.clone()) }]).await {
