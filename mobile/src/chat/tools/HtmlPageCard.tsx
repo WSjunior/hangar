@@ -113,7 +113,7 @@ function LivePageCard({ page, sessionName, serverId }: {
     setState('loading');
     setReported(null);
     try {
-      if (!base) throw new Error('no server');
+      if (!base) throw new Error('no-server');
       const r = await fetch(pageUrls(base, sessionName, page.id).raw, { headers: { Authorization: auth } });
       // O 404 da página vencida traz o código; sem ele (convidado, rota ausente) é erro.
       const code = r.status === 404 ? await r.json().then((b) => b?.detail?.code, () => null) : null;
