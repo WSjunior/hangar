@@ -67,6 +67,8 @@ pub(crate) struct SetupWizard {
     pub(super) connection: Option<Result<String, String>>,
     /// Acabou escondido com o app ligado a outro servidor: a conexão local espera o "Abrir Hangar".
     connect_later: bool,
+    /// Reaberto com o FIM já no arquivo: o fim aconteceu com o app fechado.
+    resumed_ended: bool,
     pub(super) viewing: Screen,
     pub(super) details_open: bool,
     pub(super) phone: Option<PhoneOutcome>,
@@ -115,7 +117,7 @@ impl SetupWizard {
             password, confirm, precheck: None, pkg: None, started: false, preparing: None,
             git_ready: false, bootstrap: None, token: None, runs: Runs::default(), check_tail: None, install_tail: None, records: (None, None),
             polling: false, finished: false, failure: None, vault: Vault::default(), waiting: Vec::new(), prompt: None, after_password: None,
-            opened_link: None, app_copy: None, connection: None, connect_later: false, viewing: Screen::Welcome, details_open: false, phone: None,
+            opened_link: None, app_copy: None, connection: None, connect_later: false, resumed_ended: false, viewing: Screen::Welcome, details_open: false, phone: None,
             qr: Qr::Idle, tailscale_running: false, tailscale_checking: false, ticks: 0,
             focus: cx.focus_handle(), window: window.window_handle(), _subscriptions: subscriptions,
         };
@@ -142,7 +144,19 @@ impl SetupWizard {
         self.agents = state.options.agents.iter().filter_map(|a| system::AGENTS.iter().find(|(id, _)| id == a).map(|(id, _)| *id)).collect();
         self.agents_touched = true;
         self.outside = state.options.outside;
-        // O passo 0 já gravou (ou vai gravar) a senha do celular: nunca uma senha nova no meio.
+        // Só a conferência começou: a senha do celular escolhida morava na memória e o `--check` não a grava. Para a conferência
+        // e volta à tela 1 sem começar, para a pessoa escolher a senha de novo.
+        let Some(install) = state.install else {
+            // Sem hora de início guardada o pid pode já ser de outro processo: não mata.
+            if let Some(record) = state.check.filter(|r| !r.started.is_empty()) {
+                cx.background_executor().spawn(async move { run::stop(record.pid, &record.started) }).detach();
+            }
+            run::clear_state();
+            let token = local::read_install(&self.dest).token.is_some();
+            self.password_mode = if token { PasswordMode::Keep } else { PasswordMode::Generate };
+            return;
+        };
+        // O passo 0 já gravou a senha do celular: nunca uma senha nova no meio.
         self.password_mode = PasswordMode::Keep;
         (self.started, self.git_ready, self.precheck) = (true, true, Some(Vec::new()));
         self.vault = Vault::new(state.askpass_code);
@@ -151,13 +165,12 @@ impl SetupWizard {
             self.runs.check = Some(Progress::default());
             self.records.0 = Some(record);
         }
-        if let Some(record) = state.install {
-            self.install_tail = Some(Tail::new(record.log.clone()));
-            self.runs.install = Some(Progress::default());
-            self.records.1 = Some(record);
-        }
+        self.install_tail = Some(Tail::new(install.log.clone()));
+        self.runs.install = Some(Progress::default());
+        self.records.1 = Some(install);
         self.bootstrap = run::state_dir().map(|dir| dir.join(run::bootstrap_name(cfg!(windows)))).filter(|p| p.is_file());
         self.read_tails(false);
+        self.resumed_ended = self.runs.end().is_some();
         self.go(self.frontier_now(), cx);
         suspend_updates(true, cx);
         self.start_poll(window, cx);
@@ -522,17 +535,21 @@ impl SetupWizard {
         let me = cx.entity_id();
         let hidden_while_connected = self.hangar.read_with(cx, |hangar, _| hangar.api.is_some()
             && hangar.setup_hidden.as_ref().is_some_and(|hidden| hidden.entity_id() == me)).unwrap_or(false);
-        if hidden_while_connected { self.connect_later = true; return; }
+        // Reaberto depois do fim com uma conexão salva: também não troca calado.
+        let resumed_over_saved = self.resumed_ended && super::super::load_connection().is_some();
+        if hidden_while_connected || resumed_over_saved { self.connect_later = true; return; }
         self.connection = Some(Ok(address.clone()));
         let _ = self.hangar.update(cx, |hangar, cx| hangar.setup_connect(address, token, window, cx));
     }
 
     pub(super) fn retry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Pendência não para o script: rodar de novo antes do FIM seria um segundo instalador na mesma pasta.
+        if self.is_running() { return; }
         let before = self.frontier_now();
         (self.failure, self.finished, self.started) = (None, false, true);
         self.runs = Runs::default();
         (self.check_tail, self.install_tail, self.records) = (None, None, (None, None));
-        (self.app_copy, self.connection, self.opened_link, self.connect_later) = (None, None, None, false);
+        (self.app_copy, self.connection, self.opened_link, self.connect_later, self.resumed_ended) = (None, None, None, false, false);
         (self.qr, self.tailscale_running) = (Qr::Idle, false);
         // A senha escolhida continua em `token`; sem ela, o instalador mantém a do `.env` ou gera uma.
         self.vault = Vault::new(askpass::new_code());
@@ -644,6 +661,8 @@ impl SetupWizard {
             let _ = self.hangar.update(cx, |hangar, cx| hangar.hide_setup(window, cx));
             return;
         }
+        // Sem nada rodando o fim (ou a falha) já foi visto: o `state.json` não pode reabrir o assistente a cada início.
+        run::clear_state();
         suspend_updates(false, cx);
         let _ = self.hangar.update(cx, |hangar, cx| hangar.close_setup(window, cx));
     }

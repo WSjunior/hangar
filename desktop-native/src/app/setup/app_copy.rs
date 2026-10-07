@@ -150,7 +150,7 @@ mod tests {
     #[test]
     fn windows_script_escapes_the_path() {
         let script = windows_shortcut_script(Path::new(r"C:\Users\d'Ávila\AppData\Local\Programs\Hangar\Hangar.exe"));
-        assert!(script.starts_with(r"$app = 'C:\Users\d''Ávila\AppData\Local\Programs\Hangar\Hangar.exe'"));
+        assert!(script.lines().any(|l| l == r"$app = 'C:\Users\d''Ávila\AppData\Local\Programs\Hangar\Hangar.exe'"));
         assert!(!script.contains("__APP__"));
     }
 

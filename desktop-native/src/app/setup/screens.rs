@@ -168,8 +168,8 @@ impl SetupWizard {
         let url = latest.link("tailscale-login")?.to_owned();
         let mut actions = vec![Button::new("setup-tailscale-login-open").primary().small().icon(IconName::ExternalLink).label(tr("setup_tailscale_login"))
             .on_click(move |_, _, cx| cx.open_url(&url)).into_any_element()];
-        // Passou o teto do script sem login: "Conferir de novo" roda o script de novo.
-        if latest.pendings.iter().any(|(c, _)| c == "tailscale-login") || latest.error.as_deref() == Some("tailscale-login") {
+        // Passou o teto do script sem login: "Conferir de novo" roda o script de novo, só depois do FIM (a pendência não o para).
+        if self.runs.end().is_some() && (latest.pendings.iter().any(|(c, _)| c == "tailscale-login") || latest.error.as_deref() == Some("tailscale-login")) {
             actions.push(recheck_button("setup-tailscale-login-recheck", cx));
         }
         Some(callout("setup-tailscale-login", tr("setup_tailscale_login"), vec![tr("setup_tailscale_login_hint")], actions))
@@ -413,12 +413,12 @@ impl SetupWizard {
         if self.tailscale_running && !account_marked { rows.push(row("tailscale-running", RowMark::Ok, tr("setup_tailscale_connected"), None, None)); }
         let has_code = |code: &str| self.runs.latest().is_some_and(|p| p.pendings.iter().any(|(c, _)| c == code) || p.error.as_deref() == Some(code));
         let login_callout = self.login_notice(cx);
-        let recheck = |id: &'static str, cx: &mut Context<Self>| recheck_button(id, cx);
+        let ended = self.runs.end().is_some();
         let https_callout = has_code("tailscale-https").then(|| callout("setup-tailscale-https", tr("setup_tailscale_https_title"),
             vec![tr("setup_tailscale_https_lead"), tr("setup_tailscale_https_1"), tr("setup_tailscale_https_2")],
             vec![Button::new("setup-tailscale-https-open").primary().small().icon(IconName::ExternalLink).label(tr("setup_tailscale_open_settings"))
-                    .on_click(|_, _, cx| cx.open_url(TAILSCALE_DNS)).into_any_element(),
-                recheck("setup-tailscale-https-recheck", cx)]));
+                    .on_click(|_, _, cx| cx.open_url(TAILSCALE_DNS)).into_any_element()]
+                .into_iter().chain(ended.then(|| recheck_button("setup-tailscale-https-recheck", cx))).collect()));
         div().flex().flex_col().gap_4()
             .when(!rows.is_empty(), |el| el.child(card(rows)))
             .children(login_callout)

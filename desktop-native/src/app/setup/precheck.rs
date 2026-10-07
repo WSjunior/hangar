@@ -17,7 +17,8 @@ const PKG_MANAGERS: [(&str, &[&str]); 5] = [
 ];
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Sudo { Ready, Denied(String), Missing }
+/// `Unconfirmed`: fora dos grupos de administrador, mas o sudoers pode ter uma linha da pessoa; quem decide é o `sudo -S -v` do script.
+pub(crate) enum Sudo { Ready, Unconfirmed(String), Missing }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Facts {
@@ -59,7 +60,7 @@ pub(crate) fn rows(f: &Facts) -> Vec<CheckRow> {
         rows.push(row(Check::Pkg, f.pkg.is_some(), f.pkg.unwrap_or("").to_owned(), None));
         rows.push(match &f.sudo {
             Sudo::Ready => row(Check::Sudo, true, String::new(), None),
-            Sudo::Denied(why) => row(Check::Sudo, false, why.clone(), Some("sem-sudo")),
+            Sudo::Unconfirmed(why) => CheckRow { blocking: false, ..row(Check::Sudo, false, why.clone(), None) },
             Sudo::Missing => row(Check::Sudo, false, "sudo".into(), Some("sem-sudo")),
         });
     }
@@ -72,7 +73,7 @@ pub(crate) fn needs_git(rows: &[CheckRow]) -> bool { rows.iter().any(|r| r.check
 /// Sem senha guardada, `sudo -n true` falha mesmo para quem pode: o grupo responde sem pedir senha.
 pub(crate) fn sudo_from(n_ok: bool, groups: &str) -> Sudo {
     if n_ok || groups.split_whitespace().any(|g| matches!(g, "sudo" | "wheel" | "admin")) { Sudo::Ready }
-    else { Sudo::Denied(format!("id -Gn: {}", groups.trim())) }
+    else { Sudo::Unconfirmed(format!("id -Gn: {}", groups.trim())) }
 }
 
 pub(crate) fn git_command(pkg: &str) -> Option<&'static [&'static str]> { PKG_MANAGERS.iter().find(|(name, _)| *name == pkg).map(|(_, cmd)| *cmd) }
@@ -204,7 +205,15 @@ mod tests {
     fn sudo_by_cached_password_or_admin_group() {
         assert_eq!(sudo_from(true, ""), Sudo::Ready);
         assert_eq!(sudo_from(false, "dev wheel audio"), Sudo::Ready);
-        assert!(matches!(sudo_from(false, "dev audio"), Sudo::Denied(_)));
+        assert!(matches!(sudo_from(false, "dev audio"), Sudo::Unconfirmed(_)));
+    }
+
+    #[test]
+    fn sudo_outside_admin_groups_warns_without_blocking() {
+        let rows = rows(&Facts { sudo: sudo_from(false, "dev audio"), ..linux() });
+        let sudo = rows.iter().find(|r| r.check == Check::Sudo).unwrap();
+        assert_eq!((sudo.ok, sudo.blocking, sudo.code), (false, false, None));
+        assert!(!blocked(&rows));
     }
 
     #[test]
