@@ -1284,9 +1284,14 @@ impl Hangar {
         cx.notify();
     }
 
+    /// Nova conversa e Nova sessão não abrem sem servidor nem por cima de um diálogo.
+    fn create_blocked(&self, window: &mut Window, cx: &mut App) -> bool {
+        self.api.is_none() || window.has_active_dialog(cx) || self.connection_dialog
+    }
+
     /// Volta à tela sem sessão, a da nova conversa. O rascunho da sessão fica guardado como na troca de sessão.
     pub(super) fn go_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.api.is_none() || window.has_active_dialog(cx) || self.connection_dialog { return; }
+        if self.create_blocked(window, cx) { return; }
         if self.settings.is_some() && !self.settings_live() { self.close_settings(window, cx); }
         self.pending_remote = None;
         // Cada tela tem o próprio texto: o da conversa fechada fica com ela, e a nova conversa volta com o dela.
@@ -6256,8 +6261,7 @@ impl Render for Hangar {
             .on_action(cx.listener(|this, _: &PreviousSession, window, cx| this.step_session(-1, window, cx)))
             .on_action(cx.listener(|this, _: &NewChat, window, cx| this.go_home(window, cx)))
             .on_action(cx.listener(|this, _: &OpenNewSession, window, cx| {
-                // As mesmas guardas do Nova conversa: diálogo aberto ou conexão em edição seguram o atalho.
-                if this.api.is_some() && !window.has_active_dialog(cx) && !this.connection_dialog { this.open_new_session(None, window, cx); }
+                if !this.create_blocked(window, cx) { this.open_new_session(None, window, cx); }
             }))
             .on_action(cx.listener(|this, _: &CloseSession, window, cx| this.close_selected(window, cx)))
             .on_action(cx.listener(|this, _: &RenameSession, window, cx| this.rename_selected(window, cx)))

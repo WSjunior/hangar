@@ -6,7 +6,7 @@ const INPUT_WAIT: Duration = Duration::from_millis(500);
 fn brazilian_layout(layout: &str) -> bool { matches!(layout, "Portuguese (Brazil)" | "com.apple.keylayout.Brazilian-ABNT2") }
 
 /// Layouts cujos símbolos com Shift na fileira de números sabemos traduzir de volta para dígitos.
-pub(super) fn known_layout(layout: &str) -> bool {
+fn known_layout(layout: &str) -> bool {
     brazilian_layout(layout) || matches!(layout, "English (US)" | "com.apple.keylayout.US" | "com.apple.keylayout.ABC")
 }
 
@@ -22,10 +22,15 @@ pub(super) fn digit_for_key(key: &str, layout: &str) -> Option<char> {
     }
 }
 
+/// O dígito de uma tecla pelo id ou pelo nome do layout atual (o mesmo layout aparece com um ou outro).
+pub(super) fn layout_digit(key: &str, layouts: [&str; 2]) -> Option<char> {
+    layouts.into_iter().find_map(|layout| digit_for_key(key, layout))
+}
+
 /// O dígito de uma tecla com os modificadores de segurar: a posição física vale em qualquer layout; sem ela, o símbolo
 /// é traduzido pela tabela dos layouts conhecidos.
 pub(super) fn event_digit(physical: Option<char>, key: &str, layouts: [&str; 2]) -> Option<char> {
-    physical.or_else(|| layouts.into_iter().find_map(|layout| digit_for_key(key, layout)))
+    physical.or_else(|| layout_digit(key, layouts))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

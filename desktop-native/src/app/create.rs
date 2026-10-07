@@ -1271,7 +1271,7 @@ impl NewSession {
                 };
                 self.sessions.finish(seq, result.map_err(|e| Hangar::fetch_failure(&e)));
                 self.name.update(cx, |input, cx| input.set_value(name, window, cx));
-                if std::mem::take(&mut self.create_when_ready) { self.create(None, cx); }
+                if std::mem::take(&mut self.create_when_ready) { self.submit(cx); }
             }
             CreateReply::Providers(seq, result) => {
                 let probes = result.map_err(|e| Hangar::fetch_failure(&e))
@@ -1616,8 +1616,8 @@ impl NewSession {
         if enter_action(self.compact || self.is_transfer(), self.picked.is_some(), None) == EnterAction::Submit { self.submit(cx); }
     }
 
-    /// O mesmo que o botão do formulário: retoma a conversa escolhida ou cria. Com o nome sugerido ainda chegando, a
-    /// criação espera por ele em vez de o Enter se perder.
+    /// A ação do botão do formulário, também a do Enter: retoma a conversa escolhida ou cria. Com o nome sugerido ainda
+    /// chegando, a criação espera por ele em vez de o Enter se perder.
     fn submit(&mut self, cx: &mut Context<Self>) {
         if self.target().is_some() { return self.resume(cx); }
         if self.can_create(cx) { self.create(None, cx); }
@@ -1940,10 +1940,10 @@ impl NewSession {
         // Uma ação primária só: com uma conversa escolhida, o botão continua aquela conversa em vez de criar.
         let submit = match &target {
             Some(c) => Button::new("create-resume-submit").primary().large().w_full().label(self.resume_label(c)).loading(busy).disabled(busy || !self.resume_ready())
-                .on_click(cx.listener(|this, _, _, cx| this.resume(cx))),
+                .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
             None => Button::new("create-submit").primary().large().w_full()
                 .label(tr(if busy { "create_creating" } else if self.baton.is_some() { "create_baton_submit" } else { "create_submit" }))
-                .loading(busy).disabled(!can && !busy).on_click(cx.listener(|this, _, _, cx| this.create(None, cx))),
+                .loading(busy).disabled(!can && !busy).on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
         };
         let footer = div().flex_shrink_0().pt(px(12.)).border_t_1().border_color(theme::border()).flex().flex_col().gap(px(8.))
             .when_some(self.error.clone(), |el, error| el.child(alert("create-error", error)))

@@ -133,8 +133,8 @@ fn captured_stroke(event: &KeyDownEvent, mapper: &dyn PlatformKeyboardMapper) ->
 
 fn number_key(key: &str) -> bool { key.len() == 1 && key.as_bytes()[0].is_ascii_digit() }
 
-fn reserved_number_key(key: &str, physical: Modifiers, hold: Modifiers, layout: &str) -> bool {
-    physical == hold && (super::session_numbers::digit_for_key(key, layout).is_some() || matches!(key, "enter" | "escape" | "backspace"))
+fn reserved_number_key(key: &str, physical: Modifiers, hold: Modifiers, layouts: [&str; 2]) -> bool {
+    physical == hold && (super::session_numbers::layout_digit(key, layouts).is_some() || matches!(key, "enter" | "escape" | "backspace"))
 }
 
 fn key_label(source: &str) -> String {
@@ -158,8 +158,7 @@ fn display_key(source: &str, physical: Option<Modifiers>, cx: &App) -> String {
     shown.key = mapped.key().to_owned();
     if shown.modifiers.shift {
         let layout = cx.keyboard_layout();
-        if let Some(digit) = super::session_numbers::digit_for_key(&shown.key, layout.id())
-            .or_else(|| super::session_numbers::digit_for_key(&shown.key, layout.name())) { shown.key = digit.to_string(); }
+        if let Some(digit) = super::session_numbers::layout_digit(&shown.key, [layout.id(), layout.name()]) { shown.key = digit.to_string(); }
     }
     key_label(&shown.unparse())
 }
@@ -223,11 +222,10 @@ impl Config {
             let key = KeybindingKeystroke::new_with_mapper(parsed, false, cx.keyboard_mapper().as_ref());
             let physical = self.physical.get(&canonical_key(source)?).copied().unwrap_or_else(|| {
                 let mut modifiers = *key.modifiers();
-                if !number_key(key.key()) && (super::session_numbers::digit_for_key(key.key(), layout.id()).is_some()
-                    || super::session_numbers::digit_for_key(key.key(), layout.name()).is_some()) { modifiers.shift = true; }
+                if !number_key(key.key()) && super::session_numbers::layout_digit(key.key(), [layout.id(), layout.name()]).is_some() { modifiers.shift = true; }
                 modifiers
             });
-            if reserved_number_key(key.key(), physical, self.hold, layout.id()) || reserved_number_key(key.key(), physical, self.hold, layout.name()) {
+            if reserved_number_key(key.key(), physical, self.hold, [layout.id(), layout.name()]) {
                 return Err(tr("keyboard_number_reserved").replace("{key}", &display_key(source, Some(physical), cx)));
             }
             if let Some(previous) = seen.insert((context.to_owned(), key.inner().unparse()), label.clone()) {
@@ -598,8 +596,7 @@ impl Hangar {
         if matches!(event.keystroke.key.as_str(), "shift" | "control" | "alt" | "platform" | "super" | "cmd" | "win") { return true; }
         let layout = cx.keyboard_layout();
         let physical = window.modifiers();
-        if reserved_number_key(stroke.key(), physical, self.keyboard.config.hold, layout.id())
-            || reserved_number_key(stroke.key(), physical, self.keyboard.config.hold, layout.name()) {
+        if reserved_number_key(stroke.key(), physical, self.keyboard.config.hold, [layout.id(), layout.name()]) {
             edit.key = None;
             edit.physical = None;
             self.keyboard.save_error = Some(tr("keyboard_number_reserved").replace("{key}", &display_key(&stroke.unparse(), Some(physical), cx)));
@@ -933,10 +930,10 @@ mod tests {
     #[test]
     fn shifted_number_capture_uses_physical_modifiers_and_known_layout() {
         let hold = Modifiers { control: true, shift: true, ..Modifiers::none() };
-        assert!(reserved_number_key("!", hold, hold, "English (US)"));
-        assert!(reserved_number_key("dead_diaeresis", hold, hold, "Portuguese (Brazil)"));
-        assert!(!reserved_number_key("!", Modifiers::control(), hold, "English (US)"));
-        assert!(!reserved_number_key("&", hold, hold, "German"));
+        assert!(reserved_number_key("!", hold, hold, ["English (US)"; 2]));
+        assert!(reserved_number_key("dead_diaeresis", hold, hold, ["Portuguese (Brazil)"; 2]));
+        assert!(!reserved_number_key("!", Modifiers::control(), hold, ["English (US)"; 2]));
+        assert!(!reserved_number_key("&", hold, hold, ["German"; 2]));
     }
 
     #[test]
