@@ -631,3 +631,31 @@ fn user_input_request_without_questions_asks_nothing() {
     line(&mut engine,json!({"id":6,"method":"item/tool/requestUserInput","params":{"threadId":"thread-1"}}),10.0);
     assert!(engine.view()["codex_question"].is_null());
 }
+
+#[test]
+fn undecodable_turn_completed_still_closes_the_turn() {
+    let mut engine = engine();
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),10.0);
+    let effects = line(&mut engine,json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":5}}}),11.0);
+    assert_eq!(diags(&effects),vec![(DiagEvent::CodexDecode,"turn_completed".into())]);
+    assert!(effects.iter().any(|e|matches!(e,Effect::WakeQueue)));
+    assert_eq!(engine.view()["state"],"idle");
+}
+
+#[test]
+fn undecodable_approval_shows_the_raw_command() {
+    let mut engine = engine();
+    line(&mut engine,json!({"id":3,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-1",
+        "command":"rm -rf build","cwd":"/repo","reason":5}}),10.0);
+    assert_eq!(engine.view()["question"],"Rodar `rm -rf build` em /repo?");
+}
+
+#[test]
+fn unreadable_codex_version_is_reported_without_problem() {
+    let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true}),1,clock(10.0));
+    let effects = engine.bootstrap(true,"boot".into()).unwrap();
+    let id = frames(&effects)[0]["id"].clone();
+    let effects = line(&mut engine,json!({"id":id,"result":{"userAgent":"sem versão"}}),11.0);
+    assert_eq!(diags(&effects),vec![(DiagEvent::CodexVersion,"codex_desconhecida".into())]);
+    assert!(engine.view()["problema"].is_null());
+}

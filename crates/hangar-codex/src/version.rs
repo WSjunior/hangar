@@ -18,6 +18,8 @@ fn major_minor(version:&str) -> Option<(u64,u64)> {
     Some((parts.next()?.parse().ok()?,parts.next()?.parse().ok()?))
 }
 
+pub fn readable(installed:&str) -> bool { major_minor(installed).is_some() }
+
 /// Versão ilegível não avisa: sem número não há o que comparar.
 pub fn differs(installed:&str) -> bool {
     match (major_minor(installed),major_minor(CHECKED)) { (Some(a),Some(b)) => a != b, _ => false }

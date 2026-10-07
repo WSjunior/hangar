@@ -200,6 +200,21 @@ fn decoded(request:&Value) -> wire::ServerRequest {
     wire::ServerRequest::decode(request["method"].as_str().unwrap_or(""),&request["params"]).unwrap_or(wire::ServerRequest::Unknown)
 }
 
+/// Só os campos que mudam o estado, lidos crus quando a notificação de ciclo de vida não decodifica.
+fn lifecycle_from_raw(method:&str,params:&Value) -> Option<wire::ServerNotification> {
+    let text = |value:&Value|value.as_str().unwrap_or("").to_owned();
+    let turn = || wire::Turn { id:text(&params["turn"]["id"]),status:text(&params["turn"]["status"]),
+        error:wire::TurnError::deserialize(&params["turn"]["error"]).ok() };
+    Some(match method {
+        "turn/started" => wire::ServerNotification::TurnStarted(wire::TurnStartedNotification { turn:turn(),..Default::default() }),
+        "turn/completed" => wire::ServerNotification::TurnCompleted(wire::TurnCompletedNotification { turn:turn(),..Default::default() }),
+        "thread/status/changed" => wire::ServerNotification::ThreadStatusChanged(wire::ThreadStatusChangedNotification {
+            status:match params["status"]["type"].as_str() { Some("active") => wire::ThreadStatus::Active, Some("idle") => wire::ThreadStatus::Idle, _ => wire::ThreadStatus::Unknown },
+            ..Default::default() }),
+        _ => return None,
+    })
+}
+
 fn unsupported_notice(request:&Value) -> Option<String> {
     let method = request["method"].as_str()?;
     if matches!(method,"item/commandExecution/requestApproval" | "item/fileChange/requestApproval" | "item/tool/requestUserInput") { return None; }
@@ -254,12 +269,20 @@ impl Engine {
         state.question = None; state.options = None;
         if let Some((_,request)) = pending_approval {
             let place = |path:Option<String>|path.map_or(String::new(),|p|format!(" em {p}"));
-            let (target,reason) = match decoded(request) {
-                wire::ServerRequest::FileChangeApproval(p) => (format!("Editar arquivos{}",place(p.grant_root)),p.reason),
-                wire::ServerRequest::CommandExecutionApproval(p) => (format!("Rodar `{}`{}",p.command.as_deref().unwrap_or("?"),place(p.cwd)),p.reason),
-                // Pedido fora do formato continua na tela, sem os detalhes.
-                _ if request["method"] == "item/fileChange/requestApproval" => ("Editar arquivos".into(),None),
-                _ => ("Rodar `?`".into(),None),
+            // Fora do formato os detalhes saem da linha crua: aprovar às cegas não é opção.
+            let raw = |key:&str|request["params"][key].as_str().map(str::to_owned);
+            let (target,reason) = if request["method"] == "item/fileChange/requestApproval" {
+                let (root,reason) = match decoded(request) {
+                    wire::ServerRequest::FileChangeApproval(p) => (p.grant_root,p.reason),
+                    _ => (raw("grantRoot"),raw("reason")),
+                };
+                (format!("Editar arquivos{}",place(root)),reason)
+            } else {
+                let (command,cwd,reason) = match decoded(request) {
+                    wire::ServerRequest::CommandExecutionApproval(p) => (p.command,p.cwd,p.reason),
+                    _ => (raw("command"),raw("cwd"),raw("reason")),
+                };
+                (format!("Rodar `{}`{}",command.as_deref().unwrap_or("?"),place(cwd)),reason)
             };
             state.question = Some(format!("{target}?{}",reason.map_or(String::new(),|r|format!(" {r}"))));
             state.options = Some(vec!["Permitir".into(),"Negar".into(),"Sempre permitir".into()]);
@@ -826,12 +849,15 @@ impl Engine {
             "initialize" => {
                 self.initialized = true;
                 let response:wire::InitializeResponse = self.decode_reply(&rpc.method,&result,effects);
-                if let Some(installed) = hangar_codex::version::from_user_agent(&response.user_agent) {
-                    if hangar_codex::version::differs(installed) {
+                match hangar_codex::version::from_user_agent(&response.user_agent) {
+                    Some(installed) if hangar_codex::version::differs(installed) => {
                         effects.push(Effect::Diag { event:DiagEvent::CodexVersion,code:hangar_codex::version::diag_code(installed) });
                         self.state.problema = Some("codex_versao_nao_conferida".into());
                         self.state.problema_detalhe = Some(format!("instalado {installed}, conferido {}",hangar_codex::version::CHECKED));
                     }
+                    Some(installed) if hangar_codex::version::readable(installed) => {}
+                    // Sem versão legível o aviso não tem com o que comparar, mas a falta fica no diário.
+                    _ => effects.push(Effect::Diag { event:DiagEvent::CodexVersion,code:"codex_desconhecida".into() }),
                 }
             }
             "thread/resume" | "thread/start" => {
@@ -1146,7 +1172,8 @@ impl Engine {
                 tracing::warn!(session=%self.state.session,method=%failure.method,error=wire::error_kind(&failure.error),"notificação do Codex fora do formato");
                 effects.push(Effect::Diag { event:DiagEvent::CodexDecode,code:decode_code(&failure.method) });
                 self.report_format(format!("decode:{}",failure.method),||line.clone(),effects);
-                return Ok(());
+                // Ciclo de vida não pode ser ignorado: a sessão ficaria `working` para sempre.
+                match lifecycle_from_raw(method,params) { Some(notification) => notification, None => return Ok(()) }
             }
         };
         use wire::ServerNotification as N;

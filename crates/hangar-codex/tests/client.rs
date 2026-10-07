@@ -103,3 +103,29 @@ async fn websocket_transport() {
     let init:InitializeResponse = client.request(ClientRequest::Initialize(Default::default()),Duration::from_secs(5)).await.unwrap();
     assert_eq!(init.user_agent,"x/0.159.3 (y)");
 }
+
+#[tokio::test]
+async fn request_with_invalid_id_is_rejected() {
+    let (ours,theirs) = tokio::io::duplex(1 << 16);
+    let (r,w) = tokio::io::split(ours);
+    let (_client,_incoming) = Client::over_lines(r,w);
+    let (read,mut write) = tokio::io::split(theirs);
+    write.write_all(b"{\"id\":1.5,\"method\":\"item/tool/requestUserInput\",\"params\":{}}\n").await.unwrap();
+    let mut lines = BufReader::new(read).lines();
+    let reply = tokio::time::timeout(Duration::from_secs(2),lines.next_line()).await.expect("sem resposta ao id inválido").unwrap().unwrap();
+    let reply:Value = serde_json::from_str(&reply).unwrap();
+    assert!(reply["id"].is_null());
+    assert_eq!(reply["error"]["code"],-32600);
+}
+
+#[tokio::test]
+async fn writer_dying_fails_pending_at_once() {
+    let (ours,_theirs) = tokio::io::duplex(1 << 16);
+    let (r,_) = tokio::io::split(ours);
+    let (broken,gone) = tokio::io::duplex(64);
+    drop(gone);
+    let (client,_incoming) = Client::over_lines(r,broken);
+    let call = client.request::<Value>(ClientRequest::ModelList(Default::default()),Duration::from_secs(60));
+    let result = tokio::time::timeout(Duration::from_secs(2),call).await.expect("não pode esperar o prazo");
+    assert!(matches!(result,Err(ClientError::Closed)));
+}

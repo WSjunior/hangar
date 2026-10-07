@@ -11,6 +11,13 @@ if [ "$instalada" != "$conferida" ]; then
 fi
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 codex app-server generate-json-schema --experimental --out "$tmp" >/dev/null
-(cd "$raiz/crates" && CODEX_SCHEMA_DIR="$tmp" CARGO_BUILD_JOBS=4 cargo test -q -p hangar-codex --lib -- --ignored regenerate_slice)
-(cd "$raiz/crates" && CARGO_BUILD_JOBS=4 cargo test -q -p hangar-codex --lib schema_check::fields_used_exist_in_checked_schema)
+# Filtro que não casa nenhum teste sai 0 calado; aqui isso é falha.
+rodar() {
+  local saida
+  saida="$(cd "$raiz/crates" && "$@" 2>&1)" || { echo "$saida"; exit 1; }
+  echo "$saida"
+  grep -qE 'test result: ok\. [1-9]' <<<"$saida" || { echo "Nenhum teste rodou: $*"; exit 1; }
+}
+rodar env CODEX_SCHEMA_DIR="$tmp" CARGO_BUILD_JOBS=4 cargo test -q -p hangar-codex --lib -- --ignored regenerate_slice
+rodar env CARGO_BUILD_JOBS=4 cargo test -q -p hangar-codex --lib schema_check::fields_used_exist_in_checked_schema
 git -C "$raiz" status --short -- crates/hangar-codex/schema

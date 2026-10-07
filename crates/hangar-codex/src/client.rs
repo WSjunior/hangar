@@ -30,14 +30,27 @@ impl Client {
         let pending:Pending = Arc::new(Mutex::new(Some(HashMap::new())));
         let (tx,rx) = mpsc::channel(INCOMING_CAPACITY);
         let reader_pending = pending.clone();
+        // Fraco: o leitor não pode manter o escritor vivo depois que o último `Client` sair.
+        let reader_out = out.downgrade();
         tokio::spawn(async move {
             while let Some(line) = lines_in.recv().await {
-                let Ok(Value::Object(mut msg)) = serde_json::from_str::<Value>(&line) else {
-                    tracing::debug!("mensagem do app-server do Codex que não é objeto JSON; descartada");
-                    continue;
+                let mut msg = match serde_json::from_str::<Value>(&line) {
+                    Ok(Value::Object(msg)) => msg,
+                    Ok(_) => { tracing::warn!(bytes=line.len(),error="not_object","mensagem do app-server do Codex descartada"); continue; }
+                    Err(e) => { tracing::warn!(bytes=line.len(),error=crate::proto::error_kind(&e),"mensagem do app-server do Codex descartada"); continue; }
                 };
+                let has_id = msg.get("id").is_some_and(|id|!id.is_null());
                 let id = msg.get("id").filter(|id|!id.is_null()).and_then(|id|RequestId::deserialize(id).ok());
                 let method = match msg.remove("method") { Some(Value::String(method)) => Some(method), _ => None };
+                if has_id && id.is_none() {
+                    tracing::warn!(request=method.is_some(),"id do app-server do Codex inválido; mensagem descartada");
+                    // Pedido sem id legível não pode virar notificação: o Codex ficaria esperando a resposta.
+                    // `try_send`: o leitor não pode travar atrás de um escritor parado.
+                    if method.is_some() && reader_out.upgrade().is_none_or(|out|out.try_send(json!({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"id inválido"}}).to_string()).is_err()) {
+                        tracing::warn!("resposta ao id inválido do Codex não coube na fila de saída");
+                    }
+                    continue;
+                }
                 let params = msg.remove("params").unwrap_or(Value::Null);
                 match (id,method) {
                     (Some(id),Some(method)) => {
@@ -61,9 +74,7 @@ impl Client {
                 }
             }
             // Conexão acabou: quem espera resposta sai agora, não no prazo.
-            if let Some(map) = reader_pending.lock().unwrap().take() {
-                for (_,waiter) in map { let _ = waiter.send(Err(ClientError::Closed)); }
-            }
+            close_pending(&reader_pending);
         });
         (Self { out,pending,next:Arc::new(AtomicI64::new(1)) },rx)
     }
@@ -82,11 +93,12 @@ impl Client {
                 // `take` limita a linha: acima do teto a conexão é encerrada.
                 let read = (&mut reader).take(MAX_LINE as u64 + 1).read_until(b'\n',&mut buffer).await;
                 match read {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) => break,
+                    Err(e) => { tracing::warn!(error=?e.kind(),"leitura do app-server do Codex falhou; conexão encerrada"); break; }
                     Ok(_) if buffer.len() > MAX_LINE => { tracing::warn!("linha do app-server do Codex acima do teto; conexão encerrada"); break; }
                     Ok(_) => {
                         let Ok(text) = std::str::from_utf8(&buffer) else {
-                            tracing::debug!("linha do app-server do Codex fora de UTF-8; descartada");
+                            tracing::warn!(bytes=buffer.len(),error="utf8","mensagem do app-server do Codex descartada");
                             continue;
                         };
                         let text = text.trim_end();
@@ -96,12 +108,20 @@ impl Client {
             }
         });
         let (out_tx,mut out_rx) = mpsc::channel::<String>(OUTGOING_CAPACITY);
+        let (client,incoming) = Self::start(lines_rx,out_tx);
+        let pending = client.pending.clone();
         tokio::spawn(async move {
             while let Some(line) = out_rx.recv().await {
-                if writer.write_all(line.as_bytes()).await.is_err() || writer.write_all(b"\n").await.is_err() || writer.flush().await.is_err() { break; }
+                let written = async { writer.write_all(line.as_bytes()).await?; writer.write_all(b"\n").await?; writer.flush().await }.await;
+                if let Err(e) = written {
+                    tracing::warn!(error=?e.kind(),"escrita para o app-server do Codex falhou; conexão encerrada");
+                    break;
+                }
             }
+            // Sem escritor nenhum pedido chega ao Codex: quem espera sai agora, não no prazo.
+            close_pending(&pending);
         });
-        Self::start(lines_rx,out_tx)
+        (client,incoming)
     }
 
     /// O `Receiver<Incoming>` segue o mesmo contrato de [`Client::over_lines`].
@@ -124,20 +144,30 @@ impl Client {
         let (mut sink,mut stream) = socket.split();
         let (lines_tx,lines_rx) = mpsc::channel::<String>(INCOMING_CAPACITY);
         tokio::spawn(async move {
-            while let Some(Ok(message)) = stream.next().await {
+            while let Some(message) = stream.next().await {
                 match message {
-                    Message::Text(text) => { if lines_tx.send(text.to_string()).await.is_err() { break; } }
-                    Message::Close(_) => break,
-                    _ => {},
+                    Ok(Message::Text(text)) => { if lines_tx.send(text.to_string()).await.is_err() { break; } }
+                    Ok(Message::Close(_)) => break,
+                    Ok(Message::Binary(data)) => tracing::warn!(bytes=data.len(),error="binary","mensagem do app-server do Codex descartada"),
+                    Ok(_) => {},
+                    Err(e) => { tracing::warn!(error=ws_error_kind(&e),"leitura do WebSocket do Codex falhou; conexão encerrada"); break; }
                 }
             }
         });
         let (out_tx,mut out_rx) = mpsc::channel::<String>(OUTGOING_CAPACITY);
+        let (client,incoming) = Self::start(lines_rx,out_tx);
+        let pending = client.pending.clone();
         tokio::spawn(async move {
-            while let Some(line) = out_rx.recv().await { if sink.send(Message::text(line)).await.is_err() { break; } }
+            while let Some(line) = out_rx.recv().await {
+                if let Err(e) = sink.send(Message::text(line)).await {
+                    tracing::warn!(error=ws_error_kind(&e),"escrita no WebSocket do Codex falhou; conexão encerrada");
+                    break;
+                }
+            }
+            close_pending(&pending);
             let _ = sink.close().await;
         });
-        Ok(Self::start(lines_rx,out_tx))
+        Ok((client,incoming))
     }
 
     pub async fn request<R:DeserializeOwned>(&self,request:ClientRequest,timeout:Duration) -> Result<R,ClientError> {
@@ -170,6 +200,25 @@ impl Client {
     }
 }
 
+/// Fecha o mapa: os pedidos em voo saem com `Closed` e os novos já nascem recusados.
+fn close_pending(pending:&Pending) {
+    if let Some(map) = pending.lock().unwrap().take() {
+        for (_,waiter) in map { let _ = waiter.send(Err(ClientError::Closed)); }
+    }
+}
+
+/// Só a categoria: a mensagem do erro pode ecoar o quadro recebido.
+fn ws_error_kind(error:&tokio_tungstenite::tungstenite::Error) -> &'static str {
+    use tokio_tungstenite::tungstenite::Error;
+    match error {
+        Error::ConnectionClosed | Error::AlreadyClosed => "closed",
+        Error::Io(_) => "io",
+        Error::Protocol(_) => "protocol",
+        Error::Capacity(_) => "capacity",
+        Error::Utf8(_) => "utf8",
+        _ => "other",
+    }
+}
 
 struct ForgetOnDrop<'a> { pending:&'a Pending, id:&'a RequestId }
 
