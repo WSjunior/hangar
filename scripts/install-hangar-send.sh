@@ -77,14 +77,20 @@ plugin_dst="$HOME/.claude/skills/hangar"
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) msys=1 ;; *) msys= ;; esac
 # Pasta `hangar` que não é o plugin é de outra pessoa e fica.
 if ! grep -qs '"name": *"hangar"' "$plugin_dst/.claude-plugin/plugin.json"; then
-    :
+    if [ -e "$plugin_dst" ] || [ -L "$plugin_dst" ]; then
+        echo "aviso: ~/.claude/skills/hangar nao e o plugin do Hangar; ficou, e o /plugin pode acusar nome repetido" >&2
+    fi
 elif [ -L "$plugin_dst" ]; then
     # Só o link sai: `rm -rf` atravessaria a junção e apagaria o destino dela.
-    if [ -n "$msys" ]; then cmd //c rmdir "$(cygpath -w "$plugin_dst")"; else rm -f "$plugin_dst"; fi
-    echo "ok: ~/.claude/skills/hangar removido (plugin vem por --plugin-dir)"
-else
-    rm -rf "$plugin_dst"
+    if { [ -n "$msys" ] && cmd //c rmdir "$(cygpath -w "$plugin_dst")"; } || { [ -z "$msys" ] && rm -f "$plugin_dst"; }; then
+        echo "ok: ~/.claude/skills/hangar removido (plugin vem por --plugin-dir)"
+    else
+        echo "aviso: nao consegui remover o link ~/.claude/skills/hangar; apague-o a mao" >&2
+    fi
+elif rm -rf "$plugin_dst"; then
     echo "ok: copia antiga do plugin em ~/.claude/skills/hangar removida"
+else
+    echo "aviso: nao consegui remover a copia antiga em ~/.claude/skills/hangar; apague-a a mao" >&2
 fi
 
 # Agentes das skills (ex.: preparar-plano da orquestrar): link no Claude, .toml em cada home do Codex.
