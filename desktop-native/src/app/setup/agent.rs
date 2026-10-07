@@ -23,9 +23,11 @@ pub(crate) const REMOVED_ENV: [&str; 9] = ["CLAUDECODE", "HANGAR_TOKEN", "HANGAR
 
 /// Sem senha de administrador e sem mexer no histórico da pasta: o app desfaz pelo `git status`, e commit ou reset
 /// esconderiam a edição dele.
-pub(crate) const CLAUDE_DENIED: [&str; 16] = ["Bash(sudo *)", "Bash(su *)", "Bash(doas *)", "Bash(pkexec *)", "Bash(runas *)",
+pub(crate) const CLAUDE_DENIED: [&str; 20] = ["Bash(sudo *)", "Bash(su *)", "Bash(doas *)", "Bash(pkexec *)", "Bash(runas *)",
     "Bash(git commit *)", "Bash(git push *)", "Bash(git reset *)", "Bash(git checkout *)", "Bash(git restore *)", "Bash(git stash *)",
-    "Bash(git clean *)", "Bash(git switch *)", "Bash(git rebase *)", "Bash(git merge *)", "Bash(git pull *)"];
+    "Bash(git clean *)", "Bash(git switch *)", "Bash(git rebase *)", "Bash(git merge *)", "Bash(git pull *)",
+    // `git -C <pasta> commit` e `bash -c 'sudo …'` escapam das regras que casam só o começo do comando.
+    "Bash(git -C *)", "Bash(git -c *)", "Bash(/usr/bin/sudo *)", "Bash(*sudo *)"];
 
 /// Teto do conserto: passou, o app pára o agente e segue com o que houver.
 pub(crate) const MAX_RUN: Duration = Duration::from_secs(20 * 60);
@@ -149,6 +151,8 @@ pub(crate) struct Transcript {
     pub commands: Vec<String>,
     pub edits: Vec<String>,
     pub explanation: Option<String>,
+    /// O agente terminou com erro (limite de turnos, falha da API): a explicação é o motivo, não um conserto.
+    pub failed: bool,
 }
 
 impl Transcript {
@@ -183,6 +187,12 @@ impl Transcript {
                     _ => {}
                 }
             },
+            Some("result") if event.get("is_error").and_then(Value::as_bool) == Some(true) => {
+                let reason = event.get("subtype").and_then(Value::as_str).unwrap_or("error");
+                let detail = event.get("result").and_then(Value::as_str).unwrap_or_default();
+                self.failed = true;
+                self.explanation = Some(format!("{reason}: {detail}").trim_end_matches([':', ' ']).to_owned());
+            }
             Some("result") => if let Some(text) = event.get("result").and_then(Value::as_str) { self.explanation = Some(text.to_owned()) },
             _ => {}
         }
@@ -272,7 +282,7 @@ mod tests {
         let args = args(Agent::Claude, Path::new("/home/dev"), Path::new("/home/dev/hangar"), Path::new("/cfg/setup/agent"));
         let joined = args.join(" ");
         for needle in ["-p --output-format stream-json --verbose", "--permission-mode dontAsk", "--no-session-persistence",
-            "--allowedTools Bash Read Edit Write Glob Grep", "Bash(sudo *)", "Bash(pkexec *)", "Bash(git commit *)", "Bash(git reset *)"] {
+            "--allowedTools Bash Read Edit Write Glob Grep", "Bash(sudo *)", "Bash(pkexec *)", "Bash(git commit *)", "Bash(git reset *)", "Bash(git -C *)", "Bash(git -c *)", "Bash(/usr/bin/sudo *)", "Bash(*sudo *)"] {
             assert!(joined.contains(needle), "{needle}: {joined}");
         }
         assert_eq!(&args[args.len() - 3..], ["--add-dir", "/home/dev", "/home/dev/hangar"]);
@@ -312,6 +322,11 @@ mod tests {
         assert_eq!(t.commands, vec!["systemctl --user status"]);
         assert_eq!(t.edits, vec!["/home/dev/hangar/install.sh"]);
         assert_eq!(t.explanation.as_deref(), Some("Consertei o PATH."));
+        assert!(!t.failed);
+        let mut failed = Transcript::default();
+        failed.feed(Agent::Claude, r#"{"type":"result","subtype":"error_max_turns","is_error":true}"#);
+        assert!(failed.failed);
+        assert_eq!(failed.explanation.as_deref(), Some("error_max_turns"));
         assert_eq!(t.lines, vec!["$ systemctl --user status", "✎ /home/dev/hangar/install.sh", "aviso cru no stderr"]);
     }
 
@@ -329,7 +344,7 @@ mod tests {
 
     #[test]
     fn recheck_only_checks_until_the_phone_password_is_saved() {
-        let options = run::Options { agents: vec!["claude".into()], outside: false, ..Default::default() };
+        let options = run::Options { agents: vec!["claude".into()], outside: false };
         let dest = Path::new("/home/dev/hangar");
         assert_eq!(recheck_command(dest, &options, true, false), "bash '/home/dev/hangar/install.sh' --app --agentes=claude --tailscale=nao --sem-nativo");
         assert!(recheck_command(dest, &options, false, false).ends_with(" --check"));
