@@ -1,7 +1,14 @@
 //! Cliente do `codex app-server` em stdio: JSON-RPC 2.0, um objeto por linha.
 use serde_json::{Value, json};
-use std::{collections::HashMap, path::{Path, PathBuf}, process::Stdio, sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU64, Ordering}}, time::Duration};
+use crate::app::setup::system::{find_program, refreshed_path};
+use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU64, Ordering}}, time::Duration};
 use tokio::{io::{AsyncBufReadExt, AsyncWriteExt, BufReader}, process::{Child, ChildStdin, Command}, sync::{Mutex as AsyncMutex, oneshot}};
+
+const DEADLINE: Duration = Duration::from_secs(30);
+
+/// O `codex` achado e o PATH com que ele roda: o atalho do npm/fnm precisa do `node` nesse PATH.
+#[derive(Clone, Debug)]
+pub struct Codex { pub bin: PathBuf, pub path: String }
 
 #[derive(Debug)]
 pub enum RpcError { Spawn, Closed, Timeout, Server(String) }
@@ -16,7 +23,19 @@ enum Routed { Reply(u64, Result<Value, RpcError>), Incoming(Incoming) }
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>>>;
 
-pub struct Rpc { stdin: AsyncMutex<ChildStdin>, next: AtomicU64, pending: Pending, closed: Arc<AtomicBool>, _child: Child }
+pub struct Rpc { stdin: AsyncMutex<ChildStdin>, next: AtomicU64, pending: Pending, closed: Arc<AtomicBool>, pid: Option<u32>, _child: Child }
+
+// `kill_on_drop` só mata o `cmd.exe` quando o atalho é `codex.cmd`; a árvore inteira cai pelo taskkill.
+impl Drop for Rpc {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if let Some(pid) = self.pid {
+            let _ = crate::app::setup::system::hidden(std::process::Command::new("taskkill").args(["/T", "/F", "/PID", &pid.to_string()])).output();
+        }
+        #[cfg(not(windows))]
+        let _ = self.pid;
+    }
+}
 
 fn route(line: &str) -> Option<Routed> {
     let value: Value = serde_json::from_str(line).ok()?;
@@ -37,31 +56,25 @@ fn route(line: &str) -> Option<Routed> {
     }
 }
 
-fn find_in(dirs: &[PathBuf]) -> Option<PathBuf> {
-    let names: &[&str] = if cfg!(windows) { &["codex.exe", "codex.cmd"] } else { &["codex"] };
-    dirs.iter().flat_map(|dir| names.iter().map(move |name| dir.join(name))).find(|path| path.is_file())
-}
-
-pub fn find_codex() -> Option<PathBuf> {
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|path| std::env::split_paths(&path).collect()).unwrap_or_default();
-    // App aberto pelo .desktop não herda o PATH do shell; ~/.local/bin é onde o instalador do Codex põe o atalho.
-    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-        dirs.push(PathBuf::from(home).join(".local").join("bin"));
-    }
-    find_in(&dirs)
+/// Bloqueia (o PATH refeito pode rodar `npm prefix -g`): quem chama o faz fora da thread da tela.
+pub fn find_codex() -> Option<Codex> {
+    let path = refreshed_path();
+    find_program("codex", &path).map(|bin| Codex { bin, path })
 }
 
 impl Rpc {
-    pub async fn spawn(codex: &Path) -> Result<(Rpc, async_channel::Receiver<Incoming>), RpcError> {
-        Self::spawn_program(codex.as_os_str(), &["app-server"]).await
+    pub async fn spawn(codex: &Codex) -> Result<(Rpc, async_channel::Receiver<Incoming>), RpcError> {
+        Self::spawn_program(&codex.bin, &["app-server"], Some(&codex.path)).await
     }
 
-    async fn spawn_program(program: impl AsRef<std::ffi::OsStr>, args: &[&str]) -> Result<(Rpc, async_channel::Receiver<Incoming>), RpcError> {
+    async fn spawn_program(program: impl AsRef<std::ffi::OsStr>, args: &[&str], path: Option<&str>) -> Result<(Rpc, async_channel::Receiver<Incoming>), RpcError> {
         let mut command = Command::new(program);
         command.args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+        if let Some(path) = path { command.env("PATH", path); }
         #[cfg(windows)]
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: sem console piscando ao ligar a voz
         let mut child = command.spawn().map_err(|_| RpcError::Spawn)?;
+        let pid = child.id();
         let stdin = child.stdin.take().ok_or(RpcError::Spawn)?;
         let stdout = child.stdout.take().ok_or(RpcError::Spawn)?;
         let pending: Pending = Default::default();
@@ -69,9 +82,13 @@ impl Rpc {
         let (tx, rx) = async_channel::unbounded();
         let (readers, reader_closed) = (pending.clone(), closed.clone());
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                match route(&line) {
+            // Bytes, não `lines()`: uma linha fora de UTF-8 não pode encerrar a leitura.
+            let mut reader = BufReader::new(stdout);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                if !matches!(reader.read_until(b'\n', &mut buf).await, Ok(n) if n > 0) { break; }
+                match route(&String::from_utf8_lossy(&buf)) {
                     Some(Routed::Reply(id, result)) => {
                         if let Some(waiter) = readers.lock().unwrap().remove(&id) { let _ = waiter.send(result); }
                     }
@@ -84,13 +101,15 @@ impl Rpc {
             for (_, waiter) in readers.lock().unwrap().drain() { let _ = waiter.send(Err(RpcError::Closed)); }
             let _ = tx.send(Incoming::Exited).await;
         });
-        Ok((Rpc { stdin: AsyncMutex::new(stdin), next: AtomicU64::new(0), pending, closed, _child: child }, rx))
+        Ok((Rpc { stdin: AsyncMutex::new(stdin), next: AtomicU64::new(0), pending, closed, pid, _child: child }, rx))
     }
 
+    // O prazo cobre a trava e a escrita: pipe parado não pode prender o stdin para sempre.
     async fn write(&self, value: Value) -> Result<(), RpcError> {
         let mut line = value.to_string();
         line.push('\n');
-        self.stdin.lock().await.write_all(line.as_bytes()).await.map_err(|_| RpcError::Closed)
+        let send = async { self.stdin.lock().await.write_all(line.as_bytes()).await.map_err(|_| RpcError::Closed) };
+        tokio::time::timeout(DEADLINE, send).await.unwrap_or(Err(RpcError::Timeout))
     }
 
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, RpcError> {
@@ -105,7 +124,7 @@ impl Rpc {
             self.pending.lock().unwrap().remove(&id);
             return Err(error);
         }
-        match tokio::time::timeout(Duration::from_secs(30), rx).await {
+        match tokio::time::timeout(DEADLINE, rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(RpcError::Closed),
             Err(_) => { self.pending.lock().unwrap().remove(&id); Err(RpcError::Timeout) }
@@ -151,22 +170,11 @@ mod tests {
         assert_eq!(message, "conversation is not running");
     }
 
-    #[test]
-    fn finds_codex_in_path_dir() {
-        let dir = std::env::temp_dir().join(format!("voice-find-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let name = if cfg!(windows) { "codex.exe" } else { "codex" };
-        std::fs::write(dir.join(name), b"").unwrap();
-        assert_eq!(find_in(&[dir.clone()]), Some(dir.join(name)));
-        assert_eq!(find_in(&[dir.join("nada")]), None);
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
     #[tokio::test]
     async fn exited_child_fails_pending_requests() {
         // Um "codex" que sai na hora: a request pendente falha com Closed em vez de esperar o prazo.
         let (program, args): (&str, &[&str]) = if cfg!(windows) { ("cmd", &["/c", "exit"]) } else { ("true", &[]) };
-        let (rpc, incoming) = Rpc::spawn_program(program, args).await.unwrap();
+        let (rpc, incoming) = Rpc::spawn_program(program, args, None).await.unwrap();
         let result = rpc.request("initialize", serde_json::json!({})).await;
         assert!(matches!(result, Err(RpcError::Closed)));
         assert!(matches!(incoming.recv().await, Ok(Incoming::Exited)));
