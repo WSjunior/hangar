@@ -63,7 +63,10 @@ jobs:
             libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev libvulkan-dev libzstd-dev
       # O rustup do runner lê o rust-toolchain.toml (1.98.1) no primeiro cargo. actions/cache e não rust-cache: a
       # política do repositório só libera actions do GitHub e de criadores verificados.
-      - uses: actions/cache@v4
+      # Só a main grava (o passo `cache/save` lá embaixo); as outras branches leem o dela. Cada branch
+      # gravando a própria cópia estourava o limite de cache do repositório e o GitHub despejava a da main.
+      - uses: actions/cache/restore@v4
+        id: cache-rust
         with:
           path: |
             ~/.cargo/registry
@@ -78,6 +81,14 @@ jobs:
           HANGAR_NATIVE_CHANNEL: ${{ github.ref_name }}
           CARGO_PROFILE_RELEASE_LTO: fat
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+      - uses: actions/cache/save@v4
+        if: github.ref == 'refs/heads/main' && steps.cache-rust.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop-native/target
+          key: ${{ steps.cache-rust.outputs.cache-primary-key }}
       # Binário cru com nome limpo (o que o app baixa para se atualizar) + arquivo compactado para quem baixa à mão.
       # O binário cru mantém o nome usado pelo atualizador. O arquivo manual leva o lançador/ícone no Linux,
       # o executável com ícone incorporado no Windows e o pacote .app com ICNS no macOS.

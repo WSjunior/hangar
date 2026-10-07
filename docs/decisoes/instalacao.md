@@ -509,6 +509,10 @@ os passos do que mudou, e árvore que já passou não roda nada.
   contra Server 2022, e o cache frio de cada rodada do CI.
 - **O que só o CI faz**: build release com LTO fat (`zigbuild` com glibc 2.28 no Linux), macOS, a
   publicação dos binários e do `dist-latest`, e o `passos` (o pre-commit faz o mesmo por commit).
+- **Cache do Rust no Actions: só a `main` grava, toda branch lê o dela.** Em 07/10 o repositório
+  estava em 7,3 GB de 10 GB, com cópias de 2 a 3,6 GB gravadas por branches `fix/*`; a parte1
+  tinha perdido o cache de Linux e Windows. O Windows do `server.yml` levou 1503 s frio contra
+  1144 s quente na mesma árvore (PRs de medição #95/#96).
 - **Exigido só onde vira PR ou main (decisão do dono, 07/10).** Exigir em todo push travava quem só
   quer guardar trabalho numa branch. O que importa é o que vai ser revisto e juntado: o PR nasce
   verificado inteiro, e cada push seguinte nele ou na `main` também.
