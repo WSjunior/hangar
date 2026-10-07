@@ -696,7 +696,9 @@ def session_write_rows() -> tuple[list, list]:
             return {"operation_id": operation_id, "disposition": chosen[0], "payload": chosen[1]}
 
     diary = []
-    api.diag.registrar = lambda event, level="ok", **fields: diary.append({"event": event, "code": fields.get("codigo")})
+    # Só os eventos da rota: sem tmux no ambiente, o módulo dele também escreve no diário (`mux.*`).
+    api.diag.registrar = lambda event, level="ok", **fields: (event.startswith(("runtime.", "opcao."))
+        and diary.append({"event": event, "code": fields.get("codigo")}))
     api.uuid = SimpleNamespace(uuid4=lambda: SimpleNamespace(hex=INPUT_OP))
     api._recusa_orq = lambda name: None
     api._session_exists = lambda name: True
@@ -858,7 +860,7 @@ def control_rows() -> list:
                 raise RuntimeError(self.reply.removeprefix("!erro: "))
             return {"operation_id": operation_id, "disposition": self.reply[0], "payload": self.reply[1]}
 
-    api.diag.registrar = lambda event, level="ok", **fields: diary.append(event)
+    api.diag.registrar = lambda event, level="ok", **fields: event.startswith(("runtime.", "opcao.")) and diary.append(event)
     api._recusa_orq = lambda name: None
     api._session_exists = lambda name: True
     api._provider_of = lambda name: "claude"

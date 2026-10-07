@@ -18,6 +18,7 @@ lado guarda a cópia na própria branch; quem junta por último leva a versão f
 | `/rename`, `DELETE`, `/recarregar`, `/keys`, `/term-input` e `DELETE …/queue/{id}` com provedor Codex: repassados ao Python pela tabela (Codex com terminal só vira na 5C) | Codex vira quando plugar 5B/5C/5E | — |
 | Criar sessão (`POST /api/sessions`) | **parte 6**, aprovado pelo dono em 07/10. Na 5E a metade Codex leva para o Rust só as checagens Codex da criação (escolha de conta, catálogo de modelo, reserva), chamadas pela rota Python por `/internal` | 5E (Codex) |
 | `/commands` (leitura) | fora da 5-0: Claude na C4, Codex na 5B | — |
+| Processo do cano no Rust (subir, escopo systemd/job, socket+token, sidecar, matar grupo, órfãos, reiniciar/fechar), módulo comum com argumentos por provedor; o Python só calcula comando/ambiente até a parte 6 | Codex desenha e faz; Claude pluga depois (decisão do dono) | 5B |
 | Plugin do Claude (C2), fatos do terminal (C3), administração sem empréstimo (C4), ciclo de vida do Claude (C5) | Claude | depois da 5-0 |
 
 ## Regras dos arquivos que as duas mexem
