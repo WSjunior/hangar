@@ -325,7 +325,7 @@ class RuntimeCoordinator:
         from app import conversation_transfer
         for record in await asyncio.to_thread(conversation_transfer.list_incomplete):
             try:
-                await self.ingress(record.name, True)
+                await self.ingress(record.name, True, held=True)
                 conversation_transfer.hold_gate(record.name)
             except Exception as exc:
                 _registration_failed("runtime.ingress_failed", record.name, exc, rust_dead=not self._rust_alive())
@@ -1466,47 +1466,50 @@ class RuntimeCoordinator:
                     self.slots.pop(slot.binding.key, None)
                 raise
 
-    async def ingress(self, name, closed):
+    async def ingress(self, name, closed, *, held=False):
         """Fecha/abre a porta de escrita do Rust para a sessão `name`. Vai direto pelo transporte:
-        `op` passa por queue_gate/freeze e travaria dentro do próprio freeze."""
+        `op` passa por queue_gate/freeze e travaria dentro do próprio freeze. `held`: fechamento da
+        troca de conversa, que pode durar indefinidamente; o Rust recusa na hora em vez de esperar, e
+        a reabertura correspondente leva o mesmo `held`."""
         if self.transport is None:
             return
         # O Rust trata `ingress` antes de procurar a entrada: serve qualquer chave, até de nome sem registro.
         descriptor = {"key": name, "generation": 0, "meta": {}}
-        await self._rpc(descriptor, {"kind": "ingress", "name": name, "closed": closed}, uuid.uuid4().hex)
+        command = {"kind": "ingress", "name": name, "closed": closed}
+        if held:
+            command["held"] = True
+        await self._rpc(descriptor, command, uuid.uuid4().hex)
 
-    def ingress_sync(self, name, closed):
+    def ingress_sync(self, name, closed, *, held=False):
         if self.transport is None:
             return
         from app.runtime_adapter import run_sync
-        run_sync(lambda: self.ingress(name, closed), self.loop)
+        run_sync(lambda: self.ingress(name, closed, held=held), self.loop)
 
     @asynccontextmanager
     async def _ingress_closed(self, *names):
         """Cada fechamento é contado no Rust: abre exatamente os que este bloco fechou."""
-        closed, failure, ok = [], None, False
+        closed = []
         try:
             for name in names:
                 await self.close_ingress(name)
                 closed.append(name)
             yield
-            ok = True
         finally:
-            # Cada reabertura na sua tentativa: uma falha não deixa as outras portas fechadas.
+            # Cada reabertura na sua tentativa: uma falha não deixa as outras portas fechadas. Não
+            # levanta: o bloco já fez o trabalho (um /rename concluído não pode responder erro), e a
+            # porta presa vai ao diário com o código.
             for name in closed:
                 try:
                     await self.ingress(name, False)
                 except Exception as exc:
                     from app import diag
                     diag.registrar("runtime.ingress_reopen_failed", "erro", sessao=name, **failure_reason(exc))
-                    failure = failure or exc
-            if ok and failure is not None:
-                raise failure
 
-    async def close_ingress(self, name):
+    async def close_ingress(self, name, *, held=False):
         """Fecha a porta; se quem espera for cancelado, o pedido já enviado termina (o transporte o
         protege) e o fechamento que ninguém vai abrir é desfeito."""
-        task = asyncio.ensure_future(self.ingress(name, True))
+        task = asyncio.ensure_future(self.ingress(name, True, held=held))
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError:
@@ -1516,7 +1519,7 @@ class RuntimeCoordinator:
                 pass            # o fechamento não chegou ao Rust: nada a desfazer
             else:
                 try:
-                    await self.ingress(name, False)
+                    await self.ingress(name, False, held=held)
                 except Exception:
                     _log.warning("porta do Rust ficou fechada após cancelamento de %s", name, exc_info=True)
             raise

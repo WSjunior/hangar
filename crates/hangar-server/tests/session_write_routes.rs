@@ -206,6 +206,22 @@ async fn gate_closed_past_the_wait_answers_409_busy() {
 }
 
 #[tokio::test]
+async fn gate_held_by_a_transfer_answers_409_without_waiting() {
+    let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
+    open_entry(&registry, dir.path(), "k", "s").await;
+    registry.ingress().hold("s", Duration::from_secs(1)).await.unwrap();
+    // Espera padrão da porta (30 s): a retenção não pode gastá-la.
+    let (python, server) = serve_with(Some(registry)).await;
+    let start = std::time::Instant::now();
+    let (status, text) = tokio::time::timeout(Duration::from_secs(5), post(server, "input", r#"{"text":"oi"}"#, OWNER)).await.unwrap();
+    assert!(start.elapsed() < Duration::from_secs(1), "{:?}", start.elapsed());
+    assert_eq!(status, 409);
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(body["detail"]["code"], "session_transfer_busy");
+    assert_eq!(python.hits_to("/api/sessions/s/input"), 0);
+}
+
+#[tokio::test]
 async fn oversized_body_answers_python_413_text() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
     open_entry(&registry, dir.path(), "k", "s").await;
@@ -235,7 +251,8 @@ async fn forwarding_never_holds_the_ingress_pass() {
     // Entrada doente: o cano cai depois de aberta e o retrato passa a dizer `cano_exited`.
     let kill = Arc::new(tokio::sync::Notify::new());
     open_entry_with(&registry, dir.path(), "d", "doente", 1, cano_with(Some(kill.clone())).await).await;
-    kill.notify_waiters();
+    // `notify_one` guarda o aviso se o cano falso ainda não chegou ao `select`.
+    kill.notify_one();
     for _ in 0..100 {
         if !registry.writable("doente").await.unwrap().healthy { break; }
         tokio::time::sleep(Duration::from_millis(20)).await;

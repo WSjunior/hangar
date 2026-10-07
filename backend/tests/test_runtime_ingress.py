@@ -14,16 +14,22 @@ class Transport:
     def __init__(self, log=None, busy=False):
         self.log = [] if log is None else log
         self.busy = busy
+        self.held = []
 
     async def op(self, descriptor, command, operation_id, clock):
         assert descriptor["key"] and operation_id
         self.log.append((command["kind"], command.get("name"), command.get("closed")))
+        if command["kind"] == "ingress":
+            self.held.append(command.get("held"))
         if command["kind"] == "ingress" and command["closed"] and self.busy:
             raise RustOpError("ingress_busy", 503, "ingress_busy")
         return {"closed": command.get("closed")}
 
     def ingress(self):
         return [(n, c) for k, n, c in self.log if k == "ingress"]
+
+    def holds(self):
+        return [(n, c, h) for (n, c), h in zip(self.ingress(), self.held)]
 
 
 def binding(tmp_path, name="session"):
@@ -46,6 +52,8 @@ def test_freeze_closes_before_frozen_and_opens_on_exit(tmp_path):
         async with coordinator.freeze("session"):
             assert transport.ingress() == [("session", True)] and slot.frozen
         assert transport.ingress() == [("session", True), ("session", False)] and not slot.frozen
+        # Congelamento curto: fechamento comum, o Rust espera reabrir em vez de recusar.
+        assert transport.holds() == [("session", True, None), ("session", False, None)]
     asyncio.run(flow())
     coordinator.close_python_leases()
 
@@ -174,7 +182,7 @@ def test_transfer_operation_opens_when_transfer_is_terminal(transfer_env):
         async with ct.transfer_operation("s"):
             assert transport.ingress() == [("s", True)]
     asyncio.run(flow())
-    assert transport.ingress() == [("s", True), ("s", False)]
+    assert transport.holds() == [("s", True, True), ("s", False, True)]
 
 
 def test_transfer_operation_keeps_gate_closed_while_transfer_incomplete(transfer_env):
@@ -190,6 +198,8 @@ def test_transfer_operation_keeps_gate_closed_while_transfer_incomplete(transfer
         await asyncio.to_thread(ct.release_gate, "s")
     asyncio.run(flow())
     assert transport.ingress() == [("s", True), ("s", False)] and not ct._gate_held
+    # Fechamento da troca é retido no Rust (recusa na hora) e a reabertura desfaz a retenção.
+    assert transport.holds() == [("s", True, True), ("s", False, True)]
 
 
 def test_recover_with_gate_already_held_does_not_close_twice(transfer_env):
@@ -248,7 +258,7 @@ def test_enter_rust_closes_every_incomplete_transfer(tmp_path, monkeypatch):
     monkeypatch.setattr(ct, "_gate_held", set())
     monkeypatch.setattr(ct, "list_incomplete", lambda: [SimpleNamespace(name="a"), SimpleNamespace(name="b")])
     asyncio.run(coordinator._close_ingress_of_incomplete_transfers())
-    assert transport.ingress() == [("a", True), ("b", True)] and ct._gate_held == {"a", "b"}
+    assert transport.holds() == [("a", True, True), ("b", True, True)] and ct._gate_held == {"a", "b"}
 
 
 # --- sessão Claude sem vínculo no Rust ---------------------------------------------------
@@ -317,7 +327,7 @@ def test_cancelled_close_is_undone_once_the_request_lands(tmp_path):
     coordinator.close_python_leases()
 
 
-def test_failed_reopen_does_not_stop_the_others_and_surfaces_when_block_ok(tmp_path):
+def test_failed_reopen_does_not_stop_the_others_and_never_fails_a_done_block(tmp_path, monkeypatch):
     transport = Transport()
     coordinator, _ = coordinator_with(tmp_path, transport)
     original = transport.op
@@ -332,9 +342,12 @@ def test_failed_reopen_does_not_stop_the_others_and_surfaces_when_block_ok(tmp_p
     async def bad_block():
         async with coordinator._ingress_closed("session", "novo"):
             raise ValueError("corpo")
-    with pytest.raises(RustOpError):
-        asyncio.run(ok_block())
+    from app import diag
+    logged = []
+    monkeypatch.setattr(diag, "registrar", lambda event, level, **fields: logged.append((event, fields["codigo"])))
+    asyncio.run(ok_block())         # o bloco deu certo: a reabertura que falha só vai ao diário
     assert ("novo", False) in transport.ingress()
+    assert logged == [("runtime.ingress_reopen_failed", "queue_io")]
     with pytest.raises(ValueError):                 # a falha do corpo não é mascarada
         asyncio.run(bad_block())
     coordinator.close_python_leases()
@@ -342,7 +355,7 @@ def test_failed_reopen_does_not_stop_the_others_and_surfaces_when_block_ok(tmp_p
 
 def test_release_gate_failure_keeps_the_name_held(monkeypatch):
     class Broken:
-        def ingress_sync(self, name, closed):
+        def ingress_sync(self, name, closed, *, held=False):
             raise RuntimeError("loop fora")
     monkeypatch.setattr(runtime_coordinator, "_current", Broken())
     monkeypatch.setattr(ct, "_gate_held", {"s"})

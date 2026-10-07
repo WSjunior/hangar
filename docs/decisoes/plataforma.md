@@ -1661,6 +1661,11 @@ pelo Rust, com e sem terminal. Decisões:
   transferir, renomear) e reabre depois. Fechar espera as escritas em curso por até 60 s e, se
   não esvaziar, responde `ingress_busy` e reabre. A mensagem `ingress` vai direto pelo transporte,
   nunca por `coordinator.op`: `op` passa pelo `freeze` e travaria dentro do próprio `freeze`.
+- **Porta retida pela troca de conversa recusa na hora.** A troca pode parar numa fase não
+  terminal (`RESTORE_FAILED`) e reter a porta indefinidamente; esperar os 30 s da rota antes do
+  409 `session_transfer_busy` seria pior que o `_transfer_guard` antigo, que recusava na hora. O
+  fechamento da troca leva `held: true` (e a reabertura dela também); o congelamento curto segue
+  sem `held` e a escrita espera reabrir.
 - **Nenhum repasse ao Python com o passe de entrada na mão.** O `/clear` do Python fecha a porta e
   esperaria o passe da própria rota (30 s de travada em todo `/clear`). A decisão de repassar vem
   antes do `enter` ou o passe é solto antes.

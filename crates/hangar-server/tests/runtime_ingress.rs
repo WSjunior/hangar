@@ -30,6 +30,18 @@ async fn ingress_command_closes_and_opens_without_an_entry() {
 }
 
 #[tokio::test]
+async fn ingress_command_carries_the_hold() {
+    let (address,server) = serve().await;
+    let (status,body) = send(address,serde_json::json!({"kind":"ingress","name":"s","closed":true,"held":true})).await;
+    assert_eq!((status,body),(200,serde_json::json!({"ok":true,"result":{"closed":true}})));
+    let (status,body) = send(address,serde_json::json!({"kind":"ingress","name":"s","closed":false,"held":true})).await;
+    assert_eq!((status,body),(200,serde_json::json!({"ok":true,"result":{"closed":false}})));
+    let (status,body) = send(address,serde_json::json!({"kind":"ingress","name":"s","closed":true,"held":"sim"})).await;
+    assert_eq!((status,body["error_code"].as_str()),(503,Some("ingress_payload")));
+    server.abort();
+}
+
+#[tokio::test]
 async fn ingress_command_rejects_extra_field_and_bad_payload() {
     let (address,server) = serve().await;
     let (status,body) = send(address,serde_json::json!({"kind":"ingress","name":"s","closed":true,"extra":1})).await;

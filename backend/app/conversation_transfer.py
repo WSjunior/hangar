@@ -482,7 +482,7 @@ def release_gate(name: str) -> None:
     coordinator = runtime_coordinator.current()
     try:
         if coordinator is not None:
-            coordinator.ingress_sync(name, False)
+            coordinator.ingress_sync(name, False, held=True)
     except Exception:
         # O Rust segue fechado: o nome fica retido para a próxima chance de reabrir.
         _log.warning("porta do Rust não reabriu ao fim da troca de %s", name, exc_info=True)
@@ -502,7 +502,7 @@ async def transfer_operation(name: str):
         own = False
         if coordinator is not None and coordinator.transport is not None and name not in _gate_held:
             try:
-                await coordinator.close_ingress(name)
+                await coordinator.close_ingress(name, held=True)
             except Exception:
                 _log.warning("porta do Rust não fechou para a troca de %s", name, exc_info=True)
                 raise TransferError("session_transfer_gate_unavailable", status=503) from None
@@ -521,7 +521,7 @@ async def transfer_operation(name: str):
                     hold_gate(name)
                 else:
                     try:
-                        await coordinator.ingress(name, False)
+                        await coordinator.ingress(name, False, held=True)
                     except Exception:
                         _log.warning("porta do Rust não reabriu para %s", name, exc_info=True)
                         hold_gate(name)

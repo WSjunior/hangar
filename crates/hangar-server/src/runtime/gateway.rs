@@ -402,7 +402,7 @@ async fn dispatch(registry:&RuntimeRegistry,envelope:&Envelope) -> Result<Value,
         "submit"=>&["kind","text","steer","pre_transcript"],
         "control"=>&["kind","control","payload"],
         "queue"=>&["kind","action"],
-        "ingress"=>&["kind","name","closed"],
+        "ingress"=>&["kind","name","closed","held"],
         "close" | "snapshot" | "drain" | "confirm" | "ensure_projection"=>&["kind"],
         _=>return Err(failure("command_kind")),
     };
@@ -412,8 +412,15 @@ async fn dispatch(registry:&RuntimeRegistry,envelope:&Envelope) -> Result<Value,
     if kind == "ingress" {
         let name = command["name"].as_str().filter(|n|!n.is_empty()).ok_or_else(||failure("ingress_payload"))?;
         let closed = command["closed"].as_bool().ok_or_else(||failure("ingress_payload"))?;
-        if closed { registry.ingress().close(name,INGRESS_CLOSE_WAIT).await.map_err(|_|failure("ingress_busy"))? }
-        else { registry.ingress().open(name) }
+        // `held`: fechamento da troca de conversa; a reabertura correspondente leva o mesmo `held`.
+        let held = match &command["held"] { Value::Null=>false, value=>value.as_bool().ok_or_else(||failure("ingress_payload"))? };
+        let gates = registry.ingress();
+        match (closed,held) {
+            (true,false)=>gates.close(name,INGRESS_CLOSE_WAIT).await.map_err(|_|failure("ingress_busy"))?,
+            (true,true)=>gates.hold(name,INGRESS_CLOSE_WAIT).await.map_err(|_|failure("ingress_busy"))?,
+            (false,false)=>gates.open(name),
+            (false,true)=>gates.release(name),
+        }
         return Ok(json!({"closed":closed}));
     }
     if kind == "open" {
