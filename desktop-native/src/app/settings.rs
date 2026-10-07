@@ -566,6 +566,7 @@ impl Hangar {
         // Quem muda as linhas ou o desenho delas refaz a conversa: a lista guarda a altura de cada linha.
         if (before.tool_look, before.task_list, before.thinking_tools, before.table_chart, before.code_font, before.code_size)
             != (next.tool_look, next.task_list, next.thinking_tools, next.table_chart, next.code_font, next.code_size) {
+            self.chat.invalidate();
             self.sync_rows(cx);
             self.list_state.remeasure();
             self.restyle_subagent(cx);

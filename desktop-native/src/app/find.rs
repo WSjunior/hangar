@@ -144,7 +144,7 @@ impl Hangar {
         self.find.row = None;
         let Some(id) = self.find.hits.get(self.find.active) else { return };
         let Some(ix) = self.chat.events.iter().position(|e| &e.id == id) else { return };
-        let Some(row) = self.items.iter().position(|item| covers(item, ix)) else { return };
+        let Some(row) = self.conversation.items.iter().position(|item| covers(item, ix)) else { return };
         self.find.row = self.row_ids.get(row).cloned();
         self.find.reveal = 8;
         self.jump_to_row(row, cx);

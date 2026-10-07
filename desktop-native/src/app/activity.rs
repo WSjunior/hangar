@@ -655,7 +655,7 @@ impl ActivityState {
 impl Hangar {
     /// Tarefas, agentes (mesmo os que terminaram), shells rodando, subagentes no disco ou processos vivos.
     pub(super) fn has_activity(&self) -> bool {
-        let a = &self.activity;
+        let a = &self.conversation.activity;
         !a.tasks.is_empty() || !a.agents.is_empty() || a.running_shells().next().is_some() || self.act.count > 0 || !self.chat.state.shells.is_empty()
     }
 
@@ -691,7 +691,7 @@ impl Hangar {
         let key = self.selected_key();
         if !self.side.open { self.act.pending_tab = None; }
         let target = key.filter(|_| self.side.open && !self.side_menu_shown() && self.side_tab() == SideTab::Activity).zip(self.activity_link());
-        let (activity, processes) = (&self.activity, &self.chat.state.shells);
+        let (activity, processes) = (&self.conversation.activity, &self.chat.state.shells);
         self.act.view.update(cx, |view, cx| { view.set_data(activity, processes, cx); view.show(target, cx); });
         for tab in &self.act.tabs { tab.view.update(cx, |view, cx| view.set_data(activity, processes, cx)); }
     }
@@ -809,7 +809,7 @@ impl Hangar {
 
     /// O Agent desta chamada lançou um subagente que falhou: casado pelo `agentId` do resultado ou pelo prompt.
     pub(super) fn agent_failed(&self, call: usize) -> bool {
-        self.act.subs.iter().any(|s| s.failed) && agent_failed(&self.activity.agents, &self.act.subs, call)
+        self.act.subs.iter().any(|s| s.failed) && agent_failed(&self.conversation.activity.agents, &self.act.subs, call)
     }
 
     /// A marca da aba Atividade, pintada fora dela e do painel.
@@ -842,7 +842,7 @@ impl Hangar {
                 view.key = Some(key);
                 view.link = Some(link);
                 view.subs = self.act.subs.clone();
-                view.set_data(&self.activity, &self.chat.state.shells, cx);
+                view.set_data(&self.conversation.activity, &self.chat.state.shells, cx);
                 view.request_agent(prompt.clone(), title.clone(), cx);
             });
             self.act.tabs.push(SubagentTab { id, agent_id: run.agent_id, title, view, previous: self.act.active_tab });
@@ -995,8 +995,8 @@ impl Hangar {
     /// com agente rodando, cor de destaque e o ícone respirando.
     pub(super) fn render_activity_button(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.has_activity() || self.side_shown(window) { return None; }
-        let running = self.activity.running_agents().next().is_some();
-        let badge = self.activity.badge();
+        let running = self.conversation.running_agents().next().is_some();
+        let badge = self.conversation.activity_badge();
         let label = web("ctx_atividade");
         let color = if running { theme::accent() } else { theme::muted() };
         let icon: AnyElement = if running { chrome::Breathing::new("activity-breath", IconName::ListChecks, px(16.), color).into_any_element() }
