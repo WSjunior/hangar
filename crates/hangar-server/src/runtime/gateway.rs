@@ -82,6 +82,12 @@ async fn open_store(state_path:&std::path::Path,projection_dir:&std::path::Path,
         })?
 }
 
+/// Negação do `_rust_failed` do Python (erro vazio não é erro), exceto `terminal_facts`, que aqui é doente.
+fn healthy(terminal:bool,view:&Value)->bool {
+    let failed = match &view["error"] {Value::Null=>false,Value::String(code)=>!code.is_empty(),_=>true};
+    if terminal { !failed || view["error"]=="receipt_scan" } else { !failed && view["view"]["alive"] != false }
+}
+
 fn failure(code:&str) -> RuntimeError { RuntimeError::new(code,"runtime indisponível para esta chave ou geração") }
 
 /// Prazo da devolução da janela esticada ao abrir a sessão com terminal (`unstretch`).
@@ -275,10 +281,7 @@ impl RuntimeRegistry {
             .map(|(key,e)|(key.clone(),e.generation,e.provider.clone(),e.handle.clone()))?;
         let terminal = matches!(&handle,EntryHandle::Terminal {..});
         let healthy = match tokio::time::timeout(Duration::from_secs(1),handle.snapshot()).await {
-            Ok(Ok(view))=>{
-                let error = view["error"].as_str();
-                if terminal { error.is_none_or(|code|code=="receipt_scan") } else { error.is_none() && view["view"]["alive"] != false }
-            },
+            Ok(Ok(view))=>healthy(terminal,&view),
             _=>false,
         };
         Some(WriteTarget { key,generation,provider,terminal,healthy,handle })
@@ -502,6 +505,18 @@ async fn events(State(state):State<Gateway>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn healthy_follows_python_rust_failed() {
+        assert!(!healthy(true,&json!({"error":"terminal_facts","view":{}})));
+        assert!(healthy(true,&json!({"error":"receipt_scan","view":{}})));
+        assert!(!healthy(true,&json!({"error":"queue_io","view":{}})));
+        assert!(healthy(true,&json!({"error":null,"view":{}})));
+        assert!(!healthy(false,&json!({"error":null,"view":{"alive":false}})));
+        assert!(!healthy(false,&json!({"error":"cano_exited","view":{"alive":true}})));
+        assert!(healthy(false,&json!({"error":null,"view":{"alive":true}})));
+        assert!(healthy(false,&json!({"error":"","view":{}})));
+    }
 
     #[test]
     fn terminal_and_headless_sources_do_not_overlap() {

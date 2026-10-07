@@ -8,58 +8,69 @@ use tokio::sync::watch;
 #[derive(Clone, Default)]
 pub struct IngressGates { inner: Arc<Mutex<HashMap<String, Gate>>> }
 
-struct Gate { closed: watch::Sender<bool>, passes: watch::Sender<usize> }
+// Fechamentos em curso (contador, não flag: dois `close` não desfazem um ao outro) e escritas em curso.
+struct Gate { closes: watch::Sender<usize>, passes: watch::Sender<usize> }
 
 #[derive(Debug)]
 pub struct GateClosed;
 #[derive(Debug)]
 pub struct IngressBusy;
-pub struct IngressPass { gates: IngressGates, key: String }
+pub struct IngressPass { gates: IngressGates, name: String }
+
+/// Desfaz o fechamento de um `close` que desistiu ou foi cancelado no meio da espera.
+struct CloseGuard<'a> { gates: &'a IngressGates, name: &'a str, armed: bool }
+impl Drop for CloseGuard<'_> {
+    fn drop(&mut self) { if self.armed { self.gates.open(self.name); } }
+}
+
+impl Gate {
+    fn idle(&self) -> bool {
+        *self.closes.borrow() == 0 && *self.passes.borrow() == 0 && self.closes.receiver_count() == 0 && self.passes.receiver_count() == 0
+    }
+}
 
 impl IngressGates {
-    fn with_gate<T>(&self, key: &str, f: impl FnOnce(&Gate) -> T) -> T {
+    fn with_gate<T>(&self, name: &str, f: impl FnOnce(&Gate) -> T) -> T {
         let mut map = self.inner.lock().unwrap();
-        f(map.entry(key.into()).or_insert_with(|| Gate { closed: watch::channel(false).0, passes: watch::channel(0).0 }))
+        f(map.entry(name.into()).or_insert_with(|| Gate { closes: watch::channel(0).0, passes: watch::channel(0).0 }))
     }
-    pub async fn enter(&self, key: &str, wait: Duration) -> Result<IngressPass, GateClosed> {
+    pub async fn enter(&self, name: &str, wait: Duration) -> Result<IngressPass, GateClosed> {
         let deadline = tokio::time::Instant::now() + wait;
         loop {
             // Conferir e contar sob a mesma trava do `close`: senão um fechamento passa entre os dois.
-            let mut closed = match self.with_gate(key, |g| {
-                if *g.closed.borrow() { Err(g.closed.subscribe()) } else { g.passes.send_modify(|n| *n += 1); Ok(()) }
+            let mut closes = match self.with_gate(name, |g| {
+                if *g.closes.borrow() > 0 { Err(g.closes.subscribe()) } else { g.passes.send_modify(|n| *n += 1); Ok(()) }
             }) {
-                Ok(()) => return Ok(IngressPass { gates: self.clone(), key: key.into() }),
+                Ok(()) => return Ok(IngressPass { gates: self.clone(), name: name.into() }),
                 Err(rx) => rx,
             };
-            tokio::time::timeout_at(deadline, closed.wait_for(|c| !*c)).await.map_err(|_| GateClosed)?.map_err(|_| GateClosed)?;
+            tokio::time::timeout_at(deadline, closes.wait_for(|c| *c == 0)).await.map_err(|_| GateClosed)?.map_err(|_| GateClosed)?;
         }
     }
-    pub async fn close(&self, key: &str, wait: Duration) -> Result<(), IngressBusy> {
-        let mut passes = self.with_gate(key, |g| { g.closed.send_replace(true); g.passes.subscribe() });
-        if tokio::time::timeout(wait, passes.wait_for(|n| *n == 0)).await.is_err() {
-            // Quem fecha desiste com erro; a porta não pode ficar fechada sem dono.
-            self.open(key);
-            return Err(IngressBusy);
-        }
+    pub async fn close(&self, name: &str, wait: Duration) -> Result<(), IngressBusy> {
+        let mut passes = self.with_gate(name, |g| { g.closes.send_modify(|n| *n += 1); g.passes.subscribe() });
+        // Declarado antes de `passes`: o receptor cai primeiro e a porta desistida pode sair do mapa.
+        let mut guard = CloseGuard { gates: self, name, armed: true };
+        if tokio::time::timeout(wait, passes.wait_for(|n| *n == 0)).await.is_err() { return Err(IngressBusy); }
+        guard.armed = false;
         Ok(())
     }
-    pub fn open(&self, key: &str) {
+    /// Desfaz um fechamento (o contador não passa de zero).
+    pub fn open(&self, name: &str) {
         let mut map = self.inner.lock().unwrap();
-        let Some(g) = map.get(key) else { return };
-        g.closed.send_replace(false);
+        let Some(g) = map.get(name) else { return };
+        g.closes.send_modify(|n| *n = n.saturating_sub(1));
         // Aberta e sem escrita em curso é igual a não existir: o mapa não cresce com nomes antigos.
-        if *g.passes.borrow() == 0 && g.closed.receiver_count() == 0 && g.passes.receiver_count() == 0 { map.remove(key); }
+        if g.idle() { map.remove(name); }
     }
 }
 
 impl Drop for IngressPass {
     fn drop(&mut self) {
         let mut map = self.gates.inner.lock().unwrap();
-        let Some(g) = map.get(&self.key) else { return };
+        let Some(g) = map.get(&self.name) else { return };
         g.passes.send_modify(|n| *n -= 1);
-        if *g.passes.borrow() == 0 && !*g.closed.borrow() && g.closed.receiver_count() == 0 && g.passes.receiver_count() == 0 {
-            map.remove(&self.key);
-        }
+        if g.idle() { map.remove(&self.name); }
     }
 }
 
@@ -137,6 +148,53 @@ mod tests {
         for t in late { assert!(!t.await.unwrap()); }
         for t in tasks { let _ = t.await; }
         gates.open("k");
+        assert!(gates.enter("k", Duration::from_millis(20)).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn timed_out_close_does_not_reopen_another_close() {
+        let gates = IngressGates::default();
+        let pass = gates.enter("k", Duration::from_millis(10)).await.unwrap();
+        assert!(gates.close("k", Duration::from_millis(30)).await.is_err());
+        drop(pass);
+        assert!(gates.close("k", Duration::from_millis(30)).await.is_ok());
+        assert!(gates.enter("k", Duration::from_millis(20)).await.is_err());
+        // Primeiro close que deu certo: um open por close bem-sucedido.
+        let held = gates.enter("j", Duration::from_millis(10)).await.unwrap();
+        let g = gates.clone();
+        let first = tokio::spawn(async move { g.close("j", Duration::from_secs(5)).await });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(gates.close("j", Duration::from_millis(20)).await.is_err());
+        drop(held);
+        assert!(first.await.unwrap().is_ok());
+        assert!(gates.enter("j", Duration::from_millis(20)).await.is_err());
+        gates.open("j");
+        assert!(gates.enter("j", Duration::from_millis(20)).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn two_successful_closes_need_two_opens() {
+        let gates = IngressGates::default();
+        gates.close("k", Duration::from_millis(10)).await.unwrap();
+        gates.close("k", Duration::from_millis(10)).await.unwrap();
+        gates.open("k");
+        assert!(gates.enter("k", Duration::from_millis(20)).await.is_err());
+        gates.open("k");
+        assert!(gates.enter("k", Duration::from_millis(20)).await.is_ok());
+        gates.open("k");
+        gates.open("k");
+        assert!(gates.enter("k", Duration::from_millis(20)).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn cancelled_close_leaves_gate_open() {
+        let gates = IngressGates::default();
+        let _pass = gates.enter("k", Duration::from_millis(10)).await.unwrap();
+        let g = gates.clone();
+        let closing = tokio::spawn(async move { g.close("k", Duration::from_secs(30)).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        closing.abort();
+        let _ = closing.await;
         assert!(gates.enter("k", Duration::from_millis(20)).await.is_ok());
     }
 }
