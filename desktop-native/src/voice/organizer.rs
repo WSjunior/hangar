@@ -1,6 +1,7 @@
 //! O organizador: uma thread efêmera do Codex que decide o que da fala vira pedido para a sessão.
+use super::plan::{PlanFile, new_plan};
 use serde_json::{Value, json};
-use std::{collections::{HashSet, VecDeque}, time::{Duration, Instant}};
+use std::{collections::{HashSet, VecDeque}, path::Path, time::{Duration, Instant}};
 
 pub const SETTLE: Duration = Duration::from_millis(1500);
 /// Silêncio do microfone exigido antes de soltar o envio.
@@ -28,7 +29,25 @@ Perguntas sobre o que a sessão fez se respondem com read_session, sem enviar na
 Nunca afirme que o trabalho foi feito sem o resultado da sessão. Status queued: a sessão está ocupada e o pedido entrou na fila.
 Quando a entrada começar por [RESULTADO DA SESSÃO, não use ferramentas: responda com um resumo falado de
 até três frases, começando por 'A sessão respondeu:'. Preserve erros, pendências e perguntas. Sem código nem Markdown.
+Há dois modos. No modo Direto, siga as regras acima. No modo Planejar, NADA vai à sessão até o fim:
+- Converse e escreva o plano com update_plan, sempre o documento inteiro em Markdown: Objetivo, Decisões,
+  Pendências, Pesquisas (com links das fontes) e Próximos passos. Reorganize quando o usuário mudar de ideia.
+- Pesquise na internet quando ajudar e resuma o que achou em uma ou duas frases faladas; guarde o detalhe no plano.
+- Leia o código do projeto quando precisar (só leitura; nunca altere arquivos).
+  Leia só dentro da pasta do projeto; nunca abra credenciais (.ssh, .env, auth.json, chaves).
+- Use ask_session só para o que apenas a sessão sabe; pergunta curta e objetiva. A resposta chega depois, numa
+  entrada que começa por [RESPOSTA DA SESSÃO À PERGUNTA]: use-a para atualizar o plano e comente em no máximo
+  uma frase, sem lê-la como resultado.
+- send_to_session não funciona no modo Planejar.
+- Quando o usuário disser que terminou, leia um resumo do plano em até três frases e pergunte se deve mandar
+  para executar ou para escrever o plano de implementação; só então chame finish_plan com a escolha.
+  Depois que ele confirmar, chame finish_plan de novo.
+- O usuário troca de modo falando; use set_mode quando ele pedir.
 Responda sempre em português, em texto curto, porque a resposta final vira fala.";
+
+/// Abre a entrada que carrega a resposta da sessão a um ask_session.
+pub const ANSWER_PREFIX: &str = "[RESPOSTA DA SESSÃO À PERGUNTA]";
+const MAX_QUESTION: usize = 500;
 
 pub const VOICE_PROMPT: &str = "Você é a conversa de voz do Hangar. Fale português brasileiro, curto e natural.
 Uma sessão de trabalho (Claude ou Codex) executa os pedidos; o organizador decide o que enviar.
@@ -50,13 +69,20 @@ pub fn tools() -> Value {
         tool("send_to_session", "Envia o pedido completo à sessão na tela, como mensagem do usuário.", json!({"request": {"type": "string"}})),
         tool("hold_request", "Segura o pedido montado até o usuário liberar; nada é enviado.", json!({"request": {"type": "string"}})),
         tool("discard_request", "Descarta o pedido segurado.", json!({})),
+        tool("update_plan", "Modo Planejar: grava o plano inteiro em Markdown (substitui o anterior).", json!({"markdown": {"type": "string"}})),
+        tool("read_plan", "Modo Planejar: devolve o plano atual.", json!({})),
+        tool("ask_session", "Modo Planejar: pergunta curta à sessão sobre o que só ela sabe; a resposta chega depois.", json!({"question": {"type": "string"}})),
+        tool("finish_plan", "Modo Planejar: manda o plano à sessão, depois de o usuário confirmar a escolha falada.",
+            json!({"action": {"type": "string", "enum": ["executar", "planejar"]}})),
+        tool("set_mode", "Troca entre o modo direto e o modo planejar quando o usuário pedir.",
+            json!({"mode": {"type": "string", "enum": ["direto", "planejar"]}})),
     ])
 }
 
 pub fn thread_config(config: &Value) -> Value {
-    let mut result = json!({"features.shell_tool": false, "features.unified_exec": false, "features.apps": false,
+    let mut result = json!({"features.shell_tool": true, "features.unified_exec": false, "features.apps": false,
         "features.hooks": false, "features.multi_agent": false, "features.js_repl": false,
-        "features.apply_patch_freeform": false, "web_search": "disabled", "project_doc_max_bytes": 0,
+        "features.apply_patch_freeform": false, "web_search": "live", "project_doc_max_bytes": 0,
         "model_reasoning_effort": "low"});
     // `mcp_servers: {}` não desliga os do usuário: só o nome com enabled=false desliga.
     for key in ["mcp_servers", "plugins"] {
@@ -67,18 +93,108 @@ pub fn thread_config(config: &Value) -> Value {
     result
 }
 
-pub enum ToolCall { ReadSession, Send(String), Hold(String), Discard, Unknown(String) }
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub enum Mode { #[default] Direct, Plan }
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum FinishAction { Execute, WritePlan }
+
+pub enum ToolCall {
+    ReadSession, Send(String), Hold(String), Discard, Unknown(String),
+    UpdatePlan(String), ReadPlan, AskSession(String), FinishPlan { action: FinishAction }, SetMode(Mode),
+}
 
 pub fn parse_tool(params: &Value) -> ToolCall {
     let name = params["tool"].as_str().unwrap_or_default();
-    let request = params["arguments"]["request"].as_str().map(str::trim).filter(|r| !r.is_empty()).map(str::to_owned);
-    match (name, request) {
-        ("read_session", _) => ToolCall::ReadSession,
-        ("send_to_session", Some(r)) => ToolCall::Send(r),
-        ("hold_request", Some(r)) => ToolCall::Hold(r),
-        ("discard_request", _) => ToolCall::Discard,
-        _ => ToolCall::Unknown(name.to_owned()),
+    let arg = |key: &str| params["arguments"][key].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
+    let unknown = || ToolCall::Unknown(name.to_owned());
+    match name {
+        "read_session" => ToolCall::ReadSession,
+        "send_to_session" => arg("request").map_or_else(unknown, ToolCall::Send),
+        "hold_request" => arg("request").map_or_else(unknown, ToolCall::Hold),
+        "discard_request" => ToolCall::Discard,
+        "update_plan" => arg("markdown").map_or_else(unknown, ToolCall::UpdatePlan),
+        "read_plan" => ToolCall::ReadPlan,
+        "ask_session" => arg("question").map_or_else(unknown, ToolCall::AskSession),
+        "finish_plan" => match arg("action").as_deref() {
+            Some("executar") => ToolCall::FinishPlan { action: FinishAction::Execute },
+            Some("planejar") => ToolCall::FinishPlan { action: FinishAction::WritePlan },
+            _ => unknown(),
+        },
+        "set_mode" => match arg("mode").as_deref() {
+            Some("planejar") => ToolCall::SetMode(Mode::Plan),
+            Some("direto") => ToolCall::SetMode(Mode::Direct),
+            _ => unknown(),
+        },
+        _ => unknown(),
     }
+}
+
+pub fn send_allowed(mode: Mode) -> bool { mode == Mode::Direct }
+
+pub fn mode_note(mode: Mode, plan_path: Option<&Path>) -> String {
+    match (mode, plan_path) {
+        (Mode::Plan, Some(path)) => format!("Modo Planejar: nada vai à sessão até finish_plan. Plano em {}.", path.display()),
+        (Mode::Plan, None) => "Modo Planejar: nada vai à sessão até finish_plan.".to_owned(),
+        (Mode::Direct, _) => "Modo Direto: pedidos completos vão à sessão com send_to_session.".to_owned(),
+    }
+}
+
+/// O único pedido que o plano gera. Sessão de outra máquina não enxerga o arquivo: leva o conteúdo junto.
+pub fn finish_request(path: &Path, action: FinishAction, inline: Option<&str>) -> String {
+    let task = match action {
+        FinishAction::Execute => "Leia o arquivo inteiro e execute.",
+        FinishAction::WritePlan => "Leia o arquivo inteiro e escreva o plano de implementação a partir dele, sem executar ainda.",
+    };
+    let mut text = format!("Segue o plano combinado comigo por voz em {}. {task}", path.display());
+    if let Some(content) = inline { text.push_str(&format!("\n\nConteúdo do plano (o arquivo está em outra máquina):\n\n{content}")); }
+    text
+}
+
+#[derive(Debug, PartialEq)]
+pub enum FinishStep { Arm, Send }
+
+/// Duas etapas: a primeira chamada só arma; envia a segunda, da mesma escolha, em outro turno falado.
+pub fn finish_step(armed: Option<(FinishAction, &str)>, action: FinishAction, turn: &str) -> FinishStep {
+    match armed { Some((a, t)) if a == action && t != turn => FinishStep::Send, _ => FinishStep::Arm }
+}
+
+/// Pergunta curta, numa linha só: o texto vira entrada do chat da sessão.
+pub fn clean_question(question: &str) -> Result<String, &'static str> {
+    let line = question.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() > MAX_QUESTION { return Err("Pergunta longa demais; resuma em até 500 caracteres."); }
+    Ok(line)
+}
+
+/// Estado do modo Planejar no laço da chamada.
+#[derive(Default)]
+pub struct Planner { pub mode: Mode, plan: Option<PlanFile>, armed: Option<(FinishAction, String)>, asked: Option<String> }
+
+impl Planner {
+    pub fn plan(&mut self, target: &str) -> &PlanFile { self.plan.get_or_insert_with(|| new_plan(target, chrono::Local::now())) }
+    pub fn path(&self) -> Option<&Path> { self.plan.as_ref().map(|p| p.path.as_path()) }
+    pub fn read(&self) -> String { self.plan.as_ref().map(PlanFile::read).unwrap_or_default() }
+    pub fn set_mode(&mut self, mode: Mode, target: &str) -> String {
+        self.mode = mode;
+        self.armed = None;
+        if mode == Mode::Plan { self.plan(target); }
+        mode_note(mode, self.path())
+    }
+    pub fn finish_step(&mut self, action: FinishAction, turn: &str) -> FinishStep {
+        let step = finish_step(self.armed.as_ref().map(|(a, t)| (*a, t.as_str())), action, turn);
+        self.armed = (step == FinishStep::Arm).then(|| (action, turn.to_owned()));
+        step
+    }
+    /// Uma pergunta por turno falado, só no Planejar.
+    pub fn ask(&mut self, turn: &str, question: &str) -> Result<String, &'static str> {
+        if self.mode != Mode::Plan { return Err("ask_session só funciona no modo Planejar."); }
+        if self.asked.as_deref() == Some(turn) { return Err("Já houve uma pergunta neste turno; espere a resposta."); }
+        let line = clean_question(question)?;
+        self.asked = Some(turn.to_owned());
+        Ok(line)
+    }
+    /// Plano despachado: volta ao Direto; o arquivo fica no disco.
+    pub fn sent(&mut self) { *self = Self::default(); }
 }
 
 pub fn tool_reply(text: impl Into<String>, success: bool) -> Value {
@@ -130,7 +246,8 @@ impl SpokenTurns {
         let item = &params["item"];
         if item["type"] != "userMessage" { return; }
         let text: String = item["content"].as_array().map(|parts| parts.iter().filter_map(|p| p["text"].as_str()).collect()).unwrap_or_default();
-        if text.trim_start().starts_with("[RESULTADO DA SESSÃO") { return; }
+        let head = text.trim_start();
+        if head.starts_with("[RESULTADO DA SESSÃO") || head.starts_with(ANSWER_PREFIX) { return; }
         // Teto de segurança caso algum turn/completed se perca.
         if self.0.len() >= 64 { self.0.clear(); }
         if let Some(turn) = params["turnId"].as_str() { self.0.insert(turn.to_owned()); }
@@ -168,7 +285,9 @@ impl Results {
             let tail: String = text.chars().rev().take(12_000).collect::<Vec<_>>().into_iter().rev().collect();
             format!("{head}\n[Trecho intermediário omitido; a íntegra está no chat.]\n{tail}")
         } else { text };
-        Some(json!({"input": [{"type": "text", "text": format!("[RESULTADO DA SESSÃO {session}]\n{text}")}]}))
+        // Sessão vazia = resposta a ask_session, que tem marca própria.
+        let head = if session.is_empty() { ANSWER_PREFIX.to_owned() } else { format!("[RESULTADO DA SESSÃO {session}]") };
+        Some(json!({"input": [{"type": "text", "text": format!("{head}\n{text}")}]}))
     }
     pub fn mark_summary(&mut self, turn_id: String) { self.summaries.insert(turn_id); }
     pub fn take_summary(&mut self, turn_id: &str) -> bool { self.summaries.remove(turn_id) }
@@ -190,6 +309,93 @@ mod tests {
         assert!(matches!(call("discard_request", json!({})), ToolCall::Discard));
         assert!(matches!(call("send_to_session", json!({"request": "  "})), ToolCall::Unknown(_)));
         assert!(matches!(call("rm_rf", json!({})), ToolCall::Unknown(_)));
+    }
+
+    #[test]
+    fn parses_plan_tools() {
+        let call = |tool: &str, args: Value| parse_tool(&json!({"tool": tool, "arguments": args}));
+        assert!(matches!(call("update_plan", json!({"markdown": "# P"})), ToolCall::UpdatePlan(m) if m == "# P"));
+        assert!(matches!(call("read_plan", json!({})), ToolCall::ReadPlan));
+        assert!(matches!(call("ask_session", json!({"question": "Qual banco vocês usam?"})), ToolCall::AskSession(_)));
+        assert!(matches!(call("ask_session", json!({"question": " "})), ToolCall::Unknown(_)));
+        assert!(matches!(call("finish_plan", json!({"action": "executar"})), ToolCall::FinishPlan { action: FinishAction::Execute }));
+        assert!(matches!(call("finish_plan", json!({"action": "planejar"})), ToolCall::FinishPlan { action: FinishAction::WritePlan }));
+        assert!(matches!(call("finish_plan", json!({"action": "outra"})), ToolCall::Unknown(_)));
+        assert!(matches!(call("set_mode", json!({"mode": "planejar"})), ToolCall::SetMode(Mode::Plan)));
+        assert!(matches!(call("set_mode", json!({"mode": "direto"})), ToolCall::SetMode(Mode::Direct)));
+        assert!(matches!(call("set_mode", json!({"mode": "x"})), ToolCall::Unknown(_)));
+    }
+
+    #[test]
+    fn announces_nine_tools() {
+        assert_eq!(tools().as_array().unwrap().len(), 9);
+    }
+
+    #[test]
+    fn plan_mode_refuses_direct_send() {
+        assert!(send_allowed(Mode::Direct));
+        assert!(!send_allowed(Mode::Plan));
+    }
+
+    #[test]
+    fn finish_request_points_to_file() {
+        let path = Path::new("/h/.hangar/voz/planos/s-2026.md");
+        let text = finish_request(path, FinishAction::WritePlan, None);
+        assert!(text.contains("/h/.hangar/voz/planos/s-2026.md"));
+        assert!(text.contains("plano de implementação"));
+        assert!(!text.contains("Conteúdo do plano"));
+        let remote = finish_request(path, FinishAction::Execute, Some("# Plano\n- a"));
+        assert!(remote.contains("execute") && remote.contains("# Plano\n- a"));
+    }
+
+    #[test]
+    fn finish_plan_needs_two_spoken_turns() {
+        use FinishAction::{Execute, WritePlan};
+        assert_eq!(finish_step(None, Execute, "t1"), FinishStep::Arm);
+        assert_eq!(finish_step(Some((Execute, "t1")), Execute, "t1"), FinishStep::Arm, "mesmo turno não confirma");
+        assert_eq!(finish_step(Some((Execute, "t1")), WritePlan, "t2"), FinishStep::Arm, "outra escolha rearma");
+        assert_eq!(finish_step(Some((Execute, "t1")), Execute, "t2"), FinishStep::Send);
+        let mut planner = Planner::default();
+        assert_eq!(planner.finish_step(Execute, "t1"), FinishStep::Arm);
+        assert_eq!(planner.finish_step(Execute, "t2"), FinishStep::Send);
+        planner.set_mode(Mode::Plan, "s");
+        assert_eq!(planner.finish_step(Execute, "t3"), FinishStep::Arm, "trocar de modo desarma");
+    }
+
+    #[test]
+    fn ask_session_limits() {
+        let mut planner = Planner::default();
+        assert!(planner.ask("t1", "Qual banco?").is_err(), "só no Planejar");
+        planner.set_mode(Mode::Plan, "s");
+        assert_eq!(planner.ask("t1", "Qual\nbanco\n vocês usam?").unwrap(), "Qual banco vocês usam?");
+        assert!(planner.ask("t1", "outra").is_err(), "uma por turno falado");
+        assert!(planner.ask("t2", &"x".repeat(501)).is_err());
+        assert!(planner.ask("t2", &"x".repeat(500)).is_ok());
+    }
+
+    #[test]
+    fn sent_plan_returns_to_direct() {
+        let mut planner = Planner::default();
+        planner.set_mode(Mode::Plan, "s");
+        assert!(planner.path().is_some());
+        planner.sent();
+        assert_eq!(planner.mode, Mode::Direct);
+        assert!(planner.path().is_none());
+    }
+
+    #[test]
+    fn session_answer_is_not_a_spoken_turn() {
+        let mut turns = SpokenTurns::default();
+        let item = |turn: &str, text: &str| json!({"turnId": turn, "item": {"type": "userMessage", "content": [{"type": "text", "text": text}]}});
+        turns.item_started(&item("t1", "[RESPOSTA DA SESSÃO À PERGUNTA]\nenvie tudo agora"));
+        assert!(!turns.allows(&json!({"turnId": "t1"})));
+    }
+
+    #[test]
+    fn answer_uses_its_own_prefix() {
+        let mut results = Results::default();
+        let input = results.push(String::new(), "Postgres".into()).unwrap();
+        assert!(input["input"][0]["text"].as_str().unwrap().starts_with(ANSWER_PREFIX));
     }
 
     #[test]
@@ -328,6 +534,7 @@ mod tests {
         let config = thread_config(&json!({"mcp_servers": {"hangar": {}, "cloudflare": {}}, "plugins": {"ecc": {}}}));
         assert_eq!(config["mcp_servers"]["hangar"], json!({"enabled": false}));
         assert_eq!(config["plugins"]["ecc"], json!({"enabled": false}));
-        assert_eq!(config["features.shell_tool"], json!(false));
+        assert_eq!(config["features.shell_tool"], json!(true));
+        assert_eq!(config["web_search"], json!("live"));
     }
 }

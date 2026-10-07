@@ -5,10 +5,10 @@ pub mod plan;
 pub mod rpc;
 pub mod rtc;
 
-use organizer::{MIC_VOICE_LEVEL, Results, SendGate, SpokenTurns, ToolCall, parse_tool, tool_reply, tools, thread_config, ORGANIZER_PROMPT, VOICE_PROMPT};
+use organizer::{FinishStep, MIC_VOICE_LEVEL, Mode, Planner, Results, SendGate, SpokenTurns, ToolCall, finish_request, parse_tool, send_allowed, tool_reply, tools, thread_config, ORGANIZER_PROMPT, VOICE_PROMPT};
 use rpc::{Codex, Incoming, Rpc, RpcError, handshake};
 use serde_json::{Value, json};
-use std::{sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
+use std::{path::PathBuf, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
 use tokio::{runtime::Handle, sync::{Notify, mpsc}};
 
 pub struct CallId(Value);
@@ -17,10 +17,14 @@ pub enum Phase { Connecting, Live, Closed }
 pub enum VoiceFailure { Microphone, Speaker, AppServer, Realtime(String), Network, Timeout, Organizer }
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Activity { #[default] Idle, Thinking, Searching }
-pub enum VoiceEvent { Phase(Phase), Levels(f32, f32), Draft(Option<String>), Activity(Activity), ReadSession(CallId), Send(CallId, String), Failed(VoiceFailure) }
-pub struct VoiceOptions { pub codex: Codex, pub voice: Option<String>, pub context: String }
+pub enum VoiceEvent {
+    Phase(Phase), Levels(f32, f32), Draft(Option<String>), Activity(Activity), ReadSession(CallId), Send(CallId, String), Failed(VoiceFailure),
+    Mode(Mode), Plan { path: PathBuf, markdown: String }, AskSession(String), SendPlan { session: String, text: String },
+}
+/// `cwd`: pasta da sessão na tela quando é desta máquina (a leitura do código parte dela); `target`: nome dessa sessão.
+pub struct VoiceOptions { pub codex: Codex, pub voice: Option<String>, pub context: String, pub cwd: Option<PathBuf>, pub target: String }
 
-enum Command { Retarget(String, String), Result(String, String), Reply(Value, Value) }
+enum Command { Retarget(String, String), Result(String, String), Reply(Value, Value), SetMode(Mode), Answer(String) }
 
 pub struct Voice { commands: mpsc::UnboundedSender<Command>, muted: Arc<AtomicBool>, stopped: Arc<AtomicBool>, stop: Arc<Notify> }
 
@@ -35,6 +39,9 @@ impl Voice {
     pub fn retarget(&self, name: String, context: String) { let _ = self.commands.send(Command::Retarget(name, context)); }
     pub fn session_result(&self, session: String, text: String) { let _ = self.commands.send(Command::Result(session, text)); }
     pub fn reply(&self, call: CallId, reply: Value) { let _ = self.commands.send(Command::Reply(call.0, reply)); }
+    pub fn set_mode(&self, mode: Mode) { let _ = self.commands.send(Command::SetMode(mode)); }
+    /// Resposta, recusa ou estouro de um `ask_session`: chega ao organizador como turno marcado.
+    pub fn session_answer(&self, text: String) { let _ = self.commands.send(Command::Answer(text)); }
     pub fn stop(&mut self) {
         self.stopped.store(true, Ordering::Relaxed);
         // notify_one guarda a licença mesmo sem ninguém esperando ainda.
@@ -105,8 +112,11 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
     log("handshake ok");
     let directory = std::env::temp_dir().join(format!("hangar-voice-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&directory);
-    let mut start = json!({"ephemeral": true, "cwd": directory, "sandbox": "read-only", "approvalPolicy": "never",
-        "environments": [], "baseInstructions": ORGANIZER_PROMPT, "developerInstructions": options.context,
+    // A pasta temporária é a única apagada no fim; a da sessão só serve de cwd para ler o código.
+    let thread_cwd = options.cwd.clone().unwrap_or_else(|| directory.clone());
+    // Sem `"environments": []`: com ele o Codex não oferece o shell ao modelo.
+    let mut start = json!({"ephemeral": true, "cwd": thread_cwd, "sandbox": "read-only", "approvalPolicy": "never",
+        "baseInstructions": ORGANIZER_PROMPT, "developerInstructions": options.context,
         "config": thread_config(&config), "dynamicTools": tools()});
     if let Some(model) = config["model"].as_str() { start["model"] = json!(model); }
     let thread = rpc.request("thread/start", start).await.map_err(rpc_failure).map_err(failed("thread/start"))?["thread"]["id"].as_str().unwrap_or_default().to_owned();
@@ -151,8 +161,11 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
     let mut organizer_busy = false;
     let mut spoken = SpokenTurns::default();
     let mut activity = Activity::Idle;
+    let mut planner = Planner::default();
+    let mut target = options.target.clone();
     let outcome = loop {
-        if let Some((id, request)) = gate.due(Instant::now()) {
+        // No Planejar nada sai pelo gate; ao entrar nele o envio pendente já foi cancelado.
+        if planner.mode == Mode::Direct && let Some((id, request)) = gate.due(Instant::now()) {
             log(format!("gate sent words={}", request.split_whitespace().count()));
             let _ = events.send(VoiceEvent::Draft(None)).await;
             let _ = events.send(VoiceEvent::Send(CallId(id), request)).await;
@@ -184,6 +197,72 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                         ToolCall::Send(_) | ToolCall::Hold(_) if !spoken.allows(&params) => {
                             let _ = rpc.respond(id, tool_reply("Pedido recusado: só uma fala do usuário pode gerar envio.", false)).await;
                             "refused-not-spoken"
+                        }
+                        ToolCall::FinishPlan { .. } | ToolCall::AskSession(_) | ToolCall::SetMode(_) if !spoken.allows(&params) => {
+                            let _ = rpc.respond(id, tool_reply("Só a pedido falado do usuário.", false)).await;
+                            "refused-not-spoken"
+                        }
+                        ToolCall::Send(_) | ToolCall::Hold(_) if !send_allowed(planner.mode) => {
+                            let _ = rpc.respond(id, tool_reply("Modo Planejar: nada vai à sessão até finish_plan.", false)).await;
+                            "refused-plan-mode"
+                        }
+                        ToolCall::UpdatePlan(markdown) => {
+                            let bytes = markdown.len();
+                            let plan = planner.plan(&target);
+                            let path = plan.path.clone();
+                            match plan.write(&markdown) {
+                                Ok(()) => {
+                                    log(format!("plan saved bytes={bytes}"));
+                                    let _ = rpc.respond(id, tool_reply(format!("Plano salvo em {}.", path.display()), true)).await;
+                                    let _ = events.send(VoiceEvent::Plan { path, markdown }).await;
+                                    "plan-saved"
+                                }
+                                Err(error) => {
+                                    log(format!("plan write failed kind={:?}", error.kind()));
+                                    let _ = rpc.respond(id, tool_reply(format!("Não consegui salvar o plano: {error}"), false)).await;
+                                    "plan-failed"
+                                }
+                            }
+                        }
+                        ToolCall::ReadPlan => {
+                            let text = planner.read();
+                            let text = if text.trim().is_empty() { "Plano vazio.".to_owned() } else { text };
+                            let _ = rpc.respond(id, tool_reply(text, true)).await;
+                            "plan-read"
+                        }
+                        ToolCall::AskSession(question) => match planner.ask(params["turnId"].as_str().unwrap_or_default(), &question) {
+                            Ok(line) => {
+                                log(format!("session question bytes={}", line.len()));
+                                let _ = events.send(VoiceEvent::AskSession(line)).await;
+                                let _ = rpc.respond(id, tool_reply("Pergunta enviada; a resposta chega depois marcada [RESPOSTA DA SESSÃO À PERGUNTA].", true)).await;
+                                "asked"
+                            }
+                            Err(why) => { let _ = rpc.respond(id, tool_reply(why, false)).await; "refused-ask" }
+                        },
+                        ToolCall::FinishPlan { action } => {
+                            let content = planner.read();
+                            if content.trim().is_empty() {
+                                let _ = rpc.respond(id, tool_reply("Plano vazio; escreva o plano com update_plan antes.", false)).await;
+                                "refused-empty-plan"
+                            } else if planner.finish_step(action, params["turnId"].as_str().unwrap_or_default()) == FinishStep::Arm {
+                                let _ = rpc.respond(id, tool_reply("Leia o resumo e peça confirmação; chame finish_plan de novo depois que o usuário confirmar.", true)).await;
+                                "finish-armed"
+                            } else {
+                                let path = planner.path().map(|p| p.to_path_buf()).unwrap_or_default();
+                                // Sessão de outra máquina não lê o arquivo daqui: o conteúdo vai junto.
+                                let text = finish_request(&path, action, options.cwd.is_none().then_some(content.as_str()));
+                                log(format!("plan sent bytes={}", text.len()));
+                                let _ = events.send(VoiceEvent::SendPlan { session: target.clone(), text }).await;
+                                let _ = rpc.respond(id, tool_reply("Plano enviado à sessão; o resultado chega depois.", true)).await;
+                                planner.sent();
+                                let _ = events.send(VoiceEvent::Mode(Mode::Direct)).await;
+                                "plan-sent"
+                            }
+                        }
+                        ToolCall::SetMode(mode) => {
+                            let note = switch_mode(&mut planner, mode, &target, &mut gate, &rpc, events).await;
+                            let _ = rpc.respond(id, tool_reply(note, true)).await;
+                            "mode-set"
                         }
                         ToolCall::Send(request) => match gate.offer(id, request, Instant::now()) {
                             Err((id, why)) => { let _ = rpc.respond(id, tool_reply(why, false)).await; "refused-short" }
@@ -276,8 +355,20 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
             },
             command = inbox.recv() => match command {
                 Some(Command::Reply(id, reply)) => { log(format!("tool reply success={}", reply["success"])); let _ = rpc.respond(id, reply).await; }
+                Some(Command::SetMode(mode)) => {
+                    log(format!("mode set {mode:?}"));
+                    let note = switch_mode(&mut planner, mode, &target, &mut gate, &rpc, events).await;
+                    let _ = rpc.request("thread/realtime/appendText", json!({"threadId": thread, "role": "developer", "text": note})).await;
+                    let speech = if mode == Mode::Plan { "Modo planejar." } else { "Modo direto." };
+                    let _ = rpc.request("thread/realtime/appendSpeech", json!({"threadId": thread, "text": speech})).await;
+                }
+                Some(Command::Answer(text)) => {
+                    log(format!("session answer bytes={}", text.len()));
+                    if let Some(input) = results.push(String::new(), text) { start_summary(&rpc, &thread, input, &mut results, organizer_busy).await; }
+                }
                 Some(Command::Retarget(name, context)) => {
                     log("retarget");
+                    target = name.clone();
                     let _ = rpc.request("thread/realtime/appendText", json!({"threadId": thread, "role": "developer", "text": context})).await;
                     let _ = rpc.request("thread/realtime/appendSpeech", json!({"threadId": thread, "text": format!("Agora estou na sessão {name}.")})).await;
                 }
@@ -296,6 +387,17 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
     let _ = tokio::task::spawn_blocking(move || peer.join()).await;
     let _ = std::fs::remove_dir_all(&directory);
     outcome
+}
+
+/// Entrar no Planejar cancela o envio que esperava a janela: a chamada pendente falha em vez de ficar sem resposta.
+async fn switch_mode(planner: &mut Planner, mode: Mode, target: &str, gate: &mut SendGate<Value>, rpc: &Rpc,
+    events: &async_channel::Sender<VoiceEvent>) -> String {
+    if mode == Mode::Plan && let Some((old, _)) = gate.user_spoke() {
+        let _ = rpc.respond(old, tool_reply("Cancelado: modo Planejar; nada foi enviado.", false)).await;
+    }
+    let note = planner.set_mode(mode, target);
+    let _ = events.send(VoiceEvent::Mode(mode)).await;
+    note
 }
 
 async fn start_summary(rpc: &Rpc, thread: &str, first: Value, results: &mut Results, organizer_busy: bool) {

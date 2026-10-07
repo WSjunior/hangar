@@ -223,7 +223,8 @@ impl Hangar {
         let Some(codex) = self.voice.codex.clone() else { self.voice.error = Some(tr("voice_no_codex")); cx.notify(); return; };
         if self.dictation.recording() { self.voice.error = Some(tr("voice_dictation_busy")); cx.notify(); return; }
         let (events_tx, events) = async_channel::unbounded();
-        let options = VoiceOptions { codex, voice: self.voice.voice.clone(), context: self.voice_context() };
+        let target = self.selected.as_ref().map(|s| s.name.clone()).unwrap_or_default();
+        let options = VoiceOptions { codex, voice: self.voice.voice.clone(), context: self.voice_context(), cwd: self.local_session_dir(), target };
         self.voice.generation += 1;
         self.voice.call = Some(Voice::start(self.runtime.handle(), options, events_tx));
         self.voice.target = self.selected.as_ref().map(|s| s.name.clone());
@@ -313,6 +314,25 @@ impl Hangar {
                 self.voice.error = Some(failure_text(&failure));
                 // O erro do organizador é de uma fala e a conversa segue: aparece na pílula e no painel, sem abrir.
                 if !matches!(failure, VoiceFailure::Organizer) { self.voice.open = true; }
+            }
+            // Provisórios: o painel do plano e a pergunta à sessão entram nas próximas tarefas.
+            VoiceEvent::Mode(_) | VoiceEvent::Plan { .. } => {}
+            VoiceEvent::AskSession(_) => {
+                if let Some(voice) = &self.voice.call { voice.session_answer("Pergunta à sessão ainda não disponível.".to_owned()); }
+            }
+            VoiceEvent::SendPlan { session, text } => {
+                // O plano foi escrito para uma sessão; se a tela mudou, não vai para outra.
+                let on_screen = self.selected.as_ref().is_some_and(|s| s.name == session);
+                let key = self.selected_key().filter(|_| on_screen);
+                let Some(key) = key.filter(|key| self.api_for(&key.server).is_some()) else {
+                    if let Some(voice) = &self.voice.call { voice.session_answer(format!("O plano não foi enviado: a sessão {session} não está na tela.")); }
+                    cx.notify();
+                    return;
+                };
+                let was_working = self.chat.state.state == "working";
+                self.voice.watched.insert(key.clone(), was_working);
+                let known = self.known_user_ids();
+                if !self.post(key.clone(), text.clone(), String::new(), false, known, None, cx) { self.delivery.hold(key, text, false, None); }
             }
             VoiceEvent::ReadSession(call) => self.voice_reply(call, tool_reply(self.voice_context(), true)),
             VoiceEvent::Send(call, request) => {
