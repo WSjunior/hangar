@@ -46,7 +46,7 @@ PADROES+=('IP da tailnet (endereço real de máquina)::100\.(6[5-9]|[7-9][0-9]|1
 
 ZERO=0000000000000000000000000000000000000000
 achou=0
-mudados=""
+enviados=()
 while read -r _localref localsha _remoteref remotesha; do
     [[ "$localsha" == "$ZERO" ]] && continue          # delete de branch: nada sai
     if [[ "$remotesha" == "$ZERO" ]]; then
@@ -66,11 +66,7 @@ while read -r _localref localsha _remoteref remotesha; do
         echo "pre-push: não consegui varrer $intervalo — trava incompleta, push recusado." >&2
         exit 1
     fi
-    nomes="$(git log --name-only --format= $intervalo -- .)" || {
-        echo "pre-push: não consegui listar os arquivos de $intervalo — testes do push não rodariam, push recusado." >&2
-        exit 1
-    }
-    mudados+="$nomes"$'\n'
+    enviados+=("$localsha")
     adicionado="$(printf '%s\n' "$log_saida" | grep '^+' | grep -v '^+++' || true)"
     [[ -z "$adicionado" ]] && continue
     for entrada in "${PADROES[@]}"; do
@@ -101,78 +97,36 @@ FIM
     exit 1
 fi
 
-# Só os testes ligados ao que o push leva. A suíte inteira NÃO roda aqui: com várias sessões
-# trabalhando ela derruba a máquina e estoura tempo, e o pytest completo fecha as sessões sem
-# terminal. Quem julga a suíte inteira é o ci.yml; `scripts/ci-gates.sh` roda à mão.
+# Testes: o push exige que `scripts/verificar-local` tenha passado na árvore de cada commit enviado,
+# no Linux e, com a VM configurada (git config hangar.verificarWindows), no Windows. A trava antiga
+# perguntava pelo /dev/tty, e o comando de push de um agente nunca tem esse canal: os testes eram
+# pulados e o primeiro lugar onde rodavam era o CI.
+# Emergência, explícita e nunca automática:  HANGAR_SEM_VERIFICACAO=1 git push ...
+if [[ -n "${HANGAR_SEM_VERIFICACAO:-}" ]]; then
+    echo "pre-push: verificação local PULADA por HANGAR_SEM_VERIFICACAO=1." >&2
+    exit 0
+fi
+if [[ "$(uname -s)" != Linux ]]; then
+    echo "pre-push: a verificação local só é exigida no Linux; aqui quem confere é o CI." >&2
+    exit 0
+fi
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX
 raiz="$(git rev-parse --show-toplevel)" || exit 1
 cd "$raiz" || exit 1
+[[ -x scripts/verificar-local ]] || exit 0   # checkout de antes do script: nada a exigir
 
-front=(); core=(); back=()
-while IFS= read -r f; do
-    [[ -n "$f" && -e "$f" ]] || continue
-    case "$f" in
-        packages/core/src/*.ts) core+=("$raiz/$f"); front+=("$raiz/$f") ;;
-        frontend/src/paraglide/*) ;;
-        frontend/src/*.ts|frontend/src/*.js|frontend/src/*.svelte) front+=("$raiz/$f") ;;
-        backend/tests/test_*.py) back+=("${f#backend/}") ;;
-        backend/app/*.py)
-            nome="$(basename "$f" .py)"
-            for t in backend/tests/test_"$nome".py backend/tests/test_"$nome"_*.py; do
-                [[ -e "$t" ]] && back+=("${t#backend/}")
-            done ;;
-    esac
-done < <(printf '%s' "$mudados" | sort -u)
+falta=0
+for s in "${enviados[@]}"; do
+    scripts/verificar-local --exigir "$s" || falta=1
+done
+if (( falta )); then
+    cat >&2 <<'FIM'
 
-total=$(( ${#core[@]} + ${#front[@]} + ${#back[@]} ))
-if (( total == 0 )); then
-    exit 0
-fi
-# PERGUNTA, não roda sozinho: rodar em todo push cobrava minutos de quem só queria enviar.
-# Este hook pergunta via /dev/tty; sem esse canal, pula os testes e deixa o push seguir.
-# Isso não limita a sessão: os testes podem ser pedidos pelo app e executados pelo agente.
-resposta=""
-if { exec 3</dev/tty; } 2>/dev/null; then
-    read -r -t 60 -u 3 -p \
-        "pre-push: rodar os testes ligados aos ${total} arquivo(s) que vão subir? [s/N] " resposta
-    exec 3<&-
-    echo >&2
-else
-    echo "pre-push: este hook não conseguiu perguntar via /dev/tty — testes dos ${total} arquivo(s) PULADOS. A sessão pode executá-los quando você pedir; o CI também faz suas verificações." >&2
-fi
-case "${resposta:-n}" in
-    s|S|y|Y) ;;
-    *) exit 0 ;;
-esac
-
-falhou=()
-if (( ${#core[@]} )); then
-    echo "pre-push: vitest dos arquivos de @hangar/core que vão subir…" >&2
-    (cd packages/core && flock -w 900 /tmp/hangar-verificacao.lock \
-        npx --no-install vitest related --run --passWithNoTests "${core[@]}") || falhou+=("vitest @hangar/core")
-fi
-if (( ${#front[@]} )); then
-    echo "pre-push: vitest dos arquivos do front que vão subir…" >&2
-    if (cd frontend && npm run --silent i18n:compile >/dev/null); then
-        (cd frontend && flock -w 900 /tmp/hangar-verificacao.lock \
-            npx --no-install vitest related --run --passWithNoTests "${front[@]}") || falhou+=("vitest frontend")
-    else
-        falhou+=("i18n:compile do frontend (vitest não rodou)")
-    fi
-fi
-if (( ${#back[@]} )); then
-    mapfile -t back < <(printf '%s\n' "${back[@]}" | sort -u)
-    echo "pre-push: pytest de ${#back[@]} arquivo(s) de teste ligados ao que vai subir…" >&2
-    (cd backend && uv run pytest -q "${back[@]}") || falhou+=("pytest backend")
-fi
-
-if (( ${#falhou[@]} )); then
-    cat >&2 <<FIM
-
-  ── push recusado: testes ligados ao que vai subir falharam ────────────────
-  Falhou: ${falhou[*]}
-  Corrija e tente de novo. Emergência, sabendo o que está fazendo:
-  git push --no-verify
+  ── push recusado: falta a verificação local ───────────────────────────────
+  Rode o que o CI rodaria para estes commits (fila única na máquina):
+      scripts/verificar-local --commit <sha acima>
+  Emergência, sabendo o que está fazendo:
+      HANGAR_SEM_VERIFICACAO=1 git push ...
 
 FIM
     exit 1

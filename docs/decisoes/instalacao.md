@@ -64,6 +64,13 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `systemctl --user restart`.
 - **Criar sessão embrulha o tmux em escopo transiente do systemd, sob sonda** — um gerenciador que
   recusa escopo transiente derrubava toda criação de sessão.
+- **Push exige `scripts/verificar-local` na árvore do commit.** Ele roda o que o CI rodaria para o
+  que o commit muda, num clone fixo por máquina (`~/.cache/hangar-verificacao/arvore`), em fila
+  única (`flock`) e prioridade baixa, com HOME vazio e o `omp` fixo do CI; Windows por SSH na VM
+  de `git config hangar.verificarWindows`, com mutex. O registro é pelo tree sha; a trava só o lê.
+  Escape: `HANGAR_SEM_VERIFICACAO=1`. Na VM roda só o que o CI roda no Windows (Rust e os 6
+  `test_runtime_*`), nunca o pytest inteiro. Evidência em
+  [Verificação local antes do push](#verificação-local-antes-do-push-06102026).
 - **O bloco do MCP `hangar` no `config.toml` do Codex é reconhecido pela TABELA, não só pelos
   marcadores.** O app desktop reescreve o arquivo sem comentários; quem só procura `# >>> hangar`
   anexa de novo, e o TOML com chave duplicada derruba o ChatGPT e o Codex juntos.
@@ -453,4 +460,49 @@ Build de UM sistema que falha: no manifesto antigo ele sai da lista e o asset ve
 commit conhecido, então esse sistema vai ao topo, como antes. O manifesto por sistema
 (`platforms.<sistema>` com `commit` e `protocol`) resolve: a escolha usa a entrada do próprio
 sistema, e o `commit` do topo só vale quando a chave `platforms` não existe.
+
+## Verificação local antes do push (06/10/2026)
+
+Cada tarefa levava ~4 h, ~3 delas esperando CI. A trava `pre-push` só rodava os testes ligados aos
+arquivos quando conseguia perguntar pelo `/dev/tty`; o comando de push de um agente nunca tem esse
+canal, então os testes eram pulados e o primeiro lugar onde rodavam era o CI (Windows: 25–40 min
+por rodada).
+
+Medido nesta máquina (16 núcleos, `CARGO_BUILD_JOBS=4`, `nice`/`ionice`), commit `c14dffe8f`:
+
+| Passo | Frio | Quente, sem mudança | CI (mediana do job) |
+|---|---|---|---|
+| rust: `cargo test --workspace` + contrato do cano | 280 s | 169 s | Server Linux 865 s |
+| backend: pytest inteiro (+ contratos Rust) | 711 s | 680 s | backend 848 s |
+| front: check, vitest, build | 382 s | 386 s | frontend 791 s + dist 66 s |
+| nativo: `cargo test` do `desktop-native` | 475 s | 2 s | (o CI só compila release) |
+| Rodada inteira (`--tudo`) | 1874 s | 1263 s | — |
+
+Carga máxima (load 1 min) durante as rodadas: 6,3 a frio, 3,9 quente. Uma rodada de verdade só roda
+os passos do que mudou, e árvore que já passou não roda nada.
+
+- **Árvore fixa, não `CARGO_TARGET_DIR` compartilhado.** Target dividido entre checkouts rodou
+  binário velho. Aqui o checkout é sempre o mesmo, e o `git checkout` muda a data só do que mudou,
+  então o cargo recompila só isso. Prova: dois commits irmãos mudando uma string do
+  `hangar-server`, verificados em sequência; o binário que o pytest usa trazia só a string do commit
+  da vez (PROVA_RESULTADO).
+- **Depuração só de linhas** (`CARGO_PROFILE_DEV_DEBUG=line-tables-only`). Cada arquivo de teste
+  vira um binário; com depuração completa o target do `crates/` tinha 27 GB no Linux, e na VM
+  encheu os 14 GB livres do C: no meio da compilação. Com só linhas: 11 GB. No Windows também sem
+  incremental, mínimo de 12 GB livres para começar e um vigia que interrompe o passo abaixo de 3 GB.
+- **Ambiente de runner**: HOME vazio, `TMUX_TMPDIR` e `XDG_RUNTIME_DIR` próprios, `CI=1`, só o PATH
+  das ferramentas. O `omp` é o da versão fixada no `ci.yml`, baixado com sha256; sem ele 20 casos
+  falham. A pasta temporária do pytest fica em `/var/tmp`, fora do HOME e fora do tmpfs.
+- **Windows na VM roda só Rust e os 6 `test_runtime_*`**, como o `server.yml`. O pytest inteiro lá
+  nem coleta (`fcntl`, `os.geteuid`), e testes com `tmux -L … kill-server` falariam com o psmux
+  real da VM. O `python3` da VM é o atalho da Microsoft Store: o teste do cano lança `python3`, e
+  sem um executável de verdade (venv fixo em `C:\hangar-verificacao\py3`) dava `10054`.
+- **O que a VM não reproduz**: o relógio dela está em 1 ms (`NtQueryTimerResolution`, algum
+  processo o ergue), e o padrão do Windows é 15,625 ms: teste de prazo que passa aqui pode falhar
+  no runner; 4 núcleos dedicados contra 4 vCPU compartilhadas, Windows 11 26100
+  contra Server 2022, e o cache frio de cada rodada do CI.
+- **O que só o CI faz**: build release com LTO fat (`zigbuild` com glibc 2.28 no Linux), macOS, a
+  publicação dos binários e do `dist-latest`, e o `passos` (o pre-commit faz o mesmo por commit).
+- **`release.yml` saiu.** Empacotava o shell Electron em tag `v*` (última em 25/08); nada no
+  instalador, no Atualizar, no app nativo nem no site lê essas releases.
 
