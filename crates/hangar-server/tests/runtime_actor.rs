@@ -530,12 +530,16 @@ async fn status_turn(bad_rate:bool) -> Vec<Value> {
     assert!(handle.command(input).await.unwrap().disposition == Disposition::Accepted);
     let mut problems = Vec::new();
     tokio::time::timeout(std::time::Duration::from_secs(5),async {
+        let mut idle_seen = false;
         loop {
-            let event = events.recv().await.unwrap();
-            if event.channel == "problem" { problems.push(event.data.clone()); }
+            // A condição vale depois de cada evento e também sem evento: o último `idle` pode vir antes do problema ou da chamada.
+            if let Ok(event) = tokio::time::timeout(std::time::Duration::from_millis(100),events.recv()).await {
+                let event = event.unwrap();
+                if event.channel == "problem" { problems.push(event.data.clone()); }
+                if event.channel == "state" && event.data["state"] == "idle" { idle_seen = true; }
+            }
             // Os serviços do Python que sobraram (uso, carimbo, sidecar) já foram pedidos; o preparo e o status são locais.
-            if event.channel == "state" && event.data["state"] == "idle" && calls.load(std::sync::atomic::Ordering::SeqCst) > 0
-                && (!bad_rate || !problems.is_empty()) { break; }
+            if idle_seen && calls.load(std::sync::atomic::Ordering::SeqCst) > 0 && (!bad_rate || !problems.is_empty()) { break; }
         }
     }).await.expect("o turno precisa terminar");
     handle.stop().await.unwrap();

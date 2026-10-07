@@ -264,6 +264,7 @@ async fn open_headless(registry: &RuntimeRegistry, dir: &Path, name: &str) -> Ar
 }
 
 /// tmux falso: aceita tudo e anota cada chamada, para contar as teclas que o ator mandou.
+#[cfg(unix)]
 fn fake_tmux(dir: &Path, name: &str) -> (String, std::path::PathBuf) {
     use std::os::unix::fs::PermissionsExt;
     let (script, log) = (dir.join("tmux"), dir.join("tmux.log"));
@@ -273,11 +274,13 @@ fn fake_tmux(dir: &Path, name: &str) -> (String, std::path::PathBuf) {
     (script.to_str().unwrap().to_owned(), log)
 }
 
+#[cfg(unix)]
 fn keys_sent(log: &Path) -> usize {
     std::fs::read_to_string(log).unwrap_or_default().lines().filter(|l| l.contains("send-keys")).count()
 }
 
 /// Entrada com terminal sobre o tmux falso: o que chega ao ator vira `send-keys` no registro.
+#[cfg(unix)]
 async fn open_terminal(registry: &RuntimeRegistry, dir: &Path, name: &str) -> std::path::PathBuf {
     let (tmux, log) = fake_tmux(dir, name);
     open_terminal_with(registry, dir, name, vec![tmux]).await;
@@ -372,6 +375,7 @@ async fn queue_discard_of_an_entry_that_is_not_there_is_404() {
     assert_eq!(python.hits_to("/api/sessions/s/queue/nao-existe"), 0);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn permission_held_by_the_plugin_refuses_option_3_and_the_actor_receives_nothing() {
     let (dir, (registry, counter)) = (tempfile::tempdir().unwrap(), registry_counting().await);
@@ -391,6 +395,7 @@ async fn permission_held_by_the_plugin_refuses_option_3_and_the_actor_receives_n
     assert_eq!(python.hits_to("/api/sessions/t/select"), 0);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn select_whose_plugin_lookup_fails_is_a_503_with_a_code_and_never_a_forward() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
@@ -405,6 +410,7 @@ async fn select_whose_plugin_lookup_fails_is_a_503_with_a_code_and_never_a_forwa
     assert_eq!(keys_sent(&log), before);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_plugin_answer_without_the_pending_key_is_a_failure_not_no_question() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
@@ -417,6 +423,7 @@ async fn a_plugin_answer_without_the_pending_key_is_a_failure_not_no_question() 
     assert_eq!(keys_sent(&log), before);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn interrupt_whose_plugin_lookup_fails_never_presses_escape() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
@@ -431,6 +438,7 @@ async fn interrupt_whose_plugin_lookup_fails_never_presses_escape() {
     assert_eq!(keys_sent(&log), before, "sem ler a pergunta, nenhum Esc");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn an_accepted_escape_tells_the_plugin_which_question_it_closed() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
@@ -456,6 +464,7 @@ async fn interrupt_the_terminal_refused_does_not_tell_the_plugin() {
     assert!(python.plugin_posts().is_empty(), "pergunta não interrompida segue valendo");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn terminal_keys_and_term_input_with_bodies_python_would_refuse_reach_python() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
@@ -467,6 +476,7 @@ async fn terminal_keys_and_term_input_with_bodies_python_would_refuse_reach_pyth
     assert_eq!(python.hits_to("/api/sessions/t/keys") + python.hits_to("/api/sessions/t/term-input"), 4);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn keys_reach_the_pane_through_the_actor() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);

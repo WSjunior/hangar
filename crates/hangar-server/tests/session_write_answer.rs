@@ -11,9 +11,11 @@ use fake::*;
 use hangar_server::routes::AppState;
 use hangar_server::runtime::gateway::RuntimeRegistry;
 use hangar_server::runtime::protocol::{CanoBinding, RuntimeError, RuntimeReply, RuntimeTarget};
+#[cfg(unix)]
 use hangar_server::runtime::terminal::TerminalTarget;
 use hangar_server::session_write::answer::*;
 use hangar_server::session_write::control::control_step_answer;
+#[cfg(unix)]
 use hangar_server::terminal_input::TerminalBinding;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -248,6 +250,7 @@ async fn open_headless(registry: &RuntimeRegistry, dir: &Path, name: &str) {
 }
 
 /// tmux falso: aceita tudo e anota cada chamada com o texto que ela leva.
+#[cfg(unix)]
 fn fake_tmux(dir: &Path, name: &str, pane: &str) -> (String, std::path::PathBuf) {
     use std::os::unix::fs::PermissionsExt;
     let (script, log) = (dir.join("tmux"), dir.join("tmux.log"));
@@ -257,17 +260,21 @@ fn fake_tmux(dir: &Path, name: &str, pane: &str) -> (String, std::path::PathBuf)
     (script.to_str().unwrap().to_owned(), log)
 }
 
+#[cfg(unix)]
 fn log_lines(log: &Path) -> Vec<String> {
     std::fs::read_to_string(log).unwrap_or_default().lines().map(str::to_owned).collect()
 }
 
+#[cfg(unix)]
 fn keys_sent(log: &Path) -> usize { log_lines(log).iter().filter(|l| l.contains("send-keys")).count() }
 
 /// Entrada com terminal; a transcrição mora em `<conta>/projects/p/<name>.jsonl`, de onde sai o sidecar.
+#[cfg(unix)]
 async fn open_terminal(registry: &RuntimeRegistry, config: &Path, name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     open_terminal_on(registry, config, name, "%1").await
 }
 
+#[cfg(unix)]
 async fn open_terminal_on(registry: &RuntimeRegistry, config: &Path, name: &str, pane: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     let dir = config.join("projects/p");
     std::fs::create_dir_all(&dir).unwrap();
@@ -283,6 +290,7 @@ async fn open_terminal_on(registry: &RuntimeRegistry, config: &Path, name: &str,
     (log, transcript)
 }
 
+#[cfg(unix)]
 fn write_sidecar(config: &Path, name: &str) -> std::path::PathBuf {
     let path = config.join(".hangar-askq").join(format!("{name}.json"));
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -318,6 +326,7 @@ async fn answer(server: std::net::SocketAddr, name: &str, body: &Value) -> (u16,
 const OPT: fn() -> Value = || json!({"kind": "option", "indices": [0], "labels": ["A"]});
 const CHAT: fn() -> Value = || json!({"kind": "chat", "chat_index": 1});
 
+#[cfg(unix)]
 #[tokio::test]
 async fn chat_answer_interrupts_then_submits_and_never_borrows_the_keyboard() {
     let (config, (registry, counter)) = (tempfile::tempdir().unwrap(), registry_counting().await);
@@ -340,6 +349,7 @@ async fn chat_answer_interrupts_then_submits_and_never_borrows_the_keyboard() {
     assert_eq!(python.plugin_gets(), 1, "só a leitura da pergunta pendente foi ao Python");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn chat_answer_with_nothing_to_preserve_is_409_and_presses_nothing() {
     let (config, (registry, _)) = (tempfile::tempdir().unwrap(), registry_counting().await);
@@ -352,6 +362,7 @@ async fn chat_answer_with_nothing_to_preserve_is_409_and_presses_nothing() {
     assert_eq!(keys_sent(&log), before);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn held_question_is_answered_through_the_actor_and_clears_the_sidecar() {
     let (config, (registry, counter)) = (tempfile::tempdir().unwrap(), registry_counting().await);
@@ -366,6 +377,7 @@ async fn held_question_is_answered_through_the_actor_and_clears_the_sidecar() {
     assert_eq!(python.hits_to("/api/sessions/t/answer"), 0);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_changed_question_is_409_and_the_actor_receives_nothing() {
     let (config, (registry, counter)) = (tempfile::tempdir().unwrap(), registry_counting().await);
@@ -382,6 +394,7 @@ async fn a_changed_question_is_409_and_the_actor_receives_nothing() {
     assert!(sidecar.exists(), "pergunta não respondida segue valendo");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_plugin_lookup_that_fails_is_a_503_with_a_code_and_sends_nothing() {
     let (config, (registry, _)) = (tempfile::tempdir().unwrap(), registry_counting().await);
@@ -396,6 +409,7 @@ async fn a_plugin_lookup_that_fails_is_a_503_with_a_code_and_sends_nothing() {
     assert_eq!(keys_sent(&log), before);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn bodies_python_would_coerce_or_refuse_reach_python() {
     let (config, (registry, _)) = (tempfile::tempdir().unwrap(), registry_counting().await);
@@ -427,6 +441,7 @@ async fn headless_without_a_request_id_goes_to_python() {
     assert_eq!(python.hits_to("/api/sessions/s/answer"), 1);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn an_open_terminal_panel_refuses_the_answer_when_no_question_is_held() {
     let (config, (registry, counter)) = (tempfile::tempdir().unwrap(), registry_counting().await);
