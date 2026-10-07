@@ -79,6 +79,8 @@ mod stats;
 mod search;
 mod topbar;
 mod setup;
+/// Variável do ambiente do script com o código de uso único do askpass (`setup::askpass`).
+pub(crate) const ASKPASS_CODE_ENV: &str = "HANGAR_ASKPASS_CODE";
 
 actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, FindProjectFile, FindProjectText, NextSession, PreviousSession, ToggleDictation, NewChat, CloseSession, RenameSession, OpenCosts, OpenSearch,
     ToggleSidebar, CyclePermission, OpenWorktrees]);
