@@ -219,6 +219,16 @@ async def list_demote(request: Request) -> dict:
     return {"ok": True}
 
 
+@router.get("/quota")
+async def quota(config_dir: str = "") -> dict:
+    """Janelas de cota da conta para a linha de status que o ator Rust monta; vazio = `~/.claude`."""
+    from pathlib import Path
+    from app import runtime_policy
+    if len(config_dir) > 4096 or (config_dir and not Path(config_dir).is_absolute()):
+        raise HTTPException(400)
+    return {"windows": await asyncio.to_thread(runtime_policy.quota_windows, config_dir)}
+
+
 @router.get("/workspace/context")
 async def workspace_context(name: str | None = None) -> dict:
     """Só metadados; o consumidor privado não consulta novamente este registro."""

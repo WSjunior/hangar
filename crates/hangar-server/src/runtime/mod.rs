@@ -9,6 +9,7 @@ pub mod actor;
 pub mod gateway;
 pub mod ingress;
 pub mod terminal;
+pub mod local_policy;
 
 #[derive(Default)]
 pub(crate) struct LiveBuffer {

@@ -197,10 +197,22 @@ def test_pure_policy_runs_without_a_journal_attempt(tmp_path, monkeypatch):
     coordinator = _rust_slot(tmp_path, monkeypatch)
     client = _client()
     for _ in range(2):
-        response = _policy(client, "prepare_prompt", "op-1:prepare_prompt", {"text": "Olá"})
+        response = _policy(client, "reload_stamp", "op-1:reload_stamp", {})
         assert response.status_code == 200 and response.json()["ok"] is True
     assert internal_api._policy_calls == {}
     coordinator.close_python_leases()
+
+
+def test_quota_route_returns_windows_for_the_account(tmp_path):
+    windows = [{"rotulo": "5h", "pct": 42, "reset_ts": None, "por_modelo": False}]
+    with patch("app.runtime_policy.quota_windows", return_value=windows) as quota:
+        ok = _client().get("/internal/quota", params={"config_dir": str(tmp_path)}, headers={"X-Hangar-Internal": SECRET})
+        relative = _client().get("/internal/quota", params={"config_dir": "relativo"}, headers={"X-Hangar-Internal": SECRET})
+        refused = _client().get("/internal/quota", params={"config_dir": str(tmp_path)})
+    assert ok.status_code == 200 and ok.json() == {"windows": windows}
+    quota.assert_called_once_with(str(tmp_path))
+    assert relative.status_code == 400
+    assert refused.status_code == 404, "sem o segredo, nem de 127.0.0.1"
 
 
 def test_native_message_still_needs_its_journal_attempt(tmp_path, monkeypatch):

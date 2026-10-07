@@ -354,25 +354,15 @@ async fn setup_claude_unreachable_policy() -> (RuntimeHandle,tokio::task::JoinHa
 }
 
 #[tokio::test]
-async fn input_that_fails_before_any_write_goes_back_to_the_queue() {
-    // Nada chegou à CLI: a entrada é adiada e volta a ser drenável, nunca "incerta" para sempre.
+async fn input_is_prepared_in_rust_even_when_the_python_policy_is_unreachable() {
+    // O preparo do prompt é local: o Python fora do ar não adia mais a entrada.
     let (handle,server,dir) = setup_claude_unreachable_policy().await;
     let input = RuntimeCommand { operation_id:"msg".into(),kind:OperationKind::Input,payload:json!({"text":"Olá","entry_id":"msg"}) };
-    // Adiada, não erro: o drain que a pegou não põe a sessão inteira em erro por isso.
-    assert!(handle.command(input).await.unwrap().disposition == Disposition::Deferred);
-    let path = dir.path().join("key.queue-state.json");
-    tokio::time::timeout(std::time::Duration::from_secs(5),async {
-        loop {
-            let state:State = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-            if state.operations.get("msg").is_some_and(|op|op.status == Status::Deferred)
-                && state.rows.iter().any(|row|row["id"] == "msg" && row["delivered"] == false) { break; }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    }).await.expect("entrada sem escrita precisa voltar para a fila como adiada");
-    let state:State = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(handle.command(input).await.unwrap().disposition != Disposition::Deferred);
+    let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
     assert!(!state.operations.keys().any(|id|id.contains("prepare_prompt")),"cálculo puro não entra no diário");
     handle.stop().await.unwrap();
-    assert_eq!(server.await.unwrap(),0);
+    assert_eq!(server.await.unwrap(),1,"a mensagem chegou ao fio");
 }
 
 #[tokio::test]
@@ -552,11 +542,11 @@ async fn steering_the_queue_without_a_turn_is_refused_and_keeps_the_entry() {
     let reply = handle.command(steer).await.unwrap();
     assert!(reply.disposition == Disposition::Rejected);
     assert_eq!(reply.payload["error"],"Não há turno em andamento para orientar");
-    // A entrada continua na fila (o drain comum pode tentá-la; sem política ela volta adiada).
+    // A entrada continua na fila (o drain comum pode entregá-la depois: o preparo do prompt é local).
     tokio::time::timeout(std::time::Duration::from_secs(5),async {
         loop {
             let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
-            if state.rows.iter().any(|row|row["id"] == "later" && row["delivered"] == false) { break; }
+            if state.rows.iter().any(|row|row["id"] == "later") { break; }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }).await.expect("a entrada precisa continuar na fila");

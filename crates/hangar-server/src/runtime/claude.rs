@@ -470,7 +470,6 @@ impl ClaudeEngine {
                             self.changed(&mut effects,true);
                             return Ok(effects);
                         }
-                        "quota" => {},
                         _ => {},
                     }
                     self.changed(&mut effects,false);
