@@ -66,8 +66,10 @@ async def test_stop_encerra_os_comandos_que_o_turno_interrompido_rodava(codex, m
     monkeypatch.setattr(adapter, "ensure_running", ensure_running)
     monkeypatch.setattr(adapter, "_active_turn_id", active_turn)
     assert await adapter.interrupt("cx")
-    assert calls == [("turn/interrupt", {"threadId": "thread", "turnId": "turn"}),
-                     ("thread/backgroundTerminals/terminate", {"threadId": "thread", "processId": "43041"})]
+    # A observação da sessão também lê a thread por conta própria; aqui só contam as chamadas do Stop.
+    stop = [c for c in calls if c[0] in ("turn/interrupt", "thread/backgroundTerminals/terminate")]
+    assert stop == [("turn/interrupt", {"threadId": "thread", "turnId": "turn"}),
+                    ("thread/backgroundTerminals/terminate", {"threadId": "thread", "processId": "43041"})]
 
 
 async def test_pensamento_ao_vivo_vai_para_a_fonte_e_some_com_a_resposta(codex, monkeypatch):
