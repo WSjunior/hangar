@@ -24,7 +24,7 @@ arquivos_sem_marca() {
     cobertos="$(git log --format=%B "$intervalo" | grep -oE 'HANGAR_SEM_PASSO=1( [0-9a-f]{7,40})+' \
         | tr ' ' '\n' | grep -Ex '[0-9a-f]{7,40}' || true)"
     for c in $(git rev-list --no-merges "$intervalo"); do
-        git log -1 --format=%B "$c" | grep -qE '(^|[^A-Za-z_])HANGAR_SEM_PASSO[:=]' && continue
+        git log -1 --format=%B "$c" | grep -qE '(^|[^A-Za-z_])HANGAR_SEM_PASSO(: +[^ ]|=1 [0-9a-f]{7})' && continue
         pula=""
         for s in $cobertos; do [[ "$c" == "$s"* ]] && pula=1; done
         [[ -n "$pula" ]] && continue
@@ -34,7 +34,8 @@ arquivos_sem_marca() {
 
 case "${1:-}" in
     --staged) arquivos="$(git diff --cached --name-only --diff-filter=ACMR)" ;;
-    *..*)     arquivos="$(arquivos_sem_marca "$1"; git diff --name-only --diff-filter=ACMR "$1" | grep -E '^docs/atualizacoes/' || true)" ;;
+    *..*)     git rev-list "$1" >/dev/null || { echo "intervalo inválido: $1" >&2; exit 2; }
+              arquivos="$(arquivos_sem_marca "$1"; git diff --name-only --diff-filter=ACMR "$1" | grep -E '^docs/atualizacoes/')" ;;
     *) echo "uso: $0 --staged | <de>..<para>" >&2; exit 2 ;;
 esac
 [[ -z "$arquivos" ]] && exit 0
