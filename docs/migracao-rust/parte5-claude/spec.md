@@ -84,8 +84,10 @@ Cada subparte é uma junção na `main` e sobe o contrato interno uma vez.
   continua como cliente interno do Rust para quem nasce no Python (decisão 7 e "Fora").
 - **Serviços portados na 5-0** (os que os dois provedores usam): `prepare_prompt` (chamado em
   cada Input/Steer), `format_status` (texto dos dois provedores) e `skill_catalog`. As janelas de
-  cota do Claude no `format_status` viram fato que o Python empurra quando mudam (cotas são da parte 6); a do Codex passa a ser do Rust na 5E da metade Codex, sem empurrão. O texto do Codex bate por golden com `format_status_line`. O
-  Rust não pede mais o texto ao Python.
+  cota do Claude o Rust pede ao Python (`GET /internal/quota`) só quando vai formatar e o cache
+  dele, de 5 min, venceu (cotas são da parte 6); a cota do Codex passa a ser do próprio Rust na 5E
+  da metade Codex. O texto do Codex bate por golden com `format_status_line`. O Rust não pede mais
+  o texto da linha ao Python.
 - **Golden** de cada rota: corpo de resposta e de erro idênticos ao do Python, gerados pelas
   rotas Python (`backend/tests/fixtures/contract/`).
 
