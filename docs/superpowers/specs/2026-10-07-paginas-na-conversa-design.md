@@ -294,6 +294,27 @@ cabeçalho de token, `originWhitelist={['*']}` (a biblioteca abre sozinha, fora 
 da lista), `onShouldStartLoadWithRequest` bloqueando
 navegação (links por `ui/open-link` → `Linking.openURL`), altura por `onMessage`.
 
+## Site real na conversa (modo URL)
+
+Pedido do Jefferson depois do primeiro uso: além do HTML que o agente escreve, abrir um site de
+verdade dentro da conversa (um app web rodando em `localhost`, um site que exige login), com o login dele.
+
+- `html_render` aceita `url` (http/https) no lugar de `html`; um dos dois é obrigatório, nunca os
+  dois. `title` continua obrigatório, `height` vale como altura da moldura (padrão 640).
+- Servidor: guarda só `{url, title, height}` na mesma pasta da sessão (some com ela). Recusa
+  endereço do próprio Hangar (host loopback ou do próprio servidor nas portas 8765, 8766, 8768):
+  aquele perfil pode ter o login do Hangar. Sem medição nem print: sem o login o site nem abre.
+  O resultado `hangar_page` leva `url`.
+- Nativo (Linux): o cartão abre o site no perfil do navegador do painel (o contexto padrão do
+  Chromium do app, com os cookies e o login), sem o contexto isolado e sem o script de ponte. A
+  navegação dentro do site é livre; popup vira navegação no próprio cartão. Altura fixa, roda do
+  mouse vai para o site. Uma faixa no topo do cartão mostra o endereço atual e um botão que abre
+  o mesmo endereço no navegador do painel.
+- PWA, Expo, macOS e Windows: cartão com título, endereço e botão "abrir" (nova aba / navegador do
+  sistema). Sem site vivo.
+- Custo aceito: o site roda com o login do Jefferson dentro da conversa, fora do isolamento do
+  modo HTML. Por isso só o modo URL usa o perfil do painel; o modo HTML segue isolado.
+
 ## Fora desta etapa
 
 - Convidado (porta 8766) e par externo vendo páginas.
