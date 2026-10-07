@@ -177,6 +177,69 @@ run_install "$S/out" --app --tailscale=talvez; rc=$?
 expect_eq "ts-inválido: recusa" "$rc" 1
 expect_line "ts-inválido: diz o que aceita" "$S/out" '--tailscale aceita sim ou nao'
 
+# --- Caso: --check --app lista os itens ---
+new_sandbox itens
+rm -f "$B/tmux"; fake apt-get 'exit 0'
+run_install "$S/out" --check --app --no-frontend
+expect_line "itens: tmux na fila" "$S/out" '^##HANGAR-ITEM## tmux fila tmux$'
+expect_line "itens: Claude encontrado" "$S/out" '^##HANGAR-ITEM## claude ok Claude Code$'
+expect_line "itens: uv encontrado" "$S/out" '^##HANGAR-ITEM## uv ok uv$'
+expect_line "itens: git opcional pendente" "$S/out" '^##HANGAR-ITEM## git pendente git$'
+expect_eq "itens: preparar pendente" "$(steps "$S/out")" 'preparar fazendo|preparar pendente'
+expect_eq "itens: FIM pendente" "$(last_line "$S/out")" '##HANGAR-FIM## pendente'
+
+# --- Caso: itens da instalação no caminho feliz ---
+new_sandbox itens-feliz
+run_install "$S/out" "${APP_ARGS[@]}"
+for i in 'backend ok' 'token ok' 'nativo ok' 'rust ok' 'wrappers ok' 'rede-local ok' 'servicos ok' 'hangar-send ok' 'backend-importa ok' 'multiplexador ok'; do
+  expect_line "itens-feliz: $i" "$S/out" "^##HANGAR-ITEM## $i "
+done
+
+# --- Caso: nenhum agente ficou instalado ---
+new_sandbox sem-agente
+rm -f "$B/claude"
+run_install "$S/out" --app --agentes=codex --tailscale=nao --sem-nativo --no-frontend
+expect_line "sem-agente: item do agente na fila" "$S/out" '^##HANGAR-ITEM## codex fila Codex$'
+expect_line "sem-agente: pendência do agente" "$S/out" '^##HANGAR-PENDENCIA## agente-nao-instalou Codex instalou'
+if before "$S/out" '^##HANGAR-ERRO## sem-agente$' '^##HANGAR-FALHA## nenhum agente'; then pass "sem-agente: ERRO antes da FALHA"; else flunk "sem-agente: ERRO antes da FALHA" "$S/out"; fi
+expect_eq "sem-agente: FIM falhou" "$(last_line "$S/out")" '##HANGAR-FIM## falhou'
+
+# --- Caso: Claude Code não instalou e era o único agente ---
+new_sandbox claude-falhou
+rm -f "$B/claude"; fake curl 'exit 22'
+run_install "$S/out" "${APP_ARGS[@]}"
+expect_line "claude-falhou: item falhou" "$S/out" '^##HANGAR-ITEM## claude falhou Claude Code$'
+if before "$S/out" '^##HANGAR-ERRO## agente-nao-instalou$' '^##HANGAR-FALHA## faltam: Claude Code'; then pass "claude-falhou: ERRO antes da FALHA"; else flunk "claude-falhou: ERRO antes da FALHA" "$S/out"; fi
+
+# --- Caso: sem internet no uv sync ---
+new_sandbox sem-internet
+fake uv '[ "$1" = sync ] && exit 1; exit 0'
+fake curl 'exit 7'
+run_install "$S/out" "${APP_ARGS[@]}"
+if before "$S/out" '^##HANGAR-ERRO## sem-internet$' '^##HANGAR-FALHA## uv sync falhou'; then pass "sem-internet: ERRO antes da FALHA"; else flunk "sem-internet: ERRO antes da FALHA" "$S/out"; fi
+
+# --- Caso: uv sync falha com a internet no ar: nenhum código inventado ---
+new_sandbox uv-com-rede
+fake uv '[ "$1" = sync ] && exit 1; exit 0'
+fake curl 'exit 0'
+run_install "$S/out" "${APP_ARGS[@]}"
+expect_no "uv-com-rede: sem código" "$S/out" '^##HANGAR-ERRO##'
+
+# --- Caso: o código de erro também sai no terminal ---
+new_sandbox erro-terminal
+fake uv '[ "$1" = sync ] && exit 1; exit 0'
+fake curl 'exit 7'
+run_install "$S/out" --yes --tailscale=nao --no-frontend
+expect_line "erro-terminal: código sem --app" "$S/out" '^##HANGAR-ERRO## sem-internet$'
+expect_no "erro-terminal: sem FIM fora do --app" "$S/out" '^##HANGAR-FIM##'
+
+# --- Caso: sem systemd de usuário o assistente não termina ---
+new_sandbox sem-systemd
+rm -f "$B/systemctl"
+run_install "$S/out" "${APP_ARGS[@]}"
+expect_line "sem-systemd: código" "$S/out" '^##HANGAR-ERRO## sem-systemd$'
+expect_eq "sem-systemd: FIM falhou" "$(last_line "$S/out")" '##HANGAR-FIM## falhou'
+
 # --- fim dos casos ---
 if [ "$fail" = 0 ]; then echo "tudo ok"; else echo "houve falha"; fi
 exit "$fail"
