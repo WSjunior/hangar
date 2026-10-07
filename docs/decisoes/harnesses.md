@@ -2646,6 +2646,32 @@ na montagem e o mostra também no layout compacto do PWA.
   adicionava contexto, mas não produziu fala no teste. Teste com dois turnos de organização e
   entrada de áudio silenciosa confirmou pedido completo, resposta da sessão e retorno transcrito
   "A sessão respondeu: pinguim azul". Pausas e confirmações por áudio ainda exigem teste falado.
+
+## Voz no app nativo
+
+(`desktop-native/src/voice/`, `app/voice_ui.rs`, 07/10/2026): a voz roda no nativo, segue a sessão
+aberta na tela (Claude ou Codex) e fala pela conta Codex desta máquina; backend e Python não mudam.
+O nativo abre um `codex app-server` local (stdio, JSON-RPC em linhas; PATH do filho refeito por
+`refreshed_path`, senão o atalho do npm/fnm sai sem `node`) e uma thread efêmera organizadora com
+quatro ferramentas: `read_session` (a conversa que o nativo já tem em memória), `send_to_session`
+(pela mesma rota do composer, na sessão da tela no instante do envio), `hold_request` e
+`discard_request`. Envio direto; "espera/não manda ainda" segura o rascunho. O prompt sozinho não
+segura fragmento (já falhou no web): todo envio espera 1,5 s e é cancelado se o usuário voltar a
+falar; pedido com menos de 3 palavras é recusado. O transporte `websocket` do realtime foi recusado
+com login ChatGPT no CLI 0.160.1 (`realtime conversation requires API key auth`), então o áudio é
+WebRTC do próprio nativo: `str0m` 0.24.1 como ofertante + `opus-rs` 0.1.37, provado conectando em
+1,5 s e recebendo fala (48 kHz mono, quadros de 20 ms); sem `Connected` em 10 s a chamada falha
+(UDP bloqueado não dá erro, só não conecta). Eco: `sonora` 0.2.0 (AEC3 em Rust puro, o mesmo do
+`codex-voice-host` da OpenAI), 36 dB de eco removido em sinal sintético com a voz local a −1,1 dB.
+O `codex-voice-host` empacotado no Codex usa protocolo interno sem documentação; não é base.
+O tempo de silêncio que encerra a fala é fixo no Codex (`server_vad`). `appendSpeech` parafraseia;
+`appendText` sozinho não fala (aviso de troca de sessão vai por `appendSpeech`). Mídia antes do
+`Connected` é descartada pelo str0m. Eventos da voz levam número de chamada e passam antes do filtro
+de conexão do app: trocar de servidor não deixa ferramenta sem resposta. Resposta da sessão é
+deduplicada por id de evento; sessão que recebeu pedido e saiu da tela tem a resposta lida pelo
+histórico quando a lista mostra que ela parou. Gate: `codex_voice_beta` do servidor local
+(loopback) e `codex` encontrado.
+
 - `adapters/kimi/` + `hooks/kimi_state_hook.py` + `kimi_hook_installer.py` — Kimi Code runs in the
   same tmux-native shape as Pi: TUI in the pane, chat from
   `~/.kimi-code/sessions/<wd>/<session_id>/agents/main/wire.jsonl`, state pushed by hooks in
