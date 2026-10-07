@@ -4,7 +4,7 @@ pub mod organizer;
 pub mod rpc;
 pub mod rtc;
 
-use organizer::{Results, SendGate, ToolCall, parse_tool, tool_reply, tools, thread_config, ORGANIZER_PROMPT, VOICE_PROMPT};
+use organizer::{Results, SendGate, SpokenTurns, ToolCall, parse_tool, tool_reply, tools, thread_config, ORGANIZER_PROMPT, VOICE_PROMPT};
 use rpc::{Codex, Incoming, Rpc, RpcError, handshake};
 use serde_json::{Value, json};
 use std::{sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
@@ -101,6 +101,7 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
     let mut results = Results::default();
     let mut gate: SendGate<Value> = SendGate::default();
     let mut organizer_busy = false;
+    let mut spoken = SpokenTurns::default();
     let outcome = loop {
         if let Some((id, request)) = gate.due(Instant::now()) {
             let _ = events.send(VoiceEvent::Draft(None)).await;
@@ -116,6 +117,9 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
             item = incoming.recv() => match item {
                 Ok(Incoming::Request { id, method, params }) if method == "item/tool/call" => match parse_tool(&params) {
                     ToolCall::ReadSession => { let _ = events.send(VoiceEvent::ReadSession(CallId(id))).await; }
+                    ToolCall::Send(_) | ToolCall::Hold(_) if !spoken.allows(&params) => {
+                        let _ = rpc.respond(id, tool_reply("Pedido recusado: só uma fala do usuário pode gerar envio.", false)).await;
+                    }
                     ToolCall::Send(request) => match gate.offer(id, request, Instant::now()) {
                         Err((id, why)) => { let _ = rpc.respond(id, tool_reply(why, false)).await; }
                         Ok(Some((old, _))) => { let _ = rpc.respond(old, tool_reply("Substituído por um pedido mais recente; nada foi enviado.", false)).await; }
@@ -147,6 +151,7 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                     if params["threadId"].as_str() != Some(thread.as_str()) { continue; }
                     let user_spoke = (method == "thread/realtime/transcript/delta" && params["role"] == "user")
                         || (method == "item/started" && params["item"]["type"] == "userMessage");
+                    if method == "item/started" { spoken.item_started(&params); }
                     if user_spoke && let Some((id, _)) = gate.user_spoke() {
                         let _ = rpc.respond(id, tool_reply("O usuário continuou falando; nada foi enviado. Monte o pedido com a fala completa.", false)).await;
                     }
@@ -154,6 +159,11 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                         "turn/started" => { organizer_busy = true; results.turn_started(); }
                         "turn/completed" => {
                             organizer_busy = false;
+                            spoken.turn_completed(&params);
+                            // Turno interrompido ou falho não pode deixar um envio esperando a janela de 1,5 s.
+                            if params["turn"]["status"] != "completed" && let Some((id, _)) = gate.user_spoke() {
+                                let _ = rpc.respond(id, tool_reply("O turno foi interrompido; nada foi enviado.", false)).await;
+                            }
                             if params["turn"]["status"] == "failed" { let _ = events.send(VoiceEvent::Failed(VoiceFailure::Organizer)).await; }
                             if let Some(input) = results.turn_completed() { start_summary(&rpc, &thread, input, &mut results, organizer_busy).await; }
                         }

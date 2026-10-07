@@ -36,6 +36,8 @@ pub(super) struct VoiceUi {
     pub(super) spoken: HashSet<String>,
     /// Sessão aberta cujo turno acabou antes de a resposta chegar.
     pub(super) reply_pending: Option<SessionKey>,
+    /// Sobe a cada espera armada: o relógio de um turno velho não fala a resposta do seguinte.
+    pub(super) reply_epoch: u64,
     pub(super) pending_sends: VecDeque<(SessionKey, String, CallId)>,
     /// Sessão que recebeu pedido da voz → já foi vista trabalhando.
     pub(super) watched: HashMap<SessionKey, bool>,
@@ -53,6 +55,23 @@ pub(super) fn last_reply(events: &[(String, String, String)]) -> Option<(String,
     let replies: Vec<&(String, String, String)> = events[start..].iter().filter(|(_, k, _)| k == "assistant_msg").collect();
     let last = replies.last()?;
     Some((last.0.clone(), replies.iter().map(|(_, _, t)| t.as_str()).collect::<Vec<_>>().join("\n\n")))
+}
+
+/// Quanto o fim do turno espera pela última `assistant_msg` antes de falar o que já tem.
+const REPLY_WAIT: Duration = Duration::from_millis(1500);
+
+/// Altura (px) de uma barra da pílula, em passos inteiros: só mudança de passo repinta a janela.
+fn bar_height(level: f32) -> f32 { 4. + (level.clamp(0., 1.) * 12.).round() }
+
+/// O que o resultado diz quando a sessão parou esperando o usuário: a pergunta, ou o fim da última resposta.
+pub(super) fn waiting_text(questions: &[&str], reply: Option<&str>) -> String {
+    let asked = questions.iter().map(|q| q.trim()).filter(|q| !q.is_empty()).collect::<Vec<_>>().join(" ");
+    let detail = if !asked.is_empty() { asked } else {
+        let reply = reply.map(str::trim).unwrap_or_default();
+        reply.chars().rev().take(600).collect::<Vec<_>>().into_iter().rev().collect()
+    };
+    if detail.is_empty() { "A sessão está esperando uma resposta ou aprovação no chat.".to_owned() }
+    else { format!("A sessão está esperando sua resposta: {detail}") }
 }
 
 pub(super) fn went_idle(was_working: bool, state: &str) -> bool { was_working && state != "working" }
@@ -132,7 +151,8 @@ impl Hangar {
     pub(super) fn receive_voice_gate(&mut self, enabled: bool, codex: Option<Codex>, saved: Option<String>, cx: &mut Context<Self>) {
         (self.voice.enabled, self.voice.codex) = (enabled, codex);
         if self.voice.call.is_none() { self.voice.voice = saved; }
-        if !enabled && self.voice.call.is_some() { self.stop_voice(cx); }
+        // Sem a opção ou sem o Codex a pílula some; a chamada não pode seguir com o microfone aberto.
+        if (!enabled || self.voice.codex.is_none()) && self.voice.call.is_some() { self.stop_voice(cx); }
         cx.notify();
     }
 
@@ -191,10 +211,23 @@ impl Hangar {
                 self.voice.levels = (0., 0.);
                 self.voice.pending_sends.clear();
             }
-            VoiceEvent::Phase(phase) => self.voice.phase = Some(phase),
-            VoiceEvent::Levels(input, output) => self.voice.levels = (input, output),
+            VoiceEvent::Phase(phase) => {
+                if matches!(phase, Phase::Live) { self.voice.error = None; }
+                self.voice.phase = Some(phase);
+            }
+            VoiceEvent::Levels(input, output) => {
+                // ~16 Hz: a janela só repinta quando a barra muda de passo ou o rótulo falando/ouvindo vira.
+                let shape = |(i, o): (f32, f32)| (bar_height(i), bar_height(o), o > 0.02);
+                let changed = shape(self.voice.levels) != shape((input, output));
+                self.voice.levels = (input, output);
+                if !changed { return; }
+            }
             VoiceEvent::Draft(draft) => self.voice.draft = draft,
-            VoiceEvent::Failed(failure) => { self.voice.error = Some(failure_text(&failure)); self.voice.open = true; }
+            VoiceEvent::Failed(failure) => {
+                self.voice.error = Some(failure_text(&failure));
+                // O erro do organizador é de uma fala e a conversa segue: aparece na pílula e no painel, sem abrir.
+                if !matches!(failure, VoiceFailure::Organizer) { self.voice.open = true; }
+            }
             VoiceEvent::ReadSession(call) => self.voice_reply(call, tool_reply(self.voice_context(), true)),
             VoiceEvent::Send(call, request) => {
                 // A sessão é a da tela neste instante, não a de quando a fala começou.
@@ -211,7 +244,8 @@ impl Hangar {
                 let was_working = self.chat.state.state == "working";
                 self.voice.watched.insert(key.clone(), was_working);
                 let known = self.known_user_ids();
-                if self.post(key.clone(), request.clone(), request.clone(), false, known, None, cx) {
+                // Rascunho vazio: a voz já conta a falha ao usuário, e o pedido não vira texto no compositor.
+                if self.post(key.clone(), request.clone(), String::new(), false, known, None, cx) {
                     self.voice.pending_sends.push_back((key, request, call));
                 } else {
                     let name = key.name.clone();
@@ -229,29 +263,61 @@ impl Hangar {
         self.voice_reply(call, send_reply(&key.name, result));
     }
 
-    pub(super) fn voice_session_opened(&mut self) {
+    pub(super) fn voice_session_opened(&mut self, cx: &mut Context<Self>) {
         if self.voice.call.is_none() { return; }
         let name = self.selected.as_ref().map(|s| s.name.clone());
         if name == self.voice.target { return; }
         self.voice.target = name.clone();
         // A resposta atrasada da sessão que saiu da tela passa a vir pela lista e pelo histórico.
         if let Some(key) = self.voice.reply_pending.take() { self.voice.watched.insert(key, true); }
+        // Voltar a uma sessão que acabou enquanto estava fora: a lista não a vigia mais (é a aberta), então a espera volta.
+        if let Some(key) = self.selected_key() && self.voice.watched.get(&key) == Some(&true) {
+            self.voice.watched.remove(&key);
+            self.voice.reply_pending = Some(key);
+            self.arm_reply_wait(cx);
+        }
         let Some(voice) = &self.voice.call else { return };
         let name = name.unwrap_or_default();
         // O chat novo ainda está vazio aqui; o organizador lê o resto pelo read_session.
         voice.retarget(name.clone(), format!("A sessão na tela agora é {name}."));
     }
 
-    pub(super) fn voice_turn_finished(&mut self, state: &str) {
+    pub(super) fn voice_turn_finished(&mut self, state: &str, cx: &mut Context<Self>) {
         if self.voice.call.is_none() { return; }
-        if let Some(key) = self.selected_key() { self.voice.watched.remove(&key); }
+        let key = self.selected_key();
+        if let Some(key) = &key { self.voice.watched.remove(key); }
         if state == "awaiting_input" {
             let name = self.voice.target.clone().unwrap_or_default();
-            if let Some(voice) = &self.voice.call { voice.session_result(name, "A sessão está esperando uma resposta ou aprovação no chat.".into()); }
+            let questions: Vec<&str> = self.chat.ask.iter().flat_map(|ask| ask.payload.questions.iter().map(|q| q.question.as_str())).collect();
+            let reply = last_reply(&triples(&self.chat.events)).map(|(_, text)| text);
+            let text = waiting_text(&questions, reply.as_deref());
+            if let Some(voice) = &self.voice.call { voice.session_result(name, text); }
             return;
         }
-        // O estado pode chegar antes do último assistant_msg: se a resposta ainda não está aqui, espera por ela.
-        if !self.voice_speak_last_reply() { self.voice.reply_pending = self.selected_key(); }
+        // O que já está no chat pode ser só um passo do meio ("vou ler o arquivo…"): fala na próxima
+        // assistant_msg ou quando a espera acabar, o que vier primeiro.
+        if key.is_some() {
+            self.voice.reply_pending = key;
+            self.arm_reply_wait(cx);
+        }
+    }
+
+    fn arm_reply_wait(&mut self, cx: &mut Context<Self>) {
+        self.voice.reply_epoch += 1;
+        let epoch = self.voice.reply_epoch;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(REPLY_WAIT).await;
+            let _ = this.update(cx, |this, _| this.voice_reply_wait_over(epoch));
+        }).detach();
+    }
+
+    fn voice_reply_wait_over(&mut self, epoch: u64) {
+        if epoch != self.voice.reply_epoch { return; }
+        let Some(key) = self.voice.reply_pending.clone() else { return };
+        // Saiu da sessão no meio: a pendência já foi para a vigia da lista.
+        if self.selected_key().as_ref() != Some(&key) { return; }
+        self.voice.reply_pending = None;
+        self.voice_speak_last_reply();
     }
 
     /// Fala a última resposta da sessão aberta se ainda não foi falada; devolve se havia uma nova.
@@ -265,8 +331,9 @@ impl Hangar {
 
     /// Chamado a cada `assistant_msg` da sessão aberta.
     pub(super) fn voice_message(&mut self) {
-        if self.voice.reply_pending.is_some() && self.chat.state.state != "working" && self.voice_speak_last_reply() {
+        if self.voice.reply_pending.is_some() && self.chat.state.state != "working" {
             self.voice.reply_pending = None;
+            self.voice_speak_last_reply();
         }
     }
 
@@ -348,13 +415,14 @@ impl Hangar {
         } else {
             let (input, output) = self.voice.levels;
             // Só a altura de um div muda: nada de transform.
-            let bar = |level: f32| div().w(px(3.)).h(px(4. + level.clamp(0., 1.) * 12.)).rounded_full().bg(theme::accent());
+            let bar = |level: f32| div().w(px(3.)).h(px(bar_height(level))).rounded_full().bg(theme::accent());
             let target = self.voice.target.as_deref().map(short);
             button.child(div().flex().items_center().gap(px(6.)).text_size(px(12.5))
                 .child(div().h(px(16.)).flex().items_center().gap(px(2.)).child(bar(input)).child(bar(output)))
                 .child(div().text_color(theme::muted()).child(self.voice_status()))
                 .children(target.map(|name| div().text_color(theme::faint()).child(name)))
                 .when(self.voice.draft.is_some(), |el| el.child(div().size(px(6.)).rounded_full().bg(theme::warning())))
+                .when(self.voice.error.is_some(), |el| el.child(div().size(px(6.)).rounded_full().bg(theme::danger())))
                 .child(beta_badge()))
         };
         Some(popup::anchor(div(), "topbar-voice").child(button).into_any_element())
@@ -445,12 +513,38 @@ mod tests {
     }
 
     #[test]
-    fn send_targets_session_on_screen_at_send_time() {
+    fn send_reply_names_session_and_status() {
         let ok = send_reply("demo-session", &Ok(Delivery { ok: true, delivered: true }));
         let text = ok["contentItems"][0]["text"].as_str().unwrap();
         assert!(text.contains("demo-session") && text.contains("sent"));
         let queued = send_reply("demo-session", &Ok(Delivery { ok: true, delivered: false }));
         assert!(queued["contentItems"][0]["text"].as_str().unwrap().contains("queued"));
+    }
+
+    #[test]
+    fn final_reply_after_intermediate_text_is_a_new_id() {
+        // O passo do meio já falado não cobre a resposta final: ela tem outro id e ainda é falada.
+        let middle = last_reply(&[ev("1", "user_msg", "a"), ev("2", "assistant_msg", "Vou ler o arquivo…")]).unwrap();
+        let end = last_reply(&[ev("1", "user_msg", "a"), ev("2", "assistant_msg", "Vou ler o arquivo…"), ev("3", "assistant_msg", "Pronto, corrigi.")]).unwrap();
+        assert_ne!(middle.0, end.0);
+        assert!(end.1.ends_with("Pronto, corrigi."));
+    }
+
+    #[test]
+    fn waiting_text_prefers_question_then_reply_tail() {
+        assert_eq!(waiting_text(&["Qual branch?"], Some("texto")), "A sessão está esperando sua resposta: Qual branch?");
+        assert_eq!(waiting_text(&[" "], Some("Posso apagar o arquivo?")), "A sessão está esperando sua resposta: Posso apagar o arquivo?");
+        let long = format!("{}fim", "x".repeat(900));
+        let text = waiting_text(&[], Some(&long));
+        assert!(text.ends_with("fim") && text.chars().count() < 660);
+        assert!(waiting_text(&[], None).contains("no chat"));
+    }
+
+    #[test]
+    fn bar_height_moves_in_whole_pixels() {
+        assert_eq!(bar_height(0.), 4.);
+        assert_eq!(bar_height(1.5), 16.);
+        assert_eq!(bar_height(0.40), bar_height(0.41), "ruído pequeno não repinta");
     }
 
     #[test]

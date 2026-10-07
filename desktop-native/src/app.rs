@@ -1317,7 +1317,7 @@ impl Hangar {
         self.controls.on_select();
         self.reset_subagent_count();
         self.selected = Some(session.clone());
-        self.voice_session_opened();
+        self.voice_session_opened(cx);
         if !same_server || session.engine.as_deref().is_some_and(|e| !e.is_empty()) || session.uses_engine_account() {
             self.load_session_accounts(cx);
         }
@@ -2040,7 +2040,7 @@ impl Hangar {
                 // Estado vazio é a conversa recém-aberta: o turno já corria, e quem conta é o último envio.
                 if turned { self.turn_seen = (state.state == "working" && !self.chat.state.state.is_empty()).then(Instant::now); }
                 if state.state == "working" { self.sent_until = None; }
-                if finished { self.voice_turn_finished(&state.state); }
+                if finished { self.voice_turn_finished(&state.state, cx); }
                 self.chat.update_state(state);
                 self.sync_working_row(cx);
                 if turned { self.restart_subagent_count(cx); }

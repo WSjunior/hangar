@@ -396,6 +396,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   pura: é limite da reserva sem Rust e do Windows. Ver
   [régua com o nome da sessão](#régua-com-o-nome-da-sessão-06102026).
 
+- **Voz no app nativo:** WebRTC do próprio nativo (o transporte websocket do realtime recusa login
+  ChatGPT); envio só a partir de fala do usuário, com espera de 1,5 s cancelada se ele voltar a
+  falar. Medição em "Voz no app nativo".
+
 ## O /clear e o rodapé do Claude Code
 
 Medido em 06/10/2026, Claude Code 2.1.291, Haiku, backend isolado (issues #84 e #85, item 16 da

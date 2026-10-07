@@ -85,12 +85,14 @@ pub struct Audio {
     _output: cpal::Stream,
 }
 
-/// 48 kHz quando o aparelho aceita (sem reamostrar); senão o padrão dele.
+/// O padrão do aparelho; só a taxa muda para 48 kHz, no mesmo formato e canais (a lista vem com U8/I8 primeiro).
 fn output_config(device: &cpal::Device) -> Option<cpal::SupportedStreamConfig> {
-    let preferred = device.supported_output_configs().ok()?
-        .find(|range| range.min_sample_rate() <= RATE && RATE <= range.max_sample_rate())
-        .map(|range| range.with_sample_rate(RATE));
-    preferred.or_else(|| device.default_output_config().ok())
+    let default = device.default_output_config().ok()?;
+    if default.sample_rate() == RATE { return Some(default); }
+    let same_shape = device.supported_output_configs().ok().and_then(|mut ranges| ranges.find(|range|
+        range.sample_format() == default.sample_format() && range.channels() == default.channels()
+            && range.min_sample_rate() <= RATE && RATE <= range.max_sample_rate()));
+    Some(same_shape.map_or(default, |range| range.with_sample_rate(RATE)))
 }
 
 impl Audio {
