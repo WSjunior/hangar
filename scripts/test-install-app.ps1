@@ -315,7 +315,9 @@ Assert ($passosTs.Count -and $passosTs[-1] -eq '##HANGAR-PASSO## tailscale pende
 
 # 7b: o bash ausente deixa o item hangar-send pendente, mesmo sem somar pendencia.
 $iSend = $texto.IndexOf('$sendOk = $true')
-$fimSend = "if (`$App) { Add-AppPending 'hangar-send' 'outro' }`n}"
+# O checkout do Windows (core.autocrlf) deixa o install.ps1 em CRLF.
+$nlSend = if ($texto.Contains("`r`n")) { "`r`n" } else { "`n" }
+$fimSend = "if (`$App) { Add-AppPending 'hangar-send' 'outro' }$nlSend}"
 $send7b = $texto.Substring($iSend, $texto.IndexOf($fimSend) + $fimSend.Length - $iSend)
 . ([scriptblock]::Create((Get-Def 'Titulo')))
 function Tem($cmd) { return $false }
