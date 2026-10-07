@@ -1,5 +1,5 @@
 //! Player de áudio do visor, dos anexos da conversa e do ditado: um áudio por vez, pela chave de quem pediu
-//! ("file:<aba>", "ref:<linha>:<n>", "dictation").
+//! ("file:<aba>", "ref:<linha>:<n>", "dictation", "recent:<nome>").
 use super::*;
 use crate::audio::{self, Playback};
 
@@ -46,6 +46,13 @@ impl Hangar {
             });
         }).detach();
         cx.notify();
+    }
+
+    /// Fecha a lista de anexos recentes: o áudio tocado nela perde os controles e para junto.
+    pub(super) fn close_recent(&mut self) {
+        self.recent = None;
+        if self.player.current.as_ref().is_some_and(|(k, _)| k.starts_with("recent:")) { self.player.current = None; }
+        if self.player.loading.as_ref().is_some_and(|k| k.starts_with("recent:")) { self.player.loading = None; }
     }
 
     /// Fecha o áudio desta chave (a gravação do ditado foi trocada, a aba fechou).

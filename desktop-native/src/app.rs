@@ -230,7 +230,8 @@ enum Payload {
     // Barra lateral: prévia, leitura do silenciar e as gravações do menu da sessão.
     Sidebar(sidebar::SidebarReply),
     Terminal(terminal::Reply),
-    Dictation(u64, Result<Value, Failure>),
+    // O caminho do áudio que este pedido guardou nos anexos, também quando a transcrição falhou.
+    Dictation(u64, Option<String>, Result<Value, Failure>),
     // Aba Atividade: a conta de subagentes no disco e a lista da aba.
     Activity(activity::ActivityReply),
     FileView(files::FileReply),
@@ -1254,7 +1255,7 @@ impl Hangar {
         self.plugin_tabs_seen = None;
         self.plugin_hovered.clear();
         self.plugin_fields.clear();
-        self.recent = None;
+        self.close_recent();
         self.command_panel = false;
         // Os menus são da tela sem sessão: sem isto, o Esc seguinte seria gasto num deles, já fora da tela.
         self.new_chat_folders.set(None);
@@ -1674,7 +1675,7 @@ impl Hangar {
                 self.receive_sidebar(reply, window, cx); return;
             }
             Payload::Activity(reply) => { self.receive_activity(reply, cx); return; }
-            Payload::Dictation(seq, result) => { self.receive_dictation(seq, result, window, cx); return; }
+            Payload::Dictation(seq, path, result) => { self.receive_dictation(seq, path, result, window, cx); return; }
             Payload::FileView(reply) => { self.receive_file_view(reply, window, cx); return; }
             Payload::Dossier(key, seq, result) => { self.receive_dossier(key, seq, result, cx); return; }
             Payload::DesktopPalette(seq, result) => { self.receive_desktop_palette(seq, result, window, cx); return; }
@@ -1825,8 +1826,11 @@ impl Hangar {
                     if let Some(from) = moved { self.drafts.remove(&from); }
                 }
                 Some(new) => {
-                    if let Some(key) = self.selected_key() { self.controls.on_session_update(&key, &new); }
+                    let before = self.selected_key();
+                    if let Some(key) = &before { self.controls.on_session_update(key, &new); }
                     self.selected = Some(new);
+                    // Recentes listados para a chave de antes: com outra chave, a lista some da tela mas seguiria aberta.
+                    if self.selected_key() != before { self.close_recent(); }
                 }
                 None => {
                     self.close_terminal(false, window, cx);
@@ -2468,7 +2472,7 @@ impl Hangar {
 
     fn open_recent(&mut self, cx: &mut Context<Self>) {
         let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
-        if self.recent.as_ref().is_some_and(|recent| recent.key == key) { self.recent = None; cx.notify(); return; }
+        if self.recent.as_ref().is_some_and(|recent| recent.key == key) { self.close_recent(); cx.notify(); return; }
         self.command_panel = false;
         self.close_controls();
         self.recent = Some(Recent { key: key.clone(), files: None });
@@ -2485,7 +2489,7 @@ impl Hangar {
         let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
         let generation = self.check_dictation_owner(cx);
         let owner = self.dictation_owner(cx);
-        self.recent = None;
+        self.close_recent();
         let (connection, tx, uploads) = (self.connection, self.tx.clone(), self.uploads_for(&key));
         self.runtime.spawn(async move {
             let result = uploads.fetch(&api, &key.name, &Source::Upload(filename.clone())).await
@@ -2494,6 +2498,26 @@ impl Hangar {
             let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Files(key, owner, generation, vec![result]) }).await;
         });
         cx.notify();
+    }
+
+    /// Áudio da lista de recentes volta ao ditado lido do arquivo que o servidor já tem.
+    fn dictate_recent(&mut self, filename: String, cx: &mut Context<Self>) {
+        let Some(key) = self.selected_key() else { return; };
+        self.close_recent();
+        match self.dictate_upload(filename, cx) {
+            Ok(()) => { self.action_feedback.remove(&key); }
+            Err(problem) => { self.action_feedback.insert(key, (problem, true)); }
+        }
+        cx.notify();
+    }
+
+    /// Toca um áudio da lista de recentes, lido de onde estão os anexos da sessão (disco desta máquina ou backend).
+    fn play_recent(&mut self, filename: String, cx: &mut Context<Self>) {
+        let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
+        let (uploads, source) = (self.uploads_for(&key), Source::Upload(filename.clone()));
+        self.toggle_audio(format!("recent:{filename}"), &filename, async move {
+            uploads.fetch(&api, &key.name, &source).await.map_err(|error| Self::saved_audio_failure(&error))
+        }, cx);
     }
 
     fn ensure_media(&mut self, source: &Source) {
@@ -3868,10 +3892,25 @@ impl Hangar {
             Some(Ok(files)) if files.is_empty() => div().px(px(8.)).text_sm().text_color(theme::muted()).child(tr("recent_empty")).into_any_element(),
             Some(Ok(files)) => div().flex().flex_col().children(files.iter().enumerate().map(|(n, file)| {
                 let name = file.filename.clone();
+                if composer::is_audio(&name) {
+                    // Áudio não volta ao campo como anexo: toca aqui ou volta ao ditado, lido do que o servidor já tem.
+                    // O player fica fora do `popup::row`: a linha é um botão e o play também a dispararia.
+                    let (play, dictate) = (name.clone(), name.clone());
+                    return div().id(SharedString::from(format!("recent-{n}"))).px(px(8.)).py(px(4.)).flex().flex_col().gap_1()
+                        .child(div().flex().items_center().gap_2()
+                            .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+                            .child(div().flex_shrink_0().text_xs().text_color(theme::muted()).child(human_size(file.size)))
+                            .child(Button::new(SharedString::from(format!("recent-dictate-{n}"))).ghost().xsmall()
+                                .label(tr("dictation_again")).accessibility_label(format!("{}: {name}", tr("dictation_again")))
+                                .on_click(cx.listener(move |this, _, _, cx| this.dictate_recent(dictate.clone(), cx)))))
+                        .child(self.audio_controls(&format!("recent:{name}"), move |this, cx| this.play_recent(play.clone(), cx), cx))
+                        .into_any_element();
+                }
                 popup::row(SharedString::from(format!("recent-{n}")), false)
                     .child(div().flex_1().min_w_0().truncate().child(file.filename.clone()))
                     .child(div().flex_shrink_0().text_xs().text_color(theme::muted()).child(human_size(file.size)))
                     .on_click(cx.listener(move |this, _, _, cx| this.reattach(name.clone(), cx)))
+                    .into_any_element()
             })).into_any_element(),
         };
         Some(div().p(px(popup::INSET)).rounded_md().bg(theme::popup_content_fill()).flex().flex_col().gap(px(2.))
@@ -4152,7 +4191,7 @@ impl Hangar {
                 this.command_panel = !this.command_panel;
                 if this.command_panel {
                     this.close_controls();
-                    this.recent = None;
+                    this.close_recent();
                     this.ensure_commands(false);
                     this.command_search.update(cx, |input, cx| { input.set_value("", window, cx); input.focus(window, cx); });
                 }

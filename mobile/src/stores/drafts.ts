@@ -33,7 +33,12 @@ const draftSchema = z.object({
 const dictationSchema = z.object({
   version: z.literal(1),
   id: z.string().min(1),
-  audio: attachmentSchema,
+  // null: ditado pedido pela galeria, sem cópia local; o áudio está só no servidor.
+  audio: attachmentSchema.nullable(),
+  // Caminho do áudio no servidor, gravado antes da transcrição: o "de novo" não sobe outra cópia.
+  serverPath: z.string().min(1).optional(),
+  // Estilo que o servidor aplicou (`estilo_aplicado`), para a barra marcar a versão certa.
+  applied: z.string().optional(),
   transcript: z.string().min(1).nullable(),
   draftRevision: z.number().int().nonnegative(),
   before: z.string(),
@@ -108,6 +113,14 @@ function clearAt(key: string): void {
 
 const dictationKeyOf = (serverId: string, name: string) => `draft.v1.dictation:${serverId}::${name}`;
 
+// POST de ditado vivo neste processo: remontar o Composer não o dá por interrompido.
+const inFlight = new Set<string>();
+export function setDictationInFlight(serverId: string, name: string, id: string, on: boolean): void {
+  const key = `${dictationKeyOf(serverId, name)}#${id}`;
+  if (on) inFlight.add(key);
+  else inFlight.delete(key);
+}
+
 export function readDictation(serverId: string, name: string): DictationDraft | null {
   let raw: string | undefined;
   try { raw = prefs.getString(dictationKeyOf(serverId, name)); } catch { throw new Error(m.draft_read_error()); }
@@ -118,13 +131,21 @@ export function readDictation(serverId: string, name: string): DictationDraft | 
     || readRecoverableDraft(serverId, name)?.dictationId === value.id) {
     return { ...value, status: 'applied', issue: m.draft_clear_error() };
   }
-  // Reabrir só oferece repetição explícita: o POST anterior ainda pode responder.
-  return value.status === 'pending' ? { ...value, status: 'failed', issue: m.composer_ditado_interrompido() } : value;
+  // Sem POST vivo neste processo, reabrir só oferece repetição explícita.
+  return value.status === 'pending' && !inFlight.has(`${dictationKeyOf(serverId, name)}#${value.id}`)
+    ? { ...value, status: 'failed', issue: m.composer_ditado_interrompido() } : value;
 }
 
 export function writeDictation(serverId: string, name: string, value: DictationDraft): void {
   let validated: DictationDraft;
   try { validated = dictationSchema.parse(value); } catch { throw new Error(m.draft_write_error()); }
+  // Outro POST desta conversa ainda no ar: gravar por cima perderia o áudio e o resultado dele.
+  if (validated.status === 'pending') {
+    let current: DictationDraft | null = null;
+    // Guardado ilegível: o novo grava por cima, como no rascunho, mas deixa rastro.
+    try { current = readDictation(serverId, name); } catch (e) { console.warn('dictation: unreadable stored dictation overwritten', e); }
+    if (current?.status === 'pending' && current.id !== validated.id) throw new Error(m.composer_aguarde_transcricao());
+  }
   try { prefs.set(dictationKeyOf(serverId, name), JSON.stringify(validated)); } catch { throw new Error(m.draft_write_error()); }
 }
 
@@ -139,7 +160,7 @@ export function associateDictationTranscript(serverId: string, name: string, tra
 }
 
 export function finishDictation(serverId: string, name: string, id: string,
-  result: Pick<DictationDraft, 'text' | 'raw' | 'issue'>, active: boolean,
+  result: Pick<DictationDraft, 'text' | 'raw' | 'issue'> & Partial<Pick<DictationDraft, 'serverPath' | 'applied'>>, active: boolean,
 ): { draft: ConversationDraft | null; dictation: DictationDraft | null } {
   const voice = readDictation(serverId, name);
   if (!voice || voice.id !== id) return { draft: null, dictation: voice };
@@ -160,6 +181,19 @@ export function recoverDictation(serverId: string, name: string, id: string): Re
   const latest = readDraft(serverId, name)
     ?? { version: 1 as const, text: '', revision: 0, transcript: null, attachment: null, submission: null };
   return insertDictation(serverId, name, latest, voice);
+}
+
+// Entra sozinho só com o rascunho como estava ao gravar e na mesma conversa (jsonl).
+export function applyReadyDictation(serverId: string, name: string, transcript: string | null):
+  (ReturnType<typeof finishDictation> & { voice: DictationDraft }) | null {
+  const voice = readDictation(serverId, name);
+  if (!voice || voice.status !== 'ready' || !voice.text) return null;
+  if (voice.transcript !== null && voice.transcript !== transcript) return null;
+  const latest = readDraft(serverId, name)
+    ?? { version: 1 as const, text: '', revision: 0, transcript, attachment: null, submission: null };
+  if (latest.revision !== voice.draftRevision) return null;
+  if (voice.transcript !== null && latest.transcript !== null && latest.transcript !== voice.transcript) return null;
+  return { ...insertDictation(serverId, name, latest, voice), voice };
 }
 
 function insertDictation(serverId: string, name: string, latest: ConversationDraft, voice: DictationDraft): ReturnType<typeof finishDictation> {

@@ -52,3 +52,9 @@ Não compilados aqui: gpui-pre-windows e gpui-pre-apple/-macos (revisados só po
 | Ajuste | Onde | Por quê |
 |---|---|---|
 | `PlatformWindow::set_hidden` e `Window::set_hidden` | gpui-pre `platform.rs`/`window.rs`, gpui-pre-linux `wayland/window.rs`/`x11/window.rs`, gpui-pre-windows `window.rs` | o upstream não esconde janela; fechar para a bandeja precisa da janela viva, porque a tela do app não sobrevive a fechar e reabrir |
+
+## Colar arquivo
+
+| Ajuste | Onde | Por quê |
+|---|---|---|
+| `read()` do CLIPBOARD devolve `ExternalPaths` + texto quando a oferta tem `text/uri-list` | gpui-pre-linux `platform.rs`, `wayland/clipboard.rs`, `x11/clipboard.rs` (`Inner::read` dividido em `targets` + `read_from`) | o upstream no Linux só lê texto e imagem; arquivo copiado no gerenciador não chegava ao composer. Terminal e navegador seguem pelo texto (`ClipboardItem::text` ignora os caminhos quando há texto) |

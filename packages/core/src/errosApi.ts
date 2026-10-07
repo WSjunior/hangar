@@ -354,6 +354,8 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_cwd_indisponivel: () => m.erro_cwd_indisponivel(),
   erro_cwd_inexistente: (p) => m.erro_cwd_inexistente({ cwd: String(p.cwd) }),
   erro_arquivo_grande: () => m.erro_arquivo_grande(),
+  erro_upload_inexistente: () => m.erro_upload_inexistente(),
+  erro_arquivo_caminho_convidado: () => m.erro_arquivo_caminho_convidado(),
   erro_sem_plano_ativo: () => m.erro_sem_plano_ativo(),
   erro_sem_pasta_planos: () => m.erro_sem_pasta_planos(),
   erro_nome_plano_invalido: (p) => m.erro_nome_plano_invalido({ nome: String(p.nome) }),

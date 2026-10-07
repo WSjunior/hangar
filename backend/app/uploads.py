@@ -153,3 +153,41 @@ def resolve_upload(cwd: str, sessao: str, filename: str) -> str:
     if not os.path.isfile(real):
         raise UploadError(404, "arquivo nao encontrado")
     return real
+
+
+def _inside(path: str, base: str) -> bool:
+    path, base = os.path.normcase(path), os.path.normcase(base)
+    return path.startswith(base.rstrip(os.sep) + os.sep)
+
+
+def resolve_session_audio(cwd: str, sessao: str, ref: str, *, allow_absolute: bool) -> str:
+    """Áudio a transcrever. Nome solto = pasta da sessão atual (`resolve_upload`). Caminho absoluto
+    = um `path` devolvido antes, aceito em qualquer pasta de sessão DESTE projeto: a pasta é chaveada
+    pelo transcript, e depois de um `/clear` o áudio ficou na pasta do anterior."""
+    # NUL faz as funções de caminho levantarem ValueError, que viraria 500 em vez de 400.
+    if "\x00" in ref:
+        raise UploadError(400, "caminho invalido")
+    # Caminho de rede antes de tudo: no Windows, resolver `\\host\share` já é uma conexão SMB.
+    if ref.startswith(("\\\\", "//")):
+        raise UploadError(400, "caminho de rede recusado")
+    if not os.path.isabs(ref):
+        return resolve_upload(cwd, sessao, ref)
+    if not allow_absolute:
+        raise UploadError(403, "caminho absoluto so para o dono")
+    if ".." in Path(ref).parts:
+        raise UploadError(400, "caminho invalido")
+    base = _raiz() / _projeto(cwd)
+    # Primeiro sem tocar no disco pelo caminho de fora; a pasta do projeto é nossa, pode ser
+    # resolvida (HOME atrás de um link devolve o caminho real no /upload).
+    if not (_inside(os.path.abspath(ref), os.path.abspath(base))
+            or _inside(os.path.abspath(ref), os.path.realpath(base))):
+        raise UploadError(400, "caminho invalido")
+    real = os.path.realpath(ref)
+    # Exatamente <projeto>/<pasta da sessão>/<arquivo>, já com links resolvidos.
+    if os.path.normcase(os.path.dirname(os.path.dirname(real))) != os.path.normcase(os.path.realpath(base)):
+        raise UploadError(400, "caminho invalido")
+    if not os.path.exists(real):
+        raise UploadError(404, "arquivo nao encontrado")
+    if not os.path.isfile(real):
+        raise UploadError(400, "caminho invalido")
+    return real

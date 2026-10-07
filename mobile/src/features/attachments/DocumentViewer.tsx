@@ -12,7 +12,7 @@ export interface DocumentItem {
   uri: string;
   headers?: Record<string, string>;
   name: string;
-  kind: 'pdf' | 'html';
+  kind: 'pdf' | 'html' | 'video';
 }
 
 // Documento citado (pdf/html) em tela cheia, o par do diálogo do FileAttachment do web. Baixar e

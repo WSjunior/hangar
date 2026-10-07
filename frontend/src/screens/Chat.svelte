@@ -81,9 +81,9 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     getPlan,
     getSessionPlanPreview,
     getConfig, getConfigForServer,
-    uploadUrl,
     descartarDaFila,
   } from '@hangar/core';
+  import { dictations, draftStorageKey, parseStoredDraft, readMigrating } from '../lib/dictationStore.svelte';
   import { formataErro } from '@hangar/core';
   import { fmtDur } from '../lib/fmt';
   import { hasSeam, mergeHistoryWithLive } from '@hangar/core';
@@ -405,22 +405,14 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // digitado evaporava (ir buscar algo noutro app = perder o rascunho); trocar de sessao remonta
   // o Chat e zerava tambem. Restaura no mount; enviar limpa o campo -> remove a chave junto.
   // Snapshot do mount de proposito: o App remonta o Chat por {#key sessionName} a cada troca.
+  // Com o servidor na chave: a sessão "hangar" de duas máquinas não divide rascunho. A chave
+  // antiga (só o nome) é lida uma vez e movida.
   // svelte-ignore state_referenced_locally
-  const draftKey = `cp-draft:${sessionName}`;
-  // O rascunho guarda o TRANSCRIPT de quem o escreveu: a chave é o nome, e nome se repete. Uma
-  // sessão morta e recriada com o mesmo nome (a época de recriação só vive com o app aberto) abria
-  // com o texto da anterior. Valor antigo, só texto, vale como "transcript desconhecido".
+  const draftKey = draftStorageKey(chatServerId, sessionName);
+  // O rascunho guarda o TRANSCRIPT de quem o escreveu: nome se repete. Uma sessão morta e recriada
+  // com o mesmo nome (a época de recriação só vive com o app aberto) abria com o texto da anterior.
   function lerRascunho(): { text: string; jsonl: string | null } {
-    let cru: string | null = null;
-    try { cru = localStorage.getItem(draftKey); } catch { return { text: '', jsonl: null }; }
-    if (!cru) return { text: '', jsonl: null };
-    try {
-      const d = JSON.parse(cru);
-      if (d && typeof d === 'object' && typeof d.text === 'string') {
-        return { text: d.text, jsonl: typeof d.jsonl === 'string' ? d.jsonl : null };
-      }
-    } catch { /* texto cru de versão anterior */ }
-    return { text: cru, jsonl: null };
+    return parseStoredDraft(readMigrating(draftKey, `cp-draft:${sessionName}`));
   }
   const rascunhoSalvo = lerRascunho();
   // Com transcript gravado, só restaura depois de conferir que é o desta sessão.
@@ -877,23 +869,32 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   }
 
   // ── Atalhos de teclado (so desktop) ────────────────────────────────────────
-  let composerRef = $state<{ focus: () => void; ditarArquivo: (f: File) => void;
+  let composerRef = $state<{ focus: () => void; ditarAnexo: (arquivo: string) => void;
                             preencherComando: (n: string) => Promise<boolean>;
                             prefillText: (t: string) => Promise<boolean> } | undefined>();
 
-  // Anexo de audio de volta pro ditado: busca o arquivo que ja esta no servidor e entrega ao
-  // Composer, que transcreve de novo e abre a barra de versoes. O download acontece AQUI porque a
-  // sheet nao conhece o Composer, e o Composer so sabe lidar com File.
-  async function usarAnexoNoDitado(f: UploadFile) {
-    try {
-      const res = await fetch(uploadUrl(sessionName, f.filename, false, sessionServer()));
-      if (!res.ok) throw new Error(`${res.status}`);
-      const blob = await res.blob();
-      composerRef?.ditarArquivo(new File([blob], f.filename, { type: blob.type }));
-    } catch (e) {
-      error = `${m.anexos_erro_listar()} ${e instanceof Error ? e.message : String(e)}`;
-    }
+  // Anexo de audio de volta pro ditado: o Composer transcreve o arquivo que ja esta no servidor
+  // (`?arquivo=`) e abre a barra de versoes. Falha aparece no proprio composer.
+  function usarAnexoNoDitado(f: UploadFile) {
+    composerRef?.ditarAnexo(f.filename);
   }
+
+  // Ditado que chega com o Chat montado e o Composer fora (sessão morta, janela de recriação):
+  // junta ao campo, senão o $effect do rascunho gravaria o campo por cima do texto guardado.
+  // Registrado antes do Composer, que fica por último e recebe quando está montado.
+  // svelte-ignore state_referenced_locally
+  const soltarReceptorDoChat = dictations.receive(chatServerId, sessionName, {
+    accepts: () => !composerRef && rascunhoConferido,
+    deliver: (e) => {
+      const t = e.result!.text.trim();
+      composerText = composerText.trim() ? `${composerText.trimEnd()} ${t}` : t;
+    },
+  });
+  onDestroy(soltarReceptorDoChat);
+  $effect(() => {
+    if (composerRef || !rascunhoConferido) return;
+    queueMicrotask(() => dictations.redeliver(chatServerId, sessionName));
+  });
 
   // No desktop, a Sidebar já mantém esta lista viva por SSE. No celular, onde ela não fica montada
   // junto com o Chat, o poll de 5s alimenta navegação e a pílula "N aguardando".
@@ -3520,6 +3521,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       <Composer
         bind:this={composerRef}
         {sessionName}
+        {sessionJsonl}
         bind:inputText={composerText}
         estreito={colunaEstreita}
         voiceBeta={codexVoiceBeta}

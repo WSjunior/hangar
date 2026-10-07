@@ -106,6 +106,7 @@
     { tela: 'voz', rotulo: m.config_server_groq, descricao: m.config_server_groq_ajuda },
     { tela: 'voz', rotulo: m.config_server_transcription_endpoint, descricao: m.config_server_transcription_endpoint_ajuda },
     { tela: 'voz', rotulo: m.config_server_transcription_model, descricao: m.config_server_transcription_model_ajuda },
+    { tela: 'voz', rotulo: m.native_voice_providers, descricao: m.native_voice_providers_help },
     { tela: 'voz', rotulo: m.voz_limpar, descricao: m.voz_limpar_ajuda },
     { tela: 'voz', rotulo: m.voz_estilo, descricao: m.voz_estilo_ajuda },
     { tela: 'voz', rotulo: m.config_ditado_titulo, descricao: m.config_ditado_desc },

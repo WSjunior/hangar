@@ -289,3 +289,75 @@ def test_chaves_do_jev_nunca_voltam_inteiras():
     assert rc.estado()["jev_api_key"]["valor"] != "ts-1234567890"
 
 
+_EL = {"id": "el1", "kind": "elevenlabs", "name": "", "base_url": "",
+       "api_key": "sk_elevenlabs_secreta_1234", "model": ""}
+_GROQ = {"id": "gq1", "kind": "openai", "name": "", "base_url": "https://api.groq.com/openai/v1",
+         "api_key": "gsk_groq_secreta_5678", "model": "whisper-large-v3-turbo"}
+
+
+def test_lista_de_transcricao_volta_com_as_chaves_mascaradas():
+    rc.aplicar({"transcription_providers": [_EL, _GROQ]})
+    est = rc.estado()["transcription_providers"]
+    assert [p["id"] for p in est["valor"]] == ["el1", "gq1"]
+    assert est["valor"][0]["api_key"] == rc.mascarar(_EL["api_key"])
+    assert _EL["api_key"] not in json.dumps(est) and _GROQ["api_key"] not in json.dumps(est)
+    assert est["definido"] is True and est["origem"] == "app"
+
+
+def test_item_salvo_com_a_chave_mascarada_mantem_a_chave_guardada():
+    rc.aplicar({"transcription_providers": [_EL, _GROQ]})
+    devolvido = rc.estado()["transcription_providers"]["valor"]
+    # A tela reordena e salva exatamente o que recebeu, com as chaves mascaradas.
+    rc.aplicar({"transcription_providers": [devolvido[1], devolvido[0]]})
+    assert [p["api_key"] for p in rc.get("transcription_providers")] == [_GROQ["api_key"], _EL["api_key"]]
+
+
+def test_mascara_num_item_de_outro_id_e_recusada():
+    rc.aplicar({"transcription_providers": [_EL]})
+    mascara = rc.estado()["transcription_providers"]["valor"][0]["api_key"]
+    with pytest.raises(ValueError, match="mascarada"):
+        rc.aplicar({"transcription_providers": [{**_EL, "id": "outro", "api_key": mascara}]})
+    assert rc.get("transcription_providers")[0]["api_key"] == _EL["api_key"]
+
+
+@pytest.mark.parametrize("mudanca", [
+    {"base_url": "https://outro-host.exemplo/v1"},   # endpoint novo levaria a chave da Groq pra lá
+    {"kind": "elevenlabs", "base_url": ""},          # tipo novo, mesma chave
+])
+def test_mascara_com_tipo_ou_endpoint_trocado_pede_a_chave_de_novo(mudanca):
+    rc.aplicar({"transcription_providers": [_GROQ]})
+    devolvido = rc.estado()["transcription_providers"]["valor"][0]
+    with pytest.raises(ValueError, match="digite a chave de novo"):
+        rc.aplicar({"transcription_providers": [{**devolvido, **mudanca}]})
+    assert rc.get("transcription_providers") == [_GROQ]
+
+
+@pytest.mark.parametrize("item,trecho", [
+    ({**_EL, "kind": "whisper"}, "tipo"),
+    ({**_EL, "api_key": ""}, "sem chave"),
+    ({**_GROQ, "base_url": "api.groq.com"}, "http"),
+    ({**_EL, "id": ""}, "sem id"),
+    ({**_EL, "model": 3}, "texto"),
+])
+def test_item_invalido_e_recusado_na_gravacao(item, trecho):
+    with pytest.raises(ValueError, match=trecho):
+        rc.aplicar({"transcription_providers": [item]})
+
+
+def test_id_repetido_e_recusado():
+    with pytest.raises(ValueError, match="repetido"):
+        rc.aplicar({"transcription_providers": [_EL, {**_GROQ, "id": "el1"}]})
+
+
+def test_endpoint_do_elevenlabs_nao_e_guardado():
+    rc.aplicar({"transcription_providers": [{**_EL, "base_url": "https://qualquer.exemplo"}]})
+    assert rc.get("transcription_providers")[0]["base_url"] == ""
+
+
+def test_null_remove_a_lista_e_volta_ao_servico_unico():
+    rc.aplicar({"transcription_providers": [_EL]})
+    rc.aplicar({}, remover={"transcription_providers"})
+    assert rc.get("transcription_providers") is None
+    assert rc.estado()["transcription_providers"] == {"valor": [], "definido": False, "origem": "env"}
+
+

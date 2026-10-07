@@ -74,9 +74,11 @@ from app.adapters.codex import sessions as codex_sessions
 from app.adapters.orq import runs as orq_runs
 from app.sse import invalidate_recent_list, merged_events, nav_confirmar, nav_pendente
 from app.state import corrige_ocioso_kimi, forget_frame, menu_codex
-from app.uploads import save_upload, resolve_upload, prune_old, list_uploads, UploadError, MAX_BYTES
+from app.uploads import (save_upload, resolve_upload, resolve_session_audio, prune_old, list_uploads,
+                         UploadError, MAX_BYTES)
 from app.video import is_video, extract_frames, extract_audio
-from app.transcribe import transcribe, TranscribeError
+from app.transcribe import (transcribe, transcribe_with_provider, providers_status, Transcription,
+                            TranscribeError, DICTATION_LIMITS, FILE_LIMITS)
 from app.config import (list_config_dirs, ConfigDirInfo, _backend_config_base, settings,
                         resolve_scan_roots,
                         automations_enabled, resolve_bind_ip, variaveis_env)
@@ -7098,7 +7100,7 @@ def _id_upload(info: SessionInfo) -> str:
 
 
 @app.post("/api/sessions/{name}/upload", dependencies=[Depends(require_auth), Depends(_transfer_check)])
-async def upload(name: str, request: Request):
+async def upload(name: str, request: Request, audio_only: bool = False):
     # Resolve o cwd da sessao (registry.list() ja traz cwd via tmux #{pane_current_path}).
     # handler async -> registry.list() (subprocess tmux) no threadpool pra nao bloquear o loop.
     sessions = await asyncio.to_thread(registry.list)
@@ -7132,7 +7134,9 @@ async def upload(name: str, request: Request):
     # audio/sem chave da Groq, devolve o que conseguiu e o upload segue igual.
     frames: list[str] = []
     fala = ""
-    if is_video(path):
+    # `audio_only`: o ditado manda o áudio aqui e transcreve no /transcribe?arquivo=; tratar o webm
+    # como vídeo extrairia quadros e pagaria uma segunda transcrição.
+    if is_video(path) and not audio_only:
         try:
             frames = await asyncio.to_thread(extract_frames, path)
         except Exception:
@@ -7150,34 +7154,51 @@ async def upload(name: str, request: Request):
 
 
 @app.post("/api/sessions/{name}/transcribe", dependencies=[Depends(require_auth), Depends(_transfer_check)])
-async def transcribe_audio(name: str, request: Request, limpar: bool = False, estilo: str | None = None):
-    # Salva o audio (pra anexar o path no chat) E transcreve via Groq num round-trip. Mesmo padrao
-    # de upload (raw body + X-Filename). Devolve {path, text} -> o front monta "texto — 📎 audio: path".
-    # `limpar` so o microfone manda: audio ANEXADO (arquivo de ate 10min) nao pode pagar a limpeza.
-    # Desligado (default), a resposta e byte a byte a de sempre -> quem ja consome nao muda.
+async def transcribe_audio(name: str, request: Request, limpar: bool = False, estilo: str | None = None,
+                           arquivo: str | None = None):
+    # Com corpo: salva o áudio (anexo de áudio/vídeo) e transcreve num round-trip, raw body +
+    # X-Filename. Com `arquivo`: transcreve um áudio já enviado pelo /upload, sem gravar outra cópia
+    # — o ditado faz assim para o cliente ter o caminho antes da transcrição e poder tentar de novo.
+    # `limpar` só o microfone manda: áudio ANEXADO (arquivo de até 10min) não pode pagar a limpeza.
     sessions = await asyncio.to_thread(registry.list)
     info = next((s for s in sessions if s.name == name), None)
     if info is None:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessao nao encontrada"))
     if not info.cwd:
         raise HTTPException(409, detail=erro("erro_cwd_indisponivel", "cwd da sessao indisponivel"))
-    clen = request.headers.get("content-length")
-    if clen and clen.isdigit() and int(clen) > 100 * 1024 * 1024:
-        raise HTTPException(413, detail=erro("erro_arquivo_grande", "arquivo maior que 100 MiB"))
-    data = await request.body()
-    filename = request.headers.get("x-filename") or request.query_params.get("name")
-    try:
-        path = await asyncio.to_thread(save_upload, info.cwd, _id_upload(info), data, filename)
-    except UploadError as e:
-        raise HTTPException(e.status, e.detail)
+    if arquivo:
+        try:
+            path = await asyncio.to_thread(resolve_session_audio, info.cwd, _id_upload(info), arquivo,
+                                           allow_absolute=not _convidado(request))
+        except UploadError as e:
+            if e.status == 404:
+                raise HTTPException(404, detail=erro("erro_upload_inexistente",
+                                                     "audio nao encontrado na pasta da sessao"))
+            if e.status == 403:
+                raise HTTPException(403, detail=erro("erro_arquivo_caminho_convidado",
+                                                     "convidado so transcreve audio da pasta da sessao"))
+            raise HTTPException(e.status, e.detail)
+        data = await asyncio.to_thread(Path(path).read_bytes)
+        filename = Path(path).name
+    else:
+        clen = request.headers.get("content-length")
+        if clen and clen.isdigit() and int(clen) > 100 * 1024 * 1024:
+            raise HTTPException(413, detail=erro("erro_arquivo_grande", "arquivo maior que 100 MiB"))
+        data = await request.body()
+        filename = request.headers.get("x-filename") or request.query_params.get("name")
+        try:
+            path = await asyncio.to_thread(save_upload, info.cwd, _id_upload(info), data, filename)
+        except UploadError as e:
+            raise HTTPException(e.status, e.detail)
+    limits = DICTATION_LIMITS if limpar else FILE_LIMITS
     # Transcricao (chamada de rede bloqueante) no threadpool pra nao travar o loop.
     try:
-        text = await asyncio.to_thread(transcribe, data, filename)
+        t = await asyncio.to_thread(transcribe_with_provider, data, filename, limits)
     except TranscribeError as e:
         raise HTTPException(e.status, e.detail)
     if not limpar:
-        return {"path": path, "text": text}
-    return {"path": path, **await _cleaned_dictation(text, estilo)}
+        return _with_provider({"path": path, "text": t.text}, t)
+    return {"path": path, **_with_provider(await _cleaned_dictation(t.text, estilo), t)}
 
 
 @app.post("/api/dictation/transcribe", dependencies=[Depends(require_auth)])
@@ -7189,12 +7210,22 @@ async def transcribe_dictation(request: Request, estilo: str | None = None, limp
     data = await request.body()
     filename = request.headers.get("x-filename") or request.query_params.get("name")
     try:
-        text = await asyncio.to_thread(transcribe, data, filename)
+        t = await asyncio.to_thread(transcribe_with_provider, data, filename, DICTATION_LIMITS)
     except TranscribeError as e:
         raise HTTPException(e.status, e.detail)
     if not limpar:
-        return {"text": text}
-    return await _cleaned_dictation(text, estilo)
+        return _with_provider({"text": t.text}, t)
+    return _with_provider(await _cleaned_dictation(t.text, estilo), t)
+
+
+def _with_provider(result: dict, t: Transcription) -> dict:
+    """Junta à resposta quem transcreveu. O aviso da reserva vem antes do da limpeza e nenhum dos
+    dois some; `estilo_aplicado` já foi decidido só pelo aviso da limpeza."""
+    out = {**result, "provider": t.provider}
+    avisos = [a for a in (t.aviso, result.get("aviso")) if a]
+    if avisos:
+        out["aviso"] = " · ".join(avisos)
+    return out
 
 
 async def _cleaned_dictation(text: str, estilo: str | None) -> dict:
@@ -7237,6 +7268,13 @@ async def relimpar_ditado(body: RelimparBody):
     texto, aviso = await asyncio.to_thread(narrar.limpar_ditado, body.texto, body.estilo)
     aplicado = "cru" if (aviso or texto == body.texto) else narrar.estilo_efetivo(body.texto, body.estilo)
     return {"text": texto, "aviso": aviso, "estilo_aplicado": aplicado}
+
+
+@app.get("/api/transcription/providers/status", dependencies=[Depends(require_auth)])
+def transcription_providers_status():
+    """Espera por cota de cada serviço de transcrição, para a tela de configuração. `def` e não
+    `async`: lê um arquivo, e o FastAPI já roda isso na threadpool."""
+    return {"providers": providers_status()}
 
 
 class PensamentoPtBody(_StrictBody):

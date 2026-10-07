@@ -132,8 +132,9 @@ export function uploadUrl(name: string, filename: string, download = false, serv
   return `${server ? baseOf(server) : apiEnv().getBaseUrl()}/api/sessions/${encodeURIComponent(name)}/uploads/${encodeURIComponent(filename)}?token=${encodeURIComponent(t)}${download ? '&download=1' : ''}`;
 }
 
-export function uploadUrlNative(name: string, filename: string): string {
-  return `${apiEnv().getBaseUrl()}/api/sessions/${encodeURIComponent(name)}/uploads/${encodeURIComponent(filename)}`;
+export function uploadUrlNative(name: string, filename: string, server?: Server): string {
+  const base = server ? baseOf(server) : apiEnv().getBaseUrl();
+  return `${base}/api/sessions/${encodeURIComponent(name)}/uploads/${encodeURIComponent(filename)}`;
 }
 
 // Par nativo do transcriptImageUrl: o token vai no header (fileAuthHeader), nunca na URL.
@@ -601,8 +602,14 @@ export async function getHistoryTailCached(
 // Upload/transcrição pra sessão de um servidor específico — o composer COMPLETO do card do
 // board/canvas (mesmos endpoints/headers dos uploadFile/transcribeFile do servidor ativo; aqui
 // baseUrl+token vêm do Server dono do card, que pode não ser o ativo).
-export async function uploadFileForServer(s: Server, name: string, file: File): Promise<{ path: string }> {
-  const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/upload`, {
+export async function uploadFileForServer(
+  s: Server,
+  name: string,
+  file: File,
+  // Ditado: mesmo motivo do `audioOnly` do `uploadFile`.
+  opts?: { audioOnly?: boolean },
+): Promise<{ path: string }> {
+  const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/upload${opts?.audioOnly ? '?audio_only=1' : ''}`, {
     method: 'POST',
     headers: {
       'Content-Type': file.type || 'application/octet-stream',
@@ -627,6 +634,37 @@ function queryTranscribe(opts?: OpcoesTranscribe): string {
   return opts.estilo ? `?limpar=1&estilo=${encodeURIComponent(opts.estilo)}` : '?limpar=1';
 }
 
+export type TranscribeResult = {
+  path: string; text: string; raw?: string; aviso?: string | null; estilo_aplicado?: string;
+  /** Serviço da lista que transcreveu. O `aviso` já explica quando um anterior falhou. */
+  provider?: string;
+};
+
+function queryArquivo(opts: OpcoesTranscribe | undefined, arquivo: string): string {
+  const qs = queryTranscribe(opts);
+  return `${qs ? `${qs}&` : '?'}arquivo=${encodeURIComponent(arquivo)}`;
+}
+
+// Transcreve um áudio que JÁ está no servidor, sem receber nem gravar outra cópia. `arquivo` é o
+// nome solto na pasta da sessão, ou o caminho absoluto devolvido antes (depois de `/clear` o áudio
+// fica na pasta do transcript anterior). O ditado sobe o áudio antes por `uploadFile*`: o caminho
+// fica guardado mesmo que a transcrição nunca volte.
+export async function transcribeUploadedForServer(
+  s: Server,
+  name: string,
+  arquivo: string,
+  opts?: OpcoesTranscribe,
+): Promise<TranscribeResult> {
+  const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/transcribe${queryArquivo(opts, arquivo)}`, {
+    method: 'POST',
+    // Corpo vazio: o `apiFetchRes` poria `application/json` por padrão, e não há JSON nenhum aqui.
+    headers: { 'Content-Type': 'application/octet-stream' },
+    signal: AbortSignal.timeout(300_000),   // mesmo teto do transcribeFile (ver o comentário lá)
+  }, s);
+  if (!res.ok) throw Object.assign(new Error(`${res.status}: ${await errorDetail(res)}`), { status: res.status });
+  return res.json() as Promise<TranscribeResult>;
+}
+
 // `limpar` monta a MESMA query do transcribeFile (?limpar=1), de propósito: é o mesmo botão de
 // microfone, e ditar num card não pode devolver texto pior que ditar no chat. Só o mic manda o
 // flag — áudio anexado (arquivo de até 10min) não paga a limpeza, mesma regra do backend.
@@ -637,7 +675,7 @@ export async function transcribeFileForServer(
   name: string,
   file: File,
   opts?: OpcoesTranscribe,
-): Promise<{ path: string; text: string; raw?: string; aviso?: string | null }> {
+): Promise<TranscribeResult> {
   const qs = queryTranscribe(opts);
   const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/transcribe${qs}`, {
     method: 'POST',
@@ -649,7 +687,7 @@ export async function transcribeFileForServer(
     signal: AbortSignal.timeout(300_000),   // mesmo teto do transcribeFile (ver o comentário lá)
   }, s);
   if (!res.ok) throw new Error(`${res.status}: ${await errorDetail(res)}`);
-  return res.json() as Promise<{ path: string; text: string; raw?: string; aviso?: string | null }>;
+  return res.json() as Promise<TranscribeResult>;
 }
 
 // Ditado da tela de nova conversa: a sessão ainda não existe, então o áudio só é transcrito e
@@ -1751,6 +1789,99 @@ export interface CampoConfig {
   definido: boolean;
   origem: 'app' | 'env';
 }
+
+// Lista ordenada de serviços de transcrição (`transcription_providers`). Chega em
+// `campos.transcription_providers.valor` como lista; `CampoConfig.valor` não é alargado porque os
+// leitores de campo escalar continuam lendo string — quem quer a lista usa este parser.
+export type TranscriptionProviderKind = 'openai' | 'elevenlabs';
+export interface TranscriptionProviderConfig {
+  id: string; kind: TranscriptionProviderKind; name: string; base_url: string; api_key: string; model: string;
+}
+export interface TranscriptionProviderStatus {
+  id: string; name: string; kind: string; waiting_until: number | null; reason: string | null;
+}
+
+export function parseTranscriptionProviders(v: unknown): TranscriptionProviderConfig[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .filter((p): p is Record<string, unknown> => !!p && typeof p === 'object'
+      && typeof p.id === 'string' && (p.kind === 'openai' || p.kind === 'elevenlabs'))
+    .map((p) => ({
+      id: p.id as string, kind: p.kind as TranscriptionProviderKind,
+      name: String(p.name ?? ''), base_url: String(p.base_url ?? ''),
+      api_key: String(p.api_key ?? ''), model: String(p.model ?? ''),
+    }));
+}
+
+// Mesmo nome que o backend deriva quando o item não tem nome: o item recém-adicionado ainda não
+// passou pelo servidor e precisa de rótulo.
+export function transcriptionProviderLabel(
+  p: Pick<TranscriptionProviderConfig, 'kind' | 'name' | 'base_url' | 'model'>,
+): string {
+  if (p.name.trim()) return p.name.trim();
+  if (p.kind === 'elevenlabs') return 'ElevenLabs';
+  // Como o `urlparse(...).hostname or base` do backend: sem porta, e o texto cru se não for URL.
+  const base = p.base_url.trim() || 'https://api.groq.com/openai/v1';
+  let host = base;
+  try { host = new URL(base).hostname || base; } catch { /* endpoint sendo digitado */ }
+  return `${host} · ${p.model.trim() || 'whisper-large-v3'}`;
+}
+
+// Ordem da lista = ordem de tentativa. Troca com o vizinho; na ponta, a lista volta igual.
+export function moveTranscriptionProvider<T>(list: readonly T[], i: number, d: -1 | 1): T[] {
+  const n = [...list];
+  const j = i + d;
+  if (i < 0 || i >= n.length || j < 0 || j >= n.length) return n;
+  [n[i], n[j]] = [n[j], n[i]];
+  return n;
+}
+
+// Chave apagada volta à máscara guardada: o servidor lê a máscara como "mantém a chave".
+export function editTranscriptionProviderKey(
+  item: TranscriptionProviderConfig, typed: string, mask: string | undefined,
+): TranscriptionProviderConfig {
+  return { ...item, api_key: typed || mask || '' };
+}
+
+// O servidor só troca a máscara pela chave guardada com o mesmo tipo e endpoint do item salvo:
+// a chave nunca vai para outro serviço.
+export function transcriptionProviderKeepsKey(
+  item: Pick<TranscriptionProviderConfig, 'kind' | 'base_url'>,
+  saved: Pick<TranscriptionProviderConfig, 'kind' | 'base_url'> | undefined,
+): boolean {
+  return !!saved && item.kind === saved.kind
+    && (item.kind === 'elevenlabs' || item.base_url.trim() === saved.base_url);
+}
+
+// Tipo ou endpoint trocado num item salvo: a máscara sai, e o "falta a chave" segura o Salvar em
+// vez do 400 do servidor. De volta ao tipo e endpoint salvos, a máscara volta a valer.
+export function editTranscriptionProviderTarget(
+  item: TranscriptionProviderConfig,
+  change: Partial<Pick<TranscriptionProviderConfig, 'kind' | 'base_url'>>,
+  saved: TranscriptionProviderConfig | undefined,
+): TranscriptionProviderConfig {
+  const next = { ...item, ...change };
+  const mask = saved?.api_key;
+  if (!mask) return next;
+  const keeps = transcriptionProviderKeepsKey(next, saved);
+  if (!keeps && next.api_key === mask) return { ...next, api_key: '' };
+  if (keeps && !next.api_key) return { ...next, api_key: mask };
+  return next;
+}
+
+// Item sem chave faz o servidor recusar o Salvar inteiro (o rascunho é um só): o Salvar espera.
+export function transcriptionProvidersMissingKey(list: readonly Pick<TranscriptionProviderConfig, 'api_key'>[]): boolean {
+  return list.some((p) => !p.api_key);
+}
+
+export function getTranscriptionProvidersStatus(
+  server?: Server | null,
+): Promise<{ providers: TranscriptionProviderStatus[] }> {
+  return server
+    ? apiFetchForServer(server, '/api/transcription/providers/status')
+    : apiFetch('/api/transcription/providers/status', { signal: AbortSignal.timeout(8000) });
+}
+
 /**
  * Uma variável do `.env` mostrada em Avançado, só leitura.
  *
@@ -2063,6 +2194,9 @@ export function uploadFile(
   file: File,
   onProgresso?: (pct: number) => void,
   server?: Server | null,
+  // Ditado: o `.webm` do Chrome é só áudio, e sem isto o servidor o trataria como vídeo (quadros
+  // e uma transcrição a mais).
+  opts?: { audioOnly?: boolean },
 ): Promise<{ path: string; frames?: string[]; transcript?: string }> {
   const base = server ? baseOf(server) : apiEnv().getBaseUrl();
   // Diário à mão: sair do `apiFetchRes` significa sair do registro, e o comentário dele avisa
@@ -2076,7 +2210,7 @@ export function uploadFile(
                     detalhe: [rota, motivo].filter(Boolean).join(' — ') }, server?.baseUrl ?? base);
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', `${base}/api/sessions/${encodeURIComponent(name)}/upload`);
+    xhr.open('POST', `${base}/api/sessions/${encodeURIComponent(name)}/upload${opts?.audioOnly ? '?audio_only=1' : ''}`);
     for (const [k, v] of Object.entries(fileAuthHeader(server ?? undefined))) xhr.setRequestHeader(k, String(v));
     xhr.setRequestHeader('X-Hangar-Req', req);
     xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
@@ -2134,19 +2268,17 @@ export function uploadFile(
 }
 
 /**
- * Envia os bytes de um audio (gravado no mic ou arquivo) pra sessao. O backend salva o audio E o
- * transcreve via Groq num round-trip, devolvendo { path, text }. O app monta a mensagem
- * "<transcricao> — 📎 audio: <path>". Mesmo esquema de header (X-Filename) do uploadFile.
- * `limpar: true` (so o ditado pelo mic, nunca arquivo anexado) pede `?limpar=1` — o backend limpa o
- * texto ANTES de responder (sem corrida/troca na tela) e devolve tambem `raw` (pro desfazer) e
- * `aviso` (motivo da limpeza nao ter valido, ou null quando valeu).
+ * Envia os bytes de um áudio para a sessão: o backend salva na pasta de anexos e transcreve num
+ * round-trip, devolvendo `{ path, text }`. O ditado do composer não usa mais este caminho (sobe com
+ * `uploadFile` e transcreve com `transcribeUploaded`); fica para quem manda áudio sem precisar do
+ * caminho antes. `limpar: true` pede `?limpar=1` e devolve também `raw` e `aviso`.
  */
 export async function transcribeFile(
   name: string,
   file: File,
   opts?: OpcoesTranscribe,
   server?: Server | null,
-): Promise<{ path: string; text: string; raw?: string; aviso?: string | null; estilo_aplicado?: string }> {
+): Promise<TranscribeResult> {
   const base = server ? baseOf(server) : apiEnv().getBaseUrl();
   const qs = queryTranscribe(opts);
   const res = await fetch(`${base}/api/sessions/${encodeURIComponent(name)}/transcribe${qs}`, {
@@ -2165,9 +2297,24 @@ export async function transcribeFile(
     signal: AbortSignal.timeout(300_000),
   });
   await ensureOk(res, server);
-  return res.json() as Promise<{
-    path: string; text: string; raw?: string; aviso?: string | null; estilo_aplicado?: string;
-  }>;
+  return res.json() as Promise<TranscribeResult>;
+}
+
+/** `transcribeUploadedForServer` pelo servidor da sessão aberta no chat (ou o ativo). */
+export async function transcribeUploaded(
+  name: string,
+  arquivo: string,
+  opts?: OpcoesTranscribe,
+  server?: Server | null,
+): Promise<TranscribeResult> {
+  const base = server ? baseOf(server) : apiEnv().getBaseUrl();
+  const res = await fetch(`${base}/api/sessions/${encodeURIComponent(name)}/transcribe${queryArquivo(opts, arquivo)}`, {
+    method: 'POST',
+    headers: fileAuthHeader(server ?? undefined),
+    signal: AbortSignal.timeout(300_000),
+  });
+  await ensureOk(res, server);
+  return res.json() as Promise<TranscribeResult>;
 }
 
 /**

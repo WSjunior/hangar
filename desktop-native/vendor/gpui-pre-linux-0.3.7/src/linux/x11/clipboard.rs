@@ -49,6 +49,7 @@ use x11rb::{
 
 use gpui::{ClipboardItem, Image, ImageFormat, hash};
 use strum::IntoEnumIterator;
+use crate::linux::{file_list_item, parse_uri_list};
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -78,7 +79,7 @@ x11rb::atom_manager! {
         TEXT_MIME_UNKNOWN: b"text/plain",
 
         // HTML: b"text/html",
-        // URI_LIST: b"text/uri-list",
+        URI_LIST: b"text/uri-list",
 
         PNG__MIME: ImageFormat::mime_type(ImageFormat::Png ).as_bytes(),
         JPEG_MIME: ImageFormat::mime_type(ImageFormat::Jpeg).as_bytes(),
@@ -298,31 +299,43 @@ impl Inner {
             return Err(Error::ContentNotAvailable);
         }
         let reader = XContext::new()?;
+        let available = self.targets(&reader, selection);
+        self.read_from(&reader, formats, selection, available.as_deref())
+    }
 
-        let highest_precedence_format =
-            match self.read_single(&reader, selection, self.atoms.TARGETS) {
-                Err(err) => {
-                    log::trace!("Clipboard TARGETS query failed with {err:?}");
+    // Separado do `read` para um colar decidir entre arquivo e texto com uma consulta só ao dono.
+    fn targets(&self, reader: &XContext, selection: ClipboardKind) -> Option<Vec<Atom>> {
+        match self.read_single(reader, selection, self.atoms.TARGETS) {
+            Err(err) => {
+                log::trace!("Clipboard TARGETS query failed with {err:?}");
+                None
+            }
+            Ok(ClipboardData { bytes, format }) => {
+                if format == self.atoms.ATOM {
+                    Some(Self::parse_formats(&bytes))
+                } else {
+                    log::trace!(
+                        "Unexpected clipboard TARGETS format {}",
+                        self.atom_name(format)
+                    );
                     None
                 }
-                Ok(ClipboardData { bytes, format }) => {
-                    if format == self.atoms.ATOM {
-                        let available_formats = Self::parse_formats(&bytes);
-                        formats
-                            .iter()
-                            .find(|format| available_formats.contains(format))
-                    } else {
-                        log::trace!(
-                            "Unexpected clipboard TARGETS format {}",
-                            self.atom_name(format)
-                        );
-                        None
-                    }
-                }
-            };
+            }
+        }
+    }
+
+    fn read_from(
+        &self,
+        reader: &XContext,
+        formats: &[Atom],
+        selection: ClipboardKind,
+        available: Option<&[Atom]>,
+    ) -> Result<ClipboardData> {
+        let highest_precedence_format = available
+            .and_then(|available| formats.iter().find(|format| available.contains(format)));
 
         if let Some(&format) = highest_precedence_format {
-            let data = self.read_single(&reader, selection, format)?;
+            let data = self.read_single(reader, selection, format)?;
             if !formats.contains(&data.format) {
                 // This shouldn't happen since the format is from the TARGETS list.
                 log::trace!(
@@ -337,7 +350,7 @@ impl Inner {
 
         log::trace!("Falling back on attempting to convert clipboard to each format.");
         for format in formats {
-            match self.read_single(&reader, selection, *format) {
+            match self.read_single(reader, selection, *format) {
                 Ok(data) => {
                     if formats.contains(&data.format) {
                         return Ok(data);
@@ -1039,7 +1052,23 @@ impl Clipboard {
         format_atoms.extend(image_entries.iter().map(|(atom, _)| *atom));
         format_atoms.extend_from_slice(text_format_atoms);
 
-        let result = self.inner.read(&format_atoms, selection)?;
+        // Só o CLIPBOARD: a seleção primária (botão do meio) continua colando texto.
+        let result = if matches!(selection, ClipboardKind::Clipboard) && !self.is_owner(selection) {
+            let reader = XContext::new()?;
+            let available = self.inner.targets(&reader, selection);
+            if let Some(paths) = self.read_file_list(&reader, selection, available.as_deref()) {
+                let text = self
+                    .inner
+                    .read_from(&reader, text_format_atoms, selection, available.as_deref())
+                    .ok()
+                    .and_then(|data| self.decode_text(data));
+                return Ok(file_list_item(paths, text));
+            }
+            self.inner
+                .read_from(&reader, &format_atoms, selection, available.as_deref())?
+        } else {
+            self.inner.read(&format_atoms, selection)?
+        };
 
         log::trace!(
             "read clipboard as format {:?}",
@@ -1058,14 +1087,34 @@ impl Clipboard {
             }
         }
 
-        let text = if result.format == self.inner.atoms.STRING {
+        let text = self.decode_text(result).ok_or(Error::ConversionFailure)?;
+        Ok(ClipboardItem::new_string(text))
+    }
+
+    fn decode_text(&self, data: ClipboardData) -> Option<String> {
+        if data.format == self.inner.atoms.STRING {
             // ISO Latin-1
             // See: https://stackoverflow.com/questions/28169745/what-are-the-options-to-convert-iso-8859-1-latin-1-to-a-string-utf-8
-            result.bytes.into_iter().map(|c| c as char).collect()
+            Some(data.bytes.into_iter().map(|c| c as char).collect())
         } else {
-            String::from_utf8(result.bytes).map_err(|_| Error::ConversionFailure)?
-        };
-        Ok(ClipboardItem::new_string(text))
+            String::from_utf8(data.bytes).ok()
+        }
+    }
+
+    fn read_file_list(
+        &self,
+        reader: &XContext,
+        selection: ClipboardKind,
+        available: Option<&[Atom]>,
+    ) -> Option<smallvec::SmallVec<[std::path::PathBuf; 2]>> {
+        let uri_list = self.inner.atoms.URI_LIST;
+        // Sem TARGETS ou sem uri-list nele, não tenta às cegas: custaria uma ida ao dono em todo colar de texto.
+        if !available?.contains(&uri_list) {
+            return None;
+        }
+        let data = self.inner.read_from(reader, &[uri_list], selection, available).ok()?;
+        let paths = parse_uri_list(std::str::from_utf8(&data.bytes).ok()?);
+        (!paths.is_empty()).then_some(paths)
     }
 
     pub fn is_owner(&self, selection: ClipboardKind) -> bool {
