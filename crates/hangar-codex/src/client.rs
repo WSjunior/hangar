@@ -63,6 +63,10 @@ impl Client {
         (Self { out,pending,next:Arc::new(AtomicI64::new(1)) },rx)
     }
 
+    /// Quem recebe o `Receiver<Incoming>` tem de consumi-lo numa tarefa própria e nunca esperar um
+    /// `request` dentro desse laço: o canal tem limite, a leitura espera quando ele enche e as
+    /// respostas na fila atrás das notificações esperam junto. Soltar o `Receiver` encerra o
+    /// cliente na próxima mensagem do servidor; a partir daí todo `request` devolve `Closed`.
     pub fn over_lines(reader:impl AsyncRead+Unpin+Send+'static,mut writer:impl AsyncWrite+Unpin+Send+'static) -> (Self,mpsc::Receiver<Incoming>) {
         let (lines_tx,lines_rx) = mpsc::channel::<String>(INCOMING_CAPACITY);
         tokio::spawn(async move {
@@ -92,8 +96,10 @@ impl Client {
         Self::start(lines_rx,out_tx)
     }
 
+    /// O `Receiver<Incoming>` segue o mesmo contrato de [`Client::over_lines`].
     pub fn spawn_stdio(mut command:tokio::process::Command) -> std::io::Result<(Self,mpsc::Receiver<Incoming>,tokio::process::Child)> {
-        command.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).kill_on_drop(true);
+        // stderr cru do Codex não pode cair no diário do serviço; diagnóstico privado fica com quem chama.
+        command.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).kill_on_drop(true);
         let mut child = command.spawn()?;
         let stdout = child.stdout.take().ok_or_else(||std::io::Error::other("sem stdout"))?;
         let stdin = child.stdin.take().ok_or_else(||std::io::Error::other("sem stdin"))?;
@@ -101,6 +107,7 @@ impl Client {
         Ok((client,incoming,child))
     }
 
+    /// O `Receiver<Incoming>` segue o mesmo contrato de [`Client::over_lines`].
     pub async fn connect_ws(url:&str) -> Result<(Self,mpsc::Receiver<Incoming>),ClientError> {
         use futures_util::{SinkExt,StreamExt};
         use tokio_tungstenite::tungstenite::{Message,protocol::WebSocketConfig};
@@ -129,18 +136,18 @@ impl Client {
         let id = RequestId::Integer(self.next.fetch_add(1,Ordering::Relaxed));
         let (tx,rx) = oneshot::channel();
         match self.pending.lock().unwrap().as_mut() { Some(map) => { map.insert(id.clone(),tx); }, None => return Err(ClientError::Closed) }
+        // Futuro cancelado por quem chama (select!, timeout de fora) não pode deixar a entrada no mapa.
+        let _forget = ForgetOnDrop { pending:&self.pending,id:&id };
         let (method,params) = request.into_parts();
         let line = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}).to_string();
-        if self.out.send(line).await.is_err() { self.forget(&id); return Err(ClientError::Closed); }
+        if self.out.send(line).await.is_err() { return Err(ClientError::Closed); }
         let value = match tokio::time::timeout(timeout,rx).await {
-            Err(_) => { self.forget(&id); return Err(ClientError::Timeout); }
+            Err(_) => return Err(ClientError::Timeout),
             Ok(Err(_)) => return Err(ClientError::Closed),
             Ok(Ok(outcome)) => outcome?,
         };
         serde_json::from_value(value).map_err(|e|ClientError::Decode(format!("{method}: {}",crate::proto::error_kind(&e))))
     }
-
-    fn forget(&self,id:&RequestId) { if let Some(map) = self.pending.lock().unwrap().as_mut() { map.remove(id); } }
 
     pub async fn notify(&self,method:&str,params:Value) -> Result<(),ClientError> {
         self.out.send(json!({"jsonrpc":"2.0","method":method,"params":params}).to_string()).await.map_err(|_|ClientError::Closed)
@@ -155,3 +162,24 @@ impl Client {
     }
 }
 
+
+struct ForgetOnDrop<'a> { pending:&'a Pending, id:&'a RequestId }
+
+impl Drop for ForgetOnDrop<'_> {
+    fn drop(&mut self) { if let Some(map) = self.pending.lock().unwrap().as_mut() { map.remove(self.id); } }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelled_request_leaves_no_pending_entry() {
+        let (ours,_theirs) = tokio::io::duplex(1 << 16);
+        let (r,w) = tokio::io::split(ours);
+        let (client,_incoming) = Client::over_lines(r,w);
+        let call = client.request::<Value>(ClientRequest::ModelList(Default::default()),Duration::from_secs(60));
+        assert!(tokio::time::timeout(Duration::from_millis(20),call).await.is_err());
+        assert!(client.pending.lock().unwrap().as_ref().unwrap().is_empty());
+    }
+}
