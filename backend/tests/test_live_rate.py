@@ -2,7 +2,7 @@
 import json
 import time
 
-from app.live_rate import LiveRate
+from app.live_rate import LiveRate, first_response_report
 from app.stats import Accumulator
 
 
@@ -56,3 +56,16 @@ def test_subagente_fica_fora_do_tok_s(tmp_path):
     snap = Accumulator("claude", str(p)).collect()
     assert snap["out_tok"] == 5500
     assert snap["tok_s"] == 50.0          # 500 tok / 10 s; os 5000 do subagente não têm tempo aqui
+
+
+def test_codex_first_response_without_rate_is_scoped_to_conversation():
+    r = LiveRate()
+    for seconds in (1.0, 3.0):
+        report = first_response_report({"first_response": True, "seconds": seconds,
+                                        "conversation": "codex-thread"})
+        assert report is not None
+        r.first_response(*report)
+    assert r.snapshot("codex-thread", None) == {"ttft_ms": 2000}
+    assert r.snapshot("other-thread", None) == {}
+    assert first_response_report({"first_response": True, "seconds": float("nan"),
+                                  "conversation": "codex-thread"}) is None

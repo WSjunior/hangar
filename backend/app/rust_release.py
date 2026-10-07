@@ -81,12 +81,31 @@ def release_tag() -> str:
     if branch == "HEAD":
         diag.registrar(_EVENT, "aviso", codigo="head_solto")
         return MAIN_TAG
-    # Mesma limpeza do passo de publicação do .github/workflows/server.yml.
-    tag = "server-" + re.sub(r"[^A-Za-z0-9._-]", "-", branch)
+    tag = tag_for(branch)
     if tag == MAIN_TAG:
         # O server.yml recusa publicar esta branch, que sobrescreveria a release da main.
         diag.registrar(_EVENT, "erro", codigo="branch_colide_com_main", tag=tag)
     return tag
+
+
+def tag_for(branch: str) -> str:
+    if branch in ("main", "master"):
+        return MAIN_TAG
+    # Mesma limpeza do passo de publicação do .github/workflows/server.yml.
+    return "server-" + re.sub(r"[^A-Za-z0-9._-]", "-", branch)
+
+
+def read_manifest(url: str) -> dict:
+    """O `server-latest.json` da release em `url`. Levanta como o `_get` (404 é `HTTPError`)."""
+    manifest = json.loads(_get(f"{url}/server-latest.json", _MANIFEST_DEADLINE))
+    if not isinstance(manifest, dict):
+        raise ValueError("manifesto não é um objeto")
+    return manifest
+
+
+def has_build(manifest: dict, plat: str) -> bool:
+    files = manifest.get("files")
+    return isinstance(files, dict) and all(isinstance(files.get(f"{plat}/{n}"), dict) for n in NAMES)
 
 
 def bin_dir() -> Path:
@@ -204,9 +223,12 @@ def _fetch_one(url: str, files: object, plat: str, name: str, target: Path,
     return None
 
 
-def fetch(base_url: str | None = None, dest: Path | None = None) -> list[str] | None:
+def fetch(base_url: str | None = None, dest: Path | None = None,
+          release: tuple[str, str | None, dict] | None = None) -> list[str] | None:
     """Põe em `dest` os binários desta máquina, conferidos pelo sha256 do manifesto.
 
+    `release` = (url, tag, manifesto) já lido por quem escolheu o commit do checkout: baixar por
+    ele garante o binário daquela escolha, e um manifesto trocado depois só faz o sha não conferir.
     `None` = a release não tem build para esta máquina; `[]` = tudo no lugar; senão, os avisos.
     Nunca levanta: quem chama (instalador, botão Atualizar) segue sem os binários.
     """
@@ -215,31 +237,40 @@ def fetch(base_url: str | None = None, dest: Path | None = None) -> list[str] | 
         diag.registrar("hangar_server.baixar", "aviso", codigo="sem_build")
         return None
     # `tag` None = URL dada por quem chama: sem release da main para onde recuar.
-    url, tag = base_url or os.environ.get("HANGAR_SERVER_RELEASE_URL"), None
+    url, tag, manifest = release or (base_url or os.environ.get("HANGAR_SERVER_RELEASE_URL"), None, None)
     if not url:
         tag = release_tag()
         url = f"{RELEASES_URL}/{tag}"
     url = url.rstrip("/")
     dest = dest or bin_dir()
     ext = ".exe" if plat.startswith("windows") else ""
-    branch_tag = None   # preenchido quando a branch não tem release e caímos na da main
+    branch_tag = None   # preenchido quando a branch não serve e caímos na da main
+    missing = "ausente"
     try:
         try:
-            manifest = json.loads(_get(f"{url}/server-latest.json", _MANIFEST_DEADLINE))
+            manifest = manifest or read_manifest(url)
         except urllib.error.HTTPError as e:
             if e.code != 404 or tag in (None, MAIN_TAG):
                 raise
             # O server.yml só publica a branch quando crates/ muda: sem release própria, vale a da main.
             diag.registrar(_EVENT, "aviso", codigo="sem_release_da_branch", tag=tag)
+            manifest = None
+        else:
+            # Branch nova: um sistema pode publicar antes do outro, e o que falta vem da main.
+            if tag not in (None, MAIN_TAG) and not has_build(manifest, plat):
+                diag.registrar(_EVENT, "aviso", codigo="sem_build_na_branch", tag=tag, detalhe=plat)
+                missing, manifest = f"sem build para {plat}", None
+        if manifest is None:
             branch_tag, tag, url = tag, MAIN_TAG, f"{RELEASES_URL}/{MAIN_TAG}"
-            manifest = json.loads(_get(f"{url}/server-latest.json", _MANIFEST_DEADLINE))
+            manifest = read_manifest(url)
         files = manifest["files"]
         # Só vai ao diário, para diagnosticar versão do Python diferente da do binário.
         commit = str(manifest.get("commit", ""))[:40]
         dest.mkdir(parents=True, exist_ok=True)
     except (*_DOWNLOAD_ERRORS, KeyError, TypeError) as e:
         diag.registrar("hangar_server.baixar", "erro", etapa="manifesto", tag=tag, **diag.erro_campos(e))
-        return [f"binários Rust não baixados: não consegui ler o manifesto da release ({e})"]
+        via = f" da main (release {branch_tag} {missing})" if branch_tag else ""
+        return [f"binários Rust não baixados: não consegui ler o manifesto da release{via} ({e})"]
     avisos, kept, installed = [], [], []
     for name in NAMES:
         target = dest / f"{name}{ext}"
@@ -249,13 +280,13 @@ def fetch(base_url: str | None = None, dest: Path | None = None) -> list[str] | 
             kept.append(name)
             continue
         if aviso := _fetch_one(url, files, plat, name, target, commit, tag):
-            avisos.append(aviso)
+            avisos.append(f"release {branch_tag} {missing}; da main, {aviso}" if branch_tag else aviso)
         elif branch_tag:
             installed.append(name)
     if kept:
-        avisos.append(f"release {branch_tag} ausente; mantive os binários instalados ({', '.join(kept)})")
+        avisos.append(f"release {branch_tag} {missing}; mantive os binários instalados ({', '.join(kept)})")
     if installed:
-        avisos.append(f"release {branch_tag} ausente; instalei os da main ({', '.join(installed)})")
+        avisos.append(f"release {branch_tag} {missing}; instalei os da main ({', '.join(installed)})")
     for aviso in avisos:
         _log.warning(aviso)
     return avisos

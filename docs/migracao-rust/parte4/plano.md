@@ -103,8 +103,8 @@ contrato nos dois lados, testes.
 `test_deliverable_service_runs_prepare_session`; Rust `state_facts::validity_with_own_clock`,
 `state_facts::older_sequence_dropped`, `state_facts::snapshot_failure_is_error`.
 
-- [ ] **Step 1: Ler "Regras vigentes" de `harnesses.md`; testes, vistos falhar**
-- [ ] **Step 2: Fatos, interesse, serviços e op `state.facts`; contrato no próximo número livre; testes focados; revisar**
+- [x] **Step 1: Ler "Regras vigentes" de `harnesses.md`; testes, vistos falhar**
+- [x] **Step 2: Fatos, interesse, serviços e op `state.facts`; contrato no próximo número livre; testes focados; revisar**
 
 ### Task 2: `Monitor` de estado no Rust (sem produção)
 
@@ -129,8 +129,8 @@ shells, loop), `monitor::rounds_counted_like_python`,
 `agent_pane::matches_python_fixture`, `permission::parse_matches_python`; medida em release de uma
 rodada (captura + `reduce`) com tmux `-L`, contra 1,26 ms do Python por captura.
 
-- [ ] **Step 3: Testes e sequências novas, vistos falhar**
-- [ ] **Step 4: `Monitor`, pane do agente, shells, permissão, rebaixamento; testes focados; medida de uma rodada; revisar**
+- [x] **Step 3: Testes e sequências novas, vistos falhar**
+- [x] **Step 4: `Monitor`, pane do agente, shells, permissão, rebaixamento; testes focados; medida de uma rodada; revisar**
 
 ### Task 3: Prévia no `Monitor` (sem produção)
 
@@ -147,8 +147,8 @@ quando o bloco entra nele, porte de `sse.py:54-72, 852-855`; vaga única; `text,
 `preview::suppressed_when_in_transcript`, `preview::cleared_on_commit`,
 `preview::fast_captures_only_for_pane_preview`.
 
-- [ ] **Step 5: Testes e golden, vistos falhar**
-- [ ] **Step 6: Prévia; testes focados; revisar**
+- [x] **Step 5: Testes e golden, vistos falhar**
+- [x] **Step 6: Prévia; testes focados; revisar**
 
 ### Task 4: Pergunta nativa, sugestão, `problema` e entrega no `Monitor` (sem produção)
 
@@ -165,8 +165,8 @@ a aceitar texto" → `session.deliverable` uma vez por borda e uma ao nascer), c
 `monitor::deliverable_edge_calls_service_once`, `monitor::runtime_problem_in_key_and_wakes`,
 `monitor::suggest_on_change`; vitest dos três mapas de `problema` com os códigos novos.
 
-- [ ] **Step 7: Testes e golden, vistos falhar**
-- [ ] **Step 8: Porte; códigos nos três clientes; testes focados; revisar**
+- [x] **Step 7: Testes e golden, vistos falhar**
+- [x] **Step 8: Porte; códigos nos três clientes; testes focados; revisar**
 
 ### Task 5: Troca de dono do estado (contrato)
 
@@ -189,9 +189,9 @@ Connect), `test_guest_chat_reads_rust_channel`, `test_side_events_keeps_info_que
 Rust `side::monitor_publishes_after_rebind`, `side::python_state_for_rust_session_dropped_once`,
 `side::private_channel_counts_as_subscriber`, `monitor::one_monitor_per_session`.
 
-- [ ] **Step 9: Testes, vistos falhar; medida "antes" (`medir-estado.py`, release, 1/5/20 chats, parado e trabalhando: CPU do Python e do Rust, latência marcador → `state`, RSS)**
-- [ ] **Step 10: Hub com fonte própria, canal privado, Python calado para essas sessões; contrato; regras corrigidas; testes focados**
-- [ ] **Step 11: Medida "depois" no mesmo método; `medicao.md`; revisar**
+- [x] **Step 9: Testes, vistos falhar; medida "antes" (`medir-estado.py`, release, 1/5/20 chats, parado e trabalhando: CPU do Python e do Rust, latência marcador → `state`, RSS)**
+- [x] **Step 10: Hub com fonte própria, canal privado, Python calado para essas sessões; contrato; regras corrigidas; testes focados**
+- [x] **Step 11: Medida "depois" no mesmo método; `medicao.md`; revisar**
 
 ### Task 6: Lista lê o `Monitor` e o cartão de permissão do Claude com terminal
 
@@ -204,9 +204,9 @@ virar regra), `medicao.md`.
 `classify::permission_card_after_bash_is_awaiting`,
 `contract_terminal::permission_card_after_bash` (lista e `Monitor` dizem `awaiting_input`).
 
-- [ ] **Step 12: Reproduzir com sessão real isolada (Haiku, modo padrão, `Bash` que pede permissão): lista `working` com cartão na tela; provar a causa (superpowers:systematic-debugging) e gravar a sequência**
-- [ ] **Step 13: Testes, vistos falhar; conserto e leitura do `Monitor` pela lista; testes focados**
-- [ ] **Step 14: Medida antes/depois do tique da lista com 5 chats abertos (capturas evitadas, CPU); `medicao.md`; revisar**
+- [x] **Step 12: Reproduzir com sessão real isolada (Haiku, modo padrão, `Bash` que pede permissão): lista `working` com cartão na tela; provar a causa (superpowers:systematic-debugging) e gravar a sequência**
+- [x] **Step 13: Testes, vistos falhar; conserto e leitura do `Monitor` pela lista; testes focados**
+- [x] **Step 14: Medida antes/depois do tique da lista com 5 chats abertos (capturas evitadas, CPU); `medicao.md`; revisar**
 
 ### Task 7: Windows — captura avulsa pelo psmux
 
@@ -221,8 +221,8 @@ bom), `list/classify.rs:375-417` (mesma fonte; hoje `rc != 0` vira `capture_refu
 `capture::replacement_char_frame_not_good`, `capture::missing_vs_failed_by_has_session`,
 `monitor::windows_uses_subprocess`.
 
-- [ ] **Step 15: Ler "Regras vigentes" de `windows.md`; testes, vistos falhar**
-- [ ] **Step 16: Fonte por subprocesso no `Monitor` e na lista; job Windows do CI pelo log; revisar**
+- [x] **Step 15: Ler "Regras vigentes" de `windows.md`; testes, vistos falhar**
+- [x] **Step 16: Fonte por subprocesso no `Monitor` e na lista; job Windows do CI pelo log; revisar**
 
 ---
 
@@ -254,9 +254,9 @@ por painel, Python × Rust), contrato nos dois lados, `medicao.md`.
 `term::origin_refused_before_upgrade`, `term::shortcut_resolves_owner`,
 `term::panel_cap_refuses_1013`; Python `test_internal_term_origin_same_rules`.
 
-- [ ] **Step 17: Ler "Regras vigentes" de `windows.md` e as entradas do terminal em `frontend.md`; testes, vistos falhar; medida "antes" (`medir-terminal.py`, release)**
-- [ ] **Step 18: Rotas, porta de entrada, PTY, desmontagem, reposição; contrato; testes focados**
-- [ ] **Step 19: Medida "depois"; `medicao.md`; revisar**
+- [x] **Step 17: Ler "Regras vigentes" de `windows.md` e as entradas do terminal em `frontend.md`; testes, vistos falhar; medida "antes" (`medir-terminal.py`, release)**
+- [x] **Step 18: Rotas, porta de entrada, PTY, desmontagem, reposição; contrato; testes focados**
+- [x] **Step 19: Medida "depois"; `medicao.md`; revisar**
 
 ### Task 9: Python como porteiro, 409 e capacidade (contrato)
 
@@ -277,8 +277,8 @@ motores e capacidade), `docs/decisoes/superado.md`.
 `term::private_route_requires_secret`, `term::one_panel_across_owner_and_guest`,
 `bridge::term_active`.
 
-- [ ] **Step 20: Testes, vistos falhar**
-- [ ] **Step 21: Porteiro, 409, capacidade; contrato; regras corrigidas; testes focados; revisar**
+- [x] **Step 20: Testes, vistos falhar**
+- [x] **Step 21: Porteiro, 409, capacidade; contrato; regras corrigidas; testes focados; revisar**
 
 ### Task 10: Windows — ConPTY
 
@@ -290,9 +290,9 @@ duplex), testes `cfg(windows)`, `docs/decisoes/windows.md`.
 **Falha sem ela:** `conpty::spawn_echo_and_resize` (`cmd.exe` no runner Windows),
 `conpty::child_killed_before_close`.
 
-- [ ] **Step 22: Ler "Regras vigentes" de `windows.md`; testes, vistos falhar; job Windows do CI pelo log**
-- [ ] **Step 23: VM DELPHI-02 com web e nativo: abre, digita, resize, Claude Code em tela cheia, nenhum travamento no pedido de posição do cursor (`INHERIT_CURSOR`); reprovou → `conpty.rs` com flags 0 e repetir (verificação manual)**
-- [ ] **Step 24: Regra em `windows.md`; revisar**
+- [x] **Step 22: Ler "Regras vigentes" de `windows.md`; testes, vistos falhar; job Windows do CI pelo log**
+- [x] **Step 23: VM DELPHI-02 com web e nativo: abre, digita, resize, Claude Code em tela cheia, nenhum travamento no pedido de posição do cursor (`INHERIT_CURSOR`); reprovou → `conpty.rs` com flags 0 e repetir (verificação manual)**
+- [x] **Step 24: Regra em `windows.md`; revisar**
 
 ---
 
@@ -304,16 +304,16 @@ duplex), testes `cfg(windows)`, `docs/decisoes/windows.md`.
 `docs/decisoes/superado.md`, `inventario.md`, `../lista-estado/plano.md` (Fase C e Task 24
 apontando para esta pasta).
 
-- [ ] **Step 25: Varrer `CLAUDE.md` e `docs/decisoes/` por regra que ficou falsa; corrigir; revisar**
+- [x] **Step 25: Varrer `CLAUDE.md` e `docs/decisoes/` por regra que ficou falsa; corrigir; revisar**
 
 ### Task 12: Prova de uso real isolada
 
 **Arquivos:** `scripts/prova-parte4.py` (sobre a `Prova`), `prova-real.md` (desta pasta).
 
-- [ ] **Step 26: Claude Haiku com terminal: trabalhando/parada/esperando, pergunta nativa, cartão de permissão, prévia (arquivo e pane), sugestão, `/clear`, sessão morta, troca de conta (`em_troca`), convidado olhando o chat; nenhum `StateMonitor`/`PreviewBroker` Python (contador) e uma captura por rodada**
-- [ ] **Step 27: Codex `gpt-6-luna` com e sem terminal fora do YOLO: cartão de aprovação no sem terminal, menu na TUI com terminal, lista em `awaiting_input` nos dois; Claude sem terminal com cartão**
-- [ ] **Step 28: Terminal: dono, convidado e Connect; atalho e `term-<nome>`; 409 com painel aberto; duas conexões; queda de rede (ping); queda do Rust com painel aberto (tamanho reposto)**
-- [ ] **Step 29: Isolado com 1, 10 e 20 sessões (método de `../lista-estado/medicao.md`): CPU de Python e Rust em repouso e ativo; reserva `CP_RUST_SERVER=0` e Rust derrubado 3 vezes, o estado e o terminal voltam pelo Python igual**
+- [x] **Step 26: Claude Haiku com terminal: trabalhando/parada/esperando, pergunta nativa, cartão de permissão, prévia (arquivo e pane), sugestão, `/clear`, sessão morta, troca de conta (`em_troca`), convidado olhando o chat; nenhum `StateMonitor`/`PreviewBroker` Python (contador) e uma captura por rodada**
+- [x] **Step 27: Codex `gpt-6-luna` com e sem terminal fora do YOLO: cartão de aprovação no sem terminal, menu na TUI com terminal, lista em `awaiting_input` nos dois; Claude sem terminal com cartão**
+- [x] **Step 28: Terminal: dono, convidado e Connect; atalho e `term-<nome>`; 409 com painel aberto; duas conexões; queda de rede (ping); queda do Rust com painel aberto (tamanho reposto)**
+- [x] **Step 29: Isolado com 1, 10 e 20 sessões (método de `../lista-estado/medicao.md`): CPU de Python e Rust em repouso e ativo; reserva `CP_RUST_SERVER=0` e Rust derrubado 3 vezes, o estado e o terminal voltam pelo Python igual**
 
 ### Task 13: Uso real com o dono e VM Windows
 

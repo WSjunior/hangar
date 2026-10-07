@@ -204,7 +204,7 @@ async def test_nav_lote_para_no_primeiro_erro(identidade, monkeypatch):
 
 async def test_grupo_parear_nova_sessao_chamam_as_rotas_como_eu(identidade, monkeypatch):
     from app import api
-    from app.models import SessionInfo
+    from app.models import CreatedSessionInfo
     chamadas = {}
 
     async def group_message(name, body):
@@ -219,8 +219,9 @@ async def test_grupo_parear_nova_sessao_chamam_as_rotas_como_eu(identidade, monk
     async def create_session(body):
         # `config_dir` entra na tupla porque a conta da sessão nova é o contrato da tool: sem ele
         # aqui, criar na conta padrão em vez da de quem chama voltaria a passar no teste.
-        chamadas["nova"] = (body.name, body.cwd, body.provider, body.headless, body.config_dir)
-        return SessionInfo(name=body.name, cwd=body.cwd, provider=body.provider, headless=body.headless)
+        chamadas["nova"] = (body.name, body.cwd, body.provider, body.headless, body.config_dir, body.creator)
+        return CreatedSessionInfo(name=body.name, cwd=body.cwd, provider=body.provider,
+                                  headless=body.headless, config_dir=body.config_dir)
 
     for n, f in (("group_message", group_message), ("pair_session", pair_session),
                  ("unpair_session", unpair_session), ("create_session", create_session)):
@@ -237,52 +238,7 @@ async def test_grupo_parear_nova_sessao_chamam_as_rotas_como_eu(identidade, monk
         res = await s.call_tool("new_session", {"nome": "n2", "cwd": "/tmp", "provider": "pi", "headless": True})
         assert res.is_error and "headless só vale" in res.content[0].text
     assert chamadas == {"grupo": ("eu", "marco", False), "parear": ("eu", "outra", "t"), "desparear": "eu",
-                        "nova": ("nova", "/tmp", "codex", True, "/home/x/.claude-outra")}
-
-
-async def test_new_session_sem_conta_herda_a_de_quem_chama(identidade, monkeypatch):
-    """Sem `conta`, a sessão nasce na conta de QUEM CHAMOU — não na padrão.
-
-    O bug real: o nome resolvido era descartado, `config_dir` ia vazio e o backend caía no
-    ~/.claude. Uma sessão que vive noutra conta criava a irmã na errada, gastando cota de quem
-    ninguém escolheu, e a descrição da tool dizia que tinha herdado.
-    """
-    from app import api
-    from app.models import SessionInfo
-    visto = {}
-
-    async def create_session(body):
-        visto["config_dir"] = body.config_dir
-        return SessionInfo(name=body.name, cwd=body.cwd, provider=body.provider)
-
-    monkeypatch.setattr(api, "create_session", create_session)
-    monkeypatch.setattr(api, "_caller_config_dir",
-                        lambda nome: (Path("/home/x/.claude-jefferson"), True))
-    async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
-        res = await s.call_tool("new_session", {"nome": "nova", "cwd": "/tmp"})
-    assert visto["config_dir"] == "/home/x/.claude-jefferson"
-    assert res.structured_content["config_dir"] == "/home/x/.claude-jefferson"
-
-
-async def test_new_session_recusa_quando_nao_da_pra_ler_a_conta(identidade, monkeypatch):
-    """Conta de quem chama ilegível: RECUSA em vez de cair na padrão.
-
-    Criar assim mesmo repetiria o bug, só que sem ninguém saber — e cota gasta não volta."""
-    from app import api
-    from app.models import SessionInfo
-    criou = False
-
-    async def create_session(body):
-        nonlocal criou
-        criou = True
-        return SessionInfo(name=body.name, cwd=body.cwd, provider=body.provider)
-
-    monkeypatch.setattr(api, "create_session", create_session)
-    monkeypatch.setattr(api, "_caller_config_dir", lambda nome: (None, False))
-    async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
-        res = await s.call_tool("new_session", {"nome": "nova", "cwd": "/tmp"})
-    assert res.is_error and "não consegui confirmar a conta" in res.content[0].text
-    assert not criou
+                        "nova": ("nova", "/tmp", "codex", True, "/home/x/.claude-outra", "eu")}
 
 
 async def _coro(v):
@@ -292,11 +248,11 @@ async def _coro(v):
 @pytest.mark.parametrize("mode", [None, False, True])
 async def test_new_session_preserves_mode_omission(identidade, monkeypatch, mode):
     from app import api
-    from app.registry import SessionInfo
+    from app.models import CreatedSessionInfo
     received = []
     async def create(body):
         received.append(body.headless)
-        return SessionInfo(name=body.name, cwd=body.cwd, headless=bool(body.headless))
+        return CreatedSessionInfo(name=body.name, cwd=body.cwd, headless=bool(body.headless))
     monkeypatch.setattr(api, "create_session", create)
     args = {"nome": "test-mode", "cwd": "/tmp", "conta": "/tmp/test-account"}
     if mode is not None:

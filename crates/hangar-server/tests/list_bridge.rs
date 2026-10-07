@@ -225,8 +225,13 @@ async fn shadow_never_demotes_and_tells_python() {
     assert_eq!(python.list_facts_last.lock().unwrap()["shadow"], true);
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(python.hits_to("/internal/list/demote"), 0);
+    let sid = "00000000-0000-0000-0000-000000000000";
+    let marker: Value = serde_json::from_slice(&std::fs::read(dir.path().join(format!("home/.claude/.hangar-state/{sid}.json"))).unwrap()).unwrap();
+    let ts = marker["ts"].as_f64().unwrap();
+    assert!(!bridge.demoted.applies(sid, ts), "a sombra não rebaixa nem aqui");
     bridge.invalidate();
     bridge.produce(&Default::default()).await.unwrap();
+    assert!(bridge.demoted.applies(sid, ts), "o rebaixamento vale já no Rust, para a lista e o `Monitor`");
     assert_eq!(python.list_facts_last.lock().unwrap()["shadow"], false);
     tokio::time::timeout(Duration::from_secs(5), async {
         while python.hits_to("/internal/list/demote") == 0 { tokio::time::sleep(Duration::from_millis(20)).await; }

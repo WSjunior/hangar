@@ -245,6 +245,22 @@ impl RuntimeRegistry {
     async fn barrier(&self,key:&str) -> Arc<Mutex<()>> {
         self.lifecycle.lock().await.entry(key.into()).or_insert_with(||Arc::new(Mutex::new(()))).clone()
     }
+    /// Chave do ator de entrada terminal da sessão `name` e o retrato dele; `None` sem ator aberto.
+    pub async fn terminal_view(&self,name:&str) -> Option<(String,Value)> {
+        let found = self.entries.lock().await.iter().find_map(|(key,entry)| match &entry.handle {
+            EntryHandle::Terminal {target,handle} if target.name==name=>Some((key.clone(),handle.clone())),
+            _=>None,
+        });
+        let (key,handle) = found?;
+        match handle.snapshot().await {
+            Ok(view)=>Some((key,view)),
+            Err(error)=>Some((key,json!({"error":error.code,"view":{}}))),
+        }
+    }
+    /// Sessão do ator de entrada terminal de chave `key`.
+    pub async fn terminal_name(&self,key:&str) -> Option<String> {
+        match &self.entries.lock().await.get(key)?.handle { EntryHandle::Terminal {target,..}=>Some(target.name.clone()), EntryHandle::Headless(_)=>None }
+    }
     pub async fn snapshots(&self) -> Result<Vec<RuntimeEvent>,RuntimeError> {
         let entries:Vec<_> = self.entries.lock().await.iter().map(|(key,entry)|(key.clone(),entry.generation,entry.handle.clone())).collect();
         let mut output = Vec::new();

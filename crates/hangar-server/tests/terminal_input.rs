@@ -501,3 +501,67 @@ async fn clients_skip_control_mode() {
  let capture = { d.mods_screen().await.unwrap(); io.calls.lock().unwrap().iter().rev().find(|r| r.args.iter().any(|a| a == "capture-pane")).unwrap().args.clone() };
  assert!(capture.contains(&"-e".to_string()) && !capture.contains(&"-S".to_string()), "só a parte visível, com atributos");
 }
+// #85: com o foco no painel de agentes o texto digitado some (e o `x` dele para um subagente).
+const AGENTS_FOCUSED: &str = include_str!("../../../backend/tests/fixtures/pane_agents_panel_focused.txt");
+const AGENTS_FOOTER: &str = include_str!("../../../backend/tests/fixtures/pane_agents_footer_focused.txt");
+#[tokio::test]
+async fn terminal_input_footer_focus_returns_to_composer_with_escape_before_typing() {
+ for focused in [AGENTS_FOCUSED, AGENTS_FOOTER] {
+  let io=Arc::new(FakeIo::new(vec![focused.into(),screen(""),screen("hello"),screen("")]));
+  assert_eq!(driver(io.clone(),Arc::new(Services::new())).prompt("hello","id").await.disposition,Disposition::Accepted);
+  let writes=io.writes(); assert_eq!(writes[0].args.last().unwrap(),"Escape"); assert_eq!(writes[1].args.last().unwrap(),"hello");
+ }
+}
+#[tokio::test]
+async fn terminal_input_footer_focus_that_stays_defers_without_typing() {
+ let io=Arc::new(FakeIo::new(vec![AGENTS_FOCUSED.into()]));
+ let r=driver(io.clone(),Arc::new(Services::new())).prompt("/clear","id").await;
+ assert_eq!(r.disposition,Disposition::Deferred); assert_eq!(r.code,"footer_focus");
+ let writes=io.writes(); assert_eq!(writes.len(),1); assert_eq!(writes[0].args.last().unwrap(),"Escape");
+}
+#[test]
+fn terminal_state_agents_panel_is_not_a_menu() {
+ for pane in [AGENTS_FOCUSED, include_str!("../../../backend/tests/fixtures/pane_agents_panel_focused_working.txt")] {
+  let analysis=hangar_server::terminal_state::analyze(pane);
+  assert_ne!(analysis.state,"awaiting_input"); assert!(analysis.options.is_none());
+  assert!(hangar_server::terminal_state::footer_focus(pane));
+ }
+ assert!(!hangar_server::terminal_state::footer_focus(&screen("")));
+ assert!(!hangar_server::terminal_state::footer_focus(include_str!("../../../backend/tests/fixtures/pane_trust_dialog.txt")));
+}
+#[tokio::test]
+async fn terminal_input_interrupt_with_footer_focus_returns_focus_first() {
+ // O primeiro Esc só devolve o foco do painel de agentes ao composer: o segundo interrompe.
+ let io=Arc::new(FakeIo::new(vec![AGENTS_FOCUSED.into(),screen("")]));
+ assert_eq!(driver(io.clone(),Arc::new(Services::new())).interrupt(false).await.disposition,Disposition::Accepted);
+ let escapes=io.writes().iter().filter(|r|r.args.last().unwrap()=="Escape").count(); assert_eq!(escapes,2);
+ let io=Arc::new(FakeIo::new(vec![screen("")]));
+ driver(io.clone(),Arc::new(Services::new())).interrupt(false).await;
+ assert_eq!(io.writes().iter().filter(|r|r.args.last().unwrap()=="Escape").count(),1);
+}
+// `claude --name` (ou `/rename`) escreve o nome na régua de cima da caixa de digitar: a leitura não muda.
+#[test]
+fn terminal_state_session_name_in_the_rule_reads_the_same() {
+ use hangar_server::terminal_state::{analyze, footer_focus, is_rule};
+ let named = |pane: &str| {
+  let lines: Vec<&str> = pane.lines().collect();
+  let top = (0..lines.len() - 1).rev().find(|&i| is_rule(lines[i]) && lines[i + 1].trim_start().starts_with('❯')).unwrap();
+  let width = lines[top].chars().count();
+  let label = format!("{} minha-sessao ─", "─".repeat(width - " minha-sessao ─".chars().count()));
+  lines.iter().enumerate().map(|(i, l)| if i == top { label.as_str() } else { l }).collect::<Vec<_>>().join("\n")
+ };
+ let mut previews = 0;
+ for pane in [AGENTS_FOCUSED, AGENTS_FOOTER,
+  include_str!("../../../backend/tests/fixtures/pane_agents_panel_focused_working.txt"),
+  include_str!("../../../backend/tests/fixtures/pane_idle.txt"),
+  include_str!("../../../backend/tests/fixtures/pane_thinking.txt"),
+  include_str!("../../../backend/tests/fixtures/pane_ferramenta_em_voo_acesa.txt"),
+  include_str!("../../../backend/tests/fixtures/pane_ferramenta_em_voo_apagada.txt")] {
+  let renamed = named(pane);
+  assert_ne!(renamed, pane.trim_end_matches('\n'));
+  assert_eq!(analyze(&renamed), analyze(pane));
+  assert_eq!(footer_focus(&renamed), footer_focus(pane));
+  previews += usize::from(!analyze(pane).preview.is_empty());
+ }
+ assert!(previews > 0, "alguma captura precisa ter prévia em voo");
+}

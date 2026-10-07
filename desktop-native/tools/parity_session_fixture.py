@@ -10,9 +10,10 @@ GET /control/palette?status=<200|403|404>&escuro=<true|false>&delay=<s> sets wha
 each request keeps the values it saw on arrival, so a slow old answer can land after a fast new one.
 GET /control/wallpaper?status=<200|403|404>&path=<image file> sets what GET /api/desktop/wallpaper answers.
 GET /control/r4?rate=<n|none>&rate_status=<200|500>&rate_delay=<s>&diag=<ok|empty|404|500>&diag_delay=<s>
-&update=<ok|fail|409|drop>&behind=<n>&about_delay=<s>&diag_file=<200|500> sets the Geral/Diário/Sobre routes (only the given keys change).
+&update=<ok|fail|avisos|409|drop>&behind=<n>&about_delay=<s>&diag_file=<200|500> sets the Geral/Diário/Sobre routes (only the given keys change).
 POST /api/atualizacao/iniciar is FAKE: it only walks a synthetic state (5 steps, a 4 s "restart" in which
-GET /api/atualizacao drops the connection, then the outcome). Nothing is updated or restarted anywhere.
+GET /api/atualizacao drops the connection, then the outcome with `pid` 0, the one the start answers; update=avisos ends
+ok with the warnings the real engine leaves in `avisos`). Nothing is updated or restarted anywhere.
 Contas e modelos (Task 12 R5) moram em parity_accounts_fixture.py; GET /control/r5 muda como elas respondem.
 GET /control/r6?load=<ok|500|drop>&load_delay=<s>&save=<ok|422|500|drop>&save_delay=<s>&shortcuts=<fixture|json|>
 muda a config de atalhos (Task 12 R6): POST /api/config {"shortcuts"} grava na memória, null apaga o override.
@@ -69,11 +70,12 @@ DIAG_LINES = [
      for m in range(59, 43, -1)]
 
 
-def update_walk(fail):
+def update_walk(fail, warnings=False):
     """Estado sintético da atualização; o "reinício" derruba as leituras por 4 s."""
     for n, text in enumerate(UPDATE_STEPS, 1):
         with LOCK:
-            UPDATE["estado"] = {"fase": "rodando", "passo": n, "total": len(UPDATE_STEPS), "texto": text, "ts": time.strftime("%Y-%m-%dT%H:%M:%S-03:00")}
+            UPDATE["estado"] = {"fase": "rodando", "passo": n, "total": len(UPDATE_STEPS), "texto": text, "pid": 0,
+                                "ts": time.strftime("%Y-%m-%dT%H:%M:%S-03:00")}
         time.sleep(1.2)
     with LOCK:
         R4["offline_until"] = time.time() + 4
@@ -81,11 +83,13 @@ def update_walk(fail):
     with LOCK:
         now = time.strftime("%Y-%m-%dT%H:%M:%S-03:00")
         if fail:
-            UPDATE["estado"] = {"fase": "pronto", "ok": False, "erro": "npm ci falhou (sintético)", "voltou": True, "ts": now}
+            UPDATE["estado"] = {"fase": "pronto", "ok": False, "erro": "npm ci falhou (sintético)", "voltou": True, "pid": 0, "ts": now}
         else:
             UPDATE["backend"] = UPDATE["repo"] = "2026.09.24-def5678"
             R4["behind"] = 0
-            UPDATE["estado"] = {"fase": "pronto", "ok": True, "texto": "Atualizado", "ts": now}
+            UPDATE["estado"] = {"fase": "pronto", "ok": True, "texto": "Atualizado", "pid": 0, "ts": now,
+                                "avisos": ["versão mais nova ainda sem binário do Rust para este sistema (compilando, ou o "
+                                           "build falhou); atualizado até 63c42f8f"] if warnings else []}
 PALETTE_DARK = {"background": "#15121b", "surface": "#15121b", "surfaceContainerLow": "#1d1a24", "surfaceContainer": "#221e28",
                 "surfaceContainerHigh": "#2c2833", "onSurface": "#e8e0ec", "onSurfaceVariant": "#cbc3d1", "outline": "#958e9b",
                 "outlineVariant": "#4a4550", "primary": "#d4bbff", "onPrimary": "#3b255f"}
@@ -1100,7 +1104,7 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 UPDATE["estado"] = {"fase": "rodando", "passo": 0, "total": len(UPDATE_STEPS), "texto": "Preparando",
                                     "ts": time.strftime("%Y-%m-%dT%H:%M:%S-03:00")}
-            threading.Thread(target=update_walk, args=(mode == "fail",), daemon=True).start()
+            threading.Thread(target=update_walk, args=(mode == "fail", mode == "avisos"), daemon=True).start()
             if mode == "drop":
                 # Pedido aceito, resposta perdida: o app não sabe se começou.
                 self.close_connection = True

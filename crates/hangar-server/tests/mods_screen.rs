@@ -121,6 +121,15 @@ fn dialog_beside_and_in_a_box() {
 }
 
 #[test]
+fn session_name_in_the_rule_is_not_a_dialog() {
+    // `claude --name` (ou `/rename`) escreve o nome na régua de cima da caixa de digitar.
+    let band = tela("tmux-160-sessao-com-nome-150");
+    assert_eq!((band.dialog, band.prompt, band.focus, band.band_state), (false, Some(40), Some("prompt"), "full"));
+    let pane = tela("tmux-161-sessao-com-nome-painel-150");
+    assert_eq!((pane.dialog, pane.placement, pane.active, pane.band_state), (false, Some("dock"), Some(0), "full"));
+}
+
+#[test]
 fn the_survey_hides_the_band() {
     let t = tela("psmux-710-pesquisa-150");
     assert_eq!((t.survey, t.dialog, t.band_state), (true, false, "absent"));

@@ -1032,8 +1032,13 @@ def sugerir_claude(contas_lidas: list[CotaConta]) -> SugestaoConta | None:
                          ativa=c.ativa, folga=folga)
 
 
+# Uso da janela mais cheia a partir do qual uma conta que ninguém escolheu já não recebe sessão
+# nova: a 95% ela acaba no meio da primeira tarefa.
+QUASE_SEM_COTA_PCT = 95.0
+
+
 def conta_com_cota(config_dir: str | None, contas_lidas: list[CotaConta]) -> tuple[str | None, str | None]:
-    """Conta que ninguém escolheu (herdada ou padrão) e já esgotada: a sessão nova nasce na de mais
+    """Conta que ninguém escolheu (herdada ou padrão) e acabando: a sessão nova nasce na de mais
     folga. Devolve (config_dir, aviso); sem leitura confiável, mantém a herdada e não avisa nada."""
     def mesma(c: CotaConta) -> bool:
         if config_dir is None:
@@ -1042,12 +1047,12 @@ def conta_com_cota(config_dir: str | None, contas_lidas: list[CotaConta]) -> tup
 
     atual = next((c for c in contas_lidas if c.provedor == "claude" and mesma(c)), None)
     if atual is None or atual.estado != "lida" or not atual.janelas \
-            or max(j.pct for j in atual.janelas) < 100:
+            or (uso := max(j.pct for j in atual.janelas)) < QUASE_SEM_COTA_PCT:
         return config_dir, None
     s = sugerir_claude(contas_lidas)
-    if s is None or s.folga <= 0 or s.id == atual.id:
+    if s is None or s.id == atual.id or s.folga <= 100 - uso:
         return config_dir, None
-    return s.path, f"conta {atual.label} sem cota; a sessão nasceu em {s.label}"
+    return s.path, f"conta {atual.label} com {uso:.0f}% de uso; a sessão nasceu em {s.label}"
 
 
 @cotas_router.get("/sugestao", dependencies=[Depends(require_auth)],

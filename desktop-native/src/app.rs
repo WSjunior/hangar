@@ -2627,7 +2627,7 @@ impl Hangar {
     // Preencher o campo com um comando; texto que não é comando pede confirmação antes de ser trocado.
     fn fill_command(&mut self, name: &str, protect: bool, window: &mut Window, cx: &mut Context<Self>) {
         let current = self.composer.read(cx).value().to_string();
-        if protect && !current.trim().is_empty() && composer::slash_query(&current).is_none() {
+        if protect && !current.trim().is_empty() && !composer::only_command(&current) {
             self.confirm = Some(Confirm::Replace(name.to_owned()));
             cx.notify();
             return;
@@ -2645,6 +2645,11 @@ impl Hangar {
     fn pick_command(&mut self, command: CommandInfo, from_panel: bool, window: &mut Window, cx: &mut Context<Self>) {
         let provider = self.provider().0.to_owned();
         self.command_panel = false;
+        // Da lista em linha, só o `/nome` que é a mensagem toda roteia; no meio do texto a escolha só completa o nome.
+        if !from_panel {
+            let whole = self.composer_cursor(cx).and_then(|(text, cursor)| composer::slash_token(&text, cursor).map(|t| t.whole));
+            if whole == Some(false) { self.complete_slash(&command.name, window, cx); return; }
+        }
         if composer::needs_other_surface(&provider, &command) {
             if let Some(key) = self.selected_key() {
                 self.action_feedback.insert(key, (tr("command_other_surface").replace("{cmd}", &format!("/{}", command.name)), true));
@@ -2664,10 +2669,35 @@ impl Hangar {
     }
 
     fn visible_suggestions(&self, cx: &App) -> Vec<CommandInfo> {
-        let text = self.composer.read(cx).value().to_string();
+        let Some((text, cursor)) = self.composer_cursor(cx) else { return Vec::new(); };
         if self.suggest_dismissed.as_deref() == Some(text.as_str()) { return Vec::new(); }
-        let Some(query) = composer::slash_query(&text) else { return Vec::new(); };
-        composer::suggestions(self.command_list(), query).into_iter().cloned().collect()
+        let Some(token) = composer::slash_token(&text, cursor) else { return Vec::new(); };
+        composer::suggestions(self.command_list(), token.query).into_iter().cloned().collect()
+    }
+
+    /// Texto do campo e posição do cursor; com trecho selecionado não há cursor.
+    fn composer_cursor(&self, cx: &App) -> Option<(String, usize)> {
+        let input = self.composer.read(cx);
+        let selected = input.selected_range();
+        selected.is_empty().then(|| (input.value().to_string(), selected.end))
+    }
+
+    /// Troca o `/nome` sob o cursor pelo comando escolhido: o resto da mensagem fica, e nada é enviado.
+    fn complete_slash(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((text, cursor)) = self.composer_cursor(cx) else { return; };
+        let Some(token) = composer::slash_token(&text, cursor) else { return; };
+        let (range, insert) = composer::slash_replacement(&text, &token, name);
+        self.replace_composer(range, insert, window, cx);
+        cx.notify();
+    }
+
+    /// Troca um trecho do campo e devolve o foco a ele.
+    pub(super) fn replace_composer(&mut self, range: std::ops::Range<usize>, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer.update(cx, |input, cx| {
+            input.set_selected_range(range, cx);
+            input.replace(text, window, cx);
+            input.focus(window, cx);
+        });
     }
 
     fn tool_answered(&self, id: &str) -> bool {
@@ -3617,9 +3647,8 @@ impl Hangar {
         let state = &self.chat.state;
         if self.chat.ask.is_some() || state.state != "awaiting_input" { return None; }
         let (question, options) = (state.question.clone()?, state.options.clone().filter(|o| !o.is_empty())?);
-        // Menu do AskUserQuestion no pane: quem responde é o card nativo, que chega pelo `ask_question` (antes dele e
-        // depois de enviar, este seletor piscava por cima).
-        if interaction::ask_picker(&options) { return None; }
+        // Menu do AskUserQuestion no pane: quem responde é o card nativo (depois de enviar, este seletor piscava por cima).
+        if self.chat.ask_pane() { return None; }
         let snapshot = select_snapshot(state);
         let plan = plan_pending(state).filter(|p| !p.plan.trim().is_empty());
         let multi = options.iter().any(|o| interaction::checkbox(o).is_some());
@@ -4220,7 +4249,7 @@ impl Hangar {
         let suggestions = self.visible_suggestions(cx);
         if let Some(command) = suggestions.get(self.suggest_pick.min(suggestions.len().saturating_sub(1))) {
             let name = command.name.clone();
-            self.fill_command(&name, false, window, cx);
+            self.complete_slash(&name, window, cx);
         } else if self.composer.read(cx).value().is_empty() && !self.terminal_suggestion.is_empty() {
             let text = self.terminal_suggestion.clone();
             self.composer.update(cx, |input, cx| { input.insert(text, window, cx); });
@@ -5964,8 +5993,8 @@ impl Hangar {
         // Pergunta do transcript já respondida espera só o `tool_result`: não é pedido sem resposta.
         let answered = interaction::ask_from_events(&self.chat.events, self.provider().0)
             .and_then(|ask| ask.tool_use_id).is_some_and(|id| self.tool_answered(&id));
-        // Menu do AskUserQuestion sem o card ainda (ou já respondido): o card nativo é quem responde, sem aviso de terminal.
-        let ask_pane = self.chat.state.options.as_deref().is_some_and(interaction::ask_picker);
+        // Menu de uma pergunta nativa aberta ou recém-respondida: o card é quem responde, sem aviso de terminal.
+        let ask_pane = self.chat.ask_pane();
         let pending = card.is_none() && !answered && !ask_pane && !prethread_open && (self.chat.state.state == "awaiting_input" || self.chat.state.login);
         // Faixas e avisos entre a conversa e o compositor ficam na mesma coluna das mensagens.
         content = content

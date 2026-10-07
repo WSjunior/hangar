@@ -545,7 +545,8 @@ def session_created(name: str) -> float:
     # ser entregue — sessao morreu devendo, a divida morre junto (regra do dono). O ts do transcript
     # sozinho nao cobre o resume (`pi -c`): transcript velho, tmux novo. 0.0 = nao sei (sessao
     # sumida/erro) -> sem poda extra, comportamento de hoje.
-    cp = _run(["tmux", "display-message", "-p", "-t", f"={name}", "#{session_created}"])
+    # `=NAME` sem `:` não resolve no display-message: sai vazio com código 0.
+    cp = _run(["tmux", "display-message", "-p", "-t", f"={name}:", "#{session_created}"])
     if cp.returncode != 0:
         return 0.0
     try:

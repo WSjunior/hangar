@@ -6,8 +6,8 @@ use std::sync::{Arc,Mutex,atomic::AtomicU64};
 use std::time::Duration;
 use tokio::sync::{broadcast,Notify};
 
-struct Io { calls:Mutex<Vec<CommandRequest>>, text:Mutex<String>, gate:Notify, blocked:std::sync::atomic::AtomicBool, fail_write:std::sync::atomic::AtomicBool, fail_enter:std::sync::atomic::AtomicBool, rotate_enter:std::sync::atomic::AtomicBool, conversation:Arc<Mutex<String>>, socket_calls:Mutex<Vec<Vec<u8>>>, ghost:Mutex<String>, hold_capture:std::sync::atomic::AtomicBool, mods_screen:Mutex<Option<String>>, ring_keys:std::sync::atomic::AtomicUsize, ring_returns:std::sync::atomic::AtomicBool }
-impl Io { fn new()->Self { Self { calls:Mutex::new(vec![]),text:Mutex::new(String::new()),gate:Notify::new(),blocked:std::sync::atomic::AtomicBool::new(false),fail_write:std::sync::atomic::AtomicBool::new(false),fail_enter:std::sync::atomic::AtomicBool::new(false),rotate_enter:std::sync::atomic::AtomicBool::new(false),conversation:Arc::new(Mutex::new("sid".into())),socket_calls:Mutex::new(vec![]),ghost:Mutex::new(String::new()),hold_capture:std::sync::atomic::AtomicBool::new(false),mods_screen:Mutex::new(None),ring_keys:Default::default(),ring_returns:Default::default() } } }
+struct Io { calls:Mutex<Vec<CommandRequest>>, text:Mutex<String>, gate:Notify, blocked:std::sync::atomic::AtomicBool, fail_write:std::sync::atomic::AtomicBool, fail_enter:std::sync::atomic::AtomicBool, rotate_enter:std::sync::atomic::AtomicBool, conversation:Arc<Mutex<String>>, socket_calls:Mutex<Vec<Vec<u8>>>, ghost:Mutex<String>, hold_capture:std::sync::atomic::AtomicBool, mods_screen:Mutex<Option<String>>, ring_keys:std::sync::atomic::AtomicUsize, ring_returns:std::sync::atomic::AtomicBool, swallow:std::sync::atomic::AtomicBool, footer:std::sync::atomic::AtomicBool }
+impl Io { fn new()->Self { Self { calls:Mutex::new(vec![]),text:Mutex::new(String::new()),gate:Notify::new(),blocked:std::sync::atomic::AtomicBool::new(false),fail_write:std::sync::atomic::AtomicBool::new(false),fail_enter:std::sync::atomic::AtomicBool::new(false),rotate_enter:std::sync::atomic::AtomicBool::new(false),conversation:Arc::new(Mutex::new("sid".into())),socket_calls:Mutex::new(vec![]),ghost:Mutex::new(String::new()),hold_capture:std::sync::atomic::AtomicBool::new(false),mods_screen:Mutex::new(None),ring_keys:Default::default(),ring_returns:Default::default(),swallow:Default::default(),footer:Default::default() } } }
 impl TerminalIo for Io {
     fn command<'a>(&'a self,r:CommandRequest)->IoFuture<'a,CommandOutput> { Box::pin(async move {
         let cmd=r.args[0].clone();
@@ -20,7 +20,9 @@ impl TerminalIo for Io {
             "capture-pane" if !r.args.contains(&"-S".into()) && self.mods_screen.lock().unwrap().is_some()=>self.mods_screen.lock().unwrap().clone().unwrap().into_bytes(),
             "capture-pane"=>{let text=self.text.lock().unwrap().clone();let ghost=self.ghost.lock().unwrap().clone();
                 // O fantasma é rascunho que o Ctrl+S não guarda: o composer fica ocupado.
-                format!("────────────────────────────────\n❯ {}\n────────────────────────────────\n",if text.is_empty(){ghost}else{text}).into_bytes()},
+                // `footer`: o foco no painel de agentes, abaixo do composer, que o Esc não devolve.
+                let footer=if self.footer.load(std::sync::atomic::Ordering::Acquire) {"  ↑/↓ to select\n\n❯ ● main\n  ◯ general-purpose  sleep\n"} else {""};
+                format!("────────────────────────────────\n❯ {}\n────────────────────────────────\n{footer}",if text.is_empty(){ghost}else{text}).into_bytes()},
             // O `ctrl+x tab` da devolução do foco: com `ring_returns`, o foco volta ao prompt.
             "send-keys" if r.args.iter().any(|a|a=="C-x")=>{
                 self.ring_keys.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
@@ -31,6 +33,8 @@ impl TerminalIo for Io {
                 if self.blocked.load(std::sync::atomic::Ordering::Acquire) { self.gate.notified().await; }
                 let text=r.args.last().unwrap();
                 if text=="\r" || text=="C-u" { self.text.lock().unwrap().clear(); if text=="\r" && self.rotate_enter.load(std::sync::atomic::Ordering::Acquire){*self.conversation.lock().unwrap()="new-sid".into();} if text=="\r" && self.fail_enter.load(std::sync::atomic::Ordering::Acquire){return Err(IoFailure {code:"enter_uncertain",may_have_written:true});} }
+                // `swallow`: o texto vai para onde está o foco (o painel de agentes), não para o composer.
+                else if r.args.contains(&"-l".into()) && self.swallow.load(std::sync::atomic::Ordering::Acquire) {}
                 else if r.args.contains(&"-l".into()) {
                     *self.text.lock().unwrap()=text.clone();
                     if self.fail_write.load(std::sync::atomic::Ordering::Acquire){return Err(IoFailure {code:"partial_write",may_have_written:true});}
@@ -90,9 +94,15 @@ impl Fixture {
         self.start_returning(events,stall_notice,TerminalOptions::default().focus_return)
     }
     fn start_returning(&self,events:broadcast::Sender<hangar_server::runtime::protocol::RuntimeEvent>,stall_notice:Duration,focus_return:Duration)->hangar_server::runtime::terminal::TerminalHandle {
+        self.start_options(events,stall_notice,focus_return,TerminalOptions::default().clear_wait)
+    }
+    fn start_clear(&self,clear_wait:Duration)->hangar_server::runtime::terminal::TerminalHandle {
+        self.start_options(broadcast::channel(128).0,Duration::from_secs(30),TerminalOptions::default().focus_return,clear_wait)
+    }
+    fn start_options(&self,events:broadcast::Sender<hangar_server::runtime::protocol::RuntimeEvent>,stall_notice:Duration,focus_return:Duration,clear_wait:Duration)->hangar_server::runtime::terminal::TerminalHandle {
         let lease=queue::acquire_lease(&self.target.lease_path).unwrap();
         let store=Store::open(&self.target.state_path,&self.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
-        let options=TerminalOptions {io:self.io.clone(),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_millis(15),stall_notice,focus_return,..TerminalOptions::default()};
+        let options=TerminalOptions {io:self.io.clone(),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_millis(15),stall_notice,focus_return,clear_wait,..TerminalOptions::default()};
         TerminalActor::spawn(self.target.clone(),QueueActor::start(store,lease),self.policy.clone(),options,events,Arc::new(AtomicU64::new(0)))
     }
     fn command(&self,id:&str,text:&str)->RuntimeCommand { RuntimeCommand {operation_id:id.into(),kind:OperationKind::Input,payload:json!({"text":text,"pre_transcript":false})} }
@@ -516,6 +526,106 @@ async fn terminal_runtime_restart_after_clear_dispatch_conserves_barrier() {
 }
 
 #[tokio::test]
+async fn terminal_runtime_clear_unproved_before_enter_raises_no_barrier() {
+    // #84: o texto não chegou ao composer (foco no painel de agentes), o Enter nunca saiu.
+    let f=Fixture::new().await; f.io.swallow.store(true,std::sync::atomic::Ordering::Release); let h=f.start_clear(Duration::from_secs(30));
+    let result=h.command(f.command("clear-lost","/clear")).await.unwrap();
+    assert_eq!(result.disposition,hangar_server::runtime::protocol::Disposition::Unknown,"{}",result.payload); assert_eq!(result.payload["stage"],"input_proof");
+    assert!(f.state()["runtime_state"]["clear_barrier"].is_null());
+    assert!(!f.io.calls.lock().unwrap().iter().any(|r|r.args.last().unwrap()=="\r"),"o Enter do /clear não pode ter saído");
+    f.io.swallow.store(false,std::sync::atomic::Ordering::Release);
+    assert_eq!(h.command(f.command("after-lost-clear","Olá")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+    h.stop().await.unwrap();
+    // A reabertura usa o mesmo critério.
+    let h=f.start_clear(Duration::from_secs(30)); assert!(f.state()["runtime_state"]["clear_barrier"].is_null());
+    assert_eq!(h.command(f.command("after-restart","Olá de novo")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_runtime_clear_without_new_conversation_releases_barrier_without_resending() {
+    // O Enter saiu e o composer esvaziou, mas a conversa nunca mudou: o /clear caiu em outro lugar.
+    let f=Fixture::new().await; let h=f.start_clear(Duration::from_millis(200));
+    // Transcript de antes do despacho (outra sessão, ou conversa antiga nascida de /clear): não prova nada.
+    std::fs::write(f.target.transcript.with_file_name("older.jsonl"),"{\"message\":{\"content\":\"<command-name>/clear</command-name>\"}}\n").unwrap();
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert_eq!(h.command(f.command("clear-stuck","/clear")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+    assert!(f.state()["runtime_state"]["clear_barrier"].is_object());
+    assert!(h.command(f.command("during-barrier","Olá")).await.is_err());
+    h.queue("producer".into(),Action::Append {text:"Na fila".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("queued-row".into())}).await.unwrap();
+    f.wait_for("trava sai",||f.state()["runtime_state"]["clear_barrier"].is_null()).await;
+    let op=&f.state()["operations"]["clear-stuck"]; assert_eq!(op["status"],"rejected"); assert_eq!(op["result"]["payload"]["code"],"clear_not_applied");
+    assert_ne!(f.state()["runtime_state"]["preserve_binding"],true);
+    assert_eq!(h.snapshot().await.unwrap()["view"]["input_stalled"],"clear_not_applied");
+    f.wait_for("fila segue",||f.state()["rows"].as_array().unwrap().iter().any(|r|r["id"]=="queued-row" && r["delivered"]==true)).await;
+    assert_eq!(h.command(f.command("after-release","Olá")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+    let typed=|t:&str|f.io.calls.lock().unwrap().iter().filter(|r|r.args.contains(&"-l".into()) && r.args.last().unwrap()==t).count();
+    assert_eq!(typed("/clear"),1,"o /clear nunca é reenviado sozinho");
+    h.stop().await.unwrap();
+    // O /clear recusado pela saída não ergue a trava na reabertura.
+    let h=f.start_clear(Duration::from_secs(30)); assert!(f.state()["runtime_state"]["clear_barrier"].is_null());
+    assert_eq!(h.command(f.command("after-reopen","Olá")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_runtime_clear_with_new_transcript_on_disk_keeps_barrier() {
+    // O transcript novo do /clear existe: falta só o Python trocar o vínculo, a trava fica.
+    let f=Fixture::new().await; let h=f.start_clear(Duration::from_millis(100));
+    assert_eq!(h.command(f.command("clear-ok","/clear")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+    std::fs::write(f.target.transcript.with_file_name("new-sid.jsonl"),
+        "{\"type\":\"user\",\"message\":{\"content\":\"<command-name>/clear</command-name>\"}}\n").unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(f.state()["runtime_state"]["clear_barrier"].is_object()); assert_ne!(f.state()["operations"]["clear-ok"]["status"],"rejected");
+    assert!(h.command(f.command("old-life","Olá")).await.is_err());
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_runtime_clear_while_busy_waits_for_the_turn_before_releasing() {
+    // Com o Claude trabalhando o /clear espera na fila do próprio Claude Code e roda no fim do turno.
+    let f=Fixture::new().await; let h=f.start_clear(Duration::from_millis(100));
+    assert_eq!(h.command(f.command("clear-busy","/clear")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+    f.idle.store(false,std::sync::atomic::Ordering::Release);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(f.state()["runtime_state"]["clear_barrier"].is_object());
+    f.idle.store(true,std::sync::atomic::Ordering::Release);
+    f.wait_for("trava sai com a sessão parada",||f.state()["runtime_state"]["clear_barrier"].is_null()).await;
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_runtime_footer_focus_escape_has_a_ceiling_per_row() {
+    // O Esc devolve o foco do painel de agentes; se ele não volta, a linha tenta duas vezes e espera.
+    let f=Fixture::new().await; f.io.footer.store(true,std::sync::atomic::Ordering::Release); let h=f.start();
+    let result=h.command(f.command("stuck-focus","Olá")).await.unwrap();
+    assert_eq!(result.disposition,hangar_server::runtime::protocol::Disposition::Deferred); assert_eq!(result.payload["code"],"footer_focus");
+    let escapes=||f.io.calls.lock().unwrap().iter().filter(|r|r.args[0]=="send-keys" && r.args.last().unwrap()=="Escape").count();
+    f.wait_for("segunda tentativa",||escapes()==2).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(escapes(),2,"o Esc do rodapé não vira laço de teclas");
+    assert!(!f.io.calls.lock().unwrap().iter().any(|r|r.args.last().unwrap()=="Olá"));
+    f.io.footer.store(false,std::sync::atomic::Ordering::Release);
+    f.wait_for("entrega depois do foco voltar",||f.io.calls.lock().unwrap().iter().any(|r|r.args.last().unwrap()=="Olá")).await;
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_runtime_restart_with_stale_clear_barrier_still_expires() {
+    // A trava gravada de uma vida anterior, sem conversa nova, também tem saída.
+    let f=Fixture::new().await;
+    let mut store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
+    let clock=ClockSample {monotonic_s:0.0,epoch_s:chrono::Utc::now().timestamp() as f64};
+    store.exec(1,"prepare",clock,Action::Prepare {id:"clear-crash".into(),payload:serde_json::to_value(f.command("clear-crash","/clear")).unwrap(),entry_id:None}).unwrap();
+    store.exec(1,"dispatch",clock,Action::BeginDispatch {id:"clear-crash".into(),wire_id:"terminal:1:clear-crash".into(),staged:false}).unwrap(); drop(store);
+    let h=f.start_clear(Duration::from_millis(100));
+    assert!(h.command(f.command("after-crash","Olá")).await.is_err());
+    f.wait_for("trava sai",||f.state()["runtime_state"]["clear_barrier"].is_null()).await;
+    assert_eq!(h.command(f.command("after-expire","Olá")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+    assert!(!f.io.calls.lock().unwrap().iter().any(|r|r.args.last().unwrap()=="/clear")); h.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn terminal_runtime_claim_crash_before_intent_restores_safe_pending_row() {
     let f=Fixture::new().await; f.ready.store(false,std::sync::atomic::Ordering::Release);
     let mut store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
@@ -917,13 +1027,14 @@ async fn focus_away_defers_until_it_returns(screen:String) {
     let reply=h.command(f.command("foco","Com o foco no mod")).await.unwrap();
     assert_eq!(reply.disposition,hangar_server::runtime::protocol::Disposition::Deferred);
     assert_eq!(reply.payload["code"],"mods_focus");
-    tokio::time::sleep(Duration::from_millis(150)).await;     // dez ciclos do relógio de 15 ms
+    // Espera as releituras em vez de um tempo fixo: no Windows o relógio anda de 15 em 15 ms e 150 ms
+    // às vezes davam um tique só.
+    let reads=||f.io.calls.lock().unwrap().iter().filter(|r|r.args[0]=="capture-pane" && !r.args.contains(&"-S".into())).count();
+    f.wait_for("a fila tenta de novo a cada tique",||reads()>=2).await;
     assert!(f.io.calls.lock().unwrap().iter().all(|r|r.args[0]!="send-keys"),"nada escrito com o foco fora do prompt");
     // A linha vira `delivered` no `Claim` de cada tique e volta no adiamento: o que vale é não desistir e
     // a tela ser relida a cada tentativa.
     assert_ne!(f.state()["rows"][0]["desistiu"],true,"a linha continua na fila");
-    let reads=f.io.calls.lock().unwrap().iter().filter(|r|r.args[0]=="capture-pane" && !r.args.contains(&"-S".into())).count();
-    assert!(reads>=2,"a fila tenta de novo a cada tique: {reads} leituras");
     *f.io.mods_screen.lock().unwrap()=None;
     f.wait_for("entrega com o foco de volta",||!typed_at(&f,"Com o foco no mod").is_empty()).await;
     h.stop().await.unwrap();

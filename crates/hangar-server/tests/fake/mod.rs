@@ -130,7 +130,7 @@ pub async fn spawn_fake() -> (Arc<Fake>, SocketAddr) {
         diag: Mutex::default(),
         release: Notify::new(),
         list_facts: Mutex::new((json!({"states": {}, "overrides": [], "frozen": [], "orq": [], "shared": [],
-            "owners": {}, "hidden": [], "problems": {}, "stall_seconds": 300.0, "nav": {}, "shortcuts": null, "shadow": null}),
+            "owners": {}, "hidden": [], "problems": {}, "held": {}, "stall_seconds": 300.0, "nav": {}, "shortcuts": null, "shadow": null}),
             Duration::ZERO)),
         list_facts_calls: AtomicUsize::new(0),
         list_facts_last: Mutex::new(Value::Null),
@@ -427,7 +427,8 @@ pub async fn stream_ends(es: &mut Events) -> bool {
     loop {
         match tokio::time::timeout(Duration::from_secs(5), es.next()).await {
             Ok(None) => return true,
-            Ok(Some(Ok(ev))) if ev.event == "ping" => continue,
+            // O `Monitor` de Claude com terminal publica o estado dele a qualquer momento.
+            Ok(Some(Ok(ev))) if ev.event == "ping" || ev.event == "state" => continue,
             _ => return false,
         }
     }

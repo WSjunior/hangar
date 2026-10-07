@@ -28,6 +28,16 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   dist da main) e o auto-update fica parado. Passo de `docs/atualizacoes/` aplicado na branch de
   teste continua no registro ao voltar pra main; e, esvaziado o campo, o auto-update não tira o
   checkout da branch de teste: a volta é pelo botão.
+- **O Atualizar só avança até o commit cujo binário do Rust foi publicado para este sistema.**
+  O binário é o de `platforms.<sistema>` no `server-latest.json` da release da branch (sem a
+  chave, o `commit` do topo); o contrato é o `protocol` dele ou o `RUST_SERVER_PROTOCOL` do commit. O checkout vai ao commit mais novo de
+  `origin/<branch>` (primeiro pai) com o mesmo número, nunca recua, e o download usa o manifesto
+  lido na escolha. Atrás do topo, a tela avisa que a versão mais nova ainda não tem binário e é
+  compilada aqui (também no Reiniciar); checkout já à frente com binário de outro contrato também
+  avisa. Sem Rust (`CP_RUST_SERVER=0`), sem release própria da branch (404) ou sem build deste
+  sistema no manifesto: topo, como antes, calado. Sem como conferir (rede, git, commit ilegível):
+  topo com aviso na tela, e o auto-update espera; ele só avança com o topo inteiro publicado.
+  Evidência em [Atualizar para no binário publicado](#atualizar-para-no-binário-publicado-06102026).
 - **O app nativo segue o canal do servidor desta máquina.** `pre_voo.alvo` fora da main → release
   `native-<branch>`, que o `native.yml` publica a cada push na branch (mesma limpeza de nome no
   workflow e no `update.rs`); a `native-latest` continua só da main. Branch sem release, ou sem o
@@ -423,3 +433,24 @@ Agora o registrador remove o bloco marcado, confere pelo `tomllib` se o app já 
 com a mesma URL e o mesmo token (nada a fazer) e, senão, tira toda seção `[mcp_servers.hangar…]`
 antes de anexar o bloco marcado — idempotente contra a reescrita do app e autocorretivo num
 arquivo já duplicado. Teste em `scripts/test_registrar_mcp.py`.
+
+## Atualizar para no binário publicado (06/10/2026)
+
+Na máquina do Waldir (Linux, canal `hangar-server-parte1`) o Atualizar foi ao topo `a810120b0`,
+no contrato 36, com o binário mais novo publicado ainda no 35: o Supervisor recusou o
+hangar-server e o Python atendeu sozinho ("o binário fala outro contrato interno"). O
+`server.yml` publica minutos depois do push, e só quando `crates/` ou os caminhos dele mudam.
+
+O manifesto já traz o `commit` do build, então a escolha não precisa de nada novo no publish:
+o protocolo daquele commit é o do binário. A busca percorre só os commits de primeiro pai que
+mexeram na linha do `RUST_SERVER_PROTOCOL` (`git log -m --first-parent -G`; `--diff-merges` só
+existe do git 2.31 em diante), e o pai de cada um é o último com o número anterior. O aviso não
+promete que o build vem: o mesmo estado aparece com o CI quebrado. Prova em clone descartável, 06/10: checkout em `d99d02e9` (34), release
+`server-hangar-server-parte1` com o binário de `ce73e54f3` (34), topo `73727328e` (36): parou
+em `5b103eede`, o último commit no 34, e baixou os dois binários com o sha256 conferido.
+
+Build de UM sistema que falha: no manifesto antigo ele sai da lista e o asset velho fica sem
+commit conhecido, então esse sistema vai ao topo, como antes. O manifesto por sistema
+(`platforms.<sistema>` com `commit` e `protocol`) resolve: a escolha usa a entrada do próprio
+sistema, e o `commit` do topo só vale quando a chave `platforms` não existe.
+

@@ -31,7 +31,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app import atomico
+from app import atomico, state_facts
 from app.auth import require_loopback
 from app.live_rate import live_rate
 
@@ -42,6 +42,11 @@ plugin_router = APIRouter(prefix="/api/plugin")
 # Quanto o backend segura o long-poll antes de responder 204. Curto o bastante
 # para a morte da sessão aparecer, longo o bastante para a espera não virar poll.
 ESPERA_S = 25.0
+# Entre dois long-polls o hook volta em milissegundos (2 s se o backend falhar). Sem long-poll aberto
+# por mais que isto, o hook morreu: o Esc no terminal interrompe a ferramenta sem o `/ask-fim`.
+SEM_POLL_S = 5.0
+# O hook que ainda faz long-poll depois disso sobreviveu ao Esc do app (o diálogo ficou).
+HOOK_VIVO_S = 2.0
 
 _lock = threading.Lock()
 _waiters: dict[str, asyncio.Queue] = {}
@@ -165,7 +170,8 @@ _TTL_CAPACIDADE_S = 600.0
 _capacidade: tuple[float, bool] | None = None
 # Mods ligados por padrão no CLI daqui em diante; a variável do acesso antecipado é ignorada.
 MODS_BY_DEFAULT = (2, 1, 287)
-PLUGIN_SRC = Path(__file__).resolve().parents[2] / "plugins" / "hangar"
+PLUGINS_ROOT = Path(__file__).resolve().parents[2] / "plugins"
+PLUGIN_SRC = PLUGINS_ROOT / "hangar"
 _versao: tuple[float, tuple[int, ...] | None] | None = None
 
 
@@ -236,14 +242,21 @@ def ligado() -> bool:
 
 
 def raizes_dos_plugins() -> list[str]:
-    """`--plugin-dir` sempre, mesmo com o plugin na pasta de skills da conta.
+    """Um `--plugin-dir` por mod de `plugins/`, com `plugins/hangar` sempre primeiro.
 
     Só o plugin de `--plugin-dir` fica POR FORA dos instalados pelo marketplace na cadeia de hooks,
-    e a faixa dos mods (`ui.ts`) só enxerga o que os plugins abaixo dele desenham. Com o mesmo nome
-    nos dois lugares, o CLI carrega só o de `--plugin-dir`."""
+    e a faixa dos mods (`ui.ts`) só enxerga o que os plugins depois dele desenham: por isso o do
+    Hangar abre a lista. Com o mesmo nome nos dois lugares, o CLI carrega só o de `--plugin-dir`."""
     if not ligado():
         return []
-    return [str(PLUGIN_SRC)]
+    try:
+        outros = sorted(p for p in PLUGINS_ROOT.iterdir()
+                        if p != PLUGIN_SRC and (p / ".claude-plugin" / "plugin.json").is_file())
+    except OSError as e:
+        # Mod que não deu para listar fica de fora; a sessão nasce com o do Hangar.
+        _log.warning("plugin: não deu para listar %s: %r", PLUGINS_ROOT, e)
+        outros = []
+    return [str(PLUGIN_SRC), *map(str, outros)]
 
 
 def env_da_sessao(name: str) -> dict[str, str]:
@@ -307,7 +320,7 @@ def plugin_dir_file(home: Path | None = None) -> Path:
 
 
 def _publish_plugin_dir(home: Path | None = None) -> None:
-    """Caminho do plugin para o wrapper do shell, que não sabe onde o repositório mora.
+    """Caminhos dos plugins para o wrapper do shell, que não sabe onde o repositório mora.
 
     Sessão aberta no terminal precisa do mesmo `--plugin-dir` das que o backend abre: só pela pasta
     de skills o plugin fica por dentro do marketplace e não enxerga a faixa dos mods. Sem
@@ -319,8 +332,8 @@ def _publish_plugin_dir(home: Path | None = None) -> None:
         return
     alvo.parent.mkdir(parents=True, exist_ok=True)
     tmp = alvo.with_name(alvo.name + ".tmp")
-    # Uma linha, texto puro: quem lê é shell (bash, zsh, fish, PowerShell), sem parser de JSON.
-    tmp.write_text(raizes[0] + "\n", encoding="utf-8", newline="\n")
+    # Uma pasta por linha, texto puro: quem lê é shell (bash, zsh, fish, PowerShell), sem JSON.
+    tmp.write_text("".join(r + "\n" for r in raizes), encoding="utf-8", newline="\n")
     atomico.substituir(tmp, alvo)
 
 
@@ -405,6 +418,7 @@ def esquecer(name: str) -> None:
     _press_wakers.pop(name, None)
     for chave in [c for c in list(_recusas) if c[0] == name]:
         _recusas.pop(chave, None)
+    state_facts.notify(name)
 
 
 def _confere(name: str, token: str) -> None:
@@ -567,6 +581,8 @@ def _guardar_faixa(name: str, above: dict | None, columns: int | None, panes: li
         _band_seq += 1
         _bands[name] = (_band_seq, dados, json.dumps({"above": above, "panes": panes}, ensure_ascii=False))
     _acordar_todos(_band_wakers, name)
+    # Largura e âncora da prévia saem da faixa.
+    state_facts.notify(name)
 
 
 def band(name: str) -> tuple[int, dict]:
@@ -855,6 +871,31 @@ def _acordar(name: str) -> None:
         ev.set()
 
 
+def plugin_facts(name: str) -> dict:
+    """O que o plugin disse desta sessão, para o `Monitor` do Rust, sem as validades: elas vão como
+    idade em ms e o Rust as aplica com o relógio dele (`state_facts`)."""
+    agora = time.monotonic()
+
+    def idade(quando: float) -> int:
+        return max(0, round((agora - quando) * 1000))
+
+    with _lock:
+        hit = _estados.get(name)
+        batida = _batidas.get(name)
+        p = _perguntas.get(name)
+        out = {
+            "plugin_state": None if hit is None else {"state": hit[1], "reason": hit[2], "age_ms": idade(hit[0])},
+            "waiter_open": name in _waiters,
+            "heartbeat_age_ms": None if batida is None else idade(batida),
+            "question": None if p is None else {"id": p["id"], "questions": p["questions"], "tool": p.get("tool"),
+                                                "resumo": p.get("resumo"), "seen_age_ms": idade(p["visto"])},
+            "suggestion": _sugestoes.get(name, ""),
+        }
+    out["body_columns"] = transcript_columns(name)
+    out["band_anchor"] = band_anchor(name)
+    return out
+
+
 def estado_recente(name: str) -> tuple[str, str | None] | None:
     """O estado anunciado pelo plugin, se ainda válido. None = o pane que decida."""
     with _lock:
@@ -1119,6 +1160,7 @@ async def pull(body: PullBody, request: Request = None):
         _loop = asyncio.get_running_loop()
         _waiters[body.sessao] = fila
         _batidas[body.sessao] = time.monotonic()
+    state_facts.notify(body.sessao)
     # `faixa`: o backend tem a faixa dos mods desta sessão? Reiniciado, não tem, e o plugin reenvia.
     gone = False
     try:
@@ -1154,6 +1196,7 @@ async def pull(body: PullBody, request: Request = None):
             _batidas[body.sessao] = time.monotonic()
             if _waiters.get(body.sessao) is fila:
                 del _waiters[body.sessao]
+        state_facts.notify(body.sessao)
     if entrega is _STOP:
         return {"text": None, "faixa": body.sessao in _bands}
     return {**entrega, "faixa": body.sessao in _bands}
@@ -1177,6 +1220,7 @@ async def suggest(body: SuggestBody):
         # `mostrada=False` é proposta que a TUI não pôs na caixa (diálogo aberto, headless): mostrar
         # no app o que nem o terminal mostrou seria inventar estado.
         _sugestoes[body.sessao] = body.texto if body.mostrada else ""
+    state_facts.notify(body.sessao)
     return {"ok": True}
 
 
@@ -1296,13 +1340,29 @@ async def opened(body: OpenedBody):
 _perguntas: dict[str, dict] = {}
 
 
+def interrompeu(name: str, id: str | None) -> None:
+    """O Esc do app fecha o diálogo `id` (lido antes do Esc) no terminal, e o hook morre sem
+    `/ask-fim` deixando o long-poll aberto até a janela fechar. A pergunta interrompida deixa de
+    contar na hora e o long-poll é acordado para terminar; hook que ainda pergunta depois de
+    `HOOK_VIVO_S` sobreviveu ao Esc e a pergunta volta a contar."""
+    with _lock:
+        p = _perguntas.get(name)
+        if p is None or id is None or p["id"] != id:
+            return
+        p["interrompida"] = time.monotonic()
+        fila = p.get("fila")
+    if fila is not None:
+        fila.put_nowait({"answers": None})
+
+
 def pergunta_pendente(name: str) -> dict | None:
     """A pergunta que o plugin segura agora (`id`, `questions`), ou None.
 
     Só vale com o long-poll batendo: hook que morreu não pode segurar a resposta do app."""
     with _lock:
         p = _perguntas.get(name)
-        if p is None or time.monotonic() - p["visto"] > ESPERA_S + 10:
+        idade = time.monotonic() - p["visto"] if p is not None else 0
+        if p is None or p.get("interrompida") or idade > ESPERA_S + 10 or not p.get("fila") and idade > SEM_POLL_S:
             return None
         return {"id": p["id"], "questions": p["questions"], "tool": p.get("tool"),
                 "resumo": p.get("resumo")}
@@ -1381,6 +1441,7 @@ async def ask(body: AskBody):
             if p is not None and p["id"] == body.id:
                 del _perguntas[body.sessao]
         _acordar(body.sessao)
+        state_facts.notify(body.sessao)
         return {"soltar": True}
     fila: asyncio.Queue = asyncio.Queue()
     with _lock:
@@ -1390,10 +1451,14 @@ async def ask(body: AskBody):
             p = _perguntas[body.sessao] = {"id": body.id, "questions": body.questions or [],
                                            "tool": body.tool, "resumo": body.resumo}
         p["visto"] = time.monotonic()
+        if p.get("interrompida") and p["visto"] - p["interrompida"] > HOOK_VIVO_S:
+            p.pop("interrompida")
         guardada = p.pop("resposta", None)
         if guardada is None:
             p["fila"] = fila
     _acordar(body.sessao)
+    # Cada poll do hook renova o `visto`: pergunta nova sai na hora, a renovação no máximo a cada 25 s.
+    state_facts.notify(body.sessao, state_facts.REFRESH)
     if guardada is not None:
         return guardada
     espera = min(ESPERA_S, body.janela_ms / 1000) if body.janela_ms else ESPERA_S
@@ -1441,6 +1506,7 @@ async def ask_fim(body: AskFimBody):
     if aviso is not None and body.vencedor == "app":
         aviso.set()
     _acordar(body.sessao)
+    state_facts.notify(body.sessao)
     _log.info("plugin pergunta sessao=%s fechou por %s", body.sessao, body.vencedor)
     return {"ok": True}
 
@@ -1509,6 +1575,7 @@ async def state(body: StateBody, request: Request):
             # que o engine não dá.
             _sugestoes.pop(body.sessao, None)
     _acordar(body.sessao)
+    state_facts.notify(body.sessao, state_facts.FORCE)
     _log.debug("plugin estado sessao=%s estado=%s motivo=%s", body.sessao, body.estado, body.motivo)
     return {"ok": True}
 

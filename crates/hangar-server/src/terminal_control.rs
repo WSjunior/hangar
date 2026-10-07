@@ -247,6 +247,12 @@ impl TerminalPool {
         timeout(self.limits.startup + self.limits.command * 6, receive).await.map_err(|_| TerminalError("terminal capture timeout"))?
             .map_err(|_| TerminalError("terminal observer closed"))?
     }
+    /// Tentativas da falha guardada para esta captura, se `error` é ela: o número só muda quando o
+    /// pool tentou de novo de verdade (até lá ele devolve a mesma falha sem tentar). `None`: falha
+    /// que o pool não guarda (prazo, fila cheia), tentada de novo a cada pedido.
+    pub async fn failure_attempts(&self, request: &CaptureRequest, error: &TerminalError) -> Option<u32> {
+        self.entries.lock().await.failures.get(&Key::from(request)).filter(|f| f.error == *error).map(|f| f.attempts)
+    }
     pub async fn release(&self, consumer: &str) -> Result<()> {
         {
             let entries = self.entries.lock().await;

@@ -30,6 +30,12 @@ async fn run() {
     let stop = hangar_server::parent_gone(tokio::io::stdin());
     let state = hangar_server::routes::AppState::new(cfg);
     state.costs.schedule_warmup(std::time::Duration::from_secs(30));
+    // Só aqui, nunca no `serve_until`: os testes sobem servidores contra o tmux de verdade.
+    #[cfg(unix)]
+    tokio::spawn({
+        let term = state.term.clone();
+        async move { term.restore_after_crash().await }
+    });
     match hangar_server::serve_until_with_state(listener, state, stop).await {
         Ok(()) => {
             tracing::info!("stdin fechou: o backend saiu, hangar-server sai junto");

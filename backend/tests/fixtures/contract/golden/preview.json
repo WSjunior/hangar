@@ -1,0 +1,259 @@
+{
+ "panes": [
+  {
+   "name": "dock_sem_corte",
+   "pane": "\u276f resume o arquivo                      \u2502 Mod\n                                        \u2502 \u25cf Progresso 3/5\n\u25cf Resposta em andamento com texto       \u2502 item um\n  segunda linha da resposta             \u2502 item dois\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u276f \n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  \ud83e\udd16 modelo",
+   "columns": null,
+   "anchor": null,
+   "expected": "Resposta em andamento com texto       \u2502 item um\n  segunda linha da resposta             \u2502 item dois"
+  },
+  {
+   "name": "dock_cortado",
+   "pane": "\u276f resume o arquivo                      \u2502 Mod\n                                        \u2502 \u25cf Progresso 3/5\n\u25cf Resposta em andamento com texto       \u2502 item um\n  segunda linha da resposta             \u2502 item dois\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u276f \n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  \ud83e\udd16 modelo",
+   "columns": 40,
+   "anchor": null,
+   "expected": "Resposta em andamento com texto\n  segunda linha da resposta"
+  },
+  {
+   "name": "largos_cortados",
+   "pane": "\u276f traduz\n\u25cf \u65e5\u672c\u8a9e\u306e\u30c6\u30ad\u30b9\u30c8\u3067\u3059\ud83e\udd16 e mais texto depois\n  linha curta\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u276f \n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+   "columns": 12,
+   "anchor": null,
+   "expected": "\u65e5\u672c\u8a9e\u306e\u30c6\n  linha curt"
+  },
+  {
+   "name": "largos_borda_no_meio",
+   "pane": "\u276f traduz\n\u25cf \u65e5\u672c\u8a9e\u306e\u30c6\u30ad\u30b9\u30c8\u3067\u3059\ud83e\udd16 e mais texto depois\n  linha curta\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u276f \n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+   "columns": 7,
+   "anchor": null,
+   "expected": ""
+  },
+  {
+   "name": "faixa_sem_ancora",
+   "pane": "\u276f fa\u00e7a a tarefa\n\u25cf Texto da resposta em voo\n  continua\u00e7\u00e3o do texto\n\n\u25cf Progresso do mod: 3 de 5\n  \u2593\u2593\u2593\u2591\u2591\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u276f \n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+   "columns": null,
+   "anchor": null,
+   "expected": "Progresso do mod: 3 de 5\n  \u2593\u2593\u2593\u2591\u2591"
+  },
+  {
+   "name": "faixa_com_ancora",
+   "pane": "\u276f fa\u00e7a a tarefa\n\u25cf Texto da resposta em voo\n  continua\u00e7\u00e3o do texto\n\n\u25cf Progresso do mod: 3 de 5\n  \u2593\u2593\u2593\u2591\u2591\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u276f \n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+   "columns": null,
+   "anchor": "Progresso do mod: 3 de 5",
+   "expected": "Texto da resposta em voo\n  continua\u00e7\u00e3o do texto"
+  },
+  {
+   "name": "ancora_ausente",
+   "pane": "\u276f fa\u00e7a a tarefa\n\u25cf Texto da resposta em voo\n  continua\u00e7\u00e3o do texto\n\n\u25cf Progresso do mod: 3 de 5\n  \u2593\u2593\u2593\u2591\u2591\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u276f \n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+   "columns": null,
+   "anchor": "nada disso aparece",
+   "expected": "Progresso do mod: 3 de 5\n  \u2593\u2593\u2593\u2591\u2591"
+  },
+  {
+   "name": "corte_e_ancora",
+   "pane": "\u276f resume o arquivo                      \u2502 Mod\n                                        \u2502 \u25cf Progresso 3/5\n\u25cf Resposta em andamento com texto       \u2502 item um\n  segunda linha da resposta             \u2502 item dois\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u276f \n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  \ud83e\udd16 modelo",
+   "columns": 40,
+   "anchor": "Progresso",
+   "expected": "Resposta em andamento com texto\n  segunda linha da resposta"
+  }
+ ],
+ "sidecars": [
+  {
+   "name": "novo",
+   "files": [
+    "{\"text\": \"abc\", \"ts\": 999999.0}"
+   ],
+   "marker": null,
+   "now": 1000000.0,
+   "expected": "abc"
+  },
+  {
+   "name": "ausente",
+   "files": [
+    null
+   ],
+   "marker": null,
+   "now": 1000000.0,
+   "expected": null
+  },
+  {
+   "name": "velho_marcador_trabalhando",
+   "files": [
+    "{\"text\": \"abc\", \"ts\": 999300.0}"
+   ],
+   "marker": [
+    "working",
+    999990.0
+   ],
+   "now": 1000000.0,
+   "expected": "abc"
+  },
+  {
+   "name": "velho_marcador_velho",
+   "files": [
+    "{\"text\": \"abc\", \"ts\": 999300.0}"
+   ],
+   "marker": [
+    "working",
+    999300.0
+   ],
+   "now": 1000000.0,
+   "expected": null
+  },
+  {
+   "name": "velho_marcador_parado",
+   "files": [
+    "{\"text\": \"abc\", \"ts\": 999300.0}"
+   ],
+   "marker": [
+    "idle",
+    999990.0
+   ],
+   "now": 1000000.0,
+   "expected": null
+  },
+  {
+   "name": "velho_sem_marcador",
+   "files": [
+    "{\"text\": \"abc\", \"ts\": 999300.0}"
+   ],
+   "marker": null,
+   "now": 1000000.0,
+   "expected": null
+  },
+  {
+   "name": "vazio_velho_honrado",
+   "files": [
+    "{\"text\": \"\", \"ts\": 993000.0}"
+   ],
+   "marker": null,
+   "now": 1000000.0,
+   "expected": ""
+  },
+  {
+   "name": "json_quebrado",
+   "files": [
+    "{nao"
+   ],
+   "marker": null,
+   "now": 1000000.0,
+   "expected": null
+  },
+  {
+   "name": "nao_objeto",
+   "files": [
+    "[1, 2]"
+   ],
+   "marker": null,
+   "now": 1000000.0,
+   "expected": null
+  },
+  {
+   "name": "texto_nao_str",
+   "files": [
+    "{\"text\": 3, \"ts\": 1000000.0}"
+   ],
+   "marker": null,
+   "now": 1000000.0,
+   "expected": null
+  },
+  {
+   "name": "sem_ts",
+   "files": [
+    "{\"text\": \"sem relogio\"}"
+   ],
+   "marker": null,
+   "now": 1000000.0,
+   "expected": "sem relogio"
+  },
+  {
+   "name": "ts_texto",
+   "files": [
+    "{\"text\": \"x\", \"ts\": \"123\"}"
+   ],
+   "marker": null,
+   "now": 1000000.0,
+   "expected": "x"
+  },
+  {
+   "name": "ts_inteiro_velho",
+   "files": [
+    "{\"text\": \"x\", \"ts\": 999399}"
+   ],
+   "marker": null,
+   "now": 1000000.0,
+   "expected": null
+  },
+  {
+   "name": "segunda_pasta",
+   "files": [
+    "{\"text\": \"a\", \"ts\": 999300.0}",
+    "{\"text\": \"b\", \"ts\": 1000000.0}"
+   ],
+   "marker": null,
+   "now": 1000000.0,
+   "expected": "b"
+  },
+  {
+   "name": "primeira_vence",
+   "files": [
+    "{\"text\": \"a\", \"ts\": 1000000.0}",
+    "{\"text\": \"b\", \"ts\": 1000000.0}"
+   ],
+   "marker": null,
+   "now": 1000000.0,
+   "expected": "a"
+  }
+ ],
+ "committed": [
+  {
+   "name": "curta",
+   "preview": "abc def",
+   "committed": "abc def ghi jkl mno",
+   "norm": "abc def ghi jkl mno",
+   "expected": false
+  },
+  {
+   "name": "contida_com_markdown",
+   "preview": "Confirma a mudan\u00e7a no arquivo agora",
+   "committed": "**Confirma** a mudan\u00e7a no `arquivo` agora e depois sigo",
+   "norm": "Confirma a mudan\u00e7a no arquivo agora e depois sigo",
+   "expected": true
+  },
+  {
+   "name": "gravado_e_prefixo",
+   "preview": "Texto j\u00e1 gravado aqui completo\nMaking 1 scratchpad edit\u2026",
+   "committed": "Texto j\u00e1 gravado aqui completo",
+   "norm": "Texto j\u00e1 gravado aqui completo",
+   "expected": true
+  },
+  {
+   "name": "outra_coisa",
+   "preview": "Um texto que n\u00e3o tem nada a ver",
+   "committed": "Resposta completamente diferente desta",
+   "norm": "Resposta completamente diferente desta",
+   "expected": false
+  },
+  {
+   "name": "lista_pintada",
+   "preview": "\u2022 item um bem longo\n\u2022 item dois",
+   "committed": "- item um bem longo\n- item dois",
+   "norm": "item um bem longo item dois",
+   "expected": true
+  },
+  {
+   "name": "sem_gravado",
+   "preview": "Um texto qualquer bem comprido",
+   "committed": "",
+   "norm": "",
+   "expected": false
+  },
+  {
+   "name": "quebra_da_tela",
+   "preview": "linha que o terminal\n  quebrou no meio da frase",
+   "committed": "linha que o terminal quebrou no meio da frase.",
+   "norm": "linha que o terminal quebrou no meio da frase.",
+   "expected": true
+  }
+ ]
+}

@@ -101,7 +101,11 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
             return true;
         }
         let tail = path.strip_prefix("/api/sessions/").and_then(|r| r.split_once('/')).map(|(_, t)| t);
-        if matches!(tail, Some("history" | "events" | "cost")) {
+        // `term`: o painel do dono abre no Rust; o resto (convidado, Connect) passa pelo Python e liga ao PTY dele.
+        if matches!(tail, Some("history" | "events" | "cost" | "term")) {
+            return true;
+        }
+        if path.strip_prefix("/api/hangar-terminals/").is_some_and(|r| r.ends_with("/term")) {
             return true;
         }
     }

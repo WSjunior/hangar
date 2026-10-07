@@ -6,6 +6,7 @@ import contextvars
 import copy
 import hashlib
 import json
+import logging
 import os
 import socket
 import time
@@ -14,6 +15,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from app.runtime_coordinator import Binding, Phase, WriterLease, _clock
+
+_log = logging.getLogger("hangar.runtime_terminal")
 
 _writer = contextvars.ContextVar('runtime_terminal_writer', default=None)
 # Pedido de convidado (clique de mod pelo app): não recebe o teclado de uma sessão do Rust. A marca
@@ -31,6 +34,10 @@ class KeyboardLoanExpired(RuntimeError):
     """O prazo do teclado emprestado venceu: o Rust retomou o pane e a operação do Python falha."""
     code = 'keyboard_loan_expired'
     safe_detail = True
+
+
+class TerminalOutcomeUnknown(RuntimeError):
+    """A entrada pode ter chegado ao pane: quem chama não repete nem diz que nada foi enviado."""
 
 
 class TerminalControlError(RuntimeError):
@@ -324,7 +331,7 @@ def facts(payload, metadata):
             idle = plugin_state[0] == 'idle'
         elif hook_state is not None and hook_state[1] >= current.meta.get('legacy_import_after', current.meta.get('created', 0)):
             idle = hook_state[0] == 'idle'
-    question = bool(askquestion.pergunta_aberta(current.jsonl) or plugin.pergunta_pendente(current.name))
+    question = bool(askquestion.pergunta_aberta(Path(current.jsonl).stem) or plugin.pergunta_pendente(current.name))
     modes = plugin.declared_modes(current.name)
     live = plugin.aguardando(current.name) and _plugin_current(current)
     native = None
@@ -568,6 +575,84 @@ def _reply(operation_id, disposition, **payload):
     return {'operation_id':operation_id,'disposition':disposition,'payload':payload}
 
 
+# Quanto a trava do /clear espera a conversa nova antes de conferir se ele foi aplicado (a regra do Rust).
+CLEAR_APPLY_WAIT_S = 10.0
+# Até quando um transcript novo começado por /clear segura a trava; depois só o vínculo vale (o
+# arquivo pode ser de outra sessão na mesma pasta).
+CLEAR_DISK_TRUST_S = 60.0
+# Próxima conferência por sessão: com o Claude ocupado, cada uma custaria três gravações do diário.
+_CLEAR_NEXT: dict[str, float] = {}
+
+
+def _clear_on_disk(jsonl, since):
+    """Prova no disco de que o /clear rodou: transcript nascido depois do despacho, na pasta da
+    conversa, que começa pelo registro do comando. Leitura que falha conta como prova."""
+    atual = Path(jsonl)
+    try:
+        for p in atual.parent.glob('*.jsonl'):
+            try:
+                info = p.stat()
+                # Sem data de nascimento (Linux), vale a de escrita: o teto de 60 s limita o engano.
+                if p == atual or getattr(info, 'st_birthtime', info.st_mtime) < since - 1:
+                    continue
+                with p.open('rb') as f:
+                    if b'<command-name>/clear</command-name>' in f.read(16 * 1024):
+                        return True
+            except FileNotFoundError:
+                continue        # apagado no meio da varredura
+    except OSError:
+        _log.warning("trava do /clear: transcript ilegível em %s; a trava fica", atual.parent, exc_info=True)
+        return True
+    return False
+
+
+def _expire_clear(coordinator, descriptor, operation_id):
+    """Saída da trava do /clear: passado o prazo com a sessão parada e sem conversa nova (nem no vínculo
+    nem no disco), o /clear não foi aplicado; com o Claude trabalhando ele espera na fila do próprio
+    Claude Code. A trava sai, a operação fica recusada e nada é reenviado. True = soltou."""
+    from app import diag
+    slot = coordinator.slots[descriptor['key']]
+    barrier = slot.store.state['runtime_state'].get('clear_barrier') or {}
+    agora = time.time()
+    if 'raised' not in barrier:
+        # Trava gravada sem hora (de antes desta regra): o prazo conta de quando ela foi vista.
+        state = copy.deepcopy(slot.store.state)
+        state['runtime_state']['clear_barrier'] = {**barrier, 'since':barrier.get('since', agora), 'raised':agora}
+        slot.store._persist(state)
+        return False
+    since, raised = barrier.get('since', barrier['raised']), barrier['raised']
+    if agora - raised < CLEAR_APPLY_WAIT_S or agora < _CLEAR_NEXT.get(descriptor['key'], 0):
+        return False
+    _CLEAR_NEXT[descriptor['key']] = agora + CLEAR_APPLY_WAIT_S
+    try:
+        current = _service(coordinator, descriptor, operation_id, operation_id, 'terminal_facts',
+            {'binding':descriptor['meta']['terminal'],'operation_id':operation_id,'text':''})
+    except BindingChanged:
+        return False        # a conversa nova existe, falta reabrir
+    except Exception:
+        _log.warning("trava do /clear de %s fica: fatos indisponíveis", descriptor['name'], exc_info=True)
+        return False
+    if not current['idle'] or agora - raised < CLEAR_DISK_TRUST_S and _clear_on_disk(descriptor['jsonl'], since):
+        return False
+    # Primeiro a operação: falhando, a trava fica e o diário diz por quê.
+    op_id = barrier.get('operation_id')
+    try:
+        if op_id in slot.store.state['operations']:
+            _queue(coordinator, descriptor, {'kind':'finish','id':op_id,'status':'rejected',
+                'result':_reply(op_id, 'rejected', code='clear_not_applied', cleanup='not_needed')})
+        state = copy.deepcopy(slot.store.state)
+        state['runtime_state'].pop('clear_barrier', None)
+        state['runtime_state'].pop('preserve_binding', None)
+        slot.store._persist(state)
+    except Exception as exc:
+        from app.runtime_coordinator import failure_reason
+        diag.registrar('runtime.clear_release_failed', 'erro', sessao=descriptor['name'], **failure_reason(exc))
+        return False
+    _CLEAR_NEXT.pop(descriptor['key'], None)
+    diag.registrar('runtime.clear_not_applied', 'aviso', sessao=descriptor['name'], codigo='clear_not_applied')
+    return True
+
+
 def _python_prompt(name, text):
     from app import terminal_input as ti
     for field in ('limpou', 'stage'):
@@ -684,7 +769,7 @@ def _reserve_execute(coordinator, descriptor, command, operation_id, *, entry_id
             return old['result']
         return _reply(operation_id, 'deferred' if old['status'] in {'prepared','deferred'} else 'unknown', cleanup='not_needed')
     barrier = slot.store.state['runtime_state'].get('clear_barrier')
-    if barrier and barrier['generation'] == descriptor['generation']:
+    if barrier and barrier['generation'] == descriptor['generation'] and not _expire_clear(coordinator, descriptor, operation_id):
         raise RuntimeError('clear exige geração nova antes de escrever')
     prepared = _queue(coordinator, descriptor, {'kind':'prepare','id':operation_id,'payload':intent,'entry_id':entry_id})
     if prepared['status'] in {'accepted','confirmed','rejected'}:
@@ -700,6 +785,7 @@ def _reserve_execute(coordinator, descriptor, command, operation_id, *, entry_id
         _queue(coordinator, descriptor, {'kind':'finish','id':operation_id,'status':'deferred','result':result})
         return result
     dispatched = False
+    dispatched_at = time.time()     # antes da escrita: o transcript novo do /clear nasce logo depois do Enter
     def begin():
         nonlocal dispatched
         if dispatched:
@@ -755,7 +841,8 @@ def _reserve_execute(coordinator, descriptor, command, operation_id, *, entry_id
                             result = _reply(operation_id, 'deferred', cleanup='not_needed')
                         else:
                             safe = clean and not stage.endswith('submeter')
-                            result = _reply(operation_id, 'deferred' if safe else 'unknown', cleanup='proved' if safe else 'unproved')
+                            result = _reply(operation_id, 'deferred' if safe else 'unknown', cleanup='proved' if safe else 'unproved',
+                                **({'stage':stage} if stage else {}))
         else:
             begin()
             held = payload.get('request_id', '')
@@ -782,12 +869,16 @@ def _reserve_execute(coordinator, descriptor, command, operation_id, *, entry_id
         result = _reply(operation_id, 'unknown' if dispatched else 'deferred', cleanup='unproved' if dispatched else 'not_needed')
         _queue(coordinator, descriptor, {'kind':'finish','id':operation_id,'status':result['disposition'],'result':result})
         if dispatched and isinstance(exc, Exception):
-            raise RuntimeError('resultado terminal incerto; efeito conservado sem fallback') from exc
+            raise TerminalOutcomeUnknown('resultado terminal incerto; efeito conservado sem fallback') from exc
         raise
-    if control == 'input' and payload['text'].strip().split()[0] == '/clear' and result['disposition'] in {'accepted','unknown'}:
+    # Só o /clear cujo Enter pode ter saído ergue a trava; incerto antes do Enter é entrega incerta comum.
+    stage = (result.get('payload') or {}).get('stage') or ''
+    if control == 'input' and payload['text'].strip().split()[0] == '/clear' and (result['disposition'] == 'accepted'
+            or result['disposition'] == 'unknown' and (not stage or stage.endswith('submeter'))):
+        _CLEAR_NEXT.pop(descriptor['key'], None)
         state = copy.deepcopy(slot.store.state)
         state['runtime_state'].update(preserve_binding=True, clear_barrier={'generation':descriptor['generation'],
-            'conversation':binding['conversation'],'operation_id':operation_id})
+            'conversation':binding['conversation'],'operation_id':operation_id,'since':dispatched_at,'raised':time.time()})
         slot.store._persist(state)
         result['payload']['preserve_binding'] = True
     _queue(coordinator, descriptor, {'kind':'finish','id':operation_id,'status':result['disposition'],'result':result})
@@ -818,7 +909,8 @@ async def reserve_op(coordinator, descriptor, command, operation_id):
                     from app.runtime_queue import terminal_write_blocked
                     if terminal_write_blocked(state, descriptor['meta']['terminal']['conversation']):
                         return {'sent':0}
-                    if state['runtime_state'].get('clear_barrier', {}).get('generation') == descriptor['generation']:
+                    if (state['runtime_state'].get('clear_barrier', {}).get('generation') == descriptor['generation']
+                            and not _expire_clear(coordinator, descriptor, operation_id)):
                         return {'sent':0}
                     binding = descriptor['meta']['terminal']
                     current = _service(coordinator, descriptor, operation_id, operation_id, 'terminal_facts',
@@ -862,7 +954,7 @@ async def route(coordinator, name, command):
     if result.get('disposition') == 'rejected':
         raise RuntimeError(f"entrada recusada pelo terminal ({(result.get('payload') or {}).get('code') or 'sem código'})")
     if result.get('disposition') not in {None,'accepted','deferred'}:
-        raise RuntimeError('resultado terminal incerto; não repetir por outro transporte')
+        raise TerminalOutcomeUnknown('resultado terminal incerto; não repetir por outro transporte')
     return result
 
 

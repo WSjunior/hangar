@@ -80,6 +80,47 @@ def test_permissao_so_vai_ao_app_quando_o_modo_pergunta(monkeypatch, rodape, seg
     assert (pb.pergunta_pendente("s1") is not None) is segura
 
 
+def test_pergunta_do_hook_morto_sai_sem_esperar_o_teto_do_long_poll(monkeypatch):
+    # Item 16: o Esc no terminal interrompe o AskUserQuestion e o hook morre sem o `/ask-fim`. A
+    # pergunta seguia "aberta" por 35 s e o /clear do app era adiado nesse intervalo.
+    monkeypatch.setattr(pb, "terminal_preso", lambda name: False)
+    pb.app_entrou()
+    asyncio.run(pb.ask(_corpo("ask:t1", questions=[{"question": "A ou B?"}], janela_ms=20)))
+    assert pb.pergunta_pendente("s1") is not None
+    pb._perguntas["s1"]["visto"] -= pb.SEM_POLL_S + 1
+    assert pb.pergunta_pendente("s1") is None
+    # Com o long-poll aberto a pergunta vale até o teto de sempre.
+    pb._perguntas["s1"]["fila"] = asyncio.Queue()
+    assert pb.pergunta_pendente("s1") is not None
+
+
+def test_interrupcao_pelo_app_solta_a_pergunta_na_hora_e_acorda_o_long_poll(monkeypatch):
+    # O /interrupt do app é o Esc que fecha o diálogo; o long-poll do hook morto ficava aberto até a
+    # janela de 25 s fechar, segurando a pergunta.
+    monkeypatch.setattr(pb, "terminal_preso", lambda name: False)
+    pb.app_entrou()
+
+    async def cena():
+        espera = asyncio.create_task(pb.ask(_corpo("ask:t1", questions=[{"question": "A ou B?"}])))
+        while pb.pergunta_pendente("s1") is None:
+            await asyncio.sleep(0.01)
+        pb.interrompeu("s1", "ask:t1")
+        assert pb.pergunta_pendente("s1") is None
+        return await asyncio.wait_for(espera, 2)
+
+    assert asyncio.run(cena()) == {"answers": None}
+    # O hook que refaz o poll logo depois do Esc ainda pode estar morrendo: não volta.
+    asyncio.run(pb.ask(_corpo("ask:t1", questions=[{"question": "A ou B?"}], janela_ms=20)))
+    assert pb.pergunta_pendente("s1") is None
+    # Ainda perguntando depois de HOOK_VIVO_S, ele sobreviveu ao Esc: a pergunta volta a contar.
+    pb._perguntas["s1"]["interrompida"] -= pb.HOOK_VIVO_S + 1
+    asyncio.run(pb.ask(_corpo("ask:t1", questions=[{"question": "A ou B?"}], janela_ms=20)))
+    assert pb.pergunta_pendente("s1") is not None
+    # Interrupção de outra pergunta (lida antes do Esc) não marca a que abriu depois.
+    pb.interrompeu("s1", "ask:t0")
+    assert pb.pergunta_pendente("s1") is not None
+
+
 def test_resposta_do_app_chega_ao_hook_e_so_vale_com_o_aviso_dele(monkeypatch):
     monkeypatch.setattr(pb, "terminal_preso", lambda name: False)
     monkeypatch.setattr(pb, "CONFIRMA_S", 3.0)
@@ -113,7 +154,8 @@ def test_portao_desligado_nao_poe_nada_na_sessao_e_ligado_poe_o_plugin(monkeypat
     assert get_adapter("claude").spawn_command("/tmp/p", "sid") == ["claude", "--session-id", "sid"]
 
     monkeypatch.setattr(pb, "ligado", lambda: True)
-    (raiz,) = pb.raizes_dos_plugins()
+    # Os outros mods do repo vêm depois; a ordem completa é do teste com pasta temporária.
+    raiz = pb.raizes_dos_plugins()[0]
     assert Path(raiz).parts[-2:] == ("plugins", "hangar")
     assert get_adapter("claude").spawn_command("/tmp/p", "sid")[:5] == [
         "claude", "--session-id", "sid", "--plugin-dir", raiz]
@@ -170,7 +212,30 @@ def test_plugin_entra_por_plugin_dir_mesmo_com_mods_por_padrao(monkeypatch):
     monkeypatch.setattr(pb, "ligado", lambda: True)
     for mods in (True, False):
         monkeypatch.setattr(pb, "mods_by_default", lambda mods=mods: mods)
-        assert pb.raizes_dos_plugins() == [str(pb.PLUGIN_SRC)]
+        assert pb.raizes_dos_plugins()[0] == str(pb.PLUGIN_SRC)
+
+
+def test_hangar_abre_a_lista_dos_mods_e_pasta_sem_manifesto_fica_fora(tmp_path, monkeypatch):
+    # O do Hangar fica por fora na cadeia e repassa a faixa ao app: "aaa" vem antes dele no
+    # alfabeto e ainda assim entra depois.
+    for nome in ("zzz", "aaa", "hangar"):
+        (tmp_path / nome / ".claude-plugin").mkdir(parents=True)
+        (tmp_path / nome / ".claude-plugin" / "plugin.json").write_text("{}")
+    (tmp_path / "sem-manifesto" / "hooks").mkdir(parents=True)
+    monkeypatch.setattr(pb, "PLUGINS_ROOT", tmp_path)
+    monkeypatch.setattr(pb, "PLUGIN_SRC", tmp_path / "hangar")
+    monkeypatch.setattr(pb, "ligado", lambda: True)
+    raizes = [str(tmp_path / n) for n in ("hangar", "aaa", "zzz")]
+    assert pb.raizes_dos_plugins() == raizes
+
+    from app.adapters import get_adapter
+    argv = get_adapter("claude").spawn_command("/tmp/p", "sid")
+    assert argv[:9] == ["claude", "--session-id", "sid",
+                        "--plugin-dir", raizes[0], "--plugin-dir", raizes[1], "--plugin-dir", raizes[2]]
+
+    home = tmp_path / "home"
+    pb._publish_plugin_dir(home)
+    assert pb.plugin_dir_file(home).read_text(encoding="utf-8") == "".join(f"{r}\n" for r in raizes)
 
 
 def test_interruptor_desligado_tira_o_plugin_mesmo_com_mods_por_padrao(monkeypatch):

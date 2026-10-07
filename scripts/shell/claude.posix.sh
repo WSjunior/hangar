@@ -37,20 +37,23 @@ claude() {
     local print=0
     for a in "$@"; do case "$a" in -p|--print) print=1 ;; esac; done
 
-    # Plugin do Hangar por `--plugin-dir`, igual às sessões que o backend abre: só assim ele fica por
-    # fora dos plugins do marketplace e espelha no app a faixa que os mods desenham. O caminho vem do
-    # arquivo que o backend grava (este wrapper não sabe onde o repositório mora); o backend só o
-    # grava quando o `claude` aceita a flag. Modo -p não tem faixa e segue como estava.
+    # Plugins do Hangar por `--plugin-dir`, igual às sessões que o backend abre: só assim ficam por
+    # fora dos plugins do marketplace e o do Hangar espelha no app a faixa que os mods desenham. Os
+    # caminhos vêm do arquivo que o backend grava, um por linha e o do Hangar primeiro (este wrapper
+    # não sabe onde o repositório mora); o backend só o grava quando o `claude` aceita a flag. Modo
+    # -p não tem faixa e segue como estava.
     local -a plug
     plug=()
     local plugdir=
     if [ "$print" = 0 ] && [ -r "$HOME/.hangar/plugin-dir" ]; then
-        IFS= read -r plugdir <"$HOME/.hangar/plugin-dir" || true
-        if [ -n "$plugdir" ] && [ -d "$plugdir" ]; then
-            plug=(--plugin-dir "$plugdir")
-        elif [ -n "$plugdir" ]; then
-            echo "hangar: plugin-dir '$plugdir' não existe; a faixa dos mods não vai para o app" >&2
-        fi
+        # O `|| [ -n ]` pega a última linha sem quebra no fim.
+        while IFS= read -r plugdir || [ -n "$plugdir" ]; do
+            if [ -n "$plugdir" ] && [ -d "$plugdir" ]; then
+                plug+=(--plugin-dir "$plugdir")
+            elif [ -n "$plugdir" ]; then
+                echo "hangar: plugin-dir '$plugdir' não existe; a faixa dos mods não vai para o app" >&2
+            fi
+        done <"$HOME/.hangar/plugin-dir"
     fi
 
     # respect flags that manage their own session (injecting --session-id alongside them errors)

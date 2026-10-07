@@ -87,6 +87,13 @@ _trocando: dict[str, float] = {}
 
 def marcar_troca(name: str) -> None:
     _trocando[name] = time.monotonic() + _TROCA_S
+    from app import state_facts
+    state_facts.notify(name)
+
+
+def troca_restante_ms(name: str) -> int:
+    """Quanto falta da janela de `marcar_troca`, em ms (0 sem troca marcada)."""
+    return max(0, round((_trocando.get(name, 0.0) - time.monotonic()) * 1000))
 
 
 def em_troca(name: str) -> bool:

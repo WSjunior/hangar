@@ -602,7 +602,8 @@ def _problem_text(data):
 # Entrada que o terminal recusa sem escrever, pelo código do escritor Rust: cada uma tem frase na tela.
 _STALLED_INPUT = {"composer_busy": "terminal_input_composer_busy",
     "composer_unreadable": "terminal_input_composer_unreadable",
-    "capture_failed": "terminal_input_capture_failed", "capture_utf8": "terminal_input_capture_failed"}
+    "capture_failed": "terminal_input_capture_failed", "capture_utf8": "terminal_input_capture_failed",
+    "clear_not_applied": "terminal_clear_not_applied"}
 
 
 def runtime_problem(name):

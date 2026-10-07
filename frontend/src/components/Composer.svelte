@@ -1,6 +1,6 @@
 <script module lang="ts">
   import type { CommandInfo } from '@hangar/core';
-  import { stateColors, abbrevNum, rateLabel } from '@hangar/core';
+  import { stateColors, abbrevNum, rateLabel, replaceSlashToken, slashTokenAt } from '@hangar/core';
   // Cache de comandos por sessao: sobrevive a remontagens do Composer (ex: voltar de
   // awaiting_input) pra buscar a lista so uma vez por sessao.
   const commandCache = new Map<string, CommandInfo[]>();
@@ -1129,6 +1129,36 @@ import { cachePrazo } from '../lib/cachePrazo';
     else claudePopOpen = true;
   }
 
+  // A palavra sob o cursor é um `/nome` sendo digitado (no começo ou no meio do texto). A seleção
+  // guardada só vale para o texto em que foi medida: texto trocado por código (comando preenchido,
+  // rascunho restaurado) põe o cursor no fim, e um cursor velho reabriria a lista.
+  const slashToken = $derived.by(() => {
+    const sel = lastSelection?.value === inputText ? lastSelection : null;
+    const pos = !sel ? inputText.length : sel.start === sel.end ? sel.end : -1;
+    return slashTokenAt(inputText, pos);
+  });
+  // Texto em que o Esc fechou a lista; ela volta quando a pessoa mexe no texto.
+  let slashDismissed = $state<string | null>(null);
+  const slashQuery = $derived(slashToken && inputText !== slashDismissed ? slashToken.query : null);
+
+  // Completar só troca a palavra pelo nome, com o resto da mensagem intacto e nada enviado.
+  async function completeSlashToken(cmd: CommandInfo) {
+    if (!slashToken) return;
+    const next = replaceSlashToken(inputText, slashToken, cmd.name);
+    inputText = next.text;
+    await tick();
+    textareaEl?.focus();
+    textareaEl?.setSelectionRange(next.cursor, next.cursor);
+    rememberSelection();
+    autoGrow();
+  }
+
+  // Escolher roteia o comando só quando a palavra é a mensagem toda; no meio do texto, completa.
+  function pickSlash(cmd: CommandInfo) {
+    if (slashToken?.whole) handleSuggestPick(cmd);
+    else void completeSlashToken(cmd);
+  }
+
   // Toque numa sugestao do strip inline. model/effort abrem a caixa correspondente; comando com
   // argumento (ou destrutivo) preenche pra revisao antes de enviar; o resto envia direto.
   function handleSuggestPick(cmd: CommandInfo) {
@@ -1262,11 +1292,16 @@ import { cachePrazo } from '../lib/cachePrazo';
   }
 
   // O botão do mic tira o foco; a seleção do textarea pode voltar a zero durante o ditado.
-  let lastSelection: { value: string; start: number; end: number } | null = null;
+  // Também diz qual palavra está sob o cursor para as sugestões de `/`.
+  let lastSelection = $state.raw<{ value: string; start: number; end: number } | null>(null);
 
   function rememberSelection() {
     const field = textareaEl;
-    if (field) lastSelection = { value: field.value, start: field.selectionStart, end: field.selectionEnd };
+    if (!field) return;
+    const { value, selectionStart: start, selectionEnd: end } = field;
+    if (lastSelection?.value === value && lastSelection.start === start && lastSelection.end === end) return;
+    lastSelection = { value, start, end };
+    if (value !== slashDismissed) slashDismissed = null;
   }
 
   function rememberFocusedSelection() {
@@ -2154,8 +2189,8 @@ import { cachePrazo } from '../lib/cachePrazo';
     {/if}
 
     <SlashSuggest bind:this={slashSuggest} bind:activeOptionId={slashActiveOptionId}
-      {commands} query={inputText} onPick={handleSuggestPick}
-      onComplete={(cmd) => void fillCommand(cmd.name)} listboxId={slashListboxId} />
+      {commands} query={slashQuery} onPick={pickSlash} onComplete={(cmd) => void completeSlashToken(cmd)}
+      onDismiss={() => (slashDismissed = inputText)} listboxId={slashListboxId} />
 
     <textarea
       bind:this={textareaEl}

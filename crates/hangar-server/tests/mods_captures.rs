@@ -22,7 +22,7 @@ fn every_case_has_its_file_and_no_file_is_extra() {
         .collect();
     files.sort();
     assert_eq!(names, files);
-    assert_eq!(names.len(), 34);
+    assert_eq!(names.len(), 36);
 }
 
 #[test]

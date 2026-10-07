@@ -137,6 +137,7 @@ pub struct Engine {
     rate_limits:Value,
     preview:LiveBuffer,
     response_started:bool,
+    first_response_start:Option<(String,f64)>,
     compacting:bool,
     rpc:BTreeMap<RequestId,Rpc>,
     server_requests:Vec<(RequestId,Value)>,
@@ -198,7 +199,7 @@ impl Engine {
             model:string(&metadata["model"]),effort:string(&metadata["effort"]),mode:string(&metadata["mode"]),
             service_tier:metadata.get("service_tier").and_then(service_tier),service_tier_pending:None,
             permission_mode:metadata["permission_mode"].as_str().unwrap_or("Full Access").into(),token_usage:Value::Null,rate_limits:Value::Null,
-            preview:LiveBuffer::default(),response_started:false,compacting:false,rpc:BTreeMap::new(),server_requests:Vec::new(),
+            preview:LiveBuffer::default(),response_started:false,first_response_start:None,compacting:false,rpc:BTreeMap::new(),server_requests:Vec::new(),
             request_epochs:BTreeMap::new(),answering:BTreeSet::new(),wires:BTreeMap::new(),policies:BTreeMap::new(),last_format_request:None,format_gate:FormatGate::default(),async_questions,voices,voice_wires:BTreeMap::new(),skill_preparations:BTreeMap::new(),early_voice:BTreeMap::new(),early_voice_bytes:0,metadata }
     }
 
@@ -980,12 +981,14 @@ impl Engine {
             }
             "turn/started" => {
                 self.in_progress = true; self.turn_id = string(&params["turn"]["id"]); self.state_revision += 1;
+                self.first_response_start = self.turn_id.clone().map(|id|(id,self.clock.monotonic_s));
                 self.response_started = false; self.state.codex_buffering = false; self.clear_preview(effects);
                 self.state.problema = None; self.state.problema_detalhe = None;
             }
             "turn/completed" => {
                 if params["turn"]["id"].as_str().is_some_and(|id|self.turn_id.as_deref().is_some_and(|current|current != id)) { return Ok(()); }
                 self.in_progress = false; self.turn_id = None; self.state_revision += 1; self.compacting = false;
+                self.first_response_start = None;
                 self.state.codex_buffering = false; self.response_started = false; self.clear_preview(effects);
                 self.server_requests.clear(); self.answering.clear(); self.request_epochs.clear();
                 if params["turn"]["status"] == "failed" {
@@ -1020,6 +1023,13 @@ impl Engine {
             }
             "item/agentMessage/delta" => {
                 if params["turnId"].as_str().is_some_and(|id|self.turn_id.as_deref().is_some_and(|current|current != id)) { return Ok(()); }
+                if params["delta"].as_str().is_some_and(|text|!text.is_empty())
+                    && self.first_response_start.as_ref().is_some_and(|(id,_)|params["turnId"] == *id) {
+                    if let Some((_,started)) = self.first_response_start.take() {
+                        effects.push(Effect::Publish { channel:"rate".into(),data:json!({"first_response":true,
+                            "seconds":self.clock.monotonic_s-started,"conversation":self.thread_id}) });
+                    }
+                }
                 self.response_started = true; self.state.codex_buffering = false;
                 if let Some(text) = self.preview.append(params["delta"].as_str().unwrap_or(""),self.clock.monotonic_s) { self.publish(text,effects); }
                 return Ok(());

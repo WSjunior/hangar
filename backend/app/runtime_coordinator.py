@@ -699,12 +699,20 @@ class RuntimeCoordinator:
                     if fresh is None or fresh.key != binding.key:
                         self.slots[binding.key] = Slot(binding=binding)
                         if fresh is None:
+                            from app import diag, tmux
+                            exists = await asyncio.to_thread(tmux.sessao_existe, binding.name)
+                            born = await asyncio.to_thread(tmux.session_created, binding.name) if exists else 0.0
+                            # Sessão tmux de outra vida com o mesmo nome (fechada e recriada, até em
+                            # outro provedor): o registro morto não reserva o nome, senão a nova fica sem dados.
+                            recorded = binding.meta["terminal"].get("created")
+                            if born and recorded and born != recorded:
+                                diag.registrar("runtime.stale_terminal_record", "ok", sessao=binding.name)
+                                continue
                             self.slots[binding.key].awaiting_identity = True
                             self.names.setdefault(binding.name, binding.key)
-                            from app import diag, tmux
                             # Sem sessão tmux com o nome é sessão fechada (o estado da fila fica no
                             # disco); falha é haver sessão sem vínculo provado, ou o tmux não responder.
-                            if await asyncio.to_thread(tmux.sessao_existe, binding.name) is not False:
+                            if exists is not False:
                                 diag.registrar("runtime.registration_failed", "erro", sessao=binding.name, codigo="terminal_binding")
                             continue
                     else:
@@ -850,8 +858,10 @@ class RuntimeCoordinator:
                             if client is not None:
                                 client.receive(event["channel"], event["data"]["event"])
                         if event["channel"] == "rate":
-                            from app.live_rate import live_rate, rate_report
-                            if (report := rate_report(event["data"])) is not None:
+                            from app.live_rate import first_response_report, live_rate, rate_report
+                            if (first := first_response_report(event["data"])) is not None:
+                                live_rate(slot.binding.name).first_response(*first)
+                            elif (report := rate_report(event["data"])) is not None:
                                 live_rate(slot.binding.name).close(*report)
                             else:
                                 from app import diag
@@ -1248,8 +1258,18 @@ class RuntimeCoordinator:
             async def clear():
                 async with self.freeze(name):
                     result = await self.op(name, command, operation_id)
-                    if result.get("disposition") in {"accepted", "unknown"}:
-                        await self.op(name, {"kind":"queue", "action":{"kind":"clear"}}, uuid.uuid4().hex)
+                    # Só o /clear cujo Enter pode ter saído (o que ergueu a trava): o que parou antes não
+                    # rodou e não leva a fila junto.
+                    if (result.get("disposition") in {"accepted", "unknown"}
+                            and (result.get("payload") or {}).get("preserve_binding") is True):
+                        from app.runtime_terminal import BindingChanged
+                        try:
+                            await self.op(name, {"kind":"queue", "action":{"kind":"clear"}}, uuid.uuid4().hex)
+                        except BindingChanged as exc:
+                            # Em geral a conversa já trocou e a troca do vínculo esvazia a fila; o resto
+                            # (sessão morta) fica no diário.
+                            from app import diag
+                            diag.registrar("runtime.clear_queue_skipped", "aviso", sessao=name, **failure_reason(exc))
                     return result
             task = asyncio.create_task(clear())
             try:

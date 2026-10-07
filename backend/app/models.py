@@ -211,6 +211,16 @@ class SessionInfo(BaseModel):
         return self.git_cwd or self.cwd
 
 
+
+class CreatedSessionInfo(SessionInfo):
+    """Resposta do POST /api/sessions. Fora do `SessionInfo` porque ele é o contrato da lista com o
+    Rust: a conta em que a sessão nasceu (None = a padrão) e de onde ela veio, "inherited" (da
+    sessão criadora) ou "quota" (a herdada ou a padrão estava acabando e ela nasceu na de mais
+    folga); None = conta pedida ou a padrão."""
+    config_dir: Optional[str] = None
+    account_source: Optional[str] = None
+
+
 class ChatEvent(BaseModel):
     kind: ChatKind
     id: str

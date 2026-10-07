@@ -54,7 +54,7 @@ from app.pi_inbox import INBOX
 from app import registry as registry_mod
 from app.registry import KillFailed, SessionRegistry, sanitize_cwd
 from app.names import sanitize_session_name
-from app.models import (SessionInfo, ChatEvent, CostReport, UsoReport, RunnersResponse, RunBody,
+from app.models import (SessionInfo, CreatedSessionInfo, ChatEvent, CostReport, UsoReport, RunnersResponse, RunBody,
                         RunInfo, Runner, CustomRunnersBody, ProjectStatus, ShortcutShellBody, RunCodeBody,
                         ProjectShortcutsBody, ShortcutAnswerBody, session_key)
 from app import uso_report
@@ -1754,6 +1754,9 @@ class CreateBody(_StrictBody):
     # Claude ou Codex SEM terminal roda atrás do cano, sem tmux. O que depende de pane
     # (painel de terminal, espelho) não existe.
     headless: bool | None = Field(default=None, strict=True)
+    # Sessão que pediu a criação (MCP `new_session`, `hangar-send --new`). O que vier omitido
+    # (modo de permissão, sem terminal) herda dela; sem ela, vale o padrão do servidor.
+    creator: str | None = Field(default=None, min_length=1)
 
 
 def _jev_efetivo(pedido: bool | None) -> bool:
@@ -2225,26 +2228,78 @@ async def _kill_unclaimed(name: str) -> None:
         await asyncio.to_thread(_invalidate_lists)
 
 
-@app.post("/api/sessions", dependencies=[Depends(require_auth)], response_model=SessionInfo)
-async def create_session(body: CreateBody):
+def _creator_permission_mode(name: str, jsonl: str | None) -> str | None:
+    """Modo fora de `plan` da sessão Claude `name`, no nome que o `--permission-mode` aceita."""
+    meta = headless_sessions.load(name)
+    modo = None
+    if meta:
+        modo = meta.get("permission_mode")
+        if modo == "plan":
+            modo = meta.get("previous_non_plan")
+    modo = modo or permission_mode.session_non_plan_mode(jsonl or _jsonl_atual(name))
+    modo = "manual" if modo == "default" else modo
+    return modo if modo in model_args.MODOS_PERMISSAO_CLAUDE and modo != "plan" else None
+
+
+async def _inherit_from_creator(body: CreateBody) -> tuple[CreateBody, str | None, list[str]]:
+    """Preenche o que veio omitido com o da sessão criadora; devolve também `"inherited"` quando a
+    conta veio dela e os avisos do que não deu para herdar. O modo conta porque o primeiro recado
+    de uma criadora em bypass para uma irmã em Manual fica retido no receptor (`mode-mismatch`)."""
+    # Convidado não herda a conta nem o modo de uma sessão do dono.
+    if not body.creator or guest_users.current.get() is not None:
+        return body, None, []
+    info = await _cached_info(body.creator)
+    if info is None:
+        return body, None, [f"sessão criadora '{body.creator}' não encontrada; nada foi herdado"]
+    update: dict = {}
+    avisos: list[str] = []
+    account_source = None
+    # Perfil do omp já define a conta.
+    if body.config_dir is None and body.provider in ("claude", "pi", "omp") and not body.omp_profile:
+        cfg, confiavel = await asyncio.to_thread(_caller_config_dir, info.name)
+        if not confiavel:
+            # Criar assim nasceria na conta padrão, calado: gasta a cota de quem ninguém escolheu.
+            raise HTTPException(409, detail=erro(
+                "erro_conta_criadora", f"não consegui confirmar a conta da sessão '{info.name}' — "
+                "escolha a conta (`conta` no MCP, `--conta` no hangar-send)"))
+        account_source = "inherited"
+        if cfg:
+            update["config_dir"] = str(cfg)
+    if body.headless is None and body.provider in ("claude", "codex") and not body.read_only:
+        update["headless"] = bool(info.headless)
+    if body.permission_mode is None and body.provider == "claude" and info.provider == "claude":
+        modo = await asyncio.to_thread(_creator_permission_mode, info.name, info.jsonl)
+        if modo:
+            update["permission_mode"] = modo
+        else:
+            avisos.append(f"não consegui ler o modo de permissão de '{info.name}'; vale o padrão da conta")
+    return (body.model_copy(update=update) if update else body), account_source, avisos
+
+
+@app.post("/api/sessions", dependencies=[Depends(require_auth)], response_model=CreatedSessionInfo)
+async def create_session(body: CreateBody) -> CreatedSessionInfo:
     if "provider" not in body.model_fields_set:
         provider = await _default_session_provider(body.config_dir, body.engine, body.codex_account,
                                                    body.omp_profile, body.subagent_model)
         body = body.model_copy(update={"provider": provider})
-    avisos_extra: list[str] = []
+    explicit_account = body.config_dir is not None
+    body, account_source, avisos_extra = await _inherit_from_creator(body)
     # Convidado fica na conta Codex padrão: as outras contas são do dono.
     if body.provider == "codex" and body.codex_account is None and guest_users.current.get() is None:
         connected = await _connected_codex_accounts()
         if connected and not any(account.is_default for account in connected):
             body = body.model_copy(update={"codex_account": connected[0].id})
             avisos_extra.append(f"A conta Codex padrão não está conectada; a sessão usa a conta {connected[0].id}.")
-    if body.config_dir is None and body.provider == "claude" and not body.engine:
-        # Sem conta pedida, a padrão só vale se tiver cota; senão nasce na de mais folga.
+    if not explicit_account and body.provider == "claude" and not body.engine:
+        # Sem conta pedida, a herdada ou a padrão só vale se não estiver acabando; senão nasce na de
+        # mais folga, e a resposta diz que trocou.
         from app import cotas
-        config_dir, aviso = await asyncio.to_thread(cotas.conta_com_cota, None, cotas.cotas_claude())
+        config_dir, aviso = await asyncio.to_thread(cotas.conta_com_cota, body.config_dir, cotas.cotas_claude())
         if aviso:
             _log.warning("create_session %s: %s", body.name, aviso)
             body = body.model_copy(update={"config_dir": config_dir})
+            avisos_extra.append(aviso)
+            account_source = "quota"
     if body.provider == "claude" and not body.engine and (
             body.config_dir is None or body.config_dir in {c.path for c in list_config_dirs()}):
         cfg = Path(body.config_dir) if body.config_dir else None
@@ -2278,6 +2333,8 @@ async def create_session(body: CreateBody):
                 info = info.model_copy(update={"owner": guest.name})
             if avisos_extra:
                 info = info.model_copy(update={"avisos": [*info.avisos, *avisos_extra]})
+            info = CreatedSessionInfo(**info.model_dump(), config_dir=body.config_dir,
+                                      account_source=account_source)
             if (guest is None and body.remember_provider
                     and runtime_config.get("last_session_provider") != info.provider):
                 try:
@@ -4671,6 +4728,15 @@ async def _send_managed(name: str, text: str, provider: str, *, track_entry: boo
                 **({"entry_id":operation_id} if track_entry and queued else {})}
         if disposition not in {"accepted", "deferred"}:
             raise RuntimeError("resultado incerto; entrada conservada sem reenvio" if disposition == "unknown" else "entrada recusada pelo runtime")
+        if (disposition == "deferred" and command["kind"] == "submit" and not queued and provider == "claude"
+                and isinstance(coordinator.slot(name).binding.meta.get("terminal"), dict)):
+            # Comando de barra não tem linha na fila: adiado, ele não roda depois sozinho.
+            motivo = str((reply.get("payload") or {}).get("code") or "deferred")
+            comando = text.split()[0]
+            diag.registrar("runtime.command_deferred", "aviso", sessao=name, codigo=motivo[:60])
+            return {"ok":False, "error":erro("erro_comando_nao_executado",
+                f"{comando} não foi executado: o terminal não aceitou agora ({motivo}). Mande de novo.",
+                comando=comando, motivo=motivo)}
         return {"ok":True, "error":None, "delivered":disposition == "accepted",
             **({"native":True} if (reply.get("payload") or {}).get("native") is True else {}),
             **({"entry_id":operation_id} if track_entry and command["kind"] == "submit" and not text.lstrip().startswith("/") else {})}
@@ -5845,6 +5911,7 @@ def _recusa_se_so_enfileirou(name: str, res: dict) -> None:
 
 
 def _recusa_se_painel_aberto(name: str) -> None:
+    # Com o Rust dono, pergunta pela ponte (HTTP): rota `async` chama por `asyncio.to_thread`.
     # Com o painel anexado, a janela do tmux esta no tamanho DELE (~120x20). Quem conta linha no
     # pane — o seletor de opcao, o stepper do AskUserQuestion (terminal_input.answer_questions /
     # answer_question_pi) e o model_picker (lista e troca de modelo, que dirige o /model contando
@@ -5852,7 +5919,13 @@ def _recusa_se_painel_aberto(name: str) -> None:
     #
     # O termsock NAO importa `pty` no topo justamente pra este import funcionar no Windows.
     from app import termsock
-    if name in termsock.clientes_ativos():
+    try:
+        aberto = termsock.painel_aberto(name)
+    except list_bridge.ListBridgeError as e:
+        # Sem resposta do Rust não dá pra dizer que o painel está fechado; a ponte já foi ao diário.
+        raise HTTPException(status_code=503, detail=erro(
+            "erro_terminal_indisponivel", "nao consegui conferir o painel de terminal", detalhe=e.code))
+    if aberto:
         raise HTTPException(status_code=409,
                             detail=erro("erro_terminal_aberto",
                                         "Terminal aberto nesta sessao. Feche o painel pra responder "
@@ -5861,20 +5934,38 @@ def _recusa_se_painel_aberto(name: str) -> None:
 
 @app.post("/api/sessions/{name}/select", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 def select(name: str, body: SelectBody):
-    from app.runtime_terminal import route_sync
-    pending = plugin_bridge.pergunta_pendente(name)
-    payload = {"option":body.option}
-    if pending is not None:
-        payload["request_id"] = pending["id"]
-        if str(pending["id"]).startswith("perm:") and body.option not in (1, 2):
-            raise HTTPException(409, detail=erro("erro_opcao_nao_convergiu", "opção fora do pedido de permissão"))
-    if pending is None or not str(pending["id"]).startswith("perm:"):
-        # Pergunta `ask:` pode acabar no teclado da TUI: aí vale a trava do painel e o cursor tem de ser lido.
-        _recusa_se_painel_aberto(name)
+    from app.runtime_terminal import TerminalOutcomeUnknown, route_sync
+    info = _cached_info_sync(name)
+    # A rota do terminal só conhece o vínculo Claude: para outro provedor (Codex sem terminal
+    # incluído) ela suspendia a escrita antes de chegar ao ramo dele.
+    if getattr(info, "provider", "claude") == "claude":
+        pending = plugin_bridge.pergunta_pendente(name)
+        payload = {"option":body.option}
         if pending is not None:
-            payload["require_cursor"] = True
-    if route_sync(name, {"kind":"control", "control":"select", "payload":payload}) is not None:
-        return {"ok": True}
+            payload["request_id"] = pending["id"]
+            if str(pending["id"]).startswith("perm:") and body.option not in (1, 2):
+                raise HTTPException(409, detail=erro("erro_opcao_nao_convergiu", "opção fora do pedido de permissão"))
+        if pending is None or not str(pending["id"]).startswith("perm:"):
+            # Pergunta `ask:` pode acabar no teclado da TUI: aí vale a trava do painel e o cursor tem de ser lido.
+            _recusa_se_painel_aberto(name)
+            if pending is not None:
+                payload["require_cursor"] = True
+        try:
+            routed = route_sync(name, {"kind":"control", "control":"select", "payload":payload})
+        except (TerminalControlError, TransferInProgress):
+            raise
+        except TerminalOutcomeUnknown as e:
+            _log.warning("SELECT name=%s resultado incerto no terminal: %s", name, e)
+            raise HTTPException(409, detail=erro("erro_sem_confirmacao_resposta",
+                "resposta enviada, mas nao deu pra confirmar a tempo — "
+                "confira na sessao antes de responder de novo")) from None
+        except RuntimeError as e:
+            # Antes da entrega (vínculo, posse, Rust subindo): nada chegou ao pane.
+            _log.warning("SELECT name=%s rota do terminal falhou: %s", name, e, exc_info=True)
+            raise HTTPException(503, detail=erro("erro_opcao_nao_convergiu",
+                "não consegui responder pelo terminal — opção NÃO enviada", detalhe=str(e))) from None
+        if routed is not None:
+            return {"ok": True}
     # Mesma guarda do /input — e aqui ela é a ÚNICA: a cadeia abaixo não sabe falhar. terminal.select
     # devolve None, send_keys descarta o returncode e tmux._run converte tmux morto/travado
     # (TimeoutExpired/OSError) num CompletedProcess(returncode=1) que ninguém lê. Sem isto, responder
@@ -5899,7 +5990,6 @@ def select(name: str, body: SelectBody):
     # Kimi: os botoes de aprovacao (plano/comando/arquivo) sao desenhados a partir do WIRE, entao a
     # escolha volta pelo wire tambem — tecla numerica + `interaction.resolved` como prova. O drive
     # generico abaixo NAO atende este provider em hipotese nenhuma (ver _select_aprovacao_kimi).
-    info = _cached_info_sync(name)
     if getattr(info, "provider", "claude") == "kimi":
         return _select_aprovacao_kimi(name, info, body.option)
     codex_sem_terminal = getattr(info, "provider", "claude") == "codex" and getattr(info, "headless", False)
@@ -6011,7 +6101,9 @@ async def interrupt(name: str, clear: bool = False):
     # clear=True: alem de interromper, limpa o input (2o Esc). So o front com msg pendente passa isso —
     # garante input nao-vazio, evitando que o Esc-Esc abra o menu de rewind num input ja vazio.
     # terminal.interrupt e SYNC (tmux) -> threadpool pra nao bloquear o event loop (handler async agora).
+    pergunta = (plugin_bridge.pergunta_pendente(name) or {}).get("id")
     await asyncio.to_thread(terminal.interrupt, name, clear=clear)
+    plugin_bridge.interrompeu(name, pergunta)
     return {"ok": True}
 
 
@@ -6031,7 +6123,7 @@ async def pergunta_lateral(name: str, body: BtwBody):
     sem_terminal = await _send_thread(_headless, name)
     if not sem_terminal:
         await _send_thread(_exige_claude_de_terminal, name)
-        _recusa_se_painel_aberto(name)
+        await asyncio.to_thread(_recusa_se_painel_aberto, name)
     try:
         perguntar = btw.perguntar_sem_terminal if sem_terminal else btw.perguntar
         item = await asyncio.to_thread(perguntar, name, body.question)
@@ -6214,7 +6306,7 @@ async def _guard_permissao_codex(name: str) -> None:
     if _provider_of(name) != "codex":
         raise HTTPException(400, detail=erro("erro_permissao_so_codex",
                                              "este modo de permissao so vale para sessoes Codex"))
-    _recusa_se_painel_aberto(name)
+    await asyncio.to_thread(_recusa_se_painel_aberto, name)
     if not await get_adapter("codex").deliverable(name):
         raise HTTPException(409, detail=erro("erro_permissao_ocupada",
                                              "a sessao esta trabalhando — espere ela terminar"))
@@ -6586,6 +6678,12 @@ def _auto_update_motivo() -> Optional[str]:
             idade = _AUTO_UPDATE_FALHA_JANELA_S
         if idade < _AUTO_UPDATE_FALHA_JANELA_S:
             return "ultima atualizacao falhou"
+    # Como o dist: o automático espera o topo inteiro publicado; parar antes dele é só no botão.
+    ate = atualizar.pinned_target("main")[0]
+    if ate is None:
+        return "nao deu pra conferir o binario do Rust publicado"
+    if ate != "origin/main":
+        return "binario do Rust do topo ainda nao publicado para este sistema"
     try:
         with urllib.request.urlopen(_DIST_SHA_URL, timeout=15) as r:
             sha_dist = r.read().decode().strip()
@@ -9296,7 +9394,7 @@ async def model_effort(name: str, body: ModelEffortBody):
         except Exception as e:
             raise HTTPException(409, detail=erro("erro_modelo_indisponivel", f"não consegui trocar: {e}"))
         return {"ok": True, "scope": "session", "result": None}
-    _recusa_se_painel_aberto(name)
+    await asyncio.to_thread(_recusa_se_painel_aberto, name)
     try:
         return await asyncio.to_thread(terminal.set_model_effort, name, body.model, body.effort, body.scope)
     except PickerError as e:
@@ -9375,7 +9473,7 @@ async def permission_modes(name: str, sondar: bool = False):
         anterior = (vivo.modo_nao_plan if vivo and vivo.vivo else None) or meta.get("previous_non_plan")
         return {"current": atual, "modes": list(model_args.MODOS_PERMISSAO_CLAUDE), "sondavel": False,
                 "previous_non_plan": anterior}
-    _guard_perm(name, info)
+    await asyncio.to_thread(_guard_perm, name, info)
     key = _cache_key_perm(name, info)
     # leitura do atual sem tecla (bloqueador 1)
     try:
@@ -9466,7 +9564,7 @@ async def permission_mode_set(name: str, body: PermissionModeBody):
         view = runtime_data(name)
         return {"mode": ficou, "current": ficou,
                 "previous_non_plan":view.get("previous_non_plan") if view is not None else vivo.modo_nao_plan if vivo else None}
-    _guard_perm(name, info)
+    await asyncio.to_thread(_guard_perm, name, info)
     if alvo == "bypassPermissions" and not await asyncio.to_thread(_bypass_no_ciclo, name):
         return await _bypass_reopen(name, info)
     tracking_key = _tracking_key_perm(name, info)
@@ -9754,7 +9852,7 @@ async def model_options(name: str):
                 "models": claude_models.para_tela(modelos, atual)}
     # Conta Anthropic: le o picker de verdade. Abre e fecha um overlay — nao vai pro scrollback,
     # nao entra no transcript e nao gasta token.
-    _recusa_se_painel_aberto(name)
+    await asyncio.to_thread(_recusa_se_painel_aberto, name)
     chave = _chave_config(_session_config_dir(name))
     cacheado = _models_cache_get(chave)
     if cacheado is not None:
@@ -9873,7 +9971,7 @@ async def engine_model_set(name: str, body: EngineModelBody):
     settings.json e capturado antes e reposto depois: a troca vale onde foi pedida e em lugar nenhum
     mais. Ver app/default_model.py.
     """
-    _recusa_se_painel_aberto(name)
+    await asyncio.to_thread(_recusa_se_painel_aberto, name)
     info = await _cached_info(name)
     if not info:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessao nao encontrada"))
@@ -10147,7 +10245,7 @@ async def kimi_models_list(name: str):
 @app.post("/api/sessions/{name}/kimi/model", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 async def kimi_model_set(name: str, body: KimiModelBody):
     info = await _kimi_info(name)
-    _recusa_se_painel_aberto(name)
+    await asyncio.to_thread(_recusa_se_painel_aberto, name)
     # Sessão TRABALHANDO: o `/model` digitado cairia no composer e o Enter o enfileiraria como
     # MENSAGEM — a troca viraria um "/model" pro modelo ler. No Claude o _require_drivable cobre
     # isso pelo spinner; o do Kimi são fases de lua, fora do que ele detecta, então a guarda é o
