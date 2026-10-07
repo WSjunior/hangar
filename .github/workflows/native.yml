@@ -177,7 +177,7 @@ jobs:
           |---|---|
           | Windows (x64) | `Hangar-windows-x86_64.zip` |
           | macOS (Apple Silicon) | `Hangar-macos-aarch64.zip` |
-          | Linux (x64) | `Hangar-linux-x86_64.deb` (Ubuntu, Debian, Mint), `Hangar-linux-x86_64.rpm` (Fedora, openSUSE) ou `Hangar-linux-x86_64.tar.gz` |
+          | Linux (x64) | `Hangar-linux-x86_64.deb` (Ubuntu 24.04+, Debian 13+, Mint 22+), `Hangar-linux-x86_64.rpm` (Fedora 40+, openSUSE Tumbleweed) ou `Hangar-linux-x86_64.tar.gz` (glibc 2.39 ou mais nova) |
 
           ### Como instalar
 

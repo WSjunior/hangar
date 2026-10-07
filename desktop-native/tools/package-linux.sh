@@ -17,10 +17,14 @@ printf '[Desktop Entry]\nType=Application\nName=Hangar\nExec=/usr/bin/hangar-nat
 deb="$root/deb"
 cp -a "$pkg" "$deb"
 mkdir -p "$deb/DEBIAN"
+# O binário sai do runner ubuntu-24.04 (glibc 2.39): sem o Depends, o dpkg instala num sistema mais velho um app que não abre.
+# As outras bibliotecas ligadas (alsa, xcb, xkbcommon) vêm em todo desktop Debian/Ubuntu; o dpkg-shlibdeps gravaria os
+# nomes t64 do runner e exigiria uma árvore debian/ só para isto.
 cat > "$deb/DEBIAN/control" <<EOF
 Package: hangar
 Version: $version
 Architecture: amd64
+Depends: libc6 (>= 2.39)
 Maintainer: Hangar <jeffer1312@users.noreply.github.com>
 Section: devel
 Priority: optional
