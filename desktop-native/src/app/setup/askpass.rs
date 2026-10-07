@@ -7,12 +7,20 @@ use super::system::{find_program, hidden};
 
 pub(crate) fn new_code() -> String {
     let mut raw = [0u8; 16];
-    let _ = ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut raw);
+    // Sem aleatório do sistema o código seria previsível: melhor derrubar o assistente que seguir com ele.
+    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut raw).expect("system randomness unavailable");
     raw.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub(crate) enum Answer { Refuse, Known(String), Ask }
+
+// À mão para a senha nunca sair num `{:?}` ou no `assert_eq!` de um teste.
+impl std::fmt::Debug for Answer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self { Self::Refuse => f.write_str("Refuse"), Self::Known(_) => f.write_str("Known(..)"), Self::Ask => f.write_str("Ask") }
+    }
+}
 
 /// O código desta instalação e a senha já conferida. Nunca vai ao disco.
 #[derive(Default)]
@@ -22,7 +30,8 @@ impl Vault {
     pub(crate) fn new(code: String) -> Self { Self { code, password: None } }
     pub(crate) fn code(&self) -> &str { &self.code }
     pub(crate) fn answer(&self, code: &str) -> Answer {
-        if self.code.is_empty() || code != self.code { return Answer::Refuse; }
+        let same = ring::constant_time::verify_slices_are_equal(code.as_bytes(), self.code.as_bytes()).is_ok();
+        if self.code.is_empty() || !same { return Answer::Refuse; }
         match &self.password { Some(password) => Answer::Known(password.clone()), None => Answer::Ask }
     }
     pub(crate) fn remember(&mut self, password: String) { self.password = Some(password); }
@@ -32,8 +41,7 @@ impl Vault {
     pub(crate) fn forget(&mut self) { self.password = None; self.code.clear(); }
 }
 
-/// Confere a senha antes de guardá-la: errada, a janela pede de novo. `-k` ignora a senha que o sudo já tinha
-/// (medido em sudo-rs 0.2.8 e sudo 1.9.17: `-S -k -p '' -v` aceita; certa sai 0, errada sai 1).
+/// Confere a senha antes de guardá-la: errada, a janela pede de novo. `-k` ignora a senha que o sudo já tinha.
 pub(crate) fn sudo_accepts(password: &str, path: &str) -> Result<bool, String> {
     let sudo = find_program("sudo", path).ok_or("sudo")?;
     let mut child = hidden(&mut Command::new(sudo)).args(["-S", "-k", "-v", "-p", ""]).env("PATH", path)
