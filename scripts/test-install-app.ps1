@@ -231,7 +231,7 @@ $rodaFailIf = Get-If '$script:faltaRodaPsmux' 'roda do mouse'
 $iEss = $texto.IndexOf('$essenciais = @(')
 $essLine = $texto.Substring($iEss, $texto.IndexOf("`n", $iEss) - $iEss).TrimEnd("`r")
 Assert (-not (Get-Def 'Instale').Contains('Add-AppPending') -and -not (Get-Def 'Instale-ClaudeCode').Contains('Add-AppPending')) 'dependencia essencial do 1/8 nao ganha codigo de pendencia'
-$defs = (@('Nota', 'Ok', 'Falta', 'Erro', 'Titulo', 'Mark-Step', 'Mark-Item', 'Add-AppPending', 'Send-TailscaleLink', 'Instale', 'Loga-Tailscale', 'Pergunte-Mesmo') | ForEach-Object { Get-Def $_ }) -join "`n"
+$defs = (@('Nota', 'Ok', 'Falta', 'Erro', 'Titulo', 'Mark-Step', 'Mark-Item', 'Add-AppPending', 'Send-TailscaleLink', 'Instale', 'Loga-Tailscale', 'Pergunte-Mesmo', 'Policy-Locked') | ForEach-Object { Get-Def $_ }) -join "`n"
 $preamble = @'
 $ErrorActionPreference = 'Stop'
 $App = $true; $Sim = $false; $SoChecar = $false; $Update = $false; $script:Interativo = $false
@@ -242,11 +242,11 @@ function Pausa-Fim { }
 function FakePowerShell { $global:LASTEXITCODE = 1 }
 $PowerShellExe = 'FakePowerShell'; $raiz = 'C:\hangar-falso'; $script:psmuxSessoes = 2
 '@
-function Run-Gate($caso, $corpo) {
+function Run-Gate($caso, $corpo, $depois) {
     $child = Join-Path $env:TEMP ("hangar-test-" + [guid]::NewGuid().ToString('N') + '.ps1')
     $out = "$child.txt"
     $script1 = $preamble + "`n" + $defs + "`n" + $caso + "`ntry {`nMark-Step 'preparar' 'fazendo'`n" + $corpo + "`n" + $essLine + "`n" + $gate1 + "`n" +
-        $devModeIf + "`n" + $rodaFailIf + "`nWrite-Host 'PASSOU-PORTAO'`n" + $gateEnd + "`n`$script:finalState = 'ok'`n} finally {`n" +
+        $devModeIf + "`n" + $rodaFailIf + "`nWrite-Host 'PASSOU-PORTAO'`n" + $depois + "`n" + $gateEnd + "`n`$script:finalState = 'ok'`n} finally {`n" +
         "if (`$script:finalState -eq 'falhou' -and `$script:currentStep) { Write-Host `"##HANGAR-PASSO## `$(`$script:currentStep) falhou`" }`n" +
         "Write-Host `"##HANGAR-FIM## `$(`$script:finalState)`"`n}`n"
     [IO.File]::WriteAllText($child, $script1, (New-Object Text.UTF8Encoding $true))
@@ -291,6 +291,55 @@ function Test-Internet { return $false }
 $l = Run-Gate $depCaso "[void](Instale 'psmux (multiplexador)' 'psmux' 'marlocarlo.psmux' 'sem ele nao existe sessao')"
 Assert (-not ($l -contains 'PASSOU-PORTAO') -and ($l -contains '##HANGAR-ERRO## sem-internet')) 'dependencia essencial faltando: para no 1/8 com o codigo'
 Assert ($l[-2] -eq '##HANGAR-PASSO## preparar falhou' -and $l[-1] -eq '##HANGAR-FIM## falhou') "dependencia essencial faltando: FIM falhou (ultima: $($l[-1]))"
+
+# --- Rodada de correcao 1: a tela diz o que aconteceu ---
+# Login da Tailscale sem concluir no 1/8 e o 5d sem nome de no: a etapa fecha pendente.
+$ts5d = Get-If "`$Tailscale -eq 'nao'" 'Publica-Tailscale'
+$tsClose = Get-If '$null -ne $antesTs' "Mark-Step 'tailscale'"
+$tsCaso5d = $tsCaso + @'
+
+$Tailscale = 'sim'; $script:querTailscale = $true
+function Tem($c) { return $true }
+function Publica-Tailscale { Nota 'tailscale sem nome de no (nao logado?)' }
+'@
+$l = Run-Gate $tsCaso5d 'Loga-Tailscale' ("`$antesTs = `$null`n" + $ts5d + "`n" + $tsClose)
+$passosTs = @($l | Where-Object { $_ -like '##HANGAR-PASSO## tailscale *' })
+Assert ($passosTs.Count -and $passosTs[-1] -eq '##HANGAR-PASSO## tailscale pendente') "login da Tailscale sem concluir no 1/8: etapa tailscale pendente (veio: $($passosTs -join '|'))"
+
+# 7b: o bash ausente deixa o item hangar-send pendente, mesmo sem somar pendencia.
+$iSend = $texto.IndexOf('$sendOk = $true')
+$fimSend = "else { Mark-Item 'hangar-send' 'pendente' 'sessoes conversam entre si' }"
+$send7b = $texto.Substring($iSend, $texto.IndexOf($fimSend) + $fimSend.Length - $iSend)
+. ([scriptblock]::Create((Get-Def 'Titulo')))
+function Tem($cmd) { return $false }
+$App = $true; Limpa
+. ([scriptblock]::Create($send7b))
+Assert ($script:saida -contains '##HANGAR-ITEM## hangar-send pendente sessoes conversam entre si') '7b sem bash: ITEM hangar-send pendente'
+
+# Claude Code que nao instalou: sem rede o codigo e sem-internet.
+. ([scriptblock]::Create((Get-Def 'Instale-ClaudeCode')))
+function Nativo { return 1 }
+$SoChecar = $false; $Update = $false
+function Test-Internet { return $false }
+$script:depsError = ''; $script:pendencias = @(); Limpa
+[void](Instale-ClaudeCode 'agente escolhido')
+Assert ($script:depsError -eq 'sem-internet') 'Claude Code sem rede: sem-internet'
+function Test-Internet { return $true }
+$script:depsError = ''; $script:pendencias = @(); Limpa
+[void](Instale-ClaudeCode 'agente escolhido')
+Assert ($script:depsError -eq 'agente-nao-instalou') 'Claude Code com rede: agente-nao-instalou'
+
+# Politica travada pela TI (AllSigned por GPO): item vermelho sempre com a pendencia politica-travada.
+$polIf = Get-If '$App' 'politica-scripts'
+$soChecarIf = Get-If '$SoChecar' 'Nada faltando'
+$polCaso = @'
+function Get-ExecutionPolicy { param($Scope) if ($Scope -eq 'MachinePolicy') { return 'AllSigned' } return 'Undefined' }
+'@
+$l = Run-Gate $polCaso $polIf
+Assert ($l -contains '##HANGAR-ITEM## politica-scripts falhou permissao de scripts (travada pela TI)') 'AllSigned por GPO: item politica-scripts falhou'
+Assert (($l -contains '##HANGAR-PENDENCIA## politica-travada permissao de scripts') -and $l[-1] -eq '##HANGAR-FIM## pendente') "AllSigned por GPO: pendencia politica-travada e FIM pendente (ultima: $($l[-1]))"
+$l = Run-Gate ($polCaso + "`n`$SoChecar = `$true") ($polIf + "`n" + $soChecarIf)
+Assert (($l -contains '##HANGAR-PASSO## preparar pendente') -and $l[-1] -eq '##HANGAR-FIM## pendente') "-SoChecar com AllSigned por GPO: preparar e FIM pendente (ultima: $($l[-1]))"
 
 # --- fim dos casos ---
 if ($script:falhas) { [Console]::WriteLine("$($script:falhas) falha(s)"); exit 1 }

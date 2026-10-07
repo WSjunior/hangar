@@ -189,8 +189,6 @@ function Instalar-Wrappers($perfis) {
                 $agora = (& $i.exe -NoProfile -Command 'Get-ExecutionPolicy' 2>$null)
                 if ($agora -eq 'Restricted' -or -not $agora) {
                     $podeEscrever = $false
-                    # Lido pelo install.ps1 -App, que mostra a frase da politica travada pela TI.
-                    $script:policyLocked = $true
                     Falta "$($i.nome): ExecutionPolicy continua Restricted (GPO?) - wrapper NAO instalado"
                 } else {
                     Ok "$($i.nome): ExecutionPolicy do usuario = $agora"

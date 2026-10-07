@@ -374,6 +374,8 @@ function Loga-Tailscale {
             Stop-Job $job -ErrorAction SilentlyContinue
             Falta 'tailscale up nao concluiu em 5 min - termine o login e rode este instalador de novo'
             Mark-Item 'tailscale-conta' 'pendente' 'conta Tailscale'
+            # Lido no fim do 5d: a pendencia do 1/8 entra antes da contagem da etapa tailscale.
+            $script:tsLoginPending = $true
             # No -App ninguem le o amarelo: vira pendencia com o botao "Entrar na Tailscale".
             if ($App) { Add-AppPending 'login do Tailscale' 'tailscale-login' }
         } else {
@@ -564,7 +566,7 @@ function Instale-ClaudeCode($porque) {
         Erro "Claude Code nao instalou (exit $rc)"
         Nota 'manual: irm https://claude.ai/install.ps1 | iex'
         Mark-Item 'claude' 'falhou' $rotulo
-        if (-not $script:depsError) { $script:depsError = 'agente-nao-instalou' }
+        if (-not $script:depsError) { $script:depsError = if (Test-Internet) { 'agente-nao-instalou' } else { 'sem-internet' } }
         $script:pendencias += $rotulo
         return $false
     }
@@ -581,7 +583,7 @@ function Instale-ClaudeCode($porque) {
     Erro "Claude Code instalou mas o comando nao aparece (esperado em $binClaude\claude.exe)"
     Nota 'feche e abra o terminal, e rode o install de novo'
     Mark-Item 'claude' 'falhou' $rotulo
-    if (-not $script:depsError) { $script:depsError = 'agente-nao-instalou' }
+    if (-not $script:depsError) { $script:depsError = if (Test-Internet) { 'agente-nao-instalou' } else { 'sem-internet' } }
     $script:pendencias += $rotulo
     return $false
 }
@@ -943,7 +945,12 @@ elseif ($SoChecar -or $Update) {
 # Permissao de scripts: o 5/8 a libera para o usuario; so a regra imposta pela TI barra.
 if ($App) {
     $politicaAtual = [string](& $PowerShellExe -NoProfile -Command 'Get-ExecutionPolicy' 2>$null)
-    if (Policy-Locked) { Mark-Item 'politica-scripts' 'falhou' 'permissao de scripts (travada pela TI)' }
+    $script:policyLocked = Policy-Locked
+    # Item vermelho sempre com a pendencia: sem ela a FIM sairia ok com o perfil barrado.
+    if ($script:policyLocked) {
+        Mark-Item 'politica-scripts' 'falhou' 'permissao de scripts (travada pela TI)'
+        Add-AppPending 'permissao de scripts' 'politica-travada'
+    }
     elseif ($politicaAtual -eq 'Restricted') { Mark-Item 'politica-scripts' 'fila' 'permissao de scripts' }
     else { Mark-Item 'politica-scripts' 'ok' 'permissao de scripts' }
 }
@@ -1585,8 +1592,6 @@ if ($jaTem -or (Pergunte '  Instalar (recomendado)?')) {
     $wrappersOk = (@(Instalar-Wrappers $perfis) | Select-Object -Last 1) -eq $true
     if ($wrappersOk) { Mark-Item 'wrappers' 'ok' 'sessao aberta no terminal aparece no app' }
     else { Mark-Item 'wrappers' 'pendente' 'sessao aberta no terminal aparece no app' }
-    # Regra da TI barra o perfil de todo terminal; no -App vira a pendencia com frase propria.
-    if ($App -and $script:policyLocked) { Add-AppPending 'permissao de scripts' 'politica-travada' }
 } else {
     Nota 'pulado - sessao aberta no terminal nao vai aparecer no app'
 }
@@ -1972,7 +1977,7 @@ if ($Tailscale -eq 'nao') {
     }
 }
 if ($null -ne $antesTs) {
-    if (@($script:pendencias).Count -gt $antesTs) { Mark-Step 'tailscale' 'pendente' } else { Mark-Step 'tailscale' 'ok' }
+    if (@($script:pendencias).Count -gt $antesTs -or $script:tsLoginPending) { Mark-Step 'tailscale' 'pendente' } else { Mark-Step 'tailscale' 'ok' }
 }
 
 }
@@ -2325,7 +2330,8 @@ WScript.Quit CreateObject("WScript.Shell").Run("powershell -NoProfile -Execution
 #      protocolo no ~/.claude/CLAUDE.md. Duplicar esse texto aqui daria duas fontes da verdade,
 #      e a que diverge silenciosamente e sempre a copia.
 Mark-ItemSince 'servicos' $antesServ 'inicio automatico'
-$antesSend = @($script:pendencias).Count
+# As faltas do 7b sao amarelas e nao entram na lista: o item segue esta marca, nao a contagem.
+$sendOk = $true
 Titulo '7b/8 hangar-send (recado e pareamento entre sessoes)'
 $bash = $null
 if (Tem 'git') {
@@ -2336,6 +2342,7 @@ if (Tem 'git') {
 }
 if (-not $bash) {
     Falta 'bash do Git for Windows nao encontrado - hangar-send fica de fora'
+    $sendOk = $false
     Nota 'instale o Git e rode este instalador de novo'
 } else {
     $binUsuario = Join-Path $HOME '.local\bin'
@@ -2359,6 +2366,7 @@ if (-not $bash) {
     }
     if (-not $pyExe) {
         Falta 'nenhum Python real encontrado (so o atalho da Store) - hangar-send ficaria sem JSON'
+        $sendOk = $false
         Nota 'instale com:  winget install --id Python.Python.3.13'
     } else {
         # C:\Windows\py.exe -> /c/Windows/py.exe, que e a forma que o bash do MSYS executa.
@@ -2394,6 +2402,7 @@ if (-not $bash) {
     $lancadorConta = Join-Path $binUsuario 'hangar-conta.cmd'
     if (-not $pyExe) {
         Falta 'hangar-conta.cmd nao criado - precisa de um Python real (ver acima)'
+        $sendOk = $false
     } else {
         $conteudoConta = "@echo off`r`n" +
                          "`"$pyExe`"$arg `"$raiz\scripts\hangar-conta`" %*`r`n"
@@ -2410,6 +2419,7 @@ if (-not $bash) {
         else { Ok 'lancador hangar-doctor.cmd ja atualizado' }
     } else {
         Falta 'hangar-doctor.cmd nao criado - o venv do backend nao existe (passo 2/8 falhou?)'
+        $sendOk = $false
     }
 
     # (2c) lancador pro hangar-engine (motores de modelo). Sem ele o backend monta o comando do pane
@@ -2423,6 +2433,7 @@ if (-not $bash) {
     $lancadorEngine = Join-Path $binUsuario 'hangar-engine.cmd'
     if (-not $pyExe) {
         Falta 'hangar-engine.cmd nao criado - precisa de um Python real (ver acima)'
+        $sendOk = $false
     } else {
         $conteudoEngine = "@echo off`r`n" +
                           "`"$pyExe`"$arg `"$raiz\scripts\hangar-engine`" %*`r`n"
@@ -2480,6 +2491,7 @@ if (-not $bash) {
     if (-not (Test-Path $pyTui)) { $pyTui = $pyExe; $argTui = $arg }
     if (-not $pyExe) {
         Falta 'lancadores do Codex nao criados - precisa de um Python real (ver acima)'
+        $sendOk = $false
     } else {
         foreach ($par in @(@('hangar-codex-tui', $pyTui, $argTui), @('hangar-codex', $pyExe, $arg))) {
             $nome, $py, $a = $par
@@ -2561,12 +2573,14 @@ if (-not $bash) {
         Nota 'teste (em terminal NOVO):  hangar-send --list'
     } else {
         Falta 'install-hangar-send.sh falhou:'
+        $sendOk = $false
         $saida | Select-Object -Last 12 | ForEach-Object { Nota "  $_" }
         Nota "rodar na mao:  & '$bash' -lc 'cd $rota && ./scripts/install-hangar-send.sh'"
     }
 }
 
-Mark-ItemSince 'hangar-send' $antesSend 'sessoes conversam entre si'
+if ($sendOk) { Mark-Item 'hangar-send' 'ok' 'sessoes conversam entre si' }
+else { Mark-Item 'hangar-send' 'pendente' 'sessoes conversam entre si' }
 
 # -- Passos de atualizacao: marcar como ja feitos ----------------------------
 # Uma instalacao do ZERO ja satisfaz todo passo de docs\atualizacoes\ -- eles existem pra levar uma
