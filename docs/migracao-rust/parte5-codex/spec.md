@@ -1,6 +1,6 @@
 # Parte 5 (Codex): spec
 
-**Estado:** aguardando aprovação do dono. Não autoriza plano nem código.
+**Estado:** aprovada pelo dono em 07/10/2026. Cada subparte ganha plano próprio antes do código.
 **Análise:** [`analise.md`](analise.md). **Base do plano:** `main` + `fix/codex-hardening`
 (Stop encerra os comandos do turno, `codexErrorInfo`, pensamento ao vivo, `codex_turno_cortado`,
 kill com identidade); a spec conta com isso e não refaz.
