@@ -452,6 +452,7 @@ async fn the_footer_wait_never_releases_the_live_monitor_observer() {
     use hangar_server::terminal_control::{CaptureRequest, Limits, TerminalPool};
     let dir = tempfile::tempdir().unwrap();
     let label = format!("hangar-answer-{}", dir.path().file_name().unwrap().to_string_lossy());
+    let _server = IsolatedTmux(label.clone());
     let tmux = |args: &[&str]| {
         let out = std::process::Command::new("tmux").arg("-u").arg("-L").arg(&label).args(args).output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -476,5 +477,18 @@ async fn the_footer_wait_never_releases_the_live_monitor_observer() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(clients(), before, "o observador do monitor segue o mesmo");
     pool.capture(monitor).await.unwrap();
-    let _ = std::process::Command::new("tmux").args(["-L", &label, "kill-server"]).output();
+}
+
+/// Derruba o servidor tmux isolado (só o `-L` do teste, nunca o padrão) mesmo quando uma asserção falha.
+#[cfg(unix)]
+struct IsolatedTmux(String);
+#[cfg(unix)]
+impl Drop for IsolatedTmux {
+    fn drop(&mut self) {
+        let tmux = |args: &[&str]| std::process::Command::new("tmux").arg("-L").arg(&self.0).args(args).output().ok();
+        let socket = tmux(&["display-message", "-p", "#{socket_path}"]).filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).filter(|s| !s.is_empty());
+        tmux(&["kill-server"]);
+        if let Some(socket) = socket { let _ = std::fs::remove_file(socket); }
+    }
 }

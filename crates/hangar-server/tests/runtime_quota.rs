@@ -56,6 +56,21 @@ async fn quota_failure_formats_without_windows_and_the_next_call_retries() {
 }
 
 #[tokio::test]
+async fn quota_transport_failure_is_remembered_per_account() {
+    // Aceita e derruba a conexão: falha de transporte, contada.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    tokio::spawn(async move { loop { let (stream,_) = listener.accept().await.unwrap(); counter.fetch_add(1,Ordering::SeqCst); drop(stream); } });
+    let client = PolicyClient::new(address,"secret".into(),"instance".into());
+    for _ in 0..3 { assert!(client.quota_windows("key","/conta/a").await.is_none()); }
+    assert_eq!(calls.load(Ordering::SeqCst),1,"Python fora do ar não é consultado de novo na janela curta");
+    assert!(client.quota_windows("key","/conta/b").await.is_none());
+    assert_eq!(calls.load(Ordering::SeqCst),2,"cada conta tem a sua entrada");
+}
+
+#[tokio::test]
 async fn quota_cache_holds_at_most_sixteen_accounts() {
     let (address,calls) = fake_quota(Arc::new(AtomicBool::new(false))).await;
     let client = PolicyClient::new(address,"secret".into(),"instance".into());

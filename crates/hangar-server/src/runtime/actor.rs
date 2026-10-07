@@ -22,6 +22,8 @@ const MODS_CALL_LIMIT:Duration=Duration::from_secs(crate::mods::surface::APP_CAL
 /// A cota do Claude muda devagar: uma consulta ao Python por conta a cada 5 minutos basta.
 const QUOTA_TTL:Duration=Duration::from_secs(300);
 const QUOTA_ACCOUNTS:usize=16;
+/// Python fora do ar: sem isto cada linha de status esperaria o prazo inteiro de novo.
+const QUOTA_DOWN_TTL:Duration=Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct PolicyClient {
@@ -31,17 +33,30 @@ pub struct PolicyClient {
     http:crate::proxy::HttpClient,
     /// `config_dir` -> (quando veio, `{"windows":[…]}`).
     quota:Arc<std::sync::Mutex<BTreeMap<String,(Instant,Value)>>>,
+    /// `config_dir` -> quando a consulta não chegou ao Python (transporte ou prazo).
+    quota_down:Arc<std::sync::Mutex<BTreeMap<String,(Instant,())>>>,
+}
+
+/// Guarda no mapa limitado a `QUOTA_ACCOUNTS`, tirando a entrada mais antiga para caber a nova.
+fn remember<T>(cache:&std::sync::Mutex<BTreeMap<String,(Instant,T)>>,config_dir:&str,value:T) {
+    let Ok(mut cache) = cache.lock() else { return };
+    if !cache.contains_key(config_dir) && cache.len() >= QUOTA_ACCOUNTS {
+        if let Some(oldest) = cache.iter().min_by_key(|(_,(at,_))|*at).map(|(dir,_)|dir.clone()) { cache.remove(&oldest); }
+    }
+    cache.insert(config_dir.to_owned(),(Instant::now(),value));
 }
 
 impl PolicyClient {
     pub fn new(upstream:std::net::SocketAddr,secret:String,instance:String) -> Self {
-        Self { upstream,secret,instance,http:crate::proxy::client(),quota:Default::default() }
+        Self { upstream,secret,instance,http:crate::proxy::client(),quota:Default::default(),quota_down:Default::default() }
     }
     /// Janelas de cota da conta, só quando vai formatar. Falha formata sem janelas e deixa o cache
     /// anterior como está; o log leva o código, nunca o dado.
     pub async fn quota_windows(&self,key:&str,config_dir:&str) -> Option<Value> {
         let cached = self.quota.lock().ok().and_then(|cache|cache.get(config_dir).cloned());
         if let Some((at,value)) = &cached { if at.elapsed() < QUOTA_TTL { return Some(value.clone()); } }
+        let down = self.quota_down.lock().ok().and_then(|down|down.get(config_dir).map(|(at,_)|at.elapsed() < QUOTA_DOWN_TTL));
+        if down == Some(true) { return None; }
         let query = form_urlencoded::Serializer::new(String::new()).append_pair("config_dir",config_dir).finish();
         let fetched = tokio::time::timeout(POLICY_TIMEOUT,async {
             let request = axum::http::Request::get(format!("http://{}/internal/quota?{query}",self.upstream))
@@ -54,15 +69,12 @@ impl PolicyClient {
         }).await.unwrap_or(Err("quota_timeout"));
         match fetched {
             Ok(value) => {
-                if let Ok(mut cache) = self.quota.lock() {
-                    if !cache.contains_key(config_dir) && cache.len() >= QUOTA_ACCOUNTS {
-                        if let Some(oldest) = cache.iter().min_by_key(|(_,(at,_))|*at).map(|(dir,_)|dir.clone()) { cache.remove(&oldest); }
-                    }
-                    cache.insert(config_dir.to_owned(),(Instant::now(),value.clone()));
-                }
+                if let Ok(mut down) = self.quota_down.lock() { down.remove(config_dir); }
+                remember(&self.quota,config_dir,value.clone());
                 Some(value)
             }
             Err(code) => {
+                if matches!(code,"quota_transport" | "quota_timeout") { remember(&self.quota_down,config_dir,()); }
                 if crate::warn_limit::allow(Some(key),code) { tracing::warn!(key=%key,code=%code,"cota do Claude indisponível; a linha sai sem janelas"); }
                 None
             }
