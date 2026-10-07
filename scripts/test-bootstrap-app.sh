@@ -27,6 +27,7 @@ new_box() {
 #!/bin/sh
 d=$(dirname "$0")
 printf '%s\n' "$@" > "$d/args"
+printf '%s' "${HANGAR_TOKEN-}" > "$d/tok"
 if [ -t 0 ]; then echo tty > "$d/stdin"; else echo notty > "$d/stdin"; fi
 exit 0
 EOF
@@ -34,6 +35,7 @@ EOF
   cat > "$B/git" <<'EOF'
 #!/bin/sh
 echo "git $*" >> "$FAKE_LOG"
+[ -z "${HANGAR_TOKEN-}${HANGAR_ASKPASS-}" ] || echo "git viu o segredo" >> "$FAKE_LOG"
 case "$*" in
   *"remote get-url origin"*) echo https://github.com/jeffer1312/hangar.git ;;
   *"pull --ff-only"*) exit "$FAKE_PULL_RC" ;;
@@ -55,6 +57,7 @@ repo_existente() { mkdir -p "$1/.git"; cp "$S/install-fake.sh" "$1/install.sh"; 
 run_boot() {
   local out=$1; shift
   ( env -i HOME="$S/home" PATH="$B:$S/sys" FAKE_LOG="$S/git.log" FAKE_INSTALL="$S/install-fake.sh" \
+      ${TEST_TOKEN:+HANGAR_TOKEN=$TEST_TOKEN HANGAR_ASKPASS=/x/askpass} \
       FAKE_PULL_RC="${FAKE_PULL_RC:-0}" FAKE_DIRTY="${FAKE_DIRTY:-0}" FAKE_CLONE_RC="${FAKE_CLONE_RC:-0}" \
       FAKE_CURL_RC="${FAKE_CURL_RC:-0}" timeout 60 setsid -w "$BASH_BIN" "$REPO/bootstrap.sh" "$@" </dev/null 2>&1 ) > "$out"
 }
@@ -96,6 +99,18 @@ run_boot "$S/out" "$D" --app --tailscale=nao --sem-nativo --agentes=codex,pi
 expect_eq "repasse: opções chegam intactas" "$(paste -sd' ' "$D/args")" '--app --tailscale=nao --sem-nativo --agentes=codex,pi'
 expect_eq "repasse: install.sh rodou com stdin vazio" "$(cat "$D/stdin")" notty
 expect_line "repasse: atualizou em vez de clonar" "$S/git.log" 'pull --ff-only origin main'
+
+# --- Caso: no --app o pull não roda o hook; a senha chega ao install.sh e não ao git ---
+new_box hook-app
+D="$S/hangar"; repo_existente "$D"
+TEST_TOKEN='segredo-123' run_boot "$S/out" "$D" --app
+expect_line "hook: --app puxa sem hooks" "$S/git.log" 'core.hooksPath=/dev/null .*pull --ff-only'
+expect_no "hook: git não vê a senha" "$S/git.log" 'git viu o segredo'
+expect_eq "hook: install.sh recebe a senha" "$(cat "$D/tok")" 'segredo-123'
+new_box hook-terminal
+D="$S/hangar"; repo_existente "$D"
+run_boot "$S/out" "$D"
+expect_no "hook: sem --app o hook segue valendo" "$S/git.log" 'core.hooksPath'
 
 # --- Caso: terminal de verdade, com e sem --app ---
 tty_case

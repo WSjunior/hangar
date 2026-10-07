@@ -28,6 +28,9 @@ REPO_URL="https://github.com/jeffer1312/hangar.git"
 RAMO="main"
 APP=0
 for a in "$@"; do case $a in --app) APP=1 ;; esac; done
+# Senha do celular e auxiliar de administrador do app: só o install.sh as recebe, não o git.
+APP_TOKEN=${HANGAR_TOKEN-}; APP_ASKPASS=${HANGAR_ASKPASS-}; APP_ASKPASS_CODE=${HANGAR_ASKPASS_CODE-}
+unset HANGAR_TOKEN HANGAR_ASKPASS HANGAR_ASKPASS_CODE
 
 say()  { printf '\n\033[1m%s\033[0m\n' "$*"; }
 ok()   { printf '  \033[32mok\033[0m  %s\n' "$*"; }
@@ -107,7 +110,11 @@ elif [ ! -d "$DEST" ]; then
   fail "$DEST existe e não é uma pasta — escolha outro destino"
 elif mesma_origem "$DEST"; then
   ok "$DEST já é este repositório — atualizando em vez de clonar"
-  if ! git -C "$DEST" pull --ff-only origin "$RAMO"; then
+  # No --app o pull não roda o hook post-merge: ele faria um --update inteiro, sem marcas, antes do
+  # ##HANGAR-PROTOCOLO##; o install.sh --app logo abaixo já faz o mesmo trabalho.
+  sem_hooks=''; [ "$APP" = 1 ] && sem_hooks='-c core.hooksPath=/dev/null'
+  # shellcheck disable=SC2086  # de propósito: vazio some, cheio vira dois argumentos
+  if ! git $sem_hooks -C "$DEST" pull --ff-only origin "$RAMO"; then
     # Mudança local é o caso comum, e tem frase e botão próprios no app.
     if [ -n "$(git -C "$DEST" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
       fail_with checkout-sujo "git pull falhou em $DEST: há mudança local — resolva na mão e rode de novo"
@@ -124,6 +131,9 @@ fi
 
 say "Instalando: ./install.sh $*"
 cd "$DEST"
+[ -n "$APP_TOKEN" ] && export HANGAR_TOKEN=$APP_TOKEN
+[ -n "$APP_ASKPASS" ] && export HANGAR_ASKPASS=$APP_ASKPASS
+[ -n "$APP_ASKPASS_CODE" ] && export HANGAR_ASKPASS_CODE=$APP_ASKPASS_CODE
 # Sob `curl | bash` o stdin DESTE script é o cano do curl, e o install.sh herdaria isso: os
 # `read` dele leriam EOF na hora. Aqui entregamos o terminal de verdade. (O install.sh também
 # se defende sozinho — isto é o cinto além do suspensório.) Sem terminal, ele cai no default

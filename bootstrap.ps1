@@ -43,6 +43,14 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Senha do celular e auxiliar de administrador do app: so o install.ps1 as recebe, nao o git nem o winget.
+$appEnv = @{}
+foreach ($nome in @('HANGAR_TOKEN', 'HANGAR_ASKPASS', 'HANGAR_ASKPASS_CODE')) {
+    $valor = [Environment]::GetEnvironmentVariable($nome)
+    if ($valor) { $appEnv[$nome] = $valor }
+    Remove-Item "Env:$nome" -ErrorAction SilentlyContinue
+}
+
 $repoUrl = 'https://github.com/jeffer1312/hangar.git'
 $ramo    = 'main'
 
@@ -128,7 +136,11 @@ if (-not (Test-Path $destino)) {
     Clona
 } elseif (EhEsteRepo $destino) {
     Ok "$destino ja e este repositorio - atualizando em vez de clonar"
-    & git -C $destino pull --ff-only origin $ramo
+    # No -App o pull nao roda o hook post-merge: ele faria um -Update inteiro, sem marcas, antes do
+    # ##HANGAR-PROTOCOLO##; o install.ps1 -App logo abaixo ja faz o mesmo trabalho.
+    $semHooks = @()
+    if ($App) { $semHooks = @('-c', ('core.hooksPath=' + (Join-Path $env:TEMP 'hangar-sem-hooks'))) }
+    & git @semHooks -C $destino pull --ff-only origin $ramo
     if ($LASTEXITCODE -ne 0) {
         # Mudanca local e o caso comum, e tem frase e botao proprios no app.
         $mudancas = & git -C $destino status --porcelain --untracked-files=no 2>$null
@@ -164,5 +176,6 @@ if ($ConsertarRoda) { $repasse += '-ConsertarRoda' }
 # $PSHOME nao tem powershell.exe, e ai vale o caminho fixo do 5.1, que todo Windows tem.
 $ps = Join-Path $PSHOME 'powershell.exe'
 if (-not (Test-Path $ps)) { $ps = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" }
+foreach ($nome in $appEnv.Keys) { Set-Item "Env:$nome" $appEnv[$nome] }
 & $ps -NoProfile -ExecutionPolicy Bypass -File $instalador @repasse
 exit $LASTEXITCODE
