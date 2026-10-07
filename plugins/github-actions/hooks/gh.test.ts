@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { checks, classificarFalha, piorErro, textoAviso, disparaRun, ehGithub, ehPush, jobs, lembrarCommit, rotulosAbrir, precisaConsultar, runsVisiveis, situacao } from './gh'
-import type { GhView, RunGh } from './gh'
-import { rotuloJob } from './faixa'
+import { checks, classificarFalha, piorErro, textoAviso, disparaRun, ehGithub, ehPush, iso, jobs, lembrarCommit, ms, precisaConsultar, runsVisiveis, situacao } from './gh'
+import type { GhView, RunGh, Situacao } from './gh'
+import { barra, chavesJobs, contar, duracao, nomeJob, nomesJobs, passoCurto, progresso, rotulosAnteriores, separarPorCommit } from './faixa'
 
 const run = (id: number, wf: string, sha: string, status = 'completed', conclusion = 'success'): RunGh =>
   ({ databaseId: id, workflowName: wf, status, conclusion, headSha: sha, url: `u/${id}` })
@@ -66,12 +66,31 @@ describe('gh', () => {
     expect(ehPush('gh pr view 3')).toBe(false)
   })
 
-  test('rótulo do botão nunca se repete', () => {
-    const w = (id: number, nome: string, sha: string) => ({ id, nome, sha })
-    expect(rotulosAbrir([w(1, 'CI', 'aaaaaaaa'), w(2, 'Server', 'aaaaaaaa')])).toEqual(['abrir CI', 'abrir Server'])
-    expect(rotulosAbrir([w(1, 'CI', 'aaaaaaaa'), w(2, 'CI', 'bbbbbbbb')])).toEqual(['abrir CI aaaaaaa', 'abrir CI bbbbbbb'])
+  test('barra: um segmento por job, o que roda enche pelos passos; tempo do run', () => {
+    const j = (situacao: Situacao, feitos = 0, total = 0) => ({ nome: 'x', situacao, passo: null, feitos, total, passos: [] })
+    expect(barra([j('ok'), j('rodando', 1, 4), j('esperando')], 14)).toEqual([
+      { s: 'ok', texto: '━━━━' }, { s: 'esperando', texto: ' ' },
+      { s: 'rodando', texto: '━───' },
+      { s: 'esperando', texto: ' ────' },
+    ])
+    // Sem espaço para os vãos, os segmentos se encostam.
+    expect(barra([j('falhou'), j('ok')], 3).map(t => t.texto).join('')).toBe('━━━')
+    expect(duracao(42_000)).toBe('42s')
+    expect(duracao(252_000)).toBe('4m 12s')
+    expect(duracao(3_780_000)).toBe('1h 03m')
+    expect(ms('0001-01-01T00:00:00Z')).toBe(null)
+    const wf = { id: 1, nome: 'CI', sha: 'a', situacao: 'rodando' as const, url: '', jobs: [j('ok'), j('rodando')], inicio: 1_000, fim: null }
+    expect(progresso([wf], 61_000)).toBe('1/2 jobs · 1m 00s')
+    // Terminado sem data de fim: sem tempo, não um relógio andando.
+    expect(progresso([{ ...wf, situacao: 'ok' as const, jobs: [j('ok')] }], 61_000)).toBe('1/1 jobs')
+    // Leitura gravada antes de existirem as datas.
+    expect(iso(undefined)).toBe(undefined)
+  })
+
+  test('rótulo de run anterior nunca se repete', () => {
+    const w = (id: number) => ({ id, nome: 'CI', sha: 'aaaaaaaa', situacao: 'rodando' as const, url: '', jobs: [], inicio: null, fim: null })
     // push e pull_request do mesmo commit: o id do run desempata
-    expect(rotulosAbrir([w(1, 'CI', 'aaaaaaaa'), w(2, 'CI', 'aaaaaaaa')])).toEqual(['abrir CI #1', 'abrir CI #2'])
+    expect(rotulosAnteriores([w(1), w(2)])).toEqual(['● CI aaaaaaa #1', '● CI aaaaaaa #2'])
   })
 
   test('job rodando mostra a etapa atual; job que falhou guarda o passo', () => {
@@ -86,9 +105,34 @@ describe('gh', () => {
       ] },
     ])
     if (!rodando || !falhou) throw new Error('jobs perdidos')
-    expect(rotuloJob(rodando)).toBe('● test · pytest')
+    expect(rodando.passo).toBe('pytest')
     expect(falhou.passo).toBe('Compile')
-    expect(rotuloJob(falhou)).toBe('✕ build')
+    expect(contar([rodando, falhou])).toEqual({ ok: 0, falhou: 1, rodando: 1 })
+  })
+
+  test('job de matriz e passo encurtados', () => {
+    expect(nomeJob('build (windows-latest, windows-x86_64, .exe, true)')).toBe('build windows')
+    expect(nomeJob('statusline (ubuntu-latest)')).toBe('statusline ubuntu')
+    expect(nomeJob('backend')).toBe('backend')
+    expect(nomeJob('Lint (changed files) / report')).toBe('Lint (changed files) / report')
+    // Curto repetido no workflow: volta o nome completo; homônimos (corte do GitHub) ganham chaves diferentes.
+    const job = (nome: string) => ({ nome, situacao: 'ok' as const, passo: null, feitos: 0, total: 0, passos: [] })
+    expect(nomesJobs([job('build (win, x64)'), job('build (win, arm)'), job('lint')]))
+      .toEqual(['build (win, x64)', 'build (win, arm)', 'lint'])
+    const [a, b] = chavesJobs('CI', [job('build (x...'), job('build (x...')])
+    expect(a).not.toBe(b)
+    expect(nomeJob('build (ubuntu-latest, linux-x86_64, x86_64-unknown-linux-gnu, true, target/x86_64-unknown-linux-g...')).toBe('build ubuntu')
+    expect(passoCurto('Run uv run pytest -q')).toBe('uv run pytest -q')
+    expect(passoCurto('Run cargo build --locked --release --target x86_64')).toBe('cargo build --locked --releas…')
+  })
+
+  test('run mais novo de cada workflow fica no detalhe; o superado que ainda roda vai para a linha de anteriores', () => {
+    const w = (id: number, nome: string, sha: string) =>
+      ({ id, nome, sha, situacao: 'rodando' as const, url: '', jobs: [], inicio: null, fim: null })
+    const { atual, anteriores } = separarPorCommit([w(5, 'CI', 'bbbbbbbb'), w(4, 'CI', 'aaaaaaaa'), w(3, 'Native', 'aaaaaaaa')])
+    expect(atual.map(x => x.id)).toEqual([5, 3])
+    expect(anteriores.map(x => x.id)).toEqual([4])
+    expect(rotulosAnteriores(anteriores)).toEqual(['● CI aaaaaaa'])
   })
 
   test('resumo dos checks do PR', () => {
@@ -102,7 +146,7 @@ describe('gh', () => {
 
   test('consulta segue só enquanto algo roda', () => {
     const v = (s: 'ok' | 'rodando'): GhView => ({ branch: 'x', pr: null, workflows: [
-      { id: 1, nome: 'CI', sha: 'x', situacao: s, url: '', jobs: [{ nome: 'a', situacao: s, passo: null }] },
+      { id: 1, nome: 'CI', sha: 'x', situacao: s, url: '', jobs: [{ nome: 'a', situacao: s, passo: null, feitos: 0, total: 0, passos: [] }], inicio: null, fim: null },
     ] })
     expect(precisaConsultar(v('rodando'))).toBe(true)
     expect(precisaConsultar(v('ok'))).toBe(false)
