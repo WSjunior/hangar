@@ -8,6 +8,7 @@ pub mod diag;
 pub mod list;
 pub mod migration_status;
 pub mod mods;
+pub mod pages;
 pub mod proxy;
 pub mod routes;
 pub mod runtime;
