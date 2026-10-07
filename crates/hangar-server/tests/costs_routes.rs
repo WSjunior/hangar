@@ -81,6 +81,9 @@ struct Harness {
     collector: Arc<Collector>,
     state: Arc<AppState>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
+    // Um cliente por harness: conexão nova a cada pedido dos laços de espera esgotava as portas
+    // efêmeras do runner Windows (AddrInUse no connect).
+    client: reqwest::Client,
 }
 
 impl Drop for Harness {
@@ -140,11 +143,11 @@ impl Harness {
         let address = listener.local_addr().unwrap();
         let app = router(state.clone());
         let server = tokio::spawn(async move { axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap() });
-        Self { _dir: dir, base, address, upstream, collector, state, tasks: vec![up_task, server] }
+        Self { _dir: dir, base, address, upstream, collector, state, tasks: vec![up_task, server], client: reqwest::Client::new() }
     }
 
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
-        reqwest::Client::new().request(method, format!("http://{}{path}", self.address)).bearer_auth(OWNER)
+        self.client.request(method, format!("http://{}{path}", self.address)).bearer_auth(OWNER)
     }
 
     async fn ready(&self) -> Value {
@@ -165,7 +168,7 @@ impl Harness {
             assert!(Instant::now() < deadline, "uso não concluiu");
             if response.status() == StatusCode::OK { return serde_json::from_slice(&response.bytes().await.unwrap()).unwrap(); }
             assert_eq!(response.status(), StatusCode::ACCEPTED);
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
