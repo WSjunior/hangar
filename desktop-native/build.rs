@@ -44,4 +44,11 @@ fn main() {
     // O assistente de instalação baixa o bootstrap deste commit, não o da `main` do momento (spec "Como o app roda").
     let commit = git(&["rev-parse", "HEAD"]).unwrap_or_default();
     println!("cargo:rustc-env=HANGAR_NATIVE_COMMIT={commit}");
+    // Qualquer rerun-if-changed desliga o padrão (reexecutar a cada arquivo do pacote): o que alimenta a versão volta aqui.
+    for path in ["build.rs", "Cargo.toml", "src", "../VERSION"] { println!("cargo:rerun-if-changed={path}"); }
+    // Sem isto um build incremental guarda o commit antigo e o assistente baixa o bootstrap errado.
+    if let Some(head) = git(&["rev-parse", "--git-path", "HEAD"]) { println!("cargo:rerun-if-changed={head}"); }
+    if let Some(reference) = git(&["symbolic-ref", "-q", "HEAD"]).and_then(|r| git(&["rev-parse", "--git-path", &r])) {
+        println!("cargo:rerun-if-changed={reference}");
+    }
 }

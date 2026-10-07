@@ -18,7 +18,15 @@ impl Kind { fn name(self) -> &'static str { match self { Kind::Check => "check",
 pub(crate) struct Options { pub agents: Vec<String>, pub outside: bool }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct RunRecord { pub kind: Kind, pub log: PathBuf, pub pid: u32 }
+pub(crate) struct RunRecord {
+    pub kind: Kind,
+    pub log: PathBuf,
+    pub pid: u32,
+    /// Hora de início do processo (`identity`): sem ela, um pid reaproveitado depois de reiniciar passaria pelo script.
+    /// Ausente num `state.json` antigo = não está vivo.
+    #[serde(default)]
+    pub started: String,
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SetupState {
@@ -135,7 +143,7 @@ pub(crate) async fn fetch_bootstrap(dir: &Path, windows: bool) -> Result<PathBuf
 
 pub(crate) fn state_dir() -> Option<PathBuf> { Some(crate::appearance::dir()?.join("setup")) }
 
-/// Saída de cada execução na pasta de logs do Hangar (`log_paths.base()`), uma por execução.
+/// Saída de cada execução na pasta de logs do Hangar (`crate::log_dir()`), uma por execução.
 pub(crate) fn log_path(kind: Kind) -> PathBuf {
     crate::log_dir().join("setup").join(format!("{}-{}.log", chrono::Local::now().format("%Y%m%d-%H%M%S"), kind.name()))
 }
@@ -166,27 +174,40 @@ pub(crate) fn clear_state() {
     if let Some(dir) = state_dir() { let _ = std::fs::remove_file(dir.join("state.json")); }
 }
 
+/// Identifica o processo além do número: o pid volta a ser usado, a hora de início não.
 #[cfg(target_os = "linux")]
-pub(crate) fn alive(pid: u32) -> bool { Path::new(&format!("/proc/{pid}")).exists() }
+pub(crate) fn identity(pid: u32) -> Option<String> { parse_start(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?) }
+
+/// Campo 22 de `/proc/<pid>/stat`; o nome (campo 2) pode ter espaço e parêntese, então conta depois do último `)`.
+#[cfg(any(target_os = "linux", test))]
+fn parse_start(stat: &str) -> Option<String> {
+    stat.rsplit_once(')')?.1.split_whitespace().nth(19).map(str::to_owned)
+}
 
 #[cfg(windows)]
-pub(crate) fn alive(pid: u32) -> bool {
-    super::system::hidden(&mut Command::new("tasklist")).args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"]).output()
-        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\"")))
+pub(crate) fn identity(pid: u32) -> Option<String> {
+    let out = super::system::powershell(&format!("(Get-Process -Id {pid} -ErrorAction Stop).StartTime.ToFileTimeUtc()")).ok()?;
+    Some(out.trim().to_owned()).filter(|s| !s.is_empty())
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]
-pub(crate) fn alive(_: u32) -> bool { false }
+pub(crate) fn identity(_: u32) -> Option<String> { None }
+
+/// O pid só vale se for o mesmo processo que o app iniciou; pid 0 e fora da faixa do sistema nunca valem.
+fn same_process(pid: u32, started: &str) -> bool {
+    pid != 0 && pid <= i32::MAX as u32 && !started.is_empty() && identity(pid).as_deref() == Some(started)
+}
+
+pub(crate) fn alive(pid: u32, started: &str) -> bool { same_process(pid, started) }
 
 /// Pára a execução inteira: no Linux o `setsid` fez do script o líder do grupo; no Windows vai a árvore.
-#[cfg(target_os = "linux")]
-pub(crate) fn stop(pid: u32) { unsafe { libc::kill(-(pid as i32), libc::SIGTERM); } }
-
-#[cfg(windows)]
-pub(crate) fn stop(pid: u32) { let _ = super::system::hidden(&mut Command::new("taskkill")).args(["/PID", &pid.to_string(), "/T", "/F"]).output(); }
-
-#[cfg(not(any(target_os = "linux", windows)))]
-pub(crate) fn stop(_: u32) {}
+pub(crate) fn stop(pid: u32, started: &str) {
+    if !same_process(pid, started) { return; }
+    #[cfg(target_os = "linux")]
+    unsafe { libc::kill(-(pid as i32), libc::SIGTERM); }
+    #[cfg(windows)]
+    { let _ = super::system::hidden(&mut Command::new("taskkill")).args(["/PID", &pid.to_string(), "/T", "/F"]).output(); }
+}
 
 #[cfg(test)]
 mod tests {
@@ -232,8 +253,8 @@ mod tests {
     fn state_round_trip_keeps_runs_and_never_a_password() {
         let dir = std::env::temp_dir().join(format!("hangar-run-state-{}", std::process::id()));
         let state = SetupState { dest: "/home/dev/hangar".into(), options: options(), askpass_code: "c0de".into(),
-            check: Some(RunRecord { kind: Kind::Check, log: "/logs/a.log".into(), pid: 41 }),
-            install: Some(RunRecord { kind: Kind::Install, log: "/logs/b.log".into(), pid: 42 }) };
+            check: Some(RunRecord { kind: Kind::Check, log: "/logs/a.log".into(), pid: 41, started: "100".into() }),
+            install: Some(RunRecord { kind: Kind::Install, log: "/logs/b.log".into(), pid: 42, started: "200".into() }) };
         save_state_at(&dir, &state).unwrap();
         assert_eq!(load_state_at(&dir), Some(state));
         let text = std::fs::read_to_string(dir.join("state.json")).unwrap();
@@ -245,6 +266,25 @@ mod tests {
             assert_eq!(std::fs::metadata(dir.join("state.json")).unwrap().permissions().mode() & 0o777, 0o600);
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn start_time_is_field_22_even_with_a_tricky_name() {
+        let tail = (3..=21).map(|n| n.to_string()).collect::<Vec<_>>().join(" ");
+        assert_eq!(parse_start(&format!("7 (a b) c) S {tail} 9876 0")), Some("9876".to_owned()));
+        assert_eq!(parse_start("garbage"), None);
+    }
+
+    #[test]
+    fn a_pid_is_alive_only_with_the_same_identity() {
+        assert!(!alive(0, "1"));
+        assert!(!alive(u32::MAX, "1"));
+        assert!(!alive(std::process::id(), ""));
+        assert!(!alive(std::process::id(), "not-the-start-time"));
+        #[cfg(any(target_os = "linux", windows))] {
+            let own = identity(std::process::id()).unwrap();
+            assert!(alive(std::process::id(), &own));
+        }
     }
 
     #[test]
