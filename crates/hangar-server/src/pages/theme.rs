@@ -30,6 +30,7 @@ window.__hangarApply=apply;addEventListener("message",e=>{const d=e.data;if(d&&d
 
 static HEAD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)<head(\s[^>]*)?>").unwrap());
 static HTML: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)<html(\s[^>]*)?>").unwrap());
+static DOCTYPE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^\x{FEFF}?\s*<!doctype[^>]*>").unwrap());
 static INERT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?is)<!--.*?-->|<script\b.*?</script\s*>|<style\b.*?</style\s*>|<template\b.*?</template\s*>").unwrap()
 });
@@ -59,7 +60,9 @@ pub fn inject(html: &str) -> String {
     if let Some(at) = first_live(&HTML, html, &inert) {
         return format!("{}<head>{ours}</head>{}", &html[..at], &html[at..]);
     }
-    format!("<head>{ours}</head>{html}")
+    // Antes do doctype o navegador cai em modo quirks, e o layout e a altura mudam.
+    let at = DOCTYPE.find(html).map_or(0, |m| m.end());
+    format!("{}<head>{ours}</head>{}", &html[..at], &html[at..])
 }
 
 #[cfg(test)]
@@ -88,6 +91,13 @@ mod tests {
         let out = inject("<p>oi</p>");
         assert!(out.starts_with("<head>"));
         assert!(out.ends_with("<p>oi</p>"));
+    }
+
+    #[test]
+    fn inject_after_doctype_without_head() {
+        let out = inject("<!doctype html><p>oi</p>");
+        assert!(out.starts_with("<!doctype html><head>"));
+        assert!(out.ends_with("</head><p>oi</p>"));
     }
 
     #[test]

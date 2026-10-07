@@ -27,9 +27,9 @@ impl InlineError {
 pub struct Inlined { pub html: String, pub missing: Vec<String> }
 
 // Caminho absoluto inteiro entre aspas, ou em url( ) sem aspas. Extensão de imagem obrigatória;
-// `//host/...` é URL sem protocolo, não caminho local.
+// `//host/...` é URL sem protocolo, não caminho local. `C:\` e `C:/` cobrem o servidor no Windows.
 static PATH: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)(?P<q>["'])(?P<p>/[^/"'<>\s][^"'<>\s]*?\.(?:png|jpe?g|gif|webp|avif|svg))["']|url\((?P<u>/[^/)"'\s][^)"'\s]*?\.(?:png|jpe?g|gif|webp|avif|svg))\)"#).unwrap()
+    Regex::new(r#"(?i)(?P<q>["'])(?P<p>(?:/[^/"'<>\s]|[a-z]:[\\/])[^"'<>\s]*?\.(?:png|jpe?g|gif|webp|avif|svg))["']|url\((?P<u>(?:/[^/)"'\s]|[a-z]:[\\/])[^)"'\s]*?\.(?:png|jpe?g|gif|webp|avif|svg))\)"#).unwrap()
 });
 
 fn mime(bytes: &[u8]) -> Option<&'static str> {
@@ -48,6 +48,8 @@ fn mime(bytes: &[u8]) -> Option<&'static str> {
 
 fn load(path: &str) -> Result<String, InlineError> {
     let meta = std::fs::metadata(path).map_err(|_| InlineError::Missing(path.into()))?;
+    // FIFO ou dispositivo com nome de imagem travaria a leitura.
+    if !meta.is_file() { return Err(InlineError::Missing(path.into())); }
     if meta.len() > IMAGE_MAX { return Err(InlineError::TooLarge(path.into())); }
     let bytes = std::fs::read(path).map_err(|_| InlineError::Missing(path.into()))?;
     let kind = mime(&bytes).ok_or_else(|| InlineError::NotImage(path.into()))?;
@@ -117,6 +119,12 @@ mod tests {
     fn scan_reports_missing_without_failing() {
         let out = scan("<img src=\"/nao/existe.png\">").unwrap();
         assert_eq!(out.missing, vec!["/nao/existe.png".to_owned()]);
+    }
+
+    #[test]
+    fn recognizes_windows_paths() {
+        let out = scan("<img src=\"C:\\dir\\a.png\"><div style=\"background:url(D:/x/b.jpg)\"></div>").unwrap();
+        assert_eq!(out.missing, vec!["C:\\dir\\a.png".to_owned(), "D:/x/b.jpg".to_owned()]);
     }
 
     #[test]
