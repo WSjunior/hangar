@@ -110,6 +110,24 @@ def test_service_tier_legacy_bridge_preserves_confirmed_result(tmp_path, monkeyp
         coordinator.close_python_leases()
 
 
+@pytest.mark.parametrize("reply", [{"models": [{"value": "opus"}]}, [{"value": "opus"}]])
+def test_list_models_returns_the_list_not_the_reply_object(monkeypatch, reply):
+    """Percorrer o `{"models": [...]}` do Claude dava a chave "models" e quebrava o seletor."""
+    async def control(self, name, kind, payload=None, **kwargs):
+        return reply
+    monkeypatch.setattr(RuntimeAdapter, "control", control)
+    assert asyncio.run(RuntimeAdapter("claude").list_models("session")) == [{"value": "opus"}]
+
+
+@pytest.mark.parametrize("reply", [{}, {"error": "x"}, None, "models", {"models": []}])
+def test_list_models_without_a_list_is_an_error_not_an_empty_picker(monkeypatch, reply):
+    async def control(self, name, kind, payload=None, **kwargs):
+        return reply
+    monkeypatch.setattr(RuntimeAdapter, "control", control)
+    with pytest.raises(RuntimeError):
+        asyncio.run(RuntimeAdapter("claude").list_models("session"))
+
+
 def test_invalid_event_or_gap_requests_snapshot(owner):
     from app.runtime_adapter import apply_event
     before = dict(owner.target.view)

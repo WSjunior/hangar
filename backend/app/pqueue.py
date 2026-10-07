@@ -298,6 +298,9 @@ _IMG_PREFIX = re.compile(r"^(?:\[Image #\d+\])+\s*")
 # "📎 imagem: <path>" que o app digitou (2.1.270). Sem traduzir de volta, a entrega nunca casava e
 # o print era redigitado.
 _IMG_SOURCE = re.compile(r"\[Image: source: ([^\]]+)\]")
+# `/comando args` digitado vira `<command-name>/comando</command-name>` + `<command-args>` no transcript.
+_COMMAND_NAME = re.compile(r"<command-name>([^<]*)</command-name>")
+_COMMAND_ARGS = re.compile(r"<command-args>(.*?)</command-args>", re.S)
 
 
 def _chaves_de_commit(text: str) -> set[str]:
@@ -315,6 +318,13 @@ def _chaves_de_commit(text: str) -> set[str]:
     t = text.strip()
     base = _IMG_PREFIX.sub("", t)
     fonte = _IMG_SOURCE.sub(lambda m: f"📎 imagem: {m.group(1)}", t)
+    # Só a mensagem que É o comando conta (citar a tag não conta), e ele entra inteiro, sem quebrar por linha.
+    nome = _COMMAND_NAME.search(t) if t.startswith(("<command-name>", "<command-message>")) else None
+    if nome:
+        args = _COMMAND_ARGS.search(t)
+        comando = f"{nome.group(1).strip()} {args.group(1).strip() if args else ''}".strip()
+        if comando:
+            out.add(comando)
     for variant in (t, base, _strip_attach(t), _strip_attach(base), fonte):
         variant = variant.strip()
         if not variant:
@@ -654,13 +664,22 @@ class PromptQueue:
         return entry
 
     @_queue_method
-    def append_saida_local(self, text: str) -> dict:
+    def append_saida_local(self, text: str, confirms: str | None = None) -> dict:
         """Texto do AGENTE que nao entra no transcript (ver _saida_local). Entregue e confirmada
-        de nascenca: nunca e drenada, redigitada nem reconciliada."""
+        de nascenca: nunca e drenada, redigitada nem reconciliada. `confirms`: o comando que a CLI
+        respondeu sozinha; a entrada mais antiga com esse texto fica confirmada por esta resposta."""
         entry = {"id": uuid.uuid4().hex, "text": scrub_surrogates(text), "ts": time.time(),
                  "delivered": True, "confirmed": True, "papel": "assistant"}
         with _append_lock:
             rows = self.load()
+            comando = confirms.strip() if isinstance(confirms, str) else ""
+            if comando.startswith("/") and len(comando) > 1:
+                alvo = next((r for r in rows if not r.get("confirmed") and r.get("papel") != "assistant"
+                             and r.get("delivered") and isinstance(r.get("text"), str)
+                             and r["text"].strip() == comando), None)
+                if alvo is not None:
+                    alvo["confirmed"] = True
+                    alvo.pop("desistiu", None)
             rows.append(entry)
             if len(rows) > _MAX_ENTRIES:
                 rows = rows[-_MAX_ENTRIES:]

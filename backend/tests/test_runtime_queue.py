@@ -18,6 +18,19 @@ def append(text="Olá", entry_id="entry-1"):
             "delivered": False, "ts": None, "pre_transcript": False}
 
 
+def test_local_command_answer_confirms_the_command_outside_the_transcript(tmp_path):
+    """A CLI responde `/btw` sozinha e não grava a linha: sem isto a bolha esperava para sempre."""
+    store = open_store(tmp_path)
+    store.exec(1, "a0", CLOCK, {**append("btw", "e0"), "delivered": True})
+    store.exec(1, "a1", CLOCK, {**append("/btw", "e1"), "delivered": True})
+    store.exec(1, "a2", CLOCK, {**append("/context", "e2"), "delivered": True})
+    store.exec(1, "local", CLOCK, {"kind": "append_local", "text": "/btw isn't available in this environment.",
+                                   "entry_id": "l1", "confirms": "/btw"})
+    rows = {r["id"]: r for r in store.state["rows"]}
+    assert rows["e1"]["confirmed"]
+    assert not rows["e0"].get("confirmed") and not rows["e2"].get("confirmed")
+
+
 def test_same_operation_does_not_append_twice(tmp_path):
     store = open_store(tmp_path)
     first = store.exec(1, "call-1", CLOCK, append())

@@ -1,11 +1,13 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
-import { classificarFalha, disparaRun, piorErro, ehGithub, ehPush, emAndamento, textoAviso, jobs, lembrarCommit, pr, precisaConsultar, runsVisiveis, situacao } from './gh'
-import type { Empurrado, Falha, Situacao } from './gh'
+import { alvosMerge, classificarFalha, disparaRun, piorErro, ehGithub, ehPush, emAndamento, textoAviso, iso, jobs, lembrarCommit, ms, pr, precisaConsultar, runsVisiveis, situacao } from './gh'
+import type { AlvoMerge, Empurrado, Falha, Situacao } from './gh'
 import type { GhView, Job, JobGh, PrGh, RunGh, Workflow } from './gh'
 import { desenharFaixa } from './faixa'
 
 const view = atom({ plugin: 'github-actions', key: 'view' } as const, null as GhView | null)
+const recolhida = atom({ plugin: 'github-actions', key: 'recolhida' } as const, false)
+const abertos = atom({ plugin: 'github-actions', key: 'abertos' } as const, [] as string[])
 
 const INTERVALO_MS = 15_000
 // Depois de um push o run novo leva alguns segundos para aparecer na API.
@@ -69,8 +71,11 @@ function lerJson<T>(r: Saida | null, argv: string[]): T {
 type Lido = { w: Workflow; erro: string | null }
 
 async function workflowDe($: EngineInterface, r: RunGh, antes: Workflow | undefined): Promise<Lido> {
-  const base = { id: r.databaseId, nome: r.workflowName, sha: r.headSha, url: r.url }
   const fim = r.status === 'completed' ? situacao(r.status, r.conclusion) : null
+  const base = {
+    id: r.databaseId, nome: r.workflowName, sha: r.headSha, url: r.url,
+    inicio: ms(r.startedAt), fim: fim ? ms(r.updatedAt) : null,
+  }
   if (!fim) jobsFinais.delete(r.databaseId)
   const guardados = jobsFinais.get(r.databaseId)
   if (fim && guardados) return { w: { ...base, situacao: fim, jobs: guardados }, erro: null }
@@ -145,7 +150,7 @@ async function consultar($: EngineInterface, antes: GhView | null): Promise<GhVi
     sh($, prArgv),
     ...shas.map(async sha => {
       const argv = ['gh', 'run', 'list', '--commit', sha, '--limit', '20',
-        '--json', 'databaseId,workflowName,status,conclusion,headSha,url']
+        '--json', 'databaseId,workflowName,status,conclusion,headSha,url,startedAt,updatedAt']
       return { sha, saida: await sh($, argv), argv }
     }),
   ])
@@ -164,6 +169,7 @@ async function consultar($: EngineInterface, antes: GhView | null): Promise<GhVi
       porCommit.push((antes?.workflows ?? []).filter(w => w.sha === sha).map(w => ({
         databaseId: w.id, workflowName: w.nome, headSha: w.sha, url: w.url,
         status: emAndamento(w.situacao) ? 'in_progress' : 'completed', conclusion: CONCLUSAO[w.situacao],
+        startedAt: iso(w.inicio), updatedAt: iso(w.fim),
       })))
     }
   }
@@ -240,6 +246,34 @@ async function atualizar($: EngineInterface): Promise<void> {
   }
 }
 
+// Merge feito pela sessão: o commit nasce no GitHub, e os runs dele na base passam a ser acompanhados.
+// Vale o que o gh diz do PR, não o código de saída: `a && b` pode juntar um e falhar no outro.
+// Fora do hook do Bash: as consultas ao gh não seguram o resultado do comando.
+async function guardarMerges($: EngineInterface, merges: readonly AlvoMerge[]): Promise<void> {
+  const atual = await texto($, ['git', 'branch', '--show-current']).catch(() => null)
+  for (const { alvo, repo } of merges) {
+    if (repo) {
+      $.ui.log(`github-actions: merge em ${repo} fica de fora: a faixa só lê o repositório da pasta`, { to: 'debug' })
+      continue
+    }
+    const argv = ['gh', 'pr', 'view', ...(alvo ? [alvo] : []), '--json', 'number,state,mergeCommit,baseRefName']
+    try {
+      const p = lerJson<{ number: number; state: string; mergeCommit: { oid: string } | null; baseRefName: string }>(await sh($, argv), argv)
+      if (p.state !== 'MERGED' || !p.mergeCommit?.oid) {
+        $.ui.log(`github-actions: PR #${p.number} ainda não juntado (${p.state}); o build dele não entra`, { to: 'debug' })
+        continue
+      }
+      await guardarCommit($, { sha: p.mergeCommit.oid, branch: p.baseRefName })
+      // A faixa mostra a branch atual: em outra, o build do merge só aparece depois de trocar para a base.
+      if (atual === p.baseRefName) aguardando = { sha: p.mergeCommit.oid, ate: (await $.clock.now()) + PRAZO_PUSH_MS }
+      else $.ui.toast(`Build do merge do #${p.number} aparece na faixa quando a sessão estiver na ${p.baseRefName}`)
+    } catch (err) {
+      $.ui.log(`github-actions: não guardei o commit do merge: ${String(err)}`, { to: 'debug' })
+    }
+  }
+  agendar($, ESPERA_PUSH_MS)
+}
+
 async function headAtual($: EngineInterface): Promise<string> {
   return `${await texto($, ['git', 'branch', '--show-current'])}@${await texto($, ['git', 'rev-parse', 'HEAD'])}`
 }
@@ -281,7 +315,9 @@ export const register: Register = on => {
         $.ui.log(`github-actions: não guardei o commit empurrado: ${String(err)}`, { to: 'debug' })
       }
     }
-    agendar($, ESPERA_PUSH_MS)
+    const merges = alvosMerge(e.command)
+    if (merges.length) void guardarMerges($, merges)
+    else agendar($, ESPERA_PUSH_MS)
     return r
     // Só observa: falha aqui nunca segura o comando.
   }).catch(($, e, next) => next(e))
@@ -303,7 +339,14 @@ export const register: Register = on => {
     const v = e.props.hasSurvey ? null : await read($, view)
     if (!v || (v.workflows.length === 0 && !v.pr && !v.aviso)) return next(e)
     const t = $.ui.resolve(e)
-    const nosso = desenharFaixa(t, v, e.props.bodyColumns, url => void abrir($, url))
+    const nosso = desenharFaixa(t, v, {
+      superficie: e.surface, colunas: e.props.bodyColumns, recolhida: await read($, recolhida), agora: await $.clock.now(),
+      abertos: await read($, abertos),
+    }, {
+      abrir: url => void abrir($, url),
+      alternar: () => void update($, recolhida, r => !r),
+      alternarItem: chave => void update($, abertos, a => (a.includes(chave) ? a.filter(k => k !== chave) : [...a, chave])),
+    })
     const abaixo = await next(e).catch(() => null)
     if (!abaixo) return nosso
     const { Box } = t

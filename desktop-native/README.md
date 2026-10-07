@@ -12,6 +12,18 @@ Execute o comando na raiz desta worktree. O seletor `+1.98.1` mantém a versão 
 
 Em desenvolvimento, preserve o `target-dir` configurado no `~/.cargo/config.toml` da máquina; não abra um cache vazio por sessão. No Linux, builds de desenvolvimento rodam com `nice -n 19 ionice -c3` antes do comando Cargo. O script `tools/build-otimizado.sh` usa um target separado porque muda o perfil de compilação.
 
+### Assistente de instalação sem instalar
+
+O assistente (Linux e Windows) roda os scripts do repositório. Para ver as telas sem instalar nada nesta máquina:
+
+- `HANGAR_SETUP_BOOTSTRAP=desktop-native/tools/setup-fake-bootstrap.sh` usa o dublê no lugar do bootstrap baixado e pula a cópia do app; `FAKE_SCENARIO=ok|falha|tailscale|protocolo|askpass|interrompe` escolhe o caminho.
+- `HANGAR_SETUP_DEST=<pasta>` troca a pasta da instalação (nada é escrito nela pelo dublê).
+- `HANGAR_SETUP_DEMO=1` abre o assistente ao iniciar; `HANGAR_SETUP_DEMO=start` também aperta "Começar instalação" quando a conferência passa (`start-fora` escolhe "também fora de casa" antes).
+- `XDG_CONFIG_HOME=<pasta>` isola a configuração e a instância única do app instalado.
+- `FAKE_SCENARIO=erro FAKE_CODE=<código>` falha na etapa instalar com o código (`nenhum` = falha não prevista sem código); `FAKE_SCENARIO=pendencia FAKE_CODE=<código>` termina com a pendência; `FAKE_LEAK=1` imprime token, caminho, IP e nome `.ts.net` para provar a limpeza do relatório; com `FAKE_FIXED=<arquivo>`, o cenário `erro` passa quando o arquivo existe.
+- `HANGAR_SETUP_FAKE_CLAUDE=desktop-native/tools/setup-fake-agent.sh` (e `HANGAR_SETUP_FAKE_CODEX`) troca o agente pelo dublê; `FAKE_AGENT_MODE=fora|dentro|trava`, `FAKE_AGENT_PROMPT=<arquivo>` guarda o prompt recebido. `HANGAR_SETUP_DEMO_AGENT=1` pede ajuda ao primeiro agente assim que o relatório fica pronto.
+- `HANGAR_REPORT_URL=<url>` manda o relatório para outro endereço (um receptor local) em vez do Worker.
+
 ## Ambiente
 
 - Rust 1.98.1, fixado em `rust-toolchain.toml`. `Cargo.lock` fixa as versões usadas nesta worktree.
@@ -28,7 +40,7 @@ No macOS, `tools/package-macos.sh <binário> <Hangar.app>` monta o pacote com `i
 
 ## Baixar pronto e atualização
 
-Cada push na `main` que mexe no app recompila e publica na release fixa [`native-latest`](https://github.com/jeffer1312/hangar/releases/tag/native-latest) (workflow `.github/workflows/native.yml`): `Hangar-linux-x86_64.tar.gz`, `Hangar-windows-x86_64.zip` e `Hangar-macos-aarch64.zip`, cada um com o `.sha256` ao lado (`sha256sum -c`). O arquivo Linux contém `hangar`, `icon.png` e `install-linux.sh` (rode este último para instalar o atalho). O ZIP Windows contém `Hangar.exe`; o ZIP macOS contém `Hangar.app` com o ícone. Os binários crus continuam publicados à parte para o atualizador. Não são assinados: no macOS, abra pelo botão direito na primeira vez. Se Windows ou macOS não compilar, a release preserva o download anterior dessa plataforma e indica isso nas notas; somente os arquivos do `native-latest.json` pertencem à versão atual.
+Cada push na `main` que mexe no app recompila e publica na release fixa [`native-latest`](https://github.com/jeffer1312/hangar/releases/tag/native-latest) (workflow `.github/workflows/native.yml`): `Hangar-linux-x86_64.tar.gz`, `Hangar-linux-x86_64.deb`, `Hangar-linux-x86_64.rpm`, `Hangar-windows-x86_64.zip` e `Hangar-macos-aarch64.zip`, cada um com o `.sha256` ao lado (`sha256sum -c`). O arquivo Linux contém `hangar`, `icon.png` e `install-linux.sh` (rode este último para instalar o atalho). O .deb e o .rpm (tools/package-linux.sh) instalam o binário em /usr/bin/hangar-native, o ícone e o atalho; o assistente de instalação copia o app para ~/.local/bin, onde a autoatualização consegue trocá-lo. O ZIP Windows contém `Hangar.exe`; o ZIP macOS contém `Hangar.app` com o ícone. Os binários crus continuam publicados à parte para o atualizador. Não são assinados: no macOS, abra pelo botão direito na primeira vez. Se Windows ou macOS não compilar, a release preserva o download anterior dessa plataforma e indica isso nas notas; somente os arquivos do `native-latest.json` pertencem à versão atual.
 
 A versão é a do backend: `VERSION` da raiz + número de commits (`0.1.0.2533`), embutida pelo `build.rs` e mostrada em Configurações → Sobre. Ao abrir e a cada 6 h o app lê o `native-latest.json` da release; havendo versão maior, aparece **Atualizar** na barra do topo, ao lado da engrenagem. O clique baixa o binário da plataforma (`Hangar-<sistema>-<arquitetura>`), confere o sha256 do manifesto (diferente: recusa sem trocar nada), guarda o atual em `<executável>.old`, põe o novo no lugar e o abre. O novo prova que subiu gravando o próprio pid; se não fizer isso em 30 s ou morrer antes, o anterior volta para o lugar e a janela antiga continua aberta com o aviso. Build local de uma branch com mais commits que a `main` não recebe oferta.
 

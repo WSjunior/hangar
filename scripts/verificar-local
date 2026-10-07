@@ -1,0 +1,494 @@
+#!/usr/bin/env bash
+# Roda nesta máquina o que o CI rodaria para o que o commit muda, e grava o resultado pela árvore
+# (tree sha) para a trava pre-push conferir. Windows roda por SSH numa VM (git config
+# hangar.verificarWindows <host>), ao mesmo tempo que o Linux.
+#
+# Uso:  scripts/verificar-local                 HEAD, Linux e (se couber) Windows
+#       scripts/verificar-local --commit <ref>  outro commit
+#       scripts/verificar-local --base <ref>    o que mudou desde que saiu de <ref> (ex.: o PR inteiro)
+#       scripts/verificar-local --tudo          todos os passos, mude o que mudar
+#       scripts/verificar-local --so linux|windows
+#       scripts/verificar-local --de-novo       roda mesmo se esta árvore já passou
+#       scripts/verificar-local --plano         só mostra o que rodaria
+#       scripts/verificar-local --exigir <sha>  (pre-push) sai 1 se falta verificação
+#
+# A árvore verificada é um clone fixo por máquina, não o checkout de quem chama: compila só o que
+# mudou desde a última verificação, nunca mistura binário de outro checkout e deixa o checkout
+# livre para editar enquanto roda. Uma verificação por vez na máquina (flock) e uma por vez na VM
+# (mutex), em prioridade baixa.
+set -uo pipefail
+
+ESTADO="${XDG_STATE_HOME:-$HOME/.local/state}/hangar-verificacao"
+FIXO="${HANGAR_VERIFICAR_ARVORE:-${XDG_CACHE_HOME:-$HOME/.cache}/hangar-verificacao/arvore}"
+# Não é o /tmp/hangar-verificacao.lock: os scripts npm pegam aquele por dentro, e o mesmo arquivo
+# aqui fora travaria o filho até o prazo.
+TRAVA=/tmp/hangar-verificar-local.lock
+VM_GIT=/c/hangar-verificacao/arvore
+VM_WIN='C:/hangar-verificacao'
+
+# Os mesmos do passo "Contenção e regressões" do server.yml: mudar lá exige mudar aqui.
+RUNTIME_TESTS=(tests/test_runtime_process.py tests/test_runtime_queue_terminal_v2.py
+    tests/test_runtime_terminal_fix.py tests/test_runtime_terminal_fix2.py
+    tests/test_runtime_terminal_failure_policy.py tests/test_runtime_final_fixes.py)
+
+erro() { echo "verificar-local: $*" >&2; exit 2; }
+
+# ── o que cada mudança pede ───────────────────────────────────────────────────────────────────
+
+# Base padrão: o último commit da linha principal (primeiro pai) que já está num remoto. É o que o
+# push leva, com merge incluso: o merge de outra branch muda o resultado e entra na conta.
+base_padrao() {
+    local c="$1" velho
+    velho="$(git rev-list --first-parent "$c" --not --remotes)" || erro "não consegui listar os commits de $c"
+    velho="${velho##*$'\n'}"
+    if [[ -z "$velho" ]]; then echo "$c"; return; fi
+    git rev-parse -q --verify "$velho^" 2>/dev/null || git hash-object -t tree /dev/null
+}
+
+# Imprime "linux: p1 p2" e "windows: p1" a partir da lista de arquivos no stdin.
+classificar() {
+    local f lin=() win=()
+    local rust=0 back=0 front=0 mobile=0 nativo=0 wrap=0 status=0 pi=0 winback=0
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        case "$f" in
+            crates/*|backend/tests/fixtures/*|plugins/hangar/hooks/*|\
+            backend/app/adapters/claude_headless/cano.py|backend/tests/test_claude_headless_cano.py|\
+            backend/app/runtime_process.py|backend/app/runtime_terminal.py|backend/app/runtime_coordinator.py|\
+            backend/app/rust_server.py|backend/tests/test_runtime_*.py) rust=1 ;;
+        esac
+        # A suíte do backend lê quase o repositório inteiro (scripts, skills, plugins, docs, front).
+        # Fica de fora só o que ela comprovadamente não lê. Workflow do CI não é código: quem o
+        # confere é o próprio CI.
+        case "$f" in
+            desktop-native/*|docs/migracao-rust/*|docs/superpowers/*|site/*|.github/*) ;;
+            *) back=1 ;;
+        esac
+        case "$f" in
+            packages/*|frontend/*|messages/*|project.inlang/*|package.json|package-lock.json) front=1 ;;
+        esac
+        case "$f" in
+            mobile/*|packages/core/*|messages/*|project.inlang/*) mobile=1 ;;
+        esac
+        case "$f" in
+            desktop-native/*|crates/hangar-api/*|crates/hangar-workspace/*|crates/Cargo.toml|messages/*|VERSION) nativo=1 ;;
+        esac
+        case "$f" in
+            scripts/shell/*|scripts/test-wrappers.sh|scripts/hangar-engine|scripts/install-claude-wrapper.sh|\
+            scripts/verificar-local|scripts/test-verificar-local.sh|scripts/hook-pr-verificado.mjs|scripts/hooks/*) wrap=1 ;;
+        esac
+        case "$f" in
+            scripts/*statusline*) status=1 ;;
+        esac
+        case "$f" in
+            scripts/pi/*|scripts/test-pi-hangar-state.mjs) pi=1 ;;
+        esac
+        case "$f" in
+            backend/*|*.ps1) winback=1 ;;
+        esac
+    done
+    (( rust )) && lin+=(rust) && win+=(rust)
+    (( back )) && lin+=(backend)
+    (( front )) && lin+=(front)
+    (( mobile )) && lin+=(mobile)
+    (( nativo )) && lin+=(nativo)
+    (( wrap )) && lin+=(shell)
+    (( status )) && lin+=(statusline) && win+=(statusline)
+    (( pi )) && lin+=(pi)
+    (( winback && ! rust )) && win+=(runtime)
+    echo "linux: ${lin[*]}"
+    echo "windows: ${win[*]}"
+}
+
+TODOS_LINUX="rust backend front mobile nativo shell statusline pi"
+TODOS_WINDOWS="rust statusline"
+
+# ── passos (cwd = árvore fixa) ────────────────────────────────────────────────────────────────
+
+passo_rust() {
+    (cd crates && cargo test --locked --workspace --no-fail-fast) || return 1
+    if [[ "$SO" == linux ]]; then
+        (cd crates && cargo build --locked -p hangar-server -p hangar-cano) || return 1
+        (cd backend && uv run pytest -q "${RUNTIME_TESTS[@]}") || return 1
+        # Sem o binário a suíte pula os casos Rust e sairia verde: aqui a falta é erro, como no CI.
+        local cano="$PWD/crates/target/debug/hangar-cano"
+        [[ -x "$cano" ]] || { echo "hangar-cano não foi compilado em $cano"; return 1; }
+        (cd backend && CP_RUST_CANO_BIN="$cano" uv run pytest -q tests/test_claude_headless_cano.py)
+    else
+        passo_runtime
+    fi
+}
+
+# No Windows o CI só roda estes do pytest. A suíte inteira lá nem coleta (fcntl, os.geteuid), e
+# testes com `tmux -L … kill-server` falariam com o psmux de verdade da VM.
+passo_runtime() { (cd backend && uv run pytest -q "${RUNTIME_TESTS[@]}"); }
+
+passo_backend() {   # só Linux: no Windows fica o passo_runtime
+    # Os contratos que o pytest executa, como no ci.yml.
+    (cd crates && cargo build --locked -p hangar-server && \
+        cargo build --locked -p hangar-workspace --example workspace_contract) || return 1
+    # O CI instala um omp de versão fixa para as provas de extensão; sem ele, 20 casos falham.
+    local v omp
+    v="$(grep -o 'releases/download/v[0-9.]*/omp-linux-x64' .github/workflows/ci.yml | head -1 | cut -d/ -f3)"
+    # O nome do executável tem que ser `omp`: a extensão do Hangar decide se roda no omp ou no pi
+    # pelo process.execPath (scripts/pi/lib/agent-context.ts), e link simbólico resolve pro alvo.
+    omp="$VERIFICAR_CACHE/omp/$v/omp"
+    if [[ ! -x "$omp" ]]; then
+        local d; d="$(mktemp -d)"
+        (cd "$d" && curl -fsSL --retry 3 -o omp-linux-x64 "https://github.com/can1357/oh-my-pi/releases/download/$v/omp-linux-x64" \
+            && curl -fsSL --retry 3 -o SHA256SUMS.txt "https://github.com/can1357/oh-my-pi/releases/download/$v/SHA256SUMS.txt" \
+            && sha256sum --check --ignore-missing --quiet SHA256SUMS.txt) || { rm -rf "$d"; echo "omp $v: download falhou"; return 1; }
+        install -Dm755 "$d/omp-linux-x64" "$omp" || { rm -rf "$d"; echo "omp $v: não consegui gravar $omp"; return 1; }
+        rm -rf "$d"
+    fi
+    # basetemp em disco: o omp extrai centenas de MB por caso (7 GB na suíte), e o /tmp pode ser tmpfs.
+    mkdir -p "/var/tmp/hangar-verificacao-$USER"
+    (cd backend && OMP_TEST_BIN="$omp" uv run pytest -q --basetemp="/var/tmp/hangar-verificacao-$USER/pytest")
+}
+
+npm_ci_se_mudou() {   # $1 = lockfile, $2.. = comando
+    local lock="$1" marca; shift
+    marca="$(dirname "$lock")/node_modules/.verificar-local-lock"
+    if [[ "$(cat "$marca" 2>/dev/null)" != "$(sha256sum < "$lock")" ]]; then
+        "$@" || return 1
+        sha256sum < "$lock" > "$marca"
+    fi
+}
+
+passo_front() {
+    npm_ci_se_mudou package-lock.json npm ci --workspace=@hangar/core --workspace=frontend || return 1
+    npm run check -w @hangar/core && npm run check -w frontend && \
+        npm run test -w @hangar/core && npm run test -w frontend && npm run build -w frontend
+}
+
+passo_mobile() {
+    npm_ci_se_mudou package-lock.json npm ci --workspace=@hangar/core --workspace=frontend || return 1
+    npm_ci_se_mudou mobile/package-lock.json npm ci --prefix mobile || return 1
+    # O check do app compila as mensagens dele, não as do core; sem isto valem as da última rodada do front.
+    npm run i18n:compile -w @hangar/core && npm run check:app && npm run test:app
+}
+
+# O nativo é outro workspace: fora do target do crates/.
+passo_nativo() { (cd desktop-native && env -u CARGO_TARGET_DIR cargo test --locked); }
+passo_shell() {
+    bash scripts/test-wrappers.sh || return 1
+    [[ ! -f scripts/test-verificar-local.sh ]] || bash scripts/test-verificar-local.sh
+}
+passo_statusline() {
+    node --test scripts/test-configure-statusline.cjs || return 1
+    [[ "$SO" == linux ]] && { bash scripts/test-statusline.sh || return 1; }
+    return 0
+}
+passo_pi() { node scripts/test-pi-hangar-state.mjs; }
+
+# ── execução na árvore fixa (Linux em processo; Windows chega por `bash -s` via SSH) ──────────
+
+# Ambiente parecido com o do runner: HOME vazio (nada lê ~/.claude, ~/.hangar nem o tmux real) e
+# só o PATH das ferramentas. Caches de cargo/uv/npm continuam os da máquina.
+ambiente_limpo() {
+    local casa="$1" node_dir uv_dir
+    node_dir="$(dirname "$(realpath "$(command -v node)")")"
+    uv_dir="$(dirname "$(command -v uv)")"
+    mkdir -p "$casa/tmux" "$casa/run"
+    chmod 700 "$casa/run"
+    LIMPO=(env -i
+        HOME="$casa" USER="${USER:-$(id -un)}" LANG=C.UTF-8 TERM=dumb CI=1
+        PATH="$node_dir:$uv_dir:${CARGO_HOME:-$HOME/.cargo}/bin:/usr/local/bin:/usr/bin:/bin"
+        CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+        UV_CACHE_DIR="${UV_CACHE_DIR:-$HOME/.cache/uv}"
+        UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-$HOME/.local/share/uv/python}"
+        npm_config_cache="${npm_config_cache:-$HOME/.npm}"
+        TMUX_TMPDIR="$casa/tmux" XDG_RUNTIME_DIR="$casa/run"
+        VERIFICAR_CACHE="$(dirname "$FIXO")" "${CARGO_ENV[@]}")
+}
+
+# Mata a árvore do passo se o disco cair abaixo de 2 GB: build cheio de saída já encheu a VM.
+vigiar_disco() {   # $1 = pid do passo, $2 = log
+    local livre
+    while kill -0 "$1" 2>/dev/null; do
+        livre="$(df -Pk . | awk 'NR==2 {print int($4/1048576)}')"
+        if (( livre < 2 )); then
+            echo "verificar-local: disco com ${livre} GB livres, passo interrompido" >> "$2"
+            if [[ "$SO" == windows ]]; then taskkill //F //T //PID "$(cat "/proc/$1/winpid")" >/dev/null 2>&1
+            else kill -- "-$1" 2>/dev/null; fi
+            return
+        fi
+        sleep 10
+    done
+}
+
+executar() {   # $1 = so, $2 = sha, $3 = bundle ("-" = sem bundle), resto = passos
+    SO="$1"; local sha="$2" bundle="$3"; shift 3
+    local dir logs
+    if [[ "$SO" == windows ]]; then dir="$VM_GIT"; logs="${VM_GIT%/*}/logs"; else dir="$FIXO"; logs="$ESTADO/logs"; fi
+    mkdir -p "$logs"
+    if [[ ! -d "$dir/.git" ]]; then git init -q "$dir" || return 2; fi
+    cd "$dir" || return 2
+    if [[ "$bundle" != - ]]; then
+        git fetch -q --no-tags "$bundle" +refs/verificar/alvo:refs/verificar/alvo || return 2
+        rm -f "$bundle"
+    elif [[ -n "${ORIGEM:-}" ]]; then
+        git fetch -q --no-tags "$ORIGEM" "$sha" || return 2
+    fi
+    # Sem -x: node_modules, target e .venv ficam e são o que deixa a próxima rodada incremental.
+    git checkout -q --force --detach "$sha" && git clean -ffdq || return 2
+    unset CARGO_TARGET_DIR
+    # Cada arquivo de teste vira um binário; com depuração completa o target passa de 27 GB no Linux
+    # e enche o disco da VM. Só as linhas basta para o backtrace, e o teste roda igual.
+    CARGO_ENV=(CARGO_BUILD_JOBS=4 CARGO_PROFILE_DEV_DEBUG=line-tables-only)
+    # Os testes procuram os binários em crates/target; um `target-dir` no ~/.cargo/config.toml da
+    # máquina mandaria o build para outro lugar. A variável vence a configuração, e só chega aos
+    # passos pela lista do `env -i`.
+    if [[ "$SO" != windows ]]; then CARGO_ENV+=(CARGO_TARGET_DIR="$PWD/crates/target"); fi
+    local livre minimo=4
+    livre="$(df -Pk . | awk 'NR==2 {print int($4/1048576)}')"
+    if (( livre < minimo )); then
+        echo "=== resumo $SO ${sha:0:10}"
+        echo "  FALHOU  disco: só ${livre} GB livres em $dir (mínimo ${minimo} GB)"
+        return 1
+    fi
+
+    SETSID=""; [[ "$SO" == linux ]] && SETSID=setsid
+    local casa; casa="$(mktemp -d)"
+    if [[ "$SO" == linux ]]; then
+        ambiente_limpo "$casa"
+    else
+        # O python3 do Windows costuma ser o atalho da Microsoft Store, que não executa nada, e o
+        # teste do cano lança `python3`. No CI quem o fornece é o setup-python.
+        local py="${VM_GIT%/*}/py3/Scripts"
+        [[ -x "$py/python3.exe" ]] || { python -m venv "${py%/Scripts}" && cp -f "$py/python.exe" "$py/python3.exe"; } || return 2
+        LIMPO=(env PATH="$py:$PATH" "${CARGO_ENV[@]}" CARGO_INCREMENTAL=0)
+    fi
+
+    local p ini dur log falhou=0 resumo=()
+    for p in "$@"; do
+        log="$logs/${sha:0:10}-$SO-$p.log"
+        echo ">> $SO: $p…" >&3
+        ini=$SECONDS
+        # setsid no Linux: o passo vira grupo próprio e o vigia mata a árvore inteira.
+        "${LIMPO[@]}" SO="$SO" $SETSID bash -c "$(declare -f); $(declare -p RUNTIME_TESTS); passo_$p" >"$log" 2>&1 &
+        local spid=$! vigia rc
+        vigiar_disco "$spid" "$log" &
+        vigia=$!
+        wait "$spid"; rc=$?
+        kill "$vigia" 2>/dev/null; wait "$vigia" 2>/dev/null
+        if (( rc == 0 )); then
+            dur=$((SECONDS - ini)); resumo+=("ok      $p ${dur}s")
+        else
+            dur=$((SECONDS - ini)); resumo+=("FALHOU  $p ${dur}s  log: $log"); falhou=1
+            echo "--- $SO/$p: fim do log ---"; tail -40 "$log"
+        fi
+        echo "<< $SO: $p ${dur}s" >&3
+    done
+    rm -rf "$casa"
+    echo "=== resumo $SO ${sha:0:10}"
+    printf '  %s\n' "${resumo[@]}"
+    return $falhou
+}
+
+# ── registro ──────────────────────────────────────────────────────────────────────────────────
+
+registro() { echo "$ESTADO/resultados/$(git rev-parse "$1^{tree}")-$2"; }
+
+gravar() {   # $1 = sha, $2 = so, $3 = base, resto = passos
+    local sha="$1" so="$2" base="$3"; shift 3
+    mkdir -p "$ESTADO/resultados"
+    printf 'commit=%s\nbase=%s\npassos=%s\nquando=%s\n' "$sha" "$base" "$*" "$(date -Is)" > "$(registro "$sha" "$so")"
+}
+
+# Passos de $2.. que nenhum registro desta árvore cobre.
+faltando() {
+    local arq="$1"; shift
+    local feitos="" p
+    [[ -f "$arq" ]] && feitos=" $(sed -n 's/^passos=//p' "$arq") "
+    for p in "$@"; do [[ "$feitos" == *" $p "* ]] || printf '%s ' "$p"; done
+}
+
+# ── Windows pela VM ───────────────────────────────────────────────────────────────────────────
+
+vm_ssh() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$VM" "$@" 2> >(grep -v 'post-quantum\|store now\|upgraded\|openssh.com' >&2); }
+
+vm_rodar() {   # $1 = sha, resto = passos; saída inteira no stdout
+    local sha="$1"; shift
+    local tem bundle ps b64 nome
+    git -C "$FIXO" update-ref refs/verificar/alvo "$sha" || return 2
+    tem="$(echo "mkdir -p $VM_GIT; git -C $VM_GIT rev-parse -q --verify refs/verificar/alvo 2>/dev/null" \
+        | vm_ssh '& "C:\Program Files\Git\bin\bash.exe" -s' | tr -d '\r')" || true
+    nome=-
+    if [[ "$tem" != "$sha" ]]; then
+        nome="in-${sha:0:10}-$$.bundle"
+        bundle="$ESTADO/$nome"
+        if [[ -n "$tem" ]] && git -C "$FIXO" cat-file -e "$tem^{commit}" 2>/dev/null; then
+            # Commit que a VM já tem (ancestral do último verificado lá): nada a mandar.
+            git -C "$FIXO" merge-base --is-ancestor "$sha" "$tem" && nome=-
+        fi
+        if [[ "$nome" == - ]]; then
+            :
+        elif [[ -n "$tem" ]] && git -C "$FIXO" cat-file -e "$tem^{commit}" 2>/dev/null; then
+            git -C "$FIXO" bundle create -q "$bundle" refs/verificar/alvo --not "$tem" || return 2
+        else
+            git -C "$FIXO" bundle create -q "$bundle" refs/verificar/alvo || return 2
+        fi
+        if [[ "$nome" != - ]]; then
+            scp -q -o BatchMode=yes "$bundle" "$VM:$VM_WIN/$nome" 2>/dev/null || { rm -f "$bundle"; echo "scp para $VM falhou"; return 2; }
+            rm -f "$bundle"
+        fi
+    fi
+    # Mutex do sistema: some com o processo, então SSH caído não deixa a fila presa. Prioridade
+    # abaixo do normal passa para os filhos (cargo, pytest) e não disputa com o Hangar da VM.
+    ps="\$ProgressPreference='SilentlyContinue'
+\$m = New-Object System.Threading.Mutex(\$false, 'Global\\hangar-verificacao')
+try { [void]\$m.WaitOne() } catch [System.Threading.AbandonedMutexException] { }
+[System.Diagnostics.Process]::GetCurrentProcess().PriorityClass = 'BelowNormal'
+& 'C:\\Program Files\\Git\\bin\\bash.exe' -s -- --executar windows $sha $([[ $nome == - ]] && echo - || echo "$VM_WIN/$nome") $*
+\$rc = \$LASTEXITCODE
+\$m.ReleaseMutex()
+exit \$rc"
+    b64="$(printf '%s' "$ps" | iconv -t UTF-16LE | base64 -w0)"
+    vm_ssh "powershell -NoProfile -NonInteractive -EncodedCommand $b64" < "$SCRIPT" | tr -d '\r'
+    return "${PIPESTATUS[0]}"
+}
+
+# ── principal ─────────────────────────────────────────────────────────────────────────────────
+
+SCRIPT="$(realpath "$0" 2>/dev/null || echo "$0")"
+
+if [[ "${1:-}" == --classificar ]]; then
+    classificar
+    exit 0
+fi
+
+if [[ "${1:-}" == --executar ]]; then
+    shift
+    { true >&3; } 2>/dev/null || exec 3>&1
+    executar "$@"
+    exit $?
+fi
+
+commit=HEAD base="" tudo=0 so="" modo=rodar de_novo=0
+while (( $# )); do
+    case "$1" in
+        --commit) commit="${2:?}"; shift ;;
+        --base) base="${2:?}"; shift ;;
+        --tudo) tudo=1 ;;
+        --de-novo) de_novo=1 ;;
+        --so) so="${2:?}"; shift ;;
+        --plano) modo=plano ;;
+        --exigir) modo=exigir; commit="${2:?}"; shift ;;
+        -h|--help) sed -n '2,15p' "$SCRIPT" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) erro "opção desconhecida: $1" ;;
+    esac
+    shift
+done
+
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX
+sha="$(git rev-parse --verify -q "$commit^{commit}")" || erro "commit inválido: $commit"
+ORIGEM="$(cd "$(git rev-parse --git-common-dir)" && pwd)"
+# rc 1 do git config é "não configurado"; acima disso, erro de leitura, que não pode virar "sem VM".
+VM="$(git config hangar.verificarWindows)"; (( $? > 1 )) && erro "não consegui ler hangar.verificarWindows"
+if [[ -n "$base" ]]; then
+    # Desde onde o commit saiu de <ref>: o que a base andou depois não é mudança deste commit.
+    ref_base="$base"
+    base="$(git merge-base "$ref_base" "$sha")" || erro "base inválida ou sem ancestral comum: $ref_base (commit ${sha:0:10})"
+else
+    base="$(base_padrao "$sha")"
+fi
+
+if (( tudo )); then
+    plano_lin="$TODOS_LINUX"; plano_win="$TODOS_WINDOWS"
+else
+    # quotepath=off: caminho com acento sairia entre aspas e escaparia dos padrões.
+    arquivos="$(git -c core.quotepath=off diff --name-only --no-renames "$base" "$sha")" || erro "não consegui comparar $base com $sha"
+    plano="$(classificar <<< "$arquivos")"
+    plano_lin="$(sed -n 's/^linux: //p' <<< "$plano")"
+    plano_win="$(sed -n 's/^windows: //p' <<< "$plano")"
+fi
+[[ -z "$VM" ]] && plano_win=""
+[[ "$so" == windows ]] && plano_lin=""
+[[ "$so" == linux ]] && plano_win=""
+
+case "$modo" in
+    plano)
+        echo "commit ${sha:0:10}, comparado com ${base:0:10}"
+        echo "linux:   ${plano_lin:-nada a rodar}"
+        if [[ -n "$VM" ]]; then echo "windows: ${plano_win:-nada a rodar} (VM $VM)"
+        else echo "windows: sem VM (git config hangar.verificarWindows <host>)"; fi
+        exit 0 ;;
+    exigir)
+        # shellcheck disable=SC2086
+        fl="$(faltando "$(registro "$sha" linux)" $plano_lin)"
+        # shellcheck disable=SC2086
+        fw="$(faltando "$(registro "$sha" windows)" $plano_win)"
+        [[ -z "$fl$fw" ]] && exit 0
+        echo "  ${sha:0:10}: falta verificação local de${fl:+ linux ($fl)}${fw:+ windows ($fw)}" >&2
+        exit 1 ;;
+esac
+
+if (( ! de_novo )); then
+    # shellcheck disable=SC2086
+    [[ -n "$plano_lin" && -z "$(faltando "$(registro "$sha" linux)" $plano_lin)" ]] && \
+        { echo "verificar-local: linux já passou nesta árvore ($plano_lin); --de-novo para repetir."; plano_lin=""; }
+    # shellcheck disable=SC2086
+    [[ -n "$plano_win" && -z "$(faltando "$(registro "$sha" windows)" $plano_win)" ]] && \
+        { echo "verificar-local: windows já passou nesta árvore ($plano_win); --de-novo para repetir."; plano_win=""; }
+    [[ -z "$plano_lin$plano_win" && -f "$(registro "$sha" linux)" ]] && exit 0
+fi
+
+[[ "$commit" == HEAD && -n "$(git status --porcelain --untracked-files=no)" ]] && \
+    echo "verificar-local: há mudanças não commitadas; só o commit ${sha:0:10} é verificado." >&2
+[[ -z "$plano_lin$plano_win" ]] && { echo "verificar-local: nada a rodar para ${sha:0:10} (comparado com ${base:0:10})."; \
+    gravar "$sha" linux "$base"; exit 0; }
+
+echo "verificar-local: ${sha:0:10} contra ${base:0:10}"
+echo "  linux:   ${plano_lin:-nada}"
+[[ -n "$VM" ]] && echo "  windows: ${plano_win:-nada} (VM $VM)"
+
+mkdir -p "$ESTADO/logs"
+[[ -d "$FIXO/.git" ]] || { mkdir -p "$(dirname "$FIXO")" && git clone -q --no-checkout "$ORIGEM" "$FIXO"; } || erro "não consegui criar $FIXO"
+
+rc_lin=0 rc_win=0
+exec 3>&2
+(
+    exec 9>"$TRAVA" || exit 10
+    if ! flock -n 9; then
+        echo "verificar-local: na fila, outra verificação roda nesta máquina…" >&2
+        flock 9 || exit 10
+    fi
+    # Busca primeiro, sob a trava: o Windows sai do mesmo clone.
+    git -C "$FIXO" fetch -q --no-tags "$ORIGEM" "$sha" || exit 10
+    win_pid=""
+    if [[ -n "$plano_win" ]]; then
+        # shellcheck disable=SC2086
+        # 9>&-: processo que sobrar de um passo não pode segurar a fila da máquina.
+        vm_rodar "$sha" $plano_win > "$ESTADO/logs/${sha:0:10}-windows.log" 2>&1 9>&- &
+        win_pid=$!
+        echo ">> windows: rodando na VM $VM (log: $ESTADO/logs/${sha:0:10}-windows.log)" >&2
+    fi
+    rl=0
+    if [[ -n "$plano_lin" ]]; then
+        # shellcheck disable=SC2086
+        ORIGEM="$ORIGEM" nice -n 10 ionice -c 3 bash "$SCRIPT" --executar linux "$sha" - $plano_lin 9>&- || rl=$?
+    fi
+    rw=0
+    if [[ -n "$win_pid" ]]; then
+        wait "$win_pid" || rw=$?
+        echo
+        sed -n '/^\(--- windows\/\|=== resumo windows\)/,$p' "$ESTADO/logs/${sha:0:10}-windows.log"
+        # Sem resumo, ou com falha no resumo, não passou, seja qual for o código que o SSH devolveu.
+        grep -q '^=== resumo windows' "$ESTADO/logs/${sha:0:10}-windows.log" || \
+            { echo "=== windows não terminou (rc $rw):"; tail -20 "$ESTADO/logs/${sha:0:10}-windows.log"; rw=1; }
+        grep -q '^  FALHOU' "$ESTADO/logs/${sha:0:10}-windows.log" && rw=1
+    fi
+    exit $(( (rl ? 1 : 0) | (rw ? 2 : 0) ))
+)
+rc=$?
+case "$rc" in
+    0|1|2|3) ;;
+    *) erro "a verificação parou antes de rodar (rc $rc)" ;;
+esac
+(( rc & 1 )) && rc_lin=1
+(( rc & 2 )) && rc_win=1
+[[ -n "$plano_lin" ]] && (( ! rc_lin )) && gravar "$sha" linux "$base" $plano_lin
+[[ -n "$plano_win" ]] && (( ! rc_win )) && gravar "$sha" windows "$base" $plano_win
+(( rc_lin || rc_win )) && { echo "verificar-local: FALHOU"; exit 1; }
+echo "verificar-local: ok, gravado para a árvore $(git rev-parse --short "$sha^{tree}")"

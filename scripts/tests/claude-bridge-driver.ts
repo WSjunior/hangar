@@ -73,7 +73,7 @@ export default async function (pi: ExtensionAPI) {
       contextModule = await import("../pi/lib/agent-context.ts");
       const parserModule = await import("../pi/lib/frontmatter.ts");
       parse = await parserModule.loadFrontmatterParser(contextModule.getAgentContext());
-      const generated = () => fs.readdirSync(agents).map(file => path.join(agents, file)).find(file => parse(fs.readFileSync(file, "utf8")).frontmatter.name === "fixture-reviewer");
+      const generated = () => fs.readdirSync(agents).filter(file => file.endsWith(".md")).map(file => path.join(agents, file)).find(file => parse(fs.readFileSync(file, "utf8")).frontmatter.name === "fixture-reviewer");
       if (scenario === "discovery") {
         const task = pi.getAllTools().find(tool => tool.name === "task");
         assert.ok(task?.description.includes("fixture-reviewer"), "task deve descobrir o agent importado");

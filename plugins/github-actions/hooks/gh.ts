@@ -11,6 +11,8 @@ export type RunGh = {
   conclusion: string
   headSha: string
   url: string
+  startedAt?: string
+  updatedAt?: string
 }
 type StepGh = { name: string; status: string; conclusion: string }
 export type JobGh = { name: string; status: string; conclusion: string; steps?: StepGh[] }
@@ -40,9 +42,22 @@ function passoDe(j: JobGh, s: Situacao): string | null {
 export function jobs(lista: readonly JobGh[]): Job[] {
   return lista.map(j => {
     const s = situacao(j.status, j.conclusion)
-    return { nome: j.name, situacao: s, passo: passoDe(j, s) }
+    const steps = j.steps ?? []
+    const feitos = steps.filter(p => p.status.toLowerCase() === 'completed').length
+    const passos = steps.map(p => ({ nome: p.name, situacao: situacao(p.status, p.conclusion) }))
+    return { nome: j.name, situacao: s, passo: passoDe(j, s), feitos, total: steps.length, passos }
   })
 }
+
+/** Data ISO do gh em ms; vazia ou a zero do Go (`0001-01-01…`, run que não começou) vira null. */
+export function ms(iso: string | undefined): number | null {
+  const t = iso ? Date.parse(iso) : NaN
+  return Number.isFinite(t) && t > 0 ? t : null
+}
+
+/** Volta de ms à data do gh, para remontar o run de um commit que não respondeu. */
+// `undefined`: leitura gravada pela versão que ainda não guardava as datas.
+export const iso = (t: number | null | undefined) => (t == null ? undefined : new Date(t).toISOString())
 
 /** Runs a mostrar, de listas por commit do mais novo para o mais velho (cada uma como o `gh` lista,
  *  do run mais novo): o último de cada workflow e, além dele, todo run que ainda não terminou. */
@@ -70,11 +85,36 @@ export function lembrarCommit(lista: readonly Empurrado[], novo: Empurrado, max:
 /** Só `git push` registra commit; `gh pr|run|workflow` só pede consulta. */
 export const ehPush = (cmd: string) => /\bgit\s+push\b/.test(cmd)
 
-/** Rótulo do botão de cada linha, único na faixa: o Hangar acha o botão pelo texto. */
-export function rotulosAbrir(ws: readonly { id: number; nome: string; sha: string }[]): string[] {
-  const comSha = new Set(ws.map(w => w.sha)).size > 1
-  const base = ws.map(w => `abrir ${w.nome}${comSha ? ` ${w.sha.slice(0, 7)}` : ''}`)
-  return base.map((r, i) => (base.indexOf(r) !== base.lastIndexOf(r) ? `${r} #${ws[i]?.id ?? i}` : r))
+// Flags do `gh pr merge` que levam valor: o valor não é o PR.
+const COM_VALOR = new Set(['-t', '--subject', '-b', '--body', '-F', '--body-file', '--match-head-commit', '-R', '--repo', '-A', '--author-email'])
+const FIM = /^(;|&&|\|\||\||&)$/
+
+export type AlvoMerge = { alvo: string; repo: string | null }
+
+/** O PR de cada `gh pr merge` do comando (número, URL ou branch; '' é o da branch atual) e o `-R` dele. */
+export function alvosMerge(cmd: string): AlvoMerge[] {
+  return [...cmd.matchAll(/\bgh\s+pr\s+merge\b/g)].map(m => {
+    // Palavra a palavra, com aspas inteiras: `--subject "fix 12; ok" 106` é o 106.
+    const palavras = [...cmd.slice((m.index ?? 0) + m[0].length).matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)]
+    let alvo: string | null = null
+    let repo: string | null = null
+    for (let i = 0; i < palavras.length; i++) {
+      const p = palavras[i]!
+      const solto = p[3]
+      if (solto !== undefined && FIM.test(solto)) break
+      const valor = p[1] ?? p[2] ?? solto ?? ''
+      if (solto?.startsWith('-')) {
+        const [flag, junto] = solto.split('=', 2)
+        const v = junto ?? (COM_VALOR.has(flag ?? '') ? palavras[++i]?.slice(1).find(x => x !== undefined) ?? '' : null)
+        if (flag === '-R' || flag === '--repo') repo = v
+        continue
+      }
+      const fimColado = solto?.endsWith(';') ?? false
+      alvo ??= fimColado ? valor.slice(0, -1) : valor
+      if (fimColado) break
+    }
+    return { alvo: alvo ?? '', repo }
+  })
 }
 
 type CheckGh = { __typename?: string; status?: string; conclusion?: string | null; state?: string }

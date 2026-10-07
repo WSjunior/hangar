@@ -90,7 +90,10 @@ jobs:
         if: runner.os != 'Windows'
         run: tmux -V
       # O rustup do runner lê o crates/rust-toolchain.toml (1.98.1) no primeiro cargo.
-      - uses: actions/cache@v4
+      # Só a main grava (o passo `cache/save` lá embaixo); as outras branches leem o dela. Cada branch
+      # gravando a própria cópia estourava o limite de cache do repositório e o GitHub despejava a da main.
+      - uses: actions/cache/restore@v4
+        id: cache-rust
         with:
           path: |
             ~/.cargo/registry
@@ -117,6 +120,14 @@ jobs:
         env:
           CARGO_PROFILE_RELEASE_LTO: fat
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+      - uses: actions/cache/save@v4
+        if: github.ref == 'refs/heads/main' && steps.cache-rust.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/target
+          key: ${{ steps.cache-rust.outputs.cache-primary-key }}
       # Guarda: se o zigbuild deixar de fixar a glibc, o binário passa a exigir mais que o prometido.
       - name: glibc máxima exigida
         if: matrix.zigbuild
