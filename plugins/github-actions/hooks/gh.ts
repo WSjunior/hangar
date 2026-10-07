@@ -11,6 +11,8 @@ export type RunGh = {
   conclusion: string
   headSha: string
   url: string
+  startedAt?: string
+  updatedAt?: string
 }
 type StepGh = { name: string; status: string; conclusion: string }
 export type JobGh = { name: string; status: string; conclusion: string; steps?: StepGh[] }
@@ -40,9 +42,20 @@ function passoDe(j: JobGh, s: Situacao): string | null {
 export function jobs(lista: readonly JobGh[]): Job[] {
   return lista.map(j => {
     const s = situacao(j.status, j.conclusion)
-    return { nome: j.name, situacao: s, passo: passoDe(j, s) }
+    const steps = j.steps ?? []
+    const feitos = steps.filter(p => p.status.toLowerCase() === 'completed').length
+    return { nome: j.name, situacao: s, passo: passoDe(j, s), feitos, total: steps.length }
   })
 }
+
+/** Data ISO do gh em ms; vazia ou a zero do Go (`0001-01-01…`, run que não começou) vira null. */
+export function ms(iso: string | undefined): number | null {
+  const t = iso ? Date.parse(iso) : NaN
+  return Number.isFinite(t) && t > 0 ? t : null
+}
+
+/** Volta de ms à data do gh, para remontar o run de um commit que não respondeu. */
+export const iso = (t: number | null) => (t === null ? undefined : new Date(t).toISOString())
 
 /** Runs a mostrar, de listas por commit do mais novo para o mais velho (cada uma como o `gh` lista,
  *  do run mais novo): o último de cada workflow e, além dele, todo run que ainda não terminou. */
@@ -69,13 +82,6 @@ export function lembrarCommit(lista: readonly Empurrado[], novo: Empurrado, max:
 
 /** Só `git push` registra commit; `gh pr|run|workflow` só pede consulta. */
 export const ehPush = (cmd: string) => /\bgit\s+push\b/.test(cmd)
-
-/** Rótulo do botão de cada linha, único na faixa: o Hangar acha o botão pelo texto. */
-export function rotulosAbrir(ws: readonly { id: number; nome: string; sha: string }[]): string[] {
-  const comSha = new Set(ws.map(w => w.sha)).size > 1
-  const base = ws.map(w => `abrir ${w.nome}${comSha ? ` ${w.sha.slice(0, 7)}` : ''}`)
-  return base.map((r, i) => (base.indexOf(r) !== base.lastIndexOf(r) ? `${r} #${ws[i]?.id ?? i}` : r))
-}
 
 type CheckGh = { __typename?: string; status?: string; conclusion?: string | null; state?: string }
 

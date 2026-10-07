@@ -1,11 +1,12 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
-import { classificarFalha, disparaRun, piorErro, ehGithub, ehPush, emAndamento, textoAviso, jobs, lembrarCommit, pr, precisaConsultar, runsVisiveis, situacao } from './gh'
+import { classificarFalha, disparaRun, piorErro, ehGithub, ehPush, emAndamento, textoAviso, iso, jobs, lembrarCommit, ms, pr, precisaConsultar, runsVisiveis, situacao } from './gh'
 import type { Empurrado, Falha, Situacao } from './gh'
 import type { GhView, Job, JobGh, PrGh, RunGh, Workflow } from './gh'
 import { desenharFaixa } from './faixa'
 
 const view = atom({ plugin: 'github-actions', key: 'view' } as const, null as GhView | null)
+const recolhida = atom({ plugin: 'github-actions', key: 'recolhida' } as const, false)
 
 const INTERVALO_MS = 15_000
 // Depois de um push o run novo leva alguns segundos para aparecer na API.
@@ -69,8 +70,11 @@ function lerJson<T>(r: Saida | null, argv: string[]): T {
 type Lido = { w: Workflow; erro: string | null }
 
 async function workflowDe($: EngineInterface, r: RunGh, antes: Workflow | undefined): Promise<Lido> {
-  const base = { id: r.databaseId, nome: r.workflowName, sha: r.headSha, url: r.url }
   const fim = r.status === 'completed' ? situacao(r.status, r.conclusion) : null
+  const base = {
+    id: r.databaseId, nome: r.workflowName, sha: r.headSha, url: r.url,
+    inicio: ms(r.startedAt), fim: fim ? ms(r.updatedAt) : null,
+  }
   if (!fim) jobsFinais.delete(r.databaseId)
   const guardados = jobsFinais.get(r.databaseId)
   if (fim && guardados) return { w: { ...base, situacao: fim, jobs: guardados }, erro: null }
@@ -145,7 +149,7 @@ async function consultar($: EngineInterface, antes: GhView | null): Promise<GhVi
     sh($, prArgv),
     ...shas.map(async sha => {
       const argv = ['gh', 'run', 'list', '--commit', sha, '--limit', '20',
-        '--json', 'databaseId,workflowName,status,conclusion,headSha,url']
+        '--json', 'databaseId,workflowName,status,conclusion,headSha,url,startedAt,updatedAt']
       return { sha, saida: await sh($, argv), argv }
     }),
   ])
@@ -164,6 +168,7 @@ async function consultar($: EngineInterface, antes: GhView | null): Promise<GhVi
       porCommit.push((antes?.workflows ?? []).filter(w => w.sha === sha).map(w => ({
         databaseId: w.id, workflowName: w.nome, headSha: w.sha, url: w.url,
         status: emAndamento(w.situacao) ? 'in_progress' : 'completed', conclusion: CONCLUSAO[w.situacao],
+        startedAt: iso(w.inicio), updatedAt: iso(w.fim),
       })))
     }
   }
@@ -303,7 +308,12 @@ export const register: Register = on => {
     const v = e.props.hasSurvey ? null : await read($, view)
     if (!v || (v.workflows.length === 0 && !v.pr && !v.aviso)) return next(e)
     const t = $.ui.resolve(e)
-    const nosso = desenharFaixa(t, v, e.props.bodyColumns, url => void abrir($, url))
+    const nosso = desenharFaixa(t, v, {
+      superficie: e.surface, colunas: e.props.bodyColumns, recolhida: await read($, recolhida), agora: await $.clock.now(),
+    }, {
+      abrir: url => void abrir($, url),
+      alternar: () => void update($, recolhida, r => !r),
+    })
     const abaixo = await next(e).catch(() => null)
     if (!abaixo) return nosso
     const { Box } = t
