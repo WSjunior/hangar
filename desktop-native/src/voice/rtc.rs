@@ -38,6 +38,7 @@ pub fn offer() -> Result<Offer, RtcError> {
     Ok(Offer { sdp: offer.to_sdp_string(), rtc, socket, local, mid, pending })
 }
 
+// O canal de eventos precisa ser ilimitado: com send_blocking num canal cheio o laço de mídia travaria.
 pub fn run(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: async_channel::Sender<RtcEvent>, stop: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let outcome = drive(offer, answer, muted, &events, &stop);
@@ -58,10 +59,13 @@ fn drive(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: &async_ch
     let mut encoder = opus_rs::OpusEncoder::new(48_000, 1, opus_rs::Application::Voip).map_err(|_| RtcError::Media)?;
     let mut decoder = opus_rs::OpusDecoder::new(48_000, 1).map_err(|_| RtcError::Media)?;
     let (mut connected, mut timestamp, mut buffer) = (false, 0u64, vec![0u8; 2000]);
+    let mut write_errors = 0u32;
     let (mut decoded, mut packet) = (vec![0f32; FRAME * 2], vec![0u8; 1500]);
     let (started, mut last_levels) = (Instant::now(), Instant::now());
     let result = loop {
         if stop.load(Ordering::Relaxed) { break Ok(()); }
+        // Ninguém ouve mais: sem isto o microfone ficaria aberto.
+        if events.is_closed() { break Err(RtcError::Network); }
         if !connected && started.elapsed() > CONNECT_DEADLINE { break Err(RtcError::Network); }
         if let Some(error) = audio.failed() { break Err(audio_error(error)); }
         let timeout = match rtc.poll_output() {
@@ -82,13 +86,19 @@ fn drive(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: &async_ch
         };
         // Mídia escrita antes do Connected é descartada pelo str0m.
         if connected {
+            let mut return_media_failure = false;
             while let Some(frame) = audio.next_frame() {
                 let Ok(len) = encoder.encode(&frame, FRAME, &mut packet) else { continue };
                 let Some(writer) = rtc.writer(mid) else { break };
                 let Some(pt) = writer.payload_params().find(|p| p.spec().codec == Codec::Opus).map(|p| p.pt()) else { break };
-                let _ = writer.write(pt, Instant::now(), MediaTime::new(timestamp, Frequency::FORTY_EIGHT_KHZ), packet[..len].to_vec());
+                // Falha persistente de escrita deixaria a chamada conectada com o microfone mudo para a OpenAI.
+                match writer.write(pt, Instant::now(), MediaTime::new(timestamp, Frequency::FORTY_EIGHT_KHZ), packet[..len].to_vec()) {
+                    Ok(_) => write_errors = 0,
+                    Err(_) => { write_errors += 1; if write_errors >= 50 { return_media_failure = true; break; } }
+                }
                 timestamp += FRAME as u64;
             }
+            if return_media_failure { break Err(RtcError::Media); }
             if last_levels.elapsed() >= Duration::from_millis(60) {
                 let (input, output) = audio.levels();
                 let _ = events.try_send(RtcEvent::Levels(input, output));
@@ -97,14 +107,17 @@ fn drive(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: &async_ch
         }
         // Acorda no mínimo a cada 10 ms para drenar o microfone mesmo sem pacote chegando.
         let wait = timeout.saturating_duration_since(Instant::now()).min(Duration::from_millis(10));
-        if wait.is_zero() { let _ = rtc.handle_input(Input::Timeout(Instant::now())); continue; }
+        if wait.is_zero() {
+            if rtc.handle_input(Input::Timeout(Instant::now())).is_err() { break Err(RtcError::Network); }
+            continue;
+        }
         let _ = socket.set_read_timeout(Some(wait));
         match socket.recv_from(&mut buffer) {
             Ok((n, source)) => {
                 let Ok(contents) = buffer[..n].try_into() else { continue };
-                let _ = rtc.handle_input(Input::Receive(Instant::now(), Receive { proto: Protocol::Udp, source, destination: local, contents }));
+                if rtc.handle_input(Input::Receive(Instant::now(), Receive { proto: Protocol::Udp, source, destination: local, contents })).is_err() { break Err(RtcError::Network); }
             }
-            Err(_) => { let _ = rtc.handle_input(Input::Timeout(Instant::now())); }
+            Err(_) => { if rtc.handle_input(Input::Timeout(Instant::now())).is_err() { break Err(RtcError::Network); } }
         }
     };
     rtc.disconnect();
@@ -118,7 +131,8 @@ mod tests {
 
     #[test]
     fn offer_has_opus_audio_and_events_channel() {
-        let offer = offer().unwrap();
+        // Máquina sem rota de rede não monta a oferta.
+        let Ok(offer) = offer() else { return };
         assert!(offer.sdp.starts_with("v=0"));
         assert!(offer.sdp.contains("m=audio"));
         assert!(offer.sdp.to_lowercase().contains("opus/48000"));
