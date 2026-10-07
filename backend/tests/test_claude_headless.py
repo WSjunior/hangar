@@ -375,7 +375,7 @@ def test_context_ganha_tabela_de_limites_da_conta(adapter):
                     JanelaCota(rotulo="fable", pct=99, por_modelo=True)]
     notas: list[str] = []
 
-    async def _nota(s, texto):
+    async def _nota(s, texto, confirms=None):
         notas.append(texto)
     adapter._nota_local = _nota  # type: ignore[method-assign]
     _run(adapter._on_event(sess, {"type": "assistant", "local_command_source": "user", "message": {
