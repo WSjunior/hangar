@@ -153,7 +153,6 @@ impl Starter {
 
     /// Página da conversa: alvo num contexto próprio (sem os cookies do painel), documento posto direto e quadros
     /// em PNG, para o alfa chegar à GPUI. Sem `background` o fundo é transparente; com ele, opaco nessa cor.
-    #[expect(dead_code, reason = "a página da conversa ainda não chama")]
     pub fn start_page(self, html: &str, width: f32, background: Option<(u8, u8, u8)>, events: async_channel::Sender<Event>) -> Result<Engine, String> {
         let browser = Browser::shared(&self.executor, self.scale)?;
         let long = Duration::from_secs(10);
@@ -348,7 +347,6 @@ impl Engine {
     fn send(&self, method: &str, params: Value) { drop(self.session.call(method, params)); }
 
     /// Roda um script na página sem esperar o resultado.
-    #[expect(dead_code, reason = "a página da conversa ainda não chama")]
     pub fn evaluate(&self, expression: &str) { self.send("Runtime.evaluate", json!({"expression": expression})); }
 
     pub fn load(&self, url: &str) {

@@ -45,6 +45,7 @@ mod home_usage;
 mod recent;
 mod orq_timeline;
 mod panes;
+mod page_card;
 mod popup;
 mod rail;
 mod rows;
@@ -522,6 +523,8 @@ pub struct Hangar {
     plugin_toasts_shown: std::collections::VecDeque<SharedString>,
     recent: Option<Recent>,
     media: MediaCache<(SessionKey, Source)>,
+    /// Páginas publicadas na conversa, pelo id da página.
+    pages: page_card::Pages,
     full_images: viewer::FullImages,
     stats: Option<Stats>,
     side: side::Side,
@@ -855,7 +858,7 @@ impl Hangar {
             attachments: HashMap::new(), attach_seq: 0, uploading: HashMap::new(), commands: HashMap::new(),
             suggest_pick: 0, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None, confirm_no_ask: false,
             mention: Default::default(),
-            terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_shown: None, plugin_columns: None, plugin_source: None, plugin_local_tab: None, plugin_tabs_scroll: ScrollHandle::new(), plugin_tabs_seen: None, plugin_tabs_waits: 0, plugin_hovered: HashSet::new(), plugin_fields: HashMap::new(), plugin_draws: 0, plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
+            terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_shown: None, plugin_columns: None, plugin_source: None, plugin_local_tab: None, plugin_tabs_scroll: ScrollHandle::new(), plugin_tabs_seen: None, plugin_tabs_waits: 0, plugin_hovered: HashSet::new(), plugin_fields: HashMap::new(), plugin_draws: 0, plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), pages: page_card::Pages::new(window.window_handle()), full_images: viewer::full_images(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
             settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(),
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
@@ -5773,9 +5776,11 @@ impl Hangar {
                             .bg(theme::sheet()).shadow(theme::sheet_shadow())));
                     content = content.child(div().relative().flex_1().min_h_0().flex().flex_col()
                         .children(sheet)
+                        .child(page_card::Paint::edge(&self.pages.paint, true))
                         .child(list(self.list_state.clone(), move |i, window, cx| {
                             view.update(cx, |this, cx| this.render_row(i, window, cx)).unwrap_or_else(|_| div().into_any_element())
                         }).flex_1().min_h_0())
+                        .child(page_card::Paint::edge(&self.pages.paint, false))
                         .child(self.wheel_layer(cx))
                         .children(self.render_rail(cx))
                         .when(self.follow_detached(), |el| el.child(self.render_jump_pill(cx)))

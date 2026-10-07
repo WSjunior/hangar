@@ -54,11 +54,15 @@ fn is_task_call(name: Option<&str>) -> bool { matches!(name, Some("TaskCreate" |
 
 fn is_agent_call(name: Option<&str>) -> bool { matches!(name, Some("Agent" | "AgentSwarm")) }
 
+/// Página publicada pelo agente; mesmos nomes do `packages/core/src/htmlPage.ts`.
+pub fn is_page_call(name: Option<&str>) -> bool { matches!(name, Some("mcp__hangar__html_render")) }
+
 // Como no web: as chamadas de tarefa nunca entram no pensamento, nem no "Tudo"; o bloco de tarefas as substitui.
+// A página publicada também não: ela existe para ser vista.
 fn joins_thinking(mode: ThinkingTools, name: Option<&str>) -> bool {
     match mode {
         ThinkingTools::None => false,
-        _ if is_task_call(name) => false,
+        _ if is_task_call(name) || is_page_call(name) => false,
         ThinkingTools::All => true,
         ThinkingTools::Search => is_search(name),
     }
@@ -125,8 +129,8 @@ pub fn build(events: &[ChatEvent], view: View, pinned: &HashSet<usize>) -> Vec<I
         if event.kind == "tool_use" {
             let tool = Tool { call: i, result: paired.get(&i).copied() };
             // O subagente fica fora do grupo em todo visual: o cartão dele abre a conversa própria, e dentro de um grupo
-            // fechado o que ainda roda ficaria escondido.
-            if is_agent_call(event.tool_name.as_deref()) {
+            // fechado o que ainda roda ficaria escondido. A página publicada fica fora pelo mesmo motivo.
+            if is_agent_call(event.tool_name.as_deref()) || is_page_call(event.tool_name.as_deref()) {
                 flush_run(&mut run, &mut items);
                 items.push(Item::Tool(tool));
             } else { run.push(tool); }
@@ -561,6 +565,18 @@ mod tests {
     fn build(events: &[ChatEvent]) -> Vec<Item> { super::build(events, View::default(), &HashSet::new()) }
     fn with_input(mut event: ChatEvent, input: Value) -> ChatEvent { event.tool_input = input.as_object().cloned(); event }
     fn answered(id: &str, tool: &str, text: &str) -> ChatEvent { ChatEvent { result: Some(text.into()), ..result(id, tool) } }
+
+    #[test]
+    fn published_page_stays_out_of_groups_and_thinking() {
+        const PAGE: &str = "mcp__hangar__html_render";
+        let events = vec![call("a", "1", "Bash"), call("b", "2", "Read"), call("c", "3", "Grep"), call("h", "4", PAGE), call("d", "5", "Bash")];
+        let items = build(&events);
+        assert!(matches!(&items[0], Item::Group { tools, .. } if tools.len() == 3));
+        assert_eq!(items[1], Item::Tool(Tool { call: 3, result: None }));
+        let events = vec![ev("thinking", "t1"), call("h", "1", PAGE)];
+        let items = super::build(&events, View { thinking: ThinkingTools::All, ..View::default() }, &HashSet::new());
+        assert_eq!(items[1], Item::Tool(Tool { call: 1, result: None }));
+    }
 
     #[test]
     fn thinking_mode_decides_which_calls_fold_in() {
