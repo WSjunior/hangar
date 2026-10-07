@@ -44,6 +44,14 @@ describe('htmlPage', () => {
     expect(htmlPageFromResult('mcp__hangar__html_render', JSON.stringify([{ type: 'text', text: 'erro' }]))).toBeNull();
   });
 
+  it('alturas só de objeto simples e só números finitos positivos', () => {
+    const heightsOf = (heights: unknown) =>
+      htmlPageFromResult('mcp__hangar__html_render', JSON.stringify({ hangar_page: { id: 'a', title: 'T', heights } }))?.heights;
+    expect(heightsOf({ '360': 500, '728': 0, '1000': -3, '1200': '400', '1400': null })).toEqual({ '360': 500 });
+    expect(heightsOf([500, 380])).toEqual({});
+    expect(heightsOf('500')).toEqual({});
+  });
+
   it('lê o CallToolResult inteiro que o Codex grava, estruturado primeiro', () => {
     const text = JSON.stringify({ hangar_page: ref, message: 'x' });
     const structured = JSON.stringify({ content: [{ type: 'text', text: 'outro' }], structuredContent: { hangar_page: { ...ref, id: 's1' } } });

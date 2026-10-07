@@ -408,7 +408,8 @@ if (cmd === 'confere') {
   // giraria achando que a tela só não chegou lá. Navegador fechado ou shell fora do ar ainda saem 1
   // (helpers comuns).
   if (snap.codigo !== 0) erro(`o snapshot falhou: ${semToken(snap.texto.slice(0, 200))}`, 2);
-  let arvore = snap.texto;
+  // A árvore vai ao Jev, fora da máquina: sem o token da URL.
+  let arvore = semToken(snap.texto);
   // A prova pode estar no topo ou no fim da página; o miolo de uma lista longa é repetição.
   if (arvore.length > 100_000) arvore = `${arvore.slice(0, 50_000)}\n…\n${arvore.slice(-50_000)}`;
   let respostas;
@@ -442,7 +443,8 @@ if (cmd === 'objetivo') {
     maxPassos: Number(flags.passos) > 0 ? Number(flags.passos) : 15,
     escreverTexto: escritorDeTexto(),
     log: (linha) => console.log(semToken(linha)),
-    executar: async (verbo, args) => (await chamar(chave, verbo, args)).texto,
+    // Tudo que o navegador devolve vira estado enviado ao Jev: o token não sai da máquina.
+    executar: async (verbo, args) => semToken((await chamar(chave, verbo, args)).texto),
     perguntar: async (estado, perguntas) => {
       const { url, modelo } = jev.destinoDoJev(process.env, 'jev-latest');
       try {

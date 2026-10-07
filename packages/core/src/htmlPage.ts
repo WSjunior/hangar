@@ -18,6 +18,14 @@ export function isHtmlRenderTool(name: string | null | undefined): boolean {
 type Block = { type?: unknown; text?: unknown } | null;
 const joinText = (blocks: Block[]) => blocks.map((b) => (b?.type === 'text' && typeof b.text === 'string' ? b.text : '')).join('');
 
+// O resultado vem do agente: só objeto simples e só alturas finitas positivas chegam ao cálculo.
+function cleanHeights(raw: unknown): Record<string, number> {
+  if (!raw || typeof raw !== 'object' || Object.getPrototypeOf(raw) !== Object.prototype) return {};
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(raw)) if (typeof v === 'number' && Number.isFinite(v) && v > 0) out[k] = v;
+  return out;
+}
+
 export function htmlPageFromResult(toolName: string | null | undefined, result: string | null | undefined): HtmlPageRef | null {
   if (!isHtmlRenderTool(toolName) || !result) return null;
   try {
@@ -31,7 +39,7 @@ export function htmlPageFromResult(toolName: string | null | undefined, result: 
     const page = data?.hangar_page;
     if (!page || typeof page.id !== 'string' || typeof page.title !== 'string') return null;
     const ref: HtmlPageRef = { id: page.id, title: page.title, height: typeof page.height === 'number' ? page.height : null,
-      heights: page.heights ?? {}, ownTheme: page.own_theme === true };
+      heights: cleanHeights(page.heights), ownTheme: page.own_theme === true };
     // Só http(s): o app abre esse endereço direto.
     if (typeof page.url === 'string' && /^https?:\/\//i.test(page.url)) ref.url = page.url;
     return ref;

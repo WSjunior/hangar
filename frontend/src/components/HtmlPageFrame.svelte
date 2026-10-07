@@ -50,7 +50,11 @@
       (_all, open: string, base: string, close: string) => `${open}${css}${base.replaceAll('&quot;', '"')}${close}`);
   }
 
+  let seq = 0;
+
   async function load() {
+    // Resposta de um pedido antigo (nova tentativa no meio) não sobrescreve a do mais novo.
+    const mine = ++seq;
     status = 'loading';
     const server = sessionServer();
     try {
@@ -60,17 +64,19 @@
       const code = r.status === 404 ? await r.json().then((b) => b?.detail?.code, () => null) : null;
       const next = pageFetchState(r.status, code);
       // Tema próprio: a página fica como foi desenhada, sem as cores do app.
-      if (next === 'ready') { const html = await r.text(); doc = page.ownTheme ? html : themed(html); }
+      const html = next === 'ready' ? await r.text() : null;
+      if (mine !== seq) return;
+      if (html != null) doc = page.ownTheme ? html : themed(html);
       status = next;
     } catch {
-      status = pageFetchState('network');
+      if (mine === seq) status = pageFetchState('network');
     }
   }
 
   function onMessage(e: MessageEvent) {
     if (!frame || e.source !== frame.contentWindow) return;
     const d = e.data;
-    if (d?.method === 'ui/notifications/size-changed' && typeof d.params?.height === 'number') {
+    if (d?.method === 'ui/notifications/size-changed' && Number.isFinite(d.params?.height)) {
       reported = d.params.height;
     } else if (d?.method === 'ui/open-link' && typeof d.params?.url === 'string' && /^https?:/i.test(d.params.url)
       // Só com gesto real: a página não abre aba sozinha.
@@ -118,8 +124,9 @@
 <div class="page" bind:this={box} style:height={status === 'ready' || status === 'loading' ? `${height}px` : undefined}
   aria-busy={status === 'loading'}>
   {#if status === 'ready'}
-    <!-- Sem allow-same-origin: a página roda em origem opaca, longe do token e do localStorage do app. -->
-    <iframe bind:this={frame} title={page.title} srcdoc={doc} sandbox="allow-scripts allow-popups"
+    <!-- Sem allow-same-origin: a página roda em origem opaca, longe do token e do localStorage do app.
+         Sem allow-popups: link só abre pela ponte ui/open-link, com gesto do leitor. -->
+    <iframe bind:this={frame} title={page.title} srcdoc={doc} sandbox="allow-scripts"
       referrerpolicy="no-referrer" style:color-scheme={page.ownTheme ? 'normal' : scheme}></iframe>
   {:else if status === 'loading'}
     <p class="note">{m.page_loading({ title: page.title })}</p>

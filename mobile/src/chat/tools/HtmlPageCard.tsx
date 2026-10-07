@@ -36,6 +36,19 @@ const applyScript = (p: ThemeParams) => `window.__hangarApply&&window.__hangarAp
 // passar); fechar isso de vez exige filtro nativo.
 const onlyInitial = (r: { url: string }) => r.url === 'about:blank' || r.url.startsWith('about:srcdoc');
 
+// A lista desmonta o cartão fora da tela: voltar a ele não busca de novo nem pula de altura.
+// ponytail: teto fixo de entradas, a mais antiga sai primeiro.
+const CACHE_MAX = 20;
+const cache = new Map<string, { html: string; reported: number | null }>();
+function remember(key: string, entry: { html: string; reported: number | null }) {
+  cache.delete(key);
+  cache.set(key, entry);
+  if (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value as string);
+}
+
+// Gesto do leitor vale por pouco tempo e por um link só: a página não abre endereço sozinha.
+const GESTURE_MS = 2000;
+
 // Página publicada pelo html_render no lugar da chamada, como o cartão do nativo (page_card.rs):
 // sem moldura nem título, só a página sobre o papel de parede; carregando ocupa a altura reservada,
 // erro e expirada viram uma linha de texto apagado. A mensagem da página é do agente, não confiável:
@@ -66,12 +79,17 @@ function LivePageCard({ page, sessionName, serverId }: {
   const { theme, rt } = useUnistyles();
   // A página mora na máquina da sessão, que nem sempre é a ativa.
   const server = useServers((s) => (serverId ? s.servers.find((x) => x.id === serverId) ?? null : s.active()));
+  // Primitivos: o objeto do servidor muda a cada atualização da store e refaria a busca.
+  const base = server ? baseOf(server) : null;
+  const auth = server ? fileAuthHeader(server).Authorization ?? '' : '';
+  const key = `${server?.id ?? ''}|${sessionName}|${page.id}`;
   const { width: screen } = useWindowDimensions();
   const [width, setWidth] = useState(0);
-  const [state, setState] = useState<PageFetchState>('loading');
-  const [html, setHtml] = useState('');
-  const [reported, setReported] = useState<number | null>(null);
+  const [state, setState] = useState<PageFetchState>(() => (cache.has(key) ? 'ready' : 'loading'));
+  const [raw, setRaw] = useState(() => cache.get(key)?.html ?? '');
+  const [reported, setReported] = useState<number | null>(() => cache.get(key)?.reported ?? null);
   const web = useRef<WebView>(null);
+  const touchedAt = useRef(0);
 
   const scheme = rt.themeName === 'light' ? 'light' : 'dark';
   const params = useMemo<ThemeParams>(() => {
@@ -91,38 +109,53 @@ function LivePageCard({ page, sessionName, serverId }: {
   const seq = useRef(0);
   const load = useCallback(async () => {
     const n = ++seq.current;
+    cache.delete(key);
     setState('loading');
+    setReported(null);
     try {
-      if (!server) throw new Error('no server');
-      const r = await fetch(pageUrls(baseOf(server), sessionName, page.id).raw, { headers: fileAuthHeader(server) });
+      if (!base) throw new Error('no server');
+      const r = await fetch(pageUrls(base, sessionName, page.id).raw, { headers: { Authorization: auth } });
       // O 404 da página vencida traz o código; sem ele (convidado, rota ausente) é erro.
       const code = r.status === 404 ? await r.json().then((b) => b?.detail?.code, () => null) : null;
       const next = pageFetchState(r.status, code);
       const text = next === 'ready' ? await r.text() : '';
-      const doc = text && !own ? themed(text, paramsRef.current) : text;
       if (n !== seq.current) return;
-      setHtml(doc);
+      if (next === 'ready') remember(key, { html: text, reported: null });
+      setRaw(text);
       setState(next);
     } catch {
       if (n === seq.current) setState(pageFetchState('network'));
     }
-  }, [server, sessionName, page.id, own]);
+  }, [base, auth, key, sessionName, page.id]);
 
   useEffect(() => {
-    void load();
+    // Página trocada: o que estava na tela era da anterior.
+    const hit = cache.get(key);
+    if (hit) { seq.current++; setRaw(hit.html); setReported(hit.reported); setState('ready'); }
+    else void load();
     return () => { seq.current++; };
-  }, [load]);
+  }, [key, load]);
+
+  const doc = useMemo(() => (raw && !own ? themed(raw, paramsRef.current) : raw), [raw, own]);
 
   const onMessage = useCallback((e: WebViewMessageEvent) => {
     let d: { method?: unknown; params?: { height?: unknown; url?: unknown } } | null;
     try { d = JSON.parse(e.nativeEvent.data); } catch { return; }
     const h = d?.params?.height;
     const url = d?.params?.url;
-    if (d?.method === 'ui/notifications/size-changed' && typeof h === 'number' && Number.isFinite(h)) setReported(h);
-    else if (d?.method === 'ui/open-link' && typeof url === 'string' && /^https?:\/\//i.test(url)) {
+    if (d?.method === 'ui/notifications/size-changed' && typeof h === 'number' && Number.isFinite(h)) {
+      const next = Math.round(h);
+      const hit = cache.get(key);
+      if (hit?.reported === next) return;
+      if (hit) hit.reported = next;
+      setReported((prev) => (prev === next ? prev : next));
+    } else if (d?.method === 'ui/open-link' && typeof url === 'string' && /^https?:\/\//i.test(url)) {
+      const recent = Date.now() - touchedAt.current < GESTURE_MS;
+      touchedAt.current = 0;
+      if (!recent) return;
       Linking.openURL(url).catch((err: unknown) => toast.erro(err instanceof Error ? err.message : String(err)));
     }
-  }, []);
+  }, [key]);
 
   const onLayout = useCallback((e: LayoutChangeEvent) => setWidth(e.nativeEvent.layout.width), []);
   const w = width || screen - 2 * theme.base.space[4];
@@ -142,7 +175,8 @@ function LivePageCard({ page, sessionName, serverId }: {
     );
   }
   return (
-    <View style={[styles.page, { height }]} onLayout={onLayout} accessibilityLabel={page.title}>
+    <View style={[styles.page, { height }]} onLayout={onLayout} accessibilityLabel={page.title}
+      onTouchStart={() => { touchedAt.current = Date.now(); }}>
       {state === 'loading' ? (
         <View style={styles.loading} accessibilityRole="progressbar">
           <Text style={styles.note}>{m.page_loading({ title: page.title })}</Text>
@@ -150,7 +184,7 @@ function LivePageCard({ page, sessionName, serverId }: {
       ) : (
         <WebView
           ref={web}
-          source={{ html }}
+          source={{ html: doc }}
           style={styles.web}
           // Com '*' toda navegação passa pelo filtro abaixo; com uma lista menor, o que ficasse de fora
           // a própria lib abriria no Linking sem gesto, em qualquer esquema.
