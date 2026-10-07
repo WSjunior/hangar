@@ -47,6 +47,18 @@ if [ "$cenario" = askpass ]; then
   fi
 fi
 m "##HANGAR-ITEM## uv ok uv 0.9.2 · instalado"
+# Ordem do install.sh: o login da Tailscale acontece ainda na etapa "preparar" (linhas 514-567).
+if [ $fora = 1 ]; then
+  m "##HANGAR-PASSO## tailscale fazendo"
+  m "##HANGAR-ITEM## tailscale ok Tailscale"
+  if [ "$cenario" = tailscale ]; then
+    m "##HANGAR-ITEM## tailscale-conta fazendo conta Tailscale"
+    m "##HANGAR-LINK## tailscale-login https://login.tailscale.com/a/dubl3"
+    sleep "${FAKE_LOGIN_WAIT:-$pausa}"
+  fi
+  m "##HANGAR-ITEM## tailscale-conta ok conta Tailscale"
+  m "##HANGAR-PASSO## preparar fazendo"
+fi
 m "##HANGAR-PASSO## preparar ok"
 m "##HANGAR-PASSO## instalar fazendo"
 m "##HANGAR-ITEM## servidor fazendo Baixar o servidor"
@@ -60,24 +72,27 @@ if [ "$cenario" = falha ]; then
 fi
 if [ "$cenario" = interrompe ]; then echo "dublê: saindo sem FIM"; exit 1; fi
 m "##HANGAR-ITEM## inicio ok Iniciar com o computador"
-m "##HANGAR-PASSO## instalar ok"
+# O celular vem antes do fim da instalação, com ou sem Tailscale (install.sh:768-827).
+m "##HANGAR-PASSO## celular fazendo"
+m "##HANGAR-ITEM## rede-local ok rede de casa"
+m "##HANGAR-ITEM## firewall ok porta do Wi-Fi liberada"
+m "##HANGAR-PASSO## celular ok"
 pendencia=0
+# A Tailscale publica depois do celular (install.sh:862).
 if [ $fora = 1 ]; then
   m "##HANGAR-PASSO## tailscale fazendo"
-  m "##HANGAR-ITEM## tailscale ok Tailscale instalada"
   if [ "$cenario" = tailscale ]; then
-    m "##HANGAR-LINK## tailscale-login https://login.tailscale.com/a/dubl3"
-    m "##HANGAR-ITEM## tailscale-conta ok Conta conectada"
-    m "##HANGAR-ITEM## tailscale-https pendente Endereço seguro (HTTPS)"
+    m "##HANGAR-ITEM## tailscale-https pendente endereço seguro (HTTPS)"
     m "##HANGAR-PENDENCIA## tailscale-https o HTTPS da conta Tailscale está desligado"
     m "##HANGAR-PASSO## tailscale pendente"
     pendencia=1
   else
-    m "##HANGAR-ITEM## tailscale-conta ok Conta conectada"
-    m "##HANGAR-ITEM## tailscale-https ok Endereço seguro (HTTPS)"
+    m "##HANGAR-ITEM## tailscale-https ok endereço seguro (HTTPS)"
     m "##HANGAR-PASSO## tailscale ok"
   fi
 fi
+m "##HANGAR-PASSO## instalar fazendo"
+m "##HANGAR-PASSO## instalar ok"
 m "##HANGAR-PASSO## final fazendo"
 m "##HANGAR-ITEM## servidor-responde ok Servidor respondendo"
 m "##HANGAR-ITEM## agentes ok Agentes prontos"

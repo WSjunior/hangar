@@ -158,7 +158,7 @@ impl SetupWizard {
         }
         self.bootstrap = run::state_dir().map(|dir| dir.join(run::bootstrap_name(cfg!(windows)))).filter(|p| p.is_file());
         self.read_tails(false);
-        self.viewing = self.frontier_now();
+        self.go(self.frontier_now(), cx);
         suspend_updates(true, cx);
         self.start_poll(window, cx);
     }
@@ -550,14 +550,19 @@ impl SetupWizard {
 
     fn follow(&mut self, before: Screen, cx: &mut Context<Self>) {
         let next = flow::follow(self.viewing, before, self.frontier_now());
-        if next != self.viewing { self.go(next, cx); }
+        if next != self.viewing { self.go(next, cx); } else { self.want_qr(cx); }
     }
 
     pub(super) fn go(&mut self, screen: Screen, cx: &mut Context<Self>) {
         self.viewing = screen;
         // A tela 5 pede o QR ao abrir, só depois do fim da instalação (o backend está de pé).
-        if screen == Screen::Phone && flow::status(Screen::Phone, &self.view()) != flow::Status::Pending { self.load_qr(cx); }
+        self.want_qr(cx);
         cx.notify();
+    }
+
+    /// Só pede o código quando ele ainda não foi pedido: Failed e NoAddress esperam o botão da tela.
+    fn want_qr(&mut self, cx: &mut Context<Self>) {
+        if self.viewing == Screen::Phone && matches!(self.qr, Qr::Idle) && flow::status(Screen::Phone, &self.view()) != flow::Status::Pending { self.load_qr(cx); }
     }
 
     pub(super) fn load_qr(&mut self, cx: &mut Context<Self>) {
@@ -572,7 +577,7 @@ impl SetupWizard {
         let (done, result) = tokio::sync::oneshot::channel();
         self.runtime.spawn(async move { let _ = done.send(phone::load(api).await); });
         cx.spawn(async move |this, cx| {
-            let Ok(loaded) = result.await else { return };
+            let loaded = result.await.unwrap_or_else(|_| Err(tr("connection_failed")));
             let _ = this.update(cx, |w, cx| {
                 w.qr = match loaded {
                     Ok(Some(pairing)) => Qr::Shown { url: pairing.url, tailscale: pairing.tailscale,

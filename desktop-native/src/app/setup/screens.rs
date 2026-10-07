@@ -154,7 +154,27 @@ fn tips(tailscale: bool) -> Div {
             .child(div().text_sm().text_color(theme::muted()).whitespace_normal().child(text))))
 }
 
+fn recheck_button(id: &'static str, cx: &mut Context<SetupWizard>) -> AnyElement {
+    Button::new(id).outline().small().label(tr("setup_recheck")).on_click(cx.listener(|w, _, window, cx| w.retry(window, cx))).into_any_element()
+}
+
 impl SetupWizard {
+    /// O aviso de login da Tailscale: o script pede o login ainda na preparação, então ele aparece em qualquer tela
+    /// enquanto o link espera e a conta não conectou.
+    fn login_notice(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let latest = self.runs.latest()?;
+        let account_marked = self.runs.items(Step::Tailscale).iter().any(|i| i.id == "tailscale-conta" && i.state == State::Ok);
+        if self.tailscale_running || account_marked { return None; }
+        let url = latest.link("tailscale-login")?.to_owned();
+        let mut actions = vec![Button::new("setup-tailscale-login-open").primary().small().icon(IconName::ExternalLink).label(tr("setup_tailscale_login"))
+            .on_click(move |_, _, cx| cx.open_url(&url)).into_any_element()];
+        // Passou o teto do script sem login: "Conferir de novo" roda o script de novo.
+        if latest.pendings.iter().any(|(c, _)| c == "tailscale-login") || latest.error.as_deref() == Some("tailscale-login") {
+            actions.push(recheck_button("setup-tailscale-login-recheck", cx));
+        }
+        Some(callout("setup-tailscale-login", tr("setup_tailscale_login"), vec![tr("setup_tailscale_login_hint")], actions))
+    }
+
     fn failure_handler(&self, cx: &mut Context<Self>) -> OnFailureAction {
         let this = cx.entity().downgrade();
         Rc::new(move |action, window, cx| { let _ = this.update(cx, |w, cx| w.failure_action(action, window, cx)); })
@@ -243,7 +263,9 @@ impl SetupWizard {
             Screen::Phone => self.render_phone(cx),
             Screen::Done => self.render_done(cx),
         };
-        div().flex().flex_col().gap_6().child(head).children(failure).child(body)
+        // Na tela 4 o aviso já vem no corpo; nas outras ele sobe enquanto o script espera o login.
+        let login = (self.viewing != Screen::Tailscale && self.runs.end().is_none()).then(|| self.login_notice(cx)).flatten();
+        div().flex().flex_col().gap_6().child(head).children(failure).children(login).child(body)
     }
 
     fn agent_tile(&self, id: &'static str, name: &'static str, cx: &mut Context<Self>) -> Button {
@@ -372,7 +394,7 @@ impl SetupWizard {
         let title = self.runs.install.as_ref().and_then(|p| p.doing_item()).filter(|i| i.step == Some(Step::Install)).map(|i| i.text.clone())
             .unwrap_or_else(|| if self.runs.install.is_none() { tr("setup_install_waiting") } else { String::new() });
         let mut rows: Vec<Stateful<Div>> = items.iter().map(item_row).collect();
-        // Os itens da etapa do celular (`rede-local`, `firewall`) não têm tela própria nesta fase: moram aqui, depois dos da instalação.
+        // Os itens da etapa do celular (`rede-local`, `firewall`) moram aqui, depois dos da instalação: a tela do celular é só o código.
         rows.extend(self.runs.items(Step::Phone).iter().map(item_row));
         rows.extend(self.app_rows(cx));
         div().flex().flex_col().gap_4()
@@ -389,18 +411,9 @@ impl SetupWizard {
         let account_marked = items.iter().any(|i| i.id == "tailscale-conta" && i.state == State::Ok);
         let mut rows: Vec<Stateful<Div>> = items.iter().map(item_row).collect();
         if self.tailscale_running && !account_marked { rows.push(row("tailscale-running", RowMark::Ok, tr("setup_tailscale_connected"), None, None)); }
-        let latest = self.runs.latest();
-        let has_code = |code: &str| latest.is_some_and(|p| p.pendings.iter().any(|(c, _)| c == code) || p.error.as_deref() == Some(code));
-        let login = latest.and_then(|p| p.link("tailscale-login")).map(str::to_owned).filter(|_| !self.tailscale_running && !account_marked);
-        let recheck = |id: &'static str, cx: &mut Context<Self>| Button::new(id).outline().small().label(tr("setup_recheck"))
-            .on_click(cx.listener(|w, _, window, cx| w.retry(window, cx))).into_any_element();
-        let login_callout = login.map(|url| {
-            let mut actions = vec![Button::new("setup-tailscale-login-open").primary().small().icon(IconName::ExternalLink).label(tr("setup_tailscale_login"))
-                .on_click(move |_, _, cx| cx.open_url(&url)).into_any_element()];
-            // Passou o teto do script sem login: "Conferir de novo" roda o script de novo.
-            if has_code("tailscale-login") { actions.push(recheck("setup-tailscale-login-recheck", cx)); }
-            callout("setup-tailscale-login", tr("setup_tailscale_login"), vec![tr("setup_tailscale_login_hint")], actions)
-        });
+        let has_code = |code: &str| self.runs.latest().is_some_and(|p| p.pendings.iter().any(|(c, _)| c == code) || p.error.as_deref() == Some(code));
+        let login_callout = self.login_notice(cx);
+        let recheck = |id: &'static str, cx: &mut Context<Self>| recheck_button(id, cx);
         let https_callout = has_code("tailscale-https").then(|| callout("setup-tailscale-https", tr("setup_tailscale_https_title"),
             vec![tr("setup_tailscale_https_lead"), tr("setup_tailscale_https_1"), tr("setup_tailscale_https_2")],
             vec![Button::new("setup-tailscale-https-open").primary().small().icon(IconName::ExternalLink).label(tr("setup_tailscale_open_settings"))
@@ -434,7 +447,9 @@ impl SetupWizard {
                                 .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy.clone())))))
                         .child(tips(*tailscale)))
             }
-            Qr::Idle | Qr::Loading => div().child(muted_line("setup-phone-loading", true, tr("setup_phone_loading"))),
+            Qr::Loading => div().child(muted_line("setup-phone-loading", true, tr("setup_phone_loading"))),
+            // Idle na tela do celular é o código que ninguém pediu (retomada): sempre há como pedir.
+            Qr::Idle => div().child(retry()),
             Qr::NoAddress => div().flex().flex_col().gap_2()
                 .child(div().id("setup-phone-none").role(Role::Alert).text_sm().text_color(theme::warning_text()).whitespace_normal().child(tr("setup_phone_none")))
                 .child(div().child(retry())),
