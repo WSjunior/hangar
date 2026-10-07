@@ -17,7 +17,7 @@ use std::time::Duration;
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::Request;
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use percent_encoding::percent_decode_str;
 use serde_json::{Value, json};
@@ -28,22 +28,24 @@ use crate::runtime::gateway::{RuntimeRegistry, WriteTarget};
 use crate::runtime::ingress::{GateClosed, IngressPass};
 pub use table::{Owner, Provider, WriteRoute, decide};
 
-/// Abaixo do `OP_TIMEOUT_S` (75 s) do transporte no Python.
-const GATE_WAIT: Duration = Duration::from_secs(30);
-/// Teto do corpo lido aqui; o proxy não tinha um, então fica folgado.
-const BODY_LIMIT: usize = 64 * 1024 * 1024;
+/// Mesmo teto do middleware de corpo do Python (`uploads.MAX_BYTES`), que recusa antes da rota.
+const BODY_LIMIT: usize = 100 * 1024 * 1024;
 const BUSY_MSG: &str = "A sessão está trocando de agente; tente novamente quando terminar.";
 
 /// O que a rota precisa para escrever: o passe mantém a porta aberta até o fim da escrita.
-#[allow(dead_code)] // name/target/headers são lidos pelos corpos das Tasks 4 a 6
+#[allow(dead_code)] // name/target são lidos pelos corpos das Tasks 4 a 6
 pub(crate) struct Ctx {
     pub(crate) st: Arc<AppState>,
     pub(crate) name: String,
     pub(crate) target: WriteTarget,
     pub(crate) pass: IngressPass,
-    pub(crate) headers: HeaderMap,
     parts: Parts,
     fwd: Forward,
+}
+
+impl Ctx {
+    #[allow(dead_code)] // lido pelos corpos das Tasks 4 a 6
+    pub(crate) fn headers(&self) -> &axum::http::HeaderMap { &self.parts.headers }
 }
 
 /// Envelope do `HTTPException(detail=erro(...))` do Python (`mensagens.py`).
@@ -78,20 +80,20 @@ pub(crate) async fn admit(st: &Arc<AppState>, peer: SocketAddr, req: Request, ro
         return Err(pass(st, req, &fwd).await);
     };
     let (parts, body) = req.into_parts();
-    let headers = parts.headers.clone();
     let Ok(bytes) = to_bytes(body, BODY_LIMIT).await else {
-        let mut response = detail(StatusCode::PAYLOAD_TOO_LARGE, "erro_corpo_grande", "corpo grande demais", json!({}));
-        cors(&headers, response.headers_mut());
+        // Igual ao `_BodySizeLimitMiddleware`: texto puro, e o CORS por fora dele.
+        let mut response = (StatusCode::PAYLOAD_TOO_LARGE, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "request body too large").into_response();
+        cors(&parts.headers, response.headers_mut());
         return Err(response);
     };
     if !table::body_ok(route, &bytes) || early(&bytes) {
         return Err(forward_whole(st, parts, bytes, &fwd).await);
     }
-    let found = match enter_then_find(&runtime, &name, GATE_WAIT).await {
+    let found = match enter_then_find(&runtime, &name, st.write_gate_wait).await {
         Ok(found) => found,
         Err(GateClosed) => {
             let mut response = detail(StatusCode::CONFLICT, "session_transfer_busy", BUSY_MSG, json!({}));
-            cors(&headers, response.headers_mut());
+            cors(&parts.headers, response.headers_mut());
             return Err(response);
         }
     };
@@ -103,7 +105,7 @@ pub(crate) async fn admit(st: &Arc<AppState>, peer: SocketAddr, req: Request, ro
         drop(pass_in);
         return Err(forward_whole(st, parts, bytes, &fwd).await);
     }
-    Ok((Ctx { st: st.clone(), name, target, pass: pass_in, headers, parts, fwd }, bytes))
+    Ok((Ctx { st: st.clone(), name, target, pass: pass_in, parts, fwd }, bytes))
 }
 
 /// Provisório (Tasks 4 a 6 trocam cada rota pelo corpo dela): repassa ao Python o que o Rust já

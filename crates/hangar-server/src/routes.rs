@@ -59,6 +59,8 @@ pub struct AppState {
     pub state: Arc<crate::state::live::StateEnv>,
     /// Interface dos mods das sessões sem terminal do Rust: o ator publica, as rotas consultam.
     pub mods: crate::mods::state::Mods,
+    /// Quanto uma escrita espera a porta de entrada da sessão reabrir (os testes encurtam).
+    pub write_gate_wait: std::time::Duration,
 }
 
 impl AppState {
@@ -106,7 +108,7 @@ impl AppState {
             list, state,
             hub: Arc::default(),
             term: Arc::default(),
-            mods }
+            mods, write_gate_wait: std::time::Duration::from_secs(30) }
     }
 
     pub(crate) fn skill_origins(&self, repo: &std::path::Path) -> crate::costs::origins::Origins {

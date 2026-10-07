@@ -13,12 +13,16 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 /// Cano Claude falso mínimo: aceita o token, manda o retrato e confirma tudo o que receber.
-async fn cano() -> String {
+async fn cano() -> String { cano_with(None).await }
+
+/// `kill`: quando avisado, o cano falso cai e a entrada fica doente (`cano_exited`).
+async fn cano_with(kill: Option<Arc<tokio::sync::Notify>>) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else { return };
+            let kill = kill.clone();
             tokio::spawn(async move {
                 let (read, mut write) = tokio::io::split(stream);
                 let mut reader = BufReader::new(read);
@@ -29,7 +33,12 @@ async fn cano() -> String {
                 write.write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
                 loop {
                     let mut raw = String::new();
-                    if reader.read_line(&mut raw).await.unwrap_or(0) == 0 { return; }
+                    let line = reader.read_line(&mut raw);
+                    let read = match &kill {
+                        Some(kill) => tokio::select! { n = line => n, () = kill.notified() => return },
+                        None => line.await,
+                    };
+                    if read.unwrap_or(0) == 0 { return; }
                     let envelope: Value = serde_json::from_str(&raw).unwrap();
                     let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
                     let _ = write.write_all(format!("{ack}\n").as_bytes()).await;
@@ -71,9 +80,13 @@ async fn policy() -> std::net::SocketAddr {
 }
 
 async fn open_entry(registry: &RuntimeRegistry, dir: &std::path::Path, key: &str, name: &str) {
-    registry.open(RuntimeTarget { key: key.into(), generation: 1, name: name.into(), provider: "claude".into(),
+    open_entry_with(registry, dir, key, name, 1, cano().await).await
+}
+
+async fn open_entry_with(registry: &RuntimeRegistry, dir: &std::path::Path, key: &str, name: &str, generation: u64, escuta: String) {
+    registry.open(RuntimeTarget { key: key.into(), generation, name: name.into(), provider: "claude".into(),
         metadata: json!({"name": name, "headless": true, "session_id": "sid-1", "initialized": true}),
-        binding: CanoBinding { pid: 42, escuta: cano().await, token: "secret-test".into(), versao: 2 },
+        binding: CanoBinding { pid: 42, escuta, token: "secret-test".into(), versao: 2 },
         lease_path: dir.join(format!("{key}.lock")), state_path: dir.join(format!("{key}.queue-state.json")),
         projection_dir: dir.join(format!("{key}-projection")), transcript: dir.join(format!("{key}.jsonl")), created: 0.0 }).await.unwrap();
 }
@@ -172,12 +185,16 @@ async fn enter_then_find_without_an_entry_still_hands_back_nothing() {
     assert!(hangar_server::session_write::enter_then_find(&registry, "s", Duration::from_millis(50)).await.unwrap().is_none());
 }
 
-#[tokio::test(start_paused = true)]
-async fn gate_closed_past_thirty_seconds_answers_409_busy() {
+#[tokio::test]
+async fn gate_closed_past_the_wait_answers_409_busy() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
     open_entry(&registry, dir.path(), "k", "s").await;
     registry.ingress().close("s", Duration::from_secs(1)).await.unwrap();
-    let (python, server) = serve_with(Some(registry)).await;
+    let (python, upstream) = spawn_fake().await;
+    let mut state = AppState::new(config(upstream, "127.0.0.1"));
+    state.write_gate_wait = Duration::from_millis(100);
+    assert!(state.state.runtime.set(registry).is_ok());
+    let server = spawn_state(state).await;
     let (status, text) = post(server, "input", r#"{"text":"oi"}"#, OWNER).await;
     assert_eq!(status, 409);
     let body: Value = serde_json::from_str(&text).unwrap();
@@ -188,12 +205,44 @@ async fn gate_closed_past_thirty_seconds_answers_409_busy() {
 }
 
 #[tokio::test]
+async fn oversized_body_answers_python_413_text() {
+    let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
+    open_entry(&registry, dir.path(), "k", "s").await;
+    let (_python, server) = serve_with(Some(registry)).await;
+    let big = vec![b' '; 100 * 1024 * 1024 + 1];
+    let response = client().post(format!("http://{server}/api/sessions/s/input"))
+        .header("authorization", format!("Bearer {OWNER}")).header("origin", "http://app").body(big).send().await.unwrap();
+    assert_eq!(response.status().as_u16(), 413);
+    assert_eq!(response.headers()["content-type"], "text/plain; charset=utf-8");
+    assert_eq!(response.headers()["access-control-allow-origin"], "*");
+    assert_eq!(response.text().await.unwrap(), "request body too large");
+}
+
+#[tokio::test]
+async fn writable_picks_the_highest_generation_of_a_repeated_name() {
+    let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
+    open_entry_with(&registry, dir.path(), "a", "s", 1, cano().await).await;
+    open_entry_with(&registry, dir.path(), "b", "s", 2, cano().await).await;
+    let target = registry.writable("s").await.unwrap();
+    assert_eq!((target.key.as_str(), target.generation), ("b", 2));
+}
+
+#[tokio::test]
 async fn forwarding_never_holds_the_ingress_pass() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
     open_entry(&registry, dir.path(), "k", "s").await;
+    // Entrada doente: o cano cai depois de aberta e o retrato passa a dizer `cano_exited`.
+    let kill = Arc::new(tokio::sync::Notify::new());
+    open_entry_with(&registry, dir.path(), "d", "doente", 1, cano_with(Some(kill.clone())).await).await;
+    kill.notify_waiters();
+    for _ in 0..100 {
+        if !registry.writable("doente").await.unwrap().healthy { break; }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!registry.writable("doente").await.unwrap().healthy, "a entrada ficou doente");
     let (python, server) = serve_with(Some(registry.clone())).await;
-    // Sem entrada (outro nome) e com entrada (stub que repassa): em ambos o `close` do Python não espera.
-    for name in ["sem-entrada", "s"] {
+    // Sem entrada, doente e saudável (stub que repassa): em todos o `close` do Python não espera.
+    for name in ["sem-entrada", "doente", "s"] {
         python.hold_input(true);
         let url = format!("http://{server}/api/sessions/{name}/input");
         let sending = tokio::spawn(client().post(url).header("authorization", format!("Bearer {OWNER}")).body(r#"{"text":"oi"}"#).send());
