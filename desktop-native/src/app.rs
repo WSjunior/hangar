@@ -637,6 +637,13 @@ pub struct Hangar {
     connection_origin: Option<WeakFocusHandle>,
     /// Primeira abertura com o app Electron neste computador: a tela de conexão oferece trazer as configurações dele.
     electron_offer: bool,
+    /// O assistente de instalação aberto: ocupa a janela inteira (`setup/`).
+    setup: Option<Entity<setup::SetupWizard>>,
+    /// O assistente fechado com o script ainda rodando: fica vivo (canal da senha, atualização suspensa), sem desenhar nem
+    /// pegar teclado. Reabrir pelo menu o reaproveita.
+    setup_hidden: Option<Entity<setup::SetupWizard>>,
+    /// O cartão da entrada sem conexão salva: procurando ou o que achou neste computador.
+    entry: Option<setup::Entry>,
 }
 
 impl Drop for Hangar {
@@ -800,6 +807,8 @@ impl Hangar {
             let Some(event) = window.current_key_down_event().cloned() else { return; };
             if event.keystroke != stroke.keystroke { return; }
             let _ = weak.update(cx, |this, cx| {
+                // Com o assistente aberto, os atalhos da conversa (Ctrl+número, Esc da sessão) não valem.
+                if this.setup.is_some() { return; }
                 let root_key = this.new_session.clone().is_some_and(|dialog| dialog.update(cx, |dialog, cx| dialog.root_key_down(&event, window, cx)));
                 if root_key || (event.keystroke.key == "escape" && this.keyboard_escape(window, cx))
                     || this.keyboard_key_down(&event, window, cx) || this.session_number_key(&event, window, cx) {
@@ -847,6 +856,9 @@ impl Hangar {
             player: Default::default(),
             connection_origin: None,
             electron_offer: saved.is_none() && crate::electron::exists(),
+            setup: None,
+            setup_hidden: None,
+            entry: None,
         }
     }
 
@@ -5988,6 +6000,11 @@ impl Hangar {
 
 impl Render for Hangar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // O assistente ocupa a janela: nada da conversa por baixo recebe tecla nem clique.
+        if let Some(setup) = self.setup.clone() {
+            return div().id("hangar-root").size_full().bg(theme::window_fill()).text_color(theme::text()).text_base()
+                .font_family(theme::SANS).child(setup).into_any_element();
+        }
         self.rail_frame(window);
         let selected_name = self.selected.as_ref().map(|s| s.name.clone());
         let floating = theme::is_floating();
@@ -6337,6 +6354,7 @@ impl Render for Hangar {
                     chrome::Glass::new(dialog.focus_trap("connection-dialog", &self.connection_focus), px(16.)).into_any_element()
                 } else { dialog.focus_trap("connection-dialog", &self.connection_focus).into_any_element() })))
                 .with_priority(gpui_kit::base::POPUP_PRIORITY + 1)))
+            .into_any_element()
     }
 }
 
