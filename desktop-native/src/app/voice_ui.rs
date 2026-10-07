@@ -81,6 +81,10 @@ pub(super) fn question_text(q: &str) -> String {
 
 pub(super) fn question_expired(since: std::time::Instant, now: std::time::Instant) -> bool { now.saturating_duration_since(since) >= ASK_TIMEOUT }
 
+pub(super) fn question_marked(events: &[(String, String, String)]) -> bool {
+    events.iter().any(|(_, kind, text)| kind == "user_msg" && text.starts_with(ASK_MARK))
+}
+
 /// `(id, kind, text)` → `(id da última resposta, respostas)` dadas depois da última pergunta marcada e antes de outro pedido.
 pub(super) fn question_answer(events: &[(String, String, String)]) -> Option<(String, String)> {
     let start = events.iter().rposition(|(_, kind, text)| kind == "user_msg" && text.starts_with(ASK_MARK))? + 1;
@@ -426,11 +430,15 @@ impl Hangar {
         if self.voice.pending_question.as_ref().is_none_or(|(k, _)| k != key) { return false; }
         let answer = match question_answer(events) {
             Some((id, text)) => self.voice.spoken.insert(id).then_some(text),
-            None if events.iter().any(|(_, kind, text)| kind == "user_msg" && text.starts_with(ASK_MARK)) => None,
+            None if question_marked(events) => None,
             // A pergunta ainda não está no histórico lido: este fim de turno é de outro pedido.
             None => return false,
         };
-        let Some(text) = answer.or(waiting) else { return true };
+        let Some(text) = answer.or(waiting) else {
+            // Sem resposta ainda: a próxima assistant_msg tenta de novo (o prazo de `ASK_TIMEOUT` segue valendo).
+            self.voice.reply_pending = Some(key.clone());
+            return true;
+        };
         self.voice.pending_question = None;
         crate::voice::log(format!("ask_session answered bytes={}", text.len()));
         self.voice_answer(&text);
@@ -739,6 +747,8 @@ mod tests {
         let q = question_text("Qual banco?");
         let events = vec![ev("1", "user_msg", "outro pedido"), ev("2", "assistant_msg", "feito"), ev("3", "user_msg", &q)];
         assert_eq!(question_answer(&events), None, "ainda sem resposta; o turno anterior não conta");
+        assert!(question_marked(&events), "marca sem resposta é espera, não outro pedido");
+        assert!(!question_marked(&events[..2]));
         let mut events = events;
         events.extend([ev("4", "assistant_msg", "vou ler"), ev("5", "assistant_msg", "Postgres"), ev("6", "user_msg", "depois")]);
         assert_eq!(question_answer(&events), Some(("5".into(), "vou ler\n\nPostgres".into())));
