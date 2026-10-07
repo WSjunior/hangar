@@ -280,6 +280,20 @@ def test_o_comando_exibido_e_o_do_fornecedor_sem_o_embrulho():
     assert hi._exibir(["npm", "install", "-g", "@openai/codex"]) == "npm install -g @openai/codex"
 
 
+def test_comando_do_instalador_sinaliza_cada_caso(monkeypatch, capsys):
+    """`python -m app.harness_commands <cli>`: o instalador decide pelo código de saída."""
+    from app import harness_commands as hc
+    assert hc.main(["claude"]) == 64                      # o Claude tem caminho próprio
+    assert hc.main(["codex", "pi"]) == 64
+    monkeypatch.setitem(hc.COMMANDS, "kimi", None)
+    assert hc.main(["kimi"]) == 2 and hc.MANUAL["kimi"] in capsys.readouterr().err
+    monkeypatch.setattr(hc.shutil, "which", lambda _: None)
+    assert hc.main(["codex"]) == 3 and "npm não está nesta máquina" in capsys.readouterr().err
+    monkeypatch.setattr(hc.shutil, "which", lambda nome: f"/bin/{nome}")
+    monkeypatch.setitem(hc.COMMANDS, "codex", ["bash", "-c", "exit 5"])
+    assert hc.main(["codex"]) == 5
+
+
 def test_pipefail_faz_o_curl_que_falha_derrubar_o_pipe():
     """Sem ele o `curl … | sh` mente: o sh lê stdin vazio e sai 0, e a instalação passaria por feita."""
     argv = hi._sh("exit 7 | cat")

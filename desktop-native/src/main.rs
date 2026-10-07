@@ -91,7 +91,7 @@ fn window_size() -> Size<Pixels> {
 }
 
 /// Pasta de logs do Hangar, a mesma do backend e do shell Electron (`log_paths.base()`).
-fn log_dir() -> std::path::PathBuf {
+pub(crate) fn log_dir() -> std::path::PathBuf {
     if cfg!(windows) {
         let root = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from).unwrap_or_else(|| home_dir().join("AppData/Local"));
         root.join("hangar/logs/privado")
@@ -153,7 +153,18 @@ fn take_crash() -> Option<String> {
     Some(text.trim().to_owned()).filter(|text| !text.is_empty())
 }
 
+/// O script chama o atalho do assistente (`HANGAR_ASKPASS`) com o motivo e, quando o `sudo -S` recusou a senha anterior,
+/// `--retry`; o atalho repassa como `--askpass <motivo> [--retry]`.
+fn askpass_prompt(mut args: impl Iterator<Item = String>) -> Option<(String, bool)> {
+    let _program = args.next();
+    if args.next()? != "--askpass" { return None; }
+    let reason = args.next().unwrap_or_default();
+    Some((reason, args.next().as_deref() == Some("--retry")))
+}
+
 fn main() {
+    // Antes da instância única: senão esta execução viraria um repasse para a janela e sairia sem imprimir a senha.
+    if let Some((reason, retry)) = askpass_prompt(std::env::args()) { std::process::exit(single_instance::askpass_client(&reason, retry)); }
     log_panics();
     let (url_tx, links) = match single_instance::claim(single_instance::invite_arg(std::env::args())) {
         single_instance::Claim::Forwarded => {
@@ -206,6 +217,15 @@ mod tests {
     use super::*;
     // O glob da gpui_kit traz um `test` que colide com o atributo padrão; o nome explícito vence o glob.
     use core::prelude::v1::test;
+
+    #[test]
+    fn askpass_mode_takes_the_reason_and_the_retry_marker() {
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>().into_iter();
+        assert_eq!(askpass_prompt(args(&["hangar-native", "--askpass", "instalar o tmux"])), Some(("instalar o tmux".into(), false)));
+        assert_eq!(askpass_prompt(args(&["hangar-native", "--askpass", "instalar o tmux", "--retry"])), Some(("instalar o tmux".into(), true)));
+        assert_eq!(askpass_prompt(args(&["hangar-native", "--askpass"])), Some((String::new(), false)));
+        assert_eq!(askpass_prompt(args(&["hangar-native", "hangar://convite/h:8443/AB"])), None);
+    }
 
     fn kebab(name: &str) -> String {
         let mut out = String::new();

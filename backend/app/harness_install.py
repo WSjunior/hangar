@@ -6,11 +6,9 @@ só ele: nada de inventar passo de instalação.
 
 Quatro decisões, com o motivo de cada uma:
 
-**Só comando conferido no site do fornecedor entra em `_COMANDOS`.** Chutar nome de pacote instala
-software errado na máquina de quem usa, e o npm tem homônimo pra quase tudo: `oh-my-pi` no npm está
-na casa do 0.2 e não é o omp (que é o `can1357/oh-my-pi`, na casa do 18); `kimi-code` no npm é um
-proxy de terceiro que roda o `claude` por baixo; e `kimi` é uma biblioteca de máquina de estados.
-Harness sem comando conferido **para este sistema** não ganha botão: ganha o link em `MANUAL`.
+**Só comando conferido no site do fornecedor**, e a tabela mora em `app/harness_commands.py`, que os
+instaladores também leem. Harness sem comando conferido **para este sistema** não ganha botão: ganha
+o link em `MANUAL`.
 
 **Instalar o CLI não basta: sem o wrapper o app não o enxerga.** É o `install-claude-wrapper.sh`
 que escreve o bloco do rc que carrega os wrappers de shell (`claude`, `codex`, `pi`, `omp`, `kimi`)
@@ -38,15 +36,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import shutil
 
 from app import atualizar, diag, harness_saude
+from app.harness_commands import COMMANDS as _COMANDOS
+from app.harness_commands import MANUAL, _ps, _sh  # noqa: F401 — os testes leem por aqui
+from app.harness_commands import display as _exibir
+from app.harness_commands import resolve as _resolver
 
 _log = logging.getLogger("hangar.harness_install")
-
-# Constante de módulo, e não `os.name` lido na hora: `monkeypatch.setattr(os, "name", "nt")` leva o
-# `pathlib` junto e estoura no primeiro `Path(...)`. Mesmo motivo do `atualizar._E_WINDOWS`.
-_E_WINDOWS = os.name == "nt"
 
 _TETO_LOG = 400
 # O instalador do omp baixa um binário de ~190 MB e o do Kimi um de ~174 MB; um `npm install -g`
@@ -56,62 +53,9 @@ _TIMEOUT = 900.0
 ETAPAS = ("comando", "conferir", "wrapper", "ajustes")
 
 
-def _ps(linha: str) -> list[str]:
-    return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", linha]
-
-
-def _sh(linha: str) -> list[str]:
-    """`pipefail` nas FLAGS do bash, e não dentro do script.
-
-    Sem ele um `curl … | sh` MENTE: o `sh` lê um stdin vazio e sai 0 quando o `curl` falhou, e a
-    instalação seria dada como feita. Nas flags o `rc` fica honesto e o comando que a pessoa lê na
-    confirmação continua sendo o do fornecedor, sem enfeite nosso no meio dele.
-    """
-    return ["bash", "-o", "pipefail", "-c", linha]
-
-
-# Comando oficial de cada fornecedor, conferido na documentação deles em 07/09/2026. `None` = não há
-# comando conferido PARA ESTE SISTEMA — o card mostra o link de `MANUAL` e nenhum botão.
-_COMANDOS: dict[str, list[str] | None] = {
-    "codex": ["npm", "install", "-g", "@openai/codex"],
-    "pi": ["npm", "install", "-g", "--ignore-scripts", "@earendil-works/pi-coding-agent"],
-    "omp": (_ps("irm https://omp.sh/install.ps1 | iex") if _E_WINDOWS
-            else _sh("curl -fsSL https://omp.sh/install | sh")),
-    "kimi": (None if _E_WINDOWS
-             else _sh("curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash")),
-}
-
-# Onde ler a instrução quando não há comando para este sistema. Fica para TODOS, inclusive os que
-# têm botão: quem prefere instalar na mão continua tendo para onde ir.
-MANUAL = {
-    "codex": "https://github.com/openai/codex",
-    "pi": "https://pi.dev/docs/latest",
-    "omp": "https://github.com/can1357/oh-my-pi",
-    "kimi": "https://kimi.com/code",
-}
-
-
-def _exibir(argv: list[str]) -> str:
-    """O comando como a pessoa lê antes de aprovar: o do fornecedor, não o embrulho que o roda."""
-    return argv[-1] if argv[0] in ("bash", "powershell") else " ".join(argv)
-
-
 def comandos() -> dict[str, str]:
     """O que dá para instalar por botão nesta máquina, por harness."""
     return {cli: _exibir(argv) for cli, argv in _COMANDOS.items() if argv}
-
-
-def _resolver(argv: list[str]) -> list[str]:
-    """O CAMINHO do executável, não o nome dele.
-
-    No Windows o `CreateProcess` não aplica PATHEXT, então `["npm", ...]` (que lá é `npm.cmd`)
-    levanta `FileNotFoundError` — a mesma armadilha que deixou o painel sem versão nenhuma dos CLIs
-    instalados por npm (ver `harness_saude._versao`).
-    """
-    exe = shutil.which(argv[0])
-    if not exe:
-        raise ValueError(f"{argv[0]} não está nesta máquina")
-    return [exe, *argv[1:]]
 
 
 class EmCurso(Exception):

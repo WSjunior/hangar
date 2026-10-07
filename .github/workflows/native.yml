@@ -60,7 +60,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libasound2-dev libfontconfig-dev libfreetype-dev libwayland-dev \
-            libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev libvulkan-dev libzstd-dev
+            libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev libvulkan-dev libzstd-dev rpm
       # O rustup do runner lê o rust-toolchain.toml (1.98.1) no primeiro cargo. actions/cache e não rust-cache: a
       # política do repositório só libera actions do GitHub e de criadores verificados.
       # Só a main grava (o passo `cache/save` lá embaixo); as outras branches leem o dela. Cada branch
@@ -103,6 +103,8 @@ jobs:
               install -m755 tools/install-linux.sh stage/install-linux.sh
               install -m644 assets/brand/icon.png stage/icon.png
               tar -czf "out/$name.tar.gz" -C stage hangar install-linux.sh icon.png
+              # .deb e .rpm abrem pela loja de programas; a versão é a mesma conta do build.rs.
+              tools/package-linux.sh target/release/hangar-native "$(tr -d '[:space:]' < ../VERSION).$(git rev-list --count HEAD)" out "$name"
               ;;
             Windows) cp target/release/hangar-native.exe stage/Hangar.exe && (cd stage && 7z a -tzip "../out/$name.zip" Hangar.exe) ;;
             macOS)
@@ -186,13 +188,13 @@ jobs:
           |---|---|
           | Windows (x64) | `Hangar-windows-x86_64.zip` |
           | macOS (Apple Silicon) | `Hangar-macos-aarch64.zip` |
-          | Linux (x64) | `Hangar-linux-x86_64.tar.gz` |
+          | Linux (x64) | `Hangar-linux-x86_64.deb` (Ubuntu 24.04+, Debian 13+, Mint 22+), `Hangar-linux-x86_64.rpm` (Fedora 40+, openSUSE Tumbleweed) ou `Hangar-linux-x86_64.tar.gz` (glibc 2.39 ou mais nova) |
 
           ### Como instalar
 
           - **Windows:** descompacte e abra `Hangar.exe`. Se o SmartScreen avisar que o app não é reconhecido, use "Mais informações" e depois "Executar assim mesmo".
           - **macOS:** descompacte e arraste `Hangar.app` para Aplicativos. Na primeira vez, abra com o botão direito e escolha "Abrir": o app não é assinado.
-          - **Linux:** `tar xzf Hangar-linux-x86_64.tar.gz` e depois `./install-linux.sh`, que instala o app, o ícone e o atalho no menu.
+          - **Linux:** abra o `.deb` ou o `.rpm` com dois cliques (a loja de programas instala). Quem prefere o terminal: `tar xzf Hangar-linux-x86_64.tar.gz` e depois `./install-linux.sh`.
 
           Instalado, o app mostra um botão de atualizar quando sai versão nova. Os binários não são assinados; confira pelo `.sha256` ao lado de cada arquivo.
           EOF

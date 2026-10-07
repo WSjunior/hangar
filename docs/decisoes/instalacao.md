@@ -16,8 +16,17 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   [plataforma.md](plataforma.md#rede-local-antes-do-tailscale-baseurl-é-identidade-a-rota-é-baseof)).
   Nunca `auto`: tira o loopback de que o `tailscale serve` depende. Firewall do Windows no
   `-Update` só sem UAC (já admin); senão vira pendência com o comando.
-- **Instalador guiado: duas perguntas, o resto é padrão.** Sem terminal, tudo é NÃO. O log nunca
-  carrega o token.
+- **Instalador guiado: duas perguntas, o resto é padrão.** Sem terminal, tudo é NÃO — exceto no
+  `--app`/`-App` (assistente do app nativo), que responde pelas telas: `ask` e `ask_senha` sim,
+  `ask_extra` não, Tailscale pela opção, nada espera teclado. O log nunca carrega o token, e no
+  `--app` nem a saída: a senha chega por `HANGAR_TOKEN`. O portão do 1/8 do `install.ps1` só barra
+  pendência sem código; as com código são extras e vão ao portão do fim. A senha do celular recusa
+  ASCII não visível (acento), `#`, `$`, aspas, `\` e espaço nas pontas (o `.env` é lido pelo python-dotenv; o app nativo monta o cabeçalho só com ASCII visível). Ver
+  [a entrada](#modo---app-o-assistente-responde-pelas-telas).
+- **O instalador exige UM agente de código, não o Claude Code.** Usa os que já existem; nenhum →
+  instala o Claude Code (o padrão). `--agentes=`/`-Agentes` e o `--avancado` escolhem; o comando
+  dos que não são o Claude sai de `app/harness_commands.py`, a mesma tabela do painel de
+  Harnesses. Ver [a entrada](#o-instalador-exige-um-agente-de-código-não-o-claude-code).
 - **Atualizar pelo app faz tudo sozinho, mas nada é irreversível**: resgate antes de qualquer
   passo destrutivo, com a ref conferida. Passo só entra no registro depois da prova passar, e o
   registro é do que JÁ RODOU aqui — não do intervalo de commits.
@@ -444,6 +453,97 @@ Agora o registrador remove o bloco marcado, confere pelo `tomllib` se o app já 
 com a mesma URL e o mesmo token (nada a fazer) e, senão, tira toda seção `[mcp_servers.hangar…]`
 antes de anexar o bloco marcado — idempotente contra a reescrita do app e autocorretivo num
 arquivo já duplicado. Teste em `scripts/test_registrar_mcp.py`.
+
+## O instalador exige um agente de código, não o Claude Code
+
+(06/10/2026) O `install.sh` e o `install.ps1` tinham o Claude Code como dependência obrigatória
+do passo 1/8: sem ele a instalação parava em "faltam: Claude Code", mesmo para quem só usa Codex.
+O Codex era só verificado e Pi, omp e Kimi nem isso. O pedido foi: o Claude continua o padrão,
+mas não pode ser o único, e tem que haver pelo menos um agente.
+
+Sem a opção, a escolha sai do disco e não vira pergunta nova, porque o guiado mantém as duas
+perguntas: os agentes que já existem bastam, e só sem nenhum o Claude Code é instalado.
+`--agentes=`/`-Agentes` e o `--avancado` escolhem explicitamente. O Claude segue pelo caminho
+próprio (no Windows o `Instale-ClaudeCode` conserta o PATH que o instalador da Anthropic não
+põe). Os outros rodam no 2/8, já com o venv, por `python -m app.harness_commands <cli>`: um
+módulo só com biblioteca padrão para o instalador não carregar o backend inteiro, e que o painel
+de Harnesses também lê, para o comando conferido de cada fornecedor morar num lugar só. Kimi no
+Windows não tem comando conferido e vira pendência com o link. A prova do 2/8 é ter algum agente
+no PATH; o `hangar-doctor` só dá erro quando não há nenhum.
+
+## O `sudo` sem terminal: `sudo -S`, não `SUDO_ASKPASS`
+
+(06/10/2026, bloco 1 do instalador gráfico.) O assistente do app nativo roda o `install.sh --app`
+sem terminal e precisa entregar ao `sudo` a senha de administrador que a pessoa digitou na janela
+do app. O caminho óbvio, `SUDO_ASKPASS` + `sudo -A`, não existe no `sudo-rs`, o `sudo` padrão do
+Ubuntu 25.10. Medido em contêiner descartável (`docker run --rm`, sem terminal: `setsid`, stdin
+nulo), com usuário comum no grupo de administradores e um auxiliar que imprime a senha:
+
+| Medição | Ubuntu 25.10 (`sudo-rs 0.2.8`) | Fedora (`Sudo version 1.9.17p2`) |
+|---|---|---|
+| `sudo -A id -u`, com `SUDO_ASKPASS` | `invalid option provided`, rc 1 | o `-A` chama o `SUDO_ASKPASS`: `0`, rc 0 |
+| `sudo id -u` (sem `-A`), com `SUDO_ASKPASS` | o `SUDO_ASKPASS` é ignorado: `sudo: Authentication failed, try again.` (2×) e `sudo-rs: Maximum 3 incorrect authentication attempts`, rc 1 | o `SUDO_ASKPASS` é ignorado: `sudo: a terminal is required to read the password; either use the -S option to read from standard input or configure an askpass helper` e `sudo: a password is required`, rc 1 |
+| `aux \| sudo -S -p '' id -u`, senha certa | `0`, rc 0 | `0`, rc 0 |
+| `aux \| sudo -S -p '' sh -c 'sudo id -u'` | o `sudo` de dentro não pede nada: `0` | o `sudo` de dentro não pede nada: `0` |
+| `sudo -S`, senha errada | `sudo: Authentication failed, try again.` (2×) e `sudo-rs: Maximum 3 incorrect authentication attempts`, rc 1 | `Sorry, try again.`, `sudo: no password was provided` e `sudo: 1 incorrect password attempt`, rc 1 |
+| `sudo -n true` logo depois de um `sudo -S` bem-sucedido, mesmo processo-pai | rc 0 | rc 0 |
+| `aux \| sudo -S -p '' -v` e depois `sudo -n true` e `sudo -n <comando>`, sem terminal (direto, segunda chamada, em `$(...)`, em cano) | rc 0 nas quatro | rc 0 nas quatro |
+| usuário fora do sudoers, senha certa dele | `sudo-rs: I'm sorry <usuário>. I'm afraid I can't do that`, rc 0 1 | `<usuário> is not in the sudoers file.`, rc 0 1 (antes dele, o aviso "We trust you have received the usual lecture…", que o `sudo` clássico imprime no primeiro uso de cada usuário) |
+| auxiliar sai ≠ 0 (a pessoa cancelou) | `sudo: Authentication failed, try again.` (2×) e `sudo-rs: Maximum 3 incorrect authentication attempts`, rc 1 1 | `sudo: no password was provided` e `sudo: a password is required`, rc 1 1 |
+| auxiliar ausente (caminho que não existe) | `bash: line 1: /nao/existe/askpass: No such file or directory` e as mesmas linhas da senha errada, rc 127 1 | `bash: line 1: /nao/existe/askpass: No such file or directory`, `sudo: no password was provided` e `sudo: a password is required`, rc 127 1 |
+| `sudo -S -k -v -p ''` (conferência do app), senha certa / errada | rc 0 0 / `sudo: Authentication failed, try again.` (2×) e `sudo-rs: Maximum 3 incorrect authentication attempts`, rc 0 1 | rc 0 0 / `Sorry, try again.`, `sudo: no password was provided` e `sudo: 1 incorrect password attempt`, rc 0 1 |
+| `apt-get install` de pacote que não existe, pelo `sudo -S` | `E: Unable to locate package pacote-que-nao-existe-hangar`, rc 0 100 | — |
+
+No `sudo-rs`, auxiliar cancelado ou ausente sai com o mesmo texto da senha errada: só o código de
+saída do auxiliar separa os casos.
+
+Decisão: no `--app`, todo `sudo` do `install.sh` passa pela função `app_sudo`. Ela tenta `sudo -n`
+(a credencial que o sistema já guardou) e, sem ela, só autentica: `"$HANGAR_ASKPASS" "<motivo>" |
+sudo -S -p '' -v`. A senha só existe no cano entre os dois, nunca em variável, argv ou saída. Senha
+recusada pede de novo com `"$HANGAR_ASKPASS" "<motivo>" --retry`, até 3 vezes. O comando roda
+depois com `sudo -n <comando>`, sem a senha no stdin: com `sudo -S <comando>`, uma regra `NOPASSWD`
+deixaria a senha na entrada do comando, e a saída dele se confundiria com a do `sudo`. Se o `-v`
+passou e o `sudo -n` ainda pede senha (`timestamp_timeout=0`), a `app_sudo` para com a frase
+`SUDO_NO_CACHE` e o código `sem-sudo`. O script da
+Tailscale, que chama `sudo` por dentro, roda inteiro como administrador
+(`sh -c 'curl … | sh'` pela `app_sudo`). A causa da falha sai do texto: fora do sudoers →
+`sem-sudo`; auxiliar saiu ≠ 0 ou três senhas erradas → `senha-cancelada`; `apt` sem o pacote →
+`pacotes-desatualizados`. Sem `HANGAR_ASKPASS` (o `--app` rodado à mão) a `app_sudo` nem chama o
+`sudo -S`, e a falha fica sem código. Nunca `SUDO_ASKPASS`, `sudo -A` nem `pkexec` (pede a cada
+comando e, sem agente de polkit rodando, a janela nem aparece).
+
+## Modo `--app`: o assistente responde pelas telas
+
+(06/10/2026, spec `docs/superpowers/specs/2026-10-06-instalador-grafico-design.md`, bloco 1.) O
+assistente do app nativo instala pelos mesmos `install.sh`/`install.ps1`, sem terminal, lendo
+marcas na saída. A regra "sem terminal, tudo é NÃO" continua valendo para CI, ssh e `curl | bash`;
+o `--app`/`-App` é a exceção declarada, porque a pessoa já respondeu nas telas: `ask` sim,
+`ask_senha` sim, `ask_extra` não, Tailscale por `--tailscale=sim|nao` (`nao` vale mesmo com ela
+instalada). A senha de administrador vem da janela do app: no Linux todo `sudo` passa pela
+`app_sudo`, que pede a senha ao auxiliar do app (`HANGAR_ASKPASS`) e a entrega ao `sudo -S` pelo
+cano; no Windows o `Eleva-E-Roda` pede o UAC mesmo sem terminal. Nada espera
+teclado: o login da Tailscale vira `##HANGAR-LINK## tailscale-login` e o HTTPS desligado vira a
+pendência `tailscale-https`, e quem roda de novo é o app. A senha do celular chega por
+`HANGAR_TOKEN` (nunca argv nem saída) e sai do ambiente antes de qualquer instalador de terceiro;
+token já gravado é mantido. Ela recusa o que não é ASCII visível (acento), `#`, `$`, aspas, `\` e espaço nas pontas: o backend lê o
+`.env` pelo python-dotenv, que corta o valor em ` #`, expande `${VAR}` e tira aspas, e a senha
+gravada sem aspas não chegaria inteira. O `--app` não abre o app nem o navegador no fim, não
+imprime o token, e no Windows escreve em UTF-8. O bootstrap puxa sem hooks (`core.hooksPath`
+vazio): o post-merge rodaria um `--update` inteiro antes do `##HANGAR-PROTOCOLO##`. Ele também
+tira `HANGAR_TOKEN`/`HANGAR_ASKPASS*` do ambiente e só os devolve na linha do instalador. No `install.ps1`, o portão do 1/8 só barra
+pendência sem código: as que levam código (`Add-AppPending`) são extras, e o app as mostra no fim.
+
+Marcas, uma por linha: `##HANGAR-PROTOCOLO## 1` (primeira), `##HANGAR-PASSO## <etapa> <estado>`,
+`##HANGAR-ITEM## <id> <estado> <texto>`, `##HANGAR-LINK## tailscale-login <url>`,
+`##HANGAR-ERRO## <código>` (logo antes da falha essencial, também fora do `--app`),
+`##HANGAR-PENDENCIA## <código> <texto>` e `##HANGAR-FIM## ok|pendente|falhou` (última, de um
+`trap EXIT` no bash e do `finally` no PowerShell). `##HANGAR-FALHA##` e `##HANGAR-AVISO##` seguem
+como estão (`atualizar.py`). Mudou alguma marca: sobe o número do `##HANGAR-PROTOCOLO##` nos dois
+instaladores e no app.
+
+Sudo sem terminal, medido em [O `sudo` sem terminal: `sudo -S`, não `SUDO_ASKPASS`](#o-sudo-sem-terminal-sudo--s-não-sudo_askpass):
+a senha entra pelo `sudo -S`, porque o `sudo-rs` do Ubuntu não aceita `-A` nem lê `SUDO_ASKPASS`, e
+o script da Tailscale roda inteiro como administrador dentro de `sh -c`.
 
 ## Atualizar para no binário publicado (06/10/2026)
 
