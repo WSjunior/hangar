@@ -35,3 +35,9 @@ pub(super) enum Entry {
     Probing,
     Found(local::Found),
 }
+
+/// O assistente que estava rodando quando o app fechou (`state.json`): reabrir o app retoma nele.
+pub(super) fn saved_run() -> Option<run::SetupState> { if supported() { run::load_state() } else { None } }
+
+/// Só para provar telas: `HANGAR_SETUP_DEMO` abre o assistente ao iniciar.
+pub(super) fn demo() -> bool { supported() && std::env::var_os("HANGAR_SETUP_DEMO").is_some() }

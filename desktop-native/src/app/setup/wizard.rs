@@ -64,6 +64,8 @@ pub(crate) struct SetupWizard {
     pub(super) app_copy: Option<AppCopy>,
     /// Endereço conectado no fim, ou o motivo de não ter conectado.
     pub(super) connection: Option<Result<String, String>>,
+    /// Acabou escondido com o app ligado a outro servidor: a conexão local espera o "Abrir Hangar".
+    connect_later: bool,
     pub(super) viewing: Screen,
     pub(super) details_open: bool,
     pub(super) phone: Option<PhoneOutcome>,
@@ -107,7 +109,7 @@ impl SetupWizard {
             password, confirm, precheck: None, pkg: None, started: false, preparing: None,
             git_ready: false, bootstrap: None, token: None, runs: Runs::default(), check_tail: None, install_tail: None, records: (None, None),
             polling: false, finished: false, failure: None, vault: Vault::default(), waiting: Vec::new(), prompt: None, after_password: None,
-            opened_link: None, app_copy: None, connection: None, viewing: Screen::Welcome, details_open: false, phone: None,
+            opened_link: None, app_copy: None, connection: None, connect_later: false, viewing: Screen::Welcome, details_open: false, phone: None,
             focus: cx.focus_handle(), window: window.window_handle(), _subscriptions: subscriptions,
         };
         match origin {
@@ -507,6 +509,11 @@ impl SetupWizard {
             return;
         };
         let address = local::address(install.port);
+        // Escondido com o app já ligado a um servidor: não troca de servidor calado; conecta no "Abrir Hangar".
+        let me = cx.entity_id();
+        let hidden_while_connected = self.hangar.read_with(cx, |hangar, _| hangar.api.is_some()
+            && hangar.setup_hidden.as_ref().is_some_and(|hidden| hidden.entity_id() == me)).unwrap_or(false);
+        if hidden_while_connected { self.connect_later = true; return; }
         self.connection = Some(Ok(address.clone()));
         let _ = self.hangar.update(cx, |hangar, cx| hangar.setup_connect(address, token, window, cx));
     }
@@ -516,7 +523,7 @@ impl SetupWizard {
         (self.failure, self.finished, self.started) = (None, false, true);
         self.runs = Runs::default();
         (self.check_tail, self.install_tail, self.records) = (None, None, (None, None));
-        (self.app_copy, self.connection, self.opened_link) = (None, None, None);
+        (self.app_copy, self.connection, self.opened_link, self.connect_later) = (None, None, None, false);
         // A senha escolhida continua em `token`; sem ela, o instalador mantém a do `.env` ou gera uma.
         self.vault = Vault::new(askpass::new_code());
         suspend_updates(true, cx);
@@ -566,6 +573,7 @@ impl SetupWizard {
 
     fn open_hangar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         run::clear_state();
+        if std::mem::take(&mut self.connect_later) { self.connect_local(window, cx); }
         let _ = self.hangar.update(cx, |hangar, cx| hangar.close_setup(window, cx));
     }
 

@@ -1169,6 +1169,9 @@ impl Hangar {
                 .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(Page::Servers.title()))
                 .child(div().text_size(px(13.5)).text_color(theme::muted()).whitespace_normal().child(tr("machines_subtitle"))))
             .child(div().flex().flex_wrap().items_center().gap(px(8.))
+                // Consertar ou acrescentar agentes e Tailscale: o assistente roda na pasta já instalada.
+                .when(super::setup::supported(), |el| el.child(Button::new("machines-setup").ghost().small().icon(IconName::Wrench)
+                    .label(tr("setup_open_menu")).on_click(cx.listener(|this, _, window, cx| this.open_setup_from_menu(window, cx)))))
                 .child(invite)
                 .child(self.mark(div().rounded(px(8.)).child(add), "machines_search_tailscale"))
                 .child(pair));

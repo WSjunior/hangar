@@ -713,6 +713,16 @@ impl Hangar {
             cx.observe(&updater, |_, _, cx| cx.notify()).detach();
         }
         let saved = load_connection();
+        // Entrada (spec "Entrada"): sem conexão salva, procura um Hangar neste computador antes do cartão; o assistente que
+        // estava rodando reabre onde parou.
+        let resume = setup::saved_run();
+        let probe = saved.is_none() && resume.is_none() && !setup::demo() && setup::supported();
+        match resume {
+            Some(state) => cx.defer_in(window, move |this: &mut Self, window, cx| this.open_setup(setup::Origin::Resume(state), window, cx)),
+            None if setup::demo() => cx.defer_in(window, |this: &mut Self, window, cx| this.open_setup(setup::Origin::Menu, window, cx)),
+            None if probe => cx.defer_in(window, |this: &mut Self, window, cx| this.start_entry(window, cx)),
+            None => {}
+        }
         // Primeira abertura com a lista: as máquinas do app Electron entram sozinhas, como a conexão dele já entrava.
         let (mut known_servers, adopt) = match load_servers() { Some(list) => (list, false), None => (Vec::new(), true) };
         if adopt { cx.defer_in(window, |this: &mut Self, window, cx| this.adopt_electron_servers(window, cx)); }
@@ -730,7 +740,7 @@ impl Hangar {
         let connection_focus = cx.focus_handle();
         // O cursor do campo só para de piscar ao perder o foco: foco num campo que nunca aparece o deixa piscando para sempre.
         // Com conexão salva o diálogo não abre; o `connect` que falhar põe o foco aqui.
-        if saved.is_none() { address.update(cx, |input, cx| input.focus(window, cx)); }
+        if saved.is_none() && !probe { address.update(cx, |input, cx| input.focus(window, cx)); }
         let composer = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 10).submit_on_enter(true));
         let input_subscription = cx.subscribe_in(&composer, window, |this, _, event, window, cx| {
             match event {
@@ -858,7 +868,7 @@ impl Hangar {
             electron_offer: saved.is_none() && crate::electron::exists(),
             setup: None,
             setup_hidden: None,
-            entry: None,
+            entry: probe.then_some(setup::Entry::Probing),
         }
     }
 
@@ -6114,6 +6124,8 @@ impl Render for Hangar {
         COLUMN_FRAME.set((f32::from(window.viewport_size().width), side.is_some()));
         let dialog_top = window.viewport_size().height / 10.;
         let dialog_width = (window.viewport_size().width - px(32.)).min(px(480.));
+        let entry = self.render_entry(cx);
+        let entry_shown = entry.is_some();
         // Só montado com a conexão aberta: a raiz redesenha a cada batida das animações.
         let dialog = self.connection_dialog.then(|| div().id("connection-card").w(dialog_width).max_h(window.viewport_size().height - dialog_top - px(16.))
             .p(px(20.)).bg(theme::popup_fill(theme::raised())).border_1().border_color(theme::glass_border()).rounded(px(16.))
@@ -6127,16 +6139,19 @@ impl Render for Hangar {
                     cx.notify();
                 }
             }))
-            .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(tr("connection")))
-            .child(div().text_sm().text_color(theme::muted()).child(tr("connection_hint")))
-            .child(div().text_sm().child(tr("server"))).child(Input::new(&self.address).aria_label(tr("server")))
-            .child(div().text_sm().child(tr("token"))).child(Input::new(&self.token).aria_label(tr("token")))
+            .map(|el| match entry {
+                Some(card) => el.child(card),
+                None => el.child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(tr("connection")))
+                    .child(div().text_sm().text_color(theme::muted()).child(tr("connection_hint")))
+                    .child(div().text_sm().child(tr("server"))).child(Input::new(&self.address).aria_label(tr("server")))
+                    .child(div().text_sm().child(tr("token"))).child(Input::new(&self.token).aria_label(tr("token"))),
+            })
             .when(self.electron_offer, |el| el.child(div().flex().flex_col().gap_2().pt_3().border_t_1().border_color(theme::glass_border())
                 .child(div().text_sm().text_color(theme::muted()).child(tr("electron_import_offer_hint")))
                 .child(Button::new("electron-import").outline().label(tr("electron_import_offer"))
                     .on_click(cx.listener(|this, _, window, cx| this.import_electron(false, window, cx))))))
             .when_some(self.error.clone(), |el, error| el.child(div().text_sm().text_color(theme::warning()).child(error)))
-            .child(div().flex().justify_end().gap_2()
+            .when(!entry_shown, |el| el.child(div().flex().justify_end().gap_2()
                 .when(self.api.is_some(), |el| el.child(Button::new("cancel").label(tr("cancel")).on_click(cx.listener(|this, _, window, cx| {
                     this.connection_dialog = false;
                     this.connection_origin.take().and_then(|origin| origin.upgrade()).unwrap_or_else(|| this.root_focus.clone()).focus(window, cx);
@@ -6148,7 +6163,7 @@ impl Render for Hangar {
                         window.close_all_dialogs(cx);
                         this.root_focus.focus(window, cx);
                     }
-                })))));
+                }))))));
         self.finish_landing(window);
 
         let ticker = motion::ticker(window, cx);
