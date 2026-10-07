@@ -177,6 +177,15 @@ def test_merged_history_dedup_ts_race(tmp_path, monkeypatch):
     assert not any(e.id.startswith("queued-") for e in hist)  # entrada absorvida pelo user_msg real
 
 
+def test_saida_local_confirma_o_comando_que_nao_vai_ao_transcript(tmp_path):
+    q = PromptQueue("s")
+    btw = q.append("/btw", delivered=True)
+    outro = q.append("/context", delivered=True)
+    q.append_saida_local("/btw isn't available in this environment.", confirms="/btw")
+    rows = {r["id"]: r for r in q.load()}
+    assert rows[btw["id"]]["confirmed"] and not rows[outro["id"]].get("confirmed")
+
+
 def test_merged_history_e_follow_mostram_saida_local_como_assistente(tmp_path):
     # Saída de comando local (sessão sem terminal): confirmada de nascença, mas NÃO some do
     # histórico como uma entrada confirmada de usuário — é bolha do assistente, com id "local-".

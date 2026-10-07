@@ -654,13 +654,21 @@ class PromptQueue:
         return entry
 
     @_queue_method
-    def append_saida_local(self, text: str) -> dict:
+    def append_saida_local(self, text: str, confirms: str | None = None) -> dict:
         """Texto do AGENTE que nao entra no transcript (ver _saida_local). Entregue e confirmada
-        de nascenca: nunca e drenada, redigitada nem reconciliada."""
+        de nascenca: nunca e drenada, redigitada nem reconciliada. `confirms`: o comando que a CLI
+        respondeu sozinha; a entrada mais antiga com esse texto fica confirmada por esta resposta."""
         entry = {"id": uuid.uuid4().hex, "text": scrub_surrogates(text), "ts": time.time(),
                  "delivered": True, "confirmed": True, "papel": "assistant"}
         with _append_lock:
             rows = self.load()
+            if confirms:
+                alvo = next((r for r in rows if not r.get("confirmed") and r.get("papel") != "assistant"
+                             and r.get("delivered") and isinstance(r.get("text"), str)
+                             and r["text"].strip().lstrip("/") == confirms.strip().lstrip("/")), None)
+                if alvo is not None:
+                    alvo["confirmed"] = True
+                    alvo.pop("desistiu", None)
             rows.append(entry)
             if len(rows) > _MAX_ENTRIES:
                 rows = rows[-_MAX_ENTRIES:]

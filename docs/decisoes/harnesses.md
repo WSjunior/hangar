@@ -314,6 +314,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   índice por (arquivo, provider), que só processa o que foi acrescentado. O `UserPromptSubmit`
   NÃO confirma: dispara também para prompt que outro hook barra. Ver
   [confirmação de entrega sem reler o transcript](#confirmação-de-entrega-sem-reler-o-transcript).
+  Exceção: comando que o Claude sem terminal responde sozinho (resposta com `local_command_source`,
+  como `/btw isn't available in this environment`) não vira linha no transcript. A resposta local
+  confirma a entrada pendente mais antiga com o mesmo comando, no Rust e no Python; sem isso a
+  bolha ficava "aguardando confirmação" para sempre.
 - **App-server efêmero do Codex sobe com `-c features.plugins=false` quando não usa plugins.**
   Ver [temporários `git-*` no `.tmp` do Codex](#temporários-git--no-tmp-do-codex).
 - **Cota e catálogo do Codex vão por HTTP primeiro, com o app-server efêmero de reserva.** A rota

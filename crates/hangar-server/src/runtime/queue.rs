@@ -168,7 +168,9 @@ impl State {
 pub enum Action {
     Load,
     Append { text:String, delivered:bool, ts:Option<f64>, pre_transcript:bool, entry_id:Option<String> },
-    AppendLocal { text:String, entry_id:Option<String> },
+    /// `confirms`: o comando que a CLI respondeu sozinha, sem linha no transcript.
+    AppendLocal { text:String, entry_id:Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")] confirms:Option<String> },
     Claim { min_ts:f64, limit:Option<usize>, entry_id:Option<String> },
     SetDelivered { entry_id:String, value:bool, steered:bool },
     Abandon { entry_id:String },
@@ -416,6 +418,23 @@ fn holds_terminal_write(op:&Operation,conversation:&Value)->bool {
         && op.result["payload"]["native"]!=true && (conversation.is_null() || op.dispatch_cursor["conversation"]==*conversation)
 }
 
+/// Comando respondido pela própria CLI não vira linha no transcript: a resposta dela é a prova de
+/// que a entrada mais antiga com aquele texto chegou.
+fn confirm_local_command(state:&mut State,source:&str) {
+    let command = |text:&str|text.trim().trim_start_matches('/').to_owned();
+    let source = command(source);
+    let Some(id) = state.rows.iter().find(|r|r["confirmed"] != true && r["papel"] != "assistant" && r["delivered"] == true
+        && r["text"].as_str().map(command).as_deref() == Some(source.as_str())).map(|r|row_id(r).to_owned()) else { return };
+    if let Some(row) = state.rows.iter_mut().find(|r|row_id(r) == id) {
+        row["confirmed"] = json!(true);
+        row.as_object_mut().unwrap().remove("desistiu");
+    }
+    for (_,op) in state.operations.iter_mut().filter(|(key,op)|!key.starts_with(CALL_PREFIX) && op.entry_id.as_deref() == Some(id.as_str())) {
+        op.status = Status::Confirmed;
+    }
+    release_terminal_write_barrier(state);
+}
+
 /// A trava só sai quando a dona deixou de ser incerta e nenhuma outra da conversa resta.
 fn release_terminal_write_barrier(state:&mut State) {
     let barrier=&state.runtime_state["terminal_write_barrier"];
@@ -495,8 +514,12 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             if pre_transcript { row["pre_transcript"] = json!(true); }
             append_row(state,row)?
         }
-        Action::AppendLocal { text, entry_id } => append_row(state,json!({"id":entry_id.unwrap_or_else(||call_id.into()),
-            "text":text,"ts":clock.epoch_s,"delivered":true,"confirmed":true,"papel":"assistant"}))?,
+        Action::AppendLocal { text, entry_id, confirms } => {
+            let row = append_row(state,json!({"id":entry_id.unwrap_or_else(||call_id.into()),
+                "text":text,"ts":clock.epoch_s,"delivered":true,"confirmed":true,"papel":"assistant"}))?;
+            if let Some(source) = confirms { confirm_local_command(state,&source); }
+            row
+        }
         Action::Claim { min_ts, limit, entry_id } => {
             let mut claimed = Vec::new();
             for row in &mut state.rows {

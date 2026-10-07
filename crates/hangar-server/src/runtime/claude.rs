@@ -599,7 +599,9 @@ impl ClaudeEngine {
                             }
                         }
                     }
-                    if !text.trim().is_empty() { self.policy("local_output",json!({"text":text}),effects); }
+                    if !text.trim().is_empty() {
+                        self.policy("local_output",json!({"text":text,"source":event["local_command_source"]}),effects);
+                    }
                 } else {
                     let usage = &event["message"]["usage"];
                     if ["input_tokens","cache_read_input_tokens","cache_creation_input_tokens"].iter().any(|k|usage[*k].as_u64().unwrap_or(0) > 0) { self.usage = usage.clone(); }

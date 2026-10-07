@@ -1492,7 +1492,7 @@ class ClaudeHeadlessAdapter:
                 if texto.startswith("## Context Usage"):
                     texto += _tabela_limites(sess.janelas)
                 if texto:
-                    await self._nota_local(sess, texto)
+                    await self._nota_local(sess, texto, confirms=ev.get("local_command_source"))
                 return
             _aplicar_uso_da_chamada(sess, (ev.get("message") or {}).get("usage"))
             tools = [b for b in blocos if isinstance(b, dict) and b.get("type") == "tool_use"]
@@ -1895,11 +1895,11 @@ class ClaudeHeadlessAdapter:
         tool, detalhe = _alvo_da_permissao(req)
         return f"Permitir {tool}? {detalhe}".strip()
 
-    async def _nota_local(self, sess: _Sessao, texto: str) -> None:
+    async def _nota_local(self, sess: _Sessao, texto: str, confirms: str | None = None) -> None:
         """Bolha do assistente fora do transcript (comando local, aviso de permissão): vai pela
         fila durável, que o histórico e o SSE já sabem ler. Falha vira log e problema visível."""
         try:
-            await asyncio.to_thread(PromptQueue(sess.name).append_saida_local, texto)
+            await asyncio.to_thread(PromptQueue(sess.name).append_saida_local, texto, confirms)
         except Exception:
             _log.exception("claude headless: nota local não gravada name=%s", sess.name)
             if not sess.problema:   # um problema real (login, turno) não pode ser coberto por este

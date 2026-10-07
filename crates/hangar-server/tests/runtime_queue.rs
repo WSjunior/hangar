@@ -90,6 +90,24 @@ fn v1_state_shrinks_on_first_open() {
 fn append() -> Action { Action::Append { text:"Olá".into(), delivered:false, ts:None,
     pre_transcript:false, entry_id:Some("entry-1".into()) } }
 
+/// A CLI responde `/btw` sozinha e não grava a linha: sem isto a bolha esperava para sempre.
+#[test]
+fn local_command_answer_confirms_the_command_outside_the_transcript() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(&dir.path().join("state"),&dir.path().join("projection"),State::new("key",1,"session",vec![])).unwrap();
+    for (call,text,entry) in [("a1","/btw","e1"),("a2","/context","e2")] {
+        store.exec(1,call,clock(),Action::Append { text:text.into(),delivered:true,ts:None,pre_transcript:false,entry_id:Some(entry.into()) }).unwrap();
+    }
+    store.exec(1,"op",clock(),Action::Prepare { id:"op".into(),payload:json!({"operation_id":"op","kind":"input"}),entry_id:Some("e1".into()) }).unwrap();
+    store.exec(1,"local",clock(),Action::AppendLocal { text:"/btw isn't available in this environment.".into(),
+        entry_id:None,confirms:Some("btw".into()) }).unwrap();
+    let state = store.state();
+    let row = |id:&str|state.rows.iter().find(|r|r["id"] == id).unwrap().clone();
+    assert_eq!(row("e1")["confirmed"],true);
+    assert_ne!(row("e2")["confirmed"],true);
+    assert!(state.operations["op"].status == Status::Confirmed);
+}
+
 #[test]
 fn same_operation_does_not_append_twice() {
     let dir = tempfile::tempdir().unwrap();
