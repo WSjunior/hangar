@@ -15,6 +15,8 @@ const KNOWN_CODES = new Set(["sem-internet", "sem-winget", "sem-sudo", "senha-ca
 	"versao-diferente", "modo-desenvolvedor", "roda-do-mouse"]);
 /** O e-mail leva só o começo do relatório: o inteiro fica no KV, e e-mail grande é o que um abuso multiplicaria. */
 export const MAIL_REPORT_MAX = 8 * 1024;
+/** Metade das ~1000 escritas grátis por dia da conta: sobra para o resto. */
+export const KV_DAILY_MAX = 500;
 
 export type Outcome = keyof typeof SUBJECTS;
 
@@ -29,6 +31,8 @@ export interface Deps {
 	allow(ip: string): Promise<boolean>;
 	/** Teto de todos juntos: muitos IPs (ou um que troca) não esgotam as escritas do KV nem a caixa de e-mail. */
 	allowAll(): Promise<boolean>;
+	/** Soma um ao contador do dia e devolve o total; aproximado (por local da Cloudflare). */
+	countToday(): Promise<number>;
 	mail(subject: string, text: string): Promise<void>;
 	waitUntil(work: Promise<unknown>): void;
 }
@@ -103,8 +107,10 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
 	// O teto de todos só conta relatório válido: lixo com o carimbo público não tira a vez de quem precisa.
 	if (!(await deps.allowAll())) return json(429, { erro: "limite" });
 	const id = `${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}`;
-	let stored = true;
-	try {
+	// Acima do teto diário só o e-mail sai: as escritas grátis do KV são da conta inteira e acabariam.
+	const overDaily = (await deps.countToday()) > KV_DAILY_MAX;
+	let stored = !overDaily;
+	if (!overDaily) try {
 		await deps.reports.put(id, JSON.stringify({ ...report, received: new Date().toISOString(), country: request.cf?.country ?? null }),
 			{ expirationTtl: TTL_SECONDS });
 	} catch (e: unknown) {
@@ -121,8 +127,8 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
 		const code = typeof e === "object" && e !== null && "code" in e ? String(e.code) : null;
 		console.error(JSON.stringify({ message: "email falhou", id, error: e instanceof Error ? e.name : typeof e, code }));
 	}));
-	console.log(JSON.stringify({ message: "relatorio", id, stored, outcome: report.outcome, code: report.code }));
-	return stored ? json(201, { id }) : json(503, { erro: "armazenamento" });
+	console.log(JSON.stringify({ message: "relatorio", id, stored, overDaily, outcome: report.outcome, code: report.code }));
+	return stored || overDaily ? json(201, { id }) : json(503, { erro: "armazenamento" });
 }
 
 /** `REPORT_TO` é segredo (`wrangler secret put`), fora do `wrangler.jsonc` e por isso fora do `Env` gerado. */
@@ -134,6 +140,14 @@ export default {
 			reports: env.REPORTS,
 			allow: async (ip) => (await env.LIMITER.limit({ key: ip })).success,
 			allowAll: async () => (await env.GLOBAL_LIMITER.limit({ key: "global" })).success,
+			countToday: async () => {
+				// ponytail: contador no Cache API, por local e sem atomicidade; Durable Object se precisar exato.
+				const key = new Request(`https://hangar.dev.br/__contador/${new Date().toISOString().slice(0, 10)}`);
+				const cache = caches.default;
+				const n = Number((await (await cache.match(key))?.text()) ?? "0") + 1;
+				ctx.waitUntil(cache.put(key, new Response(String(n), { headers: { "cache-control": "max-age=90000" } })));
+				return n;
+			},
 			mail: async (subject, text) => {
 				if (!env.REPORT_TO) throw new Error("REPORT_TO ausente");
 				await env.MAILER.send({ from: FROM, to: env.REPORT_TO, subject, text });

@@ -1,6 +1,6 @@
 import { env, exports } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
-import { handle, head, MAIL_REPORT_MAX, MAX_BYTES, TTL_SECONDS, type Deps } from "../src";
+import { handle, head, KV_DAILY_MAX, MAIL_REPORT_MAX, MAX_BYTES, TTL_SECONDS, type Deps } from "../src";
 
 function report(over: Record<string, unknown> = {}) {
 	return { v: 1, app: "0.20.1.3456", commit: "abc123", os: "linux-x86_64", step: "instalar", code: "sem-systemd",
@@ -12,7 +12,7 @@ function post(body: string, headers: Record<string, string> = {}) {
 		headers: { "content-type": "application/json", "x-hangar-stamp": "hangar-native/0.20.1.3456", "cf-connecting-ip": "203.0.113.7", ...headers } });
 }
 
-function deps(allow = true, mailFails = false, allowAll = true) {
+function deps(allow = true, mailFails = false, allowAll = true, today = 1) {
 	const mails: { subject: string; text: string }[] = [];
 	const pending: Promise<unknown>[] = [];
 	const calls = { all: 0 };
@@ -20,6 +20,7 @@ function deps(allow = true, mailFails = false, allowAll = true) {
 		reports: env.REPORTS,
 		allow: async () => allow,
 		allowAll: async () => { calls.all++; return allowAll; },
+		countToday: async () => today,
 		mail: async (subject, text) => { if (mailFails) throw new Error("sem rota de e-mail"); mails.push({ subject, text }); },
 		waitUntil: (work) => { pending.push(work); },
 	};
@@ -45,6 +46,15 @@ describe("POST /api/relatorio", () => {
 		expect(mails[0].subject).toContain("sem-systemd");
 		expect(mails[0].text).toContain("log limpo");
 		expect(JSON.parse((await env.REPORTS.get(keys[0].name))!).report).toBe("log limpo");
+	});
+
+	it("over the daily KV ceiling only mails, marked as not stored", async () => {
+		const { d, mails, pending } = deps(true, false, true, KV_DAILY_MAX + 1);
+		const res = await handle(post(JSON.stringify(report())), d);
+		expect(res.status).toBe(201);
+		await Promise.all(pending);
+		expect(await stored()).toHaveLength(0);
+		expect(mails[0].text).toContain("não guardado no KV");
 	});
 
 	it("says 'consertado ali' when the agent fixed it", async () => {
