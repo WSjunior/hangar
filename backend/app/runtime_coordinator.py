@@ -315,12 +315,23 @@ class RuntimeCoordinator:
             _mode_bypass.reset(token)
             self._set_mode("python")
 
+    async def _close_ingress_of_incomplete_transfers(self):
+        """O Rust novo nasce com as portas abertas: troca interrompida precisa delas fechadas até terminar."""
+        from app import conversation_transfer
+        for record in await asyncio.to_thread(conversation_transfer.list_incomplete):
+            try:
+                await self.ingress(record.name, True)
+                conversation_transfer.hold_gate(record.name)
+            except Exception as exc:
+                _registration_failed("runtime.ingress_failed", record.name, exc, rust_dead=not self._rust_alive())
+
     async def _enter_rust(self):
         """Rust novo de pé: reabre nele as sessões que eram dele (queda) e abre as do boot (cano
         vivo, ou morto com entrada não entregue); só então o modo vira `rust`."""
         token = _mode_bypass.set(True)
         cancelled = False
         try:
+            await self._close_ingress_of_incomplete_transfers()
             async def reopen(slot):
                 try:
                     await self._reopen_registered(slot)
@@ -894,12 +905,13 @@ class RuntimeCoordinator:
         key = slot.binding.key
         if key in self.rebindings and not self.rebindings[key].done():
             return
-        slot.frozen = True
         async def rebind():
             async def changed():
                 return None
             try:
-                await self.change(slot.binding.name, changed)
+                async with self._ingress_closed(slot.binding.name):
+                    slot.frozen = True
+                    await self.change(slot.binding.name, changed)
             except Exception as exc:
                 slot.cache_valid = False
                 self._signal(slot)
@@ -1106,6 +1118,11 @@ class RuntimeCoordinator:
             if self.names.get(slot.binding.name) != slot.binding.key or slot.phase != Phase.Python:
                 continue
             async with self._barrier(slot):
+                try:
+                    # Sem reabrir: o Rust sai junto com o backend. Falha não pode impedir soltar as travas.
+                    await self.ingress(slot.binding.name, True)
+                except Exception:
+                    _log.warning("porta do Rust não fechou no desligamento de %s", slot.binding.name, exc_info=True)
                 with slot.guard:
                     slot.frozen = True
                 await self._wait_active(slot)
@@ -1440,18 +1457,48 @@ class RuntimeCoordinator:
                     self.slots.pop(slot.binding.key, None)
                 raise
 
+    async def ingress(self, name, closed):
+        """Fecha/abre a porta de escrita do Rust para a sessão `name`. Vai direto pelo transporte:
+        `op` passa por queue_gate/freeze e travaria dentro do próprio freeze."""
+        if self.transport is None:
+            return
+        # O Rust trata `ingress` antes de procurar a entrada: serve qualquer chave, até de nome sem registro.
+        descriptor = {"key": name, "generation": 0, "meta": {}}
+        await self._rpc(descriptor, {"kind": "ingress", "name": name, "closed": closed}, uuid.uuid4().hex)
+
+    def ingress_sync(self, name, closed):
+        if self.transport is None:
+            return
+        from app.runtime_adapter import run_sync
+        run_sync(lambda: self.ingress(name, closed), self.loop)
+
     @asynccontextmanager
-    async def freeze(self, name):
+    async def _ingress_closed(self, *names):
+        """Cada fechamento é contado no Rust: abre exatamente os que este bloco fechou."""
+        closed = []
+        try:
+            for name in names:
+                await self.ingress(name, True)
+                closed.append(name)
+            yield
+        finally:
+            for name in closed:
+                await self.ingress(name, False)
+
+    @asynccontextmanager
+    async def freeze(self, name, *, also=()):
         slot = self.slot(name)
         async with self._barrier(slot):
-            with slot.guard:
-                slot.frozen = True
-            try:
-                await self._wait_active(slot)
-                yield slot.binding
-            finally:
+            # Regra: quem congela uma sessão fecha antes a porta do Rust.
+            async with self._ingress_closed(name, *also):
                 with slot.guard:
-                    slot.frozen = False
+                    slot.frozen = True
+                try:
+                    await self._wait_active(slot)
+                    yield slot.binding
+                finally:
+                    with slot.guard:
+                        slot.frozen = False
 
     def close_python_leases(self):
         global _current
@@ -1491,7 +1538,7 @@ class RuntimeCoordinator:
             return await action()
 
         async def perform():
-            async with self.freeze(name):
+            async with self.freeze(name, also=(new_name,) if new_name and new_name != name else ()):
                 if self.slots.get(self.names.get(name, "")) is not slot:
                     # Outro caminho trocou o registro enquanto esta esperava a barreira.
                     raise RuntimeError("registro da sessão mudou durante a espera; tente de novo")

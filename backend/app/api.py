@@ -2800,9 +2800,9 @@ async def recarregar_sessao(name: str):
                 raise
         except TransferError as exc:
             raise HTTPException(exc.status, detail=public_error(exc)) from None
-    from app.conversation_transfer import session_operation, require_available
+    from app.conversation_transfer import transfer_operation, require_available
     try:
-        with session_operation(name):
+        async with transfer_operation(name):
             await asyncio.to_thread(require_available, name)
             return await _reload_session(name)
     except TransferError as exc:
@@ -2913,11 +2913,11 @@ async def _boot_sessions(runtime) -> None:
 
 
 async def _durante_troca(name: str, troca, *, transfer: bool = False):
-    from app.conversation_transfer import session_operation, require_available, TransferError, public_error
+    from app.conversation_transfer import transfer_operation, require_available, TransferError, public_error
     if transfer:
         return await _during_transfer_life(name, troca)
     try:
-        with session_operation(name):
+        async with transfer_operation(name):
             await asyncio.to_thread(require_available, name)
             return await _during_transfer_life(name, troca, require_idle=True)
     except TransferError as exc:
@@ -4361,6 +4361,15 @@ def _send_one(name: str, text: str, track_entry: bool = False) -> dict:
         return {"ok": False, "error": public_error(exc), "delivered": False}
 
 
+def _rust_mode(coordinator) -> bool:
+    return coordinator is not None and getattr(coordinator, "mode", None) == "rust"
+
+
+def _no_rust_binding_error() -> dict:
+    # Com o Rust de pé a entrega é dele; cair no socket/plugin/tmux do Python escreveria sem a porta.
+    return {"ok": False, "error": erro("erro_envio_falhou", "sessão Claude sem vínculo no Rust"), "delivered": False}
+
+
 def _send_one_available(name: str, text: str, track_entry: bool = False) -> dict:
     if error := _transfer_send_error(name):
         return error
@@ -4386,6 +4395,8 @@ def _send_one_available(name: str, text: str, track_entry: bool = False) -> dict
         managed = run_sync(lambda: _send_managed(name, text, provider, track_entry=track_entry), coordinator.loop)
         if managed is not None:
             return managed
+        if _rust_mode(coordinator):
+            return _no_rust_binding_error()
     stripped = text.lstrip()
     # Pi COM LINHA: cria a entrada da fila ANTES do 1o envio, pra ter um id ESTAVEL pra oferecer
     # como msg_id (achado ALTA da revisao 02/08/2026 — "Porta A"). A extensao chama sendUserMessage
@@ -4665,6 +4676,9 @@ async def _send_one_headless(name: str, text: str, *, track_entry: bool = False)
     managed = await _send_managed(name, text, "claude", track_entry=track_entry)
     if managed is not None:
         return managed
+    from app import runtime_coordinator
+    if _rust_mode(runtime_coordinator.current()):
+        return _no_rust_binding_error()
     adapter = get_adapter(CLAUDE_HEADLESS)
     async with adapter.delivery_lock(name):
         if error := _transfer_send_error(name):

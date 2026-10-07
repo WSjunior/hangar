@@ -11,7 +11,7 @@ import os
 import tempfile
 import threading
 import uuid
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
@@ -314,6 +314,8 @@ def save_transfer(record: TransferRecord) -> None:
         if previous and previous.source_life != record.source_life:
             raise ValueError("a vida da origem da transferência mudou")
         _save_locked(record)
+    if record.phase in _TERMINAL:
+        release_gate(record.name)
 
 
 def capture_snapshot(record: TransferRecord, source_path: str | Path,
@@ -455,6 +457,50 @@ def session_operation(name: str):
         yield
     finally:
         operation.release()
+
+
+# Nomes cuja porta do Rust segue fechada porque a troca ficou em fase não terminal; o
+# `save_transfer` terminal reabre.
+_gate_held: set[str] = set()
+
+
+def hold_gate(name: str) -> None:
+    with _lock:
+        _gate_held.add(name)
+
+
+def release_gate(name: str) -> None:
+    """Chamado de thread (save_transfer): reabre a porta que a troca deixou fechada."""
+    with _lock:
+        if name not in _gate_held:
+            return
+        _gate_held.discard(name)
+    from app import runtime_coordinator
+    coordinator = runtime_coordinator.current()
+    if coordinator is not None:
+        coordinator.ingress_sync(name, False)
+
+
+@asynccontextmanager
+async def transfer_operation(name: str):
+    """`session_operation` que também fecha a porta do Rust. Roda no laço (as rotas e os dois
+    pontos da troca são corrotinas), então usa `await`. Troca não terminal ao sair mantém fechada."""
+    import asyncio
+    from app import runtime_coordinator
+    with session_operation(name):
+        coordinator = runtime_coordinator.current()
+        own = False
+        if coordinator is not None and coordinator.transport is not None and name not in _gate_held:
+            await coordinator.ingress(name, True)
+            own = True
+        try:
+            yield
+        finally:
+            if own:
+                if await asyncio.to_thread(transfer_active, name):
+                    hold_gate(name)
+                else:
+                    await coordinator.ingress(name, False)
 
 
 @contextmanager
@@ -816,7 +862,7 @@ async def transfer_claude_to_codex(registry, name: str, credential_id: str, sour
     from app.adapters.codex import transfer as importer
     from app.claude_to_codex import convert_snapshot, ConversionError
     from app import terminal_input
-    with session_operation(name):
+    async with transfer_operation(name):
         require_available(name)
         await asyncio.to_thread(_source_info, registry, name, source_life, source_jsonl)
         account = await asyncio.to_thread(_resolve_target, credential_id)
@@ -904,7 +950,7 @@ async def _restore_transfer(registry, record: TransferRecord, cause: str) -> dic
 async def recover_transfer(registry, record: TransferRecord) -> dict:
     from app.adapters import get_adapter, CLAUDE_HEADLESS
     from app import terminal_input
-    with session_operation(record.name):
+    async with transfer_operation(record.name):
         async with get_adapter(CLAUDE_HEADLESS).delivery_lock(record.name):
             terminal_lock = terminal_input._send_lock(record.name)
             if not terminal_lock.acquire(blocking=False):
