@@ -281,6 +281,9 @@ Todo arquivo Python acima fica no disco como reserva do modo `python` e sai na p
 Cada subparte: testes Rust do que mudou + golden onde o cliente lê formato + uso real pelo canal
 de testes com o dono (roteiro na própria subparte) + `CP_RUST_SERVER=0` continua abrindo o Codex
 pelo Python. Codex real só com a conta do dono e na máquina dele, nunca credencial copiada.
+O uso real da parte 5 (Codex e Claude) é no backend do notebook, pelo canal de testes, feito pelo
+dono com a sessão `hangar` de lá: esta sessão nunca sobe nada nesse backend, só avisa quando a
+branch está pronta para testar.
 
 ## Regras que mudam
 
