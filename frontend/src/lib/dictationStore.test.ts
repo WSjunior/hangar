@@ -148,9 +148,9 @@ describe('ditado por sessão', () => {
 
   it('remontado no meio vê "em voo" e não começa outra', () => {
     vi.mocked(uploadFile).mockReturnValue(new Promise(() => {}));
-    expect(iniciar()).toBe(true);
+    expect(iniciar()).toBe('started');
     expect(dictations.get('a', 'x')?.status).toBe('inflight');
-    expect(iniciar()).toBe(false);
+    expect(iniciar()).toBe('inflight');
   });
 
   it('quem monta depois de guardado só recebe o aviso', async () => {
@@ -237,9 +237,19 @@ describe('ditado por sessão', () => {
     const falha = dictations.get('a', 'x');
     expect(falha).toMatchObject({ status: 'failed', file: expect.any(File) });
     expect(dictations.start({ serverId: 'a', name: 'x', jsonl: 'j1', server: undefined,
-      arquivo: 'outro.webm', opts: { ditado: true } })).toBe(false);
+      arquivo: 'outro.webm', opts: { ditado: true } })).toBe('onlyOnDevice');
     expect(dictations.get('a', 'x')).toBe(falha);
     expect(transcribeUploaded).not.toHaveBeenCalled();
+  });
+
+  it('gravação nova não substitui a que só existe no aparelho', async () => {
+    vi.mocked(uploadFile).mockRejectedValueOnce(new Error('rede'));
+    iniciar();
+    await flush();
+    const falha = dictations.get('a', 'x');
+    expect(iniciar()).toBe('onlyOnDevice');
+    expect(dictations.get('a', 'x')).toBe(falha);
+    expect(uploadFile).toHaveBeenCalledOnce();
   });
 
   it('resultado ainda não entregue não é substituído por outro áudio', async () => {
@@ -249,12 +259,12 @@ describe('ditado por sessão', () => {
     await flush();
     expect(dictations.get('a', 'x')).toMatchObject({ status: 'ready' });
     expect(dictations.start({ serverId: 'a', name: 'x', jsonl: 'j1', server: undefined,
-      arquivo: 'outro.webm', opts: { ditado: true } })).toBe(false);
-    expect(iniciar()).toBe(false);
+      arquivo: 'outro.webm', opts: { ditado: true } })).toBe('undelivered');
+    expect(iniciar()).toBe('undelivered');
     expect(dictations.get('a', 'x')?.result?.text).toBe('oi');
   });
 
-  it('resultado na memória não entra na sessão recriada com o mesmo nome', async () => {
+  it('resultado na memória não entra na sessão recriada com o mesmo nome, e avisa', async () => {
     localStorage.setItem(RASCUNHO, JSON.stringify({ text: 'de outro', jsonl: 'j0' }));
     vi.mocked(transcribeUploaded).mockResolvedValue({ path: CAMINHO, text: 'oi' });
     iniciar();
@@ -265,7 +275,34 @@ describe('ditado por sessão', () => {
     dictations.receive('a', 'x', { deliver });
     await flush();
     expect(deliver).not.toHaveBeenCalled();
-    expect(dictations.get('a', 'x')).toBeUndefined();
+    expect(dictations.get('a', 'x')).toMatchObject({ status: 'failed', error: m.composer_ditado_sessao_recriada() });
+    expect(dictations.retry('a', 'x')).toBe(false);
+  });
+
+  it('campo que quebra ao inserir: o texto vai pro rascunho e fica à vista no aviso', async () => {
+    dictations.receive('a', 'x', { deliver: async () => { throw new Error('quebrou'); } });
+    vi.mocked(transcribeUploaded).mockResolvedValue({ path: CAMINHO, text: 'olá mundo' });
+    iniciar();
+    await flush();
+    expect(JSON.parse(localStorage.getItem(RASCUNHO)!).text).toBe('olá mundo');
+    const falha = dictations.get('a', 'x');
+    expect(falha).toMatchObject({ status: 'failed', path: CAMINHO });
+    expect(falha?.error).toContain('olá mundo');
+    expect(falha?.error).toContain('quebrou');
+    expect(JSON.parse(localStorage.getItem(PENDENTE)!).error).toContain('olá mundo');
+  });
+
+  it('estilo e aviso de teto sobrevivem a recarregar: o "de novo" usa o estilo escolhido', async () => {
+    vi.mocked(transcribeUploaded).mockRejectedValueOnce(new Error('502: fora'));
+    dictations.start({ serverId: 'a', name: 'x', jsonl: 'j1', server: undefined, file: audio(),
+      opts: { ditado: true, estilo: 'prosa', avisoTeto: true } });
+    await flush();
+    dictations._resetForTests();
+    expect(dictations.get('a', 'x')?.opts).toMatchObject({ estilo: 'prosa', avisoTeto: true });
+    vi.mocked(transcribeUploaded).mockReturnValue(new Promise(() => {}));
+    expect(dictations.retry('a', 'x', undefined, 'j1')).toBe(true);
+    await flush();
+    expect(transcribeUploaded).toHaveBeenLastCalledWith('x', 'gravacao-1.webm', { limpar: true, estilo: 'prosa' }, undefined);
   });
 
   it('503 diz onde configurar a chave', async () => {

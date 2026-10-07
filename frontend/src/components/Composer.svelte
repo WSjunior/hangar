@@ -71,7 +71,7 @@ import { cachePrazo } from '../lib/cachePrazo';
   import { setCodexMode } from '@hangar/core';
   import { ttsPlayer } from '../lib/ttsPlayer.svelte';
   import {
-    dictations, dictationBarKey, draftStorageKey, onlyOnDevice, parseStoredDraft, readMigrating,
+    dictations, dictationBarKey, draftStorageKey, parseStoredDraft, readMigrating,
     type DictationEntry, type DictationOpts,
   } from '../lib/dictationStore.svelte';
 
@@ -1295,15 +1295,26 @@ import { cachePrazo } from '../lib/cachePrazo';
   // gravação terminar com o Composer já desmontado (trocou de sessão gravando).
   function startTranscription(src: { file?: File; arquivo?: string }, opts: DictationOpts,
                               jsonl: string | null = sessionJsonl ?? null) {
-    const ok = dictations.start({
-      serverId: dictationServerId, name: sessionName, jsonl, server: sessionServer(), ...src,
+    const server = sessionServer();
+    const motivo = dictations.start({
+      serverId: dictationServerId, name: sessionName, jsonl, server, ...src,
       // O estilo vai JUNTO: e o rotulo que a pessoa leu na pill antes de falar.
       opts: { ...opts, estilo: ditadoEstilo.pronto ? ditadoEstilo.valor : undefined },
     });
     // Uma por sessao: um segundo audio (multi-selecao no picker) avisa em vez de correr junto.
-    recError = ok ? ''
-      : src.arquivo && onlyOnDevice(dictations.get(dictationServerId, sessionName))
-        ? m.composer_ditado_so_no_aparelho() : m.composer_aguarde_transcricao();
+    if (!destroyed) {
+      recError = motivo === 'started' ? ''
+        : motivo === 'onlyOnDevice' ? m.composer_ditado_so_no_aparelho() : m.composer_aguarde_transcricao();
+    }
+    // Gravação recusada não some: fica nos anexos da sessão para transcrever depois.
+    if (motivo !== 'started' && src.file) {
+      uploadFile(sessionName, src.file, undefined, server, { audioOnly: true }).catch((err) => {
+        console.error('dictation: refused recording not kept', err);
+        if (!destroyed) {
+          recError = m.composer_ditado_nao_guardado({ erro: err instanceof Error ? err.message : String(err) });
+        }
+      });
+    }
   }
 
   // Resultado com a conversa aberta: entra no cursor (ou no fim, se a seleção guardada não vale
@@ -1342,7 +1353,7 @@ import { cachePrazo } from '../lib/cachePrazo';
   // svelte-ignore state_referenced_locally
   const soltarReceptor = dictations.receive(dictationServerId, sessionName, {
     accepts: () => transcriptConferido,
-    deliver: (e) => void aplicarTranscricao(e),
+    deliver: (e) => aplicarTranscricao(e),
     // Já escrito no rascunho com a conversa fechada: só falta mostrar o motivo, se houver.
     restored: (e) => {
       if (e.result?.aviso) recError = recAviso = e.result.aviso;

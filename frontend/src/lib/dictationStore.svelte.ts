@@ -36,8 +36,11 @@ export type DictationEntry = {
   stored?: boolean;
 };
 
+/** Por que o `start` não começou; `started` = começou. */
+export type DictationStart = 'started' | 'empty' | 'inflight' | 'undelivered' | 'onlyOnDevice';
+
 export interface DictationReceiver {
-  deliver(e: DictationEntry): void;
+  deliver(e: DictationEntry): void | Promise<void>;
   restored?(e: DictationEntry): void;
   /** `false` = está montado mas ainda não pode receber; o resultado espera o `redeliver`. */
   accepts?(e: DictationEntry): boolean;
@@ -89,7 +92,7 @@ const VERSOES = ['limpar', 'prosa', 'briefing'];
 const baseName = (p?: string) => p?.split(/[\\/]/).pop() || undefined;
 const recriada = (i: DictationIdentity) => sessionsStore.epoca(i.serverId, i.name) !== i.epoca;
 /** Falha cuja gravação nunca chegou ao servidor: o Blob na memória é a única cópia. */
-export const onlyOnDevice = (e?: DictationEntry) =>
+const onlyOnDevice = (e?: DictationEntry) =>
   e?.status === 'failed' && !!e.file && !e.path && !e.arquivo;
 const jsonlNaLista = (serverId: string, name: string) =>
   sessionsStore.sessionsForServer(serverId).find((s) => s.name === name)?.jsonl ?? null;
@@ -105,7 +108,8 @@ function persist(e: DictationEntry) {
   const { serverId, name, jsonl } = e.identity;
   try {
     localStorage.setItem(pendingKey(serverId, name), JSON.stringify({
-      arquivo: e.arquivo, path: e.path, opts: { ditado: e.opts.ditado }, error: e.error ?? null, jsonl,
+      arquivo: e.arquivo, path: e.path, error: e.error ?? null, jsonl,
+      opts: { ditado: e.opts.ditado, estilo: e.opts.estilo, avisoTeto: e.opts.avisoTeto },
     }));
   } catch { /* sem storage: a falha vale só enquanto a aba vive */ }
   persisted.delete(dictationKey(serverId, name));
@@ -127,7 +131,8 @@ function readPersisted(serverId: string, name: string): DictationEntry | null {
     if (d && (typeof d.path === 'string' || typeof d.arquivo === 'string')) {
       e = {
         id: ++nextId, status: 'failed', server: undefined,
-        opts: { ditado: d.opts?.ditado === true, autoEnvio: false },
+        opts: { ditado: d.opts?.ditado === true, autoEnvio: false, avisoTeto: d.opts?.avisoTeto === true,
+          estilo: typeof d.opts?.estilo === 'string' ? d.opts.estilo : undefined },
         arquivo: typeof d.arquivo === 'string' ? d.arquivo : undefined,
         path: typeof d.path === 'string' ? d.path : undefined,
         // Sem erro guardado: a PWA morreu com a transcrição no ar.
@@ -141,13 +146,12 @@ function readPersisted(serverId: string, name: string): DictationEntry | null {
   return e;
 }
 
-function begin(key: string, entry: DictationEntry, jsonlAgora: string | null = null): boolean {
+function begin(key: string, entry: DictationEntry, jsonlAgora: string | null = null) {
   entries.set(key, entry);
   // A época de recriação só anda com a lista de sessões assinada; no celular ninguém a segura com
   // o Chat aberto, então o ditado segura enquanto está no ar.
   sessionsStore.retain();
   void run(key, entry, jsonlAgora);
-  return true;
 }
 
 async function run(key: string, entry: DictationEntry, jsonlAgora: string | null) {
@@ -205,15 +209,20 @@ async function run(key: string, entry: DictationEntry, jsonlAgora: string | null
 function deliver(key: string) {
   const e = entries.get(key);
   if (!e || e.status !== 'ready') return;
-  // Resultado na memória da sessão morta não entra na recriada com o mesmo nome.
-  if (recriada(e.identity)) { entries.delete(key); forget(e.identity.serverId, e.identity.name); return; }
+  // Resultado na memória da sessão morta não entra na recriada com o mesmo nome, mas avisa.
+  if (recriada(e.identity)) {
+    forget(e.identity.serverId, e.identity.name);
+    entries.set(key, { ...e, status: 'failed', result: undefined, stored: undefined, file: undefined,
+      arquivo: undefined, path: undefined, error: m.composer_ditado_sessao_recriada() });
+    return;
+  }
   const montados = receivers.get(key) ?? [];
   const r = montados.findLast((x) => x.accepts?.(e) ?? true);
   if (r) {
     entries.delete(key);
     forget(e.identity.serverId, e.identity.name);
     if (e.stored) r.restored?.(e);
-    else r.deliver(e);
+    else void (async () => r.deliver(e))().catch((err) => receiverFailed(key, e, err));
     return;
   }
   if (montados.length || e.stored) return;   // tela montada, ainda não pronta: espera o redeliver
@@ -221,6 +230,19 @@ function deliver(key: string) {
     forget(e.identity.serverId, e.identity.name);
     entries.set(key, { ...e, stored: true });
   }
+}
+
+// O campo quebrou no meio da inserção: o texto vai para o rascunho e fica escrito no aviso, que
+// sobrevive a recarregar. Nunca some calado.
+function receiverFailed(key: string, e: DictationEntry, err: unknown) {
+  console.error('dictation: receiver failed', err);
+  storeInDraft(e);
+  if (entries.has(key)) return;   // outro ditado já começou: não pisa nele
+  const falha: DictationEntry = { ...e, status: 'failed', result: undefined, stored: undefined,
+    error: m.composer_ditado_nao_entrou({
+      erro: err instanceof Error ? err.message : String(err), text: e.result!.text.trim() }) };
+  entries.set(key, falha);
+  if (falha.path || falha.arquivo) persist(falha);
 }
 
 function storeInDraft(e: DictationEntry): boolean {
@@ -269,28 +291,31 @@ export const dictations = {
   start(input: {
     serverId: string; name: string; jsonl: string | null; server: Server | undefined;
     file?: File; arquivo?: string; opts: DictationOpts;
-  }): boolean {
+  }): DictationStart {
     const key = dictationKey(input.serverId, input.name);
     const atual = entries.get(key);
-    if (atual?.status === 'inflight' || (!input.file && !input.arquivo)) return false;
+    if (!input.file && !input.arquivo) return 'empty';
+    if (atual?.status === 'inflight') return 'inflight';
     // Substituir perderia o que só existe aqui: resultado ainda não entregue ou gravação que não subiu.
-    if (atual?.status === 'ready' && !atual.stored) return false;
-    if (input.arquivo && onlyOnDevice(atual)) return false;
+    if (atual?.status === 'ready' && !atual.stored) return 'undelivered';
+    if (onlyOnDevice(atual)) return 'onlyOnDevice';
     const { serverId, name, jsonl, server, file, arquivo, opts } = input;
     const entry: DictationEntry = {
       id: ++nextId, status: 'inflight', server, file, arquivo, opts,
       identity: { serverId, name, jsonl, epoca: sessionsStore.epoca(serverId, name) },
     };
     if (arquivo) persist(entry);
-    return begin(key, entry, jsonl);
+    begin(key, entry, jsonl);
+    return 'started';
   },
   /** `jsonl`: transcript de agora da sessão aberta, que decide entre o nome solto e o caminho. */
   retry(serverId: string, name: string, server?: Server, jsonl: string | null = null): boolean {
     const e = dictations.get(serverId, name);
     if (e?.status !== 'failed' || (!e.path && !e.arquivo && !e.file)) return false;
-    return begin(dictationKey(serverId, name),
+    begin(dictationKey(serverId, name),
       { ...e, server: e.server ?? server, id: ++nextId, status: 'inflight', error: undefined, result: undefined },
       jsonl);
+    return true;
   },
   clear(serverId: string, name: string) {
     const key = dictationKey(serverId, name);

@@ -23,6 +23,12 @@ const audio = () => new File(['a'], 'g.webm', { type: 'audio/webm' });
 const BARRA = dictationBarKey('', 's');
 const iniciar = () => dictations.start({ serverId: '', name: 's', jsonl: 'j1', server: undefined, file: audio(), opts: { ditado: true, autoEnvio: false } });
 
+function colarAudio(target: Element, f: File) {
+  const ev = new Event('paste', { bubbles: true, cancelable: true });
+  Object.defineProperty(ev, 'clipboardData', { value: { items: [{ kind: 'file', type: f.type, getAsFile: () => f }] } });
+  target.querySelector('textarea')!.dispatchEvent(ev);
+}
+
 function montar(sessionJsonl: string | null = 'j1') {
   const target = document.createElement('div');
   document.body.appendChild(target);
@@ -125,6 +131,37 @@ describe('Composer e o ditado da sessão', () => {
     await flush();
     expect(target.textContent).toContain(m.composer_ditado_audio_indisponivel());
     expect(target.querySelector('.send-error--aviso')).toBeNull();
+    unmount(comp);
+  });
+
+  it('áudio recusado com outra transcrição no ar vai para os anexos e avisa', async () => {
+    vi.mocked(transcribeUploaded).mockReturnValue(new Promise(() => {}));
+    iniciar();
+    const { target, comp } = montar();
+    await flush();
+    const f = new File(['b'], 'nota.m4a', { type: 'audio/mp4' });
+    colarAudio(target, f);
+    await flush();
+    expect(uploadFile).toHaveBeenLastCalledWith('s', f, undefined, undefined, { audioOnly: true });
+    expect(target.textContent).toContain(m.composer_aguarde_transcricao());
+    unmount(comp);
+  });
+
+  it('gravação só no aparelho: o áudio novo é guardado e o aviso diz o motivo; falha ao guardar aparece', async () => {
+    vi.mocked(uploadFile).mockRejectedValueOnce(new Error('rede'));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    iniciar();
+    const { target, comp } = montar();
+    await flush();
+    const f = new File(['b'], 'nota.m4a', { type: 'audio/mp4' });
+    colarAudio(target, f);
+    await flush();
+    expect(uploadFile).toHaveBeenLastCalledWith('s', f, undefined, undefined, { audioOnly: true });
+    expect(target.textContent).toContain(m.composer_ditado_so_no_aparelho());
+    vi.mocked(uploadFile).mockRejectedValueOnce(new Error('sem espaço'));
+    colarAudio(target, f);
+    await flush();
+    expect(target.textContent).toContain(m.composer_ditado_nao_guardado({ erro: 'sem espaço' }));
     unmount(comp);
   });
 
