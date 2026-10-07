@@ -66,15 +66,39 @@ expect_no()   { if grep -Eq -- "$3" "$2" 2>/dev/null; then flunk "$1 (achou /$3/
 expect_eq()   { if [ "$2" = "$3" ]; then pass "$1"; else flunk "$1 (veio '$2', esperado '$3')"; fi; }
 last_line()   { grep -av '^[[:space:]]*$' "$1" | tail -1; }
 
+# tty_case: com terminal de verdade (pty do `script`, stdin vazio, então só o /dev/tty serve),
+# o --app não o entrega ao install.sh e o modo terminal entrega. O run_boot não prova isso:
+# sob setsid o /dev/tty nunca abre.
+tty_case() {
+  local script_bin modo want
+  script_bin=$(command -v script 2>/dev/null)
+  if [ -z "$script_bin" ] || ! "$script_bin" --version 2>/dev/null | grep -q util-linux; then
+    echo "pula tty: sem o script do util-linux"; return 0
+  fi
+  for modo in app terminal; do
+    new_box "tty-$modo"; D="$S/hangar"; repo_existente "$D"
+    if [ "$modo" = app ]; then set -- --app; want=notty; else set --; want=tty; fi
+    # SHELL=bash: o `script` roda o comando nele, e o %q pode gerar $'…'.
+    ( env -i HOME="$S/home" PATH="$B:$S/sys" SHELL="$BASH_BIN" FAKE_LOG="$S/git.log" \
+        FAKE_INSTALL="$S/install-fake.sh" FAKE_PULL_RC=0 FAKE_DIRTY=0 FAKE_CLONE_RC=0 FAKE_CURL_RC=0 \
+        timeout 60 "$script_bin" -qec "$(printf '%q ' "$BASH_BIN" "$REPO/bootstrap.sh" "$D" "$@") </dev/null" \
+        /dev/null </dev/null 2>&1 ) > "$S/out"
+    expect_eq "tty $modo: install.sh recebe $want" "$(cat "$D/stdin" 2>/dev/null)" "$want"
+  done
+}
+
 [ "$LIB_ONLY" = 1 ] && return 0
 
-# --- Caso: pasta existente do Hangar, opções repassadas, sem terminal ---
+# --- Caso: pasta existente do Hangar, opções repassadas (a recusa do terminal é o caso tty) ---
 new_box repasse
 D="$S/hangar"; repo_existente "$D"
 run_boot "$S/out" "$D" --app --tailscale=nao --sem-nativo --agentes=codex,pi
-expect_eq "repasse: opções intactas" "$(paste -sd' ' "$D/args")" '--app --tailscale=nao --sem-nativo --agentes=codex,pi'
-expect_eq "repasse: install.sh sem terminal" "$(cat "$D/stdin")" notty
+expect_eq "repasse: opções chegam intactas" "$(paste -sd' ' "$D/args")" '--app --tailscale=nao --sem-nativo --agentes=codex,pi'
+expect_eq "repasse: install.sh rodou com stdin vazio" "$(cat "$D/stdin")" notty
 expect_line "repasse: atualizou em vez de clonar" "$S/git.log" 'pull --ff-only origin main'
+
+# --- Caso: terminal de verdade, com e sem --app ---
+tty_case
 
 # --- Caso: pasta com espaço e acento ---
 new_box acento
