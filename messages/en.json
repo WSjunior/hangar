@@ -7546,5 +7546,7 @@
   "page_expired": "This page was deleted when the session closed",
   "page_open_browser": "Open in browser",
   "page_no_image": "No preview: the server has no Chromium",
-  "native_page_open_panel": "Open in panel"
+  "native_page_open_panel": "Open in panel",
+  "native_page_collapse": "Collapse page",
+  "native_page_expand": "Expand page"
 }

@@ -7546,5 +7546,7 @@
   "page_expired": "Esta página foi apagada quando a sessão foi encerrada",
   "page_open_browser": "Abrir no navegador",
   "page_no_image": "Sem prévia: o servidor não tem Chromium",
-  "native_page_open_panel": "Abrir no painel"
+  "native_page_open_panel": "Abrir no painel",
+  "native_page_collapse": "Recolher página",
+  "native_page_expand": "Mostrar página"
 }

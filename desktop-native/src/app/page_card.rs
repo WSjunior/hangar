@@ -165,6 +165,8 @@ struct PageView {
     origin: Rc<Cell<Point<Pixels>>>,
     /// O botão desceu nesta página: só ela recebe a soltura de fora.
     pressed: bool,
+    /// Recolhida: só o cabeçalho, sem motor nem quadro guardado, para liberar memória e CPU.
+    collapsed: bool,
 }
 
 pub struct Pages {
@@ -355,6 +357,8 @@ impl Hangar {
     fn page_engine_ready(&mut self, id: String, engine: Result<Rc<Engine>, String>, received: async_channel::Receiver<crate::browser::Event>, cx: &mut Context<Self>) {
         let Some(view) = self.pages.views.get_mut(&id) else { return };
         view.busy = false;
+        // Recolhida enquanto o motor nascia: ele cai aqui mesmo.
+        if view.collapsed { return; }
         let engine = match engine {
             Ok(engine) => engine,
             Err(error) => {
@@ -428,6 +432,23 @@ impl Hangar {
         }
     }
 
+    /// Recolher fecha o motor sem guardar quadro; abrir de novo recarrega (o site, no último endereço visitado).
+    fn toggle_page(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(view) = self.pages.views.get_mut(id) else { return };
+        view.collapsed = !view.collapsed;
+        if view.collapsed {
+            #[cfg(target_os = "linux")]
+            if let Some(running) = view.running.take() && view.page.url.is_some() && let Some(at) = running.at {
+                view.page.url = Some(at);
+            }
+            (view.parked, view.last_frame, view.pressed) = (false, None, false);
+            self.pages.budget.order.retain(|x| x != id);
+            self.pages.paint.away.borrow_mut().remove(id);
+        }
+        self.remeasure_page(id);
+        cx.notify();
+    }
+
     fn retry_page(&mut self, id: &str, cx: &mut Context<Self>) {
         if let Some(view) = self.pages.views.get_mut(id) {
             (view.state, view.busy, view.html, view.shot, view.no_image) = (ViewState::Loading, false, None, None, false);
@@ -485,8 +506,16 @@ impl Hangar {
             page: page.clone(), row, state: ViewState::Loading, live, busy: false, html: None, reported: None,
             #[cfg(target_os = "linux")]
             running: None,
-            parked: false, last_frame: None, shot: None, no_image: false, focus: cx.focus_handle(), gesture: None, origin: Rc::default(), pressed: false,
+            parked: false, last_frame: None, shot: None, no_image: false, focus: cx.focus_handle(), gesture: None, origin: Rc::default(), pressed: false, collapsed: false,
         });
+        if let Some(view) = self.pages.views.get(&id).filter(|v| v.collapsed) {
+            let title = div().min_w_0().truncate().text_size(px(12.)).text_color(theme::muted()).child(view.page.title.clone());
+            let address = view.page.url.clone().map(|url| div().flex_1().min_w_0().truncate().text_size(px(12.)).text_color(theme::faint()).child(url));
+            return h_flex().w_full().gap_2()
+                .child(h_flex().flex_1().min_w_0().gap_2().child(title).children(address))
+                .child(toggle_button(&id, true, cx))
+                .into_any_element();
+        }
         // Estacionada que saiu da tela e voltou recarrega.
         #[cfg(target_os = "linux")]
         if self.pages.views.get(&id).is_some_and(|v| v.parked) && self.pages.paint.away.borrow_mut().remove(&id) {
@@ -520,7 +549,8 @@ impl Hangar {
                     .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).text_color(theme::muted()).child(url.clone()))
                     .child(Button::new(SharedString::from(format!("page-open-{id}"))).ghost().xsmall().icon(IconName::ExternalLink)
                         .label(tr_shared("page_open_browser", &[]))
-                        .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url)))))
+                        .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url))))
+                    .child(toggle_button(&id, false, cx)))
                 .into_any_element();
         }
         if !view.live {
@@ -533,7 +563,8 @@ impl Hangar {
                 .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).text_color(theme::muted()).child(title.clone()))
                 .child(Button::new(SharedString::from(format!("page-open-{id}"))).ghost().xsmall().icon(IconName::ExternalLink)
                     .label(tr_shared("page_open_browser", &[]))
-                    .on_click(cx.listener(move |this, _, _, cx| this.open_page_in_browser(open.clone(), cx))));
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_page_in_browser(open.clone(), cx))))
+                .child(toggle_button(&id, false, cx));
             let picture = match (view.state, image, view.no_image) {
                 (_, _, true) => Some(note(tr_shared("page_no_image", &[]))),
                 (_, Some(image), _) => Some(div().w_full().h(height).child(img(image).size_full().object_fit(ObjectFit::Contain))),
@@ -613,18 +644,31 @@ impl Hangar {
                     cx.stop_propagation();
                     if let Some(engine) = this.page_engine(&key_up) { engine.key(false, &event.keystroke); }
                 }));
-            let Some(at) = site else { return card.into_any_element() };
-            let panel = at.clone();
-            let strip = h_flex().gap_2()
-                .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).text_color(theme::muted()).child(at))
-                .child(Button::new(SharedString::from(format!("page-panel-{id}"))).ghost().xsmall().icon(IconName::PanelRight)
-                    .label(tr("page_open_panel"))
-                    .on_click(cx.listener(move |this, _, window, cx| this.open_in_browser_panel(panel.clone(), window, cx))));
-            return v_flex().w_full().gap_1().child(strip).child(card).into_any_element();
+            let strip = match site {
+                Some(at) => {
+                    let panel = at.clone();
+                    h_flex().gap_2()
+                        .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).text_color(theme::muted()).child(at))
+                        .child(Button::new(SharedString::from(format!("page-panel-{id}"))).ghost().xsmall().icon(IconName::PanelRight)
+                            .label(tr("page_open_panel"))
+                            .on_click(cx.listener(move |this, _, window, cx| this.open_in_browser_panel(panel.clone(), window, cx))))
+                }
+                None => h_flex().gap_2().child(div().flex_1().min_w_0().truncate().text_size(px(12.)).text_color(theme::muted()).child(title)),
+            };
+            return v_flex().w_full().gap_1().child(strip.child(toggle_button(&id, false, cx))).child(card).into_any_element();
         }
         #[cfg(not(target_os = "linux"))]
         div().w_full().h(height).child(loading()).into_any_element()
     }
+}
+
+fn toggle_button(id: &str, collapsed: bool, cx: &mut Context<Hangar>) -> Button {
+    let tip = tr(if collapsed { "page_expand" } else { "page_collapse" });
+    let target = id.to_owned();
+    Button::new(SharedString::from(format!("page-toggle-{id}"))).ghost().xsmall()
+        .icon(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown })
+        .tooltip(tip.clone()).accessibility_label(tip)
+        .on_click(cx.listener(move |this, _, _, cx| this.toggle_page(&target, cx)))
 }
 
 #[cfg(test)]
