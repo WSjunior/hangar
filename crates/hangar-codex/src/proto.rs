@@ -115,13 +115,8 @@ impl ClientRequest {
 
 wire!(pub struct InitializeResponse { pub user_agent:String });
 wire!(pub struct TurnError { pub message:String, pub additional_details:Option<String>, pub codex_error_info:Option<Value> });
-/// Item fora do formato vira `Unknown`: um item ruim no histórico não derruba o turno inteiro.
-fn lenient_items<'de,D:Deserializer<'de>>(d:D) -> Result<Vec<ThreadItem>,D::Error> {
-    Ok(Vec::<Value>::deserialize(d)?.iter().map(|item|ThreadItem::deserialize(item).unwrap_or(ThreadItem::Unknown)).collect())
-}
-
-wire!(pub struct Turn { pub id:String, pub status:String, pub error:Option<TurnError>,
-    #[serde(deserialize_with = "lenient_items")] pub items:Vec<ThreadItem> });
+// Sem `items`: o histórico pode ter MBs e o motor lê os itens crus, um a um, ao hidratar.
+wire!(pub struct Turn { pub id:String, pub status:String, pub error:Option<TurnError> });
 
 #[derive(Clone,Debug,Default,PartialEq,Serialize,Deserialize)]
 #[cfg_attr(test,derive(schemars::JsonSchema))]
@@ -283,26 +278,50 @@ pub enum ServerRequest {
     #[serde(skip)] Unknown,
 }
 
+/// Lê os `params` direto do `&Value`, sem copiar: `item/completed` pode trazer MBs de saída.
 macro_rules! decoder {
-    ($ty:ident, [$($method:literal),* $(,)?]) => {
+    ($ty:ident, { $($method:literal => $variant:ident($params:ty)),* $(,)? }) => {
         impl $ty {
             pub const METHODS:&[&str] = &[$($method),*];
             pub fn decode(method:&str,params:&Value) -> Result<Self,DecodeError> {
-                if !Self::METHODS.contains(&method) { return Ok(Self::Unknown); }
-                let params = if params.is_null() { Value::Object(Default::default()) } else { params.clone() };
-                serde_json::from_value(serde_json::json!({"method":method,"params":params}))
-                    .map_err(|error|DecodeError { method:method.into(),error })
+                let empty;
+                let params = if params.is_null() { empty = Value::Object(Default::default()); &empty } else { params };
+                let decoded = match method {
+                    $($method => <$params as Deserialize>::deserialize(params).map(Self::$variant),)*
+                    _ => return Ok(Self::Unknown),
+                };
+                decoded.map_err(|error|DecodeError { method:method.into(),error })
             }
         }
     };
 }
 
-decoder!(ServerNotification,["serverRequest/resolved","turn/started","turn/completed","thread/status/changed",
-    "thread/settings/updated","item/agentMessage/delta","item/reasoning/summaryTextDelta","item/reasoning/textDelta",
-    "item/reasoning/summaryPartAdded","model/rerouted","item/started","item/completed","model/safetyBuffering/updated",
-    "thread/tokenUsage/updated","account/rateLimits/updated","error","hook/completed"]);
-decoder!(ServerRequest,["item/commandExecution/requestApproval","item/fileChange/requestApproval","item/tool/requestUserInput",
-    "item/permissions/requestApproval","mcpServer/elicitation/request"]);
+decoder!(ServerNotification,{
+    "serverRequest/resolved" => ServerRequestResolved(ServerRequestResolvedNotification),
+    "turn/started" => TurnStarted(TurnStartedNotification),
+    "turn/completed" => TurnCompleted(TurnCompletedNotification),
+    "thread/status/changed" => ThreadStatusChanged(ThreadStatusChangedNotification),
+    "thread/settings/updated" => ThreadSettingsUpdated(ThreadSettingsUpdatedNotification),
+    "item/agentMessage/delta" => AgentMessageDelta(AgentMessageDeltaNotification),
+    "item/reasoning/summaryTextDelta" => ReasoningSummaryTextDelta(ReasoningSummaryTextDeltaNotification),
+    "item/reasoning/textDelta" => ReasoningTextDelta(ReasoningTextDeltaNotification),
+    "item/reasoning/summaryPartAdded" => ReasoningSummaryPartAdded(ReasoningSummaryPartAddedNotification),
+    "model/rerouted" => ModelRerouted(ModelReroutedNotification),
+    "item/started" => ItemStarted(ItemStartedNotification),
+    "item/completed" => ItemCompleted(ItemCompletedNotification),
+    "model/safetyBuffering/updated" => ModelSafetyBufferingUpdated(ModelSafetyBufferingUpdatedNotification),
+    "thread/tokenUsage/updated" => ThreadTokenUsageUpdated(ThreadTokenUsageUpdatedNotification),
+    "account/rateLimits/updated" => AccountRateLimitsUpdated(AccountRateLimitsUpdatedNotification),
+    "error" => Error(ErrorNotification),
+    "hook/completed" => HookCompleted(HookCompletedNotification),
+});
+decoder!(ServerRequest,{
+    "item/commandExecution/requestApproval" => CommandExecutionApproval(CommandExecutionRequestApprovalParams),
+    "item/fileChange/requestApproval" => FileChangeApproval(FileChangeRequestApprovalParams),
+    "item/tool/requestUserInput" => ToolRequestUserInput(ToolRequestUserInputParams),
+    "item/permissions/requestApproval" => PermissionsApproval(ThreadOnlyParams),
+    "mcpServer/elicitation/request" => McpServerElicitation(ThreadOnlyParams),
+});
 
 #[cfg(test)]
 mod tests {
@@ -358,17 +377,19 @@ mod tests {
         let message = json!({"type":"agentMessage","id":"a","text":"x","questions":null,"delivery":null});
         let item:ThreadItem = serde_json::from_value(message.clone()).unwrap();
         assert!(matches!(item,ThreadItem::AgentMessage { questions:None,delivery:None,.. }));
-        let n = ServerNotification::decode("turn/completed",&json!({"threadId":"t","turn":{"id":"u","status":"completed","items":[message]}})).unwrap();
-        assert!(matches!(n,ServerNotification::TurnCompleted(n) if matches!(n.turn.items[..],[ThreadItem::AgentMessage { .. }])));
+        let n = ServerNotification::decode("item/completed",&json!({"threadId":"t","turnId":"u","item":message})).unwrap();
+        assert!(matches!(n,ServerNotification::ItemCompleted(n) if matches!(n.item,ThreadItem::AgentMessage { .. })));
     }
 
     #[test]
     fn malformed_item_does_not_sink_the_turn() {
-        let response:ThreadReadResponse = serde_json::from_value(json!({"thread":{"id":"t","turns":[{"id":"u","status":"completed",
-            "items":[{"type":"agentMessage","text":5},{"type":"agentMessage","id":"a","text":"ok"}]}]}})).unwrap();
-        let items = &response.thread.turns[0].items;
-        assert!(matches!(items[0],ThreadItem::Unknown));
-        assert!(matches!(&items[1],ThreadItem::AgentMessage { text,.. } if text == "ok"));
+        // O hidratar do motor lê item a item assim: o torto vira `Unknown`, o vizinho segue.
+        let items = json!([{"type":"agentMessage","text":5},{"type":"agentMessage","id":"a","text":"ok"}]);
+        let typed:Vec<_> = items.as_array().unwrap().iter().map(|item|ThreadItem::deserialize(item).unwrap_or(ThreadItem::Unknown)).collect();
+        assert!(matches!(typed[0],ThreadItem::Unknown));
+        assert!(matches!(&typed[1],ThreadItem::AgentMessage { text,.. } if text == "ok"));
+        let response:ThreadReadResponse = serde_json::from_value(json!({"thread":{"id":"t","turns":[{"id":"u","status":"completed","items":items}]}})).unwrap();
+        assert_eq!(response.thread.turns[0].id,"u");
     }
 
     #[test]
@@ -388,8 +409,35 @@ mod tests {
     }
 
     #[test]
+    fn client_request_methods_match_the_variants() {
+        use ClientRequest as C;
+        let all = vec![C::Initialize(Default::default()),C::ThreadStart(Default::default()),C::ThreadResume(Default::default()),
+            C::ThreadRead(Default::default()),C::ThreadSettingsUpdate(Default::default()),C::ThreadCompactStart(Default::default()),
+            C::ThreadUnsubscribe(Default::default()),C::ThreadBackgroundTerminalsTerminate(Default::default()),C::TurnStart(Default::default()),
+            C::TurnSteer(Default::default()),C::TurnInterrupt(Default::default()),C::ModelList(Default::default()),
+            C::SkillsList(Default::default()),C::AccountRateLimitsRead];
+        // Sem curinga: variante nova não compila até entrar na lista acima.
+        for request in &all {
+            match request { C::Initialize(_)|C::ThreadStart(_)|C::ThreadResume(_)|C::ThreadRead(_)|C::ThreadSettingsUpdate(_)
+                |C::ThreadCompactStart(_)|C::ThreadUnsubscribe(_)|C::ThreadBackgroundTerminalsTerminate(_)|C::TurnStart(_)
+                |C::TurnSteer(_)|C::TurnInterrupt(_)|C::ModelList(_)|C::SkillsList(_)|C::AccountRateLimitsRead => {} }
+        }
+        let methods:Vec<_> = all.into_iter().map(|request|request.into_parts().0).collect();
+        assert_eq!(methods,ClientRequest::METHODS);
+    }
+
+    #[test]
     fn methods_lists_match_the_variants() {
-        for method in ServerNotification::METHODS { assert!(!matches!(ServerNotification::decode(method,&json!({})),Ok(ServerNotification::Unknown)),"{method}"); }
-        for method in ServerRequest::METHODS { assert!(!matches!(ServerRequest::decode(method,&json!({})),Ok(ServerRequest::Unknown)),"{method}"); }
+        // A tabela do `decoder!` tem de casar com o `rename` de cada variante (é ele que o recorte confere).
+        for method in ServerNotification::METHODS {
+            let decoded = ServerNotification::decode(method,&json!({})).unwrap();
+            assert!(!matches!(decoded,ServerNotification::Unknown),"{method}");
+            assert_eq!(decoded,serde_json::from_value(json!({"method":method,"params":{}})).unwrap(),"{method}");
+        }
+        for method in ServerRequest::METHODS {
+            let decoded = ServerRequest::decode(method,&json!({})).unwrap();
+            assert!(!matches!(decoded,ServerRequest::Unknown),"{method}");
+            assert_eq!(decoded,serde_json::from_value(json!({"method":method,"params":{}})).unwrap(),"{method}");
+        }
     }
 }

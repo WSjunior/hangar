@@ -1,7 +1,7 @@
 //! Cliente JSON-RPC do app-server do Codex. O núcleo fala por dois canais de texto (uma mensagem
 //! JSON por item); stdio e WebSocket só convertem o transporte nesses canais.
 use crate::proto::{ClientRequest,RequestId};
-use serde::de::DeserializeOwned;
+use serde::{Deserialize,de::DeserializeOwned};
 use serde_json::{Value,json};
 use std::collections::HashMap;
 use std::sync::{Arc,Mutex,atomic::{AtomicI64,Ordering}};
@@ -32,14 +32,19 @@ impl Client {
         let reader_pending = pending.clone();
         tokio::spawn(async move {
             while let Some(line) = lines_in.recv().await {
-                let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
-                let id = msg.get("id").filter(|id|!id.is_null()).and_then(|id|serde_json::from_value::<RequestId>(id.clone()).ok());
-                match (id,msg["method"].as_str()) {
+                let Ok(Value::Object(mut msg)) = serde_json::from_str::<Value>(&line) else {
+                    tracing::debug!("mensagem do app-server do Codex que não é objeto JSON; descartada");
+                    continue;
+                };
+                let id = msg.get("id").filter(|id|!id.is_null()).and_then(|id|RequestId::deserialize(id).ok());
+                let method = match msg.remove("method") { Some(Value::String(method)) => Some(method), _ => None };
+                let params = msg.remove("params").unwrap_or(Value::Null);
+                match (id,method) {
                     (Some(id),Some(method)) => {
-                        if tx.send(Incoming::Request { id,method:method.into(),params:msg["params"].clone() }).await.is_err() { break; }
+                        if tx.send(Incoming::Request { id,method,params }).await.is_err() { break; }
                     }
                     (None,Some(method)) => {
-                        if tx.send(Incoming::Notification { method:method.into(),params:msg["params"].clone() }).await.is_err() { break; }
+                        if tx.send(Incoming::Notification { method,params }).await.is_err() { break; }
                     }
                     (Some(id),None) => {
                         let waiter = reader_pending.lock().unwrap().as_mut().and_then(|map|map.remove(&id));
@@ -47,7 +52,7 @@ impl Client {
                             let outcome = match msg.get("error").filter(|e|!e.is_null()) {
                                 Some(error) => Err(ClientError::Rpc { code:error["code"].as_i64().unwrap_or(0),
                                     message:error["message"].as_str().unwrap_or("").into() }),
-                                None => Ok(msg.get("result").cloned().unwrap_or(Value::Null)),
+                                None => Ok(msg.remove("result").unwrap_or(Value::Null)),
                             };
                             let _ = waiter.send(outcome);
                         }
@@ -80,7 +85,10 @@ impl Client {
                     Ok(0) | Err(_) => break,
                     Ok(_) if buffer.len() > MAX_LINE => { tracing::warn!("linha do app-server do Codex acima do teto; conexão encerrada"); break; }
                     Ok(_) => {
-                        let Ok(text) = std::str::from_utf8(&buffer) else { continue };
+                        let Ok(text) = std::str::from_utf8(&buffer) else {
+                            tracing::debug!("linha do app-server do Codex fora de UTF-8; descartada");
+                            continue;
+                        };
                         let text = text.trim_end();
                         if !text.is_empty() && lines_tx.send(text.to_owned()).await.is_err() { break; }
                     }
@@ -140,12 +148,12 @@ impl Client {
         let _forget = ForgetOnDrop { pending:&self.pending,id:&id };
         let (method,params) = request.into_parts();
         let line = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}).to_string();
-        if self.out.send(line).await.is_err() { return Err(ClientError::Closed); }
-        let value = match tokio::time::timeout(timeout,rx).await {
-            Err(_) => return Err(ClientError::Timeout),
-            Ok(Err(_)) => return Err(ClientError::Closed),
-            Ok(Ok(outcome)) => outcome?,
+        // O prazo cobre também a fila de saída cheia (escritor parado).
+        let exchange = async {
+            self.out.send(line).await.map_err(|_|ClientError::Closed)?;
+            rx.await.map_err(|_|ClientError::Closed)?
         };
+        let value = tokio::time::timeout(timeout,exchange).await.map_err(|_|ClientError::Timeout)??;
         serde_json::from_value(value).map_err(|e|ClientError::Decode(format!("{method}: {}",crate::proto::error_kind(&e))))
     }
 
@@ -181,5 +189,17 @@ mod tests {
         let call = client.request::<Value>(ClientRequest::ModelList(Default::default()),Duration::from_secs(60));
         assert!(tokio::time::timeout(Duration::from_millis(20),call).await.is_err());
         assert!(client.pending.lock().unwrap().as_ref().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn deadline_covers_a_full_outgoing_queue() {
+        let (out,_unread) = mpsc::channel(1);
+        let (_lines,lines_in) = mpsc::channel(1);
+        let (client,_incoming) = Client::start(lines_in,out);
+        let short = Duration::from_millis(10);
+        assert!(matches!(client.request::<Value>(ClientRequest::ModelList(Default::default()),short).await,Err(ClientError::Timeout)));
+        let call = client.request::<Value>(ClientRequest::ModelList(Default::default()),short);
+        let outcome = tokio::time::timeout(Duration::from_secs(1),call).await.expect("prazo do pedido não cobriu o envio");
+        assert!(matches!(outcome,Err(ClientError::Timeout)));
     }
 }
