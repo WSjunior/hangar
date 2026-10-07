@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
 
+#[cfg(any(windows, test))]
 const WINDOWS_SHORTCUT: &str = r#"$ErrorActionPreference = 'Stop'
 $app = '__APP__'
 $ws = New-Object -ComObject WScript.Shell
@@ -27,6 +28,7 @@ pub(crate) fn desktop_entry(exe: &Path) -> String {
     format!("[Desktop Entry]\nType=Application\nName=Hangar\nExec=\"{}\" %u\nIcon=com.hangar.native\nTerminal=false\nCategories=Development;\nMimeType=x-scheme-handler/hangar;\nStartupWMClass=com.hangar.native\n", exe.display())
 }
 
+#[cfg(any(windows, test))]
 pub(crate) fn windows_shortcut_script(app: &Path) -> String { WINDOWS_SHORTCUT.replace("__APP__", &app.to_string_lossy().replace('\'', "''")) }
 
 fn same_file(a: &Path, b: &Path) -> bool { matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b) }

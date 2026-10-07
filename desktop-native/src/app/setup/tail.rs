@@ -1,12 +1,10 @@
 //! Acompanha o arquivo de saída do script destacado: lê só o que cresceu desde a última leitura, em linhas inteiras.
-use std::{io::{Read, Seek, SeekFrom}, path::{Path, PathBuf}};
+use std::{io::{Read, Seek, SeekFrom}, path::PathBuf};
 
 pub(crate) struct Tail { path: PathBuf, offset: u64, partial: Vec<u8> }
 
 impl Tail {
     pub(crate) fn new(path: PathBuf) -> Self { Self { path, offset: 0, partial: Vec::new() } }
-
-    pub(crate) fn path(&self) -> &Path { &self.path }
 
     /// Linhas completas novas; o pedaço sem `\n` espera a próxima leitura. Inválido vira U+FFFD (`windows.md`).
     pub(crate) fn read_new(&mut self) -> std::io::Result<Vec<String>> {

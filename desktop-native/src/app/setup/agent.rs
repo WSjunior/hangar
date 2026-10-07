@@ -212,7 +212,7 @@ impl Transcript {
     }
 }
 
-pub(crate) enum Output { Line(String), Exit(Option<i32>) }
+pub(crate) enum Output { Line(String), Exit }
 
 pub(crate) struct Launch {
     pub program: PathBuf,
@@ -251,9 +251,9 @@ pub(crate) fn spawn(launch: Launch) -> Result<(u32, async_channel::Receiver<Outp
         })
     }).collect();
     std::thread::spawn(move || {
-        let code = child.wait().ok().and_then(|status| status.code());
+        let _ = child.wait();
         for reader in readers { let _ = reader.join(); }
-        let _ = tx.send_blocking(Output::Exit(code));
+        let _ = tx.send_blocking(Output::Exit);
     });
     Ok((pid, rx))
 }
@@ -374,7 +374,7 @@ mod tests {
         let (_, output) = spawn(Launch { program: fake, args: vec![], work: dir.join("work"), env, prompt: "conserte\n".into() }).unwrap();
         let mut lines = Vec::new();
         while let Ok(item) = output.recv_blocking() {
-            match item { Output::Line(line) => lines.push(line), Output::Exit(code) => { assert_eq!(code, Some(0)); break; } }
+            match item { Output::Line(line) => lines.push(line), Output::Exit => break }
         }
         lines.sort();
         assert_eq!(lines, vec!["erro", "prompt: conserte", "token: ausente"]);

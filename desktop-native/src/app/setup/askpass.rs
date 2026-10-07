@@ -30,7 +30,9 @@ impl Vault {
     pub(crate) fn new(code: String) -> Self { Self { code, password: None } }
     pub(crate) fn code(&self) -> &str { &self.code }
     pub(crate) fn answer(&self, code: &str) -> Answer {
-        let same = ring::constant_time::verify_slices_are_equal(code.as_bytes(), self.code.as_bytes()).is_ok();
+        // O ring só expõe comparação em tempo constante pelo `hmac::verify`.
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"hangar-askpass");
+        let same = ring::hmac::verify(&key, code.as_bytes(), ring::hmac::sign(&key, self.code.as_bytes()).as_ref()).is_ok();
         if self.code.is_empty() || !same { return Answer::Refuse; }
         match &self.password { Some(password) => Answer::Known(password.clone()), None => Answer::Ask }
     }

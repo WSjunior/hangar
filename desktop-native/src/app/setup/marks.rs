@@ -134,11 +134,9 @@ impl Progress {
 
     pub(crate) fn step(&self, step: Step) -> Option<State> { self.steps.iter().find(|(s, _)| *s == step).map(|(_, st)| *st) }
     pub(crate) fn items(&self, step: Step) -> impl Iterator<Item = &ItemRow> { self.items.iter().filter(move |i| i.step == Some(step)) }
-    pub(crate) fn all_items(&self) -> &[ItemRow] { &self.items }
     pub(crate) fn link(&self, kind: &str) -> Option<&str> { self.links.iter().find(|(k, _)| k == kind).map(|(_, u)| u.as_str()) }
     pub(crate) fn lines(&self) -> impl Iterator<Item = &String> { self.lines.iter() }
     pub(crate) fn mismatch(&self) -> bool { self.protocol.is_some_and(|n| n != PROTOCOL) }
-    pub(crate) fn current(&self) -> Option<Step> { self.current }
     /// O item que está andando agora: título da barra da tela 3 e motivo da janela de senha.
     pub(crate) fn doing_item(&self) -> Option<&ItemRow> { self.items.iter().rev().find(|i| i.state == State::Doing) }
 }
@@ -187,7 +185,7 @@ mod tests {
             "##HANGAR-PASSO## instalar fazendo", "##HANGAR-ITEM## servidor fazendo Baixar o servidor"] { p.feed(line); }
         assert_eq!(p.step(Step::Prepare), Some(State::Ok));
         assert_eq!(p.step(Step::Install), Some(State::Doing));
-        assert_eq!(p.current(), Some(Step::Install));
+        assert_eq!(p.current, Some(Step::Install));
         let prepare: Vec<_> = p.items(Step::Prepare).map(|i| (i.id.as_str(), i.state, i.text.as_str())).collect();
         // Texto vazio na atualização mantém o anterior.
         assert_eq!(prepare, vec![("tmux", State::Ok, "tmux 3.5a"), ("claude", State::Ok, "baixando")]);
