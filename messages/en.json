@@ -7536,6 +7536,8 @@
   "native_voice_organizer": "The voice organizer failed on this turn; the conversation continues.",
   "native_voice_you_speaking": "You're speaking",
   "native_voice_assistant_speaking": "Voice speaking",
+  "native_voice_thinking": "Thinking…",
+  "native_voice_searching": "Searching…",
   "native_voice_draft_held": "Request on hold, not sent yet",
   "native_voice_dictation_busy": "Stop dictation before starting voice.",
   "native_voice_dictation_blocked": "Dictation is unavailable while voice is on",

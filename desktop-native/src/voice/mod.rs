@@ -4,7 +4,7 @@ pub mod organizer;
 pub mod rpc;
 pub mod rtc;
 
-use organizer::{Results, SendGate, SpokenTurns, ToolCall, parse_tool, tool_reply, tools, thread_config, ORGANIZER_PROMPT, VOICE_PROMPT};
+use organizer::{MIC_VOICE_LEVEL, Results, SendGate, SpokenTurns, ToolCall, parse_tool, tool_reply, tools, thread_config, ORGANIZER_PROMPT, VOICE_PROMPT};
 use rpc::{Codex, Incoming, Rpc, RpcError, handshake};
 use serde_json::{Value, json};
 use std::{sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
@@ -14,7 +14,9 @@ pub struct CallId(Value);
 pub enum Phase { Connecting, Live, Closed }
 #[derive(Debug, Clone)]
 pub enum VoiceFailure { Microphone, Speaker, AppServer, Realtime(String), Network, Timeout, Organizer }
-pub enum VoiceEvent { Phase(Phase), Levels(f32, f32), Draft(Option<String>), ReadSession(CallId), Send(CallId, String), Failed(VoiceFailure) }
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum Activity { #[default] Idle, Thinking, Searching }
+pub enum VoiceEvent { Phase(Phase), Levels(f32, f32), Draft(Option<String>), Activity(Activity), ReadSession(CallId), Send(CallId, String), Failed(VoiceFailure) }
 pub struct VoiceOptions { pub codex: Codex, pub voice: Option<String>, pub context: String }
 
 enum Command { Retarget(String, String), Result(String, String), Reply(Value, Value) }
@@ -147,6 +149,7 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
     let mut gate: SendGate<Value> = SendGate::default();
     let mut organizer_busy = false;
     let mut spoken = SpokenTurns::default();
+    let mut activity = Activity::Idle;
     let outcome = loop {
         if let Some((id, request)) = gate.due(Instant::now()) {
             log(format!("gate sent words={}", request.split_whitespace().count()));
@@ -165,7 +168,10 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                         log(format!("greeting appendSpeech ok={}", spoke.is_ok()));
                     }
                 }
-                Ok(rtc::RtcEvent::Levels(i, o)) => { let _ = events.try_send(VoiceEvent::Levels(i, o)); }
+                Ok(rtc::RtcEvent::Levels(i, o)) => {
+                    if i >= MIC_VOICE_LEVEL { gate.heard_voice(Instant::now()); }
+                    let _ = events.try_send(VoiceEvent::Levels(i, o));
+                }
                 Ok(rtc::RtcEvent::Failed(error)) => { log(format!("rtc failed error={error:?}")); break Err(failed("rtc")(rtc_failure(error))); }
                 Ok(rtc::RtcEvent::Closed) | Err(_) => { log("rtc closed"); break Ok(()); }
             },
@@ -224,6 +230,19 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                     if user_spoke && let Some((id, _)) = gate.user_spoke() {
                         log("gate cancelled: user kept talking");
                         let _ = rpc.respond(id, tool_reply("O usuário continuou falando; nada foi enviado. Monte o pedido com a fala completa.", false)).await;
+                    }
+                    let next = match method.as_str() {
+                        "turn/started" if spoken.allows(&params) => Some(Activity::Thinking),
+                        // A fala pode registrar o turno só depois do turn/started.
+                        "item/started" if params["item"]["type"] == "userMessage" && organizer_busy && spoken.allows(&params) => Some(Activity::Thinking),
+                        "item/started" if params["item"]["type"] == "webSearch" => Some(Activity::Searching),
+                        "turn/completed" => Some(Activity::Idle),
+                        _ => None,
+                    };
+                    if let Some(next) = next && next != activity {
+                        activity = next;
+                        log(format!("activity {activity:?}"));
+                        let _ = events.send(VoiceEvent::Activity(activity)).await;
                     }
                     match method.as_str() {
                         "turn/started" => { organizer_busy = true; results.turn_started(); }

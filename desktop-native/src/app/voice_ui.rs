@@ -2,7 +2,7 @@
 use super::*;
 use std::collections::VecDeque;
 use gpui_kit::component::{select::{Select, SelectEvent, SelectState}, searchable_list::SearchableListItem};
-use crate::voice::{CallId, Phase, Voice, VoiceEvent, VoiceFailure, VoiceOptions, rpc::Codex, organizer::{session_context, tool_reply}};
+use crate::voice::{Activity as CallActivity, CallId, Phase, Voice, VoiceEvent, VoiceFailure, VoiceOptions, rpc::Codex, organizer::{session_context, tool_reply}};
 
 /// Vozes do Realtime; vazio é o padrão do Codex.
 const VOICES: [&str; 19] = ["alloy", "arbor", "ash", "ballad", "breeze", "cedar", "coral", "cove", "echo", "ember", "juniper", "maple",
@@ -27,6 +27,10 @@ pub(super) struct VoiceUi {
     pub(super) phase: Option<Phase>,
     /// Ganhos 0..1 (entrada, saída), já com o `level_gain`.
     pub(super) levels: (f32, f32),
+    /// Quem aparece falando e desde quando a leitura crua concorda com isso: evita o rótulo piscar.
+    pub(super) shown: Option<(Speaker, std::time::Instant)>,
+    /// O que o organizador faz agora; só aparece quando ninguém está falando.
+    pub(super) activity: CallActivity,
     /// Quando a chamada ficou ao vivo: base do cronômetro.
     pub(super) live_since: Option<std::time::Instant>,
     /// Repinta o cronômetro a cada segundo; largar a Task para o relógio.
@@ -84,6 +88,22 @@ pub(super) fn speaker(input: f32, output: f32, muted: bool) -> Speaker {
     if input > SPEAKING && input >= output { Speaker::You }
     else if output > SPEAKING && output > input { Speaker::Voice }
     else { Speaker::Idle }
+}
+
+/// Folga antes de trocar o rótulo de quem fala.
+const SPEAKER_HOLD: Duration = Duration::from_millis(300);
+
+/// `since` é a última vez em que a leitura crua concordou com `shown`; a troca só vale depois de a leitura nova durar `SPEAKER_HOLD`.
+pub(super) fn settled_speaker(shown: Speaker, since: std::time::Instant, raw: Speaker, now: std::time::Instant) -> (Speaker, std::time::Instant) {
+    if raw == shown { (shown, now) }
+    else if now.saturating_duration_since(since) >= SPEAKER_HOLD { (raw, now) }
+    else { (shown, since) }
+}
+
+/// Pensando/pesquisando: barras baixas acendendo em sequência, pela fase do cronômetro.
+pub(super) fn thinking_bars(elapsed: Duration, min: f32, max: f32) -> [f32; 5] {
+    let lit = (elapsed.as_millis() / 250 % 5) as usize;
+    std::array::from_fn(|i| if i == lit { min + ((max - min) * 0.45).round() } else { min })
 }
 
 pub(super) fn call_clock(elapsed: Duration) -> String {
@@ -260,6 +280,8 @@ impl Hangar {
                 self.voice.phase = None;
                 self.voice.draft = None;
                 self.voice.levels = (0., 0.);
+                self.voice.shown = None;
+                self.voice.activity = CallActivity::Idle;
                 (self.voice.live_since, self.voice.ticker) = (None, None);
                 self.voice.pending_sends.clear();
             }
@@ -274,13 +296,18 @@ impl Hangar {
             VoiceEvent::Levels(input, output) => {
                 // ~16 Hz: a janela só repinta quando a barra muda de passo ou quem fala muda.
                 let muted = self.voice.muted;
-                let shape = |(i, o): (f32, f32)| (bar_height(i), bar_height(o), speaker(i, o, muted));
+                let bars = |(i, o): (f32, f32)| (bar_height(i), bar_height(o));
                 let levels = (level_gain(input), level_gain(output));
-                let changed = shape(self.voice.levels) != shape(levels);
+                let now = std::time::Instant::now();
+                let (old_shown, since) = self.voice.shown.unwrap_or((Speaker::Idle, now));
+                let (shown, since) = settled_speaker(old_shown, since, speaker(levels.0, levels.1, muted), now);
+                self.voice.shown = Some((shown, since));
+                let changed = bars(self.voice.levels) != bars(levels) || shown != old_shown;
                 self.voice.levels = levels;
                 if !changed { return; }
                 self.voice.frame = self.voice.frame.wrapping_add(1);
             }
+            VoiceEvent::Activity(activity) => self.voice.activity = activity,
             VoiceEvent::Draft(draft) => self.voice.draft = draft,
             VoiceEvent::Failed(failure) => {
                 self.voice.error = Some(failure_text(&failure));
@@ -491,26 +518,37 @@ impl Hangar {
 
     fn voice_status(&self) -> String {
         let Some(Phase::Live) = &self.voice.phase else { return tr_shared("codex_voice_connecting", &[]) };
-        match speaker(self.voice.levels.0, self.voice.levels.1, self.voice.muted) {
+        match self.shown_speaker() {
             Speaker::Voice => tr("voice_assistant_speaking"),
             _ if self.voice.muted => tr_shared("codex_voice_muted", &[]),
             Speaker::You => tr("voice_you_speaking"),
-            Speaker::Idle => tr_shared("codex_voice_listening", &[]),
+            Speaker::Idle => match self.voice.activity {
+                CallActivity::Thinking => tr("voice_thinking"),
+                CallActivity::Searching => tr("voice_searching"),
+                CallActivity::Idle => tr_shared("codex_voice_listening", &[]),
+            },
         }
     }
+
+    fn shown_speaker(&self) -> Speaker { self.voice.shown.map_or(Speaker::Idle, |(who, _)| who) }
 
     fn call_time(&self) -> Option<String> { self.voice.live_since.map(|since| call_clock(since.elapsed())) }
 
     /// Você: barras de baixo para cima na cor de destaque. Voz: do centro, em verde. Só a altura de um div muda: nada de transform.
     fn render_equalizer(&self, min: f32, max: f32, width: f32) -> Div {
         let (input, output) = self.voice.levels;
-        let who = speaker(input, output, self.voice.muted);
+        let who = self.shown_speaker();
+        let thinking = who == Speaker::Idle && !self.voice.muted && self.voice.activity != CallActivity::Idle;
+        let row = div().h(px(max)).flex().gap(px(2.));
+        if thinking {
+            let elapsed = self.voice.live_since.map_or(Duration::ZERO, |since| since.elapsed());
+            return row.items_center().children(thinking_bars(elapsed, min, max).map(|h| div().w(px(width)).h(px(h)).rounded_full().bg(theme::muted())));
+        }
         let (level, color) = match who {
             Speaker::You => (input, theme::accent()),
             Speaker::Voice => (output, theme::success()),
             Speaker::Idle => (0., theme::faint()),
         };
-        let row = div().h(px(max)).flex().gap(px(2.));
         let row = if who == Speaker::You { row.items_end() } else { row.items_center() };
         row.children(equalizer(level, self.voice.frame, min, max).map(|h| div().w(px(width)).h(px(h)).rounded_full().bg(color)))
     }
@@ -576,6 +614,15 @@ mod tests {
     use core::prelude::v1::test;
 
     fn ev(id: &str, kind: &str, text: &str) -> (String, String, String) { (id.into(), kind.into(), text.into()) }
+
+    #[test]
+    fn speaker_label_holds_300ms() {
+        let t0 = std::time::Instant::now();
+        let (s, since) = settled_speaker(Speaker::Idle, t0, Speaker::You, t0 + Duration::from_millis(100));
+        assert_eq!(s, Speaker::Idle, "100 ms não troca");
+        let (s, _) = settled_speaker(s, since, Speaker::You, t0 + Duration::from_millis(450));
+        assert_eq!(s, Speaker::You);
+    }
 
     #[test]
     fn last_reply_is_after_last_user_message() {
