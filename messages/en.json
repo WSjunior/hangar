@@ -7528,5 +7528,14 @@
   "native_setup_agent_recovered": "The app closed in the middle of an agent fix. These files went back to how they were before it (any change you made to them since then was undone too): {arquivos}",
   "native_setup_code_roda_do_mouse": "Mouse scrolling inside Claude does not work on this Windows until the multiplexer restarts.",
   "native_setup_fix_mouse_wheel": "Fix now",
-  "native_setup_fix_mouse_wheel_confirm": "This closes the open terminal sessions. Each conversation stays in the app. Continue?"
+  "native_setup_fix_mouse_wheel_confirm": "This closes the open terminal sessions. Each conversation stays in the app. Continue?",
+  "native_voice_no_codex": "Codex was not found on this machine.",
+  "native_voice_app_server": "The local Codex stopped responding.",
+  "native_voice_speaker": "Could not play audio on the speaker.",
+  "native_voice_network": "No audio connection to OpenAI; the network or firewall may be blocking UDP.",
+  "native_voice_organizer": "The voice organizer failed on this turn; the conversation continues.",
+  "native_voice_speaking": "Speaking",
+  "native_voice_draft_held": "Request on hold, not sent yet",
+  "native_voice_dictation_busy": "Stop dictation before starting voice.",
+  "native_voice_dictation_blocked": "Dictation is unavailable while voice is on"
 }

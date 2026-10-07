@@ -7528,5 +7528,14 @@
   "native_setup_agent_recovered": "O app fechou no meio de um conserto do agente. Estes arquivos voltaram ao que eram antes dele (uma mudança sua neles depois disso também foi desfeita): {arquivos}",
   "native_setup_code_roda_do_mouse": "A rolagem do mouse dentro do Claude não funciona neste Windows até reiniciar o multiplexador.",
   "native_setup_fix_mouse_wheel": "Consertar agora",
-  "native_setup_fix_mouse_wheel_confirm": "Isto fecha as sessões de terminal abertas. A conversa de cada uma continua no app. Continuar?"
+  "native_setup_fix_mouse_wheel_confirm": "Isto fecha as sessões de terminal abertas. A conversa de cada uma continua no app. Continuar?",
+  "native_voice_no_codex": "Codex não encontrado nesta máquina.",
+  "native_voice_app_server": "O Codex local parou de responder.",
+  "native_voice_speaker": "Não foi possível tocar o áudio no alto-falante.",
+  "native_voice_network": "Sem conexão de áudio com a OpenAI; a rede ou o firewall pode estar bloqueando UDP.",
+  "native_voice_organizer": "O organizador da voz falhou nesta fala; a conversa continua.",
+  "native_voice_speaking": "Falando",
+  "native_voice_draft_held": "Pedido segurado, ainda não enviado",
+  "native_voice_dictation_busy": "Pare o ditado antes de ligar a voz.",
+  "native_voice_dictation_blocked": "Ditado indisponível com a voz ligada"
 }
