@@ -7194,6 +7194,7 @@
   "session_transfer_queue_pending": "Há mensagens na fila ou entregas ainda não confirmadas. Aguarde a confirmação antes de transferir.",
   "session_transfer_source_busy": "A sessão tem trabalho em execução ou uma pergunta ou permissão pendente.",
   "session_transfer_busy": "A sessão está trocando de agente; tente novamente quando terminar.",
+  "session_transfer_gate_unavailable": "A sessão está terminando uma escrita; tente de novo em instantes.",
   "session_transfer_source_state_unknown": "Não foi possível confirmar que a sessão de origem está parada.",
   "session_transfer_invalid_permission_mode": "Não foi possível comprovar a permissão da origem ou a permissão anterior ao modo Plano.",
   "session_transfer_read_only": "Uma sessão protegida para somente leitura não pode ser transferida.",

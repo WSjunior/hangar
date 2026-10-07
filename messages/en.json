@@ -7194,6 +7194,7 @@
   "session_transfer_queue_pending": "Messages are queued or their delivery is not yet confirmed. Wait for confirmation before transferring.",
   "session_transfer_source_busy": "The session has work in progress or a pending question or approval.",
   "session_transfer_busy": "The session is switching agents; try again when it finishes.",
+  "session_transfer_gate_unavailable": "The session is finishing a write; try again in a moment.",
   "session_transfer_source_state_unknown": "The source session could not be confirmed idle.",
   "session_transfer_invalid_permission_mode": "The source permission or the permission before Plan mode could not be verified.",
   "session_transfer_read_only": "A protected read-only session cannot be transferred.",
