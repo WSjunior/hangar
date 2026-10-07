@@ -52,7 +52,9 @@
     try {
       const r = await fetch(pageUrls(server ? baseOf(server) : getRouteBaseUrl(), sessionName, page.id).raw,
         { headers: fileAuthHeader(server) });
-      const next = pageFetchState(r.status);
+      // O 404 da página vencida traz o código; sem ele (convidado, rota ausente) é erro.
+      const code = r.status === 404 ? await r.json().then((b) => b?.detail?.code, () => null) : null;
+      const next = pageFetchState(r.status, code);
       if (next === 'ready') doc = themed(await r.text());
       status = next;
     } catch {

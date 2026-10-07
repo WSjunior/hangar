@@ -5,21 +5,26 @@ export type PageFetchState = 'loading' | 'ready' | 'error' | 'expired';
 const MIN = 80;
 const MAX = 2000;
 const FALLBACK = 240;
-// Claude: mcp__hangar__html_render. O nome no Codex é conferido no passo de uso real.
-const NAMES = new Set(['mcp__hangar__html_render']);
+// Claude e o modo código do Codex gravam `mcp__hangar__html_render`; outros clientes MCP separam o
+// servidor da tool por `.` ou `/`. Mesma regra do `is_page_call` do nativo.
+const NAME = /^(?:mcp__)?hangar(?:__|\.|\/)html_render$/;
 
 export function isHtmlRenderTool(name: string | null | undefined): boolean {
-  return !!name && NAMES.has(name);
+  return !!name && NAME.test(name);
 }
+
+type Block = { type?: unknown; text?: unknown } | null;
+const joinText = (blocks: Block[]) => blocks.map((b) => (b?.type === 'text' && typeof b.text === 'string' ? b.text : '')).join('');
 
 export function htmlPageFromResult(toolName: string | null | undefined, result: string | null | undefined): HtmlPageRef | null {
   if (!isHtmlRenderTool(toolName) || !result) return null;
   try {
     let data = JSON.parse(result);
     // O resultado de MCP também chega como lista de blocos de conteúdo: junta o texto e lê de novo.
-    if (Array.isArray(data)) {
-      const blocks = data as ({ type?: unknown; text?: unknown } | null)[];
-      data = JSON.parse(blocks.map((b) => (b?.type === 'text' && typeof b.text === 'string' ? b.text : '')).join(''));
+    if (Array.isArray(data)) data = JSON.parse(joinText(data as Block[]));
+    // O Codex grava o CallToolResult inteiro: o estruturado vence, senão o texto dos blocos.
+    else if (data && Array.isArray(data.content) && !data.hangar_page) {
+      data = data.structuredContent?.hangar_page ? data.structuredContent : JSON.parse(joinText(data.content as Block[]));
     }
     const page = data?.hangar_page;
     if (!page || typeof page.id !== 'string' || typeof page.title !== 'string') return null;
@@ -43,8 +48,10 @@ export function frameHeight(ref: HtmlPageRef, width: number, reported: number | 
   return clamp(ref.height != null ? Math.min(ref.height, natural) : natural);
 }
 
-export function pageFetchState(status: number | 'network'): PageFetchState {
-  if (status === 404) return 'expired';
+// `code` é o `detail.code` do corpo JSON da resposta: só o servidor de páginas diz `erro_pagina_expirou`;
+// um 404 genérico (convidado, rota ausente no Python) é erro, não página vencida.
+export function pageFetchState(status: number | 'network', code?: string | null): PageFetchState {
+  if (status === 404 && code === 'erro_pagina_expirou') return 'expired';
   if (typeof status === 'number' && status >= 200 && status < 300) return 'ready';
   return 'error';
 }

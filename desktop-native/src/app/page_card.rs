@@ -23,15 +23,23 @@ const PARK_SHOT: Duration = Duration::from_secs(3);
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct PageRef { pub id: String, pub title: String, #[serde(default)] pub height: Option<u32>, #[serde(default)] pub heights: BTreeMap<u32, u32> }
 
-/// O resultado de MCP chega como texto ou como lista de blocos `{type: "text", text}`: os blocos são juntados antes.
+/// O resultado de MCP chega como texto, como lista de blocos `{type: "text", text}` ou, no Codex, como o
+/// CallToolResult inteiro (`content` + `structuredContent`): o estruturado vence, senão os blocos são juntados.
 pub fn page_from_result(tool_name: &str, result: &str) -> Option<PageRef> {
     if !conversation::is_page_call(Some(tool_name)) { return None; }
     #[derive(Deserialize)]
     struct Out { hangar_page: PageRef }
+    let join = |blocks: &[Value]| serde_json::from_str::<Value>(&blocks.iter()
+        .filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect::<String>()).ok();
     let value: Value = serde_json::from_str(result).ok()?;
     let value = match value {
-        Value::Array(blocks) => serde_json::from_str(&blocks.iter()
-            .filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect::<String>()).ok()?,
+        Value::Array(blocks) => join(&blocks)?,
+        Value::Object(ref o) if o.get("hangar_page").is_none() && o.get("content").is_some_and(Value::is_array) => {
+            match o.get("structuredContent") {
+                Some(s) if s.get("hangar_page").is_some() => s.clone(),
+                _ => join(o["content"].as_array()?)?,
+            }
+        }
         other => other,
     };
     serde_json::from_value::<Out>(value).ok().map(|o| o.hangar_page)
@@ -578,6 +586,17 @@ mod tests {
     fn reads_mcp_content_blocks() {
         let blocks = serde_json::json!([{"type": "text", "text": r#"{"hangar_page":{"id":"a","#}, {"type": "text", "text": r#""title":"T"}}"#}]).to_string();
         assert_eq!(page_from_result("mcp__hangar__html_render", &blocks).unwrap().title, "T");
+    }
+
+    #[test]
+    fn reads_codex_call_tool_result() {
+        let both = serde_json::json!({"content": [{"type": "text", "text": "outro"}],
+            "structuredContent": {"hangar_page": {"id": "s", "title": "T"}}}).to_string();
+        assert_eq!(page_from_result("mcp__hangar__html_render", &both).unwrap().id, "s");
+        let text = serde_json::json!({"content": [{"type": "text", "text": r#"{"hangar_page":{"id":"a","#}, {"type": "text", "text": r#""title":"T"}}"#}]}).to_string();
+        assert_eq!(page_from_result("hangar.html_render", &text).unwrap().id, "a");
+        let err = serde_json::json!({"content": [{"type": "text", "text": "erro"}], "isError": true}).to_string();
+        assert!(page_from_result("mcp__hangar__html_render", &err).is_none());
     }
 
     #[test]

@@ -54,8 +54,13 @@ fn is_task_call(name: Option<&str>) -> bool { matches!(name, Some("TaskCreate" |
 
 fn is_agent_call(name: Option<&str>) -> bool { matches!(name, Some("Agent" | "AgentSwarm")) }
 
-/// Página publicada pelo agente; mesmos nomes do `packages/core/src/htmlPage.ts`.
-pub fn is_page_call(name: Option<&str>) -> bool { matches!(name, Some("mcp__hangar__html_render")) }
+/// Página publicada pelo agente: servidor `hangar`, tool `html_render`, separados por `__`, `.` ou `/`, com o
+/// `mcp__` do Claude e do Codex opcional. Mesma regra do `packages/core/src/htmlPage.ts`.
+pub fn is_page_call(name: Option<&str>) -> bool {
+    let Some(head) = name.and_then(|n| n.strip_suffix("html_render")) else { return false };
+    let Some(server) = head.strip_suffix("__").or_else(|| head.strip_suffix('.')).or_else(|| head.strip_suffix('/')) else { return false };
+    server.strip_prefix("mcp__").unwrap_or(server) == "hangar"
+}
 
 // Como no web: as chamadas de tarefa nunca entram no pensamento, nem no "Tudo"; o bloco de tarefas as substitui.
 // A página publicada também não: ela existe para ser vista.
@@ -576,6 +581,17 @@ mod tests {
         let events = vec![ev("thinking", "t1"), call("h", "1", PAGE)];
         let items = super::build(&events, View { thinking: ThinkingTools::All, ..View::default() }, &HashSet::new());
         assert_eq!(items[1], Item::Tool(Tool { call: 1, result: None }));
+    }
+
+    #[test]
+    fn page_call_accepts_any_separator_and_only_the_hangar_server() {
+        for n in ["mcp__hangar__html_render", "hangar__html_render", "hangar.html_render", "hangar/html_render", "mcp__hangar.html_render"] {
+            assert!(super::is_page_call(Some(n)), "{n}");
+        }
+        for n in ["mcp__outro__html_render", "mcp__xhangar__html_render", "hangar_html_render", "html_render", "Read"] {
+            assert!(!super::is_page_call(Some(n)), "{n}");
+        }
+        assert!(!super::is_page_call(None));
     }
 
     #[test]

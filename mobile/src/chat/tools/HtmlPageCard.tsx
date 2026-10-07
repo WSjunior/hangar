@@ -75,7 +75,9 @@ export const HtmlPageCard = memo(function HtmlPageCard({ page, sessionName, serv
     try {
       if (!server) throw new Error('no server');
       const r = await fetch(pageUrls(baseOf(server), sessionName, page.id).raw, { headers: fileAuthHeader(server) });
-      const next = pageFetchState(r.status);
+      // O 404 da página vencida traz o código; sem ele (convidado, rota ausente) é erro.
+      const code = r.status === 404 ? await r.json().then((b) => b?.detail?.code, () => null) : null;
+      const next = pageFetchState(r.status, code);
       const doc = next === 'ready' ? themed(await r.text(), paramsRef.current) : '';
       if (n !== seq.current) return;
       setHtml(doc);
