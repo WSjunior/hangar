@@ -7537,5 +7537,6 @@
   "native_voice_speaking": "Falando",
   "native_voice_draft_held": "Pedido segurado, ainda não enviado",
   "native_voice_dictation_busy": "Pare o ditado antes de ligar a voz.",
-  "native_voice_dictation_blocked": "Ditado indisponível com a voz ligada"
+  "native_voice_dictation_blocked": "Ditado indisponível com a voz ligada",
+  "native_voice_not_saved": "Não foi possível gravar a voz escolhida."
 }

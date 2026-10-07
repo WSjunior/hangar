@@ -2007,7 +2007,7 @@ impl Hangar {
                 }
                 let assistant = event.kind == "assistant_msg";
                 self.chat.apply(event);
-                if assistant { self.voice_message("assistant_msg"); }
+                if assistant { self.voice_message(); }
                 if self.chat.preview.text.is_empty() {
                     self.cancel_preview_drop();
                     self.clear_visible_preview();

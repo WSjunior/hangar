@@ -34,7 +34,8 @@ pub(super) struct VoiceUi {
     pub(super) target: Option<String>,
     /// Ids de evento já falados: o mesmo texto em outro turno é outra resposta.
     pub(super) spoken: HashSet<String>,
-    pub(super) reply_pending: bool,
+    /// Sessão aberta cujo turno acabou antes de a resposta chegar.
+    pub(super) reply_pending: Option<SessionKey>,
     pub(super) pending_sends: VecDeque<(SessionKey, String, CallId)>,
     /// Sessão que recebeu pedido da voz → já foi vista trabalhando.
     pub(super) watched: HashMap<SessionKey, bool>,
@@ -111,7 +112,12 @@ impl Hangar {
     }
 
     pub(super) fn refresh_voice_gate(&mut self, cx: &mut Context<Self>) {
-        let Some(api) = self.local_api() else { self.voice.enabled = false; cx.notify(); return; };
+        let Some(api) = self.local_api() else {
+            self.voice.enabled = false;
+            // Sem a pílula, a chamada ficaria com o microfone aberto e nenhum controle na tela.
+            self.stop_voice(cx);
+            return;
+        };
         let (connection, tx) = (self.connection, self.tx.clone());
         self.runtime.spawn(async move {
             // find_codex roda `npm prefix -g`: fora da thread da tela.
@@ -144,7 +150,7 @@ impl Hangar {
         self.voice.call = Some(Voice::start(self.runtime.handle(), options, events_tx));
         self.voice.target = self.selected.as_ref().map(|s| s.name.clone());
         self.voice.spoken.clear();
-        self.voice.reply_pending = false;
+        self.voice.reply_pending = None;
         self.voice.pending_sends.clear();
         self.voice.watched.clear();
         self.voice.error = None;
@@ -224,11 +230,13 @@ impl Hangar {
     }
 
     pub(super) fn voice_session_opened(&mut self) {
-        let Some(voice) = &self.voice.call else { return };
+        if self.voice.call.is_none() { return; }
         let name = self.selected.as_ref().map(|s| s.name.clone());
         if name == self.voice.target { return; }
         self.voice.target = name.clone();
-        self.voice.reply_pending = false;
+        // A resposta atrasada da sessão que saiu da tela passa a vir pela lista e pelo histórico.
+        if let Some(key) = self.voice.reply_pending.take() { self.voice.watched.insert(key, true); }
+        let Some(voice) = &self.voice.call else { return };
         let name = name.unwrap_or_default();
         // O chat novo ainda está vazio aqui; o organizador lê o resto pelo read_session.
         voice.retarget(name.clone(), format!("A sessão na tela agora é {name}."));
@@ -243,7 +251,7 @@ impl Hangar {
             return;
         }
         // O estado pode chegar antes do último assistant_msg: se a resposta ainda não está aqui, espera por ela.
-        if !self.voice_speak_last_reply() { self.voice.reply_pending = true; }
+        if !self.voice_speak_last_reply() { self.voice.reply_pending = self.selected_key(); }
     }
 
     /// Fala a última resposta da sessão aberta se ainda não foi falada; devolve se havia uma nova.
@@ -255,9 +263,10 @@ impl Hangar {
         true
     }
 
-    pub(super) fn voice_message(&mut self, kind: &str) {
-        if self.voice.reply_pending && kind == "assistant_msg" && self.chat.state.state != "working" && self.voice_speak_last_reply() {
-            self.voice.reply_pending = false;
+    /// Chamado a cada `assistant_msg` da sessão aberta.
+    pub(super) fn voice_message(&mut self) {
+        if self.voice.reply_pending.is_some() && self.chat.state.state != "working" && self.voice_speak_last_reply() {
+            self.voice.reply_pending = None;
         }
     }
 
@@ -275,8 +284,11 @@ impl Hangar {
             if state == "working" { *was_working = true; } else if went_idle(*was_working, &state) { finished.push(key); }
         }
         for key in finished {
+            // Sessão de outra máquina que não é a aberta nem a ativa: a conexão é a da lista dela.
+            let api = self.api_for(&key.server).or_else(|| self.remote.get(&servers::norm(&key.server)).and_then(|l| l.api.clone()));
+            // Sem conexão agora, fica vigiada e a próxima lista tenta de novo.
+            let Some(api) = api else { continue };
             self.voice.watched.remove(&key);
-            let Some(api) = self.api_for(&key.server) else { continue };
             let (generation, connection, tx) = (self.voice.generation, self.connection, self.tx.clone());
             self.runtime.spawn(async move {
                 let result = api.history(&key.name, 20, None).await;
@@ -310,7 +322,7 @@ impl Hangar {
                 cx.spawn(async move |this, cx| {
                     if let Err(error) = write.await {
                         let _ = this.update(cx, |this, cx| {
-                            this.voice.error = Some(tr("settings_not_saved").replace("{error}", &error));
+                            this.voice.error = Some(format!("{} {error}", tr("voice_not_saved")));
                             cx.notify();
                         });
                     }
