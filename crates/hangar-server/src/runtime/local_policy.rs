@@ -127,8 +127,13 @@ fn image_path(excerpt: &str) -> Option<&Path> {
 }
 
 fn strerror(error: &std::io::Error) -> String {
+    // O Python usa o `strerror` da libc também no Windows; a frase do FormatMessage seria outra.
+    match error.kind() {
+        std::io::ErrorKind::NotFound => return "No such file or directory".into(),
+        std::io::ErrorKind::PermissionDenied => return "Permission denied".into(),
+        _ => {}
+    }
     let text = error.to_string();
-    // "No such file or directory (os error 2)" -> a frase do sistema, como o `strerror` do Python.
     text.split(" (os error ").next().unwrap_or(&text).to_owned()
 }
 

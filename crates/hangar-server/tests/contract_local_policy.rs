@@ -43,6 +43,10 @@ fn local_policies_match_the_python_golden() {
         // ambiente; só este teste lê ou escreve TZ, HOME e a variável de esforço.
         unsafe { std::env::set_var("TZ", document["tz"].as_str().unwrap()); }
         for case in document["cases"].as_array().unwrap() {
+            // O golden sai do Linux: o Windows ignora o TZ do processo e abre pasta como "Permission denied".
+            if cfg!(windows) && case["name"].as_str().is_some_and(|n| n.starts_with("limit_rejected") || n == "directory_named_like_image") {
+                continue;
+            }
             total += 1;
             let dir = tempfile::tempdir().unwrap();
             let root = dir.path().to_str().unwrap();
@@ -51,6 +55,8 @@ fn local_policies_match_the_python_golden() {
             unsafe {
                 std::env::remove_var("CLAUDE_CODE_EFFORT_LEVEL");
                 std::env::set_var("HOME", dir.path().join("home"));
+                // No Windows `home_dir` (e o `Path.home()` do Python) leem o USERPROFILE.
+                std::env::set_var("USERPROFILE", dir.path().join("home"));
                 for (key, value) in case["env"].as_object().into_iter().flatten() { std::env::set_var(key, value.as_str().unwrap()); }
             }
             let kind = case["kind"].as_str().unwrap();
