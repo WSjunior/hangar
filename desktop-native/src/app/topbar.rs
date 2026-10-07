@@ -128,6 +128,7 @@ impl Hangar {
                 if this.settings.is_some() && !this.settings_live() { this.close_settings(window, cx) }
                 else { this.open_settings(settings::Page::Appearance, window, cx) }
             }));
+        let voice = self.render_voice_pill(cx);
         let updater = cx.try_global::<crate::update::Handle>().map(|handle| handle.0.clone());
         let outdated = updater.as_ref().filter(|u| u.read(cx).server_outdated()).map(|u| {
             let (running, app) = u.read(cx).outdated_versions();
@@ -178,6 +179,7 @@ impl Hangar {
                     .child(control(pill))
                     .children(outdated.map(control))
                     .children(updater.map(control))
+                    .children(voice.map(control))
                     .child(control(gear));
                 match beside {
                     // Com o painel direito aberto, a busca centra no chat e os controles ficam sobre o painel; mais largos que
