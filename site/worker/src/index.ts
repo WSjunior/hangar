@@ -9,6 +9,12 @@ const CODE = /^[a-z0-9-]{1,64}$/;
 const SHORT = /^[\w .:+()/·-]{0,200}$/;
 const SUBJECTS = { consertado: "consertado ali", aberto: "aberto" } as const;
 const FROM = "relatorio@hangar.dev.br";
+/** A tabela de códigos do app (`codes.rs`); fora dela o assunto diz "falha não prevista" e o código vai no corpo. */
+const KNOWN_CODES = new Set(["sem-internet", "sem-winget", "sem-sudo", "senha-cancelada", "politica-travada", "checkout-sujo",
+	"sem-systemd", "pacotes-desatualizados", "tailscale-https", "tailscale-login", "agente-nao-instalou", "sem-agente",
+	"versao-diferente", "modo-desenvolvedor", "roda-do-mouse"]);
+/** O e-mail leva só o começo do relatório: o inteiro fica no KV, e e-mail grande é o que um abuso multiplicaria. */
+export const MAIL_REPORT_MAX = 8 * 1024;
 
 export type Outcome = keyof typeof SUBJECTS;
 
@@ -21,6 +27,8 @@ export interface Report {
 export interface Deps {
 	reports: KVNamespace;
 	allow(ip: string): Promise<boolean>;
+	/** Teto de todos juntos: muitos IPs (ou um que troca) não esgotam as escritas do KV nem a caixa de e-mail. */
+	allowAll(): Promise<boolean>;
 	mail(subject: string, text: string): Promise<void>;
 	waitUntil(work: Promise<unknown>): void;
 }
@@ -61,7 +69,17 @@ export function parseReport(value: unknown): Report | null {
 }
 
 export function subject(r: Report): string {
-	return `[Hangar] ${SUBJECTS[r.outcome]}: ${r.code ?? "falha não prevista"} · ${r.os}`;
+	const code = r.code !== null && KNOWN_CODES.has(r.code) ? r.code : "falha não prevista";
+	return `[Hangar] ${SUBJECTS[r.outcome]}: ${code} · ${r.os}`;
+}
+
+/** As primeiras linhas do texto em até `max` bytes. */
+export function head(text: string, max: number): string {
+	const bytes = new TextEncoder().encode(text);
+	if (bytes.byteLength <= max) return text;
+	const cut = new TextDecoder().decode(bytes.slice(0, max));
+	const line = cut.lastIndexOf("\n");
+	return `${line > 0 ? cut.slice(0, line) : cut}\n…`;
 }
 
 export async function handle(request: Request, deps: Deps): Promise<Response> {
@@ -69,10 +87,12 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
 	if (url.pathname !== "/api/relatorio") return json(404, { erro: "nao-encontrado" });
 	if (request.method !== "POST") return json(405, { erro: "metodo" });
 	if (!STAMP.test(request.headers.get("x-hangar-stamp") ?? "")) return json(403, { erro: "carimbo" });
-	if (!(request.headers.get("content-type") ?? "").startsWith("application/json")) return json(415, { erro: "tipo" });
+	if (!(request.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) return json(415, { erro: "tipo" });
 	if (Number(request.headers.get("content-length") ?? "0") > MAX_BYTES) return json(413, { erro: "grande" });
-	// Limite antes de ler o corpo: quem passou do limite não custa leitura nem escrita.
+	// Limite antes de ler o corpo: quem passou do limite não custa leitura nem escrita. O do IP vem primeiro: um IP
+	// barrado não gasta o teto de todos.
 	if (!(await deps.allow(request.headers.get("cf-connecting-ip") ?? "sem-ip"))) return json(429, { erro: "limite" });
+	if (!(await deps.allowAll())) return json(429, { erro: "limite" });
 	const bytes = await readCapped(request.body, MAX_BYTES);
 	if (bytes === null) return json(413, { erro: "grande" });
 	let parsed: unknown;
@@ -82,11 +102,15 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
 	const id = `${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}`;
 	await deps.reports.put(id, JSON.stringify({ ...report, received: new Date().toISOString(), country: request.cf?.country ?? null }),
 		{ expirationTtl: TTL_SECONDS });
-	const text = [`id: ${id}`, `app: ${report.app} · ${report.commit}`, `sistema: ${report.os}`, `etapa: ${report.step}`,
-		`código: ${report.code ?? "-"}`, `agente: ${report.agent ?? "-"}`, "", report.report].join("\n");
-	// Já guardado: e-mail que falha vai ao log, não desfaz o envio.
-	deps.waitUntil(deps.mail(subject(report), text).catch((e: unknown) =>
-		console.error(JSON.stringify({ message: "email falhou", id, error: e instanceof Error ? e.message : String(e) }))));
+	const text = [`chave no KV: ${id}`, `resultado: ${report.outcome}`, `código: ${report.code ?? "-"}`, `sistema: ${report.os}`,
+		`app: ${report.app} · ${report.commit}`, `etapa: ${report.step}`, `agente: ${report.agent ?? "-"}`, "",
+		head(report.report, MAIL_REPORT_MAX)].join("\n");
+	// Já guardado: e-mail que falha vai ao log, não desfaz o envio. Só nome e código do erro: a mensagem pode levar o
+	// destinatário.
+	deps.waitUntil(deps.mail(subject(report), text).catch((e: unknown) => {
+		const code = typeof e === "object" && e !== null && "code" in e ? String(e.code) : null;
+		console.error(JSON.stringify({ message: "email falhou", id, error: e instanceof Error ? e.name : typeof e, code }));
+	}));
 	console.log(JSON.stringify({ message: "relatorio", id, outcome: report.outcome, code: report.code }));
 	return json(201, { id });
 }
@@ -99,6 +123,7 @@ export default {
 		return handle(request, {
 			reports: env.REPORTS,
 			allow: async (ip) => (await env.LIMITER.limit({ key: ip })).success,
+			allowAll: async () => (await env.GLOBAL_LIMITER.limit({ key: "global" })).success,
 			mail: async (subject, text) => {
 				if (!env.REPORT_TO) throw new Error("REPORT_TO ausente");
 				await env.MAILER.send({ from: FROM, to: env.REPORT_TO, subject, text });

@@ -6,9 +6,13 @@
   // Só a rota do site: sem subdomínio workers.dev aberto a robô.
   "workers_dev": false,
   "routes": [{ "pattern": "hangar.dev.br/api/relatorio", "zone_name": "hangar.dev.br" }],
-  "kv_namespaces": [{ "binding": "REPORTS", "id": "trocar-pelo-id-do-kv-na-task-9" }],
-  // O binding só aceita períodos de 10 ou 60 s: 3 envios por minuto por IP.
-  "ratelimits": [{ "name": "LIMITER", "namespace_id": "1001", "simple": { "limit": 3, "period": 60 } }],
+  "kv_namespaces": [{ "binding": "REPORTS", "id": "id-do-kv-reports" }],
+  // O binding só aceita períodos de 10 ou 60 s: 3 envios por minuto por IP e 2 por minuto no total (chave fixa), para um
+  // IP só ou vários não esgotarem as escritas diárias do KV e a caixa de e-mail.
+  "ratelimits": [
+    { "name": "LIMITER", "namespace_id": "1001", "simple": { "limit": 3, "period": 60 } },
+    { "name": "GLOBAL_LIMITER", "namespace_id": "1002", "simple": { "limit": 2, "period": 60 } }
+  ],
   // Destinatário no segredo REPORT_TO: o repositório é público.
   "send_email": [{ "name": "MAILER" }],
   "observability": {

@@ -1,6 +1,6 @@
 import { env, exports } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
-import { handle, MAX_BYTES, TTL_SECONDS, type Deps } from "../src";
+import { handle, MAIL_REPORT_MAX, MAX_BYTES, TTL_SECONDS, type Deps } from "../src";
 
 function report(over: Record<string, unknown> = {}) {
 	return { v: 1, app: "0.20.1.3456", commit: "abc123", os: "linux-x86_64", step: "instalar", code: "sem-systemd",
@@ -12,16 +12,18 @@ function post(body: string, headers: Record<string, string> = {}) {
 		headers: { "content-type": "application/json", "x-hangar-stamp": "hangar-native/0.20.1.3456", "cf-connecting-ip": "203.0.113.7", ...headers } });
 }
 
-function deps(allow = true, mailFails = false) {
+function deps(allow = true, mailFails = false, allowAll = true) {
 	const mails: { subject: string; text: string }[] = [];
 	const pending: Promise<unknown>[] = [];
+	const calls = { all: 0 };
 	const d: Deps = {
 		reports: env.REPORTS,
 		allow: async () => allow,
+		allowAll: async () => { calls.all++; return allowAll; },
 		mail: async (subject, text) => { if (mailFails) throw new Error("sem rota de e-mail"); mails.push({ subject, text }); },
 		waitUntil: (work) => { pending.push(work); },
 	};
-	return { d, mails, pending };
+	return { d, mails, pending, calls };
 }
 
 async function stored() { return (await env.REPORTS.list()).keys; }
@@ -59,12 +61,53 @@ describe("POST /api/relatorio", () => {
 		expect(await stored()).toHaveLength(0);
 	});
 
-	it("limits by IP", async () => {
-		const { d, mails } = deps(false);
+	it("limits by IP before touching the global limit", async () => {
+		const { d, mails, calls } = deps(false);
 		const res = await handle(post(JSON.stringify(report())), d);
 		expect(res.status).toBe(429);
 		expect(await stored()).toHaveLength(0);
 		expect(mails).toHaveLength(0);
+		expect(calls.all).toBe(0);
+	});
+
+	it("limits everyone together", async () => {
+		const { d, mails, pending } = deps(true, false, false);
+		const res = await handle(post(JSON.stringify(report())), d);
+		await Promise.all(pending);
+		expect(res.status).toBe(429);
+		expect(await stored()).toHaveLength(0);
+		expect(mails).toHaveLength(0);
+	});
+
+	it("mails a short summary and keeps the whole report in KV", async () => {
+		const { d, mails, pending } = deps();
+		const big = Array.from({ length: 20_000 }, (_, n) => `linha ${n}`).join("\n");
+		const res = await handle(post(JSON.stringify(report({ report: big }))), d);
+		await Promise.all(pending);
+		expect(res.status).toBe(201);
+		const { id } = await res.json<{ id: string }>();
+		const text = mails[0].text;
+		for (const line of [`chave no KV: ${id}`, "resultado: aberto", "código: sem-systemd", "sistema: linux-x86_64", "app: 0.20.1.3456"]) {
+			expect(text).toContain(line);
+		}
+		expect(text).toContain("linha 0\n");
+		expect(text).not.toContain("linha 19999");
+		expect(new TextEncoder().encode(text).byteLength).toBeLessThanOrEqual(MAIL_REPORT_MAX + 512);
+		expect(JSON.parse((await env.REPORTS.get(id))!).report).toBe(big);
+	});
+
+	it("puts an unknown code in the body, not in the subject", async () => {
+		const { d, mails, pending } = deps();
+		await handle(post(JSON.stringify(report({ code: "disco-cheio" }))), d);
+		await Promise.all(pending);
+		expect(mails[0].subject).toContain("falha não prevista");
+		expect(mails[0].subject).not.toContain("disco-cheio");
+		expect(mails[0].text).toContain("código: disco-cheio");
+	});
+
+	it("accepts the content type in any case", async () => {
+		const { d } = deps();
+		expect((await handle(post(JSON.stringify(report()), { "content-type": "Application/JSON; charset=UTF-8" }), d)).status).toBe(201);
 	});
 
 	it("needs the app stamp, JSON and POST on the right path", async () => {
