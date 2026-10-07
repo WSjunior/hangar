@@ -573,3 +573,37 @@ fn reply_with_wrong_type_is_reported_and_engine_stays_usable() {
     line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),12.0);
     assert_eq!(engine.view()["state"],"working");
 }
+
+#[test]
+fn undecodable_cut_check_read_is_reported_once() {
+    let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true,"in_progress":true}),2,clock(10.0));
+    let init = frames(&engine.bootstrap(true,"boot".into()).unwrap())[0].clone();
+    let resume = frames(&line(&mut engine,json!({"id":init["id"],"result":{}}),10.1))[1].clone();
+    let effects = line(&mut engine,json!({"id":resume["id"],"result":{"thread":{"id":"thread-1","status":{"type":"idle"}}}}),10.2);
+    let read = frames(&effects).into_iter().find(|f|f["method"] == "thread/read").unwrap();
+    let effects = line(&mut engine,json!({"id":read["id"],"result":{"thread":"x"}}),10.3);
+    assert_eq!(effects.iter().filter(|e|matches!(e,Effect::Policy { kind,.. } if kind == "unknown_private")).count(),1);
+    assert_eq!(diags(&effects),vec![(DiagEvent::CodexDecode,"thread_read".into())]);
+    assert!(engine.view()["problema"].is_null());
+}
+
+#[test]
+fn undecodable_user_input_request_still_asks_from_the_raw_line() {
+    let mut engine = engine();
+    let effects = line(&mut engine,json!({"id":5,"method":"item/tool/requestUserInput","params":{"threadId":"thread-1",
+        "questions":[{"id":"q1","header":"H","question":"Qual?","isOther":"sim"}]}}),10.0);
+    assert_eq!(diags(&effects),vec![(DiagEvent::CodexDecode,"item_tool_requestuserinput".into())]);
+    let view = engine.view();
+    assert_eq!(view["state"],"awaiting_input");
+    assert_eq!(view["codex_question"]["questions"][0]["id"],"q1");
+    assert_eq!(view["codex_question"]["questions"][0]["isOther"],false);
+    assert_eq!(view["codex_question"]["questions"][0]["options"],json!([]));
+    assert!(diags(&line(&mut engine,json!({"method":"thread/novidade","params":{"threadId":"thread-1"}}),10.1)).is_empty());
+}
+
+#[test]
+fn user_input_request_without_questions_asks_nothing() {
+    let mut engine = engine();
+    line(&mut engine,json!({"id":6,"method":"item/tool/requestUserInput","params":{"threadId":"thread-1"}}),10.0);
+    assert!(engine.view()["codex_question"].is_null());
+}

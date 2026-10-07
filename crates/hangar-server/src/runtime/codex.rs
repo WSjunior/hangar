@@ -280,11 +280,18 @@ impl Engine {
 
     fn blocking_question(&self) -> Option<Value> {
         let (id,request) = self.server_requests.iter().find(|(_,r)|r["method"] == "item/tool/requestUserInput")?;
-        let wire::ServerRequest::ToolRequestUserInput(params) = decoded(request) else { return None };
-        let questions:Vec<_> = params.questions.into_iter().map(|q|json!({
-            "id":q.id,"header":q.header,"question":q.question,"multiSelect":false,
-            "isOther":q.is_other.unwrap_or(false),"isSecret":q.is_secret.unwrap_or(false),
-            "options":q.options.unwrap_or_default()})).collect();
+        let raw = request["params"]["questions"].as_array()?;
+        let questions:Vec<_> = match decoded(request) {
+            wire::ServerRequest::ToolRequestUserInput(params) => params.questions.into_iter().map(|q|json!({
+                "id":q.id,"header":q.header,"question":q.question,"multiSelect":false,
+                "isOther":q.is_other.unwrap_or(false),"isSecret":q.is_secret.unwrap_or(false),
+                "options":q.options.unwrap_or_default()})).collect(),
+            // Fora do formato a pergunta é lida crua, para não sumir da tela e travar a sessão.
+            _ => raw.iter().map(|q|json!({
+                "id":q["id"],"header":q["header"],"question":q["question"],"multiSelect":false,
+                "isOther":q["isOther"].as_bool().unwrap_or(false),"isSecret":q["isSecret"].as_bool().unwrap_or(false),
+                "options":q.get("options").cloned().unwrap_or_else(||json!([]))})).collect(),
+        };
         Some(json!({"provider":"codex","request_id":id,"questions":questions}))
     }
 
@@ -776,6 +783,8 @@ impl Engine {
             return Ok(());
         }
         let result = line.get("result").cloned().unwrap_or_else(||json!({}));
+        // Turno cortado: lido da mesma decodificação do `thread/read`, uma só por linha.
+        let mut cut = false;
         if voice_rpc(&rpc) {
             let call_id = rpc.continuation.as_ref().and_then(|next|next["call_id"].as_str()).unwrap_or("").to_owned();
             if rpc.method == "thread/start" {
@@ -836,6 +845,7 @@ impl Engine {
             }
             "thread/read" => {
                 let response:wire::ThreadReadResponse = self.decode_reply(&rpc.method,&result,effects);
+                cut = response.thread.status == wire::ThreadStatus::Idle && response.thread.turns.last().is_some_and(|turn|turn.status == "interrupted");
                 self.restore_thread(&response.thread,&rpc);
                 if rpc.params["includeTurns"] == true { self.async_questions.hydrate(&self.thread_id,&result["thread"]); }
             }
@@ -922,8 +932,7 @@ impl Engine {
                     }
                 }
                 Some("cut_check") => {
-                    let thread = self.decode_reply::<wire::ThreadReadResponse>(&rpc.method,&result,effects).thread;
-                    if thread.status == wire::ThreadStatus::Idle && thread.turns.last().is_some_and(|turn|turn.status == "interrupted") {
+                    if cut {
                         self.state.problema = Some("codex_turno_cortado".into()); self.state.problema_detalhe = None;
                     }
                 }
@@ -1102,6 +1111,11 @@ impl Engine {
             self.answering.remove(&request_id);
             if let Some((_,request)) = self.server_requests.iter_mut().find(|(id,_)|id == &request_id) { *request = line.clone(); }
             else { self.server_requests.push((request_id.clone(),line.clone())); }
+            // Avisa aqui, uma vez por pedido: a tela relê o pedido a cada estado.
+            if let Err(failure) = wire::ServerRequest::decode(method,params) {
+                tracing::warn!(session=%self.state.session,method=%failure.method,error=wire::error_kind(&failure.error),"pedido do Codex fora do formato");
+                effects.push(Effect::Diag { event:DiagEvent::CodexDecode,code:decode_code(&failure.method) });
+            }
             if !["item/commandExecution/requestApproval","item/fileChange/requestApproval","item/tool/requestUserInput"].contains(&method) {
                 self.counter += 1;
                 self.answer(format!("server:{}:{}",self.generation,self.counter),request_id,Value::Null,

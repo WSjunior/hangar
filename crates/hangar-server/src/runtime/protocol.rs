@@ -100,7 +100,7 @@ impl DiagEvent {
     pub fn reason(self) -> &'static str {
         match self {
             Self::CodexVersion => "versão do Codex diferente da conferida; campo renomeado pode faltar",
-            Self::CodexDecode => "notificação do Codex com formato inesperado foi ignorada",
+            Self::CodexDecode => "formato inesperado do Codex: a notificação é ignorada; a resposta segue com o padrão",
         }
     }
 }
