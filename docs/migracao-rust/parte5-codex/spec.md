@@ -63,7 +63,7 @@ Medição e alternativas em [`analise.md`](analise.md#tipos-do-protocolo). Decis
 
 A 5B depende também da **5-0** (caminho de escrita comum aos dois provedores: tabela de despacho
 rota × provedor × modo, rotas genéricas reivindicadas no Rust, `runtime_coordinator` perguntando
-à tabela, `format_status` e `skill_catalog` no Rust), que a metade Claude escreve e esta revisa.
+à tabela, `format_status` e `skill_catalog` no Rust), que a metade Claude escreve e revisa no próprio fluxo; esta só usa o resultado.
 Divisão e regras dos arquivos comuns em [`../parte5-claude/contrato-par.md`](../parte5-claude/contrato-par.md).
 5B e 5E correm em paralelo depois de 5A. Cada subparte tem plano próprio, execução com revisor
 por Task, revisão final, PR em rascunho e uso real pelo canal de testes antes da seguinte que
@@ -178,7 +178,7 @@ Pronta quando: cada ação usada uma vez no celular e no nativo com uma sessão 
   com `rusqlite`, que já está no workspace).
 - Rotas no Rust: `/api/codex-contas/*`, `/api/credenciais/codex*`, a parte Codex de
   `/api/cotas` e `/api/model-options?provider=codex`. A rota de criação (`POST /api/sessions`) é
-  da parte 6 (proposta das duas metades, aguarda o dono); aqui vão só as checagens Codex dela
+  da parte 6 (decisão do dono, 07/10); aqui vão só as checagens Codex dela
   (escolha de conta, catálogo de modelo, reserva), chamadas pela rota Python por `/internal`.
 - **Os 22 módulos Python que importam `codex_contas`** continuam com um leitor só de leitura
   (listar contas, ambiente, dono do rollout) até saírem nas partes 6/7. A escrita (criar, apagar,
