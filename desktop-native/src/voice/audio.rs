@@ -1,7 +1,7 @@
 //! Microfone e alto-falante da voz: `cpal` nas pontas, `sonora` (AEC3) no meio, 48 kHz mono para o Opus.
 use cpal::Sample as _;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use sonora::{AudioProcessing, Config, StreamConfig, config::EchoCanceller};
+use sonora::{AudioProcessing, Config, StreamConfig, config::{AdaptiveDigital, EchoCanceller, GainController2}};
 use std::{collections::VecDeque, sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering}}};
 
 pub const RATE: u32 = 48_000;
@@ -119,7 +119,10 @@ impl Audio {
         output_stream.play().map_err(|_| AudioError::Speaker)?;
         let capture_config = StreamConfig::new(in_rate, 1);
         let apm = AudioProcessing::builder()
-            .config(Config { echo_canceller: Some(EchoCanceller::default()), ..Default::default() })
+            // Ganho automático como o do navegador: microfone USB baixo chegava à OpenAI quase mudo.
+            .config(Config { echo_canceller: Some(EchoCanceller::default()),
+                gain_controller2: Some(GainController2 { adaptive_digital: Some(AdaptiveDigital::default()), ..Default::default() }),
+                ..Default::default() })
             .capture_config(capture_config).render_config(StreamConfig::new(out_rate, 1)).build();
         Ok(Audio { shared, muted, apm, capture_config, out_config: StreamConfig::new(RATE, 1),
             capture_chunk: in_rate as usize / 100, render_chunk: out_rate as usize / 100,

@@ -149,12 +149,11 @@ fn drive(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: &async_ch
                 last_levels = Instant::now();
             }
         }
-        // Acorda no mínimo a cada 10 ms para drenar o microfone mesmo sem pacote chegando.
-        let wait = timeout.saturating_duration_since(Instant::now()).min(Duration::from_millis(10));
-        if wait.is_zero() {
-            if rtc.handle_input(Input::Timeout(Instant::now())).is_err() { break Err(RtcError::Network); }
-            continue;
-        }
+        // Relógio vencido não pode pular a leitura: enviando áudio a cada volta, o socket nunca era lido
+        // e a voz da OpenAI se perdia no buffer. Acorda no mínimo a cada 10 ms para drenar o microfone.
+        let now = Instant::now();
+        if timeout <= now && rtc.handle_input(Input::Timeout(now)).is_err() { break Err(RtcError::Network); }
+        let wait = timeout.saturating_duration_since(now).clamp(Duration::from_millis(1), Duration::from_millis(10));
         let _ = socket.set_read_timeout(Some(wait));
         match socket.recv_from(&mut buffer) {
             Ok((n, source)) => {

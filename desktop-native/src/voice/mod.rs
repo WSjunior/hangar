@@ -216,8 +216,9 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                     let ours = params["threadId"].as_str() == Some(thread.as_str());
                     log_notification(&method, &params, ours, &mut last_delta);
                     if !ours { continue; }
-                    let user_spoke = (method == "thread/realtime/transcript/delta" && params["role"] == "user")
-                        || (method == "item/started" && params["item"]["type"] == "userMessage");
+                    // A transcrição da fala chega atrasada e cancelava o próprio pedido: só uma fala nova
+                    // encaminhada (outro userMessage) prova que o usuário continuou.
+                    let user_spoke = method == "item/started" && params["item"]["type"] == "userMessage";
                     // Só registra a fala; cancelar envio pendente continua só no started e no delta.
                     if method == "item/started" || method == "item/completed" { spoken.item_started(&params); }
                     if user_spoke && let Some((id, _)) = gate.user_spoke() {
