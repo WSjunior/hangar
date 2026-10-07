@@ -924,11 +924,220 @@ def control_rows() -> list:
     return asyncio.run(main())
 
 
+# ── /answer ─────────────────────────────────────────────────────────────────────────────────────────
+# Mesmo método: a rota do Python de verdade (`api.answer` → `answer_sync` → coordenador falso com o
+# Rust de pé). Único substituto: `run_admin`, que empresta o teclado só para o Esc do "Conversar"; o
+# Rust não empresta (manda `interrupt` e depois `submit` pelo ator), então o Esc entra em `sent` como
+# o controle `interrupt`. Divergências deliberadas, já espelhadas no Python:
+# - falha do runtime com terminal (op do coordenador) -> 502 `erro_envio_falhou` (antes: 500);
+# - "Conversar" com o texto não confirmado (qualquer disposição fora de accepted/deferred) -> 409
+#   `erro_sem_resposta` "a pergunta foi fechada, mas a resposta por texto não foi confirmada" (antes:
+#   500, ou 500 com outro texto quando o ator recusava/ficava incerto);
+# - sem terminal, o ator recusa a resposta com o código `claude_command` -> 409
+#   `erro_codex_resposta_invalida` (antes: 503). Diferença que o golden NÃO compara: `params.detalhe`.
+ANS_OPT = {"kind": "option", "indices": [0], "labels": ["A"]}
+ANS_MULTI = {"kind": "option", "indices": [0, 2], "multi": True, "labels": ["A", "C"]}
+ANS_TEXT = {"kind": "text", "value": "oi", "type_index": 3}
+ANS_CHAT = {"kind": "chat", "chat_index": 4}
+ASK_SIDECAR = ["Cor?", "Tamanho?"]
+
+
+def _ans(name, **kw):
+    return {"name": name, "terminal": True, "answers": [ANS_OPT], "request_id": None, "pending": None, "panel_open": False,
+            "sidecar": None, "reply": ACC, "submit_reply": ACC, **kw}
+
+
+ANSWER_CASES = [
+    _ans("ok_option", pending={"id": "ask:1"}, request_id="ask:1"),
+    _ans("ok_without_pending_or_id"),
+    _ans("ok_all_kinds_with_pending", pending={"id": "ask:1"}, answers=[ANS_OPT, ANS_MULTI, ANS_TEXT, ANS_CHAT]),
+    _ans("ok_id_without_prefix_gets_ask", pending={"id": "7"}, request_id="7"),
+    _ans("ok_id_given_without_ask_prefix", pending={"id": "ask:7"}, request_id="7"),
+    _ans("ok_permission_id_kept", pending={"id": "perm:1"}),
+    _ans("ok_id_from_body_without_pending", request_id="ask:9"),
+    _ans("ok_empty_id_falls_back_to_pending", pending={"id": "ask:1"}, request_id=""),
+    _ans("ok_panel_open_but_question_held", pending={"id": "ask:1"}, panel_open=True),
+    _ans("panel_open_without_pending", panel_open=True),
+    _ans("id_changed", pending={"id": "ask:1"}, request_id="ask:2"),
+    _ans("numeric_id_never_matches", pending={"id": "ask:1"}, request_id=1),
+    _ans("numeric_id_without_pending", request_id=5),
+    _ans("empty_answers", answers=[]),
+    _ans("text_without_value", answers=[{"kind": "text", "type_index": 1}]),
+    _ans("text_with_control_character", answers=[{"kind": "text", "value": "a\x01b", "type_index": 1}]),
+    _ans("text_with_newline", answers=[{"kind": "text", "value": "a\nb", "type_index": 1}]),
+    _ans("text_blank", answers=[{"kind": "text", "value": "  ", "type_index": 1}]),
+    _ans("text_with_c1_control", answers=[{"kind": "text", "value": "a\u0085b", "type_index": 1}]),
+    _ans("text_without_type_index", answers=[{"kind": "text", "value": "oi"}]),
+    _ans("text_position_out_of_range", answers=[{"kind": "text", "value": "oi", "type_index": 100}]),
+    _ans("chat_without_index", answers=[{"kind": "chat"}]),
+    _ans("option_without_indices", answers=[{"kind": "option", "labels": ["A"]}]),
+    _ans("option_with_empty_indices", answers=[{"kind": "option", "indices": [], "labels": ["A"]}]),
+    _ans("option_negative_index", answers=[{"kind": "option", "indices": [-1], "labels": ["A"]}]),
+    _ans("option_index_out_of_range", answers=[{"kind": "option", "indices": [100], "labels": ["A"]}]),
+    _ans("option_without_labels", answers=[{"kind": "option", "indices": [0]}]),
+    _ans("option_two_indices_not_multi", answers=[{"kind": "option", "indices": [0, 1], "labels": ["A", "B"]}]),
+    _ans("unknown_kind", answers=[{"kind": "foo"}]),
+    _ans("unknown_kind_with_quote", answers=[{"kind": "it's"}]),
+    _ans("deferred", reply=("deferred", {})),
+    _ans("rejected", reply=("rejected", {"code": "cursor"})),
+    _ans("uncertain", reply=("unknown", {})),
+    _ans("runtime_error", reply="!erro: runtime_closed: ator saiu"),
+    _ans("chat_with_answers", answers=[ANS_OPT, ANS_CHAT], sidecar=ASK_SIDECAR),
+    _ans("chat_with_text_answer_no_sidecar", answers=[ANS_TEXT, ANS_CHAT]),
+    _ans("chat_nothing_to_preserve", answers=[ANS_CHAT], sidecar=ASK_SIDECAR),
+    _ans("chat_with_pending_goes_to_the_control", answers=[ANS_OPT, ANS_CHAT], sidecar=ASK_SIDECAR, pending={"id": "ask:1"}),
+    _ans("chat_submit_deferred", answers=[ANS_OPT, ANS_CHAT], sidecar=ASK_SIDECAR, submit_reply=("deferred", {})),
+    _ans("chat_submit_rejected", answers=[ANS_OPT, ANS_CHAT], sidecar=ASK_SIDECAR, submit_reply=("rejected", {"code": "x"})),
+    _ans("chat_submit_uncertain", answers=[ANS_OPT, ANS_CHAT], sidecar=ASK_SIDECAR, submit_reply=("unknown", {})),
+    _ans("chat_submit_runtime_error", answers=[ANS_OPT, ANS_CHAT], sidecar=ASK_SIDECAR, submit_reply="!erro: runtime_closed: ator saiu"),
+    _ans("chat_panel_open", answers=[ANS_OPT, ANS_CHAT], sidecar=ASK_SIDECAR, panel_open=True),
+    _ans("headless_accepted", terminal=False, request_id="r1", answers=[ANS_OPT, ANS_TEXT, ANS_CHAT]),
+    _ans("headless_rejected", terminal=False, request_id="r1", reply=("rejected", {"error": "x"})),
+    _ans("headless_deferred", terminal=False, request_id="r1", reply=("deferred", {})),
+    _ans("headless_uncertain", terminal=False, request_id="r1", reply=("unknown", {})),
+    _ans("headless_refused_by_the_actor", terminal=False, request_id="r1", reply="!erro: claude_command: a pergunta mudou"),
+    _ans("headless_runtime_error", terminal=False, request_id="r1", reply="!erro: runtime_closed: ator saiu"),
+]
+
+# Linhas do "Conversar sobre isso": respostas dadas + o que o sidecar sabe das perguntas.
+CHAT_TEXT_CASES = [
+    ("one_chat_one_answer", [ANS_OPT, ANS_CHAT], ["Cor?", "Tamanho?"]),
+    ("several_chats", [ANS_OPT, ANS_CHAT, {"kind": "chat", "chat_index": 5}], ["Cor?", "Tamanho?", "Forma?"]),
+    ("no_sidecar", [ANS_OPT, ANS_CHAT], None),
+    ("sidecar_shorter_than_answers", [ANS_OPT, ANS_TEXT, ANS_CHAT], ["Cor?"]),
+    ("chat_without_question_text", [ANS_OPT, ANS_CHAT], ["Cor?", ""]),
+    ("only_chat", [ANS_CHAT], ["Cor?"]),
+    ("only_empty_answers", [{"kind": "text", "value": "", "type_index": 1}, ANS_CHAT], ["Cor?"]),
+    ("text_answer", [ANS_TEXT, ANS_CHAT], ["Cor?", "Tamanho?"]),
+    ("multi_labels_joined", [ANS_MULTI, ANS_CHAT], ["Cor?", "Tamanho?"]),
+    ("option_without_labels_is_skipped", [{"kind": "option", "indices": [0]}, ANS_OPT, ANS_CHAT], ["Cor?", "Tamanho?", "Forma?"]),
+    ("answer_without_question_is_a_bare_line", [ANS_OPT, ANS_TEXT], None),
+    ("no_chat_at_all", [ANS_OPT, ANS_TEXT], ["Cor?", "Tamanho?"]),
+    ("accents_and_quotes", [{"kind": "text", "value": "não «sei»", "type_index": 1}, ANS_CHAT], ["Qual é o ônus?", "Tamanho?"]),
+]
+
+
+def chat_text_rows() -> list:
+    from types import SimpleNamespace
+    from app import api
+
+    rows = []
+    for name, answers, questions in CHAT_TEXT_CASES:
+        full = [{"kind": a["kind"], "value": a.get("value"), "labels": a.get("labels") or []} for a in answers]
+        api.read_pending_askq = lambda jsonl, q=questions: None if q is None else SimpleNamespace(
+            questions=[SimpleNamespace(question=x) for x in q])
+        rows.append({"name": name, "answers": full, "questions": questions,
+                     "expect": api._askq_conversar_text(full, "/c/projects/p/sid.jsonl")})
+    return rows
+
+
+def answer_rows() -> list:
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+    from app import api, runtime_terminal, termsock, terminal_input as ti
+    from app.adapters import CLAUDE_HEADLESS
+    from app.rust_server import RustOpError
+    from app.runtime_adapter import RuntimeAdapter, RuntimeView
+    from app.runtime_coordinator import Phase
+    from app import runtime_coordinator
+
+    loop = asyncio.new_event_loop()
+    threading.Thread(target=loop.run_forever, daemon=True).start()
+    sent, cleared = [], []
+
+    class Owner:
+        instance = "runtime"
+        legacy = object()
+
+        def __init__(self, case):
+            self.case, self.loop = case, loop
+
+        def slot(self, name):
+            return SimpleNamespace(phase=Phase.Rust, binding=SimpleNamespace(
+                provider="claude", meta={"terminal": {"pane": "%1"}} if self.case["terminal"] else {}))
+
+        def managed_runtime(self, name):
+            return True
+
+        async def prepare_session(self, name, provider, *, launch=False, engine_models=None):
+            return True
+
+        async def op(self, name, command, operation_id):
+            if command["kind"] == "submit":
+                sent.append({"submit": command["text"]})
+                reply = self.case["submit_reply"]
+            else:
+                sent.append({"control": command["control"], "payload": command["payload"]})
+                reply = self.case["reply"]
+            if isinstance(reply, str):
+                code, _, message = reply.removeprefix("!erro: ").partition(": ")
+                if code == "claude_command":
+                    raise RustOpError(f"IPC recusou a operação (400: {code})", 400, code)
+                raise RuntimeError(f"{code}: {message}")
+            return {"operation_id": operation_id, "disposition": reply[0], "payload": reply[1]}
+
+    async def stand_in_for_keyboard_loan(owner, name, operation, payload, action, **kw):
+        await asyncio.to_thread(action)
+
+    runtime_terminal.run_admin = stand_in_for_keyboard_loan
+    ti.TerminalInput.interrupt = lambda self, name, *a, **k: sent.append({"control": "interrupt", "payload": {}})
+    api._espera_picker_fechar = lambda name, *a, **k: True
+    api.clear_pending_askq = lambda jsonl: cleared.append(jsonl)
+    api._recusa_orq = lambda name: None
+    api._session_exists = lambda name: True
+    api._provider_of = lambda name: "claude"
+    api._cached_info_sync = lambda name: SimpleNamespace(provider="claude", jsonl="/c/projects/p/sid.jsonl")
+    api._loop_servidor = loop
+
+    async def run(case):
+        runtime_coordinator._current = Owner(case)
+        api._headless = lambda name: not case["terminal"]
+        adapter = RuntimeAdapter("claude")
+        adapter.view = lambda name, mutating=False: RuntimeView("k", 1, 1, {})
+        api.get_adapter = lambda key: SimpleNamespace(
+            answer_questions=lambda name, request_id, answers: adapter.dispatch(
+                "answer_questions", name, {"request_id": request_id, "answers": answers}))
+        api.plugin_bridge.pergunta_pendente = lambda name: case["pending"]
+        termsock.painel_aberto = lambda name: case["panel_open"]
+        questions = case["sidecar"]
+        api.read_pending_askq = lambda jsonl: None if questions is None else SimpleNamespace(
+            questions=[SimpleNamespace(question=q) for q in questions])
+        sent.clear(), cleared.clear()
+        body = api.AnswerBody(answers=[api.AnswerItem(**a) for a in case["answers"]], request_id=case["request_id"])
+        try:
+            return {"status": 200, "body": await asyncio.to_thread(api.answer, "s", body)}
+        except HTTPException as exc:
+            return {"status": exc.status_code, "body": {"detail": exc.detail}}
+        except api.TerminalControlError as exc:
+            response = await api.terminal_control_failed(None, exc)
+            return {"status": response.status_code, "body": json.loads(response.body)}
+
+    def as_json(value):
+        return value if isinstance(value, str) else {"disposition": value[0], "payload": value[1]}
+
+    async def main():
+        rows = []
+        for case in ANSWER_CASES:
+            expect = await run(case)
+            rows.append({"name": case["name"], "terminal": case["terminal"], "answers": case["answers"],
+                         "request_id": case["request_id"], "pending": case["pending"], "panel_open": case["panel_open"],
+                         "sidecar": case["sidecar"], "reply": as_json(case["reply"]),
+                         "submit_reply": as_json(case["submit_reply"]), "expect": expect,
+                         "sent": list(sent), "cleared": bool(cleared)})
+        return rows
+
+    return asyncio.run(main())
+
+
 def write_session_write(out: Path | None = None) -> None:
     out = out or HERE / "session_write"
     out.mkdir(parents=True, exist_ok=True)
     inputs, steers = session_write_rows()
-    for name, rows in (("input.json", inputs), ("steer.json", steers), ("control.json", control_rows())):
+    for name, rows in (("input.json", inputs), ("steer.json", steers), ("control.json", control_rows()),
+                       ("answer.json", answer_rows()), ("askq_chat_text.json", chat_text_rows())):
         (out / name).write_text(json.dumps(rows, ensure_ascii=True, indent=1) + "\n", encoding="utf-8")
 
 

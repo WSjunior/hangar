@@ -9280,6 +9280,11 @@ def answer(name: str, body: AnswerBody):
                 getattr(info, "jsonl", None))
         except ValueError as exc:
             raise HTTPException(409, detail=erro("erro_sem_resposta", str(exc))) from exc
+        except (TerminalControlError, TransferInProgress):
+            raise
+        except RuntimeError as exc:
+            # Falha do runtime antes da resposta: 502 com código, como o hangar-server (antes era 500).
+            raise _falha_do_runtime(exc) from None
         if result is not None:
             if getattr(info, "jsonl", None):
                 clear_pending_askq(info.jsonl)
@@ -9309,6 +9314,9 @@ def answer(name: str, body: AnswerBody):
         except ValueError as exc:
             raise HTTPException(409, detail=erro("erro_codex_resposta_invalida", "A pergunta mudou ou não aceita essas respostas. Confira as opções e tente novamente.")) from exc
         except Exception as exc:
+            # O ator do Rust recusa a resposta inválida com este código: é recusa, não falha de envio.
+            if getattr(exc, "code", None) == "claude_command":
+                raise HTTPException(409, detail=erro("erro_codex_resposta_invalida", "A pergunta mudou ou não aceita essas respostas. Confira as opções e tente novamente.")) from exc
             _log.warning("resposta ao Claude sem terminal falhou: %s", type(exc).__name__)
             raise HTTPException(503, detail=erro("erro_codex_resposta_envio", "Não foi possível enviar a resposta.")) from exc
         return {"ok": True, "fallback": False}

@@ -1071,9 +1071,9 @@ def answer_sync(name, answers, request_id, jsonl):
                     api._espera_picker_fechar(name)
                 await run_admin(owner, name, 'answer_chat', payload, close_question)
                 # Na fila do Rust (`deferred`) a resposta sai quando o terminal ficar livre.
-                reply = await route(owner, name, {'kind':'submit','text':text})
-                if reply is None or reply.get('disposition') not in {'accepted', 'deferred'}:
-                    raise RuntimeError('a pergunta foi fechada, mas a resposta por texto não foi confirmada')
+                reply = await owner.op(name, {'kind':'submit','text':text}, uuid.uuid4().hex)
+                if reply.get('disposition') not in {'accepted', 'deferred'}:
+                    raise ValueError('a pergunta foi fechada, mas a resposta por texto não foi confirmada')
                 return reply
             def compound():
                 ti.TerminalInput().interrupt(name)

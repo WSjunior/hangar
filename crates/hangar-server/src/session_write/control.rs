@@ -236,7 +236,7 @@ async fn plugin_call(st: &AppState, name: &str, post: Option<Value>) -> Option<V
 }
 
 /// A pergunta que o plugin segura; `Err` quando o Python não respondeu (a escrita não começa).
-async fn plugin_pending(ctx: &Ctx) -> Result<Option<Value>, ()> {
+pub(super) async fn plugin_pending(ctx: &Ctx) -> Result<Option<Value>, ()> {
     match plugin_call(&ctx.st, &ctx.name, None).await {
         // Sem a chave `pending` não é "sem pergunta": é um Python que não entendeu o pedido.
         Some(body) if body.get("pending").is_some() => Ok(Some(body["pending"].clone()).filter(|p| !p.is_null())),
@@ -262,7 +262,7 @@ fn report(ctx: &Ctx, diary: Diary) {
     ctx.st.diag.report(event, &ctx.name, &code, reason);
 }
 
-fn plugin_down(code: &str) -> Answer {
+pub(super) fn plugin_down(code: &str) -> Answer {
     (StatusCode::SERVICE_UNAVAILABLE, detail_body(code, MSG_PLUGIN_DOWN, json!({"detalhe": "plugin_unavailable"})))
 }
 

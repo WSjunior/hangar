@@ -1,6 +1,6 @@
 //! Rotas de escrita de sessão Claude. O Rust as reivindica na tabela (`table`) e decide por pedido;
-//! `/input` e `/steer` (`input`) e o controle (`control`) já têm corpo no Rust; `/answer` ainda repassa
-//! ao Python (`relay`).
+//! `/input` e `/steer` (`input`), o controle (`control`) e `/answer` (`answer`) têm corpo no Rust;
+//! o que o Rust admite mas não atende (corpo que o FastAPI recusa) volta ao Python por `relay`.
 //!
 //! Ordem fixa de `admit`: dono → corpo → porta (`enter`) → entrada (`writable`) → decisão. A entrada
 //! é procurada DEPOIS da porta: a achada antes de esperar pode ser a que o relançamento parou.
@@ -114,18 +114,10 @@ pub(crate) async fn admit(st: &Arc<AppState>, peer: SocketAddr, req: Request, ro
     Ok((Ctx { st: st.clone(), name, target, pass: pass_in, parts, fwd }, bytes))
 }
 
-/// Repassa ao Python o que o Rust admitiu mas não atende (corpo que o FastAPI recusa, ou rota sem
-/// corpo ainda), soltando antes o passe.
+/// Repassa ao Python o que o Rust admitiu mas não atende (corpo que o FastAPI recusa), soltando
+/// antes o passe.
 pub(crate) async fn relay(ctx: Ctx, bytes: Bytes) -> Response {
     let Ctx { st, pass: held, parts, fwd, .. } = ctx;
     drop(held);
     forward_whole(&st, parts, bytes, &fwd).await
-}
-
-/// Corpo provisório das rotas que ainda não têm o próprio: admite e repassa.
-pub(crate) async fn through(st: &Arc<AppState>, peer: SocketAddr, req: Request, route: WriteRoute) -> Response {
-    match admit(st, peer, req, route, |_| false).await {
-        Ok((ctx, bytes)) => relay(ctx, bytes).await,
-        Err(response) => response,
-    }
 }
