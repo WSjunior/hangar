@@ -43,13 +43,30 @@ impl Vault {
     pub(crate) fn forget(&mut self) { self.password = None; self.code.clear(); }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SudoCheck {
+    Accepted,
+    Wrong,
+    /// O usuário não pode usar sudo: pedir de novo nunca resolveria. Leva a resposta do sudo.
+    Denied(String),
+}
+
+/// O mesmo que o `SUDO_DENIED_RE` do install.sh (sudo clássico e sudo-rs).
+pub(crate) fn sudo_denied(stderr: &str) -> bool {
+    let s = stderr.to_lowercase();
+    ["not in the sudoers", "not allowed to run", "not allowed to execute", "may not run sudo", "afraid i can"].iter().any(|n| s.contains(n))
+}
+
 /// Confere a senha antes de guardá-la: errada, a janela pede de novo. `-k` ignora a senha que o sudo já tinha.
-pub(crate) fn sudo_accepts(password: &str, path: &str) -> Result<bool, String> {
+pub(crate) fn sudo_accepts(password: &str, path: &str) -> Result<SudoCheck, String> {
     let sudo = find_program("sudo", path).ok_or("sudo")?;
     let mut child = hidden(&mut Command::new(sudo)).args(["-S", "-k", "-v", "-p", ""]).env("PATH", path)
-        .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e| e.to_string())?;
+        .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
     if let Some(mut stdin) = child.stdin.take() { let _ = writeln!(stdin, "{password}"); }
-    Ok(child.wait().map_err(|e| e.to_string())?.success())
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    Ok(if out.status.success() { SudoCheck::Accepted }
+        else if sudo_denied(&stderr) { SudoCheck::Denied(stderr.trim().to_owned()) } else { SudoCheck::Wrong })
 }
 
 pub(crate) fn wrapper_text(exe: &Path) -> String {
@@ -102,6 +119,15 @@ mod tests {
         vault.reject();
         assert_eq!(vault.password(), None);
         assert_eq!(vault.answer("abc"), Answer::Ask);
+    }
+
+    #[test]
+    fn denied_sudo_is_told_apart_from_a_wrong_password() {
+        assert!(sudo_denied("joao is not in the sudoers file.  This incident will be reported."));
+        assert!(sudo_denied("Sorry, user joao may not run sudo on pc."));
+        assert!(sudo_denied("sudo: I'm afraid I can't do that"));
+        assert!(!sudo_denied("Sorry, try again.\nsudo: 1 incorrect password attempt"));
+        assert!(!sudo_denied("sudo-rs: Authentication failed"));
     }
 
     #[test]

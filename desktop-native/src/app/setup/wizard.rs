@@ -290,8 +290,8 @@ pub(crate) struct Recovery {
     /// Aberto sozinho com a pasta já seguindo em frente (ou anotação de mais de um dia): nada foi desfeito.
     pub(super) skipped: bool,
     /// Aberto pelo menu com a pasta já seguindo em frente: nada foi desfeito, e estes são os arquivos que "Desfazer mesmo
-    /// assim" voltaria (a anotação fica até a pessoa escolher).
-    pub(super) offer: Option<Vec<String>>,
+    /// assim" voltaria (a anotação fica até a pessoa escolher); `Err` = a lista não pôde ser lida.
+    pub(super) offer: Option<Result<Vec<String>, String>>,
 }
 
 /// Quem pediu a recuperação de um conserto interrompido.
@@ -660,7 +660,7 @@ impl SetupWizard {
         self.records.1.as_ref().or(self.records.0.as_ref()).map(|r| (r.pid, r.started.clone()))
     }
 
-    /// ponytail: lê na thread da janela; são poucos KB por volta. Mover para o executor de fundo se a saída crescer.
+    /// ponytail: lê na thread da janela, até 1 MiB por volta (`tail::READ_CAP`). Mover para o executor de fundo se pesar.
     /// `last`: o processo morreu, então o pedaço sem `\n` no fim do arquivo também é uma linha (um FIM sem quebra).
     fn read_tails(&mut self, last: bool) -> bool {
         let mut grew = false;
@@ -1450,10 +1450,21 @@ impl SetupWizard {
         }).detach();
     }
 
-    fn password_checked(&mut self, accepted: Result<bool, String>, password: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn password_checked(&mut self, accepted: Result<askpass::SudoCheck, String>, password: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(prompt) = self.prompt.clone() else { return };
         match accepted {
-            Ok(true) => {
+            Ok(askpass::SudoCheck::Denied(why)) => {
+                // O pedido do script recebe a senha mesmo assim: o sudo dele recusa e o script dá `sem-sudo` com a causa.
+                for request in self.waiting.drain(..) { let _ = request.reply.send(Some(password.clone())); }
+                self.prompt = None;
+                window.defer(cx, |window, cx| window.close_dialog(cx));
+                if self.after_password.take().is_some() {
+                    let screen = self.failure.as_ref().map_or(Screen::Prepare, |f| f.screen);
+                    self.fail(Failure::app(Some("sem-sudo"), format!("{}\n{why}", tr("setup_code_sem_sudo")), screen), cx);
+                }
+                cx.notify();
+            }
+            Ok(askpass::SudoCheck::Accepted) => {
                 let for_git = self.after_password == Some(AfterPassword::InstallGit);
                 // A senha da lista de pacotes fica para o script que o `retry` roda logo depois.
                 let for_packages = self.after_password == Some(AfterPassword::RefreshPackages);
@@ -1471,7 +1482,7 @@ impl SetupWizard {
                 }
                 cx.notify();
             }
-            Ok(false) => prompt.update(cx, |p, cx| { (p.checking, p.error) = (false, Some(tr("setup_sudo_wrong"))); cx.notify(); }),
+            Ok(askpass::SudoCheck::Wrong) => prompt.update(cx, |p, cx| { (p.checking, p.error) = (false, Some(tr("setup_sudo_wrong"))); cx.notify(); }),
             Err(why) => prompt.update(cx, |p, cx| { (p.checking, p.error) = (false, Some(why)); cx.notify(); }),
         }
     }

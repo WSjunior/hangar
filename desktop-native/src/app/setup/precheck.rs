@@ -32,10 +32,12 @@ pub(crate) struct Facts {
     pub winget: bool,
     pub pkg: Option<&'static str>,
     pub sudo: Sudo,
+    /// A conferência local caiu: nada acima vale, e "falta o git" seria mentira.
+    pub internal: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Check { Git, Curl, Internet, Space, Winget, Pkg, Sudo }
+pub(crate) enum Check { Git, Curl, Internet, Space, Winget, Pkg, Sudo, Internal }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct CheckRow { pub check: Check, pub ok: bool, pub blocking: bool, pub detail: String, pub code: Option<&'static str> }
@@ -43,6 +45,7 @@ pub(crate) struct CheckRow { pub check: Check, pub ok: bool, pub blocking: bool,
 fn row(check: Check, ok: bool, detail: String, code: Option<&'static str>) -> CheckRow { CheckRow { check, ok, blocking: !ok, detail, code } }
 
 pub(crate) fn rows(f: &Facts) -> Vec<CheckRow> {
+    if let Some(why) = &f.internal { return vec![row(Check::Internal, false, why.clone(), None)]; }
     // Falta o git não trava: o app o instala antes de seguir.
     let mut rows = vec![CheckRow { check: Check::Git, ok: f.git, blocking: false, detail: String::new(), code: None }];
     if !f.windows { rows.push(row(Check::Curl, f.curl, String::new(), None)); }
@@ -87,8 +90,9 @@ pub(crate) async fn gather(dest: PathBuf) -> Facts {
         (has("git"), has("curl"), has("winget"), PKG_MANAGERS.iter().map(|(name, _)| *name).find(|name| has(name)),
             free_space(&dest), if cfg!(windows) { Sudo::Missing } else { sudo(&path) })
     }).await;
+    let internal = local.as_ref().err().map(|e| e.to_string());
     let (git, curl, winget, pkg, free, sudo) = local.unwrap_or_else(|e| (false, false, false, None, Err(e.to_string()), Sudo::Missing));
-    Facts { windows: cfg!(windows), git, curl, internet, free, dest: dest_text, winget, pkg, sudo }
+    Facts { windows: cfg!(windows), git, curl, internet, free, dest: dest_text, winget, pkg, sudo, internal }
 }
 
 async fn internet() -> Result<(), (String, String)> {
@@ -180,7 +184,14 @@ mod tests {
 
     fn linux() -> Facts {
         Facts { windows: false, git: true, curl: true, internet: Ok(()), free: Ok(10 * GB), dest: "/home/dev/hangar".into(),
-            winget: false, pkg: Some("apt-get"), sudo: Sudo::Ready }
+            winget: false, pkg: Some("apt-get"), sudo: Sudo::Ready, internal: None }
+    }
+
+    #[test]
+    fn crashed_local_check_is_an_internal_error_not_a_missing_git() {
+        let rows = rows(&Facts { git: false, internal: Some("task panicked".into()), ..linux() });
+        assert_eq!(rows.iter().map(|r| (r.check, r.blocking)).collect::<Vec<_>>(), vec![(Check::Internal, true)]);
+        assert!(!needs_git(&rows));
     }
 
     #[test]

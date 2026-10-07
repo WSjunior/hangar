@@ -76,7 +76,7 @@ fn item_row(item: &ItemRow) -> Stateful<Div> {
 
 fn check_id(check: Check) -> &'static str {
     match check { Check::Git => "git", Check::Curl => "curl", Check::Internet => "internet", Check::Space => "space",
-        Check::Winget => "winget", Check::Pkg => "pkg", Check::Sudo => "sudo" }
+        Check::Winget => "winget", Check::Pkg => "pkg", Check::Sudo => "sudo", Check::Internal => "internal" }
 }
 
 fn check_row(check: &CheckRow) -> Stateful<Div> {
@@ -84,9 +84,11 @@ fn check_row(check: &CheckRow) -> Stateful<Div> {
         Check::Git => tr("setup_check_git"), Check::Curl => tr("setup_check_curl"), Check::Internet => tr("setup_check_internet"),
         Check::Space => tr("setup_check_space").replace("{gb}", &(precheck::MIN_FREE / precheck::GB).to_string()),
         Check::Winget => tr("setup_check_winget"), Check::Pkg => tr("setup_check_pkg"), Check::Sudo => tr("setup_check_sudo"),
+        Check::Internal => tr("setup_check_internal"),
     };
     let mark = if check.ok { RowMark::Ok } else if check.blocking { RowMark::Failed } else { RowMark::Warn };
-    let label = if check.ok { tr("setup_check_found") } else { tr("setup_check_missing") };
+    let label = if check.ok { tr("setup_check_found") }
+        else if check.check == Check::Internal { tr("setup_check_failed") } else { tr("setup_check_missing") };
     // Bloqueio com código leva o passo a passo e o botão da tabela (spec: "bloqueio vira item com a frase e a saída").
     let failed = check.code.filter(|_| !check.ok);
     let detail = [(!check.detail.is_empty()).then(|| check.detail.clone()), failed.and_then(codes::help)].into_iter().flatten()
@@ -211,7 +213,8 @@ impl SetupWizard {
         let failed = !restored.errors.is_empty();
         let mut lines: Vec<String> = Vec::new();
         match &recovery.offer {
-            Some(files) => lines.push(tr("setup_agent_recover_offer").replace("{arquivos}", &files.join(", "))),
+            Some(Ok(files)) => lines.push(tr("setup_agent_recover_offer").replace("{arquivos}", &files.join(", "))),
+            Some(Err(why)) => lines.push(tr("setup_agent_recover_offer_unknown").replace("{erro}", why)),
             None if recovery.skipped => lines.push(tr("setup_agent_recover_skipped")),
             None => {}
         }

@@ -5,8 +5,11 @@ use std::{collections::{BTreeMap, BTreeSet}, path::{Path, PathBuf}, process::{Co
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use super::system::{find_program, hidden, refreshed_path};
+use crate::i18n::tr;
 
 const FILE: &str = "agent-snapshot.json";
+/// Arquivo mexido acima disto não é anotado: a anotação mora na memória e num JSON.
+const MAX_CONTENT: u64 = 5 << 20;
 const STATUS: [&str; 4] = ["status", "--porcelain=v1", "-z", "--untracked-files=all"];
 static DIFFS: AtomicU64 = AtomicU64::new(0);
 
@@ -133,11 +136,12 @@ pub(crate) fn moved_on(s: &Snapshot) -> bool {
 
 /// O que `restore` voltaria agora, sem mexer em nada: os arquivos diferentes do anotado na pasta e os dos commits depois
 /// do HEAD anotado (do agente e o que veio depois dele). É a lista do aviso antes de "Desfazer mesmo assim".
-pub(crate) fn pending_changes(s: &Snapshot) -> Vec<String> {
-    let Ok(git) = Git::new() else { return Vec::new() };
-    let mut out: BTreeSet<String> = git.run(&s.dir, &["diff", "--name-only", "-z", &s.head, "HEAD"]).map(|raw| String::from_utf8_lossy(&raw)
-        .split('\0').filter(|p| !p.is_empty()).map(str::to_owned).collect()).unwrap_or_default();
-    let now = git.status(&s.dir).unwrap_or_default();
+/// Erro = lista indisponível: uma lista vazia diria que nada voltaria.
+pub(crate) fn pending_changes(s: &Snapshot) -> Result<Vec<String>, String> {
+    let git = Git::new()?;
+    let mut out: BTreeSet<String> = String::from_utf8_lossy(&git.run(&s.dir, &["diff", "--name-only", "-z", &s.head, "HEAD"])?)
+        .split('\0').filter(|p| !p.is_empty()).map(str::to_owned).collect();
+    let now = git.status(&s.dir)?;
     for path in s.before.keys().chain(now.keys()) {
         let differs = match s.before.get(path) {
             Some(e) => now.get(path) != Some(&e.status) || std::fs::read(s.dir.join(path)).ok().map(|b| STANDARD.encode(b)) != e.content,
@@ -145,7 +149,7 @@ pub(crate) fn pending_changes(s: &Snapshot) -> Vec<String> {
         };
         if differs { out.insert(path.clone()); }
     }
-    out.into_iter().collect()
+    Ok(out.into_iter().collect())
 }
 
 /// Anotação com mais de um dia: a pasta já viveu demais desde então para desfazer sem a pessoa pedir.
@@ -177,13 +181,30 @@ pub(crate) fn snapshot(dir: &Path) -> Result<Snapshot, String> {
     let (branch, states) = (git.branch(dir), Some(git.states(dir)));
     let preserved = String::from_utf8_lossy(&git.run(dir, &["ls-files", "-o", "-i", "--exclude-standard", "--directory", "-z"])?)
         .split('\0').filter(|p| !p.is_empty()).map(str::to_owned).collect();
-    let before = git.status(dir)?.into_iter().map(|(path, status)| {
-        let content = std::fs::read(dir.join(&path)).ok().map(|bytes| STANDARD.encode(bytes));
+    let mut before = BTreeMap::new();
+    let mut too_big = Vec::new();
+    for (path, status) in git.status(dir)? {
+        let file = dir.join(&path);
+        // Só "não existe" vira `None`: outro erro viraria apagar o arquivo da pessoa no desfazer.
+        let content = match std::fs::metadata(&file) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(format!("{path}: {e}")),
+            // Submódulo é pasta: fica como antes, sem conteúdo.
+            Ok(meta) if meta.is_dir() => None,
+            Ok(meta) if meta.len() > MAX_CONTENT => { too_big.push(path); continue; }
+            Ok(_) => match std::fs::read(&file) {
+                Ok(bytes) => Some(STANDARD.encode(bytes)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(format!("{path}: {e}")),
+            },
+        };
         let index_clean = matches!(status.as_bytes()[0], b' ' | b'?');
         let index = if index_clean { None } else { index_entry(&git, dir, &path) };
-        let mode = file_mode(&dir.join(&path));
-        (path, Entry { status, content, index_clean, index, mode })
-    }).collect();
+        let mode = file_mode(&file);
+        before.insert(path, Entry { status, content, index_clean, index, mode });
+    }
+    // Sem o conteúdo guardado o desfazer não o devolveria: melhor não chamar o agente.
+    if !too_big.is_empty() { return Err(tr("setup_agent_too_big").replace("{arquivos}", &too_big.join(", "))); }
     Ok(Snapshot { dir: dir.to_owned(), head, before, agent_pid: None, agent_started: String::new(), preserved, branch, states,
         created: now_secs(), recover_failures: 0 })
 }
@@ -245,11 +266,19 @@ pub(crate) fn restore(s: &Snapshot) -> Restored {
 
 /// Devolve UM caminho ao estado de antes do agente (arquivo, modo e índice). `now` = status atual dele.
 fn undo(git: &Git, s: &Snapshot, path: &str, now: &str, out: &mut Restored) {
+    // A anotação vem do disco: caminho que sai da pasta nunca é juntado a ela.
+    if Path::new(path).components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+        out.errors.push(format!("{path}: outside the repository")); return;
+    }
     let entry = s.before.get(path);
     let in_head = git.run(&s.dir, &["cat-file", "-e", &format!("{}:{path}", s.head)]).is_ok();
     // O alvo é o conteúdo de antes do agente: o anotado, ou o do commit para quem estava limpo.
     let target = match entry {
-        Some(e) => e.content.as_ref().and_then(|c| STANDARD.decode(c).ok()),
+        // Conteúdo ilegível na anotação não vira "não existia": isso apagaria o arquivo.
+        Some(e) => match e.content.as_ref().map(|c| STANDARD.decode(c)).transpose() {
+            Ok(target) => target,
+            Err(err) => { out.errors.push(format!("{path}: {err}")); return; }
+        },
         None if in_head => git.run(&s.dir, &["show", &format!("{}:{path}", s.head)]).ok(),
         None => None,
     };
@@ -274,7 +303,7 @@ fn undo(git: &Git, s: &Snapshot, path: &str, now: &str, out: &mut Restored) {
         }
         Some(e) => {
             if let Err(e) = put(&file, target.as_deref()) { out.errors.push(format!("{path}: {e}")); return; }
-            if let Some(mode) = e.mode { set_mode(&file, mode); }
+            if let Some(mode) = e.mode && let Err(err) = set_mode(&file, mode) { out.errors.push(format!("{path}: {err}")); }
             match (&e.index, e.index_clean) {
                 (Some(spec), false) => git.run(&s.dir, &["update-index", "--add", "--cacheinfo", &format!("{spec},{path}")]),
                 (None, false) => git.run(&s.dir, &["rm", "--cached", "-q", "--ignore-unmatch", "--", path]),
@@ -300,9 +329,9 @@ fn file_mode(path: &Path) -> Option<u32> { use std::os::unix::fs::PermissionsExt
 fn file_mode(_: &Path) -> Option<u32> { None }
 
 #[cfg(unix)]
-fn set_mode(path: &Path, mode: u32) { use std::os::unix::fs::PermissionsExt; let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)); }
+fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)) }
 #[cfg(not(unix))]
-fn set_mode(_: &Path, _: u32) {}
+fn set_mode(_: &Path, _: u32) -> std::io::Result<()> { Ok(()) }
 
 fn put(path: &Path, bytes: Option<&[u8]>) -> std::io::Result<()> {
     match bytes {
@@ -340,10 +369,16 @@ fn diff(git: &Git, path: &str, before: Option<&[u8]>, after: Option<&[u8]>) -> S
 pub(crate) fn save_at(dir: &Path, snapshot: &Snapshot) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let tmp = dir.join("agent-snapshot.tmp");
+    // O modo só vale na criação: uma sobra aberta a todos manteria o modo dela.
+    match std::fs::remove_file(&tmp) { Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e), _ => {} }
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     // Leva o conteúdo de arquivos da pessoa: só ela lê.
-    #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+    #[cfg(unix)] {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        options.mode(0o600);
+    }
     std::io::Write::write_all(&mut options.open(&tmp)?, serde_json::to_string(snapshot).map_err(std::io::Error::other)?.as_bytes())?;
     std::fs::rename(tmp, dir.join(FILE))
 }
@@ -568,14 +603,57 @@ mod tests {
     fn pending_changes_lists_what_restore_would_undo_without_touching_it() {
         let dir = repo("pending");
         let snap = snapshot(&dir).unwrap();
-        assert!(pending_changes(&snap).is_empty());
+        assert!(pending_changes(&snap).unwrap().is_empty());
         // O agente edita um arquivo; depois a atualização faz um commit em outro.
         std::fs::write(dir.join("README.md"), "do agente\n").unwrap();
         std::fs::write(dir.join("install.sh"), "echo 3\n").unwrap();
         sh(&dir, &["commit", "-q", "-m", "atualizacao", "--", "install.sh"]);
-        assert_eq!(pending_changes(&snap), vec!["README.md".to_owned(), "install.sh".to_owned()]);
+        assert_eq!(pending_changes(&snap).unwrap(), vec!["README.md".to_owned(), "install.sh".to_owned()]);
         assert_eq!(read(&dir, "README.md").as_deref(), Some("do agente\n"));
         assert_eq!(read(&dir, "install.sh").as_deref(), Some("echo 3\n"));
+        // Pasta que o git não lê: lista indisponível, nunca uma lista vazia.
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(pending_changes(&snap).is_err());
+    }
+
+    #[test]
+    fn too_big_changed_file_refuses_the_snapshot() {
+        let dir = repo("big");
+        std::fs::write(dir.join("grande.bin"), vec![0u8; MAX_CONTENT as usize + 1]).unwrap();
+        let err = snapshot(&dir).unwrap_err();
+        assert!(err.contains("grande.bin"), "{err}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_changed_file_refuses_the_snapshot() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = repo("unreadable");
+        std::fs::write(dir.join("README.md"), "minha\n").unwrap();
+        std::fs::set_permissions(dir.join("README.md"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root lê mesmo sem permissão: aí não há o que provar.
+        if std::fs::read(dir.join("README.md")).is_err() {
+            assert!(snapshot(&dir).unwrap_err().contains("README.md"));
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bad_annotation_entries_are_errors_never_deletes() {
+        let dir = repo("badentry");
+        std::fs::write(dir.join("README.md"), "minha\n").unwrap();
+        let mut snap = snapshot(&dir).unwrap();
+        snap.before.get_mut("README.md").unwrap().content = Some("@@não é base64@@".to_owned());
+        let outside = Entry { status: "??".into(), content: None, index_clean: true, index: None, mode: None };
+        snap.before.insert("../fora.txt".into(), outside.clone());
+        snap.before.insert("/tmp/fora.txt".into(), outside);
+        std::fs::write(dir.join("README.md"), "do agente\n").unwrap();
+        let restored = restore(&snap);
+        assert!(restored.errors.iter().any(|e| e.starts_with("README.md:")), "{:?}", restored.errors);
+        assert!(restored.errors.iter().any(|e| e.starts_with("../fora.txt:")), "{:?}", restored.errors);
+        assert!(restored.errors.iter().any(|e| e.starts_with("/tmp/fora.txt:")), "{:?}", restored.errors);
+        assert_eq!(read(&dir, "README.md").as_deref(), Some("do agente\n"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -608,10 +686,14 @@ mod tests {
         let mut snap = snapshot(&dir).unwrap();
         snap.agent_pid = Some(4242);
         snap.agent_started = "12345".to_owned();
+        // Uma sobra aberta a todos de uma gravação que caiu não passa o modo dela adiante.
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("agent-snapshot.tmp"), "velho").unwrap();
         save_at(&state, &snap).unwrap();
         #[cfg(unix)] {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(state.join(FILE)).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(std::fs::metadata(&state).unwrap().permissions().mode() & 0o777, 0o700);
         }
         agent_edits(&dir);
         // O app caiu: a próxima abertura só tem o arquivo.
