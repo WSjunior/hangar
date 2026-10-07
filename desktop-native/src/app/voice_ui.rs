@@ -50,6 +50,8 @@ pub(super) struct VoiceUi {
     /// Sobe a cada espera armada: o relógio de um turno velho não fala a resposta do seguinte.
     pub(super) reply_epoch: u64,
     pub(super) pending_sends: VecDeque<(SessionKey, String, CallId)>,
+    /// Pergunta do organizador à sessão da tela, esperando a resposta dela.
+    pub(super) pending_question: Option<(SessionKey, std::time::Instant)>,
     /// Sessão que recebeu pedido da voz → já foi vista trabalhando.
     pub(super) watched: HashMap<SessionKey, bool>,
     pub(super) voice_select: Option<(Entity<SelectState<Vec<VoiceChoice>>>, Subscription)>,
@@ -64,6 +66,26 @@ pub(super) fn conversation_pairs(events: &[ChatEvent]) -> Vec<(String, String)> 
 pub(super) fn last_reply(events: &[(String, String, String)]) -> Option<(String, String)> {
     let start = events.iter().rposition(|(_, kind, _)| kind == "user_msg").map(|i| i + 1).unwrap_or(0);
     let replies: Vec<&(String, String, String)> = events[start..].iter().filter(|(_, k, _)| k == "assistant_msg").collect();
+    let last = replies.last()?;
+    Some((last.0.clone(), replies.iter().map(|(_, _, t)| t.as_str()).collect::<Vec<_>>().join("\n\n")))
+}
+
+/// Quanto a pergunta do organizador espera pela sessão antes de desistir.
+pub(super) const ASK_TIMEOUT: Duration = Duration::from_secs(600);
+const ASK_MARK: &str = "[Pergunta da conversa de voz]";
+
+/// A marca no começo é o que acha a pergunta no histórico.
+pub(super) fn question_text(q: &str) -> String {
+    format!("{ASK_MARK} {q}\nResponda curto; é para o planejamento, não execute nada.")
+}
+
+pub(super) fn question_expired(since: std::time::Instant, now: std::time::Instant) -> bool { now.saturating_duration_since(since) >= ASK_TIMEOUT }
+
+/// `(id, kind, text)` → `(id da última resposta, respostas)` dadas depois da última pergunta marcada e antes de outro pedido.
+pub(super) fn question_answer(events: &[(String, String, String)]) -> Option<(String, String)> {
+    let start = events.iter().rposition(|(_, kind, text)| kind == "user_msg" && text.starts_with(ASK_MARK))? + 1;
+    let end = events[start..].iter().position(|(_, kind, _)| kind == "user_msg").map_or(events.len(), |i| start + i);
+    let replies: Vec<&(String, String, String)> = events[start..end].iter().filter(|(_, k, _)| k == "assistant_msg").collect();
     let last = replies.last()?;
     Some((last.0.clone(), replies.iter().map(|(_, _, t)| t.as_str()).collect::<Vec<_>>().join("\n\n")))
 }
@@ -231,6 +253,7 @@ impl Hangar {
         self.voice.spoken.clear();
         self.voice.reply_pending = None;
         self.voice.pending_sends.clear();
+        self.voice.pending_question = None;
         self.voice.watched.clear();
         self.voice.error = None;
         self.voice.muted = false;
@@ -255,6 +278,7 @@ impl Hangar {
         self.voice.levels = (0., 0.);
         (self.voice.live_since, self.voice.ticker) = (None, None);
         self.voice.pending_sends.clear();
+        self.voice.pending_question = None;
         cx.notify();
     }
 
@@ -265,7 +289,7 @@ impl Hangar {
         self.voice.ticker = Some(cx.spawn(async move |this, cx| loop {
             let into = since.elapsed().subsec_millis() as u64;
             cx.background_executor().timer(Duration::from_millis(1000 - into)).await;
-            if this.update(cx, |_, cx| cx.notify()).is_err() { break; }
+            if this.update(cx, |this, cx| { this.voice_ask_expiry(); cx.notify() }).is_err() { break; }
         }));
     }
 
@@ -285,6 +309,7 @@ impl Hangar {
                 self.voice.activity = CallActivity::Idle;
                 (self.voice.live_since, self.voice.ticker) = (None, None);
                 self.voice.pending_sends.clear();
+                self.voice.pending_question = None;
             }
             VoiceEvent::Phase(phase) => {
                 if matches!(phase, Phase::Live) {
@@ -317,9 +342,7 @@ impl Hangar {
             }
             // Provisórios: o painel do plano e a pergunta à sessão entram nas próximas tarefas.
             VoiceEvent::Mode(_) | VoiceEvent::Plan { .. } => {}
-            VoiceEvent::AskSession(_) => {
-                if let Some(voice) = &self.voice.call { voice.session_answer("Pergunta à sessão ainda não disponível.".to_owned()); }
-            }
+            VoiceEvent::AskSession(question) => self.voice_ask(&question, cx),
             VoiceEvent::SendPlan { session, text } => {
                 // O plano foi escrito para uma sessão; se a tela mudou, não vai para outra.
                 let on_screen = self.selected.as_ref().is_some_and(|s| s.name == session);
@@ -332,7 +355,9 @@ impl Hangar {
                 let was_working = self.chat.state.state == "working";
                 self.voice.watched.insert(key.clone(), was_working);
                 let known = self.known_user_ids();
-                if !self.post(key.clone(), text.clone(), String::new(), false, known, None, cx) { self.delivery.hold(key, text, false, None); }
+                if self.post(key.clone(), text.clone(), String::new(), false, known, None, cx) {
+                    if let Some(voice) = &self.voice.call { voice.plan_delivered(); }
+                } else { self.delivery.hold(key, text, false, None); }
             }
             VoiceEvent::ReadSession(call) => self.voice_reply(call, tool_reply(self.voice_context(), true)),
             VoiceEvent::Send(call, request) => {
@@ -363,6 +388,55 @@ impl Hangar {
         cx.notify();
     }
 
+    fn voice_answer(&self, text: &str) {
+        if let Some(voice) = &self.voice.call { voice.session_answer(text.to_owned()); }
+    }
+
+    /// Pergunta curta do organizador à sessão da tela; a resposta volta por `voice_ask_intercept`.
+    fn voice_ask(&mut self, question: &str, cx: &mut Context<Self>) {
+        if self.voice.pending_question.is_some() { self.voice_answer("Já há uma pergunta aguardando a sessão."); return; }
+        let Some(key) = self.selected_key().filter(|key| self.api_for(&key.server).is_some()) else {
+            self.voice_answer("Nenhuma sessão aberta na tela; a pergunta não foi enviada.");
+            return;
+        };
+        let known = self.known_user_ids();
+        let text = question_text(question);
+        let bytes = text.len();
+        if self.post(key.clone(), text, String::new(), false, known, None, cx) {
+            crate::voice::log(format!("ask_session sent bytes={bytes}"));
+            self.voice.pending_question = Some((key, std::time::Instant::now()));
+        } else {
+            crate::voice::log("ask_session refused busy");
+            self.voice_answer("A sessão está ocupada; pergunta não enviada.");
+        }
+    }
+
+    /// Tique de 1 s: pergunta sem resposta por `ASK_TIMEOUT` volta ao organizador como falha.
+    fn voice_ask_expiry(&mut self) {
+        let Some((_, since)) = &self.voice.pending_question else { return };
+        if !question_expired(*since, std::time::Instant::now()) { return; }
+        self.voice.pending_question = None;
+        crate::voice::log("ask_session timeout");
+        self.voice_answer("A sessão não respondeu a tempo.");
+    }
+
+    /// Fim de turno de `key`: se a pergunta pendente é dela, a resposta vai ao organizador e não é falada como resultado.
+    /// `waiting`: o que dizer se a sessão parou esperando o usuário sem responder.
+    fn voice_ask_intercept(&mut self, key: &SessionKey, events: &[(String, String, String)], waiting: Option<String>) -> bool {
+        if self.voice.pending_question.as_ref().is_none_or(|(k, _)| k != key) { return false; }
+        let answer = match question_answer(events) {
+            Some((id, text)) => self.voice.spoken.insert(id).then_some(text),
+            None if events.iter().any(|(_, kind, text)| kind == "user_msg" && text.starts_with(ASK_MARK)) => None,
+            // A pergunta ainda não está no histórico lido: este fim de turno é de outro pedido.
+            None => return false,
+        };
+        let Some(text) = answer.or(waiting) else { return true };
+        self.voice.pending_question = None;
+        crate::voice::log(format!("ask_session answered bytes={}", text.len()));
+        self.voice_answer(&text);
+        true
+    }
+
     pub(super) fn voice_sent(&mut self, key: &SessionKey, text: &str, result: &Result<Delivery, Failure>) {
         let Some(index) = self.voice.pending_sends.iter().position(|(k, t, _)| k == key && t == text) else { return };
         let Some((_, _, call)) = self.voice.pending_sends.remove(index) else { return };
@@ -374,6 +448,10 @@ impl Hangar {
         let name = self.selected.as_ref().map(|s| s.name.clone());
         if name == self.voice.target { return; }
         self.voice.target = name.clone();
+        if self.voice.pending_question.take().is_some() {
+            crate::voice::log("ask_session timeout switched");
+            self.voice_answer("A sessão não respondeu: a conversa trocou de sessão.");
+        }
         // A resposta atrasada da sessão que saiu da tela passa a vir pela lista e pelo histórico.
         if let Some(key) = self.voice.reply_pending.take() { self.voice.watched.insert(key, true); }
         // Voltar a uma sessão que acabou enquanto estava fora: a lista não a vigia mais (é a aberta), então a espera volta.
@@ -396,8 +474,10 @@ impl Hangar {
         if state == "awaiting_input" {
             let name = self.voice.target.clone().unwrap_or_default();
             let questions: Vec<&str> = self.chat.ask.iter().flat_map(|ask| ask.payload.questions.iter().map(|q| q.question.as_str())).collect();
-            let reply = last_reply(&triples(&self.chat.events)).map(|(_, text)| text);
+            let events = triples(&self.chat.events);
+            let reply = last_reply(&events).map(|(_, text)| text);
             let text = waiting_text(&questions, reply.as_deref());
+            if let Some(key) = &key && self.voice_ask_intercept(key, &events, Some(text.clone())) { return; }
             if let Some(voice) = &self.voice.call { voice.session_result(name, text); }
             return;
         }
@@ -433,7 +513,9 @@ impl Hangar {
 
     /// Fala a última resposta da sessão aberta se ainda não foi falada; devolve se havia uma nova.
     fn voice_speak_last_reply(&mut self) -> bool {
-        let Some((id, text)) = last_reply(&triples(&self.chat.events)) else { return false };
+        let events = triples(&self.chat.events);
+        if let Some(key) = self.selected_key() && self.voice_ask_intercept(&key, &events, None) { return false; }
+        let Some((id, text)) = last_reply(&events) else { return false };
         if !self.voice.spoken.insert(id) { return false; }
         let name = self.voice.target.clone().unwrap_or_default();
         if let Some(voice) = &self.voice.call { voice.session_result(name, text); }
@@ -478,7 +560,9 @@ impl Hangar {
     pub(super) fn voice_history(&mut self, generation: u64, key: SessionKey, result: Result<api::History, Failure>) {
         if generation != self.voice.generation { return; }
         let Some(events) = result.ok().and_then(|history| history.events) else { return };
-        let Some((id, text)) = last_reply(&triples(&events)) else { return };
+        let events = triples(&events);
+        if self.voice_ask_intercept(&key, &events, None) { return; }
+        let Some((id, text)) = last_reply(&events) else { return };
         if !self.voice.spoken.insert(id) { return; }
         if let Some(voice) = &self.voice.call { voice.session_result(key.name, text); }
     }
@@ -635,6 +719,30 @@ mod tests {
     use core::prelude::v1::test;
 
     fn ev(id: &str, kind: &str, text: &str) -> (String, String, String) { (id.into(), kind.into(), text.into()) }
+
+    #[test]
+    fn question_text_is_marked_and_bounded() {
+        let text = question_text("Qual banco vocês usam?");
+        assert!(text.starts_with("[Pergunta da conversa de voz] Qual banco vocês usam?"));
+        assert!(text.contains("não execute"));
+    }
+
+    #[test]
+    fn ask_session_times_out() {
+        let now = std::time::Instant::now();
+        assert!(question_expired(now - ASK_TIMEOUT - Duration::from_secs(1), now));
+        assert!(!question_expired(now, now));
+    }
+
+    #[test]
+    fn question_answer_follows_the_marked_message() {
+        let q = question_text("Qual banco?");
+        let events = vec![ev("1", "user_msg", "outro pedido"), ev("2", "assistant_msg", "feito"), ev("3", "user_msg", &q)];
+        assert_eq!(question_answer(&events), None, "ainda sem resposta; o turno anterior não conta");
+        let mut events = events;
+        events.extend([ev("4", "assistant_msg", "vou ler"), ev("5", "assistant_msg", "Postgres"), ev("6", "user_msg", "depois")]);
+        assert_eq!(question_answer(&events), Some(("5".into(), "vou ler\n\nPostgres".into())));
+    }
 
     #[test]
     fn speaker_label_holds_300ms() {

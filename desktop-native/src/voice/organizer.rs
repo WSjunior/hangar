@@ -208,6 +208,8 @@ impl Planner {
     }
     /// Plano despachado: volta ao Direto, mas o plano fica (um envio recusado pela tela não pode perdê-lo).
     pub fn sent(&mut self) { self.mode = Mode::Direct; self.armed = None; self.asked = None; }
+    /// A sessão aceitou o plano: a próxima rodada de planejamento abre outro arquivo.
+    pub fn delivered(&mut self) { self.plan = None; }
 }
 
 pub fn tool_reply(text: impl Into<String>, success: bool) -> Value {
@@ -405,6 +407,16 @@ mod tests {
         assert!(planner.path().is_some(), "envio recusado não perde o plano");
         assert_eq!(planner.session(), Some("s"));
         assert_eq!(planner.finish_step(FinishAction::Execute, "t2"), FinishStep::Arm, "armado foi zerado");
+    }
+
+    #[test]
+    fn delivered_plan_is_forgotten() {
+        let mut planner = Planner::default();
+        planner.set_mode(Mode::Plan, "s");
+        planner.sent();
+        planner.delivered();
+        assert!(planner.path().is_none());
+        assert_eq!(planner.session(), None);
     }
 
     #[test]

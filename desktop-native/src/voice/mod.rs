@@ -24,7 +24,7 @@ pub enum VoiceEvent {
 /// `cwd`: pasta da sessão na tela quando é desta máquina (a leitura do código parte dela); `target`: nome dessa sessão.
 pub struct VoiceOptions { pub codex: Codex, pub voice: Option<String>, pub context: String, pub cwd: Option<PathBuf>, pub target: String }
 
-enum Command { Retarget(String, String, Option<PathBuf>),Result(String, String), Reply(Value, Value), SetMode(Mode), Answer(String) }
+enum Command { Retarget(String, String, Option<PathBuf>),Result(String, String), Reply(Value, Value), SetMode(Mode), Answer(String), PlanDelivered }
 
 pub struct Voice { commands: mpsc::UnboundedSender<Command>, muted: Arc<AtomicBool>, stopped: Arc<AtomicBool>, stop: Arc<Notify> }
 
@@ -43,6 +43,8 @@ impl Voice {
     pub fn set_mode(&self, mode: Mode) { let _ = self.commands.send(Command::SetMode(mode)); }
     /// Resposta, recusa ou estouro de um `ask_session`: chega ao organizador como turno marcado.
     pub fn session_answer(&self, text: String) { let _ = self.commands.send(Command::Answer(text)); }
+    /// A sessão aceitou o plano enviado: o organizador o esquece.
+    pub fn plan_delivered(&self) { let _ = self.commands.send(Command::PlanDelivered); }
     pub fn stop(&mut self) {
         self.stopped.store(true, Ordering::Relaxed);
         // notify_one guarda a licença mesmo sem ninguém esperando ainda.
@@ -366,6 +368,7 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                     let speech = if mode == Mode::Plan { "Modo planejar." } else { "Modo direto." };
                     let _ = rpc.request("thread/realtime/appendSpeech", json!({"threadId": thread, "text": speech})).await;
                 }
+                Some(Command::PlanDelivered) => planner.delivered(),
                 Some(Command::Answer(text)) => {
                     log(format!("session answer bytes={}", text.len()));
                     if let Some(input) = results.push(String::new(), text) { start_summary(&rpc, &thread, input, &mut results, organizer_busy).await; }
