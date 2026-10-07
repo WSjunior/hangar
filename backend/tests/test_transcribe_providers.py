@@ -212,14 +212,33 @@ def test_todos_em_espera_tenta_a_lista_e_tira_da_espera_quem_respondeu(monkeypat
     assert "el" not in waits and "turbo" in waits
 
 
-def test_todos_falhando_sobe_o_erro_do_primeiro(monkeypatch):
-    _config(monkeypatch, [EL, TURBO])
+def test_todos_falhando_sobe_o_erro_do_primeiro_com_o_motivo_dos_outros(monkeypatch):
+    _config(monkeypatch, [EL, TURBO, LARGE])
     _servidores(monkeypatch, {"api.elevenlabs.io": _http_error(500, b"quebrou"),
-                              "api.groq.com": _http_error(401, b"chave")})
+                              "api.groq.com": _http_error(401, b"chave"),
+                              "large.exemplo": urllib.error.URLError("sem rede")})
     with pytest.raises(TranscribeError) as ei:
         transcribe_with_provider(b"a", "a.webm")
     assert ei.value.status == 502
+    assert ei.value.detail == (
+        "ElevenLabs: servico de transcricao 500: quebrou (depois: "
+        f"{TURBO_NOME} recusou a chave (401); confira a chave desse serviço; Groq grande não respondeu)")
+    assert "gsk_" not in ei.value.detail
+
+
+def test_so_um_servico_falhando_sobe_o_erro_dele_sem_acrescimo(monkeypatch):
+    _config(monkeypatch, [EL])
+    _servidores(monkeypatch, {"api.elevenlabs.io": _http_error(500, b"quebrou")})
+    with pytest.raises(TranscribeError) as ei:
+        transcribe_with_provider(b"a", "a.webm")
     assert ei.value.detail == "ElevenLabs: servico de transcricao 500: quebrou"
+
+
+def test_arquivo_de_espera_ilegivel_deixa_aviso_no_log(caplog):
+    mod._state_path().write_text("{quebrado", encoding="utf-8")
+    with caplog.at_level("WARNING", logger=mod.logger.name):
+        assert mod._load_waits() == {}
+    assert "ilegivel" in caplog.text
 
 
 def test_teto_do_conjunto_corta_a_fila(monkeypatch):

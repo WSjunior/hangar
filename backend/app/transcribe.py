@@ -292,7 +292,11 @@ def _state_path() -> Path:
 def _load_waits() -> dict:
     try:
         d = json.loads(_state_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except OSError:
+        return {}
+    except ValueError:
+        # A próxima espera grava por cima: sem este rastro, as esperas perdidas sumiam caladas.
+        logger.warning("espera do servico de transcricao ilegivel; descartada")
         return {}
     return d if isinstance(d, dict) else {}
 
@@ -388,7 +392,7 @@ def transcribe_with_provider(content: bytes, filename: str | None,
                              limits: tuple[float, float] = DICTATION_LIMITS) -> Transcription:
     """Percorre `transcription_providers` em ordem, pulando quem está em espera por cota. Lista
     vazia = o serviço único de sempre. Todos falhando: sobe o erro do PRIMEIRO tentado, que é o
-    que a pessoa conserta; os seguintes seriam ruído em cima dele."""
+    que a pessoa conserta, com o motivo curto de cada um dos seguintes no fim."""
     per_provider, budget = limits
     providers = configured_providers()
     if not providers:
@@ -426,7 +430,11 @@ def transcribe_with_provider(content: bytes, filename: str | None,
         # espera já aparece na tela de configuração.
         aviso = f"Transcrito pelo {name}: {'; '.join(reasons)}" if reasons else None
         return Transcription(text, name, aviso)
-    raise first_error or TranscribeError(504, "nenhum servico de transcricao respondeu a tempo")
+    if first_error is None:
+        raise TranscribeError(504, "nenhum servico de transcricao respondeu a tempo")
+    if len(reasons) > 1:
+        raise TranscribeError(first_error.status, f"{first_error.detail} (depois: {'; '.join(reasons[1:])})")
+    raise first_error
 
 
 def providers_status() -> list[dict]:
