@@ -41,4 +41,7 @@ fn main() {
     println!("cargo:rustc-env=HANGAR_NATIVE_RELEASE={release}");
     println!("cargo:rustc-env=HANGAR_NATIVE_VERSION={version}");
     println!("cargo:rustc-env=HANGAR_NATIVE_BUILD_DATE={y:04}-{m:02}-{d:02}");
+    // O assistente de instalação baixa o bootstrap deste commit, não o da `main` do momento (spec "Como o app roda").
+    let commit = git(&["rev-parse", "HEAD"]).unwrap_or_default();
+    println!("cargo:rustc-env=HANGAR_NATIVE_COMMIT={commit}");
 }

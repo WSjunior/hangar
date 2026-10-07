@@ -12,6 +12,15 @@ Execute o comando na raiz desta worktree. O seletor `+1.98.1` mantém a versão 
 
 Em desenvolvimento, preserve o `target-dir` configurado no `~/.cargo/config.toml` da máquina; não abra um cache vazio por sessão. No Linux, builds de desenvolvimento rodam com `nice -n 19 ionice -c3` antes do comando Cargo. O script `tools/build-otimizado.sh` usa um target separado porque muda o perfil de compilação.
 
+### Assistente de instalação sem instalar
+
+O assistente (Linux e Windows) roda os scripts do repositório. Para ver as telas sem instalar nada nesta máquina:
+
+- `HANGAR_SETUP_BOOTSTRAP=desktop-native/tools/setup-fake-bootstrap.sh` usa o dublê no lugar do bootstrap baixado e pula a cópia do app; `FAKE_SCENARIO=ok|falha|tailscale|protocolo|askpass|interrompe` escolhe o caminho.
+- `HANGAR_SETUP_DEST=<pasta>` troca a pasta da instalação (nada é escrito nela pelo dublê).
+- `HANGAR_SETUP_DEMO=1` abre o assistente ao iniciar; `HANGAR_SETUP_DEMO=start` também aperta "Começar instalação" quando a conferência passa (`start-fora` escolhe "também fora de casa" antes).
+- `XDG_CONFIG_HOME=<pasta>` isola a configuração e a instância única do app instalado.
+
 ## Ambiente
 
 - Rust 1.98.1, fixado em `rust-toolchain.toml`. `Cargo.lock` fixa as versões usadas nesta worktree.
