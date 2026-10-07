@@ -70,10 +70,10 @@ test('faixa aberta detalha o run mais novo de cada workflow; ▾ recolhe numa li
   const jobsAbertos = textos(await ui.drawn()).join('|')
   expect(jobsAbertos).toContain('▾ Native')
   expect(jobsAbertos).toContain('▸ build windows|0/1 passos')
-  await ui.press({ key: chaveDe('job', 'Native\nbuild (windows-latest, windows-x86_64, .exe, true)') })
+  await ui.press({ key: chaveDe('job', 'Native\nbuild (windows-latest, windows-x86_64, .exe, true)\n0') })
   expect(textos(await ui.drawn()).join('|')).toContain('●|Run cargo build --locked')
   // Nome de matriz com mais de 64 caracteres: a chave curta não derruba a faixa.
-  await ui.press({ key: chaveDe('job', `Native\n${LONGO}`) })
+  await ui.press({ key: chaveDe('job', `Native\n${LONGO}\n0`) })
   expect(textos(await ui.drawn()).join('|')).toContain('✓|Set up job')
   await ui.press({ key: chaveDe('wf', 'Native') })
   expect(textos(await ui.drawn()).join('|')).not.toContain('0/1 passos')

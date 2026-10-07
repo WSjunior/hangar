@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { checks, classificarFalha, piorErro, textoAviso, disparaRun, ehGithub, ehPush, iso, jobs, lembrarCommit, ms, precisaConsultar, runsVisiveis, situacao } from './gh'
 import type { GhView, RunGh, Situacao } from './gh'
-import { barra, contar, duracao, nomeJob, passoCurto, progresso, rotulosAnteriores, separarPorCommit } from './faixa'
+import { barra, chavesJobs, contar, duracao, nomeJob, nomesJobs, passoCurto, progresso, rotulosAnteriores, separarPorCommit } from './faixa'
 
 const run = (id: number, wf: string, sha: string, status = 'completed', conclusion = 'success'): RunGh =>
   ({ databaseId: id, workflowName: wf, status, conclusion, headSha: sha, url: `u/${id}` })
@@ -114,6 +114,13 @@ describe('gh', () => {
     expect(nomeJob('build (windows-latest, windows-x86_64, .exe, true)')).toBe('build windows')
     expect(nomeJob('statusline (ubuntu-latest)')).toBe('statusline ubuntu')
     expect(nomeJob('backend')).toBe('backend')
+    expect(nomeJob('Lint (changed files) / report')).toBe('Lint (changed files) / report')
+    // Curto repetido no workflow: volta o nome completo; homônimos (corte do GitHub) ganham chaves diferentes.
+    const job = (nome: string) => ({ nome, situacao: 'ok' as const, passo: null, feitos: 0, total: 0, passos: [] })
+    expect(nomesJobs([job('build (win, x64)'), job('build (win, arm)'), job('lint')]))
+      .toEqual(['build (win, x64)', 'build (win, arm)', 'lint'])
+    const [a, b] = chavesJobs('CI', [job('build (x...'), job('build (x...')])
+    expect(a).not.toBe(b)
     expect(nomeJob('build (ubuntu-latest, linux-x86_64, x86_64-unknown-linux-gnu, true, target/x86_64-unknown-linux-g...')).toBe('build ubuntu')
     expect(passoCurto('Run uv run pytest -q')).toBe('uv run pytest -q')
     expect(passoCurto('Run cargo build --locked --release --target x86_64')).toBe('cargo build --locked --releas…')

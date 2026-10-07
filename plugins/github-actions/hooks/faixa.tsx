@@ -34,11 +34,29 @@ export function revisaoDe(p: Pr): { texto: string; cor?: string } | null {
 
 /** Job de matriz vira nome e o primeiro eixo: `build (windows-latest, x86_64, true)` → `build windows`. */
 export function nomeJob(nome: string): string {
-  // Sem exigir o `)`: o GitHub corta nome de matriz longo com `...`.
-  const m = /^(.+?)\s*\(([^,)]+)/.exec(nome)
+  // Termina em `)` ou no `...` com que o GitHub corta nome de matriz longo; `Lint (x) / report` fica como está.
+  const m = /^(.+?)\s*\(([^,)]+)[^)]*(?:\)|\.\.\.|…)$/.exec(nome)
   if (!m) return nome
-  const eixo = (m[2] ?? '').split(',')[0]?.trim().replace(/-latest$/, '') ?? ''
+  const eixo = (m[2] ?? '').trim().replace(/-latest$/, '')
   return eixo ? `${m[1]} ${eixo}` : (m[1] ?? nome)
+}
+
+const MAX_ROTULO = 48
+
+/** Nome de cada job na faixa: o curto, ou o completo cortado quando o curto se repete no workflow. */
+export function nomesJobs(js: readonly Job[]): string[] {
+  const curtos = js.map(j => nomeJob(j.nome))
+  return curtos.map((c, i) => curto(curtos.indexOf(c) !== curtos.lastIndexOf(c) ? js[i]?.nome ?? c : c, MAX_ROTULO))
+}
+
+/** Chave de cada job: o nome e, entre homônimos (nome cortado pelo GitHub), a ordem dele. */
+export function chavesJobs(wf: string, js: readonly Job[]): string[] {
+  const vistos = new Map<string, number>()
+  return js.map(j => {
+    const n = vistos.get(j.nome) ?? 0
+    vistos.set(j.nome, n + 1)
+    return chaveDe('job', `${wf}\n${j.nome}\n${n}`)
+  })
 }
 
 /** O passo sem o `Run ` que o Actions põe em todo `run:`, cortado. */
@@ -258,7 +276,7 @@ export function desenharFaixa(t: Tabela, v: GhView, o: Opcoes, acoes: Acoes): JS
       <Box key={`wf-${w.id}`} flexDirection="row" justifyContent="space-between" width={largura} columnGap={1} marginTop={1}>
         <Box flexDirection="row" flexShrink={1} columnGap={1}>
           {pinta(w.situacao, ICONE[w.situacao], true)}
-          {alterna(chaveWf, `${wfAberto ? '▾' : '▸'} ${w.nome}`)}
+          {alterna(chaveWf, `${wfAberto ? '▾' : '▸'} ${curto(w.nome, MAX_ROTULO)}`)}
           <Text dimColor>{w.sha.slice(0, 7)}</Text>
         </Box>
         <Box flexDirection="row" columnGap={2} flexShrink={0}>
@@ -278,8 +296,11 @@ export function desenharFaixa(t: Tabela, v: GhView, o: Opcoes, acoes: Acoes): JS
     }
     if (wfAberto) {
       // Aberto: todos os jobs, cada um com os passos atrás de outro clique.
+      const nomes = nomesJobs(w.jobs)
+      const chaves = chavesJobs(w.nome, w.jobs)
       w.jobs.forEach((j, i) => {
-        const chaveJob = chaveDe('job', `${w.nome}\n${j.nome}`)
+        const chaveJob = chaves[i] ?? chaveDe('job', `${w.nome}\n${j.nome}`)
+        const nome = nomes[i] ?? j.nome
         const jobAberto = o.abertos.includes(chaveJob)
         const passos = j.passos ?? []
         const falhou = j.situacao === 'falhou' || j.situacao === 'cancelado'
@@ -288,7 +309,7 @@ export function desenharFaixa(t: Tabela, v: GhView, o: Opcoes, acoes: Acoes): JS
         corpo.push(
           <Box key={`j-${w.id}-${i}`} flexDirection="row" paddingLeft={2} width={largura} columnGap={1}>
             {pinta(j.situacao, ICONE[j.situacao])}
-            {passos.length ? alterna(chaveJob, `${jobAberto ? '▾' : '▸'} ${nomeJob(j.nome)}`) : <Text>{nomeJob(j.nome)}</Text>}
+            {passos.length ? alterna(chaveJob, `${jobAberto ? '▾' : '▸'} ${nome}`) : <Text>{nome}</Text>}
             {j.total ? <Text dimColor>{`${j.feitos}/${j.total} passos`}</Text> : null}
             {detalhe ? <Box flexShrink={1}><Text dimColor wrap="truncate-end">{`· ${detalhe}`}</Text></Box> : null}
           </Box>,
@@ -308,6 +329,7 @@ export function desenharFaixa(t: Tabela, v: GhView, o: Opcoes, acoes: Acoes): JS
       continue
     }
     // Fechado: só a falha com o passo, e o que roda com a etapa atual: o que a barra não diz.
+    const nomes = nomesJobs(w.jobs)
     w.jobs.forEach((j, i) => {
       const falhou = j.situacao === 'falhou' || j.situacao === 'cancelado'
       if (!falhou && j.situacao !== 'rodando') return
@@ -316,7 +338,7 @@ export function desenharFaixa(t: Tabela, v: GhView, o: Opcoes, acoes: Acoes): JS
           : j.passo ? ` · ${passoCurto(j.passo)}` : ''
       corpo.push(
         <Box key={`j-${w.id}-${i}`} flexDirection="row" paddingLeft={2} width={largura}>
-          {pinta(j.situacao, `${ICONE[j.situacao]} ${nomeJob(j.nome)}`)}
+          {pinta(j.situacao, `${ICONE[j.situacao]} ${nomes[i] ?? j.nome}`)}
           <Box flexShrink={1}><Text dimColor wrap="truncate-end">{detalhe}</Text></Box>
         </Box>,
       )
