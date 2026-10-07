@@ -97,9 +97,9 @@ describe('galeria de anexos', () => {
     const { DictationError } = await import('../ditado/dictationRun');
     h.list.mockResolvedValue({ files: [file('ditado-1.m4a')] });
     h.dictate
-      .mockReturnValueOnce(Promise.reject(new DictationError('502: fora', false, '')))
-      .mockReturnValueOnce(Promise.reject(new DictationError('502: fora', true, '')))
-      .mockReturnValueOnce(Promise.reject(new DictationError('502: fora', false, 'disco cheio')));
+      .mockRejectedValueOnce(new DictationError('502: fora', false, ''))
+      .mockRejectedValueOnce(new DictationError('502: fora', true, ''))
+      .mockRejectedValueOnce(new DictationError('502: fora', false, 'disco cheio'));
     const { container, root } = await render();
     const botao = () => byLabel(container, 'composer_transcrever_de_novo: ditado-1.m4a')!;
     await act(async () => botao().click());

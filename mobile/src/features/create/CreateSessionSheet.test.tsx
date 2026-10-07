@@ -320,7 +320,8 @@ describe('CreateSessionSheet Codex', () => {
     calls.providers.mockReturnValue(pending.promise);
     const { container, root } = await renderSheet(false, false);
     await act(async () => button(container, 'criar_mais_opcoes')!.click());
-    await act(async () => button(container, 'Claude')!.click());
+    const options = container.querySelector<HTMLElement>('[data-testid="options-sheet"]')!;
+    await act(async () => button(options, 'Claude')!.click());
     await act(async () => pending.resolve({ codex: { disponivel: true, default: true } }));
     await send(container);
     expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({ provider: 'claude' }));
