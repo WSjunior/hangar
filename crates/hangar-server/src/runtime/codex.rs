@@ -698,6 +698,11 @@ impl Engine {
             return Ok(());
         }
         if !line["error"].is_null() && !already_initialized {
+            if rpc.method == "thread/backgroundTerminals/terminate" {
+                let text = format!("O comando do turno interrompido não foi encerrado ({}): {}",
+                    rpc.params["processId"].as_str().unwrap_or("?"),line["error"]["message"].as_str().unwrap_or("erro do Codex"));
+                self.policy("local_output",json!({"text":text}),effects);
+            }
             if voice_rpc(&rpc) && rpc.method == "thread/start" {
                 if let Some(voice) = rpc.continuation.as_ref().and_then(|next|next["call_id"].as_str()).and_then(|call|self.voices.get_mut(call)) {
                     voice.starting = false;
@@ -1101,6 +1106,7 @@ impl Engine {
             "model/rerouted" => {
                 if params["threadId"] != self.thread_id { return Ok(()); }
                 self.model = string(&params["toModel"]).or(self.model.clone());
+                self.settings_revision += 1;
             }
             "item/started" | "item/completed" => {
                 let item = &params["item"];
