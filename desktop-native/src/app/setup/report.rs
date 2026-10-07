@@ -1,6 +1,6 @@
 //! Relatório da falha (spec "Falha e relatório"): o log da instalação, o doctor, etapa e código, sistema e versão do app,
 //! limpo de senha, nome do usuário, nomes da tailnet e IPs. A pessoa vê exatamente o texto que sai.
-use std::{path::{Path, PathBuf}, process::{Command, Stdio}, time::Duration};
+use std::{sync::{Arc, Mutex, mpsc}, path::{Path, PathBuf}, process::{Command, Stdio}, time::Duration};
 use serde::Serialize;
 use crate::i18n::tr;
 use super::flow::Screen;
@@ -21,6 +21,7 @@ const SECRET_NAMES: [&str; 3] = ["token", "password", "passwd"];
 /// Teto de cada pedaço do começo do relatório: o log, que é o que mais ajuda, fica com o resto do orçamento.
 const TEXT_MAX: usize = 8 * 1024;
 const DOCTOR_MAX: usize = 24 * 1024;
+const SYSTEM_DIRS: [&str; 18] = ["dev", "bin", "sbin", "etc", "usr", "var", "tmp", "proc", "sys", "run", "opt", "srv", "mnt", "lib", "boot", "root", "home", "media"];
 const DOCTOR_TIMEOUT: Duration = Duration::from_secs(40);
 
 pub(crate) struct Secrets { pub values: Vec<String>, pub home: Option<String>, pub users: Vec<String> }
@@ -49,9 +50,11 @@ pub(crate) fn scrub(text: &str, secrets: &Secrets) -> String {
         out = replace_path(&out, home, "~");
         out = replace_path(&out, &home.replace('\\', "/"), "~");
     }
-    // Só o segmento de pasta pessoal: "/<usuario>" solto trocaria "/dev/null" para quem se chama "dev".
+    // Nome igual a pasta do sistema ("dev" em "/dev/null") só é trocado sob a pasta pessoal; os outros, em qualquer segmento.
     for user in &secrets.users {
-        for dir in ["/home/", "/Users/", "\\Users\\"] {
+        let system = SYSTEM_DIRS.iter().any(|d| d.eq_ignore_ascii_case(user));
+        let roots: &[&str] = if system { &["/home/", "/Users/", "\\Users\\"] } else { &["/", "\\"] };
+        for dir in roots {
             out = replace_path(&out, &format!("{dir}{user}"), &format!("{dir}{USER}"));
         }
     }
@@ -195,9 +198,9 @@ fn ipv6_at(b: &[u8]) -> Option<usize> {
     // Hora ("12:34:56") tem dois-pontos mas não tem "::" nem cinco separadores.
     if len - colons < 2 || colons < 2 || !(run.windows(2).any(|w| w == b"::") || colons >= 5) { return None; }
     // "::ffff:192.168.0.5": o final é um IPv4, e o endereço inteiro sai junto (ou fica, se for loopback).
-    if b.get(len) == Some(&b'.') {
-        let tail = run.iter().rposition(|c| *c == b':')? + 1;
-        let (v4, octets) = ipv4_parse(&b[tail..])?;
+    // Ponto que não é de IPv4 ("fe80::1c2b:3a4d." no fim da frase) cai no comprimento comum.
+    if b.get(len) == Some(&b'.') && let Some(tail) = run.iter().rposition(|c| *c == b':').map(|c| c + 1)
+        && let Some((v4, octets)) = ipv4_parse(&b[tail..]) {
         return (octets[0] != 127 && octets != [0, 0, 0, 0]).then_some(tail + v4);
     }
     if b.get(len).is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_') { return None; }
@@ -307,13 +310,22 @@ fn run_with_timeout(mut command: Command, limit: Duration) -> String {
         Ok(child) => child,
         Err(error) => return format!("doctor: {error}"),
     };
-    // Um fio por cano: encher um deles sem ninguém ler travaria o filho antes do prazo.
-    fn drain(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<String> {
+    // Um fio por cano: encher um deles sem ninguém ler travaria o filho antes do prazo. O texto vai para um buffer
+    // compartilhado e o fim da leitura é avisado por canal: um neto que herdou o cano não prende o relatório.
+    fn drain(pipe: Option<impl Read + Send + 'static>) -> (Arc<Mutex<Vec<u8>>>, mpsc::Receiver<()>) {
+        let (buf, (tx, rx)) = (Arc::new(Mutex::new(Vec::new())), mpsc::channel());
+        let shared = Arc::clone(&buf);
         std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            if let Some(mut pipe) = pipe { let _ = pipe.read_to_end(&mut bytes); }
-            String::from_utf8_lossy(&bytes).into_owned()
-        })
+            if let Some(mut pipe) = pipe {
+                let mut chunk = [0u8; 4096];
+                while let Ok(n) = pipe.read(&mut chunk) {
+                    if n == 0 { break; }
+                    shared.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&chunk[..n]);
+                }
+            }
+            let _ = tx.send(());
+        });
+        (buf, rx)
     }
     let (out, err) = (drain(child.stdout.take()), drain(child.stderr.take()));
     let deadline = std::time::Instant::now() + limit;
@@ -330,7 +342,15 @@ fn run_with_timeout(mut command: Command, limit: Duration) -> String {
             Ok(None) => std::thread::sleep(Duration::from_millis(100)),
         }
     }
-    let mut text = format!("{}{}", out.join().unwrap_or_default(), err.join().unwrap_or_default());
+    let mut cut = false;
+    let mut collect = |(buf, done): (Arc<Mutex<Vec<u8>>>, mpsc::Receiver<()>)| {
+        cut |= done.recv_timeout(Duration::from_secs(2)).is_err();
+        let bytes = buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    let (out, err) = (collect(out), collect(err));
+    let mut text = format!("{out}{err}");
+    if cut { text.push_str("\ndoctor: output cut (a child process kept the pipe open)\n"); }
     if timed_out { text.push_str(&format!("\ndoctor: timeout after {}s, stopped\n", limit.as_secs_f32().ceil())); }
     text
 }
@@ -449,8 +469,7 @@ mod tests {
             https://pc-da-maria.tail1234.ts.net:8443\nip 100.64.0.2 e 127.0.0.1 e 0.0.0.0:8765 e fe80::1c2b:3a4d e ::1\n\
             versão 1.2.3 e 10.0.19045.1 e 12:34:56 e app::doctor\n", &s);
         assert!(out.contains("venv em ~/hangar/.venv"), "{out}");
-        // Só segmento de pasta pessoal; "/srv/maria" solto não é trocado (um usuário "dev" estragaria "/dev/null").
-        assert!(out.contains("/srv/maria/x"), "{out}");
+        assert!(out.contains("/srv/<usuario>/x"), "{out}");
         // Nome inteiro, nunca pedaço: "/home/mariana" é outra pessoa.
         assert!(out.contains("/home/mariana/y"), "{out}");
         assert!(out.contains("https://<maquina>.ts.net:8443"), "{out}");
@@ -461,8 +480,8 @@ mod tests {
     #[test]
     fn scrub_handles_windows_paths_in_any_case() {
         let s = Secrets { values: vec![], home: Some(r"C:\Users\Maria".into()), users: vec!["Maria".into()] };
-        let out = scrub(r"C:\Users\Maria\hangar e c:/users/maria/x e D:\Users\maria\y", &s);
-        assert_eq!(out, r"~\hangar e ~/x e D:\Users\<usuario>\y");
+        let out = scrub(r"C:\Users\Maria\hangar e c:/users/maria/x e D:\Dados\maria\y", &s);
+        assert_eq!(out, r"~\hangar e ~/x e D:\Dados\<usuario>\y");
     }
 
     fn facts(log: String) -> Facts {
@@ -555,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn scrub_user_only_in_home_segments_never_bare() {
+    fn scrub_system_named_user_only_under_home_roots() {
         let s = Secrets { values: vec![], home: Some("/home/maria".into()), users: vec!["maria".into(), "dev".into()] };
         let out = scrub("/home/maria.old/x /dev/null /mnt/c/Users/dev/y /home/dev/z /usr/lib", &s);
         assert_eq!(out, "~.old/x /dev/null /mnt/c/Users/<usuario>/y /home/<usuario>/z /usr/lib");
@@ -575,6 +594,23 @@ mod tests {
         assert!(out.len() <= BASE_MAX, "{}", out.len());
         assert!(out.contains("linha 49999"));
         assert!(out.contains("item 99999"));
+    }
+
+    #[test]
+    fn scrub_keeps_ipv6_before_a_sentence_period() {
+        let s = Secrets { values: vec![], home: None, users: vec![] };
+        assert_eq!(scrub("rota fe80::1c2b:3a4d. fim", &s), "rota <ip>. fim");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_output_is_cut_when_a_grandchild_holds_the_pipe() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 20 & echo antes"]);
+        let started = std::time::Instant::now();
+        let out = run_with_timeout(command, Duration::from_secs(10));
+        assert!(started.elapsed() < Duration::from_secs(15));
+        assert!(out.contains("antes") && out.contains("output cut"), "{out}");
     }
 
     #[cfg(unix)]
