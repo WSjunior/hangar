@@ -95,14 +95,15 @@ fn append() -> Action { Action::Append { text:"Olá".into(), delivered:false, ts
 fn local_command_answer_confirms_the_command_outside_the_transcript() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open(&dir.path().join("state"),&dir.path().join("projection"),State::new("key",1,"session",vec![])).unwrap();
-    for (call,text,entry) in [("a1","/btw","e1"),("a2","/context","e2")] {
+    for (call,text,entry) in [("a0","btw","e0"),("a1","/btw","e1"),("a2","/context","e2")] {
         store.exec(1,call,clock(),Action::Append { text:text.into(),delivered:true,ts:None,pre_transcript:false,entry_id:Some(entry.into()) }).unwrap();
     }
     store.exec(1,"op",clock(),Action::Prepare { id:"op".into(),payload:json!({"operation_id":"op","kind":"input"}),entry_id:Some("e1".into()) }).unwrap();
     store.exec(1,"local",clock(),Action::AppendLocal { text:"/btw isn't available in this environment.".into(),
-        entry_id:None,confirms:Some("btw".into()) }).unwrap();
+        entry_id:None,confirms:Some("/btw".into()) }).unwrap();
     let state = store.state();
     let row = |id:&str|state.rows.iter().find(|r|r["id"] == id).unwrap().clone();
+    assert_ne!(row("e0")["confirmed"],true, "texto comum igual ao nome do comando não é o comando");
     assert_eq!(row("e1")["confirmed"],true);
     assert_ne!(row("e2")["confirmed"],true);
     assert!(state.operations["op"].status == Status::Confirmed);

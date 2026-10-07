@@ -662,10 +662,11 @@ class PromptQueue:
                  "delivered": True, "confirmed": True, "papel": "assistant"}
         with _append_lock:
             rows = self.load()
-            if confirms:
+            comando = confirms.strip() if isinstance(confirms, str) else ""
+            if comando.startswith("/") and len(comando) > 1:
                 alvo = next((r for r in rows if not r.get("confirmed") and r.get("papel") != "assistant"
                              and r.get("delivered") and isinstance(r.get("text"), str)
-                             and r["text"].strip().lstrip("/") == confirms.strip().lstrip("/")), None)
+                             and r["text"].strip() == comando), None)
                 if alvo is not None:
                     alvo["confirmed"] = True
                     alvo.pop("desistiu", None)

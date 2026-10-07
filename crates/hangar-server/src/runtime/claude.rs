@@ -68,6 +68,8 @@ pub struct ClaudeEngine {
     effort_intent: Option<Value>,
     effort_deadline: Option<f64>,
     active_input: Option<String>,
+    /// Último `/comando` escrito no processo: a CLI responde alguns sozinha, sem linha no transcript.
+    slash_input: Option<String>,
     unknown: BTreeSet<String>,
     surface: Option<Surface>,
 }
@@ -96,7 +98,7 @@ impl ClaudeEngine {
             preview:LiveBuffer::default(),thinking:LiveBuffer::default(),tool_input:LiveBuffer::default(),tool_name:None,tool_visible:false,
             label:None,compacting:false,turn_start:None,label_deadline:None,tokens_closed:0,tokens_message:None,gen_start:None,
             token_chars:0,thinking_start:None,thought_s:0.0,tasks:Vec::new(),usage:metadata.get("usage").cloned().unwrap_or(Value::Null),
-            context_window:metadata["context_window"].as_u64(),cost:metadata["cost"].as_f64(),effort_intent,effort_deadline:None,active_input:None,unknown:BTreeSet::new(),surface:None,metadata };
+            context_window:metadata["context_window"].as_u64(),cost:metadata["cost"].as_f64(),effort_intent,effort_deadline:None,active_input:None,slash_input:None,unknown:BTreeSet::new(),surface:None,metadata };
         if let Some(controls) = engine.metadata["control_carry"].as_array() {
             for control in controls {
                 let Ok(request_id) = serde_json::from_value::<RequestId>(control["request_id"].clone()) else { continue };
@@ -348,6 +350,7 @@ impl ClaudeEngine {
                     return Ok(vec![Effect::Reply { operation_id,disposition:Disposition::Deferred,payload:json!({}) }]);
                 }
                 let text = payload["text"].as_str().ok_or_else(||error("mensagem sem texto"))?;
+                if text.trim_start().starts_with('/') { self.slash_input = Some(text.trim().to_owned()); }
                 self.wires.insert(operation_id.clone(),Wire { kind:"input".into(),request_id:None,final_result:false });
                 if !self.in_progress {
                     self.active_input = Some(operation_id.clone());
@@ -599,10 +602,13 @@ impl ClaudeEngine {
                             }
                         }
                     }
+                    // `local_command_source` traz a saída, não o comando: quem respondeu é o último `/` escrito.
+                    let source = if effort_source { None } else { self.slash_input.take() };
                     if !text.trim().is_empty() {
-                        self.policy("local_output",json!({"text":text,"source":event["local_command_source"]}),effects);
+                        self.policy("local_output",json!({"text":text,"source":source}),effects);
                     }
                 } else {
+                    self.slash_input = None;
                     let usage = &event["message"]["usage"];
                     if ["input_tokens","cache_read_input_tokens","cache_creation_input_tokens"].iter().any(|k|usage[*k].as_u64().unwrap_or(0) > 0) { self.usage = usage.clone(); }
                     if let Some(blocks) = event["message"]["content"].as_array() {

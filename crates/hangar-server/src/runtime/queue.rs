@@ -421,10 +421,10 @@ fn holds_terminal_write(op:&Operation,conversation:&Value)->bool {
 /// Comando respondido pela própria CLI não vira linha no transcript: a resposta dela é a prova de
 /// que a entrada mais antiga com aquele texto chegou.
 fn confirm_local_command(state:&mut State,source:&str) {
-    let command = |text:&str|text.trim().trim_start_matches('/').to_owned();
-    let source = command(source);
+    let source = source.trim();
+    if !source.starts_with('/') || source.len() < 2 { return; }
     let Some(id) = state.rows.iter().find(|r|r["confirmed"] != true && r["papel"] != "assistant" && r["delivered"] == true
-        && r["text"].as_str().map(command).as_deref() == Some(source.as_str())).map(|r|row_id(r).to_owned()) else { return };
+        && r["text"].as_str().map(str::trim) == Some(source)).map(|r|row_id(r).to_owned()) else { return };
     if let Some(row) = state.rows.iter_mut().find(|r|row_id(r) == id) {
         row["confirmed"] = json!(true);
         row.as_object_mut().unwrap().remove("desistiu");

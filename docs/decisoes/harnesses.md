@@ -316,8 +316,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   [confirmação de entrega sem reler o transcript](#confirmação-de-entrega-sem-reler-o-transcript).
   Exceção: comando que o Claude sem terminal responde sozinho (resposta com `local_command_source`,
   como `/btw isn't available in this environment`) não vira linha no transcript. A resposta local
-  confirma a entrada pendente mais antiga com o mesmo comando, no Rust e no Python; sem isso a
-  bolha ficava "aguardando confirmação" para sempre.
+  confirma a entrada pendente mais antiga com o texto EXATO do último `/comando` que o motor
+  escreveu, no Rust e no Python; sem isso a bolha ficava "aguardando confirmação" para sempre. O
+  `local_command_source` não serve de prova: medido em 07/10/2026 (claude 2.1.292), ele traz a
+  saída embrulhada (`<local-command-stdout>…</local-command-stdout>`), não o comando.
 - **App-server efêmero do Codex sobe com `-c features.plugins=false` quando não usa plugins.**
   Ver [temporários `git-*` no `.tmp` do Codex](#temporários-git--no-tmp-do-codex).
 - **Cota e catálogo do Codex vão por HTTP primeiro, com o app-server efêmero de reserva.** A rota

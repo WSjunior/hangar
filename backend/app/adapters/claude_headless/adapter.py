@@ -232,6 +232,7 @@ class _Sessao:
         self.tarefas: dict[str, dict] = {}          # subagentes em voo: task_id -> {tipo, passo}
         self.effort_pendente: str | None = None     # `/effort` pedido com turno em voo: sai no result
         self.effort_aguardando: str | None = None   # `/effort` já no stdin, esperando a CLI confirmar
+        self.comando_enviado: str | None = None     # último `/comando` escrito: a CLI responde alguns sozinha
         self.tipos_desconhecidos: set[str] = set()  # eventos do stdout já avisados (uma nota por tipo)
         self.desconhecidos_gravados: collections.Counter[str] = collections.Counter()
         self.iniciando = False     # processo novo esperando o `initialize` (hooks de SessionStart)
@@ -473,6 +474,8 @@ class ClaudeHeadlessAdapter:
         from app.conversation_transfer import require_available
         require_available(sess.name)
         blocos, avisos = await asyncio.to_thread(_blocos_do_prompt, text)
+        if text.lstrip().startswith("/"):
+            sess.comando_enviado = text.strip()
         frame = {"type": "user", "session_id": "", "parent_tool_use_id": None,
                  "message": {"role": "user", "content": blocos}}
         if (claim := self.drain_claims.get(sess.name)) is not None:
@@ -1491,9 +1494,12 @@ class ClaudeHeadlessAdapter:
                     self._confirmar_effort(sess, texto)
                 if texto.startswith("## Context Usage"):
                     texto += _tabela_limites(sess.janelas)
+                # `local_command_source` traz a saída, não o comando: quem respondeu é o último `/` escrito.
+                comando, sess.comando_enviado = sess.comando_enviado, None
                 if texto:
-                    await self._nota_local(sess, texto, confirms=ev.get("local_command_source"))
+                    await self._nota_local(sess, texto, confirms=comando)
                 return
+            sess.comando_enviado = None
             _aplicar_uso_da_chamada(sess, (ev.get("message") or {}).get("usage"))
             tools = [b for b in blocos if isinstance(b, dict) and b.get("type") == "tool_use"]
             if tools:

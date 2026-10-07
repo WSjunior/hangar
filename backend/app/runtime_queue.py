@@ -370,10 +370,11 @@ def _holds_terminal_write(operation, conversation):
 def _confirm_local_command(state, source):
     """Comando respondido pela própria CLI não vira linha no transcript: a resposta dela é a prova
     de que a entrada mais antiga com aquele texto chegou."""
-    def command(text):
-        return text.strip().lstrip("/")
+    source = source.strip() if isinstance(source, str) else ""
+    if not source.startswith("/") or len(source) < 2:
+        return
     alvo = next((r for r in state["rows"] if not r.get("confirmed") and r.get("papel") != "assistant"
-                 and r.get("delivered") and isinstance(r.get("text"), str) and command(r["text"]) == command(source)), None)
+                 and r.get("delivered") and isinstance(r.get("text"), str) and r["text"].strip() == source), None)
     if alvo is None:
         return
     alvo["confirmed"] = True

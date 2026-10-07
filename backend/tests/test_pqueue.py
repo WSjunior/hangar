@@ -179,11 +179,13 @@ def test_merged_history_dedup_ts_race(tmp_path, monkeypatch):
 
 def test_saida_local_confirma_o_comando_que_nao_vai_ao_transcript(tmp_path):
     q = PromptQueue("s")
+    palavra = q.append("btw", delivered=True)
     btw = q.append("/btw", delivered=True)
     outro = q.append("/context", delivered=True)
     q.append_saida_local("/btw isn't available in this environment.", confirms="/btw")
     rows = {r["id"]: r for r in q.load()}
-    assert rows[btw["id"]]["confirmed"] and not rows[outro["id"]].get("confirmed")
+    assert rows[btw["id"]]["confirmed"]
+    assert not rows[palavra["id"]].get("confirmed") and not rows[outro["id"]].get("confirmed")
 
 
 def test_merged_history_e_follow_mostram_saida_local_como_assistente(tmp_path):
