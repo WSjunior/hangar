@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn start_time_is_field_22_even_with_a_tricky_name() {
-        let tail = (3..=21).map(|n| n.to_string()).collect::<Vec<_>>().join(" ");
+        let tail = (4..=21).map(|n| n.to_string()).collect::<Vec<_>>().join(" ");
         assert_eq!(parse_start(&format!("7 (a b) c) S {tail} 9876 0")), Some("9876".to_owned()));
         assert_eq!(parse_start("garbage"), None);
     }
