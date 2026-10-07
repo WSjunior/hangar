@@ -231,6 +231,9 @@ executar() {   # $1 = so, $2 = sha, $3 = bundle ("-" = sem bundle), resto = pass
     # Sem -x: node_modules, target e .venv ficam e são o que deixa a próxima rodada incremental.
     git checkout -q --force --detach "$sha" && git clean -ffdq || return 2
     unset CARGO_TARGET_DIR
+    # Os testes procuram os binários em crates/target; um `target-dir` no ~/.cargo/config.toml da
+    # máquina mandaria o build para outro lugar. A variável vence a configuração.
+    if [[ "$SO" != windows ]]; then export CARGO_TARGET_DIR="$PWD/crates/target"; fi
     # Cada arquivo de teste vira um binário; com depuração completa o target passa de 27 GB no Linux
     # e enche o disco da VM. Só as linhas basta para o backtrace, e o teste roda igual.
     CARGO_ENV=(CARGO_BUILD_JOBS=4 CARGO_PROFILE_DEV_DEBUG=line-tables-only)
