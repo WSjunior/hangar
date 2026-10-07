@@ -193,9 +193,10 @@ erro na publicação, item em `missing_images` no rascunho. URL `http(s)` fica c
 
 ### Chromium do servidor (`pages/chrome.rs`)
 
-- Binário: `CP_CHROMIUM_BIN`, senão o que a marca `~/.hangar/native/chromium-ok` aponta (Linux,
+- Binário: `HANGAR_CHROMIUM`, senão o que a marca `~/.hangar/native/chromium-ok` aponta (Linux,
   instalada pelo `install-chromium.sh`), senão `google-chrome-stable`/`google-chrome`/`chromium`
-  no `PATH`, `/Applications/Google Chrome.app/...` (macOS) e o Chrome/Edge padrão do Windows.
+  no `PATH` (`chrome.exe`/`msedge.exe` no Windows), `/Applications/Google Chrome.app/...` (macOS) e o
+  Chrome/Edge padrão do Windows, inclusive o do perfil (`%LOCALAPPDATA%`).
 - Sobe sem janela com `--remote-debugging-port=0` e perfil temporário próprio, lê a porta no
   `DevToolsActivePort` e fala CDP por WebSocket (`tokio-tungstenite`, já no `Cargo.lock`). Porta
   em vez de pipe porque o pipe por fd 3/4 não existe no Windows. Um processo por publicação,
@@ -289,7 +290,8 @@ o resultado vai para `docs/decisoes/frontend.md`.
 ### Expo (`mobile/`, depois)
 
 `react-native-webview` (já instalado, 13.16.1) com `source={{ html }}` vindo do `?raw=1` com o
-cabeçalho de token, `originWhitelist={['about:*']}`, `onShouldStartLoadWithRequest` bloqueando
+cabeçalho de token, `originWhitelist={['*']}` (a biblioteca abre sozinha, fora do app, toda URL fora
+da lista), `onShouldStartLoadWithRequest` bloqueando
 navegação (links por `ui/open-link` → `Linking.openURL`), altura por `onMessage`.
 
 ## Fora desta etapa
