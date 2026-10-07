@@ -6,6 +6,7 @@ use super::failure::{Failure, FailureAction};
 use super::flow::{self, PasswordMode, PasswordProblem, PhoneOutcome, Primary, Runs, Screen, View};
 use super::local::{self, LocalInstall};
 use super::marks::{End, Progress};
+use super::phone::{self, Qr};
 use super::precheck::{self, Check, CheckRow};
 use super::run::{self, Kind, Options, RunRecord, SetupState};
 use super::system;
@@ -69,6 +70,11 @@ pub(crate) struct SetupWizard {
     pub(super) viewing: Screen,
     pub(super) details_open: bool,
     pub(super) phone: Option<PhoneOutcome>,
+    pub(super) qr: Qr,
+    /// A conta Tailscale já respondeu `Running` ao `tailscale status`.
+    pub(super) tailscale_running: bool,
+    tailscale_checking: bool,
+    ticks: u32,
     pub(super) focus: FocusHandle,
     /// Para fechar a janela de senha de fora de um update com a janela emprestada (`fail`/`finish`).
     window: AnyWindowHandle,
@@ -110,6 +116,7 @@ impl SetupWizard {
             git_ready: false, bootstrap: None, token: None, runs: Runs::default(), check_tail: None, install_tail: None, records: (None, None),
             polling: false, finished: false, failure: None, vault: Vault::default(), waiting: Vec::new(), prompt: None, after_password: None,
             opened_link: None, app_copy: None, connection: None, connect_later: false, viewing: Screen::Welcome, details_open: false, phone: None,
+            qr: Qr::Idle, tailscale_running: false, tailscale_checking: false, ticks: 0,
             focus: cx.focus_handle(), window: window.window_handle(), _subscriptions: subscriptions,
         };
         match origin {
@@ -409,6 +416,8 @@ impl SetupWizard {
             return Watch::Stop;
         }
         self.open_new_link(cx);
+        self.ticks = self.ticks.wrapping_add(1);
+        if self.ticks % 8 == 0 { self.watch_tailscale(cx); }
         if self.runs.install.is_none() {
             match self.runs.check.as_ref().and_then(|p| p.end) {
                 Some(End::Ok | End::Pending) => {
@@ -524,6 +533,7 @@ impl SetupWizard {
         self.runs = Runs::default();
         (self.check_tail, self.install_tail, self.records) = (None, None, (None, None));
         (self.app_copy, self.connection, self.opened_link, self.connect_later) = (None, None, None, false);
+        (self.qr, self.tailscale_running) = (Qr::Idle, false);
         // A senha escolhida continua em `token`; sem ela, o instalador mantém a do `.env` ou gera uma.
         self.vault = Vault::new(askpass::new_code());
         suspend_updates(true, cx);
@@ -545,7 +555,52 @@ impl SetupWizard {
 
     pub(super) fn go(&mut self, screen: Screen, cx: &mut Context<Self>) {
         self.viewing = screen;
+        // A tela 5 pede o QR ao abrir, só depois do fim da instalação (o backend está de pé).
+        if screen == Screen::Phone && flow::status(Screen::Phone, &self.view()) != flow::Status::Pending { self.load_qr(cx); }
         cx.notify();
+    }
+
+    pub(super) fn load_qr(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.qr, Qr::Loading | Qr::Shown { .. }) { return; }
+        let install = local::read_install(&self.dest);
+        let Some(api) = install.token.as_ref().and_then(|token| crate::api::Api::new(&local::address(install.port), token).ok()) else {
+            let env = self.dest.join("backend").join(".env");
+            self.qr = Qr::Failed(tr("setup_connection_missing").replace("{path}", &env.display().to_string()));
+            return cx.notify();
+        };
+        self.qr = Qr::Loading;
+        let (done, result) = tokio::sync::oneshot::channel();
+        self.runtime.spawn(async move { let _ = done.send(phone::load(api).await); });
+        cx.spawn(async move |this, cx| {
+            let Ok(loaded) = result.await else { return };
+            let _ = this.update(cx, |w, cx| {
+                w.qr = match loaded {
+                    Ok(Some(pairing)) => Qr::Shown { url: pairing.url, tailscale: pairing.tailscale,
+                        image: Arc::new(Image::from_bytes(ImageFormat::Svg, pairing.svg)) },
+                    Ok(None) => Qr::NoAddress,
+                    Err(why) => Qr::Failed(why),
+                };
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
+    }
+
+    /// Com o link de login na tela, confere a conta pelo `tailscale status`; o teto de 5 min é o do script.
+    fn watch_tailscale(&mut self, cx: &mut Context<Self>) {
+        if self.tailscale_running || self.tailscale_checking { return; }
+        let waiting_login = self.runs.latest().and_then(|p| p.link("tailscale-login")).is_some()
+            && self.runs.step(super::marks::Step::Tailscale) == Some(super::marks::State::Doing);
+        if !waiting_login { return; }
+        self.tailscale_checking = true;
+        let task = cx.background_executor().spawn(async move { phone::tailscale_status() });
+        cx.spawn(async move |this, cx| {
+            let running = task.await;
+            let _ = this.update(cx, |w, cx| {
+                w.tailscale_checking = false;
+                if running && !w.tailscale_running { w.tailscale_running = true; cx.notify(); }
+            });
+        }).detach();
     }
 
     pub(super) fn back(&mut self, cx: &mut Context<Self>) {

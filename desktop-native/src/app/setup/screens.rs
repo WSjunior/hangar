@@ -4,6 +4,7 @@ use super::*;
 use super::failure::{self, OnFailureAction};
 use super::flow::{self, PasswordMode, PasswordProblem, PhoneOutcome, Primary, Screen, Status};
 use super::marks::{End, ItemRow, State, Step};
+use super::phone::Qr;
 use super::precheck::{self, Check, CheckRow};
 use super::system::AGENTS;
 use super::wizard::{AppCopy, SetupWizard};
@@ -130,6 +131,27 @@ fn muted_line(id: &'static str, spinner: bool, text: String) -> Stateful<Div> {
     div().id(id).role(Role::Status).flex().items_center().gap_2().text_sm().text_color(theme::muted())
         .when(spinner, |el| el.child(chrome::Spinner::new(SharedString::from(format!("{id}-spin")), IconName::LoaderCircle, px(14.), theme::muted())))
         .child(text)
+}
+
+const TAILSCALE_DNS: &str = "https://login.tailscale.com/admin/dns";
+
+/// Aviso que pede a pessoa (mock `.callout`): ícone, título, linhas e as ações.
+fn callout(id: &'static str, title: String, lines: Vec<String>, actions: Vec<AnyElement>) -> Stateful<Div> {
+    div().id(id).role(Role::Alert).flex().gap_3().p_4().rounded_lg().border_1().border_color(theme::warning().opacity(0.3)).bg(theme::warning().opacity(0.06))
+        .child(chrome::small_icon(IconName::CircleAlert, 16., theme::warning()))
+        .child(div().flex_1().min_w_0().flex().flex_col().gap_2()
+            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(title))
+            .children(lines.into_iter().map(|line| div().text_sm().text_color(theme::muted()).whitespace_normal().child(line)))
+            .child(div().flex().flex_wrap().gap_2().pt_1().children(actions)))
+}
+
+fn tips(tailscale: bool) -> Div {
+    let first = if tailscale { tr("setup_phone_tip_tailscale") } else { tr("setup_phone_tip_lan") };
+    div().flex().flex_col().gap_2().children([first, tr("setup_phone_tip_scan"), tr("setup_phone_tip_done")].into_iter().enumerate()
+        .map(|(n, text)| div().flex().items_start().gap_2()
+            .child(div().size_5().flex_shrink_0().rounded_md().bg(theme::inset()).flex().items_center().justify_center()
+                .text_xs().font_family(theme::MONO).text_color(theme::muted()).child((n + 1).to_string()))
+            .child(div().text_sm().text_color(theme::muted()).whitespace_normal().child(text))))
 }
 
 impl SetupWizard {
@@ -363,14 +385,63 @@ impl SetupWizard {
     }
 
     pub(super) fn render_tailscale(&self, cx: &mut Context<Self>) -> Div {
-        let rows: Vec<Stateful<Div>> = self.runs.items(Step::Tailscale).iter().map(item_row).collect();
+        let items = self.runs.items(Step::Tailscale);
+        let account_marked = items.iter().any(|i| i.id == "tailscale-conta" && i.state == State::Ok);
+        let mut rows: Vec<Stateful<Div>> = items.iter().map(item_row).collect();
+        if self.tailscale_running && !account_marked { rows.push(row("tailscale-running", RowMark::Ok, tr("setup_tailscale_connected"), None, None)); }
+        let latest = self.runs.latest();
+        let has_code = |code: &str| latest.is_some_and(|p| p.pendings.iter().any(|(c, _)| c == code) || p.error.as_deref() == Some(code));
+        let login = latest.and_then(|p| p.link("tailscale-login")).map(str::to_owned).filter(|_| !self.tailscale_running && !account_marked);
+        let recheck = |id: &'static str, cx: &mut Context<Self>| Button::new(id).outline().small().label(tr("setup_recheck"))
+            .on_click(cx.listener(|w, _, window, cx| w.retry(window, cx))).into_any_element();
+        let login_callout = login.map(|url| {
+            let mut actions = vec![Button::new("setup-tailscale-login-open").primary().small().icon(IconName::ExternalLink).label(tr("setup_tailscale_login"))
+                .on_click(move |_, _, cx| cx.open_url(&url)).into_any_element()];
+            // Passou o teto do script sem login: "Conferir de novo" roda o script de novo.
+            if has_code("tailscale-login") { actions.push(recheck("setup-tailscale-login-recheck", cx)); }
+            callout("setup-tailscale-login", tr("setup_tailscale_login"), vec![tr("setup_tailscale_login_hint")], actions)
+        });
+        let https_callout = has_code("tailscale-https").then(|| callout("setup-tailscale-https", tr("setup_tailscale_https_title"),
+            vec![tr("setup_tailscale_https_lead"), tr("setup_tailscale_https_1"), tr("setup_tailscale_https_2")],
+            vec![Button::new("setup-tailscale-https-open").primary().small().icon(IconName::ExternalLink).label(tr("setup_tailscale_open_settings"))
+                    .on_click(|_, _, cx| cx.open_url(TAILSCALE_DNS)).into_any_element(),
+                recheck("setup-tailscale-https-recheck", cx)]));
         div().flex().flex_col().gap_4()
             .when(!rows.is_empty(), |el| el.child(card(rows)))
+            .children(login_callout)
+            .children(https_callout)
             .child(self.render_details("setup-details-tailscale", cx))
     }
 
-    pub(super) fn render_phone(&self, _: &mut Context<Self>) -> Div {
-        div().child(muted_line("setup-phone-waiting", false, tr("setup_phone_waiting")))
+    pub(super) fn render_phone(&self, cx: &mut Context<Self>) -> Div {
+        if flow::status(Screen::Phone, &self.view()) == Status::Pending {
+            return div().child(muted_line("setup-phone-waiting", false, tr("setup_phone_waiting")));
+        }
+        let retry = || Button::new("setup-phone-retry").outline().small().label(tr("setup_phone_retry"))
+            .on_click(cx.listener(|w, _, _, cx| { w.qr = Qr::Idle; w.load_qr(cx); }));
+        match &self.qr {
+            Qr::Shown { url, tailscale, image } => {
+                let copy = url.clone();
+                div().flex().items_center().gap_8()
+                    // Fundo branco é o do QR, não decoração: câmera nenhuma lê o código sobre o tema escuro.
+                    .child(div().id("setup-qr").role(Role::Image).aria_label(tr("setup_phone_qr_label")).size_48().flex_shrink_0().p_3()
+                        .rounded_xl().bg(gpui_kit::white()).child(img(image.clone()).size_full()))
+                    .child(div().flex_1().min_w_0().flex().flex_col().gap_3()
+                        .child(div().text_xs().text_color(theme::muted()).child(tr("setup_phone_type")))
+                        .child(div().flex().items_center().gap_2().px_3().py_2().rounded_lg().bg(theme::inset()).border_1().border_color(theme::border())
+                            .child(div().flex_1().min_w_0().font_family(theme::MONO).text_sm().text_color(theme::accent_text()).whitespace_normal().child(url.clone()))
+                            .child(Button::new("setup-phone-copy").ghost().small().icon(IconName::Copy).label(tr("setup_phone_copy"))
+                                .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy.clone())))))
+                        .child(tips(*tailscale)))
+            }
+            Qr::Idle | Qr::Loading => div().child(muted_line("setup-phone-loading", true, tr("setup_phone_loading"))),
+            Qr::NoAddress => div().flex().flex_col().gap_2()
+                .child(div().id("setup-phone-none").role(Role::Alert).text_sm().text_color(theme::warning_text()).whitespace_normal().child(tr("setup_phone_none")))
+                .child(div().child(retry())),
+            Qr::Failed(why) => div().flex().flex_col().gap_2()
+                .child(div().id("setup-phone-error").role(Role::Alert).text_sm().text_color(theme::danger()).whitespace_normal().child(why.clone()))
+                .child(div().child(retry())),
+        }
     }
 
     fn done_header(&self) -> Div {

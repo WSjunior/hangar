@@ -21,7 +21,7 @@ const RESTART_POLL: Duration = Duration::from_secs(2);
 const UPGRADE_WAIT: Duration = Duration::from_secs(600);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind { Here, Lan, Tailscale, Public }
+pub(super) enum Kind { Here, Lan, Tailscale, Public }
 
 impl Kind {
     fn parse(raw: &str) -> Option<Self> {
@@ -33,20 +33,20 @@ impl Kind {
             Kind::Public => "machines_kind_public" })
     }
     /// O nome do tipo nas rotas do servidor (`/api/alcance/pareamento?endereco=`).
-    fn raw(self) -> &'static str {
+    pub(super) fn raw(self) -> &'static str {
         match self { Kind::Here => "nesta_maquina", Kind::Lan => "rede_local", Kind::Tailscale => "tailscale", Kind::Public => "publico" }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Status { Ok, Failed, Testing, Unset }
+pub(super) enum Status { Ok, Failed, Testing, Unset }
 
 #[derive(Clone, Debug)]
-struct Address { kind: Kind, url: String, status: Status, ms: Option<i64> }
+pub(super) struct Address { pub(super) kind: Kind, pub(super) url: String, pub(super) status: Status, pub(super) ms: Option<i64> }
 
 /// `/api/alcance`: por onde o servidor responde, medido por ele mesmo.
 #[derive(Clone, Debug, Default)]
-struct Reach { loopback: bool, bind: String, addresses: Vec<Address> }
+pub(super) struct Reach { pub(super) loopback: bool, pub(super) bind: String, pub(super) addresses: Vec<Address> }
 
 /// Farol de uma linha ou do cartão: a frase ao lado diz o mesmo, a cor nunca vai sozinha.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,7 +90,7 @@ fn two_way(here: &str, name: &str, going: i64, back: i64) -> Stateful<Div> {
         .child(node(name, theme::muted()))
 }
 
-fn parse_reach(value: &Value) -> Option<Reach> {
+pub(super) fn parse_reach(value: &Value) -> Option<Reach> {
     // Uma linha fora do formato derruba a leitura inteira: sumir com ela mudaria o veredito sem aviso.
     let addresses = value.get("enderecos")?.as_array()?.iter().map(|e| Some(Address {
         kind: Kind::parse(e.get("tipo")?.as_str()?)?,
