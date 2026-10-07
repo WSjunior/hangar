@@ -239,6 +239,29 @@ pub(crate) fn stop(pid: u32, started: &str) { signal(pid, started, false) }
 /// Como `stop`, sem dar escolha ao processo (SIGKILL); no Windows o `taskkill /F` já é isso.
 pub(crate) fn kill(pid: u32, started: &str) { signal(pid, started, true) }
 
+/// Linux: algum processo ainda no grupo `pgid`. O `setsid` fez do agente o líder; um comando dele em andamento sobrevive ao
+/// líder e segue no grupo. No Windows o `taskkill /T` já leva a árvore: sempre `false`.
+pub(crate) fn group_alive(pgid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        return entries.flatten().filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
+            .any(|pid| std::fs::read_to_string(format!("/proc/{pid}/stat")).ok().and_then(|s| parse_pgrp(&s)) == Some(pgid));
+    }
+    let _ = pgid;
+    false
+}
+
+/// SIGKILL ao grupo inteiro. Só para um grupo que já se sabe ser do app (o líder foi conferido pela identidade).
+pub(crate) fn kill_group(pgid: u32) {
+    #[cfg(target_os = "linux")]
+    if pgid > 1 && pgid <= i32::MAX as u32 { unsafe { libc::kill(-(pgid as i32), libc::SIGKILL); } }
+    let _ = pgid;
+}
+
+/// Campo 5 de `/proc/<pid>/stat` (o grupo), contado depois do último `)` como em `parse_start`.
+#[cfg(any(target_os = "linux", test))]
+fn parse_pgrp(stat: &str) -> Option<u32> { stat.rsplit_once(')')?.1.split_whitespace().nth(2)?.parse().ok() }
+
 fn signal(pid: u32, started: &str, force: bool) {
     let _ = force;
     if !same_process(pid, started) { return; }
@@ -325,6 +348,15 @@ mod tests {
         let tail = (4..=21).map(|n| n.to_string()).collect::<Vec<_>>().join(" ");
         assert_eq!(parse_start(&format!("7 (a b) c) S {tail} 9876 0")), Some("9876".to_owned()));
         assert_eq!(parse_start("garbage"), None);
+        assert_eq!(parse_pgrp(&format!("7 (a b) c) S 1 4321 {tail}")), Some(4321));
+        assert_eq!(parse_pgrp("garbage"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn group_of_this_test_is_alive() {
+        let own = std::fs::read_to_string("/proc/self/stat").ok().and_then(|s| parse_pgrp(&s)).unwrap();
+        assert!(group_alive(own));
     }
 
     #[test]

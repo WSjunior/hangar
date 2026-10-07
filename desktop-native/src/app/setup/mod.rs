@@ -47,5 +47,13 @@ pub(super) fn saved_run() -> Option<run::SetupState> { if supported() { run::loa
 /// pasta e avisar. A anotação só sai depois de desfazer sem erro.
 pub(super) fn interrupted_fix() -> bool { supported() && run::state_dir().is_some_and(|dir| repo::saved_at(&dir)) }
 
+/// O app abriu o assistente sozinho ao iniciar: a recuperação de um conserto interrompido fica mais cautelosa (não desfaz
+/// uma pasta que já seguiu em frente). Pelo menu, a pessoa pediu: desfaz como sempre.
+static OPENED_AT_LAUNCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(super) fn opening_at_launch() { OPENED_AT_LAUNCH.store(true, std::sync::atomic::Ordering::Relaxed); }
+
+fn take_launch() -> bool { OPENED_AT_LAUNCH.swap(false, std::sync::atomic::Ordering::Relaxed) }
+
 /// Só para provar telas: `HANGAR_SETUP_DEMO` abre o assistente ao iniciar.
 pub(super) fn demo() -> bool { supported() && std::env::var_os("HANGAR_SETUP_DEMO").is_some() }

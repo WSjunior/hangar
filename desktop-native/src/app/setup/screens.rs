@@ -204,14 +204,21 @@ impl SetupWizard {
 
     /// A abertura desfez um conserto que o app interrompeu ao cair: diz quais arquivos voltaram, nunca calado.
     fn recovered_notice(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
-        let (restored, not_stopped) = self.recovered.as_ref()?;
-        let mut lines: Vec<String> = (!restored.changed.is_empty())
-            .then(|| tr("setup_agent_recovered").replace("{arquivos}", &restored.changed.join(", "))).into_iter().collect();
+        let recovery = self.recovered.as_ref()?;
+        let restored = &recovery.restored;
+        let failed = !restored.errors.is_empty();
+        let mut lines: Vec<String> = Vec::new();
+        if recovery.skipped { lines.push(tr("setup_agent_recover_skipped")); }
+        if !restored.changed.is_empty() { lines.push(tr("setup_agent_recovered").replace("{arquivos}", &restored.changed.join(", "))); }
+        // O que não voltou fica listado (`restore_notes`), e fechar o aviso pára as tentativas sozinhas.
+        if failed { lines.push(tr("setup_agent_recover_failed")); }
         lines.extend(report::restore_notes(restored.head_moved.as_ref(), &restored.errors, false));
-        if *not_stopped { lines.push(tr("setup_agent_not_stopped")); }
+        if recovery.not_stopped { lines.push(tr("setup_agent_not_stopped")); }
+        let title = if failed { tr("setup_agent_recover_failed_title") }
+            else if recovery.skipped { tr("setup_agent_recover_skipped_title") } else { tr("setup_agent_recovered_title") };
         let close = Button::new("setup-agent-recovered-close").ghost().small().label(tr("close"))
-            .on_click(cx.listener(|w, _, _, cx| { w.recovered = None; cx.notify(); }));
-        Some(callout("setup-agent-recovered", tr("setup_agent_recovered_title"), lines, vec![close.into_any_element()]))
+            .on_click(cx.listener(|w, _, _, cx| w.dismiss_recovered(cx)));
+        Some(callout("setup-agent-recovered", title, lines, vec![close.into_any_element()]))
     }
 
     fn render_details(&self, id: &'static str, cx: &mut Context<Self>) -> Div {

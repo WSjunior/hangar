@@ -41,7 +41,25 @@ pub(crate) struct Snapshot {
     /// O ramo de antes do agente (`refs/heads/x`), `HEAD` se estava solto; vazio numa anotação antiga (não mexe no ramo).
     #[serde(default)]
     pub branch: String,
+    /// Operações do git em andamento antes do agente (`MERGE_HEAD`, `rebase-merge`…): só as que ele deixou são encerradas.
+    /// `None` numa anotação antiga: nenhuma é encerrada.
+    #[serde(default)]
+    pub states: Option<Vec<String>>,
+    /// Quando foi anotada (segundos Unix); 0 numa anotação antiga.
+    #[serde(default)]
+    pub created: u64,
+    /// Restaurações da abertura que falharam: na segunda o app pára de tentar sozinho.
+    #[serde(default)]
+    pub recover_failures: u32,
 }
+
+/// Operação em andamento (arquivo ou pasta no `.git`) e o comando que a esquece sem mexer em pasta e índice.
+const STATES: [(&str, &str); 5] = [("MERGE_HEAD", "merge"), ("CHERRY_PICK_HEAD", "cherry-pick"), ("REVERT_HEAD", "revert"),
+    ("rebase-merge", "rebase"), ("rebase-apply", "rebase")];
+/// Commits feitos até este tempo depois da anotação ainda contam como do agente (teto dele mais folga).
+const AGENT_WINDOW: u64 = 30 * 60;
+
+fn now_secs() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) }
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Restored {
@@ -93,7 +111,28 @@ impl Git {
         let same = std::fs::canonicalize(&top).ok().zip(std::fs::canonicalize(dir).ok()).is_some_and(|(a, b)| a == b);
         if same { Ok(top) } else { Err(format!("{}: not the repository root ({})", dir.display(), top.display())) }
     }
+
+    /// As operações de `STATES` em andamento agora.
+    fn states(&self, dir: &Path) -> Vec<String> {
+        STATES.iter().map(|(name, _)| *name).filter(|name| self.run(dir, &["rev-parse", "--git-path", name]).ok()
+            .is_some_and(|out| dir.join(String::from_utf8_lossy(&out).trim()).exists())).map(str::to_owned).collect()
+    }
 }
+
+/// Na abertura do app: a pasta seguiu depois do agente (a pessoa ou a atualização fez commit, trocou de ramo, apagou a
+/// pasta) se o HEAD não é o anotado nem só commits do tempo do agente em cima dele. Aí desfazer sozinho atropelaria.
+pub(crate) fn moved_on(s: &Snapshot) -> bool {
+    let Ok(git) = Git::new() else { return true };
+    let Ok(head) = git.head(&s.dir) else { return true };
+    if head == s.head { return false; }
+    if git.run(&s.dir, &["merge-base", "--is-ancestor", &s.head, &head]).is_err() { return true; }
+    let window = s.created..=s.created + AGENT_WINDOW;
+    let times = git.run(&s.dir, &["log", "--format=%ct", &format!("{}..{head}", s.head)]);
+    !times.is_ok_and(|t| String::from_utf8_lossy(&t).lines().all(|l| l.trim().parse::<u64>().is_ok_and(|c| window.contains(&c))))
+}
+
+/// Anotação com mais de um dia: a pasta já viveu demais desde então para desfazer sem a pessoa pedir.
+pub(crate) fn stale(s: &Snapshot) -> bool { now_secs().saturating_sub(s.created) > 24 * 60 * 60 }
 
 /// A pasta é a raiz do próprio repositório git: só aí o agente pode ser chamado (sem anotação ele não roda).
 pub(crate) fn own_repo(dir: &Path) -> bool { Git::new().and_then(|git| git.root(dir)).is_ok() }
@@ -118,7 +157,7 @@ pub(crate) fn snapshot(dir: &Path) -> Result<Snapshot, String> {
     let root = git.root(dir)?;
     let dir = root.as_path();
     let head = git.head(dir)?;
-    let branch = git.branch(dir);
+    let (branch, states) = (git.branch(dir), Some(git.states(dir)));
     let preserved = String::from_utf8_lossy(&git.run(dir, &["ls-files", "-o", "-i", "--exclude-standard", "--directory", "-z"])?)
         .split('\0').filter(|p| !p.is_empty()).map(str::to_owned).collect();
     let before = git.status(dir)?.into_iter().map(|(path, status)| {
@@ -128,16 +167,23 @@ pub(crate) fn snapshot(dir: &Path) -> Result<Snapshot, String> {
         let mode = file_mode(&dir.join(&path));
         (path, Entry { status, content, index_clean, index, mode })
     }).collect();
-    Ok(Snapshot { dir: dir.to_owned(), head, before, agent_pid: None, agent_started: String::new(), preserved, branch })
+    Ok(Snapshot { dir: dir.to_owned(), head, before, agent_pid: None, agent_started: String::new(), preserved, branch, states,
+        created: now_secs(), recover_failures: 0 })
 }
 
 pub(crate) fn restore(s: &Snapshot) -> Restored {
     let mut out = Restored::default();
     let git = match Git::new() { Ok(git) => git, Err(e) => { out.errors.push(e); return out; } };
-    // Merge deixado no meio: esquece o merge sem mexer em pasta e índice (`merge --quit`); os arquivos em conflito voltam
-    // abaixo como qualquer outra edição.
-    if git.run(&s.dir, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok()
-        && let Err(e) = git.run(&s.dir, &["merge", "--quit"]) { out.errors.push(e); return out; }
+    // Merge, rebase, cherry-pick ou revert que o AGENTE deixou no meio: esquecido sem mexer em pasta e índice (`--quit`);
+    // os arquivos voltam abaixo como qualquer outra edição. O que a pessoa já tinha em andamento fica.
+    if let Some(before) = &s.states {
+        let now = git.states(&s.dir);
+        let quit: BTreeSet<&str> = STATES.iter().filter(|(name, _)| now.iter().any(|n| n == name) && !before.iter().any(|b| b == name))
+            .map(|(_, command)| *command).collect();
+        for command in quit {
+            if let Err(e) = git.run(&s.dir, &[command, "--quit"]) { out.errors.push(e); return out; }
+        }
+    }
     let (agent_branch, agent_head) = (git.branch(&s.dir), git.head(&s.dir).unwrap_or_default());
     // Trocou de ramo: o HEAD volta ao ramo de antes (ou solto no commit de antes) sem tocar em pasta e índice; o ramo que
     // ele usou fica como ele deixou.
@@ -286,6 +332,13 @@ pub(crate) fn save_at(dir: &Path, snapshot: &Snapshot) -> std::io::Result<()> {
 }
 
 pub(crate) fn load_at(dir: &Path) -> Option<Snapshot> { serde_json::from_slice(&std::fs::read(dir.join(FILE)).ok()?).ok() }
+
+/// O app pára de tentar sozinho: a anotação vira `agent-snapshot.failed-<segundos>.json` (fica para quem quiser conferir)
+/// e deixa de abrir o assistente a cada início.
+pub(crate) fn archive_at(dir: &Path) -> Option<PathBuf> {
+    let to = dir.join(format!("agent-snapshot.failed-{}.json", now_secs()));
+    std::fs::rename(dir.join(FILE), &to).ok().map(|_| to)
+}
 
 /// Só a existência: na abertura do app, sem ler o conteúdo dos arquivos anotados.
 pub(crate) fn saved_at(dir: &Path) -> bool { dir.join(FILE).is_file() }
@@ -438,6 +491,72 @@ mod tests {
         assert_eq!(read(&dir, "install.sh").as_deref(), Some("echo base\n"));
         assert_eq!(status(&dir), before);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `lado` e o ramo de base mexem no mesmo `install.sh`: o merge de `lado` conflita.
+    fn conflicting_branches(name: &str) -> PathBuf {
+        let dir = repo(name);
+        let base = git_out(&dir, &["symbolic-ref", "--short", "HEAD"]);
+        sh(&dir, &["checkout", "-q", "-b", "lado"]);
+        std::fs::write(dir.join("install.sh"), "echo lado\n").unwrap();
+        sh(&dir, &["commit", "-q", "-am", "lado"]);
+        sh(&dir, &["checkout", "-q", &base]);
+        std::fs::write(dir.join("install.sh"), "echo base\n").unwrap();
+        sh(&dir, &["commit", "-q", "-am", "base 2"]);
+        dir
+    }
+
+    #[test]
+    fn a_merge_the_person_already_had_is_kept() {
+        let dir = conflicting_branches("premerge");
+        let merge = Command::new("git").arg("-C").arg(&dir).args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.hooksPath=/dev/null", "merge", "lado"])
+            .output().unwrap();
+        assert!(!merge.status.success());
+        let before = status(&dir);
+        let snap = snapshot(&dir).unwrap();
+        assert_eq!(snap.states.as_deref(), Some(&["MERGE_HEAD".to_owned()][..]));
+        std::fs::write(dir.join("README.md"), "do agente\n").unwrap();
+        let restored = restore(&snap);
+        assert!(restored.errors.is_empty(), "{:?}", restored.errors);
+        assert!(!git_out(&dir, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_empty(), "o merge da pessoa sumiu");
+        assert_eq!(read(&dir, "README.md").as_deref(), Some("leia\n"));
+        assert_eq!(status(&dir), before);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn launch_restore_is_skipped_when_the_folder_moved_on_or_is_old() {
+        let dir = repo("moved");
+        let mut snap = snapshot(&dir).unwrap();
+        assert!(!moved_on(&snap) && !stale(&snap));
+        // Commit do agente durante o conserto: ainda é desfeito na abertura.
+        std::fs::write(dir.join("install.sh"), "echo 2\n").unwrap();
+        sh(&dir, &["commit", "-q", "-am", "agente"]);
+        assert!(!moved_on(&snap));
+        // Um commit um dia depois (a pessoa ou a atualização): a pasta seguiu.
+        std::fs::write(dir.join("install.sh"), "echo 3\n").unwrap();
+        let later = format!("@{} +0000", snap.created + 24 * 60 * 60);
+        let out = Command::new("git").arg("-C").arg(&dir).args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.hooksPath=/dev/null", "commit", "-q", "-am", "depois"])
+            .env("GIT_COMMITTER_DATE", &later).output().unwrap();
+        assert!(out.status.success());
+        assert!(moved_on(&snap));
+        snap.created -= 2 * 24 * 60 * 60;
+        assert!(stale(&snap));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Pasta apagada: também não se desfaz sozinho.
+        assert!(moved_on(&snap));
+    }
+
+    #[test]
+    fn archived_annotation_stops_reopening() {
+        let (dir, state) = (repo("archive"), std::env::temp_dir().join(format!("hangar-repo-archive-{}", std::process::id())));
+        save_at(&state, &snapshot(&dir).unwrap()).unwrap();
+        assert!(saved_at(&state));
+        let archived = archive_at(&state).unwrap();
+        assert!(!saved_at(&state) && archived.is_file());
+        assert!(archived.file_name().unwrap().to_string_lossy().starts_with("agent-snapshot.failed-"));
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(state);
     }
 
     #[test]

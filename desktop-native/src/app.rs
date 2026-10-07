@@ -718,10 +718,16 @@ impl Hangar {
         let resume = setup::saved_run();
         let probe = saved.is_none() && resume.is_none() && !setup::demo() && setup::supported();
         match resume {
-            Some(state) => cx.defer_in(window, move |this: &mut Self, window, cx| this.open_setup(setup::Origin::Resume(state), window, cx)),
+            Some(state) => cx.defer_in(window, move |this: &mut Self, window, cx| {
+                setup::opening_at_launch();
+                this.open_setup(setup::Origin::Resume(state), window, cx)
+            }),
             None if setup::demo() => cx.defer_in(window, |this: &mut Self, window, cx| this.open_setup(setup::Origin::Menu, window, cx)),
             // Conserto do agente sem desfazer: o assistente abre e a recuperação dele devolve a pasta, com aviso.
-            None if setup::interrupted_fix() => cx.defer_in(window, |this: &mut Self, window, cx| this.open_setup(setup::Origin::Menu, window, cx)),
+            None if setup::interrupted_fix() => cx.defer_in(window, |this: &mut Self, window, cx| {
+                setup::opening_at_launch();
+                this.open_setup(setup::Origin::Menu, window, cx)
+            }),
             None if probe => cx.defer_in(window, |this: &mut Self, window, cx| this.start_entry(window, cx)),
             None => {}
         }

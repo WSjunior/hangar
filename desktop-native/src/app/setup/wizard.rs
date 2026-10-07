@@ -88,8 +88,7 @@ pub(crate) struct SetupWizard {
     /// O envio do relatório que leva a correção (reconferência falhou com mudança na pasta), pelo id da fila.
     pub(super) fix_sent: Option<u64>,
     /// O que a abertura desfez de um conserto que o app interrompeu ao cair; fica na tela até a pessoa fechar.
-    /// O `bool`: o agente que sobrou não pôde ser parado (sem identidade).
-    pub(super) recovered: Option<(repo::Restored, bool)>,
+    pub(super) recovered: Option<Recovery>,
     /// A recuperação ainda roda: um agente novo agora gravaria a anotação que ela apaga no fim.
     recovering: bool,
     /// "Consertar agora" da roda do mouse confirmado: a próxima instalação leva `-ConsertarRoda`.
@@ -227,6 +226,14 @@ fn stop_agent_process(pid: u32, started: &str) -> bool {
         run::kill(pid, started);
         if !wait_gone(pid, started, Duration::from_secs(3)) { crate::log_line(&format!("assistente: agente {pid} não saiu nem morto")); }
     }
+    // O líder saiu, mas um comando dele pode seguir no grupo e escrever na pasta depois de desfeita. O grupo é do agente:
+    // o líder foi conferido pela identidade logo acima.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while run::group_alive(pid) && Instant::now() < deadline {
+        run::kill_group(pid);
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if run::group_alive(pid) { crate::log_line(&format!("assistente: grupo do agente {pid} ainda vivo")); }
     true
 }
 
@@ -243,12 +250,44 @@ fn abandon_started(started: Started) {
     stop_and_restore(Some(pid), &started, Some(snapshot));
 }
 
-/// O app caiu com o agente rodando: pára quem sobrou e devolve a pasta pela anotação.
-fn recover_agent_edits() -> Option<(repo::Restored, bool)> {
-    let snapshot = repo::load_at(&run::state_dir()?)?;
+/// O que a abertura fez com um conserto interrompido; mostrado até a pessoa fechar o aviso.
+pub(crate) struct Recovery {
+    pub(super) restored: repo::Restored,
+    /// O agente que sobrou não pôde ser parado (sem identidade).
+    pub(super) not_stopped: bool,
+    /// Aberto sozinho com a pasta já seguindo em frente (ou anotação de mais de um dia): nada foi desfeito.
+    pub(super) skipped: bool,
+}
+
+/// Arquiva a anotação e registra: o assistente deixa de abrir sozinho por causa dela.
+fn archive_annotation(dir: &Path, why: &str) {
+    match repo::archive_at(dir) {
+        Some(to) => crate::log_line(&format!("assistente: anotação do conserto arquivada ({why}): {}", to.display())),
+        None => crate::log_line(&format!("assistente: anotação do conserto não arquivada ({why})")),
+    }
+}
+
+/// O app caiu com o agente rodando: pára quem sobrou e devolve a pasta pela anotação. Aberto sozinho na abertura do app
+/// (`at_launch`), não desfaz uma pasta que já seguiu em frente nem uma anotação velha: arquiva e avisa. A segunda
+/// restauração que falha também arquiva, para o assistente não abrir a cada início sem saída.
+fn recover_agent_edits(at_launch: bool) -> Option<Recovery> {
+    let dir = run::state_dir()?;
+    let snapshot = repo::load_at(&dir)?;
     let (pid, started) = (snapshot.agent_pid, snapshot.agent_started.clone());
+    if at_launch && (repo::stale(&snapshot) || repo::moved_on(&snapshot)) {
+        let not_stopped = pid.is_some_and(|pid| !stop_agent_process(pid, &started));
+        archive_annotation(&dir, "a pasta mudou depois do agente ou a anotação é velha");
+        return Some(Recovery { restored: repo::Restored::default(), not_stopped, skipped: true });
+    }
+    let mut kept = snapshot.clone();
     let (restored, not_stopped) = stop_and_restore(pid, &started, Some(snapshot));
-    Some((restored?, not_stopped))
+    let restored = restored?;
+    if !restored.errors.is_empty() {
+        kept.recover_failures += 1;
+        if kept.recover_failures >= 2 { archive_annotation(&dir, "segunda restauração com erro"); }
+        else if let Err(e) = repo::save_at(&dir, &kept) { crate::log_line(&format!("assistente: anotação sem contagem: {e}")); }
+    }
+    Some(Recovery { restored, not_stopped, skipped: false })
 }
 
 /// A seção do conserto no relatório: comandos, explicação, o diff do que foi desfeito e as notas.
@@ -281,12 +320,14 @@ impl SetupWizard {
             }
         }).detach();
         // O app caiu no meio de um conserto: pára o agente que sobrou e devolve a pasta, fora da thread da janela, e avisa.
-        let recovery = cx.background_executor().spawn(async move { recover_agent_edits() });
+        let at_launch = super::take_launch();
+        let recovery = cx.background_executor().spawn(async move { recover_agent_edits(at_launch) });
         cx.spawn(async move |this, cx| {
-            let restored = recovery.await;
+            let recovered = recovery.await;
             let _ = this.update(cx, |w, cx| {
                 w.recovering = false;
-                w.recovered = restored.filter(|(r, not_stopped)| *not_stopped || !r.changed.is_empty() || !r.errors.is_empty() || r.head_moved.is_some());
+                w.recovered = recovered.filter(|r| r.skipped || r.not_stopped || !r.restored.changed.is_empty()
+                    || !r.restored.errors.is_empty() || r.restored.head_moved.is_some());
                 cx.notify();
             });
         }).detach();
@@ -898,6 +939,16 @@ impl SetupWizard {
         if let Some(first) = self.agents_ready.first().copied() { self.details_open = true; self.ask_agent(first, cx); }
     }
 
+    /// "Fechar" do aviso da recuperação: com algo que não voltou, a anotação é arquivada — senão o assistente abriria a
+    /// cada início sem saída. Com um agente novo já chamado, a anotação é a dele: fica.
+    pub(super) fn dismiss_recovered(&mut self, cx: &mut Context<Self>) {
+        let failed = self.recovered.take().is_some_and(|r| !r.restored.errors.is_empty());
+        if failed && self.agent.is_none() && let Some(dir) = run::state_dir() {
+            cx.background_executor().spawn(async move { archive_annotation(&dir, "aviso fechado com a pasta sem voltar toda") }).detach();
+        }
+        cx.notify();
+    }
+
     pub(super) fn ask_agent(&mut self, agent: Agent, cx: &mut Context<Self>) {
         // Um agente por falha; nunca durante a recuperação de um conserto interrompido (ela apaga a anotação no fim).
         if self.agent.is_some() || self.refreshing || self.recovering || self.failure.is_none() { return; }
@@ -1024,13 +1075,27 @@ impl SetupWizard {
             secrets.extend(local::read_install(&dest).token);
             base.map(|base| report::with_agent(&base, &section, &report::Secrets::here(secrets)))
         });
+        let outcome = if fixed { Outcome::Consertado } else { Outcome::Aberto };
+        // Se o assistente fechar antes do texto ficar pronto, o envio sai daqui mesmo, com a escolha da caixa de agora.
+        let (fallback, runtime) = (self.report_about.clone().filter(|_| self.send), self.runtime.clone());
         cx.spawn(async move |this, cx| {
             let text = task.await;
-            let _ = this.update(cx, |w, cx| {
-                if let Some(text) = text { w.report = Some(text); }
-                let sent = w.send_report(if fixed { Outcome::Consertado } else { Outcome::Aberto }, Some(agent), cx);
+            let delivered = this.update(cx, |w, cx| {
+                if let Some(text) = text.clone() { w.report = Some(text); }
+                let sent = w.send_report(outcome, Some(agent), cx);
                 w.fix_sent = sent.filter(|_| !fixed && changed);
                 cx.notify();
+            }).is_ok();
+            if delivered { return; }
+            let Some(about) = fallback else { return };
+            let Some(text) = text else {
+                crate::log_line("assistente: relatório do conserto não enviado (assistente fechado antes de montar)");
+                return;
+            };
+            let payload = report::payload(about.screen, about.code, outcome, Some(agent.id()), text);
+            runtime.spawn(async move {
+                let result = report::send(payload).await;
+                crate::log_line(&format!("assistente: relatório do conserto enviado ao fechar: {}", result.err().unwrap_or_else(|| "ok".into())));
             });
         }).detach();
         cx.notify();
