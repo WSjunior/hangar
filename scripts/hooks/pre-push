@@ -113,7 +113,10 @@ fi
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX
 raiz="$(git rev-parse --show-toplevel)" || exit 1
 cd "$raiz" || exit 1
-[[ -x scripts/verificar-local ]] || exit 0   # checkout de antes do script: nada a exigir
+if [[ ! -x scripts/verificar-local ]]; then   # checkout de antes do script: nada a exigir
+    echo "pre-push: sem scripts/verificar-local executável neste checkout; verificação local não exigida." >&2
+    exit 0
+fi
 
 falta=0
 for s in "${enviados[@]}"; do

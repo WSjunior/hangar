@@ -39,7 +39,8 @@ erro() { echo "verificar-local: $*" >&2; exit 2; }
 # push leva, com merge incluso: o merge de outra branch muda o resultado e entra na conta.
 base_padrao() {
     local c="$1" velho
-    velho="$(git rev-list --first-parent "$c" --not --remotes | tail -1)"
+    velho="$(git rev-list --first-parent "$c" --not --remotes)" || erro "não consegui listar os commits de $c"
+    velho="${velho##*$'\n'}"
     if [[ -z "$velho" ]]; then echo "$c"; return; fi
     git rev-parse -q --verify "$velho^" 2>/dev/null || git hash-object -t tree /dev/null
 }
@@ -199,12 +200,12 @@ ambiente_limpo() {
         VERIFICAR_CACHE="$(dirname "$FIXO")" "${CARGO_ENV[@]}")
 }
 
-# Mata a árvore do passo se o disco cair abaixo de 3 GB: build cheio de saída já encheu a VM.
+# Mata a árvore do passo se o disco cair abaixo de 2 GB: build cheio de saída já encheu a VM.
 vigiar_disco() {   # $1 = pid do passo, $2 = log
     local livre
     while kill -0 "$1" 2>/dev/null; do
         livre="$(df -Pk . | awk 'NR==2 {print int($4/1048576)}')"
-        if (( livre < 3 )); then
+        if (( livre < 2 )); then
             echo "verificar-local: disco com ${livre} GB livres, passo interrompido" >> "$2"
             if [[ "$SO" == windows ]]; then taskkill //F //T //PID "$(cat "/proc/$1/winpid")" >/dev/null 2>&1
             else kill -- "-$1" 2>/dev/null; fi
@@ -222,7 +223,7 @@ executar() {   # $1 = so, $2 = sha, $3 = bundle ("-" = sem bundle), resto = pass
     if [[ ! -d "$dir/.git" ]]; then git init -q "$dir" || return 2; fi
     cd "$dir" || return 2
     if [[ "$bundle" != - ]]; then
-        git fetch -q --no-tags "$bundle" refs/verificar/alvo:refs/verificar/alvo || return 2
+        git fetch -q --no-tags "$bundle" +refs/verificar/alvo:refs/verificar/alvo || return 2
         rm -f "$bundle"
     elif [[ -n "${ORIGEM:-}" ]]; then
         git fetch -q --no-tags "$ORIGEM" "$sha" || return 2
@@ -233,7 +234,7 @@ executar() {   # $1 = so, $2 = sha, $3 = bundle ("-" = sem bundle), resto = pass
     # Cada arquivo de teste vira um binário; com depuração completa o target passa de 27 GB no Linux
     # e enche o disco da VM. Só as linhas basta para o backtrace, e o teste roda igual.
     CARGO_ENV=(CARGO_BUILD_JOBS=4 CARGO_PROFILE_DEV_DEBUG=line-tables-only)
-    local livre minimo=12
+    local livre minimo=4
     livre="$(df -Pk . | awk 'NR==2 {print int($4/1048576)}')"
     if (( livre < minimo )); then
         echo "=== resumo $SO ${sha:0:10}"
@@ -312,12 +313,20 @@ vm_rodar() {   # $1 = sha, resto = passos; saída inteira no stdout
         nome="in-${sha:0:10}-$$.bundle"
         bundle="$ESTADO/$nome"
         if [[ -n "$tem" ]] && git -C "$FIXO" cat-file -e "$tem^{commit}" 2>/dev/null; then
+            # Commit que a VM já tem (ancestral do último verificado lá): nada a mandar.
+            git -C "$FIXO" merge-base --is-ancestor "$sha" "$tem" && nome=-
+        fi
+        if [[ "$nome" == - ]]; then
+            :
+        elif [[ -n "$tem" ]] && git -C "$FIXO" cat-file -e "$tem^{commit}" 2>/dev/null; then
             git -C "$FIXO" bundle create -q "$bundle" refs/verificar/alvo --not "$tem" || return 2
         else
             git -C "$FIXO" bundle create -q "$bundle" refs/verificar/alvo || return 2
         fi
-        scp -q -o BatchMode=yes "$bundle" "$VM:$VM_WIN/$nome" 2>/dev/null || { rm -f "$bundle"; echo "scp para $VM falhou"; return 2; }
-        rm -f "$bundle"
+        if [[ "$nome" != - ]]; then
+            scp -q -o BatchMode=yes "$bundle" "$VM:$VM_WIN/$nome" 2>/dev/null || { rm -f "$bundle"; echo "scp para $VM falhou"; return 2; }
+            rm -f "$bundle"
+        fi
     fi
     # Mutex do sistema: some com o processo, então SSH caído não deixa a fila presa. Prioridade
     # abaixo do normal passa para os filhos (cargo, pytest) e não disputa com o Hangar da VM.
@@ -369,13 +378,16 @@ done
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX
 sha="$(git rev-parse --verify -q "$commit^{commit}")" || erro "commit inválido: $commit"
 ORIGEM="$(cd "$(git rev-parse --git-common-dir)" && pwd)"
-VM="$(git config hangar.verificarWindows || true)"
+# rc 1 do git config é "não configurado"; acima disso, erro de leitura, que não pode virar "sem VM".
+VM="$(git config hangar.verificarWindows)"; (( $? > 1 )) && erro "não consegui ler hangar.verificarWindows"
 [[ -z "$base" ]] && base="$(base_padrao "$sha")"
 
 if (( tudo )); then
     plano_lin="$TODOS_LINUX"; plano_win="$TODOS_WINDOWS"
 else
-    plano="$(git diff --name-only --no-renames "$base" "$sha" | classificar)"
+    # quotepath=off: caminho com acento sairia entre aspas e escaparia dos padrões.
+    arquivos="$(git -c core.quotepath=off diff --name-only --no-renames "$base" "$sha")" || erro "não consegui comparar $base com $sha"
+    plano="$(classificar <<< "$arquivos")"
     plano_lin="$(sed -n 's/^linux: //p' <<< "$plano")"
     plano_win="$(sed -n 's/^windows: //p' <<< "$plano")"
 fi
@@ -425,10 +437,10 @@ mkdir -p "$ESTADO/logs"
 rc_lin=0 rc_win=0
 exec 3>&2
 (
-    exec 9>"$TRAVA"
+    exec 9>"$TRAVA" || exit 10
     if ! flock -n 9; then
         echo "verificar-local: na fila, outra verificação roda nesta máquina…" >&2
-        flock 9
+        flock 9 || exit 10
     fi
     # Busca primeiro, sob a trava: o Windows sai do mesmo clone.
     git -C "$FIXO" fetch -q --no-tags "$ORIGEM" "$sha" || exit 10
@@ -448,9 +460,11 @@ exec 3>&2
     if [[ -n "$win_pid" ]]; then
         wait "$win_pid" || rw=$?
         echo
-        sed -n '/^--- windows\//,$p' "$ESTADO/logs/${sha:0:10}-windows.log"
+        sed -n '/^\(--- windows\/\|=== resumo windows\)/,$p' "$ESTADO/logs/${sha:0:10}-windows.log"
+        # Sem resumo, ou com falha no resumo, não passou, seja qual for o código que o SSH devolveu.
         grep -q '^=== resumo windows' "$ESTADO/logs/${sha:0:10}-windows.log" || \
-            { echo "=== windows não terminou (rc $rw):"; tail -20 "$ESTADO/logs/${sha:0:10}-windows.log"; }
+            { echo "=== windows não terminou (rc $rw):"; tail -20 "$ESTADO/logs/${sha:0:10}-windows.log"; rw=1; }
+        grep -q '^  FALHOU' "$ESTADO/logs/${sha:0:10}-windows.log" && rw=1
     fi
     exit $(( (rl ? 1 : 0) | (rw ? 2 : 0) ))
 )

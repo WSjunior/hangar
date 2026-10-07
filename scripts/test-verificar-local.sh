@@ -33,5 +33,9 @@ caso ".github/workflows/server.yml" "" ""
 caso "docs/migracao-rust/pedidos/x.md" "" ""
 caso "docs/decisoes/instalacao.md" "backend" ""
 
+# Erro no cálculo do plano nunca vira "nada a verificar".
+"$V" --plano --base ref-que-nao-existe >/dev/null 2>&1 && { echo "FALHOU --plano com base inválida saiu 0"; falhou=1; }
+"$V" --exigir 0000000000000000000000000000000000000000 >/dev/null 2>&1 && { echo "FALHOU --exigir com commit inválido saiu 0"; falhou=1; }
+
 (( falhou )) && exit 1
 echo "ok: classificação do verificar-local"

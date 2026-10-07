@@ -490,7 +490,8 @@ os passos do que mudou, e árvore que já passou não roda nada.
 - **Depuração só de linhas** (`CARGO_PROFILE_DEV_DEBUG=line-tables-only`). Cada arquivo de teste
   vira um binário; com depuração completa o target do `crates/` tinha 27 GB no Linux, e na VM
   encheu os 14 GB livres do C: no meio da compilação. Com só linhas: 11 GB. No Windows também sem
-  incremental, mínimo de 12 GB livres para começar e um vigia que interrompe o passo abaixo de 3 GB.
+  incremental: o target lá fica em 5,4 GB e mora na VM entre rodadas. Mínimo de 4 GB livres para
+  começar e um vigia que interrompe o passo abaixo de 2 GB.
 - **Ambiente de runner**: HOME vazio, `TMUX_TMPDIR` e `XDG_RUNTIME_DIR` próprios, `CI=1`, só o PATH
   das ferramentas. O `omp` é o da versão fixada no `ci.yml`, baixado com sha256; sem ele 20 casos
   falham. A pasta temporária do pytest fica em `/var/tmp`, fora do HOME e fora do tmpfs.
