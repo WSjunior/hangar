@@ -287,6 +287,11 @@ impl RuntimeRegistry {
         };
         Some(WriteTarget { key,generation,provider,terminal,healthy,handle })
     }
+    /// A entrada mais nova do nome é de terminal? Sem retrato: serve a decisão que vem antes da porta.
+    pub async fn is_terminal(&self,name:&str) -> bool {
+        self.entries.lock().await.values().filter(|e|e.name==name).max_by_key(|e|e.generation)
+            .is_some_and(|e|matches!(e.handle,EntryHandle::Terminal {..}))
+    }
     /// Sessão do ator de entrada terminal de chave `key`.
     pub async fn terminal_name(&self,key:&str) -> Option<String> {
         match &self.entries.lock().await.get(key)?.handle { EntryHandle::Terminal {target,..}=>Some(target.name.clone()), EntryHandle::Headless(_)=>None }

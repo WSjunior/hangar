@@ -50,7 +50,14 @@ impl Ctx {
 
 /// Envelope do `HTTPException(detail=erro(...))` do Python (`mensagens.py`).
 pub(crate) fn detail(status: StatusCode, code: &str, msg: &str, params: Value) -> Response {
-    let body = json!({"detail": {"code": code, "params": params, "msg": msg}});
+    json_response(status, detail_body(code, msg, params))
+}
+
+pub fn detail_body(code: &str, msg: &str, params: Value) -> Value {
+    json!({"detail": {"code": code, "params": params, "msg": msg}})
+}
+
+pub(crate) fn json_response(status: StatusCode, body: Value) -> Response {
     (status, [(header::CONTENT_TYPE, "application/json")], body.to_string()).into_response()
 }
 
@@ -61,7 +68,7 @@ pub async fn enter_then_find(runtime: &RuntimeRegistry, name: &str, wait: Durati
 }
 
 /// Nome da sessão em `/api/sessions/{name}/...`, já sem o escape da URL.
-fn session_name(path: &str) -> Option<String> {
+pub(crate) fn session_name(path: &str) -> Option<String> {
     let raw = path.strip_prefix("/api/sessions/")?.split('/').next().filter(|n| !n.is_empty())?;
     percent_decode_str(raw).decode_utf8().ok().map(|n| n.into_owned())
 }

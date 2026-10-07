@@ -4951,7 +4951,8 @@ async def steer_session(name: str, body: InputBody | None = None):
             sent = await adapter.steer_queue(name)
             return {"ok": True, "promoted": False, "confirmed": len(sent),
                     "queued_ids": ["queued-" + entry_id for entry_id in sent]}
-        except RuntimeError as e:
+        except (RuntimeError, ValueError) as e:
+            # ValueError = o ator recusou (sem turno em voo); sem este ramo virava 500.
             raise HTTPException(409, detail=erro("erro_sem_turno", str(e))) from None
         except OSError as e:
             # Processo morreu entre a checagem e a escrita: a mensagem continua na fila.

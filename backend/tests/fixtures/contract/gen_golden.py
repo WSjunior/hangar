@@ -586,6 +586,160 @@ def preview_rows() -> dict:
     return {"panes": panes, "sidecars": sidecars, "committed": committed}
 
 
+# ── /input e /steer: o corpo HTTP que o Python devolve para cada resposta do ator ─────────────────
+# Chama o `input_prompt` e o `steer_session` de verdade, com um coordenador falso que responde a
+# disposição do caso. O Rust lê estes arquivos e tem de responder o mesmo corpo e o mesmo código.
+# Divergência deliberada: /steer sem terminal recusado pelo ator vira 409 `erro_sem_turno` (antes o
+# ValueError virava 500; a rota do Python foi corrigida junto).
+INPUT_OP = "OP"
+# (nome, terminal, texto, steer, resposta, fila-promovida). Resposta é (disposição, payload) ou o
+# texto da exceção que o ator levanta; fila-promovida é a resposta do `steer_queue`, quando ele roda.
+INPUT_CASES = [
+    ("headless_accepted", False, "oi", False, ("accepted", {}), None),
+    ("headless_accepted_native", False, "oi", False, ("accepted", {"native": True}), None),
+    ("headless_accepted_slash", False, "/model opus", False, ("accepted", {}), None),
+    ("headless_deferred", False, "oi", False, ("deferred", {}), None),
+    ("headless_unknown", False, "oi", False, ("unknown", {}), None),
+    ("headless_unknown_transport_lost", False, "oi", False,
+     ("unknown", {"transport_lost": True, "code": "transport_lost"}), None),
+    ("headless_rejected", False, "oi", False, ("rejected", {}), None),
+    ("headless_op_error", False, "oi", False, "runtime_closed: ator saiu", None),
+    ("headless_steer_accepted", False, "oi", True, ("accepted", {}), None),
+    ("headless_steer_deferred_promoted", False, "oi", True, ("deferred", {}), ("accepted", {"ids": [INPUT_OP]})),
+    ("headless_steer_deferred_other_ids", False, "oi", True, ("deferred", {}), ("accepted", {"ids": ["outro"]})),
+    ("headless_steer_deferred_rejected", False, "oi", True, ("deferred", {}), ("rejected", {"error": "sem turno"})),
+    ("headless_steer_deferred_unknown", False, "oi", True, ("deferred", {}), ("unknown", {})),
+    ("headless_steer_deferred_op_error", False, "oi", True, ("deferred", {}), "runtime_closed: ator saiu"),
+    ("headless_steer_slash_deferred", False, "/model", True, ("deferred", {}), None),
+    ("headless_steer_unknown", False, "oi", True, ("unknown", {}), None),
+    ("terminal_accepted", True, "oi", False, ("accepted", {}), None),
+    ("terminal_accepted_native", True, "oi", False, ("accepted", {"native": True}), None),
+    ("terminal_accepted_slash", True, "/model", False, ("accepted", {}), None),
+    ("terminal_deferred_text", True, "oi", False, ("deferred", {}), None),
+    ("terminal_deferred_slash_coded", True, "/model opus", False, ("deferred", {"code": "busy"}), None),
+    ("terminal_deferred_slash_plain", True, "  /model", False, ("deferred", {}), None),
+    ("terminal_unknown_text", True, "oi", False, ("unknown", {}), None),
+    ("terminal_unknown_text_coded", True, "oi", False, ("unknown", {"code": "pane_gone"}), None),
+    ("terminal_unknown_text_steer", True, "oi", True, ("unknown", {}), None),
+    ("terminal_unknown_slash", True, "/model", False, ("unknown", {}), None),
+    ("terminal_rejected", True, "oi", False, ("rejected", {}), None),
+    ("terminal_steer_accepted", True, "oi", True, ("accepted", {}), None),
+    ("terminal_steer_deferred", True, "oi", True, ("deferred", {}), None),
+    ("terminal_op_error", True, "oi", False, "terminal_closed: pane saiu", None),
+]
+
+# (nome, terminal, corpo, resposta do control, resposta do confirm). Corpo None = pedido sem corpo.
+STEER_CASES = [
+    ("headless_text_accepted", False, "oriente", ("accepted", {}), None),
+    ("headless_text_rejected_coded", False, "oriente", ("rejected", {"error": "sem turno"}), None),
+    ("headless_text_rejected_plain", False, "oriente", ("rejected", {}), None),
+    ("headless_text_unknown", False, "oriente", ("unknown", {}), None),
+    ("headless_text_deferred", False, "oriente", ("deferred", {}), None),
+    ("headless_text_op_error", False, "oriente", "runtime_closed: ator saiu", None),
+    ("headless_queue_accepted", False, None, ("accepted", {"ids": ["a", "b"]}), None),
+    ("headless_queue_empty", False, None, ("accepted", {"ids": []}), None),
+    ("headless_queue_rejected", False, None, ("rejected", {}), None),
+    ("headless_queue_op_error", False, None, "runtime_closed: ator saiu", None),
+    ("terminal_promoted", True, None, ("accepted", {}), {"confirmed": 2}),
+    ("terminal_not_promoted", True, None, ("accepted", {"promoted": False}), {"confirmed": 0}),
+    ("terminal_no_confirmed_count", True, None, ("accepted", {}), {}),
+    ("terminal_body_is_ignored", True, "oriente", ("accepted", {}), {"confirmed": 1}),
+    ("terminal_deferred", True, None, ("deferred", {}), None),
+    ("terminal_rejected", True, None, ("rejected", {}), None),
+    ("terminal_unknown", True, None, ("unknown", {}), None),
+]
+
+
+def session_write_rows() -> tuple[list, list]:
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+    from app import api, runtime_coordinator
+    from app.runtime_adapter import RuntimeAdapter, RuntimeView
+
+    # O envio com terminal roda numa thread e fala com o coordenador pelo loop dele (`run_sync`).
+    loop = asyncio.new_event_loop()
+    threading.Thread(target=loop.run_forever, daemon=True).start()
+
+    class Owner:
+        instance = "runtime"
+        legacy = object()
+
+        def __init__(self, terminal, main, queue=None, confirm=None):
+            self.terminal, self.main, self.queue, self.confirm, self.loop = terminal, main, queue, confirm, loop
+
+        def slot(self, name):
+            return SimpleNamespace(binding=SimpleNamespace(provider="claude", meta={"terminal": {"pane": "%1"}} if self.terminal else {}))
+
+        def managed_runtime(self, name):
+            return True
+
+        async def prepare_session(self, name, provider, *, launch=False, engine_models=None):
+            return True
+
+        async def op(self, name, command, operation_id):
+            if command["kind"] == "confirm":
+                return self.confirm or {}
+            chosen = self.queue if command["kind"] == "control" and command["control"] == "steer_queue" and self.queue else self.main
+            if isinstance(chosen, str):
+                raise RuntimeError(chosen)
+            return {"operation_id": operation_id, "disposition": chosen[0], "payload": chosen[1]}
+
+    diary = []
+    api.diag.registrar = lambda event, level="ok", **fields: diary.append({"event": event, "code": fields.get("codigo")})
+    api.uuid = SimpleNamespace(uuid4=lambda: SimpleNamespace(hex=INPUT_OP))
+    api._recusa_orq = lambda name: None
+    api._session_exists = lambda name: True
+    api._provider_of = lambda name: "claude"
+    api._pane_info = lambda name: ("claude", "%1")
+
+    def as_json(value):
+        return None if value is None else value if isinstance(value, str) else {"disposition": value[0], "payload": value[1]}
+
+    async def run(call, terminal, owner):
+        runtime_coordinator._current = owner
+        api._headless = lambda name: not terminal
+        adapter = RuntimeAdapter("claude")
+        adapter.view = lambda name, mutating=False: RuntimeView("k", 1, 1, {})
+        api.get_adapter = lambda key: SimpleNamespace(
+            steer=lambda name, text: adapter.dispatch("steer", name, {"text": text}),
+            steer_queue=lambda name, *, entry_id=None: adapter.dispatch("steer_queue", name, {"entry_id": entry_id}))
+        diary.clear()
+        try:
+            return {"status": 200, "body": await call()}
+        except HTTPException as exc:
+            return {"status": exc.status_code, "body": {"detail": exc.detail}}
+        except api.TerminalControlError as exc:
+            response = await api.terminal_control_failed(None, exc)
+            return {"status": response.status_code, "body": json.loads(response.body)}
+
+    async def main():
+        inputs, steers = [], []
+        for name, terminal, text, steer, reply, queue in INPUT_CASES:
+            expect = await run(lambda: api.input_prompt("s", api.InputBody(text=text, steer=steer)),
+                               terminal, Owner(terminal, reply, queue))
+            inputs.append({"name": name, "terminal": terminal, "text": text, "steer": steer, "reply": as_json(reply),
+                           "queue": as_json(queue), "expect": expect, "diary": list(diary)})
+        for name, terminal, text, reply, confirm in STEER_CASES:
+            body = None if text is None else api.InputBody(text=text)
+            expect = await run(lambda: api.steer_session("s", body), terminal, Owner(terminal, reply, None, confirm))
+            steers.append({"name": name, "terminal": terminal, "text": text, "reply": as_json(reply),
+                           "confirm": confirm, "expect": expect})
+        return inputs, steers
+
+    return asyncio.run(main())
+
+
+def write_session_write() -> None:
+    out = HERE / "session_write"
+    out.mkdir(parents=True, exist_ok=True)
+    inputs, steers = session_write_rows()
+    for name, rows in (("input.json", inputs), ("steer.json", steers)):
+        (out / name).write_text(json.dumps(rows, ensure_ascii=True, indent=1) + "\n", encoding="utf-8")
+
+
 def main() -> None:
     claude = TRANSCRIPTS / "claude.jsonl"
     rewrite = TRANSCRIPTS / "claude_rewrite_surrogate.jsonl"
@@ -611,6 +765,7 @@ def main() -> None:
     write_golden("isotime.json", [[s, _ts({"timestamp": s})] for s in ISO])
     write_golden("ask_question.json", ask_rows())
     write_golden("preview.json", preview_rows())
+    write_session_write()
 
 
 if __name__ == "__main__":

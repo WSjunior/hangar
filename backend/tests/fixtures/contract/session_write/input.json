@@ -1,0 +1,753 @@
+[
+ {
+  "name": "headless_accepted",
+  "terminal": false,
+  "text": "oi",
+  "steer": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "queue": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "delivered": true,
+    "steered": false,
+    "native": false
+   }
+  },
+  "diary": []
+ },
+ {
+  "name": "headless_accepted_native",
+  "terminal": false,
+  "text": "oi",
+  "steer": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {
+    "native": true
+   }
+  },
+  "queue": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "delivered": true,
+    "steered": false,
+    "native": true
+   }
+  },
+  "diary": []
+ },
+ {
+  "name": "headless_accepted_slash",
+  "terminal": false,
+  "text": "/model opus",
+  "steer": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "queue": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "delivered": true,
+    "steered": false,
+    "native": false
+   }
+  },
+  "diary": []
+ },
+ {
+  "name": "headless_deferred",
+  "terminal": false,
+  "text": "oi",
+  "steer": false,
+  "reply": {
+   "disposition": "deferred",
+   "payload": {}
+  },
+  "queue": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "delivered": false,
+    "steered": false,
+    "native": false
+   }
+  },
+  "diary": []
+ },
+ {
+  "name": "headless_unknown",
+  "terminal": false,
+  "text": "oi",
+  "steer": false,
+  "reply": {
+   "disposition": "unknown",
+   "payload": {}
+  },
+  "queue": null,
+  "expect": {
+   "status": 400,
+   "body": {
+    "detail": {
+     "code": "erro_envio_falhou",
+     "params": {
+      "erro": "resultado incerto; entrada conservada sem reenvio"
+     },
+     "msg": "resultado incerto; entrada conservada sem reenvio"
+    }
+   }
+  },
+  "diary": [
+   {
+    "event": "runtime.send_failed",
+    "code": "RuntimeError"
+   }
+  ]
+ },
+ {
+  "name": "headless_unknown_transport_lost",
+  "terminal": false,
+  "text": "oi",
+  "steer": false,
+  "reply": {
+   "disposition": "unknown",
+   "payload": {
+    "transport_lost": true,
+    "code": "transport_lost"
+   }
+  },
+  "queue": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "delivered": false,
+    "steered": false,
+    "native": false
+   }
+  },
+  "diary": [
+   {
+    "event": "runtime.send_uncertain",
+    "code": "transport_lost"
+   }
+  ]
+ },
+ {
+  "name": "headless_rejected",
+  "terminal": false,
+  "text": "oi",
+  "steer": false,
+  "reply": {
+   "disposition": "rejected",
+   "payload": {}
+  },
+  "queue": null,
+  "expect": {
+   "status": 400,
+   "body": {
+    "detail": {
+     "code": "erro_envio_falhou",
+     "params": {
+      "erro": "entrada recusada pelo runtime"
+     },
+     "msg": "entrada recusada pelo runtime"
+    }
+   }
+  },
+  "diary": [
+   {
+    "event": "runtime.send_failed",
+    "code": "RuntimeError"
+   }
+  ]
+ },
+ {
+  "name": "headless_op_error",
+  "terminal": false,
+  "text": "oi",
+  "steer": false,
+  "reply": "runtime_closed: ator saiu",
+  "queue": null,
+  "expect": {
+   "status": 400,
+   "body": {
+    "detail": {
+     "code": "erro_envio_falhou",
+     "params": {
+      "erro": "runtime_closed: ator saiu"
+     },
+     "msg": "runtime_closed: ator saiu"
+    }
+   }
+  },
+  "diary": [
+   {
+    "event": "runtime.send_failed",
+    "code": "RuntimeError"
+   }
+  ]
+ },
+ {
+  "name": "headless_steer_accepted",
+  "terminal": false,
+  "text": "oi",
+  "steer": true,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "queue": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "delivered": true,
+    "steered": false,
+    "native": false
+   }
+  },
+  "diary": []
+ },
+ {
+  "name": "headless_steer_deferred_promoted",
+  "terminal": false,
+  "text": "oi",
+  "steer": true,
+  "reply": {
+   "disposition": "deferred",
+   "payload": {}
+  },
+  "queue": {
+   "disposition": "accepted",
+   "payload": {
+    "ids": [
+     "OP"
+    ]
+   }
+  },
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "delivered": true,
+    "steered": true,
+    "native": false
+   }
+  },
+  "diary": []
+ },
+ {
+  "name": "headless_steer_deferred_other_ids",
+  "terminal": false,
+  "text": "oi",
+  "steer": true,
+  "reply": {
+   "disposition": "deferred",
+   "payload": {}
+  },
+  "queue": {
+   "disposition": "accepted",
+   "payload": {
+    "ids": [
+     "outro"
+    ]
+   }
+  },
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "delivered": false,
+    "steered": false,
+    "native": false
+   }
+  },
+  "diary": []
+ },
+ {
+  "name": "headless_steer_deferred_rejected",
+  "terminal": false,
+  "text": "oi",
+  "steer": true,
+  "reply": {
+   "disposition": "deferred",
+   "payload": {}
+  },
+  "queue": {
+   "disposition": "rejected",
+   "payload": {
+    "error": "sem turno"
+   }
+  },
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "delivered": false,
+    "steered": false,
+    "native": false
+   }
+  },
+  "diary": []
+ },
+ {
+  "name": "headless_steer_deferred_unknown",
+  "terminal": false,
+  "text": "oi",
+  "steer": true,
+  "reply": {
+   "disposition": "deferred",
+   "payload": {}
+  },
+  "queue": {
+   "disposition": "unknown",
+   "payload": {}
+  },
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "delivered": false,
+    "steered": false,
+    "native": false
+   }
+  },
+  "diary": []
+ },
+ {
+  "name": "headless_steer_deferred_op_error",
+  "terminal": false,
+  "text": "oi",
+  "steer": true,
+  "reply": {
+   "disposition": "deferred",
+   "payload": {}
+  },
+  "queue": "runtime_closed: ator saiu",
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "delivered": false,
+    "steered": false,
+    "native": false
+   }
+  },
+  "diary": []
+ },
+ {
+  "name": "headless_steer_slash_deferred",
+  "terminal": false,
+  "text": "/model",
+  "steer": true,
+  "reply": {
+   "disposition": "deferred",
+   "payload": {}
+  },
+  "queue": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "delivered": false,
+    "steered": false,
+    "native": false
+   }
+  },
+  "diary": []
+ },
+ {
+  "name": "headless_steer_unknown",
+  "terminal": false,
+  "text": "oi",
+  "steer": true,
+  "reply": {
+   "disposition": "unknown",
+   "payload": {}
+  },
+  "queue": null,
+  "expect": {
+   "status": 400,
+   "body": {
+    "detail": {
+     "code": "erro_envio_falhou",
+     "params": {
+      "erro": "resultado incerto; entrada conservada sem reenvio"
+     },
+     "msg": "resultado incerto; entrada conservada sem reenvio"
+    }
+   }
+  },
+  "diary": [
+   {
+    "event": "runtime.send_failed",
+    "code": "RuntimeError"
+   }
+  ]
+ },
+ {
+  "name": "terminal_accepted",
+  "terminal": true,
+  "text": "oi",
+  "steer": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "queue": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "delivered": true,
+    "steered": false,
+    "native": false
+   }
+  },
+  "diary": []
+ },
+ {
+  "name": "terminal_accepted_native",
+  "terminal": true,
+  "text": "oi",
+  "steer": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {
+    "native": true
+   }
+  },
+  "queue": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "delivered": true,
+    "steered": false,
+    "native": true
+   }
+  },
+  "diary": []
+ },
+ {
+  "name": "terminal_accepted_slash",
+  "terminal": true,
+  "text": "/model",
+  "steer": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "queue": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "delivered": true,
+    "steered": false,
+    "native": false
+   }
+  },
+  "diary": []
+ },
+ {
+  "name": "terminal_deferred_text",
+  "terminal": true,
+  "text": "oi",
+  "steer": false,
+  "reply": {
+   "disposition": "deferred",
+   "payload": {}
+  },
+  "queue": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "delivered": false,
+    "steered": false,
+    "native": false
+   }
+  },
+  "diary": []
+ },
+ {
+  "name": "terminal_deferred_slash_coded",
+  "terminal": true,
+  "text": "/model opus",
+  "steer": false,
+  "reply": {
+   "disposition": "deferred",
+   "payload": {
+    "code": "busy"
+   }
+  },
+  "queue": null,
+  "expect": {
+   "status": 400,
+   "body": {
+    "detail": {
+     "code": "erro_comando_nao_executado",
+     "params": {
+      "comando": "/model",
+      "motivo": "busy"
+     },
+     "msg": "/model n\u00e3o foi executado: o terminal n\u00e3o aceitou agora (busy). Mande de novo."
+    }
+   }
+  },
+  "diary": [
+   {
+    "event": "runtime.command_deferred",
+    "code": "busy"
+   }
+  ]
+ },
+ {
+  "name": "terminal_deferred_slash_plain",
+  "terminal": true,
+  "text": "  /model",
+  "steer": false,
+  "reply": {
+   "disposition": "deferred",
+   "payload": {}
+  },
+  "queue": null,
+  "expect": {
+   "status": 400,
+   "body": {
+    "detail": {
+     "code": "erro_comando_nao_executado",
+     "params": {
+      "comando": "/model",
+      "motivo": "deferred"
+     },
+     "msg": "/model n\u00e3o foi executado: o terminal n\u00e3o aceitou agora (deferred). Mande de novo."
+    }
+   }
+  },
+  "diary": [
+   {
+    "event": "runtime.command_deferred",
+    "code": "deferred"
+   }
+  ]
+ },
+ {
+  "name": "terminal_unknown_text",
+  "terminal": true,
+  "text": "oi",
+  "steer": false,
+  "reply": {
+   "disposition": "unknown",
+   "payload": {}
+  },
+  "queue": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "delivered": false,
+    "steered": false,
+    "native": false
+   }
+  },
+  "diary": [
+   {
+    "event": "runtime.send_uncertain",
+    "code": "terminal_delivery_unknown"
+   }
+  ]
+ },
+ {
+  "name": "terminal_unknown_text_coded",
+  "terminal": true,
+  "text": "oi",
+  "steer": false,
+  "reply": {
+   "disposition": "unknown",
+   "payload": {
+    "code": "pane_gone"
+   }
+  },
+  "queue": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "delivered": false,
+    "steered": false,
+    "native": false
+   }
+  },
+  "diary": [
+   {
+    "event": "runtime.send_uncertain",
+    "code": "pane_gone"
+   }
+  ]
+ },
+ {
+  "name": "terminal_unknown_text_steer",
+  "terminal": true,
+  "text": "oi",
+  "steer": true,
+  "reply": {
+   "disposition": "unknown",
+   "payload": {}
+  },
+  "queue": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "delivered": false,
+    "steered": false,
+    "native": false
+   }
+  },
+  "diary": [
+   {
+    "event": "runtime.send_uncertain",
+    "code": "terminal_delivery_unknown"
+   }
+  ]
+ },
+ {
+  "name": "terminal_unknown_slash",
+  "terminal": true,
+  "text": "/model",
+  "steer": false,
+  "reply": {
+   "disposition": "unknown",
+   "payload": {}
+  },
+  "queue": null,
+  "expect": {
+   "status": 400,
+   "body": {
+    "detail": {
+     "code": "erro_envio_falhou",
+     "params": {
+      "erro": "resultado incerto; entrada conservada sem reenvio"
+     },
+     "msg": "resultado incerto; entrada conservada sem reenvio"
+    }
+   }
+  },
+  "diary": [
+   {
+    "event": "runtime.send_failed",
+    "code": "RuntimeError"
+   }
+  ]
+ },
+ {
+  "name": "terminal_rejected",
+  "terminal": true,
+  "text": "oi",
+  "steer": false,
+  "reply": {
+   "disposition": "rejected",
+   "payload": {}
+  },
+  "queue": null,
+  "expect": {
+   "status": 400,
+   "body": {
+    "detail": {
+     "code": "erro_envio_falhou",
+     "params": {
+      "erro": "entrada recusada pelo runtime"
+     },
+     "msg": "entrada recusada pelo runtime"
+    }
+   }
+  },
+  "diary": [
+   {
+    "event": "runtime.send_failed",
+    "code": "RuntimeError"
+   }
+  ]
+ },
+ {
+  "name": "terminal_steer_accepted",
+  "terminal": true,
+  "text": "oi",
+  "steer": true,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "queue": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "delivered": true,
+    "steered": false,
+    "native": false
+   }
+  },
+  "diary": []
+ },
+ {
+  "name": "terminal_steer_deferred",
+  "terminal": true,
+  "text": "oi",
+  "steer": true,
+  "reply": {
+   "disposition": "deferred",
+   "payload": {}
+  },
+  "queue": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "delivered": false,
+    "steered": false,
+    "native": false
+   }
+  },
+  "diary": []
+ },
+ {
+  "name": "terminal_op_error",
+  "terminal": true,
+  "text": "oi",
+  "steer": false,
+  "reply": "terminal_closed: pane saiu",
+  "queue": null,
+  "expect": {
+   "status": 400,
+   "body": {
+    "detail": {
+     "code": "erro_envio_falhou",
+     "params": {
+      "erro": "terminal_closed: pane saiu"
+     },
+     "msg": "terminal_closed: pane saiu"
+    }
+   }
+  },
+  "diary": [
+   {
+    "event": "runtime.send_failed",
+    "code": "RuntimeError"
+   }
+  ]
+ }
+]

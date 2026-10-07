@@ -158,8 +158,9 @@ async fn gate_reopened_in_time_lets_the_request_through() {
     let (python, server) = serve_with(Some(registry.clone())).await;
     let reopen = registry.clone();
     tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(50)).await; reopen.ingress().open("s"); });
-    assert_eq!(post(server, "input", r#"{"text":"oi"}"#, OWNER).await, (200, "from-python".into()));
-    assert_eq!(python.hits_to("/api/sessions/s/input"), 1);
+    // `/interrupt` ainda é o repasse provisório; `/input` já é do Rust.
+    assert_eq!(post(server, "interrupt", "", OWNER).await, (200, "from-python".into()));
+    assert_eq!(python.hits_to("/api/sessions/s/interrupt"), 1);
 }
 
 #[tokio::test]
@@ -241,11 +242,12 @@ async fn forwarding_never_holds_the_ingress_pass() {
     }
     assert!(!registry.writable("doente").await.unwrap().healthy, "a entrada ficou doente");
     let (python, server) = serve_with(Some(registry.clone())).await;
-    // Sem entrada, doente e saudável (stub que repassa): em todos o `close` do Python não espera.
+    // Sem entrada, doente e saudável com corpo que o Rust não atende (o FastAPI recusa): em todos o
+    // `close` do Python não espera.
     for name in ["sem-entrada", "doente", "s"] {
         python.hold_input(true);
         let url = format!("http://{server}/api/sessions/{name}/input");
-        let sending = tokio::spawn(client().post(url).header("authorization", format!("Bearer {OWNER}")).body(r#"{"text":"oi"}"#).send());
+        let sending = tokio::spawn(client().post(url).header("authorization", format!("Bearer {OWNER}")).body(r#"{"text":"oi","x":1}"#).send());
         let path = format!("/api/sessions/{name}/input");
         for _ in 0..100 { if python.hits_to(&path) == 1 { break; } tokio::time::sleep(Duration::from_millis(20)).await; }
         assert_eq!(python.hits_to(&path), 1, "o pedido chegou ao Python");

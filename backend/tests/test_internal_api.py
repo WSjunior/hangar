@@ -228,6 +228,16 @@ def test_rust_diag_route_records_event():
     assert rust_calls[0].kwargs == {"sessao": "s1", "codigo": "history_io", "detalhe": "leitura falhou"}
 
 
+def test_rust_diag_route_takes_the_send_events_with_the_python_level():
+    base = {"sessao": "s1", "codigo": "busy", "motivo": "m"}
+    with patch("app.internal_api.diag.registrar") as registrar:
+        for event in ("runtime.send_failed", "runtime.send_uncertain", "runtime.command_deferred"):
+            assert _client().post("/internal/diag", json={**base, "evento": event},
+                                  headers={"X-Hangar-Internal": SECRET}).status_code == 200
+    assert [c.args[:2] for c in registrar.call_args_list if c.args[0].startswith("runtime.")] == [
+        ("runtime.send_failed", "erro"), ("runtime.send_uncertain", "aviso"), ("runtime.command_deferred", "aviso")]
+
+
 @pytest.mark.parametrize("raw", [
     b"x" * 9000, b"not json", b"[" * 8000, b'{"evento":"rust.a","sessao":"s1","codigo":"c"}',
     b'{"evento":"rust.a","sessao":"s1","codigo":"C D","motivo":"m"}',

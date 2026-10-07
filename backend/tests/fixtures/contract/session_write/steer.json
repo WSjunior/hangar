@@ -1,0 +1,343 @@
+[
+ {
+  "name": "headless_text_accepted",
+  "terminal": false,
+  "text": "oriente",
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "confirm": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "promoted": false
+   }
+  }
+ },
+ {
+  "name": "headless_text_rejected_coded",
+  "terminal": false,
+  "text": "oriente",
+  "reply": {
+   "disposition": "rejected",
+   "payload": {
+    "error": "sem turno"
+   }
+  },
+  "confirm": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_sem_turno",
+     "params": {},
+     "msg": "sem turno"
+    }
+   }
+  }
+ },
+ {
+  "name": "headless_text_rejected_plain",
+  "terminal": false,
+  "text": "oriente",
+  "reply": {
+   "disposition": "rejected",
+   "payload": {}
+  },
+  "confirm": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_sem_turno",
+     "params": {},
+     "msg": "opera\u00e7\u00e3o recusada pelo runtime"
+    }
+   }
+  }
+ },
+ {
+  "name": "headless_text_unknown",
+  "terminal": false,
+  "text": "oriente",
+  "reply": {
+   "disposition": "unknown",
+   "payload": {}
+  },
+  "confirm": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_sem_turno",
+     "params": {},
+     "msg": "resultado incerto; a opera\u00e7\u00e3o foi conservada sem reenvio"
+    }
+   }
+  }
+ },
+ {
+  "name": "headless_text_deferred",
+  "terminal": false,
+  "text": "oriente",
+  "reply": {
+   "disposition": "deferred",
+   "payload": {}
+  },
+  "confirm": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_sem_turno",
+     "params": {},
+     "msg": "opera\u00e7\u00e3o recusada pelo runtime"
+    }
+   }
+  }
+ },
+ {
+  "name": "headless_text_op_error",
+  "terminal": false,
+  "text": "oriente",
+  "reply": "runtime_closed: ator saiu",
+  "confirm": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_sem_turno",
+     "params": {},
+     "msg": "runtime_closed: ator saiu"
+    }
+   }
+  }
+ },
+ {
+  "name": "headless_queue_accepted",
+  "terminal": false,
+  "text": null,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {
+    "ids": [
+     "a",
+     "b"
+    ]
+   }
+  },
+  "confirm": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "promoted": false,
+    "confirmed": 2,
+    "queued_ids": [
+     "queued-a",
+     "queued-b"
+    ]
+   }
+  }
+ },
+ {
+  "name": "headless_queue_empty",
+  "terminal": false,
+  "text": null,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {
+    "ids": []
+   }
+  },
+  "confirm": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "promoted": false,
+    "confirmed": 0,
+    "queued_ids": []
+   }
+  }
+ },
+ {
+  "name": "headless_queue_rejected",
+  "terminal": false,
+  "text": null,
+  "reply": {
+   "disposition": "rejected",
+   "payload": {}
+  },
+  "confirm": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_sem_turno",
+     "params": {},
+     "msg": "opera\u00e7\u00e3o recusada pelo runtime"
+    }
+   }
+  }
+ },
+ {
+  "name": "headless_queue_op_error",
+  "terminal": false,
+  "text": null,
+  "reply": "runtime_closed: ator saiu",
+  "confirm": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_sem_turno",
+     "params": {},
+     "msg": "runtime_closed: ator saiu"
+    }
+   }
+  }
+ },
+ {
+  "name": "terminal_promoted",
+  "terminal": true,
+  "text": null,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "confirm": {
+   "confirmed": 2
+  },
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "promoted": true,
+    "confirmed": 2
+   }
+  }
+ },
+ {
+  "name": "terminal_not_promoted",
+  "terminal": true,
+  "text": null,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {
+    "promoted": false
+   }
+  },
+  "confirm": {
+   "confirmed": 0
+  },
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "promoted": false,
+    "confirmed": 0
+   }
+  }
+ },
+ {
+  "name": "terminal_no_confirmed_count",
+  "terminal": true,
+  "text": null,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "confirm": {},
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "promoted": true,
+    "confirmed": 0
+   }
+  }
+ },
+ {
+  "name": "terminal_body_is_ignored",
+  "terminal": true,
+  "text": "oriente",
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "confirm": {
+   "confirmed": 1
+  },
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "promoted": true,
+    "confirmed": 1
+   }
+  }
+ },
+ {
+  "name": "terminal_deferred",
+  "terminal": true,
+  "text": null,
+  "reply": {
+   "disposition": "deferred",
+   "payload": {}
+  },
+  "confirm": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_opcao_nao_convergiu",
+     "params": {},
+     "msg": "O controle n\u00e3o foi executado; confira a sess\u00e3o."
+    }
+   }
+  }
+ },
+ {
+  "name": "terminal_rejected",
+  "terminal": true,
+  "text": null,
+  "reply": {
+   "disposition": "rejected",
+   "payload": {}
+  },
+  "confirm": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_opcao_nao_convergiu",
+     "params": {},
+     "msg": "N\u00e3o foi poss\u00edvel confirmar o controle; confira a sess\u00e3o antes de repetir."
+    }
+   }
+  }
+ },
+ {
+  "name": "terminal_unknown",
+  "terminal": true,
+  "text": null,
+  "reply": {
+   "disposition": "unknown",
+   "payload": {}
+  },
+  "confirm": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_opcao_nao_convergiu",
+     "params": {},
+     "msg": "N\u00e3o foi poss\u00edvel confirmar o controle; confira a sess\u00e3o antes de repetir."
+    }
+   }
+  }
+ }
+]

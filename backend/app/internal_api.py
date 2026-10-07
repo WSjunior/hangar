@@ -132,7 +132,9 @@ async def runtime_policy(request: Request):
 
 _LIST_FACTS_MAX = 8 << 20
 _list_facts_invalid_at = 0.0
-_DIAG_EVENT = re.compile(r"rust\.[a-z_]{1,48}")
+# Os três do envio levam o nome que o Python já usava, para o diário não ter dois nomes por falha.
+_DIAG_EVENT = re.compile(r"rust\.[a-z_]{1,48}|runtime\.(?:send_failed|send_uncertain|command_deferred)")
+_DIAG_WARNING = {"runtime.send_uncertain", "runtime.command_deferred"}
 _DIAG_CODE = re.compile(r"[a-z0-9_]{1,64}")
 
 
@@ -149,7 +151,7 @@ async def rust_diag(request: Request) -> dict:
             raise ValueError("diário inválido")
     except (ValueError, RecursionError):
         raise HTTPException(400) from None
-    diag.registrar(body["evento"], "erro", sessao=body["sessao"], codigo=body["codigo"], detalhe=body["motivo"])
+    diag.registrar(body["evento"], "aviso" if body["evento"] in _DIAG_WARNING else "erro", sessao=body["sessao"], codigo=body["codigo"], detalhe=body["motivo"])
     return {"ok": True}
 
 
