@@ -774,6 +774,7 @@ impl Hangar {
                     }
                 }
             }
+            Reply::PlanReview(generation) => { self.receive_review_file(key, generation, result); }
             Reply::PlanPreview(content) => {
                 let Some((owner, meta, body)) = self.controls.plan.as_mut() else { return; };
                 if owner != &key { return; }

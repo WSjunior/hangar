@@ -18,6 +18,7 @@ mod accounts;
 pub(crate) mod chrome;
 mod computer;
 mod controls;
+mod plan_review;
 mod create;
 mod device;
 mod follow;
@@ -257,6 +258,7 @@ enum Reply {
     RunCode(String),
     Reload,
     PlanPreview(bool),
+    PlanReview(u64),
     PreSelect(String),
     RunState,
     /// Leitura e gravação dos atalhos do projeto, com o número do pedido.
@@ -439,6 +441,7 @@ pub struct Hangar {
     ask_scroll: (String, ScrollHandle),
     plan_scroll: (String, ScrollHandle),
     plan_view: Option<(String, Entity<TextViewState>)>,
+    plan_review: plan_review::ReviewState,
     list_state: ListState,
     /// Risca do marcador de mensagens sob o mouse: abre o cartão com a pergunta e o começo da resposta.
     rail_hover: Option<usize>,
@@ -797,7 +800,7 @@ impl Hangar {
             if event.keystroke != stroke.keystroke { return; }
             let _ = weak.update(cx, |this, cx| {
                 let root_key = this.new_session.clone().is_some_and(|dialog| dialog.update(cx, |dialog, cx| dialog.root_key_down(&event, window, cx)));
-                if root_key || (event.keystroke.key == "escape" && this.keyboard_escape(window, cx))
+                if root_key || (event.keystroke.key == "escape" && (this.close_plan_review(window, cx) || this.keyboard_escape(window, cx)))
                     || this.keyboard_key_down(&event, window, cx) || this.session_number_key(&event, window, cx) {
                     cx.stop_propagation();
                 }
@@ -813,6 +816,7 @@ impl Hangar {
             delivery: DeliveryTracker::default(), stopping: HashSet::new(), stop_feedback: HashMap::new(), drafts: HashMap::new(),
             flight: InFlight::default(), action_feedback: HashMap::new(), live_terms: Vec::new(), question_open: None, question_card: None,
             hangar_open: false, hangar_focus: cx.focus_handle(), hangar_error: None, live_clock: None, ask_form: AskForm::default(), plans_dismissed: HashSet::new(), answered_tools: HashSet::new(), answering: HashMap::new(), ask_scroll: Default::default(), plan_scroll: Default::default(), plan_view: None,
+            plan_review: Default::default(),
             list_state, rail_hover: None, follow: Default::default(), row_ids: Vec::new(), row_signatures: Vec::new(), conversation: Default::default(), row_assets: Vec::new(), expanded: HashSet::new(), kept_expanded: HashMap::new(), orq_days: HashSet::new(),
             table_column: HashMap::new(), tables: HashMap::new(), last_message: None, live_clear_epoch: [0; 2], rich: HashMap::new(), prepared: HashMap::new(), cites: CiteCheck::default(), render_tick: 0,
             preview_drop_epoch: 0, preview_drop_scheduled: false,
@@ -3647,8 +3651,11 @@ impl Hangar {
                 .into_any_element()))
     }
 
-    fn render_options(&mut self, busy: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_options(&mut self, busy: bool, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.sync_plan_review(window, cx);
+        if self.plan_review_available() { return self.render_plan_review_card(false, busy, window, cx); }
         let state = &self.chat.state;
+        if state.claude_plan_pending.is_some() { return None; }
         if self.chat.ask.is_some() || state.state != "awaiting_input" { return None; }
         let (question, options) = (state.question.clone()?, state.options.clone().filter(|o| !o.is_empty())?);
         // Menu do AskUserQuestion no pane: quem responde é o card nativo (depois de enviar, este seletor piscava por cima).
@@ -4264,6 +4271,7 @@ impl Hangar {
 
     // Esc fecha o que está aberto sobre o campo; sem nada aberto e com a sessão trabalhando, pede para interromper.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.close_plan_review(window, cx) { return; }
         if self.confirm.is_some() { self.confirm = None; self.confirm_no_ask = false; }
         else if self.cancel_machine_rename() {}
         else if self.mention_is_open(cx) { self.mention.close(); }
@@ -6015,7 +6023,7 @@ impl Hangar {
         let orq = self.selected.as_ref().filter(|s| s.orq()).map(|s| s.name.clone());
         // A sessão da outra pessoa não recebe resposta nem plano daqui: o servidor dela recusa.
         let read_only = self.selected.as_ref().is_some_and(|s| s.read_only());
-        let card = if readable && !read_only { self.render_ask(busy, window, cx).or_else(|| self.render_options(busy, cx)) } else { None };
+        let card = if readable && !read_only { self.render_ask(busy, window, cx).or_else(|| self.render_options(busy, window, cx)) } else { None };
         let plan_bar = if readable && !read_only && card.is_none() {
             self.render_plan_bar(busy, cx).or_else(|| self.render_headless_plan(cx)).or_else(|| self.render_plan_preview(cx))
         } else { None };
@@ -6085,6 +6093,7 @@ impl Hangar {
 
 impl Render for Hangar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_plan_review(window, cx);
         self.rail_frame(window);
         let selected_name = self.selected.as_ref().map(|s| s.name.clone());
         let floating = theme::is_floating();
@@ -6421,6 +6430,7 @@ impl Render for Hangar {
             .children(self.render_landing_ghost(cx))
             .children(self.render_popup(window, cx))
             .children(self.render_search(window, cx))
+            .children(self.render_plan_review_overlay(window, cx))
             .child(ticker)
             // Uma autenticação recusada pode abrir a conexão sobre um formulário já aberto: adiada, fica acima dos diálogos do kit.
             .when_some(dialog, |el, dialog| el.child(deferred(div().absolute().inset_0().bg(cx.theme().overlay).occlude().opacity(dialog_in)
