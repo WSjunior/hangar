@@ -5,6 +5,7 @@ use super::*;
 use super::codes::{self, Fix};
 use super::flow::Screen;
 use super::marks::Progress;
+use super::report::Payload;
 use std::rc::Rc;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -34,19 +35,63 @@ impl Failure {
 
 /// O que o painel pede ao assistente (`SetupWizard::failure_action`).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum FailureAction { Retry, ToggleDetails, Fix(Fix), ToggleSend, SendAgain }
+pub(crate) enum FailureAction { Retry, ToggleDetails, Fix(Fix), ToggleSend, SendAgain(u64), Dismiss(u64) }
 
 pub(crate) type OnFailureAction = Rc<dyn Fn(FailureAction, &mut Window, &mut App)>;
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum SendState { Idle, Sending, Sent, Failed(String) }
+pub(crate) enum SendState { Sending, Sent, Failed(String) }
 
 /// O que o painel do relatório mostra; montado pelo assistente a cada desenho.
 pub(crate) struct PanelView<'a> {
     /// `None` enquanto monta (o doctor leva alguns segundos).
     pub report: Option<&'a str>,
     pub send: bool,
-    pub sent: &'a SendState,
+    /// Já foi entregue à fila de envio (ou a pessoa saiu do painel): a caixa não muda mais.
+    pub locked: bool,
+    /// "Atualizar e tentar de novo" rodando o `apt-get update`.
+    pub refreshing: bool,
+}
+
+/// Relatórios entregues para envio. Ficam fora da falha porque a pessoa sai do painel ao clicar (o `retry` apaga a
+/// falha): o resultado continua na tela, em qualquer etapa, até sair ou a pessoa fechar o aviso. Uma falha nova
+/// entra na fila e nunca apaga um envio pendente ou que falhou; só os já enviados saem quando chega outro.
+#[derive(Default)]
+pub(crate) struct Outbox { next: u64, pub items: Vec<(u64, SendState, Payload)> }
+
+impl Outbox {
+    /// Devolve o id e o que mandar agora.
+    pub(crate) fn push(&mut self, payload: Payload) -> (u64, Payload) {
+        self.items.retain(|(_, state, _)| *state != SendState::Sent);
+        self.next += 1;
+        self.items.push((self.next, SendState::Sending, payload.clone()));
+        (self.next, payload)
+    }
+
+    /// A resposta de um envio; sem causa (canal fechado) vira a frase de "sem resposta".
+    pub(crate) fn finish(&mut self, id: u64, result: Result<(), String>) {
+        let Some(item) = self.items.iter_mut().find(|(n, ..)| *n == id) else { return };
+        item.1 = match result {
+            Ok(()) => SendState::Sent,
+            Err(why) if why.trim().is_empty() => SendState::Failed(tr("setup_report_no_answer")),
+            Err(why) => SendState::Failed(why),
+        };
+    }
+
+    /// "Enviar de novo": só de um envio que falhou.
+    pub(crate) fn again(&mut self, id: u64) -> Option<Payload> {
+        let item = self.items.iter_mut().find(|(n, state, _)| *n == id && matches!(state, SendState::Failed(_)))?;
+        item.1 = SendState::Sending;
+        Some(item.2.clone())
+    }
+
+    /// Fechar o aviso; um envio em andamento continua na tela até responder.
+    pub(crate) fn dismiss(&mut self, id: u64) { self.items.retain(|(n, state, _)| *n != id || *state == SendState::Sending); }
+
+    /// O que ainda não saiu, para a última tentativa ao fechar o assistente.
+    pub(crate) fn failed(&self) -> Vec<Payload> {
+        self.items.iter().filter(|(_, state, _)| matches!(state, SendState::Failed(_))).map(|(.., p)| p.clone()).collect()
+    }
 }
 
 fn meta(text: String) -> Div { div().text_xs().font_family(theme::MONO).text_color(theme::muted()).child(text) }
@@ -89,23 +134,19 @@ pub(crate) fn after_panel(view: &PanelView, on_action: OnFailureAction) -> Div {
 }
 
 fn report_block(view: &PanelView, on_action: OnFailureAction) -> Div {
-    let (toggle, again) = (on_action.clone(), on_action);
-    let locked = matches!(view.sent, SendState::Sending | SendState::Sent);
-    let status = match view.sent {
-        SendState::Idle if view.send => Some(tr("setup_report_on_leave")),
-        SendState::Idle => None,
-        SendState::Sending => Some(tr("setup_report_sending")),
-        SendState::Sent => Some(tr("setup_report_sent")),
-        SendState::Failed(why) => Some(tr("setup_report_send_failed").replace("{erro}", why)),
-    };
+    let toggle = on_action;
+    // O estado do envio mora em `outbox_lines`, visível em qualquer etapa; aqui só o aviso de quando sai.
+    let status = (view.send && !view.locked).then(|| tr("setup_report_on_leave"));
     div().id("setup-report").flex().flex_col().gap_2()
+        .when(view.refreshing, |el| el.child(div().id("setup-packages-refreshing").role(Role::Status).flex().items_center().gap_2()
+            .text_sm().text_color(theme::muted())
+            .child(chrome::Spinner::new(SharedString::from("setup-packages-refreshing-spin"), IconName::LoaderCircle, px(14.), theme::muted()))
+            .child(tr("setup_packages_refreshing"))))
         .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(tr("setup_report_title")))
-        .child(Checkbox::new("setup-report-send").label(tr("setup_report_send")).checked(view.send).disabled(locked)
+        .child(Checkbox::new("setup-report-send").label(tr("setup_report_send")).checked(view.send).disabled(view.locked)
             .on_click(move |_, window, cx| toggle(FailureAction::ToggleSend, window, cx)))
         .when_some(status, |el, status| el.child(div().id("setup-report-status").role(Role::Status).text_xs()
             .text_color(theme::muted()).whitespace_normal().child(status)))
-        .when(matches!(view.sent, SendState::Failed(_)), |el| el.child(div().child(Button::new("setup-report-again").outline().small()
-            .label(tr("setup_report_send_again")).on_click(move |_, window, cx| again(FailureAction::SendAgain, window, cx)))))
         .child(div().text_xs().text_color(theme::muted()).whitespace_normal().child(tr("setup_report_hint")))
         .child(match view.report {
             None => div().id("setup-report-building").role(Role::Status).text_sm().text_color(theme::muted()).child(tr("setup_report_building")),
@@ -113,6 +154,28 @@ fn report_block(view: &PanelView, on_action: OnFailureAction) -> Div {
                 .bg(theme::inset()).p_2()
                 .child(TextView::markdown("setup-report-text", crate::conversation::fenced(text)).selectable(true).scrollable(false)),
         })
+}
+
+/// Uma linha por relatório entregue, em qualquer etapa: enviando, enviado ou o erro com "Enviar de novo".
+pub(crate) fn outbox_lines(outbox: &Outbox, on_action: OnFailureAction) -> Option<Div> {
+    if outbox.items.is_empty() { return None; }
+    let title = tr("setup_report_title");
+    Some(div().flex().flex_col().gap_2().children(outbox.items.iter().map(|(id, state, _)| {
+        let id = *id;
+        let (text, failed) = match state {
+            SendState::Sending => (tr("setup_report_sending"), false),
+            SendState::Sent => (tr("setup_report_sent"), false),
+            SendState::Failed(why) => (tr("setup_report_send_failed").replace("{erro}", why), true),
+        };
+        let (again, dismiss) = (on_action.clone(), on_action.clone());
+        div().id(SharedString::from(format!("setup-outbox-{id}"))).role(if failed { Role::Alert } else { Role::Status })
+            .flex().items_center().gap_2().text_xs().text_color(if failed { theme::warning_text() } else { theme::muted() })
+            .child(div().flex_1().min_w_0().whitespace_normal().child(format!("{title}: {text}")))
+            .when(failed, |el| el.child(Button::new(SharedString::from(format!("setup-outbox-again-{id}"))).outline().xsmall()
+                .label(tr("setup_report_send_again")).on_click(move |_, window, cx| again(FailureAction::SendAgain(id), window, cx))))
+            .when(*state != SendState::Sending, |el| el.child(Button::new(SharedString::from(format!("setup-outbox-dismiss-{id}"))).ghost()
+                .xsmall().label(tr("close")).on_click(move |_, window, cx| dismiss(FailureAction::Dismiss(id), window, cx))))
+    })))
 }
 
 /// O texto de uma pendência: a frase da tabela, senão o texto do script, senão "falha não prevista"; o código cru nunca
@@ -152,6 +215,41 @@ pub(crate) fn details(id: &'static str, open: bool, lines: &[String], on_toggle:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::report::{self, Outcome};
+
+    fn payload(code: &str) -> Payload { report::payload(Screen::Prepare, Some(code.into()), Outcome::Aberto, None, "r".into()) }
+    fn states(outbox: &Outbox) -> Vec<SendState> { outbox.items.iter().map(|(_, s, _)| s.clone()).collect() }
+
+    #[test]
+    fn send_goes_sending_then_sent_or_failed() {
+        let mut outbox = Outbox::default();
+        let (a, _) = outbox.push(payload("sem-internet"));
+        assert_eq!(states(&outbox), vec![SendState::Sending]);
+        outbox.finish(a, Err("dns".into()));
+        assert_eq!(states(&outbox), vec![SendState::Failed("dns".into())]);
+        // Só o que falhou volta a enviar, e uma vez por clique.
+        assert_eq!(outbox.again(a).and_then(|p| p.code).as_deref(), Some("sem-internet"));
+        assert!(outbox.again(a).is_none());
+        outbox.finish(a, Ok(()));
+        assert_eq!(states(&outbox), vec![SendState::Sent]);
+    }
+
+    #[test]
+    fn a_new_failure_never_hides_an_unsent_report() {
+        let mut outbox = Outbox::default();
+        let (a, _) = outbox.push(payload("sem-internet"));
+        outbox.finish(a, Err(String::new()));
+        let (b, _) = outbox.push(payload("pacotes-desatualizados"));
+        assert_eq!(states(&outbox), vec![SendState::Failed(tr("setup_report_no_answer")), SendState::Sending]);
+        assert_eq!(outbox.failed().len(), 1);
+        // Enviado sai quando chega o próximo; em andamento não se fecha.
+        outbox.finish(b, Ok(()));
+        outbox.dismiss(a);
+        let (c, _) = outbox.push(payload("sem-agente"));
+        assert_eq!(outbox.items.iter().map(|(n, ..)| *n).collect::<Vec<_>>(), vec![c]);
+        outbox.dismiss(c);
+        assert_eq!(states(&outbox), vec![SendState::Sending]);
+    }
 
     #[test]
     fn pending_never_shows_the_raw_code() {

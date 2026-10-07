@@ -190,7 +190,9 @@ impl SetupWizard {
         Rc::new(move |action, window, cx| { let _ = this.update(cx, |w, cx| w.failure_action(action, window, cx)); })
     }
 
-    fn panel_view(&self) -> PanelView<'_> { PanelView { report: self.report.as_deref(), send: self.send, sent: &self.sent } }
+    fn panel_view(&self) -> PanelView<'_> {
+        PanelView { report: self.report.as_deref(), send: self.send, locked: self.report_about.is_none(), refreshing: self.refreshing }
+    }
 
     fn render_details(&self, id: &'static str, cx: &mut Context<Self>) -> Div {
         // Com a falha na tela, "Ver detalhes" mora no painel dela.
@@ -279,7 +281,9 @@ impl SetupWizard {
         let login = (self.viewing != Screen::Tailscale && self.runs.end().is_none()).then(|| self.login_notice(cx)).flatten();
         // O relatório fica logo abaixo da falha: a pessoa lê o que sai antes de decidir.
         let after = failure.is_some().then(|| failure::after_panel(&self.panel_view(), self.failure_handler(cx)));
-        div().flex().flex_col().gap_6().child(head).children(failure).children(after).children(login).child(body)
+        // O envio continua visível depois de sair da falha, até sair ou a pessoa fechar o aviso.
+        let outbox = failure::outbox_lines(&self.outbox, self.failure_handler(cx));
+        div().flex().flex_col().gap_6().child(head).children(failure).children(after).children(outbox).children(login).child(body)
     }
 
     fn agent_tile(&self, id: &'static str, name: &'static str, cx: &mut Context<Self>) -> Button {

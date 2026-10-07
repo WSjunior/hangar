@@ -4,8 +4,8 @@ use super::*;
 use super::askpass::{self, Vault};
 use super::agent::Agent;
 use super::codes::{self, Fix};
-use super::failure::{Failure, FailureAction, SendState};
-use super::report::{self, Outcome};
+use super::failure::{Failure, FailureAction, Outbox};
+use super::report::{self, Outcome, Payload};
 use super::flow::{self, PasswordMode, PasswordProblem, PhoneOutcome, Primary, Runs, Screen, View};
 use super::local::{self, LocalInstall};
 use super::marks::{End, Progress};
@@ -62,14 +62,17 @@ pub(crate) struct SetupWizard {
     pub(super) failure: Option<Failure>,
     /// O relatório da falha na tela, já limpo; `None` enquanto monta.
     pub(super) report: Option<String>,
-    /// A falha de que o relatório fala (a de antes do agente, mesmo depois da reconferência).
-    report_about: Option<Failure>,
-    /// Montagem e envio que voltam depois de outra falha são descartados.
+    /// A falha de que o relatório fala enquanto ele ainda não foi entregue ao envio; `None` depois (a caixa trava).
+    pub(super) report_about: Option<Failure>,
+    /// Um relatório que fica pronto depois de outra falha não substitui o da tela.
     report_gen: u64,
     pub(super) send: bool,
-    pub(super) sent: SendState,
-    send_requested: bool,
-    last_send: Option<(Outcome, Option<Agent>)>,
+    /// Os relatórios entregues e o estado de cada envio, mostrados em qualquer etapa.
+    pub(super) outbox: Outbox,
+    /// Entregues antes de ficarem prontos: (geração, resultado, agente); saem quando a montagem termina.
+    send_requested: Vec<(u64, Outcome, Option<Agent>)>,
+    /// "Atualizar e tentar de novo" rodando: o painel ignora os outros botões.
+    pub(super) refreshing: bool,
     /// "Consertar agora" da roda do mouse confirmado: a próxima instalação leva `-ConsertarRoda`.
     fix_mouse_wheel: bool,
     vault: Vault,
@@ -132,7 +135,7 @@ impl SetupWizard {
             password, confirm, precheck: None, pkg: None, started: false, preparing: None,
             git_ready: false, bootstrap: None, token: None, runs: Runs::default(), check_tail: None, install_tail: None, records: (None, None),
             polling: false, finished: false, failure: None,
-            report: None, report_about: None, report_gen: 0, send: true, sent: SendState::Idle, send_requested: false, last_send: None,
+            report: None, report_about: None, report_gen: 0, send: true, outbox: Outbox::default(), send_requested: Vec::new(), refreshing: false,
             fix_mouse_wheel: false, vault: Vault::default(), waiting: Vec::new(), prompt: None, after_password: None,
             opened_link: None, app_copy: None, connection: None, connect_later: false, resumed_ended: false, viewing: Screen::Welcome, details_open: false, phone: None,
             qr: Qr::Idle, tailscale_running: false, tailscale_checking: false, ticks: 0,
@@ -350,9 +353,9 @@ impl SetupWizard {
                     Kind::Install => { self.runs.install = Some(Progress::default()); self.install_tail = Some(Tail::new(log)); self.records.1 = Some(record); }
                 }
                 self.preparing = None;
-                self.save_state();
                 // A roda do mouse é consertada uma vez: a próxima tentativa não fecha as sessões de novo sem perguntar.
                 if kind == Kind::Install { self.fix_mouse_wheel = false; }
+                self.save_state();
                 self.learn_identity(pid, cx);
                 if !self.polling { self.start_poll(window, cx); }
             }
@@ -493,12 +496,14 @@ impl SetupWizard {
     }
 
     pub(super) fn fail(&mut self, mut failure: Failure, cx: &mut Context<Self>) {
+        // O relatório da falha anterior que ainda não saiu entra na fila agora: a nova nunca o apaga.
+        self.send_before_leaving(cx);
         // Antes do `forget`: a senha de administrador e o código do askpass também são procurados e trocados no relatório.
         let secrets = self.secret_values();
         failure.fixes = codes::buttons(failure.code.as_deref(), self.agents.iter().any(|a| *a != "claude"));
         self.viewing = failure.screen;
         self.failure = Some(failure.clone());
-        (self.polling, self.preparing) = (false, None);
+        (self.polling, self.preparing, self.refreshing) = (false, None, false);
         self.vault.forget();
         self.after_password = None;
         for request in self.waiting.drain(..) { let _ = request.reply.send(None); }
@@ -520,11 +525,12 @@ impl SetupWizard {
     fn start_report(&mut self, failure: Failure, mut secrets: Vec<String>, cx: &mut Context<Self>) {
         self.report_gen += 1;
         let generation = self.report_gen;
-        (self.report, self.sent, self.send, self.send_requested, self.last_send) = (None, SendState::Idle, true, false, None);
+        (self.report, self.send) = (None, true);
         self.report_about = Some(failure.clone());
         let logs: Vec<(String, PathBuf)> = [("check", self.records.0.as_ref()), ("install", self.records.1.as_ref())].into_iter()
             .filter_map(|(run, record)| record.map(|r| (run.to_owned(), r.log.clone()))).collect();
         let dest = self.dest.clone();
+        let about = failure.clone();
         // O doctor leva segundos: fora da thread da janela.
         let task = cx.background_executor().spawn(async move {
             secrets.extend(local::read_install(&dest).token);
@@ -536,41 +542,51 @@ impl SetupWizard {
         });
         cx.spawn(async move |this, cx| {
             let text = task.await;
-            let _ = this.update(cx, |w, cx| if w.report_gen == generation { w.report_ready(text, cx) });
+            let _ = this.update(cx, |w, cx| w.report_ready(generation, about, text, cx));
         }).detach();
     }
 
-    fn report_ready(&mut self, text: String, cx: &mut Context<Self>) {
-        self.report = Some(text);
-        if self.send_requested && let Some((outcome, agent)) = self.last_send { self.send_report(outcome, agent, cx); }
+    /// Entregas feitas enquanto montava saem agora, mesmo que outra falha já esteja na tela.
+    fn report_ready(&mut self, generation: u64, about: Failure, text: String, cx: &mut Context<Self>) {
+        let (now, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.send_requested).into_iter().partition(|(g, ..)| *g == generation);
+        self.send_requested = later;
+        for (_, outcome, agent) in now {
+            self.dispatch(report::payload(about.screen, about.code.clone(), outcome, agent.map(Agent::id), text.clone()), cx);
+        }
+        if self.report_gen == generation { self.report = Some(text); }
         cx.notify();
     }
 
-    /// Manda o relatório da tela se a caixa está marcada; ainda montando, sai quando ficar pronto.
+    /// Entrega o relatório da falha na tela ao envio, uma vez, se a caixa está marcada; ainda montando, sai quando ficar
+    /// pronto. Depois a caixa trava: a pessoa já saiu do painel.
     fn send_report(&mut self, outcome: Outcome, agent: Option<Agent>, cx: &mut Context<Self>) {
-        if !self.send || matches!(self.sent, SendState::Sending | SendState::Sent) { return; }
-        self.last_send = Some((outcome, agent));
-        let (Some(text), Some(about)) = (self.report.clone(), self.report_about.as_ref()) else { self.send_requested = true; return };
-        self.send_requested = false;
-        let payload = report::payload(about.screen, about.code.clone(), outcome, agent.map(Agent::id), text);
-        let generation = self.report_gen;
-        self.sent = SendState::Sending;
+        let Some(about) = self.report_about.take() else { return };
+        if self.send {
+            match self.report.clone() {
+                Some(text) => self.dispatch(report::payload(about.screen, about.code.clone(), outcome, agent.map(Agent::id), text), cx),
+                None => self.send_requested.push((self.report_gen, outcome, agent)),
+            }
+        }
+        cx.notify();
+    }
+
+    fn dispatch(&mut self, payload: Payload, cx: &mut Context<Self>) {
+        let (id, payload) = self.outbox.push(payload);
+        self.send_now(id, payload, cx);
+    }
+
+    fn send_now(&mut self, id: u64, payload: Payload, cx: &mut Context<Self>) {
         let (done, result) = tokio::sync::oneshot::channel();
         self.runtime.spawn(async move { let _ = done.send(report::send(payload).await); });
         cx.spawn(async move |this, cx| {
             let outcome = result.await.unwrap_or_else(|_| Err(String::new()));
-            let _ = this.update(cx, |w, cx| if w.report_gen == generation {
-                w.sent = match outcome { Ok(()) => SendState::Sent, Err(why) => SendState::Failed(why) };
-                cx.notify();
-            });
+            let _ = this.update(cx, |w, cx| { w.outbox.finish(id, outcome); cx.notify(); });
         }).detach();
         cx.notify();
     }
 
     /// "Sem agente, sai na hora": na primeira ação da pessoa depois da falha (tentar de novo, um botão da frase, fechar).
-    fn send_before_leaving(&mut self, cx: &mut Context<Self>) {
-        if self.report_about.is_some() { self.send_report(Outcome::Aberto, None, cx); }
-    }
+    fn send_before_leaving(&mut self, cx: &mut Context<Self>) { self.send_report(Outcome::Aberto, None, cx); }
 
     /// Fecha a janela de senha sem acionar o `on_close` (que cancelaria); adiado porque a janela pode estar emprestada.
     fn close_prompt(&mut self, cx: &mut Context<Self>) {
@@ -633,7 +649,9 @@ impl SetupWizard {
 
     pub(super) fn retry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Pendência não para o script: rodar de novo antes do FIM seria um segundo instalador na mesma pasta.
-        if self.is_running() { return; }
+        if self.is_running() || self.refreshing { return; }
+        // Sair da falha por qualquer botão de tentar de novo entrega o relatório dela.
+        self.send_before_leaving(cx);
         let before = self.frontier_now();
         (self.failure, self.finished, self.started) = (None, false, true);
         self.runs = Runs::default();
@@ -653,12 +671,12 @@ impl SetupWizard {
     pub(super) fn failure_action(&mut self, action: FailureAction, window: &mut Window, cx: &mut Context<Self>) {
         match action {
             FailureAction::ToggleDetails => { self.details_open = !self.details_open; cx.notify(); }
-            FailureAction::ToggleSend => { self.send = !self.send; self.send_requested &= self.send; cx.notify(); }
-            FailureAction::SendAgain => {
-                self.sent = SendState::Idle;
-                if let Some((outcome, agent)) = self.last_send { self.send_report(outcome, agent, cx); }
-            }
-            FailureAction::Retry => { self.send_before_leaving(cx); self.retry(window, cx); }
+            FailureAction::ToggleSend => if self.report_about.is_some() { self.send = !self.send; cx.notify(); },
+            FailureAction::SendAgain(id) => if let Some(payload) = self.outbox.again(id) { self.send_now(id, payload, cx); },
+            FailureAction::Dismiss(id) => { self.outbox.dismiss(id); cx.notify(); }
+            // A lista de pacotes ainda atualiza: rodar o script agora bateria na trava do apt.
+            FailureAction::Retry | FailureAction::Fix(_) if self.refreshing => {}
+            FailureAction::Retry => self.retry(window, cx),
             FailureAction::Fix(fix) => self.apply_fix(fix, window, cx),
         }
     }
@@ -701,8 +719,7 @@ impl SetupWizard {
                 chrome::confirm_alert(window, cx, tr("setup_fix_mouse_wheel"), tr("setup_fix_mouse_wheel_confirm"), tr("setup_continue"),
                     ButtonVariant::Danger, move |window, cx| {
                         let _ = this.update(cx, |w, cx| {
-                            if w.is_running() { return; }
-                            w.send_before_leaving(cx);
+                            if w.is_running() || w.refreshing { return; }
                             w.fix_mouse_wheel = true;
                             w.retry(window, cx);
                         });
@@ -713,11 +730,15 @@ impl SetupWizard {
     }
 
     fn refresh_packages(&mut self, password: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refreshing { return; }
+        self.refreshing = true;
+        cx.notify();
         let (done, result) = tokio::sync::oneshot::channel();
         self.runtime.spawn_blocking(move || { let _ = done.send(precheck::refresh_package_list(&password)); });
         cx.spawn_in(window, async move |this, cx| {
             let outcome = result.await.unwrap_or_else(|_| Err(String::new()));
             let _ = this.update_in(cx, |w, window, cx| {
+                if !std::mem::take(&mut w.refreshing) { return; }
                 // A pessoa já tentou de novo enquanto a lista atualizava: não derruba a execução nova.
                 let Some(screen) = w.failure.as_ref().map(|f| f.screen) else { return };
                 match outcome {
@@ -827,6 +848,13 @@ impl SetupWizard {
         }
         // Sem nada rodando o fim (ou a falha) já foi visto: o `state.json` não pode reabrir o assistente a cada início.
         run::clear_state();
+        // O que falhou ao enviar tenta uma última vez; a janela some, então o resultado vai só para o diário.
+        for payload in self.outbox.failed() {
+            self.runtime.spawn(async move {
+                let result = report::send(payload).await;
+                crate::log_line(&format!("assistente: relatório reenviado ao fechar: {}", result.err().unwrap_or_else(|| "ok".into())));
+            });
+        }
         suspend_updates(false, cx);
         let _ = self.hangar.update(cx, |hangar, cx| hangar.close_setup(window, cx));
     }

@@ -7437,6 +7437,8 @@
   "native_setup_report_sent": "Erro enviado ao Hangar.",
   "native_setup_report_send_failed": "Não foi possível enviar: {erro}",
   "native_setup_report_send_again": "Enviar de novo",
+  "native_setup_report_no_answer": "o envio terminou sem resposta",
+  "native_setup_packages_refreshing": "Atualizando a lista de pacotes…",
   "native_setup_report_heading": "Relatório de instalação do Hangar",
   "native_setup_report_step": "Etapa: {step}",
   "native_setup_report_system": "Sistema: {system}",

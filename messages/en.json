@@ -7437,6 +7437,8 @@
   "native_setup_report_sent": "Error sent to Hangar.",
   "native_setup_report_send_failed": "Couldn't send: {erro}",
   "native_setup_report_send_again": "Send again",
+  "native_setup_report_no_answer": "the send ended without an answer",
+  "native_setup_packages_refreshing": "Updating the package list…",
   "native_setup_report_heading": "Hangar setup report",
   "native_setup_report_step": "Step: {step}",
   "native_setup_report_system": "System: {system}",
