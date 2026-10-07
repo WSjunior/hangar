@@ -43,6 +43,8 @@ async fn publish_then_get_raw_and_isolated_shell() {
     assert_eq!(page["title"], "Oi");
     assert_eq!(page["heights"], json!({}), "sem Chromium não há altura medida");
     assert!(res["result"]["message"].as_str().unwrap().contains("Não mencione"));
+    assert_eq!(res["result"]["browser"], "ausente", "o agente sabe que a página não foi medida");
+    assert_eq!(res["result"]["browser_reason"], "sem Chromium no servidor");
     let id = page["id"].as_str().unwrap().to_owned();
 
     let raw = owner_get(&s, &format!("/api/sessions/s1/pages/{id}?raw=1")).await;
@@ -106,6 +108,19 @@ async fn unknown_page_is_404_and_python_down_is_503() {
     let r = owner_get(&s, "/api/sessions/s1/pages/0123abcd").await;
     assert_eq!(r.status(), 503);
     assert!(r.text().await.unwrap().contains("erro_pagina_sem_info"));
+}
+
+#[tokio::test]
+async fn corrupt_page_is_an_error_not_expired() {
+    let s = scene().await;
+    let res = publish(&s, json!({"session": "s1", "html": "<p>oi</p>", "title": "Oi"})).await;
+    let id = res["result"]["hangar_page"]["id"].as_str().unwrap().to_owned();
+    std::fs::write(s._dir.path().join(format!("k/{id}.json")), "{corrompido").unwrap();
+    for path in [format!("/api/sessions/s1/pages/{id}"), format!("/api/sessions/s1/pages/{id}/shot")] {
+        let r = owner_get(&s, &path).await;
+        assert_eq!(r.status(), 503, "{path}");
+        assert!(r.text().await.unwrap().contains("erro_pagina_falhou"), "{path}");
+    }
 }
 
 #[tokio::test]

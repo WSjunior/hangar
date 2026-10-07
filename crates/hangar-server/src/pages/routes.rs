@@ -166,8 +166,13 @@ async fn publish(st: &AppState, b: PublishBody) -> Value {
     let rendered = chrome::render_with(bin, &html, &jobs, own_theme).await;
     let (heights, console) = match &rendered {
         Ok(r) => (r.heights.clone(), r.console.clone()),
-        Err(_) => (BTreeMap::new(), Vec::new()),
+        Err(e) => {
+            tracing::warn!(key = %key, status = e.status(), "página publicada sem medição: {}", e.reason());
+            (BTreeMap::new(), Vec::new())
+        }
     };
+    let browser = rendered.as_ref().map_or_else(|e| e.status(), |_| "ok");
+    let browser_reason = rendered.as_ref().err().map(|e| e.reason());
     if !heights.is_empty() {
         let (pages, key, id, heights) = (st.pages.clone(), key.clone(), id.clone(), heights.clone());
         match tokio::task::spawn_blocking(move || pages.set_heights(&key, &id, heights)).await {
@@ -179,13 +184,13 @@ async fn publish(st: &AppState, b: PublishBody) -> Value {
     if draft {
         // Caminho relativo e sem token: quem abre (o `browser_open`) completa endereço e credencial.
         let url = format!("/api/sessions/{}/pages/{id}", utf8_percent_encode(&b.session, NON_ALPHANUMERIC));
-        let browser = rendered.as_ref().map_or_else(|e| e.status(), |_| "ok");
         return json!({"ok": true, "result": {"draft": {"id": id, "url": url,
             "shot": rendered.is_ok().then(|| shot.map(|p| p.display().to_string())).flatten(),
             "heights": heights, "console": console, "missing_images": missing, "browser": browser,
-            "browser_reason": rendered.as_ref().err().map(|e| e.reason())}}});
+            "browser_reason": browser_reason}}});
     }
-    json!({"ok": true, "result": {"hangar_page": {"id": id, "title": title, "height": height, "heights": heights, "own_theme": own_theme}, "message": MESSAGE}})
+    json!({"ok": true, "result": {"hangar_page": {"id": id, "title": title, "height": height, "heights": heights, "own_theme": own_theme},
+        "message": MESSAGE, "browser": browser, "browser_reason": browser_reason}})
 }
 
 /// Modo URL: só o endereço vai para o disco; sem medição nem print.
@@ -209,6 +214,12 @@ async fn publish_site(st: &AppState, key: String, jsonl: String, title: String, 
 fn read_failed(st: &AppState, headers: &HeaderMap, name: &str, e: tokio::task::JoinError) -> Response {
     tracing::error!(panic = e.is_panic(), "leitura da página interrompida");
     route_failed(st, headers, "rust.pages_failed", name, "erro_pagina_falhou", "a leitura da página caiu no servidor")
+}
+
+/// Arquivo da página existe mas não se lê (permissão, JSON corrompido): erro, não expirada.
+fn disk_failed(st: &AppState, headers: &HeaderMap, name: &str, e: &std::io::Error) -> Response {
+    tracing::warn!(session = %name, "página ilegível no disco: {e}");
+    route_failed(st, headers, "rust.pages_failed", name, "erro_pagina_falhou", "a página no disco não pôde ser lida")
 }
 
 fn not_found(req: &HeaderMap, code: &str, msg: &str) -> Response {
@@ -239,12 +250,16 @@ pub async fn page(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
     drop(req);
     let key = match session_key(&st, &headers, &name).await { Ok(k) => k, Err(r) => return r };
     let pages = st.pages.clone();
-    let found = tokio::task::spawn_blocking(move || {
-        let meta = pages.meta(&key, &id)?;
-        if meta.url.is_some() { return Some(None); }
-        Some(Some((pages.html(&key, &id)?, meta)))
+    let found = tokio::task::spawn_blocking(move || -> std::io::Result<_> {
+        let Some(meta) = pages.meta(&key, &id)? else { return Ok(None) };
+        if meta.url.is_some() { return Ok(Some(None)); }
+        Ok(pages.html(&key, &id)?.map(|html| Some((html, meta))))
     }).await;
-    let found = match found { Ok(f) => f, Err(e) => return read_failed(&st, &headers, &name, e) };
+    let found = match found {
+        Ok(Ok(f)) => f,
+        Ok(Err(e)) => return disk_failed(&st, &headers, &name, &e),
+        Err(e) => return read_failed(&st, &headers, &name, e),
+    };
     let Some(found) = found else { return expired(&headers) };
     let Some((html, meta)) = found else { return no_html(&headers) };
     let mut r = if raw {
@@ -299,15 +314,19 @@ pub async fn shot(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
     let width = *WIDTHS.iter().min_by_key(|w| w.abs_diff(want)).unwrap();
     let key = match session_key(&st, &headers, &name).await { Ok(k) => k, Err(r) => return r };
     let (pages, chromium) = (st.pages.clone(), st.chromium);
-    let found = tokio::task::spawn_blocking(move || {
-        let meta = pages.meta(&key, &id)?;
-        if meta.url.is_some() { return Some(None); }
-        let html = pages.html(&key, &id)?;
+    let found = tokio::task::spawn_blocking(move || -> std::io::Result<_> {
+        let Some(meta) = pages.meta(&key, &id)? else { return Ok(None) };
+        if meta.url.is_some() { return Ok(Some(None)); }
+        let Some(html) = pages.html(&key, &id)? else { return Ok(None) };
         let path = pages.shot_path(&key, &id, theme, width);
         let ready = path.is_file();
-        Some(Some((html, meta.own_theme, path, ready, if ready { None } else { chromium() })))
+        Ok(Some(Some((html, meta.own_theme, path, ready, if ready { None } else { chromium() }))))
     }).await;
-    let found = match found { Ok(f) => f, Err(e) => return read_failed(&st, &headers, &name, e) };
+    let found = match found {
+        Ok(Ok(f)) => f,
+        Ok(Err(e)) => return disk_failed(&st, &headers, &name, &e),
+        Err(e) => return read_failed(&st, &headers, &name, e),
+    };
     let Some(found) = found else { return expired(&headers) };
     let Some((html, own_theme, path, ready, bin)) = found else { return no_html(&headers) };
     if !ready {
@@ -317,7 +336,13 @@ pub async fn shot(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
             return r;
         }
     }
-    let Ok(bytes) = tokio::fs::read(&path).await else { return expired(&headers) };
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(session = %name, "print da página não lido: {e}");
+            return route_failed(&st, &headers, "rust.pages_failed", &name, "erro_pagina_sem_imagem", "o print da página não pôde ser lido");
+        }
+    };
     let mut r = Response::new(Body::from(bytes));
     r.headers_mut().insert(header::CONTENT_TYPE, "image/png".parse().unwrap());
     r.headers_mut().insert(header::CACHE_CONTROL, "private, max-age=3600".parse().unwrap());

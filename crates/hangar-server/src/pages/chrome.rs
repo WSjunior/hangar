@@ -183,6 +183,14 @@ fn arg_text(a: &Value) -> String {
     }
 }
 
+/// Exceção ou valor que não é número não vira a altura mínima: a página sairia cortada calada.
+fn measured(eval: &Value) -> Result<u32, ChromeError> {
+    match eval["result"]["value"].as_f64() {
+        Some(h) if eval.get("exceptionDetails").is_none() && h.is_finite() => Ok((h as u32).clamp(super::HEIGHT_MIN, super::HEIGHT_MAX)),
+        _ => Err(ChromeError::Failed("altura não medida")),
+    }
+}
+
 async fn drive(url: &str, html: &str, jobs: &[Job], own_theme: bool) -> Result<Rendered, ChromeError> {
     // Print de página alta em escala 2 passa do limite de quadro padrão do tungstenite.
     let config = WebSocketConfig::default().max_frame_size(None).max_message_size(None);
@@ -209,7 +217,7 @@ async fn drive(url: &str, html: &str, jobs: &[Job], own_theme: bool) -> Result<R
         cdp.call(s, "Emulation.setDeviceMetricsOverride", json!({"width": job.width, "height": super::HEIGHT_MIN, "deviceScaleFactor": 2, "mobile": false})).await?;
         tokio::time::sleep(Duration::from_millis(150)).await;
         let h = cdp.call(s, "Runtime.evaluate", json!({"expression": MEASURE, "returnByValue": true})).await?;
-        let height = (h["result"]["value"].as_f64().unwrap_or(0.) as u32).clamp(super::HEIGHT_MIN, super::HEIGHT_MAX);
+        let height = measured(&h)?;
         heights.insert(job.width, height);
         if let Some(path) = &job.shot {
             let shot = cdp.call(s, "Page.captureScreenshot", json!({"format": "png", "captureBeyondViewport": true,
@@ -230,6 +238,16 @@ mod tests {
         let p = dir.join(name);
         std::fs::write(&p, "").unwrap();
         p
+    }
+
+    #[test]
+    fn height_that_is_not_a_number_is_an_error() {
+        assert_eq!(measured(&json!({"result": {"value": 512.6}})).unwrap(), 512);
+        assert_eq!(measured(&json!({"result": {"value": 10}})).unwrap(), super::super::HEIGHT_MIN);
+        for bad in [json!({"result": {"value": null}}), json!({"result": {"type": "undefined"}}),
+            json!({"result": {"value": 300}, "exceptionDetails": {"text": "x"}}), json!({"result": {"value": "300"}})] {
+            assert_eq!(measured(&bad).unwrap_err().reason(), "altura não medida", "{bad}");
+        }
     }
 
     #[test]

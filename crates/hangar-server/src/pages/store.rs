@@ -59,18 +59,20 @@ impl Store {
         Ok(id)
     }
 
-    pub fn html(&self, key: &str, id: &str) -> Option<String> {
-        if !valid(id) { return None; }
-        std::fs::read_to_string(self.dir(key)?.join(format!("{id}.html"))).ok()
+    /// `None` só quando o arquivo não existe (página expirada); qualquer outra falha é erro.
+    pub fn html(&self, key: &str, id: &str) -> io::Result<Option<String>> {
+        let Some(dir) = self.dir(key).filter(|_| valid(id)) else { return Ok(None) };
+        absent_is_none(std::fs::read_to_string(dir.join(format!("{id}.html"))))
     }
 
-    pub fn meta(&self, key: &str, id: &str) -> Option<PageMeta> {
-        if !valid(id) { return None; }
-        serde_json::from_slice(&std::fs::read(self.dir(key)?.join(format!("{id}.json"))).ok()?).ok()
+    pub fn meta(&self, key: &str, id: &str) -> io::Result<Option<PageMeta>> {
+        let Some(dir) = self.dir(key).filter(|_| valid(id)) else { return Ok(None) };
+        let Some(bytes) = absent_is_none(std::fs::read(dir.join(format!("{id}.json"))))? else { return Ok(None) };
+        serde_json::from_slice(&bytes).map(Some).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     pub fn set_heights(&self, key: &str, id: &str, heights: BTreeMap<u32, u32>) -> io::Result<()> {
-        let mut meta = self.meta(key, id).ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+        let mut meta = self.meta(key, id)?.ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
         meta.heights = heights;
         write_atomic(&self.root.join(key).join(format!("{id}.json")), &serde_json::to_vec(&meta)?)
     }
@@ -90,8 +92,12 @@ impl Store {
             if !entry.file_type().is_ok_and(|t| t.is_dir()) { continue; }
             let key = entry.file_name().to_string_lossy().into_owned();
             let dir = entry.path();
-            let owner = std::fs::read_to_string(dir.join("jsonl")).unwrap_or_default();
             seen.insert(key.clone());
+            // Dono ilegível não é dono ausente: apagaria as páginas de uma sessão viva.
+            let owner = match absent_is_none(std::fs::read_to_string(dir.join("jsonl"))) {
+                Ok(o) => o.unwrap_or_default(),
+                Err(e) => { tracing::warn!(key = %key, "dono das páginas ilegível, pasta mantida: {e}"); continue; }
+            };
             if live.contains(&canonical(owner.trim())) { absent.remove(&key); self.drop_old_drafts(&dir, now); continue; }
             let since = *absent.entry(key.clone()).or_insert(now);
             if now.duration_since(since).unwrap_or_default() >= GONE_AFTER {
@@ -115,11 +121,18 @@ impl Store {
             if meta.draft && age >= DRAFT_TTL.as_secs() {
                 let id = p.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_owned();
                 for f in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-                    if f.file_name().to_string_lossy().starts_with(&format!("{id}.")) { let _ = std::fs::remove_file(f.path()); }
+                    if f.file_name().to_string_lossy().starts_with(&format!("{id}."))
+                        && let Err(e) = std::fs::remove_file(f.path()) {
+                        tracing::warn!(file = %f.path().display(), "rascunho velho não apagado: {e}");
+                    }
                 }
             }
         }
     }
+}
+
+fn absent_is_none<T>(r: io::Result<T>) -> io::Result<Option<T>> {
+    match r { Ok(v) => Ok(Some(v)), Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None), Err(e) => Err(e) }
 }
 
 /// Transcript que ainda não existe resolve pela pasta; nada resolvível fica com o texto cru.
@@ -147,10 +160,38 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = Store::new(dir.path().into());
         let id = s.save("abc-1", "/t/abc-1.jsonl", &page()).unwrap();
-        assert_eq!(s.html("abc-1", &id).unwrap(), "<p>x</p>");
-        assert_eq!(s.meta("abc-1", &id).unwrap().title, "t");
+        assert_eq!(s.html("abc-1", &id).unwrap().unwrap(), "<p>x</p>");
+        assert_eq!(s.meta("abc-1", &id).unwrap().unwrap().title, "t");
         let id = s.save("abc-1", "/t/abc-1.jsonl", &NewPage { own_theme: true, ..page() }).unwrap();
-        assert!(s.meta("abc-1", &id).unwrap().own_theme);
+        assert!(s.meta("abc-1", &id).unwrap().unwrap().own_theme);
+    }
+
+    #[test]
+    fn only_a_missing_file_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::new(dir.path().into());
+        let id = s.save("k", "/t/k.jsonl", &page()).unwrap();
+        assert!(s.meta("k", "0123abcd").unwrap().is_none());
+        assert!(s.html("k", "0123abcd").unwrap().is_none());
+        std::fs::write(dir.path().join(format!("k/{id}.json")), "{corrompido").unwrap();
+        assert_eq!(s.meta("k", &id).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert!(s.set_heights("k", &id, BTreeMap::new()).is_err());
+        std::fs::remove_file(dir.path().join(format!("k/{id}.html"))).unwrap();
+        std::fs::create_dir(dir.path().join(format!("k/{id}.html"))).unwrap();
+        assert!(s.html("k", &id).is_err(), "html ilegível não é página expirada");
+    }
+
+    #[test]
+    fn unreadable_owner_keeps_the_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::new(dir.path().into());
+        s.save("k", "/t/k.jsonl", &page()).unwrap();
+        std::fs::remove_file(dir.path().join("k/jsonl")).unwrap();
+        std::fs::create_dir(dir.path().join("k/jsonl")).unwrap();
+        let t0 = SystemTime::now();
+        s.sweep(&HashSet::new(), t0);
+        s.sweep(&HashSet::new(), t0 + GONE_AFTER * 2);
+        assert!(dir.path().join("k").exists());
     }
 
     #[test]
@@ -159,8 +200,8 @@ mod tests {
         let s = Store::new(dir.path().into());
         let url = Some("http://localhost:3000/cidades".to_owned());
         let id = s.save("k", "/t/k.jsonl", &NewPage { html: String::new(), url: url.clone(), ..page() }).unwrap();
-        assert!(s.html("k", &id).is_none());
-        assert_eq!(s.meta("k", &id).unwrap().url, url);
+        assert!(s.html("k", &id).unwrap().is_none());
+        assert_eq!(s.meta("k", &id).unwrap().unwrap().url, url);
     }
 
     #[test]
@@ -174,7 +215,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = Store::new(dir.path().into());
         assert!(s.save("../x", "/t", &page()).is_err());
-        assert!(s.html("abc", "../../etc/passwd").is_none());
+        assert!(s.html("abc", "../../etc/passwd").unwrap().is_none());
     }
 
     #[test]
