@@ -38,7 +38,7 @@ macro_rules! wire {
 
 wire!(pub struct ClientInfo { pub name:String, pub title:Option<String>, pub version:String });
 wire!(pub struct InitializeCapabilities { pub experimental_api:bool });
-wire!(pub struct InitializeParams { pub client_info:ClientInfo, pub capabilities:InitializeCapabilities });
+wire!(pub struct InitializeParams { pub client_info:ClientInfo, pub capabilities:Option<InitializeCapabilities> });
 
 wire!(pub struct ThreadStartParams {
     pub cwd:Option<String>,
@@ -191,7 +191,7 @@ pub enum UserInput {
 #[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ThreadItem {
     AgentMessage { #[serde(default)] id:String, #[serde(default)] text:String, #[serde(default)] delivery:Option<String>,
-        #[serde(default)] questions:Vec<AsyncUserInputQuestion> },
+        #[serde(default)] questions:Option<Vec<AsyncUserInputQuestion>> },
     UserMessage { #[serde(default)] id:String, #[serde(default)] content:Vec<UserInput> },
     Reasoning { #[serde(default)] id:String },
     CommandExecution { #[serde(default)] id:String, #[serde(default)] process_id:Option<String> },
@@ -341,9 +341,19 @@ mod tests {
     #[test]
     fn thread_item_tags_and_fallback() {
         let item:ThreadItem = serde_json::from_value(json!({"type":"agentMessage","id":"a","text":"x","delivery":"async","questions":[{"title":"Q","options":["s"]}]})).unwrap();
-        assert!(matches!(&item,ThreadItem::AgentMessage { delivery:Some(d),questions,.. } if d == "async" && questions[0].title == "Q"));
+        assert!(matches!(&item,ThreadItem::AgentMessage { delivery:Some(d),questions:Some(questions),.. } if d == "async" && questions[0].title == "Q"));
         let item:ThreadItem = serde_json::from_value(json!({"type":"imageGeneration","id":"z"})).unwrap();
         assert!(matches!(item,ThreadItem::Unknown));
+    }
+
+    #[test]
+    fn null_optionals_on_agent_message_are_tolerated() {
+        // O Codex manda `questions` e `delivery` como `null` em toda mensagem sem pergunta.
+        let message = json!({"type":"agentMessage","id":"a","text":"x","questions":null,"delivery":null});
+        let item:ThreadItem = serde_json::from_value(message.clone()).unwrap();
+        assert!(matches!(item,ThreadItem::AgentMessage { questions:None,delivery:None,.. }));
+        let n = ServerNotification::decode("turn/completed",&json!({"threadId":"t","turn":{"id":"u","status":"completed","items":[message]}})).unwrap();
+        assert!(matches!(n,ServerNotification::TurnCompleted(n) if matches!(n.turn.items[..],[ThreadItem::AgentMessage { .. }])));
     }
 
     #[test]
