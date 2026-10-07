@@ -35,6 +35,10 @@ pub enum Event {
     // Fica em todo sistema para o `if let` de quem recebe não virar padrão irrefutável.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Frame,
+    /// Mensagem da página da conversa (`window.hangarHost`), JSON cru no formato do MCP Apps.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg_attr(target_os = "linux", expect(dead_code, reason = "a página da conversa ainda não lê"))]
+    Host(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

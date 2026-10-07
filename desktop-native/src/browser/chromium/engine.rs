@@ -34,6 +34,8 @@ struct Surface {
     /// Há um `Event::Frame` não pintado: não manda outro.
     pending: AtomicBool,
     events: async_channel::Sender<Event>,
+    /// JPEG no painel, PNG na página da conversa.
+    format: image::ImageFormat,
 }
 
 impl Surface {
@@ -43,7 +45,7 @@ impl Surface {
 
     fn upload(&self, params: &Value) -> Result<(), String> {
         let bytes = base64::engine::general_purpose::STANDARD.decode(params["data"].as_str().unwrap_or("")).map_err(|e| e.to_string())?;
-        let pixels = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).map_err(|e| e.to_string())?.into_rgba8();
+        let pixels = image::load_from_memory_with_format(&bytes, self.format).map_err(|e| e.to_string())?.into_rgba8();
         let (width, height) = pixels.dimensions();
         let (device, queue) = gpui_wgpu::WgpuContext::shared_device().ok_or("a GPUI não expôs o device wgpu")?;
         let mut shown = self.shown.lock().unwrap_or_else(PoisonError::into_inner);
@@ -98,6 +100,10 @@ pub struct Engine {
     pressed: Cell<bool>,
     /// A página caiu ou se soltou com o Chromium vivo.
     dead: Rc<Cell<bool>>,
+    /// Página da conversa: screencast em PNG.
+    png: bool,
+    /// Contexto próprio da página da conversa, fechado junto com ela.
+    context: Option<String>,
 }
 
 impl Engine {
@@ -132,22 +138,83 @@ impl Starter {
         let measured = session.call_blocking("Runtime.evaluate", json!({"expression": "outerHeight-innerHeight", "returnByValue": true}))?;
         let decoration = measured["result"]["value"].as_f64().unwrap_or(0.).max(0.) as f32;
         let state = Rc::new(RefCell::new(model::PageState::default()));
-        let surface = Arc::new(Surface { shown: Mutex::new(None), pending: AtomicBool::new(false), events: events.clone() });
+        let surface = Arc::new(Surface {
+            shown: Mutex::new(None), pending: AtomicBool::new(false), events: events.clone(), format: image::ImageFormat::Jpeg,
+        });
         let sink = surface.clone();
         browser.sink(session.id(), Box::new(move |params| sink.frame(params)));
         let dead = Rc::new(Cell::new(false));
-        let publish = listen(&session, &target, &state, &events, &self.executor, &dead);
+        let publish = listen(&session, &target, &state, &events, &self.executor, &dead, false);
         Ok(Engine {
-            session, publish, target, window, decoration, executor: self.executor, surface, dead,
+            session, publish, target, window, decoration, executor: self.executor, surface, dead, png: false, context: None,
+            placed: Cell::new(None), visible: Cell::new(false), pressed: Cell::new(false),
+        })
+    }
+
+    /// Página da conversa: alvo num contexto próprio (sem os cookies do painel), documento posto direto e quadros
+    /// em PNG. A GPUI desenha a textura da superfície sempre opaca, então o fundo transparente sairia preto: com
+    /// `background` a página ganha essa cor de fundo; sem ele fica o fundo padrão do Chromium.
+    #[expect(dead_code, reason = "a página da conversa ainda não chama")]
+    pub fn start_page(self, html: &str, width: f32, background: Option<(u8, u8, u8)>, events: async_channel::Sender<Event>) -> Result<Engine, String> {
+        let browser = Browser::shared(&self.executor, self.scale)?;
+        let long = Duration::from_secs(10);
+        let context = browser.call_blocking(None, "Target.createBrowserContext", json!({"disposeOnDetach": true}), long)?["browserContextId"]
+            .as_str().ok_or("createBrowserContext sem id")?.to_owned();
+        let opened = self.open_page(&browser, &context, html, width, background, events);
+        // Falhou no meio: fechar o contexto fecha junto o alvo que já tenha nascido nele.
+        if opened.is_err() { drop(browser.call(None, "Target.disposeBrowserContext", json!({"browserContextId": context}))); }
+        opened
+    }
+
+    fn open_page(
+        self, browser: &Rc<Browser>, context: &str, html: &str, width: f32, background: Option<(u8, u8, u8)>, events: async_channel::Sender<Event>,
+    ) -> Result<Engine, String> {
+        let long = Duration::from_secs(10);
+        let created = browser.call_blocking(None, "Target.createTarget",
+            json!({"url": "about:blank", "newWindow": true, "browserContextId": context}), long)?;
+        let target = created["targetId"].as_str().ok_or("createTarget sem targetId")?.to_owned();
+        browser.own(&target, true);
+        browser.close_initial();
+        let session = Rc::new(Session::attach(browser, &target)?);
+        let window = browser.call_blocking(None, "Browser.getWindowForTarget", json!({"targetId": target}), long)?["windowId"]
+            .as_i64().ok_or("getWindowForTarget sem windowId")?;
+        session.call_blocking("Page.enable", json!({}))?;
+        session.call_blocking("Inspector.enable", json!({}))?;
+        session.call_blocking("Runtime.enable", json!({}))?;
+        session.call_blocking("Runtime.addBinding", json!({"name": "hangarHost"}))?;
+        if let Some((r, g, b)) = background {
+            session.call_blocking("Emulation.setDefaultBackgroundColorOverride", json!({"color": {"r": r, "g": g, "b": b, "a": 1}}))?;
+        }
+        session.call_blocking("Fetch.enable", json!({"patterns": [{"resourceType": "Document", "requestStage": "Request"}]}))?;
+        browser.call_blocking(None, "Browser.setWindowBounds", json!({"windowId": window, "bounds": {"width": width.round() as i64, "height": 600}}), long)?;
+        let measured = session.call_blocking("Runtime.evaluate", json!({"expression": "outerHeight-innerHeight", "returnByValue": true}))?;
+        let decoration = measured["result"]["value"].as_f64().unwrap_or(0.).max(0.) as f32;
+        let frame = session.call_blocking("Page.getFrameTree", json!({}))?["frameTree"]["frame"]["id"].as_str().unwrap_or_default().to_owned();
+        session.call_blocking("Page.setDocumentContent", json!({"frameId": frame, "html": html}))?;
+        let state = Rc::new(RefCell::new(model::PageState::default()));
+        let surface = Arc::new(Surface {
+            shown: Mutex::new(None), pending: AtomicBool::new(false), events: events.clone(), format: image::ImageFormat::Png,
+        });
+        let sink = surface.clone();
+        browser.sink(session.id(), Box::new(move |params| sink.frame(params)));
+        let dead = Rc::new(Cell::new(false));
+        let publish = listen(&session, &target, &state, &events, &self.executor, &dead, true);
+        let host = events.clone();
+        let _ = session.on("Runtime.bindingCalled", move |params| {
+            if params["name"] == "hangarHost" { let _ = host.try_send(Event::Host(params["payload"].as_str().unwrap_or("").to_owned())); }
+        });
+        Ok(Engine {
+            session, publish, target, window, decoration, executor: self.executor, surface, dead, png: true, context: Some(context.to_owned()),
             placed: Cell::new(None), visible: Cell::new(false), pressed: Cell::new(false),
         })
     }
 }
 
-/// Estado da barra (endereço, título, carregando, voltar/avançar), diálogos e janelas novas.
+/// Estado da barra (endereço, título, carregando, voltar/avançar), diálogos e janelas novas. `block_documents`:
+/// o frame principal não navega para documento nenhum (a página da conversa já nasce com o seu).
 fn listen(
     session: &Rc<Session>, target: &str, state: &Rc<RefCell<model::PageState>>, events: &async_channel::Sender<Event>, executor: &ForegroundExecutor,
-    dead: &Rc<Cell<bool>>,
+    dead: &Rc<Cell<bool>>, block_documents: bool,
 ) -> Publish {
     let publish: Publish = {
         let (state, events) = (state.clone(), events.clone());
@@ -194,6 +261,9 @@ fn listen(
     let _ = session.on("Fetch.requestPaused", move |params| {
         let Some(session) = weak.upgrade() else { return };
         let (id, url) = (params["requestId"].clone(), params["request"]["url"].as_str().unwrap_or("").to_owned());
+        if block_documents && params["frameId"] == m.as_str() {
+            return drop(session.call("Fetch.failRequest", json!({"requestId": id, "errorReason": "BlockedByClient"})));
+        }
         if model::allowed_request(&url) { return drop(session.call("Fetch.continueRequest", json!({"requestId": id}))); }
         drop(session.call("Fetch.failRequest", json!({"requestId": id, "errorReason": "BlockedByClient"})));
         if params["frameId"] == m.as_str() { p(&|page| page.error = Some(crate::i18n::tr("browser_blocked").replace("{url}", &url))); }
@@ -276,6 +346,10 @@ impl Engine {
 
     fn send(&self, method: &str, params: Value) { drop(self.session.call(method, params)); }
 
+    /// Roda um script na página sem esperar o resultado.
+    #[expect(dead_code, reason = "a página da conversa ainda não chama")]
+    pub fn evaluate(&self, expression: &str) { self.send("Runtime.evaluate", json!({"expression": expression})); }
+
     pub fn load(&self, url: &str) {
         let (call, publish) = (self.session.call("Page.navigate", json!({"url": url})), self.publish.clone());
         self.executor.spawn(async move {
@@ -316,7 +390,9 @@ impl Engine {
             let (pw, ph) = ((w * scale).round() as i64, (h * scale).round() as i64);
             // JPEG alto em vez de PNG: o PNG pesa na decodificação e no pipe em página animada; o q92 deixa o texto
             // legível (o q85 borrava). O `shot` continua em PNG.
-            self.send("Page.startScreencast", json!({"format": "jpeg", "quality": 92, "maxWidth": pw.max(1), "maxHeight": ph.max(1), "everyNthFrame": 1}));
+            let mut params = json!({"format": "jpeg", "quality": 92, "maxWidth": pw.max(1), "maxHeight": ph.max(1), "everyNthFrame": 1});
+            if self.png { params["format"] = "png".into(); params.as_object_mut().map(|p| p.remove("quality")); }
+            self.send("Page.startScreencast", params);
         }
         // Zera antes de ler: um quadro que chegue no meio ainda avisa a tela.
         self.surface.pending.store(false, Ordering::SeqCst);
@@ -370,6 +446,9 @@ impl Drop for Engine {
     fn drop(&mut self) {
         self.session.browser().own(&self.target, false);
         drop(self.session.browser().call(None, "Target.closeTarget", json!({"targetId": self.target})));
+        if let Some(context) = &self.context {
+            drop(self.session.browser().call(None, "Target.disposeBrowserContext", json!({"browserContextId": context})));
+        }
     }
 }
 

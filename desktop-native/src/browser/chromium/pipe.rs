@@ -347,6 +347,53 @@ mod tests {
         assert_eq!(lock(&wire.pending).len(), 2);
     }
 
+    /// Prova do modo página: fundo transparente chega ao quadro PNG do screencast com alfa 0.
+    #[test]
+    #[ignore = "sobe o Chromium da máquina"]
+    fn page_mode_png_frames_keep_the_transparent_background() {
+        let bin = launch::find().unwrap();
+        let profile = std::env::temp_dir().join(format!("hangar-page-proof-{}", std::process::id()));
+        let launched = launch::spawn(bin, &profile, 1.0).unwrap();
+        let wire = Arc::new(Wire { writer: Mutex::new(launched.writer), next: AtomicU64::new(1), pending: Mutex::default(), sinks: Mutex::default() });
+        let (events, _received) = async_channel::unbounded();
+        let reading = wire.clone();
+        std::thread::spawn(move || read(launched.reader, &reading, &events));
+        let call = |session: Option<&str>, method: &str, params: Value| -> Value {
+            let (tx, rx) = mpsc::channel();
+            wire.send(session, method, params, Some(Box::new(move |r| { let _ = tx.send(r); })));
+            rx.recv_timeout(Duration::from_secs(15)).unwrap().unwrap_or_else(|e| panic!("{method}: {e}"))
+        };
+        let context = call(None, "Target.createBrowserContext", json!({"disposeOnDetach": true}))["browserContextId"].as_str().unwrap().to_owned();
+        let target = call(None, "Target.createTarget", json!({"url": "about:blank", "newWindow": true, "browserContextId": context}))["targetId"]
+            .as_str().unwrap().to_owned();
+        let session = call(None, "Target.attachToTarget", json!({"targetId": target, "flatten": true}))["sessionId"].as_str().unwrap().to_owned();
+        let s = Some(session.as_str());
+        let window = call(None, "Browser.getWindowForTarget", json!({"targetId": target}))["windowId"].as_i64().unwrap();
+        call(s, "Page.enable", json!({}));
+        call(s, "Emulation.setDefaultBackgroundColorOverride", json!({"color": {"r": 0, "g": 0, "b": 0, "a": 0}}));
+        call(None, "Browser.setWindowBounds", json!({"windowId": window, "bounds": {"width": 400, "height": 300}}));
+        let frame = call(s, "Page.getFrameTree", json!({}))["frameTree"]["frame"]["id"].as_str().unwrap().to_owned();
+        let html = r#"<style>html,body{margin:0;background:transparent}</style>
+            <div style="position:absolute;left:50px;top:50px;width:100px;height:100px;background:rgb(255,0,0)"></div>"#;
+        call(s, "Page.setDocumentContent", json!({"frameId": frame, "html": html}));
+        let decode = |data: &str| {
+            let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data).unwrap();
+            image::load_from_memory_with_format(&bytes, image::ImageFormat::Png).unwrap().into_rgba8()
+        };
+        let shot = decode(call(s, "Page.captureScreenshot", json!({"format": "png"}))["data"].as_str().unwrap());
+        eprintln!("captureScreenshot {:?}: canto {:?}, caixa {:?}", shot.dimensions(), shot.get_pixel(5, 5), shot.get_pixel(100, 100));
+        let (tx, rx) = mpsc::channel();
+        lock(&wire.sinks).insert(session.clone(), Box::new(move |p: &Value| { let _ = tx.send(p["data"].as_str().unwrap_or("").to_owned()); }));
+        call(s, "Page.startScreencast", json!({"format": "png", "maxWidth": 400, "maxHeight": 300, "everyNthFrame": 1}));
+        let pixels = decode(&rx.recv_timeout(Duration::from_secs(15)).unwrap());
+        eprintln!("screencast {:?}: canto {:?}, caixa {:?}", pixels.dimensions(), pixels.get_pixel(5, 5), pixels.get_pixel(100, 100));
+        drop(call(None, "Target.disposeBrowserContext", json!({"browserContextId": context})));
+        wire.send(None, "Browser.close", json!({}), None);
+        let _ = std::fs::remove_dir_all(&profile);
+        assert_eq!(pixels.get_pixel(5, 5)[3], 0, "fundo deveria ser transparente");
+        assert_eq!(pixels.get_pixel(100, 100).0, [255, 0, 0, 255], "caixa deveria ser opaca");
+    }
+
     #[test]
     fn frames_with_an_owner_skip_the_interface_and_are_acked() {
         let (wire, reader) = wire();
