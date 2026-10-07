@@ -1648,3 +1648,41 @@ porque quem o fecha espera a mesma barreira. O diário de falha do runtime leva 
 fora, porque algumas carregam saída do modelo; o ponto do `raise` já diz qual frase foi. O campo
 não se chama `origem` porque o `diag.registrar` grava o dele por cima.
 
+
+## Escritas do Claude no hangar-server
+
+(07/10/2026, parte 5-0, branch `hangar-server-parte5-claude`, contrato 37.) As rotas de
+escrita do dono em sessão Claude (`/input`, `/steer`, `/interrupt`, `/keys`, `/select`,
+`/select/submit`, `/answer` e o descarte da fila) passam a ser atendidas
+pelo Rust, com e sem terminal. Decisões:
+
+- **Porta de entrada por sessão, fechada pelo Python.** O Rust deixa uma escrita entrar só com a
+  porta aberta; o Python a fecha antes de todo `slot.frozen=True` (relançar, trocar de conta,
+  transferir, renomear) e reabre depois. Fechar espera as escritas em curso por até 60 s e, se
+  não esvaziar, responde `ingress_busy` e reabre. A mensagem `ingress` vai direto pelo transporte,
+  nunca por `coordinator.op`: `op` passa pelo `freeze` e travaria dentro do próprio `freeze`.
+- **Nenhum repasse ao Python com o passe de entrada na mão.** O `/clear` do Python fecha a porta e
+  esperaria o passe da própria rota (30 s de travada em todo `/clear`). A decisão de repassar vem
+  antes do `enter` ou o passe é solto antes.
+- **Quem o Rust atende vem de `owns` na saúde.** Sessão sem terminal "nasce no Rust"
+  (`_born_in_rust`); `owns` ausente ou inválido é falha de partida, não "nada é do Rust".
+- **Pergunta respondida pelo chat não empresta mais o teclado ao Python.** O Rust escreve a
+  resposta no pane; o texto do "conversar" que não se confirma responde 502 `erro_envio_falhou`
+  ("a pergunta foi fechada… confira na sessão"), não 409: o app trata 409 como "nada digitado" e
+  abre o espelho do terminal numa falha onde não precisava, e reenviar duplicaria. Nos erros do
+  `/select`, o Rust é a referência (`unknown` não é "não convergiu"), e o Python foi alinhado a
+  ele; só `no_pending_permission` vira "nenhum pedido pendente", o resto segue 503 com o motivo.
+- **Preparo do prompt, linha de status e catálogo de skills rodam no Rust.** Falha da linha de
+  status continua cosmética (não derruba a sessão); `/internal/quota` usa só o cache do Rust.
+
+**Perda conhecida.** Com o Python na frente, um envio que ficou sem resposta porque o Rust caiu
+era repetido com o mesmo `operation_id` no Rust novo (`_repeat_after_crash`,
+`runtime_coordinator.py:1333`) e o app via "incerto". Com a rota no Rust, o app vê a conexão
+cortada e um reenvio dele leva id novo: depois de uma queda no meio do envio, a mensagem pode
+duplicar. É raro e aceito; o app não manda id do cliente para deduplicar.
+
+**Fora da cobertura da porta.** Envios que nascem no Python (broadcast, grupo, par, MCP) seguem
+por `_send_one` e ficam protegidos só pelo `freeze`, não pela porta. Seguem assim até a parte 6.
+
+Roteiro de medição (sem números ainda, vêm do uso real):
+[medicao-5-0.md](../migracao-rust/parte5-claude/medicao-5-0.md).
