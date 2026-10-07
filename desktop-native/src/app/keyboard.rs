@@ -1,6 +1,6 @@
 use super::*;
 use super::settings::{section_head, settings_box};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -109,10 +109,14 @@ pub(super) struct RunShortcut { pub(super) server: String, pub(super) project: O
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
-struct Config { overrides: BTreeMap<Command, String>, shortcuts: Vec<ShortcutBinding>, hold: Modifiers, physical: BTreeMap<String, Modifiers> }
+struct Config {
+    overrides: BTreeMap<Command, String>, shortcuts: Vec<ShortcutBinding>, hold: Modifiers, physical: BTreeMap<String, Modifiers>,
+    // Padrões cedidos na leitura: fora do arquivo, para o padrão voltar quando a tecla da pessoa sair.
+    #[serde(skip)] yielded: BTreeSet<Command>,
+}
 
 impl Default for Config {
-    fn default() -> Self { Self { overrides: BTreeMap::new(), shortcuts: Vec::new(), hold: Modifiers { control: true, shift: true, ..Modifiers::none() }, physical: BTreeMap::new() } }
+    fn default() -> Self { Self { overrides: BTreeMap::new(), shortcuts: Vec::new(), hold: Modifiers { control: true, shift: true, ..Modifiers::none() }, physical: BTreeMap::new(), yielded: BTreeSet::new() } }
 }
 
 fn canonical_key(source: &str) -> Result<String, String> {
@@ -177,7 +181,7 @@ impl Config {
 
     fn keys(&self, command: &Command) -> Vec<&str> {
         let key = self.key(command);
-        if key.is_empty() { return Vec::new(); }
+        if key.is_empty() || (!self.overrides.contains_key(command) && self.yielded.contains(command)) { return Vec::new(); }
         let mut keys = vec![key];
         if cfg!(target_os = "macos") && !self.overrides.contains_key(command) {
             match command { Command::CopyTerminal => keys.push("cmd-c"), Command::PasteTerminal => keys.push("cmd-v"), _ => {} }
@@ -194,7 +198,7 @@ impl Config {
             let same = |key: &str| canonical_key(key).is_ok_and(|key| key == default);
             let taken = self.overrides.iter().any(|(other, key)| other.context() == command.context() && same(key))
                 || (command.context() == "!Terminal" && self.shortcuts.iter().any(|shortcut| same(&shortcut.key)));
-            if taken { self.overrides.insert(command, String::new()); }
+            if taken { self.yielded.insert(command); }
         }
     }
 
@@ -544,7 +548,7 @@ impl Hangar {
     fn restore_keyboard_target(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
         let mut config = self.keyboard.config.clone();
         match target {
-            Target::Command(command) => { config.overrides.remove(&command); }
+            Target::Command(command) => { config.yielded.remove(&command); config.overrides.remove(&command); }
             Target::Shortcut(shortcut) => config.shortcuts.retain(|item| !item.same_target(&shortcut)),
             Target::Hold => config.hold = Config::default().hold,
         }
@@ -896,6 +900,9 @@ mod tests {
         assert!(config.validate().is_ok());
         assert!(config.keys(&Command::NewSession).is_empty());
         assert_eq!(config.keys(&Command::Costs), ["secondary-shift-t"]);
+        // O cedido não vai para o arquivo: sem o conflito, o padrão volta na próxima leitura.
+        let saved: Config = serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert!(!saved.overrides.contains_key(&Command::NewSession) && saved.yielded.is_empty());
         // Sem conflito nada muda; a tecla escolhida pela pessoa para o próprio comando não é tocada.
         let mut config = Config::default();
         config.overrides.insert(Command::NewSession, "ctrl-alt-t".into());
