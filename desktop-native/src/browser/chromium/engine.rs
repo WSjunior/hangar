@@ -152,8 +152,7 @@ impl Starter {
     }
 
     /// Página da conversa: alvo num contexto próprio (sem os cookies do painel), documento posto direto e quadros
-    /// em PNG. A GPUI desenha a textura da superfície sempre opaca, então o fundo transparente sairia preto: com
-    /// `background` a página ganha essa cor de fundo; sem ele fica o fundo padrão do Chromium.
+    /// em PNG, para o alfa chegar à GPUI. Sem `background` o fundo é transparente; com ele, opaco nessa cor.
     #[expect(dead_code, reason = "a página da conversa ainda não chama")]
     pub fn start_page(self, html: &str, width: f32, background: Option<(u8, u8, u8)>, events: async_channel::Sender<Event>) -> Result<Engine, String> {
         let browser = Browser::shared(&self.executor, self.scale)?;
@@ -182,9 +181,10 @@ impl Starter {
         session.call_blocking("Inspector.enable", json!({}))?;
         session.call_blocking("Runtime.enable", json!({}))?;
         session.call_blocking("Runtime.addBinding", json!({"name": "hangarHost"}))?;
-        if let Some((r, g, b)) = background {
-            session.call_blocking("Emulation.setDefaultBackgroundColorOverride", json!({"color": {"r": r, "g": g, "b": b, "a": 1}}))?;
-        }
+        let (r, g, b, a) = background.map_or((0, 0, 0, 0), |(r, g, b)| (r, g, b, 1));
+        session.call_blocking("Emulation.setDefaultBackgroundColorOverride", json!({"color": {"r": r, "g": g, "b": b, "a": a}}))?;
+        // Várias páginas abertas não disputam o foco: `focus`/`release_focus` contam com isto.
+        session.call_blocking("Emulation.setFocusEmulationEnabled", json!({"enabled": true}))?;
         session.call_blocking("Fetch.enable", json!({"patterns": [{"resourceType": "Document", "requestStage": "Request"}]}))?;
         browser.call_blocking(None, "Browser.setWindowBounds", json!({"windowId": window, "bounds": {"width": width.round() as i64, "height": 600}}), long)?;
         let measured = session.call_blocking("Runtime.evaluate", json!({"expression": "outerHeight-innerHeight", "returnByValue": true}))?;
@@ -261,8 +261,9 @@ fn listen(
     let _ = session.on("Fetch.requestPaused", move |params| {
         let Some(session) = weak.upgrade() else { return };
         let (id, url) = (params["requestId"].clone(), params["request"]["url"].as_str().unwrap_or("").to_owned());
+        // `Aborted` deixa a página onde está; `BlockedByClient` a trocaria pela tela de erro do Chromium.
         if block_documents && params["frameId"] == m.as_str() {
-            return drop(session.call("Fetch.failRequest", json!({"requestId": id, "errorReason": "BlockedByClient"})));
+            return drop(session.call("Fetch.failRequest", json!({"requestId": id, "errorReason": "Aborted"})));
         }
         if model::allowed_request(&url) { return drop(session.call("Fetch.continueRequest", json!({"requestId": id}))); }
         drop(session.call("Fetch.failRequest", json!({"requestId": id, "errorReason": "BlockedByClient"})));

@@ -2849,7 +2849,8 @@ impl WgpuRendererCore {
                     pad: 0,
                     grayscale: false.into(),
                     // Negative opacity tells the shader the texture is opaque (XRGB: the X byte is not alpha).
-                    opacity: -1.0,
+                    // Rgba8Unorm comes from decoded frames with real straight alpha, which blend_color handles.
+                    opacity: if texture.format() == wgpu::TextureFormat::Rgba8Unorm { 1.0 } else { -1.0 },
                     bounds: surface.bounds,
                     content_mask: surface.content_mask.clone(),
                     corner_radii: Default::default(),
