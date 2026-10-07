@@ -3,8 +3,10 @@
 //! de endereço + token.
 use super::*;
 
+mod agent;
 mod app_copy;
 mod askpass;
+mod codes;
 mod entry;
 mod failure;
 mod flow;
@@ -12,6 +14,8 @@ mod local;
 mod marks;
 mod phone;
 mod precheck;
+mod repo;
+mod report;
 mod run;
 mod screens;
 mod system;
