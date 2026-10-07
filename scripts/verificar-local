@@ -131,13 +131,14 @@ passo_backend() {   # só Linux: no Windows fica o passo_runtime
     v="$(grep -o 'releases/download/v[0-9.]*/omp-linux-x64' .github/workflows/ci.yml | head -1 | cut -d/ -f3)"
     # O nome do executável tem que ser `omp`: a extensão do Hangar decide se roda no omp ou no pi
     # pelo process.execPath (scripts/pi/lib/agent-context.ts), e link simbólico resolve pro alvo.
-    omp="$VERIFICAR_CACHE/omp-$v/omp"
+    omp="$VERIFICAR_CACHE/omp/$v/omp"
     if [[ ! -x "$omp" ]]; then
         local d; d="$(mktemp -d)"
         (cd "$d" && curl -fsSL --retry 3 -o omp-linux-x64 "https://github.com/can1357/oh-my-pi/releases/download/$v/omp-linux-x64" \
             && curl -fsSL --retry 3 -o SHA256SUMS.txt "https://github.com/can1357/oh-my-pi/releases/download/$v/SHA256SUMS.txt" \
             && sha256sum --check --ignore-missing --quiet SHA256SUMS.txt) || { rm -rf "$d"; echo "omp $v: download falhou"; return 1; }
-        install -Dm755 "$d/omp-linux-x64" "$omp"; rm -rf "$d"
+        install -Dm755 "$d/omp-linux-x64" "$omp" || { rm -rf "$d"; echo "omp $v: não consegui gravar $omp"; return 1; }
+        rm -rf "$d"
     fi
     # basetemp em disco: o omp extrai centenas de MB por caso (7 GB na suíte), e o /tmp pode ser tmpfs.
     mkdir -p "/var/tmp/hangar-verificacao-$USER"
