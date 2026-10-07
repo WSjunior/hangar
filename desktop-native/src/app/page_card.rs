@@ -211,12 +211,26 @@ fn hex(color: Hsla) -> String {
     if c.a >= 1. { format!("#{:02x}{:02x}{:02x}", ch(c.r), ch(c.g), ch(c.b)) } else { format!("#{:02x}{:02x}{:02x}{:02x}", ch(c.r), ch(c.g), ch(c.b), ch(c.a)) }
 }
 
+/// A fonte do app vem embutida nele, não instalada: sem isto o Chromium da página cai na fonte do sistema, mais fina,
+/// e a página destoa do texto ao lado.
+#[cfg(target_os = "linux")]
+static APP_FONTS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    use base64::Engine as _;
+    let face = |bytes: &[u8], weight: u16| format!("@font-face{{font-family:\"{}\";font-weight:{weight};src:url(data:font/ttf;base64,{})}}",
+        theme::SANS, base64::engine::general_purpose::STANDARD.encode(bytes));
+    let css = [face(include_bytes!("../../assets/fonts/Geist-Regular.ttf"), 400), face(include_bytes!("../../assets/fonts/Geist-Medium.ttf"), 500),
+        face(include_bytes!("../../assets/fonts/Geist-SemiBold.ttf"), 600), face(include_bytes!("../../assets/fonts/Geist-Bold.ttf"), 700)].concat();
+    format!("(()=>{{if(document.getElementById('hangar-fonts'))return;const s=document.createElement('style');s.id='hangar-fonts';s.textContent={};document.head.appendChild(s)}})()",
+        serde_json::to_string(&css).unwrap_or_default())
+});
+
 /// Script que entrega o tema do app à página, nos nomes de variável da spec.
 #[cfg(target_os = "linux")]
 fn theme_script() -> String {
     let vars = json!({
         "--background": "transparent", "--foreground": hex(theme::text()), "--muted-foreground": hex(theme::muted()),
         "--surface": hex(theme::surface()), "--border": hex(theme::border()), "--accent": hex(theme::accent()),
+        "--font-sans": format!("\"{}\", system-ui, sans-serif", theme::SANS), "--font-mono": format!("\"{}\", ui-monospace, monospace", theme::MONO),
     });
     let params = json!({"theme": if theme::is_dark() { "dark" } else { "light" }, "styles": {"variables": vars}});
     format!("window.__hangarApply&&window.__hangarApply({params})")
@@ -505,6 +519,7 @@ impl Hangar {
             let script = theme_script();
             let follows = !view.page.own_theme;
             if let Some(running) = view.running.as_mut().filter(|r| follows && r.framed && r.theme_sent != script) {
+                if running.theme_sent.is_empty() { running.engine.evaluate(&APP_FONTS); }
                 running.engine.evaluate(&script);
                 running.theme_sent = script;
             }
