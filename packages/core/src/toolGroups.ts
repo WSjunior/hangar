@@ -40,8 +40,9 @@ export function agruparConversa(eventos: ChatEvent[], opts: OpcoesAgrupar): Item
     if (ev.kind === 'tool_result') continue;
     if (ev.kind === 'thinking') { flush(); pens.push(ev); continue; }
     // Busca so e engolida quando ha um pensamento ABERTO antes dela — busca solta continua card
-    // normal, senao sumiria numa linha que nao explica nada.
-    if (pens.length && ev.kind === 'tool_use' && opts.entraNoPensamento(ev.tool_name)) { pens.push(ev); continue; }
+    // normal, senão sumiria numa linha que não explica nada. A página publicada nunca é engolida:
+    // ela existe para ser vista.
+    if (pens.length && ev.kind === 'tool_use' && !isHtmlRenderTool(ev.tool_name) && opts.entraNoPensamento(ev.tool_name)) { pens.push(ev); continue; }
     flushPens();
     // O agente e a página publicada ficam fora do grupo: o cartão do agente abre a conversa própria
     // (dentro de um grupo fechado o que ainda roda ficaria escondido) e a página é para ser vista.
