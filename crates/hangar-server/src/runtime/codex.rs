@@ -159,6 +159,8 @@ pub struct Engine {
     policies:BTreeMap<RequestId,String>,
     last_format_request:Option<RequestId>,
     format_gate:FormatGate,
+    /// Formatos tortos já mandados ao Python: falha sistemática não vira um aviso por linha.
+    reported_formats:BTreeSet<String>,
     async_questions:AsyncQuestions,
     voices:BTreeMap<String,Voice>,
     voice_wires:BTreeMap<String,(String,RequestId,u64)>,
@@ -236,7 +238,7 @@ impl Engine {
             preview:LiveBuffer::default(),response_started:false,first_response_start:None,compacting:false,
             running_commands:BTreeMap::new(),thinking:LiveBuffer::default(),was_working:metadata["in_progress"] == true,
             rpc:BTreeMap::new(),server_requests:Vec::new(),
-            request_epochs:BTreeMap::new(),answering:BTreeSet::new(),wires:BTreeMap::new(),policies:BTreeMap::new(),last_format_request:None,format_gate:FormatGate::default(),async_questions,voices,voice_wires:BTreeMap::new(),skill_preparations:BTreeMap::new(),early_voice:BTreeMap::new(),early_voice_bytes:0,metadata }
+            request_epochs:BTreeMap::new(),answering:BTreeSet::new(),wires:BTreeMap::new(),policies:BTreeMap::new(),last_format_request:None,format_gate:FormatGate::default(),reported_formats:BTreeSet::new(),async_questions,voices,voice_wires:BTreeMap::new(),skill_preparations:BTreeMap::new(),early_voice:BTreeMap::new(),early_voice_bytes:0,metadata }
     }
 
     pub fn view(&self) -> Value {
@@ -328,10 +330,23 @@ impl Engine {
             Err(failure) => {
                 tracing::warn!(session=%self.state.session,method,error=wire::error_kind(&failure),"resposta do Codex fora do formato");
                 effects.push(Effect::Diag { event:DiagEvent::CodexDecode,code:decode_code(method) });
-                self.policy("unknown_private",json!({"kind":format!("decode:{method}"),"event":result}),effects);
+                // Só a forma do topo: o resultado pode ser o histórico inteiro, e o Python exige objeto.
+                let shape = match result {
+                    Value::Object(fields) => json!({"method":method,"result_keys":fields.keys().collect::<Vec<_>>()}),
+                    Value::Null => json!({"method":method,"result_type":"null"}),
+                    Value::Bool(_) => json!({"method":method,"result_type":"bool"}),
+                    Value::Number(_) => json!({"method":method,"result_type":"number"}),
+                    Value::String(_) => json!({"method":method,"result_type":"string"}),
+                    Value::Array(_) => json!({"method":method,"result_type":"array"}),
+                };
+                self.report_format(format!("decode:{method}"),||shape,effects);
                 T::default()
             }
         }
+    }
+
+    fn report_format(&mut self,kind:String,event:impl FnOnce() -> Value,effects:&mut Vec<Effect>) {
+        if self.reported_formats.insert(kind.clone()) { self.policy("unknown_private",json!({"kind":kind,"event":event()}),effects); }
     }
 
     fn send(&mut self,operation_id:String,request:ClientRequest,continuation:Option<Value>,effects:&mut Vec<Effect>) {
@@ -1130,7 +1145,7 @@ impl Engine {
                 // Formato inesperado num método conhecido: a linha é ignorada e fica registrada.
                 tracing::warn!(session=%self.state.session,method=%failure.method,error=wire::error_kind(&failure.error),"notificação do Codex fora do formato");
                 effects.push(Effect::Diag { event:DiagEvent::CodexDecode,code:decode_code(&failure.method) });
-                self.policy("unknown_private",json!({"kind":format!("decode:{}",failure.method),"event":line}),effects);
+                self.report_format(format!("decode:{}",failure.method),||line.clone(),effects);
                 return Ok(());
             }
         };

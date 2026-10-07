@@ -44,7 +44,7 @@ Medição e alternativas em [`analise.md`](analise.md#tipos-do-protocolo). Decis
 - **`scripts/conferir-codex-schema`**: gera o schema do Codex instalado, refaz o recorte e mostra o
   diff dos campos usados. É o passo obrigatório ao subir a versão conferida.
 - **Aviso de versão:** a resposta do `initialize` traz `userAgent` (`…/0.159.3 (…)`). Major.minor
-  diferente da conferida → uma linha no diário por servidor e um aviso discreto na sessão
+  diferente da conferida → no máximo uma linha no diário por minuto por versão e um aviso discreto na sessão
   (`codex_versao_nao_conferida`, com as duas versões). A decodificação continua tolerante.
 - **Versão conferida:** a mais nova instalada nas duas máquinas quando o plano for escrito
   (hoje 0.159.3 aqui e 0.160.1 no notebook).

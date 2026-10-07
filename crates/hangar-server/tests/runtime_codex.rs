@@ -545,6 +545,30 @@ fn notification_with_wrong_type_is_dropped_and_reported() {
 }
 
 #[test]
+fn repeated_malformed_notification_reports_privately_once() {
+    let mut engine = engine();
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),10.0);
+    let mut effects = line(&mut engine,json!({"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","delta":5}}),11.0);
+    effects.extend(line(&mut engine,json!({"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","delta":6}}),11.1));
+    assert_eq!(effects.iter().filter(|e|matches!(e,Effect::Policy { kind,.. } if kind == "unknown_private")).count(),1);
+    assert_eq!(diags(&effects).len(),2);
+}
+
+#[test]
+fn malformed_reply_reports_only_its_shape() {
+    let mut engine = engine();
+    let request = frames(&engine.command(command(OperationKind::ReadSettings,json!({})),clock(10.0)).unwrap())[0].clone();
+    let effects = line(&mut engine,json!({"id":request["id"],"result":{"thread":"x","b":1}}),11.0);
+    let payload = effects.iter().find_map(|e|match e { Effect::Policy { kind,payload,.. } if kind == "unknown_private" => Some(payload.clone()),_=>None }).unwrap();
+    assert_eq!(payload["event"],json!({"method":"thread/read","result_keys":["thread","b"]}));
+    let mut engine = self::engine();
+    let request = frames(&engine.command(command(OperationKind::ReadSettings,json!({})),clock(12.0)).unwrap())[0].clone();
+    let effects = line(&mut engine,json!({"id":request["id"],"result":"texto"}),13.0);
+    let payload = effects.iter().find_map(|e|match e { Effect::Policy { kind,payload,.. } if kind == "unknown_private" => Some(payload.clone()),_=>None }).unwrap();
+    assert_eq!(payload["event"],json!({"method":"thread/read","result_type":"string"}));
+}
+
+#[test]
 fn unknown_notification_is_silent() {
     let mut engine = engine();
     let effects = line(&mut engine,json!({"method":"thread/novidade","params":{"threadId":"thread-1"}}),10.0);

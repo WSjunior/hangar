@@ -1378,6 +1378,9 @@ git commit -m "feat(codex): Rust engine reads and writes the typed protocol, war
 
 ### Task 5: Cliente JSON-RPC assíncrono (stdio e WebSocket)
 
+> Nota da revisão final: o cliente tem dois transportes, stdio e WebSocket. O cano continua com o
+> `CanoConnection` do ator; a spec previa três transportes no cliente.
+
 **Files:**
 - Modify: `crates/hangar-codex/src/client.rs`
 - Create: `crates/hangar-codex/tests/client.rs`

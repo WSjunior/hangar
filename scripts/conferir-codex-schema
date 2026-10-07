@@ -13,4 +13,4 @@ tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 codex app-server generate-json-schema --experimental --out "$tmp" >/dev/null
 (cd "$raiz/crates" && CODEX_SCHEMA_DIR="$tmp" CARGO_BUILD_JOBS=4 cargo test -q -p hangar-codex --lib -- --ignored regenerate_slice)
 (cd "$raiz/crates" && CARGO_BUILD_JOBS=4 cargo test -q -p hangar-codex --lib schema_check::fields_used_exist_in_checked_schema)
-git -C "$raiz" diff --stat -- crates/hangar-codex/schema
+git -C "$raiz" status --short -- crates/hangar-codex/schema
