@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet};
 use serde_json::{Map, Value};
 use crate::{api::dto::ChatEvent, appearance::ThinkingTools};
 
+pub mod incremental;
+
 /// One visible row. Holds indices into `Chat::events`, never the row's own position in the list.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Item {

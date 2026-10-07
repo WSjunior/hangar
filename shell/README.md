@@ -112,19 +112,11 @@ para `shell/build/`, além dos arquivos do PWA. `shell/dist/` é saída de build
 ou o padrão `http://127.0.0.1:8765`) ou via Tailscale/LAN. Sem isso ele cai na tela de recuperação
 pedindo o endereço, do mesmo jeito que `npm start` cairia.
 
-## Release (Linux, Windows, macOS)
+## Release
 
-Empurrar uma tag `v*` (`git tag v0.1.0 && git push origin v0.1.0`) dispara
-`.github/workflows/release.yml`: builda o shell nas 3 plataformas
-(`ubuntu-latest`, `windows-latest`, `macos-latest`) e anexa AppImage, `.exe`
-(NSIS) e `.dmg` na Release do GitHub que corresponde à tag.
-
-**Os binários de Windows e macOS não são assinados** — sem certificado de
-code signing, o SmartScreen do Windows e o Gatekeeper do macOS vão avisar que
-o app é de origem desconhecida antes de deixar abrir. E o comportamento da
-janela nesses dois sistemas (`shell/main.cjs`) foi escrito a partir da
-documentação e **nunca rodou de fato** em Windows ou macOS — só o caminho
-Linux/AppImage foi testado.
+Não há mais build de release do shell no CI: o `release.yml` (tag `v*` → AppImage, `.exe` e `.dmg`)
+saiu porque o app de desktop é o nativo (`desktop-native/`, publicado pelo `native.yml`). As
+releases `v0.1.x` antigas continuam no GitHub; empacotar à mão segue sendo o `npm run dist` acima.
 
 ## Fundo
 

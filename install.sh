@@ -5,9 +5,11 @@
 #   ./install.sh --yes        # aceita tudo (não pergunta nada)
 #   ./install.sh --check      # só diz o que falta e sai, sem instalar nada
 #   ./install.sh --avancado   # pergunta cada extra (o padrão instala o recomendado sem perguntar)
+#   ./install.sh --agentes=codex,pi   # agentes de código a instalar (claude, codex, pi, omp, kimi)
 #   ./install.sh --update        # re-aplica só o que um `git pull` não atualiza sozinho
 #   ./install.sh --no-frontend   # só o backend (o PWA já roda noutro lugar)
 #   ./install.sh --no-wrapper --no-services --no-hangar-send --no-panel   # pula partes
+#   ./install.sh --app --tailscale=sim|nao --sem-nativo   # assistente do app nativo: sem perguntas, marcas ##HANGAR-*
 #
 # Os sub-scripts (services-setup.sh, lan-setup.sh, install-hangar-send.sh, ...) continuam
 # rodáveis sozinhos; este aqui só faz com que um comando baste.
@@ -15,12 +17,19 @@ set -euo pipefail
 cd "$(dirname "$0")"
 REPO=$(pwd)
 
-YES=0; CHECK=0; UPDATE=0; WRAPPER=1; SERVICES=1; CPSEND=1; PANEL=1; FRONTEND=1; AVANCADO=0
+YES=0; CHECK=0; UPDATE=0; WRAPPER=1; SERVICES=1; CPSEND=1; PANEL=1; FRONTEND=1; AVANCADO=0; AGENTES=''
+APP=0; TAILSCALE=''; SEM_NATIVO=0
 for arg in "$@"; do
   case "$arg" in
     --yes|-y)      YES=1 ;;
     --check)       CHECK=1 ;;
     --avancado)    AVANCADO=1 ;;
+    --agentes=*)   AGENTES=${arg#--agentes=} ;;
+    # --app: modo do assistente do app nativo. A pessoa já respondeu nas telas dele.
+    --app)         APP=1 ;;
+    --tailscale=sim|--tailscale=nao) TAILSCALE=${arg#--tailscale=} ;;
+    --tailscale=*) echo "--tailscale aceita sim ou nao"; exit 1 ;;
+    --sem-nativo)  SEM_NATIVO=1 ;;
     # --update: modo do hook post-merge. Re-aplica o que o `git pull` NÃO atualiza (units com
     # caminho cravado, o bloco de protocolo no ~/.claude/CLAUDE.md, deps do backend, build do
     # front) e NÃO toca em nada que peça senha ou decisão: sem instalar dependência, sem token,
@@ -36,6 +45,20 @@ for arg in "$@"; do
     *) echo "flag desconhecida: $arg"; exit 1 ;;
   esac
 done
+
+# O Hangar pilota agentes de código e precisa de pelo menos um; o Claude Code é o padrão, não o único.
+TODOS_AGENTES="claude codex pi omp kimi"
+nome_agente() {
+  case $1 in claude) echo "Claude Code" ;; codex) echo "Codex" ;; pi) echo "Pi" ;; omp) echo "omp" ;; kimi) echo "Kimi Code" ;; esac
+}
+agentes_validos() { # agentes_validos <lista separada por vírgula>: 0 = todos conhecidos e não vazia
+  local a lista=${1//,/ }
+  [ -n "${lista// /}" ] || return 1
+  for a in $lista; do case " $TODOS_AGENTES " in *" $a "*) ;; *) return 1 ;; esac; done
+}
+if [ -n "$AGENTES" ] && ! agentes_validos "$AGENTES"; then
+  echo "--agentes aceita, separados por vírgula: ${TODOS_AGENTES// /, }"; exit 1
+fi
 
 say() {
   # Título numerado ("3/8 ...") ganha a barra de progresso; os demais seguem só em negrito.
@@ -55,6 +78,117 @@ erro() { printf '  \033[31mX\033[0m   %s\n' "$*"; }
 # A marca é o que a tela do Atualizar mostra como motivo (o app só vê as últimas linhas).
 fail() { erro "$*"; echo "##HANGAR-FALHA## $*"; exit 1; }
 
+# Marcas do assistente do app nativo; contrato na spec
+# docs/superpowers/specs/2026-10-06-instalador-grafico-design.md. Só saem no --app.
+HANGAR_PROTOCOL=1
+CURRENT_STEP=''
+FINAL_STATE=falhou
+mark_step() {
+  [ "$APP" = 1 ] || return 0
+  [ "$2" = fazendo ] && CURRENT_STEP=$1
+  echo "##HANGAR-PASSO## $1 $2"
+}
+# Última linha no --app: sem ela o app sabe que a instalação foi interrompida.
+finish_app() {
+  [ "$FINAL_STATE" = falhou ] && [ -n "$CURRENT_STEP" ] && echo "##HANGAR-PASSO## $CURRENT_STEP falhou"
+  echo "##HANGAR-FIM## $FINAL_STATE"
+}
+if [ "$APP" = 1 ]; then
+  echo "##HANGAR-PROTOCOLO## $HANGAR_PROTOCOL"
+  trap finish_app EXIT
+fi
+# A senha do celular chega pelo ambiente, nunca pelo argv (que o `ps` mostra), e sai dele já aqui
+# para nenhum instalador de terceiro chamado depois herdá-la.
+APP_TOKEN=''
+[ "$APP" = 1 ] && APP_TOKEN=${HANGAR_TOKEN-}
+unset HANGAR_TOKEN
+# O auxiliar da senha de administrador (posto pelo app) e o código dele também saem do ambiente:
+# só a app_sudo os repassa, e só ao próprio auxiliar.
+APP_ASKPASS=${HANGAR_ASKPASS-}
+APP_ASKPASS_CODE=${HANGAR_ASKPASS_CODE-}
+unset HANGAR_ASKPASS HANGAR_ASKPASS_CODE
+mark_item() { [ "$APP" = 1 ] || return 0; echo "##HANGAR-ITEM## $1 $2 $3"; }
+# Item de uma parte inteira: pendente quando ela somou problema desde a contagem `antes`.
+mark_item_since() { # mark_item_since <id> <antes> <texto>
+  local st=ok
+  [ "${#PROBLEMAS[@]}" -gt "$2" ] && st=pendente
+  mark_item "$1" "$st" "$3"
+}
+# O código vem logo antes da falha, também no terminal: o app troca o texto pela frase e pelo botão.
+fail_with() { # fail_with <código ou vazio> <mensagem>
+  [ -n "$1" ] && echo "##HANGAR-ERRO## $1"
+  shift; fail "$*"
+}
+# Vazio quando a internet responde: aí a falha é de outra coisa.
+net_code() {
+  command -v curl >/dev/null || return 0
+  curl -fsS --max-time 10 -o /dev/null https://github.com 2>/dev/null || echo sem-internet
+}
+# Textos que dizem a causa de uma falha com sudo: sudo clássico, sudo-rs e apt, medidos em
+# docs/decisoes/instalacao.md ("O `sudo` sem terminal: `sudo -S`, não `SUDO_ASKPASS`").
+SUDO_DENIED_RE='not in the sudoers|not allowed to (run|execute)|may not run sudo|afraid I can.t do that'
+# Só linhas do próprio sudo: um comando que imprime "Authentication failed" não é senha errada.
+SUDO_WRONG_RE='^Sorry, try again|^sudo(-rs)?: .*(incorrect (password|authentication) attempt|Authentication failed)'
+PKG_STALE_RE='Unable to locate package|Unable to fetch some archives|Failed to fetch'
+# Escrita pela app_sudo quando a pessoa não deu a senha (fechou a janela ou errou três vezes).
+SUDO_NO_PASSWORD='hangar: a senha de administrador não foi informada'
+# Escrita pela app_sudo quando o sudo aceita a senha mas não a guarda para o comando seguinte.
+SUDO_NO_CACHE='hangar: o sudo aceitou a senha mas não a guarda entre comandos (timestamp_timeout=0)'
+
+# Todo sudo do instalador passa por aqui. No --app a senha vem da janela do app: o auxiliar do
+# HANGAR_ASKPASS a imprime e ela vai pelo cano direto ao `sudo -S`, nunca para variável, argv ou
+# saída (o sudo-rs do Ubuntu não aceita -A nem lê SUDO_ASKPASS). Fora do --app, o sudo de sempre.
+app_sudo() { # app_sudo <motivo> <comando…>
+  local reason=$1 retry='' err try
+  local -a st
+  shift
+  [ "$APP" = 1 ] || { sudo "$@"; return; }
+  # Credencial que o sudo guardou num pedido anterior deste processo: não pergunta de novo.
+  if sudo -n true 2>/dev/null; then sudo -n "$@"; return; fi
+  # --app rodado à mão: sem o app ninguém dá a senha, e isso não é senha cancelada nem falta de sudo.
+  if [ ! -x "$APP_ASKPASS" ]; then
+    echo "hangar: sem HANGAR_ASKPASS, o --app não tem como pedir a senha de administrador" >&2
+    return 1
+  fi
+  err=$(mktemp)
+  # Sudo recusado é resposta, não erro do instalador: sem isto o `set -e` sairia antes de ler a causa
+  # quando a app_sudo roda dentro de um cano (subshell). O `local -` devolve o -e na saída.
+  local -; set +e
+  # A senha só autentica (-v); o comando roda depois pelo -n. Com `sudo -S <comando>` uma regra
+  # NOPASSWD deixaria a senha na entrada do comando, e a saída dele se confundiria com a do sudo.
+  for try in 1 2 3; do
+    # A resposta do sudo vai à saída e ao arquivo: é dela que sai a causa da falha.
+    { HANGAR_ASKPASS_CODE=$APP_ASKPASS_CODE "$APP_ASKPASS" "$reason" ${retry:+"$retry"} \
+        | sudo -S -p '' -v 2>&1 | tee "$err" >&2; st=("${PIPESTATUS[@]}"); }
+    [ "${st[1]}" = 0 ] && break
+    # O auxiliar saiu sem senha: a pessoa fechou a janela.
+    [ "${st[0]}" = 0 ] || { echo "$SUDO_NO_PASSWORD" >&2; break; }
+    grep -qiE "$SUDO_DENIED_RE" "$err" && break
+    # Só senha recusada pede de novo; o --retry faz o app descartar a guardada.
+    grep -qiE "$SUDO_WRONG_RE" "$err" || break
+    [ "$try" = 3 ] && echo "$SUDO_NO_PASSWORD" >&2
+    retry=--retry
+  done
+  rm -f "$err"
+  [ "${st[1]}" = 0 ] || return "${st[1]}"
+  # Sem credencial guardada, a única via seria a senha no stdin do comando: para aqui.
+  sudo -n true 2>/dev/null || { echo "$SUDO_NO_CACHE" >&2; return 1; }
+  sudo -n "$@"
+}
+# Causa de uma falha com sudo, pela saída do comando; vazio = desconhecida.
+sudo_error_code() { # sudo_error_code <arquivo com a saída>
+  # Sudo que não guarda a credencial também não deixa este usuário instalar pelo app.
+  if grep -qiE "$SUDO_DENIED_RE" "$1" || grep -qF "$SUDO_NO_CACHE" "$1"; then
+    echo sem-sudo
+  elif grep -qF "$SUDO_NO_PASSWORD" "$1"; then
+    echo senha-cancelada
+  elif grep -qiE "$PKG_STALE_RE" "$1"; then
+    echo pacotes-desatualizados
+  elif grep -qiE "$SUDO_WRONG_RE" "$1"; then
+    echo senha-cancelada
+  fi
+}
+
 # Duas gravidades, e a diferença é o que acontece com os passos seguintes:
 #  - ESSENCIAL falhou -> para na hora (fail): backend, token e frontend sustentam todos os
 #    passos seguintes, e seguir adiante só enterrava a causa;
@@ -63,7 +197,12 @@ fail() { erro "$*"; echo "##HANGAR-FALHA## $*"; exit 1; }
 #    imprime amarelo e some foi como instalações inteiras saíram com o Tailscale sem publicar
 #    e ninguém soube na hora.
 PROBLEMAS=()
-anota_problema() { erro "$1"; PROBLEMAS+=("$1"); }
+# No --app cada problema vira pendência com código; sem código conhecido, `outro`.
+anota_problema() { # anota_problema <texto> [código]
+  erro "$1"; PROBLEMAS+=("$1")
+  [ "$APP" = 1 ] && echo "##HANGAR-PENDENCIA## ${2:-outro} $1"
+  return 0
+}
 
 gira() { # gira <rótulo> <comando...>: spinner enquanto roda; sem TTY (ou --update), saída direta
   local rotulo=$1; shift
@@ -87,7 +226,9 @@ gira() { # gira <rótulo> <comando...>: spinner enquanto roda; sem TTY (ou --upd
 # bootstrap.sh) o stdin é o cano do curl: um `read` normal recebia EOF na hora, devolvia string
 # vazia — e vazio aqui vale como "sim". O instalador aceitaria firewall, serviços, Tailscale e
 # hangar-send sem ninguém ter respondido nada. Sem terminal (CI, cron), a resposta é NÃO.
-if { exec 3</dev/tty; } 2>/dev/null; then TEM_TTY=1; else TEM_TTY=0; fi
+# --app: quem responde é o app; o terminal de onde ele foi aberto nunca é lido.
+if [ "$APP" = 1 ]; then TEM_TTY=0
+elif { exec 3</dev/tty; } 2>/dev/null; then TEM_TTY=1; else TEM_TTY=0; fi
 
 # Log em arquivo, nunca no --update: o app lê a saída CRUA pra pegar ##HANGAR-AVISO##,
 # e o `tee` quebraria esse parse. E nunca no --check: ele promete não escrever nada no disco,
@@ -113,23 +254,28 @@ _pergunta() {
   read -r r <&3 || r=''
   [ -z "$r" ] || [[ "$r" =~ ^[SsYy] ]]
 }
+# --app responde pela tabela do assistente: ask e ask_senha sim (a senha de administrador vem da
+# janela do app), ask_extra não. É a exceção declarada à regra "sem terminal, tudo é NÃO".
 ask() {
+  [ "$APP" = 1 ] && { nota "$1 -> sim (assistente)"; return 0; }
   [ "$YES" = 1 ] && return 0
   [ "$TEM_TTY" = 0 ] && { _pergunta "$1"; return; }
   [ "$AVANCADO" = 0 ] && { nota "$1 -> sim (padrão; --avancado pergunta)"; return 0; }
   _pergunta "$1"
 }
-ask_senha() { [ "$YES" = 1 ] && return 0; _pergunta "$1"; }
-ask_extra() { [ "$YES" = 1 ] && return 0; [ "$AVANCADO" = 0 ] && return 1; _pergunta "$1"; }
+ask_senha() { [ "$APP" = 1 ] && { nota "$1 -> sim (assistente)"; return 0; }; [ "$YES" = 1 ] && return 0; _pergunta "$1"; }
+ask_extra() { [ "$APP" = 1 ] && return 1; [ "$YES" = 1 ] && return 0; [ "$AVANCADO" = 0 ] && return 1; _pergunta "$1"; }
 
 PENDENTE=()
+DEPS_ERROR=''
 
 # Gerenciador de pacotes do sistema, pro único dep que precisa de root (tmux).
 detecta_pkg() {
   for p in pacman apt-get dnf zypper apk brew; do
     command -v "$p" >/dev/null || continue
     case "$p" in
-      pacman)  echo "sudo pacman -S --needed" ;;
+      # No --app ninguém responde ao [S/n] do pacman.
+      pacman)  if [ "$APP" = 1 ]; then echo "sudo pacman -S --needed --noconfirm"; else echo "sudo pacman -S --needed"; fi ;;
       apt-get) echo "sudo apt-get install -y" ;;
       dnf)     echo "sudo dnf install -y" ;;
       zypper)  echo "sudo zypper install -y" ;;
@@ -159,6 +305,15 @@ fi
 # depois disto o instalador segue sozinho, e o que restar de senha já foi anunciado aqui.
 # O --check não entra: ele não pode gravar nada no disco, token incluído.
 gera_token() { openssl rand -hex 24 2>/dev/null || python3 -c 'import secrets; print(secrets.token_hex(24))'; }
+# O backend lê o .env pelo python-dotenv, que corta o valor em " #" e expande "${VAR}": sem aspas
+# no .env, a senha com esses caracteres não chega inteira e o celular nunca entra.
+# Só ASCII visível: o app nativo monta o cabeçalho Authorization com a senha, e acento não autentica.
+TOKEN_PROIBIDO="só vale ASCII sem acento; não vale # \$ ' \" \\ nem espaço no começo ou no fim"
+token_proibido() {
+  local LC_ALL=C
+  case $1 in *[!\ -~]*|*'#'*|*'$'*|*\'*|*'"'*|*'\'*|[[:blank:]]*|*[[:blank:]]) return 0 ;; esac
+  return 1
+}
 if [ "$UPDATE" = 0 ] && [ "$CHECK" = 0 ]; then
 say "0/8 Antes de começar"
 echo "  No máximo duas perguntas agora, e depois o instalador segue sozinho até o fim."
@@ -167,6 +322,19 @@ echo "  instalar o programa que mantém as sessões abertas (tmux), liberar a po
 echo "  Wi-Fi e, se você quiser, o Tailscale."
 if [ -f backend/.env ] && grep -q '^CP_AUTH_TOKEN=' backend/.env; then
   ok "backend/.env já tem CP_AUTH_TOKEN (mantido)"
+elif [ "$APP" = 1 ]; then
+  # Mesmo piso da pergunta do terminal; vazio = o app pediu a senha gerada.
+  case $APP_TOKEN in *$'\n'*|*$'\r'*) fail "a senha do celular veio do app com quebra de linha" ;; esac
+  if [ -z "$APP_TOKEN" ]; then
+    APP_TOKEN=$(gera_token); ok "senha aleatória gerada (o app a lê de backend/.env)"
+  elif [ ${#APP_TOKEN} -lt 8 ] || [ "$APP_TOKEN" = change-me ]; then
+    fail "a senha do celular veio do app com menos de 8 caracteres"
+  elif token_proibido "$APP_TOKEN"; then
+    fail "a senha do celular veio do app com caractere que o backend não lê inteiro: $TOKEN_PROIBIDO"
+  else
+    ok "senha do celular escolhida no app"
+  fi
+  printf 'CP_AUTH_TOKEN=%s\n' "$APP_TOKEN" >> backend/.env
 elif [ "$YES" = 1 ]; then
   printf 'CP_AUTH_TOKEN=%s\n' "$(gera_token)" >> backend/.env
   ok "token aleatório gerado (--yes não pergunta)"
@@ -194,6 +362,7 @@ else
     # O backend só recusa o literal 'change-me'; o piso de 8 é daqui, pra senha curta não passar.
     [ ${#TOKEN} -lt 8 ] && { erro "curto demais — no mínimo 8 caracteres"; continue; }
     [ "$TOKEN" = "change-me" ] && { erro "esse valor o backend recusa de propósito"; continue; }
+    token_proibido "$TOKEN" && { erro "$TOKEN_PROIBIDO"; continue; }
     break
   done
   printf 'CP_AUTH_TOKEN=%s\n' "$TOKEN" >> backend/.env
@@ -208,7 +377,11 @@ grep -q '^CP_AUTH_TOKEN=.\+' backend/.env 2>/dev/null \
 nota "É esse token que você digita no celular na primeira conexão."
 
 QUER_TAILSCALE=0
-if command -v tailscale >/dev/null; then
+if [ "$TAILSCALE" = nao ]; then
+  nota "Tailscale: não usar (--tailscale=nao), mesmo se já estiver instalado"
+elif [ "$TAILSCALE" = sim ]; then
+  QUER_TAILSCALE=1; ok "Tailscale: usar fora de casa (--tailscale=sim)"
+elif command -v tailscale >/dev/null; then
   QUER_TAILSCALE=1; ok "Tailscale já instalado — vai ser usado"
 else
   echo "  Você vai usar o Hangar fora de casa (celular fora do Wi-Fi do PC)?"
@@ -221,48 +394,104 @@ fi
 # Sem passo 0 (--update, --check) ninguém respondeu nada, e o padrão é NÃO mexer no Tailscale:
 # o --update é o hook do `git pull`, onde um `sudo tailscale up` esperaria senha por 5 minutos.
 QUER_TAILSCALE=${QUER_TAILSCALE:-0}
+# Estado da etapa "tailscale" do assistente; vazio = a etapa não existe nesta instalação.
+TS_STATE=''
+[ "$QUER_TAILSCALE" = 1 ] && TS_STATE=ok
 
 # Instala o que cai no $HOME sem root. Separado de propósito do tier que precisa de sudo:
 # um instalador que pede senha sem avisar é como se perde a confiança de quem está rodando.
 precisa_home() { # precisa_home <rótulo> <cmd> <comando de instalação> <pra quê>
   local rotulo=$1 cmd=$2 instalacao=$3 porque=$4
-  if command -v "$cmd" >/dev/null; then ok "$rotulo"; return 0; fi
-  if [ "$CHECK" = 1 ]; then falta "$rotulo — $porque"; nota "$instalacao"; PENDENTE+=("$rotulo"); return 1; fi
+  if command -v "$cmd" >/dev/null; then ok "$rotulo"; mark_item "$cmd" ok "$rotulo"; return 0; fi
+  if [ "$CHECK" = 1 ]; then falta "$rotulo — $porque"; nota "$instalacao"; mark_item "$cmd" fila "$rotulo"; PENDENTE+=("$rotulo"); return 1; fi
   echo "  .. $rotulo não encontrado ($porque)"
   nota "$instalacao"
   if [ "$UPDATE" = 1 ]; then erro "$rotulo faltando (--update não instala dependência)"; PENDENTE+=("$rotulo"); return 1; fi
   if ask "Instalar agora? (vai pro teu \$HOME, sem sudo)"; then
-    eval "$instalacao" >/dev/null 2>&1 || true
+    mark_item "$cmd" fazendo "$rotulo"
+    # O erro vai ao log: o relatório de falha precisa da causa. O resultado é conferido logo abaixo.
+    eval "$instalacao" >/dev/null 2>>"$LOG" || true
     # O instalador põe em ~/.local/bin, que pode não estar no PATH DESTE shell.
     export PATH="$HOME/.local/bin:$HOME/.local/share/fnm:$PATH"
     hash -r 2>/dev/null || true
-    if command -v "$cmd" >/dev/null; then ok "$rotulo instalado"; return 0; fi
+    if command -v "$cmd" >/dev/null; then ok "$rotulo instalado"; mark_item "$cmd" ok "$rotulo"; return 0; fi
   fi
-  erro "$rotulo continua faltando"; PENDENTE+=("$rotulo"); return 1
+  erro "$rotulo continua faltando"; mark_item "$cmd" falhou "$rotulo"
+  # Código do primeiro que faltou: agente tem frase própria; o resto quase sempre é download que não veio.
+  if [ "$cmd" = claude ]; then DEPS_ERROR=${DEPS_ERROR:-agente-nao-instalou}
+  else DEPS_ERROR=${DEPS_ERROR:-$(net_code)}; fi
+  PENDENTE+=("$rotulo"); return 1
 }
 
 precisa_root() { # precisa_root <rótulo> <cmd> <pacote> <pra quê>
   local rotulo=$1 cmd=$2 pacote=$3 porque=$4
-  if command -v "$cmd" >/dev/null; then ok "$rotulo"; return 0; fi
+  if command -v "$cmd" >/dev/null; then ok "$rotulo"; mark_item "$cmd" ok "$rotulo"; return 0; fi
   if [ -z "$PKG" ]; then
     erro "$rotulo faltando e não reconheci o gerenciador de pacotes — instale $pacote na mão"
+    mark_item "$cmd" falhou "$rotulo"
     PENDENTE+=("$rotulo"); return 1
   fi
-  if [ "$CHECK" = 1 ]; then falta "$rotulo — $porque"; nota "$PKG $pacote"; PENDENTE+=("$rotulo"); return 1; fi
+  if [ "$CHECK" = 1 ]; then falta "$rotulo — $porque"; nota "$PKG $pacote"; mark_item "$cmd" fila "$rotulo"; PENDENTE+=("$rotulo"); return 1; fi
   echo "  .. $rotulo não encontrado ($porque)"
   nota "$PKG $pacote     <- precisa de senha de administrador"
   if [ "$UPDATE" = 1 ]; then erro "$rotulo faltando (--update não instala dependência)"; PENDENTE+=("$rotulo"); return 1; fi
   if ask_senha "Rodar esse comando?"; then
-    eval "$PKG $pacote" && { ok "$rotulo instalado"; return 0; }
+    mark_item "$cmd" fazendo "$rotulo"
+    # O sudo do gerenciador passa pela app_sudo. A saída também vai para um arquivo: é dela que sai
+    # o código da falha para o app.
+    local instala=$PKG saida
+    [ "${PKG%% *}" = sudo ] && instala="app_sudo 'instalar o $rotulo' ${PKG#sudo }"
+    saida=$(mktemp)
+    if eval "$instala $pacote" 2>&1 | tee "$saida"; then
+      rm -f "$saida"; ok "$rotulo instalado"; mark_item "$cmd" ok "$rotulo"; return 0
+    fi
+    DEPS_ERROR=${DEPS_ERROR:-$(sudo_error_code "$saida")}
+    rm -f "$saida"
   fi
-  erro "$rotulo continua faltando"; PENDENTE+=("$rotulo"); return 1
+  erro "$rotulo continua faltando"; mark_item "$cmd" falhou "$rotulo"; PENDENTE+=("$rotulo"); return 1
 }
 
 # ── 1/8 Dependências ─────────────────────────────────────────────────────────
 [ "$UPDATE" = 1 ] && say "Modo --update: só o que um git pull não atualiza sozinho" || true
+mark_step preparar fazendo
 say "1/8 Dependências"
 precisa_root "tmux"        tmux   tmux 'sem ele não existe sessão' || true
-precisa_home "Claude Code" claude 'curl -fsSL https://claude.ai/install.sh | bash' 'é o que o app pilota' || true
+CLAUDE_INSTALL='curl -fsSL https://claude.ai/install.sh | bash'
+ACHADOS=''
+for a in $TODOS_AGENTES; do command -v "$a" >/dev/null && ACHADOS="$ACHADOS $a"; done
+# Só o --avancado pergunta: o guiado tem duas perguntas e decide o resto pelo que já está no disco.
+if [ -z "$AGENTES" ] && [ "$AVANCADO" = 1 ] && [ "$TEM_TTY" = 1 ] && [ "$UPDATE" = 0 ] && [ "$CHECK" = 0 ]; then
+  PADRAO_AGENTES=$(echo ${ACHADOS:-claude} | tr ' ' ',')
+  echo "  Quais agentes de código você vai usar? (${TODOS_AGENTES// /, }; separe por vírgula)"
+  while :; do
+    printf '  Agentes [%s]: ' "$PADRAO_AGENTES"
+    read -r AGENTES <&3 || AGENTES=''
+    AGENTES=${AGENTES// /}; AGENTES=${AGENTES:-$PADRAO_AGENTES}
+    agentes_validos "$AGENTES" && break
+    erro "não conheço algum desses — use: ${TODOS_AGENTES// /, }"
+  done
+fi
+# Escolhidos que faltam e não são o Claude: o comando oficial deles roda no 2/8, com o backend
+# pronto, pela mesma tabela do painel de Harnesses (backend/app/harness_commands.py).
+AGENTES_NOVOS=''
+if [ -n "$AGENTES" ]; then
+  for a in ${AGENTES//,/ }; do
+    if [ "$a" = claude ]; then
+      precisa_home "Claude Code" claude "$CLAUDE_INSTALL" 'agente escolhido' || true
+    elif command -v "$a" >/dev/null; then
+      ok "$(nome_agente "$a")"; mark_item "$a" ok "$(nome_agente "$a")"
+    elif [ "$CHECK" = 1 ] || [ "$UPDATE" = 1 ]; then
+      falta "$(nome_agente "$a") — agente escolhido"; mark_item "$a" fila "$(nome_agente "$a")"; PENDENTE+=("$(nome_agente "$a")")
+    else
+      AGENTES_NOVOS="$AGENTES_NOVOS $a"; mark_item "$a" fila "$(nome_agente "$a")"; nota "$(nome_agente "$a"): instalado no passo 2/8"
+    fi
+  done
+elif [ -n "$ACHADOS" ]; then
+  for a in $ACHADOS; do ok "$(nome_agente "$a")"; mark_item "$a" ok "$(nome_agente "$a")"; done
+  command -v claude >/dev/null || nota "Claude Code não é obrigatório; para instalar: ./install.sh --agentes=claude"
+else
+  precisa_home "Claude Code" claude "$CLAUDE_INSTALL" 'nenhum agente de código encontrado; o Claude Code é o padrão' || true
+fi
 precisa_home "uv"          uv     'curl -LsSf https://astral.sh/uv/install.sh | sh' 'gerencia o venv do backend' || true
 if [ "$FRONTEND" = 0 ]; then
   ok "Node: dispensado (--no-frontend)"
@@ -271,53 +500,110 @@ elif ! command -v npm >/dev/null; then
     'curl -fsSL https://fnm.vercel.app/install | bash && "$HOME/.local/share/fnm/fnm" install 22 && "$HOME/.local/share/fnm/fnm" default 22' \
     'o frontend é Svelte' || true
 elif ! node -e 'process.exit(parseInt(process.versions.node) >= 20 ? 0 : 1)' 2>/dev/null; then
-  erro "Node 20+ é necessário (atual: $(node --version))"; PENDENTE+=("Node 20+")
+  erro "Node 20+ é necessário (atual: $(node --version))"; mark_item node falhou "Node 20+"; PENDENTE+=("Node 20+")
 else
-  ok "node $(node --version)"
+  ok "node $(node --version)"; mark_item node ok "Node $(node --version)"
 fi
 
-# Codex é OPCIONAL: o app é primariamente um cockpit de Claude Code. Exigir o binário aqui
-# travava a instalação inteira de quem só usa Claude.
-if command -v codex >/dev/null; then ok "codex"; else
-  falta "codex ausente — sessões Codex indisponíveis, o resto funciona"
-  nota "habilitar depois: https://developers.openai.com/codex/cli"
-fi
-command -v git >/dev/null && ok "git" || falta "git ausente — o painel de git e o chip de branch ficam vazios"
+if command -v git >/dev/null; then ok "git"; mark_item git ok git
+else falta "git ausente — o painel de git e o chip de branch ficam vazios"; mark_item git pendente git; fi
 
 # Tailscale entra aqui, junto das outras dependências: a decisão já foi tomada no passo 0, e o
 # 6/8 só publica. Falhar aqui não derruba a instalação — o app ainda funciona no Wi-Fi de casa.
 # `UPDATE = 0` nos dois: o --update é o hook do `git pull` e nada ali pode parar pedindo senha.
+# O app liga cada item à última etapa que começou: a Tailscale abre a dela e devolve a vez.
+[ -n "$TS_STATE" ] && mark_step tailscale fazendo
+# No --app o script da Tailscale, que chama sudo por dentro, roda inteiro como administrador: o
+# sudo de dentro já é root e não pede nada. No terminal, como sempre.
+ts_install() {
+  if [ "$APP" = 1 ]; then app_sudo "instalar a Tailscale" sh -c 'curl -fsSL https://tailscale.com/install.sh | sh'
+  else curl -fsSL https://tailscale.com/install.sh | sh; fi
+}
+# O link do login sai no stderr do `tailscale up`; no --app ele vira marca e o app abre o navegador.
+tailscale_up() {
+  app_sudo "entrar na conta Tailscale" timeout 300 tailscale up 2>&1 | while IFS= read -r linha; do
+    printf '%s\n' "$linha"
+    case $linha in
+      *https://login.tailscale.com/*)
+        if [ "$APP" = 1 ]; then
+          echo "##HANGAR-LINK## tailscale-login $(printf '%s\n' "$linha" | grep -o 'https://login\.tailscale\.com/[^[:space:]]*')"
+        fi ;;
+    esac
+  done
+  return "${PIPESTATUS[0]}"
+}
+if [ "$UPDATE" = 0 ] && [ "$QUER_TAILSCALE" = 1 ] && command -v tailscale >/dev/null; then
+  mark_item tailscale ok Tailscale
+fi
 if [ "$UPDATE" = 0 ] && [ "$QUER_TAILSCALE" = 1 ] && ! command -v tailscale >/dev/null; then
   nota "Tailscale: instalação do sistema."
   if ask_senha "Instalar o Tailscale agora (vai pedir a senha)?"; then
-    curl -fsSL https://tailscale.com/install.sh | sh && command -v tailscale >/dev/null \
-      && ok "Tailscale instalado" \
-      || { anota_problema "instalação do Tailscale falhou"; QUER_TAILSCALE=0; }
+    mark_item tailscale fazendo Tailscale
+    if ts_install && command -v tailscale >/dev/null; then
+      ok "Tailscale instalado"; mark_item tailscale ok Tailscale
+    else
+      anota_problema "instalação do Tailscale falhou"; QUER_TAILSCALE=0; TS_STATE=pendente
+      mark_item tailscale falhou Tailscale
+    fi
   else
     QUER_TAILSCALE=0; nota "pulado — o celular entra só pelo Wi-Fi do PC"
   fi
 fi
-if [ "$UPDATE" = 0 ] && [ "$QUER_TAILSCALE" = 1 ] && ! tailscale status >/dev/null 2>&1; then
-  echo "  Falta entrar no Tailscale: vai abrir um link, faça login no navegador (até 5 min)."
-  if ask_senha "Entrar agora (vai pedir a senha)?"; then
-    timeout 300 sudo tailscale up || anota_problema "login no Tailscale não concluiu — depois: sudo tailscale up e ./install.sh"
+if [ "$UPDATE" = 0 ] && [ "$QUER_TAILSCALE" = 1 ]; then
+  if tailscale status >/dev/null 2>&1; then
+    mark_item tailscale-conta ok "conta Tailscale"
+  else
+    echo "  Falta entrar no Tailscale: vai abrir um link, faça login no navegador (até 5 min)."
+    if ask_senha "Entrar agora (vai pedir a senha)?"; then
+      mark_item tailscale-conta fazendo "conta Tailscale"
+      if tailscale_up; then
+        mark_item tailscale-conta ok "conta Tailscale"
+      else
+        anota_problema "login no Tailscale não concluiu — depois: sudo tailscale up e ./install.sh" tailscale-login
+        TS_STATE=pendente; mark_item tailscale-conta pendente "conta Tailscale"
+      fi
+    fi
   fi
 fi
+[ -n "$TS_STATE" ] && mark_step preparar fazendo
 
 if [ "$CHECK" = 1 ]; then
   if [ -x backend/.venv/bin/python ]; then
     say "Diagnóstico"; (cd backend && uv run --quiet --no-sync python -m app.doctor) || PENDENTE+=("doctor")
   fi
-  [ ${#PENDENTE[@]} -eq 0 ] && { say "Nada faltando."; exit 0; }
+  if [ ${#PENDENTE[@]} -eq 0 ]; then mark_step preparar ok; FINAL_STATE=ok; say "Nada faltando."; exit 0; fi
+  mark_step preparar pendente; FINAL_STATE=pendente
   say "Faltam: ${PENDENTE[*]}"; exit 1
 fi
-[ ${#PENDENTE[@]} -eq 0 ] || fail "faltam: ${PENDENTE[*]}"
+[ ${#PENDENTE[@]} -eq 0 ] || fail_with "$DEPS_ERROR" "faltam: ${PENDENTE[*]}"
+mark_step preparar ok
 
 # ── 2/8 Backend ──────────────────────────────────────────────────────────────
+mark_step instalar fazendo
 say "2/8 Backend"
-(cd backend && uv sync --quiet) || fail "uv sync falhou — o backend ficou sem as dependências"
+(cd backend && uv sync --quiet) || fail_with "$(net_code)" "uv sync falhou — o backend ficou sem as dependências"
 ok "dependências instaladas"
+mark_item backend ok "servidor do Hangar"
 nota "psutil NÃO entra aqui: no Linux existe /proc e ele é mais rápido (ver app/procinfo.py)"
+
+for a in $AGENTES_NOVOS; do
+  mark_item "$a" fazendo "$(nome_agente "$a")"
+  if (cd backend && gira "instalando $(nome_agente "$a")" uv run --quiet --no-sync python -m app.harness_commands "$a"); then
+    export PATH="$HOME/.local/bin:$PATH"; hash -r 2>/dev/null || true
+    if command -v "$a" >/dev/null; then ok "$(nome_agente "$a") instalado"; mark_item "$a" ok "$(nome_agente "$a")"
+    else
+      anota_problema "$(nome_agente "$a") instalou, mas o comando $a não aparece no PATH — abra outro terminal e rode ./install.sh de novo" agente-nao-instalou
+      mark_item "$a" falhou "$(nome_agente "$a")"
+    fi
+  else
+    anota_problema "$(nome_agente "$a") não instalou — instale pelo painel Harnesses do app ou veja a saída acima" agente-nao-instalou
+    mark_item "$a" falhou "$(nome_agente "$a")"
+  fi
+done
+# Prova do mínimo: sem nenhum agente o app abre, mas não tem o que pilotar.
+TEM_AGENTE=0
+for a in $TODOS_AGENTES; do command -v "$a" >/dev/null && TEM_AGENTE=1; done
+[ "$TEM_AGENTE" = 1 ] || fail_with sem-agente "nenhum agente de código instalado — o Hangar precisa de pelo menos um (./install.sh --agentes=claude)"
 
 # ── 3/8 Token de acesso ──────────────────────────────────────────────────────
 # O trabalho foi feito no passo 0: token e Tailscale são as DUAS decisões da pessoa, e elas
@@ -328,6 +614,7 @@ say "3/8 Token de acesso"
 if grep -q '^CP_AUTH_TOKEN=.\+' backend/.env 2>/dev/null \
    && ! grep -q '^CP_AUTH_TOKEN=change-me[[:space:]]*$' backend/.env; then
   ok "definido no passo 0"
+  mark_item token ok "senha do celular"
 elif [ "$UPDATE" = 1 ]; then
   anota_problema "backend/.env sem CP_AUTH_TOKEN — rode ./install.sh sem --update para definir"
 else
@@ -412,10 +699,17 @@ else
     || fail "o build do frontend falhou — corrige o erro acima e re-roda (ele continua de onde parou)"
 fi
 fi
+[ "$FRONTEND" = 1 ] && mark_item frontend ok "tela do Hangar"
 
 # ── App nativo (desktop-native, release native-latest) ───────────────────────
 # É a única janela de desktop instalada. Falhar aqui não derruba a instalação: o Hangar segue no navegador.
 say "App nativo"
+if [ "$SEM_NATIVO" = 1 ]; then
+  # O próprio app (assistente) se copia para o lugar de sempre; o install-native.sh baixaria a
+  # native-latest por cima do binário aberto.
+  ok "pulado (--sem-nativo): o app já está nesta máquina"
+  mark_item nativo ok "app do Hangar"
+else
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64) NATIVO_APP="$HOME/.local/bin/hangar-native" ;;
   Darwin-arm64) NATIVO_APP="$HOME/Applications/Hangar.app" ;;
@@ -426,11 +720,14 @@ if [ -z "$NATIVO_APP" ]; then
   falta "sem app nativo para esta máquina — use o Hangar pelo navegador"
 elif ./scripts/install-native.sh && [ -e "$NATIVO_APP" ]; then
   ok "app nativo instalado (lançador \"Hangar\")"
+  mark_item nativo ok "app do Hangar"
   if [ -x "$HOME/.local/bin/hangar-native" ] && [ "$TEM_TTY" = 1 ] && [ "$UPDATE" = 0 ] && { [ -n "${WAYLAND_DISPLAY:-}" ] || [ -n "${DISPLAY:-}" ]; }; then
     ABRIR_NATIVO=1
   fi
 else
   anota_problema "o app nativo não instalou — use o Hangar pelo navegador (tente: ./scripts/install-native.sh)"
+  mark_item nativo pendente "app do Hangar"
+fi
 fi
 
 # ── Binários Rust (hangar-server e hangar-cano, release server-latest) ───────
@@ -439,15 +736,16 @@ say "Binários Rust"
 RUST_RC=0
 (cd backend && uv run --quiet --no-sync python -m app.rust_release) || RUST_RC=$?
 case "$RUST_RC" in
-  0) ok "hangar-server e hangar-cano em ~/.hangar/bin" ;;
-  2) falta "sem binários Rust para esta máquina — o backend em Python atende sozinho" ;;
-  *) anota_problema "binários Rust não baixaram — o backend em Python atende sozinho (tente: cd backend && uv run python -m app.rust_release)" ;;
+  0) ok "hangar-server e hangar-cano em ~/.hangar/bin"; mark_item rust ok "servidor rápido" ;;
+  2) falta "sem binários Rust para esta máquina — o backend em Python atende sozinho"; mark_item rust ok "servidor rápido (não há para esta máquina)" ;;
+  *) anota_problema "binários Rust não baixaram — o backend em Python atende sozinho (tente: cd backend && uv run python -m app.rust_release)"; mark_item rust pendente "servidor rápido" ;;
 esac
 
 # ── 5/8 Wrappers do claude e do codex ────────────────────────────────────────
 # Sem eles um `claude` que VOCÊ abre no terminal é invisível pro app: sem --session-id o backend
 # não sabe qual transcript é daquela sessão, e fora do tmux não há pane pra ler estado nem
 # receber input. Sessão criada PELO app funciona de qualquer jeito; isto é a outra direção.
+WRAP_N=${#PROBLEMAS[@]}
 say "5/8 Wrappers do claude e do codex"
 # Já instalado -> nem pergunta. Re-rodar o install.sh depois de um `git pull` deve pegar só o
 # que falta, sem obrigar a responder S/n pro que já está de pé.
@@ -465,8 +763,11 @@ else
   nota "pulado — sessão aberta no terminal não vai aparecer no app"
   nota "depois: ./scripts/install-claude-wrapper.sh"
 fi
+mark_item_since wrappers "$WRAP_N" "sessão aberta no terminal aparece no app"
 
 # ── 6/8 Acesso pelo celular ──────────────────────────────────────────────────
+mark_step celular fazendo
+CEL_N=${#PROBLEMAS[@]}
 say "6/8 Acesso pelo celular"
 # Escutar em todas as interfaces é o que deixa os clientes usarem a rede local antes do Tailscale.
 # 0.0.0.0 e nunca 'auto': 'auto' tira o loopback, e o `tailscale serve` fala com localhost. Valor
@@ -480,6 +781,7 @@ if [ "$CHECK" = 0 ] && { [ -z "$BIND_ATUAL" ] || [ "$BIND_ATUAL" = 127.0.0.1 ] |
 fi
 grep -qE '^CP_LAN_BIND_IP=' backend/.env 2>/dev/null || [ "$CHECK" = 1 ] \
   || fail "CP_LAN_BIND_IP não foi gravado em backend/.env"
+mark_item rede-local ok "rede de casa"
 if [ "$UPDATE" = 1 ]; then
   ok "pulado no --update (firewall e Tailscale pedem senha; nada aqui muda com git pull)"
 else
@@ -509,31 +811,41 @@ if command -v ufw >/dev/null || command -v firewall-cmd >/dev/null; then
   for p in "${PORTAS[@]}"; do porta_liberada "$p" || FALTA=1; done
   if [ "$FALTA" = 0 ]; then
     ok "porta(s) $LISTA já liberada(s) no firewall"
+    mark_item firewall ok "porta do Wi-Fi liberada"
   else
     nota "Liberar precisa de senha de administrador. Por fora seria:"
     for p in "${PORTAS[@]}"; do nota "    sudo ./scripts/lan-setup.sh $p"; done
     if ask_senha "Liberar a(s) porta(s) $LISTA agora (vai pedir a senha)?"; then
       OK_FW=1
-      for p in "${PORTAS[@]}"; do sudo ./scripts/lan-setup.sh "$p" || OK_FW=0; done
-      [ "$OK_FW" = 1 ] && ok "portas liberadas" || anota_problema "liberar portas no firewall falhou"
+      for p in "${PORTAS[@]}"; do app_sudo "liberar a porta $p no firewall" ./scripts/lan-setup.sh "$p" || OK_FW=0; done
+      if [ "$OK_FW" = 1 ]; then ok "portas liberadas"; mark_item firewall ok "porta do Wi-Fi liberada"
+      else anota_problema "liberar portas no firewall falhou"; mark_item firewall pendente "porta do Wi-Fi liberada"; fi
     fi
   fi
 else
   nota "sem ufw/firewalld — provavelmente não há firewall bloqueando (padrão de Arch/CachyOS)"
 fi
+[ "${#PROBLEMAS[@]}" -gt "$CEL_N" ] && mark_step celular pendente || mark_step celular ok
 
 publica_tailscale() { # grava CP_PUBLIC_URL com o https do tailnet; o serve precisa de root (ou operator)
-  local nome
+  local nome saida_serve teto='' codigo=outro
   nome=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null || true)
-  [ -n "$nome" ] || { falta "Tailscale sem login — sudo tailscale up e ./install.sh de novo"; return 1; }
+  [ -n "$nome" ] || { falta "Tailscale sem login — sudo tailscale up e ./install.sh de novo"; TS_STATE=pendente; return 1; }
   nota "Publicar o Hangar no Tailscale precisa da senha (tailscale serve)."
   ask_senha "Publicar agora (vai pedir a senha)?" || { nota "pulado — depois: ./install.sh"; return 1; }
-  if sudo tailscale serve --bg "$PORTA_FIM" >/dev/null 2>&1 && tailscale serve status --json 2>/dev/null | grep -q '"443"'; then
+  # No --app ninguém responde ao convite que o serve imprime com o HTTPS desligado: o teto devolve a
+  # vez ao app, que mostra a pendência com "Conferir de novo".
+  [ "$APP" = 1 ] && teto='timeout 60'
+  if saida_serve=$(app_sudo "publicar o Hangar na Tailscale" $teto tailscale serve --bg "$PORTA_FIM" 2>&1) \
+     && tailscale serve status --json 2>/dev/null | grep -q '"443"'; then
     grep -q '^CP_PUBLIC_URL=' backend/.env 2>/dev/null && sed -i.bak '/^CP_PUBLIC_URL=/d' backend/.env && rm -f backend/.env.bak
     printf 'CP_PUBLIC_URL=https://%s\n' "$nome" >> backend/.env
     ok "publicado no Tailscale: https://$nome"
+    mark_item tailscale-https ok "endereço seguro (HTTPS)"
   else
-    anota_problema "tailscale serve falhou — HTTPS do tailnet desligado? Habilite em https://login.tailscale.com/admin/dns (HTTPS Certificates) e rode ./install.sh de novo"
+    printf '%s\n' "$saida_serve" | grep -qiE 'https|not enabled' && codigo=tailscale-https
+    anota_problema "tailscale serve falhou — HTTPS do tailnet desligado? Habilite em https://login.tailscale.com/admin/dns (HTTPS Certificates) e rode ./install.sh de novo" "$codigo"
+    TS_STATE=pendente; mark_item tailscale-https pendente "endereço seguro (HTTPS)"
     return 1
   fi
 }
@@ -544,17 +856,27 @@ operador_tailscale() {
   command -v tailscale >/dev/null || return 0
   sudo -n true 2>/dev/null || ask_senha "Liberar o Funnel para compartilhar sessão (vai pedir a senha)?" \
     || { nota "pulado — para compartilhar sessão: sudo tailscale set --operator=$u"; return 0; }
-  if sudo tailscale set --operator="$u" >/dev/null 2>&1; then ok "Tailscale: $u pode ligar o Funnel (compartilhar sessão)"
-  else anota_problema "tailscale set --operator falhou — compartilhar sessão vai pedir: sudo tailscale set --operator=$u"; fi
+  if app_sudo "liberar o compartilhamento de sessão" tailscale set --operator="$u" >/dev/null 2>&1; then ok "Tailscale: $u pode ligar o Funnel (compartilhar sessão)"
+  else anota_problema "tailscale set --operator falhou — compartilhar sessão vai pedir: sudo tailscale set --operator=$u"; TS_STATE=pendente; fi
 }
-if [ "$QUER_TAILSCALE" = 1 ]; then publica_tailscale || true; operador_tailscale
-else nota "sem Tailscale: o celular entra pelo Wi-Fi do PC. Fora de casa? ./install.sh e responda Sim."
+if [ -n "$TS_STATE" ]; then
+  mark_step tailscale fazendo
+  if [ "$QUER_TAILSCALE" = 1 ]; then publica_tailscale || true; operador_tailscale; fi
+  mark_step tailscale "$TS_STATE"
+else
+  nota "sem Tailscale: o celular entra pelo Wi-Fi do PC. Fora de casa? ./install.sh e responda Sim."
 fi
 
 fi
 
 # ── 7/8 Rodar sozinho + sessões-irmãs + painel ───────────────────────────────
+mark_step instalar fazendo
 say "7/8 Serviços, hangar-send e painel"
+# No --app ninguém vai subir o backend na mão: sem systemd de usuário o assistente não termina.
+if [ "$APP" = 1 ] && ! systemctl --user show-environment >/dev/null 2>&1; then
+  fail_with sem-systemd "sem systemd de usuário nesta máquina — o Hangar não tem como iniciar sozinho"
+fi
+SERV_N=${#PROBLEMAS[@]}
 if ! command -v systemctl >/dev/null; then
   nota "serviços: sem systemd nesta máquina — rode backend e frontend na mão"
 elif systemctl --user list-unit-files hangar-backend.service >/dev/null 2>&1 &&
@@ -584,6 +906,8 @@ elif [ "$SERVICES" = 1 ] && ask "Rodar backend+frontend como serviços de usuár
 else
   nota "pulado — rodando na mão, fechar o terminal derruba o backend"
 fi
+mark_item_since servicos "$SERV_N" "início automático"
+SEND_N=${#PROBLEMAS[@]}
 
 if [ -e "$HOME/.local/bin/hangar-send" ]; then
   # O binário é symlink (atualiza sozinho), mas o bloco "Sessões-irmãs" do ~/.claude/CLAUDE.md
@@ -596,6 +920,7 @@ elif [ "$CPSEND" = 1 ] && ask "Instalar hangar-send + skills (sessões conversam
 else
   nota "pulado — depois: ./scripts/install-hangar-send.sh"
 fi
+mark_item_since hangar-send "$SEND_N" "sessões conversam entre si"
 
 # Ponte de skills pro Pi e pro Kimi. Roda SEMPRE (inclusive no --update): quem cria sessão nesses
 # dois agentes é este app, e uma sessão nascida assim não enxerga as skills do Claude sem a ponte.
@@ -690,9 +1015,12 @@ fi
 # ── 8/8 Checagem de fumaça ───────────────────────────────────────────────────
 # Até aqui foi tudo instalação. Este passo separa "instalou" de "funciona" — e é o mesmo passo
 # que, do lado Windows, pegou o backend não importando por causa de um `import fcntl`.
+mark_step instalar ok
+mark_step final fazendo
 say "8/8 Checagem de fumaça"
 (cd backend && uv run python -c "from app import api, registry, procinfo, projects" ) \
-  && ok "o backend importa" || fail "o backend não importa nesta máquina"
+  && { ok "o backend importa"; mark_item backend-importa ok "o servidor abre"; } \
+  || fail "o backend não importa nesta máquina"
 
 (cd backend && uv run python -c "from app import procinfo; assert procinfo._TEM_PROC, 'sem /proc'") \
   && ok "leitura de processo via /proc funcionando" \
@@ -702,6 +1030,7 @@ S="cp-fumaca-$$"
 if tmux new-session -d -s "$S" -c /tmp 'sh' 2>/dev/null; then
   tmux kill-session -t "=$S" 2>/dev/null
   ok "o multiplexador cria e mata sessão"
+  mark_item multiplexador ok "sessões abrem e fecham"
 else
   fail "o tmux não criou uma sessão de teste — o app não vai abrir sessão"
 fi
@@ -719,9 +1048,11 @@ if [ ${#PROBLEMAS[@]} -gt 0 ]; then
     # extra quebrado. E NÃO cai no "Pronto": a última palavra não pode ser sucesso.
     echo "##HANGAR-AVISO## terminou com pendencias: ${PROBLEMAS[*]}"
   else
+    mark_step final pendente; FINAL_STATE=pendente
     exit 1
   fi
 else
+  mark_step final ok
   say "Pronto"
 fi
 if [ "${ABRIR_NATIVO:-0}" = 1 ]; then
@@ -774,8 +1105,10 @@ fi
 cat <<EOF
 
   O QUE FAZER AGORA
-   1. No PC: abra um terminal, digite  claude  e faça o login (só na primeira vez).
 EOF
+PRIMEIRO_AGENTE=''
+for a in $TODOS_AGENTES; do command -v "$a" >/dev/null && { PRIMEIRO_AGENTE=$a; break; }; done
+echo "   1. No PC: abra um terminal, digite  ${PRIMEIRO_AGENTE:-claude}  e faça o login (só na primeira vez)."
 if [ "$QR_MOSTRADO" = 1 ]; then
   echo "   2. No celular: leia o QR acima (ou abra $URL_FIM e digite o token)."
 else
@@ -788,3 +1121,4 @@ cat <<EOF
    Log desta instalação: $LOG
    Guia completo: docs/USAGE.md
 EOF
+FINAL_STATE=ok

@@ -14,6 +14,7 @@ from app.config import pairing_url, settings
 
 Linha = namedtuple("Linha", "nivel titulo conserto")
 _WIN = os.name == "nt"
+_OUTROS_AGENTES = (("codex", "Codex"), ("pi", "Pi"), ("omp", "omp"), ("kimi", "Kimi Code"))
 
 
 def _binario(nome: str) -> str | None:
@@ -172,9 +173,14 @@ def diagnosticar(s) -> list[Linha]:
         conserto = "winget install marlocarlo.psmux" if _WIN else "instale o tmux pelo gerenciador de pacotes"
         linhas.append(Linha("erro", "tmux não encontrado — sem ele nenhuma sessão abre", conserto))
 
+    # O Claude Code é o agente padrão, não obrigatório: o mínimo é ter algum agente de código.
+    outros = [nome for cli, nome in _OUTROS_AGENTES if _binario(cli)]
     if not _binario("claude"):
-        linhas.append(Linha("erro", "Claude Code não encontrado no PATH",
-                            "curl -fsSL https://claude.ai/install.sh | bash  (Windows: irm https://claude.ai/install.ps1 | iex)"))
+        if outros:
+            linhas.append(Linha("ok", f"agentes de código: {', '.join(outros)}", ""))
+        else:
+            linhas.append(Linha("erro", "nenhum agente de código no PATH (Claude Code, Codex, Pi, omp ou Kimi Code)",
+                                "curl -fsSL https://claude.ai/install.sh | bash  (Windows: irm https://claude.ai/install.ps1 | iex)"))
     elif _claude_logado():
         linhas.append(Linha("ok", "Claude Code instalado e logado", ""))
     else:

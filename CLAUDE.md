@@ -94,18 +94,24 @@ npm --prefix frontend run dev              # Vite dev server
 npm --prefix frontend run build            # production build — does NOT typecheck
 npm --prefix frontend run check            # svelte-check + tsc — THIS is the type gate
 
+scripts/verificar-local                    # o que o CI rodaria para o commit (Linux + VM Windows); a trava pre-push exige
 ./scripts/test-wrappers.sh                 # claude-engine (bash/zsh/fish) against a fake `claude`, no tmux
 ./scripts/test-statusline.sh               # statusline.js contract (engine sessions suppress cost), needs node
 node scripts/test-pi-hangar-state.mjs          # hangar-state.ts: fork de subagente do Pi não rouba o pane
 ```
 
 **A verificação da tarefa é o uso real**: abrir a tela, clicar, rodar o fluxo. **Teste
-automatizado (vitest, pytest, check) só roda quando o usuário pedir** — ele pede no fim, antes do
+automatizado avulso (vitest, pytest, check) só roda quando o usuário pedir** — ele pede no fim, antes do
 push; nem entre edições, nem ao terminar a tarefa. Pedido o focado: num comando só, os testes dos
 arquivos tocados (`cd backend && uv run pytest tests/test_x.py tests/test_y.py`,
 `cd frontend && npx vitest run src/x.test.ts src/y.test.ts`); falhou → repita só o que falhou.
-Pedido o completo: `npm run check` na raiz, `vitest` e `pytest` inteiros. O `pre-push` roda sozinho os testes
-ligados aos arquivos que vão subir e recusa o push se falharem; a suíte inteira é do `ci.yml`. `npm run build` só para servir o `dist` local. Ao reportar, diga o que foi conferido no uso real e que os testes automatizados não rodaram.
+Pedido o completo: `npm run check` na raiz, `vitest` e `pytest` inteiros. **`scripts/verificar-local` é exigido ao
+abrir PR e ao subir para a `main` ou para branch com PR aberto**: ele roda, numa árvore fixa da
+máquina e em fila única, o que o CI rodaria para o que o commit muda, no Linux e no Windows da VM
+(`git config hangar.verificarWindows <host>`), e grava o resultado pela árvore. O hook do
+`gh pr create` (`.claude/settings.json`) confere o PR inteiro desde a base; a trava `pre-push`, cada
+push. Branch sem PR sobe livre. Emergência explícita: `HANGAR_SEM_VERIFICACAO=1` no comando. O que ela cobre e o que só o CI cobre:
+[instalacao.md](docs/decisoes/instalacao.md#verificação-local-antes-do-push-06102026). `npm run build` só para servir o `dist` local. Ao reportar, diga o que foi conferido no uso real e que os testes automatizados não rodaram.
 
 Claude sessions with a terminal must run as `claude --session-id <uuid>` **inside tmux** —
 `scripts/install-claude-wrapper.sh` sets this up. Headless Claude/Codex sessions are created by the

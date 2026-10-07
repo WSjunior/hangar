@@ -57,6 +57,7 @@ impl Chat {
         }
         if self.removed.contains(&event.id) { return; }
         if let Some(&i) = self.index.get(&event.id) {
+            if self.events[i] == event { return; }
             if event.kind == "assistant_msg" && self.events[i].text != event.text
                 && event.text.as_deref().is_some_and(|text| preview_matches(&self.preview.text, text)) {
                 self.clear_preview();
@@ -394,6 +395,21 @@ mod tests {
         assert_eq!(chat.take_unsynced(), 0);
         chat.invalidate();
         assert_eq!(chat.take_unsynced(), 0);
+    }
+
+    #[test]
+    fn identical_replay_preserves_unsynced_prefix_but_metadata_changes_do_not() {
+        let mut chat = Chat::default();
+        let original = event("assistant_msg", "same", "Texto");
+        chat.apply(original.clone());
+        chat.take_unsynced();
+        chat.apply(original.clone());
+        assert_eq!(chat.take_unsynced(), 1);
+        let mut changed = original;
+        changed.is_error = Some(true);
+        chat.apply(changed);
+        assert_eq!(chat.take_unsynced(), 0);
+        assert_eq!(chat.events[0].is_error, Some(true));
     }
 
     #[test]

@@ -21,6 +21,7 @@ mod controls;
 mod create;
 mod device;
 mod follow;
+mod row_patch;
 mod landing;
 mod edits;
 mod terminal_look;
@@ -78,6 +79,9 @@ mod worktrees;
 mod stats;
 mod search;
 mod topbar;
+mod setup;
+/// Variável do ambiente do script com o código de uso único do askpass (`setup::askpass`).
+pub(crate) const ASKPASS_CODE_ENV: &str = "HANGAR_ASKPASS_CODE";
 
 actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, FindProjectFile, FindProjectText, NextSession, PreviousSession, ToggleDictation, NewChat, OpenNewSession, CloseSession, RenameSession, OpenCosts, OpenSearch,
     ToggleSidebar, CyclePermission, OpenWorktrees]);
@@ -444,7 +448,8 @@ pub struct Hangar {
     follow: follow::Follow,
     row_ids: Vec<String>,
     row_signatures: Vec<String>,
-    items: Vec<Item>,
+    conversation: conversation::incremental::Incremental,
+    row_assets: Vec<row_patch::RowAssets>,
     expanded: HashSet<String>,
     // O `expanded` das conversas que saíram da tela: o que foi aberto ou fechado volta com a conversa.
     kept_expanded: HashMap<SessionKey, HashSet<String>>,
@@ -454,11 +459,6 @@ pub struct Hangar {
     table_column: HashMap<String, usize>,
     // Tabelas que dão gráfico em cada resposta, com a fonte de onde saíram: refeitas só quando a fonte muda.
     tables: HashMap<String, (String, std::rc::Rc<[crate::tables::Table]>)>,
-    // Chamada → resultado do transcript, refeito junto com as linhas; o desenho só consulta.
-    paired: HashMap<usize, usize>,
-    // Agentes e shells de fundo, dobrados junto com as linhas; `pinned` são as chamadas dos agentes rodando.
-    activity: conversation::Activity,
-    pinned: HashSet<usize>,
     last_message: Option<usize>,
     live_clear_epoch: [u64; 2],
     rich: HashMap<String, RichText>,
@@ -636,6 +636,13 @@ pub struct Hangar {
     connection_origin: Option<WeakFocusHandle>,
     /// Primeira abertura com o app Electron neste computador: a tela de conexão oferece trazer as configurações dele.
     electron_offer: bool,
+    /// O assistente de instalação aberto: ocupa a janela inteira (`setup/`).
+    setup: Option<Entity<setup::SetupWizard>>,
+    /// O assistente fechado com o script ainda rodando: fica vivo (canal da senha, atualização suspensa), sem desenhar nem
+    /// pegar teclado. Reabrir pelo menu o reaproveita.
+    setup_hidden: Option<Entity<setup::SetupWizard>>,
+    /// O cartão da entrada sem conexão salva: procurando ou o que achou neste computador.
+    entry: Option<setup::Entry>,
 }
 
 impl Drop for Hangar {
@@ -705,6 +712,24 @@ impl Hangar {
             cx.observe(&updater, |_, _, cx| cx.notify()).detach();
         }
         let saved = load_connection();
+        // Entrada (spec "Entrada"): sem conexão salva, procura um Hangar neste computador antes do cartão; o assistente que
+        // estava rodando reabre onde parou.
+        let resume = setup::saved_run();
+        let probe = saved.is_none() && resume.is_none() && !setup::demo() && setup::supported();
+        match resume {
+            Some(state) => cx.defer_in(window, move |this: &mut Self, window, cx| {
+                setup::opening_at_launch();
+                this.open_setup(setup::Origin::Resume(state), window, cx)
+            }),
+            None if setup::demo() => cx.defer_in(window, |this: &mut Self, window, cx| this.open_setup(setup::Origin::Menu, window, cx)),
+            // Conserto do agente sem desfazer: o assistente abre e a recuperação dele devolve a pasta, com aviso.
+            None if setup::interrupted_fix() => cx.defer_in(window, |this: &mut Self, window, cx| {
+                setup::opening_at_launch();
+                this.open_setup(setup::Origin::Menu, window, cx)
+            }),
+            None if probe => cx.defer_in(window, |this: &mut Self, window, cx| this.start_entry(window, cx)),
+            None => {}
+        }
         // Primeira abertura com a lista: as máquinas do app Electron entram sozinhas, como a conexão dele já entrava.
         let (mut known_servers, adopt) = match load_servers() { Some(list) => (list, false), None => (Vec::new(), true) };
         if adopt { cx.defer_in(window, |this: &mut Self, window, cx| this.adopt_electron_servers(window, cx)); }
@@ -722,7 +747,7 @@ impl Hangar {
         let connection_focus = cx.focus_handle();
         // O cursor do campo só para de piscar ao perder o foco: foco num campo que nunca aparece o deixa piscando para sempre.
         // Com conexão salva o diálogo não abre; o `connect` que falhar põe o foco aqui.
-        if saved.is_none() { address.update(cx, |input, cx| input.focus(window, cx)); }
+        if saved.is_none() && !probe { address.update(cx, |input, cx| input.focus(window, cx)); }
         let composer = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 10).submit_on_enter(true));
         let input_subscription = cx.subscribe_in(&composer, window, |this, _, event, window, cx| {
             match event {
@@ -799,6 +824,8 @@ impl Hangar {
             let Some(event) = window.current_key_down_event().cloned() else { return; };
             if event.keystroke != stroke.keystroke { return; }
             let _ = weak.update(cx, |this, cx| {
+                // Com o assistente aberto, os atalhos da conversa (Ctrl+número, Esc da sessão) não valem.
+                if this.setup.is_some() { return; }
                 let root_key = this.new_session.clone().is_some_and(|dialog| dialog.update(cx, |dialog, cx| dialog.root_key_down(&event, window, cx)));
                 if root_key || (event.keystroke.key == "escape" && this.keyboard_escape(window, cx))
                     || this.keyboard_key_down(&event, window, cx) || this.session_number_key(&event, window, cx) {
@@ -816,8 +843,8 @@ impl Hangar {
             delivery: DeliveryTracker::default(), stopping: HashSet::new(), stop_feedback: HashMap::new(), drafts: HashMap::new(),
             flight: InFlight::default(), action_feedback: HashMap::new(), live_terms: Vec::new(), question_open: None, question_card: None,
             hangar_open: false, hangar_focus: cx.focus_handle(), hangar_error: None, live_clock: None, ask_form: AskForm::default(), plans_dismissed: HashSet::new(), answered_tools: HashSet::new(), answering: HashMap::new(), ask_scroll: Default::default(), plan_scroll: Default::default(), plan_view: None,
-            list_state, rail_hover: None, follow: Default::default(), row_ids: Vec::new(), row_signatures: Vec::new(), items: Vec::new(), expanded: HashSet::new(), kept_expanded: HashMap::new(), orq_days: HashSet::new(),
-            table_column: HashMap::new(), tables: HashMap::new(), paired: HashMap::new(), activity: Default::default(), pinned: HashSet::new(), last_message: None, live_clear_epoch: [0; 2], rich: HashMap::new(), prepared: HashMap::new(), cites: CiteCheck::default(), render_tick: 0,
+            list_state, rail_hover: None, follow: Default::default(), row_ids: Vec::new(), row_signatures: Vec::new(), conversation: Default::default(), row_assets: Vec::new(), expanded: HashSet::new(), kept_expanded: HashMap::new(), orq_days: HashSet::new(),
+            table_column: HashMap::new(), tables: HashMap::new(), last_message: None, live_clear_epoch: [0; 2], rich: HashMap::new(), prepared: HashMap::new(), cites: CiteCheck::default(), render_tick: 0,
             preview_drop_epoch: 0, preview_drop_scheduled: false,
             visible_preview: Preview::default(), preview_tick_epoch: 0, preview_tick_scheduled: false,
             preview_last_tick: None, preview_carry: 0., preview_deadline: None,
@@ -846,6 +873,9 @@ impl Hangar {
             player: Default::default(),
             connection_origin: None,
             electron_offer: saved.is_none() && crate::electron::exists(),
+            setup: None,
+            setup_hidden: None,
+            entry: probe.then_some(setup::Entry::Probing),
         }
     }
 
@@ -1072,6 +1102,8 @@ impl Hangar {
         self.start_remote_lists();
         self.sync_updater(cx);
         self.connection_dialog = false;
+        // Conectado por qualquer caminho: reabrir o cartão mostra endereço + token, não a entrada da primeira abertura.
+        self.entry = None;
         self.root_focus.focus(window, cx);
         let tx = self.tx.clone();
         let connection = self.connection;
@@ -1248,7 +1280,7 @@ impl Hangar {
         self.rich.clear();
         // A busca era da conversa anterior.
         self.find.reset();
-        self.row_ids.clear();
+        row_patch::reset_rows(&mut self.row_ids, &mut self.arrived, &mut self.tree_folds);
         self.list_state.reset(0);
         self.follow_reset();
         let key = self.session_server().and_then(|server| SessionKey::new(&server, &session));
@@ -1288,7 +1320,7 @@ impl Hangar {
                 self.session_task = Some(self.runtime.spawn(forward_stream(api, Some(session.name), connection, Some(selection), tx)));
             }
         }
-        (self.activity, self.pinned) = (Default::default(), HashSet::new());
+        self.conversation = Default::default();
         self.sync_activity(cx);
         self.load_run_state();
         self.load_project_shortcuts();
@@ -2045,7 +2077,7 @@ impl Hangar {
                 self.loading = false;
                 self.has_older = false;
                 self.rich.clear();
-                self.row_ids.clear();
+                row_patch::reset_rows(&mut self.row_ids, &mut self.arrived, &mut self.tree_folds);
                 self.list_state.reset(0);
                 self.follow_reset();
                 self.etag = None;
@@ -2088,11 +2120,11 @@ impl Hangar {
     }
 
     fn toggle(&mut self, key: String, cx: &mut Context<Self>) {
-        if !self.expanded.remove(&key) { self.expanded.insert(key.clone()); }
+        toggle_detail(&mut self.expanded, &mut self.prepared, &key);
         self.prepare_tools();
         let row = self.row_ids.iter().position(|id| id == &key || id.strip_prefix(PINNED) == Some(key.as_str())).or_else(|| {
             let events = &self.chat.events;
-            self.items.iter().position(|item| match item {
+            self.conversation.items.iter().position(|item| match item {
                 Item::Group { tools, .. } => tools.iter().any(|t| events[t.call].id == key),
                 Item::Thinking { parts, .. } => parts.iter().any(|&i| events[i].id == key),
                 _ => false,
@@ -2861,19 +2893,17 @@ impl Hangar {
     fn sync_rows(&mut self, cx: &mut Context<Self>) {
         let a = appearance::get();
         let stable = self.chat.take_unsynced();
-        self.activity = conversation::fold_activity(&self.chat.events);
-        self.pinned = self.activity.running_agents().map(|agent| agent.call).collect();
-        self.sync_activity(cx);
-        api::open_trace(|| format!("sync_rows activity {} events", self.chat.events.len()));
-        self.items = conversation::build(&self.chat.events, conversation::View { thinking: a.thinking_tools, tasks: a.task_list,
-            merge_thinking: a.tool_look == appearance::ToolLook::Tree, every_run_groups: a.tool_look == appearance::ToolLook::Terminal }, &self.pinned);
-        self.paired = conversation::pair_results(&self.chat.events).0;
+        let delta = self.conversation.update(&self.chat.events, stable, conversation::View {
+            thinking: a.thinking_tools, tasks: a.task_list,
+            merge_thinking: a.tool_look == appearance::ToolLook::Tree,
+            every_run_groups: a.tool_look == appearance::ToolLook::Terminal,
+        });
+        if delta.activity_changed { self.sync_activity(cx); }
         self.orq_days = if self.selected.as_ref().is_some_and(SessionInfo::orq) { orq_timeline::day_starts(self.chat.events.iter().filter(|event| event.orq.is_some())) } else { HashSet::new() };
-        self.sync_tables(a.table_chart, stable);
-        api::open_trace(|| format!("sync_rows built {} items, {stable} events unchanged", self.items.len()));
-        self.sync_row_ids(Some(stable), cx);
+        api::open_trace(|| format!("sync_rows built {} items, {} rows unchanged", self.conversation.items.len(), delta.from));
+        self.sync_row_ids(Some(delta), cx);
         api::open_trace(|| format!("sync_rows prepared {} rows", self.row_ids.len()));
-        self.check_cites(cx);
+        self.check_cites(delta.stable_events, cx);
         let provider = self.provider().0.to_owned();
         if matches!(provider.as_str(), "pi" | "omp" | "kimi") {
             let derived = interaction::ask_from_events(&self.chat.events, &provider)
@@ -2886,101 +2916,92 @@ impl Hangar {
     /// os mesmos, e os itens, o texto preparado e as assinaturas da última reconstrução continuam valendo.
     fn sync_tail_rows(&mut self, cx: &mut Context<Self>) {
         // Lista zerada (troca de sessão, reset) ainda sem os itens: só a reconstrução inteira sabe as linhas.
-        let full = self.row_ids.len() < self.items.len();
+        let full = self.row_ids.len() < self.conversation.items.len();
         if full { self.sync_rows(cx) } else { self.sync_row_ids(None, cx) }
     }
 
-    /// Ids e assinaturas das linhas, splice na lista e texto das linhas que mudaram. `rebuilt` = os itens foram refeitos,
-    /// com quantos eventos do começo intactos (o texto preparado deles é reaproveitado); sem ele, só as linhas depois
-    /// dos itens são comparadas.
-    fn sync_row_ids(&mut self, rebuilt: Option<usize>, cx: &mut Context<Self>) {
-        let full = rebuilt.is_some();
-        let stable = rebuilt.unwrap_or(0);
-        let mut old = if full { std::mem::take(&mut self.prepared) } else { HashMap::new() };
+    /// Reconstrói somente o sufixo invalidado; as linhas anteriores conservam vetores e caches.
+    fn sync_row_ids(&mut self, rebuilt: Option<conversation::incremental::Delta>, cx: &mut Context<Self>) {
+        let items = self.conversation.items.len();
+        let from = rebuilt.map_or(items, |delta| delta.from).min(self.row_ids.len());
+        let stable = rebuilt.map_or(self.chat.events.len(), |delta| delta.stable_events);
         let opening = self.opening_row_shown();
         let events = &self.chat.events;
-        let items = self.items.len();
-        let (mut ids, mut signatures): (Vec<String>, Vec<String>) = if full {
-            (self.items.iter().map(|item| item.id(events)).collect(), self.items.iter().map(|item| {
-                // O separador de dia muda a altura da linha quando histórico mais antigo chega antes dela.
-                let day = matches!(item, Item::Event(_)) && self.orq_days.contains(&item.id(events));
-                if day { format!("day{}", signature(item, events)) } else { signature(item, events) }
-            }).collect())
-        } else { (self.row_ids[..items].to_vec(), self.row_signatures[..items].to_vec()) };
+        let (mut ids, mut signatures): (Vec<String>, Vec<String>) = self.conversation.items[from..].iter().map(|item| {
+            let id = item.id(events);
+            let day = matches!(item, Item::Event(_)) && self.orq_days.contains(&id);
+            let signature = if day { format!("day{}", signature(item, events)) } else { signature(item, events) };
+            (id, signature)
+        }).unzip();
         if !self.chat.live_thinking.is_empty() { ids.push(LIVE_THINKING.into()); signatures.push(String::new()); }
         if let Some(tool) = &self.chat.live_tool { ids.push(LIVE_TOOL.into()); signatures.push(format!("{}{}", tool.name, tool.input)); }
         if !self.visible_preview.text.is_empty() { ids.push(PREVIEW.into()); signatures.push(String::new()); }
         if opening { ids.push(landing::OPENING.into()); signatures.push(String::new()); }
         if self.working_row_shown() { ids.push(WORKING.into()); signatures.push(String::new()); }
-        for agent in self.activity.running_agents() { ids.push(format!("{PINNED}{}", events[agent.call].id)); signatures.push(String::new()); }
-        let prefix = self.row_ids.iter().zip(&ids).take_while(|(a,b)| a == b).count();
-        let suffix = self.row_ids[prefix..].iter().rev().zip(ids[prefix..].iter().rev()).take_while(|(a,b)| a == b).count();
-        let spliced = prefix + suffix < self.row_ids.len() || prefix + suffix < ids.len();
-        api::open_trace(|| format!("rows splice prefix={prefix} suffix={suffix} old={} new={}", self.row_ids.len(), ids.len()));
-        // Mesma linha com outro conteúdo (resultado que chegou, grupo que cresceu): altura muda.
-        let previous: HashMap<&String, &String> = self.row_ids.iter().zip(&self.row_signatures).collect();
-        let resized: Vec<usize> = ids.iter().zip(&signatures).enumerate()
-            .filter(|(_, (id, signature))| previous.get(id).is_some_and(|old| old != signature)).map(|(index, _)| index).collect();
-        let mut prepared = HashMap::new();
-        let rewritten: Vec<(usize, String)> = ids.iter().enumerate().filter_map(|(index, id)| {
-            if !full && index < items { return None; }
-            let body = if id == PREVIEW { preview_source(&self.visible_preview) } else {
-                let Some(Item::Event(i)) = self.items.get(index) else { return None };
-                // Guardado de outro tipo sob o mesmo id é preparado de novo, em vez de derrubar o app.
-                let message = old.remove(id).filter(|m| *i < stable && matches!(m, Prepared::Message { .. }))
-                    .unwrap_or_else(|| prepare_message(&events[*i], &self.cites.dead));
-                let Prepared::Message { markdown, .. } = &message else { return None };
-                let body = markdown.clone();
-                prepared.insert(id.clone(), message);
-                body
-            };
-            self.rich.get(id).filter(|cached| cached.source != body).map(|_| (index, body))
-        }).collect();
-        if full {
-            // Saída de ferramenta de evento intacto já foi contada e cortada; o resto o `prepare_tools` refaz.
-            for (key, value) in old {
-                let Some((id, part)) = key.rsplit_once(':') else { continue };
-                let Some(i) = self.chat.position(id).filter(|i| *i < stable) else { continue };
-                let keep = match part {
-                    "lines" => true,
-                    "input" => self.expanded.contains(id),
-                    "result" => self.expanded.contains(id) && self.paired.get(&i).is_none_or(|result| *result < stable),
-                    _ => false,
-                };
-                if keep { prepared.insert(key, value); }
+        for agent in self.conversation.running_agents() { ids.push(format!("{PINNED}{}", events[agent.call].id)); signatures.push(String::new()); }
+        let patch = row_patch::RowPatch::between(from, &self.row_ids[from..], &self.row_signatures[from..],
+            &ids, &signatures, if rebuilt.is_some() { items - from } else { 0 });
+        let prefix = patch.remove.start;
+        let added = patch.insert.len();
+        let spliced = !patch.remove.is_empty() || added > 0;
+        let entering = prefix > 0 && patch.remove.is_empty() && (1..=4).contains(&added);
+        let mut old_parts = HashSet::new();
+        if rebuilt.is_some() {
+            for assets in self.row_assets.drain(from..) {
+                for key in assets.prepared { self.prepared.remove(&key); }
+                for id in assets.parts { self.tree_parts.remove(&id); old_parts.insert(id); }
             }
-            self.prepared = prepared;
-            self.last_message = events.iter().rposition(|e| e.kind == "assistant_msg" || e.kind == "user_msg" && !e.queued());
-            self.prepare_tools();
+            for item in &self.conversation.items[from..] {
+                if let Item::Event(i) = item {
+                    self.prepared.insert(events[*i].id.clone(), prepare_message(&events[*i], &self.cites.dead));
+                }
+                self.row_assets.push(row_patch::RowAssets::of(item, events, &self.conversation.paired));
+            }
+            if rebuilt.is_some_and(|delta| delta.full) { self.last_message = None; }
+            if let Some(i) = events[stable..].iter().rposition(|e| e.kind == "assistant_msg" || e.kind == "user_msg" && !e.queued()) {
+                self.last_message = Some(stable + i);
+            }
+        }
+        let rewritten: Vec<(usize, String)> = ids.iter().enumerate().filter_map(|(i, id)| {
+            let cached = self.rich.get(id)?;
+            if id == PREVIEW {
+                let body = preview_source(&self.visible_preview);
+                return (cached.source != body).then_some((from + i, body));
+            }
+            let Prepared::Message { markdown, .. } = self.prepared.get(id)? else { return None };
+            (cached.source != *markdown).then(|| (from + i, markdown.clone()))
+        }).collect();
+        if rebuilt.is_some() {
+            self.prepare_tools_from(from);
+            self.sync_tables(appearance::get().table_chart, from);
         }
         // Só linha que muda de altura puxa a mola: um quadro sem mudança não pode desgrudar a lista do fim.
-        if spliced || !resized.is_empty() || !rewritten.is_empty() { self.follow_content_changed(cx); }
-        if spliced { self.splice_rows(prefix..self.row_ids.len()-suffix, &ids[prefix..ids.len()-suffix]); }
+        if spliced || !patch.resized.is_empty() || !rewritten.is_empty() { self.follow_content_changed(cx); }
+        if spliced { self.splice_rows(patch.remove.clone(), &ids[patch.insert.clone()]); }
         // Só o bloco novo entra animado: um acréscimo pequeno no meio ou no fim de uma conversa já aberta. Troca de linha (a
         // prévia virando a resposta gravada, o envio virando a mensagem real), histórico carregando ou páginas antigas
         // chegando em cima aparecem direto.
-        let added = ids.len() - prefix - suffix;
-        if prefix > 0 && prefix + suffix == self.row_ids.len() && (1..=4).contains(&added) {
+        if entering {
             let now = Instant::now();
-            for id in &ids[prefix..prefix + added] { if id != WORKING { self.arrived.insert(id.clone(), now); } }
+            for id in &ids[patch.insert.clone()] { if id != WORKING { self.arrived.insert(id.clone(), now); } }
         }
         // Parte nova num grupo da Árvore entra animada pela mesma regra: conversa já na tela e poucas de uma vez, uma
         // depois da outra.
-        if full {
-            let parts: Vec<String> = self.items.iter().filter_map(|item| match item { Item::Group { tools, .. } => Some(tools), _ => None })
-                .flatten().map(|tool| self.chat.events[tool.call].id.clone()).collect();
-            let fresh: Vec<&String> = parts.iter().filter(|id| !self.tree_parts.contains(*id)).collect();
+        if rebuilt.is_some() {
+            let parts: Vec<&String> = self.row_assets[from..].iter().flat_map(|assets| assets.parts.iter()).collect();
+            let fresh: Vec<&String> = parts.iter().copied().filter(|id| !old_parts.contains(*id) && !self.tree_parts.contains(*id)).collect();
             if prefix > 0 && (1..=4).contains(&fresh.len()) {
                 let now = Instant::now();
                 for (n, id) in fresh.into_iter().enumerate() { self.part_arrived.insert(id.clone(), now + motion::TOOL_STAGGER * n as u32); }
             }
-            self.tree_parts = parts.into_iter().collect();
-            self.part_arrived.retain(|id, _| self.tree_parts.contains(id));
+            self.tree_parts.extend(parts.into_iter().cloned());
+            for id in old_parts { if !self.tree_parts.contains(&id) { self.part_arrived.remove(&id); } }
         }
-        for index in resized { self.list_state.remeasure_items(index..index + 1); }
+        for index in patch.resized { self.list_state.remeasure_items(index..index + 1); }
         for (index, body) in rewritten {
-            let Some(cached) = self.rich.get_mut(&ids[index]) else { continue };
-            let added = if ids[index] == PREVIEW { body.strip_prefix(&cached.source).map(str::to_owned) } else { None };
+            let id = &ids[index - from];
+            let Some(cached) = self.rich.get_mut(id) else { continue };
+            let added = if id == PREVIEW { body.strip_prefix(&cached.source).map(str::to_owned) } else { None };
             cached.source = body.clone();
             if let Some(added) = added {
                 cached.view.update(cx, |view, cx| view.push_str(&added, cx));
@@ -2989,13 +3010,19 @@ impl Hangar {
             }
             self.list_state.remeasure_items(index..index+1);
         }
-        self.row_ids = ids;
-        self.row_signatures = signatures;
-        let rows: HashSet<&String> = self.row_ids.iter().collect();
+        let kept: HashSet<_> = ids.iter().collect();
+        let removed: HashSet<_> = self.row_ids[from..].iter().filter(|id| !kept.contains(id)).cloned().collect();
         // Visões fora da lista (plano, diff do painel) usam linha "__…__" e saem só pelo limite do cache.
-        self.rich.retain(|_, rich| rows.contains(&rich.row) || rich.row.starts_with("__"));
-        self.arrived.retain(|id, _| rows.contains(id));
-        self.tree_folds.retain(|id, _| rows.contains(id));
+        self.rich.retain(|_, rich| !removed.contains(&rich.row) || rich.row.starts_with("__"));
+        for id in removed {
+            self.arrived.remove(&id);
+            self.tree_folds.remove(&id);
+            self.tables.remove(&id);
+        }
+        self.row_ids.truncate(from);
+        self.row_ids.extend(ids);
+        self.row_signatures.truncate(from);
+        self.row_signatures.extend(signatures);
     }
 
     /// Passo do streaming com a linha da prévia já na lista: só ela muda, e o resto da conversa não é refeito
@@ -3021,13 +3048,13 @@ impl Hangar {
     /// resposta cuja fonte mudou; o desenho só consulta. Sem a opção, nada é lido nem guardado.
     /// Confere no servidor, em lote, os arquivos citados nas mensagens ainda não conferidos; os que não abrem perdem o
     /// chip, e as mensagens são preparadas de novo. Falha na conferência deixa os chips como estão.
-    fn check_cites(&mut self, cx: &mut Context<Self>) {
+    fn check_cites(&mut self, mut stable: usize, cx: &mut Context<Self>) {
         let owner = self.selected_key();
-        if self.cites.owner != owner { self.cites = CiteCheck { owner: owner.clone(), ..Default::default() }; }
+        if self.cites.owner != owner { self.cites = CiteCheck { owner: owner.clone(), ..Default::default() }; stable = 0; }
         let (Some(owner), Some(api)) = (owner, self.session_api()) else { return };
         let mut fresh = Vec::new();
         let mut revived = false;
-        for event in &self.chat.events {
+        for event in &self.chat.events[stable..] {
             if !(event.kind == "assistant_msg" || peer_of(event).is_some()) || !self.cites.scanned.insert(event.id.clone()) { continue; }
             for path in composer::citation_paths(&composer::citation_markdown(&display_body(event))) {
                 // Mensagem nova citando um que não abria ("vou criar x.rs" e depois "criei x.rs"): confere de novo.
@@ -3074,29 +3101,23 @@ impl Hangar {
 
     /// Mensagens preparadas de novo depois que o conjunto de chips mortos mudou.
     fn refresh_cites(&mut self, cx: &mut Context<Self>) {
-        self.sync_tables(appearance::get().table_chart, 0);
-        self.sync_row_ids(Some(0), cx);
+        self.sync_row_ids(Some(conversation::incremental::Delta {
+            from: 0, previous_len: self.conversation.items.len(), stable_events: 0, full: true, activity_changed: false,
+        }), cx);
         cx.notify();
     }
 
-    fn sync_tables(&mut self, enabled: bool, stable: usize) {
-        let mut old = std::mem::take(&mut self.tables);
-        if !enabled { return; }
+    fn sync_tables(&mut self, enabled: bool, from: usize) {
+        if !enabled { self.tables.clear(); return; }
         let decimal = tr("decimal").chars().next().unwrap_or(',');
         let events = &self.chat.events;
-        for item in &self.items {
-            let Item::Event(i) = item else { continue };
+        for item in &self.conversation.items[from..] {
+            let Item::Event(i) = item else { self.tables.remove(&item.id(events)); continue };
             let event = &events[*i];
-            if event.kind != "assistant_msg" || event.is_error == Some(true) { continue; }
-            if *i < stable && let Some(kept) = old.remove(&event.id) {
-                self.tables.insert(event.id.clone(), kept);
-                continue;
-            }
+            if event.kind != "assistant_msg" || event.is_error == Some(true) { self.tables.remove(&event.id); continue; }
             let source = safe_markdown(&composer::citation_markdown_with(&display_body(event), &|p| self.cites.dead.contains(p)));
-            let tables = match old.remove(&event.id) {
-                Some((seen, tables)) if seen == source => tables,
-                _ => crate::tables::read(&source, decimal).into(),
-            };
+            if self.tables.get(&event.id).is_some_and(|(seen, _)| seen == &source) { continue; }
+            let tables = crate::tables::read(&source, decimal).into();
             self.tables.insert(event.id.clone(), (source, tables));
         }
     }
@@ -3130,7 +3151,7 @@ impl Hangar {
     fn render_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(id) = self.row_ids.get(index).cloned() else { return div().into_any_element(); };
         self.tree_motion = false;
-        let inner = match (id.as_str(), self.items.get(index).cloned()) {
+        let inner = match (id.as_str(), self.conversation.items.get(index).cloned()) {
             (PREVIEW, _) => self.render_message(index, &id, cx),
             (LIVE_THINKING, _) => self.render_live_thinking(cx),
             (LIVE_TOOL, _) => self.render_live_tool(),
@@ -3150,7 +3171,7 @@ impl Hangar {
             (_, None) => div().into_any_element(),
         };
         if self.tree_motion { motion::request_frame(window, cx); }
-        let message = id == PREVIEW || id == landing::OPENING || matches!(self.items.get(index), Some(Item::Event(_)));
+        let message = id == PREVIEW || id == landing::OPENING || matches!(self.conversation.items.get(index), Some(Item::Event(_)));
         let row = row_frame(inner, message);
         // Pede quadro só para a área da conversa, e só enquanto a linha entra; rolar até ela depois não a anima de novo.
         let entering = self.arrived.get(&id).map(|at| motion::FADE_IN.raw(*at)).filter(|raw| *raw < 1. && !cx.reduce_motion());
@@ -3189,11 +3210,11 @@ impl Hangar {
     // Sem resultado só é "em execução" enquanto a sessão trabalha e nenhuma mensagem veio depois. Agente rodando é
     // "em execução" até o fim real, mesmo com a sessão ociosa.
     fn running(&self, call: usize) -> bool {
-        self.pinned.contains(&call) || self.chat.state.state == "working" && self.last_message.is_none_or(|last| call > last)
+        self.conversation.pinned.contains(&call) || self.chat.state.state == "working" && self.last_message.is_none_or(|last| call > last)
     }
 
     fn pinned_call(&self, event_id: &str) -> Option<usize> {
-        self.activity.running_agents().map(|agent| agent.call).find(|&call| self.chat.events[call].id == event_id)
+        self.conversation.running_agents().map(|agent| agent.call).find(|&call| self.chat.events[call].id == event_id)
     }
 
     /// A linha de trabalhando fica sob a última linha durante todo o turno, com pensamento, ferramenta ou texto chegando,
@@ -3373,17 +3394,19 @@ impl Hangar {
 
     /// Contar, cortar e cercar uma saída grande pesa: faz uma vez por mudança do chat ou abertura de detalhe,
     /// nunca no desenho. Só insere o que falta.
-    fn prepare_tools(&mut self) {
+    fn prepare_tools(&mut self) { self.prepare_tools_from(0); }
+
+    fn prepare_tools_from(&mut self, from: usize) {
         let (events, prepared, expanded) = (&self.chat.events, &mut self.prepared, &self.expanded);
         let mut tools = Vec::new();
         let mut orphans = Vec::new();
-        for item in &self.items {
+        for item in &self.conversation.items[from..] {
             match item {
                 Item::Tool(tool) => tools.push(*tool),
                 // O raciocínio que a Árvore põe no grupo não tem entrada nem resultado a preparar.
                 Item::Group { tools: group, .. } => tools.extend(group.iter().copied().filter(|t| events[t.call].kind != "thinking")),
                 Item::Thinking { parts, .. } => tools.extend(parts.iter().filter(|&&i| events[i].kind != "thinking")
-                    .map(|&i| Tool { call: i, result: self.paired.get(&i).copied() })),
+                    .map(|&i| Tool { call: i, result: self.conversation.paired.get(&i).copied() })),
                 Item::Orphan(i) => orphans.push(*i),
                 Item::Event(_) | Item::Tasks { .. } => {}
             }
@@ -3501,7 +3524,7 @@ impl Hangar {
         let mut body: Vec<AnyElement> = Vec::new();
         if open {
             // Só os pares das chamadas deste bloco, tirados do mapa refeito no `sync_rows`.
-            let paired: HashMap<usize, usize> = if has_calls { parts.iter().filter_map(|&i| self.paired.get(&i).map(|&r| (i, r))).collect() } else { HashMap::new() };
+            let paired: HashMap<usize, usize> = if has_calls { parts.iter().filter_map(|&i| self.conversation.paired.get(&i).map(|&r| (i, r))).collect() } else { HashMap::new() };
             for &i in parts {
                 let event = &self.chat.events[i];
                 if event.tool_name.as_deref() == Some("ToolSearch") { continue; }
@@ -4354,7 +4377,7 @@ impl Hangar {
         let mut discard = None;
         let mut baton = None;
         // Sessão orq: linha do tempo do orquestrador já interpretada pelo backend, desenhada à parte.
-        if let Some(&Item::Event(event_index)) = self.items.get(index).filter(|_| id != PREVIEW) {
+        if let Some(&Item::Event(event_index)) = self.conversation.items.get(index).filter(|_| id != PREVIEW) {
             if self.chat.events.get(event_index).is_some_and(|event| event.orq.is_some()) { return self.render_orq_event(&id, event_index, cx); }
         }
         // Texto preparado quando o chat mudou; a prévia usa a fonte que o passo do streaming já montou.
@@ -4362,7 +4385,7 @@ impl Hangar {
             let markdown = self.rich.get(&id).map(|rich| rich.source.clone()).unwrap_or_else(|| preview_source(&self.visible_preview));
             (markdown, self.visible_preview.text.trim().is_empty())
         } else {
-            let Some(Item::Event(event_index)) = self.items.get(index) else { return div().into_any_element(); };
+            let Some(Item::Event(event_index)) = self.conversation.items.get(index) else { return div().into_any_element(); };
             let local;
             let message = match self.prepared.get(&id) {
                 Some(message) => message,
@@ -4380,7 +4403,7 @@ impl Hangar {
             // "Trabalhando" é da linha de baixo, que segue sob o texto chegando.
             (tr("assistant"), None, false, false)
         } else {
-            let Some(Item::Event(event_index)) = self.items.get(index) else { return div().into_any_element(); };
+            let Some(Item::Event(event_index)) = self.conversation.items.get(index) else { return div().into_any_element(); };
             let event = &self.chat.events[*event_index];
             let label = match event.kind.as_str() {
                 "user_msg" => tr("you"), "assistant_msg" => tr("assistant"), "thinking" => tr("thinking"),
@@ -4414,17 +4437,17 @@ impl Hangar {
         }
         // Conversa sem cartões: usuário em bolha à direita, agente em texto corrido. Só o que não é nenhum dos
         // dois (erro, aviso, formato desconhecido) mantém o rótulo, porque ali o rótulo é informação.
-        let plain = id == PREVIEW || (kind_of(&self.items, index, &self.chat.events) == Some("assistant_msg") && !error);
+        let plain = id == PREVIEW || (kind_of(&self.conversation.items, index, &self.chat.events) == Some("assistant_msg") && !error);
         // Resposta gravada com tabela numérica: o texto vai em trechos, e cada tabela ganha o botão Gráfico.
         // Só o retrato do `sync_tables`, e só com a mesma fonte que está sendo desenhada; a prévia nunca tem gráfico.
         let charted = (plain && id != PREVIEW && appearance::get().table_chart).then(|| self.tables.get(&id)).flatten()
             .filter(|(source, tables)| *source == markdown && !tables.is_empty()).map(|(_, tables)| tables.clone());
-        let refs = match self.items.get(index) {
+        let refs = match self.conversation.items.get(index) {
             Some(Item::Event(i)) if id != PREVIEW => self.chat.events.get(*i).map(attachment_refs).unwrap_or_default(),
             _ => Vec::new(),
         };
         // Na bolha do usuário as imagens saem em miniatura, lado a lado e acima do texto, como no web.
-        let peer = match self.items.get(index) { Some(Item::Event(i)) if user => self.chat.events.get(*i).and_then(peer_of), _ => None };
+        let peer = match self.conversation.items.get(index) { Some(Item::Event(i)) if user => self.chat.events.get(*i).and_then(peer_of), _ => None };
         let peer_scope = peer.as_ref().map(|peer| peer.scope);
         let peer_head = peer.map(|peer| self.peer_head(&id, peer, cx));
         let (images, refs): (Vec<_>, Vec<_>) = refs.into_iter().partition(|(_, _, image)| user && *image);
@@ -4432,7 +4455,7 @@ impl Hangar {
         let files = (!refs.is_empty()).then(|| self.render_refs(&id, refs, cx));
         let more_key = format!("{id}#more");
         // Skill injetada: só o rótulo, e o SKILL.md inteiro no "mostrar mais" (como a linha recolhida do web).
-        let skill = match self.items.get(index) {
+        let skill = match self.conversation.items.get(index) {
             Some(Item::Event(i)) if id != PREVIEW => self.chat.events.get(*i).is_some_and(|e| e.skill.is_some()),
             _ => false,
         };
@@ -4454,7 +4477,7 @@ impl Hangar {
             .on_click(cx.listener(move |this, _, _, cx| this.toggle(more_key.clone(), cx))));
         // Hora e copiar sob a mensagem, só ao passar o mouse; a faixa é reservada para a lista não remedir.
         let actions = (id != PREVIEW && (user || plain)).then(|| {
-            let ts = match self.items.get(index) { Some(Item::Event(i)) => self.chat.events.get(*i).and_then(|e| e.ts), _ => None };
+            let ts = match self.conversation.items.get(index) { Some(Item::Event(i)) => self.chat.events.get(*i).and_then(|e| e.ts), _ => None };
             let (view, copy_id) = (cx.weak_entity(), id.clone());
             div().h(px(24.)).flex().items_center().gap_1().opacity(0.).group_hover(ROW_GROUP, |s| s.opacity(1.))
                 .when_some(stamp(ts), |el, at| el.child(div().text_xs().text_color(theme::faint()).child(at)))
@@ -5501,6 +5524,13 @@ fn count_lines(result: &ChatEvent) -> usize {
     result.result.as_deref().unwrap_or("").trim().lines().count()
 }
 
+fn toggle_detail(expanded: &mut HashSet<String>, prepared: &mut HashMap<String, Prepared>, key: &str) {
+    if expanded.remove(key) {
+        prepared.remove(&format!("{key}:input"));
+        prepared.remove(&format!("{key}:result"));
+    } else { expanded.insert(key.to_owned()); }
+}
+
 fn prepare_detail(full: String) -> Prepared {
     let total = full.chars().count();
     let (shown, clipped) = conversation::clip(&full, DETAIL_MAX);
@@ -6090,6 +6120,11 @@ impl Hangar {
 
 impl Render for Hangar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // O assistente ocupa a janela: nada da conversa por baixo recebe tecla nem clique.
+        if let Some(setup) = self.setup.clone() {
+            return div().id("hangar-root").size_full().bg(theme::window_fill()).text_color(theme::text()).text_base()
+                .font_family(theme::SANS).child(setup).into_any_element();
+        }
         self.rail_frame(window);
         let selected_name = self.selected.as_ref().map(|s| s.name.clone());
         let floating = theme::is_floating();
@@ -6199,6 +6234,8 @@ impl Render for Hangar {
         COLUMN_FRAME.set((f32::from(window.viewport_size().width), side.is_some()));
         let dialog_top = window.viewport_size().height / 10.;
         let dialog_width = (window.viewport_size().width - px(32.)).min(px(480.));
+        let entry = self.render_entry(cx);
+        let entry_shown = entry.is_some();
         // Só montado com a conexão aberta: a raiz redesenha a cada batida das animações.
         let dialog = self.connection_dialog.then(|| div().id("connection-card").w(dialog_width).max_h(window.viewport_size().height - dialog_top - px(16.))
             .p(px(20.)).bg(theme::popup_fill(theme::raised())).border_1().border_color(theme::glass_border()).rounded(px(16.))
@@ -6212,16 +6249,19 @@ impl Render for Hangar {
                     cx.notify();
                 }
             }))
-            .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(tr("connection")))
-            .child(div().text_sm().text_color(theme::muted()).child(tr("connection_hint")))
-            .child(div().text_sm().child(tr("server"))).child(Input::new(&self.address).aria_label(tr("server")))
-            .child(div().text_sm().child(tr("token"))).child(Input::new(&self.token).aria_label(tr("token")))
+            .map(|el| match entry {
+                Some(card) => el.child(card),
+                None => el.child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(tr("connection")))
+                    .child(div().text_sm().text_color(theme::muted()).child(tr("connection_hint")))
+                    .child(div().text_sm().child(tr("server"))).child(Input::new(&self.address).aria_label(tr("server")))
+                    .child(div().text_sm().child(tr("token"))).child(Input::new(&self.token).aria_label(tr("token"))),
+            })
             .when(self.electron_offer, |el| el.child(div().flex().flex_col().gap_2().pt_3().border_t_1().border_color(theme::glass_border())
                 .child(div().text_sm().text_color(theme::muted()).child(tr("electron_import_offer_hint")))
                 .child(Button::new("electron-import").outline().label(tr("electron_import_offer"))
                     .on_click(cx.listener(|this, _, window, cx| this.import_electron(false, window, cx))))))
             .when_some(self.error.clone(), |el, error| el.child(div().text_sm().text_color(theme::warning()).child(error)))
-            .child(div().flex().justify_end().gap_2()
+            .when(!entry_shown, |el| el.child(div().flex().justify_end().gap_2()
                 .when(self.api.is_some(), |el| el.child(Button::new("cancel").label(tr("cancel")).on_click(cx.listener(|this, _, window, cx| {
                     this.connection_dialog = false;
                     this.connection_origin.take().and_then(|origin| origin.upgrade()).unwrap_or_else(|| this.root_focus.clone()).focus(window, cx);
@@ -6233,7 +6273,7 @@ impl Render for Hangar {
                         window.close_all_dialogs(cx);
                         this.root_focus.focus(window, cx);
                     }
-                })))));
+                }))))));
         self.finish_landing(window);
 
         let ticker = motion::ticker(window, cx);
@@ -6442,6 +6482,7 @@ impl Render for Hangar {
                     chrome::Glass::new(dialog.focus_trap("connection-dialog", &self.connection_focus), px(16.)).into_any_element()
                 } else { dialog.focus_trap("connection-dialog", &self.connection_focus).into_any_element() })))
                 .with_priority(gpui_kit::base::POPUP_PRIORITY + 1)))
+            .into_any_element()
     }
 }
 
@@ -6450,6 +6491,27 @@ mod tests {
     use super::{message_card, preview_step, safe_markdown, stream_motion, working_tokens, working_verb};
     use crate::{api::dto::ChatEvent, cards::Card, i18n::tr};
     use std::{collections::HashSet, time::Duration};
+
+    #[test]
+    fn closing_historical_tool_releases_full_details_without_another_event() {
+        use super::{Prepared, prepare_detail, toggle_detail};
+        use std::collections::HashMap;
+        let mut expanded = HashSet::from(["old".to_owned(), "other".to_owned()]);
+        let mut prepared = HashMap::from([
+            ("old:input".into(), prepare_detail("Entrada".repeat(10000))),
+            ("old:result".into(), prepare_detail("Saída".repeat(100000))),
+            ("result:lines".into(), Prepared::Lines(100)),
+            ("other:result".into(), prepare_detail("Outro detalhe".into())),
+        ]);
+        toggle_detail(&mut expanded, &mut prepared, "old");
+        assert!(!expanded.contains("old"));
+        assert!(!prepared.contains_key("old:input"));
+        assert!(!prepared.contains_key("old:result"));
+        assert!(prepared.contains_key("result:lines"));
+        assert!(prepared.contains_key("other:result"));
+        toggle_detail(&mut expanded, &mut prepared, "old");
+        assert!(expanded.contains("old"));
+    }
 
     #[test]
     fn plugin_show_404_is_an_older_server_not_an_error() {
