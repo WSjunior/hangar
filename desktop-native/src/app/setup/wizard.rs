@@ -214,20 +214,48 @@ fn wait_gone(pid: u32, started: &str, limit: Duration) -> bool {
     }
 }
 
+/// O que fazer com o pid anotado do agente, decidido ANTES de qualquer sinal.
+#[derive(Debug, PartialEq, Eq)]
+enum StopPlan {
+    /// A identidade lida agora é a anotada: o processo é o agente, e o grupo dele também.
+    Signal,
+    /// O pid sumiu ou já é de outro processo (um app que caiu horas antes, um shell do tmux): nenhum sinal, a ele nem ao grupo.
+    Gone,
+    /// Sem identidade anotada ou leitura falhou (K2): nenhum sinal; quem chama avisa que não pôde parar.
+    Unverified,
+}
+
+fn stop_plan(recorded: &str, now: &run::Identity) -> StopPlan {
+    match now {
+        _ if recorded.is_empty() => StopPlan::Unverified,
+        run::Identity::Known(id) if id == recorded => StopPlan::Signal,
+        run::Identity::Known(_) | run::Identity::Gone => StopPlan::Gone,
+        run::Identity::Unknown => StopPlan::Unverified,
+    }
+}
+
 /// Pára o agente e espera ele sair — uma última escrita depois de desfazer passaria —; ainda vivo em 10 s, mata sem
-/// escolha. `false` = sem identidade (K2): nunca se mata por pid nu, e quem chama avisa. Bloqueia: só fora da janela.
+/// escolha. Só sinaliza com a identidade conferida agora; `false` = não deu para conferir (quem chama avisa e desfaz
+/// mesmo assim). Bloqueia: só fora da janela.
 fn stop_agent_process(pid: u32, started: &str) -> bool {
-    if started.is_empty() {
-        crate::log_line(&format!("assistente: agente {pid} sem identidade gravada; não foi parado"));
-        return false;
+    match stop_plan(started, &run::read_identity(pid)) {
+        StopPlan::Gone => {
+            crate::log_line(&format!("assistente: agente {pid} já não existe ou o número é de outro processo; nenhum sinal enviado"));
+            return true;
+        }
+        StopPlan::Unverified => {
+            crate::log_line(&format!("assistente: agente {pid} sem identidade conferida; não foi parado"));
+            return false;
+        }
+        StopPlan::Signal => {}
     }
     run::stop(pid, started);
     if !wait_gone(pid, started, Duration::from_secs(10)) {
         run::kill(pid, started);
         if !wait_gone(pid, started, Duration::from_secs(3)) { crate::log_line(&format!("assistente: agente {pid} não saiu nem morto")); }
     }
-    // O líder saiu, mas um comando dele pode seguir no grupo e escrever na pasta depois de desfeita. O grupo é do agente:
-    // o líder foi conferido pela identidade logo acima.
+    // O líder conferido saiu, mas um comando dele pode seguir no grupo e escrever na pasta depois de desfeita. Enquanto o
+    // grupo tem membros, o número dele não volta a ser usado: ainda é o grupo do agente.
     let deadline = Instant::now() + Duration::from_secs(3);
     while run::group_alive(pid) && Instant::now() < deadline {
         run::kill_group(pid);
@@ -306,7 +334,9 @@ fn suspend_updates(on: bool, cx: &mut App) {
 }
 
 impl SetupWizard {
-    pub(super) fn new(hangar: WeakEntity<Hangar>, runtime: tokio::runtime::Handle, origin: Origin, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// `at_launch`: o app abriu sozinho ao iniciar (a recuperação de um conserto interrompido fica mais cautelosa).
+    pub(super) fn new(hangar: WeakEntity<Hangar>, runtime: tokio::runtime::Handle, origin: Origin, at_launch: bool, window: &mut Window,
+        cx: &mut Context<Self>) -> Self {
         let password = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(tr("setup_password_field")));
         let confirm = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(tr("setup_password_confirm")));
         let subscriptions = vec![cx.subscribe(&password, |_, _, _: &InputEvent, cx| cx.notify()),
@@ -320,7 +350,6 @@ impl SetupWizard {
             }
         }).detach();
         // O app caiu no meio de um conserto: pára o agente que sobrou e devolve a pasta, fora da thread da janela, e avisa.
-        let at_launch = super::take_launch();
         let recovery = cx.background_executor().spawn(async move { recover_agent_edits(at_launch) });
         cx.spawn(async move |this, cx| {
             let recovered = recovery.await;
@@ -944,7 +973,13 @@ impl SetupWizard {
     pub(super) fn dismiss_recovered(&mut self, cx: &mut Context<Self>) {
         let failed = self.recovered.take().is_some_and(|r| !r.restored.errors.is_empty());
         if failed && self.agent.is_none() && let Some(dir) = run::state_dir() {
-            cx.background_executor().spawn(async move { archive_annotation(&dir, "aviso fechado com a pasta sem voltar toda") }).detach();
+            // Até arquivar, `ask_agent` recusa: senão a anotação nova dele seria a arquivada.
+            self.recovering = true;
+            let task = cx.background_executor().spawn(async move { archive_annotation(&dir, "aviso fechado com a pasta sem voltar toda") });
+            cx.spawn(async move |this, cx| {
+                task.await;
+                let _ = this.update(cx, |w, cx| { w.recovering = false; cx.notify(); });
+            }).detach();
         }
         cx.notify();
     }
@@ -1433,5 +1468,22 @@ impl Render for PasswordPrompt {
                     .on_click(|_, window, cx| window.close_dialog(cx)))
                 .child(Button::new("setup-sudo-ok").primary().label(tr("setup_sudo_ok")).disabled(self.checking)
                     .on_click(move |_, window, cx| { let _ = submit.update(cx, |w, cx| w.submit_password(window, cx)); })))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_recorded_identity_is_ever_signalled() {
+        let known = |id: &str| run::Identity::Known(id.to_owned());
+        assert_eq!(stop_plan("100", &known("100")), StopPlan::Signal);
+        // O pid virou outro processo (um shell do tmux depois de o app cair): nenhum sinal, nem ao grupo.
+        assert_eq!(stop_plan("100", &known("200")), StopPlan::Gone);
+        assert_eq!(stop_plan("100", &run::Identity::Gone), StopPlan::Gone);
+        assert_eq!(stop_plan("100", &run::Identity::Unknown), StopPlan::Unverified);
+        assert_eq!(stop_plan("", &known("")), StopPlan::Unverified);
+        assert_eq!(stop_plan("", &known("100")), StopPlan::Unverified);
     }
 }

@@ -68,6 +68,8 @@ impl Hangar {
     }
 
     pub(in crate::app) fn open_setup(&mut self, origin: Origin, window: &mut Window, cx: &mut Context<Self>) {
+        // Lido já: uma volta antecipada não deixa a marca para a próxima abertura pelo menu.
+        let at_launch = super::take_launch();
         if self.setup.is_some() || !supported() { return; }
         // O escondido volta como estava: nunca dois assistentes nem duas execuções.
         if let Some(hidden) = self.setup_hidden.take() {
@@ -77,7 +79,7 @@ impl Hangar {
             return;
         }
         let (hangar, runtime) = (cx.entity().downgrade(), self.runtime.handle().clone());
-        self.setup = Some(cx.new(|cx| SetupWizard::new(hangar, runtime, origin, window, cx)));
+        self.setup = Some(cx.new(|cx| SetupWizard::new(hangar, runtime, origin, at_launch, window, cx)));
         cx.notify();
     }
 
