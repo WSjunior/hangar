@@ -105,11 +105,12 @@ automatizado avulso (vitest, pytest, check) só roda quando o usuário pedir** �
 push; nem entre edições, nem ao terminar a tarefa. Pedido o focado: num comando só, os testes dos
 arquivos tocados (`cd backend && uv run pytest tests/test_x.py tests/test_y.py`,
 `cd frontend && npx vitest run src/x.test.ts src/y.test.ts`); falhou → repita só o que falhou.
-Pedido o completo: `npm run check` na raiz, `vitest` e `pytest` inteiros. **Push exige `scripts/verificar-local`
-no commit**: ele roda, numa árvore fixa da máquina e em fila única, o que o CI rodaria para o que
-o commit muda, no Linux e no Windows da VM (`git config hangar.verificarWindows <host>`), e grava
-o resultado pela árvore; sem ele a trava `pre-push` recusa. Emergência explícita:
-`HANGAR_SEM_VERIFICACAO=1 git push`. O que ela cobre e o que só o CI cobre:
+Pedido o completo: `npm run check` na raiz, `vitest` e `pytest` inteiros. **`scripts/verificar-local` é exigido ao
+abrir PR e ao subir para a `main` ou para branch com PR aberto**: ele roda, numa árvore fixa da
+máquina e em fila única, o que o CI rodaria para o que o commit muda, no Linux e no Windows da VM
+(`git config hangar.verificarWindows <host>`), e grava o resultado pela árvore. O hook do
+`gh pr create` (`.claude/settings.json`) confere o PR inteiro desde a base; a trava `pre-push`, cada
+push. Branch sem PR sobe livre. Emergência explícita: `HANGAR_SEM_VERIFICACAO=1` no comando. O que ela cobre e o que só o CI cobre:
 [instalacao.md](docs/decisoes/instalacao.md#verificação-local-antes-do-push-06102026). `npm run build` só para servir o `dist` local. Ao reportar, diga o que foi conferido no uso real e que os testes automatizados não rodaram.
 
 Claude sessions with a terminal must run as `claude --session-id <uuid>` **inside tmux** —

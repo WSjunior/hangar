@@ -5,7 +5,7 @@
 #
 # Uso:  scripts/verificar-local                 HEAD, Linux e (se couber) Windows
 #       scripts/verificar-local --commit <ref>  outro commit
-#       scripts/verificar-local --base <ref>    compara com <ref> em vez do que já está publicado
+#       scripts/verificar-local --base <ref>    o que mudou desde que saiu de <ref> (ex.: o PR inteiro)
 #       scripts/verificar-local --tudo          todos os passos, mude o que mudar
 #       scripts/verificar-local --so linux|windows
 #       scripts/verificar-local --de-novo       roda mesmo se esta árvore já passou
@@ -75,7 +75,7 @@ classificar() {
         esac
         case "$f" in
             scripts/shell/*|scripts/test-wrappers.sh|scripts/hangar-engine|scripts/install-claude-wrapper.sh|\
-            scripts/verificar-local|scripts/test-verificar-local.sh|scripts/hooks/*) wrap=1 ;;
+            scripts/verificar-local|scripts/test-verificar-local.sh|scripts/hook-pr-verificado.mjs|scripts/hooks/*) wrap=1 ;;
         esac
         case "$f" in
             scripts/*statusline*) status=1 ;;
@@ -380,7 +380,12 @@ sha="$(git rev-parse --verify -q "$commit^{commit}")" || erro "commit inválido:
 ORIGEM="$(cd "$(git rev-parse --git-common-dir)" && pwd)"
 # rc 1 do git config é "não configurado"; acima disso, erro de leitura, que não pode virar "sem VM".
 VM="$(git config hangar.verificarWindows)"; (( $? > 1 )) && erro "não consegui ler hangar.verificarWindows"
-[[ -z "$base" ]] && base="$(base_padrao "$sha")"
+if [[ -n "$base" ]]; then
+    # Desde onde o commit saiu de <ref>: o que a base andou depois não é mudança deste commit.
+    base="$(git merge-base "$base" "$sha")" || erro "sem ancestral comum entre $base e ${sha:0:10}"
+else
+    base="$(base_padrao "$sha")"
+fi
 
 if (( tudo )); then
     plano_lin="$TODOS_LINUX"; plano_win="$TODOS_WINDOWS"

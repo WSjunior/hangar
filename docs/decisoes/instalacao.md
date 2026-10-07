@@ -64,11 +64,15 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `systemctl --user restart`.
 - **Criar sessão embrulha o tmux em escopo transiente do systemd, sob sonda** — um gerenciador que
   recusa escopo transiente derrubava toda criação de sessão.
-- **Push exige `scripts/verificar-local` na árvore do commit.** Ele roda o que o CI rodaria para o
+- **`scripts/verificar-local` é exigido ao abrir PR e ao subir para a `main` ou para branch com PR
+  aberto; branch sem PR sobe livre.** O hook PreToolUse do `gh pr create` (`.claude/settings.json`)
+  confere o PR inteiro, desde o ponto em que a ponta saiu da base; a trava `pre-push` confere cada
+  push, e consulta o PR com prazo de 10 s: sem `gh` ou sem resposta, segue com aviso. PR aberto pelo
+  site fica com o CI. Ele roda o que o CI rodaria para o
   que o commit muda, num clone fixo por máquina (`~/.cache/hangar-verificacao/arvore`), em fila
   única (`flock`) e prioridade baixa, com HOME vazio e o `omp` fixo do CI; Windows por SSH na VM
   de `git config hangar.verificarWindows`, com mutex. O registro é pelo tree sha; a trava só o lê.
-  Escape: `HANGAR_SEM_VERIFICACAO=1`. Na VM roda só o que o CI roda no Windows (Rust e os 6
+  Escape nos dois: `HANGAR_SEM_VERIFICACAO=1`. Na VM roda só o que o CI roda no Windows (Rust e os 6
   `test_runtime_*`), nunca o pytest inteiro. Evidência em
   [Verificação local antes do push](#verificação-local-antes-do-push-06102026).
 - **O bloco do MCP `hangar` no `config.toml` do Codex é reconhecido pela TABELA, não só pelos
@@ -505,6 +509,9 @@ os passos do que mudou, e árvore que já passou não roda nada.
   contra Server 2022, e o cache frio de cada rodada do CI.
 - **O que só o CI faz**: build release com LTO fat (`zigbuild` com glibc 2.28 no Linux), macOS, a
   publicação dos binários e do `dist-latest`, e o `passos` (o pre-commit faz o mesmo por commit).
+- **Exigido só onde vira PR ou main (decisão do dono, 07/10).** Exigir em todo push travava quem só
+  quer guardar trabalho numa branch. O que importa é o que vai ser revisto e juntado: o PR nasce
+  verificado inteiro, e cada push seguinte nele ou na `main` também.
 - **`release.yml` saiu.** Empacotava o shell Electron em tag `v*` (última em 25/08); nada no
   instalador, no Atualizar, no app nativo nem no site lê essas releases.
 

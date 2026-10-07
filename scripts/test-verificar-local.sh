@@ -37,5 +37,23 @@ caso "docs/decisoes/instalacao.md" "backend" ""
 "$V" --plano --base ref-que-nao-existe >/dev/null 2>&1 && { echo "FALHOU --plano com base inválida saiu 0"; falhou=1; }
 "$V" --exigir 0000000000000000000000000000000000000000 >/dev/null 2>&1 && { echo "FALHOU --exigir com commit inválido saiu 0"; falhou=1; }
 
+# Hook do `gh pr create` (.claude/settings.json): só age no comando dele, aceita o escape e recusa
+# com frase quando não consegue resolver a base.
+hook() {   # $1 = comando, $2 = código esperado
+    local rc
+    printf '{"cwd":"%s","tool_input":{"command":"%s"}}' "$PWD" "$1" | node "$(dirname "$0")/hook-pr-verificado.mjs" 2>/dev/null
+    rc=$?
+    (( rc == $2 )) || { echo "FALHOU hook \"$1\": saiu $rc (esperado $2)"; falhou=1; }
+}
+hook "git status" 0
+hook "git commit -m 'o hook do gh pr create --base now'" 0
+hook "printf '%s' 'x && gh pr create --base nao-existe'" 0
+hook "HANGAR_SEM_VERIFICACAO=1 gh pr create --base main" 0
+if [[ "$(uname -s)" == Linux ]]; then
+    hook "gh pr create --base base-que-nao-existe" 2
+    hook "true && gh pr create --base base-que-nao-existe" 2
+    hook "(cd . && FOO=1 gh pr create --base base-que-nao-existe)" 2
+fi
+
 (( falhou )) && exit 1
 echo "ok: classificação do verificar-local"
