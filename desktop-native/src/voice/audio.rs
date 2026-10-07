@@ -49,13 +49,20 @@ impl Resampler {
     }
 }
 
-fn bounded_extend(queue: &mut VecDeque<f32>, samples: impl IntoIterator<Item = f32>) {
+fn bounded_extend(queue: &mut VecDeque<f32>, samples: impl IntoIterator<Item = f32>, cap: usize) {
     queue.extend(samples);
-    let excess = queue.len().saturating_sub(MAX_QUEUE);
+    let excess = queue.len().saturating_sub(cap);
     queue.drain(..excess);
 }
 
+/// Só aparelho que sumiu ou fluxo invalidado derruba a chamada; estouro de buffer e troca de aparelho o fluxo supera.
+fn is_fatal(error: &cpal::Error) -> bool {
+    matches!(error.kind(), cpal::ErrorKind::DeviceNotAvailable | cpal::ErrorKind::StreamInvalidated)
+}
+
 struct Shared {
+    // Microfone parado não pode virar áudio velho depois: 200 ms na taxa do aparelho.
+    capture_cap: usize,
     capture: Mutex<VecDeque<f32>>,
     render: Mutex<VecDeque<f32>>,
     playback: Mutex<VecDeque<f32>>,
@@ -96,6 +103,7 @@ impl Audio {
         let (in_rate, in_channels) = (in_config.sample_rate(), in_config.channels().max(1) as usize);
         let (out_rate, out_channels) = (out_config.sample_rate(), out_config.channels().max(1) as usize);
         let shared = Arc::new(Shared {
+            capture_cap: in_rate as usize / 5,
             capture: Default::default(), render: Default::default(), playback: Default::default(),
             input_level: AtomicU32::new(0), output_level: AtomicU32::new(0), failed: AtomicU8::new(0),
         });
@@ -139,13 +147,15 @@ impl Audio {
             }
             let _ = self.apm.set_stream_delay_ms(STREAM_DELAY_MS);
             let mut clean = vec![0f32; RATE as usize / 100];
-            if self.apm.process_capture_f32_with_config(&[&capture], &self.capture_config, &self.out_config, &mut [&mut clean]).is_ok() {
-                self.pending.extend_from_slice(&clean);
+            match self.apm.process_capture_f32_with_config(&[&capture], &self.capture_config, &self.out_config, &mut [&mut clean]) {
+                Ok(()) => self.pending.extend_from_slice(&clean),
+                // Sem isto a chamada ficaria muda sem ninguém saber por quê.
+                Err(_) => self.shared.failed.store(1, Ordering::Relaxed),
             }
         }
     }
 
-    pub fn play(&self, samples: &[f32]) { bounded_extend(&mut self.shared.playback.lock().unwrap(), samples.iter().copied()); }
+    pub fn play(&self, samples: &[f32]) { bounded_extend(&mut self.shared.playback.lock().unwrap(), samples.iter().copied(), MAX_QUEUE); }
 
     pub fn reset(&mut self) {
         self.shared.capture.lock().unwrap().clear();
@@ -165,7 +175,7 @@ impl Audio {
 
 fn on_input<T: cpal::SizedSample>(data: &[T], channels: usize, shared: &Shared) where f32: cpal::FromSample<T> {
     let floats: Vec<f32> = data.iter().map(|v| f32::from_sample(*v)).collect();
-    bounded_extend(&mut shared.capture.lock().unwrap(), downmix(&floats, channels));
+    bounded_extend(&mut shared.capture.lock().unwrap(), downmix(&floats, channels), shared.capture_cap);
 }
 
 fn on_output<T: cpal::SizedSample + cpal::FromSample<f32>>(data: &mut [T], channels: usize, shared: &Shared,
@@ -187,7 +197,7 @@ fn on_output<T: cpal::SizedSample + cpal::FromSample<f32>>(data: &mut [T], chann
     for (frame, sample) in data.chunks_mut(channels).zip(&mono) {
         for slot in frame { *slot = T::from_sample(*sample); }
     }
-    bounded_extend(&mut shared.render.lock().unwrap(), mono);
+    bounded_extend(&mut shared.render.lock().unwrap(), mono, MAX_QUEUE);
 }
 
 fn build_input(device: &cpal::Device, config: &cpal::SupportedStreamConfig, channels: usize, shared: Arc<Shared>) -> Option<cpal::Stream> {
@@ -195,7 +205,7 @@ fn build_input(device: &cpal::Device, config: &cpal::SupportedStreamConfig, chan
         ($t:ty) => {{
             let (data, error) = (shared.clone(), shared.clone());
             device.build_input_stream::<$t, _, _>(config.config(), move |samples: &[$t], _| on_input(samples, channels, &data),
-                move |_| error.failed.store(1, Ordering::Relaxed), None).ok()
+                move |e| if is_fatal(&e) { error.failed.store(1, Ordering::Relaxed) }, None).ok()
         }};
     }
     match config.sample_format() {
@@ -212,7 +222,7 @@ fn build_output(device: &cpal::Device, config: &cpal::SupportedStreamConfig, rat
             let (mut resampler, mut carry) = (Resampler::new(RATE, rate), VecDeque::new());
             device.build_output_stream::<$t, _, _>(config.config(),
                 move |samples: &mut [$t], _| on_output(samples, channels, &data, &mut resampler, &mut carry),
-                move |_| error.failed.store(2, Ordering::Relaxed), None).ok()
+                move |e| if is_fatal(&e) { error.failed.store(2, Ordering::Relaxed) }, None).ok()
         }};
     }
     match config.sample_format() {
