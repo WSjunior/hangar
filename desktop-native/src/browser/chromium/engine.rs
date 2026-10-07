@@ -102,6 +102,8 @@ pub struct Engine {
     dead: Rc<Cell<bool>>,
     /// Página da conversa: screencast em PNG.
     png: bool,
+    /// Desenhada no dobro da tela (página e site da conversa).
+    double: bool,
     /// Contexto próprio da página da conversa, fechado junto com ela.
     context: Option<String>,
 }
@@ -146,9 +148,19 @@ impl Starter {
         let dead = Rc::new(Cell::new(false));
         let publish = listen(&session, &target, &state, &events, &self.executor, &dead, false);
         Ok(Engine {
-            session, publish, target, window, decoration, executor: self.executor, surface, dead, png: false, context: None,
+            session, publish, target, window, decoration, executor: self.executor, surface, dead, png: false, double: false, context: None,
             placed: Cell::new(None), visible: Cell::new(false), pressed: Cell::new(false),
         })
+    }
+
+    /// Site de verdade na conversa: o mesmo perfil do painel (cookies e login), navegação livre dentro do site e popup
+    /// no próprio alvo, como o painel. Quadros em JPEG como o painel: o site tem fundo próprio, sem alfa a preservar, e
+    /// rola e anima mais que a página do agente.
+    pub fn start_url(self, url: &str, events: async_channel::Sender<Event>) -> Result<Engine, String> {
+        let mut engine = self.start(events)?;
+        engine.double = true;
+        engine.load(url);
+        Ok(engine)
     }
 
     /// Página da conversa: alvo num contexto próprio (sem os cookies do painel), documento posto direto e quadros
@@ -203,7 +215,7 @@ impl Starter {
             if params["name"] == "hangarHost" { let _ = host.try_send(Event::Host(params["payload"].as_str().unwrap_or("").to_owned())); }
         });
         Ok(Engine {
-            session, publish, target, window, decoration, executor: self.executor, surface, dead, png: true, context: Some(context.to_owned()),
+            session, publish, target, window, decoration, executor: self.executor, surface, dead, png: true, double: true, context: Some(context.to_owned()),
             placed: Cell::new(None), visible: Cell::new(false), pressed: Cell::new(false),
         })
     }
@@ -381,13 +393,13 @@ impl Engine {
         let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
         // A página da conversa é desenhada no dobro da tela e reduzida pela GPU: em 1x o Chromium sem janela só suaviza o
         // texto em cinza (o fundo é transparente) e ela sai com cara de vídeo em baixa resolução ao lado do texto do app.
-        let frame_scale = if self.png { (scale * 2.).ceil() } else { scale };
+        let frame_scale = if self.double { (scale * 2.).ceil() } else { scale };
         let resized = self.placed.get() != Some((bounds.size, scale));
         if resized {
             self.placed.set(Some((bounds.size, scale)));
             let size = json!({"width": w.round() as i64, "height": (h + self.decoration).round() as i64});
             drop(self.session.browser().call(None, "Browser.setWindowBounds", json!({"windowId": self.window, "bounds": size})));
-            if self.png {
+            if self.double {
                 self.send("Emulation.setDeviceMetricsOverride", json!({
                     "width": w.round() as i64, "height": h.round() as i64, "deviceScaleFactor": frame_scale, "mobile": false,
                 }));

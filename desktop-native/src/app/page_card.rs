@@ -14,6 +14,8 @@ pub const LIVE_MAX: usize = 4;
 const MIN: u32 = 80;
 const MAX: u32 = 2000;
 const FALLBACK: f32 = 240.;
+/// Moldura do site (modo URL) sem altura pedida; o servidor já manda esta, o app repete para resultado antigo.
+const SITE_HEIGHT: u32 = 640;
 /// Clique ou tecla na página que ainda vale como gesto para ela abrir um link.
 const GESTURE: Duration = Duration::from_secs(2);
 /// Espera do último quadro da página que sai do orçamento.
@@ -25,6 +27,8 @@ pub struct PageRef {
     pub id: String, pub title: String, #[serde(default)] pub height: Option<u32>, #[serde(default)] pub heights: BTreeMap<u32, u32>,
     // A página leva as próprias cores: o app não lhe passa o tema.
     #[serde(default)] pub own_theme: bool,
+    // Site de verdade (modo URL): o cartão abre o endereço em vez de um documento.
+    #[serde(default)] pub url: Option<String>,
 }
 
 /// O resultado de MCP chega como texto, como lista de blocos `{type: "text", text}` ou, no Codex, como o
@@ -46,7 +50,9 @@ pub fn page_from_result(tool_name: &str, result: &str) -> Option<PageRef> {
         }
         other => other,
     };
-    serde_json::from_value::<Out>(value).ok().map(|o| o.hangar_page)
+    let mut page = serde_json::from_value::<Out>(value).ok()?.hangar_page;
+    page.url = page.url.filter(|u| u.starts_with("http://") || u.starts_with("https://"));
+    Some(page)
 }
 
 fn natural(page: &PageRef, width: f32, reported: Option<f32>) -> f32 {
@@ -57,6 +63,7 @@ fn natural(page: &PageRef, width: f32, reported: Option<f32>) -> f32 {
 }
 
 pub fn frame_height(page: &PageRef, width: f32, reported: Option<f32>) -> f32 {
+    if page.url.is_some() { return page.height.unwrap_or(SITE_HEIGHT).clamp(MIN, MAX) as f32; }
     let natural = natural(page, width, reported);
     let capped = page.height.map_or(natural, |h| natural.min(h as f32));
     capped.clamp(MIN as f32, MAX as f32)
@@ -132,7 +139,7 @@ enum ViewState { Loading, Ready, Error, Expired }
 
 /// Motor vivo da página e o laço que lê os eventos dele; caem juntos.
 #[cfg(target_os = "linux")]
-struct Running { engine: Rc<Engine>, _drain: Task<()>, framed: bool, theme_sent: String }
+struct Running { engine: Rc<Engine>, _drain: Task<()>, framed: bool, theme_sent: String, at: Option<String> }
 
 struct PageView {
     page: PageRef,
@@ -266,7 +273,7 @@ impl Hangar {
         if view.busy || matches!(view.state, ViewState::Error | ViewState::Expired) { return; }
         #[cfg(target_os = "linux")]
         if view.live {
-            if view.html.is_none() {
+            if view.html.is_none() && view.page.url.is_none() {
                 view.busy = true;
                 let (page_id, name) = (id.to_owned(), key.name.clone());
                 let task = self.runtime.spawn(async move { api.page(&name, &page_id, &[], &[("raw", "1")]).await });
@@ -290,6 +297,8 @@ impl Hangar {
             }
             return;
         }
+        // Site sem página viva: o cartão só abre o endereço, nada a buscar.
+        if view.page.url.is_some() { view.state = ViewState::Ready; return; }
         let dark = theme::is_dark();
         let bucket = shot_width(width);
         if view.no_image || view.shot.as_ref().is_some_and(|(d, w, _)| *d == dark && *w == bucket) { return; }
@@ -324,7 +333,8 @@ impl Hangar {
     fn start_page_engine(&mut self, id: &str, cx: &mut Context<Self>) {
         let (handle, width) = (self.pages.window, self.pages.width.get());
         let Some(view) = self.pages.views.get_mut(id) else { return };
-        let Some(html) = view.html.clone() else { return };
+        let (url, html) = (view.page.url.clone(), view.html.clone());
+        if url.is_none() && html.is_none() { return; }
         // Tema próprio nasce no branco do navegador, como a página foi desenhada; ela pinta por cima.
         let background = view.page.own_theme.then_some((255, 255, 255));
         view.busy = true;
@@ -333,7 +343,10 @@ impl Hangar {
             // Sem limite: o motor manda com `try_send` e quadro perdido não volta.
             let (events, received) = async_channel::unbounded();
             let engine = handle.update(cx, |_, window, cx| Engine::prepare(window, cx)).map_err(|e| e.to_string()).and_then(|r| r)
-                .and_then(|starter| starter.start_page(&html, width, background, events)).map(Rc::new);
+                .and_then(|starter| match &url {
+                    Some(url) => starter.start_url(url, events),
+                    None => starter.start_page(html.as_deref().unwrap_or_default(), width, background, events),
+                }).map(Rc::new);
             let _ = this.update(cx, |this, cx| this.page_engine_ready(id, engine, received, cx));
         }).detach();
     }
@@ -357,7 +370,7 @@ impl Hangar {
                 if this.update(cx, |this, cx| this.page_event(&owner, event, cx)).is_err() { break; }
             }
         });
-        view.running = Some(Running { engine, _drain: drain, framed: false, theme_sent: String::new() });
+        view.running = Some(Running { engine, _drain: drain, framed: false, theme_sent: String::new(), at: None });
         view.state = ViewState::Ready;
         if let Some(old) = self.pages.budget.touch(&id) { self.park_page(&old, cx); }
         cx.notify();
@@ -407,7 +420,11 @@ impl Hangar {
                 Some(HostMsg::Link(url)) if view.gesture.take().is_some_and(|at| at.elapsed() < GESTURE) => cx.open_url(&url),
                 _ => {}
             },
-            crate::browser::Event::State(_) => {}
+            // Endereço atual do site, para a faixa do cartão.
+            crate::browser::Event::State(state) => if let Some(running) = &mut view.running && running.at != state.url {
+                running.at = state.url;
+                cx.notify();
+            },
         }
     }
 
@@ -496,6 +513,16 @@ impl Hangar {
             _ => {}
         }
         let loading = || div().id(SharedString::from(format!("page-loading-{id}"))).size_full().flex().items_center().role(Role::Status).child(note(tr_shared("page_loading", &[("title", &title)])));
+        if !view.live && let Some(url) = view.page.url.clone() {
+            return v_flex().w_full().gap_1()
+                .child(div().truncate().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(title))
+                .child(h_flex().gap_2()
+                    .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).text_color(theme::muted()).child(url.clone()))
+                    .child(Button::new(SharedString::from(format!("page-open-{id}"))).ghost().xsmall().icon(IconName::ExternalLink)
+                        .label(tr_shared("page_open_browser", &[]))
+                        .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url)))))
+                .into_any_element();
+        }
         if !view.live {
             let open = id.clone();
             let image = view.shot.as_ref().map(|(_, _, image)| image.clone());
@@ -517,7 +544,7 @@ impl Hangar {
         #[cfg(target_os = "linux")]
         {
             let script = theme_script();
-            let follows = !view.page.own_theme;
+            let follows = !view.page.own_theme && view.page.url.is_none();
             if let Some(running) = view.running.as_mut().filter(|r| follows && r.framed && r.theme_sent != script) {
                 if running.theme_sent.is_empty() { running.engine.evaluate(&APP_FONTS); }
                 running.engine.evaluate(&script);
@@ -525,7 +552,9 @@ impl Hangar {
             }
             let engine = view.running.as_ref().map(|r| r.engine.clone());
             let framed = view.running.as_ref().is_some_and(|r| r.framed);
-            let inside = scrolls_inside(&view.page, width, view.reported);
+            // O site tem altura fixa e rola por dentro: a roda é sempre dele.
+            let inside = view.page.url.is_some() || scrolls_inside(&view.page, width, view.reported);
+            let site = view.page.url.clone().map(|start| view.running.as_ref().and_then(|r| r.at.clone()).unwrap_or(start));
             let (paint, origin, width_cell, mark) = (self.pages.paint.clone(), view.origin.clone(), self.pages.width.clone(), id.clone());
             let shown = engine.clone();
             let surface = canvas(|bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal), move |bounds, hitbox, window, _| {
@@ -550,7 +579,7 @@ impl Hangar {
             });
             let focused = view.focus.clone();
             let (down, up, up_out, moved, key_down, key_up) = (id.clone(), id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
-            return div().id(SharedString::from(format!("page-{id}"))).relative().w_full().h(height).overflow_hidden()
+            let card = div().id(SharedString::from(format!("page-{id}"))).relative().w_full().h(height).overflow_hidden()
                 .rounded(px(8.)).border_1().border_color(transparent_black())
                 .track_focus(&view.focus).key_context("BrowserPage").aria_label(title.clone())
                 .focus(|el| el.border_color(theme::accent_focus()))
@@ -583,8 +612,15 @@ impl Hangar {
                 .on_key_up(cx.listener(move |this, event: &KeyUpEvent, _, cx| {
                     cx.stop_propagation();
                     if let Some(engine) = this.page_engine(&key_up) { engine.key(false, &event.keystroke); }
-                }))
-                .into_any_element();
+                }));
+            let Some(at) = site else { return card.into_any_element() };
+            let panel = at.clone();
+            let strip = h_flex().gap_2()
+                .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).text_color(theme::muted()).child(at))
+                .child(Button::new(SharedString::from(format!("page-panel-{id}"))).ghost().xsmall().icon(IconName::PanelRight)
+                    .label(tr("page_open_panel"))
+                    .on_click(cx.listener(move |this, _, window, cx| this.open_in_browser_panel(panel.clone(), window, cx))));
+            return v_flex().w_full().gap_1().child(strip).child(card).into_any_element();
         }
         #[cfg(not(target_os = "linux"))]
         div().w_full().h(height).child(loading()).into_any_element()
@@ -634,13 +670,24 @@ mod tests {
 
     #[test]
     fn height_rules() {
-        let p = PageRef { id: "a".into(), title: "T".into(), height: Some(300), heights: [(728, 380)].into(), own_theme: false };
+        let p = PageRef { id: "a".into(), title: "T".into(), height: Some(300), heights: [(728, 380)].into(), own_theme: false, url: None };
         assert_eq!(frame_height(&p, 700., None), 300.);
         assert!(scrolls_inside(&p, 700., None));
         let free = PageRef { height: None, ..p.clone() };
         assert_eq!(frame_height(&free, 700., Some(5000.)), 2000.);
         assert!(scrolls_inside(&free, 700., Some(5000.)));
         assert!(!scrolls_inside(&free, 700., None));
+        let site = PageRef { url: Some("http://localhost:3000/cidades".into()), height: None, ..p.clone() };
+        assert_eq!(frame_height(&site, 700., Some(100.)), 640., "site tem moldura fixa");
+        assert_eq!(frame_height(&PageRef { height: Some(900), ..site }, 700., None), 900.);
+    }
+
+    #[test]
+    fn site_page_keeps_only_web_url() {
+        let read = |url: &str| page_from_result("mcp__hangar__html_render",
+            &serde_json::json!({"hangar_page": {"id": "a", "title": "T", "height": 640, "url": url}}).to_string()).unwrap().url;
+        assert_eq!(read("http://localhost:3000/cidades").as_deref(), Some("http://localhost:3000/cidades"));
+        assert_eq!(read("javascript:alert(1)"), None);
     }
 
     #[test]
