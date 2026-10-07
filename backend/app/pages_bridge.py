@@ -5,7 +5,7 @@ import urllib.error
 import urllib.request
 
 _config: tuple[str, str] | None = None
-_TIMEOUT = 15.0  # o Rust tem 8 s de Chromium; folga para gravar e responder
+_TIMEOUT = 30.0  # o Rust espera vaga no Chromium (fora do prazo) e mais 8 s de render
 _MAX_RESPONSE = 256 * 1024
 _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -41,4 +41,7 @@ def publish(payload: dict) -> dict:
     if not isinstance(value, dict) or value.get("ok") is not True:
         error = value.get("error") if isinstance(value, dict) and isinstance(value.get("error"), dict) else {}
         raise PagesBridgeError(str(error.get("code") or "erro_paginas_indisponivel"), str(error.get("detail") or ""))
-    return value["result"]
+    result = value.get("result")
+    if not isinstance(result, dict):
+        raise PagesBridgeError("erro_paginas_indisponivel", "resposta sem resultado")
+    return result

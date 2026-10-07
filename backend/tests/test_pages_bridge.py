@@ -48,3 +48,14 @@ def test_without_rust_server_is_clear_error():
     with pytest.raises(pages_bridge.PagesBridgeError) as e:
         pages_bridge.publish({"session": "x", "html": "<p></p>", "title": "t"})
     assert e.value.code == "erro_paginas_sem_servidor_rust"
+
+
+def test_ok_without_result_is_unavailable():
+    srv = _server({"ok": True}, [])
+    pages_bridge.configure(f"127.0.0.1:{srv.server_port}", "s")
+    try:
+        with pytest.raises(pages_bridge.PagesBridgeError) as e:
+            pages_bridge.publish({"session": "x", "html": "<p></p>", "title": "t"})
+    finally:
+        srv.shutdown(); pages_bridge.configure(None, None)
+    assert e.value.code == "erro_paginas_indisponivel"
