@@ -379,14 +379,22 @@ impl Engine {
     pub fn place(&self, bounds: Bounds<Pixels>, window: &mut Window) {
         let scale = window.scale_factor();
         let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+        // A página da conversa é desenhada no dobro da tela e reduzida pela GPU: em 1x o Chromium sem janela só suaviza o
+        // texto em cinza (o fundo é transparente) e ela sai com cara de vídeo em baixa resolução ao lado do texto do app.
+        let frame_scale = if self.png { (scale * 2.).ceil() } else { scale };
         let resized = self.placed.get() != Some((bounds.size, scale));
         if resized {
             self.placed.set(Some((bounds.size, scale)));
             let size = json!({"width": w.round() as i64, "height": (h + self.decoration).round() as i64});
             drop(self.session.browser().call(None, "Browser.setWindowBounds", json!({"windowId": self.window, "bounds": size})));
+            if self.png {
+                self.send("Emulation.setDeviceMetricsOverride", json!({
+                    "width": w.round() as i64, "height": h.round() as i64, "deviceScaleFactor": frame_scale, "mobile": false,
+                }));
+            }
         }
         if !self.visible.replace(true) || resized {
-            let (pw, ph) = ((w * scale).round() as i64, (h * scale).round() as i64);
+            let (pw, ph) = ((w * frame_scale).round() as i64, (h * frame_scale).round() as i64);
             // JPEG alto em vez de PNG: o PNG pesa na decodificação e no pipe em página animada; o q92 deixa o texto
             // legível (o q85 borrava). O `shot` continua em PNG.
             let mut params = json!({"format": "jpeg", "quality": 92, "maxWidth": pw.max(1), "maxHeight": ph.max(1), "everyNthFrame": 1});
@@ -402,7 +410,7 @@ impl Engine {
             latest.as_ref().map(|s| s.texture.clone())
         };
         // Esticado até o painel: durante um resize o quadro do tamanho antigo cobre tudo até chegar o do novo.
-        if let Some(texture) = shown { window.paint_surface(pixel_aligned(bounds, &texture, scale), Arc::new(texture)); }
+        if let Some(texture) = shown { window.paint_surface(pixel_aligned(bounds, &texture, scale, frame_scale), Arc::new(texture)); }
     }
 
     /// Página fora da tela: sem screencast. O controlador cuida do tamanho dela para o `shot`.
@@ -443,13 +451,13 @@ impl Engine {
 
 /// Retângulo em pixels inteiros da tela, do tamanho do quadro: posição ou largura fracionada faz a GPU reamostrar a
 /// textura inteira e o texto da página perde a nitidez.
-fn pixel_aligned(bounds: Bounds<Pixels>, texture: &wgpu::Texture, scale: f32) -> Bounds<Pixels> {
+fn pixel_aligned(bounds: Bounds<Pixels>, texture: &wgpu::Texture, scale: f32, frame_scale: f32) -> Bounds<Pixels> {
     let snap = |v: Pixels| px((f32::from(v) * scale).round() / scale);
     let origin = point(snap(bounds.origin.x), snap(bounds.origin.y));
-    let fits = (texture.width() as f32 - f32::from(bounds.size.width) * scale).abs() <= 2.
-        && (texture.height() as f32 - f32::from(bounds.size.height) * scale).abs() <= 2.;
+    let fits = (texture.width() as f32 - f32::from(bounds.size.width) * frame_scale).abs() <= 2. * frame_scale
+        && (texture.height() as f32 - f32::from(bounds.size.height) * frame_scale).abs() <= 2. * frame_scale;
     // Durante um resize o quadro antigo ainda tem outro tamanho: aí ele estica até o painel, como antes.
-    let size = if fits { size(px(texture.width() as f32 / scale), px(texture.height() as f32 / scale)) }
+    let size = if fits { size(snap(px(texture.width() as f32 / frame_scale)), snap(px(texture.height() as f32 / frame_scale))) }
         else { size(snap(bounds.size.width), snap(bounds.size.height)) };
     Bounds { origin, size }
 }
