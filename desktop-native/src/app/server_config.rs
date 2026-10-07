@@ -1301,8 +1301,9 @@ impl Hangar {
                 .map(|(value, label)| {
                     let id = id.clone();
                     let on = if value == "elevenlabs" { kind == "elevenlabs" } else { kind != "elevenlabs" };
+                    // Ghost: no outline o `selected` só ganha o fundo de "pressionado" e o escolhido não se distingue.
                     // `selected` só pinta; o leitor de tela sabe o tipo escolhido pelo estado de alternância.
-                    Button::new(SharedString::from(format!("provider-{id}-kind-{value}"))).outline().xsmall().label(tr(label)).selected(on).toggled(on)
+                    Button::new(SharedString::from(format!("provider-{id}-kind-{value}"))).ghost().xsmall().label(tr(label)).selected(on).toggled(on)
                         .on_click(cx.listener(move |this, _, window, cx| this.set_provider_kind(&id, value, window, cx)))
                 }));
             let (up, down, remove) = (id.clone(), id.clone(), id.clone());
