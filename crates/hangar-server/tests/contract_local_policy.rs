@@ -39,7 +39,8 @@ fn local_policies_match_the_python_golden() {
     let mut total = 0;
     for file in ["prepare_prompt.json", "format_status_claude.json", "format_status_codex.json", "skill_catalog.json"] {
         let document = golden(file);
-        // SAFETY: único teste deste binário; nenhuma outra thread lê o ambiente enquanto ele roda.
+        // SAFETY: o outro teste deste binário só chama tipos remotos, que devolvem `None` sem tocar no
+        // ambiente; só este teste lê ou escreve TZ, HOME e a variável de esforço.
         unsafe { std::env::set_var("TZ", document["tz"].as_str().unwrap()); }
         for case in document["cases"].as_array().unwrap() {
             total += 1;

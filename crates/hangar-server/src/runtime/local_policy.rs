@@ -32,7 +32,7 @@ pub fn run_at(kind: &str, payload: &Value, meta: &Value, quota: Option<&Value>, 
     Some(match kind {
         "prepare_prompt" => prepare_prompt(payload, provider),
         "format_status" => match provider {
-            "claude" => Ok(claude_status(payload, meta, quota, now)),
+            "claude" => claude_status(payload, meta, quota, now),
             "codex" => Ok(codex_status(payload, now)),
             _ => Err(error("policy_provider")),
         },
@@ -224,7 +224,10 @@ fn local_hhmm(secs: i64) -> Option<String> {
     }
 }
 
-fn claude_status(payload: &Value, meta: &Value, quota: Option<&Value>, now: f64) -> Value {
+fn claude_status(payload: &Value, meta: &Value, quota: Option<&Value>, now: f64) -> Result<Value, RuntimeError> {
+    // O Python chamava `.get` no que veio do cano e falhava se não fosse objeto.
+    let rate = &payload["rate_limit_info"];
+    if truthy(rate) && !rate.is_object() { return Err(error("policy_input")); }
     let mut parts: Vec<String> = Vec::new();
     if let Some(model) = text(&payload["model"]) {
         let model = if truthy(&meta["engine_account"]) { model.split_once('/').map_or(model, |(_, rest)| rest) } else { model };
@@ -247,9 +250,8 @@ fn claude_status(payload: &Value, meta: &Value, quota: Option<&Value>, now: f64)
         if let Some(reset) = window["reset_ts"].as_f64().filter(|reset| *reset != 0.0) { segment.push_str(&format!(" ↺{}", format_reset(reset, now))); }
         parts.push(segment);
     }
-    let rate = &payload["rate_limit_info"];
     let limit_reset = if rate["status"] == "rejected" { rate["resetsAt"].as_f64().and_then(|at| local_hhmm(at.floor() as i64)) } else { None };
-    json!({"status_line": if parts.is_empty() { Value::Null } else { json!(parts.join(" │ ")) }, "limit_reset": limit_reset})
+    Ok(json!({"status_line": if parts.is_empty() { Value::Null } else { json!(parts.join(" │ ")) }, "limit_reset": limit_reset}))
 }
 
 fn codex_window(window: &Value, now: f64) -> Option<String> {

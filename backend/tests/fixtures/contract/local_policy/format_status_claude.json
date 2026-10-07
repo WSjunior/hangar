@@ -1605,6 +1605,21 @@
    }
   },
   {
+   "name": "limit_info_not_an_object",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "rate_limit_info": "boom"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "error": true
+   }
+  },
+  {
    "name": "limit_rejected_negative_epoch",
    "kind": "format_status",
    "payload": {

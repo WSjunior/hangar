@@ -250,6 +250,7 @@ def status_cases():
     add("limit_rejected_without_reset", {"rate_limit_info": {"status": "rejected"}})
     add("limit_rejected_reset_text", {**rate("rejected", "amanhã")})
     add("limit_null_info", {"model": "claude-opus-5", "rate_limit_info": None})
+    add("limit_info_not_an_object", {"model": "claude-opus-5", "rate_limit_info": "boom"})
     add("limit_rejected_negative_epoch", {**rate("rejected", -3600)})
     return out
 

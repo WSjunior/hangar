@@ -36,12 +36,12 @@ async def execute(kind: str, payload: dict, metadata: dict) -> dict:
         return {"ok": False, "error_type": type(exc).__name__}
 
 
-def _quota(metadata):
+def _quota(metadata, fresh=False):
     from app import cotas
     root = Path(metadata.get("config_dir") or Path.home() / ".claude").resolve()
     with _quota_lock:
         cached = _quota_cache.get(root)
-        if cached is not None and time.monotonic() - cached[0] < 300:
+        if not fresh and cached is not None and time.monotonic() - cached[0] < 300:
             return cached[1]
         try:
             value = next((account.model_dump() for account in cotas.listar_cotas()
@@ -55,8 +55,9 @@ def _quota(metadata):
 
 
 def quota_windows(config_dir):
-    """Janelas da conta que o ator Rust põe na linha de status (as por modelo ficam fora)."""
-    quota = _quota({"config_dir": config_dir})
+    """Janelas da conta que o ator Rust põe na linha de status (as por modelo ficam fora).
+    Sem cache de 300 s aqui: o do ator Rust é o único."""
+    quota = _quota({"config_dir": config_dir}, fresh=True)
     return [window for window in (quota or {}).get("janelas", []) if not window.get("por_modelo")]
 
 

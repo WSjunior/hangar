@@ -319,7 +319,7 @@ async fn late_wire_reply_resolves_parent() {
 }
 
 /// Cano Claude falso que só conta o que chega ao fio; a política aponta para uma porta fechada.
-async fn setup_claude_unreachable_policy() -> (RuntimeHandle,tokio::task::JoinHandle<usize>,tempfile::TempDir) {
+async fn setup_claude_unreachable_policy(initialized:bool) -> (RuntimeHandle,tokio::task::JoinHandle<usize>,tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -336,11 +336,14 @@ async fn setup_claude_unreachable_policy() -> (RuntimeHandle,tokio::task::JoinHa
             let mut raw = String::new();
             if reader.read_line(&mut raw).await.unwrap() == 0 { break; }
             sent += 1;
+            let envelope:Value = serde_json::from_str(&raw).unwrap();
+            let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
+            reader.get_mut().write_all(format!("{ack}\n").as_bytes()).await.unwrap();
         }
         sent
     });
     let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
-        metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true}),
+        metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":initialized}),
         binding:CanoBinding { pid:42,escuta:format!("tcp:{address}"),token:"secret-test".into(),versao:2 },
         lease_path:dir.path().join("key.lock"),state_path:dir.path().join("key.queue-state.json"),projection_dir:dir.path().join("projection"),
         transcript:dir.path().join("chat.jsonl"),created:0.0 };
@@ -356,9 +359,9 @@ async fn setup_claude_unreachable_policy() -> (RuntimeHandle,tokio::task::JoinHa
 #[tokio::test]
 async fn input_is_prepared_in_rust_even_when_the_python_policy_is_unreachable() {
     // O preparo do prompt é local: o Python fora do ar não adia mais a entrada.
-    let (handle,server,dir) = setup_claude_unreachable_policy().await;
+    let (handle,server,dir) = setup_claude_unreachable_policy(true).await;
     let input = RuntimeCommand { operation_id:"msg".into(),kind:OperationKind::Input,payload:json!({"text":"Olá","entry_id":"msg"}) };
-    assert!(handle.command(input).await.unwrap().disposition != Disposition::Deferred);
+    assert!(handle.command(input).await.unwrap().disposition == Disposition::Accepted);
     let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
     assert!(!state.operations.keys().any(|id|id.contains("prepare_prompt")),"cálculo puro não entra no diário");
     handle.stop().await.unwrap();
@@ -444,10 +447,13 @@ async fn policy_server() -> (std::net::SocketAddr,std::sync::Arc<std::sync::atom
                         if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") { length = value.trim().parse().unwrap(); }
                     }
                     let mut body = vec![0;length]; reader.read_exact(&mut body).await.unwrap();
-                    counter.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
-                    let kind = serde_json::from_slice::<Value>(&body).unwrap()["kind"].clone();
-                    let data = if kind == "prepare_prompt" { json!({"content":"Olá","notices":[],"native_candidate":false}) } else { json!({}) };
-                    let reply = json!({"ok":true,"data":data}).to_string();
+                    // GET /internal/quota (sem corpo) não é uma política: responde sem contar.
+                    let reply = if body.is_empty() { json!({"windows":[]}).to_string() } else {
+                        counter.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+                        let kind = serde_json::from_slice::<Value>(&body).unwrap()["kind"].clone();
+                        let data = if kind == "prepare_prompt" { json!({"content":"Olá","notices":[],"native_candidate":false}) } else { json!({}) };
+                        json!({"ok":true,"data":data}).to_string()
+                    };
                     let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",reply.len());
                     reader.get_mut().write_all(response.as_bytes()).await.unwrap();
                 }
@@ -461,6 +467,20 @@ async fn policy_server() -> (std::net::SocketAddr,std::sync::Arc<std::sync::atom
 async fn status_formatting_and_state_changes_do_not_rewrite_the_journal() {
     // Uma mensagem custava ~60 regravações do estado: cada format_status passava pelo diário e
     // cada mudança de estado gravava a vista inteira, mesmo sem nada durável mudar.
+    status_turn(false).await;
+}
+
+#[tokio::test]
+async fn a_local_format_failure_is_cosmetic_and_leaves_the_session_alive() {
+    // `rate_limit_info` que não é objeto faz o formatador local falhar (o Python também falhava):
+    // a sessão só perde a linha de status e o turno termina.
+    let problems = status_turn(true).await;
+    assert!(problems.iter().any(|problem|problem["error_code"] == "policy_input"),"a falha precisa aparecer: {problems:?}");
+}
+
+/// Um turno completo com o cano falso; devolve os `problem` publicados. `bad_rate` manda um
+/// `rate_limit_event` com `rate_limit_info` inválido antes do resultado.
+async fn status_turn(bad_rate:bool) -> Vec<Value> {
     let dir = tempfile::tempdir().unwrap();
     let transcript = dir.path().join("chat.jsonl");
     std::fs::write(&transcript,"").unwrap();
@@ -479,12 +499,13 @@ async fn status_formatting_and_state_changes_do_not_rewrite_the_journal() {
             let envelope:Value = serde_json::from_str(&raw).unwrap();
             let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
             reader.get_mut().write_all(format!("{ack}\n").as_bytes()).await.unwrap();
-            let events = [json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"m1"}}}),
+            let mut events = vec![json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"m1"}}}),
                 json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}),
                 json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"oi"}}}),
                 json!({"type":"stream_event","event":{"type":"content_block_stop","index":0}}),
                 json!({"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"oi"}]}}),
                 json!({"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":1,"output_tokens":1}})];
+            if bad_rate { events.insert(1,json!({"type":"rate_limit_event","rate_limit_info":"boom"})); }
             for event in events {
                 let frame = json!({"type":"cano_output","frame":event.to_string()});
                 reader.get_mut().write_all(format!("{frame}\n").as_bytes()).await.unwrap();
@@ -507,10 +528,14 @@ async fn status_formatting_and_state_changes_do_not_rewrite_the_journal() {
     let mut events = handle.subscribe();
     let input = RuntimeCommand { operation_id:"msg".into(),kind:OperationKind::Input,payload:json!({"text":"Olá","entry_id":"msg"}) };
     assert!(handle.command(input).await.unwrap().disposition == Disposition::Accepted);
+    let mut problems = Vec::new();
     tokio::time::timeout(std::time::Duration::from_secs(5),async {
         loop {
             let event = events.recv().await.unwrap();
-            if event.channel == "state" && event.data["state"] == "idle" && calls.load(std::sync::atomic::Ordering::SeqCst) > 2 { break; }
+            if event.channel == "problem" { problems.push(event.data.clone()); }
+            // Os serviços do Python que sobraram (uso, carimbo, sidecar) já foram pedidos; o preparo e o status são locais.
+            if event.channel == "state" && event.data["state"] == "idle" && calls.load(std::sync::atomic::Ordering::SeqCst) > 0
+                && (!bad_rate || !problems.is_empty()) { break; }
         }
     }).await.expect("o turno precisa terminar");
     handle.stop().await.unwrap();
@@ -519,6 +544,7 @@ async fn status_formatting_and_state_changes_do_not_rewrite_the_journal() {
     assert!(!state.operations.keys().any(|id|id.starts_with("policy:")),"serviço sem efeito não entra no diário");
     let views = state.operations.values().filter(|op|op.payload["kind"] == "set_runtime_state").count();
     assert!(views <= 3,"vista gravada {views} vezes num turno sem mudança durável relevante");
+    problems
 }
 
 #[tokio::test]
@@ -536,20 +562,21 @@ async fn a_queue_refusal_carries_its_reason() {
 
 #[tokio::test]
 async fn steering_the_queue_without_a_turn_is_refused_and_keeps_the_entry() {
-    let (handle,server,dir) = setup_claude_unreachable_policy().await;
+    // Sessão ainda sem inicialização: o drain não entrega, e a entrada só pode mudar pela orientação.
+    let (handle,server,dir) = setup_claude_unreachable_policy(false).await;
     handle.queue("append".into(),Action::Append { text:"Depois".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("later".into()) }).await.unwrap();
     let steer = RuntimeCommand { operation_id:"steer-1".into(),kind:OperationKind::SteerQueue,payload:json!({"entry_id":"later"}) };
     let reply = handle.command(steer).await.unwrap();
     assert!(reply.disposition == Disposition::Rejected);
     assert_eq!(reply.payload["error"],"Não há turno em andamento para orientar");
-    // A entrada continua na fila (o drain comum pode entregá-la depois: o preparo do prompt é local).
+    // A entrada continua na fila e não ganha a marca de entregue: a orientação recusada não escreve nada.
     tokio::time::timeout(std::time::Duration::from_secs(5),async {
         loop {
             let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
-            if state.rows.iter().any(|row|row["id"] == "later") { break; }
+            if state.rows.iter().any(|row|row["id"] == "later" && row["delivered"] == false) { break; }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-    }).await.expect("a entrada precisa continuar na fila");
+    }).await.unwrap_or_else(|_|panic!("a entrada precisa continuar na fila: {}",std::fs::read_to_string(dir.path().join("key.queue-state.json")).unwrap()));
     handle.stop().await.unwrap();
     assert_eq!(server.await.unwrap(),0);
 }

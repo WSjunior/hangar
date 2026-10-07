@@ -1156,7 +1156,7 @@ async fn capture_cursor(target:&RuntimeTarget,view:&Value) -> Result<Value,Runti
         .await.map_err(|_|failure("cursor_job"))?.map_err(io_failure).and_then(|cursor|serde_json::to_value(cursor).map_err(|_|failure("cursor_json")))
 }
 
-const COSMETIC_POLICIES:[&str;3] = ["reload_stamp","last_usage","unknown_private"];
+const COSMETIC_POLICIES:[&str;4] = ["format_status","reload_stamp","last_usage","unknown_private"];
 
 /// Serviço puro do ator: roda fora do laço, já que `prepare_prompt` lê imagem e `format_status` lê o `settings.json`.
 async fn run_local(kind:String,payload:Value,target:&RuntimeTarget,quota:Option<Value>) -> Result<Value,RuntimeError> {
