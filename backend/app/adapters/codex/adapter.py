@@ -26,7 +26,7 @@ from app.adapters.codex import sem_terminal
 from app.adapters.codex import sessions as codex_sessions
 from app.adapters.codex.appserver import AppServerClient
 from app.adapters.codex.async_questions import AsyncQuestions
-from app.adapters.codex.lancador import (APPROVAL, CLIENT_INFO, SANDBOX,
+from app.adapters.codex.lancador import (APPROVAL, CLIENT_INFO, NO_UPDATE_CHECK, SANDBOX,
                                           comando_do_lancador, service_tier_override)
 from app.hook_state import hook_state
 from app.models import session_key
@@ -106,7 +106,7 @@ def ensure_tmux_tui(name: str, cwd: str, thread_id: str | None, endpoint: str,
             return
         tmux.kill_session(name)
     if thread_id:
-        argv = ["codex", "resume", "--remote", endpoint, "--no-alt-screen"]
+        argv = ["codex", "resume", "--remote", endpoint, "--no-alt-screen", *NO_UPDATE_CHECK]
         if model:
             argv += ["--model", model]
         if effort:
@@ -119,7 +119,7 @@ def ensure_tmux_tui(name: str, cwd: str, thread_id: str | None, endpoint: str,
         # o thread/started emitido por esta TUI e passa a controlar a mesma thread.
         argv = [
             "codex", "--remote", endpoint, "--no-alt-screen", "-C", cwd,
-            "--sandbox", SANDBOX, "--ask-for-approval", APPROVAL,
+            "--sandbox", SANDBOX, "--ask-for-approval", APPROVAL, *NO_UPDATE_CHECK,
         ]
         if initial_prompt:
             argv.append(initial_prompt)

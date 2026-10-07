@@ -25,6 +25,9 @@ CLIENT_INFO = {"name": "hangar", "title": None, "version": "0.1.0"}
 # `--dangerously-bypass-approvals-and-sandbox` so existe no CLI, e deixaria as duas divergentes).
 SANDBOX = "danger-full-access"
 APPROVAL = "never"
+# O aviso de atualização da TUI trava a abertura antes da thread e o app só mostra "subindo o
+# app-server"; atualizar o Codex fica fora da abertura da sessão.
+NO_UPDATE_CHECK = ("-c", "check_for_update_on_startup=false")
 PERMISSION_POLICIES = {
     "Ask for approval": ("on-request", "read-only"),
     "Approve for me": ("on-request", "workspace-write"),

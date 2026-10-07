@@ -181,6 +181,69 @@ def _codex() -> str:
     return caminho
 
 
+_CONSULTA_VERSAO_S = 3600
+
+
+def _versao(texto: str) -> tuple[int, ...] | None:
+    try:
+        return tuple(int(parte) for parte in texto.strip().split("-")[0].split("."))
+    except ValueError:
+        return None
+
+
+def _atualizar_codex() -> None:
+    """Atualiza o Codex instalado pelo npm antes de abrir a sessão, mostrando isso na tela.
+
+    A TUI sobe com a checagem dela desligada (o aviso travava a abertura); quem atualiza é o
+    lançador, aqui, e a tela de abertura do app mostra a espera. A versão publicada é consultada no
+    máximo uma vez por hora. Falha nunca impede a abertura: a sessão segue na versão instalada.
+    Instalação fora do npm (script, brew) não é atualizada: o Hangar não sabe o comando dela.
+    """
+    codex = shutil.which("codex")
+    npm = shutil.which("npm")
+    if not codex or not npm or "node_modules" not in os.path.realpath(codex).replace("\\", "/"):
+        return
+    estado = Path.home() / ".hangar" / "codex-atualizacao.json"
+    trava = None
+    try:
+        estado.parent.mkdir(parents=True, exist_ok=True)
+        trava = open(estado.with_suffix(".lock"), "w")
+        try:
+            import fcntl
+            fcntl.flock(trava, fcntl.LOCK_EX)
+        except ImportError:
+            pass   # ponytail: sem trava no Windows; dois npm juntos lá só falham e a sessão segue
+        try:
+            visto = json.loads(estado.read_text())
+        except (OSError, ValueError):
+            visto = {}
+        if time.time() - float(visto.get("consultado_em", 0)) < _CONSULTA_VERSAO_S:
+            return
+        saida = subprocess.run([codex, "--version"], capture_output=True, text=True, timeout=15)
+        atual = (saida.stdout.split() or [""])[-1]
+        consulta = subprocess.run([npm, "view", "@openai/codex", "version"],
+                                  capture_output=True, text=True, timeout=15)
+        publicada = consulta.stdout.strip()
+        estado.write_text(json.dumps({"consultado_em": time.time()}))
+        if consulta.returncode != 0 or not (_versao(publicada) and _versao(atual)) \
+                or _versao(publicada) <= _versao(atual):
+            return
+        print(f"hangar-codex-tui: atualizando o Codex {atual} → {publicada}…", file=sys.stderr)
+        feito = subprocess.run([npm, "install", "-g", f"@openai/codex@{publicada}"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600)
+        if feito.returncode == 0:
+            print(f"hangar-codex-tui: Codex atualizado para {publicada}", file=sys.stderr)
+        else:
+            print(f"hangar-codex-tui: não deu para atualizar o Codex (npm saiu com {feito.returncode}); "
+                  f"a sessão abre na {atual}", file=sys.stderr)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"hangar-codex-tui: não deu para conferir a versão do Codex ({type(exc).__name__}); "
+              "a sessão abre na versão instalada", file=sys.stderr)
+    finally:
+        if trava is not None:
+            trava.close()
+
+
 def _porta_livre() -> str:
     # Reserva e solta uma porta loopback. Ha uma janela minima ate o app-server dar bind; quem
     # perde a corrida ve o servidor sair, e a espera abaixo falha em vez de deixar uma TUI apontando
@@ -257,6 +320,47 @@ def _esperar_porta(endpoint: str, servidor, erros, teto: float) -> bool:
     return False
 
 
+def _confiar_hooks(endpoint: str, cwd: str) -> None:
+    """Confia nos hooks pendentes antes da TUI subir.
+
+    Os hooks chegam ao Codex pela sincronização do próprio Hangar; sem isto a TUI para em "Hooks
+    need review" antes da thread e quem abriu pelo app vê a sessão travada. A confiança é gravada
+    pelo escritor do próprio Codex (`config/batchWrite`), com o hash que o `hooks/list` informa.
+    Falha aqui não impede a abertura: a TUI pergunta, como antes.
+    """
+    from websockets.sync.client import connect
+    from app.adapters.codex.lancador import CLIENT_INFO
+
+    def pedir(ws, ident: int, metodo: str, params: dict):
+        ws.send(json.dumps({"jsonrpc": "2.0", "id": ident, "method": metodo, "params": params}))
+        while True:
+            msg = json.loads(ws.recv(timeout=10))
+            if isinstance(msg, dict) and msg.get("id") == ident and "method" not in msg:
+                if msg.get("error"):
+                    raise RuntimeError(f"{metodo} recusado")
+                return msg.get("result") or {}
+
+    try:
+        with connect(endpoint, open_timeout=5, max_size=None) as ws:
+            pedir(ws, 1, "initialize", {"clientInfo": CLIENT_INFO, "capabilities": None})
+            dados = pedir(ws, 2, "hooks/list", {"cwds": [cwd]})
+            pendentes = {h["key"]: h["currentHash"] for entrada in dados.get("data") or []
+                         for h in entrada.get("hooks") or []
+                         if h.get("enabled") and h.get("trustStatus") in ("untrusted", "modified")
+                         and isinstance(h.get("key"), str) and isinstance(h.get("currentHash"), str)}
+            if not pendentes:
+                return
+            edicoes = [{"keyPath": ".".join(json.dumps(p) for p in ("hooks", "state", chave, "trusted_hash")),
+                        "value": hash_atual, "mergeStrategy": "replace"}
+                       for chave, hash_atual in pendentes.items()]
+            pedir(ws, 3, "config/batchWrite", {"edits": edicoes, "reloadUserConfig": True})
+            print(f"hangar-codex-tui: {len(pendentes)} hooks sincronizados pelo Hangar foram aceitos",
+                  file=sys.stderr)
+    except Exception as exc:
+        print(f"hangar-codex-tui: não deu para aceitar os hooks ({type(exc).__name__}); "
+              "o Codex vai perguntar no terminal", file=sys.stderr)
+
+
 def _espera_thread(endpoint: str, cwd: str, servidor, erros, salvar) -> None:
     """Acompanha as threads principais abertas pela TUI durante a vida do pane.
 
@@ -330,7 +434,7 @@ def main() -> int:
     _com_websockets()
     sys.path.insert(0, str(_REPO / "backend"))
     from app.adapters.codex import sessions as codex_sessions
-    from app.adapters.codex.lancador import (APPROVAL, SANDBOX, PERMISSION_POLICIES,
+    from app.adapters.codex.lancador import (APPROVAL, NO_UPDATE_CHECK, SANDBOX, PERMISSION_POLICIES,
                                             service_tier_override, tool_output_override)
     launch_key = None
     def runtime():
@@ -499,6 +603,7 @@ def main() -> int:
             _registrar_falha_servidor(erros, "criar_processo", exc=exc)
             raise
 
+    _atualizar_codex()
     servidor = subir_servidor()
 
     def salvar(thread_id: str, rollout: str, thread: dict | None = None) -> None:
@@ -568,7 +673,7 @@ def main() -> int:
     # errada e o backend, cruzando modelo x nivel no catalogo (`codex_models.checar_escolha`).
     # As flags valem nos DOIS ramos, resume incluido: hoje ninguem passa modelo num resume, mas
     # montar so num deles faria um `--model` com `--resume` ser aceito e ignorado calado.
-    flags_da_escolha = []
+    flags_da_escolha = list(NO_UPDATE_CHECK)
     if args.model:
         flags_da_escolha += ["-m", args.model]
     if args.effort:
@@ -595,6 +700,7 @@ def main() -> int:
         print("hangar-codex-tui: subindo o app-server do Codex…", file=sys.stderr)
         if not _esperar_porta(endpoint, servidor, erros, _ESPERA_THREAD):
             return 1
+        _confiar_hooks(endpoint, cwd)
         tui = subprocess.Popen(argv)
         update_runtime(tui_pid=tui.pid)
         # O servidor pode morrer com a TUI viva (SIGTERM alheio, crash). A TUI `--remote` tenta

@@ -580,7 +580,9 @@ def test_lancador_traduz_a_escolha_de_modelo(tmp_path):
             proc.wait(timeout=20)
     argv = (tmp_path / "tui-argv.txt").read_text().split("\n")
     assert argv[argv.index("-m") + 1] == "gpt-5.6-luna"
-    assert argv[argv.index("-c") + 1] == 'model_reasoning_effort="xhigh"'
+    assert 'model_reasoning_effort="xhigh"' in argv
+    # A checagem de atualização sai sempre: o aviso dela trava a TUI antes da thread.
+    assert "check_for_update_on_startup=false" in argv
     assert "--effort" not in argv
     # A escolha tambem vai pro SIDECAR: e de la que a pill do app le o modelo da sessao. Sem isto a
     # sessao nascia no modelo certo e a pill mostrava vazio (medido ao vivo em 30/08/2026) — o ramo
@@ -601,7 +603,8 @@ def test_lancador_sem_escolha_e_o_comando_de_hoje(tmp_path):
     )
     proc.wait(timeout=30)
     argv = (tmp_path / "tui-argv.txt").read_text().split("\n")
-    assert "-m" not in argv and "-c" not in argv
+    assert "-m" not in argv
+    assert [argv[i + 1] for i, x in enumerate(argv) if x == "-c"] == ["check_for_update_on_startup=false"]
 
 
 @pytest.mark.skipif(os.name != "posix", reason="o lancador so e usado em pane POSIX por ora")
@@ -817,3 +820,42 @@ def test_non_imported_resume_keeps_legacy_independent_permission_flags(tmp_path)
     assert result.returncode == 0, result.stderr
     server_args = json.loads(Path(env["FAKE_SERVER_OUT"]).read_text())
     assert 'approval_policy="never"' in server_args and 'sandbox_mode="read-only"' in server_args
+
+
+def _atualizacao(monkeypatch, tmp_path, publicada="0.161.0", npm_install_rc=0):
+    lancador = runpy.run_path(str(_LANCADOR))
+    globais = lancador["_atualizar_codex"].__globals__
+    chamadas = []
+
+    def run(argv, **_):
+        chamadas.append(argv[1:])
+        saida = {"--version": "codex-cli 0.159.3\n", "view": f"{publicada}\n"}.get(argv[1], "")
+        rc = npm_install_rc if argv[1] == "install" else 0
+        return subprocess.CompletedProcess(argv, rc, stdout=saida, stderr="")
+
+    monkeypatch.setattr(globais["shutil"], "which", lambda nome: f"/bin/{nome}")
+    monkeypatch.setattr(globais["os"].path, "realpath", lambda _: "/lib/node_modules/@openai/codex/bin/codex.js")
+    monkeypatch.setattr(globais["subprocess"], "run", run)
+    monkeypatch.setattr(globais["Path"], "home", lambda: tmp_path)
+    return lancador["_atualizar_codex"], chamadas
+
+
+def test_atualiza_o_codex_desatualizado_e_avisa_na_tela(monkeypatch, tmp_path, capsys):
+    atualizar, chamadas = _atualizacao(monkeypatch, tmp_path)
+    atualizar()
+    assert ["install", "-g", "@openai/codex@0.161.0"] in chamadas
+    assert "atualizando o Codex 0.159.3 → 0.161.0" in capsys.readouterr().err
+
+
+def test_consulta_a_versao_no_maximo_uma_vez_por_hora(monkeypatch, tmp_path):
+    atualizar, chamadas = _atualizacao(monkeypatch, tmp_path, publicada="0.159.3")
+    atualizar()
+    feitas = len(chamadas)
+    atualizar()
+    assert len(chamadas) == feitas
+
+
+def test_falha_do_npm_nao_impede_a_abertura(monkeypatch, tmp_path, capsys):
+    atualizar, _ = _atualizacao(monkeypatch, tmp_path, npm_install_rc=1)
+    atualizar()
+    assert "a sessão abre na 0.159.3" in capsys.readouterr().err

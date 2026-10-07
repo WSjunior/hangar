@@ -203,6 +203,30 @@
     }
   },
   {
+    "name": "pane_codex_update_rodape_curto.txt",
+    "pane": "  Update available · 0.159.3 → 0.160.0\n  Release notes: https://github.com/openai/codex/releases/latest\n\n› 1. Update now (runs `npm install -g @openai/codex`)\n  2. Skip\n  3. Skip until next version\n\n  enter continue · esc skip\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n",
+    "expected": {
+      "state": "idle",
+      "label": null,
+      "question": null,
+      "options": null,
+      "spinner": null,
+      "status_line": "  3. Skip until next version\n  enter continue · esc skip",
+      "overlay": false,
+      "login": false,
+      "limit_reset": null,
+      "preview": "",
+      "codex_menu": {
+        "question": "Release notes: https://github.com/openai/codex/releases/latest",
+        "options": [
+          "Update now (runs `npm install -g @openai/codex`)",
+          "Skip",
+          "Skip until next version"
+        ]
+      }
+    }
+  },
+  {
     "name": "pane_ferramenta_em_voo_acesa.txt",
     "pane": "\n ▐▛███▛█   Claude Code v2.1.289\n▝▜██████▀  Haiku 4.5 · Claude Max\n ▝▝   ▝▝   ~/projeto · /rc\n\n\n❯ Rode em sequência, cada um numa chamada Bash separada, com description: 1) sleep 4; echo um  2) sleep 4; echo dois  3) cat /etc/hostname. Entre o 1 e o 2\n  escreva uma frase curta. No fim diga pronto.\n\n  Ran 1 shell command\n\n● Primeiro comando concluído.\n\n  Aguardando o segundo...\n\n● Aguardar 4 segundos e imprimir \"dois\" · 2s\n  ⎿  $ sleep 4; echo dois (3s)\n     (ctrl+b ctrl+b (twice) to run in background)\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n✢ Photosynthesizing… (13s · ↓ 442 tokens)\n\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n  ~/projeto | Haiku 4.5 | 54k/200k | 7d:38%\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n",
     "expected": {
@@ -807,6 +831,29 @@
         "options": [
           "Opção ação continua 🐍",
           "Outra"
+        ]
+      }
+    }
+  },
+  {
+    "name": "codex_short_footer",
+    "pane": "  Update available · 0.159.3 → 0.160.0\n› 1. Update now\n  2. Skip\n\n  enter continue · esc skip\n\n\n",
+    "expected": {
+      "state": "idle",
+      "label": null,
+      "question": null,
+      "options": null,
+      "spinner": null,
+      "status_line": "  2. Skip\n  enter continue · esc skip",
+      "overlay": false,
+      "login": false,
+      "limit_reset": null,
+      "preview": "",
+      "codex_menu": {
+        "question": "Update available · 0.159.3 → 0.160.0",
+        "options": [
+          "Update now",
+          "Skip"
         ]
       }
     }

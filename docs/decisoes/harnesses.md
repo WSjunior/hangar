@@ -136,8 +136,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   a sessão parada), e o main fica mudo quando delega. Quem decide é a fronteira de turno, não o
   mtime. `tool.result` não tem `uuid` — id é `res:<toolCallId>`.
 - **Integração nativa do Codex: o Codex converte, o backend decide quando, o lançador só avisa.**
-  Dois gatilhos, e só: abertura de sessão Codex e o botão Reconciliar. Nunca gravar confiança
-  para autoaprovar hooks. Fonte inválida nunca significa remoção.
+  Dois gatilhos, e só: abertura de sessão Codex e o botão Reconciliar. A integração não grava
+  confiança de hooks; quem confia nos pendentes é o lançador, na abertura (regra abaixo). Fonte
+  inválida nunca significa remoção.
 - **Triagem do Claude não atravessa a importação para o Codex.** `skill-suggester.py`,
   `jev-command-gate.py` e `jev-answer-check.py` são excluídos pelo nome exato do arquivo,
   inclusive em caminhos Windows. O manifesto anterior retira só entradas já importadas;
@@ -260,6 +261,13 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **Quem segura a abertura de uma sessão Codex é a TUI parada num widget**, não a
   sincronização. Sem thread não há sidecar, e o app fica esperando para sempre — o cartão de
   seletor pré-thread existe para isso.
+- **A abertura com terminal não pergunta nada que o Hangar já sabe responder** (decisão do
+  dono): a TUI sobe com `check_for_update_on_startup=false`; o lançador atualiza o Codex do npm
+  antes do app-server (versão publicada consultada no máximo uma vez por hora, a tela mostra
+  "atualizando o Codex"), e confia nos hooks pendentes pelo app-server (`hooks/list` +
+  `config/batchWrite` do `trusted_hash`), porque eles vêm da sincronização do próprio Hangar.
+  Falha em qualquer dos dois só registra na tela e a abertura segue. O cartão pré-thread
+  reconhece o rodapé curto (`enter continue · esc skip`) além do antigo.
 - **Pergunta assíncrona do Codex chega como `agentMessage` com `delivery: "async"`**, não como
   pedido JSON-RPC. Cada pergunta é independente; o eco da resposta local não responde outra de
   título igual.
@@ -824,9 +832,10 @@ Sem a ponte, cada um mantinha uma fazenda de symlinks à mão apontando pro
   `CODEX_HOME`; o lock em `CODEX_HOME/.hangar-integracao.lock` serializa os escritores do Hangar
   mesmo quando seus valores de `HOME` diferem. `GET` do painel é só
   leitura, `POST` inicia ou acompanha a operação existente (202). O painel consulta enquanto a
-  operação executa e descarta respostas ao trocar servidor/desmontar. **Nunca gravar confiança
-  para autoaprovar hooks**: normalizar RTK/`SessionEnd` pode invalidar aprovação, então o painel
-  e a TUI avisam. Instruções globais usam bloco gerenciado no `AGENTS.md`; fallbacks `CLAUDE.md`
+  operação executa e descarta respostas ao trocar servidor/desmontar. A integração não grava
+  confiança de hooks: normalizar RTK/`SessionEnd` pode invalidar aprovação, e quem confia de novo
+  é o lançador, na abertura da sessão (decisão do dono, 07/10/2026: os hooks vêm da sincronização
+  do próprio Hangar e a pergunta da TUI travava a abertura pelo app). Instruções globais usam bloco gerenciado no `AGENTS.md`; fallbacks `CLAUDE.md`
   e `CLAUDE.MD` são acrescentados à config sem substituir os já existentes.
   `settings.env` entra pelo item nativo `CONFIG` em HOME temporário; somente
   `shell_environment_policy.set` é mesclado por variável e registrado no manifesto. As políticas
