@@ -136,3 +136,32 @@ async fn bridge_is_private_and_needs_the_secret() {
     let no_secret = client().post(format!("http://{}/__hangar_server/pages", s.private)).body(body.to_string()).send().await.unwrap();
     assert_eq!(no_secret.status(), 404);
 }
+
+#[tokio::test]
+async fn url_page_is_published_without_html() {
+    let s = scene().await;
+    let res = publish(&s, json!({"session": "s1", "url": "http://localhost:3000/cidades", "title": "Cidades"})).await;
+    let page = &res["result"]["hangar_page"];
+    assert_eq!(page["url"], "http://localhost:3000/cidades", "{res}");
+    assert_eq!(page["height"], 640, "moldura padrão do site");
+    let id = page["id"].as_str().unwrap().to_owned();
+    let raw = owner_get(&s, &format!("/api/sessions/s1/pages/{id}?raw=1")).await;
+    assert_eq!(raw.status(), 404);
+    assert!(raw.text().await.unwrap().contains("erro_pagina_sem_html"));
+    let shot = owner_get(&s, &format!("/api/sessions/s1/pages/{id}/shot")).await;
+    assert!(shot.text().await.unwrap().contains("erro_pagina_sem_html"));
+    let tall = publish(&s, json!({"session": "s1", "url": "https://example.com", "title": "T", "height": 900})).await;
+    assert_eq!(tall["result"]["hangar_page"]["height"], 900);
+}
+
+#[tokio::test]
+async fn url_draft_only_validates_and_bad_urls_are_refused() {
+    let s = scene().await;
+    let draft = publish(&s, json!({"session": "zz", "url": "http://LOCALHOST:3000/cidades", "title": "C", "draft": true})).await;
+    assert_eq!(draft["result"]["draft"], json!({"url": "http://localhost:3000/cidades"}), "{draft}");
+    let code = |v: Value| v["error"]["code"].as_str().unwrap().to_owned();
+    assert_eq!(code(publish(&s, json!({"session": "s1", "url": "http://127.0.0.1:8765/", "title": "x"})).await), "erro_pagina_endereco_recusado");
+    assert_eq!(code(publish(&s, json!({"session": "s1", "url": "file:///etc/passwd", "title": "x"})).await), "erro_pagina_invalida");
+    assert_eq!(code(publish(&s, json!({"session": "s1", "url": "https://example.com", "html": "<p></p>", "title": "x"})).await), "erro_pagina_invalida");
+    assert_eq!(code(publish(&s, json!({"session": "s1", "title": "x"})).await), "erro_pagina_invalida");
+}

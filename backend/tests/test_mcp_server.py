@@ -289,3 +289,15 @@ async def test_html_render_sends_own_theme_only_when_asked(identidade, monkeypat
         assert not (await s.call_tool("html_render", {"html": "<p></p>", "title": "t"})).is_error
         assert not (await s.call_tool("html_render", {"html": "<p></p>", "title": "t", "own_theme": True})).is_error
     assert "own_theme" not in sent[0] and sent[1]["own_theme"] is True
+
+
+async def test_html_render_takes_html_or_url_never_both(identidade, monkeypatch):
+    from app import pages_bridge
+    sent = []
+    monkeypatch.setattr(pages_bridge, "publish", lambda payload: sent.append(payload) or {"hangar_page": {"id": "a"}})
+    async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
+        url = "http://localhost:3000/cidades"
+        assert not (await s.call_tool("html_render", {"url": url, "title": "t"})).is_error
+        assert (await s.call_tool("html_render", {"url": url, "html": "<p></p>", "title": "t"})).is_error
+        assert (await s.call_tool("html_render", {"title": "t"})).is_error
+    assert sent == [{"session": sent[0]["session"], "title": "t", "draft": False, "url": url}]

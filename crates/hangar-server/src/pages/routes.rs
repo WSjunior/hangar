@@ -1,6 +1,6 @@
 //! Rotas das páginas: publicação pela ponte privada (MCP do Python), leitura pelo dono. Convidado segue ao Python.
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -23,12 +23,17 @@ const BODY_LIMIT: usize = 4 * 1024 * 1024;
 const BODY_TIMEOUT: Duration = Duration::from_secs(10);
 const SHOT_WIDTH: u32 = 728;
 const SWEEP_EVERY: Duration = Duration::from_secs(30);
+const URL_HEIGHT: u32 = 640;
+const HANGAR_PORTS: [u16; 3] = [8765, 8766, 8768];
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublishBody {
     session: String,
-    html: String,
+    #[serde(default)]
+    html: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
     title: String,
     // Com sinal: altura negativa recebe a mensagem do limite, não "corpo inválido".
     #[serde(default)]
@@ -59,14 +64,65 @@ pub async fn publish_bridge(State(st): State<Arc<AppState>>, ConnectInfo(peer): 
 
 struct Prepared { id: String, html: String, missing: Vec<String>, bin: Option<PathBuf> }
 
+/// Endereço do modo URL, normalizado. O site abre no perfil do painel, que pode ter o login do Hangar.
+fn site_url(raw: &str) -> Result<String, Value> {
+    let bad = || fail("erro_pagina_invalida", "url precisa ser um endereço http ou https");
+    let url = reqwest::Url::parse(raw.trim()).map_err(|_| bad())?;
+    if !matches!(url.scheme(), "http" | "https") { return Err(bad()); }
+    let host = url.host_str().ok_or_else(bad)?;
+    if url.port_or_known_default().is_some_and(|p| HANGAR_PORTS.contains(&p)) && own_host(host) {
+        return Err(fail("erro_pagina_endereco_recusado", "endereço do próprio Hangar não abre na conversa"));
+    }
+    Ok(url.into())
+}
+
+/// ponytail: sem listar as interfaces da máquina, qualquer endereço de rede local ou VPN conta como
+/// próprio; só vale nas portas do Hangar, onde um par também teria o login dele.
+fn own_host(host: &str) -> bool {
+    let h = host.trim_start_matches('[').trim_end_matches(']').trim_end_matches('.').to_ascii_lowercase();
+    if let Ok(ip) = h.parse::<IpAddr>() {
+        let ip = match ip { IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4), v4 => v4 };
+        return ip.is_loopback() || ip.is_unspecified() || match ip {
+            IpAddr::V4(v4) => v4.is_private() || v4.is_link_local() || (v4.octets()[0] == 100 && v4.octets()[1] & 0xc0 == 64),
+            IpAddr::V6(v6) => v6.is_unique_local() || v6.is_unicast_link_local(),
+        };
+    }
+    h == "localhost" || h.ends_with(".localhost") || h.ends_with(".ts.net")
+        || machine_name().is_some_and(|n| h.split('.').next() == Some(n.as_str()))
+}
+
+#[cfg(unix)]
+fn machine_name() -> Option<String> {
+    let mut b = [0u8; 256];
+    // SAFETY: buffer próprio, tamanho certo; o nome sai terminado em zero ou cortado no tamanho.
+    if unsafe { libc::gethostname(b.as_mut_ptr().cast(), b.len()) } != 0 { return None; }
+    let n = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+    let name = String::from_utf8_lossy(&b[..n]).split('.').next()?.to_ascii_lowercase();
+    (!name.is_empty()).then_some(name)
+}
+
+#[cfg(not(unix))]
+fn machine_name() -> Option<String> {
+    std::env::var("COMPUTERNAME").ok().map(|n| n.to_ascii_lowercase()).filter(|n| !n.is_empty())
+}
+
 async fn publish(st: &AppState, b: PublishBody) -> Value {
-    let chars = b.html.chars().count();
-    if chars == 0 || chars > HTML_MAX_CHARS { return fail("erro_pagina_invalida", "html precisa ter de 1 a 512000 caracteres"); }
+    let site = match (&b.html, &b.url) {
+        (Some(html), None) => {
+            let chars = html.chars().count();
+            if chars == 0 || chars > HTML_MAX_CHARS { return fail("erro_pagina_invalida", "html precisa ter de 1 a 512000 caracteres"); }
+            None
+        }
+        (None, Some(url)) => match site_url(url) { Ok(u) => Some(u), Err(v) => return v },
+        _ => return fail("erro_pagina_invalida", "passe html ou url, nunca os dois"),
+    };
     let title = b.title.trim().to_owned();
     let title_chars = title.chars().count();
     if title_chars == 0 || title_chars > TITLE_MAX_CHARS { return fail("erro_pagina_invalida", "title precisa ter de 1 a 200 caracteres"); }
     if b.height.is_some_and(|h| !(i64::from(HEIGHT_MIN)..=i64::from(HEIGHT_MAX)).contains(&h)) { return fail("erro_pagina_invalida", "height fica entre 80 e 2000"); }
     let height = b.height.map(|h| h as u32);
+    // Rascunho de site só confere o endereço: sem o login do Jefferson o servidor nem abriria.
+    if b.draft && let Some(url) = &site { return json!({"ok": true, "result": {"draft": {"url": url}}}); }
     let info = match fetch_info(&st.http, st.cfg.upstream, &st.cfg.internal_secret, &b.session).await {
         Ok(Some(i)) => i,
         Ok(None) => return fail("erro_sessao_desconhecida", "sessão não encontrada"),
@@ -77,7 +133,8 @@ async fn publish(st: &AppState, b: PublishBody) -> Value {
         return fail("erro_pagina_sem_transcript", "a sessão ainda não tem transcript");
     };
     let key = info.session_key;
-    let (pages, chromium, draft, own_theme, html) = (st.pages.clone(), st.chromium, b.draft, b.own_theme, b.html);
+    if let Some(url) = site { return publish_site(st, key, jsonl, title, height.unwrap_or(URL_HEIGHT), url).await; }
+    let (pages, chromium, draft, own_theme, html) = (st.pages.clone(), st.chromium, b.draft, b.own_theme, b.html.unwrap_or_default());
     let (key2, title2) = (key.clone(), title.clone());
     // Imagens, tema e gravação leem e escrevem disco: fora da thread do runtime.
     let prepared = tokio::task::spawn_blocking(move || -> Result<Prepared, Value> {
@@ -87,7 +144,7 @@ async fn publish(st: &AppState, b: PublishBody) -> Value {
         } else {
             (images::inline(&html).map_err(too_large)?, Vec::new())
         };
-        let page = NewPage { html: theme::inject(&html, !own_theme), title: title2, height, heights: BTreeMap::new(), draft, own_theme };
+        let page = NewPage { html: theme::inject(&html, !own_theme), title: title2, height, heights: BTreeMap::new(), draft, own_theme, url: None };
         let id = pages.save(&key2, &jsonl, &page).map_err(|e| {
             tracing::warn!(key = %key2, "página não gravada: {e}");
             fail("erro_pagina_nao_gravada", "não foi possível gravar a página")
@@ -131,17 +188,39 @@ async fn publish(st: &AppState, b: PublishBody) -> Value {
     json!({"ok": true, "result": {"hangar_page": {"id": id, "title": title, "height": height, "heights": heights, "own_theme": own_theme}, "message": MESSAGE}})
 }
 
+/// Modo URL: só o endereço vai para o disco; sem medição nem print.
+async fn publish_site(st: &AppState, key: String, jsonl: String, title: String, height: u32, url: String) -> Value {
+    let page = NewPage { html: String::new(), title: title.clone(), height: Some(height), heights: BTreeMap::new(), draft: false, own_theme: false, url: Some(url.clone()) };
+    let pages = st.pages.clone();
+    match tokio::task::spawn_blocking(move || pages.save(&key, &jsonl, &page).map_err(|e| (key, e))).await {
+        Ok(Ok(id)) => json!({"ok": true, "result": {"hangar_page": {"id": id, "title": title, "height": height, "heights": {}, "own_theme": false, "url": url}, "message": MESSAGE}}),
+        Ok(Err((key, e))) => {
+            tracing::warn!(key = %key, "página não gravada: {e}");
+            fail("erro_pagina_nao_gravada", "não foi possível gravar a página")
+        }
+        Err(e) => {
+            tracing::error!(panic = e.is_panic(), "gravação da página interrompida");
+            fail("erro_pagina_nao_gravada", "a gravação caiu no servidor")
+        }
+    }
+}
+
 /// Leitura do disco que caiu no servidor: não é página expirada.
 fn read_failed(st: &AppState, headers: &HeaderMap, name: &str, e: tokio::task::JoinError) -> Response {
     tracing::error!(panic = e.is_panic(), "leitura da página interrompida");
     route_failed(st, headers, "rust.pages_failed", name, "erro_pagina_falhou", "a leitura da página caiu no servidor")
 }
 
-fn expired(req: &HeaderMap) -> Response {
-    let mut r = json_reply(StatusCode::NOT_FOUND, json!({"detail": {"code": "erro_pagina_expirou", "msg": "página apagada com a sessão"}}));
+fn not_found(req: &HeaderMap, code: &str, msg: &str) -> Response {
+    let mut r = json_reply(StatusCode::NOT_FOUND, json!({"detail": {"code": code, "msg": msg}}));
     cors(req, r.headers_mut());
     r
 }
+
+fn expired(req: &HeaderMap) -> Response { not_found(req, "erro_pagina_expirou", "página apagada com a sessão") }
+
+/// Página do modo URL não tem documento: o app abre o endereço dela.
+fn no_html(req: &HeaderMap) -> Response { not_found(req, "erro_pagina_sem_html", "página de site não tem html; abra a url dela") }
 
 /// Chave da pasta da sessão; a resposta pronta quando não há (página expirada ou Python sem responder).
 async fn session_key(st: &AppState, headers: &HeaderMap, name: &str) -> Result<String, Response> {
@@ -160,11 +239,14 @@ pub async fn page(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
     drop(req);
     let key = match session_key(&st, &headers, &name).await { Ok(k) => k, Err(r) => return r };
     let pages = st.pages.clone();
-    let found = match tokio::task::spawn_blocking(move || Some((pages.html(&key, &id)?, pages.meta(&key, &id)?))).await {
-        Ok(f) => f,
-        Err(e) => return read_failed(&st, &headers, &name, e),
-    };
-    let Some((html, meta)) = found else { return expired(&headers) };
+    let found = tokio::task::spawn_blocking(move || {
+        let meta = pages.meta(&key, &id)?;
+        if meta.url.is_some() { return Some(None); }
+        Some(Some((pages.html(&key, &id)?, meta)))
+    }).await;
+    let found = match found { Ok(f) => f, Err(e) => return read_failed(&st, &headers, &name, e) };
+    let Some(found) = found else { return expired(&headers) };
+    let Some((html, meta)) = found else { return no_html(&headers) };
     let mut r = if raw {
         let mut r = Response::new(Body::from(html));
         let h = r.headers_mut();
@@ -218,14 +300,16 @@ pub async fn shot(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
     let key = match session_key(&st, &headers, &name).await { Ok(k) => k, Err(r) => return r };
     let (pages, chromium) = (st.pages.clone(), st.chromium);
     let found = tokio::task::spawn_blocking(move || {
+        let meta = pages.meta(&key, &id)?;
+        if meta.url.is_some() { return Some(None); }
         let html = pages.html(&key, &id)?;
-        let own_theme = pages.meta(&key, &id).is_some_and(|m| m.own_theme);
         let path = pages.shot_path(&key, &id, theme, width);
         let ready = path.is_file();
-        Some((html, own_theme, path, ready, if ready { None } else { chromium() }))
+        Some(Some((html, meta.own_theme, path, ready, if ready { None } else { chromium() })))
     }).await;
     let found = match found { Ok(f) => f, Err(e) => return read_failed(&st, &headers, &name, e) };
-    let Some((html, own_theme, path, ready, bin)) = found else { return expired(&headers) };
+    let Some(found) = found else { return expired(&headers) };
+    let Some((html, own_theme, path, ready, bin)) = found else { return no_html(&headers) };
     if !ready {
         if let Err(e) = chrome::render_with(bin, &html, &[Job { width, theme, shot: Some(path.clone()) }], own_theme).await {
             let mut r = json_reply(StatusCode::NOT_FOUND, json!({"detail": {"code": "erro_pagina_sem_imagem", "msg": e.reason()}}));
@@ -297,5 +381,23 @@ mod tests {
         assert!(b.own_theme);
         let b: PublishBody = serde_json::from_str(r#"{"session":"s","html":"x","title":"t","height":-5}"#).unwrap();
         assert_eq!(b.height, Some(-5), "negativa passa pelo corpo e cai na mensagem do limite");
+        let b: PublishBody = serde_json::from_str(r#"{"session":"s","url":"http://localhost:3000/cidades","title":"t"}"#).unwrap();
+        assert!(b.html.is_none() && b.url.is_some());
+    }
+
+    #[test]
+    fn site_url_is_normalized_and_hangar_is_refused() {
+        assert_eq!(site_url(" http://LocalHost:3000/cidades ").unwrap(), "http://localhost:3000/cidades");
+        assert_eq!(site_url("https://example.com").unwrap(), "https://example.com/");
+        let code = |raw: &str| site_url(raw).unwrap_err()["error"]["code"].as_str().unwrap().to_owned();
+        for bad in ["file:///etc/passwd", "javascript:alert(1)", "ftp://example.com", "localhost:3000", ""] {
+            assert_eq!(code(bad), "erro_pagina_invalida", "{bad}");
+        }
+        for own in ["http://127.0.0.1:8765/", "http://localhost:8766/x", "http://[::1]:8768/", "http://0.0.0.0:8765",
+            "http://192.168.0.10:8765", "http://100.64.0.2:8766", "https://maquina.tail1234.ts.net:8765/"] {
+            assert_eq!(code(own), "erro_pagina_endereco_recusado", "{own}");
+        }
+        assert!(site_url("http://localhost:3000/").is_ok(), "app local em outra porta abre");
+        assert!(site_url("http://example.com:8765/").is_ok(), "site de fora na mesma porta não é o Hangar");
     }
 }

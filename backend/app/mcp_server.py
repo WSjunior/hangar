@@ -273,6 +273,8 @@ _HTML_RENDER = (
     "`heights`; com o app desktop aberto, passe a `url` do rascunho a browser_open exatamente como veio (caminho "
     "relativo; o servidor completa endereço e acesso) e use browser para passar o mouse e clicar. "
     "Página publicada não muda: corrigir é publicar de novo. "
+    "url (http/https, no lugar de html) abre um site de verdade dentro da conversa, com o login do navegador do "
+    "app; só aparece vivo no app desktop; use para app rodando em localhost ou site que exige login. "
     "PÁGINA: um documento só, com <style> e <script> embutidos. Imagem local por caminho absoluto "
     "(src=\"/abs/a.png\", url(/abs/b.webp) ou string JS) é embutida sozinha; arquivo que não é imagem é recusado. "
     "URL http(s) (biblioteca de gráfico em CDN) carrega como está; file: não. "
@@ -290,11 +292,17 @@ _HTML_RENDER = (
 
 
 @mcp.tool(description=_HTML_RENDER)
-async def html_render(ctx: Context, html: str, title: str, height: int | None = None, draft: bool = False,
-                      own_theme: bool = False) -> dict[str, Any]:
+async def html_render(ctx: Context, title: str, html: str | None = None, url: str | None = None,
+                      height: int | None = None, draft: bool = False, own_theme: bool = False) -> dict[str, Any]:
     from app import pages_bridge
+    if (html is None) == (url is None):
+        raise ToolError("erro_pagina_html_ou_url: passe html ou url, nunca os dois")
     eu = await _eu(ctx)
-    payload: dict[str, Any] = {"session": eu, "html": html, "title": title, "draft": draft}
+    payload: dict[str, Any] = {"session": eu, "title": title, "draft": draft}
+    if url is not None:
+        payload["url"] = url
+    else:
+        payload["html"] = html
     # Só quando pedido: hangar-server antigo recusa campo desconhecido no corpo.
     if own_theme:
         payload["own_theme"] = True
