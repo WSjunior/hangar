@@ -41,7 +41,7 @@ pub(crate) enum FailureAction { Retry, ToggleDetails, Fix(Fix), ToggleSend, Send
 pub(crate) type OnFailureAction = Rc<dyn Fn(FailureAction, &mut Window, &mut App)>;
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum SendState { Sending, Sent, Failed(String) }
+pub(crate) enum SendState { Sending, Sent, Failed(String), Refused(String) }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum AgentPhase { Starting, Running, Restoring, Rechecking, Done { fixed: bool }, Failed(String) }
@@ -93,6 +93,8 @@ impl Outbox {
         item.1 = match result {
             Ok(()) => SendState::Sent,
             Err(why) if why.trim().is_empty() => SendState::Failed(tr("setup_report_no_answer")),
+            // Grande demais para o Worker: o mesmo corpo seria recusado de novo, então sem "Enviar de novo".
+            Err(why) if why == tr("setup_report_too_large") => SendState::Refused(why),
             Err(why) => SendState::Failed(why),
         };
     }
@@ -129,7 +131,8 @@ pub(crate) fn failure_panel(failure: &Failure, details_open: bool, lines: &[Stri
         (None, _) => tr("setup_failure_unexpected"),
     };
     // Com frase da tabela, a mensagem do script fica como apoio; sem ela, é a própria frase.
-    let support = sentence.as_ref().map(|_| failure.text.clone()).filter(|t| !t.is_empty() && *t != tr("setup_failure_title"));
+    let support = sentence.as_ref().filter(|s| **s != failure.text).map(|_| failure.text.clone())
+        .filter(|t| !t.is_empty() && *t != tr("setup_failure_title"));
     let buttons: Vec<Button> = failure.fixes.iter().enumerate()
         .map(|(n, fix)| fix_button(format!("setup-fix-{}", fix.id()), *fix, n == 0, on_action.clone())).collect();
     let toggle = on_action;
@@ -188,7 +191,7 @@ pub(crate) fn agent_block(view: &PanelView, on_action: OnFailureAction) -> Optio
         .child(div().id("setup-agent-status").role(Role::Status).flex().items_center().gap_2().text_sm().font_weight(FontWeight::MEDIUM)
             .when(busy, |el| el.child(chrome::Spinner::new(SharedString::from("setup-agent-spin"), IconName::LoaderCircle, px(14.), theme::muted())))
             .child(line))
-        .children(stop.map(|button| div().child(button)))
+        .children(stop.map(|button| div().flex().child(button)))
         .when(panel.not_stopped, |el| el.child(div().id("setup-agent-not-stopped").role(Role::Alert).text_sm()
             .text_color(theme::warning_text()).whitespace_normal().child(tr("setup_agent_not_stopped"))))
         .when_some(explanation, |el, text| el.child(TextView::markdown("setup-agent-explanation", text).selectable(true).scrollable(false)))
@@ -234,13 +237,14 @@ pub(crate) fn outbox_lines(outbox: &Outbox, on_action: OnFailureAction) -> Optio
         let (text, failed) = match state {
             SendState::Sending => (tr("setup_report_sending"), false),
             SendState::Sent => (tr("setup_report_sent"), false),
-            SendState::Failed(why) => (tr("setup_report_send_failed").replace("{erro}", why), true),
+            SendState::Failed(why) | SendState::Refused(why) => (tr("setup_report_send_failed").replace("{erro}", why), true),
         };
+        let retry = matches!(state, SendState::Failed(_));
         let (again, dismiss) = (on_action.clone(), on_action.clone());
         div().id(SharedString::from(format!("setup-outbox-{id}"))).role(if failed { Role::Alert } else { Role::Status })
             .flex().items_center().gap_2().text_xs().text_color(if failed { theme::warning_text() } else { theme::muted() })
             .child(div().flex_1().min_w_0().whitespace_normal().child(format!("{title}: {text}")))
-            .when(failed, |el| el.child(Button::new(SharedString::from(format!("setup-outbox-again-{id}"))).outline().xsmall()
+            .when(retry, |el| el.child(Button::new(SharedString::from(format!("setup-outbox-again-{id}"))).outline().xsmall()
                 .label(tr("setup_report_send_again")).on_click(move |_, window, cx| again(FailureAction::SendAgain(id), window, cx))))
             .when(*state != SendState::Sending, |el| el.child(Button::new(SharedString::from(format!("setup-outbox-dismiss-{id}"))).ghost()
                 .xsmall().label(tr("close")).on_click(move |_, window, cx| dismiss(FailureAction::Dismiss(id), window, cx))))
@@ -301,6 +305,16 @@ mod tests {
         assert!(outbox.again(a).is_none());
         outbox.finish(a, Ok(()));
         assert_eq!(states(&outbox), vec![SendState::Sent]);
+    }
+
+    #[test]
+    fn a_report_too_large_for_the_worker_is_never_sent_again() {
+        let mut outbox = Outbox::default();
+        let (a, _) = outbox.push(payload("sem-internet"));
+        outbox.finish(a, Err(tr("setup_report_too_large")));
+        assert_eq!(states(&outbox), vec![SendState::Refused(tr("setup_report_too_large"))]);
+        assert!(outbox.again(a).is_none());
+        assert!(outbox.failed().is_empty());
     }
 
     #[test]

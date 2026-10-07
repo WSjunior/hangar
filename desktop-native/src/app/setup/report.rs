@@ -6,9 +6,11 @@ use crate::i18n::tr;
 use super::flow::Screen;
 use super::system::{hidden, refreshed_path};
 
-/// O Worker aceita 256 KB de JSON: o texto fica abaixo disso com folga para o escape e para a seção do agente.
+/// O Worker aceita 256 KB de JSON. Os tetos contam bytes já escapados (`json_len`): `"`, `\\` e controle pesam mais no corpo.
 pub(crate) const BASE_MAX: usize = 140 * 1024;
 pub(crate) const AGENT_MAX: usize = 60 * 1024;
+/// Corpo inteiro do `POST`, com folga abaixo dos 262144 do Worker.
+pub(crate) const BODY_MAX: usize = 250 * 1024;
 pub(crate) const URL: &str = "https://hangar.dev.br/api/relatorio";
 const SECRET: &str = "<senha>";
 const USER: &str = "<usuario>";
@@ -17,7 +19,7 @@ const TAILNET_HOST: &str = "<maquina>";
 /// Senha mais curta que isto não é procurada no texto: trocaria letras soltas no relatório inteiro.
 const MIN_SECRET: usize = 4;
 /// Nome seguido de `=` ou `:` (também JSON, `"token": "x"`): o valor depois dele é senha.
-const SECRET_NAMES: [&str; 3] = ["token", "password", "passwd"];
+const SECRET_NAMES: [&str; 6] = ["token", "password", "passwd", "secret", "api_key", "apikey"];
 /// Teto de cada pedaço do começo do relatório: o log, que é o que mais ajuda, fica com o resto do orçamento.
 const TEXT_MAX: usize = 8 * 1024;
 const DOCTOR_MAX: usize = 24 * 1024;
@@ -40,7 +42,7 @@ impl Secrets {
 }
 
 pub(crate) fn scrub(text: &str, secrets: &Secrets) -> String {
-    let mut out = text.to_owned();
+    let mut out = strip_controls(text);
     let mut values: Vec<&str> = secrets.values.iter().map(String::as_str).filter(|v| v.chars().count() >= MIN_SECRET).collect();
     values.sort_by_key(|v| std::cmp::Reverse(v.len()));
     for value in values { out = out.replace(value, SECRET); }
@@ -60,6 +62,43 @@ pub(crate) fn scrub(text: &str, secrets: &Secrets) -> String {
     }
     scrub_ips(&scrub_tailnet(&out))
 }
+
+/// Cor ANSI (o `install.sh` pinta mesmo sem terminal) e `\r` de progresso: lixo na prévia e 6 bytes cada no JSON. Da linha
+/// com `\r` fica o que vem depois do último, como o terminal mostrou.
+fn strip_controls(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for (n, line) in text.split('\n').enumerate() {
+        if n > 0 { out.push('\n'); }
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let mut chars = line.rsplit('\r').next().unwrap_or(line).chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\x1b' => match chars.next() {
+                    // CSI: parâmetros até o byte final (`m` da cor, `K` de apagar a linha).
+                    Some('[') => { for c in chars.by_ref() { if ('\x40'..='\x7e').contains(&c) { break; } } }
+                    // OSC (título, link): até BEL ou ESC \.
+                    Some(']') => { while let Some(c) = chars.next() { if c == '\x07' { break; } if c == '\x1b' { chars.next(); break; } } }
+                    _ => {}
+                },
+                '\t' => out.push(c),
+                c if c.is_control() => {}
+                c => out.push(c),
+            }
+        }
+    }
+    out
+}
+
+/// Bytes do caractere dentro de uma string JSON do `serde_json` (que não escapa o que não é ASCII).
+fn json_char(c: char) -> usize {
+    match c {
+        '"' | '\\' | '\n' | '\r' | '\t' | '\x08' | '\x0c' => 2,
+        c if c < ' ' => 6,
+        c => c.len_utf8(),
+    }
+}
+
+pub(crate) fn json_len(text: &str) -> usize { text.chars().map(json_char).sum() }
 
 /// Troca `needle` (sem diferenciar maiúsculas ASCII: caminho do Windows) só quando o nome acaba ali.
 fn replace_path(text: &str, needle: &str, with: &str) -> String {
@@ -82,6 +121,12 @@ fn replace_path(text: &str, needle: &str, with: &str) -> String {
 /// `to_eol`: o cabeçalho `Authorization: Basic xxx` vai até o fim da linha (esquema + credencial).
 fn value_range(text: &str, from: usize, to_eol: bool) -> Option<(usize, usize)> {
     let start = from + text[from..].len() - text[from..].trim_start_matches([' ', '\t']).len();
+    // JSON dentro de outra string (`{\"password\": \"x\"}`): o valor vai até a aspa escapada que fecha.
+    if let Some(q) = ["\\\"", "\\'"].into_iter().find(|q| text[start..].starts_with(q)) {
+        let s = start + q.len();
+        let end = text[s..].find(q).into_iter().chain(text[s..].find('\n')).min().map_or(text.len(), |n| s + n);
+        return (end > s).then_some((s, end));
+    }
     let quote = text[start..].chars().next().filter(|c| matches!(c, '"' | '\''));
     let (start, end) = match quote {
         Some(q) => (start + 1, text[start + 1..].find([q, '\n']).map_or(text.len(), |n| start + 1 + n)),
@@ -101,7 +146,8 @@ fn scrub_assignments(text: &str) -> String {
             for (at, _) in lower.match_indices(name) {
                 // Nome, aspa opcional (JSON), espaços, `=` ou `:`.
                 let mut at = at + name.len();
-                if matches!(lower.as_bytes().get(at), Some(b'"' | b'\'')) { at += 1; }
+                if lower[at..].starts_with("\\\"") || lower[at..].starts_with("\\'") { at += 2; }
+                else if matches!(lower.as_bytes().get(at), Some(b'"' | b'\'')) { at += 1; }
                 at += lower[at..].len() - lower[at..].trim_start_matches([' ', '\t']).len();
                 if matches!(lower.as_bytes().get(at), Some(b'=' | b':')) {
                     ranges.extend(value_range(text, at + 1, to_eol));
@@ -207,11 +253,11 @@ fn ipv6_at(b: &[u8]) -> Option<usize> {
     Some(len)
 }
 
-/// O fim do texto em até `max` bytes, começando numa linha inteira: no log de instalação o que importa é o fim.
+/// O fim do texto em até `max` bytes de JSON, começando numa linha inteira: no log de instalação o que importa é o fim.
 pub(crate) fn tail(text: &str, max: usize) -> String {
-    if text.len() <= max { return text.to_owned(); }
-    let mut start = text.len() - max;
-    while !text.is_char_boundary(start) { start += 1; }
+    if json_len(text) <= max { return text.to_owned(); }
+    let mut size = 0;
+    let start = text.char_indices().rev().find(|&(_, c)| { size += json_char(c); size > max }).map_or(0, |(i, c)| i + c.len_utf8());
     let start = text[start..].find('\n').map_or(start, |n| start + n + 1);
     format!("\n{}\n{}", tr("setup_report_log_cut").replace("{bytes}", &start.to_string()), &text[start..])
 }
@@ -243,7 +289,7 @@ pub(crate) fn compose(f: &Facts, secrets: &Secrets) -> String {
         tr("setup_report_doctor"));
     head.push_str(&match &f.doctor { Some(text) => tail(&scrub(text, secrets), DOCTOR_MAX), None => tr("setup_report_doctor_missing") });
     let logs: String = f.logs.iter().map(|(run, text)| format!("\n\n## {}\n\n{}", tr("setup_report_log").replace("{run}", run), scrub(text, secrets))).collect();
-    let budget = BASE_MAX.saturating_sub(head.len() + 256);
+    let budget = BASE_MAX.saturating_sub(json_len(&head) + 256);
     format!("{head}{}\n", tail(&logs, budget))
 }
 
@@ -274,9 +320,9 @@ pub(crate) fn with_agent(base: &str, s: &AgentSection, secrets: &Secrets) -> Str
     let diff = if s.diff.is_empty() { tr("setup_report_no_diff") } else { s.diff.clone() };
     section.push_str(&format!("\n## {}\n\n{diff}\n", tr("setup_report_diff")));
     let section = scrub(&section, secrets);
-    if section.len() <= AGENT_MAX { return format!("{base}{section}"); }
-    let mut end = AGENT_MAX;
-    while !section.is_char_boundary(end) { end -= 1; }
+    if json_len(&section) <= AGENT_MAX { return format!("{base}{section}"); }
+    let mut size = 0;
+    let end = section.char_indices().find(|&(_, c)| { size += json_char(c); size > AGENT_MAX }).map_or(section.len(), |(i, _)| i);
     format!("{base}{}\n{}\n", &section[..end], tr("setup_report_cut"))
 }
 
@@ -399,9 +445,14 @@ pub(crate) struct Payload {
 
 pub(crate) fn payload(step: Screen, code: Option<String>, outcome: Outcome, agent: Option<&str>, report: String) -> Payload {
     let code = code.filter(|c| (1..=64).contains(&c.len()) && c.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'));
-    Payload { v: 1, app: crate::update::CURRENT.to_owned(), commit: super::run::COMMIT.to_owned(),
+    let mut p = Payload { v: 1, app: crate::update::CURRENT.to_owned(), commit: super::run::COMMIT.to_owned(),
         os: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH), step: screen_slug(step).to_owned(), code, outcome,
-        agent: agent.map(str::to_owned), report }
+        agent: agent.map(str::to_owned), report };
+    // `compose`/`with_agent` já cabem; isto segura qualquer outro caminho: o Worker recusaria e "Enviar de novo" nunca
+    // passaria. Corta o começo, o fim do log é o que importa.
+    let body = serde_json::to_vec(&p).map_or(0, |b| b.len());
+    if body > BODY_MAX { p.report = tail(&p.report, json_len(&p.report).saturating_sub(body - BODY_MAX + 1024)); }
+    p
 }
 
 /// Carimbo do app: barra robô genérico, não alguém determinado (o código é aberto).
@@ -415,8 +466,9 @@ pub(crate) async fn send(payload: Payload) -> Result<(), String> {
 
 pub(crate) async fn send_to(url: &str, payload: Payload) -> Result<(), String> {
     let client = reqwest::Client::builder().timeout(Duration::from_secs(20)).build().map_err(|e| describe(&e))?;
-    client.post(url).header("X-Hangar-Stamp", stamp()).json(&payload).send().await
-        .and_then(reqwest::Response::error_for_status).map(|_| ()).map_err(|e| describe(&e))
+    let response = client.post(url).header("X-Hangar-Stamp", stamp()).json(&payload).send().await.map_err(|e| describe(&e))?;
+    if response.status() == reqwest::StatusCode::PAYLOAD_TOO_LARGE { return Err(tr("setup_report_too_large")); }
+    response.error_for_status().map(|_| ()).map_err(|e| describe(&e))
 }
 
 /// A mensagem de topo do reqwest ("error sending request") não diz a causa; ela está na cadeia de origens.
@@ -594,6 +646,47 @@ mod tests {
         assert!(out.len() <= BASE_MAX, "{}", out.len());
         assert!(out.contains("linha 49999"));
         assert!(out.contains("item 99999"));
+    }
+
+    #[test]
+    fn scrub_drops_ansi_colors_and_progress_carriage_returns() {
+        let s = Secrets { values: vec![], home: None, users: vec![] };
+        let out = scrub("\x1b[1;31merro\x1b[0m: x\n10%\r50%\r100% pronto\r\n\x1b]0;titulo\x07fim\tok\x08\n", &s);
+        assert_eq!(out, "erro: x\n100% pronto\nfim\tok\n");
+    }
+
+    #[test]
+    fn a_huge_colored_log_fits_the_worker_body_and_keeps_its_end() {
+        // Cada linha do `install.sh` vem pintada; caminho do Windows e aspas pesam o dobro no JSON.
+        let log: String = (0..200_000).map(|n| format!("\x1b[32mok\x1b[0m C:\\Hangar\\x \"q\" linha {n}\r\n")).collect();
+        let base = compose(&facts(log), &secrets());
+        assert!(!base.contains('\x1b') && !base.contains('\r'));
+        let section = AgentSection { agent: "Claude Code".into(), commands: vec![], explanation: "x".into(),
+            diff: "+\"C:\\\\a\\\\b\"\n".repeat(40_000), notes: vec![], recheck: Recheck::Passed };
+        let report = with_agent(&base, &section, &secrets());
+        let p = payload(Screen::Install, Some("sem-systemd".into()), Outcome::Aberto, Some("claude"), report);
+        let body = serde_json::to_vec(&p).unwrap().len();
+        assert!(body <= BODY_MAX, "{body}");
+        assert!(p.report.contains("linha 199999") && p.report.contains("sem-systemd"));
+    }
+
+    #[test]
+    fn payload_cuts_the_head_of_a_report_too_big_for_the_worker() {
+        let report: String = (0..60_000).map(|n| format!("\"\\\" {n}\n")).collect();
+        let p = payload(Screen::Install, None, Outcome::Aberto, None, report);
+        assert!(serde_json::to_vec(&p).unwrap().len() <= BODY_MAX);
+        assert!(p.report.ends_with("\"\\\" 59999\n"));
+    }
+
+    #[test]
+    fn scrub_catches_api_keys_secrets_and_escaped_json() {
+        let s = Secrets { values: vec![], home: None, users: vec![] };
+        let out = scrub("OPENAI_API_KEY=sk-k1 apikey: k2 client_secret='k3' SECRET=\"k4\" access_token=k5\n\
+            {\"api_key\": \"k6\"} log: {\\\"password\\\": \\\"k7 com espaco\\\", \\\"secret\\\":\\\"k8\\\"}\n", &s);
+        for leaked in ["k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8"] {
+            assert!(!out.contains(leaked), "{leaked} vazou: {out}");
+        }
+        assert!(out.contains("{\\\"password\\\": \\\"<senha>\\\""), "{out}");
     }
 
     #[test]

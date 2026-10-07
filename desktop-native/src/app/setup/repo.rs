@@ -131,6 +131,23 @@ pub(crate) fn moved_on(s: &Snapshot) -> bool {
     !times.is_ok_and(|t| String::from_utf8_lossy(&t).lines().all(|l| l.trim().parse::<u64>().is_ok_and(|c| window.contains(&c))))
 }
 
+/// O que `restore` voltaria agora, sem mexer em nada: os arquivos diferentes do anotado na pasta e os dos commits depois
+/// do HEAD anotado (do agente e o que veio depois dele). É a lista do aviso antes de "Desfazer mesmo assim".
+pub(crate) fn pending_changes(s: &Snapshot) -> Vec<String> {
+    let Ok(git) = Git::new() else { return Vec::new() };
+    let mut out: BTreeSet<String> = git.run(&s.dir, &["diff", "--name-only", "-z", &s.head, "HEAD"]).map(|raw| String::from_utf8_lossy(&raw)
+        .split('\0').filter(|p| !p.is_empty()).map(str::to_owned).collect()).unwrap_or_default();
+    let now = git.status(&s.dir).unwrap_or_default();
+    for path in s.before.keys().chain(now.keys()) {
+        let differs = match s.before.get(path) {
+            Some(e) => now.get(path) != Some(&e.status) || std::fs::read(s.dir.join(path)).ok().map(|b| STANDARD.encode(b)) != e.content,
+            None => true,
+        };
+        if differs { out.insert(path.clone()); }
+    }
+    out.into_iter().collect()
+}
+
 /// Anotação com mais de um dia: a pasta já viveu demais desde então para desfazer sem a pessoa pedir.
 pub(crate) fn stale(s: &Snapshot) -> bool { now_secs().saturating_sub(s.created) > 24 * 60 * 60 }
 
@@ -545,6 +562,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         // Pasta apagada: também não se desfaz sozinho.
         assert!(moved_on(&snap));
+    }
+
+    #[test]
+    fn pending_changes_lists_what_restore_would_undo_without_touching_it() {
+        let dir = repo("pending");
+        let snap = snapshot(&dir).unwrap();
+        assert!(pending_changes(&snap).is_empty());
+        // O agente edita um arquivo; depois a atualização faz um commit em outro.
+        std::fs::write(dir.join("README.md"), "do agente\n").unwrap();
+        std::fs::write(dir.join("install.sh"), "echo 3\n").unwrap();
+        sh(&dir, &["commit", "-q", "-m", "atualizacao", "--", "install.sh"]);
+        assert_eq!(pending_changes(&snap), vec!["README.md".to_owned(), "install.sh".to_owned()]);
+        assert_eq!(read(&dir, "README.md").as_deref(), Some("do agente\n"));
+        assert_eq!(read(&dir, "install.sh").as_deref(), Some("echo 3\n"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -198,8 +198,10 @@ impl SetupWizard {
             not_stopped: run.not_stopped });
         // O aviso da correção só aparece depois que o envio dela saiu de verdade.
         let fix_sent = self.fix_sent.is_some_and(|id| self.outbox.items.iter().any(|(n, state, _)| *n == id && *state == SendState::Sent));
+        // Sem internet o agente também não roda: a oferta só daria um erro de API.
+        let offline = self.failure.as_ref().is_some_and(|f| f.code.as_deref() == Some("sem-internet"));
         PanelView { report: self.report.as_deref(), send: self.send, locked: self.report_about.is_none(), refreshing: self.refreshing,
-            agents: &self.agents_ready, agent, fix_sent }
+            agents: if offline { &[] } else { &self.agents_ready }, agent, fix_sent }
     }
 
     /// A abertura desfez um conserto que o app interrompeu ao cair: diz quais arquivos voltaram, nunca calado.
@@ -208,7 +210,11 @@ impl SetupWizard {
         let restored = &recovery.restored;
         let failed = !restored.errors.is_empty();
         let mut lines: Vec<String> = Vec::new();
-        if recovery.skipped { lines.push(tr("setup_agent_recover_skipped")); }
+        match &recovery.offer {
+            Some(files) => lines.push(tr("setup_agent_recover_offer").replace("{arquivos}", &files.join(", "))),
+            None if recovery.skipped => lines.push(tr("setup_agent_recover_skipped")),
+            None => {}
+        }
         if !restored.changed.is_empty() { lines.push(tr("setup_agent_recovered").replace("{arquivos}", &restored.changed.join(", "))); }
         // O que não voltou fica listado (`restore_notes`), e fechar o aviso pára as tentativas sozinhas.
         if failed { lines.push(tr("setup_agent_recover_failed")); }
@@ -218,7 +224,10 @@ impl SetupWizard {
             else if recovery.skipped { tr("setup_agent_recover_skipped_title") } else { tr("setup_agent_recovered_title") };
         let close = Button::new("setup-agent-recovered-close").ghost().small().label(tr("close"))
             .on_click(cx.listener(|w, _, _, cx| w.dismiss_recovered(cx)));
-        Some(callout("setup-agent-recovered", title, lines, vec![close.into_any_element()]))
+        // Com um agente novo chamado, a anotação já é a dele: o botão sumiria com o conserto errado.
+        let undo = (recovery.offer.is_some() && self.agent.is_none()).then(|| Button::new("setup-agent-undo-anyway").outline().small()
+            .label(tr("setup_agent_recover_undo")).on_click(cx.listener(|w, _, _, cx| w.undo_anyway(cx))).into_any_element());
+        Some(callout("setup-agent-recovered", title, lines, undo.into_iter().chain([close.into_any_element()]).collect()))
     }
 
     fn render_details(&self, id: &'static str, cx: &mut Context<Self>) -> Div {

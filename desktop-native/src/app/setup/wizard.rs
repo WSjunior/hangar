@@ -254,15 +254,19 @@ fn stop_agent_process(pid: u32, started: &str) -> bool {
         run::kill(pid, started);
         if !wait_gone(pid, started, Duration::from_secs(3)) { crate::log_line(&format!("assistente: agente {pid} não saiu nem morto")); }
     }
-    // O líder conferido saiu, mas um comando dele pode seguir no grupo e escrever na pasta depois de desfeita. Enquanto o
-    // grupo tem membros, o número dele não volta a ser usado: ainda é o grupo do agente.
+    sweep_group(pid);
+    true
+}
+
+/// O líder conferido saiu, mas um comando dele pode seguir no grupo e escrever na pasta depois de desfeita. Enquanto o
+/// grupo tem membros, o número dele não volta a ser usado: ainda é o grupo do agente. Só para líder conferido.
+fn sweep_group(pid: u32) {
     let deadline = Instant::now() + Duration::from_secs(3);
     while run::group_alive(pid) && Instant::now() < deadline {
         run::kill_group(pid);
         std::thread::sleep(Duration::from_millis(100));
     }
     if run::group_alive(pid) { crate::log_line(&format!("assistente: grupo do agente {pid} ainda vivo")); }
-    true
 }
 
 /// Pára (se ainda roda) e desfaz. O `bool` diz que o agente não pôde ser parado: a pasta é desfeita mesmo assim.
@@ -285,6 +289,20 @@ pub(crate) struct Recovery {
     pub(super) not_stopped: bool,
     /// Aberto sozinho com a pasta já seguindo em frente (ou anotação de mais de um dia): nada foi desfeito.
     pub(super) skipped: bool,
+    /// Aberto pelo menu com a pasta já seguindo em frente: nada foi desfeito, e estes são os arquivos que "Desfazer mesmo
+    /// assim" voltaria (a anotação fica até a pessoa escolher).
+    pub(super) offer: Option<Vec<String>>,
+}
+
+/// Quem pediu a recuperação de um conserto interrompido.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Recover {
+    /// O app abriu sozinho ao iniciar: pasta adiante ou anotação velha não se desfaz, arquiva.
+    Launch,
+    /// Aberto pelo menu: pasta adiante não se desfaz sozinha, oferece o botão.
+    Menu,
+    /// "Desfazer mesmo assim": desfaz o que houver.
+    Anyway,
 }
 
 /// Arquiva a anotação e registra: o assistente deixa de abrir sozinho por causa dela.
@@ -295,17 +313,22 @@ fn archive_annotation(dir: &Path, why: &str) {
     }
 }
 
-/// O app caiu com o agente rodando: pára quem sobrou e devolve a pasta pela anotação. Aberto sozinho na abertura do app
-/// (`at_launch`), não desfaz uma pasta que já seguiu em frente nem uma anotação velha: arquiva e avisa. A segunda
+/// O app caiu com o agente rodando: pára quem sobrou e devolve a pasta pela anotação. Aberto sozinho na abertura do app,
+/// não desfaz uma pasta que já seguiu em frente nem uma anotação velha: arquiva e avisa. Pelo menu, pasta adiante também
+/// não se desfaz sozinha (voltaria uma atualização): avisa com a lista e espera "Desfazer mesmo assim". A segunda
 /// restauração que falha também arquiva, para o assistente não abrir a cada início sem saída.
-fn recover_agent_edits(at_launch: bool) -> Option<Recovery> {
+fn recover_agent_edits(mode: Recover) -> Option<Recovery> {
     let dir = run::state_dir()?;
     let snapshot = repo::load_at(&dir)?;
     let (pid, started) = (snapshot.agent_pid, snapshot.agent_started.clone());
-    if at_launch && (repo::stale(&snapshot) || repo::moved_on(&snapshot)) {
+    if mode == Recover::Launch && (repo::stale(&snapshot) || repo::moved_on(&snapshot)) {
         let not_stopped = pid.is_some_and(|pid| !stop_agent_process(pid, &started));
         archive_annotation(&dir, "a pasta mudou depois do agente ou a anotação é velha");
-        return Some(Recovery { restored: repo::Restored::default(), not_stopped, skipped: true });
+        return Some(Recovery { restored: repo::Restored::default(), not_stopped, skipped: true, offer: None });
+    }
+    if mode == Recover::Menu && repo::moved_on(&snapshot) {
+        let not_stopped = pid.is_some_and(|pid| !stop_agent_process(pid, &started));
+        return Some(Recovery { restored: repo::Restored::default(), not_stopped, skipped: true, offer: Some(repo::pending_changes(&snapshot)) });
     }
     let mut kept = snapshot.clone();
     let (restored, not_stopped) = stop_and_restore(pid, &started, Some(snapshot));
@@ -315,7 +338,7 @@ fn recover_agent_edits(at_launch: bool) -> Option<Recovery> {
         if kept.recover_failures >= 2 { archive_annotation(&dir, "segunda restauração com erro"); }
         else if let Err(e) = repo::save_at(&dir, &kept) { crate::log_line(&format!("assistente: anotação sem contagem: {e}")); }
     }
-    Some(Recovery { restored, not_stopped, skipped: false })
+    Some(Recovery { restored, not_stopped, skipped: false, offer: None })
 }
 
 /// A seção do conserto no relatório: comandos, explicação, o diff do que foi desfeito e as notas.
@@ -349,17 +372,6 @@ impl SetupWizard {
                 if this.update_in(cx, |w, window, cx| w.on_askpass(request, window, cx)).is_err() { break; }
             }
         }).detach();
-        // O app caiu no meio de um conserto: pára o agente que sobrou e devolve a pasta, fora da thread da janela, e avisa.
-        let recovery = cx.background_executor().spawn(async move { recover_agent_edits(at_launch) });
-        cx.spawn(async move |this, cx| {
-            let recovered = recovery.await;
-            let _ = this.update(cx, |w, cx| {
-                w.recovering = false;
-                w.recovered = recovered.filter(|r| r.skipped || r.not_stopped || !r.restored.changed.is_empty()
-                    || !r.restored.errors.is_empty() || r.restored.head_moved.is_some());
-                cx.notify();
-            });
-        }).detach();
         let mut wizard = Self {
             hangar, runtime, exe: std::env::current_exe().ok(), dest: local::default_dir().unwrap_or_default(), located: false,
             agents: vec!["claude"], agents_touched: false, installed: Vec::new(), outside: false, password_mode: PasswordMode::Generate,
@@ -374,6 +386,7 @@ impl SetupWizard {
             qr: Qr::Idle, tailscale_running: false, tailscale_checking: false, ticks: 0,
             focus: cx.focus_handle(), window: window.window_handle(), _subscriptions: subscriptions,
         };
+        wizard.recover(if at_launch { Recover::Launch } else { Recover::Menu }, cx);
         match origin {
             Origin::Entry(install) => { wizard.apply_install(install); wizard.located = true; }
             Origin::Menu => {}
@@ -382,6 +395,29 @@ impl SetupWizard {
         if !wizard.started { wizard.recheck(window, cx); }
         wizard.focus.focus(window, cx);
         wizard
+    }
+
+    /// O app caiu no meio de um conserto: pára o agente que sobrou e devolve a pasta, fora da thread da janela, e avisa.
+    fn recover(&mut self, mode: Recover, cx: &mut Context<Self>) {
+        self.recovering = true;
+        let recovery = cx.background_executor().spawn(async move { recover_agent_edits(mode) });
+        cx.spawn(async move |this, cx| {
+            let recovered = recovery.await;
+            let _ = this.update(cx, |w, cx| {
+                w.recovering = false;
+                w.recovered = recovered.filter(|r| r.skipped || r.not_stopped || !r.restored.changed.is_empty()
+                    || !r.restored.errors.is_empty() || r.restored.head_moved.is_some());
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    /// "Desfazer mesmo assim" do aviso de pasta adiante. Com um agente novo chamado, a anotação já é a dele: não mexe.
+    pub(super) fn undo_anyway(&mut self, cx: &mut Context<Self>) {
+        if self.agent.is_some() || self.recovering || !self.recovered.as_ref().is_some_and(|r| r.offer.is_some()) { return; }
+        self.recovered = None;
+        self.recover(Recover::Anyway, cx);
+        cx.notify();
     }
 
     /// A pasta achada decide onde roda e se a senha do celular já existe ("senha atual mantida").
@@ -676,11 +712,13 @@ impl SetupWizard {
         let grew = self.read_tails(false);
         if self.runs.latest().is_some_and(Progress::mismatch) {
             if let Some((pid, started)) = self.active_run() {
-                // `stop` lê a identidade e, no Windows, roda o `taskkill`: fora da thread da janela.
-                cx.background_executor().spawn(async move {
-                    let started = if started.is_empty() { run::identity(pid).unwrap_or_default() } else { started };
-                    run::stop(pid, &started);
-                }).detach();
+                // Sem identidade guardada não há o que conferir: nenhum sinal, o script termina sozinho.
+                if started.is_empty() {
+                    crate::log_line(&format!("assistente: versão diferente; script {pid} sem identidade guardada, nenhum sinal enviado"));
+                } else {
+                    // `stop` confere a identidade e, no Windows, roda o `taskkill`: fora da thread da janela.
+                    cx.background_executor().spawn(async move { run::stop(pid, &started); }).detach();
+                }
             }
             self.fail(Failure::app(Some("versao-diferente"), tr("setup_failure_protocol"), before), cx);
             return Watch::Stop;
@@ -968,14 +1006,15 @@ impl SetupWizard {
         if let Some(first) = self.agents_ready.first().copied() { self.details_open = true; self.ask_agent(first, cx); }
     }
 
-    /// "Fechar" do aviso da recuperação: com algo que não voltou, a anotação é arquivada — senão o assistente abriria a
-    /// cada início sem saída. Com um agente novo já chamado, a anotação é a dele: fica.
+    /// "Fechar" do aviso da recuperação: com algo que não voltou (ou a pessoa não quis desfazer), a anotação é arquivada —
+    /// senão o assistente abriria a cada início sem saída. Com um agente novo já chamado, a anotação é a dele: fica.
     pub(super) fn dismiss_recovered(&mut self, cx: &mut Context<Self>) {
-        let failed = self.recovered.take().is_some_and(|r| !r.restored.errors.is_empty());
-        if failed && self.agent.is_none() && let Some(dir) = run::state_dir() {
+        let why = self.recovered.take().and_then(|r| if r.offer.is_some() { Some("aviso fechado sem desfazer a pasta adiante") }
+            else if !r.restored.errors.is_empty() { Some("aviso fechado com a pasta sem voltar toda") } else { None });
+        if let Some(why) = why && self.agent.is_none() && let Some(dir) = run::state_dir() {
             // Até arquivar, `ask_agent` recusa: senão a anotação nova dele seria a arquivada.
             self.recovering = true;
-            let task = cx.background_executor().spawn(async move { archive_annotation(&dir, "aviso fechado com a pasta sem voltar toda") });
+            let task = cx.background_executor().spawn(async move { archive_annotation(&dir, why) });
             cx.spawn(async move |this, cx| {
                 task.await;
                 let _ = this.update(cx, |w, cx| { w.recovering = false; cx.notify(); });
@@ -1014,7 +1053,12 @@ impl SetupWizard {
                 if exited { break; }
             }
             let Ok(Some((snapshot, done))) = this.update(cx, |w, cx| w.take_snapshot(cx)) else { return };
-            let restored = cx.background_executor().spawn(async move { finish_restore(snapshot) }).await;
+            let restored = cx.background_executor().spawn(async move {
+                // Saiu sozinho: um filho dele ainda vivo no grupo escreveria na pasta depois de desfeita. Só com a
+                // identidade conferida na largada o grupo é sabidamente dele.
+                if let Some(pid) = snapshot.agent_pid.filter(|_| !snapshot.agent_started.is_empty()) { sweep_group(pid); }
+                finish_restore(snapshot)
+            }).await;
             // Fechado enquanto desfazia: quem fechou espera esta resposta para mandar o relatório com o diff.
             let _ = done.send(restored.clone());
             let _ = window.update(cx, |_, window, cx| this.update(cx, |w, cx| w.recheck_after_agent(restored, window, cx)));
