@@ -589,8 +589,12 @@ def preview_rows() -> dict:
 # ── /input e /steer: o corpo HTTP que o Python devolve para cada resposta do ator ─────────────────
 # Chama o `input_prompt` e o `steer_session` de verdade, com um coordenador falso que responde a
 # disposição do caso. O Rust lê estes arquivos e tem de responder o mesmo corpo e o mesmo código.
-# Divergência deliberada: /steer sem terminal recusado pelo ator vira 409 `erro_sem_turno` (antes o
-# ValueError virava 500; a rota do Python foi corrigida junto).
+# Divergências deliberadas, já espelhadas na rota do Python:
+# - /steer sem terminal recusado pelo ator vira 409 `erro_sem_turno` (antes o ValueError virava 500);
+# - /steer com terminal, falha do runtime no controle ou no confirm vira 502 `erro_envio_falhou` (antes 500).
+# Diferenças que o golden NÃO compara: o `msg` de falha do runtime (Rust: `codigo: mensagem`; Python
+# real: "IPC recusou a operação (...)") e o `codigo` do diário `runtime.send_failed` (Rust: código do
+# runtime; Python: nome da classe da exceção). Aqui a exceção do ator já traz o texto `codigo: mensagem`.
 INPUT_OP = "OP"
 # (nome, terminal, texto, steer, resposta, fila-promovida). Resposta é (disposição, payload) ou o
 # texto da exceção que o ator levanta; fila-promovida é a resposta do `steer_queue`, quando ele roda.
@@ -647,6 +651,8 @@ STEER_CASES = [
     ("terminal_deferred", True, None, ("deferred", {}), None),
     ("terminal_rejected", True, None, ("rejected", {}), None),
     ("terminal_unknown", True, None, ("unknown", {}), None),
+    ("terminal_op_error", True, None, "terminal_closed: pane saiu", None),
+    ("terminal_confirm_error", True, None, ("accepted", {}), "terminal_closed: pane saiu"),
 ]
 
 
@@ -681,6 +687,8 @@ def session_write_rows() -> tuple[list, list]:
 
         async def op(self, name, command, operation_id):
             if command["kind"] == "confirm":
+                if isinstance(self.confirm, str):
+                    raise RuntimeError(self.confirm)
                 return self.confirm or {}
             chosen = self.queue if command["kind"] == "control" and command["control"] == "steer_queue" and self.queue else self.main
             if isinstance(chosen, str):
@@ -732,8 +740,8 @@ def session_write_rows() -> tuple[list, list]:
     return asyncio.run(main())
 
 
-def write_session_write() -> None:
-    out = HERE / "session_write"
+def write_session_write(out: Path | None = None) -> None:
+    out = out or HERE / "session_write"
     out.mkdir(parents=True, exist_ok=True)
     inputs, steers = session_write_rows()
     for name, rows in (("input.json", inputs), ("steer.json", steers)):

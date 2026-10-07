@@ -4965,9 +4965,15 @@ async def steer_session(name: str, body: InputBody | None = None):
         from app.runtime_terminal import route
         owner = runtime_coordinator.current()
         if owner is not None and getattr(owner, "legacy", None) is not None:
-            result = await route(owner, name, {"kind":"control", "control":"steer", "payload":{}})
+            try:
+                result = await route(owner, name, {"kind":"control", "control":"steer", "payload":{}})
+                confirmed = await owner.op(name, {"kind":"confirm"}, uuid.uuid4().hex) if result is not None else None
+            except TerminalControlError:
+                raise       # o handler do app responde 409
+            except RuntimeError as e:
+                # Falha do runtime (não recusa do controle): erro com código, não 500 genérico.
+                raise HTTPException(502, detail=erro("erro_envio_falhou", str(e), erro=str(e))) from None
             if result is not None:
-                confirmed = await owner.op(name, {"kind":"confirm"}, uuid.uuid4().hex)
                 return {"ok":True, "promoted":result["disposition"] == "accepted" and
                     (result.get("payload") or {}).get("promoted", True), "confirmed":confirmed.get("confirmed", 0)}
     # `is False` e nao `not ...`: o unico produtor de False e o tmux recusando a tecla; um dublê de

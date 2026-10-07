@@ -1,5 +1,5 @@
 //! Rotas de escrita de sessão Claude. O Rust as reivindica na tabela (`table`) e decide por pedido;
-//! enquanto o corpo de cada uma não existe, a decisão `Rust` ainda repassa ao Python (`relay`).
+//! `/input` e `/steer` já têm corpo no Rust (`input`); as demais ainda repassam ao Python (`relay`).
 //!
 //! Ordem fixa de `admit`: dono → corpo → porta (`enter`) → entrada (`writable`) → decisão. A entrada
 //! é procurada DEPOIS da porta: a achada antes de esperar pode ser a que o relançamento parou.
@@ -33,7 +33,6 @@ const BODY_LIMIT: usize = 100 * 1024 * 1024;
 const BUSY_MSG: &str = "A sessão está trocando de agente; tente novamente quando terminar.";
 
 /// O que a rota precisa para escrever: o passe mantém a porta aberta até o fim da escrita.
-#[allow(dead_code)] // name/target são lidos pelos corpos das Tasks 4 a 6
 pub(crate) struct Ctx {
     pub(crate) st: Arc<AppState>,
     pub(crate) name: String,
@@ -44,7 +43,6 @@ pub(crate) struct Ctx {
 }
 
 impl Ctx {
-    #[allow(dead_code)] // lido pelos corpos das Tasks 4 a 6
     pub(crate) fn headers(&self) -> &axum::http::HeaderMap { &self.parts.headers }
 }
 
@@ -115,15 +113,15 @@ pub(crate) async fn admit(st: &Arc<AppState>, peer: SocketAddr, req: Request, ro
     Ok((Ctx { st: st.clone(), name, target, pass: pass_in, parts, fwd }, bytes))
 }
 
-/// Provisório (Tasks 4 a 6 trocam cada rota pelo corpo dela): repassa ao Python o que o Rust já
-/// admitiu, soltando antes o passe.
+/// Repassa ao Python o que o Rust admitiu mas não atende (corpo que o FastAPI recusa, ou rota sem
+/// corpo ainda), soltando antes o passe.
 pub(crate) async fn relay(ctx: Ctx, bytes: Bytes) -> Response {
     let Ctx { st, pass: held, parts, fwd, .. } = ctx;
     drop(held);
     forward_whole(&st, parts, bytes, &fwd).await
 }
 
-/// Corpo provisório comum dos handlers: admite e repassa.
+/// Corpo provisório das rotas que ainda não têm o próprio: admite e repassa.
 pub(crate) async fn through(st: &Arc<AppState>, peer: SocketAddr, req: Request, route: WriteRoute) -> Response {
     match admit(st, peer, req, route, |_| false).await {
         Ok((ctx, bytes)) => relay(ctx, bytes).await,

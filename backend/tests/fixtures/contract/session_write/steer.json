@@ -339,5 +339,46 @@
     }
    }
   }
+ },
+ {
+  "name": "terminal_op_error",
+  "terminal": true,
+  "text": null,
+  "reply": "terminal_closed: pane saiu",
+  "confirm": null,
+  "expect": {
+   "status": 502,
+   "body": {
+    "detail": {
+     "code": "erro_envio_falhou",
+     "params": {
+      "erro": "terminal_closed: pane saiu"
+     },
+     "msg": "terminal_closed: pane saiu"
+    }
+   }
+  }
+ },
+ {
+  "name": "terminal_confirm_error",
+  "terminal": true,
+  "text": null,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "confirm": "terminal_closed: pane saiu",
+  "expect": {
+   "status": 502,
+   "body": {
+    "detail": {
+     "code": "erro_envio_falhou",
+     "params": {
+      "erro": "terminal_closed: pane saiu"
+     },
+     "msg": "terminal_closed: pane saiu"
+    }
+   }
+  }
  }
 ]

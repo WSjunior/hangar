@@ -62,14 +62,18 @@ fn input_answers_match_the_python_golden() {
 #[test]
 fn steer_answers_match_the_python_golden() {
     let cases = golden("steer.json");
-    assert!(cases.len() >= 15);
+    assert!(cases.len() >= 19);
     for case in cases {
         let name = case["name"].as_str().unwrap();
         let control = reply(&case["reply"]);
         let (status, body) = if case["terminal"].as_bool().unwrap() {
             match steer_terminal_control(&control) {
                 Err(refused) => refused,
-                Ok(promoted) => steer_terminal_done(promoted, &Ok(if case["confirm"].is_null() { json!({}) } else { case["confirm"].clone() })),
+                Ok(promoted) => steer_terminal_done(promoted, &match &case["confirm"] {
+                    Value::Null => Ok(json!({})),
+                    text if text.is_string() => reply(text).map(|_| json!({})),
+                    done => Ok(done.clone()),
+                }),
             }
         } else {
             steer_headless(!case["text"].is_null(), &control)
@@ -246,6 +250,18 @@ async fn bodies_python_would_refuse_still_reach_python() {
 }
 
 #[tokio::test]
+async fn deferred_submit_with_steer_promotes_that_very_entry() {
+    let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
+    open_headless(&registry, dir.path(), "s", "written").await;
+    let (python, server) = serve(registry, Duration::from_secs(5)).await;
+    // O primeiro envio abre o turno e o cano nunca o termina: o segundo fica adiado na fila.
+    assert_eq!(post(server, "s", "input", r#"{"text":"um"}"#).await.1["delivered"], true);
+    let (status, body) = post(server, "s", "input", r#"{"text":"dois","steer":true}"#).await;
+    assert_eq!((status, &body), (200, &json!({"ok": true, "delivered": true, "steered": true, "native": false})), "{body}");
+    assert_eq!(python.hits_to("/api/sessions/s/input"), 0);
+}
+
+#[tokio::test]
 async fn headless_steer_with_text_is_served_in_rust() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
     open_headless(&registry, dir.path(), "s", "written").await;
@@ -283,7 +299,8 @@ async fn unhealthy_terminal_entry_sends_input_to_python() {
     open_sick_terminal(&registry, dir.path(), "t").await;
     let target = registry.writable("t").await.unwrap();
     assert!(target.terminal && !target.healthy, "a entrada com o vínculo trocado está doente");
-    assert!(target.provider == "claude");
+    let snapshot = registry.snapshots().await.unwrap().into_iter().find(|e| e.key == "k-t").unwrap();
+    assert_eq!(snapshot.data["error"], "terminal_facts", "doente pelo motivo do vínculo, não por outro");
     let (python, server) = serve(registry, Duration::from_secs(5)).await;
     assert_eq!(post(server, "t", "input", r#"{"text":"oi"}"#).await, (200, "from-python".into()));
     assert_eq!(python.hits_to("/api/sessions/t/input"), 1);
