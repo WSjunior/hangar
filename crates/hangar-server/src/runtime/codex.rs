@@ -1,5 +1,7 @@
 use super::{LiveBuffer,protocol::*};
 use hangar_api::state::StateEvent;
+use hangar_codex::proto::{self as wire,ClientRequest};
+use serde::Deserialize;
 use serde_json::{Value,json};
 use std::collections::{BTreeMap,BTreeSet};
 
@@ -54,27 +56,31 @@ struct AsyncQuestions {
 }
 
 impl AsyncQuestions {
-    fn observe(&mut self,thread:&str,item:&Value) {
-        let Some(id) = item["id"].as_str() else { return };
-        let kind = item["type"].as_str().unwrap_or("");
-        if self.seen.contains(id) || !(kind == "userMessage" || kind == "agentMessage" && item["delivery"] == "async"
-            && item["questions"].as_array().is_some_and(|questions|!questions.is_empty())) { return; }
-        self.seen.insert(id.into());
-        if let Some(items) = self.during_load.as_mut() { items.push(item.clone()); }
-        if kind == "agentMessage" {
-            for (index,question) in item["questions"].as_array().unwrap().iter().enumerate() {
-                let Some(title) = question["title"].as_str().filter(|s|!s.trim().is_empty()) else { continue };
+    /// Decide pelo item tipado; o cru é o que fica guardado para o snapshot.
+    fn observe(&mut self,thread:&str,item:&wire::ThreadItem,raw:&Value) {
+        let (id,questions) = match item {
+            wire::ThreadItem::AgentMessage { id,delivery:Some(delivery),questions:Some(questions),.. }
+                if delivery == "async" && !questions.is_empty() => (id,Some(questions)),
+            wire::ThreadItem::UserMessage { id,.. } => (id,None),
+            _ => return,
+        };
+        if id.is_empty() || self.seen.contains(id) { return; }
+        self.seen.insert(id.clone());
+        if let Some(items) = self.during_load.as_mut() { items.push(raw.clone()); }
+        if let Some(questions) = questions {
+            for (index,question) in questions.iter().enumerate() {
+                let title = question.title.as_str();
+                if title.trim().is_empty() { continue; }
                 let request_id = format!("async:{thread}:{id}:{index}");
                 if self.resolved.contains(&request_id) { continue; }
-                let options:Vec<_> = question["options"].as_array().map(|options|options.iter().filter_map(Value::as_str)
-                    .map(|label|json!({"label":label,"description":""})).collect()).unwrap_or_default();
+                let options:Vec<_> = question.options.iter().flatten().filter_map(Value::as_str)
+                    .map(|label|json!({"label":label,"description":""})).collect();
                 self.pending.push((request_id.clone(),json!({"provider":"codex","request_id":request_id,"is_async":true,
                     "questions":[{"id":"answer","header":(index+1).to_string(),"question":title,"multiSelect":false,
                     "isOther":true,"isSecret":false,"options":options}]})));
             }
-        } else {
-            let text = item["content"].as_array().map(|blocks|blocks.iter().filter(|b|b["type"] == "text")
-                .filter_map(|b|b["text"].as_str()).collect::<String>()).unwrap_or_default();
+        } else if let wire::ThreadItem::UserMessage { content,.. } = item {
+            let text = content.iter().filter_map(|block|match block { wire::UserInput::Text { text }=>Some(text.as_str()),_=>None }).collect::<String>();
             if let Some(count) = self.echoes.get_mut(&text).filter(|c|**c > 0) { *count -= 1; return; }
             let text = text.trim();
             if let Some(body) = text.strip_prefix("<send_user_message_question_reply>").and_then(|s|s.strip_suffix("</send_user_message_question_reply>")) {
@@ -96,10 +102,11 @@ impl AsyncQuestions {
 
     fn hydrate(&mut self,thread_id:&str,thread:&Value) {
         let mut restored = Self { skipped:self.skipped.clone(),resolved:self.skipped.clone(),..Self::default() };
+        let typed = |item:&Value|wire::ThreadItem::deserialize(item).unwrap_or(wire::ThreadItem::Unknown);
         if let Some(turns) = thread["turns"].as_array() {
-            for turn in turns { if let Some(items) = turn["items"].as_array() { for item in items { restored.observe(thread_id,item); } } }
+            for turn in turns { if let Some(items) = turn["items"].as_array() { for item in items { restored.observe(thread_id,&typed(item),item); } } }
         }
-        for item in self.during_load.take().unwrap_or_default() { restored.observe(thread_id,&item); }
+        for item in self.during_load.take().unwrap_or_default() { restored.observe(thread_id,&typed(&item),&item); }
         for (id,text) in &self.local_answers { restored.record_answer(id,text); }
         *self = restored;
     }
@@ -170,12 +177,29 @@ fn approval(mode:&str) -> &str { if mode == "Full Access" { "never" } else { "on
 fn sandbox(mode:&str) -> &str { match mode { "Ask for approval"=>"read-only","Approve for me"=>"workspace-write",_=>"danger-full-access" } }
 
 /// Código do problema pelo `codexErrorInfo` (texto, ou objeto de chave única); None = sem classe própria.
-fn error_class(error:&Value) -> Option<&'static str> {
-    let info = &error["codexErrorInfo"];
+fn error_class(info:&Value) -> Option<&'static str> {
     let info = info.as_str().or_else(||info.as_object().and_then(|fields|fields.keys().next()).map(String::as_str))?;
     match info { "usageLimitExceeded" | "rateLimitExceeded"=>Some("codex_limite_uso"),"unauthorized"=>Some("codex_sem_login"),_=>None }
 }
+/// `item/agentMessage/delta` → `item_agentmessage_delta` (o diário aceita `[a-z0-9_]{1,64}`).
+fn decode_code(method:&str) -> String {
+    method.chars().map(|c|if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' }).take(64).collect()
+}
+
+/// Resposta lida pelo tipo sem copiar a linha; formato inesperado vira o padrão (campos vazios).
+fn decode<T:for<'de> Deserialize<'de> + Default>(value:&Value) -> T { T::deserialize(value).unwrap_or_default() }
+
+/// Texto de entrada da pessoa: a lista que o `prepare_prompt` montou, ou só o texto.
+fn input_of(payload:&Value,text:&str) -> Vec<Value> {
+    payload["input"].as_array().cloned().unwrap_or_else(||vec![json!({"type":"text","text":text})])
+}
+
 fn retry_problem(problem:Option<&str>) -> bool { matches!(problem,Some("codex_sem_conexao" | "codex_limite_uso")) }
+
+/// Pedido do servidor guardado cru (vai ao snapshot como veio), lido pelo tipo na hora de mostrar.
+fn decoded(request:&Value) -> wire::ServerRequest {
+    wire::ServerRequest::decode(request["method"].as_str().unwrap_or(""),&request["params"]).unwrap_or(wire::ServerRequest::Unknown)
+}
 
 fn unsupported_notice(request:&Value) -> Option<String> {
     let method = request["method"].as_str()?;
@@ -230,11 +254,15 @@ impl Engine {
         state.label = self.compacting.then(||"Compactando…".into());
         state.question = None; state.options = None;
         if let Some((_,request)) = pending_approval {
-            let params = &request["params"];
-            let target = if request["method"] == "item/fileChange/requestApproval" { format!("Editar arquivos{}",
-                params["grantRoot"].as_str().map_or(String::new(),|p|format!(" em {p}"))) }
-                else { format!("Rodar `{}`{}",params["command"].as_str().unwrap_or("?"),params["cwd"].as_str().map_or(String::new(),|p|format!(" em {p}"))) };
-            state.question = Some(format!("{target}?{}",params["reason"].as_str().map_or(String::new(),|r|format!(" {r}"))));
+            let place = |path:Option<String>|path.map_or(String::new(),|p|format!(" em {p}"));
+            let (target,reason) = match decoded(request) {
+                wire::ServerRequest::FileChangeApproval(p) => (format!("Editar arquivos{}",place(p.grant_root)),p.reason),
+                wire::ServerRequest::CommandExecutionApproval(p) => (format!("Rodar `{}`{}",p.command.as_deref().unwrap_or("?"),place(p.cwd)),p.reason),
+                // Pedido fora do formato continua na tela, sem os detalhes.
+                _ if request["method"] == "item/fileChange/requestApproval" => ("Editar arquivos".into(),None),
+                _ => ("Rodar `?`".into(),None),
+            };
+            state.question = Some(format!("{target}?{}",reason.map_or(String::new(),|r|format!(" {r}"))));
             state.options = Some(vec!["Permitir".into(),"Negar".into(),"Sempre permitir".into()]);
         }
         serde_json::to_value(state).unwrap()
@@ -255,10 +283,11 @@ impl Engine {
 
     fn blocking_question(&self) -> Option<Value> {
         let (id,request) = self.server_requests.iter().find(|(_,r)|r["method"] == "item/tool/requestUserInput")?;
-        let questions:Vec<_> = request["params"]["questions"].as_array()?.iter().map(|q|json!({
-            "id":q["id"],"header":q["header"],"question":q["question"],"multiSelect":false,
-            "isOther":q["isOther"].as_bool().unwrap_or(false),"isSecret":q["isSecret"].as_bool().unwrap_or(false),
-            "options":q.get("options").cloned().unwrap_or_else(||json!([]))})).collect();
+        let wire::ServerRequest::ToolRequestUserInput(params) = decoded(request) else { return None };
+        let questions:Vec<_> = params.questions.into_iter().map(|q|json!({
+            "id":q.id,"header":q.header,"question":q.question,"multiSelect":false,
+            "isOther":q.is_other.unwrap_or(false),"isSecret":q.is_secret.unwrap_or(false),
+            "options":q.options.unwrap_or_default()})).collect();
         Some(json!({"provider":"codex","request_id":id,"questions":questions}))
     }
 
@@ -286,6 +315,11 @@ impl Engine {
         if !format { return; }
         let payload = json!({"model":self.model,"effort":self.effort,"token_usage":self.token_usage,"rate_limits":self.rate_limits});
         if self.format_gate.due(&payload,self.clock.monotonic_s) { self.policy("format_status",payload,effects); }
+    }
+
+    fn send(&mut self,operation_id:String,request:ClientRequest,continuation:Option<Value>,effects:&mut Vec<Effect>) {
+        let (method,params) = request.into_parts();
+        self.rpc(operation_id,method,params,continuation,effects);
     }
 
     fn rpc(&mut self,operation_id:String,method:&str,params:Value,continuation:Option<Value>,effects:&mut Vec<Effect>) {
@@ -325,14 +359,16 @@ impl Engine {
         if !pending.acknowledged || !pending.candidate || pending.verifying { return; }
         pending.candidate = false; pending.verifying = true;
         let parent = pending.operation_id.clone(); let thread = pending.thread_id.clone();
-        self.rpc(format!("{parent}:verify:{}",self.counter+1),"thread/resume",json!({"threadId":thread}),
+        self.send(format!("{parent}:verify:{}",self.counter+1),ClientRequest::ThreadResume(wire::ThreadResumeParams { thread_id:thread }),
             Some(json!({"kind":"service_tier_confirm","parent":parent})),effects);
     }
 
     fn send_service_tier(&mut self,effects:&mut Vec<Effect>) {
         let Some(pending) = self.service_tier_pending.as_ref() else { return };
-        self.rpc(pending.operation_id.clone(),"thread/settings/update",json!({"threadId":pending.thread_id,"serviceTier":pending.tier}),
-            Some(json!({"kind":"service_tier_update","parent":pending.operation_id})),effects);
+        let (id,parent) = (pending.operation_id.clone(),json!({"kind":"service_tier_update","parent":pending.operation_id}));
+        let request = ClientRequest::ThreadSettingsUpdate(wire::ThreadSettingsUpdateParams { thread_id:pending.thread_id.clone(),
+            service_tier:Some(pending.tier.clone()),..Default::default() });
+        self.send(id,request,Some(parent),effects);
     }
 
     fn restore_service_tier(&mut self,result:&Value,revision:u64,effects:&mut Vec<Effect>) {
@@ -367,9 +403,9 @@ impl Engine {
         match next["kind"].as_str() {
             Some("service_tier_catalog") => {
                 let pending = self.service_tier_pending.as_ref().unwrap();
-                let supported = pending.model == self.model && self.model.is_some() && result["data"].as_array().is_some_and(|models|
-                    models.iter().any(|model|model["model"].as_str() == self.model.as_deref() && model["hidden"] != true
-                        && model["serviceTiers"].as_array().is_some_and(|tiers|tiers.iter().any(|tier|tier["id"] == "priority" && tier["hidden"] != true))));
+                let supported = pending.model == self.model && self.model.is_some() && decode::<wire::ModelListResponse>(result).data.iter()
+                    .any(|model|Some(model.model.as_str()) == self.model.as_deref() && !model.hidden
+                        && model.service_tiers.as_ref().is_some_and(|tiers|tiers.iter().any(|tier|tier["id"] == "priority" && tier["hidden"] != true)));
                 if !supported { self.finish_service_tier(Disposition::Rejected,json!({"error":"Fast não está disponível para o modelo atual"}),effects); }
                 else { self.send_service_tier(effects); }
             }
@@ -426,8 +462,10 @@ impl Engine {
         self.reconnect = reconnect;
         self.ready = false;
         let mut effects = Vec::new();
-        self.rpc(format!("{operation_id}:initialize"),"initialize",json!({"clientInfo":{"name":"hangar","title":null,"version":"0.1.0"},
-            "capabilities":{"experimentalApi":true}}),Some(json!({"kind":"bootstrap","parent":operation_id})),&mut effects);
+        let request = ClientRequest::Initialize(wire::InitializeParams {
+            client_info:wire::ClientInfo { name:"hangar".into(),title:None,version:"0.1.0".into() },
+            capabilities:Some(wire::InitializeCapabilities { experimental_api:true }) });
+        self.send(format!("{operation_id}:initialize"),request,Some(json!({"kind":"bootstrap","parent":operation_id})),&mut effects);
         self.changed(&mut effects,true);
         Ok(effects)
     }
@@ -465,6 +503,15 @@ impl Engine {
         if let Some(text) = self.thinking.clear() { self.publish_on("thinking",text,effects); }
     }
 
+    fn thread_read(&self,include_turns:bool) -> ClientRequest {
+        ClientRequest::ThreadRead(wire::ThreadReadParams { thread_id:self.thread_id.clone(),include_turns })
+    }
+
+    /// Sem `cwd` a lista vai vazia, e o Codex usa a pasta da sessão.
+    fn skills_list(&self) -> ClientRequest {
+        ClientRequest::SkillsList(wire::SkillsListParams { cwds:string(&self.metadata["cwd"]).into_iter().collect() })
+    }
+
     fn terminate_after(&self,turn:&str) -> Option<Value> {
         let processes:Vec<_> = self.running_commands.values().filter(|(owner,_)|owner == turn).map(|(_,process)|process.clone()).collect();
         (!processes.is_empty()).then(||json!({"kind":"terminate_after","processes":processes}))
@@ -484,48 +531,53 @@ impl Engine {
                 if !self.deliverable() { return Ok(vec![Effect::Reply { operation_id:id,disposition:Disposition::Deferred,payload:json!({}) }]); }
                 if payload["skill_name"].is_string() && payload["skill_lookup_done"] != true {
                     let next = json!({"kind":"skill_lookup","parent":id,"command":{"operation_id":id,"kind":"input","payload":payload}});
-                    self.rpc(format!("{id}:skills"),"skills/list",json!({"cwds":[self.metadata["cwd"]]}),Some(next),&mut effects);
+                    self.send(format!("{id}:skills"),self.skills_list(),Some(next),&mut effects);
                     self.changed(&mut effects,false);
                     return Ok(effects);
                 }
                 let text = payload["text"].as_str().ok_or_else(||error("mensagem sem texto"))?;
                 // Sem `summary` o pensamento sai cifrado no rollout e não há o que mostrar.
-                self.rpc(id,"turn/start",json!({"threadId":self.thread_id,"approvalPolicy":approval(&self.permission_mode),"summary":"detailed",
-                    "input":payload.get("input").cloned().unwrap_or_else(||json!([{"type":"text","text":text}]))}),None,&mut effects);
+                let request = ClientRequest::TurnStart(wire::TurnStartParams { thread_id:self.thread_id.clone(),
+                    approval_policy:Some(approval(&self.permission_mode).into()),summary:Some("detailed".into()),input:input_of(&payload,text) });
+                self.send(id,request,None,&mut effects);
             }
             OperationKind::Steer => {
                 if payload["skill_name"].is_string() && payload["skill_lookup_done"] != true {
                     let next = json!({"kind":"skill_lookup","parent":id,"command":{"operation_id":id,"kind":"steer","payload":payload}});
-                    self.rpc(format!("{id}:skills"),"skills/list",json!({"cwds":[self.metadata["cwd"]]}),Some(next),&mut effects);
+                    self.send(format!("{id}:skills"),self.skills_list(),Some(next),&mut effects);
                     self.changed(&mut effects,false);
                     return Ok(effects);
                 }
                 let text = payload["text"].as_str().filter(|s|!s.trim().is_empty()).ok_or_else(||error("a orientação não pode estar vazia"))?;
                 let turn = payload["turn_id"].as_str().or(self.turn_id.as_deref()).ok_or_else(||error("não há turno em andamento para orientar"))?;
                 if !self.in_progress { return Err(error("não há turno em andamento para orientar")); }
-                self.rpc(id,"turn/steer",json!({"threadId":self.thread_id,"expectedTurnId":turn,
-                    "input":payload.get("input").cloned().unwrap_or_else(||json!([{"type":"text","text":text}]))}),None,&mut effects);
+                let request = ClientRequest::TurnSteer(wire::TurnSteerParams { thread_id:self.thread_id.clone(),
+                    expected_turn_id:turn.into(),input:input_of(&payload,text) });
+                self.send(id,request,None,&mut effects);
             }
             OperationKind::Interrupt => {
                 if let Some(turn) = self.turn_id.clone() {
                     let next = self.terminate_after(&turn);
-                    self.rpc(id,"turn/interrupt",json!({"threadId":self.thread_id,"turnId":turn}),next,&mut effects);
+                    self.send(id,ClientRequest::TurnInterrupt(wire::TurnInterruptParams { thread_id:self.thread_id.clone(),turn_id:turn }),next,&mut effects);
                 } else {
-                    self.rpc(format!("{id}:read"),"thread/read",json!({"threadId":self.thread_id,"includeTurns":true}),
-                        Some(json!({"kind":"interrupt","parent":id})),&mut effects);
+                    self.send(format!("{id}:read"),self.thread_read(true),Some(json!({"kind":"interrupt","parent":id})),&mut effects);
                 }
             }
             OperationKind::Compact => {
                 if !self.idle() { return Err(error("espere o Codex terminar e responda às perguntas antes de compactar")); }
-                self.rpc(id,"thread/compact/start",json!({"threadId":self.thread_id}),None,&mut effects);
+                self.send(id,ClientRequest::ThreadCompactStart(wire::ThreadCompactStartParams { thread_id:self.thread_id.clone() }),None,&mut effects);
             }
-            OperationKind::ListModels => self.rpc(id,"model/list",json!({}),None,&mut effects),
-            OperationKind::ListSkills => self.rpc(id,"skills/list",json!({"cwds":[self.metadata["cwd"]]}),None,&mut effects),
-            OperationKind::ReadRateLimits => self.rpc(id,"account/rateLimits/read",json!({}),None,&mut effects),
-            OperationKind::ReadSettings => self.rpc(id,"thread/read",json!({"threadId":self.thread_id,
-                "includeTurns":payload["include_turns"].as_bool().unwrap_or(false)}),None,&mut effects),
-            OperationKind::SetModel | OperationKind::SetEffort => self.rpc(id,"thread/settings/update",json!({"threadId":self.thread_id,
-                "model":payload.get("model").cloned().unwrap_or_else(||json!(self.model)),"effort":payload.get("effort").cloned().unwrap_or_else(||json!(self.effort))}),None,&mut effects),
+            OperationKind::ListModels => self.send(id,ClientRequest::ModelList(Default::default()),None,&mut effects),
+            OperationKind::ListSkills => self.send(id,self.skills_list(),None,&mut effects),
+            OperationKind::ReadRateLimits => self.send(id,ClientRequest::AccountRateLimitsRead,None,&mut effects),
+            OperationKind::ReadSettings => self.send(id,self.thread_read(payload["include_turns"].as_bool().unwrap_or(false)),None,&mut effects),
+            OperationKind::SetModel | OperationKind::SetEffort => {
+                // Campo presente no pedido vence o atual; `null` no pedido limpa.
+                let pick = |key:&str,current:&Option<String>|payload.get(key).map_or_else(||current.clone(),|value|string(value));
+                let request = ClientRequest::ThreadSettingsUpdate(wire::ThreadSettingsUpdateParams { thread_id:self.thread_id.clone(),
+                    model:Some(pick("model",&self.model)),effort:Some(pick("effort",&self.effort)),..Default::default() });
+                self.send(id,request,None,&mut effects);
+            }
             OperationKind::SetServiceTier => {
                 let tier = payload["service_tier"].as_str().filter(|tier|["priority","default"].contains(tier))
                     .ok_or_else(||error("Escolha Fast inválida"))?;
@@ -539,13 +591,12 @@ impl Engine {
                 self.service_tier_pending = Some(ServiceTierChange { operation_id:id.clone(),thread_id:self.thread_id.clone(),model:self.model.clone(),
                     tier:tier.into(),deadline:clock.monotonic_s+10.0,acknowledged:false,candidate:false,verifying:false });
                 if tier == "priority" {
-                    self.rpc(format!("{id}:catalog"),"model/list",json!({}),Some(json!({"kind":"service_tier_catalog","parent":id})),&mut effects);
+                    self.send(format!("{id}:catalog"),ClientRequest::ModelList(Default::default()),Some(json!({"kind":"service_tier_catalog","parent":id})),&mut effects);
                 } else { self.send_service_tier(&mut effects); }
             }
             OperationKind::SetMode => {
                 let mode = payload["mode"].as_str().filter(|mode|["default","plan"].contains(mode)).ok_or_else(||error("modo Codex inválido"))?;
-                self.rpc(format!("{id}:settings"),"thread/read",json!({"threadId":self.thread_id,"includeTurns":false}),
-                    Some(json!({"kind":"set_mode","parent":id,"mode":mode})),&mut effects);
+                self.send(format!("{id}:settings"),self.thread_read(false),Some(json!({"kind":"set_mode","parent":id,"mode":mode})),&mut effects);
             }
             OperationKind::Select => {
                 let (request_id,_) = self.server_requests.iter().find(|(id,request)|!self.answering.contains(id)
@@ -563,8 +614,10 @@ impl Engine {
                         let response = question_response(&question,&payload["answers"])?;
                         let answer = response["answers"]["answer"]["answers"][0].as_str().unwrap_or("");
                         let text = format!("> {}\n\n{answer}",question["questions"][0]["question"].as_str().unwrap_or(""));
-                        self.rpc(id,"turn/start",json!({"threadId":self.thread_id,"input":[{"type":"text","text":text}]}),
-                            Some(json!({"kind":"async_answer","request_id":request,"text":text})),&mut effects);
+                        let next = json!({"kind":"async_answer","request_id":request,"text":text});
+                        let request = ClientRequest::TurnStart(wire::TurnStartParams { thread_id:self.thread_id.clone(),
+                            approval_policy:None,summary:None,input:vec![json!({"type":"text","text":text})] });
+                        self.send(id,request,Some(next),&mut effects);
                         self.changed(&mut effects,true);
                         return Ok(effects);
                     }
@@ -735,34 +788,44 @@ impl Engine {
             return Ok(());
         }
         match rpc.method.as_str() {
-            "initialize" => self.initialized = true,
-            "thread/resume" | "thread/start" => {
-                let thread = &result["thread"];
-                if let Some(id) = thread["id"].as_str() {
-                    if id != self.thread_id {
-                        self.finish_service_tier(Disposition::Unknown,json!({"error":"A conversa mudou antes de confirmar Fast"}),effects);
-                        self.clear_preview(effects); self.thread_id = id.into();
+            "initialize" => {
+                self.initialized = true;
+                let response:wire::InitializeResponse = decode(&result);
+                if let Some(installed) = hangar_codex::version::from_user_agent(&response.user_agent) {
+                    if hangar_codex::version::differs(installed) {
+                        effects.push(Effect::Diag { event:DiagEvent::CodexVersion,code:hangar_codex::version::diag_code(installed) });
+                        self.state.problema = Some("codex_versao_nao_conferida".into());
+                        self.state.problema_detalhe = Some(format!("instalado {installed}, conferido {}",hangar_codex::version::CHECKED));
                     }
                 }
+            }
+            "thread/resume" | "thread/start" => {
+                let response:wire::ThreadStartResponse = decode(&result);
+                if !response.thread.id.is_empty() && response.thread.id != self.thread_id {
+                    self.finish_service_tier(Disposition::Unknown,json!({"error":"A conversa mudou antes de confirmar Fast"}),effects);
+                    self.clear_preview(effects); self.thread_id = response.thread.id.clone();
+                }
                 if rpc.settings_revision == self.settings_revision {
-                    self.model = string(&result["model"]).or(self.model.clone());
-                    self.effort = string(&result["reasoningEffort"]).or(self.effort.clone());
+                    self.model = response.model.clone().or(self.model.clone());
+                    self.effort = response.reasoning_effort.clone().or(self.effort.clone());
                     self.restore_service_tier(&result,rpc.settings_revision,effects);
                 }
-                self.restore_thread(thread,&rpc);
-                self.async_questions.hydrate(&self.thread_id,thread);
-                self.policy("session.patch_meta",json!({"thread_id":self.thread_id,"rollout_path":thread["path"]}),effects);
+                self.restore_thread(&response.thread,&rpc);
+                self.async_questions.hydrate(&self.thread_id,&result["thread"]);
+                self.policy("session.patch_meta",json!({"thread_id":self.thread_id,"rollout_path":response.thread.path}),effects);
             }
             "turn/start" => {
                 if rpc.state_revision == self.state_revision {
-                    self.turn_id = string(&result["turn"]["id"]); self.in_progress = true; self.state_revision += 1;
+                    let response:wire::TurnStartResponse = decode(&result);
+                    self.turn_id = Some(response.turn.id).filter(|id|!id.is_empty()); self.in_progress = true; self.state_revision += 1;
                 }
             }
             "thread/compact/start" => {
                 if rpc.state_revision == self.state_revision { self.in_progress = true; self.compacting = true; self.state_revision += 1; }
             }
             "thread/read" => {
-                self.restore_thread(&result["thread"],&rpc);
+                let response:wire::ThreadReadResponse = decode(&result);
+                self.restore_thread(&response.thread,&rpc);
                 if rpc.params["includeTurns"] == true { self.async_questions.hydrate(&self.thread_id,&result["thread"]); }
             }
             "thread/settings/update" => {
@@ -774,7 +837,10 @@ impl Engine {
                     self.policy("session.patch_meta",json!({"model":self.model,"effort":self.effort}),effects);
                 }
             }
-            "account/rateLimits/read" if result["rateLimits"]["limitId"].is_null() || result["rateLimits"]["limitId"] == "codex" => self.rate_limits = result["rateLimits"].clone(),
+            "account/rateLimits/read" => {
+                let response:wire::GetAccountRateLimitsResponse = decode(&result);
+                if response.rate_limits.limit_id.as_deref().is_none_or(|id|id == "codex") { self.rate_limits = result["rateLimits"].clone(); }
+            }
             _ => {},
         }
         if let Some(next) = rpc.continuation.clone() {
@@ -789,15 +855,14 @@ impl Engine {
                     self.wires.insert(notification.clone(),Wire { request_id:None,server_request:None,server_epoch:None,final_result:false });
                     effects.push(Effect::Write { operation_id:Some(notification),
                         frame:json!({"jsonrpc":"2.0","method":"initialized","params":{}}) });
-                    let (method,params) = if self.reconnect && !self.thread_id.is_empty() { ("thread/resume",json!({"threadId":self.thread_id})) }
-                        else {
-                            let mut params = json!({"cwd":self.metadata["cwd"],"model":self.model,
-                                "approvalPolicy":approval(&self.permission_mode),"sandbox":sandbox(&self.permission_mode)});
-                            if let Some(tier) = &self.service_tier { params["serviceTier"] = json!(tier); }
-                            ("thread/start",params)
-                        };
-                    self.rpc(format!("{parent}:thread"),method,params,
-                        Some(json!({"kind":"bootstrap_thread","parent":parent})),effects);
+                    let request = if self.reconnect && !self.thread_id.is_empty() {
+                        ClientRequest::ThreadResume(wire::ThreadResumeParams { thread_id:self.thread_id.clone() })
+                    } else {
+                        ClientRequest::ThreadStart(wire::ThreadStartParams { cwd:string(&self.metadata["cwd"]),model:self.model.clone(),
+                            approval_policy:Some(approval(&self.permission_mode).into()),sandbox:Some(sandbox(&self.permission_mode).into()),
+                            service_tier:self.service_tier.clone() })
+                    };
+                    self.send(format!("{parent}:thread"),request,Some(json!({"kind":"bootstrap_thread","parent":parent})),effects);
                 }
                 Some("bootstrap_thread") => {
                     let parent = next["parent"].as_str().unwrap_or("");
@@ -805,12 +870,12 @@ impl Engine {
                         // A vida anterior estava no meio de um turno: se ele voltou `interrupted`, foi cortado.
                         self.counter += 1;
                         let operation_id = format!("cut-check:{}:{}",self.generation,self.counter);
-                        self.rpc(operation_id,"thread/read",json!({"threadId":self.thread_id,"includeTurns":true}),
-                            Some(json!({"kind":"cut_check"})),effects);
+                        self.send(operation_id,self.thread_read(true),Some(json!({"kind":"cut_check"})),effects);
                     }
                     if let Some(effort) = self.metadata["effort"].as_str().map(str::to_owned) {
-                        self.rpc(format!("{parent}:effort"),"thread/settings/update",json!({"threadId":self.thread_id,"effort":effort}),
-                            Some(json!({"kind":"bootstrap_ready","parent":parent})),effects);
+                        let request = ClientRequest::ThreadSettingsUpdate(wire::ThreadSettingsUpdateParams { thread_id:self.thread_id.clone(),
+                            effort:Some(Some(effort)),..Default::default() });
+                        self.send(format!("{parent}:effort"),request,Some(json!({"kind":"bootstrap_ready","parent":parent})),effects);
                     } else { self.ready = true; effects.push(Effect::Reply { operation_id:parent.into(),disposition:Disposition::Accepted,payload:json!({"ready":true}) }); effects.push(Effect::WakeQueue); }
                 }
                 Some("bootstrap_ready") => {
@@ -819,15 +884,18 @@ impl Engine {
                     effects.push(Effect::WakeQueue);
                 }
                 Some("set_mode") => {
-                    let Some(model) = &self.model else { return Err(error("modelo atual indisponível")); };
-                    self.rpc(next["parent"].as_str().unwrap_or("").into(),"thread/settings/update",json!({"threadId":self.thread_id,
-                        "collaborationMode":{"mode":next["mode"],"settings":{"model":model,"reasoning_effort":self.effort,"developer_instructions":null}}}),None,effects);
+                    let Some(model) = self.model.clone() else { return Err(error("modelo atual indisponível")); };
+                    let mode = wire::CollaborationMode { mode:next["mode"].as_str().unwrap_or("").into(),
+                        settings:wire::CollaborationSettings { model,reasoning_effort:self.effort.clone(),developer_instructions:None } };
+                    let request = ClientRequest::ThreadSettingsUpdate(wire::ThreadSettingsUpdateParams { thread_id:self.thread_id.clone(),
+                        collaboration_mode:Some(mode),..Default::default() });
+                    self.send(next["parent"].as_str().unwrap_or("").into(),request,None,effects);
                 }
                 Some("interrupt") => {
                     let parent = next["parent"].as_str().unwrap_or("");
                     if let Some(turn) = self.turn_id.clone() {
                         let after = self.terminate_after(&turn);
-                        self.rpc(parent.into(),"turn/interrupt",json!({"threadId":self.thread_id,"turnId":turn}),after,effects);
+                        self.send(parent.into(),ClientRequest::TurnInterrupt(wire::TurnInterruptParams { thread_id:self.thread_id.clone(),turn_id:turn }),after,effects);
                     }
                     else { effects.push(Effect::Reply { operation_id:parent.into(),disposition:Disposition::Accepted,payload:json!({"interrupted":false}) }); }
                 }
@@ -837,12 +905,14 @@ impl Engine {
                         self.running_commands.retain(|_,(_,running)|running != process);
                         self.counter += 1;
                         let operation_id = format!("terminate:{}:{}",self.generation,self.counter);
-                        self.rpc(operation_id,"thread/backgroundTerminals/terminate",json!({"threadId":self.thread_id,"processId":process}),None,effects);
+                        let request = ClientRequest::ThreadBackgroundTerminalsTerminate(wire::ThreadBackgroundTerminalsTerminateParams {
+                            thread_id:self.thread_id.clone(),process_id:process.into() });
+                        self.send(operation_id,request,None,effects);
                     }
                 }
                 Some("cut_check") => {
-                    let last = result["thread"]["turns"].as_array().and_then(|turns|turns.last());
-                    if result["thread"]["status"]["type"] == "idle" && last.is_some_and(|turn|turn["status"] == "interrupted") {
+                    let thread = decode::<wire::ThreadReadResponse>(&result).thread;
+                    if thread.status == wire::ThreadStatus::Idle && thread.turns.last().is_some_and(|turn|turn.status == "interrupted") {
                         self.state.problema = Some("codex_turno_cortado".into()); self.state.problema_detalhe = None;
                     }
                 }
@@ -861,34 +931,34 @@ impl Engine {
                 _ => {},
             }
         }
-        let payload = if rpc.method == "model/list" { json!(result["data"].as_array().map(|models|models.iter().filter(|m|m["hidden"] != true).map(|model|json!({
-            "model":model["model"],"displayName":model["displayName"],"description":model["description"],
-            "efforts":model["supportedReasoningEfforts"].as_array().map(|efforts|efforts.iter().map(|e|json!({"value":e["reasoningEffort"],"description":e["description"]})).collect::<Vec<_>>()).unwrap_or_default(),
-            "defaultEffort":model["defaultReasoningEffort"],"serviceTiers":model.get("serviceTiers").cloned().unwrap_or_else(||json!([])),
-            "defaultServiceTier":model["defaultServiceTier"]})).collect::<Vec<_>>()).unwrap_or_default()) }
-            else { result };
+        let payload = if rpc.method == "model/list" {
+            json!(decode::<wire::ModelListResponse>(&result).data.into_iter().filter(|model|!model.hidden).map(|model|json!({
+                "model":model.model,"displayName":model.display_name,"description":model.description,
+                "efforts":model.supported_reasoning_efforts.into_iter().map(|e|json!({"value":e.reasoning_effort,"description":e.description})).collect::<Vec<_>>(),
+                "defaultEffort":model.default_reasoning_effort,"serviceTiers":model.service_tiers.unwrap_or_default(),
+                "defaultServiceTier":model.default_service_tier})).collect::<Vec<_>>())
+        } else { result };
         effects.push(Effect::Reply { operation_id:rpc.operation_id,disposition:Disposition::Accepted,payload });
         self.changed(effects,true);
         Ok(())
     }
 
-    fn restore_thread(&mut self,thread:&Value,rpc:&Rpc) {
+    fn restore_thread(&mut self,thread:&wire::Thread,rpc:&Rpc) {
         if rpc.state_revision == self.state_revision {
-            match thread["status"]["type"].as_str() {
-                Some("active") => {
+            match thread.status {
+                wire::ThreadStatus::Active => {
                     self.in_progress = true;
                     if rpc.params["includeTurns"] == true {
-                        self.turn_id = thread["turns"].as_array().and_then(|turns|turns.iter().rev().find(|turn|turn["status"] == "inProgress"))
-                            .and_then(|turn|string(&turn["id"]));
+                        self.turn_id = thread.turns.iter().rev().find(|turn|turn.status == "inProgress").map(|turn|turn.id.clone());
                     }
                 }
-                Some("idle") => { self.in_progress = false; self.turn_id = None; self.state.codex_buffering = false; },
+                wire::ThreadStatus::Idle => { self.in_progress = false; self.turn_id = None; self.state.codex_buffering = false; },
                 _ => {},
             }
         }
         if rpc.settings_revision == self.settings_revision {
-            if thread["model"].is_string() { self.model = string(&thread["model"]); }
-            if thread.get("reasoningEffort").is_some() { self.effort = string(&thread["reasoningEffort"]); }
+            if let Some(Some(model)) = &thread.model { self.model = Some(model.clone()); }
+            if let Some(effort) = &thread.reasoning_effort { self.effort = effort.clone(); }
         }
     }
 
@@ -915,7 +985,7 @@ impl Engine {
                     if pending {
                         effects.push(Effect::Reply { operation_id:id,disposition:Disposition::Unknown,payload:json!({"closed":false}) });
                     } else if let Some(thread_id) = thread.filter(|_|!voice.unsubscribed) {
-                        self.rpc(id,"thread/unsubscribe",json!({"threadId":thread_id}),Some(json!({"kind":"voice","call_id":call_id})),&mut effects);
+                        self.send(id,ClientRequest::ThreadUnsubscribe(wire::ThreadUnsubscribeParams { thread_id }),Some(json!({"kind":"voice","call_id":call_id})),&mut effects);
                     } else {
                         effects.push(Effect::Reply { operation_id:id,disposition:Disposition::Accepted,payload:json!({"closed":true}) });
                     }
@@ -960,7 +1030,8 @@ impl Engine {
             && rpc.continuation.as_ref().is_some_and(|next|next["call_id"] == call_id)) { return; }
         self.counter += 1;
         let operation_id = format!("voice-cleanup:{}:{}",self.generation,self.counter);
-        self.rpc(operation_id,"thread/unsubscribe",json!({"threadId":thread_id}),Some(json!({"kind":"voice","call_id":call_id})),effects);
+        self.send(operation_id,ClientRequest::ThreadUnsubscribe(wire::ThreadUnsubscribeParams { thread_id:thread_id.into() }),
+            Some(json!({"kind":"voice","call_id":call_id})),effects);
     }
 
     fn notification(&mut self,line:Value,effects:&mut Vec<Effect>) -> Result<(),RuntimeError> {
@@ -1028,52 +1099,66 @@ impl Engine {
             }
             self.changed(effects,true); return Ok(());
         }
-        match method {
-            "serverRequest/resolved" => {
-                let request_id:RequestId = serde_json::from_value(params["requestId"].clone()).map_err(|_|error("ID de resolução inválido"))?;
+        let notification = match wire::ServerNotification::decode(method,params) {
+            Ok(notification) => notification,
+            Err(failure) => {
+                // Formato inesperado num método conhecido: a linha é ignorada e fica registrada.
+                tracing::warn!(session=%self.state.session,method=%failure.method,error=wire::error_kind(&failure.error),"notificação do Codex fora do formato");
+                effects.push(Effect::Diag { event:DiagEvent::CodexDecode,code:decode_code(&failure.method) });
+                self.policy("unknown_private",json!({"kind":format!("decode:{}",failure.method),"event":line}),effects);
+                return Ok(());
+            }
+        };
+        use wire::ServerNotification as N;
+        match notification {
+            N::ServerRequestResolved(n) => {
+                let request_id = n.request_id.ok_or_else(||error("ID de resolução inválido"))?;
                 let notice = self.server_requests.iter().find(|(key,_)|key == &request_id).and_then(|(_,request)|unsupported_notice(request));
                 if let Some(text) = notice { self.policy("local_output",json!({"text":text}),effects); }
                 self.server_requests.retain(|(id,_)|id != &request_id); self.answering.remove(&request_id); self.request_epochs.remove(&request_id);
             }
-            "turn/started" => {
-                self.in_progress = true; self.turn_id = string(&params["turn"]["id"]); self.state_revision += 1;
+            N::TurnStarted(n) => {
+                self.in_progress = true; self.turn_id = Some(n.turn.id).filter(|id|!id.is_empty()); self.state_revision += 1;
                 self.first_response_start = self.turn_id.clone().map(|id|(id,self.clock.monotonic_s));
                 self.response_started = false; self.state.codex_buffering = false; self.clear_preview(effects);
                 self.state.problema = None; self.state.problema_detalhe = None;
                 self.running_commands.clear();
             }
-            "turn/completed" => {
-                if params["turn"]["id"].as_str().is_some_and(|id|self.turn_id.as_deref().is_some_and(|current|current != id)) { return Ok(()); }
+            N::TurnCompleted(n) => {
+                if !n.turn.id.is_empty() && self.turn_id.as_deref().is_some_and(|current|current != n.turn.id) { return Ok(()); }
                 self.in_progress = false; self.turn_id = None; self.state_revision += 1; self.compacting = false;
                 self.first_response_start = None;
                 self.state.codex_buffering = false; self.response_started = false; self.clear_preview(effects);
                 self.server_requests.clear(); self.answering.clear(); self.request_epochs.clear();
-                if params["turn"]["status"] == "failed" {
-                    let class = error_class(&params["turn"]["error"]);
+                if n.turn.status == "failed" {
+                    let error = n.turn.error.unwrap_or_default();
+                    let class = error.codex_error_info.as_ref().and_then(error_class);
                     // O `turn.error` pode vir sem `codexErrorInfo`; a causa já veio no `error` anterior.
                     if class.is_some() || !matches!(self.state.problema.as_deref(),Some("codex_limite_uso" | "codex_sem_login")) {
                         self.state.problema = Some(class.unwrap_or("headless_turno_erro").into());
-                        self.state.problema_detalhe = string(&params["turn"]["error"]["message"]);
+                        self.state.problema_detalhe = Some(error.message).filter(|m|!m.is_empty());
                     }
                 } else if retry_problem(self.state.problema.as_deref()) { self.state.problema = None; self.state.problema_detalhe = None; }
                 self.changed(effects,true); effects.push(Effect::WakeQueue); return Ok(());
             }
-            "thread/status/changed" => {
-                match params["status"]["type"].as_str() {
-                    Some("active") => self.in_progress = true,
-                    Some("idle") => { self.in_progress = false; self.turn_id = None; self.state.codex_buffering = false; },
+            N::ThreadStatusChanged(n) => {
+                match n.status {
+                    wire::ThreadStatus::Active => self.in_progress = true,
+                    wire::ThreadStatus::Idle => { self.in_progress = false; self.turn_id = None; self.state.codex_buffering = false; },
                     _ => return Ok(()),
                 }
                 self.state_revision += 1;
             }
-            "thread/settings/updated" => {
-                if params["threadId"] != self.thread_id { return Ok(()); }
-                let settings = &params["threadSettings"];
-                if settings.get("model").is_some() { self.model = string(&settings["model"]); }
-                if settings.get("effort").is_some() { self.effort = string(&settings["effort"]); }
-                if settings.get("collaborationMode").is_some() { self.mode = Some(settings["collaborationMode"]["mode"].as_str().unwrap_or("default").into()); }
+            N::ThreadSettingsUpdated(n) => {
+                if n.thread_id != self.thread_id { return Ok(()); }
+                let settings = n.thread_settings;
+                if let Some(model) = settings.model { self.model = Some(model); }
+                if let Some(effort) = settings.effort { self.effort = effort; }
+                if let Some(mode) = settings.collaboration_mode {
+                    self.mode = Some(mode.map(|m|m.mode).filter(|m|!m.is_empty()).unwrap_or_else(||"default".into()));
+                }
                 self.settings_revision += 1;
-                if let Some(tier) = settings.get("serviceTier").and_then(service_tier) {
+                if let Some(tier) = settings.service_tier.map(|t|t.unwrap_or_else(||"default".into())).filter(|t|["priority","default"].contains(&t.as_str())) {
                     self.service_tier = Some(tier.clone());
                     self.policy("session.patch_meta",json!({"service_tier":tier}),effects);
                     if let Some(pending) = self.service_tier_pending.as_mut() {
@@ -1082,76 +1167,77 @@ impl Engine {
                     self.verify_service_tier(effects);
                 }
             }
-            "item/agentMessage/delta" => {
-                if params["turnId"].as_str().is_some_and(|id|self.turn_id.as_deref().is_some_and(|current|current != id)) { return Ok(()); }
-                if params["delta"].as_str().is_some_and(|text|!text.is_empty())
-                    && self.first_response_start.as_ref().is_some_and(|(id,_)|params["turnId"] == *id) {
+            N::AgentMessageDelta(n) => {
+                if !n.turn_id.is_empty() && self.turn_id.as_deref().is_some_and(|current|current != n.turn_id) { return Ok(()); }
+                if !n.delta.is_empty() && self.first_response_start.as_ref().is_some_and(|(id,_)|*id == n.turn_id) {
                     if let Some((_,started)) = self.first_response_start.take() {
                         effects.push(Effect::Publish { channel:"rate".into(),data:json!({"first_response":true,
                             "seconds":self.clock.monotonic_s-started,"conversation":self.thread_id}) });
                     }
                 }
                 self.response_started = true; self.state.codex_buffering = false;
-                if let Some(text) = self.preview.append(params["delta"].as_str().unwrap_or(""),self.clock.monotonic_s) { self.publish(text,effects); }
+                if let Some(text) = self.preview.append(&n.delta,self.clock.monotonic_s) { self.publish(text,effects); }
                 return Ok(());
             }
-            "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" | "item/reasoning/summaryPartAdded" => {
-                if params["turnId"].as_str().is_some_and(|id|self.turn_id.as_deref().is_some_and(|current|current != id)) { return Ok(()); }
-                let piece = if method == "item/reasoning/summaryPartAdded" {
-                    if params["summaryIndex"].as_u64().unwrap_or(0) > 0 { "\n\n" } else { "" }
-                } else { params["delta"].as_str().unwrap_or("") };
+            N::ReasoningSummaryTextDelta(wire::ReasoningSummaryTextDeltaNotification { turn_id,delta,.. })
+            | N::ReasoningTextDelta(wire::ReasoningTextDeltaNotification { turn_id,delta,.. }) => {
+                if !turn_id.is_empty() && self.turn_id.as_deref().is_some_and(|current|current != turn_id) { return Ok(()); }
+                if let Some(text) = self.thinking.append(&delta,self.clock.monotonic_s) { self.publish_on("thinking",text,effects); }
+                return Ok(());
+            }
+            N::ReasoningSummaryPartAdded(n) => {
+                if !n.turn_id.is_empty() && self.turn_id.as_deref().is_some_and(|current|current != n.turn_id) { return Ok(()); }
+                let piece = if n.summary_index > 0 { "\n\n" } else { "" };
                 if let Some(text) = self.thinking.append(piece,self.clock.monotonic_s) { self.publish_on("thinking",text,effects); }
                 return Ok(());
             }
-            "model/rerouted" => {
-                if params["threadId"] != self.thread_id { return Ok(()); }
-                self.model = string(&params["toModel"]).or(self.model.clone());
+            N::ModelRerouted(n) => {
+                if n.thread_id != self.thread_id { return Ok(()); }
+                self.model = n.to_model.or(self.model.clone());
                 self.settings_revision += 1;
             }
-            "item/started" | "item/completed" => {
-                let item = &params["item"];
-                self.async_questions.observe(&self.thread_id,item);
-                if item["type"] == "contextCompaction" { self.compacting = method == "item/started"; }
-                if item["type"] == "agentMessage" { self.clear_preview(effects); }
-                if item["type"] == "reasoning" && method == "item/started" {
-                    if let Some(text) = self.thinking.clear() { self.publish_on("thinking",text,effects); }
-                }
-                if item["type"] == "commandExecution" {
-                    let id = item["id"].as_str().unwrap_or("").to_owned();
-                    match (method,item["processId"].as_str(),params["turnId"].as_str()) {
-                        ("item/started",Some(process),Some(turn)) => { self.running_commands.insert(id,(turn.into(),process.into())); }
-                        _ => { self.running_commands.remove(&id); }
+            N::ItemStarted(n) | N::ItemCompleted(n) => {
+                let started = method == "item/started";
+                self.async_questions.observe(&self.thread_id,&n.item,&params["item"]);
+                match &n.item {
+                    wire::ThreadItem::ContextCompaction { .. } => self.compacting = started,
+                    wire::ThreadItem::AgentMessage { .. } => self.clear_preview(effects),
+                    wire::ThreadItem::Reasoning { .. } if started => {
+                        if let Some(text) = self.thinking.clear() { self.publish_on("thinking",text,effects); }
                     }
+                    wire::ThreadItem::CommandExecution { id,process_id } => match (started,process_id,n.turn_id.is_empty()) {
+                        (true,Some(process),false) => { self.running_commands.insert(id.clone(),(n.turn_id.clone(),process.clone())); }
+                        _ => { self.running_commands.remove(id); }
+                    },
+                    _ => {},
                 }
-                if item["type"] != "userMessage" && retry_problem(self.state.problema.as_deref()) {
+                if !matches!(n.item,wire::ThreadItem::UserMessage { .. }) && retry_problem(self.state.problema.as_deref()) {
                     self.state.problema = None; self.state.problema_detalhe = None;
                 }
             }
-            "model/safetyBuffering/updated" => {
-                if !self.in_progress || self.response_started || params["threadId"] != self.thread_id { return Ok(()); }
-                if self.turn_id.as_deref().is_some_and(|turn|params["turnId"] != turn) { return Ok(()); }
-                if let Some(buffering) = params["showBufferingUi"].as_bool() { self.state.codex_buffering = buffering; }
+            N::ModelSafetyBufferingUpdated(n) => {
+                if !self.in_progress || self.response_started || n.thread_id != self.thread_id { return Ok(()); }
+                if self.turn_id.as_deref().is_some_and(|turn|n.turn_id != turn) { return Ok(()); }
+                if let Some(buffering) = n.show_buffering_ui { self.state.codex_buffering = buffering; }
             }
-            "thread/tokenUsage/updated" => { if params["tokenUsage"].is_object() { self.token_usage = params["tokenUsage"].clone(); } }
-            "account/rateLimits/updated" => {
-                if params["rateLimits"].is_object() && (params["rateLimits"]["limitId"].is_null() || params["rateLimits"]["limitId"] == "codex") { self.rate_limits = params["rateLimits"].clone(); }
+            // Uso e cota seguem crus para a linha de status; o tipo só confere o formato.
+            N::ThreadTokenUsageUpdated(_) => { if params["tokenUsage"].is_object() { self.token_usage = params["tokenUsage"].clone(); } }
+            N::AccountRateLimitsUpdated(n) => {
+                if n.rate_limits.as_ref().is_some_and(|r|r.limit_id.as_deref().is_none_or(|id|id == "codex")) { self.rate_limits = params["rateLimits"].clone(); }
                 else { return Ok(()); }
             }
-            "error" => {
-                self.state.problema = Some(error_class(&params["error"])
-                    .unwrap_or(if params["willRetry"] == true { "codex_sem_conexao" } else { "headless_turno_erro" }).into());
-                self.state.problema_detalhe = string(&params["error"]["message"]);
+            N::Error(n) => {
+                self.state.problema = Some(n.error.codex_error_info.as_ref().and_then(error_class)
+                    .unwrap_or(if n.will_retry { "codex_sem_conexao" } else { "headless_turno_erro" }).into());
+                self.state.problema_detalhe = Some(n.error.message).filter(|m|!m.is_empty());
             }
-            "hook/completed" if params["run"]["eventName"] == "userPromptSubmit"
-                && ["blocked","stopped"].contains(&params["run"]["status"].as_str().unwrap_or("")) => {
-                let run = &params["run"];
-                let source = run["sourcePath"].as_str().unwrap_or("hook");
+            N::HookCompleted(n) if n.run.event_name == "userPromptSubmit" && ["blocked","stopped"].contains(&n.run.status.as_str()) => {
+                let source = n.run.source_path.as_deref().unwrap_or("hook");
                 let normalized = source.replace('\\',"/");
                 let parts:Vec<_> = normalized.split('/').collect();
                 let origin = parts.iter().position(|part|*part == "cache").and_then(|index|parts.get(index+2)).copied().unwrap_or(source);
-                let reason = run["entries"].as_array().and_then(|entries|entries.iter().find(|entry|
-                    ["stop","feedback","error"].contains(&entry["kind"].as_str().unwrap_or("")) && entry["text"].is_string()))
-                    .and_then(|entry|entry["text"].as_str()).unwrap_or("");
+                let reason = n.run.entries.iter().find(|entry|["stop","feedback","error"].contains(&entry.kind.as_str()) && entry.text.is_some())
+                    .and_then(|entry|entry.text.as_deref()).unwrap_or("");
                 self.state.problema = Some("codex_prompt_bloqueado".into());
                 self.state.problema_detalhe = Some(format!("{origin}: {reason}").trim_matches([' ',':']).chars().take(300).collect());
             }

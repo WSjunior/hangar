@@ -25,11 +25,12 @@ pub struct PolicyClient {
     secret:String,
     instance:String,
     http:crate::proxy::HttpClient,
+    diag:crate::diag::DiagClient,
 }
 
 impl PolicyClient {
     pub fn new(upstream:std::net::SocketAddr,secret:String,instance:String) -> Self {
-        Self { upstream,secret,instance,http:crate::proxy::client() }
+        Self { upstream,diag:crate::diag::DiagClient::new(upstream,secret.clone()),secret,instance,http:crate::proxy::client() }
     }
     async fn run(&self,target:&RuntimeTarget,kind:&str,request_id:&RequestId,payload:Value,phase_id:&str) -> Result<Value,RuntimeError> {
         self.run_for(&target.key,target.generation,kind,request_id,payload,phase_id).await
@@ -610,6 +611,11 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                     SurfaceEffect::Copied { plugin,text } => { if let Some(mods) = &engine.mods { mods.copied(&target.name,engine.mods_life,&plugin,&text); } }
                     SurfaceEffect::Reply { token,result } => { if let Some(waiter) = mods_waiters.remove(&token) { let _ = waiter.send(result); } }
                 },
+                Effect::Diag { event,code } => {
+                    // Versão é do servidor, não da sessão: sem nome, o limite de 1/min vale para todos.
+                    let session = if event == DiagEvent::CodexVersion { "" } else { target.name.as_str() };
+                    if let Some(policy) = &engine.policy { policy.diag.report(event.event(),session,&code,event.reason()); }
+                }
                 Effect::Stop { .. } => { closed.store(true,Ordering::Release); },
             }
         }

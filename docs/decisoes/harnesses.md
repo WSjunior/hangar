@@ -149,6 +149,11 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   Só `on-request` e `never` existem (`untrusted` morreu); o sandbox vai no `-c` da subida e trocar
   de modo reabre o servidor ocioso. Pedido do servidor sem tela recebe `-32601` + nota, nunca
   sucesso vazio. Um cliente por cano.
+- **Protocolo do Codex no Rust é tipado e tolerante** (`crates/hangar-codex`): todo campo usado
+  existe no recorte do schema da versão conferida (`schema/<versão>.json`, teste
+  `schema_check`); campo novo é ignorado; formato inesperado num método conhecido descarta só
+  aquela linha e vai ao diário (`rust.codex_decode`); outra major.minor no `initialize` vira
+  `codex_versao_nao_conferida`. Atualizar a versão conferida: `scripts/conferir-codex-schema`.
 - **A rota do terminal Claude só recebe sessão Claude.** `route_sync`, `run_admin` e
   `answer_sync` abrem `prepare_session(name, "claude")`, que suspende a escrita sem vínculo
   Claude nem pane. Rota que atende outros provedores filtra pelo provedor antes (`/answer`,

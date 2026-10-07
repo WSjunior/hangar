@@ -946,6 +946,7 @@
   "problema_headless_nao_subiu": "O processo do Claude não subiu — confira se o `claude` está instalado e a pasta existe",
   "problema_codex_headless_nao_subiu": "O app-server do Codex não subiu — confira se o `codex` está instalado e logado; encerre a sessão e crie de novo",
   "problema_codex_sem_conexao": "O Codex não consegue falar com o provedor do modelo e segue tentando — se ele não voltar, reinicie a sessão",
+  "problema_codex_versao_nao_conferida": "Este Codex é de uma versão que o Hangar ainda não conferiu; se faltar alguma informação na tela, é por isso",
   "problema_codex_limite_uso": "A cota do Codex desta conta acabou — espere a liberação ou use outra conta",
   "problema_codex_sem_login": "O Codex recusou o login desta conta — entre de novo na conta (`codex login`) e reenvie a mensagem",
   "problema_codex_turno_cortado": "O processo do Codex caiu no meio do turno e o turno foi cortado; pedidos de aprovação abertos se perderam — reenvie a mensagem para continuar",

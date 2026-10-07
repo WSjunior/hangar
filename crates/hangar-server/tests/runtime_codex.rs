@@ -505,3 +505,58 @@ fn finished_turn_after_reconnect_is_not_reported_as_cut() {
         "turns":[{"id":"turn-1","status":"completed"}]}}}),10.3);
     assert!(engine.view()["problema"].is_null());
 }
+
+fn diags(effects:&[Effect]) -> Vec<(DiagEvent,String)> {
+    effects.iter().filter_map(|e|match e { Effect::Diag { event,code }=>Some((*event,code.clone())),_=>None }).collect()
+}
+
+#[test]
+fn other_codex_version_warns_once_on_initialize() {
+    let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true}),1,clock(10.0));
+    let effects = engine.bootstrap(true,"boot".into()).unwrap();
+    let id = frames(&effects)[0]["id"].clone();
+    let effects = line(&mut engine,json!({"id":id,"result":{"userAgent":"hangar/9.1.0 (x)"}}),11.0);
+    assert_eq!(diags(&effects),vec![(DiagEvent::CodexVersion,"codex_9_1".into())]);
+    assert_eq!(engine.view()["problema"],"codex_versao_nao_conferida");
+    assert!(engine.view()["problema_detalhe"].as_str().unwrap().contains("9.1.0"));
+}
+
+#[test]
+fn checked_codex_version_is_silent() {
+    let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true}),1,clock(10.0));
+    let effects = engine.bootstrap(true,"boot".into()).unwrap();
+    let id = frames(&effects)[0]["id"].clone();
+    let ua = format!("hangar/{} (x)",hangar_codex::version::CHECKED);
+    let effects = line(&mut engine,json!({"id":id,"result":{"userAgent":ua}}),11.0);
+    assert!(diags(&effects).is_empty());
+    assert!(engine.view()["problema"].is_null());
+}
+
+#[test]
+fn notification_with_wrong_type_is_dropped_and_reported() {
+    let mut engine = engine();
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),10.0);
+    let effects = line(&mut engine,json!({"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","delta":5}}),11.0);
+    assert_eq!(diags(&effects),vec![(DiagEvent::CodexDecode,"item_agentmessage_delta".into())]);
+    assert!(effects.iter().any(|e|matches!(e,Effect::Policy { kind,.. } if kind == "unknown_private")));
+    let effects = line(&mut engine,json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}),12.0);
+    assert!(effects.iter().any(|e|matches!(e,Effect::WakeQueue)));
+    assert_eq!(engine.view()["state"],"idle");
+}
+
+#[test]
+fn unknown_notification_is_silent() {
+    let mut engine = engine();
+    let effects = line(&mut engine,json!({"method":"thread/novidade","params":{"threadId":"thread-1"}}),10.0);
+    assert!(diags(&effects).is_empty());
+    assert!(effects.is_empty());
+}
+
+#[test]
+fn unknown_server_request_still_gets_method_not_found() {
+    let mut engine = engine();
+    let effects = line(&mut engine,json!({"id":77,"method":"foo/bar","params":{"threadId":"thread-1"}}),10.0);
+    let reply = frames(&effects).into_iter().find(|f|f["id"] == 77).unwrap();
+    assert_eq!(reply["error"]["code"],-32601);
+    assert!(reply["error"]["message"].as_str().unwrap().contains("foo/bar"));
+}

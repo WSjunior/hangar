@@ -946,6 +946,7 @@
   "problema_headless_nao_subiu": "The Claude process did not start — check that `claude` is installed and the folder exists",
   "problema_codex_headless_nao_subiu": "The Codex app-server did not start — check that `codex` is installed and logged in; close the session and create it again",
   "problema_codex_sem_conexao": "Codex cannot reach the model provider and keeps retrying — if it does not come back, restart the session",
+  "problema_codex_versao_nao_conferida": "This Codex is a version Hangar has not checked yet; if something is missing on screen, this is why",
   "problema_codex_limite_uso": "This account's Codex quota ran out — wait for it to reset or use another account",
   "problema_codex_sem_login": "Codex rejected this account's login — sign in to the account again (`codex login`) and resend the message",
   "problema_codex_turno_cortado": "The Codex process died mid-turn and the turn was cut off; open approval requests were lost — resend the message to continue",
