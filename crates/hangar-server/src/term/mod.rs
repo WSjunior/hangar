@@ -98,6 +98,10 @@ impl Terms {
         self.panels.lock().unwrap().contains_key(target)
     }
 
+    /// Só para teste de rota: marca o alvo como de painel aberto, sem abrir PTY.
+    #[doc(hidden)]
+    pub async fn mark_open_for_test(&self, target: &str, diag: &crate::diag::DiagClient) { let _ = self.claim(target, diag).await; }
+
     fn slot(&self) -> Option<Arc<Slot>> {
         self.live.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < self.cfg.max_panels).then_some(n + 1))
             .ok().map(|_| Arc::new(Slot(self.live.clone())))

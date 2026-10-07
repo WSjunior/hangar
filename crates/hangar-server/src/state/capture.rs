@@ -76,6 +76,11 @@ impl PaneCapture {
         if cfg!(windows) { Self::process(program, target) } else { Self::Pool(PoolCapture::new(pool, name, binding, target)) }
     }
 
+    /// Como `new`, com consumidor próprio no pool (captura avulsa que não pode soltar o do `Monitor`).
+    pub fn with_consumer(pool: TerminalPool, consumer: String, program: impl Into<OsString>, name: &str, binding: &str, target: String) -> Self {
+        if cfg!(windows) { Self::process(program, target) } else { Self::Pool(PoolCapture::with_consumer(pool, consumer, name, binding, target)) }
+    }
+
     pub fn process(program: impl Into<OsString>, target: String) -> Self {
         Self::Process { mux: MuxProcess::new(program, TIMEOUT), target }
     }

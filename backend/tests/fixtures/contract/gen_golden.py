@@ -930,9 +930,15 @@ def control_rows() -> list:
 # Rust não empresta (manda `interrupt` e depois `submit` pelo ator), então o Esc entra em `sent` como
 # o controle `interrupt`. Divergências deliberadas, já espelhadas no Python:
 # - falha do runtime com terminal (op do coordenador) -> 502 `erro_envio_falhou` (antes: 500);
-# - "Conversar" com o texto não confirmado (qualquer disposição fora de accepted/deferred) -> 409
-#   `erro_sem_resposta` "a pergunta foi fechada, mas a resposta por texto não foi confirmada" (antes:
-#   500, ou 500 com outro texto quando o ator recusava/ficava incerto);
+# - "Conversar" com o texto não confirmado (qualquer disposição fora de accepted/deferred) -> 502
+#   `erro_envio_falhou` "a pergunta foi fechada, mas a resposta por texto não foi confirmada — confira
+#   na sessão antes de responder de novo" (antes: 500, ou 500 com outro texto quando o ator
+#   recusava/ficava incerto). Não é 409: o app lê 409 como "nada digitado", e aqui a pergunta já
+#   fechou e o texto pode ter entrado;
+# - Esc do "Conversar" não aceito (`interrupt_reply`): adiado/incerto/recusado -> 409
+#   `erro_opcao_nao_convergiu` (como o `TerminalControlError` do Python), falha do runtime -> 502;
+#   nada é digitado;
+# - headless sem `request_id`: o Python aceita; o Rust repassa o pedido a ele (`relays_headless`).
 # - sem terminal, o ator recusa a resposta com o código `claude_command` -> 409
 #   `erro_codex_resposta_invalida` (antes: 503). Diferença que o golden NÃO compara: `params.detalhe`.
 ANS_OPT = {"kind": "option", "indices": [0], "labels": ["A"]}
@@ -944,7 +950,7 @@ ASK_SIDECAR = ["Cor?", "Tamanho?"]
 
 def _ans(name, **kw):
     return {"name": name, "terminal": True, "answers": [ANS_OPT], "request_id": None, "pending": None, "panel_open": False,
-            "sidecar": None, "reply": ACC, "submit_reply": ACC, **kw}
+            "sidecar": None, "reply": ACC, "submit_reply": ACC, "interrupt_reply": ACC, **kw}
 
 
 ANSWER_CASES = [
@@ -991,6 +997,11 @@ ANSWER_CASES = [
     _ans("chat_submit_uncertain", answers=[ANS_OPT, ANS_CHAT], sidecar=ASK_SIDECAR, submit_reply=("unknown", {})),
     _ans("chat_submit_runtime_error", answers=[ANS_OPT, ANS_CHAT], sidecar=ASK_SIDECAR, submit_reply="!erro: runtime_closed: ator saiu"),
     _ans("chat_panel_open", answers=[ANS_OPT, ANS_CHAT], sidecar=ASK_SIDECAR, panel_open=True),
+    _ans("chat_interrupt_deferred", answers=[ANS_OPT, ANS_CHAT], sidecar=ASK_SIDECAR, interrupt_reply=("deferred", {})),
+    _ans("chat_interrupt_uncertain", answers=[ANS_OPT, ANS_CHAT], sidecar=ASK_SIDECAR, interrupt_reply=("unknown", {})),
+    _ans("chat_interrupt_rejected", answers=[ANS_OPT, ANS_CHAT], sidecar=ASK_SIDECAR, interrupt_reply=("rejected", {"code": "x"})),
+    _ans("chat_interrupt_runtime_error", answers=[ANS_OPT, ANS_CHAT], sidecar=ASK_SIDECAR, interrupt_reply="!erro: runtime_closed: ator saiu"),
+    _ans("headless_without_request_id", terminal=False),
     _ans("headless_accepted", terminal=False, request_id="r1", answers=[ANS_OPT, ANS_TEXT, ANS_CHAT]),
     _ans("headless_rejected", terminal=False, request_id="r1", reply=("rejected", {"error": "x"})),
     _ans("headless_deferred", terminal=False, request_id="r1", reply=("deferred", {})),
@@ -1083,7 +1094,17 @@ def answer_rows() -> list:
         await asyncio.to_thread(action)
 
     runtime_terminal.run_admin = stand_in_for_keyboard_loan
-    ti.TerminalInput.interrupt = lambda self, name, *a, **k: sent.append({"control": "interrupt", "payload": {}})
+    current = {}
+
+    def interrupt(self, name, *a, **k):
+        sent.append({"control": "interrupt", "payload": {}})
+        reply = current["case"]["interrupt_reply"]
+        if isinstance(reply, str):
+            raise RuntimeError(reply.removeprefix("!erro: "))
+        if reply[0] != "accepted":
+            raise api.TerminalControlError("interrupt", reply[0], None)
+
+    ti.TerminalInput.interrupt = interrupt
     api._espera_picker_fechar = lambda name, *a, **k: True
     api.clear_pending_askq = lambda jsonl: cleared.append(jsonl)
     api._recusa_orq = lambda name: None
@@ -1106,6 +1127,7 @@ def answer_rows() -> list:
         api.read_pending_askq = lambda jsonl: None if questions is None else SimpleNamespace(
             questions=[SimpleNamespace(question=q) for q in questions])
         sent.clear(), cleared.clear()
+        current["case"] = case
         body = api.AnswerBody(answers=[api.AnswerItem(**a) for a in case["answers"]], request_id=case["request_id"])
         try:
             return {"status": 200, "body": await asyncio.to_thread(api.answer, "s", body)}
@@ -1125,7 +1147,8 @@ def answer_rows() -> list:
             rows.append({"name": case["name"], "terminal": case["terminal"], "answers": case["answers"],
                          "request_id": case["request_id"], "pending": case["pending"], "panel_open": case["panel_open"],
                          "sidecar": case["sidecar"], "reply": as_json(case["reply"]),
-                         "submit_reply": as_json(case["submit_reply"]), "expect": expect,
+                         "submit_reply": as_json(case["submit_reply"]), "interrupt_reply": as_json(case["interrupt_reply"]),
+                         "expect": expect,
                          "sent": list(sent), "cleared": bool(cleared)})
         return rows
 

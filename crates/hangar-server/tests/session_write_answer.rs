@@ -13,6 +13,7 @@ use hangar_server::runtime::gateway::RuntimeRegistry;
 use hangar_server::runtime::protocol::{CanoBinding, RuntimeError, RuntimeReply, RuntimeTarget};
 use hangar_server::runtime::terminal::TerminalTarget;
 use hangar_server::session_write::answer::*;
+use hangar_server::session_write::control::control_step_answer;
 use hangar_server::terminal_input::TerminalBinding;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -82,10 +83,17 @@ fn terminal_answers_match_the_python_golden() {
                 let text = chat_text(&body.answers_json(), &questions);
                 match chat_refusal(&text) {
                     Some(refused) => refused,
-                    None => {
-                        assert_eq!(sent, &[json!({"control": "interrupt", "payload": {}}), json!({"submit": text})], "{name}: Esc e depois o texto");
-                        chat_submit_answer(&reply(&case["submit_reply"]))
-                    }
+                    None => match control_step_answer(&reply(&case["interrupt_reply"])) {
+                        // O Esc não foi aceito: nada é digitado.
+                        Err(not_closed) => {
+                            assert_eq!(sent, &[json!({"control": "interrupt", "payload": {}})], "{name}: só o Esc");
+                            not_closed
+                        }
+                        Ok(()) => {
+                            assert_eq!(sent, &[json!({"control": "interrupt", "payload": {}}), json!({"submit": text})], "{name}: Esc e depois o texto");
+                            chat_submit_answer(&reply(&case["submit_reply"]))
+                        }
+                    },
                 }
             }
         };
@@ -102,6 +110,12 @@ fn headless_answers_match_the_python_golden() {
         seen += 1;
         let name = case["name"].as_str().unwrap();
         let body = parse_body(&body_of(&case).into()).unwrap();
+        // Sem id o Rust não responde: repassa ao Python (que aceita, como o golden mostra).
+        if relays_headless(&body) {
+            assert!(case["request_id"].is_null() && case["expect"]["status"] == 200, "{name}: só o pedido sem id é repassado");
+            continue;
+        }
+        assert!(!case["request_id"].is_null(), "{name}");
         let command = headless_command(&body);
         // O Python manda `indices: null` nas respostas que não são de opção; o ator lê igual.
         let mut want = case["sent"][0]["payload"].clone();
@@ -234,11 +248,11 @@ async fn open_headless(registry: &RuntimeRegistry, dir: &Path, name: &str) {
 }
 
 /// tmux falso: aceita tudo e anota cada chamada com o texto que ela leva.
-fn fake_tmux(dir: &Path, name: &str) -> (String, std::path::PathBuf) {
+fn fake_tmux(dir: &Path, name: &str, pane: &str) -> (String, std::path::PathBuf) {
     use std::os::unix::fs::PermissionsExt;
     let (script, log) = (dir.join("tmux"), dir.join("tmux.log"));
     std::fs::write(&script, format!(
-        "#!/bin/sh\nif [ \"$1\" = display-message ]; then printf '{name}\\t%%1\\t1\\n'; exit 0; fi\necho \"$@\" >> '{}'\n", log.display())).unwrap();
+        "#!/bin/sh\nif [ \"$1\" = display-message ]; then printf '{name}\\t{}\\t1\\n'; exit 0; fi\necho \"$@\" >> '{}'\n", pane.replace('%', "%%"), log.display())).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     (script.to_str().unwrap().to_owned(), log)
 }
@@ -251,10 +265,14 @@ fn keys_sent(log: &Path) -> usize { log_lines(log).iter().filter(|l| l.contains(
 
 /// Entrada com terminal; a transcrição mora em `<conta>/projects/p/<name>.jsonl`, de onde sai o sidecar.
 async fn open_terminal(registry: &RuntimeRegistry, config: &Path, name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    open_terminal_on(registry, config, name, "%1").await
+}
+
+async fn open_terminal_on(registry: &RuntimeRegistry, config: &Path, name: &str, pane: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     let dir = config.join("projects/p");
     std::fs::create_dir_all(&dir).unwrap();
-    let (tmux, log) = fake_tmux(config, name);
-    let binding = TerminalBinding { name: name.into(), pane: "%1".into(), conversation: "sid".into(), generation: 1, created: 1,
+    let (tmux, log) = fake_tmux(config, name, pane);
+    let binding = TerminalBinding { name: name.into(), pane: pane.into(), conversation: "sid".into(), generation: 1, created: 1,
         mux_argv: vec![tmux], windows: false, clipboard_lock_path: None };
     let transcript = dir.join(format!("{name}.jsonl"));
     std::fs::write(&transcript, "").unwrap();
@@ -275,10 +293,16 @@ fn write_sidecar(config: &Path, name: &str) -> std::path::PathBuf {
 }
 
 async fn serve(registry: Arc<RuntimeRegistry>) -> (Arc<Fake>, std::net::SocketAddr) {
+    serve_with(registry, hangar_server::terminal_control::TerminalPool::new(), None).await
+}
+
+/// `panel`: a sessão com painel de terminal aberto na tela.
+async fn serve_with(registry: Arc<RuntimeRegistry>, pool: hangar_server::terminal_control::TerminalPool, panel: Option<&str>) -> (Arc<Fake>, std::net::SocketAddr) {
     let (python, upstream) = spawn_fake().await;
-    let mut state = AppState::new(config(upstream, "127.0.0.1"));
+    let mut state = AppState::with_terminal_pool(config(upstream, "127.0.0.1"), pool);
     state.write_gate_wait = Duration::from_secs(5);
     assert!(state.state.runtime.set(registry).is_ok());
+    if let Some(name) = panel { state.term.mark_open_for_test(name, &state.diag).await; }
     (python, spawn_state(state).await)
 }
 
@@ -401,4 +425,56 @@ async fn headless_without_a_request_id_goes_to_python() {
     let (python, server) = serve(registry).await;
     assert_eq!(answer(server, "s", &json!({"answers": [OPT()]})).await, (200, "from-python".into()));
     assert_eq!(python.hits_to("/api/sessions/s/answer"), 1);
+}
+
+#[tokio::test]
+async fn an_open_terminal_panel_refuses_the_answer_when_no_question_is_held() {
+    let (config, (registry, counter)) = (tempfile::tempdir().unwrap(), registry_counting().await);
+    let (log, _) = open_terminal(&registry, config.path(), "t").await;
+    let sidecar = write_sidecar(config.path(), "t");
+    let (python, server) = serve_with(registry, hangar_server::terminal_control::TerminalPool::new(), Some("t")).await;
+    let before = keys_sent(&log);
+    let (status, body) = answer(server, "t", &json!({"answers": [OPT(), CHAT()]})).await;
+    assert_eq!((status, body["detail"]["code"].as_str()), (409, Some("erro_terminal_aberto")), "{body}");
+    assert_eq!((keys_sent(&log), counter.load(std::sync::atomic::Ordering::SeqCst)), (before, 0), "nada chegou ao ator");
+    assert!(sidecar.exists());
+    assert_eq!(python.hits_to("/api/sessions/t/answer"), 0);
+    // Com a pergunta segurada pelo plugin a resposta entra sem teclado, então o painel não a impede.
+    python.set_plugin_pending(json!({"id": "ask:1", "questions": []}));
+    assert_eq!(answer(server, "t", &json!({"answers": [OPT()]})).await.0, 200);
+}
+
+/// O Esc que fecha a pergunta e a espera do menu usam o observador do pane; o do `Monitor` da sessão
+/// (`monitor:<nome>`) divide esse observador e tem de sobreviver à resposta.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_footer_wait_never_releases_the_live_monitor_observer() {
+    use hangar_server::terminal_control::{CaptureRequest, Limits, TerminalPool};
+    let dir = tempfile::tempdir().unwrap();
+    let label = format!("hangar-answer-{}", dir.path().file_name().unwrap().to_string_lossy());
+    let tmux = |args: &[&str]| {
+        let out = std::process::Command::new("tmux").arg("-u").arg("-L").arg(&label).args(args).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap()
+    };
+    tmux(&["-f", "/dev/null", "new-session", "-d", "-s", "t", "-x", "120", "-y", "30", "cat"]);
+    let socket = std::path::PathBuf::from(tmux(&["display-message", "-p", "#{socket_path}"]).trim());
+    let pane = tmux(&["display-message", "-p", "-t", "=t:", "#{pane_id}"]).trim().to_owned();
+    let pool = TerminalPool::with_program("tmux", Some(socket), Limits::default());
+    let monitor = CaptureRequest { consumer: "monitor:t".into(), name: "t".into(), provider: "claude".into(), binding: "sid".into(),
+        target: pane.clone(), started: 0.0, lines: 200, colors: false, join: false };
+    pool.capture(monitor.clone()).await.unwrap();
+    let clients = || tmux(&["list-clients", "-F", "#{client_pid}"]);
+    let before = clients();
+    assert_eq!(before.lines().count(), 1, "um cliente de controle do monitor");
+
+    let (config, (registry, _)) = (tempfile::tempdir().unwrap(), registry_counting().await);
+    open_terminal_on(&registry, config.path(), "t", &pane).await;
+    write_sidecar(config.path(), "t");
+    let (_, server) = serve_with(registry, pool.clone(), None).await;
+    assert_eq!(answer(server, "t", &json!({"answers": [OPT(), CHAT()]})).await.0, 200);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(clients(), before, "o observador do monitor segue o mesmo");
+    pool.capture(monitor).await.unwrap();
+    let _ = std::process::Command::new("tmux").args(["-L", &label, "kill-server"]).output();
 }

@@ -2,7 +2,7 @@
 //! `runtime_terminal.answer_sync`). Com terminal, "Conversar sobre isso" fecha a pergunta (`interrupt`)
 //! e manda as respostas como texto (`input`) pelo próprio ator, sem emprestar o teclado ao Python.
 //! Divergências deliberadas, espelhadas no Python: falha do runtime é 502 `erro_envio_falhou`; texto do
-//! "Conversar" não confirmado é 409 `erro_sem_resposta`; o ator sem terminal que recusa a resposta
+//! "Conversar" não confirmado é 502 `erro_envio_falhou`; o ator sem terminal que recusa a resposta
 //! (`claude_command`) é 409 `erro_codex_resposta_invalida`.
 use std::future::Future;
 use std::net::SocketAddr;
@@ -34,7 +34,7 @@ const PICKER_POLL: Duration = Duration::from_millis(100);
 
 const MSG_CHAT_EMPTY: &str = "resposta sem texto para conversar";
 const MSG_CHANGED: &str = "a pergunta mudou; resposta conservada";
-const MSG_CHAT_UNCONFIRMED: &str = "a pergunta foi fechada, mas a resposta por texto não foi confirmada";
+const MSG_CHAT_UNCONFIRMED: &str = "a pergunta foi fechada, mas a resposta por texto não foi confirmada — confira na sessão antes de responder de novo";
 const MSG_HEADLESS_INVALID: &str = "A pergunta mudou ou não aceita essas respostas. Confira as opções e tente novamente.";
 const MSG_HEADLESS_SEND: &str = "Não foi possível enviar a resposta.";
 /// Código com que o ator sem terminal recusa uma resposta inválida (`claude.rs::error`).
@@ -267,12 +267,16 @@ pub fn chat_submit_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
     match sent {
         Err(error) => runtime_failed(error),
         Ok(reply) if matches!(reply.disposition, Disposition::Accepted | Disposition::Deferred) => success(),
-        Ok(_) => refused(MSG_CHAT_UNCONFIRMED),
+        // 502, não 409: o app trata 409 como "nada digitado", e aqui a pergunta já fechou e o texto pode ter entrado.
+        Ok(_) => (StatusCode::BAD_GATEWAY, detail_body("erro_envio_falhou", MSG_CHAT_UNCONFIRMED, json!({"erro": MSG_CHAT_UNCONFIRMED}))),
     }
 }
 
 /// O corpo do `answer_questions` sem terminal: o ator confere a pergunta pendente e monta a resposta.
 pub fn headless_command(body: &Body) -> Value { json!({"request_id": body.request_id, "answers": body.answers_json()}) }
+
+/// O ator exige o id da pergunta; sem ele quem decide é o Python, que não confere.
+pub fn relays_headless(body: &Body) -> bool { body.request_id.is_null() }
 
 pub fn headless_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
     let invalid = || (StatusCode::CONFLICT, detail_body("erro_codex_resposta_invalida", MSG_HEADLESS_INVALID, json!({})));
@@ -301,8 +305,9 @@ where F: FnMut() -> Fut, Fut: Future<Output = Option<bool>> {
 }
 
 async fn picker_closed(ctx: &Ctx, target: &TerminalTarget) -> bool {
-    let capture = PaneCapture::new(ctx.st.terminal.clone(), ctx.st.list.env().capture_program.clone(), &ctx.name,
-        &target.binding.conversation, target.binding.pane.clone());
+    // Consumidor só desta espera: o `monitor:` da sessão divide o observador e não pode ser solto aqui.
+    let capture = PaneCapture::with_consumer(ctx.st.terminal.clone(), format!("answer:{}:{}", ctx.name, random_hex(8)),
+        ctx.st.list.env().capture_program.clone(), &ctx.name, &target.binding.conversation, target.binding.pane.clone());
     let gone = wait_footer_gone(|| async {
         match capture.capture().await {
             Ok(frame) => Some(crate::terminal_state::footer_visible(&frame.text)),
@@ -363,7 +368,7 @@ pub async fn answer(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     let result = match &ctx.target.handle {
         EntryHandle::Terminal { target, handle } => terminal(&ctx, &body, target, handle).await,
         // Sem pergunta pendente de referência, o Python decide o que `request_id` ausente significa.
-        _ if body.request_id.is_null() => return relay(ctx, bytes).await,
+        _ if relays_headless(&body) => return relay(ctx, bytes).await,
         headless => headless_answer(&headless.command(RuntimeCommand { operation_id: random_hex(16), kind: OperationKind::AnswerQuestions, payload: headless_command(&body) }).await),
     };
     respond(&ctx, result)
