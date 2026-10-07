@@ -444,3 +444,39 @@ módulo só com biblioteca padrão para o instalador não carregar o backend int
 de Harnesses também lê, para o comando conferido de cada fornecedor morar num lugar só. Kimi no
 Windows não tem comando conferido e vira pendência com o link. A prova do 2/8 é ter algum agente
 no PATH; o `hangar-doctor` só dá erro quando não há nenhum.
+
+## O `sudo` sem terminal: `sudo -S`, não `SUDO_ASKPASS`
+
+(06/10/2026, bloco 1 do instalador gráfico.) O assistente do app nativo roda o `install.sh --app`
+sem terminal e precisa entregar ao `sudo` a senha de administrador que a pessoa digitou na janela
+do app. O caminho óbvio, `SUDO_ASKPASS` + `sudo -A`, não existe no `sudo-rs`, o `sudo` padrão do
+Ubuntu 25.10. Medido em contêiner descartável (`docker run --rm`, sem terminal: `setsid`, stdin
+nulo), com usuário comum no grupo de administradores e um auxiliar que imprime a senha:
+
+| Medição | Ubuntu 25.10 (`sudo-rs 0.2.8`) | Fedora (`Sudo version 1.9.17p2`) |
+|---|---|---|
+| `sudo -A id -u`, com `SUDO_ASKPASS` | `invalid option provided`, rc 1 | o `-A` chama o `SUDO_ASKPASS`: `0`, rc 0 |
+| `sudo id -u` (sem `-A`), com `SUDO_ASKPASS` | o `SUDO_ASKPASS` é ignorado: `sudo: Authentication failed, try again.` (2×) e `sudo-rs: Maximum 3 incorrect authentication attempts`, rc 1 | o `SUDO_ASKPASS` é ignorado: `sudo: a terminal is required to read the password; either use the -S option to read from standard input or configure an askpass helper` e `sudo: a password is required`, rc 1 |
+| `aux \| sudo -S -p '' id -u`, senha certa | `0`, rc 0 | `0`, rc 0 |
+| `aux \| sudo -S -p '' sh -c 'sudo id -u'` | o `sudo` de dentro não pede nada: `0` | o `sudo` de dentro não pede nada: `0` |
+| `sudo -S`, senha errada | `sudo: Authentication failed, try again.` (2×) e `sudo-rs: Maximum 3 incorrect authentication attempts`, rc 1 | `Sorry, try again.`, `sudo: no password was provided` e `sudo: 1 incorrect password attempt`, rc 1 |
+| `sudo -n true` logo depois de um `sudo -S` bem-sucedido, mesmo processo-pai | rc 0 | rc 0 |
+| usuário fora do sudoers, senha certa dele | `sudo-rs: I'm sorry <usuário>. I'm afraid I can't do that`, rc 0 1 | `<usuário> is not in the sudoers file.`, rc 0 1 (antes dele, o aviso "We trust you have received the usual lecture…", que o `sudo` clássico imprime no primeiro uso de cada usuário) |
+| auxiliar sai ≠ 0 (a pessoa cancelou) | `sudo: Authentication failed, try again.` (2×) e `sudo-rs: Maximum 3 incorrect authentication attempts`, rc 1 1 | `sudo: no password was provided` e `sudo: a password is required`, rc 1 1 |
+| auxiliar ausente (caminho que não existe) | `bash: line 1: /nao/existe/askpass: No such file or directory` e as mesmas linhas da senha errada, rc 127 1 | `bash: line 1: /nao/existe/askpass: No such file or directory`, `sudo: no password was provided` e `sudo: a password is required`, rc 127 1 |
+| `sudo -S -k -v -p ''` (conferência do app), senha certa / errada | rc 0 0 / `sudo: Authentication failed, try again.` (2×) e `sudo-rs: Maximum 3 incorrect authentication attempts`, rc 0 1 | rc 0 0 / `Sorry, try again.`, `sudo: no password was provided` e `sudo: 1 incorrect password attempt`, rc 0 1 |
+| `apt-get install` de pacote que não existe, pelo `sudo -S` | `E: Unable to locate package pacote-que-nao-existe-hangar`, rc 0 100 | — |
+
+No `sudo-rs`, auxiliar cancelado ou ausente sai com o mesmo texto da senha errada: só o código de
+saída do auxiliar separa os casos.
+
+Decisão: no `--app`, todo `sudo` do `install.sh` passa pela função `app_sudo`. Ela tenta `sudo -n`
+(a credencial que o sistema já guardou) e, sem ela, roda `"$HANGAR_ASKPASS" "<motivo>" | sudo -S
+-p '' <comando>`: a senha só existe no cano entre os dois, nunca em variável, argv ou saída. Senha
+recusada pede de novo com `"$HANGAR_ASKPASS" "<motivo>" --retry`, até 3 vezes. O script da
+Tailscale, que chama `sudo` por dentro, roda inteiro como administrador
+(`sh -c 'curl … | sh'` pela `app_sudo`). A causa da falha sai do texto: fora do sudoers →
+`sem-sudo`; auxiliar saiu ≠ 0 ou três senhas erradas → `senha-cancelada`; `apt` sem o pacote →
+`pacotes-desatualizados`. Sem `HANGAR_ASKPASS` (o `--app` rodado à mão) a `app_sudo` nem chama o
+`sudo -S`, e a falha fica sem código. Nunca `SUDO_ASKPASS`, `sudo -A` nem `pkexec` (pede a cada
+comando e, sem agente de polkit rodando, a janela nem aparece).
