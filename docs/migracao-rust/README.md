@@ -21,6 +21,7 @@ um pull nela traz a documentação em qualquer máquina.
 | `lista-estado/` | Lista de sessões no Rust: medição (o repouso de 4% era o Supervisor), inventário, desenho, plano e provas. Fases 0–B executadas (lista do dono no `ListHub`); a Fase C e a Task 24 foram substituídas pela `parte4/` |
 | `parte4/` | Estado, prévia, pergunta nativa e terminal real no Rust: inventário, desenho, plano, medições (`medicao.md`), prova isolada (`prova-real.md`) e achados sem conserto (`achados-pendentes.md`) |
 | `pedidos/` | Pedidos enviados às sessões Codex e os achados de revisão da 2C |
+| `parte5-codex/` | Parte 5, todo o Codex no Rust: análise (`analise.md`) e spec em subpartes 5A–5I (`spec.md`) — aguardando aprovação |
 
 Os caminhos absolutos dentro de `pedidos/` e dos documentos das sessões apontam para as pastas de
 trabalho da máquina de origem; nesta pasta os arquivos equivalentes são os da tabela acima.
