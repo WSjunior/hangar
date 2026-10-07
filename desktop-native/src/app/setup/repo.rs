@@ -38,6 +38,9 @@ pub(crate) struct Snapshot {
     /// Ignorados pelo git que já existiam antes do agente (pasta termina em `/`): nunca são apagados.
     #[serde(default)]
     pub preserved: Vec<String>,
+    /// O ramo de antes do agente (`refs/heads/x`), `HEAD` se estava solto; vazio numa anotação antiga (não mexe no ramo).
+    #[serde(default)]
+    pub branch: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -76,7 +79,24 @@ impl Git {
     fn head(&self, dir: &Path) -> Result<String, String> { Ok(String::from_utf8_lossy(&self.run(dir, &["rev-parse", "HEAD"])?).trim().to_owned()) }
 
     fn status(&self, dir: &Path) -> Result<BTreeMap<String, String>, String> { Ok(parse_status(&self.run(dir, &STATUS)?).into_iter().collect()) }
+
+    /// `refs/heads/<ramo>`, ou `HEAD` com o HEAD solto.
+    fn branch(&self, dir: &Path) -> String {
+        self.run(dir, &["symbolic-ref", "-q", "HEAD"]).map(|out| String::from_utf8_lossy(&out).trim().to_owned())
+            .ok().filter(|b| !b.is_empty()).unwrap_or_else(|| "HEAD".to_owned())
+    }
+
+    /// A raiz do repositório, só quando é a própria `dir`: dentro de outro repositório (dotfiles em `~`) anotar e desfazer
+    /// pegaria o de fora.
+    fn root(&self, dir: &Path) -> Result<PathBuf, String> {
+        let top = PathBuf::from(String::from_utf8_lossy(&self.run(dir, &["rev-parse", "--show-toplevel"])?).trim());
+        let same = std::fs::canonicalize(&top).ok().zip(std::fs::canonicalize(dir).ok()).is_some_and(|(a, b)| a == b);
+        if same { Ok(top) } else { Err(format!("{}: not the repository root ({})", dir.display(), top.display())) }
+    }
 }
+
+/// A pasta é a raiz do próprio repositório git: só aí o agente pode ser chamado (sem anotação ele não roda).
+pub(crate) fn own_repo(dir: &Path) -> bool { Git::new().and_then(|git| git.root(dir)).is_ok() }
 
 /// `git status --porcelain=v1 -z`: "XY caminho\0"; renomeado traz depois a origem, apagada em stage ("D ").
 pub(crate) fn parse_status(raw: &[u8]) -> Vec<(String, String)> {
@@ -95,9 +115,10 @@ pub(crate) fn parse_status(raw: &[u8]) -> Vec<(String, String)> {
 pub(crate) fn snapshot(dir: &Path) -> Result<Snapshot, String> {
     let git = Git::new()?;
     // Na raiz do repositório: os caminhos do `git status` são relativos a ela, e o desfazer os junta à pasta anotada.
-    let root = PathBuf::from(String::from_utf8_lossy(&git.run(dir, &["rev-parse", "--show-toplevel"])?).trim());
+    let root = git.root(dir)?;
     let dir = root.as_path();
     let head = git.head(dir)?;
+    let branch = git.branch(dir);
     let preserved = String::from_utf8_lossy(&git.run(dir, &["ls-files", "-o", "-i", "--exclude-standard", "--directory", "-z"])?)
         .split('\0').filter(|p| !p.is_empty()).map(str::to_owned).collect();
     let before = git.status(dir)?.into_iter().map(|(path, status)| {
@@ -107,17 +128,32 @@ pub(crate) fn snapshot(dir: &Path) -> Result<Snapshot, String> {
         let mode = file_mode(&dir.join(&path));
         (path, Entry { status, content, index_clean, index, mode })
     }).collect();
-    Ok(Snapshot { dir: dir.to_owned(), head, before, agent_pid: None, agent_started: String::new(), preserved })
+    Ok(Snapshot { dir: dir.to_owned(), head, before, agent_pid: None, agent_started: String::new(), preserved, branch })
 }
 
 pub(crate) fn restore(s: &Snapshot) -> Restored {
     let mut out = Restored::default();
     let git = match Git::new() { Ok(git) => git, Err(e) => { out.errors.push(e); return out; } };
-    // Commit do agente: só a ref volta (`--soft`); o que o commit levou aparece no status e é desfeito abaixo como
-    // qualquer outra edição. Sem isso o arquivo commitado ficaria "limpo" e escaparia do desfazer.
-    if let Ok(head) = git.head(&s.dir) && head != s.head {
-        out.head_moved = Some((s.head.clone(), head));
-        if let Err(e) = git.run(&s.dir, &["reset", "--soft", "-q", &s.head]) { out.errors.push(e); return out; }
+    // Merge deixado no meio: esquece o merge sem mexer em pasta e índice (`merge --quit`); os arquivos em conflito voltam
+    // abaixo como qualquer outra edição.
+    if git.run(&s.dir, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok()
+        && let Err(e) = git.run(&s.dir, &["merge", "--quit"]) { out.errors.push(e); return out; }
+    let (agent_branch, agent_head) = (git.branch(&s.dir), git.head(&s.dir).unwrap_or_default());
+    // Trocou de ramo: o HEAD volta ao ramo de antes (ou solto no commit de antes) sem tocar em pasta e índice; o ramo que
+    // ele usou fica como ele deixou.
+    let switched = !s.branch.is_empty() && agent_branch != s.branch;
+    if switched {
+        let back = if s.branch == "HEAD" { git.run(&s.dir, &["update-ref", "--no-deref", "HEAD", &s.head]) }
+            else { git.run(&s.dir, &["symbolic-ref", "HEAD", &s.branch]) };
+        if let Err(e) = back { out.errors.push(e); return out; }
+    }
+    // Commit do agente: só a ref do ramo de antes volta (como `reset --soft`); o que o commit levou aparece no status e é
+    // desfeito abaixo como qualquer outra edição. Sem isso o arquivo commitado ficaria "limpo" e escaparia do desfazer.
+    if git.head(&s.dir).ok().as_deref() != Some(s.head.as_str())
+        && let Err(e) = git.run(&s.dir, &["update-ref", "HEAD", &s.head]) { out.errors.push(e); return out; }
+    if switched || agent_head != s.head {
+        let name = |branch: &str, sha: &str| match branch.strip_prefix("refs/heads/") { Some(b) => format!("{b} {sha}"), None => sha.to_owned() };
+        out.head_moved = Some((name(&s.branch, &s.head), name(&agent_branch, &agent_head)));
     }
     let mut after = match git.status(&s.dir) { Ok(after) => after, Err(e) => { out.errors.push(e); return out; } };
     // `.gitignore` primeiro: desfeito, o que o agente des-ignorou volta a ser ignorado e sai da lista.
@@ -251,6 +287,9 @@ pub(crate) fn save_at(dir: &Path, snapshot: &Snapshot) -> std::io::Result<()> {
 
 pub(crate) fn load_at(dir: &Path) -> Option<Snapshot> { serde_json::from_slice(&std::fs::read(dir.join(FILE)).ok()?).ok() }
 
+/// Só a existência: na abertura do app, sem ler o conteúdo dos arquivos anotados.
+pub(crate) fn saved_at(dir: &Path) -> bool { dir.join(FILE).is_file() }
+
 pub(crate) fn clear_at(dir: &Path) { let _ = std::fs::remove_file(dir.join(FILE)); }
 
 #[cfg(test)]
@@ -328,8 +367,10 @@ mod tests {
         let dir = repo("commit");
         person_edits(&dir);
         let before = status(&dir);
-        // Anotada de uma subpasta: o snapshot sobe para a raiz do repositório.
-        let snap = snapshot(&dir.join("backend")).unwrap();
+        // Subpasta de um repositório não é "o próprio repositório": nada de anotar o de fora.
+        assert!(snapshot(&dir.join("backend")).is_err());
+        assert!(!own_repo(&dir.join("backend")) && own_repo(&dir));
+        let snap = snapshot(&dir).unwrap();
         std::fs::write(dir.join("install.sh"), "echo 2\n").unwrap();
         sh(&dir, &["commit", "-q", "-am", "agente"]);
         let restored = restore(&snap);
@@ -342,6 +383,60 @@ mod tests {
         assert_eq!(read(&dir, "README.md").as_deref(), Some("leia\nminha nota\n"));
         assert_eq!(status(&dir), before);
         assert!(restored.diff.contains("+echo 2"), "{}", restored.diff);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn git_out(dir: &Path, args: &[&str]) -> String {
+        String::from_utf8(Command::new("git").arg("-C").arg(dir).args(args).output().unwrap().stdout).unwrap().trim().to_owned()
+    }
+
+    #[test]
+    fn agent_branch_switch_goes_back_and_leaves_the_other_branch_alone() {
+        let dir = repo("switch");
+        person_edits(&dir);
+        let before = status(&dir);
+        let snap = snapshot(&dir).unwrap();
+        assert!(snap.branch.starts_with("refs/heads/"), "{}", snap.branch);
+        sh(&dir, &["checkout", "-q", "-b", "outro"]);
+        std::fs::write(dir.join("install.sh"), "echo 2\n").unwrap();
+        sh(&dir, &["commit", "-q", "-am", "agente"]);
+        let agent_commit = git_out(&dir, &["rev-parse", "HEAD"]);
+        let restored = restore(&snap);
+        assert!(restored.errors.is_empty(), "{:?}", restored.errors);
+        assert_eq!(git_out(&dir, &["symbolic-ref", "HEAD"]), snap.branch);
+        assert_eq!(git_out(&dir, &["rev-parse", "HEAD"]), snap.head);
+        // O ramo que o agente criou não é movido para o commit de antes.
+        assert_eq!(git_out(&dir, &["rev-parse", "outro"]), agent_commit);
+        assert_eq!(read(&dir, "install.sh").as_deref(), Some("echo 1\n"));
+        assert_eq!(read(&dir, "README.md").as_deref(), Some("leia\nminha nota\n"));
+        assert_eq!(status(&dir), before);
+        assert!(restored.head_moved.as_ref().is_some_and(|(_, after)| after.starts_with("outro ")), "{:?}", restored.head_moved);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn merge_left_in_progress_is_forgotten_and_the_files_come_back() {
+        let dir = repo("merge");
+        let base = git_out(&dir, &["symbolic-ref", "--short", "HEAD"]);
+        sh(&dir, &["checkout", "-q", "-b", "lado"]);
+        std::fs::write(dir.join("install.sh"), "echo lado\n").unwrap();
+        sh(&dir, &["commit", "-q", "-am", "lado"]);
+        sh(&dir, &["checkout", "-q", &base]);
+        std::fs::write(dir.join("install.sh"), "echo base\n").unwrap();
+        sh(&dir, &["commit", "-q", "-am", "base 2"]);
+        person_edits(&dir);
+        let before = status(&dir);
+        let snap = snapshot(&dir).unwrap();
+        // O agente começa um merge que conflita e o deixa no meio.
+        let merge = Command::new("git").arg("-C").arg(&dir).args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.hooksPath=/dev/null", "merge", "lado"])
+            .output().unwrap();
+        assert!(!merge.status.success());
+        assert!(!git_out(&dir, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_empty());
+        let restored = restore(&snap);
+        assert!(restored.errors.is_empty(), "{:?}", restored.errors);
+        assert!(git_out(&dir, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_empty());
+        assert_eq!(read(&dir, "install.sh").as_deref(), Some("echo base\n"));
+        assert_eq!(status(&dir), before);
         let _ = std::fs::remove_dir_all(dir);
     }
 

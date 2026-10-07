@@ -7474,6 +7474,8 @@
   "native_setup_agent_no_explanation": "O {agente} terminou sem explicar.",
   "native_setup_agent_closed": "assistente fechado no meio do conserto",
   "native_setup_agent_missing": "o programa não foi encontrado",
+  "native_setup_agent_crashed": "a preparação do agente parou sem resposta",
+  "native_setup_agent_not_stopped": "Não deu para parar o agente: o app não conseguiu identificar o processo dele, então ele pode seguir rodando. A pasta do Hangar é desfeita mesmo assim.",
   "native_setup_agent_recovered_title": "A pasta do Hangar foi devolvida",
   "native_setup_agent_recovered": "O app fechou no meio de um conserto do agente. Estes arquivos voltaram ao que eram antes dele (uma mudança sua neles depois disso também foi desfeita): {arquivos}",
   "native_setup_code_roda_do_mouse": "A rolagem do mouse dentro do Claude não funciona neste Windows até reiniciar o multiplexador.",

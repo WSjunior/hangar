@@ -82,10 +82,14 @@ pub(crate) struct SetupWizard {
     agent_runs: u64,
     /// O relatório como estava quando o agente foi chamado; o final é ele mais a seção do conserto.
     report_base: Option<String>,
+    /// Os segredos lidos antes de o cofre esquecer (senha de administrador, código do askpass, senha do celular): o
+    /// relatório do conserto é montado depois do `forget` e tem de limpá-los também.
+    report_secrets: Vec<String>,
     /// O envio do relatório que leva a correção (reconferência falhou com mudança na pasta), pelo id da fila.
     pub(super) fix_sent: Option<u64>,
     /// O que a abertura desfez de um conserto que o app interrompeu ao cair; fica na tela até a pessoa fechar.
-    pub(super) recovered: Option<repo::Restored>,
+    /// O `bool`: o agente que sobrou não pôde ser parado (sem identidade).
+    pub(super) recovered: Option<(repo::Restored, bool)>,
     /// A recuperação ainda roda: um agente novo agora gravaria a anotação que ela apaga no fim.
     recovering: bool,
     /// "Consertar agora" da roda do mouse confirmado: a próxima instalação leva `-ConsertarRoda`.
@@ -137,12 +141,16 @@ pub(crate) struct AgentRun {
     snapshot: Option<repo::Snapshot>,
     pub(super) restored: Option<repo::Restored>,
     pub(super) timed_out: bool,
+    /// "Parar" sem identidade do processo: ele segue rodando, e a tela diz isso.
+    pub(super) not_stopped: bool,
+    /// Desfazendo: a resposta da tarefa que desfaz, para quem fechar no meio mandar o relatório com o diff.
+    restore_done: Option<tokio::sync::oneshot::Receiver<repo::Restored>>,
 }
 
 impl AgentRun {
     fn new(agent: Agent, number: u64) -> Self {
         Self { agent, phase: AgentPhase::Starting, transcript: agent::Transcript::default(), number, pid: None, started: String::new(),
-            snapshot: None, restored: None, timed_out: false }
+            snapshot: None, restored: None, timed_out: false, not_stopped: false, restore_done: None }
     }
 
     /// Subindo, trabalhando ou desfazendo: a pasta é dele, nada mais roda nela.
@@ -180,27 +188,52 @@ fn start_agent(agent: Agent, report: &str, dest: &Path, options: &Options, state
     Ok(Started { snapshot, pid, started, output })
 }
 
-/// Desfaz e só então esquece a anotação: se o app cair no meio, a próxima abertura desfaz.
+/// Uma restauração por vez no processo: fechar no meio do conserto e reabrir logo depois rodaria duas na mesma pasta.
+static RESTORING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Desfaz e só então esquece a anotação: se o app cair no meio, a próxima abertura desfaz. A segunda que chegar espera a
+/// primeira e, com a pasta já devolvida, não acha nada para desfazer.
 fn finish_restore(snapshot: repo::Snapshot) -> repo::Restored {
+    let _one = RESTORING.lock().unwrap_or_else(|e| e.into_inner());
     let restored = repo::restore(&snapshot);
     if restored.errors.is_empty() && let Some(dir) = run::state_dir() { repo::clear_at(&dir); }
+    if !restored.errors.is_empty() { crate::log_line(&format!("assistente: pasta não voltou ao original: {:?}", restored.errors)); }
     restored
 }
 
-/// Pára o agente (só com a identidade conhecida), espera ele sair — uma última escrita depois de desfazer passaria — e
-/// desfaz a pasta. Bloqueia: só fora da thread da janela.
-fn stop_and_restore(pid: Option<u32>, started: &str, snapshot: Option<repo::Snapshot>) -> Option<repo::Restored> {
-    match pid {
-        Some(pid) if !started.is_empty() => {
-            run::stop(pid, started);
-            for _ in 0..20 { if !run::alive(pid, started) { break; } std::thread::sleep(Duration::from_millis(100)); }
+/// Espera o processo sumir (ou o pid passar a ser de outro); `false` se ainda vive no prazo.
+fn wait_gone(pid: u32, started: &str, limit: Duration) -> bool {
+    let deadline = Instant::now() + limit;
+    loop {
+        match run::read_identity(pid) {
+            run::Identity::Gone => return true,
+            run::Identity::Known(id) if id != started => return true,
+            _ => {}
         }
-        Some(pid) => crate::log_line(&format!("assistente: agente {pid} sem identidade gravada; não foi parado")),
-        None => {}
+        if Instant::now() >= deadline { return false; }
+        std::thread::sleep(Duration::from_millis(100));
     }
-    let restored = finish_restore(snapshot?);
-    if !restored.errors.is_empty() { crate::log_line(&format!("assistente: pasta não voltou ao original: {:?}", restored.errors)); }
-    Some(restored)
+}
+
+/// Pára o agente e espera ele sair — uma última escrita depois de desfazer passaria —; ainda vivo em 10 s, mata sem
+/// escolha. `false` = sem identidade (K2): nunca se mata por pid nu, e quem chama avisa. Bloqueia: só fora da janela.
+fn stop_agent_process(pid: u32, started: &str) -> bool {
+    if started.is_empty() {
+        crate::log_line(&format!("assistente: agente {pid} sem identidade gravada; não foi parado"));
+        return false;
+    }
+    run::stop(pid, started);
+    if !wait_gone(pid, started, Duration::from_secs(10)) {
+        run::kill(pid, started);
+        if !wait_gone(pid, started, Duration::from_secs(3)) { crate::log_line(&format!("assistente: agente {pid} não saiu nem morto")); }
+    }
+    true
+}
+
+/// Pára (se ainda roda) e desfaz. O `bool` diz que o agente não pôde ser parado: a pasta é desfeita mesmo assim.
+fn stop_and_restore(pid: Option<u32>, started: &str, snapshot: Option<repo::Snapshot>) -> (Option<repo::Restored>, bool) {
+    let not_stopped = pid.is_some_and(|pid| !stop_agent_process(pid, started));
+    (snapshot.map(finish_restore), not_stopped)
 }
 
 /// O agente subiu mas ninguém o acompanha mais (assistente fechado enquanto subia).
@@ -211,10 +244,11 @@ fn abandon_started(started: Started) {
 }
 
 /// O app caiu com o agente rodando: pára quem sobrou e devolve a pasta pela anotação.
-fn recover_agent_edits() -> Option<repo::Restored> {
+fn recover_agent_edits() -> Option<(repo::Restored, bool)> {
     let snapshot = repo::load_at(&run::state_dir()?)?;
     let (pid, started) = (snapshot.agent_pid, snapshot.agent_started.clone());
-    stop_and_restore(pid, &started, Some(snapshot))
+    let (restored, not_stopped) = stop_and_restore(pid, &started, Some(snapshot));
+    Some((restored?, not_stopped))
 }
 
 /// A seção do conserto no relatório: comandos, explicação, o diff do que foi desfeito e as notas.
@@ -252,7 +286,7 @@ impl SetupWizard {
             let restored = recovery.await;
             let _ = this.update(cx, |w, cx| {
                 w.recovering = false;
-                w.recovered = restored.filter(|r| !r.changed.is_empty() || !r.errors.is_empty() || r.head_moved.is_some());
+                w.recovered = restored.filter(|(r, not_stopped)| *not_stopped || !r.changed.is_empty() || !r.errors.is_empty() || r.head_moved.is_some());
                 cx.notify();
             });
         }).detach();
@@ -263,7 +297,8 @@ impl SetupWizard {
             git_ready: false, bootstrap: None, token: None, runs: Runs::default(), check_tail: None, install_tail: None, records: (None, None),
             polling: false, finished: false, failure: None,
             report: None, report_about: None, report_gen: 0, send: true, outbox: Outbox::default(), send_requested: Vec::new(), refreshing: false,
-            agents_ready: Vec::new(), agent: None, agent_runs: 0, report_base: None, fix_sent: None, recovered: None, recovering: true,
+            agents_ready: Vec::new(), agent: None, agent_runs: 0, report_base: None, report_secrets: Vec::new(), fix_sent: None, recovered: None,
+            recovering: true,
             fix_mouse_wheel: false, vault: Vault::default(), waiting: Vec::new(), prompt: None, after_password: None,
             opened_link: None, app_copy: None, connection: None, connect_later: false, resumed_ended: false, viewing: Screen::Welcome, details_open: false, phone: None,
             qr: Qr::Idle, tailscale_running: false, tailscale_checking: false, ticks: 0,
@@ -640,9 +675,12 @@ impl SetupWizard {
         // A reconferência depois do agente falhou: o relatório é o de antes mais o conserto, e sai agora.
         if self.agent.as_ref().is_some_and(|run| run.phase == AgentPhase::Rechecking) {
             let detail = format!("{} {}", failure.code.as_deref().unwrap_or("-"), failure.text);
+            self.report_secrets.extend(secrets);
             self.finish_agent(report::Recheck::Failed(detail), cx);
         } else {
             (self.agent, self.fix_sent, self.report_base) = (None, None, None);
+            // Guardados para o relatório do conserto, se a pessoa chamar o agente: o cofre já esqueceu.
+            self.report_secrets = secrets.clone();
             self.start_report(failure, secrets, cx);
             self.detect_agents(cx);
         }
@@ -741,6 +779,8 @@ impl SetupWizard {
 
     fn finish(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.polling = false;
+        // A reconferência do agente acabou: o relatório dele limpa também a senha desta execução, lida antes do `forget`.
+        if self.agent.as_ref().is_some_and(|run| run.phase == AgentPhase::Rechecking) { self.report_secrets.extend(self.secret_values()); }
         self.vault.forget();
         for request in self.waiting.drain(..) { let _ = request.reply.send(None); }
         self.close_prompt(cx);
@@ -796,6 +836,8 @@ impl SetupWizard {
         // Pendência não para o script: rodar de novo antes do FIM seria um segundo instalador na mesma pasta.
         // Agente trabalhando: a pasta é dele até ser desfeita (a reconferência entra pelo `Rechecking`, que não é ocupado).
         if self.is_running() || self.refreshing || self.agent.as_ref().is_some_and(AgentRun::busy) { return; }
+        // Sem agente a caminho da reconferência, a senha de administrador guardada para o relatório dele sai da memória.
+        if self.agent.is_none() { self.report_secrets.clear(); }
         // Sair da falha por qualquer botão de tentar de novo entrega o relatório dela.
         self.send_before_leaving(cx);
         let before = self.frontier_now();
@@ -834,7 +876,12 @@ impl SetupWizard {
 
     fn detect_agents(&mut self, cx: &mut Context<Self>) {
         self.agents_ready.clear();
-        let task = cx.background_executor().spawn(async move { agent::available(&system::refreshed_path()) });
+        let dest = self.dest.clone();
+        // Sem a pasta ser a raiz do próprio repositório não há como anotar e desfazer (antes do clone, ou dentro de outro
+        // repositório como dotfiles em `~`): o botão nem aparece.
+        let task = cx.background_executor().spawn(async move {
+            if repo::own_repo(&dest) { agent::available(&system::refreshed_path()) } else { Vec::new() }
+        });
         cx.spawn(async move |this, cx| {
             let found = task.await;
             let _ = this.update(cx, |w, cx| if w.failure.is_some() && w.agent.is_none() {
@@ -865,7 +912,7 @@ impl SetupWizard {
         let (done, result) = tokio::sync::oneshot::channel();
         self.runtime.spawn_blocking(move || { let _ = done.send(start_agent(agent, &report, &dest, &options, &state_dir, english)); });
         cx.spawn(async move |this, cx| {
-            let mut started = Some(result.await.unwrap_or_else(|_| Err(String::new())));
+            let mut started = Some(result.await.unwrap_or_else(|_| Err(tr("setup_agent_crashed"))));
             let output = match this.update(cx, |w, cx| started.take().and_then(|s| w.agent_started(s, cx))) {
                 Ok(Some(output)) => output,
                 Ok(None) => return,
@@ -880,8 +927,10 @@ impl SetupWizard {
                 if this.update(cx, |w, cx| w.agent_output(item, cx)).is_err() { return; }
                 if exited { break; }
             }
-            let Ok(Some(snapshot)) = this.update(cx, |w, cx| w.take_snapshot(cx)) else { return };
+            let Ok(Some((snapshot, done))) = this.update(cx, |w, cx| w.take_snapshot(cx)) else { return };
             let restored = cx.background_executor().spawn(async move { finish_restore(snapshot) }).await;
+            // Fechado enquanto desfazia: quem fechou espera esta resposta para mandar o relatório com o diff.
+            let _ = done.send(restored.clone());
             let _ = window.update(cx, |_, window, cx| this.update(cx, |w, cx| w.recheck_after_agent(restored, window, cx)));
         }).detach();
         cx.notify();
@@ -923,12 +972,15 @@ impl SetupWizard {
         cx.notify();
     }
 
-    /// `None` quando o `close` já levou a execução.
-    fn take_snapshot(&mut self, cx: &mut Context<Self>) -> Option<repo::Snapshot> {
+    /// `None` quando o `close` já levou a execução. O canal leva o resultado a quem fechar no meio.
+    fn take_snapshot(&mut self, cx: &mut Context<Self>) -> Option<(repo::Snapshot, tokio::sync::oneshot::Sender<repo::Restored>)> {
         let run = self.agent.as_mut()?;
         run.phase = AgentPhase::Restoring;
         cx.notify();
-        run.snapshot.take()
+        let snapshot = run.snapshot.take()?;
+        let (done, wait) = tokio::sync::oneshot::channel();
+        run.restore_done = Some(wait);
+        Some((snapshot, done))
     }
 
     /// Reconfere rodando o script inteiro, como o "Tentar de novo": passou vai a "Tudo pronto", falhou volta ao painel.
@@ -944,26 +996,43 @@ impl SetupWizard {
         if run.phase != AgentPhase::Running || timer.is_some_and(|n| n != run.number) { return; }
         let Some(pid) = run.pid else { return };
         run.timed_out = timer.is_some();
+        // Sem identidade (K2) nunca se mata por pid nu: ele segue rodando e a tela diz isso.
+        if run.started.is_empty() {
+            run.not_stopped = true;
+            crate::log_line(&format!("assistente: agente {pid} sem identidade gravada; não foi parado"));
+            return cx.notify();
+        }
         let started = run.started.clone();
-        cx.background_executor().spawn(async move { run::stop(pid, &started) }).detach();
+        cx.background_executor().spawn(async move { stop_agent_process(pid, &started) }).detach();
         cx.notify();
     }
 
-    /// Fecha o conserto: o relatório final é o de antes mais a seção do agente, e sai "consertado ali" ou "aberto".
+    /// Fecha o conserto: o relatório final é o de antes mais a seção do agente, e sai "consertado ali" ou "aberto". O
+    /// `.env` (senha do servidor) é lido fora da thread da janela; o envio sai quando o texto fica pronto.
     fn finish_agent(&mut self, recheck: report::Recheck, cx: &mut Context<Self>) {
-        // ponytail: o `.env` é um arquivo de poucos bytes, lido na thread da janela como no `connect_local`.
-        let mut secrets = self.secret_values();
-        secrets.extend(local::read_install(&self.dest).token);
+        let mut secrets = std::mem::take(&mut self.report_secrets);
+        secrets.extend(self.secret_values());
         let Some(run) = self.agent.as_mut() else { return };
         // Agente que terminou com erro (limite de turnos, API) não consertou, diga a explicação o que disser.
         let fixed = recheck == report::Recheck::Passed && !run.transcript.failed;
         if !matches!(run.phase, AgentPhase::Failed(_)) { run.phase = AgentPhase::Done { fixed }; }
         let restored = run.restored.clone().unwrap_or_default();
         let section = agent_section(run, &restored, recheck);
-        let agent = run.agent;
-        if let Some(base) = self.report_base.take() { self.report = Some(report::with_agent(&base, &section, &report::Secrets::here(secrets))); }
-        let sent = self.send_report(if fixed { Outcome::Consertado } else { Outcome::Aberto }, Some(agent), cx);
-        self.fix_sent = sent.filter(|_| !fixed && !restored.diff.is_empty());
+        let (agent, changed) = (run.agent, !restored.diff.is_empty());
+        let (base, dest) = (self.report_base.take(), self.dest.clone());
+        let task = cx.background_executor().spawn(async move {
+            secrets.extend(local::read_install(&dest).token);
+            base.map(|base| report::with_agent(&base, &section, &report::Secrets::here(secrets)))
+        });
+        cx.spawn(async move |this, cx| {
+            let text = task.await;
+            let _ = this.update(cx, |w, cx| {
+                if let Some(text) = text { w.report = Some(text); }
+                let sent = w.send_report(if fixed { Outcome::Consertado } else { Outcome::Aberto }, Some(agent), cx);
+                w.fix_sent = sent.filter(|_| !fixed && changed);
+                cx.notify();
+            });
+        }).detach();
         cx.notify();
     }
 
@@ -971,12 +1040,19 @@ impl SetupWizard {
     /// que houve. Tudo no runtime: a entidade some logo depois, e a janela não espera o `taskkill` nem o git.
     fn abandon_agent(&mut self) {
         let Some(mut run) = self.agent.take_if(|run| run.busy()) else { return };
-        let (mut secrets, base, dest) = (self.secret_values(), self.report_base.take(), self.dest.clone());
+        let mut secrets = std::mem::take(&mut self.report_secrets);
+        secrets.extend(self.secret_values());
+        let (base, dest) = (self.report_base.take(), self.dest.clone());
         let about = self.report_about.take().filter(|_| self.send);
+        let restoring = run.restore_done.take();
         self.runtime.spawn(async move {
+            // Desfazendo: espera a tarefa que desfaz (ela segue sem a entidade), e o diff dela vai no relatório.
+            let restoring = match restoring { Some(wait) => Some(wait.await.unwrap_or_default()), None => None };
             let payload = tokio::task::spawn_blocking(move || {
-                // Desfazendo (`Restoring`): a anotação já saiu com a tarefa que desfaz, e o diff vai com ela.
-                let restored = stop_and_restore(run.pid, &run.started.clone(), run.snapshot.take()).unwrap_or_default();
+                let restored = match restoring {
+                    Some(restored) => restored,
+                    None => stop_and_restore(run.pid, &run.started.clone(), run.snapshot.take()).0.unwrap_or_default(),
+                };
                 let (base, about) = (base?, about?);
                 secrets.extend(local::read_install(&dest).token);
                 let section = agent_section(&run, &restored, report::Recheck::NotRun(tr("setup_agent_closed")));

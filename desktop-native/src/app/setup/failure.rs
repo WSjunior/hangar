@@ -52,6 +52,8 @@ pub(crate) struct AgentPanel<'a> {
     pub explanation: Option<&'a str>,
     /// Depois de desfazer: o teto de tempo, o commit que ele fez e o que não voltou ao original.
     pub notes: Vec<String>,
+    /// "Parar" sem identidade do processo: ele segue rodando.
+    pub not_stopped: bool,
 }
 
 /// O que o painel do relatório mostra; montado pelo assistente a cada desenho.
@@ -187,6 +189,8 @@ pub(crate) fn agent_block(view: &PanelView, on_action: OnFailureAction) -> Optio
             .when(busy, |el| el.child(chrome::Spinner::new(SharedString::from("setup-agent-spin"), IconName::LoaderCircle, px(14.), theme::muted())))
             .child(line))
         .children(stop.map(|button| div().child(button)))
+        .when(panel.not_stopped, |el| el.child(div().id("setup-agent-not-stopped").role(Role::Alert).text_sm()
+            .text_color(theme::warning_text()).whitespace_normal().child(tr("setup_agent_not_stopped"))))
         .when_some(explanation, |el, text| el.child(TextView::markdown("setup-agent-explanation", text).selectable(true).scrollable(false)))
         .children(notes.iter().map(|note| div().text_sm().text_color(theme::warning_text()).whitespace_normal().child(note.clone())))
         .when(view.fix_sent, |el| el.child(div().text_sm().text_color(theme::warning_text()).child(tr("setup_agent_fix_sent"))))

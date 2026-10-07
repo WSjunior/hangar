@@ -43,5 +43,9 @@ pub(super) enum Entry {
 /// O assistente que estava rodando quando o app fechou (`state.json`): reabrir o app retoma nele.
 pub(super) fn saved_run() -> Option<run::SetupState> { if supported() { run::load_state() } else { None } }
 
+/// Um conserto do agente ficou sem desfazer (o app caiu ou saiu enquanto desfazia): o assistente abre para devolver a
+/// pasta e avisar. A anotação só sai depois de desfazer sem erro.
+pub(super) fn interrupted_fix() -> bool { supported() && run::state_dir().is_some_and(|dir| repo::saved_at(&dir)) }
+
 /// Só para provar telas: `HANGAR_SETUP_DEMO` abre o assistente ao iniciar.
 pub(super) fn demo() -> bool { supported() && std::env::var_os("HANGAR_SETUP_DEMO").is_some() }

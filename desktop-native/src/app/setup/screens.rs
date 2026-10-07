@@ -194,7 +194,8 @@ impl SetupWizard {
     fn panel_view(&self) -> PanelView<'_> {
         let agent = self.agent.as_ref().map(|run| AgentPanel { agent: run.agent, phase: &run.phase,
             explanation: run.transcript.explanation.as_deref(),
-            notes: run.restored.as_ref().map(|r| report::restore_notes(r.head_moved.as_ref(), &r.errors, run.timed_out)).unwrap_or_default() });
+            notes: run.restored.as_ref().map(|r| report::restore_notes(r.head_moved.as_ref(), &r.errors, run.timed_out)).unwrap_or_default(),
+            not_stopped: run.not_stopped });
         // O aviso da correção só aparece depois que o envio dela saiu de verdade.
         let fix_sent = self.fix_sent.is_some_and(|id| self.outbox.items.iter().any(|(n, state, _)| *n == id && *state == SendState::Sent));
         PanelView { report: self.report.as_deref(), send: self.send, locked: self.report_about.is_none(), refreshing: self.refreshing,
@@ -203,10 +204,11 @@ impl SetupWizard {
 
     /// A abertura desfez um conserto que o app interrompeu ao cair: diz quais arquivos voltaram, nunca calado.
     fn recovered_notice(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
-        let restored = self.recovered.as_ref()?;
+        let (restored, not_stopped) = self.recovered.as_ref()?;
         let mut lines: Vec<String> = (!restored.changed.is_empty())
             .then(|| tr("setup_agent_recovered").replace("{arquivos}", &restored.changed.join(", "))).into_iter().collect();
         lines.extend(report::restore_notes(restored.head_moved.as_ref(), &restored.errors, false));
+        if *not_stopped { lines.push(tr("setup_agent_not_stopped")); }
         let close = Button::new("setup-agent-recovered-close").ghost().small().label(tr("close"))
             .on_click(cx.listener(|w, _, _, cx| { w.recovered = None; cx.notify(); }));
         Some(callout("setup-agent-recovered", tr("setup_agent_recovered_title"), lines, vec![close.into_any_element()]))
@@ -523,8 +525,9 @@ impl SetupWizard {
         rows.extend(self.app_rows(cx));
         let on_action = self.failure_handler(cx);
         rows.extend(self.runs.latest().iter().flat_map(|p| p.pendings.iter()).map(|(code, text)| failure::pending_row(code, text, on_action.clone())));
-        // Consertado pelo agente: a explicação e o relatório que saiu ficam em "Tudo pronto".
-        let fixed = self.agent.as_ref().is_some_and(|run| run.phase == AgentPhase::Done { fixed: true })
+        // Reconferência passou com o agente chamado: o que ele disse e o relatório que saiu ficam em "Tudo pronto" — também
+        // quando ele terminou com erro e o relatório foi como "aberto".
+        let fixed = self.agent.as_ref().is_some_and(|run| matches!(run.phase, AgentPhase::Done { .. }))
             .then(|| failure::after_panel(&self.panel_view(), on_action.clone()));
         div().flex().flex_col().gap_4()
             .when(self.runs.end().is_none(), |el| el.child(muted_line("setup-done-waiting", true, tr("setup_done_waiting"))))

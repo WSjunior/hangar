@@ -234,10 +234,16 @@ fn same_process(pid: u32, started: &str) -> bool {
 pub(crate) fn alive(pid: u32, started: &str) -> bool { same_process(pid, started) }
 
 /// Pára a execução inteira: no Linux o `setsid` fez do script o líder do grupo; no Windows vai a árvore.
-pub(crate) fn stop(pid: u32, started: &str) {
+pub(crate) fn stop(pid: u32, started: &str) { signal(pid, started, false) }
+
+/// Como `stop`, sem dar escolha ao processo (SIGKILL); no Windows o `taskkill /F` já é isso.
+pub(crate) fn kill(pid: u32, started: &str) { signal(pid, started, true) }
+
+fn signal(pid: u32, started: &str, force: bool) {
+    let _ = force;
     if !same_process(pid, started) { return; }
     #[cfg(target_os = "linux")]
-    unsafe { libc::kill(-(pid as i32), libc::SIGTERM); }
+    unsafe { libc::kill(-(pid as i32), if force { libc::SIGKILL } else { libc::SIGTERM }); }
     #[cfg(windows)]
     { let _ = super::system::hidden(&mut Command::new("taskkill")).args(["/PID", &pid.to_string(), "/T", "/F"]).output(); }
 }
