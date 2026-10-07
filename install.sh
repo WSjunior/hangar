@@ -127,10 +127,13 @@ net_code() {
 # Textos que dizem a causa de uma falha com sudo: sudo clássico, sudo-rs e apt, medidos em
 # docs/decisoes/instalacao.md ("O `sudo` sem terminal: `sudo -S`, não `SUDO_ASKPASS`").
 SUDO_DENIED_RE='not in the sudoers|not allowed to (run|execute)|may not run sudo|afraid I can.t do that'
-SUDO_WRONG_RE='Sorry, try again|incorrect password attempt|Authentication failed|incorrect authentication attempt'
+# Só linhas do próprio sudo: um comando que imprime "Authentication failed" não é senha errada.
+SUDO_WRONG_RE='^Sorry, try again|^sudo(-rs)?: .*(incorrect (password|authentication) attempt|Authentication failed)'
 PKG_STALE_RE='Unable to locate package|Unable to fetch some archives|Failed to fetch'
 # Escrita pela app_sudo quando a pessoa não deu a senha (fechou a janela ou errou três vezes).
 SUDO_NO_PASSWORD='hangar: a senha de administrador não foi informada'
+# Escrita pela app_sudo quando o sudo aceita a senha mas não a guarda para o comando seguinte.
+SUDO_NO_CACHE='hangar: o sudo aceitou a senha mas não a guarda entre comandos (timestamp_timeout=0)'
 
 # Todo sudo do instalador passa por aqui. No --app a senha vem da janela do app: o auxiliar do
 # HANGAR_ASKPASS a imprime e ela vai pelo cano direto ao `sudo -S`, nunca para variável, argv ou
@@ -151,10 +154,12 @@ app_sudo() { # app_sudo <motivo> <comando…>
   # Sudo recusado é resposta, não erro do instalador: sem isto o `set -e` sairia antes de ler a causa
   # quando a app_sudo roda dentro de um cano (subshell). O `local -` devolve o -e na saída.
   local -; set +e
+  # A senha só autentica (-v); o comando roda depois pelo -n. Com `sudo -S <comando>` uma regra
+  # NOPASSWD deixaria a senha na entrada do comando, e a saída dele se confundiria com a do sudo.
   for try in 1 2 3; do
-    # O stderr do sudo e do comando vai à saída e ao arquivo: é dele que sai a causa da falha.
+    # A resposta do sudo vai à saída e ao arquivo: é dela que sai a causa da falha.
     { HANGAR_ASKPASS_CODE=$APP_ASKPASS_CODE "$APP_ASKPASS" "$reason" ${retry:+"$retry"} \
-        | sudo -S -p '' "$@" 2>&1 1>&4 | tee "$err" >&2; st=("${PIPESTATUS[@]}"); } 4>&1
+        | sudo -S -p '' -v 2>&1 | tee "$err" >&2; st=("${PIPESTATUS[@]}"); }
     [ "${st[1]}" = 0 ] && break
     # O auxiliar saiu sem senha: a pessoa fechou a janela.
     [ "${st[0]}" = 0 ] || { echo "$SUDO_NO_PASSWORD" >&2; break; }
@@ -165,11 +170,15 @@ app_sudo() { # app_sudo <motivo> <comando…>
     retry=--retry
   done
   rm -f "$err"
-  return "${st[1]}"
+  [ "${st[1]}" = 0 ] || return "${st[1]}"
+  # Sem credencial guardada, a única via seria a senha no stdin do comando: para aqui.
+  sudo -n true 2>/dev/null || { echo "$SUDO_NO_CACHE" >&2; return 1; }
+  sudo -n "$@"
 }
 # Causa de uma falha com sudo, pela saída do comando; vazio = desconhecida.
 sudo_error_code() { # sudo_error_code <arquivo com a saída>
-  if grep -qiE "$SUDO_DENIED_RE" "$1"; then
+  # Sudo que não guarda a credencial também não deixa este usuário instalar pelo app.
+  if grep -qiE "$SUDO_DENIED_RE" "$1" || grep -qF "$SUDO_NO_CACHE" "$1"; then
     echo sem-sudo
   elif grep -qF "$SUDO_NO_PASSWORD" "$1"; then
     echo senha-cancelada
