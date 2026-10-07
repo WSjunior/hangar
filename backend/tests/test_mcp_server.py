@@ -52,7 +52,7 @@ async def test_lista_tools_e_quem_sou(identidade):
     async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
         nomes = {t.name for t in (await s.list_tools()).tools}
         assert nomes == {"who_am_i", "sessions", "send", "group", "pair", "unpair", "new_session",
-                         "browser_open", "browser", "browser_batch"}
+                         "browser_open", "browser", "browser_batch", "html_render"}
         res = await s.call_tool("who_am_i", {})
         assert not res.is_error and res.structured_content == {"name": "eu", "origem": "pane"}
 
@@ -200,6 +200,24 @@ async def test_nav_lote_para_no_primeiro_erro(identidade, monkeypatch):
         assert "parou no passo 1 (click)" in txt and "@e9" in txt and "ok: snapshot" in txt
         res = await s.call_tool("nav_lote", {"passos": [{"verbo": "snapshot"}, {"verbo": "text"}]})
         assert not res.is_error and res.structured_content == {"feitos": ["ok: snapshot", "ok: text"]}
+
+
+async def test_browser_open_completa_pagina_propria_e_recusa_outro_caminho(identidade, monkeypatch):
+    from app import api
+    gravados = []
+    monkeypatch.setattr(api, "_session_exists", lambda name: True)
+    monkeypatch.setattr(api, "nav_pendente", lambda name, url: gravados.append((name, url)))
+    monkeypatch.setattr(api, "resolve_bind_ip", lambda s: "0.0.0.0")
+    monkeypatch.setattr(settings, "port", 8765)
+    async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
+        # O Rust codifica o nome inteiro (`%65u` é `eu`).
+        for url in ("/api/sessions/eu/pages/abc-1", "/api/sessions/%65u/pages/abc-1"):
+            assert not (await s.call_tool("browser_open", {"url": url})).is_error
+        for url in ("/api/sessions/outra/pages/abc-1", "/api/sessions/eu/files", "/api/sessions/eu/pages/../x"):
+            res = await s.call_tool("browser_open", {"url": url})
+            assert res.is_error and "página desta sessão" in res.content[0].text
+    assert gravados == [("eu", "http://127.0.0.1:8765/api/sessions/eu/pages/abc-1?token=secret"),
+                        ("eu", "http://127.0.0.1:8765/api/sessions/%65u/pages/abc-1?token=secret")]
 
 
 async def test_grupo_parear_nova_sessao_chamam_as_rotas_como_eu(identidade, monkeypatch):

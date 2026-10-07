@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime
@@ -4974,6 +4975,22 @@ class NavBody(_StrictBody):
     url: str = Field(min_length=1)
 
 
+_PAGINA_RELATIVA = re.compile(r"^/api/sessions/([^/?#]+)/pages/([A-Za-z0-9_-]{1,128})$")
+
+
+def _url_pagina_propria(name: str, u: str) -> str:
+    """Rascunho de `html_render` vem como caminho sem token: completa com o endereço local do
+    servidor e o token do dono, como os links de arquivo. Outro caminho relativo é recusado."""
+    m = _PAGINA_RELATIVA.match(u)
+    if m is None or urllib.parse.unquote(m.group(1)) != name:
+        raise HTTPException(400, "caminho relativo só vale para página desta sessão")
+    from app.rust_server import listen_addr
+    # Mesmo endereço do pi_inbox: bind em toda interface inclui loopback; IP de LAN só escuta nele.
+    bind = resolve_bind_ip(settings)
+    host = "127.0.0.1" if bind in ("0.0.0.0", "::") else bind
+    return f"http://{listen_addr(host, settings.port)}{u}?token={urllib.parse.quote(settings.auth_token, safe='')}"
+
+
 @app.post("/api/sessions/{name}/nav", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 async def abrir_nav_sessao(name: str, body: NavBody):
     """O AGENTE abre o navegador embutido da própria sessão (CLI `hangar-preview open <url>`).
@@ -4984,7 +5001,9 @@ async def abrir_nav_sessao(name: str, body: NavBody):
     if not await _send_thread(_session_exists, name):
         raise HTTPException(404, "sessão não encontrada")
     u = body.url.strip()
-    if not re.match(r"^https?://", u, re.I):
+    if u.startswith("/"):
+        u = _url_pagina_propria(name, u)
+    elif not re.match(r"^https?://", u, re.I):
         u = "http://" + u
     await asyncio.to_thread(nav_pendente, name, u)   # grava em disco: fora do loop
     return {"ok": True}
