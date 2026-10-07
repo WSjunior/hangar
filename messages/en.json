@@ -7473,6 +7473,9 @@
   "native_setup_agent_failed": "{agente} didn't run: {erro}",
   "native_setup_agent_no_explanation": "{agente} finished without explaining.",
   "native_setup_agent_closed": "installer closed in the middle of the fix",
+  "native_setup_agent_missing": "the program was not found",
+  "native_setup_agent_recovered_title": "The Hangar folder was put back",
+  "native_setup_agent_recovered": "The app closed in the middle of an agent fix. These files went back to how they were before it (any change you made to them since then was undone too): {arquivos}",
   "native_setup_code_roda_do_mouse": "Mouse scrolling inside Claude does not work on this Windows until the multiplexer restarts.",
   "native_setup_fix_mouse_wheel": "Fix now",
   "native_setup_fix_mouse_wheel_confirm": "This closes the open terminal sessions. Each conversation stays in the app. Continue?"

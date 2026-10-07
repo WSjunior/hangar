@@ -2,6 +2,7 @@
 //! relatório com o texto exato que sai e a caixa de envio. Falha sem código, ou com código fora da tabela, é a falha não
 //! prevista: a última mensagem do script vira a frase.
 use super::*;
+use super::agent::Agent;
 use super::codes::{self, Fix};
 use super::flow::Screen;
 use super::marks::Progress;
@@ -35,12 +36,23 @@ impl Failure {
 
 /// O que o painel pede ao assistente (`SetupWizard::failure_action`).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum FailureAction { Retry, ToggleDetails, Fix(Fix), ToggleSend, SendAgain(u64), Dismiss(u64) }
+pub(crate) enum FailureAction { Retry, ToggleDetails, Fix(Fix), ToggleSend, SendAgain(u64), Dismiss(u64), AskAgent(Agent), StopAgent }
 
 pub(crate) type OnFailureAction = Rc<dyn Fn(FailureAction, &mut Window, &mut App)>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum SendState { Sending, Sent, Failed(String) }
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum AgentPhase { Starting, Running, Restoring, Rechecking, Done { fixed: bool }, Failed(String) }
+
+pub(crate) struct AgentPanel<'a> {
+    pub agent: Agent,
+    pub phase: &'a AgentPhase,
+    pub explanation: Option<&'a str>,
+    /// Depois de desfazer: o teto de tempo, o commit que ele fez e o que não voltou ao original.
+    pub notes: Vec<String>,
+}
 
 /// O que o painel do relatório mostra; montado pelo assistente a cada desenho.
 pub(crate) struct PanelView<'a> {
@@ -51,6 +63,11 @@ pub(crate) struct PanelView<'a> {
     pub locked: bool,
     /// "Atualizar e tentar de novo" rodando o `apt-get update`.
     pub refreshing: bool,
+    /// Instalados e logados: sem login o botão não aparece.
+    pub agents: &'a [Agent],
+    pub agent: Option<AgentPanel<'a>>,
+    /// Reconferência falhou com mudança na pasta e o envio saiu: a correção foi junto.
+    pub fix_sent: bool,
 }
 
 /// Relatórios entregues para envio. Ficam fora da falha porque a pessoa sai do painel ao clicar (o `retry` apaga a
@@ -130,20 +147,68 @@ pub(crate) fn failure_panel(failure: &Failure, details_open: bool, lines: &[Stri
 
 /// Logo abaixo do painel: o relatório inteiro, a caixa de envio e o estado do envio.
 pub(crate) fn after_panel(view: &PanelView, on_action: OnFailureAction) -> Div {
-    div().flex().flex_col().gap_4().child(report_block(view, on_action))
+    div().flex().flex_col().gap_4().children(agent_block(view, on_action.clone())).child(report_block(view, on_action))
+}
+
+/// Sem agente chamado: os botões "Pedir ajuda ao X"; chamado: em que pé está, "Parar" e, no fim, a explicação dele.
+pub(crate) fn agent_block(view: &PanelView, on_action: OnFailureAction) -> Option<AnyElement> {
+    let Some(panel) = &view.agent else {
+        if view.agents.is_empty() { return None; }
+        let ready = view.report.is_some();
+        let buttons: Vec<Button> = view.agents.iter().enumerate().map(|(n, agent)| {
+            let (agent, on_action) = (*agent, on_action.clone());
+            let button = Button::new(SharedString::from(format!("setup-agent-ask-{}", agent.id()))).small().disabled(!ready)
+                .label(tr("setup_agent_ask").replace("{agente}", agent.name()))
+                .on_click(move |_, window, cx| on_action(FailureAction::AskAgent(agent), window, cx));
+            if n == 0 { button.primary() } else { button.outline() }
+        }).collect();
+        return Some(div().id("setup-agent-offer").flex().flex_col().gap_2()
+            .child(div().flex().flex_wrap().gap_2().children(buttons))
+            .child(div().text_xs().text_color(theme::muted()).whitespace_normal().child(tr("setup_agent_hint")))
+            .into_any_element());
+    };
+    let name = panel.agent.name();
+    let (busy, line) = match panel.phase {
+        AgentPhase::Starting => (true, tr("setup_agent_starting").replace("{agente}", name)),
+        AgentPhase::Running => (true, tr("setup_agent_running").replace("{agente}", name)),
+        AgentPhase::Restoring => (true, tr("setup_agent_restoring")),
+        AgentPhase::Rechecking => (true, tr("setup_agent_rechecking")),
+        AgentPhase::Done { fixed: true } => (false, tr("setup_agent_fixed").replace("{agente}", name)),
+        AgentPhase::Done { fixed: false } => (false, tr("setup_agent_not_fixed").replace("{agente}", name)),
+        AgentPhase::Failed(why) => (false, tr("setup_agent_failed").replace("{agente}", name).replace("{erro}", why)),
+    };
+    let explanation = panel.explanation.filter(|_| matches!(panel.phase, AgentPhase::Done { .. })).map(str::to_owned);
+    let stop = (*panel.phase == AgentPhase::Running).then(|| Button::new("setup-agent-stop").outline().small().label(tr("setup_agent_stop"))
+        .on_click(move |_, window, cx| on_action(FailureAction::StopAgent, window, cx)));
+    // As notas só valem depois de desfazer a pasta (na reconferência e no fim).
+    let notes = if matches!(panel.phase, AgentPhase::Starting | AgentPhase::Running | AgentPhase::Restoring) { &[][..] } else { &panel.notes[..] };
+    Some(div().id("setup-agent").flex().flex_col().gap_2().p_4().rounded_lg().border_1().border_color(theme::border()).bg(theme::boxed())
+        .child(div().id("setup-agent-status").role(Role::Status).flex().items_center().gap_2().text_sm().font_weight(FontWeight::MEDIUM)
+            .when(busy, |el| el.child(chrome::Spinner::new(SharedString::from("setup-agent-spin"), IconName::LoaderCircle, px(14.), theme::muted())))
+            .child(line))
+        .children(stop.map(|button| div().child(button)))
+        .when_some(explanation, |el, text| el.child(TextView::markdown("setup-agent-explanation", text).selectable(true).scrollable(false)))
+        .children(notes.iter().map(|note| div().text_sm().text_color(theme::warning_text()).whitespace_normal().child(note.clone())))
+        .when(view.fix_sent, |el| el.child(div().text_sm().text_color(theme::warning_text()).child(tr("setup_agent_fix_sent"))))
+        .into_any_element())
 }
 
 fn report_block(view: &PanelView, on_action: OnFailureAction) -> Div {
     let toggle = on_action;
     // O estado do envio mora em `outbox_lines`, visível em qualquer etapa; aqui só o aviso de quando sai.
-    let status = (view.send && !view.locked).then(|| tr("setup_report_on_leave"));
+    // Com o agente chamado, o relatório espera ele terminar e a caixa não muda até lá.
+    let waiting = view.agent.as_ref().filter(|p| !matches!(p.phase, AgentPhase::Done { .. } | AgentPhase::Failed(_)));
+    let status = view.send.then(|| match waiting {
+        Some(panel) => Some(tr("setup_report_after_agent").replace("{agente}", panel.agent.name())),
+        None => (!view.locked).then(|| tr("setup_report_on_leave")),
+    }).flatten();
     div().id("setup-report").flex().flex_col().gap_2()
         .when(view.refreshing, |el| el.child(div().id("setup-packages-refreshing").role(Role::Status).flex().items_center().gap_2()
             .text_sm().text_color(theme::muted())
             .child(chrome::Spinner::new(SharedString::from("setup-packages-refreshing-spin"), IconName::LoaderCircle, px(14.), theme::muted()))
             .child(tr("setup_packages_refreshing"))))
         .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(tr("setup_report_title")))
-        .child(Checkbox::new("setup-report-send").label(tr("setup_report_send")).checked(view.send).disabled(view.locked)
+        .child(Checkbox::new("setup-report-send").label(tr("setup_report_send")).checked(view.send).disabled(view.locked || waiting.is_some())
             .on_click(move |_, window, cx| toggle(FailureAction::ToggleSend, window, cx)))
         .when_some(status, |el, status| el.child(div().id("setup-report-status").role(Role::Status).text_xs()
             .text_color(theme::muted()).whitespace_normal().child(status)))

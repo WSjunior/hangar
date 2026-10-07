@@ -94,6 +94,9 @@ pub(crate) fn parse_status(raw: &[u8]) -> Vec<(String, String)> {
 
 pub(crate) fn snapshot(dir: &Path) -> Result<Snapshot, String> {
     let git = Git::new()?;
+    // Na raiz do repositório: os caminhos do `git status` são relativos a ela, e o desfazer os junta à pasta anotada.
+    let root = PathBuf::from(String::from_utf8_lossy(&git.run(dir, &["rev-parse", "--show-toplevel"])?).trim());
+    let dir = root.as_path();
     let head = git.head(dir)?;
     let preserved = String::from_utf8_lossy(&git.run(dir, &["ls-files", "-o", "-i", "--exclude-standard", "--directory", "-z"])?)
         .split('\0').filter(|p| !p.is_empty()).map(str::to_owned).collect();
@@ -110,8 +113,13 @@ pub(crate) fn snapshot(dir: &Path) -> Result<Snapshot, String> {
 pub(crate) fn restore(s: &Snapshot) -> Restored {
     let mut out = Restored::default();
     let git = match Git::new() { Ok(git) => git, Err(e) => { out.errors.push(e); return out; } };
+    // Commit do agente: só a ref volta (`--soft`); o que o commit levou aparece no status e é desfeito abaixo como
+    // qualquer outra edição. Sem isso o arquivo commitado ficaria "limpo" e escaparia do desfazer.
+    if let Ok(head) = git.head(&s.dir) && head != s.head {
+        out.head_moved = Some((s.head.clone(), head));
+        if let Err(e) = git.run(&s.dir, &["reset", "--soft", "-q", &s.head]) { out.errors.push(e); return out; }
+    }
     let mut after = match git.status(&s.dir) { Ok(after) => after, Err(e) => { out.errors.push(e); return out; } };
-    if let Ok(head) = git.head(&s.dir) && head != s.head { out.head_moved = Some((s.head.clone(), head)); }
     // `.gitignore` primeiro: desfeito, o que o agente des-ignorou volta a ser ignorado e sai da lista.
     let all: BTreeSet<String> = s.before.keys().chain(after.keys()).cloned().collect();
     let rules: Vec<String> = all.into_iter().filter(|p| p.rsplit('/').next() == Some(".gitignore")).collect();
@@ -312,6 +320,28 @@ mod tests {
             assert!(restored.diff.contains(needle), "{needle} faltou no diff:\n{}", restored.diff);
         }
         assert_eq!(restored.head_moved, None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn agent_commit_is_undone_and_the_branch_goes_back() {
+        let dir = repo("commit");
+        person_edits(&dir);
+        let before = status(&dir);
+        // Anotada de uma subpasta: o snapshot sobe para a raiz do repositório.
+        let snap = snapshot(&dir.join("backend")).unwrap();
+        std::fs::write(dir.join("install.sh"), "echo 2\n").unwrap();
+        sh(&dir, &["commit", "-q", "-am", "agente"]);
+        let restored = restore(&snap);
+        assert!(restored.errors.is_empty(), "{:?}", restored.errors);
+        assert!(restored.head_moved.is_some());
+        let head = Command::new("git").arg("-C").arg(&dir).args(["rev-parse", "HEAD"]).output().unwrap().stdout;
+        assert_eq!(String::from_utf8(head).unwrap().trim(), snap.head);
+        assert_eq!(read(&dir, "install.sh").as_deref(), Some("echo 1\n"));
+        // O que a pessoa tinha mexido (e o commit levou junto) volta como estava, fora do stage.
+        assert_eq!(read(&dir, "README.md").as_deref(), Some("leia\nminha nota\n"));
+        assert_eq!(status(&dir), before);
+        assert!(restored.diff.contains("+echo 2"), "{}", restored.diff);
         let _ = std::fs::remove_dir_all(dir);
     }
 
