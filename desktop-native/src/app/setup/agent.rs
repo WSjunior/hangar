@@ -344,7 +344,7 @@ mod tests {
 
     #[test]
     fn recheck_only_checks_until_the_phone_password_is_saved() {
-        let options = run::Options { agents: vec!["claude".into()], outside: false };
+        let options = run::Options { agents: vec!["claude".into()], outside: false, fix_mouse_wheel: false };
         let dest = Path::new("/home/dev/hangar");
         assert_eq!(recheck_command(dest, &options, true, false), "bash '/home/dev/hangar/install.sh' --app --agentes=claude --tailscale=nao --sem-nativo");
         assert!(recheck_command(dest, &options, false, false).ends_with(" --check"));

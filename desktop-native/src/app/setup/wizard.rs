@@ -2,7 +2,10 @@
 //! no fim. Ocupa a janela inteira enquanto existe; o render mora em `screens.rs`.
 use super::*;
 use super::askpass::{self, Vault};
-use super::failure::{Failure, FailureAction};
+use super::agent::Agent;
+use super::codes::{self, Fix};
+use super::failure::{Failure, FailureAction, SendState};
+use super::report::{self, Outcome};
 use super::flow::{self, PasswordMode, PasswordProblem, PhoneOutcome, Primary, Runs, Screen, View};
 use super::local::{self, LocalInstall};
 use super::marks::{End, Progress};
@@ -21,7 +24,7 @@ const QUIET_CHECKS: u32 = 12;
 pub(crate) enum AppCopy { Done(PathBuf), Skipped, Failed(String) }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AfterPassword { InstallGit }
+enum AfterPassword { InstallGit, RefreshPackages }
 
 /// `Quiet` leva o pid e a hora de início: o processo só vale se for o mesmo que o app iniciou.
 enum Watch { Grew, Quiet(u32, String), Stop }
@@ -57,6 +60,18 @@ pub(crate) struct SetupWizard {
     polling: bool,
     pub(super) finished: bool,
     pub(super) failure: Option<Failure>,
+    /// O relatório da falha na tela, já limpo; `None` enquanto monta.
+    pub(super) report: Option<String>,
+    /// A falha de que o relatório fala (a de antes do agente, mesmo depois da reconferência).
+    report_about: Option<Failure>,
+    /// Montagem e envio que voltam depois de outra falha são descartados.
+    report_gen: u64,
+    pub(super) send: bool,
+    pub(super) sent: SendState,
+    send_requested: bool,
+    last_send: Option<(Outcome, Option<Agent>)>,
+    /// "Consertar agora" da roda do mouse confirmado: a próxima instalação leva `-ConsertarRoda`.
+    fix_mouse_wheel: bool,
     vault: Vault,
     waiting: Vec<AskpassRequest>,
     prompt: Option<Entity<PasswordPrompt>>,
@@ -116,7 +131,9 @@ impl SetupWizard {
             agents: vec!["claude"], agents_touched: false, installed: Vec::new(), outside: false, password_mode: PasswordMode::Generate,
             password, confirm, precheck: None, pkg: None, started: false, preparing: None,
             git_ready: false, bootstrap: None, token: None, runs: Runs::default(), check_tail: None, install_tail: None, records: (None, None),
-            polling: false, finished: false, failure: None, vault: Vault::default(), waiting: Vec::new(), prompt: None, after_password: None,
+            polling: false, finished: false, failure: None,
+            report: None, report_about: None, report_gen: 0, send: true, sent: SendState::Idle, send_requested: false, last_send: None,
+            fix_mouse_wheel: false, vault: Vault::default(), waiting: Vec::new(), prompt: None, after_password: None,
             opened_link: None, app_copy: None, connection: None, connect_later: false, resumed_ended: false, viewing: Screen::Welcome, details_open: false, phone: None,
             qr: Qr::Idle, tailscale_running: false, tailscale_checking: false, ticks: 0,
             focus: cx.focus_handle(), window: window.window_handle(), _subscriptions: subscriptions,
@@ -194,7 +211,9 @@ impl SetupWizard {
     /// Começou e ainda não acabou nem falhou: fechar a janela não pode soltar o canal da senha nem religar a atualização.
     pub(super) fn is_running(&self) -> bool { self.started && !self.finished && self.failure.is_none() }
 
-    fn options(&self) -> Options { Options { agents: self.agents.iter().map(|a| a.to_string()).collect(), outside: self.outside } }
+    fn options(&self) -> Options {
+        Options { agents: self.agents.iter().map(|a| a.to_string()).collect(), outside: self.outside, fix_mouse_wheel: self.fix_mouse_wheel }
+    }
 
     pub(super) fn recheck(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.precheck = None;
@@ -332,6 +351,8 @@ impl SetupWizard {
                 }
                 self.preparing = None;
                 self.save_state();
+                // A roda do mouse é consertada uma vez: a próxima tentativa não fecha as sessões de novo sem perguntar.
+                if kind == Kind::Install { self.fix_mouse_wheel = false; }
                 self.learn_identity(pid, cx);
                 if !self.polling { self.start_poll(window, cx); }
             }
@@ -471,16 +492,84 @@ impl SetupWizard {
         if !ended { let screen = self.frontier_now(); self.fail(Failure::app(None, tr("setup_failure_interrupted"), screen), cx); }
     }
 
-    pub(super) fn fail(&mut self, failure: Failure, cx: &mut Context<Self>) {
+    pub(super) fn fail(&mut self, mut failure: Failure, cx: &mut Context<Self>) {
+        // Antes do `forget`: a senha de administrador e o código do askpass também são procurados e trocados no relatório.
+        let secrets = self.secret_values();
+        failure.fixes = codes::buttons(failure.code.as_deref(), self.agents.iter().any(|a| *a != "claude"));
         self.viewing = failure.screen;
-        self.failure = Some(failure);
+        self.failure = Some(failure.clone());
         (self.polling, self.preparing) = (false, None);
         self.vault.forget();
         self.after_password = None;
         for request in self.waiting.drain(..) { let _ = request.reply.send(None); }
         self.close_prompt(cx);
         suspend_updates(false, cx);
+        self.start_report(failure, secrets, cx);
         cx.notify();
+    }
+
+    /// Senha do celular escolhida, a senha de administrador ainda na memória e o código do askpass; o `CP_AUTH_TOKEN` do
+    /// `.env` é lido junto com o doctor, fora da thread da janela.
+    fn secret_values(&self) -> Vec<String> {
+        let mut values: Vec<String> = self.token.iter().cloned().collect();
+        values.extend(self.vault.password().map(str::to_owned));
+        values.push(self.vault.code().to_owned());
+        values
+    }
+
+    fn start_report(&mut self, failure: Failure, mut secrets: Vec<String>, cx: &mut Context<Self>) {
+        self.report_gen += 1;
+        let generation = self.report_gen;
+        (self.report, self.sent, self.send, self.send_requested, self.last_send) = (None, SendState::Idle, true, false, None);
+        self.report_about = Some(failure.clone());
+        let logs: Vec<(String, PathBuf)> = [("check", self.records.0.as_ref()), ("install", self.records.1.as_ref())].into_iter()
+            .filter_map(|(run, record)| record.map(|r| (run.to_owned(), r.log.clone()))).collect();
+        let dest = self.dest.clone();
+        // O doctor leva segundos: fora da thread da janela.
+        let task = cx.background_executor().spawn(async move {
+            secrets.extend(local::read_install(&dest).token);
+            let secrets = report::Secrets::here(secrets);
+            let facts = report::Facts { step: failure.screen, code: failure.code.clone(), text: failure.text.clone(),
+                system: report::system_line(), app: report::app_line(), doctor: report::doctor(&dest),
+                logs: logs.into_iter().map(|(run, path)| (run, report::read_log(&path))).collect() };
+            report::compose(&facts, &secrets)
+        });
+        cx.spawn(async move |this, cx| {
+            let text = task.await;
+            let _ = this.update(cx, |w, cx| if w.report_gen == generation { w.report_ready(text, cx) });
+        }).detach();
+    }
+
+    fn report_ready(&mut self, text: String, cx: &mut Context<Self>) {
+        self.report = Some(text);
+        if self.send_requested && let Some((outcome, agent)) = self.last_send { self.send_report(outcome, agent, cx); }
+        cx.notify();
+    }
+
+    /// Manda o relatório da tela se a caixa está marcada; ainda montando, sai quando ficar pronto.
+    fn send_report(&mut self, outcome: Outcome, agent: Option<Agent>, cx: &mut Context<Self>) {
+        if !self.send || matches!(self.sent, SendState::Sending | SendState::Sent) { return; }
+        self.last_send = Some((outcome, agent));
+        let (Some(text), Some(about)) = (self.report.clone(), self.report_about.as_ref()) else { self.send_requested = true; return };
+        self.send_requested = false;
+        let payload = report::payload(about.screen, about.code.clone(), outcome, agent.map(Agent::id), text);
+        let generation = self.report_gen;
+        self.sent = SendState::Sending;
+        let (done, result) = tokio::sync::oneshot::channel();
+        self.runtime.spawn(async move { let _ = done.send(report::send(payload).await); });
+        cx.spawn(async move |this, cx| {
+            let outcome = result.await.unwrap_or_else(|_| Err(String::new()));
+            let _ = this.update(cx, |w, cx| if w.report_gen == generation {
+                w.sent = match outcome { Ok(()) => SendState::Sent, Err(why) => SendState::Failed(why) };
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
+    }
+
+    /// "Sem agente, sai na hora": na primeira ação da pessoa depois da falha (tentar de novo, um botão da frase, fechar).
+    fn send_before_leaving(&mut self, cx: &mut Context<Self>) {
+        if self.report_about.is_some() { self.send_report(Outcome::Aberto, None, cx); }
     }
 
     /// Fecha a janela de senha sem acionar o `on_close` (que cancelaria); adiado porque a janela pode estar emprestada.
@@ -552,7 +641,10 @@ impl SetupWizard {
         (self.app_copy, self.connection, self.opened_link, self.connect_later, self.resumed_ended) = (None, None, None, false, false);
         (self.qr, self.tailscale_running) = (Qr::Idle, false);
         // A senha escolhida continua em `token`; sem ela, o instalador mantém a do `.env` ou gera uma.
+        // A senha pedida pelo botão da frase (pacotes) vale para o script que roda agora: não pergunta de novo.
+        let kept = self.vault.password().map(str::to_owned);
         self.vault = Vault::new(askpass::new_code());
+        if let Some(password) = kept { self.vault.remember(password); }
         suspend_updates(true, cx);
         self.continue_start(window, cx);
         self.follow(before, cx);
@@ -560,9 +652,80 @@ impl SetupWizard {
 
     pub(super) fn failure_action(&mut self, action: FailureAction, window: &mut Window, cx: &mut Context<Self>) {
         match action {
-            FailureAction::Retry => self.retry(window, cx),
             FailureAction::ToggleDetails => { self.details_open = !self.details_open; cx.notify(); }
+            FailureAction::ToggleSend => { self.send = !self.send; self.send_requested &= self.send; cx.notify(); }
+            FailureAction::SendAgain => {
+                self.sent = SendState::Idle;
+                if let Some((outcome, agent)) = self.last_send { self.send_report(outcome, agent, cx); }
+            }
+            FailureAction::Retry => { self.send_before_leaving(cx); self.retry(window, cx); }
+            FailureAction::Fix(fix) => self.apply_fix(fix, window, cx),
         }
+    }
+
+    fn apply_fix(&mut self, fix: Fix, window: &mut Window, cx: &mut Context<Self>) {
+        // A roda do mouse só conta como ação depois de confirmada.
+        if !fix.shows_help() && fix != Fix::FixMouseWheel { self.send_before_leaving(cx); }
+        match fix {
+            Fix::Retry | Fix::Recheck | Fix::AskAgain => self.retry(window, cx),
+            Fix::HowToAllow | Fix::HowToStart => {
+                let dest = self.dest.display().to_string();
+                if let Some(failure) = self.failure.as_mut() {
+                    failure.help = if failure.help.is_some() { None }
+                        else { failure.code.as_deref().and_then(codes::help).map(|help| help.replace("{pasta}", &dest)) };
+                }
+                cx.notify();
+            }
+            Fix::OpenStore => cx.open_url(codes::STORE_URL),
+            Fix::OpenTailscaleSettings => cx.open_url(super::screens::TAILSCALE_DNS),
+            Fix::OpenDeveloperSettings => cx.open_url(codes::DEVELOPER_SETTINGS_URL),
+            Fix::TailscaleLogin => {
+                let url = self.runs.latest().and_then(|p| p.link("tailscale-login")).unwrap_or(codes::TAILSCALE_LOGIN_URL).to_owned();
+                cx.open_url(&url);
+            }
+            Fix::UpdateApp => cx.open_url(if crate::i18n::english() { codes::DOWNLOAD_URL_EN } else { codes::DOWNLOAD_URL }),
+            // Só aparece com outro agente escolhido (`codes::buttons`): segue sem o Claude Code, que é o que o script cobra.
+            Fix::InstallLater => {
+                self.agents.retain(|a| *a != "claude");
+                self.agents_touched = true;
+                self.retry(window, cx);
+            }
+            Fix::RefreshPackages => {
+                self.after_password = Some(AfterPassword::RefreshPackages);
+                let reason = tr("setup_sudo_reason").replace("{motivo}", &tr("setup_sudo_reason_packages"));
+                self.open_password_prompt(reason, window, cx);
+            }
+            // Reiniciar o psmux fecha as sessões abertas: só com o sim da pessoa.
+            Fix::FixMouseWheel => {
+                let this = cx.entity().downgrade();
+                chrome::confirm_alert(window, cx, tr("setup_fix_mouse_wheel"), tr("setup_fix_mouse_wheel_confirm"), tr("setup_continue"),
+                    ButtonVariant::Danger, move |window, cx| {
+                        let _ = this.update(cx, |w, cx| {
+                            if w.is_running() { return; }
+                            w.send_before_leaving(cx);
+                            w.fix_mouse_wheel = true;
+                            w.retry(window, cx);
+                        });
+                        true
+                    });
+            }
+        }
+    }
+
+    fn refresh_packages(&mut self, password: String, window: &mut Window, cx: &mut Context<Self>) {
+        let (done, result) = tokio::sync::oneshot::channel();
+        self.runtime.spawn_blocking(move || { let _ = done.send(precheck::refresh_package_list(&password)); });
+        cx.spawn_in(window, async move |this, cx| {
+            let outcome = result.await.unwrap_or_else(|_| Err(String::new()));
+            let _ = this.update_in(cx, |w, window, cx| {
+                // A pessoa já tentou de novo enquanto a lista atualizava: não derruba a execução nova.
+                let Some(screen) = w.failure.as_ref().map(|f| f.screen) else { return };
+                match outcome {
+                    Ok(()) => w.retry(window, cx),
+                    Err(why) => w.fail(Failure::app(Some("pacotes-desatualizados"), format!("{}\n{why}", tr("setup_packages_failed")), screen), cx),
+                }
+            });
+        }).detach();
     }
 
     fn follow(&mut self, before: Screen, cx: &mut Context<Self>) {
@@ -657,6 +820,7 @@ impl SetupWizard {
     /// Com o script rodando a entidade só sai da tela (o canal da senha e a atualização suspensa continuam); sem nada
     /// rodando, larga tudo.
     pub(super) fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.send_before_leaving(cx);
         if self.is_running() {
             let _ = self.hangar.update(cx, |hangar, cx| hangar.hide_setup(window, cx));
             return;
@@ -733,14 +897,20 @@ impl SetupWizard {
         match accepted {
             Ok(true) => {
                 let for_git = self.after_password == Some(AfterPassword::InstallGit);
+                // A senha da lista de pacotes fica para o script que o `retry` roda logo depois.
+                let for_packages = self.after_password == Some(AfterPassword::RefreshPackages);
                 // O pedido do script espera 600 s: com o prazo vencido o canal já fechou, e a senha não entra no cofre.
                 let delivered = std::mem::take(&mut self.waiting).into_iter()
                     .fold(false, |any, request| request.reply.send(Some(password.clone())).is_ok() || any);
                 self.prompt = None;
                 // Adiado: fechar agora chamaria o `on_close` dentro deste update do assistente.
                 window.defer(cx, |window, cx| window.close_dialog(cx));
-                if delivered || for_git { self.vault.remember(password); }
-                if for_git && self.after_password.take() == Some(AfterPassword::InstallGit) { self.continue_start(window, cx); }
+                if delivered || for_git || for_packages { self.vault.remember(password.clone()); }
+                match self.after_password.take() {
+                    Some(AfterPassword::InstallGit) => self.continue_start(window, cx),
+                    Some(AfterPassword::RefreshPackages) => self.refresh_packages(password, window, cx),
+                    None => {}
+                }
                 cx.notify();
             }
             Ok(false) => prompt.update(cx, |p, cx| { (p.checking, p.error) = (false, Some(tr("setup_sudo_wrong"))); cx.notify(); }),

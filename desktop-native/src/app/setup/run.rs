@@ -15,7 +15,13 @@ pub(crate) enum Kind { Check, Install }
 impl Kind { fn name(self) -> &'static str { match self { Kind::Check => "check", Kind::Install => "install" } } }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub(crate) struct Options { pub agents: Vec<String>, pub outside: bool }
+pub(crate) struct Options {
+    pub agents: Vec<String>,
+    pub outside: bool,
+    /// `-ConsertarRoda` (Windows, só a instalação): reinicia o psmux e fecha as sessões; só depois de a pessoa confirmar.
+    #[serde(default)]
+    pub fix_mouse_wheel: bool,
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct RunRecord {
@@ -64,6 +70,7 @@ pub(crate) fn script_args(kind: Kind, options: &Options, dest: &Path, windows: b
         vec![dest.to_string_lossy().into_owned(), "--app".into(), format!("--agentes={agents}"), format!("--tailscale={tailscale}"), "--sem-nativo".into()]
     };
     if kind == Kind::Check { args.push(if windows { "-SoChecar" } else { "--check" }.into()); }
+    if windows && kind == Kind::Install && options.fix_mouse_wheel { args.push("-ConsertarRoda".into()); }
     args
 }
 
@@ -239,7 +246,20 @@ pub(crate) fn stop(pid: u32, started: &str) {
 mod tests {
     use super::*;
 
-    fn options() -> Options { Options { agents: vec!["claude".into(), "codex".into()], outside: true } }
+    fn options() -> Options { Options { agents: vec!["claude".into(), "codex".into()], outside: true, fix_mouse_wheel: false } }
+
+    #[test]
+    fn mouse_wheel_fix_only_on_the_windows_install() {
+        let on = Options { fix_mouse_wheel: true, ..options() };
+        let dest = Path::new(r"C:\Users\dev\hangar");
+        assert_eq!(script_args(Kind::Install, &on, dest, true).last().map(String::as_str), Some("-ConsertarRoda"));
+        assert!(!script_args(Kind::Check, &on, dest, true).contains(&"-ConsertarRoda".to_owned()));
+        assert!(!script_args(Kind::Install, &on, dest, false).contains(&"-ConsertarRoda".to_owned()));
+        assert!(!script_args(Kind::Install, &options(), dest, true).contains(&"-ConsertarRoda".to_owned()));
+        // `state.json` de antes da opção continua lendo.
+        let old: Options = serde_json::from_str(r#"{"agents":["claude"],"outside":false}"#).unwrap();
+        assert!(!old.fix_mouse_wheel);
+    }
 
     #[test]
     fn bootstrap_comes_from_the_build_commit() {

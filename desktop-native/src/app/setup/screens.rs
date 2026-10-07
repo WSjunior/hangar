@@ -1,7 +1,8 @@
 //! As telas do assistente (mock `2026-10-06-instalador-grafico-mock.html`): lateral com as etapas, conteúdo rolável e rodapé
 //! com o progresso, Voltar e a ação principal. Cores de `theme`, medidas pelos helpers rem do GPUI.
 use super::*;
-use super::failure::{self, OnFailureAction};
+use super::codes::{self, Fix};
+use super::failure::{self, OnFailureAction, PanelView};
 use super::flow::{self, PasswordMode, PasswordProblem, PhoneOutcome, Primary, Screen, Status};
 use super::marks::{End, ItemRow, State, Step};
 use super::phone::Qr;
@@ -85,7 +86,16 @@ fn check_row(check: &CheckRow) -> Stateful<Div> {
     };
     let mark = if check.ok { RowMark::Ok } else if check.blocking { RowMark::Failed } else { RowMark::Warn };
     let label = if check.ok { tr("setup_check_found") } else { tr("setup_check_missing") };
-    row(check_id(check.check), mark, name, (!check.detail.is_empty()).then(|| check.detail.clone()), Some(trailing_text(label)))
+    // Bloqueio com código leva o passo a passo e o botão da tabela (spec: "bloqueio vira item com a frase e a saída").
+    let failed = check.code.filter(|_| !check.ok);
+    let detail = [(!check.detail.is_empty()).then(|| check.detail.clone()), failed.and_then(codes::help)].into_iter().flatten()
+        .collect::<Vec<_>>().join("\n");
+    let trailing = match failed {
+        Some("sem-winget") => Button::new("setup-check-store").outline().small().icon(IconName::ExternalLink).label(Fix::OpenStore.label())
+            .on_click(|_, _, cx| cx.open_url(codes::STORE_URL)).into_any_element(),
+        _ => trailing_text(label),
+    };
+    row(check_id(check.check), mark, name, (!detail.is_empty()).then_some(detail), Some(trailing))
 }
 
 fn status_icon(status: Status) -> Option<IconName> {
@@ -133,7 +143,7 @@ fn muted_line(id: &'static str, spinner: bool, text: String) -> Stateful<Div> {
         .child(text)
 }
 
-const TAILSCALE_DNS: &str = "https://login.tailscale.com/admin/dns";
+pub(super) const TAILSCALE_DNS: &str = "https://login.tailscale.com/admin/dns";
 
 /// Aviso que pede a pessoa (mock `.callout`): ícone, título, linhas e as ações.
 fn callout(id: &'static str, title: String, lines: Vec<String>, actions: Vec<AnyElement>) -> Stateful<Div> {
@@ -179,6 +189,8 @@ impl SetupWizard {
         let this = cx.entity().downgrade();
         Rc::new(move |action, window, cx| { let _ = this.update(cx, |w, cx| w.failure_action(action, window, cx)); })
     }
+
+    fn panel_view(&self) -> PanelView<'_> { PanelView { report: self.report.as_deref(), send: self.send, sent: &self.sent } }
 
     fn render_details(&self, id: &'static str, cx: &mut Context<Self>) -> Div {
         // Com a falha na tela, "Ver detalhes" mora no painel dela.
@@ -265,7 +277,9 @@ impl SetupWizard {
         };
         // Na tela 4 o aviso já vem no corpo; nas outras ele sobe enquanto o script espera o login.
         let login = (self.viewing != Screen::Tailscale && self.runs.end().is_none()).then(|| self.login_notice(cx)).flatten();
-        div().flex().flex_col().gap_6().child(head).children(failure).children(login).child(body)
+        // O relatório fica logo abaixo da falha: a pessoa lê o que sai antes de decidir.
+        let after = failure.is_some().then(|| failure::after_panel(&self.panel_view(), self.failure_handler(cx)));
+        div().flex().flex_col().gap_6().child(head).children(failure).children(after).children(login).child(body)
     }
 
     fn agent_tile(&self, id: &'static str, name: &'static str, cx: &mut Context<Self>) -> Button {

@@ -156,6 +156,24 @@ pub(crate) fn install_git(pkg: Option<&'static str>, password: Option<&str>) -> 
     Err(if text.is_empty() { String::from_utf8_lossy(&output.stdout).trim().to_owned() } else { text })
 }
 
+/// `pacotes-desatualizados`: o script só dá esse código no apt (`Unable to locate package`), então só o apt é atualizado.
+/// Mesmo jeito do `install_git`: a senha autentica o sudo à parte e o comando roda com `sudo -n` e stdin nulo.
+pub(crate) fn refresh_package_list(password: &str) -> Result<(), String> {
+    use std::io::Write;
+    let path = refreshed_path();
+    let sudo = find_program("sudo", &path).ok_or("sudo")?;
+    let mut child = hidden(&mut Command::new(&sudo)).args(["-S", "-p", "", "-v"]).env("PATH", &path)
+        .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+    if let Some(mut stdin) = child.stdin.take() { let _ = writeln!(stdin, "{password}"); }
+    let auth = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !auth.status.success() { return Err(String::from_utf8_lossy(&auth.stderr).trim().to_owned()); }
+    let out = hidden(&mut Command::new(&sudo)).args(["-n", "apt-get", "update"]).env("PATH", &path)
+        .stdin(Stdio::null()).output().map_err(|e| e.to_string())?;
+    if out.status.success() { return Ok(()); }
+    let text = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+    Err(if text.is_empty() { String::from_utf8_lossy(&out.stdout).trim().to_owned() } else { text })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
