@@ -176,6 +176,8 @@ pub async fn page(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
     r
 }
 
+const STRIP_TOKEN: &str = "var q=new URLSearchParams(location.search);if(q.has(\"token\")){q.delete(\"token\");q=q.toString();history.replaceState(null,\"\",location.pathname+(q?\"?\"+q:\"\")+location.hash)}";
+
 /// Casca da página: o HTML vai num JSON embutido e vira URL `blob:` no iframe isolado. Nem `data:`
 /// (o Chromium corta URL grande) nem `srcdoc` (o documento herdaria o endereço da casca, com o token).
 pub(crate) fn isolated_shell(html: &str, title: &str) -> Response {
@@ -183,8 +185,10 @@ pub(crate) fn isolated_shell(html: &str, title: &str) -> Response {
     // Sem `<` cru o conteúdo nunca fecha o `<script>` nem abre comentário dentro dele.
     let data = serde_json::to_string(html).unwrap_or_default()
         .replace('<', "\\u003c").replace('\u{2028}', "\\u2028").replace('\u{2029}', "\\u2029");
+    // O token sai do endereço antes de tudo: `browser url`/abas/snapshot levariam ele ao transcript,
+    // que convidado e par leem. Recarregar a casca depois dá 401; rascunho é de vida curta.
     let body = format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title><style>html,body{{margin:0;height:100%;overflow:hidden}}iframe{{display:block;width:100%;height:100%;border:0}}</style></head><body><iframe title=\"{title}\" sandbox=\"allow-scripts allow-popups\" referrerpolicy=\"no-referrer\"></iframe><script type=\"application/json\" id=\"p\">{data}</script><script>document.querySelector(\"iframe\").src=URL.createObjectURL(new Blob([JSON.parse(document.getElementById(\"p\").textContent)],{{type:\"text/html;charset=utf-8\"}}))</script></body></html>"
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title><style>html,body{{margin:0;height:100%;overflow:hidden}}iframe{{display:block;width:100%;height:100%;border:0}}</style></head><body><iframe title=\"{title}\" sandbox=\"allow-scripts allow-popups\" referrerpolicy=\"no-referrer\"></iframe><script type=\"application/json\" id=\"p\">{data}</script><script>{STRIP_TOKEN}document.querySelector(\"iframe\").src=URL.createObjectURL(new Blob([JSON.parse(document.getElementById(\"p\").textContent)],{{type:\"text/html;charset=utf-8\"}}))</script></body></html>"
     );
     let mut r = Response::new(Body::from(body));
     let h = r.headers_mut();
@@ -269,6 +273,9 @@ mod tests {
         assert!(!text.contains("allow-same-origin") && !text.contains("srcdoc") && !text.contains("data:text/html"));
         let json: String = serde_json::from_str(&data[7..]).unwrap();
         assert!(json.starts_with("<p>a</p></script>"));
+        let strip = text.find("history.replaceState(").expect("casca tira o token do endereço");
+        assert!(strip < text.find("createObjectURL").unwrap(), "antes de criar o iframe");
+        assert!(text[text.rfind("<script>").unwrap()..].starts_with(&format!("<script>{STRIP_TOKEN}")), "primeira coisa do script");
     }
 
     #[test]
