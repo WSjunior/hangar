@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Refaz o recorte do schema do Codex com o binário instalado e mostra o que mudou nos campos usados.
+set -euo pipefail
+raiz="$(cd "$(dirname "$0")/.." && pwd)"
+conferida="$(grep -oE '"[0-9]+\.[0-9]+\.[0-9]+[^"]*"' "$raiz/crates/hangar-codex/src/version.rs" | head -1 | tr -d '"')"
+instalada="$(codex --version | awk '{print $2}')"
+if [ "$instalada" != "$conferida" ]; then
+  echo "Codex instalado: $instalada; conferida no código: $conferida."
+  echo "Para conferir $instalada: troque o valor de checked_version!() em crates/hangar-codex/src/version.rs e rode de novo."
+  exit 1
+fi
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+codex app-server generate-json-schema --experimental --out "$tmp" >/dev/null
+(cd "$raiz/crates" && CODEX_SCHEMA_DIR="$tmp" CARGO_BUILD_JOBS=4 cargo test -q -p hangar-codex --lib -- --ignored regenerate_slice)
+(cd "$raiz/crates" && CARGO_BUILD_JOBS=4 cargo test -q -p hangar-codex --lib schema_check::fields_used_exist_in_checked_schema)
+git -C "$raiz" diff --stat -- crates/hangar-codex/schema
