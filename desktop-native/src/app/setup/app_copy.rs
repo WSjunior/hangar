@@ -1,9 +1,12 @@
 //! Com `--sem-nativo` o script não baixa o app (o `install-native` baixaria a `native-latest` por cima do binário aberto):
 //! o próprio app se copia para o caminho de sempre, onde o atalho, o link `hangar://` e o atualizador o procuram, e põe o
 //! atalho e o `hangar://` como o `install-native` põe.
-use std::{path::{Path, PathBuf}, process::{Command, Stdio}};
+use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::process::{Command, Stdio};
 
-const WINDOWS_SHORTCUT: &str = r#"$app = '__APP__'
+const WINDOWS_SHORTCUT: &str = r#"$ErrorActionPreference = 'Stop'
+$app = '__APP__'
 $ws = New-Object -ComObject WScript.Shell
 foreach ($pasta in @([Environment]::GetFolderPath('Programs'), [Environment]::GetFolderPath('DesktopDirectory'))) {
   $l = $ws.CreateShortcut((Join-Path $pasta 'Hangar.lnk')); $l.TargetPath = $app; $l.WorkingDirectory = (Split-Path -Parent $app)
@@ -41,7 +44,32 @@ pub(crate) fn copy_self(exe: &Path, target: &Path) -> Result<(), String> {
         std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
     }
     // Rename e não cópia direta: por cima de um binário aberto o Linux daria "Text file busy".
-    std::fs::rename(&new, target).map_err(|e| { let _ = std::fs::remove_file(&new); e.to_string() })
+    // No Windows o exe aberto não aceita ser substituído, mas aceita ser renomeado: o velho sai da frente.
+    #[cfg(windows)]
+    let old = move_aside(target);
+    if let Err(e) = std::fs::rename(&new, target) {
+        let _ = std::fs::remove_file(&new);
+        #[cfg(windows)]
+        if let Some(old) = old { let _ = std::fs::rename(old, target); }
+        return Err(e.to_string());
+    }
+    Ok(())
+}
+
+/// Restos de `.old` anteriores saem quando dá (os presos por app aberto ficam); o atual cede o nome.
+#[cfg(windows)]
+fn move_aside(target: &Path) -> Option<PathBuf> {
+    let name = target.file_name()?.to_string_lossy().into_owned();
+    for entry in std::fs::read_dir(target.parent()?).ok()?.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&format!("{name}.old")) { let _ = std::fs::remove_file(entry.path()); }
+    }
+    if !target.exists() { return None; }
+    let mut old = PathBuf::from(format!("{}.old", target.display()));
+    if old.exists() {
+        let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        old = PathBuf::from(format!("{}.old-{ms}", target.display()));
+    }
+    std::fs::rename(target, &old).ok().map(|_| old)
 }
 
 /// A marca que o passo de atualização confere (`install-native`): só sai com o `hangar://` registrado.
@@ -64,6 +92,8 @@ fn install_shortcut(exe: &Path) -> Result<(), String> {
     let apps = data.join("applications");
     std::fs::create_dir_all(&apps).map_err(|e| e.to_string())?;
     std::fs::write(apps.join("com.hangar.native.desktop"), desktop_entry(exe)).map_err(|e| e.to_string())?;
+    // Atalho de instalação antiga, com o ícone velho: o dock escolheria qualquer um dos dois pela mesma classe de janela.
+    let _ = std::fs::remove_file(apps.join("hangar-native.desktop"));
     let run = |program: &str, args: &[&str]| super::system::hidden(&mut Command::new(program)).args(args)
         .stdout(Stdio::null()).stderr(Stdio::null()).status();
     // Cache velho de ícones esconde o novo; banco de .desktop velho esconde o atalho. Sem as ferramentas, segue.
