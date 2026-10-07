@@ -326,9 +326,10 @@ impl SetupWizard {
 
     /// Lê a hora de início do processo fora da thread da janela e a grava no registro e no `state.json`.
     fn learn_identity(&self, pid: u32, cx: &mut Context<Self>) {
-        let task = cx.background_executor().spawn(async move { run::identity(pid) });
+        let task = cx.background_executor().spawn(async move { run::read_identity(pid) });
         cx.spawn(async move |this, cx| {
-            if let Some(id) = task.await { let _ = this.update(cx, |w, _| w.set_started(pid, id)); }
+            // Gone/Unknown ficam para a verificação da cadência Quiet, que tenta de novo.
+            if let run::Identity::Known(id) = task.await { let _ = this.update(cx, |w, _| w.set_started(pid, id)); }
         }).detach();
     }
 
@@ -373,9 +374,14 @@ impl SetupWizard {
                         quiet += 1;
                         if quiet % QUIET_CHECKS != 0 { continue; }
                         // A identidade lê o /proc (Linux) ou abre o PowerShell (Windows): fora da thread da janela.
-                        // Sem identidade conhecida o processo conta como vivo: nunca dar por morto sem prova.
+                        // Sem hora de início guardada: `Known` a guarda, `Gone` é prova de que acabou, `Unknown` conta como vivo.
                         let (alive, learned) = cx.background_executor().spawn(async move {
-                            if started.is_empty() { (true, run::identity(pid)) } else { (run::alive(pid, &started), None) }
+                            if !started.is_empty() { return (run::alive(pid, &started), None); }
+                            match run::read_identity(pid) {
+                                run::Identity::Known(id) => (true, Some(id)),
+                                run::Identity::Gone => (false, None),
+                                run::Identity::Unknown => (true, None),
+                            }
                         }).await;
                         if let Some(id) = learned && this.update(cx, |w, _| w.set_started(pid, id)).is_err() { return; }
                         if !alive && this.update(cx, |w, cx| w.process_gone(cx)).is_err() { return; }

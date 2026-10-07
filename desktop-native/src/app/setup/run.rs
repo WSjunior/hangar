@@ -174,9 +174,24 @@ pub(crate) fn clear_state() {
     if let Some(dir) = state_dir() { let _ = std::fs::remove_file(dir.join("state.json")); }
 }
 
+/// O que se sabe do processo: a hora de início, a prova de que não existe mais, ou nada (leitura falhou).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Identity { Known(String), Gone, Unknown }
+
 /// Identifica o processo além do número: o pid volta a ser usado, a hora de início não.
+pub(crate) fn identity(pid: u32) -> Option<String> {
+    match read_identity(pid) { Identity::Known(started) => Some(started), _ => None }
+}
+
 #[cfg(target_os = "linux")]
-pub(crate) fn identity(pid: u32) -> Option<String> { parse_start(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?) }
+pub(crate) fn read_identity(pid: u32) -> Identity {
+    if pid == 0 || pid > i32::MAX as u32 { return Identity::Gone; }
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(text) => parse_start(&text).map_or(Identity::Unknown, Identity::Known),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Identity::Gone,
+        Err(_) => Identity::Unknown,
+    }
+}
 
 /// Campo 22 de `/proc/<pid>/stat`; o nome (campo 2) pode ter espaço e parêntese, então conta depois do último `)`.
 #[cfg(any(target_os = "linux", test))]
@@ -184,14 +199,25 @@ fn parse_start(stat: &str) -> Option<String> {
     stat.rsplit_once(')')?.1.split_whitespace().nth(19).map(str::to_owned)
 }
 
+/// Sentinela impressa pelo script, nunca o texto de erro (localizado) do PowerShell.
+#[cfg(any(windows, test))]
+fn parse_windows_identity(out: &str) -> Identity {
+    match out.trim() {
+        "gone" => Identity::Gone,
+        number if !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) => Identity::Known(number.to_owned()),
+        _ => Identity::Unknown,
+    }
+}
+
 #[cfg(windows)]
-pub(crate) fn identity(pid: u32) -> Option<String> {
-    let out = super::system::powershell(&format!("(Get-Process -Id {pid} -ErrorAction Stop).StartTime.ToFileTimeUtc()")).ok()?;
-    Some(out.trim().to_owned()).filter(|s| !s.is_empty())
+pub(crate) fn read_identity(pid: u32) -> Identity {
+    if pid == 0 || pid > i32::MAX as u32 { return Identity::Gone; }
+    let script = format!("$p = Get-Process -Id {pid} -ErrorAction SilentlyContinue; if ($p) {{ $p.StartTime.ToFileTimeUtc() }} else {{ 'gone' }}");
+    super::system::powershell(&script).map_or(Identity::Unknown, |out| parse_windows_identity(&out))
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]
-pub(crate) fn identity(_: u32) -> Option<String> { None }
+pub(crate) fn read_identity(_: u32) -> Identity { Identity::Unknown }
 
 /// O pid só vale se for o mesmo processo que o app iniciou; pid 0 e fora da faixa do sistema nunca valem.
 fn same_process(pid: u32, started: &str) -> bool {
@@ -285,6 +311,24 @@ mod tests {
             let own = identity(std::process::id()).unwrap();
             assert!(alive(std::process::id(), &own));
         }
+    }
+
+    #[test]
+    fn identity_is_gone_for_pid_zero_and_missing_pids() {
+        assert_eq!(read_identity(0), Identity::Gone);
+        assert_eq!(read_identity(u32::MAX), Identity::Gone);
+        #[cfg(target_os = "linux")]
+        assert_eq!(read_identity(i32::MAX as u32), Identity::Gone);
+        #[cfg(any(target_os = "linux", windows))]
+        assert!(matches!(read_identity(std::process::id()), Identity::Known(_)));
+    }
+
+    #[test]
+    fn windows_identity_reads_the_sentinel_not_the_error_text() {
+        assert_eq!(parse_windows_identity("gone\r\n"), Identity::Gone);
+        assert_eq!(parse_windows_identity("133456789012345678\r\n"), Identity::Known("133456789012345678".into()));
+        assert_eq!(parse_windows_identity(""), Identity::Unknown);
+        assert_eq!(parse_windows_identity("Get-Process : Não foi possível"), Identity::Unknown);
     }
 
     #[test]
