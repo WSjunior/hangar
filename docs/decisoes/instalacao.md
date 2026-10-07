@@ -485,7 +485,8 @@ os passos do que mudou, e árvore que já passou não roda nada.
   binário velho. Aqui o checkout é sempre o mesmo, e o `git checkout` muda a data só do que mudou,
   então o cargo recompila só isso. Prova: dois commits irmãos mudando uma string do
   `hangar-server`, verificados em sequência; o binário que o pytest usa trazia só a string do commit
-  da vez (PROVA_RESULTADO).
+  da vez (depois de B: `A=0 B=1`; de A de novo: `A=1 B=0`). Essa rodada, mudança de uma linha
+  em `crates/`, levou 761 s: Rust 170 s, pytest 585 s.
 - **Depuração só de linhas** (`CARGO_PROFILE_DEV_DEBUG=line-tables-only`). Cada arquivo de teste
   vira um binário; com depuração completa o target do `crates/` tinha 27 GB no Linux, e na VM
   encheu os 14 GB livres do C: no meio da compilação. Com só linhas: 11 GB. No Windows também sem
