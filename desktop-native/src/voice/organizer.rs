@@ -116,7 +116,7 @@ impl<T> SendGate<T> {
 pub struct SpokenTurns(HashSet<String>);
 
 impl SpokenTurns {
-    /// `item/started`: guarda o turno se o item é uma fala (não o `[RESULTADO DA SESSÃO` que nós mesmos mandamos).
+    /// `item/started` ou `item/completed` (o Codex pode emitir a fala só no segundo): guarda o turno se o item é uma fala (não o `[RESULTADO DA SESSÃO` que nós mesmos mandamos).
     pub fn item_started(&mut self, params: &Value) {
         let item = &params["item"];
         if item["type"] != "userMessage" { return; }

@@ -151,7 +151,8 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                     if params["threadId"].as_str() != Some(thread.as_str()) { continue; }
                     let user_spoke = (method == "thread/realtime/transcript/delta" && params["role"] == "user")
                         || (method == "item/started" && params["item"]["type"] == "userMessage");
-                    if method == "item/started" { spoken.item_started(&params); }
+                    // Só registra a fala; cancelar envio pendente continua só no started e no delta.
+                    if method == "item/started" || method == "item/completed" { spoken.item_started(&params); }
                     if user_spoke && let Some((id, _)) = gate.user_spoke() {
                         let _ = rpc.respond(id, tool_reply("O usuário continuou falando; nada foi enviado. Monte o pedido com a fala completa.", false)).await;
                     }

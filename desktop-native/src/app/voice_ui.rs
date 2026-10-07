@@ -307,15 +307,19 @@ impl Hangar {
         let epoch = self.voice.reply_epoch;
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(REPLY_WAIT).await;
-            let _ = this.update(cx, |this, _| this.voice_reply_wait_over(epoch));
+            let _ = this.update(cx, |this, cx| this.voice_reply_wait_over(epoch, cx));
         }).detach();
     }
 
-    fn voice_reply_wait_over(&mut self, epoch: u64) {
+    fn voice_reply_wait_over(&mut self, epoch: u64, cx: &mut Context<Self>) {
         if epoch != self.voice.reply_epoch { return; }
         let Some(key) = self.voice.reply_pending.clone() else { return };
         // Saiu da sessão no meio: a pendência já foi para a vigia da lista.
         if self.selected_key().as_ref() != Some(&key) { return; }
+        // Sessão ainda trabalhando: o que está no chat é passo do meio, e o fim do turno rearma a espera.
+        if self.chat.state.state == "working" { return; }
+        // Histórico ainda não instalado: o chat está vazio ou velho, espera mais um ciclo.
+        if !self.history_installed { self.arm_reply_wait(cx); return; }
         self.voice.reply_pending = None;
         self.voice_speak_last_reply();
     }
