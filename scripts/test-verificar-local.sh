@@ -53,6 +53,12 @@ if [[ "$(uname -s)" == Linux ]]; then
     hook "gh pr create --base base-que-nao-existe" 2
     hook "true && gh pr create --base base-que-nao-existe" 2
     hook "(cd . && FOO=1 gh pr create --base base-que-nao-existe)" 2
+    hook "if true; then gh pr create --base base-que-nao-existe; fi" 2
+    hook "gh -R dono/repo pr create --base base-que-nao-existe" 2
+    hook "cd / && gh pr create --base base-que-nao-existe" 0
+    hook "gh pr create --base 'base-que-nao-existe' --body 'x'" 2
+    hook "gh pr create --body 'usa --base base-que-nao-existe' --help" 0
+    hook "gh pr create --base main --head main --body 'cita --base base-que-nao-existe'" 0
 fi
 
 (( falhou )) && exit 1

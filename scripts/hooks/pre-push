@@ -66,7 +66,7 @@ while read -r _localref localsha _remoteref remotesha; do
         echo "pre-push: não consegui varrer $intervalo — trava incompleta, push recusado." >&2
         exit 1
     fi
-    enviados+=("$localsha $_remoteref")
+    enviados+=("$localsha $_remoteref $remotesha")
     adicionado="$(printf '%s\n' "$log_saida" | grep '^+' | grep -v '^+++' || true)"
     [[ -z "$adicionado" ]] && continue
     for entrada in "${PADROES[@]}"; do
@@ -129,7 +129,7 @@ tem_pr() {   # $1 = branch; 0 = tem PR aberto, 1 = não tem, 2 = não deu para s
 
 falta=0
 for par in "${enviados[@]}"; do
-    s="${par%% *}" ref="${par#* }"
+    read -r s ref destino <<< "$par"
     case "$ref" in
         refs/heads/main) ;;
         refs/heads/*)
@@ -142,7 +142,13 @@ for par in "${enviados[@]}"; do
             esac ;;
         *) continue ;;
     esac
-    scripts/verificar-local --exigir "$s" || falta=1
+    # Base = o que o destino já tem: commit que já está noutra branch do remoto ainda conta quando
+    # chega à main ou ao PR. Branch nova no destino fica com a base padrão (o que nenhum remoto tem).
+    if [[ "$destino" != "$ZERO" ]] && git cat-file -e "$destino^{commit}" 2>/dev/null; then
+        scripts/verificar-local --base "$destino" --exigir "$s" || falta=1
+    else
+        scripts/verificar-local --exigir "$s" || falta=1
+    fi
 done
 if (( falta )); then
     cat >&2 <<'FIM'

@@ -6,7 +6,8 @@
 // Escape explícito, o mesmo do pre-push:  HANGAR_SEM_VERIFICACAO=1 gh pr create ...
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { homedir } from 'node:os';
+import { join, resolve } from 'node:path';
 
 let dados;
 try {
@@ -39,21 +40,31 @@ function trechos(texto) {
   saida.push(atual);
   return saida;
 }
-const achado = trechos(dados?.tool_input?.command ?? '')
-  .map(t => t.match(/^\s*((?:\w+=\S*\s+)*)gh\s+pr\s+create\b(.*)$/s))
-  .find(Boolean);
+// O `cd` que vem antes conta: `cd ../outra-worktree && gh pr create` é o PR de lá.
+let pasta = dados?.cwd || process.cwd();
+let achado = null;
+for (const t of trechos(dados?.tool_input?.command ?? '')) {
+  const cd = t.match(/^\s*cd\s+(['"]?)([^'"\s]+)\1\s*$/);
+  if (cd) pasta = resolve(pasta, cd[2].replace(/^~(?=\/|$)/, homedir()));
+  achado = t.match(/^\s*((?:(?:\w+=\S*|then|do|else|command|env|sudo|time|!|\{)\s+)*)gh\s+(?:(?:-R|--repo)[ =]\S+\s+)?pr\s+create\b(.*)$/s);
+  if (achado) break;
+}
 if (!achado) process.exit(0);
-const [, prefixo, comando] = achado;
+const [, prefixo] = achado;
+// Opções só fora de aspas: um --body que cite `--base x` não pode virar a base do PR.
+const comando = achado[2].replace(/'[^']*'|"(?:\\.|[^"\\])*"/g, m => (/^['"][^\s'"]+['"]$/.test(m) ? m.slice(1, -1) : '""'));
 if (process.env.HANGAR_SEM_VERIFICACAO || /\bHANGAR_SEM_VERIFICACAO=1\b/.test(prefixo)) process.exit(0);
+if (/(?:^|\s)(?:-h|--help|--dry-run)\b/.test(comando)) process.exit(0);
 // Como o pre-push: a verificação só é exigida no Linux.
 if (process.platform !== 'linux') process.exit(0);
 
-const git = (cwd, ...args) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
-const opcao = (curta, longa) => comando.match(new RegExp(`(?:^|\\s)(?:${curta}|${longa})[ =]+['"]?([^'"\\s]+)`))?.[1];
+const git = (cwd, ...args) =>
+  execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+const opcao = (curta, longa) => comando.match(new RegExp(`(?:^|\\s)(?:${curta}|${longa})[ =]+(\\S+)`))?.[1];
 
 let raiz;
 try {
-  raiz = git(dados.cwd || process.cwd(), 'rev-parse', '--show-toplevel');
+  raiz = git(pasta, 'rev-parse', '--show-toplevel');
 } catch {
   process.exit(0);
 }
@@ -86,6 +97,7 @@ const r = spawnSync(script, ['--base', alvo, '--exigir', ponta], { cwd: raiz, en
 if (r.status === 0) process.exit(0);
 console.error(
   `[pr] o PR ainda não passou no verificar-local (ponta ${ponta.slice(0, 10)}, desde ${alvo}).\n` +
+    (r.error ? `     não consegui executar ${script}: ${r.error.message}\n` : '') +
     (r.stderr || '').trimEnd() + '\n' +
     `     Rode:  scripts/verificar-local --commit ${ponta.slice(0, 10)} --base ${alvo}\n` +
     '     Emergência, sabendo o que faz:  HANGAR_SEM_VERIFICACAO=1 gh pr create ...',

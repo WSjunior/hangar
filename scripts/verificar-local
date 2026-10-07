@@ -382,7 +382,8 @@ ORIGEM="$(cd "$(git rev-parse --git-common-dir)" && pwd)"
 VM="$(git config hangar.verificarWindows)"; (( $? > 1 )) && erro "não consegui ler hangar.verificarWindows"
 if [[ -n "$base" ]]; then
     # Desde onde o commit saiu de <ref>: o que a base andou depois não é mudança deste commit.
-    base="$(git merge-base "$base" "$sha")" || erro "sem ancestral comum entre $base e ${sha:0:10}"
+    ref_base="$base"
+    base="$(git merge-base "$ref_base" "$sha")" || erro "base inválida ou sem ancestral comum: $ref_base (commit ${sha:0:10})"
 else
     base="$(base_padrao "$sha")"
 fi
