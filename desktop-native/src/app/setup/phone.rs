@@ -1,0 +1,1 @@
+//! O QR do celular.

@@ -1,0 +1,1 @@
+//! A entidade do assistente.
