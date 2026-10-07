@@ -16,6 +16,9 @@ const MAX: u32 = 2000;
 const FALLBACK: f32 = 240.;
 /// Clique ou tecla na página que ainda vale como gesto para ela abrir um link.
 const GESTURE: Duration = Duration::from_secs(2);
+/// Espera do último quadro da página que sai do orçamento.
+#[cfg(target_os = "linux")]
+const PARK_SHOT: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct PageRef { pub id: String, pub title: String, #[serde(default)] pub height: Option<u32>, #[serde(default)] pub heights: BTreeMap<u32, u32> }
@@ -135,12 +138,14 @@ struct PageView {
     /// Saiu do orçamento: mostra o último quadro até voltar à tela.
     parked: bool,
     last_frame: Option<Arc<RenderImage>>,
-    /// Imagem estática e o tema (escuro?) em que foi tirada.
-    shot: Option<(bool, Arc<RenderImage>)>,
+    /// Imagem estática, o tema (escuro?) e a largura do servidor em que foi tirada.
+    shot: Option<(bool, u32, Arc<RenderImage>)>,
     no_image: bool,
     focus: FocusHandle,
     gesture: Option<Instant>,
     origin: Rc<Cell<Point<Pixels>>>,
+    /// O botão desceu nesta página: só ela recebe a soltura de fora.
+    pressed: bool,
 }
 
 pub struct Pages {
@@ -158,6 +163,33 @@ impl Pages {
         let live = cfg!(target_os = "linux") && Engine::available().is_ok();
         Self { views: HashMap::new(), budget: Budget::default(), paint: Rc::default(), window, width: Rc::new(Cell::new(COLUMN)), live }
     }
+
+    /// Conversa trocada ou recarregada: nada da anterior é reaproveitado (a página pode ter expirado). Os motores caem
+    /// junto com as visões.
+    pub fn clear(&mut self) {
+        self.views.clear();
+        self.budget = Budget::default();
+        self.paint.away.borrow_mut().clear();
+    }
+
+    /// Conversa refeita: sai quem não tem mais linha.
+    pub fn retain_rows(&mut self, keep: impl Fn(&String) -> bool) {
+        self.views.retain(|_, view| keep(&view.row));
+        let views = &self.views;
+        self.budget.order.retain(|id| views.contains_key(id));
+    }
+}
+
+/// Largura do cartão na pintura. Mudou: o próximo quadro redesenha, para a altura e a imagem seguirem a coluna (no
+/// meio da pintura o `refresh` não vale).
+fn record_width(cell: &Cell<f32>, bounds: Bounds<Pixels>, window: &mut Window) {
+    let width = f32::from(bounds.size.width);
+    if (cell.replace(width) - width).abs() > 0.5 { window.on_next_frame(|window, _| window.refresh()); }
+}
+
+/// Larguras em que o servidor tira a imagem (`WIDTHS` da rota `shot`).
+fn shot_width(width: f32) -> u32 {
+    [360, 728, 1000].into_iter().min_by_key(|w| (*w as f32 - width).abs() as u32).unwrap_or(728)
 }
 
 fn hex(color: Hsla) -> String {
@@ -182,7 +214,6 @@ impl Hangar {
     /// Página publicada no lugar da chamada `html_render`, quando o resultado pareado traz `hangar_page`.
     pub(super) fn tool_page(&self, tool: Tool) -> Option<PageRef> {
         let call = &self.chat.events[tool.call];
-        if !conversation::is_page_call(call.tool_name.as_deref()) { return None; }
         page_from_result(call.tool_name.as_deref()?, self.chat.events[tool.result?].result.as_deref()?)
     }
 
@@ -234,9 +265,10 @@ impl Hangar {
             return;
         }
         let dark = theme::is_dark();
-        if view.no_image || view.shot.as_ref().is_some_and(|(d, _)| *d == dark) { return; }
+        let bucket = shot_width(width);
+        if view.no_image || view.shot.as_ref().is_some_and(|(d, w, _)| *d == dark && *w == bucket) { return; }
         view.busy = true;
-        let (page_id, name, w) = (id.to_owned(), key.name.clone(), (width.round() as u32).to_string());
+        let (page_id, name, w) = (id.to_owned(), key.name.clone(), bucket.to_string());
         let task = self.runtime.spawn(async move {
             let bytes = api.page(&name, &page_id, &["shot"], &[("theme", if dark { "dark" } else { "light" }), ("width", &w)]).await?;
             Ok::<_, Failure>(tokio::task::spawn_blocking(move || media::decode(&bytes, 4096, 8192, None)).await.ok().flatten())
@@ -249,7 +281,7 @@ impl Hangar {
                     Ok(image) => if let Some(view) = this.pages.views.get_mut(&id) {
                         view.busy = false;
                         match image {
-                            Some(image) => { view.shot = Some((dark, image)); view.state = ViewState::Ready; }
+                            Some(image) => { view.shot = Some((dark, bucket, image)); view.state = ViewState::Ready; }
                             None => view.state = ViewState::Error,
                         }
                     },
@@ -314,7 +346,11 @@ impl Hangar {
         let id = id.to_owned();
         cx.spawn(async move |this, cx| {
             use base64::Engine as _;
-            let frame = shot.await.ok()
+            use futures::future::{Either, select};
+            // Página escondida que não responde não segura o motor fora do orçamento: cai sem o último quadro.
+            let timer = cx.background_executor().timer(PARK_SHOT);
+            let reply = match select(std::pin::pin!(shot), std::pin::pin!(timer)).await { Either::Left((reply, _)) => reply.ok(), Either::Right(_) => None };
+            let frame = reply
                 .and_then(|v| base64::engine::general_purpose::STANDARD.decode(v["data"].as_str().unwrap_or("")).ok())
                 .and_then(|bytes| media::decode(&bytes, 4096, 8192, None));
             drop(running);
@@ -385,7 +421,13 @@ impl Hangar {
 
     #[cfg(target_os = "linux")]
     fn page_pointer(&mut self, id: &str, kind: Pointer, at: Point<Pixels>, clicks: usize) {
-        let Some(view) = self.pages.views.get(id) else { return };
+        let Some(view) = self.pages.views.get_mut(id) else { return };
+        match kind {
+            Pointer::Down => view.pressed = true,
+            // Soltura de um arrasto que não começou nesta página não é dela.
+            Pointer::Up if !std::mem::take(&mut view.pressed) => return,
+            _ => {}
+        }
         let origin = view.origin.get();
         if let Some(engine) = self.page_engine(id) { engine.pointer(kind, at - origin, clicks); }
     }
@@ -398,7 +440,7 @@ impl Hangar {
             page: page.clone(), row, state: ViewState::Loading, live, busy: false, html: None, reported: None,
             #[cfg(target_os = "linux")]
             running: None,
-            parked: false, last_frame: None, shot: None, no_image: false, focus: cx.focus_handle(), gesture: None, origin: Rc::default(),
+            parked: false, last_frame: None, shot: None, no_image: false, focus: cx.focus_handle(), gesture: None, origin: Rc::default(), pressed: false,
         });
         // Estacionada que saiu da tela e voltou recarrega.
         #[cfg(target_os = "linux")]
@@ -428,7 +470,10 @@ impl Hangar {
         let loading = || div().id(SharedString::from(format!("page-loading-{id}"))).size_full().flex().items_center().role(Role::Status).child(note(tr_shared("page_loading", &[("title", &title)])));
         if !view.live {
             let open = id.clone();
-            let image = view.shot.as_ref().map(|(_, image)| image.clone());
+            let image = view.shot.as_ref().map(|(_, _, image)| image.clone());
+            let width_cell = self.pages.width.clone();
+            // A imagem e a altura estimada vêm da largura real da coluna, não só da página viva.
+            let measure = canvas(|_, _, _| {}, move |bounds, _, window, _| record_width(&width_cell, bounds, window)).absolute().inset_0();
             let bar = h_flex().gap_2()
                 .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).text_color(theme::muted()).child(title.clone()))
                 .child(Button::new(SharedString::from(format!("page-open-{id}"))).ghost().xsmall().icon(IconName::ExternalLink)
@@ -439,7 +484,7 @@ impl Hangar {
                 (_, Some(image), _) => Some(div().w_full().h(height).child(img(image).size_full().object_fit(ObjectFit::Contain))),
                 _ => Some(div().w_full().h(height).child(loading())),
             };
-            return v_flex().w_full().gap_1().children(picture).child(bar).into_any_element();
+            return v_flex().relative().w_full().gap_1().child(measure).children(picture).child(bar).into_any_element();
         }
         #[cfg(target_os = "linux")]
         {
@@ -455,7 +500,7 @@ impl Hangar {
             let shown = engine.clone();
             let surface = canvas(|bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal), move |bounds, hitbox, window, _| {
                 origin.set(bounds.origin);
-                width_cell.set(f32::from(bounds.size.width));
+                record_width(&width_cell, bounds, window);
                 paint.mark(&mark, shown.as_ref());
                 let Some(engine) = shown else { return };
                 engine.place(bounds, window);
