@@ -36,7 +36,7 @@ impl Failure {
 
 /// O que o painel pede ao assistente (`SetupWizard::failure_action`).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum FailureAction { Retry, ToggleDetails, Fix(Fix), ToggleSend, SendAgain(u64), Dismiss(u64), AskAgent(Agent), StopAgent }
+pub(crate) enum FailureAction { ToggleDetails, Fix(Fix), ToggleSend, SendAgain(u64), Dismiss(u64), AskAgent(Agent), StopAgent }
 
 pub(crate) type OnFailureAction = Rc<dyn Fn(FailureAction, &mut Window, &mut App)>;
 
@@ -288,6 +288,8 @@ pub(crate) fn details(id: &'static str, open: bool, lines: &[String], on_toggle:
 #[cfg(test)]
 mod tests {
     use super::*;
+    // O glob da gpui_kit (via `use super::*`) traz um `test` que colide com o atributo padrão.
+    use core::prelude::v1::test;
     use super::super::report::{self, Outcome};
 
     fn payload(code: &str) -> Payload { report::payload(Screen::Prepare, Some(code.into()), Outcome::Aberto, None, "r".into()) }

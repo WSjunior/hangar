@@ -567,6 +567,8 @@ impl Render for SetupWizard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // O glob da gpui_kit (via `use super::*`) traz um `test` que colide com o atributo padrão.
+    use core::prelude::v1::test;
 
     #[test]
     fn row_marks_follow_the_item_state() {

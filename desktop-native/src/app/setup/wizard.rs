@@ -969,13 +969,12 @@ impl SetupWizard {
         match action {
             FailureAction::ToggleDetails => { self.details_open = !self.details_open; cx.notify(); }
             // Agente trabalhando: nada sobe na pasta que ele edita, e o relatório espera ele terminar.
-            FailureAction::Retry | FailureAction::Fix(_) | FailureAction::AskAgent(_) | FailureAction::ToggleSend if busy => {}
+            FailureAction::Fix(_) | FailureAction::AskAgent(_) | FailureAction::ToggleSend if busy => {}
             FailureAction::ToggleSend => if self.report_about.is_some() { self.send = !self.send; cx.notify(); },
             FailureAction::SendAgain(id) => if let Some(payload) = self.outbox.again(id) { self.send_now(id, payload, cx); },
             FailureAction::Dismiss(id) => { self.outbox.dismiss(id); cx.notify(); }
             // A lista de pacotes ainda atualiza: rodar o script agora bateria na trava do apt.
-            FailureAction::Retry | FailureAction::Fix(_) | FailureAction::AskAgent(_) if self.refreshing => {}
-            FailureAction::Retry => self.retry(window, cx),
+            FailureAction::Fix(_) | FailureAction::AskAgent(_) if self.refreshing => {}
             FailureAction::Fix(fix) => self.apply_fix(fix, window, cx),
             FailureAction::AskAgent(agent) => self.ask_agent(agent, cx),
             FailureAction::StopAgent => self.stop_agent(None, cx),
@@ -1048,7 +1047,7 @@ impl SetupWizard {
                 }
             };
             while let Ok(item) = output.recv().await {
-                let exited = matches!(item, agent::Output::Exit(_));
+                let exited = matches!(item, agent::Output::Exit);
                 if this.update(cx, |w, cx| w.agent_output(item, cx)).is_err() { return; }
                 if exited { break; }
             }
@@ -1097,7 +1096,7 @@ impl SetupWizard {
         let Some(run) = self.agent.as_mut() else { return };
         match item {
             agent::Output::Line(line) => { let agent = run.agent; run.transcript.feed(agent, &line); }
-            agent::Output::Exit(_) => { run.pid = None; run.phase = AgentPhase::Restoring; }
+            agent::Output::Exit => { run.pid = None; run.phase = AgentPhase::Restoring; }
         }
         cx.notify();
     }
@@ -1518,6 +1517,8 @@ impl Render for PasswordPrompt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // O glob da gpui_kit (via `use super::*`) traz um `test` que colide com o atributo padrão.
+    use core::prelude::v1::test;
 
     #[test]
     fn only_the_recorded_identity_is_ever_signalled() {
