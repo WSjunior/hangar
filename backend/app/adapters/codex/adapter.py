@@ -458,6 +458,8 @@ class CodexAdapter:
         # Sessão sem terminal que não sobe: (código, detalhe) que a lista e o StateEvent mostram —
         # senão o card só vira "dead" sem pista.
         self._problemas: dict[str, tuple[str, str | None]] = {}
+        # Sessões cujo app-server morreu com turno no ar: a próxima subida confere se ele foi cortado.
+        self._cortados: set[str] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
 
     def _start_tmux_watcher(self, name: str) -> None:
@@ -1033,6 +1035,15 @@ class CodexAdapter:
             self._sessions[name]["mode"] = "plan" if meta.get("previous_non_plan") else "default"
         self._sessions[name]["async_questions"].hydrate(thread)
         self._restore_turn(self._sessions[name], thread)
+        if name in self._cortados and (thread.get("status") or {}).get("type") == "idle":
+            self._cortados.discard(name)
+            try:
+                lido = (await client.request("thread/read", {"threadId": thread_id, "includeTurns": True})).get("thread") or {}
+                turnos = lido.get("turns") or []
+                if turnos and turnos[-1].get("status") == "interrupted":
+                    self._sessions[name]["turn_problem"] = ("codex_turno_cortado", "")
+            except Exception:
+                _log.warning("codex sem terminal: não deu para conferir o turno cortado name=%s", name, exc_info=True)
         _log.info("codex sem terminal: subiu name=%s thread=%s cano=%s", name, thread_id,
                   (meta.get("cano") or {}).get("pid"))
         return client
@@ -2140,6 +2151,8 @@ class CodexAdapter:
             if getattr(client, "closed", False) and self._sessions.get(name) is sess:
                 await buffer.discard()
                 await publish("")
+                if sess.get("headless") and sess.get("in_progress"):
+                    self._cortados.add(name)
                 sess["state"] = "dead"
                 self._sessions.pop(name, None)
                 PushPreviewSource._sources.pop(name, None)
