@@ -147,8 +147,11 @@ fn keys_and_term_input_answers_match_the_python_golden() {
 #[test]
 fn queue_answers_match_the_python_golden() {
     for case in golden().into_iter().filter(|c| c["route"] == "queue_remove") {
-        let removed = case["args"]["removed"].clone();
-        check(case["name"].as_str().unwrap(), queue_answer(&Ok(removed)), &case);
+        let removed = match case["args"]["error"].as_str() {
+            Some(error) => reply(&json!(format!("!erro: {error}"))).map(|_| json!(null)),
+            None => Ok(case["args"]["removed"].clone()),
+        };
+        check(case["name"].as_str().unwrap(), queue_answer(&removed), &case);
     }
 }
 
@@ -184,12 +187,23 @@ async fn cano(sink: Arc<std::sync::Mutex<Vec<Value>>>) -> String {
                     sink.lock().unwrap().push(envelope.clone());
                     let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
                     let _ = write.write_all(format!("{ack}\n").as_bytes()).await;
+                    // A CLI de verdade responde ao pedido de controle; o cano falso faz o mesmo.
+                    let frame: Value = serde_json::from_str(envelope["frame"].as_str().unwrap_or("{}")).unwrap_or(Value::Null);
+                    if frame["type"] == "control_request" {
+                        let response = json!({"type":"control_response","response":{"subtype":"success",
+                            "request_id":frame["request_id"],"response":{}}});
+                        let output = json!({"type":"cano_output","frame":response.to_string()});
+                        let _ = write.write_all(format!("{output}\n").as_bytes()).await;
+                    }
                 }
             });
         }
     });
     format!("tcp:{address}")
 }
+
+/// Quantas vezes o ator pediu o serviço de plugin ao Python (a permissão segurada vai por ele).
+static POLICY_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 async fn policy() -> std::net::SocketAddr {
     use tokio::io::AsyncReadExt;
@@ -210,7 +224,18 @@ async fn policy() -> std::net::SocketAddr {
                     }
                     let mut body = vec![0; length];
                     reader.read_exact(&mut body).await.unwrap();
-                    let reply = json!({"ok":true,"data":{}}).to_string();
+                    let request: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                    let data = match request["kind"].as_str() {
+                        // O pane confere com o vínculo da própria entrada: devolve o que veio.
+                        Some("terminal_facts") => json!({"binding": request["payload"]["binding"], "ready": true, "idle": true,
+                            "open_question": false, "plugin_live": false, "plugin_user": false, "native": null}),
+                        Some("terminal_plugin_control") => {
+                            POLICY_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            json!({"disposition": "accepted"})
+                        }
+                        _ => json!({}),
+                    };
+                    let reply = json!({"ok":true,"data":data}).to_string();
                     let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}", reply.len());
                     reader.get_mut().write_all(response.as_bytes()).await.unwrap();
                 }
@@ -234,12 +259,36 @@ async fn open_headless(registry: &RuntimeRegistry, dir: &Path, name: &str) -> Ar
     sink
 }
 
-/// Entrada com terminal cujo tmux não existe: qualquer controle que chegue ao ator falha, e é
-/// isso que prova que o Rust parou antes dele.
-async fn open_terminal(registry: &RuntimeRegistry, dir: &Path, name: &str) {
+/// tmux falso: aceita tudo e anota cada chamada, para contar as teclas que o ator mandou.
+fn fake_tmux(dir: &Path, name: &str) -> (String, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let (script, log) = (dir.join("tmux"), dir.join("tmux.log"));
+    std::fs::write(&script, format!(
+        "#!/bin/sh\nif [ \"$1\" = display-message ]; then printf '{name}\\t%%1\\t1\\n'; exit 0; fi\necho \"$@\" >> '{}'\n", log.display())).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    (script.to_str().unwrap().to_owned(), log)
+}
+
+fn keys_sent(log: &Path) -> usize {
+    std::fs::read_to_string(log).unwrap_or_default().lines().filter(|l| l.contains("send-keys")).count()
+}
+
+/// Entrada com terminal sobre o tmux falso: o que chega ao ator vira `send-keys` no registro.
+async fn open_terminal(registry: &RuntimeRegistry, dir: &Path, name: &str) -> std::path::PathBuf {
+    let (tmux, log) = fake_tmux(dir, name);
+    open_terminal_with(registry, dir, name, vec![tmux]).await;
+    log
+}
+
+/// Entrada com terminal cujo tmux não existe: qualquer controle que chegue ao ator falha.
+async fn open_terminal_without_tmux(registry: &RuntimeRegistry, dir: &Path, name: &str) {
+    open_terminal_with(registry, dir, name, vec!["/does-not-exist/hangar-test-tmux".into()]).await
+}
+
+async fn open_terminal_with(registry: &RuntimeRegistry, dir: &Path, name: &str, mux_argv: Vec<String>) {
     let (state_path, projection_dir) = (dir.join(format!("{name}.state")), dir.join(format!("{name}.projection")));
     let binding = TerminalBinding { name: name.into(), pane: "%1".into(), conversation: "sid".into(), generation: 1, created: 1,
-        mux_argv: vec!["/does-not-exist/hangar-test-tmux".into()], windows: false, clipboard_lock_path: None };
+        mux_argv, windows: false, clipboard_lock_path: None };
     let transcript = dir.join(format!("{name}.jsonl"));
     std::fs::write(&transcript, "").unwrap();
     registry.open_terminal(TerminalTarget { key: format!("k-{name}"), generation: 1, name: name.into(), binding,
@@ -271,9 +320,7 @@ async fn headless_interrupt_is_served_in_rust() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
     let sink = open_headless(&registry, dir.path(), "s").await;
     let (python, server) = serve(registry).await;
-    let (status, body) = send(server, "POST", "s/interrupt", "").await;
-    // O cano falso não responde ao pedido de controle: o ator diz que o resultado é incerto, com código.
-    assert!(status == 200 || body["detail"]["code"] == "erro_sem_turno", "{status} {body}");
+    assert_eq!(send(server, "POST", "s/interrupt", "").await, (200, json!({"ok": true})));
     assert_eq!(python.hits_to("/api/sessions/s/interrupt"), 0);
     assert!(sink.lock().unwrap().iter().any(|e| e.to_string().contains("interrupt")), "o cano recebeu a interrupção");
 }
@@ -324,46 +371,79 @@ async fn queue_discard_of_an_entry_that_is_not_there_is_404() {
 #[tokio::test]
 async fn permission_held_by_the_plugin_refuses_option_3_and_the_actor_receives_nothing() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
-    open_terminal(&registry, dir.path(), "t").await;
-    let (python, server) = serve(registry.clone()).await;
+    let log = open_terminal(&registry, dir.path(), "t").await;
+    let (python, server) = serve(registry).await;
     python.set_plugin_pending(json!({"id": "perm:1", "questions": []}));
+    let calls = || POLICY_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+    let (keys_before, policy_before) = (keys_sent(&log), calls());
     let (status, body) = send(server, "POST", "t/select", r#"{"option":3}"#).await;
-    // O tmux da entrada não existe: um controle que chegasse ao ator voltaria com outro texto.
     assert_eq!((status, body["detail"]["code"].as_str(), body["detail"]["msg"].as_str()),
         (409, Some("erro_opcao_nao_convergiu"), Some("opção fora do pedido de permissão")), "{body}");
-    assert_eq!(python.plugin_gets(), 1);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!((keys_sent(&log), calls()), (keys_before, policy_before), "nenhum controle chegou ao ator");
+    // Contraprova: a opção 1 da mesma permissão chega ao ator (pelo serviço de plugin do Python).
+    send(server, "POST", "t/select", r#"{"option":1}"#).await;
+    assert_eq!(calls(), policy_before + 1, "o contador enxerga um controle que chega");
     assert_eq!(python.hits_to("/api/sessions/t/select"), 0);
-    let snapshot = registry.snapshots().await.unwrap().into_iter().find(|e| e.key == "k-t").unwrap();
-    assert!(snapshot.data["error"].is_null(), "o ator não viu controle nenhum: {}", snapshot.data["error"]);
 }
 
 #[tokio::test]
 async fn select_whose_plugin_lookup_fails_is_a_503_with_a_code_and_never_a_forward() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
-    open_terminal(&registry, dir.path(), "t").await;
+    let log = open_terminal(&registry, dir.path(), "t").await;
     let (python, server) = serve(registry).await;
     python.fail_plugin(Some(StatusCode::INTERNAL_SERVER_ERROR));
+    let before = keys_sent(&log);
+    let (status, body) = send(server, "POST", "t/select", r#"{"option":1}"#).await;
+    assert_eq!((status, body["detail"]["code"].as_str(), body["detail"]["params"]["detalhe"].as_str()),
+        (503, Some("erro_opcao_nao_convergiu"), Some("plugin_unavailable")), "{body}");
+    assert_eq!(python.hits_to("/api/sessions/t/select"), 0);
+    assert_eq!(keys_sent(&log), before);
+}
+
+#[tokio::test]
+async fn a_plugin_answer_without_the_pending_key_is_a_failure_not_no_question() {
+    let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
+    let log = open_terminal(&registry, dir.path(), "t").await;
+    let (python, server) = serve(registry).await;
+    python.set_plugin_reply(Some(json!({"ok": true})));
+    let before = keys_sent(&log);
     let (status, body) = send(server, "POST", "t/select", r#"{"option":1}"#).await;
     assert_eq!((status, body["detail"]["code"].as_str()), (503, Some("erro_opcao_nao_convergiu")), "{body}");
-    assert_eq!(python.hits_to("/api/sessions/t/select"), 0);
+    assert_eq!(keys_sent(&log), before);
 }
 
 #[tokio::test]
 async fn interrupt_whose_plugin_lookup_fails_never_presses_escape() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
-    open_terminal(&registry, dir.path(), "t").await;
+    let log = open_terminal(&registry, dir.path(), "t").await;
     let (python, server) = serve(registry).await;
     python.fail_plugin(Some(StatusCode::INTERNAL_SERVER_ERROR));
+    let before = keys_sent(&log);
     let (status, body) = send(server, "POST", "t/interrupt", "").await;
     assert_eq!((status, body["detail"]["code"].as_str()), (503, Some("erro_envio_falhou")), "{body}");
     assert!(python.plugin_posts().is_empty());
+    assert_eq!(python.hits_to("/api/sessions/t/interrupt"), 0);
+    assert_eq!(keys_sent(&log), before, "sem ler a pergunta, nenhum Esc");
+}
+
+#[tokio::test]
+async fn an_accepted_escape_tells_the_plugin_which_question_it_closed() {
+    let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
+    let log = open_terminal(&registry, dir.path(), "t").await;
+    let (python, server) = serve(registry).await;
+    python.set_plugin_pending(json!({"id": "ask:9", "questions": []}));
+    let before = keys_sent(&log);
+    assert_eq!(send(server, "POST", "t/interrupt", "").await, (200, json!({"ok": true})));
+    assert!(keys_sent(&log) > before, "o Esc chegou ao pane");
+    assert_eq!(python.plugin_posts(), vec![json!({"interrupted": "ask:9"})]);
     assert_eq!(python.hits_to("/api/sessions/t/interrupt"), 0);
 }
 
 #[tokio::test]
 async fn interrupt_the_terminal_refused_does_not_tell_the_plugin() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
-    open_terminal(&registry, dir.path(), "t").await;
+    open_terminal_without_tmux(&registry, dir.path(), "t").await;
     let (python, server) = serve(registry).await;
     python.set_plugin_pending(json!({"id": "ask:9", "questions": []}));
     let (status, _) = send(server, "POST", "t/interrupt", "").await;
@@ -381,4 +461,27 @@ async fn terminal_keys_and_term_input_with_bodies_python_would_refuse_reach_pyth
         assert_eq!(send(server, "POST", &format!("t/{route}"), body).await, (200, "from-python".into()), "{route} {body}");
     }
     assert_eq!(python.hits_to("/api/sessions/t/keys") + python.hits_to("/api/sessions/t/term-input"), 4);
+}
+
+#[tokio::test]
+async fn keys_reach_the_pane_through_the_actor() {
+    let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
+    let log = open_terminal(&registry, dir.path(), "t").await;
+    let (python, server) = serve(registry).await;
+    let before = keys_sent(&log);
+    assert_eq!(send(server, "POST", "t/keys", r#"{"key":"Down"}"#).await, (200, json!({"ok": true})));
+    assert_eq!(keys_sent(&log), before + 1);
+    let (status, body) = send(server, "POST", "t/keys", r#"{"key":"Nope"}"#).await;
+    assert_eq!((status, body), (400, json!({"detail": "tecla não permitida"})));
+    assert_eq!(keys_sent(&log), before + 1, "tecla fora da lista não chega ao pane");
+    assert_eq!(python.hits_to("/api/sessions/t/keys"), 0);
+}
+
+#[tokio::test]
+async fn select_submit_without_a_terminal_goes_to_python() {
+    let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
+    open_headless(&registry, dir.path(), "s").await;
+    let (python, server) = serve(registry).await;
+    assert_eq!(send(server, "POST", "s/select/submit", "").await, (200, "from-python".into()));
+    assert_eq!(python.hits_to("/api/sessions/s/select/submit"), 1);
 }

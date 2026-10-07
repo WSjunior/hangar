@@ -29,6 +29,7 @@ type Answer = (StatusCode, Value);
 
 /// Pergunta humana e de uma vez só: sem resposta a escrita falha com código, não espera.
 const PLUGIN_TIMEOUT: Duration = Duration::from_secs(5);
+const PLUGIN_BODY_LIMIT: usize = 64 * 1024;
 
 const MSG_NO_TURN: &str = "Não há turno ativo para interromper.";
 const MSG_PERM_OPTION: &str = "opção fora do pedido de permissão";
@@ -89,14 +90,13 @@ pub fn select_terminal_answer(sent: &Result<RuntimeReply, RuntimeError>) -> (Ans
 pub fn select_headless_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
     let not_answered = |msg: &str| (StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_opcao_nao_convergiu", &format!("não consegui responder: {msg}"), json!({})));
     match sent {
-        // O ator recusa a opção sem permissão em aberto com este erro (não como resposta).
-        Err(error) if error.message == "nenhuma permissão pendente" => failure("erro_opcao_nao_convergiu", MSG_NO_PERMISSION, json!({})),
+        // O ator recusa a opção sem permissão em aberto com este código (não como resposta).
+        Err(error) if error.code == "no_pending_permission" => failure("erro_opcao_nao_convergiu", MSG_NO_PERMISSION, json!({})),
         Err(error) => not_answered(&error.to_string()),
         Ok(reply) => match reply.disposition {
             Disposition::Accepted => ok(),
-            Disposition::Rejected => failure("erro_opcao_nao_convergiu", MSG_NO_PERMISSION, json!({})),
+            Disposition::Rejected | Disposition::Deferred => failure("erro_opcao_nao_convergiu", MSG_NO_PERMISSION, json!({})),
             Disposition::Unknown => not_answered("resultado incerto; a operação foi conservada sem reenvio"),
-            Disposition::Deferred => not_answered(MSG_STEER_REFUSED),
         },
     }
 }
@@ -229,15 +229,17 @@ async fn plugin_call(st: &AppState, name: &str, post: Option<Value>) -> Option<V
     let request = plugin_request(st, name, post)?;
     let response = tokio::time::timeout(PLUGIN_TIMEOUT, st.http.request(request)).await.ok()?.ok()?;
     if !response.status().is_success() { return None; }
-    let body = tokio::time::timeout(PLUGIN_TIMEOUT, response.into_body().collect()).await.ok()?.ok()?.to_bytes();
+    let limited = http_body_util::Limited::new(response.into_body(), PLUGIN_BODY_LIMIT);
+    let body = tokio::time::timeout(PLUGIN_TIMEOUT, limited.collect()).await.ok()?.ok()?.to_bytes();
     serde_json::from_slice(&body).ok()
 }
 
 /// A pergunta que o plugin segura; `Err` quando o Python não respondeu (a escrita não começa).
 async fn plugin_pending(ctx: &Ctx) -> Result<Option<Value>, ()> {
     match plugin_call(&ctx.st, &ctx.name, None).await {
-        Some(body) => Ok(Some(body["pending"].clone()).filter(|p| !p.is_null())),
-        None => {
+        // Sem a chave `pending` não é "sem pergunta": é um Python que não entendeu o pedido.
+        Some(body) if body.get("pending").is_some() => Ok(Some(body["pending"].clone()).filter(|p| !p.is_null())),
+        _ => {
             ctx.st.diag.report("rust.plugin_lookup_failed", &ctx.name, "plugin_lookup", "a pergunta do plugin não foi lida; a escrita não saiu");
             Err(())
         }
@@ -260,7 +262,7 @@ fn report(ctx: &Ctx, diary: Diary) {
 }
 
 fn plugin_down(code: &str) -> Answer {
-    (StatusCode::SERVICE_UNAVAILABLE, detail_body(code, MSG_PLUGIN_DOWN, json!({"erro": "plugin_unavailable"})))
+    (StatusCode::SERVICE_UNAVAILABLE, detail_body(code, MSG_PLUGIN_DOWN, json!({"detalhe": "plugin_unavailable"})))
 }
 
 pub async fn select(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {

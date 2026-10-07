@@ -3527,7 +3527,13 @@ def clear_then_link(name: str):
 async def descartar_da_fila(name: str, entry_id: str):
     # O botao "descartar" da bolha perdida: a entrada desistida sai da fila e do chat. So o id
     # (a bolha `queued-<id>` do front); `remove` recusa o que ainda esta por entregar.
-    if not await asyncio.to_thread(PromptQueue(name).remove, entry_id):
+    try:
+        removed = await asyncio.to_thread(PromptQueue(name).remove, entry_id)
+    except TransferInProgress:
+        raise
+    except RuntimeError as e:
+        raise _falha_do_runtime(e) from None
+    if not removed:
         raise HTTPException(404, erro("erro_fila_entrada_nao_encontrada", "entrada não está na fila"))
     return {"ok": True}
 
@@ -5956,6 +5962,15 @@ def _recusa_se_painel_aberto(name: str) -> None:
                                         "por aqui."))
 
 
+_SEM_CONFIRMACAO = ("resposta enviada, mas nao deu pra confirmar a tempo — "
+                    "confira na sessao antes de responder de novo")
+
+
+def _falha_do_runtime(e: Exception) -> HTTPException:
+    """O runtime não respondeu a uma escrita: 502 com código, como o hangar-server (antes era 500)."""
+    return HTTPException(502, detail=erro("erro_envio_falhou", str(e), erro=str(e)))
+
+
 @app.post("/api/sessions/{name}/select", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 def select(name: str, body: SelectBody):
     from app.runtime_terminal import TerminalOutcomeUnknown, route_sync
@@ -5976,13 +5991,20 @@ def select(name: str, body: SelectBody):
                 payload["require_cursor"] = True
         try:
             routed = route_sync(name, {"kind":"control", "control":"select", "payload":payload})
-        except (TerminalControlError, TransferInProgress):
+        except TerminalControlError as e:
+            # O ator disse "incerto" ou "recusei": são respostas diferentes de "adiado".
+            if e.disposition == "unknown":
+                raise HTTPException(409, detail=erro("erro_sem_confirmacao_resposta", _SEM_CONFIRMACAO)) from None
+            if e.disposition == "rejected":
+                diag.registrar("opcao.nao_convergiu", "erro", sessao=name, detalhe=str(e.code))
+                raise HTTPException(409, detail=erro("erro_opcao_nao_convergiu",
+                    "não consegui marcar essa opção no terminal — tente de novo", detalhe=e.code or "rejected")) from None
+            raise
+        except TransferInProgress:
             raise
         except TerminalOutcomeUnknown as e:
             _log.warning("SELECT name=%s resultado incerto no terminal: %s", name, e)
-            raise HTTPException(409, detail=erro("erro_sem_confirmacao_resposta",
-                "resposta enviada, mas nao deu pra confirmar a tempo — "
-                "confira na sessao antes de responder de novo")) from None
+            raise HTTPException(409, detail=erro("erro_sem_confirmacao_resposta", _SEM_CONFIRMACAO)) from None
         except RuntimeError as e:
             # Antes da entrega (vínculo, posse, Rust subindo): nada chegou ao pane.
             _log.warning("SELECT name=%s rota do terminal falhou: %s", name, e, exc_info=True)
@@ -6053,10 +6075,20 @@ def select_submit(name: str):
         raise HTTPException(404, detail=erro("erro_sessao_opcao_nao_enviada", "sessão não encontrada — opção NÃO enviada"))
     try:
         terminal.submeter_multipla(name)
+    except TerminalControlError as e:
+        # Ator recusou: mesma resposta do DriveError. Incerto e adiado seguem o handler de TerminalControlError.
+        if e.disposition != "rejected":
+            raise
+        diag.registrar("opcao.envio_falhou", "erro", sessao=name, detalhe=str(e.code))
+        raise HTTPException(409, detail=erro("erro_opcao_nao_convergiu", "não consegui enviar as opções marcadas — tente de novo", detalhe=e.code or "rejected")) from None
+    except TransferInProgress:
+        raise
     except terminal_input.DriveError as e:
         # Mesma política do /select: 409 com o motivo na tela, nunca 500 calado nem "ok" mentiroso.
         diag.registrar("opcao.envio_falhou", "erro", sessao=name, detalhe=str(e))
         raise HTTPException(409, detail=erro("erro_opcao_nao_convergiu", "não consegui enviar as opções marcadas — tente de novo", detalhe=str(e)))
+    except RuntimeError as e:
+        raise _falha_do_runtime(e) from None
     return {"ok": True}
 
 
@@ -6142,14 +6174,26 @@ async def interrupt(name: str, clear: bool = False):
         return {"ok": True}
     if _headless(name):
         # Sem turno em voo não há o que interromper; responder ok seria fingir.
-        if not await get_adapter(CLAUDE_HEADLESS).interrupt(name):
+        try:
+            interrompeu = await get_adapter(CLAUDE_HEADLESS).interrupt(name)
+        except TransferInProgress:
+            raise
+        except (ValueError, RuntimeError) as e:
+            # O ator recusou ou não respondeu: sem turno para interromper, com o motivo dele.
+            raise HTTPException(409, detail=erro("erro_sem_turno", str(e))) from None
+        if not interrompeu:
             raise HTTPException(409, detail=erro("erro_sem_turno", "Não há turno ativo para interromper."))
         return {"ok": True}
     # clear=True: alem de interromper, limpa o input (2o Esc). So o front com msg pendente passa isso —
     # garante input nao-vazio, evitando que o Esc-Esc abra o menu de rewind num input ja vazio.
     # terminal.interrupt e SYNC (tmux) -> threadpool pra nao bloquear o event loop (handler async agora).
     pergunta = (plugin_bridge.pergunta_pendente(name) or {}).get("id")
-    await asyncio.to_thread(terminal.interrupt, name, clear=clear)
+    try:
+        await asyncio.to_thread(terminal.interrupt, name, clear=clear)
+    except (TerminalControlError, TransferInProgress):
+        raise
+    except RuntimeError as e:
+        raise _falha_do_runtime(e) from None
     plugin_bridge.interrompeu(name, pergunta)
     return {"ok": True}
 
@@ -6491,6 +6535,10 @@ def keys(name: str, body: KeyBody):
         terminal.send_key(name, body.key)
     except ValueError as e:
         raise HTTPException(400, str(e))
+    except (TerminalControlError, TransferInProgress):
+        raise
+    except RuntimeError as e:
+        raise _falha_do_runtime(e) from None
     return {"ok": True}
 
 
@@ -6504,6 +6552,10 @@ def term_input(name: str, body: TermInputBody):
             terminal.send_term_key(name, body.key)
     except ValueError as e:
         raise HTTPException(400, str(e))
+    except (TerminalControlError, TransferInProgress):
+        raise
+    except RuntimeError as e:
+        raise _falha_do_runtime(e) from None
     return {"ok": True}
 
 

@@ -742,14 +742,21 @@ def session_write_rows() -> tuple[list, list]:
 
 # ── /interrupt, /keys, /term-input, /select, /select/submit e DELETE …/queue/{id} ──────────────────
 # Mesmo método: a rota do Python de verdade, com o ator falso. Cada caso diz a rota, o que o plugin
-# segura (`pending`), se o painel está aberto e a resposta do ator (`reply`). Texto "!unknown" é o
-# `TerminalOutcomeUnknown` e "!erro: msg" é a falha do runtime antes da entrega. `drive_error` faz o
-# Python cair no driver direto do tmux (o `DriveError` que o ator recusado equivale). `adapter_false`
-# é o `adapter.select` do Claude sem terminal devolvendo False (nenhuma permissão pendente).
-# Diferenças que o golden NÃO compara: o texto de `params.detalhe` e o de falha do runtime.
+# segura (`pending`), se o painel está aberto e a resposta do ator (`reply`): uma disposição real, ou
+# "!erro: msg" para a falha do runtime. Divergências deliberadas, já espelhadas nas rotas do Python:
+# - /select com terminal: ator `unknown` -> 409 `erro_sem_confirmacao_resposta`; `rejected` -> 409
+#   "não consegui marcar essa opção…" com `detalhe` e diário `opcao.nao_convergiu` (antes: "Não foi
+#   possível confirmar o controle…" sem `detalhe`, que o app mostrava como "(undefined)");
+# - /select/submit com terminal: `rejected` -> 409 "não consegui enviar as opções marcadas…" com
+#   `detalhe` e diário `opcao.envio_falhou`;
+# - /select sem terminal: ator recusou -> 409 "nenhum pedido de permissão pendente" (antes: 503);
+# - falha do runtime em /keys, /term-input, /select/submit, /interrupt com terminal e DELETE …/queue
+#   -> 502 `erro_envio_falhou` (antes: 500);
+# - /interrupt sem terminal: ator recusou, incerto ou falhou -> 409 `erro_sem_turno` com o motivo (antes: 500).
+# Diferença que o golden NÃO compara: o texto de `params.detalhe`.
 def _c(name, route, **kw):
     return {"name": name, "route": route, "terminal": True, "pending": None, "panel_open": False, "reply": ("accepted", {}),
-            "rust_reply": None, "drive_error": False, "adapter_false": False, "args": {}, **kw}
+            "rust_reply": None, "args": {}, **kw}
 
 
 ACC = ("accepted", {})
@@ -762,11 +769,11 @@ CONTROL_CASES = [
     _c("select_panel_open_no_pending", "select", args={"option": 1}, panel_open=True),
     _c("select_panel_open_ask", "select", args={"option": 1}, pending={"id": "ask:1"}, panel_open=True),
     _c("select_deferred", "select", args={"option": 1}, reply=("deferred", {})),
-    _c("select_uncertain", "select", args={"option": 1}, reply="!unknown"),
+    _c("select_uncertain", "select", args={"option": 1}, reply=("unknown", {})),
     _c("select_runtime_error", "select", args={"option": 1}, reply="!erro: runtime_closed: ator saiu"),
-    _c("select_refused", "select", args={"option": 1}, reply=("rejected", {"code": "cursor"}), drive_error=True),
+    _c("select_refused", "select", args={"option": 1}, reply=("rejected", {"code": "cursor"})),
     _c("select_headless_accepted", "select", terminal=False, args={"option": 1}),
-    _c("select_headless_no_permission", "select", terminal=False, args={"option": 1}, reply=("rejected", {}), adapter_false=True),
+    _c("select_headless_no_permission", "select", terminal=False, args={"option": 1}, reply=("rejected", {})),
     _c("select_headless_deferred", "select", terminal=False, args={"option": 1}, reply=("deferred", {})),
     _c("select_headless_unknown", "select", terminal=False, args={"option": 1}, reply=("unknown", {})),
     _c("select_headless_error", "select", terminal=False, args={"option": 1}, reply="!erro: runtime_closed: ator saiu"),
@@ -774,9 +781,16 @@ CONTROL_CASES = [
     _c("submit_panel_open", "select_submit", panel_open=True),
     _c("submit_deferred", "select_submit", reply=("deferred", {})),
     _c("submit_unknown", "select_submit", reply=("unknown", {})),
-    _c("submit_refused", "select_submit", reply=("rejected", {"code": "tab"}), drive_error=True),
+    _c("submit_refused", "select_submit", reply=("rejected", {"code": "tab"})),
+    _c("submit_runtime_error", "select_submit", reply="!erro: runtime_closed: ator saiu"),
     _c("interrupt_headless_accepted", "interrupt", terminal=False),
     _c("interrupt_headless_no_turn", "interrupt", terminal=False, reply=("accepted", {"interrupted": False})),
+    _c("interrupt_headless_rejected", "interrupt", terminal=False, reply=("rejected", {"error": "sem turno"})),
+    _c("interrupt_headless_rejected_plain", "interrupt", terminal=False, reply=("rejected", {})),
+    _c("interrupt_headless_deferred", "interrupt", terminal=False, reply=("deferred", {})),
+    _c("interrupt_headless_unknown", "interrupt", terminal=False, reply=("unknown", {})),
+    _c("interrupt_headless_error", "interrupt", terminal=False, reply="!erro: runtime_closed: ator saiu"),
+    _c("interrupt_terminal_runtime_error", "interrupt", pending={"id": "ask:9"}, reply="!erro: runtime_closed: ator saiu"),
     _c("interrupt_terminal_accepted", "interrupt"),
     _c("interrupt_terminal_with_question", "interrupt", pending={"id": "ask:9"}),
     _c("interrupt_terminal_clear", "interrupt", args={"clear": True}, pending={"id": "ask:9"}),
@@ -786,6 +800,7 @@ CONTROL_CASES = [
     _c("keys_not_allowed", "keys", args={"key": "Nope"}, reply=None, rust_reply=("rejected", {"code": "key_not_allowed"})),
     _c("keys_deferred", "keys", args={"key": "Down"}, reply=("deferred", {})),
     _c("keys_unknown", "keys", args={"key": "Down"}, reply=("unknown", {})),
+    _c("keys_runtime_error", "keys", args={"key": "Down"}, reply="!erro: runtime_closed: ator saiu"),
     _c("term_text", "term_input", args={"text": "ls"}),
     _c("term_key", "term_input", args={"key": "C-c"}),
     _c("term_text_and_key", "term_input", args={"text": "ls", "key": "Enter"}),
@@ -795,8 +810,10 @@ CONTROL_CASES = [
     _c("term_bad_key_after_text", "term_input", args={"text": "ls", "key": "Nope"}, rust_reply=("rejected", {"code": "key_not_allowed"})),
     _c("term_text_deferred", "term_input", args={"text": "ls", "key": "Enter"}, reply=("deferred", {})),
     _c("term_key_unknown", "term_input", args={"key": "Enter"}, reply=("unknown", {})),
+    _c("term_runtime_error", "term_input", args={"text": "ls"}, reply="!erro: runtime_closed: ator saiu"),
     _c("queue_removed", "queue_remove", terminal=False, args={"removed": True}),
     _c("queue_not_found", "queue_remove", terminal=False, args={"removed": False}),
+    _c("queue_runtime_error", "queue_remove", terminal=False, args={"error": "runtime_closed: ator saiu"}),
 ]
 
 
@@ -808,8 +825,6 @@ def control_rows() -> list:
     from fastapi import HTTPException
     from app import api, runtime_coordinator, termsock
     from app.runtime_adapter import RuntimeAdapter, RuntimeView
-    from app.runtime_terminal import TerminalOutcomeUnknown
-    from app.terminal_input import DriveError
 
     loop = asyncio.new_event_loop()
     threading.Thread(target=loop.run_forever, daemon=True).start()
@@ -834,8 +849,6 @@ def control_rows() -> list:
         async def op(self, name, command, operation_id):
             if command["kind"] == "control":
                 sent.append({"control": command["control"], "payload": command["payload"]})
-            if self.reply == "!unknown":
-                raise TerminalOutcomeUnknown("resultado terminal incerto; não repetir por outro transporte")
             if isinstance(self.reply, str):
                 raise RuntimeError(self.reply.removeprefix("!erro: "))
             return {"operation_id": operation_id, "disposition": self.reply[0], "payload": self.reply[1]}
@@ -847,12 +860,6 @@ def control_rows() -> list:
     api._cached_info_sync = lambda name: SimpleNamespace(provider="claude", headless=False)
     api._loop_servidor = loop
     api.plugin_bridge.interrompeu = lambda name, ident: notified.append(ident)
-    real_terminal = api.terminal
-
-    def drive_failing(code):
-        def fail(*args, **kwargs):
-            raise DriveError(code)
-        return SimpleNamespace(select=fail, submeter_multipla=fail)
 
     async def call(case):
         args = case["args"]
@@ -871,25 +878,22 @@ def control_rows() -> list:
                 pass
 
             def remove(self, entry_id):
+                if "error" in args:
+                    raise RuntimeError(args["error"])
                 return args["removed"]
         api.PromptQueue = Queue
         return await api.descartar_da_fila("s", "e1")
 
     async def run(case):
         reply = case["reply"]
-        runtime_coordinator._current = Owner(case["terminal"] and not case["drive_error"], reply)
+        runtime_coordinator._current = Owner(case["terminal"], reply)
         api._headless = lambda name: not case["terminal"]
         adapter = RuntimeAdapter("claude")
         adapter.view = lambda name, mutating=False: RuntimeView("k", 1, 1, {})
-
-        async def select_false(name, option):
-            return False
-        api.get_adapter = lambda key: SimpleNamespace(select=select_false, interrupt=lambda name: adapter.dispatch("interrupt", name, {})) \
-            if case["adapter_false"] else SimpleNamespace(select=lambda name, option: adapter.dispatch("select", name, {"option": option}),
-                                                          interrupt=lambda name: adapter.dispatch("interrupt", name, {}))
+        api.get_adapter = lambda key: SimpleNamespace(select=lambda name, option: adapter.dispatch("select", name, {"option": option}),
+                                                      interrupt=lambda name: adapter.dispatch("interrupt", name, {}))
         api.plugin_bridge.pergunta_pendente = lambda name: case["pending"]
         termsock.painel_aberto = lambda name: case["panel_open"]
-        api.terminal = drive_failing("cursor nao convergiu") if case["drive_error"] else real_terminal
         sent.clear(), notified.clear(), diary.clear()
         try:
             return {"status": 200, "body": await call(case)}
@@ -908,7 +912,7 @@ def control_rows() -> list:
             expect = await run(case)
             rows.append({"name": case["name"], "route": case["route"], "terminal": case["terminal"], "args": case["args"],
                          "pending": case["pending"], "panel_open": case["panel_open"], "reply": as_json(case["reply"]),
-                         "rust_reply": as_json(case["rust_reply"]), "adapter_false": case["adapter_false"], "expect": expect,
+                         "rust_reply": as_json(case["rust_reply"]), "expect": expect,
                          "sent": list(sent), "notified": list(notified), "diary": list(diary)})
         return rows
 

@@ -65,6 +65,8 @@ pub struct Fake {
     /// quantas leituras chegaram e os corpos do aviso de interrupção.
     plugin_pending: Mutex<Value>,
     plugin_status: Mutex<Option<StatusCode>>,
+    /// Corpo que substitui `{"pending": …}` na leitura (o Python respondendo outra coisa).
+    plugin_reply: Mutex<Option<Value>>,
     plugin_gets: AtomicUsize,
     plugin_posts: Mutex<Vec<Value>>,
 }
@@ -136,6 +138,9 @@ impl Fake {
     pub fn fail_plugin(&self, s: Option<StatusCode>) {
         *self.plugin_status.lock().unwrap() = s;
     }
+    pub fn set_plugin_reply(&self, reply: Option<Value>) {
+        *self.plugin_reply.lock().unwrap() = reply;
+    }
     pub fn plugin_gets(&self) -> usize {
         self.plugin_gets.load(SeqCst)
     }
@@ -175,6 +180,7 @@ pub async fn spawn_fake() -> (Arc<Fake>, SocketAddr) {
         hold_input: std::sync::atomic::AtomicBool::new(false),
         plugin_pending: Mutex::new(Value::Null),
         plugin_status: Mutex::default(),
+        plugin_reply: Mutex::default(),
         plugin_gets: AtomicUsize::new(0),
         plugin_posts: Mutex::default(),
     });
@@ -245,7 +251,7 @@ async fn fake_plugin_get(State(f): State<Arc<Fake>>, headers: HeaderMap) -> Resp
     if let Some(s) = *f.plugin_status.lock().unwrap() {
         return status(s);
     }
-    let body = json!({"pending": f.plugin_pending.lock().unwrap().clone()});
+    let body = f.plugin_reply.lock().unwrap().clone().unwrap_or_else(|| json!({"pending": f.plugin_pending.lock().unwrap().clone()}));
     Response::builder().header("content-type", "application/json").body(Body::from(body.to_string())).unwrap()
 }
 

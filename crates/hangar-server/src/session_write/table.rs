@@ -25,9 +25,9 @@ pub fn decide(route: WriteRoute, provider: Provider, terminal: bool, healthy: bo
     if !healthy { return Owner::Python; }
     match provider {
         Provider::Codex => Owner::Python,
-        // Teclas cruas só existem num pane: sem terminal quem responde é o Python, como hoje.
+        // Teclas cruas e a aba Submit só existem num pane: sem terminal quem responde é o Python, como hoje.
         Provider::Claude => match route {
-            WriteRoute::Keys | WriteRoute::TermInput if !terminal => Owner::Python,
+            WriteRoute::Keys | WriteRoute::TermInput | WriteRoute::SelectSubmit if !terminal => Owner::Python,
             _ => Owner::Rust,
         },
     }
@@ -58,9 +58,9 @@ mod tests {
     }
 
     #[test]
-    fn healthy_claude_without_a_terminal_is_rust_except_raw_keys() {
+    fn healthy_claude_without_a_terminal_is_rust_except_pane_only_routes() {
         for route in ALL {
-            let want = if matches!(route, Keys | TermInput) { Owner::Python } else { Owner::Rust };
+            let want = if matches!(route, Keys | TermInput | SelectSubmit) { Owner::Python } else { Owner::Rust };
             assert_eq!(decide(route, Provider::Claude, false, true), want, "{route:?}");
         }
     }

@@ -848,7 +848,11 @@ class RuntimeAdapter:
             result = await self.control(name, "interrupt")
             return result.get("interrupted", True) if isinstance(result, dict) else True
         if method == "select":
-            await self.control(name, "select", {"option":arguments["option"]})
+            try:
+                await self.control(name, "select", {"option":arguments["option"]})
+            except ValueError:
+                # O ator recusou: não há pedido de permissão pendente para responder.
+                return False
             return True
         if method == "answer_questions":
             await self.control(name, "answer_questions", {"request_id":arguments["request_id"], "answers":arguments["answers"]})

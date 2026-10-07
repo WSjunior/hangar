@@ -13,7 +13,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 200,
    "body": {
@@ -47,7 +46,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 200,
    "body": {
@@ -82,7 +80,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 200,
    "body": {
@@ -117,7 +114,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 409,
    "body": {
@@ -148,7 +144,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 200,
    "body": {
@@ -182,7 +177,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 409,
    "body": {
@@ -213,7 +207,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 409,
    "body": {
@@ -242,7 +235,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 409,
    "body": {
@@ -273,9 +265,11 @@
   },
   "pending": null,
   "panel_open": false,
-  "reply": "!unknown",
+  "reply": {
+   "disposition": "unknown",
+   "payload": {}
+  },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 409,
    "body": {
@@ -308,7 +302,6 @@
   "panel_open": false,
   "reply": "!erro: runtime_closed: ator saiu",
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 503,
    "body": {
@@ -348,20 +341,26 @@
    }
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 409,
    "body": {
     "detail": {
      "code": "erro_opcao_nao_convergiu",
      "params": {
-      "detalhe": "cursor nao convergiu"
+      "detalhe": "cursor"
      },
      "msg": "n\u00e3o consegui marcar essa op\u00e7\u00e3o no terminal \u2014 tente de novo"
     }
    }
   },
-  "sent": [],
+  "sent": [
+   {
+    "control": "select",
+    "payload": {
+     "option": 1
+    }
+   }
+  ],
   "notified": [],
   "diary": [
    "opcao.nao_convergiu"
@@ -381,7 +380,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 200,
    "body": {
@@ -413,7 +411,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": true,
   "expect": {
    "status": 409,
    "body": {
@@ -424,7 +421,14 @@
     }
    }
   },
-  "sent": [],
+  "sent": [
+   {
+    "control": "select",
+    "payload": {
+     "option": 1
+    }
+   }
+  ],
   "notified": [],
   "diary": []
  },
@@ -442,14 +446,13 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
-   "status": 503,
+   "status": 409,
    "body": {
     "detail": {
      "code": "erro_opcao_nao_convergiu",
      "params": {},
-     "msg": "n\u00e3o consegui responder: opera\u00e7\u00e3o recusada pelo runtime"
+     "msg": "nenhum pedido de permiss\u00e3o pendente"
     }
    }
   },
@@ -478,7 +481,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 503,
    "body": {
@@ -511,7 +513,6 @@
   "panel_open": false,
   "reply": "!erro: runtime_closed: ator saiu",
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 503,
    "body": {
@@ -545,7 +546,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 200,
    "body": {
@@ -573,7 +573,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 409,
    "body": {
@@ -600,7 +599,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 409,
    "body": {
@@ -632,7 +630,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 409,
    "body": {
@@ -666,24 +663,58 @@
    }
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 409,
    "body": {
     "detail": {
      "code": "erro_opcao_nao_convergiu",
      "params": {
-      "detalhe": "cursor nao convergiu"
+      "detalhe": "tab"
      },
      "msg": "n\u00e3o consegui enviar as op\u00e7\u00f5es marcadas \u2014 tente de novo"
     }
    }
   },
-  "sent": [],
+  "sent": [
+   {
+    "control": "submit_selected",
+    "payload": {}
+   }
+  ],
   "notified": [],
   "diary": [
    "opcao.envio_falhou"
   ]
+ },
+ {
+  "name": "submit_runtime_error",
+  "route": "select_submit",
+  "terminal": true,
+  "args": {},
+  "pending": null,
+  "panel_open": false,
+  "reply": "!erro: runtime_closed: ator saiu",
+  "rust_reply": null,
+  "expect": {
+   "status": 502,
+   "body": {
+    "detail": {
+     "code": "erro_envio_falhou",
+     "params": {
+      "erro": "runtime_closed: ator saiu"
+     },
+     "msg": "runtime_closed: ator saiu"
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "submit_selected",
+    "payload": {}
+   }
+  ],
+  "notified": [],
+  "diary": []
  },
  {
   "name": "interrupt_headless_accepted",
@@ -697,7 +728,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 200,
    "body": {
@@ -727,7 +757,6 @@
    }
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 409,
    "body": {
@@ -748,6 +777,194 @@
   "diary": []
  },
  {
+  "name": "interrupt_headless_rejected",
+  "route": "interrupt",
+  "terminal": false,
+  "args": {},
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "rejected",
+   "payload": {
+    "error": "sem turno"
+   }
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_sem_turno",
+     "params": {},
+     "msg": "sem turno"
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "interrupt",
+    "payload": {}
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "interrupt_headless_rejected_plain",
+  "route": "interrupt",
+  "terminal": false,
+  "args": {},
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "rejected",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_sem_turno",
+     "params": {},
+     "msg": "opera\u00e7\u00e3o recusada pelo runtime"
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "interrupt",
+    "payload": {}
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "interrupt_headless_deferred",
+  "route": "interrupt",
+  "terminal": false,
+  "args": {},
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "deferred",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_sem_turno",
+     "params": {},
+     "msg": "opera\u00e7\u00e3o recusada pelo runtime"
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "interrupt",
+    "payload": {}
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "interrupt_headless_unknown",
+  "route": "interrupt",
+  "terminal": false,
+  "args": {},
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "unknown",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_sem_turno",
+     "params": {},
+     "msg": "resultado incerto; a opera\u00e7\u00e3o foi conservada sem reenvio"
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "interrupt",
+    "payload": {}
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "interrupt_headless_error",
+  "route": "interrupt",
+  "terminal": false,
+  "args": {},
+  "pending": null,
+  "panel_open": false,
+  "reply": "!erro: runtime_closed: ator saiu",
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_sem_turno",
+     "params": {},
+     "msg": "runtime_closed: ator saiu"
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "interrupt",
+    "payload": {}
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "interrupt_terminal_runtime_error",
+  "route": "interrupt",
+  "terminal": true,
+  "args": {},
+  "pending": {
+   "id": "ask:9"
+  },
+  "panel_open": false,
+  "reply": "!erro: runtime_closed: ator saiu",
+  "rust_reply": null,
+  "expect": {
+   "status": 502,
+   "body": {
+    "detail": {
+     "code": "erro_envio_falhou",
+     "params": {
+      "erro": "runtime_closed: ator saiu"
+     },
+     "msg": "runtime_closed: ator saiu"
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "interrupt",
+    "payload": {
+     "clear": false
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
   "name": "interrupt_terminal_accepted",
   "route": "interrupt",
   "terminal": true,
@@ -759,7 +976,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 200,
    "body": {
@@ -793,7 +1009,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 200,
    "body": {
@@ -829,7 +1044,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 200,
    "body": {
@@ -863,7 +1077,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 409,
    "body": {
@@ -899,7 +1112,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 409,
    "body": {
@@ -935,7 +1147,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 200,
    "body": {
@@ -969,7 +1180,6 @@
     "code": "key_not_allowed"
    }
   },
-  "adapter_false": false,
   "expect": {
    "status": 400,
    "body": {
@@ -994,7 +1204,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 409,
    "body": {
@@ -1030,7 +1239,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 409,
    "body": {
@@ -1038,6 +1246,40 @@
      "code": "erro_opcao_nao_convergiu",
      "params": {},
      "msg": "N\u00e3o foi poss\u00edvel confirmar o controle; confira a sess\u00e3o antes de repetir."
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "navigation_key",
+    "payload": {
+     "key": "Down"
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "keys_runtime_error",
+  "route": "keys",
+  "terminal": true,
+  "args": {
+   "key": "Down"
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": "!erro: runtime_closed: ator saiu",
+  "rust_reply": null,
+  "expect": {
+   "status": 502,
+   "body": {
+    "detail": {
+     "code": "erro_envio_falhou",
+     "params": {
+      "erro": "runtime_closed: ator saiu"
+     },
+     "msg": "runtime_closed: ator saiu"
     }
    }
   },
@@ -1066,7 +1308,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 200,
    "body": {
@@ -1098,7 +1339,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 200,
    "body": {
@@ -1131,7 +1371,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 200,
    "body": {
@@ -1170,7 +1409,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 200,
    "body": {
@@ -1200,7 +1438,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 200,
    "body": {
@@ -1222,7 +1459,6 @@
   "panel_open": false,
   "reply": null,
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 400,
    "body": {
@@ -1253,7 +1489,6 @@
     "code": "key_not_allowed"
    }
   },
-  "adapter_false": false,
   "expect": {
    "status": 400,
    "body": {
@@ -1286,7 +1521,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 409,
    "body": {
@@ -1322,7 +1556,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 409,
    "body": {
@@ -1345,6 +1578,40 @@
   "diary": []
  },
  {
+  "name": "term_runtime_error",
+  "route": "term_input",
+  "terminal": true,
+  "args": {
+   "text": "ls"
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": "!erro: runtime_closed: ator saiu",
+  "rust_reply": null,
+  "expect": {
+   "status": 502,
+   "body": {
+    "detail": {
+     "code": "erro_envio_falhou",
+     "params": {
+      "erro": "runtime_closed: ator saiu"
+     },
+     "msg": "runtime_closed: ator saiu"
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "terminal_input",
+    "payload": {
+     "text": "ls"
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
   "name": "queue_removed",
   "route": "queue_remove",
   "terminal": false,
@@ -1358,7 +1625,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 200,
    "body": {
@@ -1383,7 +1649,6 @@
    "payload": {}
   },
   "rust_reply": null,
-  "adapter_false": false,
   "expect": {
    "status": 404,
    "body": {
@@ -1391,6 +1656,36 @@
      "code": "erro_fila_entrada_nao_encontrada",
      "params": {},
      "msg": "entrada n\u00e3o est\u00e1 na fila"
+    }
+   }
+  },
+  "sent": [],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "queue_runtime_error",
+  "route": "queue_remove",
+  "terminal": false,
+  "args": {
+   "error": "runtime_closed: ator saiu"
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 502,
+   "body": {
+    "detail": {
+     "code": "erro_envio_falhou",
+     "params": {
+      "erro": "runtime_closed: ator saiu"
+     },
+     "msg": "runtime_closed: ator saiu"
     }
    }
   },
