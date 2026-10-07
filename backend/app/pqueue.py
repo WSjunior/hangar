@@ -298,6 +298,9 @@ _IMG_PREFIX = re.compile(r"^(?:\[Image #\d+\])+\s*")
 # "📎 imagem: <path>" que o app digitou (2.1.270). Sem traduzir de volta, a entrega nunca casava e
 # o print era redigitado.
 _IMG_SOURCE = re.compile(r"\[Image: source: ([^\]]+)\]")
+# `/comando args` digitado vira `<command-name>/comando</command-name>` + `<command-args>` no transcript.
+_COMMAND_NAME = re.compile(r"<command-name>([^<]*)</command-name>")
+_COMMAND_ARGS = re.compile(r"<command-args>(.*?)</command-args>", re.S)
 
 
 def _chaves_de_commit(text: str) -> set[str]:
@@ -315,6 +318,13 @@ def _chaves_de_commit(text: str) -> set[str]:
     t = text.strip()
     base = _IMG_PREFIX.sub("", t)
     fonte = _IMG_SOURCE.sub(lambda m: f"📎 imagem: {m.group(1)}", t)
+    # Só a mensagem que É o comando conta (citar a tag não conta), e ele entra inteiro, sem quebrar por linha.
+    nome = _COMMAND_NAME.search(t) if t.startswith(("<command-name>", "<command-message>")) else None
+    if nome:
+        args = _COMMAND_ARGS.search(t)
+        comando = f"{nome.group(1).strip()} {args.group(1).strip() if args else ''}".strip()
+        if comando:
+            out.add(comando)
     for variant in (t, base, _strip_attach(t), _strip_attach(base), fonte):
         variant = variant.strip()
         if not variant:
