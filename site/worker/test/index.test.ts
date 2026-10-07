@@ -1,6 +1,6 @@
 import { env, exports } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
-import { handle, MAIL_REPORT_MAX, MAX_BYTES, TTL_SECONDS, type Deps } from "../src";
+import { handle, head, MAIL_REPORT_MAX, MAX_BYTES, TTL_SECONDS, type Deps } from "../src";
 
 function report(over: Record<string, unknown> = {}) {
 	return { v: 1, app: "0.20.1.3456", commit: "abc123", os: "linux-x86_64", step: "instalar", code: "sem-systemd",
@@ -77,6 +77,33 @@ describe("POST /api/relatorio", () => {
 		expect(res.status).toBe(429);
 		expect(await stored()).toHaveLength(0);
 		expect(mails).toHaveLength(0);
+	});
+
+	it("charges the global limit only for valid reports", async () => {
+		const { d, calls } = deps();
+		expect((await handle(post("{"), d)).status).toBe(400);
+		expect((await handle(post(JSON.stringify(report({ outcome: "talvez" }))), d)).status).toBe(400);
+		expect(calls.all).toBe(0);
+		expect((await handle(post(JSON.stringify(report())), d)).status).toBe(201);
+		expect(calls.all).toBe(1);
+	});
+
+	it("mails the report marked as not stored when KV fails", async () => {
+		const { d, mails, pending } = deps();
+		d.reports = { put: async () => { throw new Error("kv fora"); } } as unknown as KVNamespace;
+		const res = await handle(post(JSON.stringify(report())), d);
+		await Promise.all(pending);
+		expect(res.status).toBe(503);
+		expect(await res.json()).toEqual({ erro: "armazenamento" });
+		expect(mails[0].text).toContain("não guardado no KV");
+		expect(mails[0].text).not.toContain("chave no KV");
+		expect(mails[0].text).toContain("log limpo");
+	});
+
+	it("never cuts a UTF-8 character in half", () => {
+		// "ç" ocupa 2 bytes: um corte em 3 cairia no meio do segundo.
+		expect(head("çççç", 3)).toBe("ç\n…");
+		expect(head("ação\nfim", 4)).not.toContain("\ufffd");
 	});
 
 	it("mails a short summary and keeps the whole report in KV", async () => {

@@ -77,7 +77,10 @@ export function subject(r: Report): string {
 export function head(text: string, max: number): string {
 	const bytes = new TextEncoder().encode(text);
 	if (bytes.byteLength <= max) return text;
-	const cut = new TextDecoder().decode(bytes.slice(0, max));
+	// Recua até o começo de um caractere: corte no meio vira U+FFFD no e-mail.
+	let end = max;
+	while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
+	const cut = new TextDecoder().decode(bytes.slice(0, end));
 	const line = cut.lastIndexOf("\n");
 	return `${line > 0 ? cut.slice(0, line) : cut}\n…`;
 }
@@ -89,30 +92,37 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
 	if (!STAMP.test(request.headers.get("x-hangar-stamp") ?? "")) return json(403, { erro: "carimbo" });
 	if (!(request.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) return json(415, { erro: "tipo" });
 	if (Number(request.headers.get("content-length") ?? "0") > MAX_BYTES) return json(413, { erro: "grande" });
-	// Limite antes de ler o corpo: quem passou do limite não custa leitura nem escrita. O do IP vem primeiro: um IP
-	// barrado não gasta o teto de todos.
+	// Limite do IP antes de ler o corpo: quem passou dele não custa leitura nem escrita.
 	if (!(await deps.allow(request.headers.get("cf-connecting-ip") ?? "sem-ip"))) return json(429, { erro: "limite" });
-	if (!(await deps.allowAll())) return json(429, { erro: "limite" });
 	const bytes = await readCapped(request.body, MAX_BYTES);
 	if (bytes === null) return json(413, { erro: "grande" });
 	let parsed: unknown;
 	try { parsed = JSON.parse(new TextDecoder().decode(bytes)); } catch { return json(400, { erro: "json" }); }
 	const report = parseReport(parsed);
 	if (!report) return json(400, { erro: "campos" });
+	// O teto de todos só conta relatório válido: lixo com o carimbo público não tira a vez de quem precisa.
+	if (!(await deps.allowAll())) return json(429, { erro: "limite" });
 	const id = `${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}`;
-	await deps.reports.put(id, JSON.stringify({ ...report, received: new Date().toISOString(), country: request.cf?.country ?? null }),
-		{ expirationTtl: TTL_SECONDS });
-	const text = [`chave no KV: ${id}`, `resultado: ${report.outcome}`, `código: ${report.code ?? "-"}`, `sistema: ${report.os}`,
+	let stored = true;
+	try {
+		await deps.reports.put(id, JSON.stringify({ ...report, received: new Date().toISOString(), country: request.cf?.country ?? null }),
+			{ expirationTtl: TTL_SECONDS });
+	} catch (e: unknown) {
+		// O e-mail sai mesmo assim, marcado: vira o único rastro do relatório.
+		stored = false;
+		console.error(JSON.stringify({ message: "kv falhou", id, error: e instanceof Error ? e.name : typeof e }));
+	}
+	const text = [stored ? `chave no KV: ${id}` : "não guardado no KV", `resultado: ${report.outcome}`, `código: ${report.code ?? "-"}`, `sistema: ${report.os}`,
 		`app: ${report.app} · ${report.commit}`, `etapa: ${report.step}`, `agente: ${report.agent ?? "-"}`, "",
 		head(report.report, MAIL_REPORT_MAX)].join("\n");
-	// Já guardado: e-mail que falha vai ao log, não desfaz o envio. Só nome e código do erro: a mensagem pode levar o
+	// E-mail que falha vai ao log, não desfaz o envio. Só nome e código do erro: a mensagem pode levar o
 	// destinatário.
 	deps.waitUntil(deps.mail(subject(report), text).catch((e: unknown) => {
 		const code = typeof e === "object" && e !== null && "code" in e ? String(e.code) : null;
 		console.error(JSON.stringify({ message: "email falhou", id, error: e instanceof Error ? e.name : typeof e, code }));
 	}));
-	console.log(JSON.stringify({ message: "relatorio", id, outcome: report.outcome, code: report.code }));
-	return json(201, { id });
+	console.log(JSON.stringify({ message: "relatorio", id, stored, outcome: report.outcome, code: report.code }));
+	return stored ? json(201, { id }) : json(503, { erro: "armazenamento" });
 }
 
 /** `REPORT_TO` é segredo (`wrangler secret put`), fora do `wrangler.jsonc` e por isso fora do `Env` gerado. */
