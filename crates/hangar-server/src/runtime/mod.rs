@@ -7,6 +7,7 @@ pub mod claude;
 pub mod codex;
 pub mod actor;
 pub mod gateway;
+pub mod ingress;
 pub mod terminal;
 
 #[derive(Default)]
