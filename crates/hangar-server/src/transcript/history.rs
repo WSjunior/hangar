@@ -258,19 +258,23 @@ pub(crate) fn chaves_de_commit(text: &str) -> Vec<String> {
     let t = strip(text);
     let base = IMG_PREFIX.replace(t, "").into_owned();
     let fonte = IMG_SOURCE.replace_all(t, |c: &regex::Captures| format!("📎 imagem: {}", &c[1])).into_owned();
-    // `/comando args` digitado vira `<command-name>/comando</command-name>` + `<command-args>` no transcript.
-    let comando = COMMAND_NAME.captures(t).map(|c| {
-        let args = COMMAND_ARGS.captures(t).map(|a| strip(&a[1]).to_string()).unwrap_or_default();
-        strip(&format!("{} {args}", strip(&c[1]))).to_string()
-    }).unwrap_or_default();
     let mut out = Vec::new();
-    for variant in [t.to_string(), base.clone(), strip_attach(t), strip_attach(&base), fonte, comando] {
+    for variant in [t.to_string(), base.clone(), strip_attach(t), strip_attach(&base), fonte] {
         let v = strip(&variant);
         if v.is_empty() {
             continue;
         }
         out.push(v.to_string());
         out.extend(v.split('\n').map(strip).filter(|ln| !ln.is_empty()).map(str::to_string));
+    }
+    // `/comando args` digitado vira `<command-name>/comando</command-name>` + `<command-args>` no
+    // transcript. Só a mensagem que É o comando conta (citar a tag não conta), e ela entra inteira.
+    if t.starts_with("<command-name>") || t.starts_with("<command-message>") {
+        if let Some(c) = COMMAND_NAME.captures(t) {
+            let args = COMMAND_ARGS.captures(t).map(|a| strip(&a[1]).to_string()).unwrap_or_default();
+            let comando = strip(&format!("{} {args}", strip(&c[1]))).to_string();
+            if !comando.is_empty() { out.push(comando); }
+        }
     }
     out
 }
@@ -395,5 +399,10 @@ mod tests {
         assert!(chaves_de_commit(skill).contains(&"/acme:deploy".to_string()));
         let with_args = "<command-name>/btw</command-name>\n<command-args>qual a cor do céu</command-args>";
         assert!(chaves_de_commit(with_args).contains(&"/btw qual a cor do céu".to_string()));
+        let quoting = "veja como fica <command-name>/compact</command-name> no transcript";
+        assert!(!chaves_de_commit(quoting).contains(&"/compact".to_string()));
+        let multiline = "<command-name>/x</command-name>\n<command-args>a\nb</command-args>";
+        let keys = chaves_de_commit(multiline);
+        assert!(keys.contains(&"/x a\nb".to_string()) && !keys.contains(&"b".to_string()));
     }
 }
