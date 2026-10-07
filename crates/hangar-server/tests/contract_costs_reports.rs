@@ -25,7 +25,8 @@ pub fn ready_collector(base: &Path) -> Arc<Collector> {
     };
     let collector = Arc::new(Collector::new(base.join("../idx"), base.join("pricing"), base.join("../sem-mapa.json"), Arc::new(Source(scopes))));
     collector.prepare(false).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // Só flagra a varredura que não termina: no runner Windows o disco deixa a varredura lenta.
+    let deadline = Instant::now() + Duration::from_secs(30);
     while !matches!(collector.prepare(false).unwrap(), Ready::Go) {
         assert!(Instant::now() < deadline, "coletor não concluiu");
         std::thread::sleep(Duration::from_millis(10));

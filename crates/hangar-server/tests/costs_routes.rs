@@ -11,6 +11,9 @@ use std::time::{Duration, Instant};
 
 const OWNER: &str = "dono-de-teste";
 const SECRET: &str = "interno-de-teste";
+/// Prazo de quem espera a varredura do índice: só flagra a que não termina. No runner Windows o disco
+/// faz a varredura das amostras passar de 5 s de vez em quando.
+const SCAN_WAIT: Duration = Duration::from_secs(30);
 
 fn session_error(message: &str) -> Value {
     json!({"detail": {"code": "erro_sessao_inexistente", "params": {}, "msg": message}})
@@ -78,6 +81,9 @@ struct Harness {
     collector: Arc<Collector>,
     state: Arc<AppState>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
+    // Um cliente por harness: conexão nova a cada pedido dos laços de espera esgotava as portas
+    // efêmeras do runner Windows (AddrInUse no connect).
+    client: reqwest::Client,
 }
 
 impl Drop for Harness {
@@ -137,15 +143,15 @@ impl Harness {
         let address = listener.local_addr().unwrap();
         let app = router(state.clone());
         let server = tokio::spawn(async move { axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap() });
-        Self { _dir: dir, base, address, upstream, collector, state, tasks: vec![up_task, server] }
+        Self { _dir: dir, base, address, upstream, collector, state, tasks: vec![up_task, server], client: reqwest::Client::new() }
     }
 
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
-        reqwest::Client::new().request(method, format!("http://{}{path}", self.address)).bearer_auth(OWNER)
+        self.client.request(method, format!("http://{}{path}", self.address)).bearer_auth(OWNER)
     }
 
     async fn ready(&self) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + SCAN_WAIT;
         loop {
             let response = self.request(reqwest::Method::GET, "/api/costs").send().await.unwrap();
             assert!(Instant::now() < deadline, "coleta não concluiu");
@@ -156,19 +162,19 @@ impl Harness {
     }
 
     async fn usage(&self, path: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + SCAN_WAIT;
         loop {
             let response = self.request(reqwest::Method::GET, path).send().await.unwrap();
             assert!(Instant::now() < deadline, "uso não concluiu");
             if response.status() == StatusCode::OK { return serde_json::from_slice(&response.bytes().await.unwrap()).unwrap(); }
             assert_eq!(response.status(), StatusCode::ACCEPTED);
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
     /// Passa pelo 202 e confere o 503 do Rust: código no corpo e nada repassado ao Python.
     async fn failure(&self, path: &str) -> String {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + SCAN_WAIT;
         loop {
             let response = self.request(reqwest::Method::GET, path).send().await.unwrap();
             assert!(Instant::now() < deadline, "falha não chegou");
@@ -234,7 +240,7 @@ async fn missing_scopes_fail_with_code_and_next_request_rescans() {
     assert_eq!(h.failure("/api/costs").await, "costs_no_scopes");
     *h.upstream.scopes.lock().unwrap() = Some(saved);
     // A falha guardada dispara a coleta nova; sem `fresco`, sem esperar 30 s.
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + SCAN_WAIT;
     loop {
         let response = h.request(reqwest::Method::GET, "/api/costs").send().await.unwrap();
         if response.status() == StatusCode::OK {
@@ -254,7 +260,7 @@ async fn blocked_index_fails_with_code_and_recovers_after_the_block_goes() {
     std::fs::write(&index_path, "bloqueio sintético").unwrap();
     assert_eq!(h.failure("/api/costs").await, "costs_no_disk");
     std::fs::remove_file(&index_path).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + SCAN_WAIT;
     loop {
         let response = h.request(reqwest::Method::GET, "/api/costs").send().await.unwrap();
         if response.status() == StatusCode::OK { break; }

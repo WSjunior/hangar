@@ -121,6 +121,16 @@ impl Fixture {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
+    /// Quanto depois de `since` a operação entrou no diário (o `Prepare`, a primeira escrita dela). O
+    /// comando guardado pela reserva só entra depois de solto; o resto da entrega, que no runner Windows
+    /// grava o diário várias vezes e passa de segundos, fica fora da medida.
+    async fn entered(&self,id:&str,since:std::time::Instant)->Duration {
+        loop {
+            if !self.state()["operations"][id].is_null() {return since.elapsed();}
+            assert!(since.elapsed()<WAIT,"{id} não entrou no diário");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
 }
 impl Drop for Fixture {fn drop(&mut self){self.server.abort();}}
 
@@ -554,9 +564,11 @@ async fn terminal_runtime_clear_without_new_conversation_releases_barrier_withou
     assert!(h.command(f.command("during-barrier","Olá")).await.is_err());
     h.queue("producer".into(),Action::Append {text:"Na fila".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("queued-row".into())}).await.unwrap();
     f.wait_for("trava sai",||f.state()["runtime_state"]["clear_barrier"].is_null()).await;
+    // A saída grava a trava e depois a recusa: o retrato passa pelo ator e só volta com as duas no diário.
+    let view=h.snapshot().await.unwrap();
     let op=&f.state()["operations"]["clear-stuck"]; assert_eq!(op["status"],"rejected"); assert_eq!(op["result"]["payload"]["code"],"clear_not_applied");
     assert_ne!(f.state()["runtime_state"]["preserve_binding"],true);
-    assert_eq!(h.snapshot().await.unwrap()["view"]["input_stalled"],"clear_not_applied");
+    assert_eq!(view["view"]["input_stalled"],"clear_not_applied");
     f.wait_for("fila segue",||f.state()["rows"].as_array().unwrap().iter().any(|r|r["id"]=="queued-row" && r["delivered"]==true)).await;
     assert_eq!(h.command(f.command("after-release","Olá")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
     let typed=|t:&str|f.io.calls.lock().unwrap().iter().filter(|r|r.args.contains(&"-l".into()) && r.args.last().unwrap()==t).count();
@@ -890,12 +902,14 @@ async fn pane_operation_past_its_start_does_not_run() {
 #[tokio::test]
 async fn a_late_release_still_frees_the_pane() {
     let f=Fixture::new().await; let h=f.start();
-    assert_eq!(h.pane(PaneOp::Hold{millis:5000},far()).await.unwrap(),PaneReply::Done);
+    assert_eq!(h.pane(PaneOp::Hold{millis:10_000},far()).await.unwrap(),PaneReply::Done);
     let past=std::time::Instant::now()-Duration::from_secs(1);
     assert_eq!(h.pane(PaneOp::Release,past).await.unwrap(),PaneReply::Done,"soltar vale sempre");
     let started=std::time::Instant::now();
-    h.command(f.command("depois","Depois do soltar")).await.unwrap();
-    assert!(started.elapsed()<Duration::from_secs(2),"o comando não esperou a reserva de 5 s");
+    let command={let h=h.clone();let command=f.command("depois","Depois do soltar");tokio::spawn(async move {h.command(command).await})};
+    let waited=f.entered("depois",started).await;
+    assert!(waited<Duration::from_secs(5),"o comando esperou a reserva de 10 s: {waited:?}");
+    command.await.unwrap().unwrap();
     f.wait_for("entrega depois do soltar",||f.state()["rows"].as_array().unwrap().iter().all(|r|r["delivered"]==true)).await;
     h.stop().await.unwrap();
 }
@@ -930,12 +944,14 @@ async fn mods_hold_parks_writes_until_release() {
 #[tokio::test]
 async fn a_mods_hold_ends_by_itself() {
     let f=Fixture::new().await; let h=f.start();
-    assert_eq!(h.pane(PaneOp::Hold{millis:200},far()).await.unwrap(),PaneReply::Done);
+    // Antes do pedido: a reserva começa depois deste instante, e a espera medida nunca fica menor que ela.
     let started=std::time::Instant::now();
-    h.command(f.command("depois","Depois da reserva")).await.unwrap();
-    let waited=started.elapsed();
-    assert!(waited>=Duration::from_millis(150),"o comando esperou a reserva vencer");
-    assert!(waited<Duration::from_secs(2),"a reserva vencida soltou o comando logo: {waited:?}");
+    assert_eq!(h.pane(PaneOp::Hold{millis:200},far()).await.unwrap(),PaneReply::Done);
+    let command={let h=h.clone();let command=f.command("depois","Depois da reserva");tokio::spawn(async move {h.command(command).await})};
+    let waited=f.entered("depois",started).await;
+    assert!(waited>=Duration::from_millis(150),"o comando esperou a reserva vencer: {waited:?}");
+    assert!(waited<Duration::from_secs(3),"a reserva vencida soltou o comando logo: {waited:?}");
+    command.await.unwrap().unwrap();
     f.wait_for("entrega depois da reserva",||f.state()["rows"].as_array().unwrap().iter().all(|r|r["delivered"]==true)).await;
     h.stop().await.unwrap();
 }
@@ -973,12 +989,15 @@ async fn a_mods_hold_ends_by_itself_with_the_clock_stopped_by_an_error() {
     std::fs::remove_file(&f.target.transcript).unwrap(); std::fs::create_dir(&f.target.transcript).unwrap();
     let start=std::time::Instant::now();
     while h.snapshot().await.unwrap()["error"]!="receipt_scan" {assert!(start.elapsed()<WAIT,"o erro não apareceu"); tokio::time::sleep(Duration::from_millis(5)).await;}
-    assert_eq!(h.pane(PaneOp::Hold{millis:200},far()).await.unwrap(),PaneReply::Done);
+    // Antes do pedido: a reserva começa depois deste instante, e a espera medida nunca fica menor que ela.
     let started=std::time::Instant::now();
+    assert_eq!(h.pane(PaneOp::Hold{millis:200},far()).await.unwrap(),PaneReply::Done);
     // Comando sem linha na fila: não depende do transcript que o teste quebrou.
-    let reply=tokio::time::timeout(Duration::from_secs(2),h.command(f.command("barra","/help"))).await;
-    assert!(reply.is_ok(),"o comando guardado ficou esperando outra mensagem");
-    assert!(started.elapsed()>=Duration::from_millis(150),"o comando esperou a reserva vencer");
+    let command={let h=h.clone();let command=f.command("barra","/help");tokio::spawn(async move {h.command(command).await})};
+    let waited=f.entered("barra",started).await;
+    assert!(waited<Duration::from_secs(3),"o comando guardado ficou esperando outra mensagem: {waited:?}");
+    assert!(waited>=Duration::from_millis(150),"o comando esperou a reserva vencer: {waited:?}");
+    tokio::time::timeout(WAIT,command).await.expect("o comando guardado não respondeu").unwrap().ok();
     h.stop().await.unwrap();
 }
 
@@ -1195,12 +1214,15 @@ async fn a_cleanup_that_gave_up_does_not_leave_the_message_stuck() {
 #[tokio::test]
 async fn the_focus_wait_starts_over_for_the_next_row() {
     let f=Fixture::new().await; *f.io.mods_screen.lock().unwrap()=Some(pane_focus_screen());
-    f.io.ring_returns.store(true,std::sync::atomic::Ordering::Release);
     let h=f.start_returning(broadcast::channel(128).0,Duration::from_secs(30),Duration::from_millis(600));
     assert_eq!(h.command(f.command("primeira","Primeira")).await.unwrap().payload["code"],"mods_focus");
+    // Até o `Abandon` chegar, o relógio tenta a primeira de novo; no runner Windows as gravações do diário
+    // passam dos 600 ms e ela pode devolver o foco antes. Sem `ring_returns` o foco fica no painel.
     h.queue("abandona".into(),Action::Abandon {entry_id:"primeira".into()}).await.unwrap();
+    let rung=f.io.ring_keys.load(std::sync::atomic::Ordering::SeqCst);
     tokio::time::sleep(Duration::from_millis(700)).await;
-    assert_eq!(f.io.ring_keys.load(std::sync::atomic::Ordering::SeqCst),0);
+    assert_eq!(f.io.ring_keys.load(std::sync::atomic::Ordering::SeqCst),rung,"a linha abandonada não devolve o foco");
+    f.io.ring_returns.store(true,std::sync::atomic::Ordering::Release);
     let started=std::time::Instant::now();
     assert_eq!(h.command(f.command("segunda","Segunda")).await.unwrap().payload["code"],"mods_focus");
     f.wait_for("entrega da segunda",||!typed_at(&f,"Segunda").is_empty()).await;
