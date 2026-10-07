@@ -54,7 +54,7 @@ Risk: high
   - `pub enum Theme { Dark, Light }` com `Theme::parse(&str) -> Option<Theme>` e `as_str()`
   - `pub const WIDTHS: [u32; 3] = [360, 728, 1000];`
 
-- [ ] **Step 1: Criar `pages/mod.rs` e registrar o módulo**
+- [x] **Step 1: Criar `pages/mod.rs` e registrar o módulo**
 
 ```rust
 //! Páginas HTML que o agente publica na conversa: guardadas por sessão, com tema e ponte injetados.
@@ -83,7 +83,7 @@ impl Theme {
 
 `chrome` e `routes` nascem nas Tasks 2 e 3; até lá, crie os dois arquivos vazios com só a linha `//! (Task 2)` / `//! (Task 3)` para o módulo compilar. Em `lib.rs`, acrescente `pub mod pages;` em ordem alfabética entre `pub mod mods;` e `pub mod proxy;`.
 
-- [ ] **Step 2: Escrever os testes de tema e imagens**
+- [x] **Step 2: Escrever os testes de tema e imagens**
 
 No fim de `theme.rs` e `images.rs`:
 
@@ -164,7 +164,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Implementar `theme.rs`**
+- [x] **Step 3: Implementar `theme.rs`**
 
 ```rust
 //! Tema e script de ponte que vão no começo do `<head>` de toda página publicada.
@@ -234,7 +234,7 @@ pub fn inject(html: &str) -> String {
 
 A troca de tema do app (script `HOST`, função `apply`) escreve `:root{color-scheme:<tema>;<variáveis>}` seguido do `data-base`; como o bloco fica no começo do `<head>`, regras `:root` da página continuam vencendo.
 
-- [ ] **Step 4: Implementar `images.rs`**
+- [x] **Step 4: Implementar `images.rs`**
 
 ```rust
 //! Imagem local citada por caminho absoluto vira `data:`; só entra o que for imagem pelos primeiros bytes.
@@ -318,7 +318,7 @@ pub fn scan(html: &str) -> Inlined {
 }
 ```
 
-- [ ] **Step 5: Implementar `store.rs` com teste**
+- [x] **Step 5: Implementar `store.rs` com teste**
 
 ```rust
 //! Pasta por sessão em `~/.hangar/paginas/<chave>/`: `<id>.html`, `<id>.json`, prints e o `jsonl` do dono.
@@ -486,7 +486,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/hangar-server/src/pages/ crates/hangar-server/src/lib.rs
@@ -511,7 +511,7 @@ Risk: high
   - `#[derive(Serialize)] pub struct ConsoleLine { pub level: String, pub text: String }`
   - `pub enum ChromeError { Absent, Failed(&'static str) }` com `fn status(&self) -> &'static str` (`"ausente"`/`"falhou"`)
 
-- [ ] **Step 7: Escrever os testes de `find` e de ausência**
+- [x] **Step 7: Escrever os testes de `find` e de ausência**
 
 ```rust
 #[cfg(test)]
@@ -545,7 +545,7 @@ mod tests {
 
 A marca do `install-chromium.sh` grava o caminho do binário ou uma palavra (`sistema:<caminho>`). Antes de implementar, leia `scripts/install-chromium.sh` (função `marca` e as chamadas dela) e trate exatamente os formatos que ele grava: a linha é aceita se, depois de tirar um prefixo `<palavra>:` opcional, for um caminho de arquivo existente.
 
-- [ ] **Step 8: Implementar `chrome.rs`**
+- [x] **Step 8: Implementar `chrome.rs`**
 
 ```rust
 //! Chromium sem janela do servidor: mede a altura da página, guarda o console e tira print.
@@ -677,7 +677,7 @@ async fn drive(profile: &Path, html: &str, jobs: &[Job]) -> Result<Rendered, Chr
 
 `Fetch.requestPaused` de `file:` (evento em `events`) recebe `Fetch.failRequest {requestId, errorReason: "BlockedByClient"}` dentro do laço de leitura do `call`. `console_lines` mapeia `consoleAPICalled` (`type` → `level`; `args[].value`/`description` unidos por espaço) e `exceptionThrown` (`level: "error"`, `exceptionDetails.exception.description` ou `text`), no máximo 50 linhas de 500 caracteres.
 
-- [ ] **Step 9: Verificação manual — medir uma página real**
+- [x] **Step 9: Verificação manual — medir uma página real**
 
 Escreva um teste ignorado que só roda à mão, e rode-o uma vez nesta máquina (Chrome em `/usr/bin/google-chrome-stable`):
 
@@ -698,7 +698,7 @@ async fn measures_real_page() {
 Run: `cd crates && nice -n 19 cargo test -p hangar-server pages::chrome::tests::measures_real_page -- --ignored`
 Expected: PASS. Abra o PNG gerado (caminho impresso com `dbg!(&shot)`) e confira que o fundo é transparente.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add crates/hangar-server/src/pages/chrome.rs crates/hangar-server/Cargo.toml crates/Cargo.lock
@@ -724,7 +724,7 @@ Risk: high
   - `GET /api/sessions/{name}/pages/{id}` (casca isolada), `?raw=1` (texto + CSP sandbox), `GET /api/sessions/{name}/pages/{id}/shot?theme=&width=` (PNG)
   - `AppState.pages: pages::store::Store` (campo novo, `Store::new(Store::default_root())`)
 
-- [ ] **Step 11: Extrair a casca isolada**
+- [x] **Step 11: Extrair a casca isolada**
 
 Em `workspace_routes.rs`, mova a montagem do invólucro HTML (o `prefix` com o `<iframe sandbox="allow-scripts allow-popups" referrerpolicy="no-referrer" src="data:…;base64,` e o `suffix`) para uma função reutilizável que recebe os bytes inteiros (a página já está em memória):
 
@@ -749,7 +749,7 @@ pub(crate) fn isolated_html(bytes: &[u8], title: &str) -> Response {
 
 O `serve_file` continua com o streaming dele (arquivo pode ser grande); só a string da casca passa a vir de uma constante compartilhada `ISOLATED_PREFIX`/`ISOLATED_SUFFIX` usada pelas duas, para as duas cascas nunca divergirem.
 
-- [ ] **Step 12: Escrever os testes das rotas**
+- [x] **Step 12: Escrever os testes das rotas**
 
 Em `pages/routes.rs`, testes com o padrão dos testes de rota existentes (procure `#[tokio::test]` em `crates/hangar-server/src/mods/routes.rs` ou `costs_routes.rs` e use o mesmo montador de `AppState` de teste e o Python falso que responde `/internal/sessions/{name}/info` com `{"provider":"claude","jsonl":"/t/k.jsonl","session_key":"k","history":...}`):
 
@@ -802,7 +802,7 @@ async fn guest_is_passed_to_python() {
 
 `test_state_with_info`, `publish` (POST na porta privada com o segredo), `owner_get`, `anonymous_get` e `body_text` são auxiliares do próprio módulo de teste; se já existirem equivalentes nos testes de `routes.rs`, reaproveite e não duplique. O `PATH` do teste não pode ter Chrome: os testes que publicam rodam com `CP_CHROMIUM_BIN=/nao/existe` (sem altura), exceto o ignorado da Task 2.
 
-- [ ] **Step 13: Implementar `pages/routes.rs`**
+- [x] **Step 13: Implementar `pages/routes.rs`**
 
 ```rust
 //! Rotas das páginas: publicação pela ponte privada (MCP), leitura pelo dono. Convidado segue ao Python.
@@ -950,7 +950,7 @@ pub async fn shot(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
 
 Rascunho também tem `id` e é lido pelas mesmas rotas (o `browser_open` do rascunho usa a casca).
 
-- [ ] **Step 14: Registrar as rotas, o estado e o protocolo**
+- [x] **Step 14: Registrar as rotas, o estado e o protocolo**
 
 Em `routes.rs`, no router privado (`:210-220`): `.route("/__hangar_server/pages", axum::routing::post(crate::pages::routes::publish_bridge))`. No router público (`:222-261`): `.route("/__hangar_server/pages", axum::routing::any(|| async { StatusCode::NOT_FOUND }))` junto das outras privadas, e:
 
@@ -961,7 +961,7 @@ Em `routes.rs`, no router privado (`:210-220`): `.route("/__hangar_server/pages"
 
 Em `AppState`, campo `pub pages: Arc<crate::pages::store::Store>` criado com `Arc::new(Store::new(Store::default_root()))` e o mesmo `Arc` passado ao `ListBridge` na construção (Step 15). Em `lib.rs:30`, `INTERNAL_PROTOCOL: u32 = 37`.
 
-- [ ] **Step 15: Varredura na rodada da lista**
+- [x] **Step 15: Varredura na rodada da lista**
 
 Em `list/bridge.rs`, logo depois de `self.prune_gone(&rows, Instant::now());` (`:464`), guarde os `jsonl` vivos e varra:
 
@@ -973,11 +973,11 @@ self.pages.sweep(&live, SystemTime::now());
 
 com os campos `live_jsonl: Mutex<Option<HashSet<String>>>` e `pages: Arc<Store>` no `ListBridge`, e `pub fn live_jsonl(&self) -> Option<HashSet<String>> { lock(&self.live_jsonl).clone() }`. O `sweep` é síncrono e lê só uma pasta por sessão; vai ao lado do `prune_gone`, que também é síncrono dentro da rodada. Acrescente um teste no módulo de testes de `bridge.rs` ao lado de `prune_gone` (`:907-913`): rodada com a linha `jsonl=/t/k.jsonl`, depois rodadas sem ela por mais de 60 s de relógio simulado → pasta `k` apagada.
 
-- [ ] **Step 16: Verificação manual — publicar e ler pela ponte**
+- [x] **Step 16: Verificação manual — publicar e ler pela ponte**
 
 Não suba um segundo backend para testar: ele mata as sessões sem terminal vivas (memória `nunca-subir-segundo-backend`). O uso real da rota fica na Task 4, Step 22. Aqui, só `cd crates && nice -n 19 cargo check -p hangar-server` e confira que compila.
 
-- [ ] **Step 17: Commit**
+- [x] **Step 17: Commit**
 
 ```bash
 git add crates/hangar-server/src/pages/routes.rs crates/hangar-server/src/workspace_routes.rs crates/hangar-server/src/routes.rs crates/hangar-server/src/list/bridge.rs crates/hangar-server/src/lib.rs crates/hangar-server/src/migration_status.rs
@@ -998,7 +998,7 @@ Risk: medium
 - Consumes: `POST /__hangar_server/pages` (Task 3)
 - Produces: `pages_bridge.configure(address: str | None, secret: str | None) -> None`, `pages_bridge.publish(payload: dict, public_base: str) -> dict` (levanta `PagesBridgeError(code, detail)`), tool MCP `html_render(html, title, height=None, draft=False)`
 
-- [ ] **Step 18: Escrever o teste da ponte**
+- [x] **Step 18: Escrever o teste da ponte**
 
 ```python
 import json
@@ -1052,7 +1052,7 @@ def test_without_rust_server_is_clear_error():
     assert e.value.code == "erro_paginas_sem_servidor_rust"
 ```
 
-- [ ] **Step 19: Implementar `pages_bridge.py`**
+- [x] **Step 19: Implementar `pages_bridge.py`**
 
 ```python
 """Ponte para a rota privada de páginas do hangar-server (Rust). Sem o Rust de pé, páginas não existem."""
@@ -1103,7 +1103,7 @@ def publish(payload: dict, public_base: str) -> dict:
 
 Em `rust_server.py`, acrescente `pages_bridge.configure(address, env["HANGAR_INTERNAL_SECRET"])` junto das três chamadas de `configure` (`:383-385`) e `pages_bridge.configure(None, None)` no `except` (`:389-391`); importe o módulo como os outros. `RUST_SERVER_PROTOCOL = 37` (`:35`). Volte à Task 3 Step 13 item 3 e leia o `x-hangar-public-base` no Rust.
 
-- [ ] **Step 20: Implementar a tool**
+- [x] **Step 20: Implementar a tool**
 
 ```python
 _HTML_RENDER = (
@@ -1156,7 +1156,7 @@ Peça ao Jefferson para autorizar o restart do `hangar-backend.service` apontand
 4. `draft=true` devolve `shot`; abra o PNG.
 5. Feche a sessão e, 60 s depois com a lista aberta, confira que `~/.hangar/paginas/<chave>` sumiu.
 
-- [ ] **Step 23: Commit**
+- [x] **Step 23: Commit**
 
 ```bash
 git add backend/app/pages_bridge.py backend/app/rust_server.py backend/app/mcp_server.py backend/tests/test_pages_bridge.py
@@ -1186,7 +1186,7 @@ Risk: low
   - `themeVariables(get: (name: string) => string): Record<string, string>` (lê do app as variáveis que a página usa)
   - Chaves i18n: `page_loading`, `page_error`, `page_retry`, `page_expired`, `page_open_browser`, `page_no_image`
 
-- [ ] **Step 24: Escrever os testes**
+- [x] **Step 24: Escrever os testes**
 
 ```ts
 import { describe, expect, it } from 'vitest';
@@ -1234,7 +1234,7 @@ describe('htmlPage', () => {
 
 O `tool_result` do Claude para MCP pode chegar como texto JSON puro ou como lista de blocos já unida em texto pelo backend (`transcript.py:580-596`). Se na Step 22 o `result` vier com algo em volta do JSON, ajuste `htmlPageFromResult` para procurar o primeiro objeto JSON que tenha `hangar_page` e acrescente esse caso real ao teste.
 
-- [ ] **Step 25: Implementar `htmlPage.ts`**
+- [x] **Step 25: Implementar `htmlPage.ts`**
 
 ```ts
 // Página publicada pelo agente (tool html_render do MCP hangar), desenhada no lugar da chamada.
@@ -1317,7 +1317,7 @@ Chaves em `messages/pt.json` / `messages/en.json`:
 
 (coluna da esquerda em `pt.json`, da direita em `en.json`, na ordem alfabética do arquivo).
 
-- [ ] **Step 26: Commit**
+- [x] **Step 26: Commit**
 
 ```bash
 git add packages/core/src/htmlPage.ts packages/core/src/htmlPage.test.ts packages/core/src/toolGroups.ts packages/core/src/index.ts messages/pt.json messages/en.json
@@ -1337,7 +1337,7 @@ Risk: medium
 - Consumes: `htmlPageFromResult`, `frameHeight`, `reservedHeight`, `pageUrls`, `pageFetchState`, `themeVariables` (Task 5); `baseOf(server)` e o token do servidor (como o `fileUrl` monta, `packages/core/src/api.ts:105-125`)
 - Produces: `<HtmlPageFrame page={HtmlPageRef} session={string} server={Server} onresize={() => void} />`
 
-- [ ] **Step 27: Usar a skill `svelte-code-writer` e implementar o componente**
+- [x] **Step 27: Usar a skill `svelte-code-writer` e implementar o componente**
 
 ```svelte
 <script lang="ts">
@@ -1441,7 +1441,7 @@ Risk: medium
 
 Antes de escrever, confira e use os nomes reais: de onde o front lê o token de um servidor (`frontend/src/lib/auth.ts` ou o `ApiEnv` que monta o `fileUrl`), o import de `baseOf`, como o tema atual é exposto (procure o store de tema/aparência em `frontend/src/lib/`) e o alias de import do `packages/core` usado pelos outros componentes. Troque `tokenOf`, `theme.dark` e os caminhos de import pelos reais; não crie um store novo de tema.
 
-- [ ] **Step 28: Ligar no `ToolCard` e na lista**
+- [x] **Step 28: Ligar no `ToolCard` e na lista**
 
 Em `ToolCard.svelte`, perto de `hangarAcao` (`:86-91`):
 
@@ -1461,7 +1461,7 @@ Com o backend da Task 4 de pé e a sessão `cx-paginas` com páginas publicadas:
 5. `eval 'document.querySelector("iframe").contentWindow.location.href'` deve falhar (origem opaca); `eval` dentro da página tentando `parent.localStorage` falha.
 6. Tire um print (`hangar-preview shot`) e cite o caminho na resposta. Feche o preview ao terminar.
 
-- [ ] **Step 30: Commit**
+- [x] **Step 30: Commit**
 
 ```bash
 git add frontend/src/components/HtmlPageFrame.svelte frontend/src/components/ToolCard.svelte frontend/src/components/MessageList.svelte
@@ -1485,11 +1485,11 @@ Risk: high
   - `Engine::evaluate(&self, expression: &str)` (dispara `Runtime.evaluate` sem esperar)
   - `Surface` com campo `format: image::ImageFormat` (Jpeg no painel, Png na página)
 
-- [ ] **Step 31: Ler a skill `gpui-kit` e o motor**
+- [x] **Step 31: Ler a skill `gpui-kit` e o motor**
 
 Leia a skill `gpui-kit` (Coding Guides) e `engine.rs` inteiro. O que muda: o painel continua idêntico; a página da conversa ganha um segundo jeito de nascer.
 
-- [ ] **Step 32: Implementar `start_page`**
+- [x] **Step 32: Implementar `start_page`**
 
 ```rust
 impl Starter {
@@ -1554,12 +1554,12 @@ Em `browser/mod.rs`, a variante nova com o mesmo `cfg_attr` da `Frame`:
 
 Todo `match` sobre `Event` no painel (`app/browser.rs:79-96`) ganha o braço `Event::Host(_) => {}`.
 
-- [ ] **Step 33: Compilar**
+- [x] **Step 33: Compilar**
 
 Run: `cd desktop-native && nice -n 19 cargo check`
 Expected: compila sem aviso novo.
 
-- [ ] **Step 34: Commit**
+- [x] **Step 34: Commit**
 
 ```bash
 git add desktop-native/src/browser/chromium/engine.rs desktop-native/src/browser/mod.rs desktop-native/src/app/browser.rs
@@ -1581,7 +1581,7 @@ Risk: high
 - Consumes: `Starter::start_page`, `Event::Host`, `Engine::{place, hide, pointer, wheel, key, evaluate}` (Task 7); `theme::{is_dark, colors}`; `Api::endpoint`
 - Produces: `page_card::PageRef { id, title, height: Option<u32>, heights: BTreeMap<u32,u32> }`, `page_card::page_from_result(tool_name: &str, result: &str) -> Option<PageRef>`, `page_card::Pages` (dono dos motores vivos, orçamento 4), `App::render_page_card(&mut self, tool: Tool, page: PageRef, cx) -> AnyElement`
 
-- [ ] **Step 35: Detector e orçamento com testes**
+- [x] **Step 35: Detector e orçamento com testes**
 
 Em `page_card.rs`:
 
@@ -1658,7 +1658,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 36: Estado do cartão e busca**
+- [x] **Step 36: Estado do cartão e busca**
 
 `struct PageView { page: PageRef, state: ViewState, reported: Option<f32>, engine: Option<Engine>, last_frame: Option<Arc<RenderImage>>, focused: bool }` com `enum ViewState { Loading, Ready, Error, Expired }`, guardado num `HashMap<String, PageView>` no app (chave = `page.id`) ao lado do estado de mídia (`:791`). A busca segue o `ensure_media` (`app.rs:2539`): na primeira renderização do cartão, `Api::page_raw` no runtime tokio; 404 → `Expired`; outro erro → `Error`; sucesso → guarda o HTML e, no Linux, cria o motor com `Engine::prepare(window, cx)?.start_page(&html, largura_da_coluna, tx)` e um laço `cx.spawn` que lê o `rx`:
 
@@ -1668,7 +1668,7 @@ mod tests {
 
 Sem Chromium (`Engine::available()` falha) ou fora do Linux: estado estático, que busca `Api::page_shot(session, id, tema, largura)` e mostra a imagem com o mesmo caminho de `img(Arc<RenderImage>)` das miniaturas (`app.rs:1633`). 404 com `erro_pagina_sem_imagem` → só título e botão.
 
-- [ ] **Step 37: Desenhar o cartão**
+- [x] **Step 37: Desenhar o cartão**
 
 `render_page_card` devolve uma coluna com altura fixa `frame_height(...)` e largura cheia da coluna da resposta:
 
@@ -1694,7 +1694,7 @@ Com o backend da Task 4 de pé e páginas publicadas em `cx-paginas`:
 5. Feche a sessão e reabra a conversa: "expirou".
 6. Print da janela (o print do nativo descrito na memória `feedback-conferir-no-nativo-com-print`) e cite o caminho.
 
-- [ ] **Step 40: Commit**
+- [x] **Step 40: Commit**
 
 ```bash
 git add desktop-native/src/app/page_card.rs desktop-native/src/app.rs desktop-native/src/conversation.rs desktop-native/src/api/mod.rs messages/pt.json messages/en.json
@@ -1771,7 +1771,7 @@ Risk: medium
 - Consumes: `htmlPageFromResult`, `frameHeight`, `pageFetchState`, `pageUrls`, `themeVariables` (Task 5); `fileAuthHeader` (`packages/core/src/api.ts:125`)
 - Produces: `<HtmlPageCard page session server />`
 
-- [ ] **Step 46: Usar as skills `vercel-react-native-skills` e `expo-native-ui`, depois implementar**
+- [x] **Step 46: Usar as skills `vercel-react-native-skills` e `expo-native-ui`, depois implementar**
 
 ```tsx
 import { useCallback, useEffect, useState } from 'react';
@@ -1833,7 +1833,7 @@ Antes de escrever, confira no `mobile/` como o tema atual é lido (para montar `
 
 Abra a conversa `cx-paginas` no app (build de desenvolvimento): página aparece, altura acompanha, link abre no navegador do sistema, troca de tema reflete, sessão encerrada mostra "expirou". Print da tela citado pelo caminho.
 
-- [ ] **Step 48: Commit**
+- [x] **Step 48: Commit**
 
 ```bash
 git add mobile/src/chat/tools/HtmlPageCard.tsx mobile/src/chat/MessageList.tsx mobile/src/chat/tools/fold.ts
@@ -1848,7 +1848,7 @@ Risk: low
 - Modify: `CLAUDE.md` (marcador novo em "Plataforma")
 - Modify: `docs/decisoes/plataforma.md` (entrada de mesmo título)
 
-- [ ] **Step 49: Escrever a regra e a decisão**
+- [x] **Step 49: Escrever a regra e a decisão**
 
 Marcador em "Plataforma", depois do de "HTML servido como arquivo executa isolado":
 
@@ -1875,7 +1875,7 @@ cd desktop-native && nice -n 19 cargo test page_card
 
 Falhou → repita só o que falhou. Sem pedido, reporte o que foi conferido no uso real (Steps 9, 22, 29, 39, 47) e que os testes automatizados não rodaram; o `pre-push` roda os ligados aos arquivos tocados.
 
-- [ ] **Step 51: Commit**
+- [x] **Step 51: Commit**
 
 ```bash
 git add CLAUDE.md docs/decisoes/plataforma.md
