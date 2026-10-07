@@ -58,7 +58,8 @@ await start($,{},async event=>event); timers.shift()();
 for(let i=0;i<100 && timers.length===0;i++) await new Promise(resolve=>setImmediate(resolve));
 console.log(JSON.stringify({effects,receipts,rearmed:timers.length}));
 ''')
-    result = subprocess.run(['node', str(runner), str(root), mode, published_sid], capture_output=True, text=True, timeout=10)
+    # O prazo só flagra o hook preso: o primeiro node da etapa no runner Windows já passou de 10 s.
+    result = subprocess.run(['node', str(runner), str(root), mode, published_sid], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     output = json.loads(result.stdout)
     assert output['effects'] == ([] if published_sid == 'A' else [{'kind':'fill' if mode == 'fill' else 'submit','sid':'B'}])

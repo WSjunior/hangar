@@ -1,3 +1,4 @@
+export type Falha = 'login' | 'limite' | 'outra'
 export type Situacao = 'ok' | 'falhou' | 'rodando' | 'esperando' | 'pulado' | 'cancelado'
 export type Job = { nome: string; situacao: Situacao; passo: string | null }
 export type Workflow = { id: number; nome: string; sha: string; situacao: Situacao; url: string; jobs: Job[] }
@@ -11,7 +12,8 @@ export type Pr = {
   revisao: 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | null
   checks: Checks
 }
-export type GhView = { branch: string; workflows: Workflow[]; pr: Pr | null }
+// `aviso`/`falha`: por que a última consulta falhou; a faixa o mostra e segue tentando.
+export type GhView = { branch: string; workflows: Workflow[]; pr: Pr | null; aviso?: string | null; falha?: Falha | null }
 
 declare module 'claude-code' {
   interface PluginState {

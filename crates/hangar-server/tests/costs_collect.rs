@@ -12,12 +12,13 @@ struct Fixed {
     peak: AtomicUsize,
     delay: Mutex<Duration>,
     signal: (Mutex<(usize, bool)>, Condvar),
+    first_call: Mutex<Option<Instant>>,
 }
 impl Fixed {
     fn new(value: Result<Scopes, ()>) -> Arc<Self> {
         Arc::new(Self { value: Mutex::new(value), calls: AtomicUsize::new(0),
             active: AtomicUsize::new(0), peak: AtomicUsize::new(0), delay: Mutex::new(Duration::ZERO),
-            signal: (Mutex::new((0, false)), Condvar::new()) })
+            signal: (Mutex::new((0, false)), Condvar::new()), first_call: Mutex::new(None) })
     }
     fn hold(&self) { self.signal.0.lock().unwrap().1 = true; }
     fn release(&self) { self.signal.0.lock().unwrap().1 = false; self.signal.1.notify_all(); }
@@ -31,6 +32,7 @@ impl ScopeSource for Fixed {
     fn fetch(&self) -> Result<Scopes, CollectError> {
         assert_eq!(std::thread::current().name(), Some("custos-scan"));
         assert!(tokio::runtime::Handle::try_current().is_err(), "a varredura roda fora do executor Tokio");
+        self.first_call.lock().unwrap().get_or_insert_with(Instant::now);
         self.calls.fetch_add(1, Ordering::SeqCst);
         let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.peak.fetch_max(active, Ordering::SeqCst);
@@ -55,9 +57,12 @@ fn scopes(base: &Path) -> Scopes {
 fn collector(base: &Path, source: Arc<dyn ScopeSource>) -> Arc<Collector> {
     Arc::new(Collector::new(base.join("../idx"), base.join("pricing"), base.join("../sem-mapa.json"), source))
 }
+/// Só flagra a varredura que não termina: no runner Windows o disco faz uma varredura das amostras
+/// passar de 5 s de vez em quando.
+const SCAN_WAIT: Duration = Duration::from_secs(30);
 fn wait_ready(c: &Arc<Collector>) {
     let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(5) {
+    while start.elapsed() < SCAN_WAIT {
         if matches!(c.prepare(false).unwrap(), Ready::Go) { return; }
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -65,7 +70,7 @@ fn wait_ready(c: &Arc<Collector>) {
 }
 fn wait_failed(c: &Arc<Collector>) {
     let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(5) {
+    while start.elapsed() < SCAN_WAIT {
         if c.prepare(false).is_err() { return; }
         std::thread::yield_now();
     }
@@ -362,11 +367,13 @@ fn boot_warmup_waits_thirty_seconds_and_keeps_one_scan() {
     let (_d, base) = fixtures_copy();
     let source = Fixed::new(Ok(scopes(&base)));
     let c = collector(&base, source.clone());
+    let scheduled = Instant::now();
     c.schedule_warmup(Duration::from_secs(30));
     c.schedule_warmup(Duration::from_secs(30));
-    std::thread::sleep(Duration::from_secs(29));
-    assert_eq!(source.calls.load(Ordering::SeqCst), 0);
-    source.wait_calls(1, Duration::from_secs(3));
+    // A hora da consulta, e não a contagem aos 29 s: no runner o sono do próprio teste atrasa.
+    source.wait_calls(1, Duration::from_secs(40));
+    let waited = source.first_call.lock().unwrap().unwrap() - scheduled;
+    assert!(waited >= Duration::from_secs(30), "a varredura começou aos {waited:?}");
     wait_ready(&c);
     assert_eq!(source.calls.load(Ordering::SeqCst), 1);
 }

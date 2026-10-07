@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { checks, disparaRun, ehGithub, ehPush, jobs, lembrarCommit, rotulosAbrir, precisaConsultar, runsVisiveis, situacao } from './gh'
+import { checks, classificarFalha, piorErro, textoAviso, disparaRun, ehGithub, ehPush, jobs, lembrarCommit, rotulosAbrir, precisaConsultar, runsVisiveis, situacao } from './gh'
 import type { GhView, RunGh } from './gh'
 import { rotuloJob } from './faixa'
 
@@ -29,6 +29,36 @@ describe('gh', () => {
     const c = (sha: string) => ({ sha, branch: 'x' })
     expect(lembrarCommit([c('b'), c('a')], c('c'), 2)).toEqual([c('c'), c('b')])
     expect(lembrarCommit([c('b'), c('a')], c('a'), 5)).toEqual([c('a'), c('b')])
+  })
+
+  test('gh sem login vira aviso na faixa', () => {
+    const msg = 'gh run list --commit: To get started with GitHub CLI, please run:  gh auth login'
+    expect(classificarFalha(msg)).toBe('login')
+    expect(classificarFalha('failed to get runs: HTTP 401: Bad credentials (https://api.github.com/...)')).toBe('login')
+    expect(textoAviso('login', msg, null)).toBe('gh sem login · rode gh auth login')
+  })
+
+  test('limite da API vira aviso com o horário de volta', () => {
+    const msg = 'gh run list --commit: HTTP 403: API rate limit exceeded for user ID 123.'
+    expect(classificarFalha(msg)).toBe('limite')
+    expect(classificarFalha('GraphQL: API rate limit exceeded for user ID 123.')).toBe('limite')
+    expect(textoAviso('limite', msg, '21:40')).toBe('limite da API até 21:40')
+    expect(textoAviso('limite', msg, null)).toBe('limite da API do GitHub')
+  })
+
+  test('de vários erros, vale o mais grave', () => {
+    const outra = 'dial tcp: timeout'
+    const limite = 'HTTP 403: API rate limit exceeded'
+    const login = 'HTTP 401: Bad credentials'
+    expect(piorErro(null, outra)).toBe(outra)
+    expect(piorErro(outra, limite)).toBe(limite)
+    expect(piorErro(limite, login)).toBe(limite)
+    expect(piorErro(outra, login)).toBe(login)
+  })
+
+  test('outra falha mostra a primeira linha do erro', () => {
+    expect(classificarFalha('dial tcp: lookup api.github.com: no such host')).toBe('outra')
+    expect(textoAviso('outra', 'Error: dial tcp: no such host\nmais', null)).toBe('gh falhou: dial tcp: no such host')
   })
 
   test('só git push registra commit', () => {
