@@ -321,6 +321,8 @@ import { cachePrazo } from '../lib/cachePrazo';
   // ── Gravacao de audio pelo microfone (MediaRecorder) ────────────────────────
   let recording = $state(false);
   let recError = $state('');
+  // Aviso do ditado (reserva, limpeza que desistiu) informa, não acusa erro: mesmo lugar, outro tom.
+  let recAviso = $state('');
   // "cru" nao e um estilo do servidor (nao existe em narrar.ESTILOS_DITADO): e a transcricao como a
   // Whisper devolveu, que o app ja tem na mao e aplica sem rede nenhuma.
   type VersaoDitado = EstiloDitado | 'cru';
@@ -1317,7 +1319,7 @@ import { cachePrazo } from '../lib/cachePrazo';
     } else {
       fecharDitado();
     }
-    if (aviso) recError = aviso;
+    if (aviso) recError = recAviso = aviso;
     else if (e.opts.avisoTeto) recError = m.composer_silencio();
     if (e.opts.ditado && e.opts.autoEnvio !== false) {
       if (podeEnviarSozinho({ motivo: e.opts.motivo ?? null, texto: t, aviso, rascunhoAntes: hadDraft })) {
@@ -1343,7 +1345,7 @@ import { cachePrazo } from '../lib/cachePrazo';
     deliver: (e) => void aplicarTranscricao(e),
     // Já escrito no rascunho com a conversa fechada: só falta mostrar o motivo, se houver.
     restored: (e) => {
-      if (e.result?.aviso) recError = e.result.aviso;
+      if (e.result?.aviso) recError = recAviso = e.result.aviso;
       else if (e.opts.avisoTeto) recError = m.composer_silencio();
     },
   });
@@ -1449,7 +1451,7 @@ import { cachePrazo } from '../lib/cachePrazo';
       // A limpeza pode desistir e devolver o cru (LLM fora do ar, travas do narrar). Marcar o botao
       // clicado nesse caso seria dizer que o estilo pegou: quem manda e o que o backend aplicou.
       aplicarVersao(alvo, ehVersao(estilo_aplicado) ? estilo_aplicado : v, t);
-      if (aviso) recError = aviso;
+      if (aviso) recError = recAviso = aviso;
     } catch (err) {
       if (ditado === alvo) {
         recError = err instanceof Error ? err.message : m.composer_falha_transcricao();
@@ -2226,7 +2228,11 @@ import { cachePrazo } from '../lib/cachePrazo';
       </div>
     {/if}
     {#if recError}
-      <div class="send-error" role="alert"><span>{recError}</span></div>
+      {#if recError === recAviso}
+        <div class="send-error send-error--aviso" role="status"><span>{recError}</span></div>
+      {:else}
+        <div class="send-error" role="alert"><span>{recError}</span></div>
+      {/if}
     {/if}
     {#if ditadoFalhou}
       <div class="send-error" role="alert">
@@ -3499,4 +3505,5 @@ import { cachePrazo } from '../lib/cachePrazo';
     color: var(--error);
     padding: 0 var(--space-1);
   }
+  .send-error--aviso { color: var(--warning-text); }
 </style>

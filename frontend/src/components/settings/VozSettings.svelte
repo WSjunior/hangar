@@ -54,9 +54,11 @@
     store.campos['groq_api_key']?.definido === true && !store.remocaoPendente('groq_api_key'),
   );
   const servicos = $derived(parseTranscriptionProviders(store.valorBruto('transcription_providers')));
-  const transcreverOk = $derived(servicos.length ? servicos.some((p) => p.api_key) : groqChaveOk);
+  // O selo diz o que o servidor usa agora: lê o salvo, nunca o rascunho (serviço novo ainda sem chave).
+  const servicosSalvos = $derived(parseTranscriptionProviders(store.campos['transcription_providers']?.valor));
+  const transcreverOk = $derived(servicosSalvos.length ? servicosSalvos.some((p) => p.api_key) : groqChaveOk);
   const transcricaoPersonalizada = $derived(
-    servicos.length > 0 || String(store.valorAtual('transcription_base_url') ?? '').trim().length > 0,
+    servicosSalvos.length > 0 || String(store.campos['transcription_base_url']?.valor ?? '').trim().length > 0,
   );
   let servicosAbertos = $state(false);
   let servicosDecidido = $state(false);

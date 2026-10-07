@@ -104,6 +104,19 @@ describe('Composer e o ditado da sessão', () => {
     unmount(comp);
   });
 
+  it('aviso do resultado (reserva) sai em tom de aviso, não de erro', async () => {
+    vi.mocked(transcribeUploaded).mockResolvedValue({ path: '/up/p/s/g.webm', text: 'olá', raw: 'ola', aviso: 'Transcrito pelo Groq: sem cota' });
+    const { target, comp } = montar('j1');
+    await flush();
+    iniciar();
+    await flush();
+    const aviso = target.querySelector('.send-error')!;
+    expect(aviso.textContent).toContain('Transcrito pelo Groq: sem cota');
+    expect(aviso.classList.contains('send-error--aviso')).toBe(true);
+    expect(aviso.getAttribute('role')).toBe('status');
+    unmount(comp);
+  });
+
   it('áudio que o servidor não entrega mais: a barra diz isso', async () => {
     localStorage.setItem(BARRA, JSON.stringify({ arquivo: 'g.webm', raw: 'x', before: '', after: '', jsonl: 'j1' }));
     const { target, comp } = montar('j1');
@@ -111,6 +124,7 @@ describe('Composer e o ditado da sessão', () => {
     target.querySelector('.ditado-audio')!.dispatchEvent(new Event('error'));
     await flush();
     expect(target.textContent).toContain(m.composer_ditado_audio_indisponivel());
+    expect(target.querySelector('.send-error--aviso')).toBeNull();
     unmount(comp);
   });
 

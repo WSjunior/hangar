@@ -64,6 +64,7 @@ describe('TranscriptionProviders', () => {
     const { alvo, app, setRascunho } = montar([ELEVEN]);
     const chave = alvo.querySelector<HTMLInputElement>('#tp-key-a')!;
     expect(chave.value).toBe('');
+    expect(chave.type).toBe('password');
     chave.value = 'nova';
     // O Svelte 5 delega `input` na raiz da montagem: sem bolhar, o handler não roda.
     chave.dispatchEvent(new Event('input', { bubbles: true }));

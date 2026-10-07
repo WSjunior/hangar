@@ -103,11 +103,11 @@
             {/if}
             <div class="campo">
               <label class="rot" for={`tp-key-${p.id}`}>{m.native_voice_provider_key()}</label>
-              <!-- Igual ao segredo de LinhaConfig: o campo mostra só o que foi digitado; a máscara fica ao lado. -->
+              <!-- O campo nunca recebe a máscara; ela fica ao lado. Password: a chave não aparece na tela. -->
               {#if mascara && p.api_key === mascara}
                 <span class="mascara">{mascara} <span class="mascara-nota">{m.config_server_configurada()}</span></span>
               {/if}
-              <input id={`tp-key-${p.id}`} type="text" autocomplete="off" autocapitalize="off" spellcheck={false}
+              <input id={`tp-key-${p.id}`} type="password" autocomplete="new-password" autocapitalize="off" spellcheck={false}
                 value={p.api_key === mascara ? '' : p.api_key}
                 placeholder={mascara ? m.config_motores_colar_nova() : m.config_motores_colar()}
                 oninput={(e) => atualizar(i, editTranscriptionProviderKey(p, e.currentTarget.value, mantem ? mascara : undefined))} />

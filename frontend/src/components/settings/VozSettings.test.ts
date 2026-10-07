@@ -11,12 +11,12 @@ vi.mock('@hangar/core', async (importOriginal) => ({
 vi.mock('../../lib/ttsPlayer.svelte', () => ({ ttsPlayer: { tocando: false, parar: vi.fn() } }));
 vi.mock('../../lib/ouvir', () => ({ ouvirAmostra: vi.fn() }));
 
-function montar(campos: Record<string, unknown>, extra: { salvarBloqueado?: boolean } = {}) {
+function montar(campos: Record<string, unknown>, extra: { salvarBloqueado?: boolean; rascunho?: Record<string, unknown> } = {}) {
   const alvo = document.createElement('div');
   document.body.appendChild(alvo);
   const store = {
     get alvo() { return null; }, get salvarBloqueado() { return extra.salvarBloqueado ?? false; },
-    valorBruto: (chave: string) => (campos[chave] as { valor?: unknown } | undefined)?.valor,
+    valorBruto: (chave: string) => extra.rascunho && chave in extra.rascunho ? extra.rascunho[chave] : (campos[chave] as { valor?: unknown } | undefined)?.valor,
     get campos() { return campos; }, get leitura() { return {}; },
     get carregando() { return false; }, get salvando() { return false; },
     get erro() { return ''; }, get salvo() { return false; }, get temMudanca() { return extra.salvarBloqueado ?? false; },
@@ -50,6 +50,14 @@ describe('VozSettings', () => {
   it('sem chave de transcrição, avisa que ditar está desligado', () => {
     const { alvo, app } = montar({ groq_api_key: { definido: false } });
     expect(alvo.textContent).toContain(m.voz_transcrever_sem_chave());
+    unmount(app);
+  });
+
+  it('serviço novo sem chave no rascunho não muda o selo: ele mostra o salvo', () => {
+    const novo = { id: 'n', kind: 'openai', name: '', base_url: '', api_key: '', model: '' };
+    const { alvo, app } = montar({ groq_api_key: { definido: true } }, { rascunho: { transcription_providers: [novo] } });
+    expect(alvo.querySelector('.estado')!.textContent).toContain(m.voz_status_ativo());
+    expect(alvo.textContent).not.toContain(m.voz_transcrever_sem_chave());
     unmount(app);
   });
 
