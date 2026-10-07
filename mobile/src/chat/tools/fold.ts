@@ -30,11 +30,13 @@ export function foldConversation(
       rows.push(item);
       continue;
     }
-    const page = item.type === 'tool' ? pageOf(item.ev) : null;
-    if (page) {
-      open = null;
-      rows.push({ type: 'page', id: `p-${item.id}`, ev: item.ev, page });
-      continue;
+    if (item.type === 'tool') {
+      const page = pageOf(item.ev);
+      if (page) {
+        open = null;
+        rows.push({ type: 'page', id: `p-${item.id}`, ev: item.ev, page });
+        continue;
+      }
     }
     const parts = item.type === 'tool' ? [item.ev] : item.type === 'group' ? item.tools : item.eventos;
     if (!merge) rows.push({ type: 'fold', id: `f-${item.id}`, parts, source: item.type });

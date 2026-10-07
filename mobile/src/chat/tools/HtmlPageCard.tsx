@@ -32,6 +32,8 @@ function themed(html: string, p: ThemeParams): string {
 const applyScript = (p: ThemeParams) => `window.__hangarApply&&window.__hangarApply(${JSON.stringify(p)});true`;
 
 // Só o documento inicial carrega; qualquer navegação da página (link, location, window.open) para.
+// ponytail: no Android a lib libera a navegação se o JS não responder em 250 ms (JS travado deixa
+// passar); fechar isso de vez exige filtro nativo.
 const onlyInitial = (r: { url: string }) => r.url === 'about:blank' || r.url.startsWith('about:srcdoc');
 
 // Página publicada pelo html_render no lugar da chamada, como o cartão do nativo (page_card.rs):
