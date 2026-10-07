@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 CONTRACT = Path(__file__).parent / "fixtures" / "contract"
-NAMES = {"input.json", "steer.json"}
+NAMES = {"input.json", "steer.json", "control.json"}
 
 
 def test_session_write_golden_is_current(tmp_path):

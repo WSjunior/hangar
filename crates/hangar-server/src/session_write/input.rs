@@ -18,10 +18,10 @@ use crate::runtime::protocol::{Disposition, OperationKind, RuntimeCommand, Runti
 
 const MSG_UNKNOWN: &str = "resultado incerto; entrada conservada sem reenvio";
 const MSG_REJECTED: &str = "entrada recusada pelo runtime";
-const MSG_STEER_UNKNOWN: &str = "resultado incerto; a operação foi conservada sem reenvio";
-const MSG_STEER_REFUSED: &str = "operação recusada pelo runtime";
-const MSG_CONTROL_DEFERRED: &str = "O controle não foi executado; confira a sessão.";
-const MSG_CONTROL_UNCONFIRMED: &str = "Não foi possível confirmar o controle; confira a sessão antes de repetir.";
+pub(super) const MSG_STEER_UNKNOWN: &str = "resultado incerto; a operação foi conservada sem reenvio";
+pub(super) const MSG_STEER_REFUSED: &str = "operação recusada pelo runtime";
+pub(super) const MSG_CONTROL_DEFERRED: &str = "O controle não foi executado; confira a sessão.";
+pub(super) const MSG_CONTROL_UNCONFIRMED: &str = "Não foi possível confirmar o controle; confira a sessão antes de repetir.";
 
 pub struct Params<'a> {
     pub text: &'a str,
@@ -42,12 +42,12 @@ pub type Diary = Option<(&'static str, String)>;
 fn queued(text: &str) -> bool { !text.trim_start().starts_with('/') }
 
 /// O diário só aceita `[a-z0-9_]{1,64}`; o motivo do terminal pode trazer outra coisa.
-fn diary_code(raw: &str) -> String {
+pub(super) fn diary_code(raw: &str) -> String {
     let code: String = raw.chars().take(60).map(|c| if c.is_ascii_lowercase() || c.is_ascii_digit() { c } else { '_' }).collect();
     if code.is_empty() { "unknown".into() } else { code }
 }
 
-fn payload_code(reply: &RuntimeReply) -> Option<&str> { reply.payload["code"].as_str().filter(|c| !c.is_empty()) }
+pub(super) fn payload_code(reply: &RuntimeReply) -> Option<&str> { reply.payload["code"].as_str().filter(|c| !c.is_empty()) }
 
 fn failed(code: String, msg: String) -> (Sent, Diary) {
     let refused = Sent::Refused { code: "erro_envio_falhou", params: json!({"erro": msg}), msg };
@@ -101,7 +101,7 @@ pub fn input_answer(sent: &Sent, steered: bool) -> (StatusCode, Value) {
     }
 }
 
-fn sem_turno(msg: &str) -> (StatusCode, Value) { (StatusCode::CONFLICT, detail_body("erro_sem_turno", msg, json!({}))) }
+pub(super) fn sem_turno(msg: &str) -> (StatusCode, Value) { (StatusCode::CONFLICT, detail_body("erro_sem_turno", msg, json!({}))) }
 
 /// `/steer` sem terminal: com texto vai ao turno em voo; sem texto promove a fila.
 pub fn steer_headless(with_text: bool, control: &Result<RuntimeReply, RuntimeError>) -> (StatusCode, Value) {
@@ -121,10 +121,10 @@ pub fn steer_headless(with_text: bool, control: &Result<RuntimeReply, RuntimeErr
     }
 }
 
-fn control_failed(msg: &str) -> (StatusCode, Value) { (StatusCode::CONFLICT, detail_body("erro_opcao_nao_convergiu", msg, json!({}))) }
+pub(super) fn control_failed(msg: &str) -> (StatusCode, Value) { (StatusCode::CONFLICT, detail_body("erro_opcao_nao_convergiu", msg, json!({}))) }
 
 /// Falha do runtime no `/steer` com terminal: o Python deixa virar 500; aqui tem código.
-fn runtime_failed(error: &RuntimeError) -> (StatusCode, Value) {
+pub(super) fn runtime_failed(error: &RuntimeError) -> (StatusCode, Value) {
     (StatusCode::BAD_GATEWAY, detail_body("erro_envio_falhou", &error.to_string(), json!({"erro": error.to_string()})))
 }
 
@@ -156,7 +156,7 @@ fn parse_body(bytes: &Bytes) -> Option<(String, bool)> {
 }
 
 /// O FastAPI só lê o corpo como JSON sem `Content-Type` ou com `application/json`; outro tipo é 422 dele.
-fn json_content_type(headers: &HeaderMap) -> bool {
+pub(super) fn json_content_type(headers: &HeaderMap) -> bool {
     let Some(value) = headers.get(header::CONTENT_TYPE) else { return true };
     let Ok(text) = value.to_str() else { return false };
     let mime = text.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
@@ -168,7 +168,7 @@ fn first_token_is_clear(bytes: &Bytes) -> bool {
         .is_some_and(|v| v["text"].as_str().is_some_and(|t| t.split_whitespace().next() == Some("/clear")))
 }
 
-fn answer(ctx: &Ctx, (status, body): (StatusCode, Value)) -> Response {
+pub(super) fn answer(ctx: &Ctx, (status, body): (StatusCode, Value)) -> Response {
     let mut response = json_response(status, body);
     cors(ctx.headers(), response.headers_mut());
     response

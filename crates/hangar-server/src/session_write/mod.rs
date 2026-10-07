@@ -1,5 +1,6 @@
 //! Rotas de escrita de sessão Claude. O Rust as reivindica na tabela (`table`) e decide por pedido;
-//! `/input` e `/steer` já têm corpo no Rust (`input`); as demais ainda repassam ao Python (`relay`).
+//! `/input` e `/steer` (`input`) e o controle (`control`) já têm corpo no Rust; `/answer` ainda repassa
+//! ao Python (`relay`).
 //!
 //! Ordem fixa de `admit`: dono → corpo → porta (`enter`) → entrada (`writable`) → decisão. A entrada
 //! é procurada DEPOIS da porta: a achada antes de esperar pode ser a que o relançamento parou.

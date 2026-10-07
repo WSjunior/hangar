@@ -740,11 +740,186 @@ def session_write_rows() -> tuple[list, list]:
     return asyncio.run(main())
 
 
+# ── /interrupt, /keys, /term-input, /select, /select/submit e DELETE …/queue/{id} ──────────────────
+# Mesmo método: a rota do Python de verdade, com o ator falso. Cada caso diz a rota, o que o plugin
+# segura (`pending`), se o painel está aberto e a resposta do ator (`reply`). Texto "!unknown" é o
+# `TerminalOutcomeUnknown` e "!erro: msg" é a falha do runtime antes da entrega. `drive_error` faz o
+# Python cair no driver direto do tmux (o `DriveError` que o ator recusado equivale). `adapter_false`
+# é o `adapter.select` do Claude sem terminal devolvendo False (nenhuma permissão pendente).
+# Diferenças que o golden NÃO compara: o texto de `params.detalhe` e o de falha do runtime.
+def _c(name, route, **kw):
+    return {"name": name, "route": route, "terminal": True, "pending": None, "panel_open": False, "reply": ("accepted", {}),
+            "rust_reply": None, "drive_error": False, "adapter_false": False, "args": {}, **kw}
+
+
+ACC = ("accepted", {})
+CONTROL_CASES = [
+    _c("select_accepted", "select", args={"option": 2}),
+    _c("select_perm_yes", "select", args={"option": 1}, pending={"id": "perm:1"}),
+    _c("select_perm_no_with_panel_open", "select", args={"option": 2}, pending={"id": "perm:1"}, panel_open=True),
+    _c("select_perm_option_3", "select", args={"option": 3}, pending={"id": "perm:1"}),
+    _c("select_ask_pending", "select", args={"option": 2}, pending={"id": "ask:1"}),
+    _c("select_panel_open_no_pending", "select", args={"option": 1}, panel_open=True),
+    _c("select_panel_open_ask", "select", args={"option": 1}, pending={"id": "ask:1"}, panel_open=True),
+    _c("select_deferred", "select", args={"option": 1}, reply=("deferred", {})),
+    _c("select_uncertain", "select", args={"option": 1}, reply="!unknown"),
+    _c("select_runtime_error", "select", args={"option": 1}, reply="!erro: runtime_closed: ator saiu"),
+    _c("select_refused", "select", args={"option": 1}, reply=("rejected", {"code": "cursor"}), drive_error=True),
+    _c("select_headless_accepted", "select", terminal=False, args={"option": 1}),
+    _c("select_headless_no_permission", "select", terminal=False, args={"option": 1}, reply=("rejected", {}), adapter_false=True),
+    _c("select_headless_deferred", "select", terminal=False, args={"option": 1}, reply=("deferred", {})),
+    _c("select_headless_unknown", "select", terminal=False, args={"option": 1}, reply=("unknown", {})),
+    _c("select_headless_error", "select", terminal=False, args={"option": 1}, reply="!erro: runtime_closed: ator saiu"),
+    _c("submit_accepted", "select_submit"),
+    _c("submit_panel_open", "select_submit", panel_open=True),
+    _c("submit_deferred", "select_submit", reply=("deferred", {})),
+    _c("submit_unknown", "select_submit", reply=("unknown", {})),
+    _c("submit_refused", "select_submit", reply=("rejected", {"code": "tab"}), drive_error=True),
+    _c("interrupt_headless_accepted", "interrupt", terminal=False),
+    _c("interrupt_headless_no_turn", "interrupt", terminal=False, reply=("accepted", {"interrupted": False})),
+    _c("interrupt_terminal_accepted", "interrupt"),
+    _c("interrupt_terminal_with_question", "interrupt", pending={"id": "ask:9"}),
+    _c("interrupt_terminal_clear", "interrupt", args={"clear": True}, pending={"id": "ask:9"}),
+    _c("interrupt_terminal_deferred", "interrupt", pending={"id": "ask:9"}, reply=("deferred", {})),
+    _c("interrupt_terminal_unknown", "interrupt", pending={"id": "ask:9"}, reply=("unknown", {})),
+    _c("keys_accepted", "keys", args={"key": "Down"}),
+    _c("keys_not_allowed", "keys", args={"key": "Nope"}, reply=None, rust_reply=("rejected", {"code": "key_not_allowed"})),
+    _c("keys_deferred", "keys", args={"key": "Down"}, reply=("deferred", {})),
+    _c("keys_unknown", "keys", args={"key": "Down"}, reply=("unknown", {})),
+    _c("term_text", "term_input", args={"text": "ls"}),
+    _c("term_key", "term_input", args={"key": "C-c"}),
+    _c("term_text_and_key", "term_input", args={"text": "ls", "key": "Enter"}),
+    _c("term_empty_text_and_key", "term_input", args={"text": "", "key": "Enter"}),
+    _c("term_nothing", "term_input", args={}),
+    _c("term_bad_text", "term_input", args={"text": "a\x01b"}, reply=None),
+    _c("term_bad_key_after_text", "term_input", args={"text": "ls", "key": "Nope"}, rust_reply=("rejected", {"code": "key_not_allowed"})),
+    _c("term_text_deferred", "term_input", args={"text": "ls", "key": "Enter"}, reply=("deferred", {})),
+    _c("term_key_unknown", "term_input", args={"key": "Enter"}, reply=("unknown", {})),
+    _c("queue_removed", "queue_remove", terminal=False, args={"removed": True}),
+    _c("queue_not_found", "queue_remove", terminal=False, args={"removed": False}),
+]
+
+
+def control_rows() -> list:
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+    from app import api, runtime_coordinator, termsock
+    from app.runtime_adapter import RuntimeAdapter, RuntimeView
+    from app.runtime_terminal import TerminalOutcomeUnknown
+    from app.terminal_input import DriveError
+
+    loop = asyncio.new_event_loop()
+    threading.Thread(target=loop.run_forever, daemon=True).start()
+    sent, notified, diary = [], [], []
+
+    class Owner:
+        instance = "runtime"
+        legacy = object()
+
+        def __init__(self, terminal, reply):
+            self.terminal, self.reply, self.loop = terminal, reply, loop
+
+        def slot(self, name):
+            return SimpleNamespace(binding=SimpleNamespace(provider="claude", meta={"terminal": {"pane": "%1"}} if self.terminal else {}))
+
+        def managed_runtime(self, name):
+            return True
+
+        async def prepare_session(self, name, provider, *, launch=False, engine_models=None):
+            return True
+
+        async def op(self, name, command, operation_id):
+            if command["kind"] == "control":
+                sent.append({"control": command["control"], "payload": command["payload"]})
+            if self.reply == "!unknown":
+                raise TerminalOutcomeUnknown("resultado terminal incerto; não repetir por outro transporte")
+            if isinstance(self.reply, str):
+                raise RuntimeError(self.reply.removeprefix("!erro: "))
+            return {"operation_id": operation_id, "disposition": self.reply[0], "payload": self.reply[1]}
+
+    api.diag.registrar = lambda event, level="ok", **fields: diary.append(event)
+    api._recusa_orq = lambda name: None
+    api._session_exists = lambda name: True
+    api._provider_of = lambda name: "claude"
+    api._cached_info_sync = lambda name: SimpleNamespace(provider="claude", headless=False)
+    api._loop_servidor = loop
+    api.plugin_bridge.interrompeu = lambda name, ident: notified.append(ident)
+    real_terminal = api.terminal
+
+    def drive_failing(code):
+        def fail(*args, **kwargs):
+            raise DriveError(code)
+        return SimpleNamespace(select=fail, submeter_multipla=fail)
+
+    async def call(case):
+        args = case["args"]
+        if case["route"] == "select":
+            return await asyncio.to_thread(api.select, "s", api.SelectBody(**args))
+        if case["route"] == "select_submit":
+            return await asyncio.to_thread(api.select_submit, "s")
+        if case["route"] == "interrupt":
+            return await api.interrupt("s", **args)
+        if case["route"] == "keys":
+            return await asyncio.to_thread(api.keys, "s", api.KeyBody(**args))
+        if case["route"] == "term_input":
+            return await asyncio.to_thread(api.term_input, "s", api.TermInputBody(**args))
+        class Queue:
+            def __init__(self, name):
+                pass
+
+            def remove(self, entry_id):
+                return args["removed"]
+        api.PromptQueue = Queue
+        return await api.descartar_da_fila("s", "e1")
+
+    async def run(case):
+        reply = case["reply"]
+        runtime_coordinator._current = Owner(case["terminal"] and not case["drive_error"], reply)
+        api._headless = lambda name: not case["terminal"]
+        adapter = RuntimeAdapter("claude")
+        adapter.view = lambda name, mutating=False: RuntimeView("k", 1, 1, {})
+
+        async def select_false(name, option):
+            return False
+        api.get_adapter = lambda key: SimpleNamespace(select=select_false, interrupt=lambda name: adapter.dispatch("interrupt", name, {})) \
+            if case["adapter_false"] else SimpleNamespace(select=lambda name, option: adapter.dispatch("select", name, {"option": option}),
+                                                          interrupt=lambda name: adapter.dispatch("interrupt", name, {}))
+        api.plugin_bridge.pergunta_pendente = lambda name: case["pending"]
+        termsock.painel_aberto = lambda name: case["panel_open"]
+        api.terminal = drive_failing("cursor nao convergiu") if case["drive_error"] else real_terminal
+        sent.clear(), notified.clear(), diary.clear()
+        try:
+            return {"status": 200, "body": await call(case)}
+        except HTTPException as exc:
+            return {"status": exc.status_code, "body": {"detail": exc.detail}}
+        except api.TerminalControlError as exc:
+            response = await api.terminal_control_failed(None, exc)
+            return {"status": response.status_code, "body": json.loads(response.body)}
+
+    def as_json(value):
+        return None if value is None else value if isinstance(value, str) else {"disposition": value[0], "payload": value[1]}
+
+    async def main():
+        rows = []
+        for case in CONTROL_CASES:
+            expect = await run(case)
+            rows.append({"name": case["name"], "route": case["route"], "terminal": case["terminal"], "args": case["args"],
+                         "pending": case["pending"], "panel_open": case["panel_open"], "reply": as_json(case["reply"]),
+                         "rust_reply": as_json(case["rust_reply"]), "adapter_false": case["adapter_false"], "expect": expect,
+                         "sent": list(sent), "notified": list(notified), "diary": list(diary)})
+        return rows
+
+    return asyncio.run(main())
+
+
 def write_session_write(out: Path | None = None) -> None:
     out = out or HERE / "session_write"
     out.mkdir(parents=True, exist_ok=True)
     inputs, steers = session_write_rows()
-    for name, rows in (("input.json", inputs), ("steer.json", steers)):
+    for name, rows in (("input.json", inputs), ("steer.json", steers), ("control.json", control_rows())):
         (out / name).write_text(json.dumps(rows, ensure_ascii=True, indent=1) + "\n", encoding="utf-8")
 
 

@@ -158,9 +158,9 @@ async fn gate_reopened_in_time_lets_the_request_through() {
     let (python, server) = serve_with(Some(registry.clone())).await;
     let reopen = registry.clone();
     tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(50)).await; reopen.ingress().open("s"); });
-    // `/interrupt` ainda é o repasse provisório; `/input` já é do Rust.
-    assert_eq!(post(server, "interrupt", "", OWNER).await, (200, "from-python".into()));
-    assert_eq!(python.hits_to("/api/sessions/s/interrupt"), 1);
+    // `/answer` ainda é o repasse provisório; as outras escritas já são do Rust.
+    assert_eq!(post(server, "answer", "{}", OWNER).await, (200, "from-python".into()));
+    assert_eq!(python.hits_to("/api/sessions/s/answer"), 1);
 }
 
 #[tokio::test]

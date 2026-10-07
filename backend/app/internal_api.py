@@ -8,6 +8,7 @@ import re
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, ConfigDict
 from sse_starlette.sse import EventSourceResponse
 
 from app import diag
@@ -132,8 +133,8 @@ async def runtime_policy(request: Request):
 
 _LIST_FACTS_MAX = 8 << 20
 _list_facts_invalid_at = 0.0
-# Os três do envio levam o nome que o Python já usava, para o diário não ter dois nomes por falha.
-_DIAG_EVENT = re.compile(r"rust\.[a-z_]{1,48}|runtime\.(?:send_failed|send_uncertain|command_deferred)")
+# Os do envio e os da opção levam o nome que o Python já usava, para o diário não ter dois nomes por falha.
+_DIAG_EVENT = re.compile(r"rust\.[a-z_]{1,48}|runtime\.(?:send_failed|send_uncertain|command_deferred)|opcao\.(?:nao_convergiu|envio_falhou)")
 _DIAG_WARNING = {"runtime.send_uncertain", "runtime.command_deferred"}
 _DIAG_CODE = re.compile(r"[a-z0-9_]{1,64}")
 
@@ -279,6 +280,26 @@ async def session_info(name: str) -> dict:
             diag.registrar("runtime.history_failed", "erro", sessao=name, **failure_reason(exc))
             raise HTTPException(503) from None
     return info_payload(name, info.provider, info.jsonl)
+
+
+@router.get("/sessions/{name}/plugin")
+async def plugin_pending(name: str) -> dict:
+    """A pergunta que o plugin segura, para o Rust decidir `/select` e `/interrupt`. Some com o plugin no Rust."""
+    from app import plugin_bridge
+    return {"pending": plugin_bridge.pergunta_pendente(name)}
+
+
+class _PluginInterrupted(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    interrupted: str | None
+
+
+@router.post("/sessions/{name}/plugin")
+async def plugin_interrupted(name: str, body: _PluginInterrupted) -> dict:
+    """O Esc do app fechou a pergunta `interrupted` no terminal. Some com o plugin no Rust."""
+    from app import plugin_bridge
+    plugin_bridge.interrompeu(name, body.interrupted)
+    return {"ok": True}
 
 
 @router.get("/sessions/{name}/state-facts")
