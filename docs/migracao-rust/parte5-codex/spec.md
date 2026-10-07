@@ -61,6 +61,10 @@ Medição e alternativas em [`analise.md`](analise.md#tipos-do-protocolo). Decis
                                                    └── 5G transferência (precisa de 5B)
 ```
 
+A 5B depende também da **5-0** (caminho de escrita comum aos dois provedores: tabela de despacho
+rota × provedor × modo, rotas genéricas reivindicadas no Rust, `runtime_coordinator` perguntando
+à tabela, `format_status` e `skill_catalog` no Rust), que a metade Claude escreve e esta revisa.
+Divisão e regras dos arquivos comuns em [`../parte5-claude/contrato-par.md`](../parte5-claude/contrato-par.md).
 5B e 5E correm em paralelo depois de 5A. Cada subparte tem plano próprio, execução com revisor
 por Task, revisão final, PR em rascunho e uso real pelo canal de testes antes da seguinte que
 depende dela. Mudou rota `/internal`, evento do `side-events` ou variável do filho → o próximo
@@ -114,10 +118,11 @@ com um `userAgent` falso de outra versão.
 
   Pedido de outra thread (subagente) entra no mesmo ramo: o filtro de thread só vale para
   notificação, nunca descarta pedido.
-- **Rotas de controle do Codex sem terminal servidas pelo Rust:** `/input`, `/steer`,
-  `/interrupt`, `/select`, `/answer`, `/question/skip`, `/models`, `/model`, `/service-tier`,
-  `/codex/mode`, `/limits`, `/commands`, `/recarregar`. Com terminal elas continuam no Python
-  até 5C (o Rust repassa pelo provedor e pelo modo da sessão).
+- **Rotas do Codex sem terminal no Rust:** as genéricas já reivindicadas pela 5-0 (`/input`,
+  `/steer`, `/interrupt`, `/select`, `/answer`, `DELETE …/queue/{id}`, `/rename`, `DELETE`,
+  `/recarregar`) viram `Rust` na tabela de despacho para Codex sem terminal; as só do Codex
+  (`/question/skip`, `/models`, `/model`, `/service-tier`, `/codex/mode`, `/limits`) e
+  `/commands` entram aqui. Com terminal tudo continua repassado ao Python até 5C.
 
 Pronta quando: no uso real, criar, conversar, aprovar cada tipo de pedido, interromper com
 comando longo rodando, reiniciar o backend no meio de um turno, trocar modo de permissão, Fast e
@@ -172,8 +177,9 @@ Pronta quando: cada ação usada uma vez no celular e no nativo com uma sessão 
   `checar_escolha`), `oauth` (device flow; grava `auth.json` do Codex, do Pi e o SQLite do omp
   com `rusqlite`, que já está no workspace).
 - Rotas no Rust: `/api/codex-contas/*`, `/api/credenciais/codex*`, a parte Codex de
-  `/api/cotas` e `/api/model-options?provider=codex`, e a escolha/checagem de conta e modelo da
-  criação de sessão Codex.
+  `/api/cotas` e `/api/model-options?provider=codex`. A rota de criação (`POST /api/sessions`) é
+  da parte 6 (proposta das duas metades, aguarda o dono); aqui vão só as checagens Codex dela
+  (escolha de conta, catálogo de modelo, reserva), chamadas pela rota Python por `/internal`.
 - **Os 22 módulos Python que importam `codex_contas`** continuam com um leitor só de leitura
   (listar contas, ambiente, dono do rollout) até saírem nas partes 6/7. A escrita (criar, apagar,
   marcador, login) é só do Rust; um golden do formato do marcador roda nos dois lados.
