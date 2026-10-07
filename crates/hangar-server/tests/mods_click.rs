@@ -46,8 +46,15 @@ async fn run(mods: &Mods, pane: &FakePane, until: Instant, call: ModsCall) -> Re
     click::finish(&ctx).await;
     result
 }
+/// O mod do lugar, como o `view` desenha: a faixa e os painéis `pm-mock*` são do `pm-mock`.
+fn plugin_of(site: &str) -> &'static str {
+    if site == BAND_SITE || site.starts_with("pm-mock") { "pm-mock" } else { "vitrine" }
+}
+fn press_call(site: &str, key: &str) -> ModsCall {
+    ModsCall::Press { site: site.into(), plugin: plugin_of(site).into(), key: key.into() }
+}
 async fn press(mods: &Mods, pane: &FakePane, site: &str, key: &str) -> Result<Value, ModsError> {
-    run(mods, pane, far(), ModsCall::Press { site: site.into(), key: key.into() }).await
+    run(mods, pane, far(), press_call(site, key)).await
 }
 async fn close(mods: &Mods, pane: &FakePane, site: &str) -> Result<Value, ModsError> {
     run(mods, pane, far(), ModsCall::Close { site: site.into() }).await
@@ -175,7 +182,7 @@ async fn wheel_without_the_label_goes_down_then_up_and_refuses() {
     let (mods, pane) = setup("tmux-230-longo-topo-150", longo());
     let (limits, undo, clicked) = (Limits { ring_step: Duration::from_secs(60), ..Limits::quick() }, Undo::default(), Mutex::default());
     let ctx = Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: far(), undo: &undo, life: 1, clicked: &clicked };
-    let result = click::dispatch(&ctx, ModsCall::Press { site: "vitrine-longo".into(), key: "V37-meio".into() }).await;
+    let result = click::dispatch(&ctx, press_call("vitrine-longo", "V37-meio")).await;
     click::finish(&ctx).await;
     assert_eq!(code(result), "erro_mod_painel_nao_alcancavel");
     assert_eq!(pane.actions(), ["wheel 20 115 true", "wheel 20 115 false"]);
@@ -226,7 +233,7 @@ async fn a_short_deadline_sends_nothing_to_the_mod() {
     // Faixa inteira e o rótulo achado: só falta o clique, e não sobra tempo para a confirmação (300 ms de
     // `confirm` no `quick` mais 300 ms de folga). O clique não sai.
     let (mods, pane) = setup("tmux-452-faixa-expandida-150", pm());
-    let result = run(&mods, &pane, Instant::now() + Duration::from_millis(400), ModsCall::Press { site: "above-prompt".into(), key: "pm-abrir".into() }).await;
+    let result = run(&mods, &pane, Instant::now() + Duration::from_millis(400), press_call("above-prompt", "pm-abrir")).await;
     assert_eq!(code(result), "erro_mod_clique_sem_resposta");
     assert!(pane.actions().is_empty(), "nenhuma ação sem tempo para ela: {:?}", pane.actions());
 }
@@ -238,7 +245,7 @@ async fn the_task_answers_then_cleans_up_and_releases_the_pane() {
     pane.clients(0);
     pane.on_resize(click::TALL_ROWS, vec![Show("tmux-232-longo-meio-150")]);
     pane.on_click((38, 92), vec![Pressed("vitrine-longo", "V37-meio")]);
-    let (task, answer) = click::spawn(parts(&mods, &pane), ModsCall::Press { site: "vitrine-longo".into(), key: "V37-meio".into() }, far());
+    let (task, answer) = click::spawn(parts(&mods, &pane), press_call("vitrine-longo", "V37-meio"), far());
     assert_eq!(answer.await.unwrap().unwrap(), json!({}));
     task.await.unwrap();
     assert_eq!(pane.actions(), ["resize 150 250", "click 38 92", "resize 150 45"]);
@@ -252,7 +259,7 @@ async fn a_cut_in_the_middle_of_the_stretch_gives_the_height_back() {
     pane.clients(0);
     pane.on_resize(click::TALL_ROWS, vec![Show("tmux-232-longo-meio-150")]);
     pane.stall_on("click 38 92");
-    let (task, _answer) = click::spawn(parts(&mods, &pane), ModsCall::Press { site: "vitrine-longo".into(), key: "V37-meio".into() }, far());
+    let (task, _answer) = click::spawn(parts(&mods, &pane), press_call("vitrine-longo", "V37-meio"), far());
     until(|| pane.actions().contains(&"click 38 92".to_string())).await;
     assert!(pane.held());
     // A tarefa some no meio: a guarda passa a limpeza a outra tarefa.
@@ -270,7 +277,7 @@ async fn a_cut_in_the_middle_of_the_cleanup_redoes_what_was_left() {
     pane.on_resize(click::TALL_ROWS, vec![Show("tmux-232-longo-meio-150")]);
     pane.on_click((38, 92), vec![Pressed("vitrine-longo", "V37-meio")]);
     pane.stall_on("resize 150 45");
-    let (task, answer) = click::spawn(parts(&mods, &pane), ModsCall::Press { site: "vitrine-longo".into(), key: "V37-meio".into() }, far());
+    let (task, answer) = click::spawn(parts(&mods, &pane), press_call("vitrine-longo", "V37-meio"), far());
     assert_eq!(answer.await.unwrap().unwrap(), json!({}));
     until(|| pane.actions().contains(&"resize 150 45".to_string())).await;
     assert!(pane.held());
@@ -287,7 +294,7 @@ async fn a_give_back_that_fails_in_the_request_is_retried_in_the_cleanup() {
     pane.clients(0);
     pane.stall_on("resize 150 45");
     let until = Instant::now() + Duration::from_millis(1200);
-    let result = run(&mods, &pane, until, ModsCall::Press { site: "vitrine-longo".into(), key: "V37-meio".into() }).await;
+    let result = run(&mods, &pane, until, press_call("vitrine-longo", "V37-meio")).await;
     assert_eq!(code(result), "erro_mod_clique_sem_resposta");
     assert_eq!(pane.actions(), ["resize 150 250", "resize 150 45", "resize 150 45"]);
 }
@@ -352,6 +359,43 @@ async fn keyboard_for_a_band_button() {
     assert_eq!(keys(&pane), ["C-x Tab", "Enter", "C-x Tab", "C-x Tab", "C-x Tab", "C-x Tab"]);
 }
 
+/// A faixa do `pm()` com outro mod desenhando um botão com a mesma `key` (`pm-abrir`) antes do do `pm-mock`.
+fn band_with_a_shared_key() -> TerminalView {
+    let mut v = pm();
+    v.above = json!({"type": "Box", "children": [mods_support::pane::button("pm-abrir", "Outro", "outro-mod"),
+        mods_support::pane::button("pm-abrir", "▸ xx-00000", "pm-mock")]});
+    v
+}
+
+#[tokio::test]
+async fn keyboard_skips_another_mod_with_the_same_key() {
+    // O anel passa primeiro pelo botão do outro mod, com a mesma `key`: o `Enter` só sai no do mod pedido.
+    let (mods, pane) = setup("tmux-14-ciclo-4-prompt", band_with_a_shared_key());
+    pane.mouse(false);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-5-faixa"), FocusOf("above-prompt", "outro-mod", "pm-abrir")]);
+    pane.on_keys("C-x Tab", vec![FocusOf("above-prompt", "pm-mock", "pm-abrir")]);
+    pane.on_keys("Enter", vec![Pressed("above-prompt", "pm-abrir")]);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-6-painel-1")]);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-7-painel-2")]);
+    back_from_mr(&pane);
+    press(&mods, &pane, "above-prompt", "pm-abrir").await.unwrap();
+    assert_eq!(keys(&pane), ["C-x Tab", "C-x Tab", "Enter", "C-x Tab", "C-x Tab", "C-x Tab", "C-x Tab"]);
+}
+
+#[tokio::test]
+async fn keyboard_refuses_a_shared_key_when_the_focus_comes_without_the_mod() {
+    // O plugin do Hangar carregado antes de o foco levar o mod: com a `key` em dois mods, não há como saber
+    // de qual é o foco, e a recusa é a de antes, sem `Enter`.
+    let (mods, pane) = setup("tmux-14-ciclo-4-prompt", band_with_a_shared_key());
+    pane.mouse(false);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-5-faixa"), Focus("above-prompt", "pm-abrir", false)]);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-6-painel-1")]);
+    pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-7-painel-2")]);
+    back_from_mr(&pane);
+    assert_eq!(code(press(&mods, &pane, "above-prompt", "pm-abrir").await), "erro_mod_botao_inexistente");
+    assert!(!keys(&pane).contains(&"Enter".to_string()), "{:?}", keys(&pane));
+}
+
 #[tokio::test]
 async fn keyboard_refuses_with_a_draft_or_a_dialog_before_any_key() {
     let (mods, pane) = setup("tmux-440-rascunho-150", pm());
@@ -405,7 +449,7 @@ async fn the_keyboard_never_starts_without_time_for_the_enter() {
     // `Enter` (300 ms) e a folga (300 ms). Não sai tecla nenhuma, e o alvo armado é desarmado na limpeza.
     let (mods, pane) = setup("tmux-14-ciclo-4-prompt", pm());
     pane.mouse(false);
-    let result = run(&mods, &pane, Instant::now() + Duration::from_millis(500), ModsCall::Press { site: "pm-mock-mr".into(), key: "mr-a".into() }).await;
+    let result = run(&mods, &pane, Instant::now() + Duration::from_millis(500), press_call("pm-mock-mr", "mr-a")).await;
     assert_eq!(code(result), "erro_mod_clique_sem_resposta");
     assert!(keys(&pane).is_empty(), "{:?}", pane.actions());
     assert_eq!(mods.armed_focus(S), None);
@@ -420,7 +464,7 @@ async fn a_cut_in_the_middle_of_the_keyboard_goes_back_and_disarms() {
     pane.on_keys("Tab", vec![]);
     back_from_mr(&pane);
     pane.stall_on("keys Tab");
-    let (task, _answer) = click::spawn(parts(&mods, &pane), ModsCall::Press { site: "pm-mock-mr".into(), key: "mr-a".into() }, far());
+    let (task, _answer) = click::spawn(parts(&mods, &pane), press_call("pm-mock-mr", "mr-a"), far());
     until(|| keys(&pane).contains(&"Tab".to_string())).await;
     assert!(mods.armed_focus(S).is_some() && pane.held());
     // A tarefa some com o teclado no painel e o alvo armado: a limpeza volta ao prompt e desarma.
@@ -480,7 +524,7 @@ async fn a_new_life_in_the_middle_of_the_click_stops_the_actions_and_cleans_up()
     pane.mouse(false);
     pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-5-faixa")]);
     pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-6-painel-1"), NewLife(2)]);
-    let (task, answer) = click::spawn(parts(&mods, &pane), ModsCall::Press { site: "pm-mock-mr".into(), key: "mr-a".into() }, far());
+    let (task, answer) = click::spawn(parts(&mods, &pane), press_call("pm-mock-mr", "mr-a"), far());
     assert!(answer.await.unwrap().is_err());
     task.await.unwrap();
     // O executor da vida antiga morreu com ela: nenhuma tecla depois da troca, nem a da volta ao prompt.
@@ -493,7 +537,7 @@ fn keyboard_press_without_return(mods: &Mods, pane: &Arc<FakePane>) -> (tokio::t
     to_mr(pane);
     pane.on_keys("Tab", vec![Focus("pm-mock-mr", "mr-a", false)]);
     pane.on_keys("Enter", vec![Pressed("pm-mock-mr", "mr-a")]);
-    click::spawn(parts(mods, pane), ModsCall::Press { site: "pm-mock-mr".into(), key: "mr-a".into() }, far())
+    click::spawn(parts(mods, pane), press_call("pm-mock-mr", "mr-a"), far())
 }
 
 /// A primeira reserva que a limpeza manda, logo depois do `Enter`, e o tempo que ela cobre.
@@ -544,7 +588,7 @@ async fn a_hold_that_would_expire_in_the_cleanup_is_renewed() {
     pane.on_keys("Tab", vec![]);
     back_from_mr(&pane);
     pane.stall_on("keys Tab");
-    let (task, answer) = click::spawn(parts(&mods, &pane), ModsCall::Press { site: "pm-mock-mr".into(), key: "mr-a".into() },
+    let (task, answer) = click::spawn(parts(&mods, &pane), press_call("pm-mock-mr", "mr-a"),
         Instant::now() + Duration::from_millis(1000));
     until(|| keys(&pane).contains(&"Tab".to_string())).await;
     pane.stall_on("keys C-x Tab");
@@ -567,7 +611,7 @@ async fn a_rename_in_the_middle_stops_the_actions_but_the_cleanup_still_goes_bac
     pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-6-painel-1"), Rename]);
     pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-7-painel-2")]);
     back_from_mr(&pane);
-    let (task, answer) = click::spawn(parts(&mods, &pane), ModsCall::Press { site: "pm-mock-mr".into(), key: "mr-a".into() }, far());
+    let (task, answer) = click::spawn(parts(&mods, &pane), press_call("pm-mock-mr", "mr-a"), far());
     assert_eq!(code(answer.await.unwrap()), "erro_mod_painel_inexistente");
     task.await.unwrap();
     assert_eq!(keys(&pane), ["C-x Tab", "C-x Tab", "C-x Tab", "C-x Tab", "C-x Tab"]);
@@ -589,7 +633,7 @@ async fn a_late_band_focus_refuses_instead_of_pressing_with_the_focus_ahead() {
         tokio::spawn(async move {
             until(|| mods.armed_focus(S).is_some()).await;
             tokio::time::sleep(Duration::from_millis(150)).await;
-            if let Some(attempt) = mods.armed_focus(S) { mods.focused(S, &attempt, "above-prompt", Some("pm-abrir"), false); }
+            if let Some(attempt) = mods.armed_focus(S) { mods.focused(S, &attempt, "above-prompt", None, Some("pm-abrir"), false); }
         })
     };
     assert_eq!(code(press(&mods, &pane, "above-prompt", "pm-abrir").await), "erro_mod_clique_sem_resposta");
@@ -654,7 +698,7 @@ async fn a_click_after_another_waits_the_gap_also_in_the_next_request() {
     // (até 450 ms o Claude Code engole o segundo), e com prazo de sobra o intervalo é sempre o maior.
     let gap = Duration::from_millis(300);
     let (limits, clicked) = (Limits { click_gap: Duration::from_millis(100), click_gap_near: gap, ..Limits::quick() }, Mutex::default());
-    for call in [ModsCall::Press { site: "vitrine-texto".into(), key: "V04-vitrine-texto".into() }, ModsCall::Close { site: "vitrine-texto".into() }] {
+    for call in [press_call("vitrine-texto", "V04-vitrine-texto"), ModsCall::Close { site: "vitrine-texto".into() }] {
         let undo = Undo::default();
         let ctx = Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: far(), undo: &undo, life: 1, clicked: &clicked };
         click::dispatch(&ctx, call).await.unwrap();
@@ -677,7 +721,7 @@ async fn the_click_gap_counts_against_the_deadline() {
         Undo::default(), Mutex::default());
     let ctx = Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: Instant::now() + Duration::from_millis(900), undo: &undo,
         life: 1, clicked: &clicked };
-    let result = click::dispatch(&ctx, ModsCall::Press { site: "vitrine-texto".into(), key: "V04-vitrine-texto".into() }).await;
+    let result = click::dispatch(&ctx, press_call("vitrine-texto", "V04-vitrine-texto")).await;
     click::finish(&ctx).await;
     assert_eq!(code(result), "erro_mod_clique_sem_resposta");
     assert_eq!(pane.actions(), ["click 0 87"]);
@@ -689,7 +733,7 @@ async fn the_keyboard_ring_with_a_dozen_band_buttons_fits_the_deadline() {
     // 70 ms na prova, aqui 100 ms) e os tempos de verdade: cada passo do anel é a tecla e uma leitura, sem
     // reler o tamanho, e o `Enter` sai dentro dos 7,5 s do pedido.
     let mut faixa = pm();
-    faixa.above = json!({"type": "Box", "children": (0..12).map(|i| mods_support::pane::button(&format!("b{i}"), &format!("Botão {i}"), "vitrine"))
+    faixa.above = json!({"type": "Box", "children": (0..12).map(|i| mods_support::pane::button(&format!("b{i}"), &format!("Botão {i}"), "pm-mock"))
         .collect::<Vec<_>>()});
     let (mods, pane) = setup("tmux-14-ciclo-4-prompt", faixa);
     pane.mouse(false);
@@ -706,7 +750,7 @@ async fn the_keyboard_ring_with_a_dozen_band_buttons_fits_the_deadline() {
     let (limits, undo, clicked) = (Limits::default(), Undo::default(), Mutex::default());
     let ctx = Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: started + Duration::from_millis(7500), undo: &undo, life: 1,
         clicked: &clicked };
-    let result = click::dispatch(&ctx, ModsCall::Press { site: "pm-mock-mr".into(), key: "mr-a".into() }).await;
+    let result = click::dispatch(&ctx, press_call("pm-mock-mr", "mr-a")).await;
     click::finish(&ctx).await;
     result.unwrap();
     assert_eq!(keys(&pane).iter().filter(|k| *k == "C-x Tab").count(), 14 + 2, "o anel inteiro e a volta ao prompt");
@@ -733,7 +777,7 @@ async fn a_button_beyond_the_wheel_goes_to_the_keyboard() {
     keyboard_to_mr(&pane);
     let (limits, undo, clicked) = (Limits { wheel_events: 16, ..Limits::quick() }, Undo::default(), Mutex::default());
     let ctx = Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: far(), undo: &undo, life: 1, clicked: &clicked };
-    let result = click::dispatch(&ctx, ModsCall::Press { site: "pm-mock-mr".into(), key: "mr-a".into() }).await;
+    let result = click::dispatch(&ctx, press_call("pm-mock-mr", "mr-a")).await;
     click::finish(&ctx).await;
     result.unwrap();
     assert_eq!(pane.actions().iter().filter(|a| a.starts_with("wheel ")).count(), 16);
@@ -749,7 +793,7 @@ async fn the_wheel_stops_in_time_for_the_keyboard() {
     let (limits, undo, clicked) = (Limits { wheel_gap: Duration::from_millis(50), ..Limits::quick() }, Undo::default(), Mutex::default());
     let ctx = Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: Instant::now() + Duration::from_millis(2500), undo: &undo,
         life: 1, clicked: &clicked };
-    let result = click::dispatch(&ctx, ModsCall::Press { site: "pm-mock-mr".into(), key: "mr-a".into() }).await;
+    let result = click::dispatch(&ctx, press_call("pm-mock-mr", "mr-a")).await;
     click::finish(&ctx).await;
     result.unwrap();
     let wheels = pane.actions().iter().filter(|a| a.starts_with("wheel ")).count();
@@ -769,7 +813,7 @@ async fn the_wheel_stops_in_time_for_a_short_ring_on_psmux() {
     let (limits, undo, clicked) = (Limits::default(), Undo::default(), Mutex::default());
     let ctx = Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: Instant::now() + Duration::from_millis(7500), undo: &undo,
         life: 1, clicked: &clicked };
-    let result = click::dispatch(&ctx, ModsCall::Press { site: "pm-mock-mr".into(), key: "mr-a".into() }).await;
+    let result = click::dispatch(&ctx, press_call("pm-mock-mr", "mr-a")).await;
     click::finish(&ctx).await;
     result.unwrap();
     assert!(pane.actions().iter().any(|a| a.starts_with("wheel ")), "a roda tentou antes");
@@ -783,7 +827,7 @@ async fn the_cleanup_covers_a_long_ring_back_to_the_prompt() {
     // num painel; o prazo da volta passa a acompanhar o tamanho do anel.
     let ids: Vec<String> = (0..10).map(|i| format!("p{i}")).collect();
     let mut grande = view(&ids.iter().map(|id| (id.as_str(), id.as_str(), "k", "x")).collect::<Vec<_>>());
-    grande.above = json!({"type": "Box", "children": (0..12).map(|i| mods_support::pane::button(&format!("b{i}"), &format!("Botão {i}"), "vitrine"))
+    grande.above = json!({"type": "Box", "children": (0..12).map(|i| mods_support::pane::button(&format!("b{i}"), &format!("Botão {i}"), "pm-mock"))
         .collect::<Vec<_>>()});
     let (mods, pane) = setup("tmux-14-ciclo-4-prompt", grande);
     pane.mouse(false);
@@ -794,7 +838,7 @@ async fn the_cleanup_covers_a_long_ring_back_to_the_prompt() {
     pane.on_keys("C-x Tab", vec![Show("tmux-14-ciclo-9-prompt")]);
     let pane = Arc::new(pane);
     let parts = Parts { limits: Limits::default(), ..parts(&mods, &pane) };
-    let (task, answer) = click::spawn(parts, ModsCall::Press { site: "above-prompt".into(), key: "b0".into() }, Instant::now() + Duration::from_millis(7500));
+    let (task, answer) = click::spawn(parts, press_call("above-prompt", "b0"), Instant::now() + Duration::from_millis(7500));
     assert_eq!(answer.await.unwrap().unwrap(), json!({}));
     task.await.unwrap();
     assert_eq!(keys(&pane).iter().filter(|k| *k == "C-x Tab").count(), 1 + 22);
@@ -816,7 +860,7 @@ async fn a_far_click_short_of_time_uses_the_shorter_gap_but_a_near_one_does_not(
     let ctx = Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: Instant::now() + Duration::from_millis(1000), undo: &undo,
         life: 1, clicked: &clicked };
     let started = Instant::now();
-    let result = click::dispatch(&ctx, ModsCall::Press { site: "vitrine-texto".into(), key: "V04-vitrine-texto".into() }).await;
+    let result = click::dispatch(&ctx, press_call("vitrine-texto", "V04-vitrine-texto")).await;
     click::finish(&ctx).await;
     // O título saiu com o intervalo curto; o botão, vizinho do título, já não tinha tempo para o longo.
     assert_eq!(pane.actions().first().map(String::as_str), Some("click 0 87"));
@@ -829,7 +873,7 @@ async fn a_far_click_short_of_time_uses_the_shorter_gap_but_a_near_one_does_not(
 fn pm_with_band_and_far_button() -> TerminalView {
     let mut v = pm();
     v.panes[0].tree = json!({"type": "Box", "children": [mods_support::pane::button("pm-a", "Botão lá embaixo", "pm-mock")]});
-    v.above = json!({"type": "Box", "children": (0..12).map(|i| mods_support::pane::button(&format!("b{i}"), &format!("Botão {i}"), "vitrine"))
+    v.above = json!({"type": "Box", "children": (0..12).map(|i| mods_support::pane::button(&format!("b{i}"), &format!("Botão {i}"), "pm-mock"))
         .collect::<Vec<_>>()});
     v
 }
@@ -847,7 +891,7 @@ async fn with_the_band_collapsed_the_wheel_runs_before_the_keyboard() {
     let (limits, undo, clicked) = (Limits::default(), Undo::default(), Mutex::default());
     let ctx = Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: Instant::now() + Duration::from_millis(7500), undo: &undo,
         life: 1, clicked: &clicked };
-    let result = click::dispatch(&ctx, ModsCall::Press { site: "pm-mock-pm".into(), key: "pm-a".into() }).await;
+    let result = click::dispatch(&ctx, press_call("pm-mock-pm", "pm-a")).await;
     click::finish(&ctx).await;
     result.unwrap();
     assert!(pane.actions().iter().filter(|a| a.starts_with("wheel ")).count() > 5, "{:?}", pane.actions());
@@ -869,7 +913,7 @@ async fn the_ring_does_not_wait_the_screen_on_band_buttons_that_are_not_drawn() 
     let started = Instant::now();
     let ctx = Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: started + Duration::from_millis(7500), undo: &undo, life: 1,
         clicked: &clicked };
-    let result = click::dispatch(&ctx, ModsCall::Press { site: "pm-mock-pm".into(), key: "pm-a".into() }).await;
+    let result = click::dispatch(&ctx, press_call("pm-mock-pm", "pm-a")).await;
     click::finish(&ctx).await;
     result.unwrap();
     assert!(started.elapsed() < Duration::from_millis(12 * 300), "{:?}", started.elapsed());
@@ -891,7 +935,7 @@ async fn another_tab_in_front_and_a_far_button_keep_time_for_the_keyboard() {
     let (limits, undo, clicked) = (Limits::default(), Undo::default(), Mutex::default());
     let ctx = Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: Instant::now() + Duration::from_millis(7500), undo: &undo,
         life: 1, clicked: &clicked };
-    let result = click::dispatch(&ctx, ModsCall::Press { site: "pm-mock-mr".into(), key: "mr-a".into() }).await;
+    let result = click::dispatch(&ctx, press_call("pm-mock-mr", "mr-a")).await;
     click::finish(&ctx).await;
     result.unwrap();
     assert_eq!(pane.actions()[0], "click 0 104", "a aba foi ativada pelo mouse");
@@ -907,7 +951,7 @@ async fn a_pane_the_wheel_does_not_roll_goes_to_the_keyboard() {
     keyboard_to_mr(&pane);
     let (limits, undo, clicked) = (Limits::quick(), Undo::default(), Mutex::default());
     let ctx = Ctx { name: S, pane: &pane, mods: &mods, limits: &limits, until: far(), undo: &undo, life: 1, clicked: &clicked };
-    let result = click::dispatch(&ctx, ModsCall::Press { site: "pm-mock-mr".into(), key: "mr-a".into() }).await;
+    let result = click::dispatch(&ctx, press_call("pm-mock-mr", "mr-a")).await;
     click::finish(&ctx).await;
     result.unwrap();
     assert_eq!(pane.actions().iter().filter(|a| a.starts_with("wheel ")).count(), 2, "para baixo e para cima");
@@ -915,11 +959,12 @@ async fn a_pane_the_wheel_does_not_roll_goes_to_the_keyboard() {
 }
 
 #[tokio::test]
-async fn the_same_key_from_two_mods_on_the_terminal_triggers_neither() {
-    // Dois mods com a mesma `key` no painel: nenhuma ação chega ao pane, e a resposta é a do item ausente.
+async fn the_same_key_twice_from_one_mod_on_the_terminal_triggers_neither() {
+    // O mesmo mod com a mesma `key` duas vezes no painel: nenhuma ação chega ao pane, e a resposta é a do item
+    // ausente.
     let mut v = pm();
     v.panes[1].tree = json!({"type": "Box", "children": [mods_support::pane::button("mr-a", "Abrir", "pm-mock"),
-        mods_support::pane::button("mr-a", "Outro", "vitrine")]});
+        mods_support::pane::button("mr-a", "Outro", "pm-mock")]});
     let (mods, pane) = setup("tmux-02-apos-clicar-mr-150", v);
     assert_eq!(code(press(&mods, &pane, "pm-mock-mr", "mr-a").await), "erro_mod_botao_inexistente");
     assert!(pane.actions().is_empty(), "{:?}", pane.actions());

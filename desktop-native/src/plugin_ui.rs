@@ -18,23 +18,31 @@ const TEXT_PX: f32 = 12.;
 /// Faixa sem nada para mostrar: ninguém desenhou, ou só o marcador do próprio engine.
 pub fn is_empty(tree: &Value) -> bool { !tree.is_object() || tree["type"] == "engine" }
 
-/// Clique num botão de mod: (site, key). O site é `above-prompt` ou o id do painel.
-pub type Press = Rc<dyn Fn(&str, &str, &mut Window, &mut App)>;
+/// Clique num botão de mod: (site, botão). O site é `above-prompt` ou o id do painel.
+pub type Press = Rc<dyn Fn(&str, &Control, &mut Window, &mut App)>;
+
+/// Uma ação sobre o painel de id dado: trocar de aba (`Show`) ou fechar pelo `✕` (`Close`).
+pub type PaneAction = Rc<dyn Fn(&str, &mut Window, &mut App)>;
+pub type Close = PaneAction;
+
+/// O que o app manda ao backend para achar um botão ou um campo de mod: o mod que o desenhou e a `key`, que só é
+/// única dentro do mod.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Control { pub plugin: String, pub key: String }
 pub const BAND_SITE: &str = "above-prompt";
-pub const PANE_CLOSE_KEY: &str = "__close__";
 
 /// Troca de aba pedida no app: o id do painel.
-pub type Show = Rc<dyn Fn(&str, &mut Window, &mut App)>;
+pub type Show = PaneAction;
 
 /// O ponteiro entrou (`true`) ou saiu de um escopo de hover ou de um cartão absoluto; o id é o lugar e o caminho.
 pub type Hover = Rc<dyn Fn(&str, bool, &mut Window, &mut App)>;
 
-/// Envio de um `Input` pelo rótulo de envio: (lugar, key).
-pub type Submit = Rc<dyn Fn(&str, &str, &mut Window, &mut App)>;
+/// Envio de um `Input` pelo rótulo de envio: (lugar, campo).
+pub type Submit = Rc<dyn Fn(&str, &Control, &mut Window, &mut App)>;
 
 /// Um `Input` de mod como a árvore o traz.
 #[derive(Debug, PartialEq)]
-pub struct FieldSpec { pub key: String, pub placeholder: String, pub value: String }
+pub struct FieldSpec { pub control: Control, pub placeholder: String, pub value: String }
 
 /// O campo de texto que o app mantém para um `Input`, pela `key`. `seen` é o desenho do mod (contador de eventos
 /// `plugin_ui`) que o campo já conferiu; `sync` decide quando o valor desenhado entra; `outbox` põe em ordem o que o
@@ -139,11 +147,11 @@ impl Outbox {
     }
 }
 
-/// Os `Input` com `key` de uma árvore, na ordem dela.
+/// Os `Input` com `key` e mod de uma árvore, na ordem dela.
 pub fn fields(tree: &Value) -> Vec<FieldSpec> {
     fn walk(v: &Value, out: &mut Vec<FieldSpec>) {
-        if let Some(key) = (v["type"] == "Input").then(|| v["props"]["key"].as_str()).flatten().filter(|k| !k.is_empty()) {
-            out.push(FieldSpec { key: key.to_owned(), placeholder: text_of(&v["props"]["placeholder"]), value: text_of(&v["props"]["value"]) });
+        if let Some(control) = control_of(v, "Input") {
+            out.push(FieldSpec { control, placeholder: text_of(&v["props"]["placeholder"]), value: text_of(&v["props"]["value"]) });
         }
         for k in children(v) { walk(k, out); }
     }
@@ -152,8 +160,10 @@ pub fn fields(tree: &Value) -> Vec<FieldSpec> {
     out
 }
 
-/// Chave do campo no app: o lugar e a `key`, que só é única dentro do lugar.
-pub fn field_id(site: &str, key: &str) -> String { format!("{site}\u{1f}{key}") }
+/// Chave do campo no app: o lugar, o mod e a `key`, que só é única dentro do mod.
+pub fn field_id(site: &str, field: &Control) -> String { id_of(site, &field.plugin, &field.key) }
+
+fn id_of(site: &str, plugin: &str, key: &str) -> String { format!("{site}\u{1f}{plugin}\u{1f}{key}") }
 
 /// A sessão aceita digitação pelo app: interface vinda da superfície (sessão sem terminal) e fora do só leitura. Com
 /// terminal, ou com servidor que não diz a fonte, o campo do mod só aceita digitação no terminal.
@@ -166,8 +176,23 @@ pub fn input_kind(event: &InputEvent) -> Option<&'static str> {
 
 /// O corpo do `plugin/input`, ou `None` quando a sessão não aceita digitação pelo app. Não se compara com o valor
 /// desenhado: o `set_value` que repõe o campo não emite `Change`, então todo `change` que chega é da pessoa.
-pub fn input_request(source: Option<UiSource>, read_only: bool, site: &str, key: &str, kind: &str, value: &str) -> Option<Value> {
-    accepts_typing(source, read_only).then(|| json!({"site": site, "key": key, "kind": kind, "value": value}))
+pub fn input_request(source: Option<UiSource>, read_only: bool, site: &str, field: &Control, kind: &str, value: &str) -> Option<Value> {
+    accepts_typing(source, read_only).then(|| json!({"site": site, "plugin": field.plugin, "key": field.key, "kind": kind, "value": value}))
+}
+
+/// A nova tentativa com um servidor de antes destas rotas: sem a rota `close` (404 ou 405), o `✕` vai pelo `press` com
+/// a `key` reservada; com o corpo estrito que recusa o mod (422), `press` e `input` vão uma vez sem ele, e o servidor
+/// acha o mod pela `key`, como antes. `None`: a falha é do pedido, não da versão.
+pub fn older_server_retry(action: &'static str, body: &Value, status: Option<u16>) -> Option<(&'static str, Value)> {
+    match (action, status) {
+        ("close", Some(404 | 405)) => Some(("press", json!({"site": body["site"], "key": "__close__"}))),
+        ("press" | "input", Some(422)) if body.get("plugin").is_some() => {
+            let mut older = body.clone();
+            older.as_object_mut()?.remove("plugin");
+            Some((action, older))
+        }
+        _ => None,
+    }
 }
 
 /// O que o app passa para desenhar a faixa e os painéis: quem atende o clique e a troca de aba, a largura da faixa
@@ -175,6 +200,8 @@ pub fn input_request(source: Option<UiSource>, read_only: bool, site: &str, key:
 /// rótulo e não há `✕`. `columns` é a largura, em colunas, para a qual a faixa foi desenhada.
 pub struct View<'a> {
     pub press: Option<Press>,
+    /// Sem ele (sessão só leitura), o painel não tem `✕`.
+    pub close: Option<Close>,
     pub show: Show,
     /// Rolagem da fileira de abas: o app manda rolar até a aba ativa quando ela muda.
     pub tabs_scroll: &'a ScrollHandle,
@@ -334,9 +361,20 @@ impl Element for Clip {
     }
 }
 
-pub fn button_key(v: &Value) -> Option<String> {
-    (v["type"] == "Button").then(|| v["props"]["key"].as_str().filter(|k| !k.is_empty()).map(str::to_owned)).flatten()
+/// O controle (`Button` ou `Input`) que o app aciona: sem `key` ou sem o mod do `press`, não há a quem mandar.
+fn control_of(v: &Value, kind: &str) -> Option<Control> {
+    control_ref(v, kind).map(|(plugin, key)| Control { plugin: plugin.to_owned(), key: key.to_owned() })
 }
+
+/// O `(mod, key)` do controle, emprestado da árvore: o desenho por quadro só aloca o `Control` quando precisa guardá-lo.
+fn control_ref<'a>(v: &'a Value, kind: &str) -> Option<(&'a str, &'a str)> {
+    if v["type"] != kind { return None; }
+    let key = v["props"]["key"].as_str().filter(|k| !k.is_empty())?;
+    let plugin = v["press"]["plugin"].as_str().filter(|p| !p.is_empty())?;
+    Some((plugin, key))
+}
+
+pub fn button_control(v: &Value) -> Option<Control> { control_of(v, "Button") }
 
 /// Só http(s) vira link, como no web: `javascript:` ou `file:` abririam o que o mod não deveria.
 pub fn safe_href(v: &Value) -> Option<String> {
@@ -453,11 +491,11 @@ pub fn band(tree: &Value, view: &View) -> Option<AnyElement> {
 
 /// O `✕` do lugar: fecha o painel da frente, como a marca do engine no terminal.
 fn close_mark(site: &str, view: &View) -> Option<AnyElement> {
-    let press = view.press.clone()?;
+    let close = view.close.clone()?;
     let site = site.to_owned();
     Some(div().id(SharedString::from(format!("plg-close-{site}"))).flex_shrink_0().cursor_pointer().px(px(4.))
         .text_color(theme::muted()).child("✕")
-        .on_click(move |_, window, cx| press(&site, PANE_CLOSE_KEY, window, cx)).into_any_element())
+        .on_click(move |_, window, cx| close(&site, window, cx)).into_any_element())
 }
 
 /// Largura máxima de uma aba, em células: título maior que isso sai cortado com reticências.
@@ -564,18 +602,18 @@ fn element(v: &Value, c: &Ctx, at: &Spot) -> AnyElement {
                 .when(p["italic"] == true, |el| el.italic())
                 .when(p["underline"] == true, |el| el.underline())
                 .when(p["strikethrough"] == true, |el| el.line_through());
-            match (button_key(v), c.view.press.clone()) {
-                (Some(key), Some(press)) => {
+            match (button_control(v), c.view.press.clone()) {
+                (Some(button), Some(press)) => {
                     let site = c.site.to_owned();
-                    base.id(SharedString::from(format!("plg-{site}-{key}"))).cursor_pointer()
+                    base.id(SharedString::from(format!("plg-{site}-{}-{}", button.plugin, button.key))).cursor_pointer()
                         .hover(|el| el.underline())
-                        .on_click(move |_, window, cx| press(&site, &key, window, cx))
+                        .on_click(move |_, window, cx| press(&site, &button, window, cx))
                         .child(label).into_any_element()
                 }
                 _ => base.child(label).into_any_element(),
             }
         }
-        "Input" => field(p, c),
+        "Input" => field(v, p, c),
         "Image" => div().text_color(theme::muted()).child(text_of(&p["alt"])).into_any_element(),
         _ => div().flex().children(children(v).iter().enumerate().map(|(i, k)| node(k, c, &at.child(i, lit)))).into_any_element(),
     }
@@ -593,40 +631,41 @@ fn keyless_text(p: &Value) -> (String, bool) {
 
 /// `Input` de mod: rótulo, campo e rótulo de envio. Sem `submit` (sessão com terminal, servidor que não diz a fonte ou só
 /// leitura) o campo fica desabilitado, com a dica de digitar no terminal; sem `key`, desabilitado e sem a dica.
-fn field(p: &Value, c: &Ctx) -> AnyElement {
+fn field(v: &Value, p: &Value, c: &Ctx) -> AnyElement {
     let label = text_of(&p["label"]);
-    let key = p["key"].as_str().filter(|k| !k.is_empty());
+    let control = control_ref(v, "Input");
     // Sem `min_w_0`: a linha não fica menor que rótulo, campo mínimo e envio. Encolhida, os filhos dela saíam por cima
     // dos vizinhos; assim, numa faixa estreita a linha passa da borda e o lugar a recorta.
     let row = div().flex().flex_row().items_center().gap_2()
         .when(!label.is_empty(), |el| el.child(div().flex_shrink_0().child(label)));
     let (min, basis) = field_width();
-    let Some(state) = key.and_then(|k| c.view.fields.get(&field_id(c.site, k))) else {
-        // `Input` sem `key`: não há o que mandar ao mod em nenhuma sessão, e o campo fica desabilitado, sem a dica do
-        // terminal, como no web. (Com `key` o campo já existe aqui: o app o cria antes de desenhar a faixa e os painéis.)
+    let Some(state) = control.and_then(|(plugin, key)| c.view.fields.get(&id_of(c.site, plugin, key))) else {
+        // `Input` sem `key` ou sem mod: não há o que mandar ao mod em nenhuma sessão, e o campo fica desabilitado, sem a
+        // dica do terminal, como no web. (Com os dois o campo já existe aqui: o app o cria antes de desenhar a faixa e os
+        // painéis.)
         let (text, hint) = keyless_text(p);
         return row.child(div().flex_grow(1.).flex_shrink(1.).flex_basis(px(basis)).min_w(px(min)).px(px(CELL_W / 2.))
             .rounded(px(4.)).border_1().border_color(theme::border()).bg(theme::raised()).opacity(0.6)
             .overflow_hidden().whitespace_nowrap().when(hint, |el| el.text_color(theme::muted())).child(text))
             .into_any_element();
     };
-    let typing = c.view.submit.clone().zip(key.map(str::to_owned));
+    let typing = c.view.submit.clone().zip(control.map(|(plugin, key)| Control { plugin: plugin.to_owned(), key: key.to_owned() }));
     // Sem largura mínima o campo ficava com 18 px (só o enfeite) numa linha com textos ao lado, e o clique caía no
     // enfeite, que tem foco próprio: o anel acendia, mas o texto não recebia a digitação.
     let row = row.child(div().flex_grow(1.).flex_shrink(1.).flex_basis(px(basis)).min_w(px(min))
         .child(Input::new(&state.state).small().disabled(typing.is_none())));
     match typing {
-        Some((submit, key)) => {
+        Some((submit, field)) => {
             let site = c.site.to_owned();
             let send = Some(text_of(&p["submitLabel"])).filter(|s| !s.is_empty())
                 .unwrap_or_else(|| crate::i18n::tr_shared("plugin_input_enviar", &[]));
-            row.child(div().id(SharedString::from(format!("plg-enviar-{site}-{key}"))).flex_shrink_0().cursor_pointer()
+            row.child(div().id(SharedString::from(format!("plg-enviar-{site}-{}-{}", field.plugin, field.key))).flex_shrink_0().cursor_pointer()
                 .px(px(CELL_W)).rounded(px(4.)).bg(theme::raised()).child(send)
                 // Sem isto, o `mousedown` passa o foco à raiz da janela, o campo perde o foco antes do clique, e o
                 // redesenho do blur poria o valor pendente do mod no campo: o envio mandaria esse valor, não o digitado.
                 // Com o foco no campo, o envio pelo rótulo segue o mesmo caminho do Enter.
                 .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-                .on_click(move |_, window, cx| submit(&site, &key, window, cx))).into_any_element()
+                .on_click(move |_, window, cx| submit(&site, &field, window, cx))).into_any_element()
         }
         None => div().flex().flex_col().child(row)
             .child(div().text_color(theme::muted()).whitespace_normal().child(crate::i18n::tr_shared("plugin_input_no_terminal", &[])))
@@ -930,9 +969,9 @@ fn unmark(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     // Importação explícita: `super::*` traz o `test` do gpui_kit, e o `#[test]` passaria a ser o dele.
-    use super::{accepts_typing, active_pane, box_background, button_key, cell_color, color, field_id, fields, FieldSync, fills_place, follow_local, follows_server,
-        hover_props, input_kind, input_request, is_empty, keep_hovered, keyless_text, Outbox, pane_ids, tab_scroll_target, TabScroll, plain_deep, raster_row, raster_runs, safe_href,
-        scope_active, surfaces, text_row, toast, wants_hover, FieldSpec, Surfaces, Toast, UiSource};
+    use super::{accepts_typing, active_pane, box_background, button_control, cell_color, color, field_id, fields, FieldSync, fills_place, follow_local, follows_server,
+        hover_props, input_kind, input_request, is_empty, older_server_retry, keep_hovered, keyless_text, Outbox, pane_ids, tab_scroll_target, TabScroll, plain_deep, raster_row, raster_runs, safe_href,
+        scope_active, surfaces, text_row, toast, wants_hover, Control, FieldSpec, Surfaces, Toast, UiSource};
     use gpui_kit::component::input::InputEvent;
     use gpui_kit::{rgb, Hsla};
     use serde_json::{json, Value};
@@ -1008,10 +1047,12 @@ mod tests {
     }
 
     #[test]
-    fn button_key_reads_only_buttons() {
-        assert_eq!(button_key(&json!({"type": "Button", "props": {"key": "cp-1"}})), Some("cp-1".to_owned()));
-        assert_eq!(button_key(&json!({"type": "Button", "props": {}})), None);
-        assert_eq!(button_key(&json!({"type": "Text", "props": {"key": "x"}})), None);
+    fn button_control_reads_only_buttons_with_key_and_mod() {
+        let press = json!({"plugin": "pm-mock", "handle": 1});
+        assert_eq!(button_control(&json!({"type": "Button", "props": {"key": "cp-1"}, "press": press})), Some(ctl("pm-mock", "cp-1")));
+        assert_eq!(button_control(&json!({"type": "Button", "props": {"key": "cp-1"}})), None);
+        assert_eq!(button_control(&json!({"type": "Button", "props": {}, "press": press})), None);
+        assert_eq!(button_control(&json!({"type": "Text", "props": {"key": "x"}, "press": press})), None);
     }
 
     #[test]
@@ -1170,18 +1211,23 @@ mod tests {
         assert!(hovered.is_empty());
     }
 
+    fn ctl(plugin: &str, key: &str) -> Control { Control { plugin: plugin.into(), key: key.into() } }
+
     #[test]
-    fn fields_are_the_inputs_with_a_key_in_tree_order() {
-        let tree = json!({"type": "Box", "children": [amostras()["campoV18"], {"type": "Input", "props": {"label": "sem key"}}]});
-        assert_eq!(fields(&tree), vec![FieldSpec { key: "V18-campo".into(), placeholder: "digite e tecle Enter".into(), value: String::new() }]);
+    fn fields_are_the_inputs_with_a_key_and_a_mod_in_tree_order() {
+        let tree = json!({"type": "Box", "children": [amostras()["campoV18"], {"type": "Input", "props": {"label": "sem key"}},
+            {"type": "Input", "props": {"key": "sem-mod"}}]});
+        assert_eq!(fields(&tree), vec![FieldSpec { control: ctl("vitrine", "V18-campo"), placeholder: "digite e tecle Enter".into(), value: String::new() }]);
         assert!(fields(&json!({"type": "Text", "children": ["a"]})).is_empty());
         // Ordem da árvore, inclusive dentro de filhos aninhados.
+        let press = json!({"plugin": "m", "handle": 1});
         let two = json!({"type": "Box", "children": [
-            {"type": "Box", "children": [{"type": "Input", "props": {"key": "b", "value": "x"}}]},
-            {"type": "Input", "props": {"key": "a", "placeholder": "p"}}]});
-        assert_eq!(fields(&two).iter().map(|f| f.key.as_str()).collect::<Vec<_>>(), ["b", "a"]);
-        // A `key` só é única dentro do lugar.
-        assert_ne!(field_id("vitrine-campos", "V18-campo"), field_id("above-prompt", "V18-campo"));
+            {"type": "Box", "children": [{"type": "Input", "props": {"key": "b", "value": "x"}, "press": press}]},
+            {"type": "Input", "props": {"key": "a", "placeholder": "p"}, "press": press}]});
+        assert_eq!(fields(&two).iter().map(|f| f.control.key.as_str()).collect::<Vec<_>>(), ["b", "a"]);
+        // A `key` só é única dentro do mod, e o mod só dentro do lugar.
+        assert_ne!(field_id("vitrine-campos", &ctl("vitrine", "V18-campo")), field_id("above-prompt", &ctl("vitrine", "V18-campo")));
+        assert_ne!(field_id("above-prompt", &ctl("um", "k")), field_id("above-prompt", &ctl("outro", "k")));
     }
 
     #[test]
@@ -1191,9 +1237,9 @@ mod tests {
         assert!(!accepts_typing(Some(UiSource::Terminal), false));
         assert!(!accepts_typing(None, false));
         assert!(!accepts_typing(Some(UiSource::Surface), true));
-        assert_eq!(input_request(Some(UiSource::Terminal), false, "s", "k", "change", "a"), None);
-        assert_eq!(input_request(None, false, "s", "k", "submit", "a"), None);
-        assert_eq!(input_request(Some(UiSource::Surface), true, "s", "k", "submit", "a"), None);
+        assert_eq!(input_request(Some(UiSource::Terminal), false, "s", &ctl("m", "k"), "change", "a"), None);
+        assert_eq!(input_request(None, false, "s", &ctl("m", "k"), "submit", "a"), None);
+        assert_eq!(input_request(Some(UiSource::Surface), true, "s", &ctl("m", "k"), "submit", "a"), None);
     }
 
     #[test]
@@ -1204,9 +1250,26 @@ mod tests {
     }
 
     #[test]
-    fn input_request_carries_site_key_kind_and_value() {
-        assert_eq!(input_request(Some(UiSource::Surface), false, "vitrine-campos", "V18-campo", "change", ""),
-            Some(json!({"site": "vitrine-campos", "key": "V18-campo", "kind": "change", "value": ""})));
+    fn an_older_server_gets_one_retry_in_its_own_contract() {
+        let press = json!({"site": "faixa", "plugin": "m", "key": "k"});
+        assert_eq!(older_server_retry("press", &press, Some(422)), Some(("press", json!({"site": "faixa", "key": "k"}))));
+        let input = json!({"site": "p", "plugin": "m", "key": "k", "kind": "change", "value": "a"});
+        assert_eq!(older_server_retry("input", &input, Some(422)), Some(("input", json!({"site": "p", "key": "k", "kind": "change", "value": "a"}))));
+        for status in [404, 405] {
+            assert_eq!(older_server_retry("close", &json!({"site": "p"}), Some(status)), Some(("press", json!({"site": "p", "key": "__close__"}))));
+        }
+        // A segunda tentativa já vai sem o mod, e uma recusa de verdade (409, sem resposta) não é versão.
+        assert_eq!(older_server_retry("press", &json!({"site": "faixa", "key": "k"}), Some(422)), None);
+        assert_eq!(older_server_retry("press", &press, Some(409)), None);
+        assert_eq!(older_server_retry("close", &json!({"site": "p"}), Some(409)), None);
+        assert_eq!(older_server_retry("show", &json!({"site": "p"}), Some(404)), None);
+        assert_eq!(older_server_retry("press", &press, None), None);
+    }
+
+    #[test]
+    fn input_request_carries_site_mod_key_kind_and_value() {
+        assert_eq!(input_request(Some(UiSource::Surface), false, "vitrine-campos", &ctl("vitrine", "V18-campo"), "change", ""),
+            Some(json!({"site": "vitrine-campos", "plugin": "vitrine", "key": "V18-campo", "kind": "change", "value": ""})));
     }
 
     #[test]

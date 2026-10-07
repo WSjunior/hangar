@@ -78,11 +78,12 @@ async fn a_renamed_session_is_found_by_its_birth_name() {
 async fn presses_toasts_copies_focus_and_scroll() {
     let (_python, server, mods, _probe) = setup().await;
     let since = Instant::now();
-    assert_eq!(post(server, "pressed", signed("t", json!({"requestId": "a", "element": "k"}))).await.0, 200);
-    assert!(mods.wait_pressed("t", 1, "a", "k", since - Duration::from_millis(1), Duration::from_millis(10)).await);
+    assert_eq!(post(server, "pressed", signed("t", json!({"requestId": "a", "element": "k", "plugin": "m"}))).await.0, 200);
+    assert!(mods.wait_pressed("t", 1, "a", "m", "k", since - Duration::from_millis(1), Duration::from_millis(10)).await);
+    assert!(!mods.wait_pressed("t", 1, "a", "outro", "k", since - Duration::from_millis(1), Duration::from_millis(10)).await);
     assert_eq!(post(server, "toast", signed("t", json!({"text": "aviso", "timeoutMs": 4000, "plugin": "m"}))).await.0, 200);
     assert!(mods.replay("t").iter().any(|(event, data)| *event == "plugin_toast" && data.contains("aviso")));
-    let attempt = mods.begin_click("t", "a", "k");
+    let attempt = mods.begin_click("t", "a", "vitrine", "k");
     let long = "á".repeat(65536);
     assert_eq!(post(server, "copied", signed("t", json!({"attempt": attempt, "text": long}))).await.0, 200, "o teto do Python, em caracteres");
     assert_eq!(post(server, "copied", signed("t", json!({"attempt": "outra", "text": "x"}))).await.0, 409);
@@ -90,7 +91,12 @@ async fn presses_toasts_copies_focus_and_scroll() {
     let armed = mods.arm_focus("t", 1, "a", Some("m"), "k");
     let target = post(server, "focus-target", signed("t", json!({"requestId": "a", "plugin": "m", "element": "x"}))).await.1;
     assert_eq!(target, json!({"armed": true, "attempt": armed, "rewrite": "k"}));
-    assert_eq!(post(server, "focused", signed("t", json!({"attempt": armed, "requestId": "a", "element": "k", "denied": false}))).await.0, 200);
+    let seq = mods.focus_seq("t", 1);
+    assert_eq!(post(server, "focused", signed("t", json!({"attempt": armed, "requestId": "a", "plugin": "m", "element": "k", "denied": false}))).await.0, 200);
+    let seen = mods.wait_focus("t", 1, &armed, seq, Duration::from_millis(10), |_| true).await.unwrap();
+    assert_eq!(seen.plugin.as_deref(), Some("m"), "o mod do foco chega ao clique");
+    assert_eq!(post(server, "focused", signed("t", json!({"attempt": armed, "requestId": "a", "element": "k", "denied": false}))).await.0, 200,
+        "o plugin de antes desta versão não manda o mod");
     assert_eq!(post(server, "focused", signed("t", json!({"attempt": "velha", "requestId": "a", "element": "k", "denied": false}))).await.0, 409);
     assert_eq!(post(server, "scroll", signed("t", json!({"requestId": "a", "offset": 67, "bodyRows": 38, "contentRows": 205}))).await.0, 200);
     assert_eq!(mods.last_scroll("t", 1, "a").1, Some(67));

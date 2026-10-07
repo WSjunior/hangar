@@ -105,7 +105,7 @@ test("rolagem e foco com alvo armado vão ao backend, e a key armada entra no ev
   expect(bodies(posts, "scroll")).toEqual([{ ...ponte, requestId: "pm-a", offset: 90, bodyRows: 10, contentRows: 100 }]);
   expect(bodies(posts, "focus-target")).toEqual([{ ...ponte, requestId: "pm-a", plugin: "paineis", element: "outro" }]);
   expect(focos).toEqual(["alvo"]);
-  expect(bodies(posts, "focused")).toEqual([{ ...ponte, attempt: "t-1", requestId: "pm-a", element: "alvo", denied: false }]);
+  expect(bodies(posts, "focused")).toEqual([{ ...ponte, attempt: "t-1", requestId: "pm-a", plugin: "paineis", element: "alvo", denied: false }]);
 });
 
 test("na janela do foco armado, o envio do composer só cai com o alvo confirmado como armado", PLUGINS, async ($, on) => {

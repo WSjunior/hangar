@@ -72,10 +72,10 @@ async fn post(server: std::net::SocketAddr, name: &str, route: &str, body: Value
 #[tokio::test]
 async fn press_and_close_go_to_the_surface() {
     let (python, server, _mods, link) = setup(FakeLink::default()).await;
-    assert_eq!(post(server, "s", "press", json!({"site": "above-prompt", "key": "abrir"}), Some(OWNER)).await, (200, json!({"ok": true})));
-    assert_eq!(post(server, "s", "press", json!({"site": "painel", "key": "__close__"}), Some(OWNER)).await.0, 200);
+    assert_eq!(post(server, "s", "press", json!({"site": "above-prompt", "plugin": "vitrine", "key": "abrir"}), Some(OWNER)).await, (200, json!({"ok": true})));
+    assert_eq!(post(server, "s", "close", json!({"site": "painel"}), Some(OWNER)).await.0, 200);
     assert_eq!(*link.calls.lock().unwrap(), vec![
-        ModsCall::Press { site: "above-prompt".into(), key: "abrir".into() },
+        ModsCall::Press { site: "above-prompt".into(), plugin: "vitrine".into(), key: "abrir".into() },
         ModsCall::Close { site: "painel".into() }]);
     assert_eq!(python.transfer_calls(), 2, "cada operação pergunta à guarda da troca de agente");
 }
@@ -85,7 +85,7 @@ async fn refusal_becomes_409_with_code() {
     let link = FakeLink::default();
     link.replies.lock().unwrap().push_back(Err(stale()));
     let (_python, server, _mods, _link) = setup(link).await;
-    let (status, body) = post(server, "s", "press", json!({"site": "above-prompt", "key": "abrir"}), Some(OWNER)).await;
+    let (status, body) = post(server, "s", "press", json!({"site": "above-prompt", "plugin": "vitrine", "key": "abrir"}), Some(OWNER)).await;
     assert_eq!(status, 409);
     assert_eq!(body["detail"]["code"], "erro_mod_desenho_vencido");
 }
@@ -93,10 +93,12 @@ async fn refusal_becomes_409_with_code() {
 #[tokio::test]
 async fn other_session_or_guest_goes_to_python() {
     let (python, server, _mods, link) = setup(FakeLink::default()).await;
-    assert_eq!(post(server, "outra", "press", json!({"site": "x", "key": "y"}), Some(OWNER)).await.1, "from-python");
+    assert_eq!(post(server, "outra", "press", json!({"site": "x", "plugin": "vitrine", "key": "y"}), Some(OWNER)).await.1, "from-python");
     assert_eq!(python.hits_to("/api/sessions/outra/plugin/press"), 1);
     assert_eq!(post(server, "outra", "show", json!({"site": "x"}), Some(OWNER)).await.1, "from-python");
-    assert_eq!(post(server, "s", "input", json!({"site": "x", "key": "y", "kind": "change", "value": ""}), Some("errado")).await.1, "from-python");
+    assert_eq!(post(server, "outra", "close", json!({"site": "x"}), Some(OWNER)).await.1, "from-python");
+    assert_eq!(python.hits_to("/api/sessions/outra/plugin/close"), 1);
+    assert_eq!(post(server, "s", "input", json!({"site": "x", "plugin": "vitrine", "key": "y", "kind": "change", "value": ""}), Some("errado")).await.1, "from-python");
     assert!(link.calls.lock().unwrap().is_empty());
     assert_eq!(python.transfer_calls(), 0, "o que segue ao Python passa pela guarda dele, não pela do Rust");
 }
@@ -106,7 +108,7 @@ async fn input_outside_the_surface_is_refused_in_rust() {
     // Sem superfície no Rust não há por onde digitar no campo do mod, e o Python não tem a rota: a recusa
     // sai do Rust, com o código que o app traduz.
     let (python, server, _mods, _link) = setup(FakeLink::default()).await;
-    let (status, body) = post(server, "outra", "input", json!({"site": "p", "key": "k", "kind": "submit", "value": "olá"}), Some(OWNER)).await;
+    let (status, body) = post(server, "outra", "input", json!({"site": "p", "plugin": "vitrine", "key": "k", "kind": "submit", "value": "olá"}), Some(OWNER)).await;
     assert_eq!((status, body["detail"]["code"].as_str()), (409, Some("erro_mod_sem_digitacao")));
     // B4: a `msg` é a frase nova, que vale para a sessão com terminal e para a sem terminal fora da superfície.
     assert_eq!(body["detail"]["msg"], "Nesta sessão, o campo do mod só aceita digitação no terminal ou não está ligado ao app.");
@@ -118,9 +120,9 @@ async fn input_outside_the_surface_is_refused_in_rust() {
 async fn transfer_in_progress_is_refused_before_the_mod() {
     let (python, server, _mods, link) = setup(FakeLink::default()).await;
     python.set_transfer(Some(StatusCode::CONFLICT));
-    for (route, body) in [("press", json!({"site": "above-prompt", "key": "abrir"})),
+    for (route, body) in [("press", json!({"site": "above-prompt", "plugin": "vitrine", "key": "abrir"})),
                           ("show", json!({"site": "painel"})),
-                          ("input", json!({"site": "painel", "key": "V18-campo", "kind": "change", "value": "o"}))] {
+                          ("input", json!({"site": "painel", "plugin": "vitrine", "key": "V18-campo", "kind": "change", "value": "o"}))] {
         let (status, answer) = post(server, "s", route, body, Some(OWNER)).await;
         assert_eq!((status, answer["detail"]["code"].as_str()), (409, Some("session_transfer_busy")), "{route}");
     }
@@ -128,7 +130,7 @@ async fn transfer_in_progress_is_refused_before_the_mod() {
     // A12: a guarda é perguntada a cada operação, inclusive a cada `change` do campo.
     assert_eq!(python.transfer_calls(), 3);
     python.set_transfer(None);
-    assert_eq!(post(server, "s", "press", json!({"site": "above-prompt", "key": "abrir"}), Some(OWNER)).await.0, 200);
+    assert_eq!(post(server, "s", "press", json!({"site": "above-prompt", "plugin": "vitrine", "key": "abrir"}), Some(OWNER)).await.0, 200);
 }
 
 #[tokio::test]
@@ -136,7 +138,7 @@ async fn guard_without_answer_refuses_with_code() {
     // Dono único: sem a confirmação do Python o Rust recusa com código; não repassa nem chama o mod.
     let (python, server, _mods, link) = setup(FakeLink::default()).await;
     python.set_transfer(Some(StatusCode::INTERNAL_SERVER_ERROR));
-    let (status, body) = post(server, "s", "press", json!({"site": "above-prompt", "key": "abrir"}), Some(OWNER)).await;
+    let (status, body) = post(server, "s", "press", json!({"site": "above-prompt", "plugin": "vitrine", "key": "abrir"}), Some(OWNER)).await;
     // B2: a falha da consulta tem código próprio, com tradução (`erro_mod_guarda_indisponivel`).
     assert_eq!((status, body["detail"]["code"].as_str()), (503, Some("erro_mod_guarda_indisponivel")));
     assert!(link.calls.lock().unwrap().is_empty());
@@ -150,7 +152,7 @@ async fn conflict_without_detail_is_a_guard_failure() {
     python.set_transfer(Some(StatusCode::CONFLICT));
     for raw in ["", "{}", r#"{"detail": "texto"}"#] {
         python.set_transfer_body(Some(raw));
-        let (status, body) = post(server, "s", "press", json!({"site": "above-prompt", "key": "abrir"}), Some(OWNER)).await;
+        let (status, body) = post(server, "s", "press", json!({"site": "above-prompt", "plugin": "vitrine", "key": "abrir"}), Some(OWNER)).await;
         assert_eq!((status, body["detail"]["code"].as_str()), (503, Some("erro_mod_guarda_indisponivel")), "{raw:?}");
     }
     assert!(link.calls.lock().unwrap().is_empty());
@@ -176,14 +178,14 @@ async fn busy_turn_answers_before_the_app_gives_up_without_the_mod() {
     let turn = mods.link("s").unwrap().lock;
     let held = turn.lock().await;
     let start = Instant::now();
-    let (status, body) = post(server, "s", "press", json!({"site": "above-prompt", "key": "abrir"}), Some(OWNER)).await;
+    let (status, body) = post(server, "s", "press", json!({"site": "above-prompt", "plugin": "vitrine", "key": "abrir"}), Some(OWNER)).await;
     assert_eq!((status, body["detail"]["code"].as_str()), (409, Some("erro_mod_clique_sem_resposta")));
     assert!(start.elapsed() < APP_GIVES_UP, "{:?}", start.elapsed());
     assert!(link.calls.lock().unwrap().is_empty());
     assert_eq!(python.transfer_calls(), 0);
     // Solta a vez: o pedido seguinte passa.
     drop(held);
-    assert_eq!(post(server, "s", "press", json!({"site": "above-prompt", "key": "abrir"}), Some(OWNER)).await.0, 200);
+    assert_eq!(post(server, "s", "press", json!({"site": "above-prompt", "plugin": "vitrine", "key": "abrir"}), Some(OWNER)).await.0, 200);
 }
 
 #[tokio::test]
@@ -191,7 +193,7 @@ async fn stuck_mod_is_cut_before_the_app_gives_up_and_frees_the_turn() {
     // O que sobra do prazo limita a chamada ao mod: preso, ele não segura o app nem a vez da sessão.
     let (_python, server, mods, link) = setup(FakeLink::with(FakeInner { delay: Duration::from_secs(30), ..Default::default() })).await;
     let start = Instant::now();
-    let (status, body) = post(server, "s", "press", json!({"site": "above-prompt", "key": "abrir"}), Some(OWNER)).await;
+    let (status, body) = post(server, "s", "press", json!({"site": "above-prompt", "plugin": "vitrine", "key": "abrir"}), Some(OWNER)).await;
     assert_eq!((status, body["detail"]["code"].as_str()), (409, Some("erro_mod_clique_sem_resposta")));
     assert!(start.elapsed() < APP_GIVES_UP, "{:?}", start.elapsed());
     assert_eq!(link.calls.lock().unwrap().len(), 1);
@@ -203,25 +205,53 @@ async fn stuck_mod_is_cut_before_the_app_gives_up_and_frees_the_turn() {
 async fn show_and_input_validate_and_answer() {
     let (python, server, _mods, link) = setup(FakeLink::default()).await;
     assert_eq!(post(server, "s", "show", json!({"site": "painel"}), Some(OWNER)).await, (200, json!({"ok": true, "shown_id": "painel"})));
-    assert_eq!(post(server, "s", "input", json!({"site": "painel", "key": "V18-campo", "kind": "submit", "value": "olá"}), Some(OWNER)).await,
+    assert_eq!(post(server, "s", "input", json!({"site": "painel", "plugin": "vitrine", "key": "V18-campo", "kind": "submit", "value": "olá"}), Some(OWNER)).await,
         (200, json!({"ok": true, "value": "olá"})));
-    for bad in [json!({"site": "p", "key": "k", "kind": "blur", "value": ""}),
-                json!({"site": "p", "key": "k", "kind": "change", "value": "x".repeat(16385)}),
-                json!({"site": "p", "key": "k", "kind": "change", "value": "", "extra": 1}),
-                json!({"site": "", "key": "k", "kind": "change", "value": ""})] {
+    for bad in [json!({"site": "p", "plugin": "vitrine", "key": "k", "kind": "blur", "value": ""}),
+                json!({"site": "p", "plugin": "vitrine", "key": "k", "kind": "change", "value": "x".repeat(16385)}),
+                json!({"site": "p", "plugin": "vitrine", "key": "k", "kind": "change", "value": "", "extra": 1}),
+                json!({"site": "", "plugin": "vitrine", "key": "k", "kind": "change", "value": ""}),
+                json!({"site": "p", "plugin": "", "key": "k", "kind": "change", "value": ""})] {
         assert_eq!(post(server, "s", "input", bad, Some(OWNER)).await.0, 422);
+    }
+    for bad in [json!({"site": "p", "plugin": "", "key": "k"}), json!({"site": "p", "key": "k", "extra": 1})] {
+        assert_eq!(post(server, "s", "press", bad, Some(OWNER)).await.0, 422);
+    }
+    for bad in [json!({"site": ""}), json!({"site": "p", "key": "k"})] {
+        assert_eq!(post(server, "s", "close", bad, Some(OWNER)).await.0, 422);
     }
     // Corpo inválido é recusado antes da vez e da guarda: só os dois pedidos válidos a consultaram.
     assert_eq!(python.transfer_calls(), 2);
     assert_eq!(*link.calls.lock().unwrap(), vec![
         ModsCall::Show { site: "painel".into() },
-        ModsCall::Input { site: "painel".into(), key: "V18-campo".into(), submit: true, value: "olá".into() }]);
+        ModsCall::Input { site: "painel".into(), plugin: "vitrine".into(), key: "V18-campo".into(), submit: true, value: "olá".into() }]);
+}
+
+#[tokio::test]
+async fn an_app_without_the_mod_is_still_served() {
+    // O app de antes desta versão não manda o mod: o servidor acha o único mod com a `key` no lugar, recusa a
+    // `key` de dois mods como antes, e o `press` com `__close__` continua fechando o painel.
+    let (_python, server, mods, link) = setup(FakeLink::default()).await;
+    let button = |key: &str, plugin: &str| json!({"type": "Button", "props": {"key": key, "label": key}, "press": {"plugin": plugin, "handle": 1}});
+    let field = |key: &str, plugin: &str| json!({"type": "Input", "props": {"key": key}, "press": {"plugin": plugin, "handle": 2}});
+    mods.publish_ui("s", 1, json!({"above": {"type": "Box", "children": [button("so-um", "vitrine"), button("dois", "vitrine"), button("dois", "outro")]},
+        "panes": [{"id": "painel", "tree": {"type": "Box", "children": [field("campo", "vitrine")]}}],
+        "shown_id": "painel", "columns": 110, "source": "surface"}));
+    assert_eq!(post(server, "s", "press", json!({"site": "above-prompt", "key": "so-um"}), Some(OWNER)).await, (200, json!({"ok": true})));
+    let (status, body) = post(server, "s", "press", json!({"site": "above-prompt", "key": "dois"}), Some(OWNER)).await;
+    assert_eq!((status, body["detail"]["code"].as_str()), (409, Some("erro_mod_botao_inexistente")));
+    assert_eq!(post(server, "s", "press", json!({"site": "painel", "key": "__close__"}), Some(OWNER)).await.0, 200);
+    assert_eq!(post(server, "s", "input", json!({"site": "painel", "key": "campo", "kind": "change", "value": "a"}), Some(OWNER)).await.0, 200);
+    assert_eq!(*link.calls.lock().unwrap(), vec![
+        ModsCall::Press { site: "above-prompt".into(), plugin: "vitrine".into(), key: "so-um".into() },
+        ModsCall::Close { site: "painel".into() },
+        ModsCall::Input { site: "painel".into(), plugin: "vitrine".into(), key: "campo".into(), submit: false, value: "a".into() }]);
 }
 
 #[tokio::test]
 async fn concurrent_presses_run_one_at_a_time() {
     let (_python, server, _mods, link) = setup(FakeLink::with(FakeInner { delay: Duration::from_millis(200), ..Default::default() })).await;
-    let body = json!({"site": "above-prompt", "key": "abrir"});
+    let body = json!({"site": "above-prompt", "plugin": "vitrine", "key": "abrir"});
     let (a, b) = tokio::join!(post(server, "s", "press", body.clone(), Some(OWNER)), post(server, "s", "press", body, Some(OWNER)));
     assert_eq!((a.0, b.0), (200, 200));
     assert_eq!(link.peak.load(SeqCst), 1, "dois aparelhos não se cruzam no mod");
@@ -240,6 +270,6 @@ async fn copy_during_the_click_goes_back_to_the_app() {
     mods.publish_ui("s", 1, json!({"above": null, "shown_id": "vitrine-botoes", "columns": 110, "source": "surface",
         "panes": [{"id": "vitrine-botoes", "title": "Botões", "placement": "dock", "columns": 58,
             "tree": {"type": "Button", "props": {"key": "V44-copiar", "label": "Copiar"}, "press": {"plugin": "vitrine", "handle": 7}}}]}));
-    let (status, body) = post(server, "s", "press", json!({"site": "vitrine-botoes", "key": "V44-copiar"}), Some(OWNER)).await;
+    let (status, body) = post(server, "s", "press", json!({"site": "vitrine-botoes", "plugin": "vitrine", "key": "V44-copiar"}), Some(OWNER)).await;
     assert_eq!((status, body["copied"].as_str()), (200, Some("Texto copiado pela vitrine (V44)")));
 }

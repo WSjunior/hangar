@@ -236,6 +236,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/sessions/{name}/events", get(events).fallback(pass_any))
         // Interface dos mods: o Rust atende a sessão sem terminal dele; o resto segue ao Python.
         .route("/api/sessions/{name}/plugin/press", axum::routing::post(crate::mods::routes::press).fallback(pass_any))
+        .route("/api/sessions/{name}/plugin/close", axum::routing::post(crate::mods::routes::close).fallback(pass_any))
         .route("/api/sessions/{name}/plugin/show", axum::routing::post(crate::mods::routes::show).fallback(pass_any))
         .route("/api/sessions/{name}/plugin/input", axum::routing::post(crate::mods::routes::input).fallback(pass_any))
         // Ponte do plugin do Hangar (S7): o clique do app numa sessão sem terminal do Rust.

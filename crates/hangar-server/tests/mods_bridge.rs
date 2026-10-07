@@ -62,7 +62,7 @@ async fn setup() -> (Arc<Fake>, std::net::SocketAddr, Mods, PluginLike) {
 async fn url_of_an_app_click_goes_back_in_the_press_answer() {
     let (_python, server, _mods, _plugin) = setup().await;
     let response = post(format!("http://{server}/api/sessions/mods-s/plugin/press"),
-        json!({"site": "vitrine-botoes", "key": "V45-url"}), true).await;
+        json!({"site": "vitrine-botoes", "plugin": "vitrine", "key": "V45-url"}), true).await;
     assert_eq!(json_of(response).await, json!({"ok": true, "opened": "https://example.com/vitrine"}));
 }
 
@@ -72,7 +72,7 @@ async fn bridge_checks_token_and_url_and_passes_other_sessions() {
     let base = format!("http://{server}/api/plugin");
     let wrong = post(format!("{base}/press-start"), json!({"sessao": "mods-s", "token": "x", "requestId": "a", "element": "b"}), false).await;
     assert_eq!(wrong.status().as_u16(), 403);
-    let attempt = mods.begin_click("mods-s", "a", "b");
+    let attempt = mods.begin_click("mods-s", "a", "vitrine", "b");
     let ftp = post(format!("{base}/opened"), json!({"sessao": "mods-s", "token": mint(OWNER, "mods-s"), "attempt": attempt, "url": "ftp://x"}), false).await;
     assert_eq!(ftp.status().as_u16(), 400);
     let late = post(format!("{base}/opened"), json!({"sessao": "mods-s", "token": mint(OWNER, "mods-s"), "attempt": "outra", "url": "https://x"}), false).await;
@@ -87,7 +87,7 @@ async fn opened_checks_token_case_size_and_passes_invalid_bodies() {
     let (python, server, mods, _plugin) = setup().await;
     let base = format!("http://{server}/api/plugin");
     let token = mint(OWNER, "mods-s");
-    let attempt = mods.begin_click("mods-s", "a", "b");
+    let attempt = mods.begin_click("mods-s", "a", "vitrine", "b");
     let wrong = post(format!("{base}/opened"), json!({"sessao": "mods-s", "token": "x", "attempt": attempt, "url": "https://x"}), false).await;
     assert_eq!(wrong.status().as_u16(), 403);
     let empty = post(format!("{base}/opened"), json!({"sessao": "mods-s", "token": token, "attempt": attempt, "url": ""}), false).await;
@@ -136,7 +136,7 @@ async fn renamed_session_is_found_by_the_name_its_process_was_born_with() {
     mods.attach_process("renomeada", "mods-s", 2, Arc::new(plugin));
     assert_eq!(mods.bridge_session("mods-s").as_deref(), Some("renomeada"));
     let response = post(format!("http://{server}/api/sessions/renomeada/plugin/press"),
-        json!({"site": "vitrine-botoes", "key": "V45-url"}), true).await;
+        json!({"site": "vitrine-botoes", "plugin": "vitrine", "key": "V45-url"}), true).await;
     assert_eq!(json_of(response).await, json!({"ok": true, "opened": "https://example.com/vitrine"}));
 }
 
@@ -149,7 +149,7 @@ async fn old_name_token_never_acts_on_a_new_session_with_that_name() {
     mods.forget("mods-s", 1);
     mods.attach_process("renomeada", "mods-s", 2, Arc::new(plugin));
     mods.attach_process("mods-s", "processo-novo", 3, Arc::new(mods_support_free::Quiet));
-    let attempt = mods.begin_click("mods-s", "a", "b");
+    let attempt = mods.begin_click("mods-s", "a", "vitrine", "b");
     let base = format!("http://{server}/api/plugin");
     let token = mint(OWNER, "mods-s");
     let start = post(format!("{base}/press-start"), json!({"sessao": "mods-s", "token": token, "requestId": "a", "element": "b"}), false).await;
@@ -157,7 +157,7 @@ async fn old_name_token_never_acts_on_a_new_session_with_that_name() {
     let opened = post(format!("{base}/opened"), json!({"sessao": "mods-s", "token": token, "attempt": attempt, "url": "https://x"}), false).await;
     assert_eq!(opened.text().await.unwrap(), "from-python");
     assert_eq!((python.hits_to("/api/plugin/press-start"), python.hits_to("/api/plugin/opened")), (1, 1));
-    assert!(mods.match_click("mods-s", "a", "b").is_some(), "o clique da sessão nova segue em aberto, sem dono de fora");
+    assert!(mods.match_click("mods-s", "a", None, "b").is_some(), "o clique da sessão nova segue em aberto, sem dono de fora");
     // A renomeada sai do Rust: o nome volta a ter um processo vivo só, e a ponte o atende.
     mods.forget("renomeada", 2);
     assert_eq!(mods.bridge_session("mods-s").as_deref(), Some("mods-s"));
@@ -172,7 +172,7 @@ async fn old_name_of_a_renamed_session_that_now_names_a_session_outside_rust_goe
     mods.forget("mods-s", 1);
     mods.attach_process("renomeada", "mods-s", 2, Arc::new(plugin));
     python.set_info(json!({"provider": "claude", "jsonl": null, "session_key": "outra"}));
-    let attempt = mods.begin_click("renomeada", "a", "b");
+    let attempt = mods.begin_click("renomeada", "a", "vitrine", "b");
     let base = format!("http://{server}/api/plugin");
     let token = mint(OWNER, "mods-s");
     let start = post(format!("{base}/press-start"), json!({"sessao": "mods-s", "token": token, "requestId": "a", "element": "b"}), false).await;
@@ -180,10 +180,10 @@ async fn old_name_of_a_renamed_session_that_now_names_a_session_outside_rust_goe
     let opened = post(format!("{base}/opened"), json!({"sessao": "mods-s", "token": token, "attempt": attempt, "url": "https://x"}), false).await;
     assert_eq!(opened.text().await.unwrap(), "from-python");
     assert_eq!((python.hits_to("/api/plugin/press-start"), python.hits_to("/api/plugin/opened")), (1, 1));
-    assert_eq!(mods.match_click("renomeada", "a", "b").as_deref(), Some(attempt.as_str()), "o clique de B segue em aberto");
+    assert_eq!(mods.match_click("renomeada", "a", None, "b").as_deref(), Some(attempt.as_str()), "o clique de B segue em aberto");
     // Sem sessão A no Python, o nome de nascimento volta a levar a B.
     python.set_info(serde_json::Value::Null);
-    let attempt = mods.begin_click("renomeada", "c", "d");
+    let attempt = mods.begin_click("renomeada", "c", "vitrine", "d");
     let start = json_of(post(format!("{base}/press-start"), json!({"sessao": "mods-s", "token": token, "requestId": "c", "element": "d"}), false).await).await;
     assert_eq!((start["fromApp"].as_bool(), start["attempt"].as_str()), (Some(true), Some(attempt.as_str())));
     // Sem resposta do Python, não dá para saber de quem é o nome: vai a ele.

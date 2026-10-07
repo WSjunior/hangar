@@ -13,7 +13,7 @@
   import { openInNewTab } from '../lib/openTab';
   import { desktop as janela } from '../lib/desktop.svelte';
   import { itemModsCelular, modsCelular, modsNaTela } from '../lib/modsCelular.svelte';
-  import { activePaneId, fieldSender, followLocalTab, inputPluginField, isMissingRoute, parsePluginToast, pluginFailureText, parsePluginUi, pressPluginButton, safeHref, showPluginPane, tabFollowsServer, type PluginInputKind, type PluginSource, type PluginNode as PluginTree, type PluginPane as PluginPaneData, type PluginToast } from '@hangar/core';
+  import { activePaneId, closePluginPane, fieldSender, followLocalTab, inputPluginField, isMissingRoute, parsePluginToast, pluginFailureText, parsePluginUi, pressPluginButton, safeHref, showPluginPane, tabFollowsServer, type PluginControl, type PluginInputKind, type PluginSource, type PluginNode as PluginTree, type PluginPane as PluginPaneData, type PluginToast } from '@hangar/core';
   import SessionSwitcherSheet from '../components/SessionSwitcherSheet.svelte';
   import CreateSessionSheet from '../components/CreateSessionSheet.svelte';
   import UsageSheet from '../components/UsageSheet.svelte';
@@ -504,10 +504,10 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   }
   // O clique vira clique de mouse no terminal da sessão; o que o mod copiar ou mandar abrir acontece
   // aqui, no aparelho de quem clicou, e não na máquina do terminal.
-  async function pressPlugin(site: string, key: string) {
+  async function pressPlugin(site: string, button: PluginControl) {
     if (!modsVisiveis) return;
     try {
-      const r = await pressPluginButton(sessionName, site, key, sessionServer());
+      const r = await pressPluginButton(sessionName, site, button, sessionServer());
       const texto = r.copied;
       if (texto) {
         // Depois do `await` o iOS já não conta o toque como gesto: o aviso vira um botão que copia
@@ -527,6 +527,14 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       showPluginNotice(pluginFailureText(err, m.plugin_clique_falhou), true);
     }
   }
+  async function closePlugin(site: string) {
+    if (!modsVisiveis) return;
+    try {
+      await closePluginPane(sessionName, site, sessionServer());
+    } catch (err) {
+      showPluginNotice(pluginFailureText(err, m.plugin_fechar_falhou), true);
+    }
+  }
   // Trocar de aba avisa o servidor. Seguindo o `shown_id`, a aba só muda quando o novo chega; sem ele (servidor
   // antigo), a troca é local, e o 404/405 da rota que ainda não existe não é erro.
   async function showPlugin(site: string) {
@@ -543,13 +551,14 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // Digitação num `Input` de mod: só a sessão sem terminal aceita (o campo nem fica habilitado nas outras). Cada campo
   // tem a sua fila (`fieldSender`): um pedido em voo por vez, para as teclas chegarem ao mod na ordem.
   const pluginFieldSenders = new Map<string, (kind: PluginInputKind, value: string) => void>();
-  function inputPlugin(site: string, key: string, kind: PluginInputKind, value: string) {
+  function inputPlugin(site: string, field: PluginControl, kind: PluginInputKind, value: string) {
     if (!modsVisiveis) return;
-    const id = `${site}\u001f${key}`;
+    // A `key` só é única dentro do mod: dois mods com a mesma no mesmo lugar têm campos distintos.
+    const id = `${site}\u001f${field.plugin}\u001f${field.key}`;
     let sender = pluginFieldSenders.get(id);
     if (!sender) {
       sender = fieldSender(
-        (k, v) => inputPluginField(sessionName, site, key, k, v, sessionServer()),
+        (k, v) => inputPluginField(sessionName, site, field, k, v, sessionServer()),
         // Código conhecido, a frase dele em qualquer status; sem código, a frase do app ou o motivo do 4xx.
         (err) => showPluginNotice(pluginFailureText(err, m.plugin_input_falhou), true),
       );
@@ -3509,7 +3518,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
           <div class="mods-ocultar"><PluginHide onHide={() => (modsCelular.ligado = false)} /></div>
         {/if}
         {#if pluginActivePane}
-          <PluginPane pane={pluginActivePane} tabs={pluginPanes} onPress={pressPlugin} onShow={showPlugin}
+          <PluginPane pane={pluginActivePane} tabs={pluginPanes} onPress={pressPlugin} onClose={closePlugin} onShow={showPlugin}
                       onInput={pluginSource === 'surface' ? inputPlugin : undefined} />
         {/if}
         <PluginBand tree={pluginBand} columns={pluginColumns} onPress={pressPlugin}

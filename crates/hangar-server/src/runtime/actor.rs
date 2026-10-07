@@ -1270,7 +1270,7 @@ mod tests {
         let mut engine = RuntimeEngine::new("claude",json!({"name":"session","initialized":true}),1,ClockSample { monotonic_s:0.0,epoch_s:0.0 })
             .unwrap().with_mods(crate::mods::state::Mods::default());
         let (mut waiters,mut token) = (ModsWaiters::new(),0u64);
-        let press = || ModsCall::Press { site:"above-prompt".into(),key:"k".into() };
+        let press = || ModsCall::Press { site:"above-prompt".into(),plugin:"m".into(),key:"k".into() };
         let sample = ClockSample { monotonic_s:1.0,epoch_s:1.0 };
         // Vencido: responde sem levar o pedido à superfície (nenhum efeito, nenhum token gasto).
         let (response,mut receive) = oneshot::channel();

@@ -41,7 +41,7 @@ async fn mods_call_before_attach_answers_at_once() {
     let engine = RuntimeEngine::new("claude",target.metadata.clone(),1,ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 }).unwrap()
         .with_mods(Mods::default());
     let handle = RuntimeActor::spawn(target,QueueActor::start(store,lease),connection,engine);
-    let result = tokio::time::timeout(std::time::Duration::from_secs(2),handle.mods(ModsCall::Press { site:"above-prompt".into(),key:"k".into() },budget())).await.unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2),handle.mods(ModsCall::Press { site: "above-prompt".into(), plugin: "vitrine".into(), key: "k".into() },budget())).await.unwrap();
     assert_eq!(result.unwrap_err().code,"erro_mod_botao_inexistente");
     handle.stop().await.unwrap();
     let after = handle.mods(ModsCall::Show { site:"p".into() },budget()).await.unwrap_err();
@@ -67,7 +67,7 @@ async fn surface_session_publishes_the_band_and_answers_a_press() {
     let band = wait_ui(&mods,|ui|ui["above"].to_string().contains("superfície desktop")).await;
     assert_eq!(band["source"],"surface");
     let link = mods.link("session").unwrap().link;
-    let pressed = link.call(ModsCall::Press { site:"above-prompt".into(),key:"abrir-vitrine-botoes".into() },budget()).await.unwrap();
+    let pressed = link.call(ModsCall::Press { site: "above-prompt".into(), plugin: "vitrine".into(), key: "abrir-vitrine-botoes".into() },budget()).await.unwrap();
     assert_eq!(pressed["element"],"abrir-vitrine-botoes");
     wait_ui(&mods,|ui|ui["panes"][0]["id"] == "vitrine-botoes").await;
     let journal = std::fs::read_to_string(dir.path().join("key.queue-state.json")).unwrap();
@@ -86,7 +86,7 @@ async fn closing_the_session_answers_pending_calls() {
     registry.open(claude_target(dir.path(),escuta,true)).await.unwrap();
     wait_ui(&mods,|ui|!ui["above"].is_null()).await;
     let link = mods.link("session").unwrap().link;
-    let pending = tokio::spawn(async move { link.call(ModsCall::Press { site:"above-prompt".into(),key:"abrir-vitrine-botoes".into() },budget()).await });
+    let pending = tokio::spawn(async move { link.call(ModsCall::Press { site: "above-prompt".into(), plugin: "vitrine".into(), key: "abrir-vitrine-botoes".into() },budget()).await });
     // O clique tem que estar em aberto no ator, já no fio, quando a sessão fecha.
     wait_request(&seen,"ui_press").await;
     registry.close("key",1).await.unwrap();

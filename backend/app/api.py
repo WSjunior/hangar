@@ -6038,7 +6038,13 @@ def select_submit(name: str):
 
 class PluginPressBody(_StrictBody):
     site: str = Field(min_length=1, max_length=64)
+    # O mod do botão: a `key` só é única dentro de um mod. O app de antes desta versão não o manda.
+    plugin: str | None = Field(default=None, min_length=1, max_length=256)
     key: str = Field(min_length=1, max_length=256)
+
+
+class PluginCloseBody(_StrictBody):
+    site: str = Field(min_length=1, max_length=64)
 
 
 _MOD_CONVIDADO = erro("erro_mod_convidado",
@@ -6072,10 +6078,27 @@ def _recusa_convidado_no_terminal_do_rust(name: str, request: Request) -> None:
 async def plugin_press(name: str, body: PluginPressBody, request: Request):
     """Clique num botão que um mod desenhou na faixa ou num painel, pedido pelo app."""
     from app import plugin_click
+    # O app de antes da rota `close` fechava o painel pelo `press` com a `key` reservada.
+    if body.plugin is None and body.key == plugin_click.CLOSE_KEY:
+        return await _acao_de_mod(request, plugin_click.close(name, body.site))
+    return await _acao_de_mod(request, plugin_click.press(name, body.site, body.key, body.plugin))
+
+
+@app.post("/api/sessions/{name}/plugin/close", dependencies=[Depends(require_auth),
+    Depends(_recusa_convidado_no_terminal_do_rust), Depends(_transfer_guard)])
+async def plugin_close(name: str, body: PluginCloseBody, request: Request):
+    """Fecha um painel de mod pelo `✕` do cabeçalho, pedido pelo app."""
+    from app import plugin_click
+    return await _acao_de_mod(request, plugin_click.close(name, body.site))
+
+
+async def _acao_de_mod(request: Request, acao):
+    """Roda o clique pela tela com a marca de convidado e traduz as recusas para o app."""
+    from app import plugin_click
     from app.runtime_terminal import GuestRefused, guest_admin
     marca = guest_admin.set(_convidado(request))
     try:
-        return await plugin_click.press(name, body.site, body.key)
+        return await acao
     except plugin_click.PressRefused as e:
         raise HTTPException(409, detail=e.detail)
     except GuestRefused:
