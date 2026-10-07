@@ -5,6 +5,8 @@ use std::{collections::{HashSet, VecDeque}, time::{Duration, Instant}};
 pub const SETTLE: Duration = Duration::from_millis(1500);
 /// Silêncio do microfone exigido antes de soltar o envio.
 pub const SILENCE: Duration = Duration::from_millis(1200);
+/// Teto: ruído acima do limiar não pode segurar o envio para sempre.
+pub const MAX_WAIT: Duration = Duration::from_secs(8);
 /// RMS cru do microfone (depois do AEC/AGC) a partir do qual há voz.
 pub const MIC_VOICE_LEVEL: f32 = 0.02;
 pub const MIN_WORDS: usize = 3;
@@ -112,7 +114,8 @@ impl<T> SendGate<T> {
     pub fn user_spoke(&mut self) -> Option<(T, String)> { self.pending.take().map(|(c, r, _)| (c, r)) }
     pub fn due(&mut self, now: Instant) -> Option<(T, String)> {
         let quiet = self.last_voice.is_none_or(|at| now.saturating_duration_since(at) >= SILENCE);
-        if quiet && self.pending.as_ref().is_some_and(|(_, _, at)| now.duration_since(*at) >= SETTLE) { self.user_spoke() } else { None }
+        let waited = |at: &Instant| { let w = now.duration_since(*at); w >= SETTLE && (quiet || w >= MAX_WAIT) };
+        if self.pending.as_ref().is_some_and(|(_, _, at)| waited(at)) { self.user_spoke() } else { None }
     }
 }
 
@@ -132,7 +135,7 @@ impl SpokenTurns {
         if self.0.len() >= 64 { self.0.clear(); }
         if let Some(turn) = params["turnId"].as_str() { self.0.insert(turn.to_owned()); }
     }
-    pub fn allows(&self, params: &Value) -> bool { params["turnId"].as_str().or_else(|| params["turn"]["id"].as_str()).is_some_and(|turn| self.0.contains(turn)) }
+    pub fn allows(&self, params: &Value) -> bool { params["turnId"].as_str().is_some_and(|turn| self.0.contains(turn)) }
     pub fn turn_completed(&mut self, params: &Value) {
         if let Some(turn) = params["turn"]["id"].as_str().or_else(|| params["turnId"].as_str()) { self.0.remove(turn); }
     }
@@ -204,6 +207,16 @@ mod tests {
         assert!(gate.due(t0 + SETTLE).is_none(), "ainda falando há menos de 1,2 s");
         assert!(gate.due(t0 + Duration::from_millis(2500)).is_none());
         assert_eq!(gate.due(t0 + Duration::from_millis(2700)).map(|(id, _)| id), Some(1));
+    }
+
+    #[test]
+    fn send_has_a_ceiling() {
+        let mut gate = SendGate::default();
+        let t0 = Instant::now();
+        gate.offer(1, "Criar um botão azul de ajuda".into(), t0).unwrap();
+        for ms in (0..=9000).step_by(500) { gate.heard_voice(t0 + Duration::from_millis(ms)); }
+        assert!(gate.due(t0 + Duration::from_secs(7)).is_none());
+        assert_eq!(gate.due(t0 + Duration::from_secs(8)).map(|(id, _)| id), Some(1));
     }
 
     #[test]

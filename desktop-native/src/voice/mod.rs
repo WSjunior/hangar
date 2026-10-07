@@ -232,9 +232,8 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                         let _ = rpc.respond(id, tool_reply("O usuário continuou falando; nada foi enviado. Monte o pedido com a fala completa.", false)).await;
                     }
                     let next = match method.as_str() {
-                        "turn/started" if spoken.allows(&params) => Some(Activity::Thinking),
-                        // A fala pode registrar o turno só depois do turn/started.
-                        "item/started" if params["item"]["type"] == "userMessage" && organizer_busy && spoken.allows(&params) => Some(Activity::Thinking),
+                        // O turno só entra em SpokenTurns quando o userMessage chega, depois do turn/started.
+                        "item/started" | "item/completed" if params["item"]["type"] == "userMessage" && (method == "item/started" || organizer_busy) && spoken.allows(&params) => Some(Activity::Thinking),
                         "item/started" if params["item"]["type"] == "webSearch" => Some(Activity::Searching),
                         "turn/completed" => Some(Activity::Idle),
                         _ => None,
