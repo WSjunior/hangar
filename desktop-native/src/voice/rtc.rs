@@ -1,5 +1,5 @@
 //! Chamada WebRTC direto com a OpenAI: o app-server só troca o SDP; o áudio não passa por ele.
-use crate::voice::audio::{Audio, AudioError, FRAME};
+use crate::voice::{log, audio::{Audio, AudioError, FRAME}};
 use std::{net::{IpAddr, SocketAddr, UdpSocket}, sync::{Arc, Once, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig,
     change::{SdpAnswer, SdpPendingOffer}, format::Codec, media::{Direction, Frequency, MediaKind, MediaTime, Mid}, net::{Protocol, Receive}};
@@ -42,6 +42,7 @@ pub fn offer() -> Result<Offer, RtcError> {
 pub fn run(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: async_channel::Sender<RtcEvent>, stop: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let outcome = drive(offer, answer, muted, &events, &stop);
+        log(format!("rtc thread end outcome={outcome:?}"));
         let _ = events.send_blocking(match outcome { Ok(()) => RtcEvent::Closed, Err(error) => RtcEvent::Failed(error) });
     })
 }
@@ -50,12 +51,28 @@ fn audio_error(error: AudioError) -> RtcError {
     match error { AudioError::Microphone => RtcError::Microphone, AudioError::Speaker => RtcError::Speaker }
 }
 
+/// Contadores da janela de 5 s do diário: dizem se o microfone sai e se o áudio da OpenAI chega.
+#[derive(Default)]
+struct Window { written: u32, write_errors: u32, encode_errors: u32, no_writer: u32, no_opus: u32,
+    received: u32, decode_errors: u32, max_in: f32, max_out: f32 }
+
+const SUMMARY_EVERY: Duration = Duration::from_secs(5);
+
+/// Só o campo `type` dos eventos do canal; o resto pode trazer fala transcrita.
+fn event_type(data: &[u8]) -> String {
+    serde_json::from_slice::<serde_json::Value>(data).ok()
+        .and_then(|v| v["type"].as_str().map(str::to_owned)).unwrap_or_else(|| "?".into())
+}
+
 fn drive(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: &async_channel::Sender<RtcEvent>, stop: &AtomicBool) -> Result<(), RtcError> {
     let Offer { mut rtc, socket, local, mid, pending, .. } = offer;
     let answer = SdpAnswer::from_sdp_string(&answer).map_err(|_| RtcError::Answer)?;
     rtc.sdp_api().accept_answer(pending, answer).map_err(|_| RtcError::Answer)?;
+    log("rtc answer accepted");
     // Abrir o som aqui: o fluxo do cpal fica na thread que o usa, e a tela não espera o WASAPI.
     let mut audio = Audio::start(muted).map_err(audio_error)?;
+    let (mut window, mut last_summary) = (Window::default(), Instant::now());
+    let (mut last_type, mut repeats) = (String::new(), 0u32);
     let mut encoder = opus_rs::OpusEncoder::new(48_000, 1, opus_rs::Application::Voip).map_err(|_| RtcError::Media)?;
     let mut decoder = opus_rs::OpusDecoder::new(48_000, 1).map_err(|_| RtcError::Media)?;
     let (mut connected, mut timestamp, mut buffer) = (false, 0u64, vec![0u8; 2000]);
@@ -68,15 +85,42 @@ fn drive(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: &async_ch
         if events.is_closed() { break Err(RtcError::Network); }
         if !connected && started.elapsed() > CONNECT_DEADLINE { break Err(RtcError::Network); }
         if let Some(error) = audio.failed() { break Err(audio_error(error)); }
+        let (input, output) = audio.levels();
+        (window.max_in, window.max_out) = (window.max_in.max(input), window.max_out.max(output));
+        if last_summary.elapsed() >= SUMMARY_EVERY {
+            let w = std::mem::take(&mut window);
+            log(format!("rtc summary connected={connected} written={} write_errors={} encode_errors={} no_writer={} no_opus={} received={} decode_errors={} max_in={:.4} raw_in_peak={:.4} max_out={:.4} capture_queue={}",
+                w.written, w.write_errors, w.encode_errors, w.no_writer, w.no_opus, w.received, w.decode_errors,
+                w.max_in, audio.take_raw_peak(), w.max_out, audio.capture_len()));
+            last_summary = Instant::now();
+        }
         let timeout = match rtc.poll_output() {
             Err(_) => break Err(RtcError::Network),
             Ok(Output::Transmit(t)) => { let _ = socket.send_to(&t.contents, t.destination); continue; }
             Ok(Output::Event(event)) => {
                 match event {
-                    Event::Connected => { connected = true; audio.reset(); let _ = events.send_blocking(RtcEvent::Connected); }
-                    Event::IceConnectionStateChange(IceConnectionState::Disconnected) => break Err(RtcError::Network),
+                    Event::Connected => { log("rtc connected"); connected = true; audio.reset(); let _ = events.send_blocking(RtcEvent::Connected); }
+                    Event::IceConnectionStateChange(state) => {
+                        log(format!("rtc ice {state:?}"));
+                        if state == IceConnectionState::Disconnected { break Err(RtcError::Network); }
+                    }
+                    Event::ChannelOpen(id, label) => log(format!("rtc channel open id={id:?} label={label}")),
+                    Event::ChannelClose(id) => log(format!("rtc channel close id={id:?}")),
+                    Event::ChannelData(data) => {
+                        // Deltas chegam aos montes: repetição do mesmo tipo vira uma contagem.
+                        let kind = event_type(&data.data);
+                        if kind == last_type { repeats += 1; } else {
+                            if repeats > 0 { log(format!("rtc channel event type={last_type} repeated={repeats}")); }
+                            log(format!("rtc channel event type={kind} bytes={}", data.data.len()));
+                            (last_type, repeats) = (kind, 0);
+                        }
+                    }
                     Event::MediaData(media) => {
-                        if let Ok(n) = decoder.decode(&media.data, FRAME, &mut decoded) { audio.play(&decoded[..n]); }
+                        window.received += 1;
+                        match decoder.decode(&media.data, FRAME, &mut decoded) {
+                            Ok(n) => audio.play(&decoded[..n]),
+                            Err(_) => window.decode_errors += 1,
+                        }
                     }
                     _ => {}
                 }
@@ -88,13 +132,13 @@ fn drive(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: &async_ch
         if connected {
             let mut return_media_failure = false;
             while let Some(frame) = audio.next_frame() {
-                let Ok(len) = encoder.encode(&frame, FRAME, &mut packet) else { continue };
-                let Some(writer) = rtc.writer(mid) else { break };
-                let Some(pt) = writer.payload_params().find(|p| p.spec().codec == Codec::Opus).map(|p| p.pt()) else { break };
+                let Ok(len) = encoder.encode(&frame, FRAME, &mut packet) else { window.encode_errors += 1; continue };
+                let Some(writer) = rtc.writer(mid) else { window.no_writer += 1; break };
+                let Some(pt) = writer.payload_params().find(|p| p.spec().codec == Codec::Opus).map(|p| p.pt()) else { window.no_opus += 1; break };
                 // Falha persistente de escrita deixaria a chamada conectada com o microfone mudo para a OpenAI.
                 match writer.write(pt, Instant::now(), MediaTime::new(timestamp, Frequency::FORTY_EIGHT_KHZ), packet[..len].to_vec()) {
-                    Ok(_) => write_errors = 0,
-                    Err(_) => { write_errors += 1; if write_errors >= 50 { return_media_failure = true; break; } }
+                    Ok(_) => { write_errors = 0; window.written += 1; }
+                    Err(_) => { write_errors += 1; window.write_errors += 1; if write_errors >= 50 { return_media_failure = true; break; } }
                 }
                 timestamp += FRAME as u64;
             }
@@ -137,5 +181,11 @@ mod tests {
         assert!(offer.sdp.contains("m=audio"));
         assert!(offer.sdp.to_lowercase().contains("opus/48000"));
         assert!(offer.sdp.contains("webrtc-datachannel"));
+    }
+
+    #[test]
+    fn event_type_reads_only_the_type() {
+        assert_eq!(event_type(br#"{"type":"session.created","transcript":"oi"}"#), "session.created");
+        assert_eq!(event_type(b"not json"), "?");
     }
 }

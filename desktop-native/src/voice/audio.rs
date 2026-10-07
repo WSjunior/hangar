@@ -68,6 +68,8 @@ struct Shared {
     playback: Mutex<VecDeque<f32>>,
     input_level: AtomicU32,
     output_level: AtomicU32,
+    // Pico do microfone antes do AEC: separa "o microfone não capta" de "o AEC apagou a voz".
+    raw_peak: AtomicU32,
     // 0 = ok, 1 = microfone caiu, 2 = saída caiu
     failed: AtomicU8,
 }
@@ -107,8 +109,10 @@ impl Audio {
         let shared = Arc::new(Shared {
             capture_cap: in_rate as usize / 5,
             capture: Default::default(), render: Default::default(), playback: Default::default(),
-            input_level: AtomicU32::new(0), output_level: AtomicU32::new(0), failed: AtomicU8::new(0),
+            input_level: AtomicU32::new(0), output_level: AtomicU32::new(0), raw_peak: AtomicU32::new(0), failed: AtomicU8::new(0),
         });
+        crate::voice::log(format!("audio in rate={in_rate} ch={in_channels} fmt={:?} out rate={out_rate} ch={out_channels} fmt={:?}",
+            in_config.sample_format(), out_config.sample_format()));
         let input_stream = build_input(&input, &in_config, in_channels, shared.clone()).ok_or(AudioError::Microphone)?;
         let output_stream = build_output(&output, &out_config, out_rate, out_channels, shared.clone()).ok_or(AudioError::Speaker)?;
         input_stream.play().map_err(|_| AudioError::Microphone)?;
@@ -170,6 +174,11 @@ impl Audio {
          f32::from_bits(self.shared.output_level.load(Ordering::Relaxed)))
     }
 
+    /// Pico do microfone cru desde a última leitura.
+    pub fn take_raw_peak(&self) -> f32 { f32::from_bits(self.shared.raw_peak.swap(0, Ordering::Relaxed)) }
+
+    pub fn capture_len(&self) -> usize { self.shared.capture.lock().unwrap().len() }
+
     pub fn failed(&self) -> Option<AudioError> {
         match self.shared.failed.load(Ordering::Relaxed) { 1 => Some(AudioError::Microphone), 2 => Some(AudioError::Speaker), _ => None }
     }
@@ -177,7 +186,10 @@ impl Audio {
 
 fn on_input<T: cpal::SizedSample>(data: &[T], channels: usize, shared: &Shared) where f32: cpal::FromSample<T> {
     let floats: Vec<f32> = data.iter().map(|v| f32::from_sample(*v)).collect();
-    bounded_extend(&mut shared.capture.lock().unwrap(), downmix(&floats, channels), shared.capture_cap);
+    let mono = downmix(&floats, channels);
+    // Float positivo ordena igual aos bits: fetch_max nos bits é o máximo do valor.
+    shared.raw_peak.fetch_max(rms(&mono).to_bits(), Ordering::Relaxed);
+    bounded_extend(&mut shared.capture.lock().unwrap(), mono, shared.capture_cap);
 }
 
 fn on_output<T: cpal::SizedSample + cpal::FromSample<f32>>(data: &mut [T], channels: usize, shared: &Shared,

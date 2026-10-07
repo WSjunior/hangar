@@ -25,7 +25,14 @@ pub(super) struct VoiceUi {
     /// Sobe a cada chamada nova ou parada: eventos de uma chamada velha não mexem na atual.
     pub(super) generation: u64,
     pub(super) phase: Option<Phase>,
+    /// Ganhos 0..1 (entrada, saída), já com o `level_gain`.
     pub(super) levels: (f32, f32),
+    /// Quando a chamada ficou ao vivo: base do cronômetro.
+    pub(super) live_since: Option<std::time::Instant>,
+    /// Repinta o cronômetro a cada segundo; largar a Task para o relógio.
+    pub(super) ticker: Option<Task<()>>,
+    /// Conta repinturas das barras: semente do tremor do equalizador.
+    pub(super) frame: u64,
     pub(super) draft: Option<String>,
     pub(super) error: Option<String>,
     pub(super) muted: bool,
@@ -62,6 +69,37 @@ const REPLY_WAIT: Duration = Duration::from_millis(1500);
 
 /// Altura (px) de uma barra da pílula, em passos inteiros: só mudança de passo repinta a janela.
 fn bar_height(level: f32) -> f32 { 4. + (level.clamp(0., 1.) * 12.).round() }
+
+/// Como o web: RMS de voz fica perto de 0,05–0,2, então ×5 enche a barra.
+pub(super) fn level_gain(rms: f32) -> f32 { (rms * 5.).clamp(0., 1.) }
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) enum Speaker { You, Voice, Idle }
+
+const SPEAKING: f32 = 0.08;
+
+/// Quem fala agora, pelos ganhos; mudo, a entrada não conta.
+pub(super) fn speaker(input: f32, output: f32, muted: bool) -> Speaker {
+    let input = if muted { 0. } else { input };
+    if input > SPEAKING && input >= output { Speaker::You }
+    else if output > SPEAKING && output > input { Speaker::Voice }
+    else { Speaker::Idle }
+}
+
+pub(super) fn call_clock(elapsed: Duration) -> String {
+    let s = elapsed.as_secs();
+    if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{:02}:{:02}", s / 60, s % 60) }
+}
+
+const PROFILE: [f32; 5] = [0.55, 0.9, 1.0, 0.8, 0.6];
+
+/// Alturas (px inteiros) das cinco barras; o tremor sai do contador de repinturas, então é determinístico.
+pub(super) fn equalizer(level: f32, frame: u64, min: f32, max: f32) -> [f32; 5] {
+    std::array::from_fn(|i| {
+        let jitter = 0.85 + 0.05 * ((frame as usize + i * 3) % 4) as f32;
+        min + ((max - min) * (level * PROFILE[i] * jitter).clamp(0., 1.)).round()
+    })
+}
 
 /// O que o resultado diz quando a sessão parou esperando o usuário: a pergunta, ou o fim da última resposta.
 pub(super) fn waiting_text(questions: &[&str], reply: Option<&str>) -> String {
@@ -177,6 +215,7 @@ impl Hangar {
         self.voice.muted = false;
         self.voice.draft = None;
         self.voice.levels = (0., 0.);
+        (self.voice.live_since, self.voice.ticker) = (None, None);
         self.voice.phase = Some(Phase::Connecting);
         let (generation, connection, tx) = (self.voice.generation, self.connection, self.tx.clone());
         self.runtime.spawn(async move {
@@ -193,8 +232,20 @@ impl Hangar {
         self.voice.phase = None;
         self.voice.draft = None;
         self.voice.levels = (0., 0.);
+        (self.voice.live_since, self.voice.ticker) = (None, None);
         self.voice.pending_sends.clear();
         cx.notify();
+    }
+
+    /// Um relógio só por chamada; acorda na virada do segundo do cronômetro para não pular número.
+    fn start_call_clock(&mut self, cx: &mut Context<Self>) {
+        let Some(since) = self.voice.live_since else { return };
+        if self.voice.ticker.is_some() { return; }
+        self.voice.ticker = Some(cx.spawn(async move |this, cx| loop {
+            let into = since.elapsed().subsec_millis() as u64;
+            cx.background_executor().timer(Duration::from_millis(1000 - into)).await;
+            if this.update(cx, |_, cx| cx.notify()).is_err() { break; }
+        }));
     }
 
     fn voice_reply(&self, call: CallId, reply: Value) {
@@ -209,18 +260,26 @@ impl Hangar {
                 self.voice.phase = None;
                 self.voice.draft = None;
                 self.voice.levels = (0., 0.);
+                (self.voice.live_since, self.voice.ticker) = (None, None);
                 self.voice.pending_sends.clear();
             }
             VoiceEvent::Phase(phase) => {
-                if matches!(phase, Phase::Live) { self.voice.error = None; }
+                if matches!(phase, Phase::Live) {
+                    self.voice.error = None;
+                    self.voice.live_since.get_or_insert_with(std::time::Instant::now);
+                    self.start_call_clock(cx);
+                }
                 self.voice.phase = Some(phase);
             }
             VoiceEvent::Levels(input, output) => {
-                // ~16 Hz: a janela só repinta quando a barra muda de passo ou o rótulo falando/ouvindo vira.
-                let shape = |(i, o): (f32, f32)| (bar_height(i), bar_height(o), o > 0.02);
-                let changed = shape(self.voice.levels) != shape((input, output));
-                self.voice.levels = (input, output);
+                // ~16 Hz: a janela só repinta quando a barra muda de passo ou quem fala muda.
+                let muted = self.voice.muted;
+                let shape = |(i, o): (f32, f32)| (bar_height(i), bar_height(o), speaker(i, o, muted));
+                let levels = (level_gain(input), level_gain(output));
+                let changed = shape(self.voice.levels) != shape(levels);
+                self.voice.levels = levels;
                 if !changed { return; }
+                self.voice.frame = self.voice.frame.wrapping_add(1);
             }
             VoiceEvent::Draft(draft) => self.voice.draft = draft,
             VoiceEvent::Failed(failure) => {
@@ -417,12 +476,10 @@ impl Hangar {
                 .child(chrome::small_icon(IconName::Mic, 14., theme::muted()))
                 .when(self.voice.error.is_some(), |el| el.child(div().size(px(6.)).rounded_full().bg(theme::danger()))))
         } else {
-            let (input, output) = self.voice.levels;
-            // Só a altura de um div muda: nada de transform.
-            let bar = |level: f32| div().w(px(3.)).h(px(bar_height(level))).rounded_full().bg(theme::accent());
             let target = self.voice.target.as_deref().map(short);
             button.child(div().flex().items_center().gap(px(6.)).text_size(px(12.5))
-                .child(div().h(px(16.)).flex().items_center().gap(px(2.)).child(bar(input)).child(bar(output)))
+                .child(self.render_equalizer(3., 16., 2.))
+                .children(self.call_time().map(|time| div().text_color(theme::text()).child(time)))
                 .child(div().text_color(theme::muted()).child(self.voice_status()))
                 .children(target.map(|name| div().text_color(theme::faint()).child(name)))
                 .when(self.voice.draft.is_some(), |el| el.child(div().size(px(6.)).rounded_full().bg(theme::warning())))
@@ -433,12 +490,29 @@ impl Hangar {
     }
 
     fn voice_status(&self) -> String {
-        match &self.voice.phase {
-            Some(Phase::Live) if self.voice.muted => tr_shared("codex_voice_muted", &[]),
-            Some(Phase::Live) if self.voice.levels.1 > 0.02 => tr("voice_speaking"),
-            Some(Phase::Live) => tr_shared("codex_voice_listening", &[]),
-            _ => tr_shared("codex_voice_connecting", &[]),
+        let Some(Phase::Live) = &self.voice.phase else { return tr_shared("codex_voice_connecting", &[]) };
+        match speaker(self.voice.levels.0, self.voice.levels.1, self.voice.muted) {
+            Speaker::Voice => tr("voice_assistant_speaking"),
+            _ if self.voice.muted => tr_shared("codex_voice_muted", &[]),
+            Speaker::You => tr("voice_you_speaking"),
+            Speaker::Idle => tr_shared("codex_voice_listening", &[]),
         }
+    }
+
+    fn call_time(&self) -> Option<String> { self.voice.live_since.map(|since| call_clock(since.elapsed())) }
+
+    /// Você: barras de baixo para cima na cor de destaque. Voz: do centro, em verde. Só a altura de um div muda: nada de transform.
+    fn render_equalizer(&self, min: f32, max: f32, width: f32) -> Div {
+        let (input, output) = self.voice.levels;
+        let who = speaker(input, output, self.voice.muted);
+        let (level, color) = match who {
+            Speaker::You => (input, theme::accent()),
+            Speaker::Voice => (output, theme::success()),
+            Speaker::Idle => (0., theme::faint()),
+        };
+        let row = div().h(px(max)).flex().gap(px(2.));
+        let row = if who == Speaker::You { row.items_end() } else { row.items_center() };
+        row.children(equalizer(level, self.voice.frame, min, max).map(|h| div().w(px(width)).h(px(h)).rounded_full().bg(color)))
     }
 
     /// Conteúdo cru do painel: o `render_popup` já põe a superfície.
@@ -453,7 +527,10 @@ impl Hangar {
                 Some(name) => format!("{} · {name}", self.voice_status()),
                 None => self.voice_status(),
             };
-            body = body.child(div().text_xs().text_color(theme::muted()).child(status));
+            body = body.child(div().flex().items_center().gap(px(12.))
+                    .child(self.render_equalizer(4., 32., 4.).gap(px(3.)))
+                    .children(self.call_time().map(|time| div().text_lg().text_color(theme::text()).child(time))))
+                .child(div().text_xs().text_color(theme::muted()).child(status));
         }
         if let Some((picker, _)) = &self.voice.voice_select {
             body = body.child(div().flex().items_center().justify_between().gap(px(12.))
@@ -549,6 +626,40 @@ mod tests {
         assert_eq!(bar_height(0.), 4.);
         assert_eq!(bar_height(1.5), 16.);
         assert_eq!(bar_height(0.40), bar_height(0.41), "ruído pequeno não repinta");
+    }
+
+    #[test]
+    fn level_gain_scales_like_the_web() {
+        assert_eq!(level_gain(0.), 0.);
+        assert!((level_gain(0.1) - 0.5).abs() < 1e-6);
+        assert_eq!(level_gain(0.5), 1.);
+    }
+
+    #[test]
+    fn speaker_picks_the_louder_side() {
+        assert_eq!(speaker(0.5, 0.2, false), Speaker::You);
+        assert_eq!(speaker(0.3, 0.3, false), Speaker::You, "empate fica com você");
+        assert_eq!(speaker(0.2, 0.6, false), Speaker::Voice);
+        assert_eq!(speaker(0.05, 0.07, false), Speaker::Idle, "abaixo do limiar é silêncio");
+        assert_eq!(speaker(0.9, 0.0, true), Speaker::Idle, "mudo não fala");
+        assert_eq!(speaker(0.9, 0.5, true), Speaker::Voice);
+    }
+
+    #[test]
+    fn call_clock_formats_minutes_and_hours() {
+        assert_eq!(call_clock(Duration::from_secs(0)), "00:00");
+        assert_eq!(call_clock(Duration::from_secs(75)), "01:15");
+        assert_eq!(call_clock(Duration::from_secs(3599)), "59:59");
+        assert_eq!(call_clock(Duration::from_secs(3600 + 62)), "1:01:02");
+    }
+
+    #[test]
+    fn equalizer_stays_in_bounds_and_idles_at_min() {
+        assert_eq!(equalizer(0., 7, 3., 16.), [3.; 5]);
+        let full = equalizer(1., 0, 3., 16.);
+        assert!(full.iter().all(|h| (3. ..=16.).contains(h) && h.fract() == 0.));
+        assert!(full[2] > full[0], "o perfil sobe no meio");
+        assert_eq!(equalizer(0.6, 5, 3., 16.), equalizer(0.6, 5, 3., 16.), "determinístico");
     }
 
     #[test]
