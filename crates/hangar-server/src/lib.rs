@@ -9,6 +9,7 @@ pub mod list;
 pub mod migration_status;
 pub mod mods;
 pub mod proxy;
+mod plugin_listener;
 pub mod routes;
 pub mod runtime;
 pub mod side;

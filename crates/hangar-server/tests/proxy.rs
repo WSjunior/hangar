@@ -33,8 +33,9 @@ async fn health_answers_without_token_and_with_cors() {
 #[tokio::test]
 async fn closed_stdin_stops_the_server() {
     let (_fake, up) = spawn_fake().await;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let plugin = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, addr.port()));
     // O duplex faz o papel do stdin: soltar a ponta de escrita é o Python morrendo.
     let (parent, child_stdin) = tokio::io::duplex(64);
     let server = tokio::spawn(hangar_server::serve_until(
@@ -44,10 +45,12 @@ async fn closed_stdin_stops_the_server() {
     ));
     let r = client().get(format!("http://{addr}/__hangar_server/health")).send().await.unwrap();
     assert_eq!(r.status(), 200);
+    assert_eq!(client().get(format!("http://{plugin}/api/sessions")).send().await.unwrap().status(), 404);
     drop(parent);
     let ended = tokio::time::timeout(Duration::from_secs(5), server).await.expect("parou em 5 s");
     assert!(ended.unwrap().is_ok(), "fim pelo cano é saída limpa");
     assert!(tokio::net::TcpStream::connect(addr).await.is_err(), "a porta pública fechou");
+    assert!(tokio::net::TcpStream::connect(plugin).await.is_err(), "a ponte do plugin fechou");
 }
 
 #[tokio::test]
