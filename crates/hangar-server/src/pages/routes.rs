@@ -30,8 +30,9 @@ pub struct PublishBody {
     session: String,
     html: String,
     title: String,
+    // Com sinal: altura negativa recebe a mensagem do limite, não "corpo inválido".
     #[serde(default)]
-    height: Option<u32>,
+    height: Option<i64>,
     #[serde(default)]
     draft: bool,
 }
@@ -62,7 +63,8 @@ async fn publish(st: &AppState, b: PublishBody) -> Value {
     let title = b.title.trim().to_owned();
     let title_chars = title.chars().count();
     if title_chars == 0 || title_chars > TITLE_MAX_CHARS { return fail("erro_pagina_invalida", "title precisa ter de 1 a 200 caracteres"); }
-    if b.height.is_some_and(|h| !(HEIGHT_MIN..=HEIGHT_MAX).contains(&h)) { return fail("erro_pagina_invalida", "height fica entre 80 e 2000"); }
+    if b.height.is_some_and(|h| !(i64::from(HEIGHT_MIN)..=i64::from(HEIGHT_MAX)).contains(&h)) { return fail("erro_pagina_invalida", "height fica entre 80 e 2000"); }
+    let height = b.height.map(|h| h as u32);
     let info = match fetch_info(&st.http, st.cfg.upstream, &st.cfg.internal_secret, &b.session).await {
         Ok(Some(i)) => i,
         Ok(None) => return fail("erro_sessao_desconhecida", "sessão não encontrada"),
@@ -73,7 +75,7 @@ async fn publish(st: &AppState, b: PublishBody) -> Value {
         return fail("erro_pagina_sem_transcript", "a sessão ainda não tem transcript");
     };
     let key = info.session_key;
-    let (pages, chromium, draft, height, html) = (st.pages.clone(), st.chromium, b.draft, b.height, b.html);
+    let (pages, chromium, draft, html) = (st.pages.clone(), st.chromium, b.draft, b.html);
     let (key2, title2) = (key.clone(), title.clone());
     // Imagens, tema e gravação leem e escrevem disco: fora da thread do runtime.
     let prepared = tokio::task::spawn_blocking(move || -> Result<Prepared, Value> {
@@ -176,6 +178,8 @@ pub async fn page(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
     r
 }
 
+/// O iframe é opaco e sem `allow-top-navigation`: o link da página só abre se a casca abrir por ele.
+const OPEN_LINK: &str = "var f=document.querySelector(\"iframe\");addEventListener(\"message\",function(e){var d=e.data;if(e.source===f.contentWindow&&d&&d.method===\"ui/open-link\"&&d.params&&typeof d.params.url===\"string\"&&/^https?:/i.test(d.params.url))window.open(d.params.url,\"_blank\",\"noopener\")});";
 const STRIP_TOKEN: &str = "var q=new URLSearchParams(location.search);if(q.has(\"token\")){q.delete(\"token\");q=q.toString();history.replaceState(null,\"\",location.pathname+(q?\"?\"+q:\"\")+location.hash)}";
 
 /// Casca da página: o HTML vai num JSON embutido e vira URL `blob:` no iframe isolado. Nem `data:`
@@ -188,7 +192,7 @@ pub(crate) fn isolated_shell(html: &str, title: &str) -> Response {
     // O token sai do endereço antes de tudo: `browser url`/abas/snapshot levariam ele ao transcript,
     // que convidado e par leem. Recarregar a casca depois dá 401; rascunho é de vida curta.
     let body = format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title><style>html,body{{margin:0;height:100%;overflow:hidden}}iframe{{display:block;width:100%;height:100%;border:0}}</style></head><body><iframe title=\"{title}\" sandbox=\"allow-scripts allow-popups\" referrerpolicy=\"no-referrer\"></iframe><script type=\"application/json\" id=\"p\">{data}</script><script>{STRIP_TOKEN}document.querySelector(\"iframe\").src=URL.createObjectURL(new Blob([JSON.parse(document.getElementById(\"p\").textContent)],{{type:\"text/html;charset=utf-8\"}}))</script></body></html>"
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title><style>html,body{{margin:0;height:100%;overflow:hidden}}iframe{{display:block;width:100%;height:100%;border:0}}</style></head><body><iframe title=\"{title}\" sandbox=\"allow-scripts allow-popups\" referrerpolicy=\"no-referrer\"></iframe><script type=\"application/json\" id=\"p\">{data}</script><script>{STRIP_TOKEN}{OPEN_LINK}f.src=URL.createObjectURL(new Blob([JSON.parse(document.getElementById(\"p\").textContent)],{{type:\"text/html;charset=utf-8\"}}))</script></body></html>"
     );
     let mut r = Response::new(Body::from(body));
     let h = r.headers_mut();
@@ -241,7 +245,7 @@ pub fn spawn_sweep(list: Arc<crate::list::bridge::ListBridge>, pages: Arc<Store>
         let mut tick = tokio::time::interval(SWEEP_EVERY);
         loop {
             tick.tick().await;
-            let Some(live) = list.live_jsonl() else { continue };
+            let Some(live) = list.live_jsonl() else { pages.forget_absences(); continue };
             let pages = pages.clone();
             if let Err(e) = tokio::task::spawn_blocking(move || pages.sweep(&live, SystemTime::now())).await {
                 tracing::error!(panic = e.is_panic(), "limpeza das páginas interrompida");
@@ -275,7 +279,10 @@ mod tests {
         assert!(json.starts_with("<p>a</p></script>"));
         let strip = text.find("history.replaceState(").expect("casca tira o token do endereço");
         assert!(strip < text.find("createObjectURL").unwrap(), "antes de criar o iframe");
-        assert!(text[text.rfind("<script>").unwrap()..].starts_with(&format!("<script>{STRIP_TOKEN}")), "primeira coisa do script");
+        assert!(text[text.rfind("<script>").unwrap()..].starts_with(&format!("<script>{STRIP_TOKEN}{OPEN_LINK}")), "primeira coisa do script");
+        // Link morto não: a casca abre só o que veio do próprio iframe, e só http(s).
+        assert!(OPEN_LINK.contains("e.source===f.contentWindow") && OPEN_LINK.contains("/^https?:/i.test(d.params.url)"));
+        assert!(OPEN_LINK.contains("window.open(d.params.url,\"_blank\",\"noopener\")"));
     }
 
     #[test]
@@ -283,5 +290,7 @@ mod tests {
         assert!(serde_json::from_str::<PublishBody>(r#"{"session":"s","html":"x","title":"t","base":"http://x"}"#).is_err());
         let b: PublishBody = serde_json::from_str(r#"{"session":"s","html":"x","title":"t"}"#).unwrap();
         assert!(!b.draft && b.height.is_none());
+        let b: PublishBody = serde_json::from_str(r#"{"session":"s","html":"x","title":"t","height":-5}"#).unwrap();
+        assert_eq!(b.height, Some(-5), "negativa passa pelo corpo e cai na mensagem do limite");
     }
 }

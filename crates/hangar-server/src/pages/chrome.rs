@@ -21,7 +21,9 @@ static SLOTS: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(2));
 /// Mesma conta do script `HOST` (theme.rs), para a altura medida aqui bater com a que a página anuncia.
 const MEASURE: &str = "(()=>{const d=document.documentElement,b=document.body;\
 return Math.ceil(d.scrollHeight>d.clientHeight?d.scrollHeight:Math.max(d.getBoundingClientRect().height,b?b.getBoundingClientRect().height:0))})()";
-const LOADED: &str = "new Promise(r=>document.readyState===\"complete\"?r():addEventListener(\"load\",()=>r(),{once:true}))";
+// Recurso externo que nunca responde segura o `load`: passados 3 s, mede o que já desenhou.
+const LOADED: &str = "Promise.race([new Promise(r=>document.readyState===\"complete\"?r():addEventListener(\"load\",()=>r(),{once:true})),\
+new Promise(r=>setTimeout(r,3000))])";
 
 pub struct Job { pub width: u32, pub theme: Theme, pub shot: Option<PathBuf> }
 pub struct Rendered { pub heights: BTreeMap<u32, u32>, pub console: Vec<ConsoleLine> }
@@ -40,7 +42,10 @@ const KNOWN: &[&str] = &["/Applications/Google Chrome.app/Contents/MacOS/Google 
 const KNOWN: &[&str] = &[r"C:\Program Files\Google\Chrome\Application\chrome.exe", r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"];
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const KNOWN: &[&str] = &[];
+#[cfg(not(target_os = "windows"))]
 const ON_PATH: &[&str] = &["google-chrome-stable", "google-chrome", "chromium", "chromium-browser"];
+#[cfg(target_os = "windows")]
+const ON_PATH: &[&str] = &["chrome.exe", "msedge.exe"];
 
 /// Mesma variável e mesmo baixado do app nativo; depois a marca do `install-chromium.sh`, o PATH e os caminhos fixos.
 pub fn find() -> Option<PathBuf> {
@@ -52,6 +57,9 @@ pub fn find() -> Option<PathBuf> {
         for dir in std::env::split_paths(&path) { for n in ON_PATH { known.push(dir.join(n)); } }
     }
     known.extend(KNOWN.iter().map(PathBuf::from));
+    // Chrome instalado só para o usuário fica no perfil dele, não em Program Files.
+    #[cfg(target_os = "windows")]
+    known.extend(std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join(r"Google\Chrome\Application\chrome.exe")));
     find_with(std::env::var_os("HANGAR_CHROMIUM"), downloaded, marker.as_deref(), &known)
 }
 

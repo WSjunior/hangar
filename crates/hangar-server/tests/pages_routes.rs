@@ -87,6 +87,8 @@ async fn invalid_input_and_unknown_session_are_refused() {
     assert_eq!(code(publish(&s, json!({"session": "s1", "html": "", "title": "x"})).await), "erro_pagina_invalida");
     assert_eq!(code(publish(&s, json!({"session": "s1", "html": "<p></p>", "title": "x".repeat(201)})).await), "erro_pagina_invalida");
     assert_eq!(code(publish(&s, json!({"session": "s1", "html": "<p></p>", "title": "x", "height": 79})).await), "erro_pagina_invalida");
+    let negative = publish(&s, json!({"session": "s1", "html": "<p></p>", "title": "x", "height": -1})).await;
+    assert_eq!(negative["error"]["detail"], "height fica entre 80 e 2000", "{negative}");
     assert_eq!(code(publish(&s, json!({"session": "s1", "html": "<p></p>", "title": "x", "base": "http://x"})).await), "erro_pagina_invalida");
     s.python.set_info(json!({"provider": "claude", "session_key": "k", "history": {}}));
     assert_eq!(code(publish(&s, json!({"session": "s1", "html": "<p></p>", "title": "x"})).await), "erro_pagina_sem_transcript");

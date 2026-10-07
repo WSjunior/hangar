@@ -79,6 +79,7 @@ impl Store {
         let mut absent = self.absent_since.lock().unwrap_or_else(|e| e.into_inner());
         let mut seen = HashSet::new();
         for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|t| t.is_dir()) { continue; }
             let key = entry.file_name().to_string_lossy().into_owned();
             let dir = entry.path();
             let owner = std::fs::read_to_string(dir.join("jsonl")).unwrap_or_default();
@@ -92,6 +93,9 @@ impl Store {
         }
         absent.retain(|k, _| seen.contains(k));
     }
+
+    /// Rodada pulada (lista incerta) zera a contagem: a ausência só vale medida em rodadas certas seguidas.
+    pub fn forget_absences(&self) { self.absent_since.lock().unwrap_or_else(|e| e.into_inner()).clear(); }
 
     fn drop_old_drafts(&self, dir: &std::path::Path, now: SystemTime) {
         let Ok(entries) = std::fs::read_dir(dir) else { return };
@@ -157,6 +161,29 @@ mod tests {
         assert!(dir.path().join("k").exists());
         s.sweep(&HashSet::new(), t0 + GONE_AFTER + Duration::from_secs(1));
         assert!(!dir.path().join("k").exists());
+    }
+
+    #[test]
+    fn skipped_round_restarts_the_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::new(dir.path().into());
+        s.save("k", "/t/k.jsonl", &page()).unwrap();
+        let t0 = SystemTime::now();
+        s.sweep(&HashSet::new(), t0);
+        s.forget_absences();
+        s.sweep(&HashSet::new(), t0 + GONE_AFTER + Duration::from_secs(1));
+        assert!(dir.path().join("k").exists(), "primeira rodada certa depois da pausa só começa a contar");
+    }
+
+    #[test]
+    fn sweep_ignores_loose_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("solto"), "").unwrap();
+        let s = Store::new(dir.path().into());
+        let t0 = SystemTime::now();
+        s.sweep(&HashSet::new(), t0);
+        s.sweep(&HashSet::new(), t0 + GONE_AFTER * 2);
+        assert!(dir.path().join("solto").exists());
     }
 
     #[test]
