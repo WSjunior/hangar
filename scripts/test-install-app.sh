@@ -131,24 +131,24 @@ expect_eq "de novo: uma linha de senha só" "$(grep -c '^CP_AUTH_TOKEN=' "$R/bac
 expect_line "de novo: a senha atual é mantida" "$R/backend/.env" '^CP_AUTH_TOKEN=segredo-do-app-123$'
 expect_no "de novo: a senha nova não vaza" "$S/out2" 'outra-senha-456'
 
-# --- Caso: senha com espaço no meio e acento chega ao backend igual ---
+# --- Caso: senha com espaço no meio chega ao backend igual ---
 new_sandbox especial
-TEST_TOKEN='minha senha ção' run_install "$S/out" "${APP_ARGS[@]}"
+TEST_TOKEN='minha senha 123' run_install "$S/out" "${APP_ARGS[@]}"
 # O backend lê o .env pelo python-dotenv; sem o venv aqui, confere a linha gravada.
 PY="$REPO/backend/.venv/bin/python"
 if [ -x "$PY" ] && "$PY" -c 'import dotenv' 2>/dev/null; then
   expect_eq "especial: o backend lê igual" \
-    "$("$PY" -c 'import sys; from dotenv import dotenv_values; print(dotenv_values(sys.argv[1])["CP_AUTH_TOKEN"])' "$R/backend/.env")" 'minha senha ção'
+    "$("$PY" -c 'import sys; from dotenv import dotenv_values; print(dotenv_values(sys.argv[1])["CP_AUTH_TOKEN"])' "$R/backend/.env")" 'minha senha 123'
 else
-  expect_eq "especial: gravada literal" "$(grep '^CP_AUTH_TOKEN=' "$R/backend/.env")" 'CP_AUTH_TOKEN=minha senha ção'
+  expect_eq "especial: gravada literal" "$(grep '^CP_AUTH_TOKEN=' "$R/backend/.env")" 'CP_AUTH_TOKEN=minha senha 123'
 fi
 
 # --- Caso: senha que o .env não guarda inteira é recusada ---
-for t in 'abc #def' 'x${HOME}y' '"com-aspas"' ' espaco-inicial'; do
+for t in 'abc #def' 'x${HOME}y' '"com-aspas"' ' espaco-inicial' 'minha senha ção'; do
   new_sandbox recusada
   TEST_TOKEN=$t run_install "$S/out" "${APP_ARGS[@]}"; rc=$?
   expect_eq "recusada [$t]: falha" "$rc" 1
-  expect_line "recusada [$t]: diz quais caracteres" "$S/out" '^##HANGAR-FALHA## .*nem espaço no começo ou no fim$'
+  expect_line "recusada [$t]: diz quais caracteres" "$S/out" '^##HANGAR-FALHA## .*ASCII sem acento.*nem espaço no começo ou no fim$'
   expect_eq "recusada [$t]: FIM falhou" "$(last_line "$S/out")" '##HANGAR-FIM## falhou'
   if grep -qF -- "$t" "$S/out"; then flunk "recusada [$t]: senha na saída" "$S/out"; else pass "recusada [$t]: senha fora da saída"; fi
   rm -rf "$S"

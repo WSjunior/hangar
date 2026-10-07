@@ -675,8 +675,8 @@ function Token-Aleatorio {
 }
 # O backend le o .env pelo python-dotenv, que corta o valor em " #", expande "${VAR}" e tira
 # aspas: sem aspas no .env, a senha com esses caracteres nao chega inteira e o celular nunca entra.
-$tokenForbiddenText = 'nao vale # $ '' " \ nem espaco no comeco ou no fim'
-function Test-ForbiddenToken($token) { return ($token -match '[#$''"\\]|^[ \t]|[ \t]$') }
+$tokenForbiddenText = 'so vale ASCII sem acento; nao vale # $ '' " \ nem espaco no comeco ou no fim'
+function Test-ForbiddenToken($token) { return ($token -match '[^\x20-\x7E]|[#$''"\\]|^[ \t]|[ \t]$') }
 
 function Token-Do-Env {
     # -Encoding UTF8 pelo mesmo motivo do Set-EnvKey: sem ele o Get-Content do PS 5.1 decodifica
@@ -965,7 +965,10 @@ if ($script:querTailscale -and -not (Tem 'tailscale')) {
         Nota 'Instale o Tailscale tambem no celular (mesma conta).'
         Loga-Tailscale
     } else {
+        # Extra, como no Linux: com codigo ele passa pelo portao e o resto segue instalando.
         $script:querTailscale = $false
+        $script:pendingCodes['Tailscale'] = 'outro'
+        Mark-Step 'tailscale' 'pendente'
     }
     Mark-Step 'preparar' 'fazendo'
 }
@@ -1703,6 +1706,9 @@ function Publica-Tailscale {
             if (-not $dns) {
                 Nota 'tailscale sem nome de no (nao logado?) - rode `tailscale up` e re-rode este instalador'
             } else {
+                # Instalada e logada: a tela mostra as tres linhas, como no Linux.
+                Mark-Item 'tailscale' 'ok' 'Tailscale'
+                Mark-Item 'tailscale-conta' 'ok' 'conta Tailscale'
                 $proxy443 = Get-Proxy443
                 # Compara PORTA, nao string: o tailscale normaliza o alvo, entao "localhost:8765" e
                 # "http://127.0.0.1:8765" descrevem a mesma coisa e uma comparacao literal diria que
@@ -1893,6 +1899,7 @@ if ($regras.Count -eq $portasFw.Count) {
     } else {
         Falta 'firewall nao liberado (UAC recusado?) - num PowerShell como admin rode:'
         Mark-Item 'firewall' 'pendente' 'porta do Wi-Fi liberada'
+        if ($App) { Add-AppPending 'firewall' 'outro' }
         foreach ($p in $portasFw) {
             Nota "New-NetFirewallRule -DisplayName `"hangar $p`" -Direction Inbound -Action Allow -Protocol TCP -LocalPort $p -Profile Private"
         }
@@ -2580,7 +2587,10 @@ if (-not $bash) {
 }
 
 if ($sendOk) { Mark-Item 'hangar-send' 'ok' 'sessoes conversam entre si' }
-else { Mark-Item 'hangar-send' 'pendente' 'sessoes conversam entre si' }
+else {
+    Mark-Item 'hangar-send' 'pendente' 'sessoes conversam entre si'
+    if ($App) { Add-AppPending 'hangar-send' 'outro' }
+}
 
 # -- Passos de atualizacao: marcar como ja feitos ----------------------------
 # Uma instalacao do ZERO ja satisfaz todo passo de docs\atualizacoes\ -- eles existem pra levar uma

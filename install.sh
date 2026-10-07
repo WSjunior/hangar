@@ -307,8 +307,13 @@ fi
 gera_token() { openssl rand -hex 24 2>/dev/null || python3 -c 'import secrets; print(secrets.token_hex(24))'; }
 # O backend lê o .env pelo python-dotenv, que corta o valor em " #" e expande "${VAR}": sem aspas
 # no .env, a senha com esses caracteres não chega inteira e o celular nunca entra.
-TOKEN_PROIBIDO="não vale # \$ ' \" \\ nem espaço no começo ou no fim"
-token_proibido() { case $1 in *'#'*|*'$'*|*\'*|*'"'*|*'\'*|[[:blank:]]*|*[[:blank:]]) return 0 ;; esac; return 1; }
+# Só ASCII visível: o app nativo monta o cabeçalho Authorization com a senha, e acento não autentica.
+TOKEN_PROIBIDO="só vale ASCII sem acento; não vale # \$ ' \" \\ nem espaço no começo ou no fim"
+token_proibido() {
+  local LC_ALL=C
+  case $1 in *[!\ -~]*|*'#'*|*'$'*|*\'*|*'"'*|*'\'*|[[:blank:]]*|*[[:blank:]]) return 0 ;; esac
+  return 1
+}
 if [ "$UPDATE" = 0 ] && [ "$CHECK" = 0 ]; then
 say "0/8 Antes de começar"
 echo "  No máximo duas perguntas agora, e depois o instalador segue sozinho até o fim."

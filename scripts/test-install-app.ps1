@@ -73,7 +73,7 @@ Assert ($bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) 'ins
 $def = $ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Test-ForbiddenToken' }, $true)
 if (-not $def) { throw 'Funcao ausente: Test-ForbiddenToken' }
 . ([scriptblock]::Create($def.Extent.Text))
-foreach ($ruim in @('senha#forte', 'senha$forte', "senha'forte", 'senha"forte', 'senha\forte', ' senhaforte', "senhaforte`t")) {
+foreach ($ruim in @('senha#forte', 'senha$forte', "senha'forte", 'senha"forte', 'senha\forte', ' senhaforte', "senhaforte`t", ("senha " + [char]0xE7 + [char]0xE3 + "o"))) {
     Assert (Test-ForbiddenToken $ruim) "senha recusada: [$ruim]"
 }
 Assert (-not (Test-ForbiddenToken 'senha boa 123')) 'espaco no meio continua valendo'
@@ -292,6 +292,13 @@ $l = Run-Gate $depCaso "[void](Instale 'psmux (multiplexador)' 'psmux' 'marlocar
 Assert (-not ($l -contains 'PASSOU-PORTAO') -and ($l -contains '##HANGAR-ERRO## sem-internet')) 'dependencia essencial faltando: para no 1/8 com o codigo'
 Assert ($l[-2] -eq '##HANGAR-PASSO## preparar falhou' -and $l[-1] -eq '##HANGAR-FIM## falhou') "dependencia essencial faltando: FIM falhou (ultima: $($l[-1]))"
 
+# (4) Tailscale que nao instalou no 1/8 e extra: o portao deixa passar e a etapa fecha pendente
+$ts18 = Get-If "`$script:querTailscale -and -not (Tem 'tailscale')" 'Loga-Tailscale'
+$l = Run-Gate ($depCaso + "`n`$script:querTailscale = `$true`nfunction Loga-Tailscale { }`nfunction Nota { }") $ts18
+Assert ($l -contains '##HANGAR-PASSO## tailscale pendente') 'Tailscale que nao instalou: etapa tailscale pendente'
+Assert (($l -contains 'PASSOU-PORTAO') -and ($l -contains '##HANGAR-PENDENCIA## outro Tailscale')) 'Tailscale que nao instalou: nao para no 1/8 e vira pendencia outro'
+Assert ($l[-1] -eq '##HANGAR-FIM## pendente') "Tailscale que nao instalou: FIM pendente (ultima: $($l[-1]))"
+
 # --- Rodada de correcao 1: a tela diz o que aconteceu ---
 # Login da Tailscale sem concluir no 1/8 e o 5d sem nome de no: a etapa fecha pendente.
 $ts5d = Get-If "`$Tailscale -eq 'nao'" 'Publica-Tailscale'
@@ -308,13 +315,21 @@ Assert ($passosTs.Count -and $passosTs[-1] -eq '##HANGAR-PASSO## tailscale pende
 
 # 7b: o bash ausente deixa o item hangar-send pendente, mesmo sem somar pendencia.
 $iSend = $texto.IndexOf('$sendOk = $true')
-$fimSend = "else { Mark-Item 'hangar-send' 'pendente' 'sessoes conversam entre si' }"
+$fimSend = "if (`$App) { Add-AppPending 'hangar-send' 'outro' }`n}"
 $send7b = $texto.Substring($iSend, $texto.IndexOf($fimSend) + $fimSend.Length - $iSend)
 . ([scriptblock]::Create((Get-Def 'Titulo')))
 function Tem($cmd) { return $false }
 $App = $true; Limpa
+$script:pendencias = @(); $script:pendingCodes = @{}
 . ([scriptblock]::Create($send7b))
 Assert ($script:saida -contains '##HANGAR-ITEM## hangar-send pendente sessoes conversam entre si') '7b sem bash: ITEM hangar-send pendente'
+Assert ($script:pendencias -contains 'hangar-send' -and $script:pendingCodes['hangar-send'] -eq 'outro') '7b sem bash: -App termina pendente (pendencia outro)'
+
+# Firewall nao liberado: mesma regra, so no -App.
+Assert ($texto -match "(?s)Mark-Item 'firewall' 'pendente'[^\n]*\n\s*if \(\`$App\) \{ Add-AppPending 'firewall' 'outro' \}") 'firewall recusado: -App termina pendente (pendencia outro)'
+
+# Tailscale ja instalada e logada: itens tailscale e tailscale-conta (como no Linux).
+Assert ($texto -match "(?s)# Instalada e logada.*?Mark-Item 'tailscale' 'ok' 'Tailscale'\s*Mark-Item 'tailscale-conta' 'ok' 'conta Tailscale'\s*\`$proxy443 = Get-Proxy443") '5d: itens tailscale e tailscale-conta quando ja logada'
 
 # Claude Code que nao instalou: sem rede o codigo e sem-internet.
 . ([scriptblock]::Create((Get-Def 'Instale-ClaudeCode')))
