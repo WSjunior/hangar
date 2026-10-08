@@ -128,6 +128,7 @@ pub struct Engine {
     initialized:bool,
     ready:bool,
     reconnect:bool,
+    fresh_process:bool,
     thread_id:String,
     turn_id:Option<String>,
     in_progress:bool,
@@ -257,7 +258,7 @@ impl Engine {
             Some((call["call_id"].as_str()?.into(),Voice { thread_id:string(&call["thread_id"]),starting:call["starting"] == true,
                 unsubscribed:call["unsubscribed"] == true,closed:true,..Voice::default() }))).collect()).unwrap_or_default();
         Self { generation,clock,counter:metadata["runtime_counter"].as_u64().unwrap_or(0),headless:metadata["headless"] != false,
-            alive:true,initialized:metadata["initialized"] == true,ready:metadata["ready"] == true,reconnect:false,
+            alive:true,initialized:metadata["initialized"] == true,ready:metadata["ready"] == true,reconnect:false,fresh_process:false,
             thread_id:metadata["thread_id"].as_str().unwrap_or("").into(),turn_id:None,in_progress:false,
             state:StateEvent { session:metadata["name"].as_str().unwrap_or("").into(),state:"idle".into(),headless:true,
                 status_line:string(&metadata["status_line"]),..StateEvent::default() },state_revision:metadata["state_revision"].as_u64().unwrap_or(0),settings_revision:metadata["settings_revision"].as_u64().unwrap_or(0),
@@ -527,6 +528,10 @@ impl Engine {
         }
     }
 
+    /// Processo recém-criado pelo Rust: a subida repete a política e tem os recuos do Python.
+    /// Anexar a um cano vivo mantém o resume só com `threadId`.
+    pub fn set_fresh_process(&mut self,fresh:bool) { self.fresh_process = fresh; }
+
     pub fn bootstrap(&mut self,reconnect:bool,operation_id:String) -> Result<Vec<Effect>,RuntimeError> {
         if !self.headless { return Err(error("Codex com terminal conserva o adapter existente")); }
         self.reconnect = reconnect;
@@ -582,7 +587,7 @@ impl Engine {
     /// Mesmos recuos da subida do Python: provedor sumido da config e conversa sem rollout. Transferência nunca recua.
     fn bootstrap_fallback(&mut self,rpc:&Rpc,message:&str,effects:&mut Vec<Effect>) -> bool {
         let Some(next) = rpc.continuation.as_ref().filter(|next|next["kind"] == "bootstrap_thread") else { return false };
-        if rpc.method != "thread/resume" || self.metadata["transfer_id"].as_str().is_some_and(|id|!id.is_empty()) { return false }
+        if !self.fresh_process || rpc.method != "thread/resume" || self.metadata["transfer_id"].as_str().is_some_and(|id|!id.is_empty()) { return false }
         let parent = next["parent"].as_str().unwrap_or("");
         let request = if message.contains("Model provider") && message.contains("not found") && rpc.params.get("modelProvider").is_none() {
             let mut params = rpc.params.clone();
@@ -854,7 +859,7 @@ impl Engine {
             }
             let message = line["error"]["message"].as_str().unwrap_or("");
             if self.bootstrap_fallback(&rpc,message,effects) { return Ok(()); }
-            let transfer = self.metadata["transfer_id"].as_str().is_some_and(|id|!id.is_empty());
+            let transfer = !self.fresh_process || self.metadata["transfer_id"].as_str().is_some_and(|id|!id.is_empty());
             if let Some(parent) = rpc.continuation.as_ref().filter(|next|next["kind"] == "bootstrap_ready" && !transfer).and_then(|next|next["parent"].as_str()) {
                 // A conversa já está aberta: perder o nível escolhido é melhor que perder a sessão, mas aparece.
                 self.state.problema = Some("codex_esforco_nao_aplicado".into());
@@ -966,9 +971,11 @@ impl Engine {
                     effects.push(Effect::Write { operation_id:Some(notification),
                         frame:json!({"jsonrpc":"2.0","method":"initialized","params":{}}) });
                     let request = if self.reconnect && !self.thread_id.is_empty() {
-                        ClientRequest::ThreadResume(wire::ThreadResumeParams { thread_id:self.thread_id.clone(),cwd:string(&self.metadata["cwd"]),
-                            approval_policy:Some(approval(&self.permission_mode).into()),sandbox:Some(sandbox(&self.permission_mode).into()),
-                            service_tier:self.service_tier.clone(),model_provider:None })
+                        if self.fresh_process {
+                            ClientRequest::ThreadResume(wire::ThreadResumeParams { thread_id:self.thread_id.clone(),cwd:string(&self.metadata["cwd"]),
+                                approval_policy:Some(approval(&self.permission_mode).into()),sandbox:Some(sandbox(&self.permission_mode).into()),
+                                service_tier:self.service_tier.clone(),model_provider:None })
+                        } else { ClientRequest::ThreadResume(wire::ThreadResumeParams { thread_id:self.thread_id.clone(),..Default::default() }) }
                     } else { self.bootstrap_start() };
                     self.send(format!("{parent}:thread"),request,Some(json!({"kind":"bootstrap_thread","parent":parent})),effects);
                 }

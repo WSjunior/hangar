@@ -413,14 +413,13 @@ fn resume_uses_external_tier_and_thread_change_cancels_pending_choice() {
 }
 
 #[test]
-fn bootstrap_resume_and_start_both_carry_the_chosen_tier() {
+fn bootstrap_new_process_preserves_tier_but_live_resume_does_not_override() {
     for reconnect in [false,true] {
         let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true,"service_tier":"priority"}),1,clock(10.0));
         let init = frames(&engine.bootstrap(reconnect,"boot".into()).unwrap())[0].clone();
         let requests = frames(&line(&mut engine,json!({"id":init["id"],"result":{}}),10.1));
-        // A subida repete a escolha como o Python; só a verificação do Fast retoma sem ela.
-        assert_eq!(requests[1]["params"]["serviceTier"],"priority",
-            "reconnect={reconnect}");
+        if reconnect { assert!(requests[1]["params"].get("serviceTier").is_none()); }
+        else { assert_eq!(requests[1]["params"]["serviceTier"],"priority"); }
     }
 }
 
@@ -697,6 +696,7 @@ fn unreadable_command_approval_offers_no_session_wide_grant() {
 
 fn bootstrapped(meta:Value) -> (Engine,Vec<Value>) {
     let mut engine = Engine::new(meta,1,clock(10.0));
+    engine.set_fresh_process(true);
     let effects = engine.bootstrap(true,"boot".into()).unwrap();
     let id = frames(&effects)[0]["id"].clone();
     let effects = line(&mut engine,json!({"id":id,"result":{"userAgent":format!("hangar/{} (x)",hangar_codex::version::CHECKED)}}),11.0);
@@ -759,4 +759,16 @@ fn select_without_pending_approval_says_no_pending_permission() {
     let mut engine = engine();
     let Err(error) = engine.command(command(OperationKind::Select,json!({"option":1})),clock(10.0)) else { panic!("devia recusar") };
     assert_eq!(error.code,"no_pending_permission");
+}
+
+#[test]
+fn live_attach_resumes_with_thread_id_only_and_effort_refusal_stays_a_failure() {
+    let mut engine = Engine::new(json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p","effort":"max","service_tier":"priority"}),1,clock(10.0));
+    let id = frames(&engine.bootstrap(true,"boot".into()).unwrap())[0]["id"].clone();
+    let sent = frames(&line(&mut engine,json!({"id":id,"result":{}}),11.0));
+    let resume = find_method(&sent,"thread/resume");
+    assert_eq!(resume["params"],json!({"threadId":"t1"}));
+    let effects = line(&mut engine,json!({"id":resume["id"],"error":{"code":-32600,"message":"no rollout found for thread id t1"}}),12.0);
+    assert!(frames(&effects).is_empty());
+    assert!(effects.iter().any(|e|matches!(e,Effect::Reply { disposition:Disposition::Rejected,.. })));
 }
