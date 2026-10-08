@@ -257,6 +257,7 @@ class RuntimeCoordinator:
         self.registration_locks = {}
         self.adoption_task = None
         self.rebindings = {}
+        self.rebind_times = {}
         self.drains = {}
         self.mode = _initial_mode
         self.mode_hooks = {}        # "rust"/"python" -> corrotina que o lifespan registra
@@ -992,6 +993,15 @@ class RuntimeCoordinator:
     def _rebind(self, slot):
         key = slot.binding.key
         if key in self.rebindings and not self.rebindings[key].done():
+            return
+        # Conversa que nunca chega ao arquivo da sessão religaria a cada vista: teto por minuto.
+        now = time.monotonic()
+        recent = [t for t in self.rebind_times.get(key, ()) if now - t < 60] + [now]
+        self.rebind_times[key] = recent
+        if len(recent) > 3:
+            if len(recent) == 4:
+                from app import diag
+                diag.registrar("runtime.rebind_loop", "erro", sessao=slot.binding.name, codigo="rebind_loop")
             return
         async def rebind():
             async def changed():

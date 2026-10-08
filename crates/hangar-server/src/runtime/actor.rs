@@ -656,8 +656,9 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                     sequence += 1;
                     let phase_id = format!("policy:{}:{sequence}",target.generation);
                     let target = target.clone(); let policy = engine.policy.clone();
-                    // O Python recusa como velho o campo que difere da vista salva: ela vai antes.
-                    let save = if kind == "session.patch_meta" && (payload.get("service_tier").is_some() || payload.get("permission_mode").is_some()) {
+                    // O Python recusa como velho o campo que difere da vista salva (thread nova, modo, Fast,
+                    // modelo): ela vai antes de todo patch. Sem mudança durável a gravação não toca o disco.
+                    let save = if kind == "session.patch_meta" {
                         state_version += 1;
                         Some((state_version,engine.view()))
                     } else { None };
@@ -1116,6 +1117,17 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                         let _ = phase_id;
                         match result {
                             Ok(payload) => {
+                                // Patch recusado como velho deixa o arquivo da sessão para trás da vista (thread nova
+                                // sem gravar): nunca calado, porque o Python religa pela conversa que não bate.
+                                if kind == "session.patch_meta" && payload["stale"] == true {
+                                    if crate::warn_limit::allow(Some(&target.key),"session_patch_stale") {
+                                        tracing::warn!(key=%target.key,session=%target.name,code="session_patch_stale",
+                                            "o arquivo da sessão recusou o patch como velho");
+                                    }
+                                    let message = "o arquivo da sessão não aceitou a alteração";
+                                    publish(&events,&target,&mut revision,"problem",json!({"error_code":"session_patch_stale","message":message}));
+                                    effects.extend(engine.set_problem("session_patch_stale",Some(message.into())));
+                                }
                                 effects.extend(engine.apply(EngineInput::PolicyResult { request_id,payload },clock(start))?);
                             }
                             // Linha de status, carimbo, uso e registro que falham só perdem aquela parte: a sessão

@@ -177,26 +177,6 @@ class Medida(base.Prova):
     def raizes_projetos(self):
         return []
 
-    def lancador_extra(self):
-        # Remendo só desta medida (medicao-5b.md, "Achado"): no Rust, o `session.patch_meta` com a
-        # thread nova pode chegar antes da vista salva e voltar `stale`; o sidecar fica sem thread, o
-        # Python religa o motor, e o laço não sai. Aqui a política repete depois de a vista assentar.
-        return ("from app import runtime_policy as _rp\nimport time as _t\n_orig = _rp.run\n"
-                "def _run(kind, payload, metadata):\n"
-                "    r = _orig(kind, payload, metadata)\n"
-                "    n = 0\n"
-                "    while kind == 'session.patch_meta' and 'thread_id' in payload and r.get('stale') and n < 10:\n"
-                "        _t.sleep(0.2); n += 1; r = _orig(kind, payload, metadata)\n"
-                f"    if n: open({str(self.raiz / 'remendo.log')!r}, 'a').write(f'{{n}} {{r}}\\n')\n"
-                "    return r\n"
-                "_rp.run = _run\n")
-
-    def remendos(self):
-        try:
-            return len((self.raiz / "remendo.log").read_text().splitlines())
-        except OSError:
-            return 0
-
     def preparar(self):
         for d in (self.home / ".claude", self.home / ".codex", self.bin, self.work):
             d.mkdir(parents=True, exist_ok=True)
@@ -355,7 +335,6 @@ def main():
         for nome in m.nomes:
             m.api("DELETE", f"/api/sessions/{nome}", timeout=30)
         out["canos_depois_de_apagar"] = len(m.processos()[0])
-        out["patch_stale_remendados"] = m.remendos()
     finally:
         m.limpar()
         depois = canos_de_fora(m.home)

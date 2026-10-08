@@ -130,6 +130,27 @@ def test_rebind_closes_gate_before_marking_frozen(tmp_path):
     coordinator.close_python_leases()
 
 
+def test_rebind_loop_is_capped_and_reported(tmp_path, monkeypatch):
+    # Conversa que nunca chega ao arquivo da sessão religaria a cada vista: o teto para e registra.
+    from app import diag
+    transport = Transport()
+    coordinator, slot = coordinator_with(tmp_path, transport)
+    changes, reported = [], []
+    async def change(name, action, **kw):
+        changes.append(name)
+    coordinator.change = change
+    monkeypatch.setattr(diag, "registrar", lambda event, level, **kw: reported.append((event, kw)))
+    async def flow():
+        for _ in range(6):
+            coordinator._rebind(slot)
+            if task := coordinator.rebindings.get(slot.binding.key):
+                await task
+    asyncio.run(flow())
+    assert len(changes) == 3
+    assert reported == [("runtime.rebind_loop", {"sessao": "session", "codigo": "rebind_loop"})]
+    coordinator.close_python_leases()
+
+
 def test_no_rust_sends_nothing(tmp_path):
     coordinator = RuntimeCoordinator(None, None)
     coordinator.register(binding(tmp_path))

@@ -816,6 +816,11 @@ for line in sys.stdin:
     }
     /// Como `policy`, mas os próximos `fail` pedidos de `launch_env` respondem `codex_ausente`.
     async fn policy_failing(launch:Value,fail:Arc<std::sync::atomic::AtomicUsize>) -> (std::net::SocketAddr,Arc<Mutex<Vec<(String,Value)>>>) {
+        policy_checking(launch,fail,None).await
+    }
+    /// Com `state`, o `session.patch_meta` recusa como velho (`stale`) o campo que difere da vista
+    /// salva no arquivo da fila, como o Python faz.
+    async fn policy_checking(launch:Value,fail:Arc<std::sync::atomic::AtomicUsize>,state:Option<std::path::PathBuf>) -> (std::net::SocketAddr,Arc<Mutex<Vec<(String,Value)>>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let calls = Arc::new(Mutex::new(Vec::new()));
@@ -823,7 +828,7 @@ for line in sys.stdin:
         tokio::spawn(async move {
             loop {
                 let Ok((stream,_)) = listener.accept().await else { return };
-                let (seen,launch,fail) = (seen.clone(),launch.clone(),fail.clone());
+                let (seen,launch,fail,state) = (seen.clone(),launch.clone(),fail.clone(),state.clone());
                 tokio::spawn(async move {
                     let mut reader = BufReader::new(stream);
                     loop {
@@ -840,7 +845,14 @@ for line in sys.stdin:
                         let kind = body["kind"].as_str().unwrap_or("").to_owned();
                         seen.lock().unwrap().push((kind.clone(),body["payload"].clone()));
                         let failing = kind == "launch_env" && fail.fetch_update(std::sync::atomic::Ordering::SeqCst,std::sync::atomic::Ordering::SeqCst,|left|left.checked_sub(1)).is_ok();
-                        let data = if failing { json!({"error":"codex_ausente"}) } else if kind == "launch_env" { launch.clone() } else if kind == "session.patch_meta" { json!({"updated":true}) } else { json!({}) };
+                        let stale = kind == "session.patch_meta" && state.as_ref().is_some_and(|path|{
+                            let saved:Value = std::fs::read(path).ok().and_then(|raw|serde_json::from_slice(&raw).ok()).unwrap_or_default();
+                            let view = &saved["runtime_state"]["view"];
+                            body["payload"].as_object().unwrap().iter().any(|(key,value)|view.get(key).is_some_and(|old|old != value))
+                        });
+                        let data = if failing { json!({"error":"codex_ausente"}) } else if kind == "launch_env" { launch.clone() }
+                            else if stale { json!({"updated":false,"stale":true}) } else if kind == "session.patch_meta" { json!({"updated":true}) } else { json!({}) };
+                        if stale { seen.lock().unwrap().push(("stale".into(),body["payload"].clone())); }
                         let reply = json!({"ok":true,"data":data}).to_string();
                         let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",reply.len());
                         if reader.get_mut().write_all(response.as_bytes()).await.is_err() { return; }
@@ -1052,6 +1064,52 @@ for line in sys.stdin:
         assert_eq!(snapshot["view"]["public_state"]["problema"],"codex_headless_nao_subiu",
             "teto esgotado deixa a sessão com o problema: {}",snapshot["view"]["public_state"]);
         assert_eq!(recorded(&policy).len(),4,"cada subida grava o cano novo");
+        cleanup(&registry,&key,dir.path(),&policy).await;
+    }
+
+    #[tokio::test]
+    async fn new_thread_id_is_saved_in_the_view_before_the_patch() {
+        // O Python recusa como velho o campo que difere da vista salva: a thread nova tem que estar
+        // nela antes do `session.patch_meta {thread_id}`, senão o arquivo da sessão fica sem a thread.
+        for _ in 0..5 {
+            use_cano_bin();
+            let dir = tempfile::tempdir().unwrap();
+            let key = unique_key();
+            let owner = dir.path().to_string_lossy().into_owned();
+            let codex = fake_codex(dir.path());
+            let (address,policy) = policy_checking(json!({"program":[codex,"app-server","--stdio"],"env":env(&key,&owner),"cano_extra":{}}),
+                Arc::new(std::sync::atomic::AtomicUsize::new(0)),Some(dir.path().join("q.json"))).await;
+            let registry = RuntimeRegistry::new(address,"secret".into(),"instance".into());
+            registry.open_with_launch(target(dir.path(),&key,no_cano()),dir.path().into()).await.unwrap();
+            until_ready(&registry,&key).await;
+            until("thread gravada no arquivo da sessão",||policy.lock().unwrap().iter()
+                .any(|(kind,payload)|kind == "session.patch_meta" && payload["thread_id"] == "thread-new")).await;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let stale:Vec<Value> = policy.lock().unwrap().iter().filter(|(kind,_)|kind == "stale").map(|(_,payload)|payload.clone()).collect();
+            assert!(stale.is_empty(),"patch recusado como velho: {stale:?}");
+            cleanup(&registry,&key,dir.path(),&policy).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_patch_shows_a_problem() {
+        use_cano_bin();
+        let dir = tempfile::tempdir().unwrap();
+        let key = unique_key();
+        let owner = dir.path().to_string_lossy().into_owned();
+        let codex = fake_codex(dir.path());
+        let other = dir.path().join("other.json");
+        std::fs::write(&other,json!({"runtime_state":{"view":{"thread_id":"other"}}}).to_string()).unwrap();
+        let (address,policy) = policy_checking(json!({"program":[codex,"app-server","--stdio"],"env":env(&key,&owner),"cano_extra":{}}),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),Some(other)).await;
+        let registry = RuntimeRegistry::new(address,"secret".into(),"instance".into());
+        registry.open_with_launch(target(dir.path(),&key,no_cano()),dir.path().into()).await.unwrap();
+        until_ready(&registry,&key).await;
+        tokio::time::timeout(std::time::Duration::from_secs(10),async {
+            while handle_view(&registry,&key).await["public_state"]["problema"] != "session_patch_stale" {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }).await.expect("patch velho aparece como problema da sessão");
         cleanup(&registry,&key,dir.path(),&policy).await;
     }
 
