@@ -27,13 +27,15 @@ export interface CatalogoDaConta {
 
 export async function carregarModelos(
   q: { provider: string; engine?: string | null; configDir?: string | null;
-    codexAccount?: string | null; server?: Server | null; signal?: AbortSignal },
+    codexAccount?: string | null; engineAccount?: string | null; server?: Server | null; signal?: AbortSignal },
   chaveMemoria?: string,
 ): Promise<CatalogoDaConta> {
   if (!temEscolhaDeModelo(q.provider)) return { models: [], reduced: false, lembrado: '', esforcoLembrado: '' };
+  // A conta ChatGPT só entra quando existe: os chamadores sem ela seguem com a mesma chamada.
+  const extra = q.engineAccount ? [q.engineAccount] as const : [] as const;
   const r = q.server
-    ? await modelOptionsForServer(q.server, q.provider, q.engine, q.configDir, q.codexAccount, q.signal)
-    : await modelOptions(q.provider, q.engine, q.configDir, q.codexAccount);
+    ? await modelOptionsForServer(q.server, q.provider, q.engine, q.configDir, q.codexAccount, q.signal, ...extra)
+    : await modelOptions(q.provider, q.engine, q.configDir, q.codexAccount, ...extra);
   let lembrado = '';
   let esforcoLembrado = '';
   if (chaveMemoria) {

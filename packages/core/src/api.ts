@@ -777,12 +777,17 @@ export interface CreateSessionBody {
   // Jev no `hangar-preview objetivo`: ligado, a sessão nasce com a chave no ambiente. Escolha da
   // abertura — é assim que se roda a mesma tarefa com e sem, sem apagar a configuração.
   jev?: boolean;
+  // Conta ChatGPT do CLIProxyAPI local (só Claude com motor) e Fast (`priority`) da sessão nova.
+  engine_account?: string;
+  service_tier?: 'default' | 'priority';
   // Branch já existente (local ou remota) em que a sessão nasce; vazio = a atual da pasta.
   branch?: string | null;
   // Com new_branch, `branch` é a branch NOVA criada a partir de `base` (vazio = a atual da pasta).
   new_branch?: boolean;
   base?: string | null;
 }
+
+export type SessionOpeningExtras = Pick<CreateSessionBody, 'engine_account' | 'service_tier'>;
 
 export function buildCreateSessionBody(body: CreateSessionBody): CreateSessionBody {
   const { codex_account, branch, new_branch, base, ...rest } = body;
@@ -838,6 +843,7 @@ export function createSession(
   subagentModel?: string | null,
   jev?: boolean,
   worktree?: WorktreeChoice,
+  opening?: SessionOpeningExtras,
 ): Promise<SessionInfo> {
   // `model`/`effort`/`permissionMode`/`ompProfile` no FIM de propósito: chamador antigo com 5 argumentos continua válido e abre
   // no padrão, byte por byte (o backend valida None = comportamento de hoje).
@@ -849,6 +855,7 @@ export function createSession(
   if (subagentModel && provider === 'claude') body.subagent_model = subagentModel;
   if (jev) body.jev = true;
   if (worktree?.branch) Object.assign(body, worktree);
+  if (opening) Object.assign(body, opening);
   return apiFetch<SessionInfo>('/api/sessions', {
     method: 'POST',
     body: JSON.stringify(buildCreateSessionBody(body)),
@@ -916,6 +923,7 @@ export function passarBastao(
     permission_mode?: string | null;
     omp_profile?: string | null;
     codex_account?: string | null;
+    engine_account?: string;
     // Modo de execução da sessão que recebe o trabalho: ela é nova e nasce onde a pessoa
     // escolher, sem herdar o modo da origem.
     headless?: boolean | null;
@@ -949,6 +957,9 @@ export interface ModelOption {
   // tela não pode ter lista fechada — ver app/codex_models.py e app/kimi_models.py.
   efforts?: string[];
   default_effort?: string | null;
+  // Fast: no Codex vem como tier `priority`; no motor GPT do CLIProxyAPI local, como `supports_fast`.
+  service_tiers?: { id: string; hidden?: boolean }[];
+  supports_fast?: boolean;
 }
 
 // Orquestração: política de contas da máquina e papéis do grupo (tipos em ./orquestracao.ts).
@@ -999,22 +1010,25 @@ export async function removerPapel(
 // a da sessão viva — sem isto a lista quente de uma conta nunca seria aproveitada na abertura.
 export async function modelOptions(
   provider: string, engine?: string | null, configDir?: string | null,
-  codexAccount?: string | null,
+  codexAccount?: string | null, engineAccount?: string | null,
 ): Promise<{ kind: string; reduced: boolean; models: ModelOption[] }> {
-  return apiFetch(modelOptionsPath(provider, engine, configDir, codexAccount));
+  return apiFetch(modelOptionsPath(provider, engine, configDir, codexAccount, engineAccount));
 }
 
-function modelOptionsPath(provider: string, engine?: string | null, configDir?: string | null, codexAccount?: string | null): string {
+function modelOptionsPath(provider: string, engine?: string | null, configDir?: string | null, codexAccount?: string | null,
+  engineAccount?: string | null): string {
   const q = new URLSearchParams({ provider });
   if (engine) q.set('engine', engine);
   if (configDir) q.set('config_dir', configDir);
   if (provider === 'codex' && codexAccount) q.set('codex_account', codexAccount);
+  // O catálogo de um motor do CLIProxyAPI depende da conta ChatGPT escolhida.
+  if (provider === 'claude' && engine && engineAccount) q.set('engine_account', engineAccount);
   return `/api/model-options?${q}`;
 }
 
 export function modelOptionsForServer(server: Server, provider: string, engine?: string | null,
-  configDir?: string | null, codexAccount?: string | null, signal?: AbortSignal): ReturnType<typeof modelOptions> {
-  return apiFetchForServer(server, modelOptionsPath(provider, engine, configDir, codexAccount), { signal: comTeto(signal, 8000) });
+  configDir?: string | null, codexAccount?: string | null, signal?: AbortSignal, engineAccount?: string | null): ReturnType<typeof modelOptions> {
+  return apiFetchForServer(server, modelOptionsPath(provider, engine, configDir, codexAccount, engineAccount), { signal: comTeto(signal, 8000) });
 }
 
 export function getCredentialsForServer(server: Server, force = false, signal?: AbortSignal): Promise<Credencial[]> {
@@ -2080,7 +2094,11 @@ export interface Motor {
   // Sempre mascarada (sk-k••••••••1234). A chave inteira nunca volta do servidor.
   api_key: string;
   api_key_definida: boolean;
+  // Só em motor do CLIProxyAPI local: as contas ChatGPT do proxy, ou o motivo de não as ter lido.
+  cliproxy_accounts?: CliProxyAccount[];
+  cliproxy_error?: string;
 }
+export interface CliProxyAccount { account: string; credential_id: string; email: string; label: string; prefix?: string | null }
 export interface ModeloProvedor {
   id: string;
   context_length: number | null;

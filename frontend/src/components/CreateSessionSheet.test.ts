@@ -1279,3 +1279,65 @@ it('mantém a folha aberta até a gravação do modo responder', async () => {
     expect(document.querySelector('[role="dialog"]')).toBeNull();
   } finally { await unmount(comp); }
 });
+
+describe('CreateSessionSheet — motor GPT do CLIProxyAPI local', () => {
+  const motor = {
+    label: 'GPT proxy', base_url: 'http://127.0.0.1:8317/v1', model: 'gpt-5.5', api_key: '', api_key_definida: true,
+    cliproxy_accounts: [
+      { account: 'a1', credential_id: 'codex:a1', email: 'a1@example.test', label: 'conta-um' },
+      { account: 'a2', credential_id: 'codex:a2', email: 'a2@example.test', label: 'conta-dois' },
+    ],
+  };
+
+  it('a conta ChatGPT e o Fast escolhidos vão no create', async () => {
+    vi.mocked(api.listClaudeConfigs).mockRejectedValue(new Error('fora do ar'));
+    vi.mocked(api.getEngines).mockResolvedValue({ motores: { gpt: motor }, arquivo_corrompido: false, arquivo_caminho: '' });
+    vi.mocked(api.modelOptions).mockImplementation(async (_p, engine) => engine
+      ? { kind: 'engine', reduced: false, models: [{ id: 'gpt-5.5', supports_fast: true }] }
+      : { kind: 'claude', reduced: true, models: [{ id: 'opus' }] });
+    const { comp } = montar();
+    try {
+      await flush();
+      await escolherPasta();
+      (document.querySelector('.mais-cab') as HTMLElement).click();
+      await flush();
+      await escolherNoCombo('#engine-pick', 'GPT proxy');
+      await flush();
+      await escolherNoCombo('#engine-account-pick', 'conta-dois');
+      await flush();
+      expect(api.modelOptions).toHaveBeenLastCalledWith('claude', 'gpt', null, undefined, 'a2');
+      const fast = document.querySelector('.fast-check input') as HTMLInputElement;
+      expect(fast.disabled).toBe(true);
+      await escolherNoCombo('#model-pick', 'gpt-5.5');
+      expect(fast.disabled).toBe(false);
+      fast.click();
+      await flush();
+      (document.querySelector('.primary-btn') as HTMLElement).click();
+      await flush();
+      expect(onCreate.mock.calls.at(-1)?.[13]).toEqual({ engine_account: 'a2', service_tier: 'priority' });
+    } finally {
+      unmount(comp);
+      vi.mocked(api.getEngines).mockResolvedValue({ motores: {}, arquivo_corrompido: false, arquivo_caminho: '' });
+    }
+  });
+
+  it('erro do proxy aparece e trava o create', async () => {
+    vi.mocked(api.listClaudeConfigs).mockRejectedValue(new Error('fora do ar'));
+    vi.mocked(api.getEngines).mockResolvedValue({ motores: { gpt: { ...motor, cliproxy_accounts: [], cliproxy_error: 'sem-config' } },
+      arquivo_corrompido: false, arquivo_caminho: '' });
+    const { comp } = montar();
+    try {
+      await flush();
+      await escolherPasta();
+      (document.querySelector('.mais-cab') as HTMLElement).click();
+      await flush();
+      await escolherNoCombo('#engine-pick', 'GPT proxy');
+      await flush();
+      expect(document.body.textContent).toContain(m.native_create_proxy_error({ reason: 'sem-config' }));
+      expect((document.querySelector('.primary-btn') as HTMLButtonElement).disabled).toBe(true);
+    } finally {
+      unmount(comp);
+      vi.mocked(api.getEngines).mockResolvedValue({ motores: {}, arquivo_corrompido: false, arquivo_caminho: '' });
+    }
+  });
+});

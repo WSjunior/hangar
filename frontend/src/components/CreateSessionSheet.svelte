@@ -11,8 +11,9 @@
   import { getSessions, listClaudeConfigs, getClaudeAccountSuggestion, getEngines, getProviders, criarConta, apagarConta,
            getArchivePorCwd, resumeArchivedConversation, getArchiveHistory, getBastao, passarBastao,
            getCreationProgress, type CreationProgress,
-           type ModelOption, type Motor, type ArchiveEntry, sanitizeSessionName, uniqueSessionName } from '@hangar/core';
-  import { carregarModelos as carregarModelosDaConta, temEscolhaDeModelo } from '../lib/modelosPorConta';
+           type ModelOption, type Motor, type CliProxyAccount, type SessionOpeningExtras, type ArchiveEntry,
+           sanitizeSessionName, uniqueSessionName } from '@hangar/core';
+  import { carregarModelos as carregarModelosDaConta, temEscolhaDeModelo, valorModelo } from '../lib/modelosPorConta';
   import { basename, providerName, relativeTime, cotaDaConta, resumoCota, janelaEsgotada, effortLevels, SESSION_PROVIDERS } from '@hangar/core';
   import SessionOpeningFields from './SessionOpeningFields.svelte';
   import BranchChoice from './BranchChoice.svelte';
@@ -36,7 +37,7 @@
                engine?: string | null, model?: string | null, effort?: string | null,
                permissionMode?: string | null, ompProfile?: string | null,
                headless?: boolean, subagentModel?: string | null, jev?: boolean,
-               worktree?: WorktreeChoice | null) => Promise<void>;
+               worktree?: WorktreeChoice | null, opening?: SessionOpeningExtras) => Promise<void>;
     onOpenSession: (name: string) => void;
     /** Passagem de bastão: a MESMA folha, aberta pra criar a sessão que CONTINUA `bastao.name`.
      *  Não-nulo = modo bastão — servidor travado no da origem, cwd/nome pré-preenchidos, e o
@@ -193,14 +194,41 @@
   // Motor de modelo (Task 5): '' = conta Anthropic (o padrão de sempre). Só faz sentido com provider claude.
   let engine = $state('');
   let motores = $state<Record<string, Motor>>({});
-  // Perfil do omp (`omp --profile x`): '' = sem perfil. Só vale com provider omp; o backend valida o nome.
-  let perfilOmp = $state('');
+  // Conta ChatGPT do motor do CLIProxyAPI local e o Fast da sessão nova (null = padrão da conta).
+  let engineAccount = $state('');
+  let fastChoice = $state<'default' | 'priority' | null>(null);
+  let modelosCarregando = $state(false);
 
   // Escolha de modelo e esforço (modelo: claude, pi e kimi; esforço: só claude e pi — o Kimi não
   // tem flag de esforço no CLI, ver NIVEIS abaixo). `''` = Padrão, ou seja
   // nenhuma flag no comando: comportamento de hoje, byte por byte. A lista vem do
   // GET /api/model-options (Task 4), que já traz contexto/👁 pros provedores que informam.
   let modelo = $state('');
+  let modelos = $state<ModelOption[]>([]);
+  let erroModelos = $state('');
+  const selectedMotor = $derived(provider === 'claude' && engine ? motores[engine] ?? null : null);
+  const proxyAccounts = $derived(selectedMotor?.cliproxy_accounts ?? null);
+  // Só conta de credencial Codex do Hangar serve: é dela que sai a cota e o login do proxy.
+  const eligibleProxy = (a: CliProxyAccount) => !!a.account && /^codex:./.test(a.credential_id);
+  const proxyEligible = $derived((proxyAccounts ?? []).filter(eligibleProxy));
+  function chooseEngineAccount() {
+    engineAccount = proxyEligible.find((a) => a.account === engineAccount)?.account ?? proxyEligible[0]?.account ?? '';
+  }
+  // O que ainda impede abrir no motor do proxy, na ordem do app nativo; '' = pronto.
+  const proxyNote = $derived.by(() => {
+    if (!selectedMotor) return '';
+    if (selectedMotor.cliproxy_error) return m.native_create_proxy_error({ reason: selectedMotor.cliproxy_error });
+    if (!proxyAccounts) return '';
+    if (!proxyAccounts.length) return m.native_create_proxy_no_accounts();
+    if (!proxyEligible.some((a) => a.account === engineAccount)) return m.native_create_proxy_choose_account();
+    if (modelosCarregando) return m.native_loading();
+    if (!erroModelos && !modelos.length) return m.native_create_proxy_no_models();
+    return '';
+  });
+  const proxyBlocked = $derived(!!proxyNote || (!!proxyAccounts && !!erroModelos));
+  // Perfil do omp (`omp --profile x`): '' = sem perfil. Só vale com provider omp; o backend valida o nome.
+  let perfilOmp = $state('');
+
   let subagente = $state('');
   // Nasce no PADRÃO DO SERVIDOR (`jev_padrao`), não desligada: marcar uma vez tem que valer pras
   // próximas, inclusive nas sessões que o CLI e o MCP abrem — e o localStorage não alcança
@@ -209,9 +237,12 @@
   // Guarda a releitura tardia do padrão (ver o reset) de passar por cima de uma escolha já feita.
   let jevTocado = $state(false);
   let esforco = $state('');
-  let modelos = $state<ModelOption[]>([]);
   let listaReduzida = $state(false);
-  let erroModelos = $state('');
+  // Fast vale para o modelo escolhido; só o Codex e o motor GPT do proxy local o oferecem.
+  const fastModel = $derived(modelos.find((mod) => valorModelo(mod) === modelo) ?? null);
+  const fastAvailable = $derived(!!fastModel && (provider === 'codex'
+    ? !!fastModel.service_tiers?.some((t) => t.id === 'priority' && !t.hidden)
+    : provider === 'claude' && !!proxyAccounts && !!fastModel.supports_fast));
 
   let permissao = $state('');
   // Claude/Codex sem terminal: processo gerenciado pelo backend, sem tmux. Fora do modo bastão e
@@ -274,7 +305,9 @@
   // `targetServer` (acima) é o servidor de destino. Ele entra na chave porque MOTOR É POR SERVIDOR
   // (comentário do loadConfigs): sem isso o app lembraria um modelo de motor que o outro servidor
   // não tem — a sessão subiria com --model de um id que aquele provedor não conhece.
-  const chaveMemoria = () => `cp_last_model:${targetServer}:${provider}:${provider === 'codex' ? codexAccount : engine || '-'}`;
+  // A conta ChatGPT separa a memória: cada conta do proxy tem o próprio catálogo (mesma chave do nativo).
+  const chaveMemoria = () => `cp_last_model:${targetServer}:${provider}:${provider === 'codex' ? codexAccount : engine || '-'}`
+    + (provider === 'claude' && engineAccount ? `:account:${engineAccount}` : '');
 
   // Mesma guarda de sequência que o sheet já usa pra configs/motores (`cfgSeq`), pelo mesmo motivo
   // escrito lá: provider → motor → config em sequência rápida deixa várias respostas em voo, e a
@@ -319,12 +352,19 @@
   async function carregarModelos() {
     const seq = ++modSeq;
     modelos = []; erroModelos = ''; listaReduzida = false; modelo = ''; esforco = ''; subagente = '';
+    fastChoice = null; modelosCarregando = false;
+    chooseEngineAccount();
     if (!temEscolhaDeModelo(provider)) return;
     if (provider === 'codex' && (!codexAccount || !codexServer)) return;
+    // Motor do proxy sem conta utilizável não tem catálogo a pedir: o aviso da conta diz o porquê.
+    if (selectedMotor && (selectedMotor.cliproxy_error || (proxyAccounts && !engineAccount))) return;
+    modelosCarregando = true;
     try {
       const r = await carregarModelosDaConta({ provider, engine, configDir: selectedConfig,
+        ...(proxyAccounts ? { engineAccount } : {}),
         ...(provider === 'codex' ? { codexAccount, server: codexServer, signal: codexController.signal } : {}) }, chaveMemoria());
       if (seq !== modSeq) return;
+      modelosCarregando = false;
       modelos = r.models;
       listaReduzida = r.reduced;
       if (r.lembrado) modelo = r.lembrado;
@@ -335,6 +375,7 @@
       esforco = effortLevels(provider, modelos, modelo).includes(r.esforcoLembrado) ? r.esforcoLembrado : '';
     } catch (e) {
       if (seq !== modSeq) return;
+      modelosCarregando = false;
       erroModelos = e instanceof Error ? e.message : m.criar_modelos_erro();
     }
   }
@@ -664,6 +705,7 @@
       // fica atrás dele e não roda. Escolha de Pi indo pro create do Claude é pane no ar e erro no
       // primeiro turno, calado.
       modelo = ''; esforco = ''; subagente = ''; permissao = '';
+      engineAccount = ''; fastChoice = null; modelosCarregando = false;
       jev = segredos.ligado('jev_padrao'); jevTocado = false;
       // A leitura do dono reaplica o padrão se a pessoa ainda não mexeu no interruptor.
       // Fora desta lista, "a sessão escreve" vinha marcado na abertura seguinte e a continuação
@@ -920,8 +962,12 @@
     if (p) handlePick(p);
   }
 
+  // Fast só existe para sessão nova (nem retomada, nem bastão) e com um modelo que o aceita.
+  const showFast = $derived(!conversaAlvo && !bastao && (provider === 'codex' || (provider === 'claude' && !!proxyAccounts)));
+  const tierForCreation = $derived(showFast && fastAvailable ? fastChoice : null);
+
   async function create() {
-    if (contextBusy || loading || codexUnavailable) return;
+    if (contextBusy || loading || codexUnavailable || proxyBlocked) return;
     if (!picked || !name.trim()) return;
     // Guarda de verdade, não só o `disabled` do botão: o precedente aqui é a sonda de provider
     // (C5), cujo teste dispara um clique sintético justamente pra provar que o atributo não basta.
@@ -938,12 +984,17 @@
     const rememberProvider = providerTouched || Object.keys(providers).length > 0;
     const body = { name: name.trim(), cwd: picked, provider, codex_account: account, remember_provider: rememberProvider,
       model: modelo || null, effort: esforco || null,
+      ...(tierForCreation ? { service_tier: tierForCreation } : {}),
       // O Codex é criado por este corpo e retorna antes do `onCreate` lá embaixo: sem o `jev`
       // aqui, a caixa marcada nunca chegava ao backend e a sessão nascia no padrão do servidor.
       ...(temJev ? { jev } : {}),
       ...(worktreeChoice ?? {}),
       ...(provider === 'codex' && requestedHeadless !== undefined ? { headless: requestedHeadless,
         ...(requestedHeadless ? { permission_mode: permissao || null } : {}) } : {}) };
+    // Só existe com motor do proxy escolhido; vai como argumento extra para não mudar a chamada dos outros.
+    const opening: SessionOpeningExtras | undefined = provider === 'claude' && proxyAccounts
+      ? { engine_account: engineAccount, ...(tierForCreation ? { service_tier: tierForCreation } : {}) } : undefined;
+    const extra = opening ? [opening] as const : [] as const;
     try {
       // Memória ANTES do onCreate: se a criação falhar (rede, 400), a escolha não se perde — o
       // valor lembrado é casado contra a lista na próxima abertura, então id de provedor que saiu
@@ -978,6 +1029,7 @@
           remember_provider: rememberProvider,
           ...(body.provider === 'codex' ? { codex_account: account } : {}),
           engine: body.provider === 'claude' ? (engine || null) : null,
+          ...(opening?.engine_account ? { engine_account: opening.engine_account } : {}),
           model: body.model,
           effort: body.effort,
           permission_mode: body.provider === 'claude' ? (permissao || null) : null,
@@ -1000,7 +1052,7 @@
       if (provider === 'claude' && semTerminal) {
         // Os dois argumentos do fim só existem aqui: perfil (só omp) vazio e a flag sem terminal.
         await onCreate(name.trim(), picked, selectedConfig, provider, engine || null, modelo || null,
-                       esforco || null, permissao || null, null, requestedHeadless, (!engine && subagente) || null, jev, worktreeChoice);
+                       esforco || null, permissao || null, null, requestedHeadless, (!engine && subagente) || null, jev, worktreeChoice, ...extra);
       } else if (provider === 'claude' && !engine && subagente) {
         await onCreate(name.trim(), picked, selectedConfig, provider, null, modelo || null,
                        esforco || null, permissao || null, null, requestedHeadless, subagente, jev, worktreeChoice);
@@ -1012,7 +1064,7 @@
                        // encurtá-la aqui faria o valor cair no argumento errado. `null`/`false` são
                        // os mesmos valores que os defaults davam.
                        provider === 'omp' ? (perfilOmp.trim() || null) : null,
-                       provider === 'claude' ? requestedHeadless : false, null, jev, worktreeChoice);
+                       provider === 'claude' ? requestedHeadless : false, null, jev, worktreeChoice, ...extra);
       }
       onClose();
     } catch (err) {
@@ -1394,6 +1446,31 @@
           {#if !conversaAlvo && provider === 'codex'}
             <CodexContextControl server={servers.find((s) => s.id === targetServer) ?? null} bind:busy={contextBusy} />
           {/if}
+          {#if selectedMotor && (proxyAccounts || selectedMotor.cliproxy_error)}
+            <div class="field">
+              {#if proxyEligible.length}
+                <label class="field-label" for="engine-account-pick">{m.native_create_chatgpt_account()}</label>
+                <Select id="engine-account-pick" class="field-input" ariaLabel={m.native_create_chatgpt_account()}
+                  value={engineAccount} disabled={loading}
+                  opcoes={proxyEligible.map((a) => ({ value: a.account, label: a.label || a.email, hint: a.email }))}
+                  onchange={(v) => { if (v !== engineAccount) { engineAccount = v; carregarModelos(); } }} />
+              {/if}
+              {#if proxyNote}
+                <p class="hint" role={modelosCarregando ? 'status' : 'alert'}>{proxyNote}</p>
+              {/if}
+            </div>
+          {/if}
+          {#if showFast}
+            <label class="fast-check">
+              <input type="checkbox" role="switch" checked={tierForCreation === 'priority'} disabled={loading || !fastAvailable}
+                onchange={(e) => { fastChoice = e.currentTarget.checked ? 'priority' : 'default'; }} />
+              <span class="fast-texto">
+                <span>{m.native_ctl_fast()}</span>
+                <span class="hint">{!fastAvailable ? m.native_ctl_fast_unavailable()
+                  : fastChoice === null ? m.native_create_fast_default_hint() : m.native_ctl_fast_hint()}</span>
+              </span>
+            </label>
+          {/if}
         {/snippet}
       </SessionOpeningFields>
 
@@ -1461,7 +1538,7 @@
               : m.criar_retomar_acao()}
           </button>
         {:else}
-          <button class="primary-btn" onclick={create} disabled={loading || headlessSaving || headlessLoading || contextBusy || codexUnavailable || !name.trim() || providersCarregando || bastaoSemServidor || (providers[provider] && !providers[provider].disponivel)}>
+          <button class="primary-btn" onclick={create} disabled={loading || headlessSaving || headlessLoading || contextBusy || codexUnavailable || proxyBlocked || !name.trim() || providersCarregando || bastaoSemServidor || (providers[provider] && !providers[provider].disponivel)}>
             {loading ? m.criar_criando() : (bastao ? m.bastao_acao() : m.sessao_nova())}
           </button>
           {#if loading}
@@ -1736,6 +1813,13 @@
     cursor: pointer;
   }
   .retomar-check input { accent-color: var(--accent); }
+  /* Mesmo desenho do controle de contexto do Codex: a linha inteira é o alvo do toque. */
+  .fast-check { display: flex; align-items: center; gap: var(--space-3); min-height: 44px; margin-bottom: var(--space-4);
+                font-size: var(--text-sm); cursor: pointer; }
+  .fast-check input { flex: none; width: 22px; height: 22px; margin: 0; accent-color: var(--accent); }
+  .fast-check input:disabled { cursor: not-allowed; }
+  .fast-texto { display: grid; gap: 2px; }
+  .fast-texto .hint { margin: 0; font-size: var(--text-xs); }
 
   .conversas {
     display: flex;
