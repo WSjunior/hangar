@@ -2782,18 +2782,29 @@ async def _motivo_ocupada(name: str, headless: bool) -> str | None:
 def _requeue_unanswered(name: str) -> int:
     """Volta à fila a mensagem entregue que a sessão ociosa nunca confirmou: o processo que a
     recebeu não a gravou, e a vida nova (outra conta, outro modo) precisa responder. Só sob a trava
-    de entrega e dentro da troca, para nenhum drain correr no meio. Desistida e saída local ficam."""
+    de entrega e dentro da troca, para nenhum drain correr no meio. Desistida e saída local ficam.
+
+    Volta como linha NOVA: a antiga carrega a operação já aceita no diário da fila, e o drain com o
+    mesmo id devolveria a resposta guardada sem enviar nada. A antiga é confirmada (sai da tela).
+    O que já está no transcript só tinha a confirmação atrasada: é confirmado, nunca reenviado."""
+    meta = headless_sessions.load(name)
+    if meta is None:
+        return 0
+    committed = committed_user_lines(str(get_adapter(CLAUDE_HEADLESS).transcript_path_de(meta)))
+    if committed is None:
+        _log.warning("transcript de %s ilegível: mensagens sem confirmação ficam como estão", name)
+        return 0
     queue = PromptQueue(name)
     requeued = 0
     for row in queue.load():
         if (row.get("delivered") is not True or row.get("confirmed") or row.get("desistiu")
                 or _saida_local(row)):
             continue
-        try:
-            queue.set_delivered(str(row["id"]), False)
-        except ValueError:
-            continue        # entrega incerta no diário da fila: reenviar poderia duplicar
-        requeued += 1
+        text, row_id = row.get("text") or "", str(row.get("id"))
+        if text.strip() and text.strip() not in committed:
+            queue.append(text, pre_transcript=bool(row.get("pre_transcript")))
+            requeued += 1
+        queue.confirm_delivered(apenas=lambda r, row_id=row_id: str(r.get("id")) == row_id)
     if requeued:
         _log.info("%d mensagem(ns) sem confirmação de %s voltaram à fila", requeued, name)
     return requeued

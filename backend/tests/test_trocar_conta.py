@@ -347,19 +347,27 @@ def test_unanswered_message_goes_back_to_the_queue_before_the_new_account_wakes(
     local = queue.append_saida_local("/btw isn't available")
     done = queue.append("respondida", delivered=True)
     queue.confirm_delivered(lambda r: r["id"] == done["id"])
-    seen = {}
+    seen = []
     hl = _hl([])
-    hl.acordar = MagicMock(side_effect=lambda n: seen.update({r["id"]: r["delivered"] for r in queue.load()}))
+    hl.acordar = MagicMock(side_effect=lambda n: seen.extend(queue.load()))
     r = _post("hl", b, headless=True, conta=a, hl=hl)
     assert r.status_code == 200, r.text
-    assert seen == {lost["id"]: False, abandoned["id"]: True, local["id"]: True, done["id"]: True}
+    by_id = {row["id"]: row for row in seen}
+    # A antiga sai (o drain com o id dela devolveria a operação já aceita sem enviar); nasce uma nova.
+    assert by_id[lost["id"]]["confirmed"] is True
+    fresh = [row for row in seen if row["text"] == "resposta perdida" and row["id"] != lost["id"]]
+    assert len(fresh) == 1 and fresh[0]["delivered"] is False
+    assert by_id[abandoned["id"]].get("confirmed") is not True and by_id[abandoned["id"]]["desistiu"]
+    assert by_id[local["id"]]["delivered"] and by_id[done["id"]]["confirmed"]
 
 
-def test_uncertain_delivery_is_not_requeued(monkeypatch):
-    """O diário da fila recusa devolver entrega incerta (ValueError): ela fica, as outras voltam."""
+def test_unanswered_already_in_transcript_is_confirmed_not_resent(monkeypatch):
+    """Confirmação atrasada (o texto já está no transcript) não pode virar mensagem repetida."""
+    from types import SimpleNamespace
     import app.api as api_mod
-    rows = [{"id": "unknown", "delivered": True}, {"id": "lost", "delivered": True}]
-    calls = []
+    rows = [{"id": "landed", "text": "chegou", "delivered": True},
+            {"id": "lost", "text": "perdida", "delivered": True}]
+    appended, confirmed = [], []
 
     class Queue:
         def __init__(self, name):
@@ -368,14 +376,22 @@ def test_uncertain_delivery_is_not_requeued(monkeypatch):
         def load(self):
             return rows
 
-        def set_delivered(self, entry_id, value):
-            calls.append(entry_id)
-            if entry_id == "unknown":
-                raise ValueError("entrega incerta não pode voltar para a fila")
+        def append(self, text, pre_transcript=False):
+            appended.append(text)
+
+        def confirm_delivered(self, apenas):
+            confirmed.extend(r["id"] for r in rows if apenas(r))
 
     monkeypatch.setattr(api_mod, "PromptQueue", Queue)
+    monkeypatch.setattr(api_mod.headless_sessions, "load", lambda name: {})
+    monkeypatch.setattr(api_mod, "get_adapter", lambda kind: SimpleNamespace(transcript_path_de=lambda meta: "/x.jsonl"))
+    monkeypatch.setattr(api_mod, "committed_user_lines", lambda path: {"chegou"})
     assert api_mod._requeue_unanswered("hl") == 1
-    assert calls == ["unknown", "lost"]
+    assert appended == ["perdida"] and confirmed == ["landed", "lost"]
+    monkeypatch.setattr(api_mod, "committed_user_lines", lambda path: None)
+    appended.clear(); confirmed.clear()
+    assert api_mod._requeue_unanswered("hl") == 0, "transcript ilegível não autoriza reenviar"
+    assert appended == [] and confirmed == []
 
 
 def test_terminal_passa_por_sem_terminal_e_reabre_o_pane_na_conta_nova(contas, tmp_path):
