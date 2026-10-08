@@ -7563,6 +7563,7 @@
   "native_voice_server_closed": "OpenAI ended the call.",
   "native_voice_plan_failed": "The plan did not reach the session.",
   "native_voice_plan_off_screen": "The plan was not sent: its session is not on screen.",
+  "native_voice_action_failed": "The action requested by voice failed: {erro}",
   "native_voice_plan_title": "Plan",
   "native_voice_plan_open": "Open file",
   "native_voice_draft_held": "Request on hold, not sent yet",

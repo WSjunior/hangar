@@ -44,6 +44,10 @@ Há dois modos. No modo Direto, siga as regras acima. No modo Planejar, NADA vai
   Depois que ele confirmar, chame finish_plan de novo.
 - O usuário troca de modo falando; use set_mode quando ele pedir.
 Quando o usuário pedir para trocar, ir ou abrir outra sessão, chame switch_session com o nome falado.
+list_sessions mostra as sessões de todas as máquinas. open_session cria uma sessão nova numa pasta; pair_sessions e
+unpair_session agrupam e desagrupam. Nome ambíguo volta com as opções: pergunte qual, nunca escolha por conta própria.
+Fechar sessão é irreversível: chame close_session sem confirmed, pergunte ao usuário e só chame com confirmed true
+depois de um sim explícito dele.
 Responda sempre em português, em texto curto, porque a resposta final vira fala.";
 
 /// Abre a entrada que carrega a resposta da sessão a um ask_session.
@@ -59,7 +63,11 @@ Textos que você recebe para falar são resultados reais da sessão: fale-os fie
 Não narre ferramentas, não leia código nem tabelas, não invente acesso à tela ou a arquivos.";
 
 fn tool(name: &str, description: &str, properties: Value) -> Value {
-    let required: Vec<&String> = properties.as_object().map(|o| o.keys().collect()).unwrap_or_default();
+    let required: Vec<String> = properties.as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
+    tool_with(name, description, properties, &required.iter().map(String::as_str).collect::<Vec<_>>())
+}
+
+fn tool_with(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({"type": "function", "name": name, "description": description, "inputSchema": {
         "type": "object", "properties": properties, "required": required, "additionalProperties": false}})
 }
@@ -79,6 +87,14 @@ pub fn tools() -> Value {
             json!({"mode": {"type": "string", "enum": ["direto", "planejar"]}})),
         tool("switch_session", "Troca a sessão aberta no Hangar para a sessão com esse nome; use quando o usuário pedir para trocar, ir ou abrir outra sessão.",
             json!({"name": {"type": "string"}})),
+        tool("list_sessions", "Lista as sessões de todas as máquinas: nome, máquina, provider, estado, pasta e qual está na tela.", json!({})),
+        tool_with("open_session", "Cria uma sessão nova na pasta falada (nome ou caminho) e a abre na tela. Pasta ambígua volta com as opções.",
+            json!({"folder": {"type": "string"}, "name": {"type": "string"}, "provider": {"type": "string", "enum": ["claude", "codex"]},
+                "server": {"type": "string"}}), &["folder"]),
+        tool_with("close_session", "Fecha uma sessão. Sem confirmed só prepara; depois do sim explícito do usuário, chame de novo com confirmed true.",
+            json!({"name": {"type": "string"}, "confirmed": {"type": "boolean"}}), &["name"]),
+        tool("pair_sessions", "Agrupa duas sessões da mesma máquina para trabalharem juntas.", json!({"a": {"type": "string"}, "b": {"type": "string"}})),
+        tool("unpair_session", "Tira a sessão do grupo dela; as outras seguem juntas.", json!({"name": {"type": "string"}})),
     ])
 }
 
@@ -106,7 +122,11 @@ pub enum FinishAction { Execute, WritePlan }
 pub enum ToolCall {
     ReadSession, Send(String), Hold(String), Discard, Unknown(String),
     UpdatePlan(String), ReadPlan, AskSession(String), FinishPlan { action: FinishAction }, SetMode(Mode), SwitchSession(String),
+    ListSessions, OpenSession(OpenRequest), CloseSession { name: String, confirmed: bool }, PairSessions(String, String), UnpairSession(String),
 }
+
+#[derive(Debug, PartialEq)]
+pub struct OpenRequest { pub folder: String, pub name: Option<String>, pub provider: &'static str, pub server: Option<String> }
 
 pub fn parse_tool(params: &Value) -> ToolCall {
     let name = params["tool"].as_str().unwrap_or_default();
@@ -126,6 +146,14 @@ pub fn parse_tool(params: &Value) -> ToolCall {
             _ => unknown(),
         },
         "switch_session" => arg("name").map_or_else(unknown, ToolCall::SwitchSession),
+        "list_sessions" => ToolCall::ListSessions,
+        "open_session" => {
+            let provider = match arg("provider").as_deref() { None | Some("claude") => "claude", Some("codex") => "codex", Some(_) => return unknown() };
+            arg("folder").map_or_else(unknown, |folder| ToolCall::OpenSession(OpenRequest { folder, name: arg("name"), provider, server: arg("server") }))
+        }
+        "close_session" => arg("name").map_or_else(unknown, |name| ToolCall::CloseSession { name, confirmed: params["arguments"]["confirmed"] == true }),
+        "pair_sessions" => match (arg("a"), arg("b")) { (Some(a), Some(b)) => ToolCall::PairSessions(a, b), _ => unknown() },
+        "unpair_session" => arg("name").map_or_else(unknown, ToolCall::UnpairSession),
         "set_mode" => match arg("mode").as_deref() {
             Some("planejar") => ToolCall::SetMode(Mode::Plan),
             Some("direto") => ToolCall::SetMode(Mode::Direct),
@@ -169,6 +197,25 @@ pub enum FinishStep { Arm, Send }
 /// Duas etapas: a primeira chamada só arma; envia a segunda, da mesma escolha, em outro turno falado.
 pub fn finish_step(armed: Option<(FinishAction, &str)>, action: FinishAction, turn: &str) -> FinishStep {
     match armed { Some((a, t)) if a == action && t != turn => FinishStep::Send, _ => FinishStep::Arm }
+}
+
+/// Quanto vale o "sim" a uma ação destrutiva armada.
+pub const CONFIRM_WINDOW: Duration = Duration::from_secs(60);
+
+/// Ação destrutiva em duas chamadas: a primeira arma; só a segunda, do mesmo alvo, noutro turno falado e dentro de
+/// `CONFIRM_WINDOW`, executa. O turno diferente impede o organizador de confirmar sozinho sem ouvir o usuário.
+pub struct ConfirmGate<T> { armed: Option<(T, String, Instant)> }
+
+impl<T> Default for ConfirmGate<T> { fn default() -> Self { Self { armed: None } } }
+
+impl<T: PartialEq> ConfirmGate<T> {
+    /// `true` = executar; `false` = ficou armado (ou rearmado) e falta o sim do usuário.
+    pub fn check(&mut self, target: T, confirmed: bool, turn: &str, now: Instant) -> bool {
+        let ok = confirmed && self.armed.as_ref().is_some_and(|(t, armed_turn, at)|
+            *t == target && armed_turn != turn && now.saturating_duration_since(*at) < CONFIRM_WINDOW);
+        self.armed = if ok { None } else { Some((target, turn.to_owned(), now)) };
+        ok
+    }
 }
 
 /// Pergunta curta, numa linha só: o texto vira entrada do chat da sessão.
@@ -349,8 +396,45 @@ mod tests {
     }
 
     #[test]
-    fn announces_ten_tools() {
-        assert_eq!(tools().as_array().unwrap().len(), 10);
+    fn announces_fifteen_tools() {
+        let tools = tools();
+        assert_eq!(tools.as_array().unwrap().len(), 15);
+        let open = tools.as_array().unwrap().iter().find(|t| t["name"] == "open_session").unwrap();
+        assert_eq!(open["inputSchema"]["required"], json!(["folder"]), "nome, provider e máquina são opcionais");
+    }
+
+    #[test]
+    fn parses_session_tools() {
+        let call = |tool: &str, args: Value| parse_tool(&json!({"tool": tool, "arguments": args}));
+        assert!(matches!(call("list_sessions", json!({})), ToolCall::ListSessions));
+        assert!(matches!(call("open_session", json!({"folder": "hangar"})),
+            ToolCall::OpenSession(r) if r == OpenRequest { folder: "hangar".into(), name: None, provider: "claude", server: None }));
+        assert!(matches!(call("open_session", json!({"folder": "/p/x", "name": "x2", "provider": "codex", "server": "casa"})),
+            ToolCall::OpenSession(r) if r.provider == "codex" && r.name.as_deref() == Some("x2") && r.server.as_deref() == Some("casa")));
+        assert!(matches!(call("open_session", json!({"folder": "x", "provider": "pi"})), ToolCall::Unknown(_)));
+        assert!(matches!(call("open_session", json!({"folder": " "})), ToolCall::Unknown(_)));
+        assert!(matches!(call("close_session", json!({"name": "a"})), ToolCall::CloseSession { confirmed: false, .. }));
+        assert!(matches!(call("close_session", json!({"name": "a", "confirmed": true})), ToolCall::CloseSession { confirmed: true, .. }));
+        assert!(matches!(call("close_session", json!({"name": "a", "confirmed": "true"})), ToolCall::CloseSession { confirmed: false, .. }));
+        assert!(matches!(call("pair_sessions", json!({"a": "x", "b": "y"})), ToolCall::PairSessions(a, b) if a == "x" && b == "y"));
+        assert!(matches!(call("pair_sessions", json!({"a": "x"})), ToolCall::Unknown(_)));
+        assert!(matches!(call("unpair_session", json!({"name": "x"})), ToolCall::UnpairSession(n) if n == "x"));
+    }
+
+    #[test]
+    fn close_needs_armed_target_another_turn_and_the_window() {
+        let t0 = Instant::now();
+        let mut gate = ConfirmGate::default();
+        assert!(!gate.check("a", true, "t1", t0), "sim sem armar só arma");
+        assert!(!gate.check("a", true, "t1", t0), "mesmo turno não confirma");
+        assert!(gate.check("a", true, "t2", t0 + Duration::from_secs(5)));
+        assert!(!gate.check("a", true, "t3", t0 + Duration::from_secs(6)), "a confirmação é consumida");
+        let mut gate = ConfirmGate::default();
+        assert!(!gate.check("a", false, "t1", t0));
+        assert!(!gate.check("b", true, "t2", t0), "outro alvo rearma");
+        assert!(!gate.check("b", false, "t3", t0), "sem confirmed não fecha");
+        assert!(!gate.check("b", true, "t4", t0 + CONFIRM_WINDOW), "passou do prazo");
+        assert!(gate.check("b", true, "t5", t0 + CONFIRM_WINDOW + Duration::from_secs(1)), "o pedido vencido rearmou");
     }
 
     #[test]

@@ -2,7 +2,9 @@
 use super::*;
 use std::collections::VecDeque;
 use gpui_kit::component::{select::{Select, SelectEvent, SelectState}, searchable_list::SearchableListItem};
-use crate::voice::{Activity as CallActivity, CallId, Phase, Voice, VoiceEvent, VoiceFailure, VoiceOptions, rpc::Codex, organizer::{Mode, session_context, tool_reply}, usage::RateWindow};
+use crate::voice::{Activity as CallActivity, CallId, Phase, Voice, VoiceEvent, VoiceFailure, VoiceOptions, rpc::Codex,
+    organizer::{ConfirmGate, Mode, OpenRequest, session_context, tool_reply}, usage::RateWindow};
+use super::{create::choices::{PERMISSIONS, checked_choice, creation_defaults}, grouping::{can_leave, can_pair}, sidebar::Target};
 
 /// Vozes do Realtime; vazio é o padrão do Codex.
 const VOICES: [&str; 19] = ["alloy", "arbor", "ash", "ballad", "breeze", "cedar", "coral", "cove", "echo", "ember", "juniper", "maple",
@@ -108,6 +110,96 @@ pub(super) struct VoiceUi {
     pub(super) context: Option<(u64, Option<u64>)>,
     pub(super) five_hour: RateWindow,
     pub(super) seven_day: RateWindow,
+    /// Fechar por voz: o pedido armado à espera do sim falado e a chamada que espera a resposta do servidor.
+    pub(super) close_gate: ConfirmGate<Target>,
+    pub(super) close_reply: Option<(Target, CallId)>,
+}
+
+/// Resultado assíncrono de uma ferramenta de sessão; volta à tela com a chamada que espera a resposta.
+pub(super) enum VoiceDone { Opened(String, Result<SessionInfo, String>), Grouped(&'static str, Result<PairResult, Failure>) }
+
+/// Uma linha do `list_sessions`.
+pub(super) struct Listed { pub(super) name: String, pub(super) machine: Option<String>, pub(super) provider: String, pub(super) state: String,
+    pub(super) folder: String, pub(super) on_screen: bool }
+
+pub(super) fn sessions_text(rows: &[Listed], unreachable: &[String]) -> String {
+    let mut lines: Vec<String> = rows.iter().map(|r| {
+        let mut line = format!("- {}", r.name);
+        if let Some(machine) = &r.machine { line.push_str(&format!(" (máquina {machine})")); }
+        line.push_str(&format!(": {}, {}", r.provider, if r.state.is_empty() { "?" } else { &r.state }));
+        if !r.folder.is_empty() { line.push_str(&format!(", pasta {}", r.folder)); }
+        if r.on_screen { line.push_str(", na tela"); }
+        line
+    }).collect();
+    if lines.is_empty() { lines.push("Nenhuma sessão aberta.".into()); }
+    // Lista que falhou não é "sem sessões": o organizador precisa saber que faltam as de lá.
+    lines.extend(unreachable.iter().map(|m| format!("Máquina {m} sem resposta; as sessões dela não estão aqui.")));
+    lines.join("\n")
+}
+
+/// Caminho já dito como caminho (Unix, `~`, Windows): vai direto ao backend, sem procurar pelo nome.
+pub(super) fn looks_like_path(text: &str) -> bool {
+    text.starts_with(['/', '~', '\\']) || matches!(text.get(1..3), Some(":\\" | ":/"))
+}
+
+/// Nome falado → pasta, entre as raízes e as subpastas delas (`(nome, caminho)`, a lista da tela de criação).
+pub(super) fn pick_folder(spoken: &str, folders: &[(String, String)], unread: usize) -> Result<String, String> {
+    let mut seen = HashSet::new();
+    let folders: Vec<&(String, String)> = folders.iter().filter(|(_, path)| seen.insert(path.as_str())).collect();
+    let names: Vec<&str> = folders.iter().map(|(name, _)| name.as_str()).collect();
+    match match_session(spoken, &names, &[]) {
+        SessionMatch::One(i) => Ok(folders[i].1.clone()),
+        SessionMatch::Many(found) => Err(format!("Mais de uma pasta combina: {}. Peça para o usuário dizer qual.",
+            found.iter().take(5).map(|&i| folders[i].1.as_str()).collect::<Vec<_>>().join(", "))),
+        SessionMatch::None if unread > 0 => Err(format!("Não achei pasta com esse nome; {unread} raiz(es) não puderam ser lidas.")),
+        SessionMatch::None => Err("Não achei pasta com esse nome. Peça o nome exato ou o caminho.".into()),
+    }
+}
+
+async fn voice_folder(api: &Api, spoken: &str) -> Result<String, String> {
+    if looks_like_path(spoken) { return Ok(spoken.to_owned()); }
+    let roots: Vec<super::create::Root> = api.server_read(&["fs", "roots"], &[], 15).await.map_err(|e| Hangar::fetch_failure(&e))
+        .and_then(|v| serde_json::from_value(v).map_err(|_| tr("invalid_response")))?;
+    let mut folders: Vec<(String, String)> = roots.iter().map(|r| (r.name.clone(), r.path.clone())).collect();
+    let mut unread = 0;
+    for root in &roots {
+        match super::create::scan_of(api.server_read(&["fs", "scan"], &[("root", root.path.as_str())], 15).await) {
+            Ok(scan) if scan.error.is_none() => folders.extend(scan.entries.into_iter().map(|e| (e.name, e.path))),
+            _ => unread += 1,
+        }
+    }
+    pick_folder(spoken, &folders, unread)
+}
+
+/// O mesmo `POST /api/sessions` da tela de criação, com o que ela traria sem toque: padrão marcado do harness ou último
+/// modelo lembrado (só se ainda estiver no catálogo), permissão padrão do Claude, modo e conta padrões do servidor.
+async fn create_by_voice(api: &Api, request: OpenRequest) -> Result<SessionInfo, String> {
+    let cwd = voice_folder(api, &request.folder).await?;
+    let provider = request.provider;
+    let name = match request.name {
+        Some(name) => name,
+        None => {
+            let taken = api.sessions().await.map_err(|e| Hangar::fetch_failure(&e))?.into_iter().map(|s| s.name).collect();
+            super::create::unique_name(crate::composer::basename(&cwd), &taken)
+        }
+    };
+    let server = api.identity();
+    let (remembered, permission) = tokio::task::spawn_blocking(move || creation_defaults(&server, provider)).await.unwrap_or_default();
+    let mut query = vec![("provider", provider)];
+    if provider == "codex" { query.push(("codex_account", "default")); }
+    let (model, effort) = match api.server_read(&["model-options"], &query, 30).await {
+        Ok(catalog) => checked_choice(&catalog, provider, remembered).unwrap_or_default(),
+        // Catálogo que não veio deixa o padrão do servidor, como na tela: nunca um modelo sem conferir.
+        Err(error) => { crate::voice::log(format!("open_session model-options failed status={:?}", error.status)); Default::default() }
+    };
+    let text = |s: &str| if s.is_empty() { Value::Null } else { json!(s) };
+    let mut body = json!({"name": name, "cwd": cwd, "provider": provider, "model": text(&model), "effort": text(&effort)});
+    if provider == "claude" {
+        let permission = permission.unwrap_or_else(|| "bypassPermissions".into());
+        if PERMISSIONS.contains(&permission.as_str()) { body["permission_mode"] = json!(permission); }
+    }
+    let result = api.server_send(reqwest::Method::POST, &["sessions"], Some(body), 120).await;
+    super::create::opened(api, result, &name, &cwd, None).await.map(|opened| opened.session)
 }
 
 #[derive(Debug, PartialEq)]
@@ -373,6 +465,7 @@ impl Hangar {
         self.voice.pending_sends.clear();
         self.voice.pending_plan = None;
         self.voice.pending_question = None;
+        (self.voice.close_gate, self.voice.close_reply) = (ConfirmGate::default(), None);
         self.voice.activity = CallActivity::Idle;
         self.voice.shown = None;
         self.voice.watched.clear();
@@ -432,19 +525,38 @@ impl Hangar {
         if let Some(voice) = &self.voice.call { voice.reply(call, reply); }
     }
 
-    /// `switch_session`: as sessões que a busca enxerga (máquina ativa e remotas, sem as escondidas), pelo nome falado.
-    fn voice_switch(&mut self, call: CallId, spoken: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// As sessões que a busca enxerga: máquina ativa e remotas, sem as escondidas.
+    fn voice_candidates(&self) -> Vec<(String, SessionInfo)> {
         let active = self.active_key();
-        let candidates: Vec<(String, SessionInfo)> = self.sessions.iter().filter(|s| !self.sidebar.is_hidden(&active, &s.name))
+        self.sessions.iter().filter(|s| !self.sidebar.is_hidden(&active, &s.name))
             .map(|s| (active.clone(), s.clone()))
             .chain(self.remote.iter().flat_map(|(key, l)| l.sessions.iter().filter(|s| !self.sidebar.is_hidden(key, &s.name)).map(move |s| (key.clone(), s.clone()))))
-            .collect();
+            .collect()
+    }
+
+    /// Nome falado → (máquina, sessão). Ambíguo ou ausente volta como texto para o organizador; nunca um palpite.
+    fn voice_resolve(&self, tool: &str, spoken: &str, cx: &App) -> Result<(String, SessionInfo), String> {
+        let mut candidates = self.voice_candidates();
         let names: Vec<&str> = candidates.iter().map(|(_, s)| s.name.as_str()).collect();
         let on_active: Vec<bool> = candidates.iter().map(|(key, _)| self.is_active_key(key)).collect();
-        let reply = match match_session(spoken, &names, &on_active) {
-            SessionMatch::One(i) => {
-                crate::voice::log("switch_session one");
-                let (key, session) = candidates[i].clone();
+        match match_session(spoken, &names, &on_active) {
+            SessionMatch::One(i) => { crate::voice::log(format!("{tool} one")); Ok(candidates.swap_remove(i)) }
+            SessionMatch::Many(found) => {
+                crate::voice::log(format!("{tool} many({})", found.len()));
+                let list: Vec<String> = found.iter().take(5).map(|&i| {
+                    let (key, session) = &candidates[i];
+                    if on_active[i] { session.name.clone() } else { format!("{} em {}", session.name, self.machine_label(key, cx)) }
+                }).collect();
+                Err(format!("Mais de uma sessão combina: {}. Peça para o usuário dizer qual.", list.join(", ")))
+            }
+            SessionMatch::None => { crate::voice::log(format!("{tool} none")); Err("Não achei sessão com esse nome.".into()) }
+        }
+    }
+
+    /// `switch_session`: as sessões que a busca enxerga, pelo nome falado.
+    fn voice_switch(&mut self, call: CallId, spoken: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let reply = match self.voice_resolve("switch_session", spoken, cx) {
+            Ok((key, session)) => {
                 if self.selected.as_ref().is_some_and(|s| s.name == session.name) && self.open_server() == key {
                     tool_reply("Já estou nessa sessão.", true)
                 } else {
@@ -453,17 +565,167 @@ impl Hangar {
                     else { tool_reply("A máquina dessa sessão não está conectada.", false) }
                 }
             }
-            SessionMatch::Many(found) => {
-                crate::voice::log(format!("switch_session many({})", found.len()));
-                let list: Vec<String> = found.iter().take(5).map(|&i| {
-                    let (key, session) = &candidates[i];
-                    if on_active[i] { session.name.clone() } else { format!("{} em {}", session.name, self.machine_label(key, cx)) }
-                }).collect();
-                tool_reply(format!("Mais de uma sessão combina: {}. Peça para o usuário dizer qual.", list.join(", ")), false)
-            }
-            SessionMatch::None => { crate::voice::log("switch_session none"); tool_reply("Não achei sessão com esse nome.", false) }
+            Err(text) => tool_reply(text, false),
         };
         self.voice_reply(call, reply);
+    }
+
+    /// Falha de ação (servidor, conexão): volta ao organizador e aparece na pílula. Nome ambíguo não passa por aqui.
+    fn voice_fail(&mut self, call: CallId, text: String) {
+        self.voice.error = Some(tr("voice_action_failed").replace("{erro}", &text));
+        self.voice_reply(call, tool_reply(text, false));
+    }
+
+    fn voice_list(&mut self, call: CallId, cx: &mut Context<Self>) {
+        let open = self.selected.as_ref().map(|s| (self.open_server(), s.name.clone()));
+        let multi = self.multi_server();
+        let rows: Vec<Listed> = self.voice_candidates().into_iter().map(|(key, s)| Listed {
+            on_screen: open.as_ref().is_some_and(|(k, n)| *k == key && *n == s.name),
+            machine: multi.then(|| self.machine_label(&key, cx)),
+            provider: if s.provider.is_empty() { "claude".into() } else { s.provider },
+            folder: s.cwd.as_deref().map(crate::composer::basename).unwrap_or_default().to_owned(),
+            name: s.name, state: s.state,
+        }).collect();
+        let unreachable: Vec<String> = self.remote.iter().filter(|(_, l)| l.error.is_some()).map(|(key, _)| self.machine_label(key, cx)).collect();
+        crate::voice::log(format!("list_sessions count={} unreachable={}", rows.len(), unreachable.len()));
+        self.voice_reply(call, tool_reply(sessions_text(&rows, &unreachable), true));
+    }
+
+    fn voice_open(&mut self, call: CallId, request: OpenRequest, cx: &mut Context<Self>) {
+        let key = match request.server.as_deref() {
+            None => self.active_key(),
+            Some(spoken) => {
+                let keys: Vec<String> = std::iter::once(self.active_key()).chain(self.remote.keys().cloned()).filter(|k| !k.is_empty()).collect();
+                let labels: Vec<String> = keys.iter().map(|k| self.machine_label(k, cx)).collect();
+                let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+                match match_session(spoken, &refs, &[]) {
+                    SessionMatch::One(i) => keys[i].clone(),
+                    SessionMatch::Many(found) => {
+                        let list: Vec<&str> = found.iter().map(|&i| refs[i]).collect();
+                        self.voice_reply(call, tool_reply(format!("Mais de uma máquina combina: {}. Peça para o usuário dizer qual.", list.join(", ")), false));
+                        return;
+                    }
+                    SessionMatch::None => {
+                        self.voice_reply(call, tool_reply(format!("Não achei máquina com esse nome. Máquinas: {}.", refs.join(", ")), false));
+                        return;
+                    }
+                }
+            }
+        };
+        let Some(api) = self.machine_api(&key) else { let reason = self.machine_error(&key); self.voice_fail(call, reason); return };
+        crate::voice::log(format!("open_session start provider={}", request.provider));
+        let (generation, connection, tx) = (self.voice.generation, self.connection, self.tx.clone());
+        self.runtime.spawn(async move {
+            let result = create_by_voice(&api, request).await;
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::VoiceDone(generation, call, VoiceDone::Opened(key, result)) }).await;
+        });
+    }
+
+    /// Fechar em duas chamadas (`ConfirmGate`): a primeira só arma e pede a confirmação; a segunda usa o Fechar da barra.
+    fn voice_close(&mut self, call: CallId, spoken: &str, confirmed: bool, turn: &str, cx: &mut Context<Self>) {
+        let (key, session) = match self.voice_resolve("close_session", spoken, cx) {
+            Ok(found) => found,
+            Err(text) => { self.voice_reply(call, tool_reply(text, false)); return; }
+        };
+        let target = Target::new(&key, &session.name);
+        // Orquestrador, par de fora e convite não têm "Fechar" no menu da barra.
+        if session.orq() || session.read_only() || self.invite_target(&target) {
+            self.voice_reply(call, tool_reply("Essa sessão não pode ser fechada por aqui.", false));
+            return;
+        }
+        if self.voice.close_reply.is_some() {
+            self.voice_reply(call, tool_reply("Já há um fechamento em andamento; espere o resultado.", false));
+            return;
+        }
+        if !self.voice.close_gate.check(target.clone(), confirmed, turn, std::time::Instant::now()) {
+            crate::voice::log("close_session armed");
+            let place = self.machine_label(&key, cx);
+            self.voice_reply(call, tool_reply(format!("Nada foi fechado. Confirme com o usuário: fechar a sessão {} em {place}? \
+                Só depois de um sim explícito, chame close_session de novo com confirmed true.", session.name), true));
+            return;
+        }
+        if self.machine_api(&key).is_none() { let reason = self.machine_error(&key); self.voice_fail(call, reason); return; }
+        crate::voice::log("close_session sent");
+        self.voice.close_reply = Some((target.clone(), call));
+        self.delete_target(target, cx);
+    }
+
+    /// Resposta do Fechar da barra: só a do pedido da voz volta ao organizador.
+    pub(super) fn voice_closed(&mut self, target: &Target, result: &Result<Value, Failure>) {
+        if self.voice.close_reply.as_ref().is_none_or(|(t, _)| t != target) { return; }
+        let Some((_, call)) = self.voice.close_reply.take() else { return };
+        match result {
+            Ok(_) => { crate::voice::log("close_session closed"); self.voice_reply(call, tool_reply(format!("Sessão {} fechada.", target.name), true)); }
+            Err(error) => {
+                crate::voice::log(format!("close_session failed status={:?}", error.status));
+                self.voice_fail(call, Self::fetch_failure(error));
+            }
+        }
+    }
+
+    /// Mesma chamada do arrastar/diálogo de agrupar; só na mesma máquina, com as recusas da barra.
+    fn voice_pair(&mut self, call: CallId, a: &str, b: &str, cx: &mut Context<Self>) {
+        let (first, second) = match (self.voice_resolve("pair_sessions", a, cx), self.voice_resolve("pair_sessions", b, cx)) {
+            (Ok(first), Ok(second)) => (first, second),
+            (Err(text), _) | (_, Err(text)) => { self.voice_reply(call, tool_reply(text, false)); return; }
+        };
+        if let Err(refusal) = can_pair(&first.1, &second.1, first.0 == second.0) { self.voice_reply(call, tool_reply(refusal.text(), false)); return; }
+        let Some(api) = self.machine_api(&first.0) else { let reason = self.machine_error(&first.0); self.voice_fail(call, reason); return };
+        crate::voice::log("pair_sessions sent");
+        let (origin, target) = (first.1.name, second.1.name);
+        // Tarefa vazia: entrando num grupo que existe vale a dele; dois soltos nascem sem, como o campo vazio do diálogo.
+        self.voice_group(call, "grupo_drop_falhou", async move { api.pair(&target, &[origin], "", false).await });
+    }
+
+    fn voice_unpair(&mut self, call: CallId, spoken: &str, cx: &mut Context<Self>) {
+        let (key, session) = match self.voice_resolve("unpair_session", spoken, cx) {
+            Ok(found) => found,
+            Err(text) => { self.voice_reply(call, tool_reply(text, false)); return; }
+        };
+        if !can_leave(&session) { self.voice_reply(call, tool_reply(format!("A sessão {} não está em grupo.", session.name), false)); return; }
+        let Some(api) = self.machine_api(&key) else { let reason = self.machine_error(&key); self.voice_fail(call, reason); return };
+        crate::voice::log("unpair_session sent");
+        self.voice_group(call, "grupo_drop_sair_falhou", async move { api.unpair(&session.name).await });
+    }
+
+    /// `fallback`: a frase do web quando o servidor não diz o motivo.
+    fn voice_group(&self, call: CallId, fallback: &'static str, work: impl std::future::Future<Output = Result<PairResult, Failure>> + Send + 'static) {
+        let (generation, connection, tx) = (self.voice.generation, self.connection, self.tx.clone());
+        self.runtime.spawn(async move {
+            let result = work.await;
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::VoiceDone(generation, call, VoiceDone::Grouped(fallback, result)) }).await;
+        });
+    }
+
+    pub(super) fn voice_done(&mut self, generation: u64, call: CallId, done: VoiceDone, window: &mut Window, cx: &mut Context<Self>) {
+        if generation != self.voice.generation { return; }
+        match done {
+            VoiceDone::Opened(key, Ok(session)) => {
+                crate::voice::log("open_session created");
+                let name = session.name.clone();
+                // Como na tela de criação: a lista guardada da outra máquina já a inclui, para a leitura seguinte não fechá-la.
+                if let Some(list) = self.remote.get_mut(&key).filter(|l| l.loaded && !l.sessions.iter().any(|s| s.name == name)) {
+                    list.sessions.push(session.clone());
+                }
+                if self.select_on(&key, session, window, cx) {
+                    self.voice_reply(call, tool_reply(format!("Sessão {name} criada e aberta na tela; a troca já foi anunciada, não repita."), true));
+                } else {
+                    self.voice_fail(call, format!("A sessão {name} foi criada, mas a máquina dela não está conectada para abri-la."));
+                }
+            }
+            VoiceDone::Opened(_, Err(text)) => { crate::voice::log("open_session failed"); self.voice_fail(call, text); }
+            VoiceDone::Grouped(_, Ok(result)) => {
+                crate::voice::log(format!("group done warning={}", result.warning.is_some()));
+                // O vínculo mudou, mas alguém não foi avisado: o organizador precisa dizer isso.
+                let text = result.warning.map_or_else(|| "Feito.".to_owned(), |w| format!("Feito, mas com aviso: {w}"));
+                self.voice_reply(call, tool_reply(text, true));
+            }
+            VoiceDone::Grouped(fallback, Err(error)) => {
+                crate::voice::log(format!("group failed status={:?}", error.status));
+                self.voice_fail(call, super::grouping::failed(&error, fallback));
+            }
+        }
+        cx.notify();
     }
 
     pub(super) fn receive_voice(&mut self, generation: u64, event: VoiceEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -521,6 +783,11 @@ impl Hangar {
                 self.voice.seven_day = seven_day.or(self.voice.seven_day);
             }
             VoiceEvent::SwitchSession(call, name) => self.voice_switch(call, &name, window, cx),
+            VoiceEvent::ListSessions(call) => self.voice_list(call, cx),
+            VoiceEvent::OpenSession(call, request) => self.voice_open(call, request, cx),
+            VoiceEvent::CloseSession { call, name, confirmed, turn } => self.voice_close(call, &name, confirmed, &turn, cx),
+            VoiceEvent::PairSessions(call, a, b) => self.voice_pair(call, &a, &b, cx),
+            VoiceEvent::UnpairSession(call, name) => self.voice_unpair(call, &name, cx),
             VoiceEvent::SendPlan { session, text } => {
                 // O plano foi escrito para uma sessão; se a tela mudou, não vai para outra.
                 let on_screen = self.selected.as_ref().is_some_and(|s| s.name == session);
@@ -1044,6 +1311,36 @@ mod tests {
         assert_eq!(match_session("shop", &names, &active), SessionMatch::Many(vec![2, 3]));
         assert_eq!(match_session("cloudflare", &names, &active), SessionMatch::None);
         assert_eq!(match_session(" - ", &names, &active), SessionMatch::None, "consulta vazia não casa tudo");
+    }
+
+    #[test]
+    fn folder_pick_prefers_exact_and_lists_ambiguity() {
+        let f = |n: &str, p: &str| (n.to_owned(), p.to_owned());
+        let folders = [f("Projetos", "/h/Projetos"), f("hangar", "/h/Projetos/hangar"), f("hangar-5", "/h/Projetos/hangar-5"),
+            f("hangar", "/h/Projetos/hangar"), f("shop-web", "/h/Projetos/shop-web"), f("shop-api", "/h/Work/shop-api")];
+        assert_eq!(pick_folder("hangar", &folders, 0), Ok("/h/Projetos/hangar".into()), "igual vence parcial; caminho repetido conta uma vez");
+        assert_eq!(pick_folder("shop web", &folders, 0), Ok("/h/Projetos/shop-web".into()));
+        let many = pick_folder("shop", &folders, 0).unwrap_err();
+        assert!(many.contains("/h/Projetos/shop-web") && many.contains("/h/Work/shop-api"));
+        assert!(pick_folder("loja", &folders, 2).unwrap_err().contains("2 raiz"), "raiz não lida aparece");
+        let twins = [f("api", "/a/api"), f("api", "/b/api")];
+        assert!(pick_folder("api", &twins, 0).is_err(), "mesmo nome em duas raízes não é palpite");
+    }
+
+    #[test]
+    fn paths_skip_the_folder_search() {
+        for path in ["/home/x/p", "~/p", "C:\\Users\\x", "D:/w", "\\\\nas\\share"] { assert!(looks_like_path(path), "{path}"); }
+        for name in ["hangar", "minha loja", "a:b"] { assert!(!looks_like_path(name), "{name}"); }
+    }
+
+    #[test]
+    fn sessions_text_marks_screen_machine_and_unreachable() {
+        let row = |name: &str, machine: Option<&str>, on_screen: bool| Listed { name: name.into(), machine: machine.map(str::to_owned),
+            provider: "codex".into(), state: "working".into(), folder: "hangar".into(), on_screen };
+        let text = sessions_text(&[row("a", None, true), row("b", Some("casa"), false)], &["vps".into()]);
+        assert_eq!(text, "- a: codex, working, pasta hangar, na tela\n- b (máquina casa): codex, working, pasta hangar\n\
+            Máquina vps sem resposta; as sessões dela não estão aqui.");
+        assert_eq!(sessions_text(&[], &[]), "Nenhuma sessão aberta.");
     }
 
     #[test]

@@ -22,6 +22,10 @@ pub enum VoiceEvent {
     Phase(Phase), Levels(f32, f32), Draft(Option<String>), Activity(Activity), ReadSession(CallId), Send(CallId, String), Failed(VoiceFailure),
     Mode(Mode), Plan { path: PathBuf, markdown: String }, AskSession(String), SendPlan { session: String, text: String },
     SwitchSession(CallId, String),
+    /// Ferramentas de sessão: a tela resolve os nomes falados e responde por `Voice::reply`. `turn` separa o pedido do sim.
+    ListSessions(CallId), OpenSession(CallId, organizer::OpenRequest),
+    CloseSession { call: CallId, name: String, confirmed: bool, turn: String },
+    PairSessions(CallId, String, String), UnpairSession(CallId, String),
     /// Contexto da thread do organizador (não o da voz, que não é informado): input do último turno e a janela do modelo.
     OrganizerContext { used: u64, window: Option<u64> },
     AccountLimits { five_hour: usage::RateWindow, seven_day: usage::RateWindow },
@@ -218,7 +222,8 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                             let _ = rpc.respond(id, tool_reply("Pedido recusado: só uma fala do usuário pode gerar envio.", false)).await;
                             "refused-not-spoken"
                         }
-                        ToolCall::FinishPlan { .. } | ToolCall::AskSession(_) | ToolCall::SetMode(_) | ToolCall::SwitchSession(_) if !spoken.allows(&params) => {
+                        ToolCall::FinishPlan { .. } | ToolCall::AskSession(_) | ToolCall::SetMode(_) | ToolCall::SwitchSession(_)
+                            | ToolCall::OpenSession(_) | ToolCall::CloseSession { .. } | ToolCall::PairSessions(..) | ToolCall::UnpairSession(_) if !spoken.allows(&params) => {
                             let _ = rpc.respond(id, tool_reply("Só a pedido falado do usuário.", false)).await;
                             "refused-not-spoken"
                         }
@@ -307,6 +312,15 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                         }
                         // A resposta vem da tela (`Voice::reply`), depois de resolver o nome.
                         ToolCall::SwitchSession(name) => { let _ = events.send(VoiceEvent::SwitchSession(CallId(id), name)).await; "switch" }
+                        ToolCall::ListSessions => { let _ = events.send(VoiceEvent::ListSessions(CallId(id))).await; "list" }
+                        ToolCall::OpenSession(request) => { let _ = events.send(VoiceEvent::OpenSession(CallId(id), request)).await; "open" }
+                        ToolCall::CloseSession { name, confirmed } => {
+                            let turn = params["turnId"].as_str().unwrap_or_default().to_owned();
+                            let _ = events.send(VoiceEvent::CloseSession { call: CallId(id), name, confirmed, turn }).await;
+                            if confirmed { "close-confirmed" } else { "close" }
+                        }
+                        ToolCall::PairSessions(a, b) => { let _ = events.send(VoiceEvent::PairSessions(CallId(id), a, b)).await; "pair" }
+                        ToolCall::UnpairSession(name) => { let _ = events.send(VoiceEvent::UnpairSession(CallId(id), name)).await; "unpair" }
                         ToolCall::SetMode(mode) => {
                             let note = switch_mode(&mut planner, mode, &target, &mut gate, &rpc, events).await;
                             let _ = rpc.respond(id, tool_reply(note, true)).await;
