@@ -249,6 +249,10 @@ fn composer_end(lines: &[&str], end: usize) -> Option<usize> {
     lines[upper + 1..lower].iter().any(|l| left(l).starts_with('❯')).then_some(lower)
 }
 
+/// O rodapé de navegação de um menu (picker) ainda está em algum lugar do pane inteiro, não só nas
+/// últimas linhas: pergunta longa empurra o rodapé para fora da janela do `overlay`.
+pub fn footer_visible(pane: &str) -> bool { P.footer.is_match(pane) }
+
 /// O teclado está no rodapé do Claude Code (painel de agentes ou pílula de tarefas), não no composer:
 /// o que se digita some, e o `x` do painel para um subagente.
 pub fn footer_focus(pane: &str) -> bool {
@@ -294,7 +298,8 @@ fn status_line(lines: &[&str]) -> Option<String> {
     if chrome.is_empty() { None } else { Some(chrome.join("\n")) }
 }
 
-const CODEX_FOOTERS: [&str; 2] = ["press enter to confirm", "press enter to continue"];
+// A TUI mais nova encurtou o rodapé para "enter continue · esc skip"; as duas formas valem.
+const CODEX_FOOTERS: [&str; 4] = ["enter to confirm", "enter to continue", "enter confirm", "enter continue"];
 fn codex_menu(lines: &[&str]) -> Option<TerminalQuestion> {
     if !CODEX_FOOTERS.iter().any(|f| tail(lines, 8).to_lowercase().contains(f)) { return None; }
     let mut options: Vec<String> = Vec::new();

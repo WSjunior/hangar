@@ -8,6 +8,7 @@ import re
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, ConfigDict
 from sse_starlette.sse import EventSourceResponse
 
 from app import diag
@@ -132,7 +133,9 @@ async def runtime_policy(request: Request):
 
 _LIST_FACTS_MAX = 8 << 20
 _list_facts_invalid_at = 0.0
-_DIAG_EVENT = re.compile(r"rust\.[a-z_]{1,48}")
+# Os do envio e os da opção levam o nome que o Python já usava, para o diário não ter dois nomes por falha.
+_DIAG_EVENT = re.compile(r"rust\.[a-z_]{1,48}|runtime\.(?:send_failed|send_uncertain|command_deferred)|opcao\.(?:nao_convergiu|envio_falhou)")
+_DIAG_WARNING = {"runtime.send_uncertain", "runtime.command_deferred"}
 _DIAG_CODE = re.compile(r"[a-z0-9_]{1,64}")
 
 
@@ -149,7 +152,7 @@ async def rust_diag(request: Request) -> dict:
             raise ValueError("diário inválido")
     except (ValueError, RecursionError):
         raise HTTPException(400) from None
-    diag.registrar(body["evento"], "erro", sessao=body["sessao"], codigo=body["codigo"], detalhe=body["motivo"])
+    diag.registrar(body["evento"], "aviso" if body["evento"] in _DIAG_WARNING else "erro", sessao=body["sessao"], codigo=body["codigo"], detalhe=body["motivo"])
     return {"ok": True}
 
 
@@ -216,6 +219,16 @@ async def list_demote(request: Request) -> dict:
     return {"ok": True}
 
 
+@router.get("/quota")
+async def quota(config_dir: str = "") -> dict:
+    """Janelas de cota da conta para a linha de status que o ator Rust monta; vazio = `~/.claude`."""
+    from pathlib import Path
+    from app import runtime_policy
+    if len(config_dir) > 4096 or (config_dir and not Path(config_dir).is_absolute()):
+        raise HTTPException(400)
+    return {"windows": await asyncio.to_thread(runtime_policy.quota_windows, config_dir)}
+
+
 @router.get("/workspace/context")
 async def workspace_context(name: str | None = None) -> dict:
     """Só metadados; o consumidor privado não consulta novamente este registro."""
@@ -277,6 +290,26 @@ async def session_info(name: str) -> dict:
             diag.registrar("runtime.history_failed", "erro", sessao=name, **failure_reason(exc))
             raise HTTPException(503) from None
     return info_payload(name, info.provider, info.jsonl)
+
+
+@router.get("/sessions/{name}/plugin")
+async def plugin_pending(name: str) -> dict:
+    """A pergunta que o plugin segura, para o Rust decidir `/select` e `/interrupt`. Some com o plugin no Rust."""
+    from app import plugin_bridge
+    return {"pending": plugin_bridge.pergunta_pendente(name)}
+
+
+class _PluginInterrupted(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    interrupted: str | None
+
+
+@router.post("/sessions/{name}/plugin")
+async def plugin_interrupted(name: str, body: _PluginInterrupted) -> dict:
+    """O Esc do app fechou a pergunta `interrupted` no terminal. Some com o plugin no Rust."""
+    from app import plugin_bridge
+    plugin_bridge.interrompeu(name, body.interrupted)
+    return {"ok": True}
 
 
 @router.get("/sessions/{name}/state-facts")

@@ -179,6 +179,13 @@ pub fn ticker(window: &mut Window, cx: &mut App) -> AnyElement {
     AnyView::from(ticker.view.clone()).cached(StyleRefinement::default().absolute().size_0()).into_any_element()
 }
 
+/// Redesenha só a raiz, fora do desenho: as áreas guardadas são reusadas. `false` sem o relógio montado.
+pub fn tick_root(cx: &mut App) -> bool {
+    let Some(tick) = cx.try_global::<Ticker>().map(|ticker| ticker.view.entity_id()) else { return false };
+    cx.notify(tick);
+    true
+}
+
 /// Pede o próximo quadro para quem está desenhando: na raiz, pelo relógio dela; numa área ou view própria, só ela.
 pub fn request_frame(window: &Window, cx: &App) {
     match cx.try_global::<Ticker>().filter(|ticker| ticker.root == window.current_view()) {

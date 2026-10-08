@@ -1,6 +1,6 @@
 <script lang="ts">
   import { useSessionServer } from '../lib/sessionServer';
-  import { computeEditDiff, extractEdits, extractEditPaths, diffFromPatch, diffFromEdits, extractFilePath, pseudoCaminhoPorConteudo, type ChatEvent } from '@hangar/core';
+  import { computeEditDiff, extractEdits, extractEditPaths, diffFromPatch, diffFromEdits, extractFilePath, pseudoCaminhoPorConteudo, htmlPageFromResult, type ChatEvent } from '@hangar/core';
   import * as m from '../paraglide/messages';
   import { parseFilePaths, summarizeToolInput, summarizeToolResult, toolPhase, toolVerbo } from '@hangar/core';
   import { getBashOutput, getToolProgress, nomeFerramenta, separarComando, type EtapaFerramenta } from '@hangar/core';
@@ -13,6 +13,7 @@
   import { rolagemSoAoClicar } from '../lib/rolagemSoAoClicar';
   import { lerComandoHangar, lerFerramentaClaude } from '../lib/hangarCmd';
   import HangarCommandCard from './HangarCommandCard.svelte';
+  import HtmlPageFrame from './HtmlPageFrame.svelte';
   import FileAttachment from './FileAttachment.svelte';
   import EditDiff from './EditDiff.svelte';
   import TerminalDiff from './TerminalDiff.svelte';
@@ -89,6 +90,8 @@
         lerFerramentaClaude(event.tool_name, event.tool_input, String(result.result ?? ''), phase === 'error')
       : null,
   );
+  // Página publicada pelo html_render: desenhada no lugar do cartão. Rodando ainda, cartão normal.
+  const pagina = $derived(htmlPageFromResult(event.tool_name, result?.result));
   const duracao = $derived(
     result?.ts && event.ts ? Math.max(0, (result.ts - event.ts) * 1000) : null,
   );
@@ -369,7 +372,9 @@
   {/if}
 {/snippet}
 
-{#if hangarAcao}
+{#if pagina}
+  <HtmlPageFrame page={pagina} {sessionName} />
+{:else if hangarAcao}
   <HangarCommandCard
     acao={hangarAcao}
     comando={comandoBash}

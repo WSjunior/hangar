@@ -326,6 +326,16 @@ impl Api {
         Ok(body)
     }
 
+    /// Página publicada: sem `extra` é a casca isolada (com `raw=1`, o HTML cru); `["shot"]` é a imagem. O 404 diz
+    /// pelo `code` se a página expirou (`erro_pagina_expirou`) ou se o servidor não tem imagem (`erro_pagina_sem_imagem`).
+    pub async fn page(&self, name: &str, id: &str, extra: &[&str], query: &[(&str, &str)]) -> Result<Vec<u8>, Failure> {
+        let mut url = self.endpoint(Some(name), Some("pages"));
+        url.path_segments_mut().expect("validated HTTP base").push(id).extend(extra);
+        if !query.is_empty() { url.query_pairs_mut().extend_pairs(query); }
+        let r = self.client.get(url).timeout(Duration::from_secs(30)).send().await.map_err(|_| Failure::transport(false))?;
+        Ok(Self::checked(r, false).await?.bytes().await.map_err(|_| Failure::transport(false))?.to_vec())
+    }
+
     pub async fn interrupt(&self, name: &str, clear: bool) -> Result<(), Failure> {
         let mut url = self.endpoint(Some(name), Some("interrupt"));
         url.query_pairs_mut().append_pair("clear", if clear { "true" } else { "false" });

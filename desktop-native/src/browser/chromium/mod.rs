@@ -5,4 +5,4 @@ mod engine;
 mod launch;
 pub mod pipe;
 
-pub use engine::Engine;
+pub use engine::{Engine, Warm};

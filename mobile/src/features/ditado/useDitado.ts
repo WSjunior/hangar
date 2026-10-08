@@ -6,12 +6,16 @@ import {
   requestRecordingPermissionsAsync,
   setAudioModeAsync,
 } from 'expo-audio';
-import type { AudioRecorder, RecordingStatus } from 'expo-audio';
+import type { AudioRecorder, RecordingEvents, RecordingStatus } from 'expo-audio';
+import type { SharedObject } from 'expo';
 import { novoEstadoVad, passoVad } from '@hangar/core';
 import type { EstadoVad, MotivoFim } from '@hangar/core';
 
 const TETO_MS = 180_000;
 const STOP_STATUS_TIMEOUT_MS = 5_000;
+
+// O tipo do áudio não resolve a base quando o core do Expo fica aninhado no SDK.
+type ManagedRecorder = AudioRecorder & InstanceType<SharedObject<RecordingEvents>>;
 
 interface Opts {
   onFim: (file: File, motivo: MotivoFim, uri: string) => void;
@@ -19,7 +23,7 @@ interface Opts {
 }
 
 interface Recording {
-  recorder: AudioRecorder | null;
+  recorder: ManagedRecorder | null;
   phase: 'permission' | 'preparing' | 'recording' | 'stopping';
   interrupted: boolean;
   onFim: Opts['onFim'];
@@ -155,7 +159,7 @@ export function useDitado({ onFim, onErroParada }: Opts) {
       const recorder = new AudioModule.AudioRecorder({
         ...options,
         ...(Platform.OS === 'ios' ? options.ios : Platform.OS === 'android' ? options.android : options.web),
-      });
+      }) as ManagedRecorder;
       recording.recorder = recorder;
       recording.subscription = recorder.addListener('recordingStatusUpdate', (status) => {
         if (status.hasError || status.mediaServicesDidReset) {

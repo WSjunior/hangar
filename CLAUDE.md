@@ -410,6 +410,12 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   do realpath. Escrita nova fora da raiz entra por aqui, nunca afrouxando o `/files/write`.
 - **HTML servido como arquivo executa isolado e sem o token na URL do documento interno.**
   Arquivos citados e uploads usam `file_response`; SVG/XML mantêm o MIME com scripts bloqueados.
+- **Página da conversa mora no Rust e some com a sessão.** `html_render` publica só pela ponte
+  privada (`/__hangar_server/pages`); lê o dono, convidado não vê. Link e URL do rascunho nunca
+  levam token ao transcript; o documento da página nunca tem `allow-same-origin` nem token na URL
+  (PWA `srcdoc` com fetch autenticado, casca `blob:`, nativo em contexto de navegador próprio).
+  Limpeza só pela varredura contra a lista; conjunto incerto não apaga nada. Evidência em
+  [plataforma.md](docs/decisoes/plataforma.md#página-da-conversa-mora-no-rust-e-some-com-a-sessão).
 - **Configuração compartilhada leva o conteúdo, e o destino resolve caminho e programa.** Caminho
   vira marcador `⟦HOME⟧`/`⟦CLAUDE⟧`/`⟦CODEX⟧`/`⟦HANGAR⟧` (nunca `{HOME}`); quem envia vence;
   hooks e skills do Hangar, MCP `hangar`, credenciais e o login do `.claude.json` são sempre do
@@ -451,6 +457,16 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   (Rust) juntos. O `versao` do snapshot do `hangar-cano` acompanha o `VERSAO` do `cano.py`.
   Medidas e motivo em [plataforma.md](docs/decisoes/plataforma.md#hangar-server-a-porta-pública-em-rust-o-python-atrás).
   Índice, paridade e medidas de custos em [plataforma.md](docs/decisoes/plataforma.md#custos-e-uso-no-hangar-server).
+- **As escritas do dono em sessão Claude são do Rust.** `/input`, `/steer`, `/interrupt`, `/keys`,
+  `/select`, `/select/submit`, `/term-input`, `/answer` e o descarte da fila são decididos no
+  `hangar-server`. Repasse ao Python só na decisão inicial: tabela de dono, entrada ausente ou
+  doente, corpo que o Rust não atende (o FastAPI recusa; `/answer` sem terminal com `request_id`
+  nulo) e `/clear` com terminal. Decidido no Rust, falha vira erro com código. Cada sessão tem uma
+  porta de entrada no Rust: o Python a fecha antes de congelar ou transferir a sessão (renomear,
+  trocar de conta, relançar) e a reabre depois; fechada pela troca de conversa, recusa na hora
+  (409), fechada por congelamento curto, a escrita espera. A saúde diz o que o Rust atende em `owns`. Convidado, Connect, broadcast, grupo, par e
+  MCP seguem pelo Python (`_send_one`, coberto só pelo `freeze`). Contrato e motivo em
+  [plataforma.md](docs/decisoes/plataforma.md#escritas-do-claude-no-hangar-server).
 - **A lista do dono é do Rust; o Python só fornece fatos.** `GET /api/sessions` e
   `/api/sessions/events` do dono saem do `ListHub` (`list/hub.rs`): um produtor por servidor,
   ligado enquanto houver lista aberta, tique de 1,5 s, JSON só quando a assinatura muda; cada

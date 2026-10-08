@@ -192,7 +192,16 @@ def test_assistant_message_output_text():
 def test_reasoning_encrypted_ignored():
     obj = {"timestamp": "t", "type": "response_item",
            "payload": {"type": "reasoning", "summary": [], "encrypted_content": "gAAAA..."}}
-    assert parse_rollout_obj(obj) == []  # opaco no rollout; v1 ignora
+    assert parse_rollout_obj(obj) == []  # sem resumo, só o cifrado: nada legível
+
+
+def test_reasoning_summary_becomes_thinking():
+    obj = {"timestamp": "t", "type": "response_item",
+           "payload": {"type": "reasoning", "encrypted_content": "gAAAA...", "summary": [
+               {"type": "summary_text", "text": "**Primeiro**"}, {"type": "summary_text", "text": " "},
+               {"type": "summary_text", "text": "Segundo"}]}}
+    evs = parse_rollout_obj(obj)
+    assert [(e.kind, e.text) for e in evs] == [("thinking", "**Primeiro**\n\nSegundo")]
 
 
 def test_tool_call_and_result():

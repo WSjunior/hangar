@@ -70,6 +70,16 @@ fn parse_raw(line: &Value) -> Vec<ChatEvent> {
             }]
         }
         Some("custom_tool_call") => vec![custom_tool_call(payload, id())],
+        // rollout.py: só o resumo é legível; o raciocínio inteiro vem cifrado.
+        Some("reasoning") => {
+            let parts: Vec<&str> = payload.get("summary").and_then(Value::as_array).into_iter().flatten()
+                .filter_map(Value::as_object)
+                .filter(|b| b.get("type").and_then(Value::as_str) == Some("summary_text"))
+                .filter_map(|b| b.get("text").and_then(Value::as_str))
+                .filter(|t| !strip(t).is_empty())
+                .collect();
+            if parts.is_empty() { Vec::new() } else { vec![text_event(ChatKind::Thinking, id(), parts.join("\n\n"))] }
+        }
         Some("custom_tool_call_output" | "function_call_output") => {
             let (result, failed) = output_result(payload.get("output"));
             vec![ChatEvent {
@@ -310,4 +320,22 @@ fn output_result(output: Option<&Value>) -> (Option<String>, bool) {
         }
     }
     (Some(parts.join("\n\n")), failed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn reasoning_summary_becomes_thinking() {
+        let line = json!({"timestamp":"t","type":"response_item","payload":{"type":"reasoning","encrypted_content":"x",
+            "summary":[{"type":"summary_text","text":"**Primeiro**"},{"type":"summary_text","text":" "},{"type":"summary_text","text":"Segundo"}]}});
+        let evs = parse_rollout_obj(&line);
+        assert_eq!(evs.len(), 1);
+        assert!(matches!(evs[0].kind, ChatKind::Thinking));
+        assert_eq!(evs[0].text.as_deref(), Some("**Primeiro**\n\nSegundo"));
+        let encrypted = json!({"type":"response_item","payload":{"type":"reasoning","summary":[],"encrypted_content":"x"}});
+        assert!(parse_rollout_obj(&encrypted).is_empty());
+    }
 }

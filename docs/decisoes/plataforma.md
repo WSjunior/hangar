@@ -702,6 +702,39 @@ citados mudou para invalidar respostas antigas na revalidação; cache fresco an
 No navegador embutido, o HTML executou JavaScript, mas não leu token pela URL, baseURI ou referrer,
 nem acessou a página pai ou o armazenamento. Sem mudanças na autorização de caminhos.
 
+## Página da conversa mora no Rust e some com a sessão
+
+(07/10/2026, pedido do usuário.) O agente publica HTML pela tool MCP `html_render`; o Rust guarda
+a página por sessão em `~/.hangar/paginas` e a conversa mostra o cartão: PWA e Expo num iframe
+`srcdoc`, nativo Linux com a página viva, macOS com a imagem estática e "abrir no navegador".
+
+- **Rascunho é parâmetro (`draft=true`) da mesma tool e da mesma rota**, não uma segunda tool
+  `html_preview`: regra de 1 tool : 1 endpoint e uma entrada a menos no catálogo de toda sessão.
+- **Token fora do transcript.** O resultado da tool fica no transcript, que o histórico e o
+  convidado leem; por isso a `url` do rascunho é caminho relativo, sem token. O `browser_open`
+  completa base e token só para caminho de página da própria sessão (outro `/api/` volta 400); o
+  evento `nav`, que carrega a URL completa, vai só a conexões do dono; e a casca isolada apaga o
+  `token` do próprio endereço ao carregar, senão `browser url`/`tab list` o levariam à conversa.
+- **Casca isolada por URL `blob:`.** `data:` falhou: o Chromium limita URL em 2 MB e página com
+  foto abria em branco. `srcdoc` na casca herda o `baseURI` dela, que tem `?token=`. Com `blob:`
+  o documento fica em origem opaca e o `baseURI` é a própria URL `blob:`.
+- **Limpeza é um mecanismo só: varredura a cada 30 s**, fora da thread assíncrona, contra o
+  conjunto de `jsonl` vivos que a rodada da lista publica. Um gancho no fechamento perderia
+  sessão morta sem fechar (crash, restart). Conjunto incerto não apaga nada: fatos que falharam,
+  linha Claude/Codex sem `jsonl`, rodada com mais de 15 s ou lista nunca aberta — sem isso a
+  página de sessão recém-criada seria apagada. Os caminhos são canonicalizados nos dois lados
+  porque `~/.claude-<conta>` é symlink do `~/.claude`.
+- **Altura reservada medida no servidor com a mesma fórmula do script da página**, depois do
+  `load` e com viewport pequena: com viewport alta o `scrollHeight` nunca fica abaixo dela e a
+  página curta reservava espaço vazio.
+- **Nativo:** cada página num contexto de navegador próprio (não divide armazenamento com o
+  navegador embutido) e quadros em PNG, que levam alfa (JPEG não). A GPUI vendorizada respeita o
+  alfa de superfície `Rgba8Unorm`, com alfa puro: o `blend_color` já multiplica, e pré-multiplicar
+  aplicaria o alfa duas vezes; a superfície XRGB do WPE continua opaca. Navegação bloqueada responde
+  `Aborted`: `BlockedByClient` troca a página pela tela de erro do Chrome.
+- **Windows:** cartão estático, como o macOS, até a prova na VM DELPHI-02 de que a WebView2 fora
+  da tela continua mandando quadros por CDP. A prova (Task 9) está pendente; não há resultado.
+
 ## Configuração compartilhada: leva o conteúdo, o destino resolve caminho e programa
 
 (25/09/2026, pedido do usuário.) Levar a configuração de uma máquina para outras, só manual.
@@ -1648,3 +1681,46 @@ porque quem o fecha espera a mesma barreira. O diário de falha do runtime leva 
 fora, porque algumas carregam saída do modelo; o ponto do `raise` já diz qual frase foi. O campo
 não se chama `origem` porque o `diag.registrar` grava o dele por cima.
 
+
+## Escritas do Claude no hangar-server
+
+(07/10/2026, parte 5-0, branch `hangar-server-parte5-claude`, contrato 37.) As rotas de
+escrita do dono em sessão Claude (`/input`, `/steer`, `/interrupt`, `/keys`, `/select`,
+`/select/submit`, `/answer` e o descarte da fila) passam a ser atendidas
+pelo Rust, com e sem terminal. Decisões:
+
+- **Porta de entrada por sessão, fechada pelo Python.** O Rust deixa uma escrita entrar só com a
+  porta aberta; o Python a fecha antes de todo `slot.frozen=True` (relançar, trocar de conta,
+  transferir, renomear) e reabre depois. Fechar espera as escritas em curso por até 60 s e, se
+  não esvaziar, responde `ingress_busy` e reabre. A mensagem `ingress` vai direto pelo transporte,
+  nunca por `coordinator.op`: `op` passa pelo `freeze` e travaria dentro do próprio `freeze`.
+- **Porta retida pela troca de conversa recusa na hora.** A troca pode parar numa fase não
+  terminal (`RESTORE_FAILED`) e reter a porta indefinidamente; esperar os 30 s da rota antes do
+  409 `session_transfer_busy` seria pior que o `_transfer_guard` antigo, que recusava na hora. O
+  fechamento da troca leva `held: true` (e a reabertura dela também); o congelamento curto segue
+  sem `held` e a escrita espera reabrir.
+- **Nenhum repasse ao Python com o passe de entrada na mão.** O `/clear` do Python fecha a porta e
+  esperaria o passe da própria rota (30 s de travada em todo `/clear`). A decisão de repassar vem
+  antes do `enter` ou o passe é solto antes.
+- **Quem o Rust atende vem de `owns` na saúde.** Sessão sem terminal "nasce no Rust"
+  (`_born_in_rust`); `owns` ausente ou inválido é falha de partida, não "nada é do Rust".
+- **Pergunta respondida pelo chat não empresta mais o teclado ao Python.** O Rust escreve a
+  resposta no pane; o texto do "conversar" que não se confirma responde 502 `erro_envio_falhou`
+  ("a pergunta foi fechada… confira na sessão"), não 409: o app trata 409 como "nada digitado" e
+  abre o espelho do terminal numa falha onde não precisava, e reenviar duplicaria. Nos erros do
+  `/select`, o Rust é a referência (`unknown` não é "não convergiu"), e o Python foi alinhado a
+  ele; só `no_pending_permission` vira "nenhum pedido pendente", o resto segue 503 com o motivo.
+- **Preparo do prompt, linha de status e catálogo de skills rodam no Rust.** Falha da linha de
+  status continua cosmética (não derruba a sessão); `/internal/quota` usa só o cache do Rust.
+
+**Perda conhecida.** Com o Python na frente, um envio que ficou sem resposta porque o Rust caiu
+era repetido com o mesmo `operation_id` no Rust novo (`_repeat_after_crash`,
+`runtime_coordinator.py:1333`) e o app via "incerto". Com a rota no Rust, o app vê a conexão
+cortada e um reenvio dele leva id novo: depois de uma queda no meio do envio, a mensagem pode
+duplicar. É raro e aceito; o app não manda id do cliente para deduplicar.
+
+**Fora da cobertura da porta.** Envios que nascem no Python (broadcast, grupo, par, MCP) seguem
+por `_send_one` e ficam protegidos só pelo `freeze`, não pela porta. Seguem assim até a parte 6.
+
+Roteiro de medição (sem números ainda, vêm do uso real):
+[medicao-5-0.md](../migracao-rust/parte5-claude/medicao-5-0.md).

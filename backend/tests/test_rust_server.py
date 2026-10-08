@@ -58,6 +58,7 @@ protocol = os.environ.get("FAKE_PROTOCOL", "__PROTOCOL__")
 class Health(BaseHTTPRequestHandler):
     def do_GET(self):
         health = {"ok": True, "version": "0.0.0-test", "terminal_panel": True,
+                  "owns": [{"provider": "claude", "headless": True}, {"provider": "claude", "headless": False}],
                   "terminal_address": f"127.0.0.1:{self.server.server_port}"}
         if protocol != "sem":
             health["protocol"] = int(protocol)
@@ -520,7 +521,7 @@ def test_watcher_failure_puts_the_cause_in_the_diary(monkeypatch, events):
 def test_protocol_is_the_same_number_on_both_sides():
     lib = (Path(__file__).resolve().parents[2] / "crates/hangar-server/src/lib.rs").read_text()
     rust = int(re.search(r"pub const INTERNAL_PROTOCOL: u32 = (\d+);", lib).group(1))
-    assert rust == rust_server.RUST_SERVER_PROTOCOL == 36
+    assert rust == rust_server.RUST_SERVER_PROTOCOL == 38
 
 
 # --- Modo do processo (dono único, Task 5) ---
@@ -576,7 +577,8 @@ def test_terminal_panel_from_rust_health(monkeypatch):
     monkeypatch.setattr(rust_server, "_runtime_ready", lambda proc, instance: {"type":"runtime_ready",
         "protocol":rust_server.RUST_SERVER_PROTOCOL, "instance":instance, "port":1})
     monkeypatch.setattr(supervisor, "configure_runtime", lambda *args: None)
-    health = {"protocol": rust_server.RUST_SERVER_PROTOCOL, "terminal_address": "127.0.0.1:9"}
+    health = {"protocol": rust_server.RUST_SERVER_PROTOCOL, "terminal_address": "127.0.0.1:9",
+              "owns": [{"provider": "claude", "headless": True}]}
     monkeypatch.setattr(rust_server, "_health", lambda host, port: health)
     try:
         for panel in (False, True):

@@ -28,6 +28,9 @@ const QUEUE_ORDER: u64 = 1_000_000_000;
 static ATTACH: LazyLock<Regex> = LazyLock::new(|| py_re(r"(?s)(?:\s*—\s*)?📎\s*(?:imagem|arquivo):.*$"));
 static IMG_PREFIX: LazyLock<Regex> = LazyLock::new(|| py_re(r"\A(?:\[Image #\d+\])+\s*"));
 static IMG_SOURCE: LazyLock<Regex> = LazyLock::new(|| py_re(r"\[Image: source: ([^\]]+)\]"));
+// pqueue.py `_COMMAND_NAME`/`_COMMAND_ARGS`
+static COMMAND_NAME: LazyLock<Regex> = LazyLock::new(|| py_re(r"<command-name>([^<]*)</command-name>"));
+static COMMAND_ARGS: LazyLock<Regex> = LazyLock::new(|| py_re(r"(?s)<command-args>(.*?)</command-args>"));
 
 /// O que o Python devolve em `GET /internal/sessions/{name}/info`.
 #[derive(serde::Deserialize, Clone, Debug)]
@@ -264,6 +267,15 @@ pub(crate) fn chaves_de_commit(text: &str) -> Vec<String> {
         out.push(v.to_string());
         out.extend(v.split('\n').map(strip).filter(|ln| !ln.is_empty()).map(str::to_string));
     }
+    // `/comando args` digitado vira `<command-name>/comando</command-name>` + `<command-args>` no
+    // transcript. Só a mensagem que É o comando conta (citar a tag não conta), e ela entra inteira.
+    if t.starts_with("<command-name>") || t.starts_with("<command-message>") {
+        if let Some(c) = COMMAND_NAME.captures(t) {
+            let args = COMMAND_ARGS.captures(t).map(|a| strip(&a[1]).to_string()).unwrap_or_default();
+            let comando = strip(&format!("{} {args}", strip(&c[1]))).to_string();
+            if !comando.is_empty() { out.push(comando); }
+        }
+    }
     out
 }
 
@@ -375,4 +387,22 @@ pub fn history_etag(req: &HistoryRequest) -> Option<String> {
     let queue_stamp = req.queue.as_deref().and_then(stamp).unwrap_or_else(|| "-".into());
     let limit = req.limit.map_or_else(|| "None".to_string(), |n| n.to_string());
     Some(format!("\"rs-{transcript}-{queue_stamp}-{}-{limit}-{}\"", req.provider.as_str(), *CODE_MARK))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chaves_de_commit;
+
+    #[test]
+    fn typed_slash_command_matches_its_transcript_form() {
+        let skill = "<command-message>acme:deploy</command-message>\n<command-name>/acme:deploy</command-name>";
+        assert!(chaves_de_commit(skill).contains(&"/acme:deploy".to_string()));
+        let with_args = "<command-name>/btw</command-name>\n<command-args>qual a cor do céu</command-args>";
+        assert!(chaves_de_commit(with_args).contains(&"/btw qual a cor do céu".to_string()));
+        let quoting = "veja como fica <command-name>/compact</command-name> no transcript";
+        assert!(!chaves_de_commit(quoting).contains(&"/compact".to_string()));
+        let multiline = "<command-name>/x</command-name>\n<command-args>a\nb</command-args>";
+        let keys = chaves_de_commit(multiline);
+        assert!(keys.contains(&"/x a\nb".to_string()) && !keys.contains(&"b".to_string()));
+    }
 }

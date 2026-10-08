@@ -59,6 +59,12 @@ pub struct AppState {
     pub state: Arc<crate::state::live::StateEnv>,
     /// Interface dos mods das sessões sem terminal do Rust: o ator publica, as rotas consultam.
     pub mods: crate::mods::state::Mods,
+    /// Páginas HTML publicadas pelas sessões (`~/.hangar/paginas`); o teste troca por uma pasta temporária.
+    pub pages: Arc<crate::pages::store::Store>,
+    /// Onde está o Chromium do servidor, perguntado a cada medição; o teste força "ausente".
+    pub chromium: fn() -> Option<std::path::PathBuf>,
+    /// Quanto uma escrita espera a porta de entrada da sessão reabrir (os testes encurtam).
+    pub write_gate_wait: std::time::Duration,
 }
 
 impl AppState {
@@ -106,7 +112,10 @@ impl AppState {
             list, state,
             hub: Arc::default(),
             term: Arc::default(),
-            mods }
+            mods,
+            pages: Arc::new(crate::pages::store::Store::new(crate::pages::store::Store::default_root())),
+            chromium: crate::pages::chrome::find,
+            write_gate_wait: std::time::Duration::from_secs(30) }
     }
 
     pub(crate) fn skill_origins(&self, repo: &std::path::Path) -> crate::costs::origins::Origins {
@@ -186,7 +195,7 @@ pub(crate) fn route_failed(st: &AppState, req: &HeaderMap, event: &'static str, 
     resp
 }
 
-const INFO_REASON: &str = "o backend não devolveu os dados da sessão";
+pub(crate) const INFO_REASON: &str = "o backend não devolveu os dados da sessão";
 
 pub async fn serve(listener: TcpListener, cfg: Config) -> std::io::Result<()> {
     serve_with_terminal_pool(listener, cfg, crate::terminal_control::TerminalPool::new()).await
@@ -212,6 +221,7 @@ pub fn terminal_router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/terminal", axum::routing::post(crate::terminal_routes::terminal))
         .route("/__hangar_server/workspace", axum::routing::post(crate::workspace_routes::private))
         .route("/__hangar_server/list", axum::routing::post(crate::list::bridge::private))
+        .route("/__hangar_server/pages", axum::routing::post(crate::pages::routes::publish_bridge))
         .layer(axum::middleware::from_fn(crate::migration_status::count_bridge));
     // Painel e canal do estado ficam fora da contagem: conexões longas, não chamadas da ponte.
     router.route("/__hangar_server/term", get(crate::term::private_ws))
@@ -227,6 +237,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/terminal", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/workspace", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/list", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
+        .route("/__hangar_server/pages", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/term", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/state/{name}/events", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         // Outro método nessas rotas (preflight OPTIONS, HEAD) segue ao Python.
@@ -250,6 +261,19 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/plugin/focus-target", axum::routing::post(crate::mods::bridge::focus_target).fallback(pass_any))
         .route("/api/plugin/focused", axum::routing::post(crate::mods::bridge::focused).fallback(pass_any))
         .route("/api/plugin/scroll", axum::routing::post(crate::mods::bridge::scroll).fallback(pass_any))
+        // Páginas HTML da conversa: o dono lê no Rust; o convidado segue ao Python.
+        .route("/api/sessions/{name}/pages/{id}", get(crate::pages::routes::page).fallback(pass_any))
+        .route("/api/sessions/{name}/pages/{id}/shot", get(crate::pages::routes::shot).fallback(pass_any))
+        // Escritas Claude: o Rust decide por pedido e repassa o que não é dele (corpo intacto).
+        .route("/api/sessions/{name}/input", axum::routing::post(crate::session_write::input::input).fallback(pass_any))
+        .route("/api/sessions/{name}/steer", axum::routing::post(crate::session_write::input::steer).fallback(pass_any))
+        .route("/api/sessions/{name}/interrupt", axum::routing::post(crate::session_write::control::interrupt).fallback(pass_any))
+        .route("/api/sessions/{name}/select", axum::routing::post(crate::session_write::control::select).fallback(pass_any))
+        .route("/api/sessions/{name}/select/submit", axum::routing::post(crate::session_write::control::select_submit).fallback(pass_any))
+        .route("/api/sessions/{name}/answer", axum::routing::post(crate::session_write::answer::answer).fallback(pass_any))
+        .route("/api/sessions/{name}/keys", axum::routing::post(crate::session_write::control::keys).fallback(pass_any))
+        .route("/api/sessions/{name}/term-input", axum::routing::post(crate::session_write::control::term_input).fallback(pass_any))
+        .route("/api/sessions/{name}/queue/{entry_id}", axum::routing::delete(crate::session_write::control::queue_remove).fallback(pass_any))
         .route("/api/sessions/{name}/cost", get(crate::costs_routes::session_cost).fallback(pass_any))
         .route("/api/costs", get(crate::costs_routes::costs).fallback(pass_any))
         .route("/api/cotacao", get(crate::costs_routes::cotacao).fallback(pass_any))
@@ -261,8 +285,11 @@ pub fn router(state: Arc<AppState>) -> Router {
 }
 
 async fn health(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let owns: Vec<_> = crate::session_write::table::owned_modes().into_iter()
+        .map(|(provider, headless)| serde_json::json!({"provider": provider.name(), "headless": headless})).collect();
     let body = serde_json::json!({"ok": true, "version": env!("CARGO_PKG_VERSION"),
         "protocol": crate::INTERNAL_PROTOCOL,
+        "owns": owns,
         // O painel de terminal real é do Rust em todas as plataformas.
         "terminal_panel": true,
         "terminal_address": st.terminal_address.map(|a| a.to_string())}).to_string();

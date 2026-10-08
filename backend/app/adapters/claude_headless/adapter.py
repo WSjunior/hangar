@@ -46,7 +46,7 @@ from app.adapters.preview_push import PushPreviewSource, fonte_ferramenta, fonte
 from app.adapters.stream_buffer import StreamBuffer, error_frames
 from app.config import settings
 from app.pqueue import PromptQueue
-from app.procinfo import pid_vivo
+from app.procinfo import _argv, pid_vivo
 from app.state import StateEvent
 from app.live_rate import live_rate
 from app.transcript import ChatEvent, TranscriptTailer
@@ -2451,8 +2451,32 @@ def _hora_local(epoch) -> str | None:
     return time.strftime("%H:%M", time.localtime(epoch))
 
 
+def _e_cano(pid: int) -> bool:
+    """O pid ainda é um cano? Depois de reiniciar a máquina o número pode ser de outro processo."""
+    argv = _argv(pid)
+    if not argv and _zumbi(pid):
+        return True   # cano morto sem ser colhido: o `claude` do grupo dele pode seguir vivo
+    try:
+        log = argv[argv.index("--log") + 1]
+    except (ValueError, IndexError):
+        return False
+    return "--escuta" in argv and Path(log).name.startswith("cano-")
+
+
+def _zumbi(pid: int) -> bool:
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            return fh.read().rsplit(")", 1)[1].split()[0] == "Z"
+    except (OSError, IndexError):
+        return False
+
+
 def _matar_grupo(pid: int, name: str) -> None:
     """SIGTERM no grupo do cano (cano + claude, que é filho dele no mesmo grupo). Idempotente."""
+    if not _e_cano(pid):
+        if pid_vivo(pid):
+            _log.warning("pid %s do sidecar não é mais o cano da sessão name=%s; não matei", pid, name)
+        return
     if os.name == "nt":
         import subprocess
         if not pid_vivo(pid):

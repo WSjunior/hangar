@@ -1,0 +1,1730 @@
+[
+ {
+  "name": "select_accepted",
+  "route": "select",
+  "terminal": true,
+  "args": {
+   "option": 2
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true
+   }
+  },
+  "sent": [
+   {
+    "control": "select",
+    "payload": {
+     "option": 2
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "select_perm_yes",
+  "route": "select",
+  "terminal": true,
+  "args": {
+   "option": 1
+  },
+  "pending": {
+   "id": "perm:1"
+  },
+  "panel_open": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true
+   }
+  },
+  "sent": [
+   {
+    "control": "select",
+    "payload": {
+     "option": 1,
+     "request_id": "perm:1"
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "select_perm_no_with_panel_open",
+  "route": "select",
+  "terminal": true,
+  "args": {
+   "option": 2
+  },
+  "pending": {
+   "id": "perm:1"
+  },
+  "panel_open": true,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true
+   }
+  },
+  "sent": [
+   {
+    "control": "select",
+    "payload": {
+     "option": 2,
+     "request_id": "perm:1"
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "select_perm_option_3",
+  "route": "select",
+  "terminal": true,
+  "args": {
+   "option": 3
+  },
+  "pending": {
+   "id": "perm:1"
+  },
+  "panel_open": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_opcao_nao_convergiu",
+     "params": {},
+     "msg": "op\u00e7\u00e3o fora do pedido de permiss\u00e3o"
+    }
+   }
+  },
+  "sent": [],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "select_ask_pending",
+  "route": "select",
+  "terminal": true,
+  "args": {
+   "option": 2
+  },
+  "pending": {
+   "id": "ask:1"
+  },
+  "panel_open": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true
+   }
+  },
+  "sent": [
+   {
+    "control": "select",
+    "payload": {
+     "option": 2,
+     "request_id": "ask:1",
+     "require_cursor": true
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "select_panel_open_no_pending",
+  "route": "select",
+  "terminal": true,
+  "args": {
+   "option": 1
+  },
+  "pending": null,
+  "panel_open": true,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_terminal_aberto",
+     "params": {},
+     "msg": "Terminal aberto nesta sessao. Feche o painel pra responder por aqui."
+    }
+   }
+  },
+  "sent": [],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "select_panel_open_ask",
+  "route": "select",
+  "terminal": true,
+  "args": {
+   "option": 1
+  },
+  "pending": {
+   "id": "ask:1"
+  },
+  "panel_open": true,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_terminal_aberto",
+     "params": {},
+     "msg": "Terminal aberto nesta sessao. Feche o painel pra responder por aqui."
+    }
+   }
+  },
+  "sent": [],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "select_deferred",
+  "route": "select",
+  "terminal": true,
+  "args": {
+   "option": 1
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "deferred",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_opcao_nao_convergiu",
+     "params": {},
+     "msg": "O controle n\u00e3o foi executado; confira a sess\u00e3o."
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "select",
+    "payload": {
+     "option": 1
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "select_uncertain",
+  "route": "select",
+  "terminal": true,
+  "args": {
+   "option": 1
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "unknown",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_sem_confirmacao_resposta",
+     "params": {},
+     "msg": "resposta enviada, mas nao deu pra confirmar a tempo \u2014 confira na sessao antes de responder de novo"
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "select",
+    "payload": {
+     "option": 1
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "select_runtime_error",
+  "route": "select",
+  "terminal": true,
+  "args": {
+   "option": 1
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": "!erro: runtime_closed: ator saiu",
+  "rust_reply": null,
+  "expect": {
+   "status": 503,
+   "body": {
+    "detail": {
+     "code": "erro_opcao_nao_convergiu",
+     "params": {
+      "detalhe": "runtime_closed: ator saiu"
+     },
+     "msg": "n\u00e3o consegui responder pelo terminal \u2014 op\u00e7\u00e3o N\u00c3O enviada"
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "select",
+    "payload": {
+     "option": 1
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "select_refused",
+  "route": "select",
+  "terminal": true,
+  "args": {
+   "option": 1
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "rejected",
+   "payload": {
+    "code": "cursor"
+   }
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_opcao_nao_convergiu",
+     "params": {
+      "detalhe": "cursor"
+     },
+     "msg": "n\u00e3o consegui marcar essa op\u00e7\u00e3o no terminal \u2014 tente de novo"
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "select",
+    "payload": {
+     "option": 1
+    }
+   }
+  ],
+  "notified": [],
+  "diary": [
+   "opcao.nao_convergiu"
+  ]
+ },
+ {
+  "name": "select_headless_accepted",
+  "route": "select",
+  "terminal": false,
+  "args": {
+   "option": 1
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true
+   }
+  },
+  "sent": [
+   {
+    "control": "select",
+    "payload": {
+     "option": 1
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "select_headless_no_permission",
+  "route": "select",
+  "terminal": false,
+  "args": {
+   "option": 1
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": "!no_pending",
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_opcao_nao_convergiu",
+     "params": {},
+     "msg": "nenhum pedido de permiss\u00e3o pendente"
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "select",
+    "payload": {
+     "option": 1
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "select_headless_rejected",
+  "route": "select",
+  "terminal": false,
+  "args": {
+   "option": 1
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "rejected",
+   "payload": {
+    "error": "op\u00e7\u00e3o inv\u00e1lida"
+   }
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 503,
+   "body": {
+    "detail": {
+     "code": "erro_opcao_nao_convergiu",
+     "params": {},
+     "msg": "n\u00e3o consegui responder: op\u00e7\u00e3o inv\u00e1lida"
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "select",
+    "payload": {
+     "option": 1
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "select_headless_deferred",
+  "route": "select",
+  "terminal": false,
+  "args": {
+   "option": 1
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "deferred",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 503,
+   "body": {
+    "detail": {
+     "code": "erro_opcao_nao_convergiu",
+     "params": {},
+     "msg": "n\u00e3o consegui responder: opera\u00e7\u00e3o recusada pelo runtime"
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "select",
+    "payload": {
+     "option": 1
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "select_headless_unknown",
+  "route": "select",
+  "terminal": false,
+  "args": {
+   "option": 1
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "unknown",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 503,
+   "body": {
+    "detail": {
+     "code": "erro_opcao_nao_convergiu",
+     "params": {},
+     "msg": "n\u00e3o consegui responder: resultado incerto; a opera\u00e7\u00e3o foi conservada sem reenvio"
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "select",
+    "payload": {
+     "option": 1
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "select_headless_error",
+  "route": "select",
+  "terminal": false,
+  "args": {
+   "option": 1
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": "!erro: runtime_closed: ator saiu",
+  "rust_reply": null,
+  "expect": {
+   "status": 503,
+   "body": {
+    "detail": {
+     "code": "erro_opcao_nao_convergiu",
+     "params": {},
+     "msg": "n\u00e3o consegui responder: runtime_closed: ator saiu"
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "select",
+    "payload": {
+     "option": 1
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "submit_accepted",
+  "route": "select_submit",
+  "terminal": true,
+  "args": {},
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true
+   }
+  },
+  "sent": [
+   {
+    "control": "submit_selected",
+    "payload": {}
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "submit_panel_open",
+  "route": "select_submit",
+  "terminal": true,
+  "args": {},
+  "pending": null,
+  "panel_open": true,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_terminal_aberto",
+     "params": {},
+     "msg": "Terminal aberto nesta sessao. Feche o painel pra responder por aqui."
+    }
+   }
+  },
+  "sent": [],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "submit_deferred",
+  "route": "select_submit",
+  "terminal": true,
+  "args": {},
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "deferred",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_opcao_nao_convergiu",
+     "params": {},
+     "msg": "O controle n\u00e3o foi executado; confira a sess\u00e3o."
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "submit_selected",
+    "payload": {}
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "submit_unknown",
+  "route": "select_submit",
+  "terminal": true,
+  "args": {},
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "unknown",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_opcao_nao_convergiu",
+     "params": {},
+     "msg": "N\u00e3o foi poss\u00edvel confirmar o controle; confira a sess\u00e3o antes de repetir."
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "submit_selected",
+    "payload": {}
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "submit_refused",
+  "route": "select_submit",
+  "terminal": true,
+  "args": {},
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "rejected",
+   "payload": {
+    "code": "tab"
+   }
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_opcao_nao_convergiu",
+     "params": {
+      "detalhe": "tab"
+     },
+     "msg": "n\u00e3o consegui enviar as op\u00e7\u00f5es marcadas \u2014 tente de novo"
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "submit_selected",
+    "payload": {}
+   }
+  ],
+  "notified": [],
+  "diary": [
+   "opcao.envio_falhou"
+  ]
+ },
+ {
+  "name": "submit_runtime_error",
+  "route": "select_submit",
+  "terminal": true,
+  "args": {},
+  "pending": null,
+  "panel_open": false,
+  "reply": "!erro: runtime_closed: ator saiu",
+  "rust_reply": null,
+  "expect": {
+   "status": 502,
+   "body": {
+    "detail": {
+     "code": "erro_envio_falhou",
+     "params": {
+      "erro": "runtime_closed: ator saiu"
+     },
+     "msg": "runtime_closed: ator saiu"
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "submit_selected",
+    "payload": {}
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "interrupt_headless_accepted",
+  "route": "interrupt",
+  "terminal": false,
+  "args": {},
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true
+   }
+  },
+  "sent": [
+   {
+    "control": "interrupt",
+    "payload": {}
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "interrupt_headless_no_turn",
+  "route": "interrupt",
+  "terminal": false,
+  "args": {},
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {
+    "interrupted": false
+   }
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_sem_turno",
+     "params": {},
+     "msg": "N\u00e3o h\u00e1 turno ativo para interromper."
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "interrupt",
+    "payload": {}
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "interrupt_headless_rejected",
+  "route": "interrupt",
+  "terminal": false,
+  "args": {},
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "rejected",
+   "payload": {
+    "error": "sem turno"
+   }
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_sem_turno",
+     "params": {},
+     "msg": "sem turno"
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "interrupt",
+    "payload": {}
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "interrupt_headless_rejected_plain",
+  "route": "interrupt",
+  "terminal": false,
+  "args": {},
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "rejected",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_sem_turno",
+     "params": {},
+     "msg": "opera\u00e7\u00e3o recusada pelo runtime"
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "interrupt",
+    "payload": {}
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "interrupt_headless_deferred",
+  "route": "interrupt",
+  "terminal": false,
+  "args": {},
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "deferred",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_sem_turno",
+     "params": {},
+     "msg": "opera\u00e7\u00e3o recusada pelo runtime"
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "interrupt",
+    "payload": {}
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "interrupt_headless_unknown",
+  "route": "interrupt",
+  "terminal": false,
+  "args": {},
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "unknown",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_sem_turno",
+     "params": {},
+     "msg": "resultado incerto; a opera\u00e7\u00e3o foi conservada sem reenvio"
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "interrupt",
+    "payload": {}
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "interrupt_headless_error",
+  "route": "interrupt",
+  "terminal": false,
+  "args": {},
+  "pending": null,
+  "panel_open": false,
+  "reply": "!erro: runtime_closed: ator saiu",
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_sem_turno",
+     "params": {},
+     "msg": "runtime_closed: ator saiu"
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "interrupt",
+    "payload": {}
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "interrupt_terminal_runtime_error",
+  "route": "interrupt",
+  "terminal": true,
+  "args": {},
+  "pending": {
+   "id": "ask:9"
+  },
+  "panel_open": false,
+  "reply": "!erro: runtime_closed: ator saiu",
+  "rust_reply": null,
+  "expect": {
+   "status": 502,
+   "body": {
+    "detail": {
+     "code": "erro_envio_falhou",
+     "params": {
+      "erro": "runtime_closed: ator saiu"
+     },
+     "msg": "runtime_closed: ator saiu"
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "interrupt",
+    "payload": {
+     "clear": false
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "interrupt_terminal_accepted",
+  "route": "interrupt",
+  "terminal": true,
+  "args": {},
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true
+   }
+  },
+  "sent": [
+   {
+    "control": "interrupt",
+    "payload": {
+     "clear": false
+    }
+   }
+  ],
+  "notified": [
+   null
+  ],
+  "diary": []
+ },
+ {
+  "name": "interrupt_terminal_with_question",
+  "route": "interrupt",
+  "terminal": true,
+  "args": {},
+  "pending": {
+   "id": "ask:9"
+  },
+  "panel_open": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true
+   }
+  },
+  "sent": [
+   {
+    "control": "interrupt",
+    "payload": {
+     "clear": false
+    }
+   }
+  ],
+  "notified": [
+   "ask:9"
+  ],
+  "diary": []
+ },
+ {
+  "name": "interrupt_terminal_clear",
+  "route": "interrupt",
+  "terminal": true,
+  "args": {
+   "clear": true
+  },
+  "pending": {
+   "id": "ask:9"
+  },
+  "panel_open": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true
+   }
+  },
+  "sent": [
+   {
+    "control": "interrupt",
+    "payload": {
+     "clear": true
+    }
+   }
+  ],
+  "notified": [
+   "ask:9"
+  ],
+  "diary": []
+ },
+ {
+  "name": "interrupt_terminal_deferred",
+  "route": "interrupt",
+  "terminal": true,
+  "args": {},
+  "pending": {
+   "id": "ask:9"
+  },
+  "panel_open": false,
+  "reply": {
+   "disposition": "deferred",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_opcao_nao_convergiu",
+     "params": {},
+     "msg": "O controle n\u00e3o foi executado; confira a sess\u00e3o."
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "interrupt",
+    "payload": {
+     "clear": false
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "interrupt_terminal_unknown",
+  "route": "interrupt",
+  "terminal": true,
+  "args": {},
+  "pending": {
+   "id": "ask:9"
+  },
+  "panel_open": false,
+  "reply": {
+   "disposition": "unknown",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_opcao_nao_convergiu",
+     "params": {},
+     "msg": "N\u00e3o foi poss\u00edvel confirmar o controle; confira a sess\u00e3o antes de repetir."
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "interrupt",
+    "payload": {
+     "clear": false
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "keys_accepted",
+  "route": "keys",
+  "terminal": true,
+  "args": {
+   "key": "Down"
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true
+   }
+  },
+  "sent": [
+   {
+    "control": "navigation_key",
+    "payload": {
+     "key": "Down"
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "keys_not_allowed",
+  "route": "keys",
+  "terminal": true,
+  "args": {
+   "key": "Nope"
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": null,
+  "rust_reply": {
+   "disposition": "rejected",
+   "payload": {
+    "code": "key_not_allowed"
+   }
+  },
+  "expect": {
+   "status": 400,
+   "body": {
+    "detail": "tecla n\u00e3o permitida"
+   }
+  },
+  "sent": [],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "keys_deferred",
+  "route": "keys",
+  "terminal": true,
+  "args": {
+   "key": "Down"
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "deferred",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_opcao_nao_convergiu",
+     "params": {},
+     "msg": "O controle n\u00e3o foi executado; confira a sess\u00e3o."
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "navigation_key",
+    "payload": {
+     "key": "Down"
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "keys_unknown",
+  "route": "keys",
+  "terminal": true,
+  "args": {
+   "key": "Down"
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "unknown",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_opcao_nao_convergiu",
+     "params": {},
+     "msg": "N\u00e3o foi poss\u00edvel confirmar o controle; confira a sess\u00e3o antes de repetir."
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "navigation_key",
+    "payload": {
+     "key": "Down"
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "keys_runtime_error",
+  "route": "keys",
+  "terminal": true,
+  "args": {
+   "key": "Down"
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": "!erro: runtime_closed: ator saiu",
+  "rust_reply": null,
+  "expect": {
+   "status": 502,
+   "body": {
+    "detail": {
+     "code": "erro_envio_falhou",
+     "params": {
+      "erro": "runtime_closed: ator saiu"
+     },
+     "msg": "runtime_closed: ator saiu"
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "navigation_key",
+    "payload": {
+     "key": "Down"
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "term_text",
+  "route": "term_input",
+  "terminal": true,
+  "args": {
+   "text": "ls"
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true
+   }
+  },
+  "sent": [
+   {
+    "control": "terminal_input",
+    "payload": {
+     "text": "ls"
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "term_key",
+  "route": "term_input",
+  "terminal": true,
+  "args": {
+   "key": "C-c"
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true
+   }
+  },
+  "sent": [
+   {
+    "control": "interactive_key",
+    "payload": {
+     "key": "C-c"
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "term_text_and_key",
+  "route": "term_input",
+  "terminal": true,
+  "args": {
+   "text": "ls",
+   "key": "Enter"
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true
+   }
+  },
+  "sent": [
+   {
+    "control": "terminal_input",
+    "payload": {
+     "text": "ls"
+    }
+   },
+   {
+    "control": "interactive_key",
+    "payload": {
+     "key": "Enter"
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "term_empty_text_and_key",
+  "route": "term_input",
+  "terminal": true,
+  "args": {
+   "text": "",
+   "key": "Enter"
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true
+   }
+  },
+  "sent": [
+   {
+    "control": "interactive_key",
+    "payload": {
+     "key": "Enter"
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "term_nothing",
+  "route": "term_input",
+  "terminal": true,
+  "args": {},
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true
+   }
+  },
+  "sent": [],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "term_bad_text",
+  "route": "term_input",
+  "terminal": true,
+  "args": {
+   "text": "a\u0001b"
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": null,
+  "rust_reply": null,
+  "expect": {
+   "status": 400,
+   "body": {
+    "detail": "texto inv\u00e1lido para terminal"
+   }
+  },
+  "sent": [],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "term_bad_key_after_text",
+  "route": "term_input",
+  "terminal": true,
+  "args": {
+   "text": "ls",
+   "key": "Nope"
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "rust_reply": {
+   "disposition": "rejected",
+   "payload": {
+    "code": "key_not_allowed"
+   }
+  },
+  "expect": {
+   "status": 400,
+   "body": {
+    "detail": "tecla n\u00e3o permitida"
+   }
+  },
+  "sent": [
+   {
+    "control": "terminal_input",
+    "payload": {
+     "text": "ls"
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "term_text_deferred",
+  "route": "term_input",
+  "terminal": true,
+  "args": {
+   "text": "ls",
+   "key": "Enter"
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "deferred",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_opcao_nao_convergiu",
+     "params": {},
+     "msg": "O controle n\u00e3o foi executado; confira a sess\u00e3o."
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "terminal_input",
+    "payload": {
+     "text": "ls"
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "term_key_unknown",
+  "route": "term_input",
+  "terminal": true,
+  "args": {
+   "key": "Enter"
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "unknown",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_opcao_nao_convergiu",
+     "params": {},
+     "msg": "N\u00e3o foi poss\u00edvel confirmar o controle; confira a sess\u00e3o antes de repetir."
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "interactive_key",
+    "payload": {
+     "key": "Enter"
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "term_runtime_error",
+  "route": "term_input",
+  "terminal": true,
+  "args": {
+   "text": "ls"
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": "!erro: runtime_closed: ator saiu",
+  "rust_reply": null,
+  "expect": {
+   "status": 502,
+   "body": {
+    "detail": {
+     "code": "erro_envio_falhou",
+     "params": {
+      "erro": "runtime_closed: ator saiu"
+     },
+     "msg": "runtime_closed: ator saiu"
+    }
+   }
+  },
+  "sent": [
+   {
+    "control": "terminal_input",
+    "payload": {
+     "text": "ls"
+    }
+   }
+  ],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "queue_removed",
+  "route": "queue_remove",
+  "terminal": false,
+  "args": {
+   "removed": true
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true
+   }
+  },
+  "sent": [],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "queue_not_found",
+  "route": "queue_remove",
+  "terminal": false,
+  "args": {
+   "removed": false
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 404,
+   "body": {
+    "detail": {
+     "code": "erro_fila_entrada_nao_encontrada",
+     "params": {},
+     "msg": "entrada n\u00e3o est\u00e1 na fila"
+    }
+   }
+  },
+  "sent": [],
+  "notified": [],
+  "diary": []
+ },
+ {
+  "name": "queue_runtime_error",
+  "route": "queue_remove",
+  "terminal": false,
+  "args": {
+   "error": "runtime_closed: ator saiu"
+  },
+  "pending": null,
+  "panel_open": false,
+  "reply": {
+   "disposition": "accepted",
+   "payload": {}
+  },
+  "rust_reply": null,
+  "expect": {
+   "status": 502,
+   "body": {
+    "detail": {
+     "code": "erro_envio_falhou",
+     "params": {
+      "erro": "runtime_closed: ator saiu"
+     },
+     "msg": "runtime_closed: ator saiu"
+    }
+   }
+  },
+  "sent": [],
+  "notified": [],
+  "diary": []
+ }
+]

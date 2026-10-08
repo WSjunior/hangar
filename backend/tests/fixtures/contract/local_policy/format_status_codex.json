@@ -1,0 +1,518 @@
+{
+ "tz": "BRT3",
+ "cases": [
+  {
+   "name": "full",
+   "kind": "format_status",
+   "payload": {
+    "model": "GPT-5.5",
+    "effort": "high",
+    "token_usage": {
+     "last": {
+      "inputTokens": 14389,
+      "outputTokens": 1200
+     },
+     "modelContextWindow": 258400
+    },
+    "rate_limits": {
+     "primary": {
+      "windowDurationMins": 300,
+      "usedPercent": 41.6,
+      "resetsAt": 1800010920.0
+     },
+     "secondary": {
+      "windowDurationMins": 10080,
+      "usedPercent": 12,
+      "resetsAt": 1800432000.0
+     }
+    }
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 GPT-5.5 (high) │ 💬 14k/1k 14k/258k │ ⚡5h:42% ↺3h2m │ 📅7d:12% ↺5d"
+   }
+  },
+  {
+   "name": "only_model",
+   "kind": "format_status",
+   "payload": {
+    "model": "gpt-5.5"
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 gpt-5.5"
+   }
+  },
+  {
+   "name": "model_default_fallback",
+   "kind": "format_status",
+   "payload": {
+    "model": null,
+    "default_model": "gpt-5.5",
+    "effort": null,
+    "default_effort": "medium"
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 gpt-5.5 (medium)"
+   }
+  },
+  {
+   "name": "model_blank_falls_back",
+   "kind": "format_status",
+   "payload": {
+    "model": "",
+    "default_model": "gpt-5.5",
+    "effort": "",
+    "default_effort": "low"
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 gpt-5.5 (low)"
+   }
+  },
+  {
+   "name": "model_beats_default",
+   "kind": "format_status",
+   "payload": {
+    "model": "a",
+    "default_model": "b",
+    "effort": "x",
+    "default_effort": "y"
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 a (x)"
+   }
+  },
+  {
+   "name": "effort_without_model",
+   "kind": "format_status",
+   "payload": {
+    "effort": "high"
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": null
+   }
+  },
+  {
+   "name": "effort_default_without_model",
+   "kind": "format_status",
+   "payload": {
+    "default_effort": "high"
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": null
+   }
+  },
+  {
+   "name": "everything_missing",
+   "kind": "format_status",
+   "payload": {},
+   "meta": {
+    "provider": "codex"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": null
+   }
+  },
+  {
+   "name": "usage_needs_window",
+   "kind": "format_status",
+   "payload": {
+    "token_usage": {
+     "last": {
+      "inputTokens": 1
+     }
+    }
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": null
+   }
+  },
+  {
+   "name": "usage_needs_input",
+   "kind": "format_status",
+   "payload": {
+    "token_usage": {
+     "last": {
+      "outputTokens": 1
+     },
+     "modelContextWindow": 1000
+    }
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": null
+   }
+  },
+  {
+   "name": "usage_zero_input",
+   "kind": "format_status",
+   "payload": {
+    "token_usage": {
+     "last": {
+      "inputTokens": 0
+     },
+     "modelContextWindow": 1000
+    }
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": null
+   }
+  },
+  {
+   "name": "usage_without_output",
+   "kind": "format_status",
+   "payload": {
+    "token_usage": {
+     "last": {
+      "inputTokens": 2500
+     },
+     "modelContextWindow": 1000000
+    }
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "💬 2k/0 2k/1M"
+   }
+  },
+  {
+   "name": "usage_empty_object",
+   "kind": "format_status",
+   "payload": {
+    "token_usage": {}
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": null
+   }
+  },
+  {
+   "name": "windows_five_hours_edges",
+   "kind": "format_status",
+   "payload": {
+    "rate_limits": {
+     "primary": {
+      "windowDurationMins": 270,
+      "usedPercent": 1
+     },
+     "secondary": {
+      "windowDurationMins": 330,
+      "usedPercent": 2
+     }
+    }
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "⚡5h:1% │ ⚡5h:2%"
+   }
+  },
+  {
+   "name": "windows_outside_ranges",
+   "kind": "format_status",
+   "payload": {
+    "rate_limits": {
+     "primary": {
+      "windowDurationMins": 269,
+      "usedPercent": 1
+     },
+     "secondary": {
+      "windowDurationMins": 331,
+      "usedPercent": 2
+     }
+    }
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": null
+   }
+  },
+  {
+   "name": "windows_seven_days_edges",
+   "kind": "format_status",
+   "payload": {
+    "rate_limits": {
+     "primary": {
+      "windowDurationMins": 10020,
+      "usedPercent": 1
+     },
+     "secondary": {
+      "windowDurationMins": 10140,
+      "usedPercent": 2
+     }
+    }
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "📅7d:1% │ 📅7d:2%"
+   }
+  },
+  {
+   "name": "windows_seven_days_outside",
+   "kind": "format_status",
+   "payload": {
+    "rate_limits": {
+     "primary": {
+      "windowDurationMins": 10019,
+      "usedPercent": 1
+     },
+     "secondary": {
+      "windowDurationMins": 10141,
+      "usedPercent": 2
+     }
+    }
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": null
+   }
+  },
+  {
+   "name": "window_missing_percent",
+   "kind": "format_status",
+   "payload": {
+    "rate_limits": {
+     "primary": {
+      "windowDurationMins": 300
+     }
+    }
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": null
+   }
+  },
+  {
+   "name": "window_missing_minutes",
+   "kind": "format_status",
+   "payload": {
+    "rate_limits": {
+     "primary": {
+      "usedPercent": 5
+     }
+    }
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": null
+   }
+  },
+  {
+   "name": "window_no_reset",
+   "kind": "format_status",
+   "payload": {
+    "rate_limits": {
+     "primary": {
+      "windowDurationMins": 300,
+      "usedPercent": 50.5
+     }
+    }
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "⚡5h:50%"
+   }
+  },
+  {
+   "name": "window_banker_percent",
+   "kind": "format_status",
+   "payload": {
+    "rate_limits": {
+     "primary": {
+      "windowDurationMins": 300,
+      "usedPercent": 0.5
+     },
+     "secondary": {
+      "windowDurationMins": 10080,
+      "usedPercent": 2.5
+     }
+    }
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "⚡5h:0% │ 📅7d:2%"
+   }
+  },
+  {
+   "name": "window_reset_in_past",
+   "kind": "format_status",
+   "payload": {
+    "rate_limits": {
+     "primary": {
+      "windowDurationMins": 300,
+      "usedPercent": 5,
+      "resetsAt": 1799999950.0
+     }
+    }
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "⚡5h:5% ↺0m"
+   }
+  },
+  {
+   "name": "window_reset_days_only",
+   "kind": "format_status",
+   "payload": {
+    "rate_limits": {
+     "secondary": {
+      "windowDurationMins": 10080,
+      "usedPercent": 5,
+      "resetsAt": 1800172800.0
+     }
+    }
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "📅7d:5% ↺2d"
+   }
+  },
+  {
+   "name": "window_reset_hours_only",
+   "kind": "format_status",
+   "payload": {
+    "rate_limits": {
+     "secondary": {
+      "windowDurationMins": 10080,
+      "usedPercent": 5,
+      "resetsAt": 1800007200.0
+     }
+    }
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "📅7d:5% ↺2h"
+   }
+  },
+  {
+   "name": "window_reset_minutes",
+   "kind": "format_status",
+   "payload": {
+    "rate_limits": {
+     "primary": {
+      "windowDurationMins": 300,
+      "usedPercent": 5,
+      "resetsAt": 1800001799.0
+     }
+    }
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "⚡5h:5% ↺29m"
+   }
+  },
+  {
+   "name": "rate_limits_empty",
+   "kind": "format_status",
+   "payload": {
+    "rate_limits": {}
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": null
+   }
+  },
+  {
+   "name": "rate_limits_null_window",
+   "kind": "format_status",
+   "payload": {
+    "rate_limits": {
+     "primary": null,
+     "secondary": {
+      "windowDurationMins": 10080,
+      "usedPercent": 12,
+      "resetsAt": 1800432000.0
+     }
+    }
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "📅7d:12% ↺5d"
+   }
+  }
+ ]
+}

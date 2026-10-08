@@ -164,7 +164,8 @@ passo_front() {
 passo_mobile() {
     npm_ci_se_mudou package-lock.json npm ci --workspace=@hangar/core --workspace=frontend || return 1
     npm_ci_se_mudou mobile/package-lock.json npm ci --prefix mobile || return 1
-    npm run check:app && npm run test:app
+    # O check do app compila as mensagens dele, não as do core; sem isto valem as da última rodada do front.
+    npm run i18n:compile -w @hangar/core && npm run check:app && npm run test:app
 }
 
 # O nativo é outro workspace: fora do target do crates/.

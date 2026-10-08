@@ -57,9 +57,20 @@ fn now_ms() -> u128 { std::time::SystemTime::now().duration_since(std::time::UNI
 
 /// Sidecar no formato do Electron (`url`/`targetId` no topo, `abas` ao lado), com o `pid` do dono para o `list`.
 pub fn write_sidecar(key: &str, url: &str, title: &str) {
+    let url = &without_token(url);
     let tab = json!({"id": 1, "url": url, "titulo": title, "targetId": null});
     let value = json!({"chave": key, "url": url, "targetId": null, "ts": now_ms(), "ativa": 1, "abas": [tab], "pid": std::process::id()});
     if let Err(e) = write_json(&sidecar_name(key), &value) { eprintln!("[nav] sidecar de {key} nao gravado: {e}"); }
+}
+
+/// A casca das páginas nasce com `?token=` e só o tira depois de carregar; o sidecar é lido pelo
+/// `hangar-preview`, cuja saída vai para o transcript.
+fn without_token(raw: &str) -> String {
+    let Ok(mut url) = url::Url::parse(raw) else { return raw.to_owned() };
+    if !url.query_pairs().any(|(k, _)| k == "token") { return raw.to_owned(); }
+    let rest: Vec<(String, String)> = url.query_pairs().filter(|(k, _)| k != "token").map(|(k, v)| (k.into(), v.into())).collect();
+    if rest.is_empty() { url.set_query(None) } else { url.query_pairs_mut().clear().extend_pairs(rest); }
+    url.into()
 }
 
 pub fn remove_sidecar(key: &str) {
@@ -289,6 +300,14 @@ mod tests {
         assert_eq!(parse_body(br#"{"verbo":"snapshot"}"#).err(), Some("erro: corpo invalido".into()));
         let with_tab = parse_body(br#"{"chave":"k","verbo":"url","aba":2}"#).unwrap();
         assert_eq!((with_tab.tab, with_tab.args.len()), (Some(2), 0));
+    }
+
+    #[test]
+    fn sidecar_url_never_keeps_the_token() {
+        assert_eq!(super::without_token("http://h/api/sessions/s/pages/a?token=abc"), "http://h/api/sessions/s/pages/a");
+        assert_eq!(super::without_token("http://h/p?raw=1&token=abc#x"), "http://h/p?raw=1#x");
+        assert_eq!(super::without_token("http://h/p?q=1"), "http://h/p?q=1");
+        assert_eq!(super::without_token(""), "");
     }
 
     #[test]

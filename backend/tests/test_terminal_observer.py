@@ -203,7 +203,7 @@ def test_supervisor_enables_only_after_health_and_clears_even_without_proc(monke
     monkeypatch.setattr(rust_server.Supervisor, "configure_runtime", lambda *args: None)
     def health(*args):
         assert t._config is None
-        return {"ok": True, "protocol": rust_server.RUST_SERVER_PROTOCOL, "terminal_panel": True,
+        return {"ok": True, "protocol": rust_server.RUST_SERVER_PROTOCOL, "terminal_panel": True, "owns": [],
                 "terminal_address": "127.0.0.1:12347"}
     monkeypatch.setattr(rust_server, "_health", health)
     monkeypatch.setattr(rust_server, "server_log_path", lambda: "/tmp/unused-test-log")

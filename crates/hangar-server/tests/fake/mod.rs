@@ -57,6 +57,18 @@ pub struct Fake {
     transfer_calls: AtomicUsize,
     /// Corpos que chegaram em `/api/plugin/ui` (a cópia da faixa que o Rust manda).
     plugin_ui: Mutex<Vec<Value>>,
+    /// Corpo cru do último pedido de escrita repassado.
+    last_body: Mutex<Vec<u8>>,
+    /// Enquanto ligado, `/input` só responde depois de `release`.
+    hold_input: std::sync::atomic::AtomicBool,
+    /// A pergunta que o plugin segura (`/internal/sessions/{name}/plugin`), o status que a faz falhar,
+    /// quantas leituras chegaram e os corpos do aviso de interrupção.
+    plugin_pending: Mutex<Value>,
+    plugin_status: Mutex<Option<StatusCode>>,
+    /// Corpo que substitui `{"pending": …}` na leitura (o Python respondendo outra coisa).
+    plugin_reply: Mutex<Option<Value>>,
+    plugin_gets: AtomicUsize,
+    plugin_posts: Mutex<Vec<Value>>,
 }
 
 impl Fake {
@@ -111,6 +123,30 @@ impl Fake {
     pub fn transfer_calls(&self) -> usize {
         self.transfer_calls.load(SeqCst)
     }
+    /// Bytes do corpo do último pedido de escrita repassado.
+    pub fn last_body(&self) -> Vec<u8> {
+        self.last_body.lock().unwrap().clone()
+    }
+    /// `/input` fica preso no Python falso até `release.notify_one()`.
+    pub fn hold_input(&self, on: bool) {
+        self.hold_input.store(on, SeqCst);
+    }
+    pub fn set_plugin_pending(&self, pending: Value) {
+        *self.plugin_pending.lock().unwrap() = pending;
+    }
+    /// A rota interna do plugin responde só este status (o Python caído ou recusando).
+    pub fn fail_plugin(&self, s: Option<StatusCode>) {
+        *self.plugin_status.lock().unwrap() = s;
+    }
+    pub fn set_plugin_reply(&self, reply: Option<Value>) {
+        *self.plugin_reply.lock().unwrap() = reply;
+    }
+    pub fn plugin_gets(&self) -> usize {
+        self.plugin_gets.load(SeqCst)
+    }
+    pub fn plugin_posts(&self) -> Vec<Value> {
+        self.plugin_posts.lock().unwrap().clone()
+    }
     /// Os corpos que chegaram em `/api/plugin/ui`, na ordem.
     pub fn plugin_ui_bodies(&self) -> Vec<Value> {
         self.plugin_ui.lock().unwrap().clone()
@@ -140,6 +176,13 @@ pub async fn spawn_fake() -> (Arc<Fake>, SocketAddr) {
         transfer_body: Mutex::default(),
         transfer_calls: AtomicUsize::new(0),
         plugin_ui: Mutex::default(),
+        last_body: Mutex::default(),
+        hold_input: std::sync::atomic::AtomicBool::new(false),
+        plugin_pending: Mutex::new(Value::Null),
+        plugin_status: Mutex::default(),
+        plugin_reply: Mutex::default(),
+        plugin_gets: AtomicUsize::new(0),
+        plugin_posts: Mutex::default(),
     });
     let app = Router::new()
         .route("/internal/sessions/{name}/info", get(fake_info))
@@ -147,6 +190,7 @@ pub async fn spawn_fake() -> (Arc<Fake>, SocketAddr) {
         .route("/internal/diag", axum::routing::post(fake_diag))
         .route("/internal/list/facts", axum::routing::post(fake_list_facts))
         .route("/internal/sessions/{name}/transfer", get(fake_transfer))
+        .route("/internal/sessions/{name}/plugin", get(fake_plugin_get).post(fake_plugin_post))
         .fallback(fake_python)
         .with_state(fake.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -197,6 +241,29 @@ async fn fake_diag(State(f): State<Arc<Fake>>, headers: HeaderMap, body: Bytes) 
     }
     f.diag.lock().unwrap().push(serde_json::from_slice(&body).unwrap());
     status(StatusCode::OK)
+}
+
+async fn fake_plugin_get(State(f): State<Arc<Fake>>, headers: HeaderMap) -> Response {
+    if !internal_ok(&headers) {
+        return status(StatusCode::NOT_FOUND);
+    }
+    f.plugin_gets.fetch_add(1, SeqCst);
+    if let Some(s) = *f.plugin_status.lock().unwrap() {
+        return status(s);
+    }
+    let body = f.plugin_reply.lock().unwrap().clone().unwrap_or_else(|| json!({"pending": f.plugin_pending.lock().unwrap().clone()}));
+    Response::builder().header("content-type", "application/json").body(Body::from(body.to_string())).unwrap()
+}
+
+async fn fake_plugin_post(State(f): State<Arc<Fake>>, headers: HeaderMap, body: Bytes) -> Response {
+    if !internal_ok(&headers) {
+        return status(StatusCode::NOT_FOUND);
+    }
+    f.plugin_posts.lock().unwrap().push(serde_json::from_slice(&body).unwrap_or(Value::Null));
+    if let Some(s) = *f.plugin_status.lock().unwrap() {
+        return status(s);
+    }
+    Response::builder().header("content-type", "application/json").body(Body::from(r#"{"ok":true}"#)).unwrap()
 }
 
 async fn fake_transfer(State(f): State<Arc<Fake>>, headers: HeaderMap) -> Response {
@@ -251,6 +318,13 @@ async fn fake_python(State(f): State<Arc<Fake>>, mut req: Request) -> Response {
     if path == "/api/plugin/ui" {
         let bytes = axum::body::to_bytes(std::mem::take(req.body_mut()), 1 << 20).await.unwrap_or_default();
         f.plugin_ui.lock().unwrap().push(serde_json::from_slice(&bytes).unwrap_or(Value::Null));
+    }
+    if req.method() != axum::http::Method::GET && path != "/ws" && path != "/api/plugin/ui" {
+        let bytes = axum::body::to_bytes(std::mem::take(req.body_mut()), 1 << 24).await.unwrap_or_default();
+        *f.last_body.lock().unwrap() = bytes.to_vec();
+    }
+    if path.ends_with("/input") && f.hold_input.load(SeqCst) {
+        f.release.notified().await;
     }
     match path.as_str() {
         "/redirect" => Response::builder().status(302).header("location", "/outro").body(Body::empty()).unwrap(),

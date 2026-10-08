@@ -22,7 +22,7 @@ pub mod cdp {
 #[cfg(target_os = "linux")]
 mod chromium;
 #[cfg(target_os = "linux")]
-pub use chromium::Engine;
+pub use chromium::{Engine, Warm};
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod wry_engine;
@@ -35,6 +35,9 @@ pub enum Event {
     // Fica em todo sistema para o `if let` de quem recebe não virar padrão irrefutável.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Frame,
+    /// Mensagem da página da conversa (`window.hangarHost`), JSON cru no formato do MCP Apps.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Host(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -179,3 +179,28 @@ async def test_side_events_keeps_info_queue_nav_ping_toast(rust):
     assert not {"state", "preview", "ask_question", "suggest"} & set(_nomes(vistos))
     assert adapter.drains == [] and adapter.tails == []
     sse.nav_confirmar("s")
+
+
+@pytest.mark.parametrize("count_app", [False, True])
+async def test_nav_marker_only_reaches_owner_connections(rust, count_app):
+    # A url do rascunho de página leva o token do dono: convidado e par externo (count_app=False)
+    # nunca recebem o marcador; o dono pela porta do Connect recebe.
+    _adapter, jsonl = rust
+    sse.nav_pendente("s", "http://127.0.0.1:8765/api/sessions/s/pages/abc?token=segredo")
+    vistos = []
+    async with _CanalRust():
+        gen = sse.merged_events("s", str(jsonl), count_app=count_app)
+        try:
+            async with asyncio.timeout(2.5):
+                async for ev in gen:
+                    vistos.append(ev)
+                    if ev["event"] == "nav":
+                        break
+        except TimeoutError:
+            pass
+        finally:
+            await gen.aclose()
+    sse.nav_confirmar("s")
+    assert ("nav" in _nomes(vistos)) is count_app
+    if not count_app:
+        assert not any("segredo" in str(e.get("data", "")) for e in vistos)

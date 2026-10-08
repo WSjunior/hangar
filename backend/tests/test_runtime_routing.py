@@ -183,6 +183,9 @@ class Transport:
 
     async def op(self, descriptor, command, operation_id, clock):
         from app.rust_server import RustOpError
+        if command["kind"] == "ingress":
+            # A porta de escrita é conferida em test_runtime_ingress; aqui ela não entra na sequência.
+            return {"closed": command["closed"]}
         self.ops.append((command["kind"], descriptor))
         if command["kind"] == "open":
             await asyncio.sleep(self.delay)
