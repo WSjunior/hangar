@@ -399,6 +399,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **Voz no app nativo:** WebRTC do próprio nativo (o transporte websocket do realtime recusa login
   ChatGPT); envio só a partir de fala do usuário, com espera de 1,5 s cancelada se ele voltar a
   falar. Medição em "Voz no app nativo".
+- **Voz: modo Planejar:** nada vai à sessão até o fim; `finish_plan`, `ask_session` e `set_mode` só
+  saem de fala do usuário, `finish_plan` em dois passos, e o envio só sai após silêncio do
+  microfone. A leitura de arquivos fora do projeto está em aberto. Medição em "Voz: modo Planejar".
 
 ## O /clear e o rodapé do Claude Code
 
@@ -2675,6 +2678,46 @@ de conexão do app: trocar de servidor não deixa ferramenta sem resposta. Respo
 deduplicada por id de evento; sessão que recebeu pedido e saiu da tela tem a resposta lida pelo
 histórico quando a lista mostra que ela parou. Gate: `codex_voice_beta` do servidor local
 (loopback) e `codex` encontrado.
+
+## Voz: modo Planejar
+
+(`desktop-native/src/voice/organizer.rs`, 07/10/2026, Codex 0.160.1): a voz tem dois modos, trocados
+pela chave do painel ou falando ("vamos planejar", "volta pro direto"). **Direto** é o de antes: o
+pedido completo vai à sessão. **Planejar** não manda nada até o fim: o organizador escreve e
+reorganiza um plano (objetivo, decisões, pendências, pesquisas com fontes) em
+`~/.hangar/voz/planos/<sessão>-<AAAA-MM-DD-HHMM>.md`, gravado por tmp+rename atômico, e o painel
+mostra o plano crescendo.
+
+**Opção C.** O organizador pesquisa na internet (`web_search: "live"`), lê o projeto só para
+leitura (thread em sandbox `read-only` com `approvalPolicy: never`) e pergunta à sessão o que só ela
+sabe. Provado: `thread/start` aceita `web_search: "live"` (a pesquisa de fato não foi exercitada
+na prova); com `environments: []` o modelo fica sem shell, então a chave saiu; sem ela, `ls` roda
+sem pedir aprovação; escrever fora do cwd falha com "Read-only file system".
+
+**Regras de segurança.**
+- `finish_plan`, `ask_session` e `set_mode` só valem a partir de turno falado; a resposta da sessão
+  que volta ao organizador não conta como fala.
+- `finish_plan` tem dois passos: arma, e só confirma noutro turno falado. A voz lê o resumo e o
+  usuário escolhe entre "leia e execute" e "escreva o plano de implementação a partir dele"; sai um
+  único pedido apontando o arquivo.
+- `send_to_session` e `hold_request` são recusados no Planejar.
+- `ask_session` responde logo ao organizador; a resposta da sessão volta como turno marcado
+  `[RESPOSTA DA SESSÃO À PERGUNTA]`, com prazo de 10 min, e não é falada como resultado.
+- O plano é preso à sessão para a qual nasceu; sessão em outra máquina recebe o plano inline, já
+  que o arquivo é local.
+
+**Envio só após silêncio do microfone.** Só a espera fixa de 1,5 s gerou envio duplicado: duas
+falas no mesmo turno, envios às 18:29:06 e 18:29:15. Agora o envio sai depois de 1,2 s de silêncio
+do microfone, com teto de 8 s.
+
+**RTP.** O pacote solto inicial que a OpenAI manda é descartado pelo `RtpStart`; a reserva de áudio
+é de 240 ms porque o socket mostrou buracos de 66 a 190 ms com o laço rodando em 12 a 52 ms.
+
+**EM ABERTO (decisão do Jefferson): o shell lê fora do projeto.** Medido: `ls ~/.ssh` lista 10
+entradas e `~/.codex/auth.json` é legível (conteúdo não impresso). Hoje a única proteção é uma linha
+do prompt ("leia só dentro da pasta do projeto; nunca abra credenciais"), que não é barreira.
+Opções: A) manter só o prompt; B) trocar o shell por ferramentas do app de ler, listar e buscar,
+restritas à pasta da sessão; C) desligar a pesquisa na web enquanto o shell estiver ligado.
 
 - `adapters/kimi/` + `hooks/kimi_state_hook.py` + `kimi_hook_installer.py` — Kimi Code runs in the
   same tmux-native shape as Pi: TUI in the pane, chat from
