@@ -251,6 +251,8 @@ class RuntimeCoordinator:
         self._hooks_ran = set()
         self._settling = False      # entrando num modo: as sessões ainda abrindo ou voltando
         self._mode_event = None
+        # Sessões cuja recusa de fundo por cache inválido já foi ao diário nesta sequência.
+        self._cache_invalid_logged: set[str] = set()
         # Antes da saúde do Rust vale o que se espera dele; depois, o que ele anuncia.
         self._owns = {("claude", True), ("claude", False)}
 
@@ -1311,12 +1313,20 @@ class RuntimeCoordinator:
             await self._await_resync(name, command.get("kind"))
         transport = self.transport
         try:
-            return await self._op_once(name, command, operation_id)
+            result = await self._op_once(name, command, operation_id)
+            self._cache_invalid_logged.discard(name)
+            return result
         except Exception as exc:
             if not getattr(exc, "_hangar_rust", False) or getattr(exc, "code", "") in _ANSWER_CODES:
                 raise
             from app import diag
-            diag.registrar("runtime.rust_op_failed", "erro", sessao=name, etapa=str(command.get("kind")), **failure_reason(exc))
+            # Fundo recusado por cache inválido se repete a cada troca de estado até alguém reabrir a
+            # sessão: vai ao diário uma vez por sequência; a operação que der certo zera.
+            background_refusal = isinstance(exc, RustCacheInvalid) and command.get("kind") in _BACKGROUND_KINDS
+            if not background_refusal or name not in self._cache_invalid_logged:
+                diag.registrar("runtime.rust_op_failed", "erro", sessao=name, etapa=str(command.get("kind")), **failure_reason(exc))
+            if background_refusal:
+                self._cache_invalid_logged.add(name)
             if getattr(exc, "_transport_lost", False):
                 slot = self.slots.get(self.names.get(name, ""))
                 if slot is not None:

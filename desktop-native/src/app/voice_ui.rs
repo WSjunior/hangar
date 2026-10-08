@@ -1,8 +1,11 @@
 //! Voz nativa na barra de cima: a pílula, o painel e a ponte entre a chamada (`crate::voice`) e a sessão na tela.
 use super::*;
 use std::collections::VecDeque;
+use serde::Deserialize;
 use gpui_kit::component::{select::{Select, SelectEvent, SelectState}, searchable_list::SearchableListItem};
-use crate::voice::{Activity as CallActivity, CallId, Phase, Voice, VoiceEvent, VoiceFailure, VoiceOptions, rpc::Codex, organizer::{Mode, session_context, tool_reply}, usage::RateWindow};
+use crate::voice::{Activity as CallActivity, CallId, Phase, Voice, VoiceEvent, VoiceFailure, VoiceOptions, rpc::Codex,
+    organizer::{ConfirmGate, DEFAULT_EFFORT, Mode, ModeModel, ModeModels, OpenRequest, OrganizerAction, session_context, tool_reply}, usage::RateWindow};
+use super::{create::choices::{PERMISSIONS, checked_choice, creation_defaults}, grouping::{can_leave, can_pair}, sidebar::Target};
 
 /// Vozes do Realtime; vazio é o padrão do Codex.
 const VOICES: [&str; 19] = ["alloy", "arbor", "ash", "ballad", "breeze", "cedar", "coral", "cove", "echo", "ember", "juniper", "maple",
@@ -18,8 +21,9 @@ impl SearchableListItem for VoiceChoice {
 }
 
 /// Conta Codex desta máquina: `home` é o que o id `codex:<home>` do backend carrega; vazio é a conta padrão.
+/// `id`: o `codex_account` do backend (`default` na padrão), que o catálogo de modelos pede.
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct CodexAccount { home: String, label: String }
+pub(super) struct CodexAccount { home: String, label: String, id: String }
 
 impl SearchableListItem for CodexAccount {
     type Value = String;
@@ -37,14 +41,14 @@ impl SearchableListItem for CodexAccount {
 /// Codex com pasta própria; o rótulo é o da tela de contas (apelido, senão e-mail, senão nome).
 fn codex_accounts(list: &Value) -> Vec<CodexAccount> {
     let text = |v: &Value| v.as_str().filter(|t| !t.is_empty()).map(str::to_owned);
-    let mut default = CodexAccount { home: String::new(), label: String::new() };
+    let mut default = CodexAccount { home: String::new(), label: String::new(), id: "default".into() };
     let mut others = Vec::new();
     // `codex_account` só existe nas contas com pasta; as de cota avulsa não servem de CODEX_HOME.
     for c in list.as_array().into_iter().flatten().filter(|c| c["tipo"] == "codex" && text(&c["codex_account"]).is_some()) {
         let Some(home) = c["id"].as_str().and_then(|i| i.strip_prefix("codex:")).filter(|h| !h.is_empty()) else { continue };
         let label = text(&c["apelido"]).or_else(|| text(&c["login"]["email"])).or_else(|| text(&c["nome"])).unwrap_or_else(|| home.to_owned());
         if c["ativa"].as_bool() == Some(true) { default.label = label; }
-        else { others.push(CodexAccount { home: crate::app::disk::plain_path(home), label }); }
+        else { others.push(CodexAccount { home: crate::app::disk::plain_path(home), label, id: text(&c["codex_account"]).unwrap_or_default() }); }
     }
     std::iter::once(default).chain(others).collect()
 }
@@ -55,12 +59,63 @@ fn chosen_home(accounts: &[CodexAccount], saved: Option<&str>) -> Option<std::pa
     accounts.iter().find(|a| a.home == saved).map(|a| std::path::PathBuf::from(&a.home))
 }
 
+/// Modelo do catálogo Codex da conta escolhida (`/api/model-options`, o mesmo do diálogo de criar).
+#[derive(Clone, Debug, Deserialize)]
+pub(super) struct OrganizerModel { id: String, name: Option<String>, #[serde(default)] efforts: Vec<String> }
+
+/// Item dos seletores do organizador; `id` vazio é o modelo do config do Codex.
+#[derive(Clone)]
+pub(super) struct OrganizerChoice { id: String, label: String }
+
+impl SearchableListItem for OrganizerChoice {
+    type Value = String;
+    fn title(&self) -> SharedString { self.label.clone().into() }
+    fn value(&self) -> &String { &self.id }
+}
+
+/// Esforços do modelo escolhido; sem escolha (o modelo do config não se sabe antes da chamada) ou sem lista, os três básicos.
+fn organizer_efforts(models: &[OrganizerModel], model: Option<&str>) -> Vec<String> {
+    model.and_then(|m| models.iter().find(|o| o.id == m)).map(|o| o.efforts.clone()).filter(|e| !e.is_empty())
+        .unwrap_or_else(|| ["low", "medium", "high"].map(str::to_owned).to_vec())
+}
+
+/// O esforço gravado se o modelo o aceita; senão o padrão, senão o primeiro da lista.
+fn fit_effort(efforts: &[String], current: Option<&str>) -> String {
+    [current.unwrap_or(DEFAULT_EFFORT), DEFAULT_EFFORT].into_iter().find(|e| efforts.iter().any(|x| x == e)).map(str::to_owned)
+        .or_else(|| efforts.first().cloned()).unwrap_or_else(|| DEFAULT_EFFORT.to_owned())
+}
+
+/// Preferências da voz gravadas neste computador.
+#[derive(Debug, Default, PartialEq)]
+pub(super) struct SavedVoice { voice: Option<String>, account: Option<String>, organizer: ModeModels }
+
+/// O par do Direto mora nas chaves antigas (`organizer_model`/`organizer_effort`); sem `organizer_plan` gravado, o Planejar
+/// nasce igual ao Direto, e assim o arquivo de um par só vale para os dois modos.
+fn parse_saved_voice(value: &Value) -> SavedVoice {
+    let text = |v: &Value, k: &str| v[k].as_str().filter(|v| !v.is_empty()).map(str::to_owned);
+    let pair = |v: &Value, model: &str, effort: &str| ModeModel { model: text(v, model), effort: text(v, effort).unwrap_or_else(|| DEFAULT_EFFORT.to_owned()) };
+    let direct = pair(value, "organizer_model", "organizer_effort");
+    let plan = value["organizer_plan"].is_object().then(|| pair(&value["organizer_plan"], "model", "effort")).unwrap_or_else(|| direct.clone());
+    SavedVoice { voice: text(value, "voice"), account: text(value, "codex_home"), organizer: ModeModels { direct, plan } }
+}
+
+/// Posição do modo nos seletores do cartão.
+fn slot(mode: Mode) -> usize { match mode { Mode::Direct => 0, Mode::Plan => 1 } }
+
 #[derive(Default)]
 pub(super) struct VoiceUi {
     pub(super) accounts: Vec<CodexAccount>,
     /// Escolha gravada (home da conta); só vale enquanto estiver em `accounts`.
     pub(super) account: Option<String>,
     pub(super) account_select: Option<(Entity<SelectState<Vec<CodexAccount>>>, Subscription)>,
+    /// Modelo e esforço do organizador por modo, gravados; editar na chamada vale já para o modo atual.
+    pub(super) organizer: ModeModels,
+    /// Catálogo da conta escolhida: `None` = lendo (ou nunca pedido, com `models_seq` 0).
+    pub(super) organizer_models: Option<Result<Vec<OrganizerModel>, String>>,
+    pub(super) models_seq: u64,
+    /// Um seletor por modo, na ordem de `slot`.
+    pub(super) model_select: [Option<(Entity<SelectState<Vec<OrganizerChoice>>>, Subscription)>; 2],
+    pub(super) effort_select: [Option<(Entity<SelectState<Vec<OrganizerChoice>>>, Subscription)>; 2],
     pub(super) enabled: bool,
     pub(super) codex: Option<Codex>,
     pub(super) call: Option<Voice>,
@@ -73,6 +128,11 @@ pub(super) struct VoiceUi {
     pub(super) shown: Option<(Speaker, std::time::Instant)>,
     /// O que o organizador faz agora; só aparece quando ninguém está falando.
     pub(super) activity: CallActivity,
+    /// Resumo do raciocínio do turno em curso (cauda) e a ação que o organizador executa; o fim do turno limpa.
+    pub(super) thought: String,
+    pub(super) action: Option<OrganizerAction>,
+    /// Passo da animação de espera: muda a cada `ANIM_STEP` e força a repintura entre níveis iguais.
+    pub(super) anim_step: u128,
     /// Quando a chamada ficou ao vivo: base do cronômetro.
     pub(super) live_since: Option<std::time::Instant>,
     /// Repinta o cronômetro a cada segundo; largar a Task para o relógio.
@@ -108,6 +168,96 @@ pub(super) struct VoiceUi {
     pub(super) context: Option<(u64, Option<u64>)>,
     pub(super) five_hour: RateWindow,
     pub(super) seven_day: RateWindow,
+    /// Fechar por voz: o pedido armado à espera do sim falado e a chamada que espera a resposta do servidor.
+    pub(super) close_gate: ConfirmGate<Target>,
+    pub(super) close_reply: Option<(Target, CallId)>,
+}
+
+/// Resultado assíncrono de uma ferramenta de sessão; volta à tela com a chamada que espera a resposta.
+pub(super) enum VoiceDone { Opened(String, Result<SessionInfo, String>), Grouped(&'static str, Result<PairResult, Failure>) }
+
+/// Uma linha do `list_sessions`.
+pub(super) struct Listed { pub(super) name: String, pub(super) machine: Option<String>, pub(super) provider: String, pub(super) state: String,
+    pub(super) folder: String, pub(super) on_screen: bool }
+
+pub(super) fn sessions_text(rows: &[Listed], unreachable: &[String]) -> String {
+    let mut lines: Vec<String> = rows.iter().map(|r| {
+        let mut line = format!("- {}", r.name);
+        if let Some(machine) = &r.machine { line.push_str(&format!(" (máquina {machine})")); }
+        line.push_str(&format!(": {}, {}", r.provider, if r.state.is_empty() { "?" } else { &r.state }));
+        if !r.folder.is_empty() { line.push_str(&format!(", pasta {}", r.folder)); }
+        if r.on_screen { line.push_str(", na tela"); }
+        line
+    }).collect();
+    if lines.is_empty() { lines.push("Nenhuma sessão aberta.".into()); }
+    // Lista que falhou não é "sem sessões": o organizador precisa saber que faltam as de lá.
+    lines.extend(unreachable.iter().map(|m| format!("Máquina {m} sem resposta; as sessões dela não estão aqui.")));
+    lines.join("\n")
+}
+
+/// Caminho já dito como caminho (Unix, `~`, Windows): vai direto ao backend, sem procurar pelo nome.
+pub(super) fn looks_like_path(text: &str) -> bool {
+    text.starts_with(['/', '~', '\\']) || matches!(text.get(1..3), Some(":\\" | ":/"))
+}
+
+/// Nome falado → pasta, entre as raízes e as subpastas delas (`(nome, caminho)`, a lista da tela de criação).
+pub(super) fn pick_folder(spoken: &str, folders: &[(String, String)], unread: usize) -> Result<String, String> {
+    let mut seen = HashSet::new();
+    let folders: Vec<&(String, String)> = folders.iter().filter(|(_, path)| seen.insert(path.as_str())).collect();
+    let names: Vec<&str> = folders.iter().map(|(name, _)| name.as_str()).collect();
+    match match_session(spoken, &names, &[]) {
+        SessionMatch::One(i) => Ok(folders[i].1.clone()),
+        SessionMatch::Many(found) => Err(format!("Mais de uma pasta combina: {}. Peça para o usuário dizer qual.",
+            found.iter().take(5).map(|&i| folders[i].1.as_str()).collect::<Vec<_>>().join(", "))),
+        SessionMatch::None if unread > 0 => Err(format!("Não achei pasta com esse nome; {unread} raiz(es) não puderam ser lidas.")),
+        SessionMatch::None => Err("Não achei pasta com esse nome. Peça o nome exato ou o caminho.".into()),
+    }
+}
+
+async fn voice_folder(api: &Api, spoken: &str) -> Result<String, String> {
+    if looks_like_path(spoken) { return Ok(spoken.to_owned()); }
+    let roots: Vec<super::create::Root> = api.server_read(&["fs", "roots"], &[], 15).await.map_err(|e| Hangar::fetch_failure(&e))
+        .and_then(|v| serde_json::from_value(v).map_err(|_| tr("invalid_response")))?;
+    let mut folders: Vec<(String, String)> = roots.iter().map(|r| (r.name.clone(), r.path.clone())).collect();
+    let mut unread = 0;
+    for root in &roots {
+        match super::create::scan_of(api.server_read(&["fs", "scan"], &[("root", root.path.as_str())], 15).await) {
+            Ok(scan) if scan.error.is_none() => folders.extend(scan.entries.into_iter().map(|e| (e.name, e.path))),
+            _ => unread += 1,
+        }
+    }
+    pick_folder(spoken, &folders, unread)
+}
+
+/// O mesmo `POST /api/sessions` da tela de criação, com o que ela traria sem toque: padrão marcado do harness ou último
+/// modelo lembrado (só se ainda estiver no catálogo), permissão padrão do Claude, modo e conta padrões do servidor.
+async fn create_by_voice(api: &Api, request: OpenRequest) -> Result<SessionInfo, String> {
+    let cwd = voice_folder(api, &request.folder).await?;
+    let provider = request.provider;
+    let name = match request.name {
+        Some(name) => name,
+        None => {
+            let taken = api.sessions().await.map_err(|e| Hangar::fetch_failure(&e))?.into_iter().map(|s| s.name).collect();
+            super::create::unique_name(crate::composer::basename(&cwd), &taken)
+        }
+    };
+    let server = api.identity();
+    let (remembered, permission) = tokio::task::spawn_blocking(move || creation_defaults(&server, provider)).await.unwrap_or_default();
+    let mut query = vec![("provider", provider)];
+    if provider == "codex" { query.push(("codex_account", "default")); }
+    let (model, effort) = match api.server_read(&["model-options"], &query, 30).await {
+        Ok(catalog) => checked_choice(&catalog, provider, remembered).unwrap_or_default(),
+        // Catálogo que não veio deixa o padrão do servidor, como na tela: nunca um modelo sem conferir.
+        Err(error) => { crate::voice::log(format!("open_session model-options failed status={:?}", error.status)); Default::default() }
+    };
+    let text = |s: &str| if s.is_empty() { Value::Null } else { json!(s) };
+    let mut body = json!({"name": name, "cwd": cwd, "provider": provider, "model": text(&model), "effort": text(&effort)});
+    if provider == "claude" {
+        let permission = permission.unwrap_or_else(|| "bypassPermissions".into());
+        if PERMISSIONS.contains(&permission.as_str()) { body["permission_mode"] = json!(permission); }
+    }
+    let result = api.server_send(reqwest::Method::POST, &["sessions"], Some(body), 120).await;
+    super::create::opened(api, result, &name, &cwd, None).await.map(|opened| opened.session)
 }
 
 #[derive(Debug, PartialEq)]
@@ -123,6 +273,7 @@ fn squash(text: &str) -> String {
 
 /// Nome falado → sessão. Igual vence parcial; o mesmo nome em duas máquinas fica com o da ativa (`on_active`).
 pub(super) fn match_session(query: &str, names: &[&str], on_active: &[bool]) -> SessionMatch {
+    let original = query;
     let query = squash(query);
     if query.is_empty() { return SessionMatch::None; }
     let squashed: Vec<String> = names.iter().map(|n| squash(n)).collect();
@@ -132,7 +283,12 @@ pub(super) fn match_session(query: &str, names: &[&str], on_active: &[bool]) -> 
         let mine: Vec<usize> = exact.iter().copied().filter(|&i| on_active.get(i) == Some(&true)).collect();
         return if mine.len() == 1 { SessionMatch::One(mine[0]) } else { pick(exact) };
     }
-    pick((0..names.len()).filter(|&i| squashed[i].contains(&query)).collect())
+    let partial: Vec<usize> = (0..names.len()).filter(|&i| squashed[i].contains(&query)).collect();
+    if !partial.is_empty() { return pick(partial); }
+    // Palavras soltas em qualquer ordem: "plano do rust" casa com grupos-rust-plano; "do", "da", "a" não contam.
+    let words: Vec<String> = original.split(|c: char| !c.is_alphanumeric()).map(squash).filter(|w| w.chars().count() > 2).collect();
+    if words.len() < 2 { return SessionMatch::None; }
+    pick((0..names.len()).filter(|&i| words.iter().all(|w| squashed[i].contains(w.as_str()))).collect())
 }
 
 pub(super) fn conversation_pairs(events: &[ChatEvent]) -> Vec<(String, String)> {
@@ -204,10 +360,66 @@ pub(super) fn settled_speaker(shown: Speaker, since: std::time::Instant, raw: Sp
     else { (shown, since) }
 }
 
-/// Pensando/pesquisando: barras baixas acendendo em sequência, pela fase do cronômetro.
-pub(super) fn thinking_bars(elapsed: Duration, min: f32, max: f32) -> [f32; 5] {
-    let lit = (elapsed.as_millis() / 250 % 5) as usize;
-    std::array::from_fn(|i| if i == lit { min + ((max - min) * 0.45).round() } else { min })
+/// Passo das animações de espera (ms).
+const ANIM_STEP: u128 = 250;
+
+/// Barras baixas acendendo em sequência, pela fase do cronômetro: `step` ms por barra, `rise` da altura útil.
+pub(super) fn wave_bars(elapsed: Duration, min: f32, max: f32, step: u128, rise: f32) -> [f32; 5] {
+    let lit = (elapsed.as_millis() / step % 5) as usize;
+    std::array::from_fn(|i| if i == lit { min + ((max - min) * rise).round() } else { min })
+}
+
+/// Cauda do raciocínio guardada; o que aparece é ainda menor (`thought_tail`).
+const THOUGHT_KEEP: usize = 2000;
+
+pub(super) fn push_thought(thought: &mut String, delta: &str) {
+    thought.push_str(delta);
+    let excess = thought.len().saturating_sub(THOUGHT_KEEP);
+    if excess > 0 {
+        let cut = (excess..thought.len()).find(|i| thought.is_char_boundary(*i)).unwrap_or(thought.len());
+        thought.drain(..cut);
+    }
+}
+
+/// As últimas `lines` linhas não vazias, cada uma cortada em `width` caracteres.
+pub(super) fn thought_tail(thought: &str, lines: usize, width: usize) -> Vec<String> {
+    let all: Vec<&str> = thought.lines().map(|l| l.trim().trim_matches('*').trim()).filter(|l| !l.is_empty()).collect();
+    all[all.len().saturating_sub(lines)..].iter().map(|l| clip(l, width)).collect()
+}
+
+fn clip(text: &str, width: usize) -> String {
+    if text.chars().count() <= width { return text.to_owned(); }
+    format!("{}…", text.chars().take(width - 1).collect::<String>())
+}
+
+/// Ação em curso numa linha curta.
+pub(super) fn action_text(action: &OrganizerAction) -> String {
+    match action {
+        OrganizerAction::Tool(tool) => match tool.as_str() {
+            "read_session" => tr("voice_tool_read_session"),
+            "send_to_session" => tr("voice_tool_send_to_session"),
+            "hold_request" => tr("voice_tool_hold_request"),
+            "discard_request" => tr("voice_tool_discard_request"),
+            "update_plan" => tr("voice_tool_update_plan"),
+            "read_plan" => tr("voice_tool_read_plan"),
+            "ask_session" => tr("voice_tool_ask_session"),
+            "finish_plan" => tr("voice_tool_finish_plan"),
+            "set_mode" => tr("voice_tool_set_mode"),
+            "switch_session" => tr("voice_tool_switch_session"),
+            "list_sessions" => tr("voice_tool_list_sessions"),
+            "open_session" => tr("voice_tool_open_session"),
+            "close_session" => tr("voice_tool_close_session"),
+            "pair_sessions" => tr("voice_tool_pair_sessions"),
+            "unpair_session" => tr("voice_tool_unpair_session"),
+            other => tr("voice_tool_other").replace("{tool}", other),
+        },
+        OrganizerAction::Search(query) if query.trim().is_empty() => tr("voice_action_search"),
+        OrganizerAction::Search(query) => tr("voice_action_search_query").replace("{query}", &clip(query.trim(), 80)),
+        OrganizerAction::Command(command) => {
+            let line = command.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
+            tr("voice_action_command").replace("{command}", &clip(line, 80))
+        }
+    }
 }
 
 pub(super) fn call_clock(elapsed: Duration) -> String {
@@ -260,25 +472,28 @@ fn failure_text(failure: &VoiceFailure) -> String {
         VoiceFailure::Network => tr("voice_network"),
         VoiceFailure::Timeout => tr_shared("codex_voice_timeout", &[]),
         VoiceFailure::Organizer => tr("voice_organizer"),
+        VoiceFailure::ModelSwitch => tr("voice_model_switch_failed"),
+        VoiceFailure::OwnFolder => tr("voice_own_folder_failed"),
         VoiceFailure::Closed => tr("voice_server_closed"),
     }
 }
 
 fn voice_file() -> Option<std::path::PathBuf> { Some(appearance::dir()?.join("voice.json")) }
 
-/// (voz, conta Codex) gravadas.
-fn read_saved_voice() -> (Option<String>, Option<String>) {
+fn read_saved_voice() -> SavedVoice {
     let value: Value = voice_file().and_then(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-    let text = |k: &str| value[k].as_str().filter(|v| !v.is_empty()).map(str::to_owned);
-    (text("voice"), text("codex_home"))
+    parse_saved_voice(&value)
 }
 
-fn save_voice(voice: Option<&str>, account: Option<&str>) -> Result<(), String> {
+fn save_voice(saved: &SavedVoice) -> Result<(), String> {
     let path = voice_file().ok_or_else(|| tr("keyboard_no_directory"))?;
     let dir = path.parent().ok_or_else(|| tr("keyboard_no_directory"))?;
     std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
     let temporary = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec(&json!({"voice": voice, "codex_home": account})).map_err(|error| error.to_string())?;
+    let (direct, plan) = (&saved.organizer.direct, &saved.organizer.plan);
+    let bytes = serde_json::to_vec(&json!({"voice": saved.voice, "codex_home": saved.account,
+        "organizer_model": direct.model, "organizer_effort": direct.effort,
+        "organizer_plan": {"model": plan.model, "effort": plan.effort}})).map_err(|error| error.to_string())?;
     std::fs::write(&temporary, bytes).and_then(|_| std::fs::rename(&temporary, &path)).map_err(|error| error.to_string())
 }
 
@@ -315,12 +530,12 @@ impl Hangar {
         });
     }
 
-    pub(super) fn receive_voice_gate(&mut self, enabled: Option<bool>, codex: Option<Codex>, saved: (Option<String>, Option<String>), accounts: Option<Vec<CodexAccount>>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn receive_voice_gate(&mut self, enabled: Option<bool>, codex: Option<Codex>, saved: SavedVoice, accounts: Option<Vec<CodexAccount>>, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(enabled) = enabled { self.voice.enabled = enabled; }
         self.voice.codex = codex;
         if self.voice.call.is_none() {
-            self.voice.voice = saved.0;
-            self.voice.account = saved.1;
+            (self.voice.voice, self.voice.account) = (saved.voice, saved.account);
+            self.voice.organizer = saved.organizer;
             // Lista que não veio fica como estava: leitura falha não é "sem contas".
             if let Some(accounts) = accounts { self.voice.accounts = accounts; }
             // O seletor aberto segue a lista que `chosen_home` usa.
@@ -363,7 +578,8 @@ impl Hangar {
             return;
         }
         crate::voice::log(format!("voice: account chosen {}", if codex_home.is_some() { "custom" } else { "default" }));
-        let options = VoiceOptions { codex, voice: self.voice.voice.clone(), context: self.voice_context(), cwd: self.local_session_dir(), target, codex_home };
+        let options = VoiceOptions { codex, voice: self.voice.voice.clone(), context: self.voice_context(), cwd: self.local_session_dir(), target, codex_home,
+            organizer: self.voice.organizer.clone() };
         self.voice.generation += 1;
         self.voice.call = Some(Voice::start(self.runtime.handle(), options, events_tx));
         self.voice.target = self.selected.as_ref().map(|s| s.name.clone());
@@ -373,7 +589,9 @@ impl Hangar {
         self.voice.pending_sends.clear();
         self.voice.pending_plan = None;
         self.voice.pending_question = None;
+        (self.voice.close_gate, self.voice.close_reply) = (ConfirmGate::default(), None);
         self.voice.activity = CallActivity::Idle;
+        (self.voice.thought, self.voice.action) = (String::new(), None);
         self.voice.shown = None;
         self.voice.watched.clear();
         self.voice.error = None;
@@ -406,6 +624,7 @@ impl Hangar {
         self.voice.pending_plan = None;
         self.voice.pending_question = None;
         self.voice.activity = CallActivity::Idle;
+        (self.voice.thought, self.voice.action) = (String::new(), None);
         self.voice.shown = None;
         cx.notify();
     }
@@ -432,19 +651,38 @@ impl Hangar {
         if let Some(voice) = &self.voice.call { voice.reply(call, reply); }
     }
 
-    /// `switch_session`: as sessões que a busca enxerga (máquina ativa e remotas, sem as escondidas), pelo nome falado.
-    fn voice_switch(&mut self, call: CallId, spoken: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// As sessões que a busca enxerga: máquina ativa e remotas, sem as escondidas.
+    fn voice_candidates(&self) -> Vec<(String, SessionInfo)> {
         let active = self.active_key();
-        let candidates: Vec<(String, SessionInfo)> = self.sessions.iter().filter(|s| !self.sidebar.is_hidden(&active, &s.name))
+        self.sessions.iter().filter(|s| !self.sidebar.is_hidden(&active, &s.name))
             .map(|s| (active.clone(), s.clone()))
             .chain(self.remote.iter().flat_map(|(key, l)| l.sessions.iter().filter(|s| !self.sidebar.is_hidden(key, &s.name)).map(move |s| (key.clone(), s.clone()))))
-            .collect();
+            .collect()
+    }
+
+    /// Nome falado → (máquina, sessão). Ambíguo ou ausente volta como texto para o organizador; nunca um palpite.
+    fn voice_resolve(&self, tool: &str, spoken: &str, cx: &App) -> Result<(String, SessionInfo), String> {
+        let mut candidates = self.voice_candidates();
         let names: Vec<&str> = candidates.iter().map(|(_, s)| s.name.as_str()).collect();
         let on_active: Vec<bool> = candidates.iter().map(|(key, _)| self.is_active_key(key)).collect();
-        let reply = match match_session(spoken, &names, &on_active) {
-            SessionMatch::One(i) => {
-                crate::voice::log("switch_session one");
-                let (key, session) = candidates[i].clone();
+        match match_session(spoken, &names, &on_active) {
+            SessionMatch::One(i) => { crate::voice::log(format!("{tool} one")); Ok(candidates.swap_remove(i)) }
+            SessionMatch::Many(found) => {
+                crate::voice::log(format!("{tool} many({})", found.len()));
+                let list: Vec<String> = found.iter().take(5).map(|&i| {
+                    let (key, session) = &candidates[i];
+                    if on_active[i] { session.name.clone() } else { format!("{} em {}", session.name, self.machine_label(key, cx)) }
+                }).collect();
+                Err(format!("Mais de uma sessão combina: {}. Peça para o usuário dizer qual.", list.join(", ")))
+            }
+            SessionMatch::None => { crate::voice::log(format!("{tool} none")); Err("Não achei sessão com esse nome.".into()) }
+        }
+    }
+
+    /// `switch_session`: as sessões que a busca enxerga, pelo nome falado.
+    fn voice_switch(&mut self, call: CallId, spoken: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let reply = match self.voice_resolve("switch_session", spoken, cx) {
+            Ok((key, session)) => {
                 if self.selected.as_ref().is_some_and(|s| s.name == session.name) && self.open_server() == key {
                     tool_reply("Já estou nessa sessão.", true)
                 } else {
@@ -453,17 +691,167 @@ impl Hangar {
                     else { tool_reply("A máquina dessa sessão não está conectada.", false) }
                 }
             }
-            SessionMatch::Many(found) => {
-                crate::voice::log(format!("switch_session many({})", found.len()));
-                let list: Vec<String> = found.iter().take(5).map(|&i| {
-                    let (key, session) = &candidates[i];
-                    if on_active[i] { session.name.clone() } else { format!("{} em {}", session.name, self.machine_label(key, cx)) }
-                }).collect();
-                tool_reply(format!("Mais de uma sessão combina: {}. Peça para o usuário dizer qual.", list.join(", ")), false)
-            }
-            SessionMatch::None => { crate::voice::log("switch_session none"); tool_reply("Não achei sessão com esse nome.", false) }
+            Err(text) => tool_reply(text, false),
         };
         self.voice_reply(call, reply);
+    }
+
+    /// Falha de ação (servidor, conexão): volta ao organizador e aparece na pílula. Nome ambíguo não passa por aqui.
+    fn voice_fail(&mut self, call: CallId, text: String) {
+        self.voice.error = Some(tr("voice_action_failed").replace("{erro}", &text));
+        self.voice_reply(call, tool_reply(text, false));
+    }
+
+    fn voice_list(&mut self, call: CallId, cx: &mut Context<Self>) {
+        let open = self.selected.as_ref().map(|s| (self.open_server(), s.name.clone()));
+        let multi = self.multi_server();
+        let rows: Vec<Listed> = self.voice_candidates().into_iter().map(|(key, s)| Listed {
+            on_screen: open.as_ref().is_some_and(|(k, n)| *k == key && *n == s.name),
+            machine: multi.then(|| self.machine_label(&key, cx)),
+            provider: if s.provider.is_empty() { "claude".into() } else { s.provider },
+            folder: s.cwd.as_deref().map(crate::composer::basename).unwrap_or_default().to_owned(),
+            name: s.name, state: s.state,
+        }).collect();
+        let unreachable: Vec<String> = self.remote.iter().filter(|(_, l)| l.error.is_some()).map(|(key, _)| self.machine_label(key, cx)).collect();
+        crate::voice::log(format!("list_sessions count={} unreachable={}", rows.len(), unreachable.len()));
+        self.voice_reply(call, tool_reply(sessions_text(&rows, &unreachable), true));
+    }
+
+    fn voice_open(&mut self, call: CallId, request: OpenRequest, cx: &mut Context<Self>) {
+        let key = match request.server.as_deref() {
+            None => self.active_key(),
+            Some(spoken) => {
+                let keys: Vec<String> = std::iter::once(self.active_key()).chain(self.remote.keys().cloned()).filter(|k| !k.is_empty()).collect();
+                let labels: Vec<String> = keys.iter().map(|k| self.machine_label(k, cx)).collect();
+                let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+                match match_session(spoken, &refs, &[]) {
+                    SessionMatch::One(i) => keys[i].clone(),
+                    SessionMatch::Many(found) => {
+                        let list: Vec<&str> = found.iter().map(|&i| refs[i]).collect();
+                        self.voice_reply(call, tool_reply(format!("Mais de uma máquina combina: {}. Peça para o usuário dizer qual.", list.join(", ")), false));
+                        return;
+                    }
+                    SessionMatch::None => {
+                        self.voice_reply(call, tool_reply(format!("Não achei máquina com esse nome. Máquinas: {}.", refs.join(", ")), false));
+                        return;
+                    }
+                }
+            }
+        };
+        let Some(api) = self.machine_api(&key) else { let reason = self.machine_error(&key); self.voice_fail(call, reason); return };
+        crate::voice::log(format!("open_session start provider={}", request.provider));
+        let (generation, connection, tx) = (self.voice.generation, self.connection, self.tx.clone());
+        self.runtime.spawn(async move {
+            let result = create_by_voice(&api, request).await;
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::VoiceDone(generation, call, VoiceDone::Opened(key, result)) }).await;
+        });
+    }
+
+    /// Fechar em duas chamadas (`ConfirmGate`): a primeira só arma e pede a confirmação; a segunda usa o Fechar da barra.
+    fn voice_close(&mut self, call: CallId, spoken: &str, confirmed: bool, turn: &str, cx: &mut Context<Self>) {
+        let (key, session) = match self.voice_resolve("close_session", spoken, cx) {
+            Ok(found) => found,
+            Err(text) => { self.voice_reply(call, tool_reply(text, false)); return; }
+        };
+        let target = Target::new(&key, &session.name);
+        // Orquestrador, par de fora e convite não têm "Fechar" no menu da barra.
+        if session.orq() || session.read_only() || self.invite_target(&target) {
+            self.voice_reply(call, tool_reply("Essa sessão não pode ser fechada por aqui.", false));
+            return;
+        }
+        if self.voice.close_reply.is_some() {
+            self.voice_reply(call, tool_reply("Já há um fechamento em andamento; espere o resultado.", false));
+            return;
+        }
+        if !self.voice.close_gate.check(target.clone(), confirmed, turn, std::time::Instant::now()) {
+            crate::voice::log("close_session armed");
+            let place = self.machine_label(&key, cx);
+            self.voice_reply(call, tool_reply(format!("Nada foi fechado. Confirme com o usuário: fechar a sessão {} em {place}? \
+                Só depois de um sim explícito, chame close_session de novo com confirmed true.", session.name), true));
+            return;
+        }
+        if self.machine_api(&key).is_none() { let reason = self.machine_error(&key); self.voice_fail(call, reason); return; }
+        crate::voice::log("close_session sent");
+        self.voice.close_reply = Some((target.clone(), call));
+        self.delete_target(target, cx);
+    }
+
+    /// Resposta do Fechar da barra: só a do pedido da voz volta ao organizador.
+    pub(super) fn voice_closed(&mut self, target: &Target, result: &Result<Value, Failure>) {
+        if self.voice.close_reply.as_ref().is_none_or(|(t, _)| t != target) { return; }
+        let Some((_, call)) = self.voice.close_reply.take() else { return };
+        match result {
+            Ok(_) => { crate::voice::log("close_session closed"); self.voice_reply(call, tool_reply(format!("Sessão {} fechada.", target.name), true)); }
+            Err(error) => {
+                crate::voice::log(format!("close_session failed status={:?}", error.status));
+                self.voice_fail(call, Self::fetch_failure(error));
+            }
+        }
+    }
+
+    /// Mesma chamada do arrastar/diálogo de agrupar; só na mesma máquina, com as recusas da barra.
+    fn voice_pair(&mut self, call: CallId, a: &str, b: &str, cx: &mut Context<Self>) {
+        let (first, second) = match (self.voice_resolve("pair_sessions", a, cx), self.voice_resolve("pair_sessions", b, cx)) {
+            (Ok(first), Ok(second)) => (first, second),
+            (Err(text), _) | (_, Err(text)) => { self.voice_reply(call, tool_reply(text, false)); return; }
+        };
+        if let Err(refusal) = can_pair(&first.1, &second.1, first.0 == second.0) { self.voice_reply(call, tool_reply(refusal.text(), false)); return; }
+        let Some(api) = self.machine_api(&first.0) else { let reason = self.machine_error(&first.0); self.voice_fail(call, reason); return };
+        crate::voice::log("pair_sessions sent");
+        let (origin, target) = (first.1.name, second.1.name);
+        // Tarefa vazia: entrando num grupo que existe vale a dele; dois soltos nascem sem, como o campo vazio do diálogo.
+        self.voice_group(call, "grupo_drop_falhou", async move { api.pair(&target, &[origin], "", false).await });
+    }
+
+    fn voice_unpair(&mut self, call: CallId, spoken: &str, cx: &mut Context<Self>) {
+        let (key, session) = match self.voice_resolve("unpair_session", spoken, cx) {
+            Ok(found) => found,
+            Err(text) => { self.voice_reply(call, tool_reply(text, false)); return; }
+        };
+        if !can_leave(&session) { self.voice_reply(call, tool_reply(format!("A sessão {} não está em grupo.", session.name), false)); return; }
+        let Some(api) = self.machine_api(&key) else { let reason = self.machine_error(&key); self.voice_fail(call, reason); return };
+        crate::voice::log("unpair_session sent");
+        self.voice_group(call, "grupo_drop_sair_falhou", async move { api.unpair(&session.name).await });
+    }
+
+    /// `fallback`: a frase do web quando o servidor não diz o motivo.
+    fn voice_group(&self, call: CallId, fallback: &'static str, work: impl std::future::Future<Output = Result<PairResult, Failure>> + Send + 'static) {
+        let (generation, connection, tx) = (self.voice.generation, self.connection, self.tx.clone());
+        self.runtime.spawn(async move {
+            let result = work.await;
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::VoiceDone(generation, call, VoiceDone::Grouped(fallback, result)) }).await;
+        });
+    }
+
+    pub(super) fn voice_done(&mut self, generation: u64, call: CallId, done: VoiceDone, window: &mut Window, cx: &mut Context<Self>) {
+        if generation != self.voice.generation { return; }
+        match done {
+            VoiceDone::Opened(key, Ok(session)) => {
+                crate::voice::log("open_session created");
+                let name = session.name.clone();
+                // Como na tela de criação: a lista guardada da outra máquina já a inclui, para a leitura seguinte não fechá-la.
+                if let Some(list) = self.remote.get_mut(&key).filter(|l| l.loaded && !l.sessions.iter().any(|s| s.name == name)) {
+                    list.sessions.push(session.clone());
+                }
+                if self.select_on(&key, session, window, cx) {
+                    self.voice_reply(call, tool_reply(format!("Sessão {name} criada e aberta na tela; a troca já foi anunciada, não repita."), true));
+                } else {
+                    self.voice_fail(call, format!("A sessão {name} foi criada, mas a máquina dela não está conectada para abri-la."));
+                }
+            }
+            VoiceDone::Opened(_, Err(text)) => { crate::voice::log("open_session failed"); self.voice_fail(call, text); }
+            VoiceDone::Grouped(_, Ok(result)) => {
+                crate::voice::log(format!("group done warning={}", result.warning.is_some()));
+                // O vínculo mudou, mas alguém não foi avisado: o organizador precisa dizer isso.
+                let text = result.warning.map_or_else(|| "Feito.".to_owned(), |w| format!("Feito, mas com aviso: {w}"));
+                self.voice_reply(call, tool_reply(text, true));
+            }
+            VoiceDone::Grouped(fallback, Err(error)) => {
+                crate::voice::log(format!("group failed status={:?}", error.status));
+                self.voice_fail(call, super::grouping::failed(&error, fallback));
+            }
+        }
+        cx.notify();
     }
 
     pub(super) fn receive_voice(&mut self, generation: u64, event: VoiceEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -477,6 +865,7 @@ impl Hangar {
                 self.voice.levels = (0., 0.);
                 self.voice.shown = None;
                 self.voice.activity = CallActivity::Idle;
+                (self.voice.thought, self.voice.action) = (String::new(), None);
                 (self.voice.live_since, self.voice.ticker) = (None, None);
                 self.voice.pending_sends.clear();
                 self.voice.pending_plan = None;
@@ -499,17 +888,22 @@ impl Hangar {
                 let (old_shown, since) = self.voice.shown.unwrap_or((Speaker::Idle, now));
                 let (shown, since) = settled_speaker(old_shown, since, speaker(levels.0, levels.1, muted), now);
                 self.voice.shown = Some((shown, since));
-                let changed = bars(self.voice.levels) != bars(levels) || shown != old_shown;
+                let step = self.voice.live_since.map_or(0, |since| since.elapsed().as_millis() / ANIM_STEP);
+                let changed = bars(self.voice.levels) != bars(levels) || shown != old_shown || step != self.voice.anim_step;
+                self.voice.anim_step = step;
                 self.voice.levels = levels;
                 if !changed { return; }
                 self.voice.frame = self.voice.frame.wrapping_add(1);
             }
             VoiceEvent::Activity(activity) => self.voice.activity = activity,
+            VoiceEvent::Thought(delta) => push_thought(&mut self.voice.thought, &delta),
+            VoiceEvent::Action(action) => self.voice.action = action,
+            VoiceEvent::TurnDone => (self.voice.thought, self.voice.action) = (String::new(), None),
             VoiceEvent::Draft(draft) => self.voice.draft = draft,
             VoiceEvent::Failed(failure) => {
                 self.voice.error = Some(failure_text(&failure));
-                // O erro do organizador é de uma fala e a conversa segue: aparece na pílula e no painel, sem abrir.
-                if !matches!(failure, VoiceFailure::Organizer) { self.voice.open = true; }
+                // Erro do organizador ou da troca de modelo não para a conversa: aparece na pílula e no painel, sem abrir.
+                if !matches!(failure, VoiceFailure::Organizer | VoiceFailure::ModelSwitch | VoiceFailure::OwnFolder) { self.voice.open = true; }
             }
             VoiceEvent::Mode(mode) => self.voice.mode = mode,
             VoiceEvent::Plan { path, markdown } => self.voice.plan = Some((path, markdown)),
@@ -521,6 +915,11 @@ impl Hangar {
                 self.voice.seven_day = seven_day.or(self.voice.seven_day);
             }
             VoiceEvent::SwitchSession(call, name) => self.voice_switch(call, &name, window, cx),
+            VoiceEvent::ListSessions(call) => self.voice_list(call, cx),
+            VoiceEvent::OpenSession(call, request) => self.voice_open(call, request, cx),
+            VoiceEvent::CloseSession { call, name, confirmed, turn } => self.voice_close(call, &name, confirmed, &turn, cx),
+            VoiceEvent::PairSessions(call, a, b) => self.voice_pair(call, &a, &b, cx),
+            VoiceEvent::UnpairSession(call, name) => self.voice_unpair(call, &name, cx),
             VoiceEvent::SendPlan { session, text } => {
                 // O plano foi escrito para uma sessão; se a tela mudou, não vai para outra.
                 let on_screen = self.selected.as_ref().is_some_and(|s| s.name == session);
@@ -799,16 +1198,91 @@ impl Hangar {
                 let SelectEvent::Confirm(Some(home)) = event else { return };
                 this.voice.account = (!home.is_empty()).then(|| home.clone());
                 this.persist_voice_prefs(cx);
+                // O catálogo é por conta.
+                this.load_organizer_models(cx);
                 cx.notify();
             });
             self.voice.account_select = Some((picker, sub));
         }
+        if open && !matches!(self.voice.organizer_models, Some(Ok(_))) { self.load_organizer_models(cx); }
         cx.notify();
     }
 
+    fn load_organizer_models(&mut self, cx: &mut Context<Self>) {
+        self.voice.models_seq += 1;
+        (self.voice.organizer_models, self.voice.model_select, self.voice.effort_select) = (None, Default::default(), Default::default());
+        let Some(api) = self.local_api() else { self.voice.organizer_models = Some(Err(String::new())); cx.notify(); return };
+        let account = self.voice.accounts.get(self.account_index()).map_or_else(|| "default".to_owned(), |a| a.id.clone());
+        let (seq, connection, tx) = (self.voice.models_seq, self.connection, self.tx.clone());
+        self.runtime.spawn(async move {
+            let result = api.server_read(&["model-options"], &[("provider", "codex"), ("codex_account", account.as_str())], 30).await
+                .map_err(|e| Hangar::fetch_failure(&e))
+                .and_then(|v| serde_json::from_value::<Vec<OrganizerModel>>(v["models"].clone()).map_err(|_| tr("invalid_response")));
+            match &result { Ok(models) => crate::voice::log(format!("organizer models count={}", models.len())), Err(_) => crate::voice::log("organizer models failed") }
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::VoiceModels(seq, result) }).await;
+        });
+    }
+
+    pub(super) fn receive_organizer_models(&mut self, seq: u64, result: Result<Vec<OrganizerModel>, String>, window: &mut Window, cx: &mut Context<Self>) {
+        if seq != self.voice.models_seq { return; }
+        self.voice.organizer_models = Some(result);
+        for mode in [Mode::Direct, Mode::Plan] {
+            self.build_model_pick(mode, window, cx);
+            self.build_effort_pick(mode, window, cx);
+        }
+        cx.notify();
+    }
+
+    fn organizer_pair(&mut self, mode: Mode) -> &mut ModeModel {
+        match mode { Mode::Direct => &mut self.voice.organizer.direct, Mode::Plan => &mut self.voice.organizer.plan }
+    }
+
+    /// Grava os pares e, com a chamada no ar, os entrega a ela: o do modo atual troca já no próximo turno.
+    fn organizer_changed(&mut self, cx: &mut Context<Self>) {
+        self.persist_voice_prefs(cx);
+        if let Some(call) = &self.voice.call { call.set_models(self.voice.organizer.clone()); }
+        cx.notify();
+    }
+
+    fn build_model_pick(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Ok(models)) = &self.voice.organizer_models else { return };
+        let chosen = self.voice.organizer.get(mode).model.clone();
+        let mut items: Vec<OrganizerChoice> = std::iter::once(OrganizerChoice { id: String::new(), label: tr("voice_organizer_default") })
+            .chain(models.iter().map(|m| OrganizerChoice { id: m.id.clone(), label: m.name.clone().unwrap_or_else(|| m.id.clone()) })).collect();
+        // Gravado que saiu do catálogo continua à vista: a próxima chamada ainda o usa.
+        if let Some(model) = chosen.as_ref().filter(|m| !items.iter().any(|i| &i.id == *m)) { items.push(OrganizerChoice { id: model.clone(), label: model.clone() }); }
+        let at = items.iter().position(|i| Some(&i.id) == chosen.as_ref()).unwrap_or(0);
+        let picker = cx.new(|cx| SelectState::new(items, Some(gpui_kit::component::IndexPath::new(at)), window, cx));
+        let sub = cx.subscribe_in(&picker, window, move |this: &mut Hangar, _, event: &SelectEvent<Vec<OrganizerChoice>>, window, cx| {
+            let SelectEvent::Confirm(Some(id)) = event else { return };
+            this.organizer_pair(mode).model = (!id.is_empty()).then(|| id.clone());
+            this.build_effort_pick(mode, window, cx);
+            this.organizer_changed(cx);
+        });
+        self.voice.model_select[slot(mode)] = Some((picker, sub));
+    }
+
+    /// Refeito a cada troca de modelo: os esforços são do modelo, e o que ele não aceita vira o padrão.
+    fn build_effort_pick(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Ok(models)) = &self.voice.organizer_models else { return };
+        let pair = self.voice.organizer.get(mode);
+        let efforts = organizer_efforts(models, pair.model.as_deref());
+        let effort = fit_effort(&efforts, Some(&pair.effort));
+        let at = efforts.iter().position(|e| *e == effort).unwrap_or(0);
+        self.organizer_pair(mode).effort = effort;
+        let items: Vec<OrganizerChoice> = efforts.into_iter().map(|e| OrganizerChoice { label: e.clone(), id: e }).collect();
+        let picker = cx.new(|cx| SelectState::new(items, Some(gpui_kit::component::IndexPath::new(at)), window, cx));
+        let sub = cx.subscribe_in(&picker, window, move |this: &mut Hangar, _, event: &SelectEvent<Vec<OrganizerChoice>>, _, cx| {
+            let SelectEvent::Confirm(Some(id)) = event else { return };
+            this.organizer_pair(mode).effort = id.clone();
+            this.organizer_changed(cx);
+        });
+        self.voice.effort_select[slot(mode)] = Some((picker, sub));
+    }
+
     fn persist_voice_prefs(&mut self, cx: &mut Context<Self>) {
-        let (voice, account) = (self.voice.voice.clone(), self.voice.account.clone());
-        let write = cx.background_executor().spawn(async move { save_voice(voice.as_deref(), account.as_deref()) });
+        let saved = SavedVoice { voice: self.voice.voice.clone(), account: self.voice.account.clone(), organizer: self.voice.organizer.clone() };
+        let write = cx.background_executor().spawn(async move { save_voice(&saved) });
         cx.spawn(async move |this, cx| {
             if let Err(error) = write.await {
                 let _ = this.update(cx, |this, cx| {
@@ -835,7 +1309,7 @@ impl Hangar {
             button.child(div().flex().items_center().gap(px(6.)).text_size(px(12.5))
                 .child(self.render_equalizer(3., 16., 2.))
                 .children(self.call_time().map(|time| div().text_color(theme::text()).child(time)))
-                .child(div().text_color(theme::muted()).child(self.voice_status()))
+                .child(div().text_color(self.voice_state_color()).child(self.voice_status()))
                 .when(self.voice.mode == Mode::Plan, |el| el.child(div().flex_shrink_0().px(px(5.)).rounded(px(4.)).border_1().border_color(theme::border())
                     .text_size(px(10.)).text_color(theme::muted()).child(tr("voice_planning"))))
                 .children(target.map(|name| div().text_color(theme::faint()).child(name)))
@@ -855,6 +1329,7 @@ impl Hangar {
             Speaker::Idle => match self.voice.activity {
                 CallActivity::Thinking => tr("voice_thinking"),
                 CallActivity::Searching => tr("voice_searching"),
+                CallActivity::Working => tr("voice_working"),
                 CallActivity::Idle => tr_shared("codex_voice_listening", &[]),
             },
         }
@@ -864,15 +1339,33 @@ impl Hangar {
 
     fn call_time(&self) -> Option<String> { self.voice.live_since.map(|since| call_clock(since.elapsed())) }
 
-    /// Você: barras de baixo para cima na cor de destaque. Voz: do centro, em verde. Só a altura de um div muda: nada de transform.
+    /// Cor do estado da chamada: a mesma no equalizador e no rótulo.
+    fn voice_state_color(&self) -> Hsla {
+        if !matches!(self.voice.phase, Some(Phase::Live)) { return theme::muted(); }
+        match self.shown_speaker() {
+            Speaker::Voice => theme::success(),
+            _ if self.voice.muted => theme::muted(),
+            Speaker::You => theme::accent(),
+            Speaker::Idle => match self.voice.activity {
+                CallActivity::Idle => theme::muted(),
+                CallActivity::Thinking => theme::text(),
+                CallActivity::Searching | CallActivity::Working => theme::warning(),
+            },
+        }
+    }
+
+    /// Você: barras de baixo para cima na cor de destaque. Voz: do centro, em verde. Ouvindo: uma barra lenta;
+    /// pensando ou agindo: mais rápida e alta, na cor do estado. Só a altura de um div muda: nada de transform.
     fn render_equalizer(&self, min: f32, max: f32, width: f32) -> Div {
         let (input, output) = self.voice.levels;
         let who = self.shown_speaker();
-        let thinking = who == Speaker::Idle && !self.voice.muted && self.voice.activity != CallActivity::Idle;
         let row = div().h(px(max)).flex().gap(px(2.));
-        if thinking {
+        if who == Speaker::Idle && !self.voice.muted && matches!(self.voice.phase, Some(Phase::Live)) {
             let elapsed = self.voice.live_since.map_or(Duration::ZERO, |since| since.elapsed());
-            return row.items_center().children(thinking_bars(elapsed, min, max).map(|h| div().w(px(width)).h(px(h)).rounded_full().bg(theme::muted())));
+            let bars = if self.voice.activity == CallActivity::Idle { wave_bars(elapsed, min, max, ANIM_STEP * 2, 0.2) }
+                else { wave_bars(elapsed, min, max, ANIM_STEP, 0.6) };
+            let color = if self.voice.activity == CallActivity::Idle { theme::faint() } else { self.voice_state_color() };
+            return row.items_center().children(bars.map(|h| div().w(px(width)).h(px(h)).rounded_full().bg(color)));
         }
         let (level, color) = match who {
             Speaker::You => (input, theme::accent()),
@@ -929,14 +1422,19 @@ impl Hangar {
                 .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(tr_shared("codex_voice_title", &[])))
                 .child(beta_badge()));
         if live {
-            let status = match self.voice.target.as_deref() {
-                Some(name) => format!("{} · {name}", self.voice_status()),
-                None => self.voice_status(),
-            };
-            body = body.child(div().flex().items_center().gap(px(12.))
-                    .child(self.render_equalizer(4., 32., 4.).gap(px(3.)))
-                    .children(self.call_time().map(|time| div().text_lg().text_color(theme::text()).child(time))))
-                .child(div().text_xs().text_color(theme::muted()).child(status));
+            // O estado em destaque, e logo abaixo o que o organizador faz e pensa neste turno.
+            let action = self.voice.action.as_ref().map(action_text);
+            let thought = thought_tail(&self.voice.thought, 3, 140);
+            body = body.child(div().flex().flex_col().gap(px(8.)).p(px(12.)).rounded(px(10.)).border_1().border_color(theme::border())
+                .child(div().flex().items_center().gap(px(12.))
+                    .child(self.render_equalizer(4., 28., 4.).gap(px(3.)))
+                    .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
+                        .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(self.voice_state_color()).child(self.voice_status()))
+                        .children(self.voice.target.as_deref().map(|name| div().text_xs().text_color(theme::faint()).truncate().child(name.to_owned()))))
+                    .children(self.call_time().map(|time| div().flex_shrink_0().text_lg().text_color(theme::text()).child(time))))
+                .children(action.map(|text| div().text_sm().text_color(theme::text()).truncate().child(text)))
+                .when(!thought.is_empty(), |el| el.child(div().flex().flex_col().gap(px(2.))
+                    .children(thought.into_iter().map(|line| div().text_xs().text_color(theme::muted()).truncate().child(line))))));
         }
         let ready = live && matches!(self.voice.phase, Some(Phase::Live));
         body = body.child(div().flex().items_center().gap(px(6.))
@@ -967,6 +1465,26 @@ impl Hangar {
             body = body.child(div().flex().items_center().justify_between().gap(px(12.))
                 .child(div().text_xs().text_color(theme::muted()).child(tr("voice_account")))
                 .child(div().w(px(200.)).child(Select::new(picker).small().disabled(live).accessibility_label(tr("voice_account")))));
+        }
+        // Abertos também na chamada: o par do modo atual troca já no próximo turno.
+        for (mode, title) in [(Mode::Direct, "voice_mode_direct"), (Mode::Plan, "voice_mode_plan")] {
+            let at = slot(mode);
+            if self.voice.model_select[at].is_none() && self.voice.effort_select[at].is_none() { continue; }
+            body = body.child(div().text_xs().font_weight(FontWeight::MEDIUM).text_color(theme::muted()).child(tr(title)));
+            for (select, key) in [(&self.voice.model_select[at], "voice_organizer_model"), (&self.voice.effort_select[at], "voice_organizer_effort")] {
+                let Some((picker, _)) = select else { continue };
+                let label = format!("{} · {}", tr(title), tr(key));
+                body = body.child(div().flex().items_center().justify_between().gap(px(12.))
+                    .child(div().text_xs().text_color(theme::muted()).child(tr(key)))
+                    .child(div().w(px(200.)).child(Select::new(picker).small().accessibility_label(label))));
+            }
+        }
+        match &self.voice.organizer_models {
+            Some(Ok(_)) => body = body.child(div().text_xs().text_color(theme::faint()).whitespace_normal().child(tr("voice_organizer_hint"))),
+            Some(Err(error)) => body = body.child(div().text_xs().text_color(theme::danger()).whitespace_normal()
+                .child(format!("{} {error}", tr("voice_models_failed")).trim_end().to_owned())),
+            None if self.voice.models_seq > 0 => body = body.child(div().text_xs().text_color(theme::muted()).child(tr("voice_models_loading"))),
+            None => {}
         }
         if let Some(draft) = &self.voice.draft {
             body = body.child(div().flex().flex_col().gap(px(4.)).p(px(10.)).rounded(px(8.)).border_1().border_color(theme::warning())
@@ -1009,6 +1527,34 @@ mod tests {
     fn ev(id: &str, kind: &str, text: &str) -> (String, String, String) { (id.into(), kind.into(), text.into()) }
 
     #[test]
+    fn thought_keeps_a_short_tail_and_shows_last_lines() {
+        let mut thought = String::new();
+        push_thought(&mut thought, "**Lendo a sessão**");
+        push_thought(&mut thought, "\n");
+        push_thought(&mut thought, "Vou trocar ");
+        push_thought(&mut thought, "de sessão");
+        assert_eq!(thought_tail(&thought, 3, 140), ["Lendo a sessão", "Vou trocar de sessão"]);
+        push_thought(&mut thought, &format!("\n{}", "é".repeat(3000)));
+        assert!(thought.len() <= THOUGHT_KEEP, "cauda limitada e cortada em fronteira de caractere");
+        let tail = thought_tail(&thought, 1, 10);
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].chars().count(), 10);
+        assert!(tail[0].ends_with('…'));
+        assert!(thought_tail("a\nb\nc\nd", 3, 140) == ["b", "c", "d"]);
+    }
+
+    #[test]
+    fn action_text_names_tools_searches_and_commands() {
+        assert_eq!(action_text(&OrganizerAction::Tool("switch_session".into())), tr("voice_tool_switch_session"));
+        assert_ne!(tr("voice_tool_switch_session"), "voice_tool_switch_session", "chave traduzida");
+        assert!(action_text(&OrganizerAction::Tool("novo_tool".into())).contains("novo_tool"));
+        assert!(action_text(&OrganizerAction::Search("gpui animation".into())).contains("gpui animation"));
+        assert_eq!(action_text(&OrganizerAction::Search(" ".into())), tr("voice_action_search"));
+        let command = action_text(&OrganizerAction::Command(format!("\n  cat {}\nsegunda", "x".repeat(200))));
+        assert!(command.contains("cat x") && !command.contains("segunda") && command.ends_with('…'));
+    }
+
+    #[test]
     fn codex_accounts_put_default_first_and_skip_quota_only_and_other_kinds() {
         let list = json!([
             {"id": "codex:/h/.codex", "tipo": "codex", "codex_account": "default", "ativa": true, "nome": "default", "apelido": "", "login": {"email": "a@example.com"}},
@@ -1026,11 +1572,41 @@ mod tests {
 
     #[test]
     fn chosen_home_falls_back_when_missing_or_gone() {
-        let accounts = vec![CodexAccount { home: "/h/.codex-b".into(), label: "b".into() }];
+        let accounts = vec![CodexAccount { home: "/h/.codex-b".into(), label: "b".into(), id: "b".into() }];
         assert_eq!(chosen_home(&accounts, Some("/h/.codex-b")), Some(std::path::PathBuf::from("/h/.codex-b")));
         assert_eq!(chosen_home(&accounts, Some("/h/.codex-gone")), None);
         assert_eq!(chosen_home(&accounts, Some("")), None);
         assert_eq!(chosen_home(&accounts, None), None);
+    }
+
+    #[test]
+    fn saved_voice_defaults_and_reads_organizer_choice() {
+        // Arquivo antigo, sem as chaves do organizador: modelo do config e esforço padrão.
+        let old = parse_saved_voice(&json!({"voice": "ash", "codex_home": "/h/.codex-b"}));
+        assert_eq!(old, SavedVoice { voice: Some("ash".into()), account: Some("/h/.codex-b".into()), organizer: ModeModels::default() });
+        assert_eq!(parse_saved_voice(&json!({})), SavedVoice::default());
+        assert_eq!(ModeModels::default().plan, ModeModel { model: None, effort: "low".into() });
+        // Um par só (antes dos modos) vale para os dois.
+        let single = parse_saved_voice(&json!({"organizer_model": "gpt-x", "organizer_effort": "high"})).organizer;
+        let pair = ModeModel { model: Some("gpt-x".into()), effort: "high".into() };
+        assert_eq!(single, ModeModels { direct: pair.clone(), plan: pair.clone() });
+        // Planejar gravado vence, inclusive "modelo do config" (null).
+        let both = parse_saved_voice(&json!({"organizer_model": "gpt-x", "organizer_effort": "high",
+            "organizer_plan": {"model": null, "effort": "xhigh"}})).organizer;
+        assert_eq!(both, ModeModels { direct: pair, plan: ModeModel { model: None, effort: "xhigh".into() } });
+    }
+
+    #[test]
+    fn organizer_effort_follows_the_model() {
+        let models: Vec<OrganizerModel> = serde_json::from_value(json!([{"id": "a", "efforts": ["medium", "xhigh"]}, {"id": "b"}])).unwrap();
+        let basic = ["low", "medium", "high"].map(str::to_owned).to_vec();
+        assert_eq!(organizer_efforts(&models, None), basic, "modelo do config: lista básica");
+        assert_eq!(organizer_efforts(&models, Some("b")), basic, "catálogo sem esforços: lista básica");
+        let a = organizer_efforts(&models, Some("a"));
+        assert_eq!(a, ["medium", "xhigh"]);
+        assert_eq!(fit_effort(&basic, None), "low");
+        assert_eq!(fit_effort(&a, Some("xhigh")), "xhigh");
+        assert_eq!(fit_effort(&a, Some("low")), "medium", "sem o gravado nem o padrão, o primeiro");
     }
 
     #[test]
@@ -1044,6 +1620,43 @@ mod tests {
         assert_eq!(match_session("shop", &names, &active), SessionMatch::Many(vec![2, 3]));
         assert_eq!(match_session("cloudflare", &names, &active), SessionMatch::None);
         assert_eq!(match_session(" - ", &names, &active), SessionMatch::None, "consulta vazia não casa tudo");
+        let names = ["grupos-rust-plano", "rust-parte5-claude", "gpt-sol"];
+        let active = [true; 3];
+        assert_eq!(match_session("grupos", &names, &active), SessionMatch::One(0), "pedaço do nome");
+        assert_eq!(match_session("rust grupos", &names, &active), SessionMatch::One(0), "palavras em qualquer ordem");
+        assert_eq!(match_session("plano do rust", &names, &active), SessionMatch::One(0), "palavra curta não conta");
+        assert_eq!(match_session("plano do claude", &names, &active), SessionMatch::None, "palavra que não está no nome não casa");
+        assert_eq!(match_session("rust", &names, &active), SessionMatch::Many(vec![0, 1]));
+    }
+
+    #[test]
+    fn folder_pick_prefers_exact_and_lists_ambiguity() {
+        let f = |n: &str, p: &str| (n.to_owned(), p.to_owned());
+        let folders = [f("Projetos", "/h/Projetos"), f("hangar", "/h/Projetos/hangar"), f("hangar-5", "/h/Projetos/hangar-5"),
+            f("hangar", "/h/Projetos/hangar"), f("shop-web", "/h/Projetos/shop-web"), f("shop-api", "/h/Work/shop-api")];
+        assert_eq!(pick_folder("hangar", &folders, 0), Ok("/h/Projetos/hangar".into()), "igual vence parcial; caminho repetido conta uma vez");
+        assert_eq!(pick_folder("shop web", &folders, 0), Ok("/h/Projetos/shop-web".into()));
+        let many = pick_folder("shop", &folders, 0).unwrap_err();
+        assert!(many.contains("/h/Projetos/shop-web") && many.contains("/h/Work/shop-api"));
+        assert!(pick_folder("loja", &folders, 2).unwrap_err().contains("2 raiz"), "raiz não lida aparece");
+        let twins = [f("api", "/a/api"), f("api", "/b/api")];
+        assert!(pick_folder("api", &twins, 0).is_err(), "mesmo nome em duas raízes não é palpite");
+    }
+
+    #[test]
+    fn paths_skip_the_folder_search() {
+        for path in ["/home/x/p", "~/p", "C:\\Users\\x", "D:/w", "\\\\nas\\share"] { assert!(looks_like_path(path), "{path}"); }
+        for name in ["hangar", "minha loja", "a:b"] { assert!(!looks_like_path(name), "{name}"); }
+    }
+
+    #[test]
+    fn sessions_text_marks_screen_machine_and_unreachable() {
+        let row = |name: &str, machine: Option<&str>, on_screen: bool| Listed { name: name.into(), machine: machine.map(str::to_owned),
+            provider: "codex".into(), state: "working".into(), folder: "hangar".into(), on_screen };
+        let text = sessions_text(&[row("a", None, true), row("b", Some("casa"), false)], &["vps".into()]);
+        assert_eq!(text, "- a: codex, working, pasta hangar, na tela\n- b (máquina casa): codex, working, pasta hangar\n\
+            Máquina vps sem resposta; as sessões dela não estão aqui.");
+        assert_eq!(sessions_text(&[], &[]), "Nenhuma sessão aberta.");
     }
 
     #[test]

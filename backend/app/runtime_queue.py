@@ -20,6 +20,8 @@ _VERSION = 2
 _RECENT_CALLS = 256
 _FINAL = {"accepted", "rejected", "confirmed"}
 _TARGETED = {"prepare", "bind_dispatch", "begin_dispatch", "finish", "late_rpc_resolution", "confirm_occurrence"}
+# Ações cujo resultado é a operação inteira. Mesmo conjunto de `OPERATION_RECEIPTS` em queue.rs.
+_OPERATION_RECEIPTS = {"prepare", "bind_dispatch", "begin_dispatch", "mark_writing", "finish", "late_rpc_resolution"}
 _RECEIPT_METADATA = {"native", "message_id", "native_status", "cleanup", "code", "stage",
                      "preserve_binding", "queued", "already_confirmed", "disposition", "draft"}
 
@@ -265,6 +267,12 @@ def compact(state):
     for key, op in state["operations"].items():
         if not key.startswith(_CALL_PREFIX) and op["status"] in _FINAL:
             _slim_operation(op)
+    # A intenção já mora na operação e no recibo do Prepare; quem repete a chamada só lê
+    # `status` e `result`. Sem isto cada fase copiava a intenção inteira (anexo incluído).
+    for key, receipt in state["operations"].items():
+        if (key.startswith(_CALL_PREFIX) and receipt["payload"].get("kind") in _OPERATION_RECEIPTS
+                and isinstance(receipt["result"], dict) and "payload" in receipt["result"]):
+            receipt["result"]["payload"] = None
     # Linha confirmada não volta a confirmar (confirm_occurrence recusa), mesmo que a resposta
     # tardia tenha devolvido a operação para `accepted`.
     confirmed_rows = {row.get("id") for row in state["rows"] if row.get("confirmed") is True}

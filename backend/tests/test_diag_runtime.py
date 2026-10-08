@@ -258,6 +258,24 @@ def test_plugin_long_poll_logs_only_failures(status):
     assert [r["codigo"] for r in rows] == ([] if status == 200 else ["409"])
 
 
+@pytest.mark.parametrize("status", [200, 500])
+def test_internal_rust_calls_log_only_failures(status):
+    from app.api import _correlaciona_diag
+    from starlette.requests import Request
+    from starlette.responses import Response
+
+    request = Request({"type": "http", "method": "POST", "path": "/internal/list/facts",
+                       "query_string": b"", "headers": [],
+                       "route": SimpleNamespace(path="/internal/list/facts")})
+
+    async def respond(req):
+        return Response("", status_code=status)
+
+    asyncio.run(_correlaciona_diag(request, respond))
+    rows = [r for r in events() if r["evento"] == "api.servidor"]
+    assert [r["codigo"] for r in rows] == ([] if status == 200 else ["500"])
+
+
 @pytest.mark.parametrize("failure", [RuntimeError("segredo"), asyncio.CancelledError()])
 def test_http_exception_and_cancellation_are_distinct(failure):
     from app.api import _correlaciona_diag

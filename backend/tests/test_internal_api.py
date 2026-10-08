@@ -250,6 +250,14 @@ def test_rust_diag_route_takes_the_send_events_with_the_python_level():
         ("runtime.send_failed", "erro"), ("runtime.send_uncertain", "aviso"), ("runtime.command_deferred", "aviso")]
 
 
+def test_rust_diag_takes_codes_with_detail_suffix():
+    body = {"evento": "rust.list_facts_unavailable", "sessao": "", "codigo": "list_facts_status:500", "motivo": "m"}
+    with patch("app.internal_api.diag.registrar") as registrar:
+        response = _client().post("/internal/diag", json=body, headers={"X-Hangar-Internal": SECRET})
+    assert response.status_code == 200
+    assert [c.kwargs["codigo"] for c in registrar.call_args_list if c.args[0].startswith("rust.")] == ["list_facts_status:500"]
+
+
 @pytest.mark.parametrize("raw", [
     b"x" * 9000, b"not json", b"[" * 8000, b'{"evento":"rust.a","sessao":"s1","codigo":"c"}',
     b'{"evento":"rust.a","sessao":"s1","codigo":"C D","motivo":"m"}',

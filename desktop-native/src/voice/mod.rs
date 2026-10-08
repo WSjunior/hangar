@@ -6,7 +6,7 @@ pub mod rpc;
 pub mod rtc;
 pub mod usage;
 
-use organizer::{FinishStep, MIC_VOICE_LEVEL, Mode, Planner, Results, SendGate, SpokenTurns, ToolCall, finish_request, parse_tool, send_allowed, tool_reply, tools, thread_config, ORGANIZER_PROMPT, VOICE_PROMPT};
+use organizer::{FinishStep, MIC_VOICE_LEVEL, Mode, ModeModel, ModeModels, Planner, Results, SendGate, SpokenTurns, ToolCall, finish_request, parse_tool, send_allowed, settings_update, tool_reply, organizer_start, ORGANIZER_PROMPT, VOICE_PROMPT};
 use rpc::{Codex, Incoming, Rpc, RpcError, handshake};
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
@@ -15,21 +15,29 @@ use tokio::{runtime::Handle, sync::{Notify, mpsc}};
 pub struct CallId(Value);
 pub enum Phase { Connecting, Live, Closed }
 #[derive(Debug, Clone)]
-pub enum VoiceFailure { Microphone, Speaker, AppServer, Realtime(String), Network, Timeout, Organizer, Closed }
+pub enum VoiceFailure { Microphone, Speaker, AppServer, Realtime(String), Network, Timeout, Organizer, ModelSwitch, OwnFolder, Closed }
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub enum Activity { #[default] Idle, Thinking, Searching }
+pub enum Activity { #[default] Idle, Thinking, Searching, Working }
 pub enum VoiceEvent {
     Phase(Phase), Levels(f32, f32), Draft(Option<String>), Activity(Activity), ReadSession(CallId), Send(CallId, String), Failed(VoiceFailure),
     Mode(Mode), Plan { path: PathBuf, markdown: String }, AskSession(String), SendPlan { session: String, text: String },
     SwitchSession(CallId, String),
+    /// Ferramentas de sessão: a tela resolve os nomes falados e responde por `Voice::reply`. `turn` separa o pedido do sim.
+    ListSessions(CallId), OpenSession(CallId, organizer::OpenRequest),
+    CloseSession { call: CallId, name: String, confirmed: bool, turn: String },
+    PairSessions(CallId, String, String), UnpairSession(CallId, String),
     /// Contexto da thread do organizador (não o da voz, que não é informado): input do último turno e a janela do modelo.
     OrganizerContext { used: u64, window: Option<u64> },
     AccountLimits { five_hour: usage::RateWindow, seven_day: usage::RateWindow },
+    /// Só para a tela: pedaço do resumo do raciocínio, a ação em curso e o fim do turno, que limpa os dois.
+    Thought(String), Action(Option<organizer::OrganizerAction>), TurnDone,
 }
-/// `cwd`: pasta da sessão na tela quando é desta máquina (a leitura do código parte dela); `target`: nome dessa sessão.
-pub struct VoiceOptions { pub codex: Codex, pub voice: Option<String>, pub context: String, pub cwd: Option<PathBuf>, pub target: String, pub codex_home: Option<PathBuf> }
+/// `cwd`: pasta da sessão na tela quando é desta máquina (o organizador lê o código dela); `target`: nome dessa sessão.
+/// `organizer`: modelo e esforço do organizador por modo; a chamada nasce no Direto.
+pub struct VoiceOptions { pub codex: Codex, pub voice: Option<String>, pub context: String, pub cwd: Option<PathBuf>, pub target: String,
+    pub codex_home: Option<PathBuf>, pub organizer: ModeModels }
 
-enum Command { Retarget(String, String, Option<PathBuf>), Result(String, String), Reply(Value, Value), SetMode(Mode), Answer(String), PlanDelivered }
+enum Command { Retarget(String, String, Option<PathBuf>), Result(String, String), Reply(Value, Value), SetMode(Mode), Models(ModeModels), Answer(String), PlanDelivered }
 
 pub struct Voice { commands: mpsc::UnboundedSender<Command>, muted: Arc<AtomicBool>, stopped: Arc<AtomicBool>, stop: Arc<Notify> }
 
@@ -46,6 +54,8 @@ impl Voice {
     pub fn session_result(&self, session: String, text: String) { let _ = self.commands.send(Command::Result(session, text)); }
     pub fn reply(&self, call: CallId, reply: Value) { let _ = self.commands.send(Command::Reply(call.0, reply)); }
     pub fn set_mode(&self, mode: Mode) { let _ = self.commands.send(Command::SetMode(mode)); }
+    /// Pares editados no cartão durante a chamada: o do modo atual vale já no próximo turno.
+    pub fn set_models(&self, models: ModeModels) { let _ = self.commands.send(Command::Models(models)); }
     /// Resposta, recusa ou estouro de um `ask_session`: chega ao organizador como turno marcado.
     pub fn session_answer(&self, text: String) { let _ = self.commands.send(Command::Answer(text)); }
     /// A sessão aceitou o plano enviado: o organizador o esquece.
@@ -69,7 +79,7 @@ fn failed(step: &'static str) -> impl FnOnce(VoiceFailure) -> VoiceFailure {
 /// Deltas vêm aos montes: só o primeiro de cada (método, papel) até virar o turno ou mudar o falante.
 fn first_delta(last: &mut Option<(String, String)>, method: &str, role: &str) -> bool {
     if method == "turn/started" || method == "turn/completed" { *last = None; return true; }
-    if !method.ends_with("/delta") { return true; }
+    if !method.ends_with("/delta") && !method.ends_with("Delta") { return true; }
     let key = (method.to_owned(), role.to_owned());
     if last.as_ref() == Some(&key) { return false; }
     *last = Some(key);
@@ -118,15 +128,16 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
     log("app-server spawned");
     let config = handshake(&rpc).await.map_err(rpc_failure).map_err(failed("handshake"))?;
     log("handshake ok");
-    let directory = std::env::temp_dir().join(format!("hangar-voice-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&directory);
-    // A pasta temporária é a única apagada no fim; a da sessão só serve de cwd para ler o código.
-    let thread_cwd = options.cwd.clone().unwrap_or_else(|| directory.clone());
-    // Sem `"environments": []`: com ele o Codex não oferece o shell ao modelo.
-    let mut start = json!({"ephemeral": true, "cwd": thread_cwd, "sandbox": "read-only", "approvalPolicy": "never",
-        "baseInstructions": ORGANIZER_PROMPT, "developerInstructions": options.context,
-        "config": thread_config(&config), "dynamicTools": tools()});
-    if let Some(model) = config["model"].as_str() { start["model"] = json!(model); }
+    // Pasta própria e fixa: o que o organizador grava fica entre chamadas, nada aqui a apaga.
+    let own = plan::files_dir();
+    if let Err(error) = std::fs::create_dir_all(&own) {
+        log(format!("own folder create failed kind={:?}", error.kind()));
+        let _ = events.send(VoiceEvent::Failed(VoiceFailure::OwnFolder)).await;
+    }
+    let mut models = options.organizer.clone();
+    let mut applied = models.direct.clone();
+    let start = organizer_start(&config, &own, options.cwd.as_deref(), &options.context, applied.model.as_deref(), &applied.effort);
+    log(format!("organizer model={} effort={}", if applied.model.is_some() { "chosen" } else { "config" }, applied.effort));
     // A conta lida em paralelo, com prazo curto: falhar só deixa os limites ocultos até a primeira atualização.
     let limits = async {
         match tokio::time::timeout(Duration::from_secs(3), rpc.request("account/rateLimits/read", json!({}))).await {
@@ -136,7 +147,10 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
         }
     };
     let (started, ()) = tokio::join!(rpc.request("thread/start", start), limits);
-    let thread = started.map_err(rpc_failure).map_err(failed("thread/start"))?["thread"]["id"].as_str().unwrap_or_default().to_owned();
+    let started = started.map_err(rpc_failure).map_err(failed("thread/start"))?;
+    let thread = started["thread"]["id"].as_str().unwrap_or_default().to_owned();
+    // Voltar ao modelo do config pede o nome dele: o do config, senão o que a thread abriu sem escolha.
+    let default_model = config["model"].as_str().or_else(|| started["model"].as_str().filter(|_| applied.model.is_none())).map(str::to_owned);
     log(format!("thread started id={thread}"));
 
     let offer = tokio::task::spawn_blocking(rtc::offer).await.map_err(|_| VoiceFailure::Network)
@@ -212,13 +226,15 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
             item = incoming.recv() => match item {
                 Ok(Incoming::Request { id, method, params }) if method == "item/tool/call" => {
                     let tool = params["tool"].as_str().unwrap_or("?").to_owned();
+                    let _ = events.send(VoiceEvent::Action(Some(organizer::OrganizerAction::Tool(tool.clone())))).await;
                     let outcome = match parse_tool(&params) {
                         ToolCall::ReadSession => { let _ = events.send(VoiceEvent::ReadSession(CallId(id))).await; "read" }
                         ToolCall::Send(_) | ToolCall::Hold(_) if !spoken.allows(&params) => {
                             let _ = rpc.respond(id, tool_reply("Pedido recusado: só uma fala do usuário pode gerar envio.", false)).await;
                             "refused-not-spoken"
                         }
-                        ToolCall::FinishPlan { .. } | ToolCall::AskSession(_) | ToolCall::SetMode(_) | ToolCall::SwitchSession(_) if !spoken.allows(&params) => {
+                        ToolCall::FinishPlan { .. } | ToolCall::AskSession(_) | ToolCall::SetMode(_) | ToolCall::SwitchSession(_)
+                            | ToolCall::OpenSession(_) | ToolCall::CloseSession { .. } | ToolCall::PairSessions(..) | ToolCall::UnpairSession(_) if !spoken.allows(&params) => {
                             let _ = rpc.respond(id, tool_reply("Só a pedido falado do usuário.", false)).await;
                             "refused-not-spoken"
                         }
@@ -299,16 +315,28 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                                 log(format!("plan sent bytes={}", text.len()));
                                 let session = planner.session().unwrap_or(&target).to_owned();
                                 let _ = events.send(VoiceEvent::SendPlan { session, text }).await;
-                                let _ = rpc.respond(id, tool_reply("Plano enviado à sessão; o resultado chega depois.", true)).await;
                                 planner.sent();
+                                let warn = apply_models(&rpc, &thread, &mut applied, &models, Mode::Direct, default_model.as_deref(), events).await;
+                                let reply = format!("Plano enviado à sessão; o resultado chega depois. {}", warn.unwrap_or_default());
+                                let _ = rpc.respond(id, tool_reply(reply.trim_end(), true)).await;
                                 let _ = events.send(VoiceEvent::Mode(Mode::Direct)).await;
                                 "plan-sent"
                             }
                         }
                         // A resposta vem da tela (`Voice::reply`), depois de resolver o nome.
                         ToolCall::SwitchSession(name) => { let _ = events.send(VoiceEvent::SwitchSession(CallId(id), name)).await; "switch" }
+                        ToolCall::ListSessions => { let _ = events.send(VoiceEvent::ListSessions(CallId(id))).await; "list" }
+                        ToolCall::OpenSession(request) => { let _ = events.send(VoiceEvent::OpenSession(CallId(id), request)).await; "open" }
+                        ToolCall::CloseSession { name, confirmed } => {
+                            let turn = params["turnId"].as_str().unwrap_or_default().to_owned();
+                            let _ = events.send(VoiceEvent::CloseSession { call: CallId(id), name, confirmed, turn }).await;
+                            if confirmed { "close-confirmed" } else { "close" }
+                        }
+                        ToolCall::PairSessions(a, b) => { let _ = events.send(VoiceEvent::PairSessions(CallId(id), a, b)).await; "pair" }
+                        ToolCall::UnpairSession(name) => { let _ = events.send(VoiceEvent::UnpairSession(CallId(id), name)).await; "unpair" }
                         ToolCall::SetMode(mode) => {
-                            let note = switch_mode(&mut planner, mode, &target, &mut gate, &rpc, events).await;
+                            let mut note = switch_mode(&mut planner, mode, &target, &mut gate, &rpc, events).await;
+                            if let Some(warn) = apply_models(&rpc, &thread, &mut applied, &models, mode, default_model.as_deref(), events).await { note = format!("{note} {warn}"); }
                             let _ = rpc.respond(id, tool_reply(note, true)).await;
                             "mode-set"
                         }
@@ -361,10 +389,15 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                         log("gate cancelled: user kept talking");
                         let _ = rpc.respond(id, tool_reply("O usuário continuou falando; nada foi enviado. Monte o pedido com a fala completa.", false)).await;
                     }
+                    if let Some(action) = organizer::organizer_action(&method, &params["item"]) { let _ = events.send(VoiceEvent::Action(action)).await; }
+                    if let Some(delta) = organizer::reasoning_delta(&method, &params) { let _ = events.send(VoiceEvent::Thought(delta)).await; }
+                    let kind = params["item"]["type"].as_str().unwrap_or_default();
                     let next = match method.as_str() {
                         // O turno só entra em SpokenTurns quando o userMessage chega, depois do turn/started.
                         "item/started" | "item/completed" if params["item"]["type"] == "userMessage" && (method == "item/started" || organizer_busy) && spoken.allows(&params) => Some(Activity::Thinking),
-                        "item/started" if params["item"]["type"] == "webSearch" => Some(Activity::Searching),
+                        "item/started" if kind == "webSearch" => Some(Activity::Searching),
+                        "item/started" if matches!(kind, "dynamicToolCall" | "commandExecution") => Some(Activity::Working),
+                        "item/completed" if matches!(kind, "webSearch" | "dynamicToolCall" | "commandExecution") && activity != Activity::Idle => Some(Activity::Thinking),
                         "turn/completed" => Some(Activity::Idle),
                         _ => None,
                     };
@@ -377,6 +410,7 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                         "turn/started" => { organizer_busy = true; results.turn_started(); }
                         "turn/completed" => {
                             organizer_busy = false;
+                            let _ = events.send(VoiceEvent::TurnDone).await;
                             spoken.turn_completed(&params);
                             // Turno interrompido ou falho não pode deixar um envio esperando a janela de 1,5 s.
                             if params["turn"]["status"] != "completed" && let Some((id, _)) = gate.user_spoke() {
@@ -420,10 +454,16 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                 }
                 Some(Command::SetMode(mode)) => {
                     log(format!("mode set {mode:?}"));
-                    let note = switch_mode(&mut planner, mode, &target, &mut gate, &rpc, events).await;
+                    let mut note = switch_mode(&mut planner, mode, &target, &mut gate, &rpc, events).await;
+                    if let Some(warn) = apply_models(&rpc, &thread, &mut applied, &models, mode, default_model.as_deref(), events).await { note = format!("{note} {warn}"); }
                     let _ = rpc.request("thread/realtime/appendText", json!({"threadId": thread, "role": "developer", "text": note})).await;
                     let speech = if mode == Mode::Plan { "Modo planejar." } else { "Modo direto." };
                     let _ = rpc.request("thread/realtime/appendSpeech", json!({"threadId": thread, "text": speech})).await;
+                }
+                Some(Command::Models(edited)) => {
+                    models = edited;
+                    // A falha já aparece no cartão; o modo não mudou, não há o que dizer ao organizador.
+                    let _ = apply_models(&rpc, &thread, &mut applied, &models, planner.mode, default_model.as_deref(), events).await;
                 }
                 Some(Command::PlanDelivered) => planner.delivered(),
                 Some(Command::Answer(text)) => {
@@ -438,10 +478,8 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                     }
                     target = name.clone();
                     target_cwd = cwd;
-                    // A pasta da thread não muda no meio dela.
-                    if let Some(note) = organizer::code_note(options.cwd.as_deref(), target_cwd.as_deref()) {
-                        let _ = rpc.request("thread/realtime/appendText", json!({"threadId": thread, "role": "developer", "text": note})).await;
-                    }
+                    let note = organizer::code_note(target_cwd.as_deref(), &own);
+                    let _ = rpc.request("thread/realtime/appendText", json!({"threadId": thread, "role": "developer", "text": note})).await;
                     let _ = rpc.request("thread/realtime/appendText", json!({"threadId": thread, "role": "developer", "text": context})).await;
                     let _ = rpc.request("thread/realtime/appendSpeech", json!({"threadId": thread, "text": format!("Agora estou na sessão {name}.")})).await;
                 }
@@ -458,7 +496,6 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
     stopped.store(true, Ordering::Relaxed);
     let _ = rpc.request("thread/realtime/stop", json!({"threadId": thread})).await;
     if !matches!(tokio::task::spawn_blocking(move || peer.join()).await, Ok(Ok(()))) { log("rtc thread join failed (panic)"); }
-    let _ = std::fs::remove_dir_all(&directory);
     outcome
 }
 
@@ -477,6 +514,27 @@ async fn switch_mode(planner: &mut Planner, mode: Mode, target: &str, gate: &mut
     let note = planner.set_mode(mode, target);
     let _ = events.send(VoiceEvent::Mode(mode)).await;
     note
+}
+
+/// Leva a thread ao par do modo; vale a partir do próximo turno. Falha aparece na tela e o texto devolvido avisa o organizador.
+async fn apply_models(rpc: &Rpc, thread: &str, applied: &mut ModeModel, models: &ModeModels, mode: Mode, default_model: Option<&str>,
+    events: &async_channel::Sender<VoiceEvent>) -> Option<&'static str> {
+    let wanted = models.get(mode);
+    // Voltar ao "modelo do config" sem saber qual é ele não troca nada: dizer, em vez de fingir que trocou.
+    if wanted.model.is_none() && default_model.is_none() && applied.model.is_some() {
+        log(format!("settings update skipped mode={mode:?} reason=unknown_default_model"));
+        let _ = events.send(VoiceEvent::Failed(VoiceFailure::ModelSwitch)).await;
+        return Some("O modo mudou, mas o modelo que pensa não trocou; segue o anterior.");
+    }
+    let Some(update) = settings_update(thread, applied, wanted, default_model) else { *applied = wanted.clone(); return None };
+    if rpc.request("thread/settings/update", update).await.is_ok() {
+        log(format!("settings update ok mode={mode:?}"));
+        *applied = wanted.clone();
+        return None;
+    }
+    log(format!("settings update failed mode={mode:?}"));
+    let _ = events.send(VoiceEvent::Failed(VoiceFailure::ModelSwitch)).await;
+    Some("O modo mudou, mas o modelo que pensa não trocou; segue o anterior.")
 }
 
 async fn start_summary(rpc: &Rpc, thread: &str, first: Value, results: &mut Results, organizer_busy: bool) {

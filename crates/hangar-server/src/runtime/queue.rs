@@ -17,6 +17,8 @@ const VERSION: u32 = 2;
 const RECENT_CALLS: u64 = 256;
 const RECEIPT_METADATA: &[&str] = &["native", "message_id", "native_status", "cleanup", "code", "stage",
     "preserve_binding", "queued", "already_confirmed", "disposition", "draft"];
+/// Ações cujo resultado é a operação inteira. Mesmo conjunto de `_OPERATION_RECEIPTS` em runtime_queue.py.
+const OPERATION_RECEIPTS: &[&str] = &["prepare", "bind_dispatch", "begin_dispatch", "mark_writing", "finish", "late_rpc_resolution"];
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -119,15 +121,18 @@ impl State {
             operations:BTreeMap::new(), used_occurrences:BTreeMap::new(), runtime_state:json!({}), next_seq:1 }
     }
 
-    /// Lê v1 ou v2 já podado; devolve se veio da v1. Sem ordem gravada, tudo o que veio da v1
-    /// conta como antigo: fora da janela já na leitura.
+    /// Lê v1 ou v2 já podado; devolve se precisa regravar (veio da v1 ou confirmou comando
+    /// local antigo). Sem ordem gravada, tudo o que veio da v1 conta como antigo: fora da janela já na leitura.
     pub fn load(bytes: &[u8]) -> io::Result<(Self, bool)> {
         let mut state: State = serde_json::from_slice(bytes).map_err(|_| invalid("estado da fila inválido"))?;
-        let migrated = state.version == 1;
+        let mut migrated = state.version == 1;
         if migrated { state.version = VERSION; state.next_seq = RECENT_CALLS + 1; }
         if state.version != VERSION || state.next_seq == 0 || !state.rows.iter().all(Value::is_object)
             || !state.runtime_state.is_object() { return Err(invalid("estado da fila incompatível")); }
-        if !needs_terminal_recovery(&state) {state.compact();}
+        if !needs_terminal_recovery(&state) {
+            migrated |= confirm_answered_commands(&mut state);
+            state.compact();
+        }
         Ok((state, migrated))
     }
 
@@ -149,6 +154,12 @@ impl State {
         self.operations.retain(|key, _| keep.contains(key));
         for (_, op) in self.operations.iter_mut().filter(|(key, op)| !key.starts_with(CALL_PREFIX)
             && matches!(op.status, Status::Accepted | Status::Rejected | Status::Confirmed)) { op.slim(); }
+        // A intenção já mora na operação e no recibo do Prepare; quem repete a chamada só lê
+        // `status` e `result`. Sem isto cada fase copiava a intenção inteira (anexo incluído).
+        for (_, receipt) in self.operations.iter_mut().filter(|(key, receipt)| key.starts_with(CALL_PREFIX)
+            && OPERATION_RECEIPTS.contains(&receipt.payload["kind"].as_str().unwrap_or(""))) {
+            if let Some(intent) = receipt.result.get_mut("payload") { *intent = Value::Null; }
+        }
         // Linha confirmada não volta a confirmar (ConfirmOccurrence recusa), mesmo que a resposta
         // tardia tenha devolvido a operação para `accepted`.
         let confirmed_rows: BTreeSet<&str> = self.rows.iter().filter(|r| r["confirmed"] == true).filter_map(|r| r["id"].as_str()).collect();
@@ -425,14 +436,36 @@ fn confirm_local_command(state:&mut State,source:&str) {
     if !source.starts_with('/') || source.len() < 2 { return; }
     let Some(id) = state.rows.iter().find(|r|r["confirmed"] != true && r["papel"] != "assistant" && r["delivered"] == true
         && r["text"].as_str().map(str::trim) == Some(source)).map(|r|row_id(r).to_owned()) else { return };
+    confirm_row(state,&id);
+}
+
+fn confirm_row(state:&mut State,id:&str) {
     if let Some(row) = state.rows.iter_mut().find(|r|row_id(r) == id) {
         row["confirmed"] = json!(true);
         row.as_object_mut().unwrap().remove("desistiu");
     }
-    for (_,op) in state.operations.iter_mut().filter(|(key,op)|!key.starts_with(CALL_PREFIX) && op.entry_id.as_deref() == Some(id.as_str())) {
+    for (_,op) in state.operations.iter_mut().filter(|(key,op)|!key.starts_with(CALL_PREFIX) && op.entry_id.as_deref() == Some(id)) {
         op.status = Status::Confirmed;
     }
     release_terminal_write_barrier(state);
+}
+
+/// Fila gravada antes de a resposta local confirmar o comando: a entrada `/x` entregue seguida
+/// logo de uma resposta local que nomeia o mesmo `/x` é a mesma prova, só que já no disco.
+fn confirm_answered_commands(state:&mut State)->bool {
+    let answered:Vec<String> = state.rows.windows(2).filter(|pair| {
+        let (entry,answer) = (&pair[0],&pair[1]);
+        let gap = answer["ts"].as_f64().unwrap_or(f64::MAX) - entry["ts"].as_f64().unwrap_or(0.0);
+        let Some(command) = entry["text"].as_str().and_then(|text|text.split_whitespace().next()).filter(|c|c.starts_with('/') && c.len() > 1)
+            else { return false };
+        // Só a resposta que começa pelo próprio comando ("/btw isn't available…"); aviso local qualquer não prova nada.
+        let names = answer["text"].as_str().and_then(|text|text.trim_start().strip_prefix(command))
+            .is_some_and(|rest|rest.is_empty() || rest.starts_with(char::is_whitespace));
+        entry["confirmed"] != true && entry["papel"] != "assistant" && entry["delivered"] == true && entry["desistiu"] != true
+            && answer["papel"] == "assistant" && (0.0..=10.0).contains(&gap) && names
+    }).map(|pair|row_id(&pair[0]).to_owned()).collect();
+    for id in &answered { confirm_row(state,id); }
+    !answered.is_empty()
 }
 
 /// A trava só sai quando a dona deixou de ser incerta e nenhuma outra da conversa resta.

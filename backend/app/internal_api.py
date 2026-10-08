@@ -138,7 +138,8 @@ _list_facts_invalid_at = 0.0
 # Os do envio e os da opção levam o nome que o Python já usava, para o diário não ter dois nomes por falha.
 _DIAG_EVENT = re.compile(r"rust\.[a-z_]{1,48}|runtime\.(?:send_failed|send_uncertain|command_deferred)|opcao\.(?:nao_convergiu|envio_falhou)")
 _DIAG_WARNING = {"runtime.send_uncertain", "runtime.command_deferred", "rust.groups_sweep_failed", "rust.groups_sweep_recovered"}
-_DIAG_CODE = re.compile(r"[a-z0-9_]{1,64}")
+# `:` e maiúscula: o Rust anexa o detalhe ao código (`list_facts_status:500`, `…:sessions:Eof`).
+_DIAG_CODE = re.compile(r"[A-Za-z0-9_:]{1,64}")
 
 
 @router.post("/diag")

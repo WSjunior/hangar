@@ -6,10 +6,10 @@ use crate::appearance::{self, SurfaceMaterial};
 pub use crate::motion::ease_out;
 use std::{cell::Cell, rc::Rc, sync::OnceLock, time::{Duration, Instant}};
 
-/// Batida das animações que se repetem: 30 por segundo, numa grade de tempo comum a todas. Menos que isso a marca e os
-/// spinners andam aos saltos. Relógios próprios, fora de fase entre si, somariam quadros; na grade, as views que batem
-/// juntas saem num quadro só.
-const PULSE_TICK: Duration = Duration::from_micros(33_333);
+/// Batida das animações que se repetem: 15 por segundo, numa grade de tempo comum a todas. Cada batida redesenha a raiz,
+/// que pinta as marcas flutuantes, então a cadência é o custo da sessão trabalhando. Relógios próprios,
+/// fora de fase entre si, somariam quadros; na grade, as views que batem juntas saem num quadro só.
+const PULSE_TICK: Duration = Duration::from_micros(66_667);
 
 thread_local! {
     /// A janela tem o foco. Sem ele o relógio para: a marca fica parada no último quadro e nada acorda a janela.

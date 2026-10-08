@@ -17,6 +17,9 @@ A entrada realtime_delegation traz a fala mais recente em input e a conversa em 
 Use read_session para ver a sessão que está na tela e o que ela respondeu; faça isso antes de enviar.
 Quando a fala trouxer um pedido completo para a sessão, chame send_to_session com o pedido inteiro:
 objetivo, restrições e correções da conversa, escrito como o usuário escreveria.
+Modo Direto: send_to_session só para uma instrução clara dirigida ao trabalho da sessão. Comentários, opiniões,
+perguntas para você, pensar em voz alta e ideias pela metade se respondem na conversa e nunca vão à sessão.
+Na dúvida, pergunte 'mando isso para a sessão?' e espere a resposta antes de enviar.
 Se o usuário disser 'espera', 'não manda ainda', 'segura' ou equivalente, chame hold_request com o
 pedido montado até ali; continue montando com ele e só envie quando ele liberar ('pode mandar', 'manda').
 'Não manda ainda' controla você e não entra no texto do pedido.
@@ -33,8 +36,8 @@ Há dois modos. No modo Direto, siga as regras acima. No modo Planejar, NADA vai
 - Converse e escreva o plano com update_plan, sempre o documento inteiro em Markdown: Objetivo, Decisões,
   Pendências, Pesquisas (com links das fontes) e Próximos passos. Reorganize quando o usuário mudar de ideia.
 - Pesquise na internet quando ajudar e resuma o que achou em uma ou duas frases faladas; guarde o detalhe no plano.
-- Leia o código do projeto quando precisar (só leitura; nunca altere arquivos).
-  Leia só dentro da pasta do projeto; nunca abra credenciais (.ssh, .env, auth.json, chaves).
+- Leia o código do projeto quando precisar, pelo caminho completo que o contexto informa; nunca altere o projeto.
+  Arquivos seus só na sua pasta própria; nunca abra credenciais (.ssh, .env, auth.json, chaves).
 - Use ask_session só para o que apenas a sessão sabe; pergunta curta e objetiva. A resposta chega depois, numa
   entrada que começa por [RESPOSTA DA SESSÃO À PERGUNTA]: use-a para atualizar o plano e comente em no máximo
   uma frase, sem lê-la como resultado.
@@ -42,8 +45,14 @@ Há dois modos. No modo Direto, siga as regras acima. No modo Planejar, NADA vai
 - Quando o usuário disser que terminou, leia um resumo do plano em até três frases e pergunte se deve mandar
   para executar ou para escrever o plano de implementação; só então chame finish_plan com a escolha.
   Depois que ele confirmar, chame finish_plan de novo.
-- O usuário troca de modo falando; use set_mode quando ele pedir.
-Quando o usuário pedir para trocar, ir ou abrir outra sessão, chame switch_session com o nome falado.
+- O usuário troca de modo falando ('modo planejar', 'modo direto'; 'pensa mais' é planejar, 'modo rápido' é direto); use set_mode,
+  que troca também o modelo que pensa.
+Quando o usuário pedir para trocar, ir ou abrir outra sessão, chame switch_session com o nome falado, mesmo que seja
+só um pedaço do nome ('abre a grupos' é a sessão grupos-rust-plano). Na dúvida, chame list_sessions antes.
+open_session só quando ele pedir sessão NOVA ou falar em pasta ('abre uma sessão nova na pasta hangar'); pair_sessions e
+unpair_session agrupam e desagrupam. Nome ambíguo volta com as opções: pergunte qual, nunca escolha por conta própria.
+Fechar sessão é irreversível: chame close_session sem confirmed, pergunte ao usuário e só chame com confirmed true
+depois de um sim explícito dele.
 Responda sempre em português, em texto curto, porque a resposta final vira fala.";
 
 /// Abre a entrada que carrega a resposta da sessão a um ask_session.
@@ -55,11 +64,17 @@ Uma sessão de trabalho (Claude ou Codex) executa os pedidos; o organizador deci
 Espere o usuário terminar a ideia. 'Eh', 'hum' e palavras soltas não são tarefas.
 Quando a ideia estiver completa, encaminhe ao organizador. Se o usuário pedir para esperar, encaminhe também: o organizador segura.
 Não diga que enviou antes de o organizador confirmar. Enviado não significa terminado.
+Trocar, abrir, fechar e parear sessão sempre vão ao organizador, mesmo quando parecer simples; você não faz isso sozinha.
+Nunca diga que trocou ou abriu antes da confirmação: 'Agora estou na sessão X' é a confirmação.
 Textos que você recebe para falar são resultados reais da sessão: fale-os fielmente, sem trocar o sentido nem omitir erros e perguntas.
 Não narre ferramentas, não leia código nem tabelas, não invente acesso à tela ou a arquivos.";
 
 fn tool(name: &str, description: &str, properties: Value) -> Value {
-    let required: Vec<&String> = properties.as_object().map(|o| o.keys().collect()).unwrap_or_default();
+    let required: Vec<String> = properties.as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
+    tool_with(name, description, properties, &required.iter().map(String::as_str).collect::<Vec<_>>())
+}
+
+fn tool_with(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({"type": "function", "name": name, "description": description, "inputSchema": {
         "type": "object", "properties": properties, "required": required, "additionalProperties": false}})
 }
@@ -79,15 +94,60 @@ pub fn tools() -> Value {
             json!({"mode": {"type": "string", "enum": ["direto", "planejar"]}})),
         tool("switch_session", "Troca a sessão aberta no Hangar para a sessão com esse nome; use quando o usuário pedir para trocar, ir ou abrir outra sessão.",
             json!({"name": {"type": "string"}})),
+        tool("list_sessions", "Lista as sessões de todas as máquinas: nome, máquina, provider, estado, pasta e qual está na tela.", json!({})),
+        tool_with("open_session", "Cria uma sessão nova na pasta falada (nome ou caminho) e a abre na tela. Pasta ambígua volta com as opções.",
+            json!({"folder": {"type": "string"}, "name": {"type": "string"}, "provider": {"type": "string", "enum": ["claude", "codex"]},
+                "server": {"type": "string"}}), &["folder"]),
+        tool_with("close_session", "Fecha uma sessão. Sem confirmed só prepara; depois do sim explícito do usuário, chame de novo com confirmed true.",
+            json!({"name": {"type": "string"}, "confirmed": {"type": "boolean"}}), &["name"]),
+        tool("pair_sessions", "Agrupa duas sessões da mesma máquina para trabalharem juntas.", json!({"a": {"type": "string"}, "b": {"type": "string"}})),
+        tool("unpair_session", "Tira a sessão do grupo dela; as outras seguem juntas.", json!({"name": {"type": "string"}})),
     ])
 }
 
-pub fn thread_config(config: &Value) -> Value {
-    // O sandbox read-only só foi provado no Linux; no Windows o organizador fica sem shell.
+/// Esforço do organizador quando a pessoa não escolheu outro.
+pub const DEFAULT_EFFORT: &str = "low";
+
+/// `thread/start` do organizador. `workspace-write` com cwd na pasta própria: grava só nela (e no /tmp); o código da
+/// sessão é lido pelo caminho completo que a nota leva. Sem `"environments": []`: com ele o Codex não oferece o shell.
+pub fn organizer_start(config: &Value, own: &Path, session: Option<&Path>, context: &str, model: Option<&str>, effort: &str) -> Value {
+    let mut start = json!({"ephemeral": true, "cwd": own, "sandbox": "workspace-write", "approvalPolicy": "never",
+        "baseInstructions": ORGANIZER_PROMPT, "developerInstructions": format!("{}\n\n{context}", code_note(session, own)),
+        "config": thread_config(config, effort), "dynamicTools": tools()});
+    if let Some(model) = model.or_else(|| config["model"].as_str()) { start["model"] = json!(model); }
+    start
+}
+
+/// Modelo e esforço do organizador num modo; `model` `None` = o modelo do config do Codex.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModeModel { pub model: Option<String>, pub effort: String }
+
+impl Default for ModeModel { fn default() -> Self { Self { model: None, effort: DEFAULT_EFFORT.to_owned() } } }
+
+/// Um par por modo: trocar de modo na chamada troca o modelo da thread.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ModeModels { pub direct: ModeModel, pub plan: ModeModel }
+
+impl ModeModels {
+    pub fn get(&self, mode: Mode) -> &ModeModel { match mode { Mode::Direct => &self.direct, Mode::Plan => &self.plan } }
+}
+
+/// `thread/settings/update` de `from` para `to`, só com o que muda; `None` = nada a mandar. Voltar ao modelo do config
+/// exige mandá-lo pelo nome (`default_model`); sem ele, o modelo fica como está.
+pub fn settings_update(thread: &str, from: &ModeModel, to: &ModeModel, default_model: Option<&str>) -> Option<Value> {
+    let resolved = |m: &ModeModel| m.model.clone().or_else(|| default_model.map(str::to_owned));
+    let mut update = json!({"threadId": thread});
+    if let Some(model) = resolved(to).filter(|m| Some(m) != resolved(from).as_ref()) { update["model"] = json!(model); }
+    if to.effort != from.effort { update["effort"] = json!(to.effort); }
+    (update.as_object().is_some_and(|o| o.len() > 1)).then_some(update)
+}
+
+pub fn thread_config(config: &Value, effort: &str) -> Value {
+    // O sandbox só foi provado no Linux; no Windows o organizador fica sem shell (e portanto não grava nada).
     let mut result = json!({"features.shell_tool": !cfg!(windows),"features.unified_exec": false, "features.apps": false,
         "features.hooks": false, "features.multi_agent": false, "features.js_repl": false,
         "features.apply_patch_freeform": false, "web_search": "live", "project_doc_max_bytes": 0,
-        "model_reasoning_effort": "low"});
+        "model_reasoning_effort": effort, "model_reasoning_summary": "concise"});
     // `mcp_servers: {}` não desliga os do usuário: só o nome com enabled=false desliga.
     for key in ["mcp_servers", "plugins"] {
         let off: serde_json::Map<String, Value> = config[key].as_object()
@@ -95,6 +155,31 @@ pub fn thread_config(config: &Value) -> Value {
         result[key] = Value::Object(off);
     }
     result
+}
+
+/// O que o organizador faz agora; só vai à tela, nunca ao diário.
+#[derive(Clone, PartialEq, Debug)]
+pub enum OrganizerAction { Tool(String), Search(String), Command(String) }
+
+/// `item/started` de ferramenta, pesquisa ou comando → a ação; `item/completed` deles → `Some(None)`, acabou.
+pub fn organizer_action(method: &str, item: &Value) -> Option<Option<OrganizerAction>> {
+    let text = |key: &str| item[key].as_str().unwrap_or_default().to_owned();
+    let action = match item["type"].as_str()? {
+        "dynamicToolCall" => OrganizerAction::Tool(text("tool")),
+        "webSearch" => OrganizerAction::Search(text("query")),
+        "commandExecution" => OrganizerAction::Command(text("command")),
+        _ => return None,
+    };
+    match method { "item/started" => Some(Some(action)), "item/completed" => Some(None), _ => None }
+}
+
+/// Pedaço do resumo do raciocínio; parte nova do resumo vira quebra de linha.
+pub fn reasoning_delta(method: &str, params: &Value) -> Option<String> {
+    match method {
+        "item/reasoning/summaryTextDelta" => params["delta"].as_str().map(str::to_owned),
+        "item/reasoning/summaryPartAdded" => Some("\n".into()),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
@@ -106,7 +191,11 @@ pub enum FinishAction { Execute, WritePlan }
 pub enum ToolCall {
     ReadSession, Send(String), Hold(String), Discard, Unknown(String),
     UpdatePlan(String), ReadPlan, AskSession(String), FinishPlan { action: FinishAction }, SetMode(Mode), SwitchSession(String),
+    ListSessions, OpenSession(OpenRequest), CloseSession { name: String, confirmed: bool }, PairSessions(String, String), UnpairSession(String),
 }
+
+#[derive(Debug, PartialEq)]
+pub struct OpenRequest { pub folder: String, pub name: Option<String>, pub provider: &'static str, pub server: Option<String> }
 
 pub fn parse_tool(params: &Value) -> ToolCall {
     let name = params["tool"].as_str().unwrap_or_default();
@@ -126,6 +215,14 @@ pub fn parse_tool(params: &Value) -> ToolCall {
             _ => unknown(),
         },
         "switch_session" => arg("name").map_or_else(unknown, ToolCall::SwitchSession),
+        "list_sessions" => ToolCall::ListSessions,
+        "open_session" => {
+            let provider = match arg("provider").as_deref() { None | Some("claude") => "claude", Some("codex") => "codex", Some(_) => return unknown() };
+            arg("folder").map_or_else(unknown, |folder| ToolCall::OpenSession(OpenRequest { folder, name: arg("name"), provider, server: arg("server") }))
+        }
+        "close_session" => arg("name").map_or_else(unknown, |name| ToolCall::CloseSession { name, confirmed: params["arguments"]["confirmed"] == true }),
+        "pair_sessions" => match (arg("a"), arg("b")) { (Some(a), Some(b)) => ToolCall::PairSessions(a, b), _ => unknown() },
+        "unpair_session" => arg("name").map_or_else(unknown, ToolCall::UnpairSession),
         "set_mode" => match arg("mode").as_deref() {
             Some("planejar") => ToolCall::SetMode(Mode::Plan),
             Some("direto") => ToolCall::SetMode(Mode::Direct),
@@ -157,10 +254,13 @@ pub fn finish_request(path: &Path, action: FinishAction, inline: Option<&str>) -
 }
 
 /// A pasta que o organizador lê é fixa na thread: trocar de sessão com outra pasta exige avisá-lo.
-pub fn code_note(thread_cwd: Option<&Path>, now: Option<&Path>) -> Option<String> {
-    if thread_cwd == now { return None; }
-    Some(if now.is_some() { "A pasta de código que você pode ler é a da sessão anterior; não leia código para a sessão atual." }
-        else { "O código da sessão atual não está disponível aqui; não leia código." }.to_owned())
+/// Onde está o código da sessão na tela e onde o organizador pode gravar; vai no início e a cada troca de sessão.
+pub fn code_note(session: Option<&Path>, own: &Path) -> String {
+    let write = format!("Você só grava arquivos em {}; nunca tente gravar no projeto, peça à sessão.", own.display());
+    match session {
+        Some(path) => format!("O código da sessão está em {}; leia por caminho completo. {write}", path.display()),
+        None => format!("O código da sessão atual não está disponível nesta máquina; não leia código. {write}"),
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -169,6 +269,25 @@ pub enum FinishStep { Arm, Send }
 /// Duas etapas: a primeira chamada só arma; envia a segunda, da mesma escolha, em outro turno falado.
 pub fn finish_step(armed: Option<(FinishAction, &str)>, action: FinishAction, turn: &str) -> FinishStep {
     match armed { Some((a, t)) if a == action && t != turn => FinishStep::Send, _ => FinishStep::Arm }
+}
+
+/// Quanto vale o "sim" a uma ação destrutiva armada.
+pub const CONFIRM_WINDOW: Duration = Duration::from_secs(60);
+
+/// Ação destrutiva em duas chamadas: a primeira arma; só a segunda, do mesmo alvo, noutro turno falado e dentro de
+/// `CONFIRM_WINDOW`, executa. O turno diferente impede o organizador de confirmar sozinho sem ouvir o usuário.
+pub struct ConfirmGate<T> { armed: Option<(T, String, Instant)> }
+
+impl<T> Default for ConfirmGate<T> { fn default() -> Self { Self { armed: None } } }
+
+impl<T: PartialEq> ConfirmGate<T> {
+    /// `true` = executar; `false` = ficou armado (ou rearmado) e falta o sim do usuário.
+    pub fn check(&mut self, target: T, confirmed: bool, turn: &str, now: Instant) -> bool {
+        let ok = confirmed && self.armed.as_ref().is_some_and(|(t, armed_turn, at)|
+            *t == target && armed_turn != turn && now.saturating_duration_since(*at) < CONFIRM_WINDOW);
+        self.armed = if ok { None } else { Some((target, turn.to_owned(), now)) };
+        ok
+    }
 }
 
 /// Pergunta curta, numa linha só: o texto vira entrada do chat da sessão.
@@ -349,8 +468,45 @@ mod tests {
     }
 
     #[test]
-    fn announces_ten_tools() {
-        assert_eq!(tools().as_array().unwrap().len(), 10);
+    fn announces_fifteen_tools() {
+        let tools = tools();
+        assert_eq!(tools.as_array().unwrap().len(), 15);
+        let open = tools.as_array().unwrap().iter().find(|t| t["name"] == "open_session").unwrap();
+        assert_eq!(open["inputSchema"]["required"], json!(["folder"]), "nome, provider e máquina são opcionais");
+    }
+
+    #[test]
+    fn parses_session_tools() {
+        let call = |tool: &str, args: Value| parse_tool(&json!({"tool": tool, "arguments": args}));
+        assert!(matches!(call("list_sessions", json!({})), ToolCall::ListSessions));
+        assert!(matches!(call("open_session", json!({"folder": "hangar"})),
+            ToolCall::OpenSession(r) if r == OpenRequest { folder: "hangar".into(), name: None, provider: "claude", server: None }));
+        assert!(matches!(call("open_session", json!({"folder": "/p/x", "name": "x2", "provider": "codex", "server": "casa"})),
+            ToolCall::OpenSession(r) if r.provider == "codex" && r.name.as_deref() == Some("x2") && r.server.as_deref() == Some("casa")));
+        assert!(matches!(call("open_session", json!({"folder": "x", "provider": "pi"})), ToolCall::Unknown(_)));
+        assert!(matches!(call("open_session", json!({"folder": " "})), ToolCall::Unknown(_)));
+        assert!(matches!(call("close_session", json!({"name": "a"})), ToolCall::CloseSession { confirmed: false, .. }));
+        assert!(matches!(call("close_session", json!({"name": "a", "confirmed": true})), ToolCall::CloseSession { confirmed: true, .. }));
+        assert!(matches!(call("close_session", json!({"name": "a", "confirmed": "true"})), ToolCall::CloseSession { confirmed: false, .. }));
+        assert!(matches!(call("pair_sessions", json!({"a": "x", "b": "y"})), ToolCall::PairSessions(a, b) if a == "x" && b == "y"));
+        assert!(matches!(call("pair_sessions", json!({"a": "x"})), ToolCall::Unknown(_)));
+        assert!(matches!(call("unpair_session", json!({"name": "x"})), ToolCall::UnpairSession(n) if n == "x"));
+    }
+
+    #[test]
+    fn close_needs_armed_target_another_turn_and_the_window() {
+        let t0 = Instant::now();
+        let mut gate = ConfirmGate::default();
+        assert!(!gate.check("a", true, "t1", t0), "sim sem armar só arma");
+        assert!(!gate.check("a", true, "t1", t0), "mesmo turno não confirma");
+        assert!(gate.check("a", true, "t2", t0 + Duration::from_secs(5)));
+        assert!(!gate.check("a", true, "t3", t0 + Duration::from_secs(6)), "a confirmação é consumida");
+        let mut gate = ConfirmGate::default();
+        assert!(!gate.check("a", false, "t1", t0));
+        assert!(!gate.check("b", true, "t2", t0), "outro alvo rearma");
+        assert!(!gate.check("b", false, "t3", t0), "sem confirmed não fecha");
+        assert!(!gate.check("b", true, "t4", t0 + CONFIRM_WINDOW), "passou do prazo");
+        assert!(gate.check("b", true, "t5", t0 + CONFIRM_WINDOW + Duration::from_secs(1)), "o pedido vencido rearmou");
     }
 
     #[test]
@@ -385,12 +541,29 @@ mod tests {
     }
 
     #[test]
-    fn code_note_only_when_folder_differs() {
-        let (a, b) = (Path::new("/p/a"), Path::new("/p/b"));
-        assert!(code_note(Some(a), Some(a)).is_none());
-        assert!(code_note(None, None).is_none());
-        assert!(code_note(Some(a), Some(b)).unwrap().contains("anterior"));
-        assert!(code_note(Some(a), None).unwrap().contains("não está disponível"));
+    fn code_note_points_to_session_and_own_folder() {
+        let (session, own) = (Path::new("/p/a"), Path::new("/h/.hangar/voz/arquivos"));
+        let note = code_note(Some(session), own);
+        assert!(note.contains("/p/a") && note.contains("/h/.hangar/voz/arquivos"));
+        let none = code_note(None, own);
+        assert!(none.contains("não está disponível") && none.contains("/h/.hangar/voz/arquivos"));
+    }
+
+    #[test]
+    fn organizer_writes_only_in_own_folder_with_chosen_model_and_effort() {
+        let (own, session) = (Path::new("/h/.hangar/voz/arquivos"), Path::new("/p/a"));
+        let config = json!({"model": "gpt-config"});
+        let start = organizer_start(&config, own, Some(session), "ctx", Some("gpt-x"), "medium");
+        assert_eq!(start["sandbox"], json!("workspace-write"));
+        assert_eq!(start["cwd"], json!(own));
+        assert_eq!(start["model"], json!("gpt-x"));
+        assert_eq!(start["config"]["model_reasoning_effort"], json!("medium"));
+        assert!(start.get("writableRoots").is_none() && start["config"].get("sandbox_workspace_write").is_none());
+        let developer = start["developerInstructions"].as_str().unwrap();
+        assert!(developer.contains("/p/a") && developer.ends_with("ctx"));
+        // Sem escolha: o modelo do config.toml, como antes.
+        assert_eq!(organizer_start(&config, own, None, "", None, DEFAULT_EFFORT)["model"], json!("gpt-config"));
+        assert!(organizer_start(&json!({}), own, None, "", None, DEFAULT_EFFORT).get("model").is_none());
     }
 
     #[test]
@@ -524,6 +697,49 @@ mod tests {
     }
 
     #[test]
+    fn voice_prompt_delegates_session_actions_and_waits_for_confirmation() {
+        assert!(VOICE_PROMPT.contains("Trocar, abrir, fechar e parear sessão sempre vão ao organizador"));
+        assert!(VOICE_PROMPT.contains("'Agora estou na sessão X' é a confirmação"));
+    }
+
+    #[test]
+    fn direct_mode_sends_only_clear_instructions() {
+        assert!(ORGANIZER_PROMPT.contains("send_to_session só para uma instrução clara dirigida ao trabalho da sessão"));
+        assert!(ORGANIZER_PROMPT.contains("pensar em voz alta e ideias pela metade se respondem na conversa e nunca vão à sessão"));
+        assert!(ORGANIZER_PROMPT.contains("Na dúvida, pergunte 'mando isso para a sessão?' e espere"));
+    }
+
+    #[test]
+    fn organizer_actions_and_reasoning_from_notifications() {
+        let item = |kind: &str, extra: Value| { let mut v = extra; v["type"] = json!(kind); v };
+        assert_eq!(organizer_action("item/started", &item("dynamicToolCall", json!({"tool": "switch_session"}))),
+            Some(Some(OrganizerAction::Tool("switch_session".into()))));
+        assert_eq!(organizer_action("item/started", &item("webSearch", json!({"query": "rust gpui"}))),
+            Some(Some(OrganizerAction::Search("rust gpui".into()))));
+        assert_eq!(organizer_action("item/started", &item("commandExecution", json!({"command": "ls /p"}))),
+            Some(Some(OrganizerAction::Command("ls /p".into()))));
+        assert_eq!(organizer_action("item/completed", &item("commandExecution", json!({}))), Some(None), "acabou limpa");
+        assert_eq!(organizer_action("item/started", &item("agentMessage", json!({}))), None);
+        assert_eq!(reasoning_delta("item/reasoning/summaryTextDelta", &json!({"delta": "Lendo"})).as_deref(), Some("Lendo"));
+        assert_eq!(reasoning_delta("item/reasoning/summaryPartAdded", &json!({})).as_deref(), Some("\n"));
+        assert_eq!(reasoning_delta("item/reasoning/textDelta", &json!({"delta": "cru"})), None, "só o resumo aparece");
+        assert_eq!(thread_config(&json!({}), DEFAULT_EFFORT)["model_reasoning_summary"], json!("concise"));
+    }
+
+    #[test]
+    fn mode_switch_sends_only_what_changes() {
+        let pair = |model: Option<&str>, effort: &str| ModeModel { model: model.map(str::to_owned), effort: effort.to_owned() };
+        let (direct, plan) = (ModeModel::default(), pair(Some("gpt-big"), "high"));
+        assert_eq!(settings_update("t", &direct, &plan, Some("gpt-cfg")), Some(json!({"threadId": "t", "model": "gpt-big", "effort": "high"})));
+        assert_eq!(settings_update("t", &plan, &direct, Some("gpt-cfg")), Some(json!({"threadId": "t", "model": "gpt-cfg", "effort": "low"})),
+            "volta ao modelo do config pelo nome");
+        assert_eq!(settings_update("t", &direct, &pair(None, "high"), Some("gpt-cfg")), Some(json!({"threadId": "t", "effort": "high"})));
+        assert_eq!(settings_update("t", &plan, &direct, None), Some(json!({"threadId": "t", "effort": "low"})), "sem o nome do config o modelo fica");
+        assert_eq!(settings_update("t", &pair(Some("gpt-cfg"), "low"), &direct, Some("gpt-cfg")), None, "mesmo modelo resolvido não manda nada");
+        assert_eq!(settings_update("t", &direct, &direct, None), None);
+    }
+
+    #[test]
     fn spoken_input_extracts_utterance() {
         let text = "<realtime_delegation>\n<input>cria um botão azul</input>\n<transcript_delta>…</transcript_delta>\n</realtime_delegation>";
         assert_eq!(spoken_input(text), "cria um botão azul");
@@ -585,7 +801,7 @@ mod tests {
 
     #[test]
     fn config_disables_mcp_by_name() {
-        let config = thread_config(&json!({"mcp_servers": {"hangar": {}, "cloudflare": {}}, "plugins": {"ecc": {}}}));
+        let config = thread_config(&json!({"mcp_servers": {"hangar": {}, "cloudflare": {}}, "plugins": {"ecc": {}}}), DEFAULT_EFFORT);
         assert_eq!(config["mcp_servers"]["hangar"], json!({"enabled": false}));
         assert_eq!(config["plugins"]["ecc"], json!({"enabled": false}));
         assert_eq!(config["features.shell_tool"], json!(!cfg!(windows)));

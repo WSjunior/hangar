@@ -12,9 +12,12 @@ use regex::Regex;
 
 use super::capped::Capped;
 use crate::transcript::py::{is_space, py_re};
-use crate::transcript::{merged_history, HistoryRequest, Provider, TAIL_WINDOW};
+use crate::transcript::history::merged_history_capped;
+use crate::transcript::{HistoryRequest, Provider, TAIL_WINDOW};
 
 const HISTORY_LIMIT: usize = 8;
+// Mesmo teto do `DEEP_TAIL` dos links: cauda sem evento não pode fazer a lista reler o arquivo todo.
+const MAX_TAIL: u64 = 8 * 1024 * 1024;
 const MAX_CHARS: usize = 160;
 
 // archive.py:90-92
@@ -72,7 +75,7 @@ impl ReplyCache {
                     limit: Some(HISTORY_LIMIT),
                     tail_window: TAIL_WINDOW,
                 };
-                let events = match merged_history(&req) {
+                let events = match merged_history_capped(&req, MAX_TAIL) {
                     Ok(events) => events,
                     Err(error) => {
                         failures.push((row.name.clone(), error));
