@@ -813,13 +813,31 @@ fn live_attach_refusal_is_a_visible_problem_and_effort_refusal_stays_a_failure()
     assert!(effects.iter().any(|e|matches!(e,Effect::Reply { operation_id,disposition:Disposition::Rejected,.. } if operation_id == "boot")));
     assert_eq!(engine.view()["problema"],"codex_conversa_nao_abriu");
     assert!(engine.view()["problema_detalhe"].as_str().unwrap().contains("not loaded"));
+    assert!(effects.iter().any(|e|matches!(e,Effect::Diag { event:DiagEvent::CodexBootstrap,code } if code == "thread/resume")));
+}
 
-    let (mut engine,resume) = live_attach(json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p","effort":"max"}));
-    let effects = line(&mut engine,json!({"id":resume["id"],"error":{"code":-32600,"message":"no rollout found for thread id t1"}}),12.0);
-    let update = find_method(&frames(&effects),"thread/settings/update");
-    let effects = line(&mut engine,json!({"id":update["id"],"error":{"code":-32600,"message":"effort max not supported"}}),13.0);
+#[test]
+fn initialize_refusal_is_a_visible_problem() {
+    let mut engine = Engine::new(json!({"name":"s","thread_id":"t1","headless":true}),1,clock(10.0));
+    let id = frames(&engine.bootstrap(true,"boot".into()).unwrap())[0]["id"].clone();
+    let effects = line(&mut engine,json!({"id":id,"error":{"code":-32600,"message":"bad client"}}),11.0);
     assert!(effects.iter().any(|e|matches!(e,Effect::Reply { operation_id,disposition:Disposition::Rejected,.. } if operation_id == "boot")));
     assert_eq!(engine.view()["problema"],"codex_conversa_nao_abriu");
+}
+
+/// A vida anterior aplicou o esforço; religar no cano vivo não o reenvia (como o Python), nem com nem sem rollout.
+#[test]
+fn live_attach_does_not_resend_effort() {
+    let (mut engine,resume) = live_attach(json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p","effort":"max","async_during_load":[]}));
+    let effects = line(&mut engine,json!({"id":resume["id"],"error":{"code":-32600,"message":"no rollout found for thread id t1"}}),12.0);
+    assert!(frames(&effects).iter().all(|f|f["method"] != "thread/settings/update"));
+    assert_eq!(engine.control_view()["ready"],true);
+    assert!(engine.control_view()["async_during_load"].is_null());
+
+    let (mut engine,resume) = live_attach(json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p","effort":"max"}));
+    let effects = line(&mut engine,json!({"id":resume["id"],"result":{"thread":{"id":"t1","status":{"type":"idle"},"turns":[]},"model":"gpt-6"}}),12.0);
+    assert!(frames(&effects).iter().all(|f|f["method"] != "thread/settings/update"));
+    assert_eq!(engine.control_view()["ready"],true);
 }
 
 /// O Python recusa Fast sozinho enquanto o arquivo ainda tem a thread anterior: vai no patch da thread.

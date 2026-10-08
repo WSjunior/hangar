@@ -709,7 +709,8 @@ impl Engine {
             let operation_id = format!("cut-check:{}:{}",self.generation,self.counter);
             self.send(operation_id,self.thread_read(true),Some(json!({"kind":"cut_check"})),effects);
         }
-        if let Some(effort) = self.metadata["effort"].as_str().map(str::to_owned) {
+        // Cano vivo já tem o esforço que a vida anterior aplicou: como no Python, religar não o reenvia.
+        if let Some(effort) = self.metadata["effort"].as_str().filter(|_|self.fresh_process).map(str::to_owned) {
             let request = ClientRequest::ThreadSettingsUpdate(wire::ThreadSettingsUpdateParams { thread_id:self.thread_id.clone(),
                 effort:Some(Some(effort)),..Default::default() });
             self.send(format!("{parent}:effort"),request,Some(json!({"kind":"bootstrap_ready","parent":parent})),effects);
@@ -721,6 +722,7 @@ impl Engine {
         let Some(next) = rpc.continuation.as_ref().filter(|next|next["kind"] == "bootstrap_thread") else { return false };
         // Cano vivo com thread ainda sem turno: ela já está carregada nele, e o `resume` só a recusa por não ter rollout.
         if !self.fresh_process && rpc.method == "thread/resume" && message.contains("no rollout found") {
+            self.async_questions.hydrate(&self.thread_id,&json!({}));
             self.thread_opened(next["parent"].as_str().unwrap_or(""),effects);
             self.changed(effects,true);
             return true;
@@ -1044,7 +1046,7 @@ impl Engine {
             }
             let message = line["error"]["message"].as_str().unwrap_or("");
             if self.bootstrap_fallback(&rpc,message,effects) { return Ok(()); }
-            let transfer = !self.fresh_process || self.metadata["transfer_id"].as_str().is_some_and(|id|!id.is_empty());
+            let transfer = self.metadata["transfer_id"].as_str().is_some_and(|id|!id.is_empty());
             if let Some(parent) = rpc.continuation.as_ref().filter(|next|next["kind"] == "bootstrap_ready" && !transfer).and_then(|next|next["parent"].as_str()) {
                 // A conversa já está aberta: perder o nível escolhido é melhor que perder a sessão, mas aparece.
                 self.state.problema = Some("codex_esforco_nao_aplicado".into());

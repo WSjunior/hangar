@@ -77,3 +77,4 @@ de pedidos, rotas só do Codex), contrato 38. Falta e fica para depois:
 - **Contrato 39** nesta branch: a junção reconfere o próximo número livre na `main`.
 - **Renomear sessão Codex sem terminal** com chat aberto: o canal do feed é por nome e o hub
   também; conferir no uso real que o rename fecha e reabre os dois.
+- **Subida do Codex:** pedido da subida que estoura o prazo vira `Unknown` sem problema na sessão, e o erro que chega depois manda uma segunda resposta final.
