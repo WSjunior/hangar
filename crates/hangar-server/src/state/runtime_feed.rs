@@ -1,4 +1,4 @@
-//! Estado ao vivo do Codex sem terminal: o hub publica o último valor que o ator escreveu no canal
+//! Estado ao vivo de Claude e Codex sem terminal: o hub publica o último valor que o ator escreveu no canal
 //! em processo (`RuntimeRegistry::live`), coalescido, no lugar do `Monitor` e sem passar pelo Python.
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -152,7 +152,7 @@ pub async fn guarded(hub: Weak<Hub>, run: impl std::future::Future<Output = ()>,
         return;
     }
     let Some(hub) = hub.upgrade() else { return };
-    tracing::error!(session = hub.name.as_str(), code = "state_feed_panic", "estado: feed do Codex caiu");
+    tracing::error!(session = hub.name.as_str(), code = "state_feed_panic", "estado: feed do runtime caiu");
     on_panic(&hub.name);
     let state = feed_problem(&hub.name, "state_feed_failed", "o estado da sessão caiu; volta ao reabrir o chat");
     if let Ok(data) = serde_json::to_string(&state) {
@@ -316,6 +316,55 @@ mod tests {
         assert!(of(&got, "suggest").is_empty());
         assert_eq!(of(&got, "pensamento").last().unwrap().2, json!({"text": "pensa"}));
         assert_eq!(of(&got, "ferramenta").last().unwrap().2, json!({"text": "{}"}));
+    }
+
+    fn claude_fixture() -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx();
+        let binding = Binding { provider: Provider::ClaudeHeadless, jsonl: dir.path().join("sid.jsonl"), key: "sid".into(), headless: false };
+        let lease = ctx.hubs.acquire("s", binding, &ctx);
+        Fixture { _dir: dir, lease, published: Arc::default() }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn claude_headless_publishes_the_actor_view() {
+        let f = claude_fixture();
+        let mut rx = f.lease.hub.tx.subscribe();
+        let question = json!({"questions": [{"question": "Qual?"}]});
+        let mut asking = live("awaiting_input");
+        asking.public_state["codex_question"] = question.clone();
+        let (_tx, live_rx) = channel(Some(LiveState { preview: "texto".into(), thinking: "pensa".into(), tool: "{}".into(), ..asking }));
+        let _feed = spawn(&f, Some(live_rx));
+        let got = collect(&mut rx, Duration::from_millis(50)).await;
+        assert_eq!(of(&got, "ask_question")[0].2, question);
+        assert_eq!(of(&got, "state")[0].2["state"], "awaiting_input");
+        assert_eq!(of(&got, "preview")[0].2["text"], "texto");
+        assert_eq!(of(&got, "pensamento")[0].2, json!({"text": "pensa"}));
+        assert_eq!(of(&got, "ferramenta")[0].2, json!({"text": "{}"}));
+        assert!(of(&got, "suggest").is_empty());
+        assert_eq!(f.published.get("s", Some("sid")).map(|e| e.state.clone()).as_deref(), Some("awaiting_input"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn claude_turn_reopened_mid_stream_is_working_until_result() {
+        // Rust reiniciado no meio de um turno: a vista do motor reaberto fica `working` até o `result`.
+        use crate::runtime::claude::ClaudeEngine;
+        use crate::runtime::protocol::{ClockSample, EngineInput};
+        let clock = |s: f64| ClockSample { monotonic_s: s, epoch_s: 1_800_000_000.0 + s };
+        let mut engine = ClaudeEngine::new(json!({"name": "s", "session_id": "sid", "initialized": true}), 1, clock(10.0));
+        let view = |engine: &ClaudeEngine| LiveState { public_state: engine.view()["public_state"].clone(), ..Default::default() };
+        let f = claude_fixture();
+        let mut rx = f.lease.hub.tx.subscribe();
+        let (tx, live_rx) = channel(Some(view(&engine)));
+        let _feed = spawn(&f, Some(live_rx));
+        assert_eq!(of(&collect(&mut rx, Duration::from_millis(50)).await, "state")[0].2["state"], "idle");
+        let delta = json!({"type": "stream_event", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "meio"}}});
+        engine.apply(EngineInput::Line(delta), clock(11.0)).unwrap();
+        tx.send_replace(Some(Arc::new(view(&engine))));
+        assert_eq!(of(&collect(&mut rx, Duration::from_millis(300)).await, "state")[0].2["state"], "working");
+        engine.apply(EngineInput::Line(json!({"type": "result", "subtype": "success"})), clock(20.0)).unwrap();
+        tx.send_replace(Some(Arc::new(view(&engine))));
+        assert_eq!(of(&collect(&mut rx, Duration::from_millis(300)).await, "state").last().unwrap().2["state"], "idle");
     }
 
     #[tokio::test(start_paused = true)]

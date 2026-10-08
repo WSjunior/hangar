@@ -414,6 +414,7 @@ def esquecer(name: str) -> None:
         _cliques.pop(name, None)
     _eventos.pop(name, None)
     _band_wakers.pop(name, None)
+    _suggest_wakers.pop(name, None)
     _toast_wakers.pop(name, None)
     _press_wakers.pop(name, None)
     for chave in [c for c in list(_recusas) if c[0] == name]:
@@ -539,6 +540,7 @@ _VAZIA_JSON = json.dumps({"above": None, "panes": []})
 # Guardado com o loop que o criou: Event usado em outro loop levanta RuntimeError.
 _band_wakers: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Event]] = {}
 _press_wakers: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Event]] = {}
+_suggest_wakers: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Event]] = {}
 
 
 def _waker(tabela: dict, name: str) -> asyncio.Event:
@@ -615,6 +617,12 @@ async def esperar_faixa(name: str, vista: int, timeout: float) -> int:
     """Dorme até a faixa sair da versão `vista`, ou até `timeout`; devolve a versão atual."""
     await _esperar_ate(_band_wakers, name, lambda: band(name)[0] != vista, timeout)
     return band(name)[0]
+
+
+async def wait_suggestion(name: str, seen: str, timeout: float) -> str:
+    """Dorme até a sugestão sair de `seen`, ou até `timeout`; devolve a atual."""
+    await _esperar_ate(_suggest_wakers, name, lambda: sugestao(name) != seen, timeout)
+    return sugestao(name)
 
 
 # Avisos (`$.ui.toast`) dos mods, por sessão: (número, quando vence, dado). O terminal os desenha por
@@ -1220,6 +1228,7 @@ async def suggest(body: SuggestBody):
         # `mostrada=False` é proposta que a TUI não pôs na caixa (diálogo aberto, headless): mostrar
         # no app o que nem o terminal mostrou seria inventar estado.
         _sugestoes[body.sessao] = body.texto if body.mostrada else ""
+    _acordar_todos(_suggest_wakers, body.sessao)
     state_facts.notify(body.sessao)
     return {"ok": True}
 
@@ -1575,6 +1584,7 @@ async def state(body: StateBody, request: Request):
             # que o engine não dá.
             _sugestoes.pop(body.sessao, None)
     _acordar(body.sessao)
+    _acordar_todos(_suggest_wakers, body.sessao)
     state_facts.notify(body.sessao, state_facts.FORCE)
     _log.debug("plugin estado sessao=%s estado=%s motivo=%s", body.sessao, body.estado, body.motivo)
     return {"ok": True}

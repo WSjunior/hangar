@@ -42,19 +42,26 @@ pub struct Binding {
     pub provider: Provider,
     pub jsonl: PathBuf,
     pub key: String,
-    /// Codex sem terminal: o estado é do feed do runtime, não do Python.
+    /// Codex sem terminal: o estado é do feed do runtime, não do Python. O Claude sem terminal já vem
+    /// no provider (`ClaudeHeadless`).
     pub headless: bool,
 }
 
 impl Binding {
     /// Eventos do estado que o Rust publica para esta ligação: os quatro do `Monitor` (Claude com
-    /// terminal), os seis do feed (Codex sem terminal) ou nenhum (o Python observa).
+    /// terminal), os do feed (Claude e Codex sem terminal) ou nenhum (o Python observa).
     pub fn state_events(&self) -> Option<&'static [&'static str]> {
         match (self.provider, self.headless) {
-            (Provider::Claude, _) => Some(&FEED_EVENTS[..4]),
+            (Provider::Claude, _) => Some(&STATE_EVENTS),
+            (Provider::ClaudeHeadless, _) => Some(&CLAUDE_HEADLESS_EVENTS),
             (Provider::Codex, true) => Some(&FEED_EVENTS),
             _ => None,
         }
+    }
+
+    /// O estado desta ligação sai do feed do runtime (o ator escreve no canal em processo).
+    pub fn runtime_feed(&self) -> bool {
+        matches!((self.provider, self.headless), (Provider::ClaudeHeadless, _) | (Provider::Codex, true))
     }
 
     /// Mesmo critério de `InternalInfo::history_request`: provider lido pelo Rust e com jsonl.
@@ -108,6 +115,8 @@ pub type SpawnMonitor = Arc<dyn Fn(&Arc<Hub>) -> tokio::task::JoinHandle<()> + S
 const STATE_EVENTS: [&str; 4] = ["state", "preview", "ask_question", "suggest"];
 /// Os seis do feed do Codex sem terminal: os quatro mais pensamento e ferramenta em voo.
 const FEED_EVENTS: [&str; 6] = ["state", "preview", "ask_question", "suggest", "pensamento", "ferramenta"];
+/// Os do feed do Claude sem terminal: a sugestão do plugin ainda sai do Python.
+const CLAUDE_HEADLESS_EVENTS: [&str; 5] = ["state", "preview", "ask_question", "pensamento", "ferramenta"];
 
 #[derive(Clone)]
 pub struct SideCtx {
@@ -213,7 +222,7 @@ pub struct Hub {
     bound: Mutex<Option<Bound>>,
     cache: Mutex<SideCache>,
     side: Mutex<Option<tokio::task::AbortHandle>>,
-    /// Dono do estado (o `Monitor` de Claude com terminal ou o feed de Codex sem terminal), o leitor
+    /// Dono do estado (o `Monitor` de Claude com terminal ou o feed de quem não tem terminal), o leitor
     /// das respostas gravadas e os eventos que esse dono publica.
     pub(crate) monitor: Mutex<Option<(tokio::task::AbortHandle, tokio::task::AbortHandle, &'static [&'static str])>>,
     /// Última resposta gravada no transcript desta ligação, normalizada (`preview::norm`).
@@ -277,7 +286,7 @@ impl Hub {
         hub
     }
 
-    /// Claude com terminal ganha o `Monitor` e Codex sem terminal o feed (um por hub); a ligação que
+    /// Claude com terminal ganha o `Monitor` e Claude ou Codex sem terminal o feed (um por hub); a ligação que
     /// troca de dono (`/modo-execucao`) troca a tarefa, e sem dono ela sai. Dono que acabou (sessão
     /// morta, pânico) volta quando alguém religa ou assina de novo.
     fn ensure_monitor(self: &Arc<Self>) {
@@ -679,7 +688,7 @@ async fn side_once(hub: &Arc<Hub>, attempt: &mut u32) -> SideEnd {
 }
 
 /// Evento da conexão interna (fora `info` e `ping`). Com o dono do estado vivo, os eventos dele
-/// (quatro do `Monitor`, seis do feed) são só dele: vindo do Python, a troca vazou; sai do canal e
+/// (`Binding::state_events`) são só dele: vindo do Python, a troca vazou; sai do canal e
 /// vai ao log uma vez por sessão. `true`: repassado aos aparelhos (ou igual ao último).
 fn on_side_event(hub: &Arc<Hub>, event: &str, data: &str) -> bool {
     if hub.owned_events().contains(&event) {
@@ -744,7 +753,7 @@ async fn seed_committed(hub: &Weak<Hub>, only_if_empty: bool) {
 }
 
 /// `GET /__hangar_server/state/{name}/events` na porta privada: o Python lê daqui `state`,
-/// `preview`, `ask_question` e `suggest` (e, no Codex sem terminal, `pensamento` e `ferramenta`) de
+/// `preview`, `ask_question` e `suggest` (sem terminal, também `pensamento` e `ferramenta`; no Claude, sem `suggest`) de
 /// quem entrou pelas portas dele (convite, Connect). Conta
 /// como assinante do hub, então liga o `Monitor` igual a um aparelho do dono.
 pub async fn private_events(
@@ -761,7 +770,7 @@ pub async fn private_events(
         st.diag.report("rust.state_channel_failed", &name, "internal_info", "o backend não devolveu os dados da sessão");
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    // Só Claude com terminal e Codex sem terminal têm o estado aqui; o resto o Python observa.
+    // Só Claude (com ou sem terminal) e Codex sem terminal têm o estado aqui; o resto o Python observa.
     let Some(binding) = info.as_ref().and_then(Binding::from_info).filter(|b| b.state_events().is_some()) else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -1101,6 +1110,43 @@ mod tests {
         assert_eq!(lease.hub.python_leaks.load(Ordering::SeqCst), 1);
     }
 
+    #[tokio::test]
+    async fn python_state_for_claude_headless_dropped_once() {
+        // Claude sem terminal: o feed é dono de cinco; a sugestão segue do Python por enquanto.
+        let dir = tempfile::tempdir().unwrap();
+        let (spawn, count) = fake_feeds();
+        let ctx = SideCtx { monitors: Some(spawn), ..idle_ctx() };
+        let binding = Binding { provider: Provider::ClaudeHeadless, jsonl: dir.path().join("h.jsonl"), key: "h".into(), headless: false };
+        let lease = ctx.hubs.acquire("h", binding, &ctx);
+        assert_eq!(count.load(Ordering::SeqCst), 1, "o hub liga o feed");
+        for event in ["state", "preview", "ask_question", "pensamento", "ferramenta"] {
+            assert!(!on_side_event(&lease.hub, event, r#"{"text":""}"#), "{event} do Python para Claude sem terminal sai");
+        }
+        assert!(on_side_event(&lease.hub, "suggest", r#"{"text":"y"}"#), "a sugestão continua do Python");
+        assert!(on_side_event(&lease.hub, "stats", "{}"));
+        assert_eq!(lease.hub.python_leaks.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn claude_mode_flip_swaps_monitor_and_feed_without_gap() {
+        // `/modo-execucao` no Claude: o provider troca no `info`, o hub religa e o dono troca na hora.
+        let dir = tempfile::tempdir().unwrap();
+        let (spawn, count) = fake_feeds();
+        let ctx = SideCtx { monitors: Some(spawn), ..idle_ctx() };
+        let binding = |provider| Binding { provider, jsonl: dir.path().join("a.jsonl"), key: "a".into(), headless: false };
+        let lease = ctx.hubs.acquire("s", binding(Provider::Claude), &ctx);
+        assert_eq!(lease.hub.owned_events(), &STATE_EVENTS[..], "com terminal: o Monitor");
+        let _again = ctx.hubs.acquire("s", binding(Provider::ClaudeHeadless), &ctx);
+        assert_eq!(lease.hub.owned_events(), &CLAUDE_HEADLESS_EVENTS[..], "sem terminal: o feed, já no rebind");
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+        assert!(!on_side_event(&lease.hub, "state", r#"{"state":"idle"}"#), "nunca os dois donos");
+        assert!(on_side_event(&lease.hub, "suggest", r#"{"text":""}"#));
+        lease.hub.rebind(binding(Provider::Claude));
+        assert_eq!(lease.hub.owned_events(), &STATE_EVENTS[..], "de volta ao terminal: o Monitor");
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+        assert!(!on_side_event(&lease.hub, "suggest", r#"{"text":"x"}"#));
+    }
+
     /// Fábrica que conta e liga um feed parado (só ocupa a vaga do dono do estado).
     fn fake_feeds() -> (SpawnMonitor, Arc<AtomicU32>) {
         let count = Arc::new(AtomicU32::new(0));
@@ -1163,6 +1209,12 @@ mod tests {
         assert_eq!(codex.state_events(), Some(&six[..]));
         assert_eq!(claude.state_events(), Some(&six[..4]), "Claude continua com os quatro");
         assert_eq!(terminal.state_events(), None, "Codex com terminal o Python observa");
+        let headless = Binding { provider: Provider::ClaudeHeadless, ..claude.clone() };
+        let five = ["state", "preview", "ask_question", "pensamento", "ferramenta"];
+        assert_eq!(headless.state_events(), Some(&five[..]), "Claude sem terminal: o feed, sem a sugestão");
+        assert_eq!(Binding { headless: true, ..headless.clone() }.state_events(), Some(&five[..]));
+        assert!(codex.runtime_feed() && headless.runtime_feed());
+        assert!(!claude.runtime_feed() && !terminal.runtime_feed());
         for (event, pass) in six.iter().map(|e| (*e, true)).chain([("stats", false), ("message", false)]) {
             assert_eq!(state_frame(&sse_frame(event, "{}", None), &six), pass, "{event}");
         }

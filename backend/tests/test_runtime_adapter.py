@@ -710,27 +710,3 @@ def test_read_rate_limits_returns_the_snapshot_like_the_python_adapter(monkeypat
         return reply
     monkeypatch.setattr(RuntimeAdapter, "control", control)
     assert asyncio.run(RuntimeAdapter("codex").dispatch("read_rate_limits", "session", {})) == expected
-
-
-@pytest.mark.parametrize("provider,fed", [("codex", False), ("claude", True)])
-def test_push_channels_feeds_python_sources_only_for_claude(monkeypatch, provider, fed):
-    # Codex sem terminal: a prévia é do feed do hub do Rust; o Python não a reenvia a ninguém.
-    from app.adapters import preview_push
-    pushed = []
-
-    class _Fonte:
-        def __init__(self, name):
-            self.name = name
-
-        async def push(self, text):
-            pushed.append((self.name, text))
-
-    monkeypatch.setattr(preview_push.PushPreviewSource, "get", classmethod(lambda cls, name: _Fonte(name)))
-    monkeypatch.setattr(preview_push, "fonte_pensamento", lambda name: _Fonte(f"{name}#pensamento"))
-    monkeypatch.setattr(preview_push, "fonte_ferramenta", lambda name: _Fonte(f"{name}#ferramenta"))
-    slot = SimpleNamespace(binding=SimpleNamespace(name="session", provider=provider, headless=True),
-        view={"channels":{channel:{"text":"oi"} for channel in ("preview", "thinking", "tool")}})
-    asyncio.run(runtime_coordinator.RuntimeCoordinator._push_channels(None, slot))
-    assert bool(pushed) is fed
-    if fed:
-        assert sorted(name for name, _ in pushed) == ["session", "session#ferramenta", "session#pensamento"]

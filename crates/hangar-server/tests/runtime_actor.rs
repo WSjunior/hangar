@@ -884,7 +884,7 @@ async fn codex_view_and_actor_error_reach_live() {
 }
 
 #[tokio::test]
-async fn claude_headless_preview_still_on_events() {
+async fn claude_headless_view_and_preview_go_to_live_not_to_events() {
     let dir = tempfile::tempdir().unwrap();
     let (cano,server) = claude_cano(vec![json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"oi"}}})]).await;
     let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
@@ -895,16 +895,18 @@ async fn claude_headless_preview_still_on_events() {
     let lease = acquire_lease(&target.lease_path).unwrap();
     let store = Store::open(&target.state_path,&target.projection_dir,State::new("key",1,"session",vec![])).unwrap();
     let (events,mut rx) = tokio::sync::broadcast::channel(64);
-    let (live,live_rx) = tokio::sync::watch::channel(None);
+    let (live,mut live_rx) = tokio::sync::watch::channel(None);
     let engine = RuntimeEngine::new("claude",target.metadata.clone(),1,ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 }).unwrap()
         .with_publisher(events).with_live(live);
     let connection = cano::connect(&target.binding).await.unwrap();
     let handle = RuntimeActor::spawn(target,QueueActor::start(store,lease),connection,engine);
-    let preview = tokio::time::timeout(std::time::Duration::from_secs(5),async {
-        loop { let event = rx.recv().await.unwrap(); if event.channel == "preview" { return event; } }
-    }).await.expect("prévia do Claude sem terminal segue no events");
-    assert_eq!(preview.data["text"],"oi");
-    assert!(live_rx.borrow().is_none(),"o canal em processo é só do Codex");
+    // Turno que a CLI já tocava (reabertura): a vista sai `working` junto com a prévia.
+    live_until(&mut live_rx,"prévia do Claude sem terminal no canal em processo",
+        |s|s.preview == "oi" && s.public_state["state"] == "working").await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    while let Ok(event) = rx.try_recv() {
+        assert!(!["preview","thinking","tool"].contains(&event.channel.as_str()),"prévia foi ao events: {}",event.channel);
+    }
     handle.stop().await.unwrap();
     server.await.unwrap();
 }
