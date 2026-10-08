@@ -2661,7 +2661,7 @@ class SessionRegistry:
         service_tier = _claude_service_tier(meta.get("engine"), model, meta.get("service_tier"))
         argv = ["claude", "--resume" if resume else "--session-id", sid] + model_args.args_de(
             "claude", model, meta.get("effort"), meta.get("permission_mode"))
-        argv = session_customizations.apply_settings(argv, meta.get("claude_settings"), cwd=meta["cwd"])
+        argv = session_customizations.apply_settings(argv, meta.get("claude_settings"), cwd=meta.get("cwd"))
         cmd = tmux.join_cmd(argv)
         if meta.get("engine"):
             from app import engines

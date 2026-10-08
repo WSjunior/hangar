@@ -224,7 +224,8 @@ def test_pane_aberto_no_shell_le_conta_e_escolhas_do_claude_filho(reg, tmp_path,
     monkeypatch.setattr(R, "agente_do_pane", lambda pid, children=None: ("claude", 1000))
     monkeypatch.setattr(R, "_config_dir_of", so_filho(tmp_path / ".claude-b"))
     monkeypatch.setattr(R.procinfo, "_model_of", lambda pid: ("sonnet", "high") if pid == 1000 else (None, None))
-    monkeypatch.setattr(R.procinfo, "_env_var_of", so_filho("haiku"))
+    monkeypatch.setattr(R.procinfo, "_env_var_of",
+                        lambda pid, key: "haiku" if pid == 1000 and key == "CLAUDE_CODE_SUBAGENT_MODEL" else None)
     meta = reg.para_headless("t1", "plan")
     assert meta["config_dir"] == str(tmp_path / ".claude-b")
     assert (meta["model"], meta["effort"], meta["subagent_model"]) == ("sonnet", "high", "haiku")

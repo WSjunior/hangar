@@ -344,7 +344,9 @@ impl NewSession {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{CatalogRow, CustomizationContext, CustomizationSelection, is_customization_eligible};
+    use crate::api::dto::ClaudeCustomizations;
+    use serde_json::json;
 
     fn context(machine: &str, config: Option<&str>, cwd: &str) -> CustomizationContext {
         CustomizationContext { machine: machine.into(), config: config.map(str::to_owned), cwd: cwd.into() }
