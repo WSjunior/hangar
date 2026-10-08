@@ -111,10 +111,7 @@ pub(super) fn codex_control(msg: &str) -> (StatusCode, Value) { (StatusCode::CON
 /// recusa é `erro_codex_controle`.
 pub fn steer_headless(with_text: bool, codex: bool, control: &Result<RuntimeReply, RuntimeError>) -> (StatusCode, Value) {
     let answer = steer_headless_claude(with_text, control);
-    if codex && answer.0 != StatusCode::OK {
-        super::codex::log_outcome(None, "steer", control, "orientação do Codex não aceita; a rota responde 409 erro_codex_controle");
-        return codex_control(MSG_CODEX_CONTROL);
-    }
+    if codex && answer.0 != StatusCode::OK { return codex_control(MSG_CODEX_CONTROL); }
     answer
 }
 
@@ -253,7 +250,11 @@ pub async fn steer(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
                 Some(text) => (OperationKind::Steer, json!({"text": text, "turn_id": null})),
                 None => (OperationKind::SteerQueue, json!({"entry_id": null})),
             };
-            steer_headless(text.is_some(), ctx.target.provider == "codex", &headless.command(RuntimeCommand { operation_id, kind, payload }).await)
+            let sent = headless.command(RuntimeCommand { operation_id, kind, payload }).await;
+            let codex = ctx.target.provider == "codex";
+            let result = steer_headless(text.is_some(), codex, &sent);
+            if codex && result.0 != StatusCode::OK { super::codex::log_outcome(&ctx.name, "steer", &sent, "orientação do Codex não aceita; a rota responde 409 erro_codex_controle"); }
+            result
         }
     };
     answer(&ctx, result)

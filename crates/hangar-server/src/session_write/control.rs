@@ -156,10 +156,7 @@ pub fn interrupt_headless_answer(codex: bool, sent: &Result<RuntimeReply, Runtim
         return match sent {
             Ok(reply) if reply.disposition == Disposition::Accepted && reply.payload["interrupted"] == false => codex_control(MSG_CODEX_NO_TURN),
             Ok(reply) if reply.disposition == Disposition::Accepted => ok(),
-            _ => {
-                super::codex::log_outcome(None, "interrupt", sent, "interrupção do Codex não confirmada; a rota responde 409 erro_codex_controle");
-                codex_control(MSG_CODEX_CONTROL)
-            }
+            _ => codex_control(MSG_CODEX_CONTROL),
         };
     }
     let reply = match sent {
@@ -335,7 +332,12 @@ pub async fn interrupt(State(st): State<Arc<AppState>>, ConnectInfo(peer): Conne
                 interrupted
             }
         },
-        headless => interrupt_headless_answer(ctx.target.provider == "codex", &headless.command(RuntimeCommand { operation_id, kind: OperationKind::Interrupt, payload: json!({}) }).await),
+        headless => {
+            let sent = headless.command(RuntimeCommand { operation_id, kind: OperationKind::Interrupt, payload: json!({}) }).await;
+            let codex = ctx.target.provider == "codex";
+            if codex { super::codex::log_outcome(&ctx.name, "interrupt", &sent, "interrupção do Codex não confirmada; a rota responde 409 erro_codex_controle"); }
+            interrupt_headless_answer(codex, &sent)
+        }
     };
     answer(&ctx, result)
 }

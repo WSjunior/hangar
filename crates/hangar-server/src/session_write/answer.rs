@@ -284,7 +284,6 @@ pub fn headless_answer(codex: bool, sent: &Result<RuntimeReply, RuntimeError>) -
     let invalid = || (StatusCode::CONFLICT, detail_body("erro_codex_resposta_invalida", MSG_HEADLESS_INVALID, json!({})));
     let unsent = || (StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_codex_resposta_envio",
         if codex { MSG_CODEX_SEND } else { MSG_HEADLESS_SEND }, json!({})));
-    if codex { super::codex::log_outcome(None, "answer", sent, "resposta da pergunta do Codex não aceita"); }
     match sent {
         Err(error) if error.code == ACTOR_REFUSAL && !codex => invalid(),
         Err(_) => unsent(),
@@ -373,7 +372,12 @@ pub async fn answer(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
         EntryHandle::Terminal { target, handle } => terminal(&ctx, &body, target, handle).await,
         // Sem pergunta pendente de referência, o Python decide o que `request_id` ausente significa.
         _ if relays_headless(&body) => return relay(ctx, bytes).await,
-        headless => headless_answer(ctx.target.provider == "codex", &headless.command(RuntimeCommand { operation_id: random_hex(16), kind: OperationKind::AnswerQuestions, payload: headless_command(&body) }).await),
+        headless => {
+            let sent = headless.command(RuntimeCommand { operation_id: random_hex(16), kind: OperationKind::AnswerQuestions, payload: headless_command(&body) }).await;
+            let codex = ctx.target.provider == "codex";
+            if codex { super::codex::log_outcome(&ctx.name, "answer", &sent, "resposta da pergunta do Codex não aceita"); }
+            headless_answer(codex, &sent)
+        }
     };
     respond(&ctx, result)
 }
