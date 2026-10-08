@@ -1,0 +1,228 @@
+//! Aplica os planos de `local.rs` sob um lock por processo, restaurando o estado anterior quando
+//! a escrita falha no meio. Só disco: nada aqui fala com outra máquina nem entrega recado.
+use super::local::{self, JoinInput, JoinRefusal, Snapshot};
+use super::model::Sidecar;
+use super::store::{PairDir, StoreError};
+use std::collections::{BTreeMap, hash_map::RandomState};
+use std::future::Future;
+use std::hash::{BuildHasher, Hasher};
+use std::pin::Pin;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrqPhase { Live, Ended, NotStarted, Unknown }
+
+/// Fatos da orquestração, que moram no Python.
+pub trait OrqFacts: Send + Sync {
+    /// Falha em descobrir = `Unknown`.
+    fn phase<'a>(&'a self, gid: &'a str) -> BoxFuture<'a, OrqPhase>;
+    /// `Err` = texto do conflito.
+    fn promote<'a>(&'a self, name: &'a str, gid: &'a str) -> BoxFuture<'a, Result<(), String>>;
+}
+
+#[derive(Debug)]
+pub enum GroupError { Refused(JoinRefusal), Orq(String), Store(StoreError) }
+impl From<StoreError> for GroupError { fn from(e: StoreError) -> Self { GroupError::Store(e) } }
+impl std::fmt::Display for GroupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GroupError::Refused(r) => write!(f, "refused: {r:?}"),
+            GroupError::Orq(text) => write!(f, "orq: {text}"),
+            GroupError::Store(e) => write!(f, "{e}"),
+        }
+    }
+}
+impl std::error::Error for GroupError {}
+
+pub struct JoinOwned {
+    pub name: String,
+    pub others: Vec<String>,
+    pub task: String,
+    pub replace_task: bool,
+    pub harness: BTreeMap<String, String>,
+    pub orq: bool,
+}
+
+pub struct JoinOutcome {
+    pub members: Vec<String>,
+    pub gid: String,
+    pub task: String,
+    pub orq: bool,
+    /// Membros locais que estavam soltos: só eles recebem o protocolo.
+    pub newcomers: Vec<String>,
+    pub before: Snapshot,
+}
+
+pub struct GroupService {
+    dir: Arc<PairDir>,
+    lock: Mutex<()>,
+    orq: Arc<dyn OrqFacts>,
+    server_id: String,
+}
+
+impl GroupService {
+    pub fn new(dir: PairDir, orq: Arc<dyn OrqFacts>, server_id: String) -> Self {
+        Self { dir: Arc::new(dir), lock: Mutex::new(()), orq, server_id }
+    }
+
+    pub fn server_id(&self) -> &str { &self.server_id }
+
+    pub async fn join(&self, input: JoinOwned) -> Result<JoinOutcome, GroupError> {
+        let _guard = self.lock.lock().await;
+        let dir = self.dir.clone();
+        let name = input.name.clone();
+        let plan = blocking(move || -> Result<local::JoinPlan, GroupError> {
+            let read = reader(&dir);
+            let join = JoinInput { name: &input.name, others: &input.others, task: &input.task, replace_task: input.replace_task, harness: &input.harness, orq: input.orq };
+            let plan = local::plan_join(&read, &join, &fresh_gid).map_err(GroupError::Refused)?;
+            for loser in &plan.merged { dir.merge_contract(loser, &plan.gid); }
+            if let Err(e) = apply(&dir, &[], &plan.writes) {
+                restore_logged(&dir, &plan.before);
+                return Err(e.into());
+            }
+            Ok(plan)
+        }).await??;
+        // Promover sob o mesmo lock: um join concorrente não enxerga o grupo meio configurado.
+        if plan.orq && plan.new_gid && let Err(conflict) = self.orq.promote(&name, &plan.gid).await {
+            self.restore_blocking(plan.before.clone()).await;
+            return Err(GroupError::Orq(conflict));
+        }
+        let newcomers = plan.members.iter().filter(|m| matches!(plan.before.get(*m), Some(None))).cloned().collect();
+        Ok(JoinOutcome { members: plan.members, gid: plan.gid, task: plan.task, orq: plan.orq, newcomers, before: plan.before })
+    }
+
+    /// Devolve os ex-companheiros. O contrato é arquivado depois de soltar o lock: faxina não
+    /// desfaz uma saída que já valeu.
+    pub async fn leave(&self, name: &str) -> Result<Vec<String>, GroupError> {
+        let (peers, archive) = {
+            let _guard = self.lock.lock().await;
+            let dir = self.dir.clone();
+            let owner = name.to_owned();
+            // A fase só interessa a sidecar `orq`; `Live` e `Unknown` contam como viva.
+            let link = blocking({ let (dir, owner) = (dir.clone(), owner.clone()); move || reader(&dir)(&owner) }).await?;
+            let alive = match link {
+                Some(s) if s.orq => matches!(self.orq.phase(&s.gid).await, OrqPhase::Live | OrqPhase::Unknown),
+                _ => false,
+            };
+            blocking(move || -> Result<(Vec<String>, Option<String>), GroupError> {
+                let Some(plan) = local::plan_leave(&reader(&dir), &owner, alive) else { return Ok((Vec::new(), None)) };
+                if let Err(e) = apply(&dir, &plan.clears, &plan.writes) {
+                    restore_logged(&dir, &plan.before);
+                    return Err(GroupError::from(e));
+                }
+                Ok((plan.ex_peers, plan.archive))
+            }).await??
+        };
+        if let Some(gid) = archive {
+            let dir = self.dir.clone();
+            blocking(move || dir.archive_contracts(&gid)).await?;
+        }
+        Ok(peers)
+    }
+
+    pub async fn rename(&self, old: &str, new: &str) -> Result<(), GroupError> {
+        let _guard = self.lock.lock().await;
+        let (dir, old, new) = (self.dir.clone(), old.to_owned(), new.to_owned());
+        blocking(move || {
+            let read = reader(&dir);
+            let (clears, writes) = local::plan_rename(&read, &old, &new);
+            let before: Snapshot = clears.iter().chain(writes.iter().map(|(n, _)| n)).map(|n| (n.clone(), read(n))).collect();
+            apply(&dir, &clears, &writes).map_err(|e| { restore_logged(&dir, &before); GroupError::from(e) })
+        }).await?
+    }
+
+    /// Volta cada sidecar ao estado do snapshot (um join que não pôde ser concluído).
+    pub async fn restore(&self, before: Snapshot) -> Result<(), GroupError> {
+        let _guard = self.lock.lock().await;
+        let dir = self.dir.clone();
+        blocking(move || restore_all(&dir, &before)).await?.map_err(GroupError::from)
+    }
+
+    pub async fn external_link(&self, local: &str, address: &str, harness: BTreeMap<String, String>) -> Result<String, GroupError> {
+        let _guard = self.lock.lock().await;
+        let (dir, local, address) = (self.dir.clone(), local.to_owned(), address.to_owned());
+        blocking(move || -> Result<String, GroupError> {
+            let writes = local::plan_external_link(&reader(&dir), &local, &address, &harness, &fresh_gid).map_err(GroupError::Refused)?;
+            apply(&dir, &[], &writes)?;
+            Ok(writes.into_iter().next().map(|(_, s)| s.gid).unwrap_or_default())
+        }).await?
+    }
+
+    /// Tira `address` da lista de `local`; sem mais ninguém (e sem orq), o grupo some e o contrato
+    /// vai para o arquivo.
+    pub async fn external_unlink(&self, local: &str, address: &str) -> Result<(), GroupError> {
+        let archive = {
+            let _guard = self.lock.lock().await;
+            let (dir, local, address) = (self.dir.clone(), local.to_owned(), address.to_owned());
+            blocking(move || {
+                let Some(mut st) = reader(&dir)(&local) else { return Ok(None) };
+                if !st.peers.contains(&address) { return Ok(None); }
+                st.peers.retain(|p| *p != address);
+                if st.peers.is_empty() && !st.orq {
+                    dir.clear_sidecar(&local)?;
+                    return Ok(Some(st.gid));
+                }
+                dir.write_sidecar(&local, &st)?;
+                Ok::<_, GroupError>(None)
+            }).await??
+        };
+        if let Some(gid) = archive {
+            let dir = self.dir.clone();
+            blocking(move || dir.archive_contracts(&gid)).await?;
+        }
+        Ok(())
+    }
+
+    async fn restore_blocking(&self, before: Snapshot) {
+        let dir = self.dir.clone();
+        let _ = blocking(move || restore_logged(&dir, &before)).await;
+    }
+}
+
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, GroupError> {
+    tokio::task::spawn_blocking(f).await.map_err(|e| GroupError::Store(StoreError::Io(std::io::Error::other(e))))
+}
+
+/// Sidecar ilegível ou torto vale como sem grupo e vai ao diário.
+fn reader(dir: &PairDir) -> impl Fn(&str) -> Option<Sidecar> + '_ {
+    move |name| match dir.sidecar(name) {
+        Ok(s) => s,
+        Err(error) => {
+            if crate::warn_limit::allow(Some(name), "groups_sidecar_unreadable") {
+                tracing::warn!(code = "groups_sidecar_unreadable", name, %error, "groups: sidecar de grupo ilegível ou torto, tratado como sem grupo");
+            }
+            None
+        }
+    }
+}
+
+fn apply(dir: &PairDir, clears: &[String], writes: &[(String, Sidecar)]) -> Result<(), StoreError> {
+    for name in clears { dir.clear_sidecar(name)?; }
+    for (name, sidecar) in writes { dir.write_sidecar(name, sidecar)?; }
+    Ok(())
+}
+
+/// Tenta todos mesmo que um falhe: parar no primeiro deixaria o resto assimétrico. Devolve o primeiro erro.
+fn restore_all(dir: &PairDir, before: &Snapshot) -> Result<(), StoreError> {
+    let mut first = None;
+    for (name, state) in before {
+        let done = match state {
+            None => dir.clear_sidecar(name),
+            Some(s) => dir.write_sidecar(name, s),
+        };
+        if let Err(error) = done {
+            tracing::warn!(code = "groups_restore_failed", name, %error, "groups: o sidecar não voltou ao estado anterior");
+            first.get_or_insert(error);
+        }
+    }
+    first.map_or(Ok(()), Err)
+}
+
+/// Restauração de quem já está devolvendo outro erro: o erro original é o que importa ao chamador.
+fn restore_logged(dir: &PairDir, before: &Snapshot) { let _ = restore_all(dir, before); }
+
+/// 8 hex como o `uuid4().hex[:8]` do Python; `RandomState` é semeado pelo sistema, sem dependência nova.
+fn fresh_gid() -> String { format!("{:08x}", RandomState::new().build_hasher().finish() as u32) }
