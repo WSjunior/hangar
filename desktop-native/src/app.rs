@@ -247,7 +247,7 @@ enum Payload {
     // Evento da chamada de voz com o número dela: o da chamada parada é descartado.
     Voice(u64, crate::voice::VoiceEvent),
     // Opção beta do servidor local, o Codex achado e a voz gravada neste computador.
-    VoiceGate(bool, Option<crate::voice::rpc::Codex>, Option<String>),
+    VoiceGate(bool, Option<crate::voice::rpc::Codex>, (Option<String>, Option<String>), Vec<voice_ui::CodexAccount>),
     // Histórico da sessão que recebeu pedido da voz e terminou fora da tela.
     VoiceHistory(u64, SessionKey, Result<api::History, Failure>),
 }
@@ -1429,7 +1429,7 @@ impl Hangar {
             }
             // A chamada é deste computador: a troca de servidor não a derruba, só a geração dela decide.
             Payload::Voice(generation, event) => { self.receive_voice(generation, event, window, cx); return; }
-            Payload::VoiceGate(enabled, codex, saved) => { self.receive_voice_gate(enabled, codex, saved, cx); return; }
+            Payload::VoiceGate(enabled, codex, saved, accounts) => { self.receive_voice_gate(enabled, codex, saved, accounts, cx); return; }
             Payload::VoiceHistory(generation, key, result) => { self.voice_history(generation, key, result); return; }
             Payload::Files(key, owner, generation, files) => { self.receive_files(key, owner, generation, files, cx); cx.notify(); return; }
             Payload::UploadStep(key, id, result) => { let key = self.delivery.current(key); self.receive_upload(key, id, result); cx.notify(); return; }

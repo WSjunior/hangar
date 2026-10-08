@@ -63,14 +63,15 @@ pub fn find_codex() -> Option<Codex> {
 }
 
 impl Rpc {
-    pub async fn spawn(codex: &Codex) -> Result<(Rpc, async_channel::Receiver<Incoming>), RpcError> {
-        Self::spawn_program(&codex.bin, &["app-server"], Some(&codex.path)).await
+    pub async fn spawn(codex: &Codex, home: Option<&std::path::Path>) -> Result<(Rpc, async_channel::Receiver<Incoming>), RpcError> {
+        Self::spawn_program(&codex.bin, &["app-server"], Some(&codex.path), home).await
     }
 
-    async fn spawn_program(program: impl AsRef<std::ffi::OsStr>, args: &[&str], path: Option<&str>) -> Result<(Rpc, async_channel::Receiver<Incoming>), RpcError> {
+    async fn spawn_program(program: impl AsRef<std::ffi::OsStr>, args: &[&str], path: Option<&str>, home: Option<&std::path::Path>) -> Result<(Rpc, async_channel::Receiver<Incoming>), RpcError> {
         let mut command = Command::new(program);
         command.args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
         if let Some(path) = path { command.env("PATH", path); }
+        if let Some(home) = home { command.env("CODEX_HOME", home); }
         #[cfg(windows)]
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: sem console piscando ao ligar a voz
         let mut child = command.spawn().map_err(|_| RpcError::Spawn)?;
@@ -174,7 +175,7 @@ mod tests {
     async fn exited_child_fails_pending_requests() {
         // Um "codex" que sai na hora: a request pendente falha com Closed em vez de esperar o prazo.
         let (program, args): (&str, &[&str]) = if cfg!(windows) { ("cmd", &["/c", "exit"]) } else { ("true", &[]) };
-        let (rpc, incoming) = Rpc::spawn_program(program, args, None).await.unwrap();
+        let (rpc, incoming) = Rpc::spawn_program(program, args, None, None).await.unwrap();
         let result = rpc.request("initialize", serde_json::json!({})).await;
         assert!(matches!(result, Err(RpcError::Closed)));
         assert!(matches!(incoming.recv().await, Ok(Incoming::Exited)));

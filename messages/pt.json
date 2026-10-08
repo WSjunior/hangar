@@ -7549,5 +7549,7 @@
   "native_voice_not_saved": "Não foi possível gravar a voz escolhida.",
   "native_voice_context_title": "Contexto do organizador",
   "native_voice_context_tokens": "{used} tokens",
-  "native_voice_account_limits": "Limites da conta"
+  "native_voice_account_limits": "Limites da conta",
+  "native_voice_account": "Conta Codex",
+  "native_voice_account_default": "Conta padrão"
 }

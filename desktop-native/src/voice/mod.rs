@@ -27,7 +27,7 @@ pub enum VoiceEvent {
     AccountLimits { five_hour: usage::RateWindow, seven_day: usage::RateWindow },
 }
 /// `cwd`: pasta da sessão na tela quando é desta máquina (a leitura do código parte dela); `target`: nome dessa sessão.
-pub struct VoiceOptions { pub codex: Codex, pub voice: Option<String>, pub context: String, pub cwd: Option<PathBuf>, pub target: String }
+pub struct VoiceOptions { pub codex: Codex, pub voice: Option<String>, pub context: String, pub cwd: Option<PathBuf>, pub target: String, pub codex_home: Option<PathBuf> }
 
 enum Command { Retarget(String, String, Option<PathBuf>), Result(String, String), Reply(Value, Value), SetMode(Mode), Answer(String), PlanDelivered }
 
@@ -114,7 +114,7 @@ fn rtc_failure(error: rtc::RtcError) -> VoiceFailure {
 
 async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEvent>, inbox: &mut mpsc::UnboundedReceiver<Command>,
     muted: &Arc<AtomicBool>, stopped: &Arc<AtomicBool>) -> Result<(), VoiceFailure> {
-    let (rpc, incoming) = Rpc::spawn(&options.codex).await.map_err(rpc_failure).map_err(failed("app-server spawn"))?;
+    let (rpc, incoming) = Rpc::spawn(&options.codex, options.codex_home.as_deref()).await.map_err(rpc_failure).map_err(failed("app-server spawn"))?;
     log("app-server spawned");
     let config = handshake(&rpc).await.map_err(rpc_failure).map_err(failed("handshake"))?;
     log("handshake ok");

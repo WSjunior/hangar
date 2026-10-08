@@ -7549,5 +7549,7 @@
   "native_voice_not_saved": "Could not save the chosen voice.",
   "native_voice_context_title": "Organizer context",
   "native_voice_context_tokens": "{used} tokens",
-  "native_voice_account_limits": "Account limits"
+  "native_voice_account_limits": "Account limits",
+  "native_voice_account": "Codex account",
+  "native_voice_account_default": "Default account"
 }

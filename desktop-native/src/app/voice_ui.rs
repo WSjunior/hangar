@@ -17,8 +17,38 @@ impl SearchableListItem for VoiceChoice {
     fn value(&self) -> &String { &self.id }
 }
 
+/// Conta Codex desta máquina: `home` é o que o id `codex:<home>` do backend carrega; vazio é a conta padrão.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct CodexAccount { home: String, label: String }
+
+impl SearchableListItem for CodexAccount {
+    type Value = String;
+    fn title(&self) -> SharedString { if self.home.is_empty() { tr("voice_account_default").into() } else { self.label.clone().into() } }
+    fn value(&self) -> &String { &self.home }
+}
+
+/// Contas Codex da lista de credenciais; o rótulo é o da tela de contas (apelido, senão e-mail, senão nome).
+fn codex_accounts(list: &Value) -> Vec<CodexAccount> {
+    let text = |v: &Value| v.as_str().filter(|t| !t.is_empty()).map(str::to_owned);
+    list.as_array().into_iter().flatten().filter(|c| c["tipo"] == "codex").filter_map(|c| {
+        let home = c["id"].as_str()?.strip_prefix("codex:").filter(|h| !h.is_empty())?.to_owned();
+        let label = text(&c["apelido"]).or_else(|| text(&c["login"]["email"])).or_else(|| text(&c["nome"])).unwrap_or_else(|| home.clone());
+        Some(CodexAccount { home, label })
+    }).collect()
+}
+
+/// A escolha só vale se a conta ainda existe; senão volta ao comportamento de antes (sem `CODEX_HOME`).
+fn chosen_home(accounts: &[CodexAccount], saved: Option<&str>) -> Option<std::path::PathBuf> {
+    let saved = saved.filter(|s| !s.is_empty())?;
+    accounts.iter().find(|a| a.home == saved).map(|a| std::path::PathBuf::from(&a.home))
+}
+
 #[derive(Default)]
 pub(super) struct VoiceUi {
+    pub(super) accounts: Vec<CodexAccount>,
+    /// Escolha gravada (home da conta); só vale enquanto estiver em `accounts`.
+    pub(super) account: Option<String>,
+    pub(super) account_select: Option<(Entity<SelectState<Vec<CodexAccount>>>, Subscription)>,
     pub(super) enabled: bool,
     pub(super) codex: Option<Codex>,
     pub(super) call: Option<Voice>,
@@ -221,17 +251,19 @@ fn failure_text(failure: &VoiceFailure) -> String {
 
 fn voice_file() -> Option<std::path::PathBuf> { Some(appearance::dir()?.join("voice.json")) }
 
-fn read_saved_voice() -> Option<String> {
-    let value: Value = serde_json::from_slice(&std::fs::read(voice_file()?).ok()?).ok()?;
-    value["voice"].as_str().filter(|v| !v.is_empty()).map(str::to_owned)
+/// (voz, conta Codex) gravadas.
+fn read_saved_voice() -> (Option<String>, Option<String>) {
+    let value: Value = voice_file().and_then(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let text = |k: &str| value[k].as_str().filter(|v| !v.is_empty()).map(str::to_owned);
+    (text("voice"), text("codex_home"))
 }
 
-fn save_voice(voice: Option<&str>) -> Result<(), String> {
+fn save_voice(voice: Option<&str>, account: Option<&str>) -> Result<(), String> {
     let path = voice_file().ok_or_else(|| tr("keyboard_no_directory"))?;
     let dir = path.parent().ok_or_else(|| tr("keyboard_no_directory"))?;
     std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
     let temporary = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec(&json!({"voice": voice})).map_err(|error| error.to_string())?;
+    let bytes = serde_json::to_vec(&json!({"voice": voice, "codex_home": account})).map_err(|error| error.to_string())?;
     std::fs::write(&temporary, bytes).and_then(|_| std::fs::rename(&temporary, &path)).map_err(|error| error.to_string())
 }
 
@@ -259,16 +291,23 @@ impl Hangar {
         self.runtime.spawn(async move {
             // find_codex roda `npm prefix -g`: fora da thread da tela.
             let codex = tokio::task::spawn_blocking(crate::voice::rpc::find_codex).await.ok().flatten();
-            let saved = tokio::task::spawn_blocking(read_saved_voice).await.ok().flatten();
+            let saved = tokio::task::spawn_blocking(read_saved_voice).await.unwrap_or_default();
             let enabled = api.server_read(&["harness", "codex", "opcoes"], &[], 8).await.ok()
                 .and_then(|v| v["codex_voice_beta"].as_bool()).unwrap_or(false);
-            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::VoiceGate(enabled, codex, saved) }).await;
+            let accounts = api.server_read(&["credenciais"], &[], 15).await.map(|v| codex_accounts(&v)).unwrap_or_default();
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::VoiceGate(enabled, codex, saved, accounts) }).await;
         });
     }
 
-    pub(super) fn receive_voice_gate(&mut self, enabled: bool, codex: Option<Codex>, saved: Option<String>, cx: &mut Context<Self>) {
+    pub(super) fn receive_voice_gate(&mut self, enabled: bool, codex: Option<Codex>, saved: (Option<String>, Option<String>), accounts: Vec<CodexAccount>, cx: &mut Context<Self>) {
         (self.voice.enabled, self.voice.codex) = (enabled, codex);
-        if self.voice.call.is_none() { self.voice.voice = saved; }
+        if self.voice.call.is_none() {
+            self.voice.voice = saved.0;
+            self.voice.account = saved.1;
+            // Lista nova só troca o seletor com o painel fechado: ele nasce de novo na próxima abertura.
+            if self.voice.accounts != accounts && !self.voice.open { self.voice.account_select = None; }
+            self.voice.accounts = accounts;
+        }
         // Sem a opção ou sem o Codex a pílula some; a chamada não pode seguir com o microfone aberto.
         if (!enabled || self.voice.codex.is_none()) && self.voice.call.is_some() { self.stop_voice(cx); }
         cx.notify();
@@ -284,7 +323,9 @@ impl Hangar {
         if self.dictation.recording() { self.voice.error = Some(tr("voice_dictation_busy")); cx.notify(); return; }
         let (events_tx, events) = async_channel::unbounded();
         let target = self.selected.as_ref().map(|s| s.name.clone()).unwrap_or_default();
-        let options = VoiceOptions { codex, voice: self.voice.voice.clone(), context: self.voice_context(), cwd: self.local_session_dir(), target };
+        let codex_home = chosen_home(&self.voice.accounts, self.voice.account.as_deref());
+        crate::voice::log(format!("voice: account chosen {}", if codex_home.is_some() { "custom" } else { "default" }));
+        let options = VoiceOptions { codex, voice: self.voice.voice.clone(), context: self.voice_context(), cwd: self.local_session_dir(), target, codex_home };
         self.voice.generation += 1;
         self.voice.call = Some(Voice::start(self.runtime.handle(), options, events_tx));
         self.voice.target = self.selected.as_ref().map(|s| s.name.clone());
@@ -688,21 +729,39 @@ impl Hangar {
             let sub = cx.subscribe_in(&picker, window, |this: &mut Hangar, _, event: &SelectEvent<Vec<VoiceChoice>>, _, cx| {
                 let SelectEvent::Confirm(Some(id)) = event else { return };
                 this.voice.voice = (!id.is_empty()).then(|| id.clone());
-                let saved = this.voice.voice.clone();
-                let write = cx.background_executor().spawn(async move { save_voice(saved.as_deref()) });
-                cx.spawn(async move |this, cx| {
-                    if let Err(error) = write.await {
-                        let _ = this.update(cx, |this, cx| {
-                            this.voice.error = Some(format!("{} {error}", tr("voice_not_saved")));
-                            cx.notify();
-                        });
-                    }
-                }).detach();
+                this.persist_voice_prefs(cx);
                 cx.notify();
             });
             self.voice.voice_select = Some((picker, sub));
         }
+        if open && self.voice.account_select.is_none() && self.voice.accounts.len() > 1 {
+            let items: Vec<CodexAccount> = std::iter::once(CodexAccount { home: String::new(), label: String::new() })
+                .chain(self.voice.accounts.iter().cloned()).collect();
+            let at = chosen_home(&self.voice.accounts, self.voice.account.as_deref())
+                .and_then(|h| items.iter().position(|a| std::path::Path::new(&a.home) == h)).unwrap_or(0);
+            let picker = cx.new(|cx| SelectState::new(items, Some(gpui_kit::component::IndexPath::new(at)), window, cx));
+            let sub = cx.subscribe_in(&picker, window, |this: &mut Hangar, _, event: &SelectEvent<Vec<CodexAccount>>, _, cx| {
+                let SelectEvent::Confirm(Some(home)) = event else { return };
+                this.voice.account = (!home.is_empty()).then(|| home.clone());
+                this.persist_voice_prefs(cx);
+                cx.notify();
+            });
+            self.voice.account_select = Some((picker, sub));
+        }
         cx.notify();
+    }
+
+    fn persist_voice_prefs(&mut self, cx: &mut Context<Self>) {
+        let (voice, account) = (self.voice.voice.clone(), self.voice.account.clone());
+        let write = cx.background_executor().spawn(async move { save_voice(voice.as_deref(), account.as_deref()) });
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = write.await {
+                let _ = this.update(cx, |this, cx| {
+                    this.voice.error = Some(format!("{} {error}", tr("voice_not_saved")));
+                    cx.notify();
+                });
+            }
+        }).detach();
     }
 
     /// Pílula da barra de cima; `None` sem a opção beta ou sem Codex nesta máquina.
@@ -849,6 +908,11 @@ impl Hangar {
                 .child(div().text_xs().text_color(theme::muted()).child(tr_shared("codex_voice_label", &[])))
                 .child(div().w(px(200.)).child(Select::new(picker).small().disabled(live).accessibility_label(tr_shared("codex_voice_label", &[])))));
         }
+        if let Some((picker, _)) = &self.voice.account_select {
+            body = body.child(div().flex().items_center().justify_between().gap(px(12.))
+                .child(div().text_xs().text_color(theme::muted()).child(tr("voice_account")))
+                .child(div().w(px(200.)).child(Select::new(picker).small().disabled(live).accessibility_label(tr("voice_account")))));
+        }
         if let Some(draft) = &self.voice.draft {
             body = body.child(div().flex().flex_col().gap(px(4.)).p(px(10.)).rounded(px(8.)).border_1().border_color(theme::warning())
                 .child(div().text_xs().text_color(theme::warning()).child(tr("voice_draft_held")))
@@ -888,6 +952,27 @@ mod tests {
     use core::prelude::v1::test;
 
     fn ev(id: &str, kind: &str, text: &str) -> (String, String, String) { (id.into(), kind.into(), text.into()) }
+
+    #[test]
+    fn codex_accounts_use_alias_then_email_and_skip_other_kinds() {
+        let list = json!([
+            {"id": "codex:/h/.codex", "tipo": "codex", "nome": "default", "apelido": "", "login": {"email": "a@example.com"}},
+            {"id": "codex:/h/.codex-b", "tipo": "codex", "nome": "b", "apelido": "Second"},
+            {"id": "claude:/h/.claude", "tipo": "claude", "nome": "c"},
+        ]);
+        let accounts = codex_accounts(&list);
+        assert_eq!(accounts.iter().map(|a| (a.home.as_str(), a.label.as_str())).collect::<Vec<_>>(),
+            [("/h/.codex", "a@example.com"), ("/h/.codex-b", "Second")]);
+    }
+
+    #[test]
+    fn chosen_home_falls_back_when_missing_or_gone() {
+        let accounts = vec![CodexAccount { home: "/h/.codex-b".into(), label: "b".into() }];
+        assert_eq!(chosen_home(&accounts, Some("/h/.codex-b")), Some(std::path::PathBuf::from("/h/.codex-b")));
+        assert_eq!(chosen_home(&accounts, Some("/h/.codex-gone")), None);
+        assert_eq!(chosen_home(&accounts, Some("")), None);
+        assert_eq!(chosen_home(&accounts, None), None);
+    }
 
     #[test]
     fn session_match_prefers_exact_and_ignores_separators() {
