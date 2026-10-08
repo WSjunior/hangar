@@ -33,8 +33,8 @@ Há dois modos. No modo Direto, siga as regras acima. No modo Planejar, NADA vai
 - Converse e escreva o plano com update_plan, sempre o documento inteiro em Markdown: Objetivo, Decisões,
   Pendências, Pesquisas (com links das fontes) e Próximos passos. Reorganize quando o usuário mudar de ideia.
 - Pesquise na internet quando ajudar e resuma o que achou em uma ou duas frases faladas; guarde o detalhe no plano.
-- Leia o código do projeto quando precisar (só leitura; nunca altere arquivos).
-  Leia só dentro da pasta do projeto; nunca abra credenciais (.ssh, .env, auth.json, chaves).
+- Leia o código do projeto quando precisar, pelo caminho completo que o contexto informa; nunca altere o projeto.
+  Arquivos seus só na sua pasta própria; nunca abra credenciais (.ssh, .env, auth.json, chaves).
 - Use ask_session só para o que apenas a sessão sabe; pergunta curta e objetiva. A resposta chega depois, numa
   entrada que começa por [RESPOSTA DA SESSÃO À PERGUNTA]: use-a para atualizar o plano e comente em no máximo
   uma frase, sem lê-la como resultado.
@@ -98,12 +98,25 @@ pub fn tools() -> Value {
     ])
 }
 
-pub fn thread_config(config: &Value) -> Value {
-    // O sandbox read-only só foi provado no Linux; no Windows o organizador fica sem shell.
+/// Esforço do organizador quando a pessoa não escolheu outro.
+pub const DEFAULT_EFFORT: &str = "low";
+
+/// `thread/start` do organizador. `workspace-write` com cwd na pasta própria: grava só nela (e no /tmp); o código da
+/// sessão é lido pelo caminho completo que a nota leva. Sem `"environments": []`: com ele o Codex não oferece o shell.
+pub fn organizer_start(config: &Value, own: &Path, session: Option<&Path>, context: &str, model: Option<&str>, effort: &str) -> Value {
+    let mut start = json!({"ephemeral": true, "cwd": own, "sandbox": "workspace-write", "approvalPolicy": "never",
+        "baseInstructions": ORGANIZER_PROMPT, "developerInstructions": format!("{}\n\n{context}", code_note(session, own)),
+        "config": thread_config(config, effort), "dynamicTools": tools()});
+    if let Some(model) = model.or_else(|| config["model"].as_str()) { start["model"] = json!(model); }
+    start
+}
+
+pub fn thread_config(config: &Value, effort: &str) -> Value {
+    // O sandbox só foi provado no Linux; no Windows o organizador fica sem shell (e portanto não grava nada).
     let mut result = json!({"features.shell_tool": !cfg!(windows),"features.unified_exec": false, "features.apps": false,
         "features.hooks": false, "features.multi_agent": false, "features.js_repl": false,
         "features.apply_patch_freeform": false, "web_search": "live", "project_doc_max_bytes": 0,
-        "model_reasoning_effort": "low"});
+        "model_reasoning_effort": effort});
     // `mcp_servers: {}` não desliga os do usuário: só o nome com enabled=false desliga.
     for key in ["mcp_servers", "plugins"] {
         let off: serde_json::Map<String, Value> = config[key].as_object()
@@ -185,10 +198,13 @@ pub fn finish_request(path: &Path, action: FinishAction, inline: Option<&str>) -
 }
 
 /// A pasta que o organizador lê é fixa na thread: trocar de sessão com outra pasta exige avisá-lo.
-pub fn code_note(thread_cwd: Option<&Path>, now: Option<&Path>) -> Option<String> {
-    if thread_cwd == now { return None; }
-    Some(if now.is_some() { "A pasta de código que você pode ler é a da sessão anterior; não leia código para a sessão atual." }
-        else { "O código da sessão atual não está disponível aqui; não leia código." }.to_owned())
+/// Onde está o código da sessão na tela e onde o organizador pode gravar; vai no início e a cada troca de sessão.
+pub fn code_note(session: Option<&Path>, own: &Path) -> String {
+    let write = format!("Você só grava arquivos em {}; nunca tente gravar no projeto, peça à sessão.", own.display());
+    match session {
+        Some(path) => format!("O código da sessão está em {}; leia por caminho completo. {write}", path.display()),
+        None => format!("O código da sessão atual não está disponível nesta máquina; não leia código. {write}"),
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -469,12 +485,29 @@ mod tests {
     }
 
     #[test]
-    fn code_note_only_when_folder_differs() {
-        let (a, b) = (Path::new("/p/a"), Path::new("/p/b"));
-        assert!(code_note(Some(a), Some(a)).is_none());
-        assert!(code_note(None, None).is_none());
-        assert!(code_note(Some(a), Some(b)).unwrap().contains("anterior"));
-        assert!(code_note(Some(a), None).unwrap().contains("não está disponível"));
+    fn code_note_points_to_session_and_own_folder() {
+        let (session, own) = (Path::new("/p/a"), Path::new("/h/.hangar/voz/arquivos"));
+        let note = code_note(Some(session), own);
+        assert!(note.contains("/p/a") && note.contains("/h/.hangar/voz/arquivos"));
+        let none = code_note(None, own);
+        assert!(none.contains("não está disponível") && none.contains("/h/.hangar/voz/arquivos"));
+    }
+
+    #[test]
+    fn organizer_writes_only_in_own_folder_with_chosen_model_and_effort() {
+        let (own, session) = (Path::new("/h/.hangar/voz/arquivos"), Path::new("/p/a"));
+        let config = json!({"model": "gpt-config"});
+        let start = organizer_start(&config, own, Some(session), "ctx", Some("gpt-x"), "medium");
+        assert_eq!(start["sandbox"], json!("workspace-write"));
+        assert_eq!(start["cwd"], json!(own));
+        assert_eq!(start["model"], json!("gpt-x"));
+        assert_eq!(start["config"]["model_reasoning_effort"], json!("medium"));
+        assert!(start.get("writableRoots").is_none() && start["config"].get("sandbox_workspace_write").is_none());
+        let developer = start["developerInstructions"].as_str().unwrap();
+        assert!(developer.contains("/p/a") && developer.ends_with("ctx"));
+        // Sem escolha: o modelo do config.toml, como antes.
+        assert_eq!(organizer_start(&config, own, None, "", None, DEFAULT_EFFORT)["model"], json!("gpt-config"));
+        assert!(organizer_start(&json!({}), own, None, "", None, DEFAULT_EFFORT).get("model").is_none());
     }
 
     #[test]
@@ -669,7 +702,7 @@ mod tests {
 
     #[test]
     fn config_disables_mcp_by_name() {
-        let config = thread_config(&json!({"mcp_servers": {"hangar": {}, "cloudflare": {}}, "plugins": {"ecc": {}}}));
+        let config = thread_config(&json!({"mcp_servers": {"hangar": {}, "cloudflare": {}}, "plugins": {"ecc": {}}}), DEFAULT_EFFORT);
         assert_eq!(config["mcp_servers"]["hangar"], json!({"enabled": false}));
         assert_eq!(config["plugins"]["ecc"], json!({"enabled": false}));
         assert_eq!(config["features.shell_tool"], json!(!cfg!(windows)));

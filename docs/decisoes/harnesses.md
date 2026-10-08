@@ -441,6 +441,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **Voz: modo Planejar:** nada vai à sessão até o fim; `finish_plan`, `ask_session` e `set_mode` só
   saem de fala do usuário, `finish_plan` em dois passos, e o envio só sai após silêncio do
   microfone. A leitura fora do projeto fica liberada (mesmo acesso da sessão). Medição em "Voz: modo Planejar".
+- **Voz: o organizador só grava na própria pasta:** `workspace-write` com cwd em `~/.hangar/voz/arquivos`
+  (fixa, nunca apagada) e sem raízes extras; o código da sessão é lido pelo caminho completo que a nota de
+  contexto leva. Modelo e esforço vêm do card da voz (padrão: modelo do config do Codex, esforço `low`).
 
 ## O /clear e o rodapé do Claude Code
 

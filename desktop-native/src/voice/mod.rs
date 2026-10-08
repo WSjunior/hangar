@@ -6,7 +6,7 @@ pub mod rpc;
 pub mod rtc;
 pub mod usage;
 
-use organizer::{FinishStep, MIC_VOICE_LEVEL, Mode, Planner, Results, SendGate, SpokenTurns, ToolCall, finish_request, parse_tool, send_allowed, tool_reply, tools, thread_config, ORGANIZER_PROMPT, VOICE_PROMPT};
+use organizer::{FinishStep, MIC_VOICE_LEVEL, Mode, Planner, Results, SendGate, SpokenTurns, ToolCall, finish_request, parse_tool, send_allowed, tool_reply, organizer_start, ORGANIZER_PROMPT, VOICE_PROMPT};
 use rpc::{Codex, Incoming, Rpc, RpcError, handshake};
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
@@ -30,8 +30,10 @@ pub enum VoiceEvent {
     OrganizerContext { used: u64, window: Option<u64> },
     AccountLimits { five_hour: usage::RateWindow, seven_day: usage::RateWindow },
 }
-/// `cwd`: pasta da sessão na tela quando é desta máquina (a leitura do código parte dela); `target`: nome dessa sessão.
-pub struct VoiceOptions { pub codex: Codex, pub voice: Option<String>, pub context: String, pub cwd: Option<PathBuf>, pub target: String, pub codex_home: Option<PathBuf> }
+/// `cwd`: pasta da sessão na tela quando é desta máquina (o organizador lê o código dela); `target`: nome dessa sessão.
+/// `organizer_model`: `None` = o modelo do config do Codex.
+pub struct VoiceOptions { pub codex: Codex, pub voice: Option<String>, pub context: String, pub cwd: Option<PathBuf>, pub target: String,
+    pub codex_home: Option<PathBuf>, pub organizer_model: Option<String>, pub organizer_effort: String }
 
 enum Command { Retarget(String, String, Option<PathBuf>), Result(String, String), Reply(Value, Value), SetMode(Mode), Answer(String), PlanDelivered }
 
@@ -122,15 +124,11 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
     log("app-server spawned");
     let config = handshake(&rpc).await.map_err(rpc_failure).map_err(failed("handshake"))?;
     log("handshake ok");
-    let directory = std::env::temp_dir().join(format!("hangar-voice-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&directory);
-    // A pasta temporária é a única apagada no fim; a da sessão só serve de cwd para ler o código.
-    let thread_cwd = options.cwd.clone().unwrap_or_else(|| directory.clone());
-    // Sem `"environments": []`: com ele o Codex não oferece o shell ao modelo.
-    let mut start = json!({"ephemeral": true, "cwd": thread_cwd, "sandbox": "read-only", "approvalPolicy": "never",
-        "baseInstructions": ORGANIZER_PROMPT, "developerInstructions": options.context,
-        "config": thread_config(&config), "dynamicTools": tools()});
-    if let Some(model) = config["model"].as_str() { start["model"] = json!(model); }
+    // Pasta própria e fixa: o que o organizador grava fica entre chamadas, nada aqui a apaga.
+    let own = plan::files_dir();
+    if let Err(error) = std::fs::create_dir_all(&own) { log(format!("own folder create failed kind={:?}", error.kind())); }
+    let start = organizer_start(&config, &own, options.cwd.as_deref(), &options.context, options.organizer_model.as_deref(), &options.organizer_effort);
+    log(format!("organizer model={} effort={}", if options.organizer_model.is_some() { "chosen" } else { "config" }, options.organizer_effort));
     // A conta lida em paralelo, com prazo curto: falhar só deixa os limites ocultos até a primeira atualização.
     let limits = async {
         match tokio::time::timeout(Duration::from_secs(3), rpc.request("account/rateLimits/read", json!({}))).await {
@@ -452,10 +450,8 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                     }
                     target = name.clone();
                     target_cwd = cwd;
-                    // A pasta da thread não muda no meio dela.
-                    if let Some(note) = organizer::code_note(options.cwd.as_deref(), target_cwd.as_deref()) {
-                        let _ = rpc.request("thread/realtime/appendText", json!({"threadId": thread, "role": "developer", "text": note})).await;
-                    }
+                    let note = organizer::code_note(target_cwd.as_deref(), &own);
+                    let _ = rpc.request("thread/realtime/appendText", json!({"threadId": thread, "role": "developer", "text": note})).await;
                     let _ = rpc.request("thread/realtime/appendText", json!({"threadId": thread, "role": "developer", "text": context})).await;
                     let _ = rpc.request("thread/realtime/appendSpeech", json!({"threadId": thread, "text": format!("Agora estou na sessão {name}.")})).await;
                 }
@@ -472,7 +468,6 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
     stopped.store(true, Ordering::Relaxed);
     let _ = rpc.request("thread/realtime/stop", json!({"threadId": thread})).await;
     if !matches!(tokio::task::spawn_blocking(move || peer.join()).await, Ok(Ok(()))) { log("rtc thread join failed (panic)"); }
-    let _ = std::fs::remove_dir_all(&directory);
     outcome
 }
 
