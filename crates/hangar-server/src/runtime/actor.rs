@@ -151,13 +151,15 @@ pub struct RuntimeEngine {
     mods:Option<crate::mods::state::Mods>,
     /// A vida deste ator no `Mods` (`Mods::new_life`), com que ele publica e é esquecido.
     mods_life:u64,
+    /// Canal em processo do hub (Codex sem terminal): estado, erro e prévia saem por ele.
+    live:Option<LiveSender>,
 }
 
 impl RuntimeEngine {
     pub fn new(provider:&str,metadata:Value,generation:u64,clock:ClockSample) -> Result<Self,RuntimeError> {
         let core = match provider { "claude"=>Core::Claude(ClaudeEngine::new(metadata,generation,clock)),
             "codex"=>Core::Codex(CodexEngine::new(metadata,generation,clock)),_=>return Err(failure("provider")) };
-        Ok(Self { core,launch:None,policy:None,publisher:None,revision:Arc::new(AtomicU64::new(0)),mods:None,mods_life:0 })
+        Ok(Self { core,launch:None,policy:None,publisher:None,revision:Arc::new(AtomicU64::new(0)),mods:None,mods_life:0,live:None })
     }
     /// O ator sobe o processo de novo quando ele cai, e reinicia/troca o sandbox (só Codex).
     pub fn with_launch(mut self,launch:LaunchConfig) -> Self { if matches!(self.core,Core::Codex(_)) { self.launch = Some(launch); } self }
@@ -165,7 +167,7 @@ impl RuntimeEngine {
     fn renewed(&self,metadata:Value,generation:u64,clock:ClockSample) -> Result<Self,RuntimeError> {
         let provider = match self.core { Core::Claude(_)=>"claude",Core::Codex(_)=>"codex" };
         let mut next = Self::new(provider,metadata,generation,clock)?;
-        (next.launch,next.policy,next.publisher,next.revision) = (self.launch.clone(),self.policy.clone(),self.publisher.clone(),self.revision.clone());
+        (next.launch,next.policy,next.publisher,next.revision,next.live) = (self.launch.clone(),self.policy.clone(),self.publisher.clone(),self.revision.clone(),self.live.clone());
         Ok(next)
     }
     fn problem(&self) -> Option<String> { match &self.core { Core::Codex(core)=>core.problem().map(str::to_owned),Core::Claude(_)=>None } }
@@ -175,6 +177,9 @@ impl RuntimeEngine {
     pub fn with_policy(mut self,policy:PolicyClient) -> Self { self.policy = Some(policy); self }
     pub fn with_publisher(mut self,publisher:broadcast::Sender<RuntimeEvent>) -> Self { self.publisher = Some(publisher); self }
     pub fn with_revision(mut self,revision:Arc<AtomicU64>) -> Self { self.revision = revision; self }
+    /// Canal em processo do hub: estado, erro e prévia do Codex sem terminal saem por ele.
+    /// Só o Codex: o Claude sem terminal segue publicando no `events` (fora desta parte).
+    pub fn with_live(mut self,live:LiveSender) -> Self { if matches!(self.core,Core::Codex(_)) { self.live = Some(live); } self }
     /// Processo subido agora pelo Rust: a abertura do Codex repete a política (ver `codex::Engine`).
     pub fn set_fresh_process(&mut self,fresh:bool) { if let Core::Codex(core) = &mut self.core { core.set_fresh_process(fresh); } }
     /// Liga a interface dos mods: o Claude sem terminal vira superfície `desktop` e publica no `Mods`.
@@ -424,6 +429,7 @@ impl RuntimeActor {
         let closed = Arc::new(AtomicBool::new(false));
         let (key,name,life) = (target.key.clone(),target.name.clone(),engine.mods_life);
         let mods = engine.mods.clone();
+        let live = engine.live.clone();
         let handle = RuntimeHandle { sender:sender.clone(),task:Arc::new(Mutex::new(None)),closed:closed.clone(),events:events.clone(),
             stopped:Arc::new(Mutex::new(None)),key:key.clone() };
         // O slot fica preso até receber a tarefa: um `stop` que chegue antes espera por ele e junta a tarefa.
@@ -437,6 +443,14 @@ impl RuntimeActor {
             // Saída por `?` deixava o ator mudo: só sobrava o runtime_closed de quem chamasse depois.
             if let Err(error) = &result {
                 tracing::warn!(key=%key,session=%guard.name,code=%error.code,reason=%error.message,"ator do runtime terminou com erro");
+                // O hub mostra a saída com erro até o `close` esvaziar o canal.
+                if let Some(live) = &live {
+                    live.send_modify(|value| {
+                        let mut next = value.as_deref().cloned().unwrap_or_default();
+                        next.error = Some((error.code.clone(),error.message.clone()));
+                        *value = Some(Arc::new(next));
+                    });
+                }
             } else {
                 // Saída normal (`stop` ou caixa fechada): quem limpa a faixa é o `close`, com o `forget`.
                 guard.mods = None;
@@ -484,6 +498,8 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
     let mut confirming = false;
     let mut channels:BTreeMap<String,Value> = ["preview","thinking","tool"].into_iter().map(|channel|
         (channel.into(),json!({"session":target.name,"text":"","md":true,"full":true,"vivo":true}))).collect();
+    let mut live = LiveOut { sender:engine.live.clone(),state:LiveState { public_state:engine.view()["public_state"].clone(),..Default::default() } };
+    live.send();
     let receipt = Arc::new(std::sync::Mutex::new(ReceiptIndex::new(&target.provider,engine.view()["conversation"].as_str().unwrap_or(""))));
     let mut sequence = initial.operations.keys().filter_map(|id|id.rsplit(':').next()?.parse::<u64>().ok()).max().unwrap_or(0);
     let mut write_order = 0u64;
@@ -506,6 +522,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
         effects.extend(engine.initialize(id)?);
     }
     loop {
+        live.error(&error);
         loop {
             let first_input = roots.values().filter(|root|root.preparing && matches!(root.command.kind,OperationKind::Input | OperationKind::Steer))
                 .map(|root|root.arrival).min();
@@ -609,7 +626,10 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                 }
                 Effect::Publish { channel,data } => {
                     if ["preview","thinking","tool"].contains(&channel.as_str()) {
-                        channels.insert(channel.clone(),data.clone()); publish(&events,&target,&mut revision,&channel,data);
+                        channels.insert(channel.clone(),data.clone());
+                        // Prévia do Codex sem terminal só pelo canal do hub: no `events` ela subiria a
+                        // revisão e o Python a decodificaria a cada delta.
+                        if !live.channel(&channel,&data) { publish(&events,&target,&mut revision,&channel,data); }
                     } else if ["voice","voice_target","rate"].contains(&channel.as_str()) {
                         publish(&events,&target,&mut revision,&channel,data);
                     }
@@ -1171,6 +1191,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                                 last_state = state;
                                 // Vista igual à publicada não sai: cada aparelho redesenharia a tela à toa.
                                 if view != durable_view {
+                                    live.update(|state|state.public_state = view["public_state"].clone());
                                     durable_view = view.clone();
                                     publish(&events,&target,&mut revision,"view",view.clone());
                                     publish(&events,&target,&mut revision,"state",view["public_state"].clone());
@@ -1506,6 +1527,30 @@ fn fail_root(roots:&mut BTreeMap<String,Pending>,id:&str,error:RuntimeError) {
     if let Some(pending) = roots.get_mut(id) {
         pending.error = Some(error.clone()); pending.preparing = false;
         for response in pending.responses.drain(..) { let _ = response.send(Err(error.clone())); }
+    }
+}
+
+/// O que o ator escreve no canal do hub; só envia quando muda.
+struct LiveOut { sender:Option<LiveSender>,state:LiveState }
+
+impl LiveOut {
+    fn send(&self) { if let Some(sender) = &self.sender { sender.send_replace(Some(Arc::new(self.state.clone()))); } }
+    fn update(&mut self,change:impl FnOnce(&mut LiveState)) {
+        if self.sender.is_none() { return; }
+        let before = self.state.clone();
+        change(&mut self.state);
+        if self.state != before { self.send(); }
+    }
+    /// `false`: sem canal, quem chamou publica no `events`.
+    fn channel(&mut self,channel:&str,data:&Value) -> bool {
+        if self.sender.is_none() { return false; }
+        let text = data["text"].as_str().unwrap_or("").to_owned();
+        self.update(|state| match channel { "preview"=>state.preview = text, "thinking"=>state.thinking = text, _=>state.tool = text });
+        true
+    }
+    fn error(&mut self,error:&Option<RuntimeError>) {
+        let same = match (&self.state.error,error) { (None,None)=>true, (Some((code,message)),Some(e))=>*code == e.code && *message == e.message, _=>false };
+        if !same { self.update(|state|state.error = error.as_ref().map(|e|(e.code.clone(),e.message.clone()))); }
     }
 }
 

@@ -43,6 +43,9 @@ pub struct InternalInfo {
     /// `{"queue": "<sidecar da fila>"}`.
     #[serde(default)]
     pub history: Value,
+    /// Codex sem terminal (sidecar `headless`): o estado ao vivo dele é do feed do hub.
+    #[serde(default)]
+    pub headless: bool,
 }
 
 #[derive(Clone, Debug)]

@@ -753,6 +753,188 @@ async fn the_deadline_never_puts_back_a_native_message_that_may_have_been_sent()
     assert_eq!(server.await.unwrap(),0,"nada foi escrito no cano: o recado foi pelo Python");
 }
 
+// --- Estado e prévia do Codex sem terminal pelo canal em processo (5B Task 9) ---
+
+/// Cano Codex falso: depois do retrato manda o que o teste empurrar; responde e confirma cada escrita.
+/// Devolve os métodos escritos no fio.
+async fn codex_cano(pendentes:Vec<&'static str>) -> (std::net::SocketAddr,tokio::task::JoinHandle<Vec<String>>,tokio::sync::mpsc::UnboundedSender<Value>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (push,mut pushed) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let server = tokio::spawn(async move {
+        let (stream,_) = listener.accept().await.unwrap();
+        let (read,mut write) = stream.into_split();
+        let mut reader = BufReader::new(read);
+        let mut header = String::new(); reader.read_line(&mut header).await.unwrap();
+        let snapshot = json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,
+            "pendentes":pendentes,"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+        write.write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
+        let mut methods = Vec::new();
+        loop {
+            let mut raw = String::new();
+            tokio::select! {
+                line = pushed.recv() => {
+                    let Some(line) = line else { continue };
+                    let frame = json!({"type":"cano_output","frame":line.to_string()});
+                    if write.write_all(format!("{frame}\n").as_bytes()).await.is_err() { break; }
+                }
+                n = reader.read_line(&mut raw) => {
+                    if n.unwrap_or(0) == 0 { break; }
+                    let envelope:Value = serde_json::from_str(&raw).unwrap();
+                    let frame:Value = serde_json::from_str(envelope["frame"].as_str().unwrap()).unwrap();
+                    methods.push(frame["method"].as_str().unwrap_or("").to_owned());
+                    let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
+                    write.write_all(format!("{ack}\n").as_bytes()).await.unwrap();
+                    if frame.get("id").is_some() && frame.get("method").is_some() {
+                        let result = if frame["method"] == "turn/start" { json!({"turn":{"id":"turn-1","status":"inProgress"}}) } else { json!({"data":[]}) };
+                        let reply = json!({"type":"cano_output","frame":json!({"id":frame["id"],"result":result}).to_string()});
+                        write.write_all(format!("{reply}\n").as_bytes()).await.unwrap();
+                    }
+                }
+            }
+        }
+        methods
+    });
+    (address,server,push)
+}
+
+async fn codex_live_actor(dir:&std::path::Path,cano:std::net::SocketAddr,live:Option<LiveSender>) -> RuntimeHandle {
+    codex_live_actor_as(dir,cano,live,true).await
+}
+
+/// `headless: false` faz a hidratação recusar: é o ator que sai com erro.
+async fn codex_live_actor_as(dir:&std::path::Path,cano:std::net::SocketAddr,live:Option<LiveSender>,headless:bool) -> RuntimeHandle {
+    let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"codex".into(),
+        metadata:json!({"name":"session","headless":headless,"thread_id":"thread-1","initialized":true,"ready":headless}),
+        binding:CanoBinding { pid:42,escuta:format!("tcp:{cano}"),token:"secret-test".into(),versao:2 },
+        lease_path:dir.join("key.lock"),state_path:dir.join("key.queue-state.json"),projection_dir:dir.join("projection"),
+        transcript:dir.join("chat.jsonl"),created:0.0 };
+    let lease = acquire_lease(&target.lease_path).unwrap();
+    let store = Store::open(&target.state_path,&target.projection_dir,State::new("key",1,"session",vec![])).unwrap();
+    let queue = QueueActor::start(store,lease);
+    let connection = cano::connect(&target.binding).await.unwrap();
+    let mut engine = RuntimeEngine::new("codex",target.metadata.clone(),1,ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 }).unwrap();
+    if let Some(live) = live { engine = engine.with_live(live); }
+    RuntimeActor::spawn(target,queue,connection,engine)
+}
+
+async fn live_until(rx:&mut LiveReceiver,what:&str,check:impl Fn(&LiveState)->bool) -> std::sync::Arc<LiveState> {
+    tokio::time::timeout(std::time::Duration::from_secs(5),async {
+        loop {
+            if let Some(state) = rx.borrow_and_update().clone() && check(&state) { return state; }
+            rx.changed().await.unwrap();
+        }
+    }).await.unwrap_or_else(|_|panic!("{what}"))
+}
+
+fn delta(text:&str) -> Value { json!({"method":"item/agentMessage/delta","params":{"threadId":"thread-1","delta":text}}) }
+
+#[tokio::test]
+async fn codex_preview_goes_to_live_not_to_events() {
+    // Prévia no `events` sobe a `revision` e o Python a decodifica: com o canal em processo, ela não vai lá.
+    let dir = tempfile::tempdir().unwrap();
+    let (cano,server,push) = codex_cano(vec![]).await;
+    let (live,mut rx) = tokio::sync::watch::channel(None);
+    let handle = codex_live_actor(dir.path(),cano,Some(live)).await;
+    let mut events = handle.subscribe();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    while events.try_recv().is_ok() {}
+    let before = handle.snapshot().await.unwrap()["revision"].as_u64().unwrap();
+    push.send(delta("olá")).unwrap();
+    live_until(&mut rx,"prévia no canal em processo",|s|s.preview == "olá").await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    while let Ok(event) = events.try_recv() {
+        assert!(!["preview","thinking","tool"].contains(&event.channel.as_str()),"prévia foi ao events: {}",event.channel);
+    }
+    assert_eq!(handle.snapshot().await.unwrap()["revision"].as_u64().unwrap(),before,"a revision não anda com a prévia");
+    handle.stop().await.unwrap();
+    drop(push);
+    server.abort();
+}
+
+#[tokio::test]
+async fn codex_view_and_actor_error_reach_live() {
+    let dir = tempfile::tempdir().unwrap();
+    let (cano,server,push) = codex_cano(vec![]).await;
+    let (live,mut rx) = tokio::sync::watch::channel(None);
+    let handle = codex_live_actor(dir.path(),cano,Some(live)).await;
+    // `Job::View` leva o estado público ao canal.
+    push.send(json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}})).unwrap();
+    live_until(&mut rx,"vista trabalhando no canal",|s|s.public_state["state"] == "working" && s.error.is_none()).await;
+    handle.stop().await.unwrap();
+    server.abort();
+    // Ator que sai com erro deixa o erro marcado.
+    let dir = tempfile::tempdir().unwrap();
+    let (cano,server,_push) = codex_cano(vec![]).await;
+    let (live,mut rx) = tokio::sync::watch::channel(None);
+    let live_tx = live.clone();
+    let handle = codex_live_actor_as(dir.path(),cano,Some(live),false).await;
+    let state = live_until(&mut rx,"erro do ator no canal",|s|s.error.is_some()).await;
+    assert!(!state.error.as_ref().unwrap().0.is_empty());
+    let _ = handle.stop().await;
+    server.abort();
+    // O ator que volta (reaberto no mesmo canal) começa sem o erro.
+    let (sender,mut rx) = (live_tx,rx);
+    let dir = tempfile::tempdir().unwrap();
+    let (cano,server,_push) = codex_cano(vec![]).await;
+    let handle = codex_live_actor(dir.path(),cano,Some(sender)).await;
+    live_until(&mut rx,"erro some com o ator de volta",|s|s.error.is_none()).await;
+    handle.stop().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn claude_headless_preview_still_on_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let (cano,server) = claude_cano(vec![json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"oi"}}})]).await;
+    let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
+        metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true}),
+        binding:CanoBinding { pid:42,escuta:format!("tcp:{cano}"),token:"secret-test".into(),versao:2 },
+        lease_path:dir.path().join("key.lock"),state_path:dir.path().join("key.queue-state.json"),projection_dir:dir.path().join("projection"),
+        transcript:dir.path().join("chat.jsonl"),created:0.0 };
+    let lease = acquire_lease(&target.lease_path).unwrap();
+    let store = Store::open(&target.state_path,&target.projection_dir,State::new("key",1,"session",vec![])).unwrap();
+    let (events,mut rx) = tokio::sync::broadcast::channel(64);
+    let (live,live_rx) = tokio::sync::watch::channel(None);
+    let engine = RuntimeEngine::new("claude",target.metadata.clone(),1,ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 }).unwrap()
+        .with_publisher(events).with_live(live);
+    let connection = cano::connect(&target.binding).await.unwrap();
+    let handle = RuntimeActor::spawn(target,QueueActor::start(store,lease),connection,engine);
+    let preview = tokio::time::timeout(std::time::Duration::from_secs(5),async {
+        loop { let event = rx.recv().await.unwrap(); if event.channel == "preview" { return event; } }
+    }).await.expect("prévia do Claude sem terminal segue no events");
+    assert_eq!(preview.data["text"],"oi");
+    assert!(live_rx.borrow().is_none(),"o canal em processo é só do Codex");
+    handle.stop().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn queued_input_drains_without_any_subscriber() {
+    // O gatilho de entrega do `sse.py` some para o Codex: o ator drena sozinho no fim do turno.
+    let dir = tempfile::tempdir().unwrap();
+    let (cano,server,push) = codex_cano(vec![]).await;
+    let (live,mut rx) = tokio::sync::watch::channel(None);
+    let handle = codex_live_actor(dir.path(),cano,Some(live)).await;
+    let first = handle.command(RuntimeCommand { operation_id:"in-1".into(),kind:OperationKind::Input,payload:json!({"text":"um"}) }).await.unwrap();
+    assert!(first.disposition == Disposition::Accepted);
+    push.send(json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}})).unwrap();
+    live_until(&mut rx,"turno aberto",|s|s.public_state["state"] == "working").await;
+    handle.queue("append-2".into(),Action::Append { text:"dois".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("in-2".into()) }).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let path = dir.path().join("key.queue-state.json");
+    let sent = |path:&std::path::Path| { let state:State = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        state.operations.get("in-2").is_some_and(|op|matches!(op.status,Status::Accepted | Status::Confirmed)) };
+    assert!(!sent(&path),"com turno rodando a segunda espera");
+    push.send(json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}})).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5),async { while !sent(&path) { tokio::time::sleep(std::time::Duration::from_millis(20)).await; } })
+        .await.expect("fim do turno drena a fila sem assinante nenhum");
+    handle.stop().await.unwrap();
+    drop(push);
+    let methods = server.await.unwrap();
+    assert_eq!(methods.iter().filter(|m|*m == "turn/start").count(),2,"{methods:?}");
+}
+
 // --- Codex sem terminal nasce e religa no Rust (5B Task 4) ---
 
 #[cfg(target_os = "linux")]
@@ -1258,6 +1440,22 @@ for line in sys.stdin:
         }).await.expect("a sessão mostra o turno cortado depois de religar");
         assert_eq!(starts(dir.path()).len(),2,"um processo novo, nunca dois");
         cleanup(&registry,&key,dir.path(),&policy).await;
+    }
+
+    #[tokio::test]
+    async fn registry_live_follows_open_respawn_and_close() {
+        // O canal do hub nasce com a sessão aberta no Rust, passa pela religação e esvazia no `close`.
+        let dir = tempfile::tempdir().unwrap();
+        let key = unique_key();
+        let (registry,policy) = lifecycle_session(dir.path(),&key,"Full Access",std::time::Duration::from_millis(300)).await;
+        let rx = registry.live("cx");
+        until("estado da sessão aberta no canal",||rx.borrow().as_ref().is_some_and(|s|s.public_state["state"] == "idle")).await;
+        process::kill(&recorded(&policy)[0],&key,dir.path()).await.unwrap();
+        until("religou sozinho",||recorded(&policy).len() >= 2).await;
+        until_ready(&registry,&key).await;
+        until("vida nova no mesmo canal",||rx.borrow().as_ref().is_some_and(|s|s.public_state["state"] == "idle" && s.error.is_none())).await;
+        cleanup(&registry,&key,dir.path(),&policy).await;
+        until("fechar esvazia o canal",||rx.borrow().is_none()).await;
     }
 
     #[tokio::test]

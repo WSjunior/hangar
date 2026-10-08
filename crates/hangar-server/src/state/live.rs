@@ -121,9 +121,18 @@ impl StateEnv {
     fn program(&self) -> std::ffi::OsString { self.list.env().capture_program.clone() }
 }
 
-/// A fábrica do hub: um `Monitor` de produção por hub de Claude com terminal.
+/// A fábrica do hub: um `Monitor` de produção por hub de Claude com terminal e um feed do runtime
+/// por hub de Codex sem terminal.
 pub fn spawner(env: Arc<StateEnv>) -> SpawnMonitor {
     Arc::new(move |hub: &Arc<Hub>| {
+        if hub.binding().is_some_and(|b| b.provider == crate::transcript::Provider::Codex && b.headless) {
+            let live = env.runtime.get().map(|registry| registry.live(&hub.name));
+            let feed = super::runtime_feed::RuntimeFeed::new(hub, live, env.list.published.clone());
+            let diag = env.diag.clone();
+            return tokio::spawn(super::runtime_feed::guarded(Arc::downgrade(hub), feed.run(), move |name| {
+                diag.report("rust.state_feed_failed", name, "state_feed_panic", "o estado do Codex sem terminal caiu; volta com o próximo assinante");
+            }));
+        }
         let src = LiveSources::new(env.clone(), hub);
         let diag = env.diag.clone();
         tokio::spawn(async move {
@@ -142,6 +151,9 @@ pub fn spawner(env: Arc<StateEnv>) -> SpawnMonitor {
 }
 
 static NEXT_OWNER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Dono novo no mapa que a lista lê: cresce a cada `Monitor` ou feed.
+pub(crate) fn next_owner() -> u64 { NEXT_OWNER.fetch_add(1, Ordering::Relaxed) }
 
 struct CaptureSlot { generation: u64, target: String, capture: Arc<PaneCapture> }
 
@@ -174,7 +186,7 @@ impl LiveSources {
         });
         Self { hub_wake: hub.wake(), hub: Arc::downgrade(hub), name, wake, runtime_wake, runtime_view, runtime_task, env,
             capture: tokio::sync::Mutex::new(None), snapshot: Mutex::default(), hook_files: Arc::default(),
-            owner: NEXT_OWNER.fetch_add(1, Ordering::Relaxed) }
+            owner: next_owner() }
     }
 
     fn publish_raw(&self, event: &str, data: &str) -> bool { self.hub.upgrade().is_some_and(|h| h.publish_own(event, data)) }

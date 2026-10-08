@@ -42,6 +42,8 @@ pub struct RuntimeRegistry {
     ingress:super::ingress::IngressGates,
     /// Primeira espera da religação do processo que cai (dobra a cada subida seguida).
     respawn_base:Duration,
+    /// Último valor do Codex sem terminal por nome, para o feed do hub (`live`).
+    live:std::sync::Mutex<BTreeMap<String,LiveSender>>,
 }
 
 /// A trava pode demorar a soltar: as tarefas de E/S de um ator que saiu, ou o `LockFileEx` de um
@@ -175,13 +177,22 @@ impl RuntimeRegistry {
     pub fn new(upstream:SocketAddr,secret:String,instance:String) -> Self {
         Self { entries:Mutex::new(BTreeMap::new()),events:broadcast::channel(1024).0,
             policy:PolicyClient::new(upstream,secret,instance.clone()),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()),mods:None,ingress:Default::default(),
-            respawn_base:Duration::from_secs(5) }
+            respawn_base:Duration::from_secs(5),live:Default::default() }
     }
     pub fn with_respawn_base(mut self,base:Duration) -> Self { self.respawn_base = base; self }
     /// Interface dos mods: sessão Claude sem terminal aberta aqui vira superfície remota e publica no `Mods`.
     pub fn with_mods(mut self,mods:crate::mods::state::Mods) -> Self { self.mods = Some(mods); self }
     pub fn ingress(&self) -> &super::ingress::IngressGates { &self.ingress }
     pub fn subscribe(&self) -> broadcast::Receiver<RuntimeEvent> { self.events.subscribe() }
+    /// Último valor da sessão `name` para o feed do hub; `None` enquanto ela não está aberta aqui.
+    pub fn live(&self,name:&str) -> LiveReceiver { self.live_sender(name).subscribe() }
+    /// Canal do nome, criado na primeira procura (feed ou ator, o que vier antes). Canal vazio e sem
+    /// receptor sai do mapa aqui: sem isto o mapa guardaria todo nome que já teve chat aberto.
+    fn live_sender(&self,name:&str) -> LiveSender {
+        let mut map = self.live.lock().unwrap_or_else(|e|e.into_inner());
+        map.retain(|key,sender|key == name || sender.receiver_count() > 0 || sender.borrow().is_some());
+        map.entry(name.to_owned()).or_insert_with(||tokio::sync::watch::channel(None).0).clone()
+    }
     pub async fn handle(&self,key:&str,generation:u64) -> Result<RuntimeHandle,RuntimeError> {
         match self.entry(key,generation).await? {EntryHandle::Headless(handle)=>Ok(handle),_=>Err(failure("runtime_provider"))}
     }
@@ -247,6 +258,7 @@ impl RuntimeRegistry {
         engine.set_fresh_process(fresh);
         if let Some(sidecar_dir) = &managed { engine = engine.with_launch(LaunchConfig { sidecar_dir:sidecar_dir.clone(),backoff:self.respawn_base }); }
         if let Some(mods) = &self.mods { engine = engine.with_mods(mods.clone()); }
+        if target.provider == "codex" { engine = engine.with_live(self.live_sender(&target.name)); }
         // Dono único dos pedidos dos apps até o `close` (S9). Só o Claude tem superfície. Registrado antes
         // de a tarefa do ator existir: a primeira faixa publicada já encontra a sessão no `Mods`.
         // A vida no `Mods` é única no servidor; o processo é a chave durável mais o cano, que o renomear mantém.
@@ -351,16 +363,28 @@ impl RuntimeRegistry {
                 // erro deixava o Python achando que ela seguia aqui; `killed: false` e quem pediu decide.
                 tracing::warn!(key,code=%error.code,"sessão fechada sem encerrar o processo");
                 self.entries.lock().await.remove(key);
+                self.clear_live(&name).await;
                 if let Some(mods) = &self.mods { mods.forget(&name,life); }
                 return Ok(json!({"closed":true,"killed":false}));
             }
             tracing::warn!(key,code=%error.code,"ator do runtime já tinha terminado; sessão liberada");
         }
         self.entries.lock().await.remove(key);
+        self.clear_live(&name).await;
         // A sessão saiu do Rust: os apps perdem a faixa e os pedidos voltam a não ter dono (S9). Com ou sem
         // terminal, esquece só esta vida: outra sessão que tenha tomado o nome (outra vida) fica.
         if let Some(mods) = &self.mods { mods.forget(&name,life); }
         Ok(if kill { json!({"closed":true,"killed":true}) } else { json!({"closed":true}) })
+    }
+    /// Sessão fora do Rust: o feed mostra a parada (`None`), e o canal sem receptor sai do mapa.
+    async fn clear_live(&self,name:&str) {
+        // Outra vida com o mesmo nome (reaberta antes deste fechamento) segue dona do canal.
+        if self.entries.lock().await.values().any(|entry|entry.name == name) { return; }
+        let mut map = self.live.lock().unwrap_or_else(|e|e.into_inner());
+        if let Some(sender) = map.get(name) {
+            sender.send_replace(None);
+            if sender.receiver_count() == 0 { map.remove(name); }
+        }
     }
     async fn barrier(&self,key:&str) -> Arc<Mutex<()>> {
         self.lifecycle.lock().await.entry(key.into()).or_insert_with(||Arc::new(Mutex::new(()))).clone()

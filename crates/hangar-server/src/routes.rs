@@ -665,7 +665,7 @@ mod tests {
         };
         let jsonl = dir.join("t.jsonl");
         std::fs::write(&jsonl, "").unwrap();
-        let lease = ctx.hubs.acquire("s", Binding { provider: crate::transcript::Provider::Claude, jsonl, key: "k".into() }, &ctx);
+        let lease = ctx.hubs.acquire("s", Binding { provider: crate::transcript::Provider::Claude, jsonl, key: "k".into(), headless: false }, &ctx);
         let hub = lease.hub.clone();
         let (tx, rx) = mpsc::channel::<Queued>(64);
         tokio::spawn(client_loop(lease, None, tx));

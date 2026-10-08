@@ -116,6 +116,21 @@ pub struct RuntimeReply {
     pub payload: Value,
 }
 
+/// Último valor do Codex sem terminal para o hub da sessão (`RuntimeRegistry::live`): a prévia sai
+/// só por aqui, fora do `events`, e o feed do hub a publica coalescida.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LiveState {
+    pub public_state: Value,
+    pub preview: String,
+    pub thinking: String,
+    pub tool: String,
+    /// Erro durável do ator: (código, frase).
+    pub error: Option<(String, String)>,
+}
+
+pub type LiveSender = tokio::sync::watch::Sender<Option<std::sync::Arc<LiveState>>>;
+pub type LiveReceiver = tokio::sync::watch::Receiver<Option<std::sync::Arc<LiveState>>>;
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeEvent {

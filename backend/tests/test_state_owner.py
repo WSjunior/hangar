@@ -21,9 +21,13 @@ _RUST_EVENTS = [
 class _Dono:
     """Coordenador com o Rust dono do processo; nenhuma sessão aberta nele."""
 
-    def __init__(self, mode):
+    def __init__(self, mode, owns=(("claude", True), ("claude", False), ("codex", True))):
         self.mode = mode
         self.legacy = None
+        self.owns = set(owns)
+
+    def rust_owns(self, provider, headless):
+        return (provider, headless) in self.owns
 
     def managed_queue(self, name):
         return False
@@ -75,8 +79,9 @@ def rust(tmp_path, monkeypatch):
 class _CanalRust:
     """Porta privada do Rust de mentira: guarda os pedidos e responde o canal do estado."""
 
-    def __init__(self):
+    def __init__(self, eventos=None):
         self.pedidos = []
+        self.eventos = eventos or _RUST_EVENTS
 
     async def __aenter__(self):
         self.server = await asyncio.start_server(self._atende, "127.0.0.1", 0)
@@ -93,7 +98,7 @@ class _CanalRust:
         self.pedidos.append(cabeca.decode())
         writer.write(b"HTTP/1.0 200 OK\r\ncontent-type: text/event-stream\r\n\r\n")
         writer.write(b"event: ping\r\ndata: {}\r\n\r\n")
-        for event, data in _RUST_EVENTS:
+        for event, data in self.eventos:
             writer.write(f"event: {event}\r\ndata: {data}\r\n\r\n".encode())
         await writer.drain()
         await asyncio.Event().wait()
@@ -179,3 +184,112 @@ async def test_side_events_keeps_info_queue_nav_ping_toast(rust):
     assert not {"state", "preview", "ask_question", "suggest"} & set(_nomes(vistos))
     assert adapter.drains == [] and adapter.tails == []
     sse.nav_confirmar("s")
+
+
+# --- Codex sem terminal: o feed do hub do Rust é dono dos seis eventos (5B Task 9) ---
+
+_SEIS = {"state", "preview", "ask_question", "suggest", "pensamento", "ferramenta"}
+_CODEX_EVENTS = [
+    ("state", json.dumps({"session": "cx", "state": "working", "headless": True})),
+    ("ask_question", "null"),
+    ("preview", json.dumps({"session": "cx", "text": "em voo", "md": True, "full": True, "vivo": True})),
+    ("pensamento", json.dumps({"text": "pensando"})),
+    ("ferramenta", json.dumps({"text": ""})),
+]
+
+
+class _CodexAdapter(_Adapter):
+    provider = "codex"
+
+    async def _transcript(self, path, start_offset=None):
+        self.tails.append(path)
+        yield ChatEvent(kind="user_msg", id="u1", text="oi")
+        yield ChatEvent(kind="assistant_msg", id="a1", text="resposta gravada")
+        await asyncio.Event().wait()
+
+
+@pytest.fixture
+def codex(tmp_path, monkeypatch):
+    from app.adapters.codex import sessions as codex_sessions
+    monkeypatch.setattr(pqueue, "_queue_dir", lambda: tmp_path)
+    monkeypatch.setattr(sse, "_nav_arquivo", lambda: tmp_path / "nav.json")
+    adapter = _CodexAdapter()
+    monkeypatch.setattr(sse, "get_adapter", lambda provider: adapter)
+    monkeypatch.setattr(sse.PreviewBroker, "get", _sem_broker)
+    monkeypatch.setattr(runtime_coordinator, "_current", _Dono("rust"))
+    sidecar = {"headless": True}
+    monkeypatch.setattr(codex_sessions, "load", lambda name: sidecar)
+    confirmados = []
+    monkeypatch.setattr(sse, "_confirm_codex_queue", lambda name, jsonl: confirmados.append((name, jsonl)))
+    jsonl = tmp_path / "rollout-abc.jsonl"
+    jsonl.write_text("")
+    return adapter, jsonl, sidecar, confirmados
+
+
+@pytest.mark.parametrize("modo,sidecar,owns,rust", [
+    ("rust", {"headless": True}, True, True), ("pending", {"headless": True}, True, True),
+    ("python", {"headless": True}, True, False), ("rust", {"headless": False}, True, False),
+    ("rust", None, True, False), ("rust", {"headless": True}, False, False)])
+def test_codex_state_is_rust_only_headless_and_owned(monkeypatch, modo, sidecar, owns, rust):
+    from app.adapters.codex import sessions as codex_sessions
+    monkeypatch.setattr(codex_sessions, "load", lambda name: sidecar)
+    dono = (("claude", True), ("claude", False)) + ((("codex", True),) if owns else ())
+    monkeypatch.setattr(runtime_coordinator, "_current", _Dono(modo, dono))
+    assert sse._estado_do_rust("codex", "cx") is rust
+    assert sse._estado_do_rust("claude", "cx") is (modo != "python")
+
+
+async def _por(gen, segundos):
+    """Tudo o que o stream manda em `segundos` (o ping seguinte só sai em 10 s)."""
+    vistos = []
+    try:
+        async with asyncio.timeout(segundos):
+            async for ev in gen:
+                vistos.append(ev)
+    except TimeoutError:
+        pass
+    finally:
+        await gen.aclose()
+    return vistos
+
+
+async def test_codex_headless_internal_connection_sends_none_of_the_six(codex, monkeypatch):
+    adapter, jsonl, _sidecar, confirmados = codex
+    vistos = await _por(sse.merged_events("cx", str(jsonl), provider="codex", side=True), 1.5)
+    assert vistos[0]["event"] == "info" and json.loads(vistos[0]["data"])["headless"] is True
+    assert not _SEIS & set(_nomes(vistos)), _nomes(vistos)
+    assert adapter.tails == [str(jsonl)], "o tail_pump fica: é ele que confirma a fila do Codex"
+    # Abertura confirma uma vez; o `user_msg` do transcript, outra.
+    assert len(confirmados) >= 2
+    assert adapter.drains == [], "a fila do Codex o ator drena sozinho"
+
+
+async def test_codex_headless_guest_reads_six_from_rust_channel(codex):
+    _adapter, jsonl, _sidecar, _ = codex
+    async with _CanalRust(_CODEX_EVENTS):
+        gen = sse.merged_events("cx", str(jsonl), provider="codex", count_app=False)
+        vistos = await _coleta(gen, lambda v: "ferramenta" in _nomes(v))
+    do_rust = [(e["event"], e["data"]) for e in vistos if e["event"] in _SEIS]
+    assert do_rust == _CODEX_EVENTS, "os seis passam como o hub os publicou, sem cópia do Python"
+
+
+async def test_codex_headless_flip_reprovides_and_sends_new_info(codex, monkeypatch):
+    from app.models import SessionInfo
+    _adapter, jsonl, sidecar, _ = codex
+    viva = {"headless": True}
+
+    async def lista():
+        return [SessionInfo(name="cx", jsonl=str(jsonl), provider="codex", headless=viva["headless"])]
+
+    monkeypatch.setattr(sse, "_cached_list", lista)
+    gen = sse.merged_events("cx", str(jsonl), provider="codex", side=True)
+
+    async def vira():
+        await asyncio.sleep(0.3)
+        sidecar["headless"] = viva["headless"] = False
+
+    task = asyncio.create_task(vira())
+    vistos = await _coleta(gen, lambda v: sum(e["event"] == "info" for e in v) >= 2, limite=6.0)
+    await task
+    infos = [json.loads(e["data"]) for e in vistos if e["event"] == "info"]
+    assert [i["headless"] for i in infos[:2]] == [True, False], infos

@@ -879,6 +879,9 @@ class RuntimeCoordinator:
             client.fail(RuntimeError("runtime encerrado; chamada de voz invalidada"))
 
     async def _push_channels(self, slot):
+        # Codex sem terminal: a prévia vai do ator ao hub do Rust em processo, nunca por aqui.
+        if slot.binding.provider == "codex":
+            return
         from app.adapters.preview_push import PushPreviewSource, fonte_ferramenta, fonte_pensamento
         for channel, data in (slot.view.get("channels") or {}).items():
             source = {"preview":PushPreviewSource.get, "thinking":fonte_pensamento, "tool":fonte_ferramenta}.get(channel)
