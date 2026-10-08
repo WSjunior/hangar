@@ -139,7 +139,7 @@ Status: ready-for-agent
 - Produces: `groups::model::{Fed, Sidecar, Member, GroupRecord, PROTOCOL, legacy_gid}`;
   `groups::store::{PairDir, file_stem, StoreError}`.
 
-- [ ] **Step 1: Gerar as fixtures pelo Python**
+- [x] **Step 1: Gerar as fixtures pelo Python**
 
 Em `gen_golden.py`, um caso que grava com `pair.PairLink(...).set(...)` num `projects_dir`
 temporário os sidecars abaixo, copia os `.json` para `golden/pair_sidecars/` e grava
@@ -160,7 +160,7 @@ E um sidecar com `fed`, escrito cru (o Python de hoje não grava `fed`):
 {"peers": ["b", "lab::c"], "task": "t", "gid": "ab12cd34", "harness": {}, "fed": {"owner": "casa", "local": true, "version": 7}}
 ```
 
-- [ ] **Step 2: Escrever o teste**
+- [x] **Step 2: Escrever o teste**
 
 ```rust
 // crates/hangar-server/tests/groups_store.rs
@@ -225,10 +225,10 @@ fn sidecars_skips_registry_files() {
 }
 ```
 
-- [ ] **Step 3: Rodar e ver falhar** — `cargo test -p hangar-server --test groups_store`.
+- [x] **Step 3: Rodar e ver falhar** — `cargo test -p hangar-server --test groups_store`.
   Esperado: não compila (`groups` não existe).
 
-- [ ] **Step 4: Escrever `model.rs`**
+- [x] **Step 4: Escrever `model.rs`**
 
 ```rust
 //! Arquivos de grupo em `.hangar-pair`. O sidecar é o formato de hoje (Python, hook e lista leem);
@@ -318,7 +318,7 @@ pub fn legacy_gid(name: &str, peers: &[String]) -> String {
 Conferir qual `truthy` o `links.rs` importa hoje (`list/discover_other.rs:601` ou
 `list/context.rs:273`) e usar a mesma.
 
-- [ ] **Step 5: Escrever `store.rs`**
+- [x] **Step 5: Escrever `store.rs`**
 
 ```rust
 //! Leitura e escrita da pasta `.hangar-pair` e do arquivo de contratos. Sem lock aqui: quem
@@ -370,12 +370,12 @@ fn replace_atomic(target: &Path, bytes: &[u8]) -> std::io::Result<()>;
 Os métodos de registro (`record`, `write_record`, `delete_record`, `records`) e a fila entram na
 Task 10, quando passam a existir.
 
-- [ ] **Step 6: Trocar `links.rs`** — `pair_of` vira `read_object` + `Sidecar::parse`; o `Pair`
+- [x] **Step 6: Trocar `links.rs`** — `pair_of` vira `read_object` + `Sidecar::parse`; o `Pair`
   privado sai. A lista não muda (os testes `contract_list` e `list_*` existentes cobrem).
 
-- [ ] **Step 7: Rodar** `--test groups_store` e `--test list_routes`. Esperado: PASS.
+- [x] **Step 7: Rodar** `--test groups_store` e `--test list_routes`. Esperado: PASS.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/hangar-server/src/groups crates/hangar-server/src/lib.rs crates/hangar-server/src/list/links.rs crates/hangar-server/tests/groups_store.rs backend/tests/fixtures/contract/gen_golden.py backend/tests/fixtures/contract/golden/pair_sidecars
@@ -434,7 +434,7 @@ pub enum GroupError { Refused(JoinRefusal), Orq(String), Store(StoreError) }
 `BoxFuture<'a, T>` = `Pin<Box<dyn Future<Output = T> + Send + 'a>>`, como o `ServiceFuture` de
 `terminal_input.rs:7`.
 
-- [ ] **Step 1: Escrever os testes portados de `backend/tests/test_pair.py`** (conferir os nomes
+- [x] **Step 1: Escrever os testes portados de `backend/tests/test_pair.py`** (conferir os nomes
   equivalentes ao portar)
 
 ```rust
@@ -561,24 +561,24 @@ sidecars são os de antes), `orq_join_promotes_once_and_restores_on_conflict` (f
 sidecars voltam, erro `GroupError::Orq`), `leave_archives_contract_file` (`grupo-g1.md` vai para o
 arquivo), `external_link_refuses_grouped_session`.
 
-- [ ] **Step 2: Rodar e ver falhar** — `cargo test -p hangar-server --test groups_local`.
+- [x] **Step 2: Rodar e ver falhar** — `cargo test -p hangar-server --test groups_local`.
 
-- [ ] **Step 3: Implementar `local.rs`** portando `join_group`, `leave`, `rename_pair` e o ramo de
+- [x] **Step 3: Implementar `local.rs`** portando `join_group`, `leave`, `rename_pair` e o ramo de
   par externo do `join_group` (`pair.py:162-223`, `287-323`, `353-370`) sem mudar regra, exceto: se
   a união de membros tem nome com `::`, recusa com `JoinRefusal::Mix` (o par 1:1 entre máquinas é
   da Task 5). `plan_external_link` recusa com `AlreadyGrouped` se `local` já tem sidecar e grava só
   o sidecar de `local` com `peers: [address]`, tarefa vazia, `harness` recebido e `gid` novo.
 
-- [ ] **Step 4: Implementar `service.rs`**: um `tokio::sync::Mutex<()>` por processo; dentro dele,
+- [x] **Step 4: Implementar `service.rs`**: um `tokio::sync::Mutex<()>` por processo; dentro dele,
   ler, planejar e gravar com `spawn_blocking`; escrita que falha restaura `before` (como
   `_restore_locked`); fusão chama `merge_contract` para cada perdedor; `orq` com gid novo chama
   `OrqFacts::promote` ainda sob o lock e restaura se falhar; `leave` consulta `OrqFacts::phase` só
   quando o sidecar é `orq` e conta `Live`/`Unknown` como viva; arquivamento depois de soltar o lock
   (faxina não desfaz saída). Nada de HTTP ou entrega aqui dentro.
 
-- [ ] **Step 5: Rodar** os testes da Task. Esperado: PASS.
+- [x] **Step 5: Rodar** os testes da Task. Esperado: PASS.
 
-- [ ] **Step 6: Commit** — `git commit -m "feat(groups): port single-machine group operations to Rust"`
+- [x] **Step 6: Commit** — `git commit -m "feat(groups): port single-machine group operations to Rust"`
 
 ### Task 3: Entrega de aviso, texto do protocolo e fatos da orquestração
 
@@ -612,16 +612,16 @@ Status: ready-for-agent
   - `/internal/orq/associate {name, gid, mtime}` → contexto do `orq_context.associate` sem
     `pair._LOCK` (usada pela ponte na Task 6).
 
-- [ ] **Step 1: Testes** — Rust: `deliver_text` numa sessão Claude com terminal falsa chega pelo
+- [x] **Step 1: Testes** — Rust: `deliver_text` numa sessão Claude com terminal falsa chega pelo
   caminho do Rust; numa sessão `codex` repassa ao Python falso com `{"text", "steer": false}`;
   erro do Python volta como envelope. Python: cada rota interna com sessão falsa, inclusive
   `promote` com `IdentityUnavailable` (200) e com `PromotionConflict` (409).
-- [ ] **Step 2: Rodar e ver falhar.**
-- [ ] **Step 3: Implementar.** Extrair o miolo do `session_write::input` numa função sem mudar o
+- [x] **Step 2: Rodar e ver falhar.**
+- [x] **Step 3: Implementar.** Extrair o miolo do `session_write::input` numa função sem mudar o
   handler (que passa a chamá-la). As rotas Python ficam no mesmo arquivo e com a mesma autenticação
   das demais `/internal/*`.
-- [ ] **Step 4: Rodar.** Esperado: PASS.
-- [ ] **Step 5: Commit** — `git commit -m "feat(groups): deliver group notices and read orchestration facts from Rust"`
+- [x] **Step 4: Rodar.** Esperado: PASS.
+- [x] **Step 5: Commit** — `git commit -m "feat(groups): deliver group notices and read orchestration facts from Rust"`
 
 ### Task 4: Rotas de grupo de uma máquina no Rust (paridade)
 
@@ -642,14 +642,14 @@ Status: ready-for-agent
   por `groups::routes::router() -> Router<Arc<AppState>>`. **Não registrados no roteador principal
   nesta Task** (a Task 6 registra junto com a troca do Python, para nunca haver dois escritores).
 
-- [ ] **Step 1: Golden pelo Python** — `gen_golden.py` roda as rotas Python com sessões falsas e
+- [x] **Step 1: Golden pelo Python** — `gen_golden.py` roda as rotas Python com sessões falsas e
   grava status + corpo de: par de duas soltas; tarefa diferente (409); `erro_autopareamento` (400);
   `erro_peer_nao_informado` (400); sessão inexistente (404); orquestrador (409 `erro_sessao_orq`);
   saída (`{ok, warning: null}`); saída de quem não está em grupo; `group-message` (ok; barra; `[grupo:`
   reencaminhado; sem grupo 404 `erro_sessao_sem_grupo`; 6º em 60 s = 429); contrato sem grupo (404
   `erro_sessao_nao_pareada`) e com grupo; corpo com campo a mais (422 do FastAPI).
 
-- [ ] **Step 2: Testes das rotas** (padrão de `tests/list_routes.rs`: `fake` + `list_support::server`,
+- [x] **Step 2: Testes das rotas** (padrão de `tests/list_routes.rs`: `fake` + `list_support::server`,
   com o `groups::routes::router()` montado no servidor de teste), um por golden do Step 1, comparando
   por `common::canon`, mais:
 
@@ -674,9 +674,9 @@ async fn contract_put_checks_mtime_and_creates_exclusively() {
 }
 ```
 
-- [ ] **Step 3: Rodar e ver falhar.**
+- [x] **Step 3: Rodar e ver falhar.**
 
-- [ ] **Step 4: Implementar `routes.rs`.**
+- [x] **Step 4: Implementar `routes.rs`.**
   - Dono: `auth.is_owner`; não dono → `pass_any` (Python).
   - Sessões e provedores: retrato da `ListBridge` (até 2 s); nome ausente → uma descoberta forçada
     antes do 404 (como `_cached_info_sync`, `api.py:1096-1107`).
@@ -695,9 +695,9 @@ async fn contract_put_checks_mtime_and_creates_exclusively() {
     (segundos `f64`, tolerância `1e-6`, como `orq_md`) senão; conflito → 409 `erro_contrato_mudou`.
     Este código entra já na 1a com frase nas três superfícies.
 
-- [ ] **Step 5: Rodar** os testes da Task. Esperado: PASS.
+- [x] **Step 5: Rodar** os testes da Task. Esperado: PASS.
 
-- [ ] **Step 6: Commit** — `git commit -m "feat(groups): single-machine pairing routes in Rust"`
+- [x] **Step 6: Commit** — `git commit -m "feat(groups): single-machine pairing routes in Rust"`
 
 ### Task 5: Par 1:1 entre máquinas no Rust (paridade)
 
@@ -727,14 +727,14 @@ impl PeerClient {
 }
 ```
 
-- [ ] **Step 1: Golden pelo Python**: `_pair_cross_server` feliz, peer recusou (502
+- [x] **Step 1: Golden pelo Python**: `_pair_cross_server` feliz, peer recusou (502
   `erro_pareamento_rejeitado`), rede caiu (502 `erro_pareamento_nao_confirmado`, com a chamada de
   limpeza ao `/unpair-remote`), `CP_SERVER_ID` ausente (400), mais de um remoto (400
   `erro_pareamento_cross_1_1`); `/pair-remote` feliz e com aviso falho (502); `/unpair-remote`
   de quem não é par (`noop`); saída avisando remoto que não responde (`warning`
   `erro_pareamento_saida_falhou` com `erro_peer_nao_avisado`).
 
-- [ ] **Step 2: Testes**: os goldens acima com duas instâncias de teste (`casa` e `lab`, cada uma com
+- [x] **Step 2: Testes**: os goldens acima com duas instâncias de teste (`casa` e `lab`, cada uma com
   `tempdir`, `HANGAR_SERVER_ID` e `peers.json` apontando para a outra); `PeerBook` lê só entradas
   com `base_url` e `token` (entrada só com `app` não é peer; `enabled: false` continua endereçável);
   `PeerClient`: corpo de 2 MiB → `Transport`; 409 com código → `Refused`; o redirect segue sem levar o
@@ -742,17 +742,17 @@ impl PeerClient {
   recusar redirect para outro host); `delete_pair_ends_external_pair` (sessão com par externo: o
   Python falso recebe `/internal/external-pairs/end`).
 
-- [ ] **Step 3: Rodar e ver falhar.**
+- [x] **Step 3: Rodar e ver falhar.**
 
-- [ ] **Step 4: Implementar** o iniciador (`api.py:5162-5211`), o receptor (`5219-5243`), o
+- [x] **Step 4: Implementar** o iniciador (`api.py:5162-5211`), o receptor (`5219-5243`), o
   `/unpair-remote` com a defesa de "é mesmo par" (`5250-5268`), e a saída (`DELETE /pair` e
   `GroupService::leave` chamada pela ponte) avisando cada remoto de máquina própria pelo
   `/unpair-remote` e chamando `/internal/external-pairs/end` quando um ex-companheiro é par externo
   (o Python desfaz o lado de fora como `registry._encerrar_pares_externos`). Rede sempre fora do lock.
 
-- [ ] **Step 5: Rodar.** Esperado: PASS.
+- [x] **Step 5: Rodar.** Esperado: PASS.
 
-- [ ] **Step 6: Commit** — `git commit -m "feat(groups): 1:1 cross-machine pairing in Rust with Python parity"`
+- [x] **Step 6: Commit** — `git commit -m "feat(groups): 1:1 cross-machine pairing in Rust with Python parity"`
 
 ### Task 6: O Python passa a pedir ao Rust; o Rust registra as rotas
 
@@ -794,7 +794,7 @@ Status: ready-for-agent
   `groups_bridge.call(op, **args) -> dict` (no `pending` espera até `PENDING_WAIT_S`, depois
   `runtime_starting`, como as demais operações); `pair.GroupsOwnedByRust(RuntimeError)`.
 
-- [ ] **Step 1: Testes Python**
+- [x] **Step 1: Testes Python**
 
 ```python
 # backend/tests/test_groups_bridge.py
@@ -831,9 +831,9 @@ No Rust (`groups_bridge.rs`): ponte sem segredo → 404 (como as outras pontes p
 o mesmo `{status, body}` da rota pública; `group.orq_associate` chama `/internal/orq/associate`
 segurando o lock (um `group.leave` concorrente espera).
 
-- [ ] **Step 2: Rodar e ver falhar.**
+- [x] **Step 2: Rodar e ver falhar.**
 
-- [ ] **Step 3: Implementar.** No modo `rust`/`pending`: `registry._clear_pair` → `group.leave`;
+- [x] **Step 3: Implementar.** No modo `rust`/`pending`: `registry._clear_pair` → `group.leave`;
   na criação, falha da ponte com sidecar presente recusa a criação (`erro_grupo_limpeza_falhou`); no
   kill, falha vai ao log e a varredura do Rust resolve; `registry.rename` → `group.rename` antes de
   mexer no tmux/sidecar sem terminal; `api.kill_session` → sem `_avisar_saida` (o Rust avisa);
@@ -843,9 +843,9 @@ segurando o lock (um `group.leave` concorrente espera).
   O corpo atual do `associate`, sem `pair._LOCK`, vira a função que a `/internal/orq/associate`
   chama. Subir o protocolo para o próximo número livre nos três lugares.
 
-- [ ] **Step 4: Rodar** os testes da Task e `--test proxy`. Esperado: PASS.
+- [x] **Step 4: Rodar** os testes da Task e `--test proxy`. Esperado: PASS.
 
-- [ ] **Step 5: Commit** — `git commit -m "feat(groups): make Rust the only writer of group files"`
+- [x] **Step 5: Commit** — `git commit -m "feat(groups): make Rust the only writer of group files"`
 
 ### Task 7: Varredura de membro morto e de grupo `orq` sozinho no Rust
 
@@ -860,7 +860,7 @@ Status: ready-for-agent
 - Consumes: `GroupService::leave`, `ListBridge` (retrato), `OrqFacts::phase`.
 - Produces: `groups::sweep::spawn(service, bridge) -> JoinHandle<()>`.
 
-- [ ] **Step 1: Testes**
+- [x] **Step 1: Testes**
 
 ```rust
 #[tokio::test(start_paused = true)] async fn dead_member_leaves_after_five_seconds_of_absence() {} // 4 s fica; 5 s sai
@@ -870,15 +870,15 @@ Status: ready-for-agent
 #[tokio::test(start_paused = true)] async fn no_sidecar_no_list_request() {}                       // sem sidecar, nada é pedido
 ```
 
-- [ ] **Step 2: Rodar e ver falhar.**
-- [ ] **Step 3: Implementar** `registry._varrer_pares_mortos` (`registry.py:3138-3174`) e
+- [x] **Step 2: Rodar e ver falhar.**
+- [x] **Step 3: Implementar** `registry._varrer_pares_mortos` (`registry.py:3138-3174`) e
   `pair.dissolve_lone_orq` (`pair.py:330-350`) a cada 2 s: primeiro um `read_dir` barato; só com
   sidecar, o retrato da lista (até 2 s); lista com erro ou vazia não varre (diário uma vez por
   sequência: `grupos.varredura_falhou`/`grupos.varredura_voltou`); `orq` sozinho sai com fase
   `Ended`, ou `NotStarted` com o sidecar sem escrita há mais de 3600 s. A saída é o mesmo
   `GroupService::leave` (que já avisa remotos e pede o fim do par externo).
-- [ ] **Step 4: Rodar.** Esperado: PASS.
-- [ ] **Step 5: Commit** — `git commit -m "feat(groups): sweep dead group members in Rust"`
+- [x] **Step 4: Rodar.** Esperado: PASS.
+- [x] **Step 5: Commit** — `git commit -m "feat(groups): sweep dead group members in Rust"`
 
 ### Task 8: A lista reemite quando só o grupo muda
 
@@ -894,14 +894,14 @@ Status: ready-for-agent
 - Test: `crates/hangar-server/tests/list_routes.rs` (caso novo), `backend/tests/test_sse.py`,
   `backend/tests/test_list_facts.py:179`, `crates/hangar-server/tests/contract_list/markers.rs:121-132`
 
-- [ ] **Step 1: Teste** — Rust `pair_change_alone_reemits_the_list`: lista aberta, só o sidecar de
+- [x] **Step 1: Teste** — Rust `pair_change_alone_reemits_the_list`: lista aberta, só o sidecar de
   `b` muda → chega um `sessions` novo em até 2 tiques. Python: duas listas que diferem só em
   `pair_peers` têm `_list_sig` diferente.
-- [ ] **Step 2: Rodar e ver falhar.**
-- [ ] **Step 3: Implementar** (tupla idêntica; `test_list_facts.py:179` e `markers.rs` provam a
+- [x] **Step 2: Rodar e ver falhar.**
+- [x] **Step 3: Implementar** (tupla idêntica; `test_list_facts.py:179` e `markers.rs` provam a
   paridade).
-- [ ] **Step 4: Rodar.** Esperado: PASS.
-- [ ] **Step 5: Commit** — `git commit -m "fix(list): re-emit the session list when only the group changes"`
+- [x] **Step 4: Rodar.** Esperado: PASS.
+- [x] **Step 5: Commit** — `git commit -m "fix(list): re-emit the session list when only the group changes"`
 
 ### Task 9: Verificação manual com o dono (1a)
 
@@ -915,6 +915,9 @@ Status: ready-for-human
   `orq` nasce, o árbitro fica sozinho entre Tasks, dissolve no fim.
 - [ ] **Step 4: verificação manual — reserva Python**: `CP_RUST_SERVER=0`; grupo local funciona como
   hoje.
+- [ ] **Step 5: verificação manual — Rust caindo com grupo vivo**: matar o `hangar-server` no meio de
+  uma troca de conta de uma sessão em grupo; quando ele volta, a sessão continua no grupo e a
+  varredura não a tira.
 
 ---
 
