@@ -510,10 +510,12 @@ def _export_codex(roots: Roots, bundle: Bundle, keep: set[str] | None = None) ->
 
 # Conta leva a pasta, o apelido e as chaves que só ela tem no settings.json (o resto vem do
 # principal na reconciliação). O login nunca: `.credentials.json` e o `.claude.json` da conta não
-# são lidos, e cada conta faz login no destino. Estas chaves carregam credencial ou o comando que
-# a fabrica.
-_ACCOUNT_SECRET_SETTINGS = frozenset({"env", "apiKeyHelper", "awsAuthRefresh",
-                                      "awsCredentialExport", "otelHeadersHelper"})
+# são lidos, e cada conta faz login no destino. Ficam fora a credencial e o comando que a fabrica,
+# o que tem item próprio (hooks e plugins precisam do conserto de caminho e programa dele) e a
+# postura de permissão da conta.
+_ACCOUNT_SKIPPED_SETTINGS = _OWNED_SETTINGS | frozenset({
+    "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper",
+    "permissions", "skipDangerousModePermissionPrompt"})
 
 
 def _alias_id(path: Path) -> str:
@@ -531,9 +533,15 @@ def _export_accounts(roots: Roots, bundle: Bundle, keep: set[str] | None = None)
             continue
         if keep is not None and name not in keep:
             continue
-        own = _read_json(path / "settings.json")
+        try:
+            own = _read_json(path / "settings.json")
+        except (BundleError, OSError, ValueError) as exc:
+            bundle.warnings.setdefault("claude_accounts", []).append(
+                _warn("config_sync_unreadable", entry=f"{name}/settings.json",
+                      error=type(exc).__name__))
+            continue
         entry: dict = {"settings": _canon({k: v for k, v in own.items() if k not in principal
-                                           and k not in _ACCOUNT_SECRET_SETTINGS}, roots)}
+                                           and k not in _ACCOUNT_SKIPPED_SETTINGS}, roots)}
         if alias := aliases.get(_alias_id(path)):
             entry["alias"] = alias
         accounts[name] = entry
@@ -559,6 +567,11 @@ def _native_dir(roots: Roots) -> Path:
         / "hangar-native"
 
 
+def _background_name(name) -> str:
+    """Só o nome mostrado na tela; igual nos dois lados para o hash convergir."""
+    return name if isinstance(name, str) and len(name) <= 255 and "\n" not in name else ""
+
+
 def _export_appearance(roots: Roots, bundle: Bundle, keep: set[str] | None = None) -> dict:
     folder = _native_dir(roots)
     data: dict = {"hashes": {}}
@@ -571,7 +584,8 @@ def _export_appearance(roots: Roots, bundle: Bundle, keep: set[str] | None = Non
     if image.is_file() and (keep is None or "background-image" in keep):
         raw = image.read_bytes()
         name_file = folder / "background-name"
-        name = name_file.read_text(encoding="utf-8") if name_file.is_file() else ""
+        name = _background_name(name_file.read_bytes().decode("utf-8", "replace")
+                                if name_file.is_file() else "")
         bundle.files[_BACKGROUND] = FileBlob(raw, 0o644)
         data["background"] = {"name": name}
         data["hashes"]["background-image"] = _hash([hashlib.sha256(raw).hexdigest(), name])
@@ -1093,41 +1107,44 @@ def _apply_accounts(ctx: _Apply) -> None:
         if not contas._NOME_OK.fullmatch(name) or not isinstance(entry, dict):
             res["warnings"].append(_warn("config_sync_invalid_entry", entry=name))
             continue
-        path = Path(ctx.roots.home) / f".claude-{name}"
         _emit(ctx.progress, "apply", item, name)
-        touched = False
-        if not contas.e_conta(path):
-            if path.is_symlink() or path.exists():
-                res["warnings"].append(_warn("config_sync_account_not_hangar", account=name))
-                continue
-            try:
-                contas.criar(name)
-            except (contas.ContaError, OSError) as exc:
-                res["warnings"].append(_warn("config_sync_account_failed", account=name,
-                                             error=str(exc)[:200]))
-                continue
+        try:
+            _apply_account(ctx, res, name, entry)
+        except Exception as exc:  # noqa: BLE001 — uma conta que quebra não para as outras
+            res["warnings"].append(_warn("config_sync_account_failed", account=name,
+                                         error=str(exc)[:200]))
+
+
+def _apply_account(ctx: _Apply, res: dict, name: str, entry: dict) -> None:
+    path = contas.caminho(name)   # o mesmo caminho que o `contas.criar` usa
+    if not contas.e_conta(path):
+        if path.is_symlink() or path.exists():
+            res["warnings"].append(_warn("config_sync_account_not_hangar", account=name))
+            return
+        contas.criar(name)
+        res["changed"].append(name)
+        res["warnings"].append(_warn("config_sync_account_needs_login", account=name))
+    touched = False
+    alias = entry.get("alias")
+    if isinstance(alias, str) and alias.strip():
+        key = _alias_id(path)
+        if apelidos.ler().get(key) != alias.strip()[:apelidos._MAX]:
+            apelidos.definir(key, alias)
             touched = True
-            res["warnings"].append(_warn("config_sync_account_needs_login", account=name))
-        alias = entry.get("alias")
-        if isinstance(alias, str) and alias.strip():
-            key = _alias_id(path)
-            if apelidos.ler().get(key) != alias.strip()[:apelidos._MAX]:
-                apelidos.definir(key, alias)
-                touched = True
-        settings = entry.get("settings")
-        incoming = {k: v for k, v in _uncanon(settings, ctx.roots).items()
-                    if k not in _ACCOUNT_SECRET_SETTINGS} if isinstance(settings, dict) else {}
-        if incoming:
-            changed: list[str] = []
+    settings = entry.get("settings")
+    incoming = {k: v for k, v in _uncanon(settings, ctx.roots).items()
+                if k not in _ACCOUNT_SKIPPED_SETTINGS} if isinstance(settings, dict) else {}
+    if incoming:
+        changed: list[str] = []
 
-            def change(current: dict) -> dict:
-                changed.clear()
-                return _merge_keys(current, incoming, changed)
+        def change(current: dict) -> dict:
+            changed.clear()
+            return _merge_keys(current, incoming, changed)
 
-            _edit_json(path / "settings.json", change, ctx)
-            touched = touched or bool(changed)
-        if touched:
-            res["changed"].append(name)
+        _edit_json(path / "settings.json", change, ctx)
+        touched = touched or bool(changed)
+    if touched and name not in res["changed"]:
+        res["changed"].append(name)
 
 
 def _apply_appearance(ctx: _Apply) -> None:
@@ -1139,8 +1156,7 @@ def _apply_appearance(ctx: _Apply) -> None:
     image_changed = False
     background = data.get("background")
     if isinstance(background, dict) and _BACKGROUND in ctx.bundle.files:
-        name = background.get("name")
-        name = name if isinstance(name, str) and len(name) <= 255 and "\n" not in name else ""
+        name = _background_name(background.get("name"))
         for file_name, blob in (("background-image", ctx.bundle.files[_BACKGROUND]),
                                 ("background-name", FileBlob(name.encode("utf-8"), 0o644))):
             image_changed |= _write_entry(folder / file_name, "file", {"": blob}, ctx, item,

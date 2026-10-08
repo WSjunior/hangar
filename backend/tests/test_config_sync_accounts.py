@@ -13,7 +13,7 @@ from tests.config_sync_machines import make_machine, use_machine
 
 ITEMS = ["claude_accounts", "hangar_appearance"]
 SECRETS = (b"rt-ana-secreto", b"conta-ana@x", b"env-secreto", b"helper-secreto",
-           b"nao-pode-sair")
+           b"otel-secreto", b"bypassPermissions", b"nao-pode-sair")
 
 
 async def _no_after(ctx, items):
@@ -60,7 +60,9 @@ def pair(tmp_path, monkeypatch):
     ana, bia = make_machine(tmp_path, "ana"), make_machine(tmp_path, "bia", full=False)
     _account(monkeypatch, ana, "claude-2", "Claude 2",
              {"model": "opus", "outputStyle": "Concise", "env": {"T": "env-secreto"},
-              "apiKeyHelper": "echo helper-secreto"}, "rt-ana-secreto", "conta-ana@x")
+              "apiKeyHelper": "echo helper-secreto", "otelHeadersHelper": "echo otel-secreto",
+              "permissions": {"defaultMode": "bypassPermissions"}},
+             "rt-ana-secreto", "conta-ana@x")
     (Path(ana.home) / ".claude-solta").mkdir()   # sem marcador: não é conta do Hangar
     _appearance(monkeypatch, ana, {"theme": "light", "font": "mono", "chrome_autofill": True,
                       "side_width": 512.0, "language": "en"}, b"\x89PNG-ana")
@@ -120,7 +122,8 @@ async def test_forged_accounts_and_secret_keys_are_refused(pair, monkeypatch):
     bundle.items["claude_accounts"]["accounts"].update({
         "../fora": {"settings": {}}, "Maiuscula": {"settings": {}}, "solta": {"settings": {}}})
     bundle.items["claude_accounts"]["accounts"]["claude-2"]["settings"].update(
-        {"env": {"T": "forjado"}, "apiKeyHelper": "echo forjado"})
+        {"env": {"T": "forjado"}, "apiKeyHelper": "echo forjado",
+         "permissions": {"defaultMode": "bypassPermissions"}})
     report = await _apply(bundle, ["claude_accounts"], bia)
     warnings = report["items"]["claude_accounts"]["warnings"]
     assert {(w["code"], w["params"].get("entry") or w["params"].get("account"))
@@ -130,7 +133,7 @@ async def test_forged_accounts_and_secret_keys_are_refused(pair, monkeypatch):
     assert not (Path(bia.home).parent / "fora").exists()
     assert sorted(p.name for p in (Path(bia.home) / ".claude-solta").iterdir()) == ["nota.txt"]
     settings = json.loads((Path(bia.home) / ".claude-claude-2" / "settings.json").read_text())
-    assert "env" not in settings and "apiKeyHelper" not in settings
+    assert not {"env", "apiKeyHelper", "permissions"} & set(settings)
 
 
 async def test_appearance_keeps_machine_choices_and_carries_the_image(pair, monkeypatch):

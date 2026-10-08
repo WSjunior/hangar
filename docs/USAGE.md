@@ -832,9 +832,9 @@ status, plugins, MCPs, variáveis de ambiente, motores, preferências do Hangar 
 
 Os caminhos são resolvidos no destino (inclusive Windows), e o programa de um hook que não existe
 lá (o `node` de outra versão, por exemplo) é trocado pelo que o destino tem no PATH. Não vão:
-credenciais (`.credentials.json`, `auth.json`), o login do `.claude.json` (nem o das contas), as
-chaves de credencial do `settings.json` de cada conta (`env`, `apiKeyHelper`), o `CLAUDE.local.md`,
-os hooks e skills do próprio Hangar e o MCP `hangar` de cada máquina. As pastas `.venv`,
+credenciais (`.credentials.json`, `auth.json`), o login do `.claude.json` (nem o das contas), do
+`settings.json` de cada conta as credenciais (`env`, `apiKeyHelper`), hooks, plugins e permissões,
+o `CLAUDE.local.md`, os hooks e skills do próprio Hangar e o MCP `hangar` de cada máquina. As pastas `.venv`,
 `node_modules` e `.git` de uma skill ficam de fora e, no destino, as que já existiam continuam.
 Máquina com Hangar anterior a esta tela aparece como "atualize o Hangar lá".
 
