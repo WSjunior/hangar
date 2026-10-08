@@ -16,6 +16,8 @@ use tokio::sync::{broadcast,Mutex};
 pub(crate) enum EntryHandle { Headless(RuntimeHandle), Terminal {target:super::terminal::TerminalTarget,handle:super::terminal::TerminalHandle} }
 impl EntryHandle {
     pub(crate) async fn snapshot(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.snapshot().await,Self::Terminal {handle,..}=>handle.snapshot().await}}
+    /// Só o ator sem terminal tem motor próprio; o de terminal não é sessão Codex.
+    pub(crate) async fn view(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.view().await,Self::Terminal {..}=>Err(failure("runtime_terminal"))}}
     pub(crate) async fn stop(&self)->Result<(),RuntimeError> {match self {Self::Headless(h)=>h.stop().await,Self::Terminal {handle,..}=>handle.stop().await}}
     pub(crate) async fn command(&self,command:RuntimeCommand)->Result<RuntimeReply,RuntimeError> {match self {Self::Headless(h)=>h.command(command).await,Self::Terminal {handle,..}=>handle.command(command).await}}
     pub(crate) async fn queue(&self,id:String,action:Action)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.queue(id,action).await,Self::Terminal {handle,..}=>handle.queue(id,action).await}}

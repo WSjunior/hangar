@@ -273,6 +273,8 @@ enum Message {
     Command { command:RuntimeCommand,response:Response,from_queue:bool },
     Queue { call_id:String,action:Action,response:oneshot::Sender<Result<Value,RuntimeError>> },
     Snapshot(oneshot::Sender<Result<Value,RuntimeError>>),
+    /// Vista do motor agora, sem esperar a gravação: o que uma troca já respondida deixou valendo.
+    View(oneshot::Sender<Value>),
     Drain(oneshot::Sender<Result<Value,RuntimeError>>),
     Confirm(oneshot::Sender<Result<Value,RuntimeError>>),
     /// `deadline`: quando quem pediu deixa de esperar (o prazo da rota, limitado ao teto do ator). Pedido
@@ -308,6 +310,11 @@ impl RuntimeHandle {
         let (send,receive) = oneshot::channel();
         self.sender.send(Message::Snapshot(send)).await.map_err(|_|self.gone("runtime_closed"))?;
         receive.await.map_err(|_|self.gone("runtime_closed"))?
+    }
+    pub async fn view(&self) -> Result<Value,RuntimeError> {
+        let (send,receive) = oneshot::channel();
+        self.sender.send(Message::View(send)).await.map_err(|_|self.gone("runtime_closed"))?;
+        receive.await.map_err(|_|self.gone("runtime_closed"))
     }
     pub async fn drain(&self) -> Result<Value,RuntimeError> {
         let (send,receive) = oneshot::channel(); self.sender.send(Message::Drain(send)).await.map_err(|_|self.gone("runtime_closed"))?;
@@ -903,6 +910,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                         let _ = response.send(Ok(json!({"key":target.key,"generation":target.generation,"revision":revision.value,
                             "view":durable_view,"channels":channels,"error":error.as_ref().map(|e|e.code.clone())})));
                     }
+                    Message::View(response) => { let _ = response.send(engine.view()); }
                     Message::Drain(response) => {
                         if engine.view()["deliverable"] != true && !drain_active {
                             let _ = response.send(Ok(json!({"sent":0})));

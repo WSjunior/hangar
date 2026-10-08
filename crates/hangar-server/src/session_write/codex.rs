@@ -260,9 +260,10 @@ pub async fn commands(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connec
 
 pub async fn permissions(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let (ctx, _) = admitted!(st, peer, req);
-    // A vista publicada pelo ator: vale com o processo caído, como o arquivo da sessão no Python.
-    let result = match ctx.target.handle.snapshot().await {
-        Ok(snapshot) => (StatusCode::OK, permission_modes(snapshot["view"]["permission_mode"].as_str())),
+    // O modo do motor, que vale com o processo caído; a vista publicada só chega depois de gravada e
+    // logo após abrir ou trocar o modo ainda traria o anterior.
+    let result = match ctx.target.handle.view().await {
+        Ok(view) => (StatusCode::OK, permission_modes(view["permission_mode"].as_str())),
         Err(error) => (StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_permissao_picker", &error.to_string(), json!({}))),
     };
     answer(&ctx, result)
