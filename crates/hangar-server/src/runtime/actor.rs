@@ -116,25 +116,72 @@ impl PolicyClient {
     }
 }
 
+/// Sessão cujo processo o Rust sobe: pasta do arquivo dela e a primeira espera da religação.
+#[derive(Clone)]
+pub struct LaunchConfig { pub sidecar_dir:std::path::PathBuf, pub backoff:Duration }
+
+/// Religação depois da queda do cano: um timer por sessão (`next_at`, no relógio do ator), até 3
+/// subidas seguidas sem ficar pronta, cada espera o dobro da anterior.
+#[derive(Default)]
+struct Respawn {
+    failures:u8,
+    next_at:Option<f64>,
+    task:Option<JoinHandle<Result<Relaunched,(RuntimeError,Value)>>>,
+    /// O que uma subida que falhou já gravou no arquivo da sessão: a próxima vida parte dele.
+    carried:Value,
+    /// Operação da pessoa (reiniciar, trocar o sandbox) e o que ela recebe quando o processo novo conecta.
+    user:Option<(String,Value)>,
+    /// A queda entregou `cano_saiu`: o processo filho morreu e o cano que ficou pode ser encerrado.
+    kill:bool,
+    /// O cano caiu durante uma subida pedida: a queda é dela, não agenda outra.
+    swallowed:bool,
+    was_working:bool,
+    last:Option<RuntimeError>,
+}
+const RESPAWN_MAX:u8 = 3;
+
+struct Relaunched { target:RuntimeTarget, spawned:bool, connection:CanoConnection, patch:Value }
+
 pub struct RuntimeEngine {
     core:Core,
+    launch:Option<LaunchConfig>,
     policy:Option<PolicyClient>,
     publisher:Option<broadcast::Sender<RuntimeEvent>>,
     revision:Arc<AtomicU64>,
     mods:Option<crate::mods::state::Mods>,
     /// A vida deste ator no `Mods` (`Mods::new_life`), com que ele publica e é esquecido.
     mods_life:u64,
+    /// Canal em processo do hub (Codex sem terminal): estado, erro e prévia saem por ele.
+    live:Option<LiveSender>,
 }
 
 impl RuntimeEngine {
     pub fn new(provider:&str,metadata:Value,generation:u64,clock:ClockSample) -> Result<Self,RuntimeError> {
         let core = match provider { "claude"=>Core::Claude(ClaudeEngine::new(metadata,generation,clock)),
             "codex"=>Core::Codex(CodexEngine::new(metadata,generation,clock)),_=>return Err(failure("provider")) };
-        Ok(Self { core,policy:None,publisher:None,revision:Arc::new(AtomicU64::new(0)),mods:None,mods_life:0 })
+        Ok(Self { core,launch:None,policy:None,publisher:None,revision:Arc::new(AtomicU64::new(0)),mods:None,mods_life:0,live:None })
+    }
+    /// O ator sobe o processo de novo quando ele cai, e reinicia/troca o sandbox (só Codex).
+    pub fn with_launch(mut self,launch:LaunchConfig) -> Self { if matches!(self.core,Core::Codex(_)) { self.launch = Some(launch); } self }
+    /// Motor da vida nova do processo, com as ligações desta.
+    fn renewed(&self,metadata:Value,generation:u64,clock:ClockSample) -> Result<Self,RuntimeError> {
+        let provider = match self.core { Core::Claude(_)=>"claude",Core::Codex(_)=>"codex" };
+        let mut next = Self::new(provider,metadata,generation,clock)?;
+        (next.launch,next.policy,next.publisher,next.revision,next.live) = (self.launch.clone(),self.policy.clone(),self.publisher.clone(),self.revision.clone(),self.live.clone());
+        Ok(next)
+    }
+    fn problem(&self) -> Option<String> { match &self.core { Core::Codex(core)=>core.problem().map(str::to_owned),Core::Claude(_)=>None } }
+    fn set_problem(&mut self,code:&str,detail:Option<String>) -> Vec<Effect> {
+        match &mut self.core { Core::Codex(core)=>core.set_problem(code,detail),Core::Claude(_)=>Vec::new() }
     }
     pub fn with_policy(mut self,policy:PolicyClient) -> Self { self.policy = Some(policy); self }
     pub fn with_publisher(mut self,publisher:broadcast::Sender<RuntimeEvent>) -> Self { self.publisher = Some(publisher); self }
     pub fn with_revision(mut self,revision:Arc<AtomicU64>) -> Self { self.revision = revision; self }
+    /// Canal em processo do hub: estado, erro e prévia do Codex sem terminal saem por ele.
+    /// Só o Codex: o Claude sem terminal segue publicando no `events` (fora desta parte).
+    pub fn with_live(mut self,live:LiveSender) -> Self { if matches!(self.core,Core::Codex(_)) { self.live = Some(live); } self }
+    /// Processo subido agora pelo Rust: a abertura do Codex repete a política (ver `codex::Engine`).
+    pub fn set_fresh_process(&mut self,fresh:bool) { if let Core::Codex(core) = &mut self.core { core.set_fresh_process(fresh); } }
     /// Liga a interface dos mods: o Claude sem terminal vira superfície `desktop` e publica no `Mods`.
     /// O prefixo dos pedidos é único por ator, para a resposta de uma vida anterior não casar.
     pub fn with_mods(mut self,mods:crate::mods::state::Mods) -> Self {
@@ -226,12 +273,15 @@ enum Message {
     Command { command:RuntimeCommand,response:Response,from_queue:bool },
     Queue { call_id:String,action:Action,response:oneshot::Sender<Result<Value,RuntimeError>> },
     Snapshot(oneshot::Sender<Result<Value,RuntimeError>>),
+    /// Vista do motor agora, sem esperar a gravação: o que uma troca já respondida deixou valendo.
+    View(oneshot::Sender<Value>),
     Drain(oneshot::Sender<Result<Value,RuntimeError>>),
     Confirm(oneshot::Sender<Result<Value,RuntimeError>>),
     /// `deadline`: quando quem pediu deixa de esperar (o prazo da rota, limitado ao teto do ator). Pedido
     /// que chega à vez depois disso não roda, e a superfície recebe o que sobra dele.
     Mods { call:ModsCall,deadline:Instant,response:oneshot::Sender<Result<Value,ModsError>> },
-    Stop(oneshot::Sender<Result<(),RuntimeError>>),
+    /// `kill`: o processo da sessão morre junto (encerrar a sessão).
+    Stop { response:oneshot::Sender<Result<(),RuntimeError>>,kill:bool },
 }
 
 #[derive(Clone)]
@@ -260,6 +310,11 @@ impl RuntimeHandle {
         let (send,receive) = oneshot::channel();
         self.sender.send(Message::Snapshot(send)).await.map_err(|_|self.gone("runtime_closed"))?;
         receive.await.map_err(|_|self.gone("runtime_closed"))?
+    }
+    pub async fn view(&self) -> Result<Value,RuntimeError> {
+        let (send,receive) = oneshot::channel();
+        self.sender.send(Message::View(send)).await.map_err(|_|self.gone("runtime_closed"))?;
+        receive.await.map_err(|_|self.gone("runtime_closed"))
     }
     pub async fn drain(&self) -> Result<Value,RuntimeError> {
         let (send,receive) = oneshot::channel(); self.sender.send(Message::Drain(send)).await.map_err(|_|self.gone("runtime_closed"))?;
@@ -290,12 +345,15 @@ impl RuntimeHandle {
         failure(code)
     }
     pub fn subscribe(&self) -> broadcast::Receiver<RuntimeEvent> { self.events.subscribe() }
-    pub async fn stop(&self) -> Result<(),RuntimeError> {
+    pub async fn stop(&self) -> Result<(),RuntimeError> { self.stop_with(false).await }
+    /// Para o ator e mata o processo da sessão, com os arquivos do cano.
+    pub async fn stop_killing(&self) -> Result<(),RuntimeError> { self.stop_with(true).await }
+    async fn stop_with(&self,kill:bool) -> Result<(),RuntimeError> {
         let mut stopped = self.stopped.lock().await;
         if let Some(result) = &*stopped { return result.clone(); }
         self.closed.store(true,Ordering::Release);
         let (send,receive) = oneshot::channel();
-        let mut result = match self.sender.send(Message::Stop(send)).await {
+        let mut result = match self.sender.send(Message::Stop { response:send,kill }).await {
             Ok(())=>receive.await.map_err(|_|self.gone("runtime_closed")).and_then(|result|result),
             Err(_)=>Err(self.gone("runtime_closed")),
         };
@@ -344,7 +402,7 @@ enum Job {
     Write { wire:String,result:Result<(),RuntimeError> },
     Ack { logical_id:String,outcome:WriteOutcome,result:Result<(),RuntimeError> },
     Finished { reply:RuntimeReply,result:Result<(),RuntimeError> },
-    Policy { request_id:RequestId,kind:String,phase_id:String,result:Result<Value,RuntimeError> },
+    Policy { request_id:RequestId,kind:String,phase_id:String,conversation:Option<Value>,result:Result<Value,RuntimeError> },
     PreparedInput { id:String,result:Result<Value,RuntimeError> },
     Saved(Result<(),RuntimeError>),
     Queued { wake:bool,result:Result<(),RuntimeError> },
@@ -378,6 +436,7 @@ impl RuntimeActor {
         let closed = Arc::new(AtomicBool::new(false));
         let (key,name,life) = (target.key.clone(),target.name.clone(),engine.mods_life);
         let mods = engine.mods.clone();
+        let live = engine.live.clone();
         let handle = RuntimeHandle { sender:sender.clone(),task:Arc::new(Mutex::new(None)),closed:closed.clone(),events:events.clone(),
             stopped:Arc::new(Mutex::new(None)),key:key.clone() };
         // O slot fica preso até receber a tarefa: um `stop` que chegue antes espera por ele e junta a tarefa.
@@ -387,10 +446,14 @@ impl RuntimeActor {
         let run = run(target,queue,connection,engine,receiver,sender,closed,events);
         *slot = Some(tokio::spawn(async move {
             let mut guard = ClearOnDrop { mods,name,life };
+            let mut panic = LivePanicMark(live);
             let result = run.await;
+            let live = panic.0.take();
             // Saída por `?` deixava o ator mudo: só sobrava o runtime_closed de quem chamasse depois.
             if let Err(error) = &result {
                 tracing::warn!(key=%key,session=%guard.name,code=%error.code,reason=%error.message,"ator do runtime terminou com erro");
+                // O hub mostra a saída com erro, inclusive depois do `close`.
+                if let Some(live) = &live { mark_live_error(live,&error.code,&error.message); }
             } else {
                 // Saída normal (`stop` ou caixa fechada): quem limpa a faixa é o `close`, com o `forget`.
                 guard.mods = None;
@@ -399,6 +462,25 @@ impl RuntimeActor {
         }));
         drop(slot);
         handle
+    }
+}
+
+/// Erro durável no canal do hub, sobre o último valor.
+pub(crate) fn mark_live_error(live:&LiveSender,code:&str,message:&str) {
+    live.send_modify(|value| {
+        let mut next = value.as_deref().cloned().unwrap_or_default();
+        next.error = Some((code.to_owned(),message.to_owned()));
+        *value = Some(Arc::new(next));
+    });
+}
+
+/// Armada durante a vida do ator: em pânico ela é solta sem desarmar, e o hub passa a mostrar o
+/// problema em vez do último estado (o canal não fecha, o registro ainda segura o emissor).
+struct LivePanicMark(Option<LiveSender>);
+
+impl Drop for LivePanicMark {
+    fn drop(&mut self) {
+        if let Some(live) = &self.0 { mark_live_error(live,"runtime_panic","o ator do runtime caiu"); }
     }
 }
 
@@ -413,7 +495,7 @@ impl Drop for ClearOnDrop {
     }
 }
 
-async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut engine:RuntimeEngine,
+async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut engine:RuntimeEngine,
     mut receiver:mpsc::Receiver<Message>,internal:mpsc::Sender<Message>,closed:Arc<AtomicBool>,events:broadcast::Sender<RuntimeEvent>) -> Result<(),RuntimeError> {
     let start = Instant::now();
     let initial = queue.initial_state().clone();
@@ -438,6 +520,8 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
     let mut confirming = false;
     let mut channels:BTreeMap<String,Value> = ["preview","thinking","tool"].into_iter().map(|channel|
         (channel.into(),json!({"session":target.name,"text":"","md":true,"full":true,"vivo":true}))).collect();
+    let mut live = LiveOut { sender:engine.live.clone(),state:LiveState { public_state:engine.view()["public_state"].clone(),..Default::default() } };
+    live.send();
     let receipt = Arc::new(std::sync::Mutex::new(ReceiptIndex::new(&target.provider,engine.view()["conversation"].as_str().unwrap_or(""))));
     let mut sequence = initial.operations.keys().filter_map(|id|id.rsplit(':').next()?.parse::<u64>().ok()).max().unwrap_or(0);
     let mut write_order = 0u64;
@@ -452,6 +536,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
     let mut mods_waiters:ModsWaiters = BTreeMap::new();
     let mut mods_token = 0u64;
     let mut ui_writes = 0u64;
+    let mut respawn = Respawn::default();
     effects.extend(engine.hydrate(snapshot)?);
     if engine.view()["initialized"] != true || target.provider == "codex" && engine.view()["ready"] != true {
         let id = format!("bootstrap:{}:{}",target.key,target.generation);
@@ -459,6 +544,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
         effects.extend(engine.initialize(id)?);
     }
     loop {
+        live.error(&error);
         loop {
             let first_input = roots.values().filter(|root|root.preparing && matches!(root.command.kind,OperationKind::Input | OperationKind::Steer))
                 .map(|root|root.arrival).min();
@@ -562,13 +648,18 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                 }
                 Effect::Publish { channel,data } => {
                     if ["preview","thinking","tool"].contains(&channel.as_str()) {
-                        channels.insert(channel.clone(),data.clone()); publish(&events,&target,&mut revision,&channel,data);
+                        channels.insert(channel.clone(),data.clone());
+                        // Prévia do Codex sem terminal só pelo canal do hub: no `events` ela subiria a
+                        // revisão e o Python a decodificaria a cada delta.
+                        if !live.channel(&channel,&data) { publish(&events,&target,&mut revision,&channel,data); }
                     } else if ["voice","voice_target","rate"].contains(&channel.as_str()) {
                         publish(&events,&target,&mut revision,&channel,data);
                     }
                 }
                 Effect::StateChanged => {
                     let view = engine.view();
+                    // Subida boa zera o teto: só a que nunca fica pronta conta como seguida.
+                    if view["ready"] == true && respawn.failures > 0 { respawn.failures = 0; respawn.last = None; }
                     state_version += 1;
                     let version = state_version;
                     let queue = queue.clone(); let generation = target.generation; let sample = clock(start);
@@ -607,7 +698,10 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                     sequence += 1;
                     let phase_id = format!("policy:{}:{sequence}",target.generation);
                     let target = target.clone(); let policy = engine.policy.clone();
-                    let save = if kind == "session.patch_meta" && payload.get("service_tier").is_some() {
+                    // O Python recusa como velho o campo que difere da vista salva (thread nova, modo, Fast,
+                    // modelo): ela vai antes de todo patch. Sem mudança durável a gravação não toca o disco.
+                    let conversation = (kind == "session.patch_meta").then(||payload.get("thread_id").or_else(||payload.get("session_id")).cloned()).flatten();
+                    let save = if kind == "session.patch_meta" {
                         state_version += 1;
                         Some((state_version,engine.view()))
                     } else { None };
@@ -633,7 +727,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                                 None => Err(failure("policy_unavailable")),
                             }
                         }.await;
-                        Job::Policy { request_id,kind,phase_id,result }
+                        Job::Policy { request_id,kind,phase_id,conversation,result }
                     });
                 }
                 Effect::WakeQueue => { drain_requested = true; },
@@ -676,6 +770,26 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                     if let Some(policy) = &engine.policy { policy.diag.report(event.event(),session,&code,event.reason()); }
                 }
                 Effect::Stop { .. } => { closed.store(true,Ordering::Release); },
+                Effect::Respawn { operation_id,reason,patch,reply } => {
+                    if respawn.task.is_some() {
+                        fail_root(&mut roots,&operation_id,RuntimeError::new("erro_codex_reiniciando","o Codex já está subindo de novo; tente em instantes"));
+                        continue;
+                    }
+                    // Ação da pessoa: nova rodada de tentativas.
+                    (respawn.failures,respawn.next_at,respawn.user) = (0,None,Some((operation_id.clone(),reply)));
+                    // O Python recusa como velho o campo que difere da vista salva: ela vai com o valor novo.
+                    let saved = patch.as_object().map(|fields|{
+                        let mut view = engine.view();
+                        for (key,value) in fields { view[key] = value.clone(); }
+                        state_version += 1;
+                        (queue.clone(),clock(start),state_gate.clone(),state_version,view)
+                    });
+                    tracing::info!(key=%target.key,session=%target.name,reason=%reason,"processo da sessão sobe de novo a pedido");
+                    if let Err(failure) = start_respawn(&mut respawn,&engine,&target,true,patch,saved) {
+                        respawn.user = None;
+                        fail_root(&mut roots,&operation_id,failure);
+                    }
+                }
             }
         }
         while let Some((wire,result)) = prepared_writes.remove(&next_write) {
@@ -712,7 +826,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                 Job::Drained(result)
             });
         }
-        let deadline = engine.deadline().into_iter().chain(roots.values().filter(|root|root.result.is_none() && !root.timed_out).map(|root|root.deadline))
+        let deadline = engine.deadline().into_iter().chain(respawn.next_at).chain(roots.values().filter(|root|root.result.is_none() && !root.timed_out).map(|root|root.deadline))
             .min_by(f64::total_cmp).map(|seconds|start + Duration::from_secs_f64(seconds.max(0.0)))
             .unwrap_or_else(||Instant::now()+Duration::from_secs(3600));
         tokio::select! {
@@ -796,6 +910,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                         let _ = response.send(Ok(json!({"key":target.key,"generation":target.generation,"revision":revision.value,
                             "view":durable_view,"channels":channels,"error":error.as_ref().map(|e|e.code.clone())})));
                     }
+                    Message::View(response) => { let _ = response.send(engine.view()); }
                     Message::Drain(response) => {
                         if engine.view()["deliverable"] != true && !drain_active {
                             let _ = response.send(Ok(json!({"sent":0})));
@@ -808,11 +923,13 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                         let job = confirm_inputs(queue.clone(),receipt.clone(),target.transcript.clone(),target.generation,clock(start));
                         jobs.spawn(async move { Job::Confirmed { response:Some(response),result:job.await } });
                     }
-                    Message::Stop(response) => {
+                    Message::Stop { response,kill } => {
                         closed.store(true,Ordering::Release);
+                        finish_respawn(&mut respawn,&mut target).await;
                         jobs.abort_all();
                         while jobs.join_next().await.is_some() {}
                         io.stop().await;
+                        let killed = if kill { kill_process(&engine,&target).await } else { Ok(()) };
                         let result = queue.exec(target.generation,&format!("stop-repair:{}",unique()),clock(start),Action::EnsureProjection).await
                             .and_then(|_|Ok(())).map_err(io_failure);
                         if let Err(error) = result { let _ = response.send(Err(error.clone())); return Err(error); }
@@ -820,7 +937,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                         for pending in roots.values_mut() { for waiter in pending.responses.drain(..) { let _ = waiter.send(Err(failure("runtime_stopped"))); } }
                         let queue = Arc::try_unwrap(queue).map_err(|_|failure("queue_busy"))?;
                         queue.shutdown().await.map_err(io_failure)?;
-                        let _ = response.send(Ok(()));
+                        let _ = response.send(killed);
                         return Ok(());
                     }
                 }
@@ -852,11 +969,77 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                         }
                     }
                     Some(IoEvent::Stderr(_)) => {},
-                    Some(IoEvent::End { code }) => effects.extend(engine.apply(EngineInput::Line(json!({"type":"cano_saiu","rc":code})),clock(start))?),
+                    // Queda durante uma subida pedida é a do processo que ela encerrou: não agenda outra.
+                    Some(IoEvent::End { .. }) if respawn.task.is_some() => respawn.swallowed = true,
+                    Some(IoEvent::End { code }) => {
+                        if respawn.next_at.is_none() { respawn.was_working = engine.view()["in_progress"] == true; }
+                        effects.extend(engine.apply(EngineInput::Line(json!({"type":"cano_saiu","rc":code})),clock(start))?);
+                        respawn.kill = true;
+                        effects.extend(after_exit(&mut respawn,&mut engine,&target,clock(start).monotonic_s,closed.load(Ordering::Acquire)));
+                    }
+                    None if respawn.task.is_some() => { io_open = false; respawn.swallowed = true; },
                     None => {
                         io_open = false; enter_error(&mut error,&target,failure("cano_closed"));
+                        if respawn.next_at.is_none() && !respawn.kill { respawn.was_working = engine.view()["in_progress"] == true; }
                         effects.extend(engine.apply(EngineInput::Line(json!({"type":"cano_saiu","rc":null})),clock(start))?);
+                        effects.extend(after_exit(&mut respawn,&mut engine,&target,clock(start).monotonic_s,closed.load(Ordering::Acquire)));
                     },
+                }
+            }
+            relaunched = async { respawn.task.as_mut().unwrap().await }, if respawn.task.is_some() => {
+                respawn.task = None;
+                match relaunched.unwrap_or_else(|_|Err((failure("respawn_panic"),Value::Null))) {
+                    Ok(Relaunched { target:next,spawned,connection,patch }) => {
+                        io.stop().await;
+                        let snapshot = connection.snapshot.clone();
+                        io = connection.start(next.generation,128).hold_lease(queue.lease());
+                        io_open = true;
+                        if error.as_ref().is_some_and(|current|current.code == "cano_closed") { error = None; }
+                        // A vida nova parte da vista desta (conversa, modelo, modo) e do que a pessoa trocou.
+                        let mut metadata = next.metadata.clone();
+                        if let Some(fields) = engine.view().as_object() {
+                            for (key,value) in fields { if key != "public_state" && key != "conversation" { metadata[key] = value.clone(); } }
+                        }
+                        // O que uma subida anterior gravou no arquivo vale aqui também: o comando já saiu dele.
+                        for fields in [std::mem::take(&mut respawn.carried),patch].iter().filter_map(Value::as_object) {
+                            for (key,value) in fields { metadata[key] = value.clone(); }
+                        }
+                        metadata["in_progress"] = json!(std::mem::take(&mut respawn.was_working));
+                        target = next;
+                        let mut renewed = engine.renewed(metadata,target.generation,clock(start))?;
+                        renewed.set_fresh_process(spawned);
+                        engine = renewed;
+                        (respawn.kill,respawn.swallowed) = (false,false);
+                        effects.extend(engine.hydrate(snapshot)?);
+                        let id = format!("bootstrap:{}:{}:{}",target.key,target.generation,unique());
+                        match queue.exec(target.generation,&format!("prepare:{id}"),clock(start),Action::Prepare { id:id.clone(),payload:json!({"kind":"bootstrap"}),entry_id:None }).await {
+                            Ok(_)=>effects.extend(engine.initialize(id)?),
+                            Err(failure)=>enter_error(&mut error,&target,io_failure(failure)),
+                        }
+                        if let Some((operation_id,payload)) = respawn.user.take() {
+                            effects.push_back(Effect::Reply { operation_id,disposition:Disposition::Accepted,payload });
+                        }
+                        drain_requested = true;
+                    }
+                    Err((failure,written)) => {
+                        if !written.is_null() { respawn.carried = written; }
+                        tracing::warn!(key=%target.key,session=%target.name,code=%failure.code,reason=%failure.message,attempt=respawn.failures,"processo da sessão não subiu de novo");
+                        let user = respawn.user.take();
+                        if let Some((operation_id,_)) = &user { fail_root(&mut roots,operation_id,failure.clone()); }
+                        let gone = std::mem::take(&mut respawn.swallowed);
+                        if gone {
+                            effects.extend(engine.apply(EngineInput::Line(json!({"type":"cano_saiu","rc":null})),clock(start))?);
+                            respawn.kill = true;
+                        }
+                        respawn.last = Some(failure.clone());
+                        // Pedido da pessoa (gravar o modo, encerrar) que falhou no kill: o processo segue vivo e a
+                        // sessão como estava. Falha depois do kill (gravação) já o derrubou: a queda engolida
+                        // (`gone`) ou a que chegar depois agenda pelo caminho normal.
+                        if user.is_none() || gone {
+                            effects.extend(engine.set_problem("codex_headless_nao_subiu",Some(failure.message)));
+                            effects.extend(after_exit(&mut respawn,&mut engine,&target,clock(start).monotonic_s,closed.load(Ordering::Acquire)));
+                        }
+                    }
                 }
             }
             result = jobs.join_next(), if !jobs.is_empty() => {
@@ -974,10 +1157,30 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                             Err(failure)=>enter_error(&mut error,&target,failure),
                         }
                     }
-                    Job::Policy { request_id,kind,phase_id,result } => {
+                    Job::Policy { request_id,kind,phase_id,conversation,result } => {
                         let _ = phase_id;
                         match result {
                             Ok(payload) => {
+                                // O Python só religa quando o arquivo da sessão já tem a conversa da vista: a
+                                // conversa nova gravada sai de novo na vista, para a religação acontecer agora.
+                                let current = engine.view()["conversation"].clone();
+                                let conversation = conversation.is_some_and(|value|!value.is_null() && value == current);
+                                if kind == "session.patch_meta" && payload["updated"] == true && conversation && durable_view["conversation"] == current {
+                                    publish(&events,&target,&mut revision,"view",durable_view.clone());
+                                }
+                                // Recusado como velho: Fast de outra thread e thread já trocada são esperados (só log);
+                                // a conversa ATUAL recusada deixa o arquivo para trás e aparece como problema.
+                                if kind == "session.patch_meta" && payload["stale"] == true {
+                                    if crate::warn_limit::allow(Some(&target.key),"session_patch_stale") {
+                                        tracing::warn!(key=%target.key,session=%target.name,code="session_patch_stale",
+                                            "o arquivo da sessão recusou o patch como velho");
+                                    }
+                                    if conversation {
+                                        let message = "o arquivo da sessão não aceitou a conversa nova";
+                                        publish(&events,&target,&mut revision,"problem",json!({"error_code":"session_patch_stale","message":message}));
+                                        effects.extend(engine.set_problem("session_patch_stale",Some(message.into())));
+                                    }
+                                }
                                 effects.extend(engine.apply(EngineInput::PolicyResult { request_id,payload },clock(start))?);
                             }
                             // Linha de status, carimbo, uso e registro que falham só perdem aquela parte: a sessão
@@ -1011,6 +1214,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                                 last_state = state;
                                 // Vista igual à publicada não sai: cada aparelho redesenharia a tela à toa.
                                 if view != durable_view {
+                                    live.update(|state|state.public_state = view["public_state"].clone());
                                     durable_view = view.clone();
                                     publish(&events,&target,&mut revision,"view",view.clone());
                                     publish(&events,&target,&mut revision,"state",view["public_state"].clone());
@@ -1115,13 +1319,96 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                             payload:json!({"error":"operação sem resposta"}) });
                     }
                 }
+                if respawn.task.is_none() && respawn.next_at.is_some_and(|at|sample.monotonic_s >= at) {
+                    respawn.next_at = None;
+                    respawn.failures += 1;
+                    let kill = std::mem::take(&mut respawn.kill);
+                    if let Err(failure) = start_respawn(&mut respawn,&engine,&target,kill,Value::Null,None) {
+                        tracing::warn!(key=%target.key,session=%target.name,code=%failure.code,"religação sem como subir o processo");
+                    }
+                }
             },
         }
     }
     closed.store(true,Ordering::Release);
+    finish_respawn(&mut respawn,&mut target).await;
     jobs.abort_all(); while jobs.join_next().await.is_some() {}
     io.stop().await;
     Arc::try_unwrap(queue).map_err(|_|failure("queue_busy"))?.shutdown().await.map_err(io_failure)
+}
+
+type SavedState = (Arc<QueueActor>,ClockSample,Arc<Mutex<SavedView>>,u64,Value);
+
+fn start_respawn(respawn:&mut Respawn,engine:&RuntimeEngine,target:&RuntimeTarget,kill:bool,patch:Value,saved:Option<SavedState>) -> Result<(),RuntimeError> {
+    let (Some(launch),Some(policy)) = (&engine.launch,&engine.policy) else {
+        return Err(RuntimeError::new("lifecycle_required","esta sessão não sobe o próprio processo"));
+    };
+    respawn.swallowed = false;
+    respawn.task = Some(tokio::spawn(relaunch(policy.clone(),target.clone(),launch.sidecar_dir.clone(),kill,patch,saved)));
+    Ok(())
+}
+
+/// Subida em curso termina antes de o ator parar: abortada no meio, deixaria um processo que ninguém
+/// conhece. O que ela subiu fica gravado no arquivo da sessão e é o que um `kill` encerra.
+async fn finish_respawn(respawn:&mut Respawn,target:&mut RuntimeTarget) {
+    if let Some(task) = respawn.task.take() {
+        if let Ok(Ok(relaunched)) = task.await { target.binding = relaunched.target.binding; }
+    }
+}
+
+/// Queda do cano de sessão que o Rust sobe: um timer, com espera dobrando; passado o teto, desiste.
+fn after_exit(respawn:&mut Respawn,engine:&mut RuntimeEngine,target:&RuntimeTarget,now:f64,closed:bool) -> Vec<Effect> {
+    let Some(launch) = &engine.launch else { return Vec::new() };
+    if closed || respawn.next_at.is_some() || respawn.task.is_some() { return Vec::new(); }
+    if respawn.failures < RESPAWN_MAX {
+        respawn.next_at = Some(now + launch.backoff.as_secs_f64() * f64::from(1u32 << respawn.failures));
+        return Vec::new();
+    }
+    if crate::warn_limit::allow(Some(&target.key),"respawn_gave_up") {
+        tracing::warn!(key=%target.key,session=%target.name,code=%respawn.last.as_ref().map_or("",|last|last.code.as_str()),
+            "religação desistiu depois de 3 subidas seguidas; só ação da pessoa abre outra rodada");
+    }
+    // Regra 6: problema mais específico que a última subida deixou fica; a queda genérica vira o do teto.
+    if engine.problem().is_none_or(|problem|problem == "headless_caiu") {
+        let detail = respawn.last.as_ref().map_or_else(||"o Codex caiu 3 vezes seguidas ao subir".to_owned(),|last|last.message.clone());
+        return engine.set_problem("codex_headless_nao_subiu",Some(detail));
+    }
+    Vec::new()
+}
+
+fn cano_of(binding:&CanoBinding) -> super::process::Cano {
+    super::process::Cano { pid:binding.pid,escuta:binding.escuta.clone(),token:binding.token.clone(),ts:0.0,versao:binding.versao,extra:Default::default() }
+}
+
+/// Grava o que a pessoa trocou, encerra o processo de antes (quando ele já não serve) e sobe outro
+/// pela regra 1: cano vivo e da sessão é reaproveitado, nunca dois.
+/// O erro leva o que já foi gravado no arquivo: o processo antigo morre ANTES da gravação, então falha
+/// no kill ou na gravação deixa tudo no modo de antes, e só a falha da subida deixa o modo novo gravado.
+async fn relaunch(policy:PolicyClient,mut target:RuntimeTarget,sidecar_dir:std::path::PathBuf,kill:bool,patch:Value,saved:Option<SavedState>) -> Result<Relaunched,(RuntimeError,Value)> {
+    if kill && target.binding.pid != 0 {
+        super::process::kill(&cano_of(&target.binding),&target.key,&sidecar_dir).await
+            .map_err(|error|(RuntimeError::new(error.code(),"o processo antigo da sessão não encerrou"),Value::Null))?;
+    }
+    if let Some((queue,sample,gate,version,view)) = saved { save_view(&queue,target.generation,sample,&gate,version,&view,true).await.map_err(|error|(error,Value::Null))?; }
+    if !patch.is_null() {
+        let written = super::gateway::launch_policy(&policy,&target,"session.patch_meta",patch.clone()).await.map_err(|error|(error,Value::Null))?;
+        if written["updated"] != true { return Err((RuntimeError::new("session_patch_stale","o arquivo da sessão não aceitou o modo novo"),Value::Null)); }
+    }
+    let spawned = super::gateway::launch_if_needed(&policy,&mut target,&sidecar_dir).await.map_err(|error|(error,patch.clone()))?;
+    match super::cano::connect(&target.binding).await {
+        Ok(connection)=>Ok(Relaunched { target,spawned:spawned.is_some(),connection,patch }),
+        Err(error)=>{
+            if let Some(cano) = spawned { super::gateway::discard(&policy,&target,&cano,&sidecar_dir).await; }
+            Err((error,patch))
+        }
+    }
+}
+
+async fn kill_process(engine:&RuntimeEngine,target:&RuntimeTarget) -> Result<(),RuntimeError> {
+    let Some(launch) = &engine.launch else { return Err(RuntimeError::new("close_kill","esta sessão não sobe o próprio processo")) };
+    if target.binding.pid == 0 { return Ok(()); }
+    super::process::kill(&cano_of(&target.binding),&target.key,&launch.sidecar_dir).await
+        .map_err(|error|RuntimeError::new(error.code(),"o processo da sessão não encerrou; arquivo e fila conservados"))
 }
 
 /// Prova cada entrada despachada e ainda não confirmada contra o transcript, a partir do cursor do
@@ -1268,6 +1555,30 @@ fn fail_root(roots:&mut BTreeMap<String,Pending>,id:&str,error:RuntimeError) {
     }
 }
 
+/// O que o ator escreve no canal do hub; só envia quando muda.
+struct LiveOut { sender:Option<LiveSender>,state:LiveState }
+
+impl LiveOut {
+    fn send(&self) { if let Some(sender) = &self.sender { sender.send_replace(Some(Arc::new(self.state.clone()))); } }
+    fn update(&mut self,change:impl FnOnce(&mut LiveState)) {
+        if self.sender.is_none() { return; }
+        let before = self.state.clone();
+        change(&mut self.state);
+        if self.state != before { self.send(); }
+    }
+    /// `false`: sem canal, quem chamou publica no `events`.
+    fn channel(&mut self,channel:&str,data:&Value) -> bool {
+        if self.sender.is_none() { return false; }
+        let text = data["text"].as_str().unwrap_or("").to_owned();
+        self.update(|state| match channel { "preview"=>state.preview = text, "thinking"=>state.thinking = text, _=>state.tool = text });
+        true
+    }
+    fn error(&mut self,error:&Option<RuntimeError>) {
+        let same = match (&self.state.error,error) { (None,None)=>true, (Some((code,message)),Some(e))=>*code == e.code && *message == e.message, _=>false };
+        if !same { self.update(|state|state.error = error.as_ref().map(|e|(e.code.clone(),e.message.clone()))); }
+    }
+}
+
 struct Revision { value:u64,counter:Arc<AtomicU64> }
 
 fn publish(events:&broadcast::Sender<RuntimeEvent>,target:&RuntimeTarget,revision:&mut Revision,channel:&str,data:Value) {
@@ -1311,6 +1622,22 @@ mod tests {
         let second = tokio::time::timeout(Duration::from_secs(2),handle.mods(call(),soon())).await.unwrap();
         assert_eq!(second.unwrap_err().code,"erro_mod_clique_sem_resposta");
         assert_eq!(MODS_CALL_LIMIT,Duration::from_secs(7));
+    }
+
+    #[test]
+    fn an_actor_panic_marks_the_live_channel_and_a_finished_run_does_not() {
+        let (live,rx) = tokio::sync::watch::channel(Some(Arc::new(LiveState { public_state:json!({"state":"working"}),..Default::default() })));
+        // Saída que chegou ao fim: desarmada, o valor fica como o ator deixou.
+        let mut done = LivePanicMark(Some(live.clone()));
+        let _ = done.0.take();
+        drop(done);
+        assert!(rx.borrow().as_ref().unwrap().error.is_none());
+        let armed = LivePanicMark(Some(live));
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || { let _armed = armed; panic!("pânico simulado do ator"); }));
+        assert!(panicked.is_err());
+        let state = rx.borrow().clone().unwrap();
+        assert_eq!(state.error.as_ref().map(|(code,_)|code.as_str()),Some("runtime_panic"));
+        assert_eq!(state.public_state["state"],"working","o problema vai sobre o último estado");
     }
 
     #[test]

@@ -11,8 +11,9 @@ from pathlib import Path
 from app import diag
 
 _PATCH = {
-    "claude": {"session_id", "cwd", "model", "effort", "permission_mode", "previous_non_plan", "context_window", "problema"},
-    "codex": {"thread_id", "rollout_path", "cwd", "model", "effort", "mode", "service_tier", "skipped_async_questions", "problema"},
+    "claude": {"session_id", "cwd", "model", "effort", "permission_mode", "previous_non_plan", "context_window", "problema", "cano"},
+    "codex": {"thread_id", "rollout_path", "cwd", "model", "effort", "mode", "service_tier", "skipped_async_questions", "problema", "cano",
+              "permission_mode"},
 }
 _unknown_guard = threading.Lock()
 _mutation_locks = {}
@@ -128,6 +129,53 @@ async def state_service(kind: str, name: str, payload: dict) -> dict:
     return await asyncio.to_thread(state_service_sync, kind, name, payload)
 
 
+def _sessions(provider):
+    if provider == "claude":
+        from app.adapters.claude_headless import sessions
+    else:
+        from app.adapters.codex import sessions
+    return sessions
+
+
+def launch_env(metadata: dict) -> dict:
+    """Comando e ambiente do processo que o Rust sobe dentro do cano. O ambiente é segredo: vai na
+    resposta e em nenhum outro lugar."""
+    if metadata["provider"] != "codex":
+        raise ValueError("subida pelo Rust ainda só para o Codex")
+    import shutil
+    from app.adapters.codex import sem_terminal, sessions
+    # O registro em memória não vê o que o Rust gravou depois de abrir (modo trocado): vale o arquivo.
+    current = sessions.load(metadata["name"])
+    if current and current.get("key") == metadata["key"]:
+        metadata = {**metadata, **current}
+    env = sem_terminal._ambiente(metadata)
+    program = sem_terminal.argv(metadata)
+    # O PATH da sessão decide, como no `subir`; no Windows o `which` acha o `.cmd` pelo PATHEXT.
+    resolved = shutil.which(program[0], path=env.get("PATH"))
+    if resolved is None:
+        return {"error": "codex_ausente"}
+    return {"program": [resolved, *program[1:]], "env": env, "cano_extra": {}}
+
+
+def clear_cano(payload: dict, metadata: dict) -> dict:
+    """Tira o `cano` do arquivo da sessão só se ele ainda for o processo `pid`; arquivo apagado fica apagado."""
+    pid = payload.get("pid")
+    if type(pid) is not int or set(payload) != {"pid"}:
+        raise ValueError("pid do cano inválido")
+    validate = metadata.get("validate")
+    if validate is None:
+        raise RuntimeError("alteração sem confirmação de posse")
+    sessions = _sessions(metadata["provider"])
+    with _unknown_guard:
+        lock = _mutation_locks.setdefault(metadata["key"], threading.Lock())
+    with lock:
+        validate()
+        current = sessions.load(metadata["name"])
+        if not current or current.get("key") != metadata["key"] or (current.get("cano") or {}).get("pid") != pid:
+            return {"cleared": False}
+        return {"cleared": sessions.update(metadata["name"], cano=None) is not None}
+
+
 def run(kind: str, payload: dict, metadata: dict) -> dict:
     if not isinstance(payload, dict) or not isinstance(metadata, dict):
         raise ValueError("serviço com dados inválidos")
@@ -142,6 +190,10 @@ def run(kind: str, payload: dict, metadata: dict) -> dict:
             "terminal_plugin_control":runtime_terminal.plugin_control}[kind](payload, metadata)
     if kind == "native_message":
         return native_message(payload, metadata)
+    if kind == "launch_env":
+        return launch_env(metadata)
+    if kind == "session.clear_cano":
+        return clear_cano(payload, metadata)
     if kind == "session.patch_meta":
         if set(payload) - _PATCH[provider]:
             raise ValueError("campo fora do catálogo do sidecar")
@@ -158,10 +210,7 @@ def run(kind: str, payload: dict, metadata: dict) -> dict:
                 source = "conversation" if key == "session_id" else key
                 if source in view and view[source] != value:
                     return {"updated": False, "stale": True}
-            if provider == "claude":
-                from app.adapters.claude_headless import sessions
-            else:
-                from app.adapters.codex import sessions
+            sessions = _sessions(provider)
             current = sessions.load(metadata["name"])
             if not current or current.get("key") != metadata["key"]:
                 raise RuntimeError("sidecar de outra vida")

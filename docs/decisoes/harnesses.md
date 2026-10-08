@@ -151,12 +151,33 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   inclusive em caminhos Windows. O manifesto anterior retira só entradas já importadas;
   hooks nativos e nomes desconhecidos permanecem. A política entra na assinatura da fonte
   para invalidar o cache da próxima reconciliação.
-- **Codex sem terminal: o app-server é do CANO, em stdio.** O backend abre a thread na criação e
-  religa pelo snapshot (aprovação pendente volta). `initialize` repetido responde "Already
-  initialized" e é sucesso; thread sem turno não tem rollout e o `resume` a recusa — abre outra.
-  Só `on-request` e `never` existem (`untrusted` morreu); o sandbox vai no `-c` da subida e trocar
-  de modo reabre o servidor ocioso. Pedido do servidor sem tela recebe `-32601` + nota, nunca
-  sucesso vazio. Um cliente por cano.
+- **Codex sem terminal: o app-server é do CANO, em stdio, e o cano é do Rust.** Com o
+  `hangar-server` de pé, o Rust sobe, religa e mata o `hangar-cano` da sessão e conduz a thread;
+  o Python só calcula argv/env (`launch_env` da política) e grava o arquivo da sessão
+  (`session.patch_meta {cano}` / `session.clear_cano {pid}`). O `env` (tokens, `CODEX_HOME`) é
+  pedido ao Python a cada subida e nunca vai a disco nem a log. O cano que sai é religado por
+  evento (teto de 3 subidas seguidas, espera 5/10/20 s), sem varrer. Reiniciar com turno rodando
+  é permitido (destrava turno preso); trocar o sandbox com turno rodando recusa com
+  `erro_permissao_ocupada` (409). `initialize` repetido responde "Already initialized" e é
+  sucesso; thread sem turno não tem rollout e o `resume` a recusa — processo novo abre outra,
+  cano vivo segue pronto na mesma (ela já está carregada nele). Subida recusada vira
+  `codex_conversa_nao_abriu` com o motivo, nunca sessão ociosa calada. Só `on-request` e
+  `never` existem (`untrusted` morreu); o sandbox vai no `-c` da subida e trocar de modo reabre o
+  servidor ocioso. Todo pedido do servidor tem resposta. Têm tela ou resposta própria: cartões de
+  permissão, URL como cartão de link, `requestUserInput`, formulário MCP como pergunta nativa e
+  `currentTime/read`. Todo o resto (`item/tool/call`, `chatgptAuthTokens/refresh`,
+  `attestation/generate`, v1 legado, desconhecido) recebe `-32601` + nota, nunca sucesso vazio;
+  pedido de thread de subagente nunca é descartado. Um cliente por cano.
+  Falha vira erro com código, nunca passagem ao Python; o código Python fica para o modo `python`.
+  Codex com terminal segue no Python até a 5C.
+- **Processo do cano é um módulo só (`runtime/process.rs`), Claude e Codex.** Subir espera o
+  `listen` por 10 s; matar confere a identidade do pid (pid reaproveitado nunca é morto) e apaga
+  `cano-<chave16>*` só na pasta da sessão, nunca numa derivada de caminho gravado no arquivo. A
+  varredura de órfãos roda UMA vez na subida do Rust, sobre `~/.hangar/claude-headless` e
+  `~/.hangar/codex-sessions`, com dono = HOME (`HANGAR_CANO_OWNER`); o `matar_orfaos` do Python
+  só roda no modo `python`. Teste ou backend isolado que sobe o Rust usa dono único ou
+  `CP_RUST_NO_ORPHAN_SWEEP=1`, senão mata os canos reais da máquina. Windows não varre (sem
+  `/proc`); mata por `taskkill /T /F`, aceitando 0 e 128.
 - **Protocolo do Codex no Rust é tipado e tolerante** (`crates/hangar-codex`): todo campo usado
   existe no recorte do schema da versão conferida (`schema/<versão>.json`, teste
   `schema_check`); campo novo é ignorado; formato inesperado num método conhecido: a
@@ -181,10 +202,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   antes dessa identidade comum.
 - **Contas Codex adicionais têm `CODEX_HOME` próprio**; a identidade é `credential_id=codex:<home>`,
   nunca a chave. Sem migração, rotação ou troca automática por cota.
-- **Abrir Codex adicional não espera no modal**: o pane nasce primeiro, e o lançador espera o
-  preparo da conta e a confiança da pasta antes de subir a TUI. O backend não prepara por trás;
-  chamada que falha ou excede o prazo deixa o erro no terminal até Enter e não abre a TUI com
-  config antiga.
+- **Abrir Codex nunca espera a sincronização**, nem no modal nem no pane: o lançador dispara o
+  preparo da conta adicional (ou a reconciliação da padrão) no backend e sobe a TUI na hora, com a
+  config que a conta já tem; o resultado vale a partir da próxima sessão. Preparo em andamento →
+  o lançador confia a pasta ele mesmo; falha ao pedir vira aviso no pane, nunca sessão fechada.
 - **A memória do Claude só é vista pelo Codex com uma CONVERSA ao lado dela** — e não basta o
   `.jsonl` existir: sessão que abriu e nunca conversou é descartada igual. Copiar só a `memory/`
   faz a reconciliação terminar `ok` sem trazer nada. Como o critério do detector não é documentado,
@@ -1616,6 +1637,19 @@ isolada: `plugin_accepted`, marca ainda presente), então com algo guardado o es
   necessária; o cache não promete abertura imediata após o prazo.
   Após a alteração, duas preparações reais consecutivas da adicional levaram 2,55s e 0,51s,
   medidas do POST até `ready`, com consultas a cada 0,5s; não inclui a abertura da conversa.
+
+  Abertura sem espera (08/10/2026): o cache de 5 min não valia na prática. A conta
+  `jefferson-felizardo` ficava `partial` com `trust_pending: true` por avisos permanentes
+  (`codex_account_plugin_origin_conflict` ×5, MCP com credencial excluída), e falha ou confiança
+  pendente exigem nova conferência — então toda abertura esperava a reconciliação da padrão
+  (etapa `principal`) e refazia a conferência nativa dos plugins. Numa abertura o pane estourou
+  os 180s e a sessão não abriu. A espera saiu do lançador: a TUI sobe com a config que existe e o
+  preparo termina no backend. O preparo grava com comparação do conteúdo anterior
+  (`codex_arquivos.gravar`), então a escrita concorrente da TUI no `config.toml` vira
+  `codex_account_changed_during_prepare` e a próxima abertura refaz, sem perder escrita calada.
+  Na mesma investigação: sessão aberta na home lista o `~/.codex/hooks.json` como hook de
+  projeto (19 hooks pendentes na pergunta da TUI); o lançador passa a aceitá-lo pelo caminho do
+  arquivo, além das origens `user` e `plugin`.
 
 ## Painel de saúde dos harnesses
 

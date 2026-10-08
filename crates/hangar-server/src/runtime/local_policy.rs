@@ -300,8 +300,14 @@ fn codex_status(payload: &Value, now: f64) -> Value {
 
 /// Habilitadas com nome e caminho; homônimas ganham `:<sha256(path)[:8]>`; ordenadas por nome.
 fn skill_catalog(payload: &Value) -> Result<Value, RuntimeError> {
-    use ring::digest;
     let catalog = payload.get("catalog").filter(|catalog| catalog.is_object()).ok_or_else(|| error("policy_input"))?;
+    let found = skills(catalog).into_iter().find(|skill| payload.get("name").is_some_and(|wanted| &skill["name"] == wanted));
+    Ok(json!({"skill": found}))
+}
+
+/// O `skills_do_catalogo` do Python sobre a resposta do `skills/list`.
+pub fn skills(catalog: &Value) -> Vec<Value> {
+    use ring::digest;
     // Mesmo caminho listado duas vezes: fica a última, na posição da primeira (dict do Python).
     let mut by_path: IndexMap<&str, &Value> = IndexMap::new();
     for skill in catalog["data"].as_array().into_iter().flatten().flat_map(|group| group["skills"].as_array().into_iter().flatten()) {
@@ -319,8 +325,7 @@ fn skill_catalog(payload: &Value) -> Result<Value, RuntimeError> {
             "description": skill["description"], "source": "skill", "destructive": false})
     }).collect();
     skills.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-    let found = skills.into_iter().find(|skill| payload.get("name").is_some_and(|wanted| &skill["name"] == wanted));
-    Ok(json!({"skill": found}))
+    skills
 }
 
 // ---- last_usage ----

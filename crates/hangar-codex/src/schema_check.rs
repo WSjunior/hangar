@@ -12,7 +12,6 @@ fn slice_path() -> std::path::PathBuf {
 /// Tipos nossos sem nome no schema → definições do schema que eles representam.
 const LOCAL_NAMES:&[(&str,&[&str])] = &[
     ("CollaborationSettings",&["Settings"]),
-    ("ThreadOnlyParams",&["PermissionsRequestApprovalParams","McpServerElicitationRequestParams"]),
 ];
 
 fn schema_names(ours:&str) -> Vec<String> {
@@ -69,8 +68,12 @@ fn slice() -> Value {
     serde_json::from_str(&text).expect("recorte inválido")
 }
 
+/// Propriedades da definição e, quando é união (`oneOf`/`anyOf`), as de qualquer ramo.
 fn their_props(def:&Value) -> BTreeSet<String> {
-    def["properties"].as_object().map(|p|p.keys().cloned().collect()).unwrap_or_default()
+    let own = def["properties"].as_object().into_iter().flat_map(|p|p.keys().cloned());
+    let branches = def["oneOf"].as_array().into_iter().chain(def["anyOf"].as_array()).flatten()
+        .flat_map(|branch|branch["properties"].as_object().into_iter().flat_map(|p|p.keys().cloned()));
+    own.chain(branches).collect()
 }
 
 fn their_branch<'a>(def:&'a Value,tag:&str,value:&str) -> Option<&'a Value> {

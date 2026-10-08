@@ -62,6 +62,8 @@ def test_stale_provider_or_ambiguous_process_never_allows_unbound_writer(monkeyp
 @pytest.mark.parametrize('commands,hidden', [
     ([['pi']], False), ([['omp']], False), ([['kimi']], False), ([['codex']], False),
     ([['claude', 'auth']], False), ([], True), ([['pi'], ['pi']], False),
+    ([['claude', '--session-id', 'sid', '--plugin-dir', '/p', 'auth', 'login', '--claudeai']], False),
+    ([['claude', '--session-id=sid', '--plugin-dir=/p', 'setup-token']], False),
 ])
 def test_proven_outside_scope_preserves_existing_drivers(monkeypatch, commands, hidden):
     ages = current_processes(monkeypatch, commands, hidden=hidden)
@@ -72,6 +74,29 @@ def test_proven_outside_scope_preserves_existing_drivers(monkeypatch, commands, 
     assert asyncio.run(owner.prepare_session('session', 'claude')) is False
     terminal.assert_writer('session')
     assert ages and all(age == 0 for age in ages)
+
+
+def test_wrapper_session_without_auth_stays_in_scope(monkeypatch):
+    current_processes(monkeypatch, [['claude', '--session-id', 'sid', '--plugin-dir', '/p']])
+    assert terminal.outside_scope('session') is False
+
+
+@pytest.mark.parametrize('commands,allowed', [
+    ([['claude', '--session-id', 'sid', '--plugin-dir', '/p', 'auth', 'login', '--claudeai']], True),
+    ([['claude', '--session-id', 'sid']], False),
+])
+def test_dead_life_record_does_not_block_login_window(monkeypatch, commands, allowed):
+    current_processes(monkeypatch, commands, hidden=True)
+    owner = rc.RuntimeCoordinator()
+    owner.legacy = SimpleNamespace(binding=lambda *args: None)
+    owner.names, owner.slots = {'session': 'k'}, {'k': rc.Slot(binding=SimpleNamespace(meta={'terminal': {'name': 'session'}}),
+                                                              awaiting_identity=True)}
+    monkeypatch.setattr(rc, '_current', owner)
+    if allowed:
+        terminal.assert_writer('session')
+    else:
+        with pytest.raises(RuntimeError, match='posse da escrita'):
+            terminal.assert_writer('session')
 
 
 @pytest.mark.parametrize('text,content,accepted', [
