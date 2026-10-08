@@ -4549,6 +4549,7 @@
   "native_browser_cookies_error": "Couldn't bring the login: {e}",
   "native_browser_cookies_confirm": "Your Chrome cookies go into the embedded browser, which is shared by every session: the login becomes available in the browser of any session and to the agents that use it. Click again to bring it.",
   "native_side_tools": "Tools",
+  "native_side_tabs": "Panel tabs",
   "native_auth_error": "Token rejected. Open Connection and check your credentials.",
   "native_connection_not_saved": "Connected, but the connection was not saved for next launch: {error}",
   "native_rate_limited": "Too many attempts. The connection will wait for the server retry period.",

@@ -1648,7 +1648,10 @@ impl Hangar {
             // O estado em destaque, e logo abaixo o que o organizador faz e pensa neste turno.
             let action = self.voice.action.as_ref().map(action_text);
             let thought = thought_tail(&self.voice.thought, 3, 140);
-            header = header.child(div().flex().flex_col().gap(px(8.)).p(px(12.)).rounded(px(10.)).border_1().border_color(theme::border())
+            // Texto solto não vira nó de acessibilidade: o estado inteiro vai no nome do bloco.
+            let spoken = [Some(self.voice_status().to_string()), self.voice.target.clone(), action.clone()]
+                .into_iter().flatten().collect::<Vec<_>>().join(" · ");
+            header = header.child(div().id("voice-status").role(Role::Status).aria_label(spoken).flex().flex_col().gap(px(8.)).p(px(12.)).rounded(px(10.)).border_1().border_color(theme::border())
                 .child(div().flex().items_center().gap(px(12.))
                     .child(self.render_equalizer(4., 28., 4.).gap(px(3.)))
                     .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
@@ -1662,10 +1665,10 @@ impl Hangar {
         let ready = live && matches!(self.voice.phase, Some(Phase::Live));
         body = body.child(div().flex().items_center().gap(px(6.))
             .child(Button::new("voice-mode-direct").ghost().small().rounded_full().label(tr("voice_mode_direct"))
-                .selected(self.voice.mode == Mode::Direct).disabled(!ready)
+                .selected(self.voice.mode == Mode::Direct).aria_selected(self.voice.mode == Mode::Direct).disabled(!ready)
                 .on_click(cx.listener(|this, _, _, cx| this.set_voice_mode(Mode::Direct, cx))))
             .child(Button::new("voice-mode-plan").ghost().small().rounded_full().label(tr("voice_mode_plan"))
-                .selected(self.voice.mode == Mode::Plan).disabled(!ready)
+                .selected(self.voice.mode == Mode::Plan).aria_selected(self.voice.mode == Mode::Plan).disabled(!ready)
                 .on_click(cx.listener(|this, _, _, cx| this.set_voice_mode(Mode::Plan, cx)))));
         if let Some((path, markdown)) = &self.voice.plan {
             let open = path.clone();
@@ -1714,7 +1717,7 @@ impl Hangar {
         }
         let mut footer = div().flex_none().flex().flex_col().gap(px(8.)).p(px(16.)).pt(px(12.)).border_t_1().border_color(theme::border());
         if let Some(error) = &self.voice.error {
-            footer = footer.child(div().text_xs().text_color(theme::danger()).whitespace_normal().child(error.clone()));
+            footer = footer.child(div().id("voice-error").role(Role::Alert).aria_label(error.clone()).text_xs().text_color(theme::danger()).whitespace_normal().child(error.clone()));
         }
         let actions = if live {
             let mute = if self.voice.muted { "codex_voice_unmute_short" } else { "codex_voice_mute_short" };
@@ -1735,7 +1738,8 @@ impl Hangar {
         let middle = div().relative().flex_shrink(1.).min_h_0().flex().flex_col()
             .child(div().id("voice-card-body").flex_shrink(1.).min_h_0().overflow_y_scroll().track_scroll(&self.voice.body_scroll).child(body))
             .child(div().absolute().inset_0().child(Scrollbar::vertical(&self.voice.body_scroll).mode(ScrollbarMode::Always)));
-        div().max_h(height).flex().flex_col().child(header).child(middle).child(footer.child(actions)).into_any_element()
+        div().id("voice-panel").role(Role::Group).aria_label(tr_shared("codex_voice_title", &[]))
+            .max_h(height).flex().flex_col().child(header).child(middle).child(footer.child(actions)).into_any_element()
     }
 
     /// Voz, conta e o par do organizador de cada modo, dentro dos Ajustes abertos.
@@ -1743,12 +1747,12 @@ impl Hangar {
         if let Some((picker, _)) = &self.voice.voice_select {
             body = body.child(div().flex().items_center().justify_between().gap(px(12.))
                 .child(div().text_xs().text_color(theme::muted()).child(tr_shared("codex_voice_label", &[])))
-                .child(div().w(px(200.)).child(Select::new(picker).small().disabled(live).accessibility_label(tr_shared("codex_voice_label", &[])))));
+                .child(div().w(px(200.)).child(Select::new(picker).id("voice-select-voice").small().disabled(live).accessibility_label(tr_shared("codex_voice_label", &[])))));
         }
         if let Some((picker, _)) = &self.voice.account_select {
             body = body.child(div().flex().items_center().justify_between().gap(px(12.))
                 .child(div().text_xs().text_color(theme::muted()).child(tr("voice_account")))
-                .child(div().w(px(200.)).child(Select::new(picker).small().disabled(live).accessibility_label(tr("voice_account")))));
+                .child(div().w(px(200.)).child(Select::new(picker).id("voice-select-account").small().disabled(live).accessibility_label(tr("voice_account")))));
         }
         // Abertos também na chamada: o par do modo atual troca já no próximo turno.
         for (mode, title) in [(Mode::Direct, "voice_mode_direct"), (Mode::Plan, "voice_mode_plan")] {
@@ -1760,7 +1764,8 @@ impl Hangar {
                 let label = format!("{} · {}", tr(title), tr(key));
                 body = body.child(div().flex().items_center().justify_between().gap(px(12.))
                     .child(div().text_xs().text_color(theme::muted()).child(tr(key)))
-                    .child(div().w(px(200.)).child(Select::new(picker).small().accessibility_label(label))));
+                    .child(div().w(px(200.)).child(Select::new(picker).id(SharedString::from(format!("voice-select-{title}-{key}")))
+                        .small().accessibility_label(label))));
             }
         }
         match &self.voice.organizer_models {
