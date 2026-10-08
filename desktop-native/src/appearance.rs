@@ -468,6 +468,7 @@ pub fn remember_model(key: &str, model: &str, effort: &str) {
 pub fn load() -> Result<Appearance, String> {
     *IMAGE_NAME.write().unwrap_or_else(|e| e.into_inner()) = read_image_name();
     let Some(path) = path() else { return Ok(Appearance::default()) };
+    *SEEN.lock().unwrap_or_else(|e| e.into_inner()) = stamp(&path);
     match std::fs::read(&path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Appearance::default()),
         Err(e) => Err(e.to_string()),
@@ -486,7 +487,24 @@ pub fn save() -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, serde_json::to_vec_pretty(&value).map_err(std::io::Error::other)?)?;
-    std::fs::rename(&tmp, &path)
+    std::fs::rename(&tmp, &path)?;
+    *SEEN.lock().unwrap_or_else(|e| e.into_inner()) = stamp(&path);
+    Ok(())
+}
+
+/// Última versão do arquivo que este app leu ou gravou. A configuração compartilhada grava nele com o app aberto.
+static SEEN: Mutex<Option<std::time::SystemTime>> = Mutex::new(None);
+
+fn stamp(path: &std::path::Path) -> Option<std::time::SystemTime> { std::fs::metadata(path).and_then(|m| m.modified()).ok() }
+
+/// Bloqueante. `true` quando o arquivo mudou por fora desde a última leitura ou gravação deste app.
+pub fn changed_on_disk() -> bool {
+    let Some(path) = path() else { return false };
+    let now = stamp(&path);
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if now.is_none() || *seen == now { return false; }
+    *seen = now;
+    true
 }
 
 #[cfg(test)]
