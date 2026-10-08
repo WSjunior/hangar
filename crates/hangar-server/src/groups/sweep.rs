@@ -22,6 +22,8 @@ pub const ORQ_LAUNCH_GRACE: Duration = Duration::from_secs(3600);
 
 pub const FAILED_EVENT: &str = "rust.groups_sweep_failed";
 pub const RECOVERED_EVENT: &str = "rust.groups_sweep_recovered";
+pub const PANICKED_EVENT: &str = "rust.groups_sweep_panicked";
+const PANICKED: &str = "groups_sweep_panicked";
 const EMPTY_LIST: &str = "list_empty";
 
 /// O que a varredura pede ao resto do servidor; o teste troca por um falso.
@@ -30,7 +32,8 @@ pub trait SweepEnv: Send + Sync {
     fn live_names(&self) -> BoxFuture<'_, Result<Vec<String>, String>>;
     /// Sai do grupo e avisa as outras máquinas; devolve os ex-companheiros.
     fn leave<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<Vec<String>, GroupError>>;
-    /// Uma vez por sequência de falhas (`FAILED_EVENT`) e uma na volta (`RECOVERED_EVENT`).
+    /// Uma vez por sequência de falhas (`FAILED_EVENT`), uma na volta (`RECOVERED_EVENT`) e uma por
+    /// rodada em pânico (`PANICKED_EVENT`).
     fn report(&self, event: &'static str, code: &str);
 }
 
@@ -44,6 +47,20 @@ pub struct Sweeper {
 impl Sweeper {
     pub fn new(groups: Arc<GroupService>, env: Arc<dyn SweepEnv>) -> Self {
         Self { groups, env, absent: HashMap::new(), failing: None }
+    }
+
+    /// A rodada numa tarefa própria: com o laço do Python desligado, um pânico parava a varredura
+    /// de vez e calado. Vai ao diário e a próxima rodada recomeça a contagem das ausências.
+    pub async fn guarded_round(mut self) -> Self {
+        let (groups, env) = (self.groups.clone(), self.env.clone());
+        match tokio::spawn(async move { self.round().await; self }).await {
+            Ok(sweeper) => sweeper,
+            Err(error) => {
+                tracing::error!(code = PANICKED, %error, "groups: a rodada da varredura de grupos entrou em pânico");
+                env.report(PANICKED_EVENT, PANICKED);
+                Sweeper::new(groups, env)
+            }
+        }
     }
 
     /// Uma rodada. Sem sidecar nenhum não pergunta a lista.
@@ -157,7 +174,11 @@ impl SweepEnv for AppEnv {
     }
 
     fn report(&self, event: &'static str, code: &str) {
-        let reason = if event == FAILED_EVENT { "lista de sessões indisponível; a varredura de grupos não rodou" } else { "a lista voltou; a varredura de grupos rodou" };
+        let reason = match event {
+            FAILED_EVENT => "lista de sessões indisponível; a varredura de grupos não rodou",
+            PANICKED_EVENT => "a rodada da varredura de grupos entrou em pânico; a próxima recomeça",
+            _ => "a lista voltou; a varredura de grupos rodou",
+        };
         self.st.diag.report(event, "", code, reason);
     }
 }
@@ -169,7 +190,7 @@ pub fn spawn(st: Arc<AppState>) -> Option<JoinHandle<()>> {
         let mut sweeper = Sweeper::new(groups.clone(), Arc::new(AppEnv { st, groups }));
         loop {
             tokio::time::sleep(TICK).await;
-            sweeper.round().await;
+            sweeper = sweeper.guarded_round().await;
         }
     }))
 }

@@ -237,6 +237,28 @@ async fn orq_join_promotes_once_and_restores_on_conflict() {
     assert_eq!(orq.promotes.load(Ordering::SeqCst), 1);
 }
 
+/// Promoção que falha depois de deixar o temporário de `arb` virar pasta: a volta atrás não apaga o sidecar dele.
+struct SabotagedOrq(std::path::PathBuf);
+impl OrqFacts for SabotagedOrq {
+    fn phase<'a>(&'a self, _gid: &'a str) -> BoxFuture<'a, OrqPhase> { Box::pin(async { OrqPhase::Ended }) }
+    fn promote<'a>(&'a self, _name: &'a str, _gid: &'a str) -> BoxFuture<'a, Result<(), PromoteError>> {
+        Box::pin(async move {
+            std::fs::create_dir(self.0.join("arb.json.tmp")).unwrap();
+            Err(PromoteError::Unavailable("groups_orq_promote_status_503".into()))
+        })
+    }
+}
+
+#[tokio::test]
+async fn orq_join_whose_undo_fails_reports_the_disk_not_the_promote() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("pair");
+    let svc = GroupService::new(PairDir::new(root.clone(), tmp.path().join("arquivo")), Arc::new(SabotagedOrq(root.clone())), "srv".into());
+    let err = svc.join(owned("arb", &["exec"], true)).await.err().expect("a promoção falhou");
+    // Responder 503 "tente de novo" com o sidecar `orq` ainda gravado seria dizer que nada ficou.
+    assert!(matches!(err, GroupError::Store(_)), "{err:?}");
+}
+
 #[tokio::test]
 async fn join_reports_only_loose_sessions_as_newcomers() {
     let tmp = tempfile::tempdir().unwrap();

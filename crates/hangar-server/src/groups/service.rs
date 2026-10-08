@@ -123,8 +123,10 @@ impl GroupService {
         }).await??;
         // Promover sob o mesmo lock: um join concorrente não enxerga o grupo meio configurado.
         if plan.orq && plan.new_gid && let Err(failed) = self.orq.promote(&name, &plan.gid).await {
-            self.restore_blocking(plan.before.clone()).await;
+            let restored = self.restore_blocking(plan.before.clone()).await;
             self.changed();
+            // Sidecar `orq` que não voltou pesa mais que a promoção: 409/503 diria que nada ficou.
+            restored?;
             return Err(GroupError::Orq(failed));
         }
         self.changed();
@@ -262,9 +264,10 @@ impl GroupService {
         work.await
     }
 
-    async fn restore_blocking(&self, before: Snapshot) {
+    /// `restore` de quem já segura o lock.
+    async fn restore_blocking(&self, before: Snapshot) -> Result<(), GroupError> {
         let dir = self.dir.clone();
-        let _ = blocking(move || restore_logged(&dir, &before)).await;
+        blocking(move || restore_all(&dir, &before)).await?.map_err(GroupError::from)
     }
 }
 

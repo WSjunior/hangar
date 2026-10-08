@@ -11,9 +11,12 @@ use hangar_server::groups::exit::leave_and_notify;
 use hangar_server::groups::orq::PythonOrq;
 use hangar_server::groups::service::{BoxFuture, GroupError, GroupService, JoinOwned, OrqFacts, OrqPhase, PromoteError};
 use hangar_server::groups::store::PairDir;
-use hangar_server::groups::sweep::{FAILED_EVENT, RECOVERED_EVENT, SweepEnv, Sweeper, live_names_of};
+use hangar_server::groups::sweep::{FAILED_EVENT, PANICKED_EVENT, RECOVERED_EVENT, SweepEnv, Sweeper, live_names_of};
 use hangar_server::list::bridge::Produced;
 use hangar_server::list::facts::ListFacts;
+
+/// Resposta da lista falsa que faz a rodada entrar em pânico.
+const PANIC: &str = "panic";
 
 struct Phase(Mutex<BTreeMap<String, OrqPhase>>);
 impl OrqFacts for Phase {
@@ -34,6 +37,7 @@ impl SweepEnv for Env {
     fn live_names(&self) -> BoxFuture<'_, Result<Vec<String>, String>> {
         *self.list_calls.lock().unwrap() += 1;
         let answer = self.live.lock().unwrap().clone();
+        if answer.as_ref().err().map(String::as_str) == Some(PANIC) { panic!("rodada quebrada"); }
         Box::pin(async move { answer })
     }
     fn leave<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<Vec<String>, GroupError>> {
@@ -119,6 +123,19 @@ async fn sweep_skips_failed_or_empty_list() {
     r.sweeper.round().await;
     assert_eq!(r.env.reports.lock().unwrap().last(), Some(&(RECOVERED_EVENT, "list_empty".to_owned())));
     assert_eq!(r.env.reports.lock().unwrap().len(), 3);
+}
+
+/// Rodada que entra em pânico não para a varredura para sempre: vai ao diário e a próxima roda.
+#[tokio::test]
+async fn panicking_round_goes_to_the_diary_and_the_sweep_goes_on() {
+    let r = rig();
+    join(&r.groups, "a", &["b"], false).await;
+    *r.env.live.lock().unwrap() = Err(PANIC.to_owned());
+    let sweeper = r.sweeper.guarded_round().await;
+    assert_eq!(*r.env.reports.lock().unwrap(), [(PANICKED_EVENT, "groups_sweep_panicked".to_owned())]);
+    live(&r.env, &["a", "b"]);
+    let _ = sweeper.guarded_round().await;
+    assert_eq!(*r.env.list_calls.lock().unwrap(), 2, "a rodada seguinte pergunta a lista de novo");
 }
 
 /// Sem nenhuma resposta dos fatos, a sessão vista só por eles (transferência, `orq`) é desconhecida,
