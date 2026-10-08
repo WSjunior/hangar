@@ -62,8 +62,8 @@ from app import uso_report
 from app.planprog import (plan_progress, list_plans, write_pin, is_safe_stem, _plans_dir,
                           PlanPinError, PIN_NONE, marcar_step, arquivar, caminho_do_plano,
                           PlanWriteError)
-from app.pqueue import (PromptQueue, _transcript_start_ts, committed_user_lines, fila_interna_pendente,
-                        linha_mais_parecida)
+from app.pqueue import (PromptQueue, _saida_local, _transcript_start_ts, committed_user_lines,
+                        fila_interna_pendente, linha_mais_parecida)
 from app.prune import prune_loop as _prune_loop
 from app.renova_token import laco as _renova_token_loop
 from app.chain import ThenLink
@@ -2755,18 +2755,18 @@ async def _motivo_ocupada(name: str, headless: bool) -> str | None:
                 return "erro_sessao_trabalhando"
             if state.get("state") not in ("idle", "dead"):
                 return "erro_sessao_iniciando"
-            fila = await asyncio.to_thread(PromptQueue(name).load)
-            return "erro_fila_pendente" if any(
-                (not row.get("delivered") or not row.get("confirmed")) and not row.get("saida_local")
-                for row in fila) else None
-        sess = get_adapter(CLAUDE_HEADLESS)._sessions.get(name)
-        if sess is not None and sess.vivo:
-            if sess.iniciando:
-                return "erro_sessao_iniciando"
-            if sess.pending or sess.question:
-                return "erro_sessao_esperando_resposta"
-            if sess.in_progress:
-                return "erro_sessao_trabalhando"
+            # Entregue sem confirmação não segura a troca: ociosa, o ator já conferiu o transcript, e a
+            # que não chegou (limite da conta, desistida) prendia a sessão para sempre. Quem reinicia
+            # o processo a devolve à fila (`_requeue_unanswered`).
+        else:
+            sess = get_adapter(CLAUDE_HEADLESS)._sessions.get(name)
+            if sess is not None and sess.vivo:
+                if sess.iniciando:
+                    return "erro_sessao_iniciando"
+                if sess.pending or sess.question:
+                    return "erro_sessao_esperando_resposta"
+                if sess.in_progress:
+                    return "erro_sessao_trabalhando"
     else:
         info = next((i for i in await registry.list_with_state() if i.name == name), None)
         if info is not None and info.state == "awaiting_input":
@@ -2777,6 +2777,26 @@ async def _motivo_ocupada(name: str, headless: bool) -> str | None:
     if any(e.get("delivered") is False for e in fila):
         return "erro_fila_pendente"
     return None
+
+
+def _requeue_unanswered(name: str) -> int:
+    """Volta à fila a mensagem entregue que a sessão ociosa nunca confirmou: o processo que a
+    recebeu não a gravou, e a vida nova (outra conta, outro modo) precisa responder. Só sob a trava
+    de entrega e dentro da troca, para nenhum drain correr no meio. Desistida e saída local ficam."""
+    queue = PromptQueue(name)
+    requeued = 0
+    for row in queue.load():
+        if (row.get("delivered") is not True or row.get("confirmed") or row.get("desistiu")
+                or _saida_local(row)):
+            continue
+        try:
+            queue.set_delivered(str(row["id"]), False)
+        except ValueError:
+            continue        # entrega incerta no diário da fila: reenviar poderia duplicar
+        requeued += 1
+    if requeued:
+        _log.info("%d mensagem(ns) sem confirmação de %s voltaram à fila", requeued, name)
+    return requeued
 
 
 @app.post("/api/sessions/{name}/recarregar", dependencies=[Depends(require_auth)])
@@ -2992,6 +3012,7 @@ async def _trocar_modo(name: str, body: ModoExecucaoBody):
         if motivo:
             raise HTTPException(409, detail=erro(motivo, _OCUPADA[motivo]))
         if headless:
+            await asyncio.to_thread(_requeue_unanswered, name)
             try:
                 await asyncio.to_thread(registry.para_terminal, name)
             except ValueError as e:
@@ -3264,6 +3285,8 @@ async def _trocar_conta(name: str, destino: str | None, *, engine_account: str |
         original_meta = None
         movida: tuple[str, str, str | None] | None = None
         try:
+            if headless:
+                await asyncio.to_thread(_requeue_unanswered, name)
             meta = headless_sessions.load(name)
             if meta is None:
                 raise RuntimeError("sessão sem o arquivo de estado")
@@ -9749,6 +9772,7 @@ async def _reabrir_em_bypass(name: str, info):
             raise HTTPException(409, detail=erro(motivo, "para entrar em bypass a sessão reinicia: " + _OCUPADA[motivo]))
         if headless:
             antes = headless_sessions.load(name) or {}
+            await asyncio.to_thread(_requeue_unanswered, name)
             await hl.parar(name)
             if headless_sessions.update(name, permission_mode="bypassPermissions",
                                         previous_non_plan="bypassPermissions") is None:

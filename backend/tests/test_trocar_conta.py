@@ -167,7 +167,9 @@ def test_proxy_fast_does_not_restart_busy_session(contas, tmp_path, reason):
     ("working", {"in_progress": True}, [], True, "erro_sessao_trabalhando"),
     ("awaiting_input", {"pending": {}}, [], True, "erro_sessao_esperando_resposta"),
     ("idle", {}, [{"delivered": False, "confirmed": True}], True, "erro_fila_pendente"),
-    ("idle", {}, [{"delivered": True, "confirmed": False}], True, "erro_fila_pendente"),
+    ("idle", {}, [{"delivered": True, "confirmed": False}], True, None),
+    ("idle", {}, [{"delivered": True, "desistiu": True}], True, None),
+    ("idle", {}, [{"delivered": True, "confirmed": True, "papel": "assistant"}], True, None),
     (None, {}, [], True, "erro_sessao_iniciando"),
     ("idle", {}, [], False, "erro_sessao_iniciando"),
     ("idle", {}, [], True, None),
@@ -329,6 +331,51 @@ def test_sem_terminal_para_move_e_religa_na_conta_nova(contas, tmp_path):
     destino = Path(b) / "projects" / origem.parent.name
     assert (destino / f"{SID}.jsonl").exists() and (destino / SID).is_dir() and not origem.exists()
     assert ordem == ["parou", ("acordou", b)]
+
+
+def test_unanswered_message_goes_back_to_the_queue_before_the_new_account_wakes(contas, tmp_path):
+    """Entregue e nunca confirmada (limite da conta) volta à fila para a conta nova responder;
+    desistida, saída local e confirmada ficam como estão."""
+    from app.pqueue import PromptQueue
+    a, b = contas
+    S.save("hl", str(tmp_path / "repo"), SID, config_dir=a)
+    _conversa(a, str(tmp_path / "repo"))
+    queue = PromptQueue("hl")
+    lost = queue.append("resposta perdida", delivered=True)
+    abandoned = queue.append("desistida", delivered=True)
+    queue.desistir(abandoned["id"])
+    local = queue.append_saida_local("/btw isn't available")
+    done = queue.append("respondida", delivered=True)
+    queue.confirm_delivered(lambda r: r["id"] == done["id"])
+    seen = {}
+    hl = _hl([])
+    hl.acordar = MagicMock(side_effect=lambda n: seen.update({r["id"]: r["delivered"] for r in queue.load()}))
+    r = _post("hl", b, headless=True, conta=a, hl=hl)
+    assert r.status_code == 200, r.text
+    assert seen == {lost["id"]: False, abandoned["id"]: True, local["id"]: True, done["id"]: True}
+
+
+def test_uncertain_delivery_is_not_requeued(monkeypatch):
+    """O diário da fila recusa devolver entrega incerta (ValueError): ela fica, as outras voltam."""
+    import app.api as api_mod
+    rows = [{"id": "unknown", "delivered": True}, {"id": "lost", "delivered": True}]
+    calls = []
+
+    class Queue:
+        def __init__(self, name):
+            pass
+
+        def load(self):
+            return rows
+
+        def set_delivered(self, entry_id, value):
+            calls.append(entry_id)
+            if entry_id == "unknown":
+                raise ValueError("entrega incerta não pode voltar para a fila")
+
+    monkeypatch.setattr(api_mod, "PromptQueue", Queue)
+    assert api_mod._requeue_unanswered("hl") == 1
+    assert calls == ["unknown", "lost"]
 
 
 def test_terminal_passa_por_sem_terminal_e_reabre_o_pane_na_conta_nova(contas, tmp_path):

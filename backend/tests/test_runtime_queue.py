@@ -95,6 +95,18 @@ def test_unknown_never_unclaims(tmp_path):
     assert not store.state["rows"][0].get("confirmed")
 
 
+def test_accepted_but_unconfirmed_goes_back_to_the_queue(tmp_path):
+    """A troca de conta devolve à fila o que a CLI aceitou e nunca gravou: `accepted` não é incerto."""
+    store = open_store(tmp_path)
+    store.exec(1, "append", CLOCK, {**append(), "delivered": True})
+    store.exec(1, "prepare", CLOCK, {"kind": "prepare", "id": "op", "payload": {"text": "Olá"}, "entry_id": "entry-1"})
+    store.exec(1, "dispatch", CLOCK, {"kind": "begin_dispatch", "id": "op", "wire_id": "wire:op:1"})
+    store.exec(1, "accepted", CLOCK, {"kind": "finish", "id": "op", "status": "accepted", "result": None})
+    assert store.state["rows"][0]["delivered"] is True
+    store.exec(1, "unclaim", CLOCK, {"kind": "set_delivered", "entry_id": "entry-1", "value": False, "steered": False})
+    assert store.state["rows"][0]["delivered"] is False
+
+
 def test_cap_keeps_pending(tmp_path):
     rows = [{"id": str(i), "text": "pending", "ts": 1, "delivered": True, "desistiu": True} for i in range(1000)]
     store = open_store(tmp_path, rows)
