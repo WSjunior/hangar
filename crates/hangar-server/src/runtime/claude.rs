@@ -372,7 +372,7 @@ impl ClaudeEngine {
                 self.clear_streams(&mut effects);
             }
             OperationKind::Select => {
-                let (id,request) = self.pending.first().cloned().ok_or_else(||error("nenhuma permissão pendente"))?;
+                let (id,request) = self.pending.first().cloned().ok_or_else(||RuntimeError::new("no_pending_permission","nenhuma permissão pendente"))?;
                 let option = payload["option"].as_u64().filter(|n| (1..=3).contains(n)).ok_or_else(||error("opção inválida"))?;
                 let suggestions:Vec<_> = request["permission_suggestions"].as_array().map(|rules|rules.iter().filter(|v|v.is_object()).cloned().collect()).unwrap_or_default();
                 let allow = option == 1 || option == 3 && !suggestions.is_empty();
@@ -473,7 +473,6 @@ impl ClaudeEngine {
                             self.changed(&mut effects,true);
                             return Ok(effects);
                         }
-                        "quota" => {},
                         _ => {},
                     }
                     self.changed(&mut effects,false);

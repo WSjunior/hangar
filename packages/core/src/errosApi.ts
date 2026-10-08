@@ -512,6 +512,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_mod_convidado: () => m.erro_mod_convidado(),
   // Troca de agente em curso: o Python recusa com este código, e o Rust o repassa nas rotas dos mods.
   session_transfer_busy: () => m.session_transfer_busy(),
+  session_transfer_gate_unavailable: () => m.session_transfer_gate_unavailable(),
 };
 
 // Falha com código do servidor (503 do dono único): a frase traduzida já está no `message`.

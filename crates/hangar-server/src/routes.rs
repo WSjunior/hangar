@@ -59,6 +59,8 @@ pub struct AppState {
     pub state: Arc<crate::state::live::StateEnv>,
     /// Interface dos mods das sessões sem terminal do Rust: o ator publica, as rotas consultam.
     pub mods: crate::mods::state::Mods,
+    /// Quanto uma escrita espera a porta de entrada da sessão reabrir (os testes encurtam).
+    pub write_gate_wait: std::time::Duration,
 }
 
 impl AppState {
@@ -106,7 +108,7 @@ impl AppState {
             list, state,
             hub: Arc::default(),
             term: Arc::default(),
-            mods }
+            mods, write_gate_wait: std::time::Duration::from_secs(30) }
     }
 
     pub(crate) fn skill_origins(&self, repo: &std::path::Path) -> crate::costs::origins::Origins {
@@ -250,6 +252,16 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/plugin/focus-target", axum::routing::post(crate::mods::bridge::focus_target).fallback(pass_any))
         .route("/api/plugin/focused", axum::routing::post(crate::mods::bridge::focused).fallback(pass_any))
         .route("/api/plugin/scroll", axum::routing::post(crate::mods::bridge::scroll).fallback(pass_any))
+        // Escritas Claude: o Rust decide por pedido e repassa o que não é dele (corpo intacto).
+        .route("/api/sessions/{name}/input", axum::routing::post(crate::session_write::input::input).fallback(pass_any))
+        .route("/api/sessions/{name}/steer", axum::routing::post(crate::session_write::input::steer).fallback(pass_any))
+        .route("/api/sessions/{name}/interrupt", axum::routing::post(crate::session_write::control::interrupt).fallback(pass_any))
+        .route("/api/sessions/{name}/select", axum::routing::post(crate::session_write::control::select).fallback(pass_any))
+        .route("/api/sessions/{name}/select/submit", axum::routing::post(crate::session_write::control::select_submit).fallback(pass_any))
+        .route("/api/sessions/{name}/answer", axum::routing::post(crate::session_write::answer::answer).fallback(pass_any))
+        .route("/api/sessions/{name}/keys", axum::routing::post(crate::session_write::control::keys).fallback(pass_any))
+        .route("/api/sessions/{name}/term-input", axum::routing::post(crate::session_write::control::term_input).fallback(pass_any))
+        .route("/api/sessions/{name}/queue/{entry_id}", axum::routing::delete(crate::session_write::control::queue_remove).fallback(pass_any))
         .route("/api/sessions/{name}/cost", get(crate::costs_routes::session_cost).fallback(pass_any))
         .route("/api/costs", get(crate::costs_routes::costs).fallback(pass_any))
         .route("/api/cotacao", get(crate::costs_routes::cotacao).fallback(pass_any))
@@ -261,8 +273,11 @@ pub fn router(state: Arc<AppState>) -> Router {
 }
 
 async fn health(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let owns: Vec<_> = crate::session_write::table::owned_modes().into_iter()
+        .map(|(provider, headless)| serde_json::json!({"provider": provider.name(), "headless": headless})).collect();
     let body = serde_json::json!({"ok": true, "version": env!("CARGO_PKG_VERSION"),
         "protocol": crate::INTERNAL_PROTOCOL,
+        "owns": owns,
         // O painel de terminal real é do Rust em todas as plataformas.
         "terminal_panel": true,
         "terminal_address": st.terminal_address.map(|a| a.to_string())}).to_string();

@@ -37,6 +37,8 @@ class Gateway:
         self.fail = False
 
     async def op(self, target, command, operation_id, clock):
+        if command["kind"] == "ingress":
+            return {"closed": command["closed"]}
         if self.fail:
             raise TimeoutError("synthetic IPC")
         if command["kind"] == "open":
@@ -314,6 +316,8 @@ class Reopenable(Gateway):
     async def op(self, target, command, operation_id, clock):
         from app.rust_server import RustOpError
         kind = command["kind"]
+        if kind == "ingress":
+            return {"closed": command["closed"]}
         self.kinds.append(kind)
         if kind == "snapshot":
             if self.broken == "gone":

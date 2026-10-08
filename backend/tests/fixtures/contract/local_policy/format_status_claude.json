@@ -1,0 +1,1641 @@
+{
+ "tz": "BRT3",
+ "cases": [
+  {
+   "name": "model_claude-opus-5",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "effort": "high"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5 (high)",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "model_claude-opus-4-7",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-4-7",
+    "effort": "high"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus4.7 (high)",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "model_claude-opus-5[1m]",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5[1m]",
+    "effort": "high"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5·1M (high)",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "model_claude-opus-5[1M]",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5[1M]",
+    "effort": "high"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5·1M (high)",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "model_claude-sonnet-4-5-20250929",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-sonnet-4-5-20250929",
+    "effort": "high"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Sonnet 4.5 (high)",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "model_claude-haiku-5",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-haiku-5",
+    "effort": "high"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Haiku 5 (high)",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "model_claude-fable-5-1",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-fable-5-1",
+    "effort": "high"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Fable 5.1 (high)",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "model_claude-fable-5-1[1m]",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-fable-5-1[1m]",
+    "effort": "high"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Fable 5.1·1M (high)",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "model_opus",
+   "kind": "format_status",
+   "payload": {
+    "model": "opus",
+    "effort": "high"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus (high)",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "model_sonnet[1m]",
+   "kind": "format_status",
+   "payload": {
+    "model": "sonnet[1m]",
+    "effort": "high"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Sonnet·1M (high)",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "model_claude-sonnet",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-sonnet",
+    "effort": "high"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Sonnet (high)",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "model_gpt-5.5",
+   "kind": "format_status",
+   "payload": {
+    "model": "gpt-5.5",
+    "effort": "high"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 gpt-5.5 (high)",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "model_claude-opus-5",
+   "kind": "format_status",
+   "payload": {
+    "model": "  claude-opus-5  ",
+    "effort": "high"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5 (high)",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "model_claude-opus-4-1-20250805",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-4-1-20250805",
+    "effort": "high"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus4.1 (high)",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "model_[1m]",
+   "kind": "format_status",
+   "payload": {
+    "model": "[1m]",
+    "effort": "high"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 [1m] (high)",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "model_claude-",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-",
+    "effort": "high"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 claude- (high)",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "model_engine_slash_with_account",
+   "kind": "format_status",
+   "payload": {
+    "model": "deepseek/deepseek-v4",
+    "effort": "low"
+   },
+   "meta": {
+    "provider": "claude",
+    "engine_account": "ds"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 deepseek-v4 (low)",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "model_engine_slash_without_account",
+   "kind": "format_status",
+   "payload": {
+    "model": "deepseek/deepseek-v4",
+    "effort": "low"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 deepseek/deepseek-v4 (low)",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "model_engine_family_after_slash",
+   "kind": "format_status",
+   "payload": {
+    "model": "anthropic/claude-sonnet-4-6"
+   },
+   "meta": {
+    "provider": "claude",
+    "engine_account": "x"
+   },
+   "now": 1800000000.0,
+   "env": {
+    "CLAUDE_CODE_EFFORT_LEVEL": "max"
+   },
+   "expected": {
+    "status_line": "🤖 Sonnet 4.6 (max)",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "model_empty",
+   "kind": "format_status",
+   "payload": {
+    "model": ""
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": null,
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "model_null_everything_null",
+   "kind": "format_status",
+   "payload": {},
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": null,
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "effort_from_env",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "env": {
+    "CLAUDE_CODE_EFFORT_LEVEL": "xhigh"
+   },
+   "expected": {
+    "status_line": "🤖 Opus5 (xhigh)",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "effort_session_beats_env",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "effort": "low"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "env": {
+    "CLAUDE_CODE_EFFORT_LEVEL": "xhigh"
+   },
+   "expected": {
+    "status_line": "🤖 Opus5 (low)",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "effort_from_account_settings",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5"
+   },
+   "meta": {
+    "provider": "claude",
+    "config_dir": "{ROOT}/cfg"
+   },
+   "now": 1800000000.0,
+   "files": {
+    "cfg/settings.json": {
+     "text": "{\"effortLevel\": \"medium\"}"
+    }
+   },
+   "expected": {
+    "status_line": "🤖 Opus5 (medium)",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "effort_env_beats_settings",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5"
+   },
+   "meta": {
+    "provider": "claude",
+    "config_dir": "{ROOT}/cfg"
+   },
+   "now": 1800000000.0,
+   "env": {
+    "CLAUDE_CODE_EFFORT_LEVEL": "high"
+   },
+   "files": {
+    "cfg/settings.json": {
+     "text": "{\"effortLevel\": \"medium\"}"
+    }
+   },
+   "expected": {
+    "status_line": "🤖 Opus5 (high)",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "effort_settings_not_json",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5"
+   },
+   "meta": {
+    "provider": "claude",
+    "config_dir": "{ROOT}/cfg"
+   },
+   "now": 1800000000.0,
+   "files": {
+    "cfg/settings.json": {
+     "text": "{nao"
+    }
+   },
+   "expected": {
+    "status_line": "🤖 Opus5",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "effort_settings_not_object",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5"
+   },
+   "meta": {
+    "provider": "claude",
+    "config_dir": "{ROOT}/cfg"
+   },
+   "now": 1800000000.0,
+   "files": {
+    "cfg/settings.json": {
+     "text": "[1]"
+    }
+   },
+   "expected": {
+    "status_line": "🤖 Opus5",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "effort_settings_empty_level",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5"
+   },
+   "meta": {
+    "provider": "claude",
+    "config_dir": "{ROOT}/cfg"
+   },
+   "now": 1800000000.0,
+   "files": {
+    "cfg/settings.json": {
+     "text": "{\"effortLevel\": \"\"}"
+    }
+   },
+   "expected": {
+    "status_line": "🤖 Opus5",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "effort_settings_level_not_string",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5"
+   },
+   "meta": {
+    "provider": "claude",
+    "config_dir": "{ROOT}/cfg"
+   },
+   "now": 1800000000.0,
+   "files": {
+    "cfg/settings.json": {
+     "text": "{\"effortLevel\": 3}"
+    }
+   },
+   "expected": {
+    "status_line": "🤖 Opus5",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "effort_settings_missing",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5"
+   },
+   "meta": {
+    "provider": "claude",
+    "config_dir": "{ROOT}/vazio"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "effort_from_home_default",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "files": {
+    "home/.claude/settings.json": {
+     "text": "{\"effortLevel\": \"low\"}"
+    }
+   },
+   "expected": {
+    "status_line": "🤖 Opus5 (low)",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "usage_basic",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "effort": "high",
+    "context_window": 200000,
+    "usage": {
+     "input_tokens": 1500,
+     "cache_creation_input_tokens": 1000,
+     "cache_read_input_tokens": 0,
+     "output_tokens": 500
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5 (high) │ 💬 2k/500 2k/200k",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "usage_tie_rounds_to_even",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "effort": "high",
+    "context_window": 200000,
+    "usage": {
+     "input_tokens": 2500
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5 (high) │ 💬 2k/0 2k/200k",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "usage_tie_rounds_to_even_odd",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "effort": "high",
+    "context_window": 200000,
+    "usage": {
+     "input_tokens": 1500,
+     "output_tokens": 3500
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5 (high) │ 💬 2k/4k 2k/200k",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "usage_millions",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "effort": "high",
+    "context_window": 2500000,
+    "usage": {
+     "input_tokens": 1234567,
+     "output_tokens": 2500000
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5 (high) │ 💬 1M/2M 1M/2M",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "usage_below_1000",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "effort": "high",
+    "context_window": 999,
+    "usage": {
+     "input_tokens": 999,
+     "output_tokens": 1
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5 (high) │ 💬 999/1 999/999",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "usage_float_values",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "effort": "high",
+    "context_window": 200000,
+    "usage": {
+     "input_tokens": 1499.5,
+     "output_tokens": 0.5
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5 (high) │ 💬 2k/0 2k/200k",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "usage_zero",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "effort": "high",
+    "context_window": 200000,
+    "usage": {
+     "input_tokens": 0
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5 (high)",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "usage_null_values",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "effort": "high",
+    "context_window": 200000,
+    "usage": {
+     "input_tokens": null,
+     "cache_read_input_tokens": 12000
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5 (high) │ 💬 12k/0 12k/200k",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "usage_without_window",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "usage": {
+     "input_tokens": 1500,
+     "cache_creation_input_tokens": 1000,
+     "cache_read_input_tokens": 0,
+     "output_tokens": 500
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "usage_window_zero",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "usage": {
+     "input_tokens": 1500,
+     "cache_creation_input_tokens": 1000,
+     "cache_read_input_tokens": 0,
+     "output_tokens": 500
+    },
+    "context_window": 0
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "usage_null",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "effort": "high",
+    "context_window": 200000,
+    "usage": null
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5 (high)",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "usage_cache_only",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "effort": "high",
+    "context_window": 200000,
+    "usage": {
+     "cache_read_input_tokens": 150000,
+     "output_tokens": 800
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5 (high) │ 💬 150k/800 150k/200k",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "cost_0",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "cost": 0
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5 │ 💵 $0.00",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "cost_0.0",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "cost": 0.0
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5 │ 💵 $0.00",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "cost_0.125",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "cost": 0.125
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5 │ 💵 $0.12",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "cost_0.375",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "cost": 0.375
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5 │ 💵 $0.38",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "cost_0.005",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "cost": 0.005
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5 │ 💵 $0.01",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "cost_1.005",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "cost": 1.005
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5 │ 💵 $1.00",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "cost_2.675",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "cost": 2.675
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5 │ 💵 $2.67",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "cost_12.3456",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "cost": 12.3456
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5 │ 💵 $12.35",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "cost_3",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "cost": 3
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5 │ 💵 $3.00",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "cost_1234.5",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "cost": 1234.5
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5 │ 💵 $1234.50",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "cost_0.994999",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "cost": 0.994999
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5 │ 💵 $0.99",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "cost_null",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "cost": null
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "cost_only",
+   "kind": "format_status",
+   "payload": {
+    "cost": 0.5
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "💵 $0.50",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "windows_both",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "quota": {
+    "windows": [
+     {
+      "rotulo": "5h",
+      "pct": 42,
+      "reset_ts": 1800000090.0,
+      "por_modelo": false
+     },
+     {
+      "rotulo": "7d",
+      "pct": 7.5,
+      "reset_ts": 1800176400.0,
+      "por_modelo": false
+     }
+    ]
+   },
+   "expected": {
+    "status_line": "🤖 Opus5 │ ⚡5h:42% ↺1m │ 📅7d:8% ↺2d1h",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "windows_five_hours_only",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "quota": {
+    "windows": [
+     {
+      "rotulo": "5h",
+      "pct": 42,
+      "reset_ts": 1800000090.0,
+      "por_modelo": false
+     }
+    ]
+   },
+   "expected": {
+    "status_line": "🤖 Opus5 │ ⚡5h:42% ↺1m",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "windows_without_model",
+   "kind": "format_status",
+   "payload": {},
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "quota": {
+    "windows": [
+     {
+      "rotulo": "5h",
+      "pct": 42,
+      "reset_ts": 1800000090.0,
+      "por_modelo": false
+     },
+     {
+      "rotulo": "7d",
+      "pct": 7.5,
+      "reset_ts": 1800176400.0,
+      "por_modelo": false
+     }
+    ]
+   },
+   "expected": {
+    "status_line": "⚡5h:42% ↺1m │ 📅7d:8% ↺2d1h",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "windows_empty",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "quota": {
+    "windows": []
+   },
+   "expected": {
+    "status_line": "🤖 Opus5",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "windows_unknown_label_skipped",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "quota": {
+    "windows": [
+     {
+      "rotulo": "1h",
+      "pct": 10,
+      "reset_ts": null
+     },
+     {
+      "rotulo": "5h",
+      "pct": 42,
+      "reset_ts": 1800000090.0,
+      "por_modelo": false
+     }
+    ]
+   },
+   "expected": {
+    "status_line": "🤖 Opus5 │ ⚡5h:42% ↺1m",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "window_pct_reset_0",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "quota": {
+    "windows": [
+     {
+      "rotulo": "5h",
+      "pct": 0.5,
+      "reset_ts": null
+     }
+    ]
+   },
+   "expected": {
+    "status_line": "🤖 Opus5 │ ⚡5h:0%",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "window_pct_reset_1",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "quota": {
+    "windows": [
+     {
+      "rotulo": "5h",
+      "pct": 1.5,
+      "reset_ts": 1800000000.0
+     }
+    ]
+   },
+   "expected": {
+    "status_line": "🤖 Opus5 │ ⚡5h:2% ↺0m",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "window_pct_reset_2",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "quota": {
+    "windows": [
+     {
+      "rotulo": "5h",
+      "pct": 2.5,
+      "reset_ts": 1799999900.0
+     }
+    ]
+   },
+   "expected": {
+    "status_line": "🤖 Opus5 │ ⚡5h:2% ↺0m",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "window_pct_reset_3",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "quota": {
+    "windows": [
+     {
+      "rotulo": "5h",
+      "pct": 99.5,
+      "reset_ts": 1800000059.0
+     }
+    ]
+   },
+   "expected": {
+    "status_line": "🤖 Opus5 │ ⚡5h:100% ↺0m",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "window_pct_reset_4",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "quota": {
+    "windows": [
+     {
+      "rotulo": "5h",
+      "pct": 100,
+      "reset_ts": 1800003600.0
+     }
+    ]
+   },
+   "expected": {
+    "status_line": "🤖 Opus5 │ ⚡5h:100% ↺1h",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "window_pct_reset_5",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "quota": {
+    "windows": [
+     {
+      "rotulo": "5h",
+      "pct": 41.5,
+      "reset_ts": 1800018060.0
+     }
+    ]
+   },
+   "expected": {
+    "status_line": "🤖 Opus5 │ ⚡5h:42% ↺5h1m",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "window_pct_reset_6",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "quota": {
+    "windows": [
+     {
+      "rotulo": "5h",
+      "pct": 12,
+      "reset_ts": 1800086400.0
+     }
+    ]
+   },
+   "expected": {
+    "status_line": "🤖 Opus5 │ ⚡5h:12% ↺1d",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "window_pct_reset_7",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "quota": {
+    "windows": [
+     {
+      "rotulo": "5h",
+      "pct": 12,
+      "reset_ts": 1800788459.0
+     }
+    ]
+   },
+   "expected": {
+    "status_line": "🤖 Opus5 │ ⚡5h:12% ↺9d3h",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "window_pct_reset_8",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "quota": {
+    "windows": [
+     {
+      "rotulo": "5h",
+      "pct": 12,
+      "reset_ts": 1800000060.0
+     }
+    ]
+   },
+   "expected": {
+    "status_line": "🤖 Opus5 │ ⚡5h:12% ↺1m",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "window_pct_reset_9",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "quota": {
+    "windows": [
+     {
+      "rotulo": "5h",
+      "pct": 12,
+      "reset_ts": 1800003599.9
+     }
+    ]
+   },
+   "expected": {
+    "status_line": "🤖 Opus5 │ ⚡5h:12% ↺59m",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "window_pct_reset_10",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "quota": {
+    "windows": [
+     {
+      "rotulo": "5h",
+      "pct": 33,
+      "reset_ts": 0
+     }
+    ]
+   },
+   "expected": {
+    "status_line": "🤖 Opus5 │ ⚡5h:33%",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "window_pct_reset_11",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "quota": {
+    "windows": [
+     {
+      "rotulo": "5h",
+      "pct": 33,
+      "reset_ts": 1800000000.5
+     }
+    ]
+   },
+   "expected": {
+    "status_line": "🤖 Opus5 │ ⚡5h:33% ↺0m",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "window_seven_days_hours_only",
+   "kind": "format_status",
+   "payload": {},
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "quota": {
+    "windows": [
+     {
+      "rotulo": "7d",
+      "pct": 5,
+      "reset_ts": 1800259200.0
+     }
+    ]
+   },
+   "expected": {
+    "status_line": "📅7d:5% ↺3d",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "windows_with_usage_cost_and_model",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-sonnet-4-5",
+    "effort": "medium",
+    "usage": {
+     "input_tokens": 1500,
+     "cache_creation_input_tokens": 1000,
+     "cache_read_input_tokens": 0,
+     "output_tokens": 500
+    },
+    "context_window": 1000000,
+    "cost": 4.2
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "quota": {
+    "windows": [
+     {
+      "rotulo": "5h",
+      "pct": 42,
+      "reset_ts": 1800000090.0,
+      "por_modelo": false
+     },
+     {
+      "rotulo": "7d",
+      "pct": 7.5,
+      "reset_ts": 1800176400.0,
+      "por_modelo": false
+     }
+    ]
+   },
+   "expected": {
+    "status_line": "🤖 Sonnet 4.5 (medium) │ 💬 2k/500 2k/1M │ 💵 $4.20 │ ⚡5h:42% ↺1m │ 📅7d:8% ↺2d1h",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "limit_rejected",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "rate_limit_info": {
+     "status": "rejected",
+     "resetsAt": 1800018000.0
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5",
+    "limit_reset": "10:00"
+   }
+  },
+  {
+   "name": "limit_rejected_float",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "rate_limit_info": {
+     "status": "rejected",
+     "resetsAt": 1800012345.678
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5",
+    "limit_reset": "08:25"
+   }
+  },
+  {
+   "name": "limit_rejected_local_midnight",
+   "kind": "format_status",
+   "payload": {
+    "rate_limit_info": {
+     "status": "rejected",
+     "resetsAt": 1799981999
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": null,
+    "limit_reset": "23:59"
+   }
+  },
+  {
+   "name": "limit_allowed_ignores_reset",
+   "kind": "format_status",
+   "payload": {
+    "rate_limit_info": {
+     "status": "allowed",
+     "resetsAt": 1800000000.0
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": null,
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "limit_rejected_without_reset",
+   "kind": "format_status",
+   "payload": {
+    "rate_limit_info": {
+     "status": "rejected"
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": null,
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "limit_rejected_reset_text",
+   "kind": "format_status",
+   "payload": {
+    "rate_limit_info": {
+     "status": "rejected",
+     "resetsAt": "amanhã"
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": null,
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "limit_null_info",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "rate_limit_info": null
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": "🤖 Opus5",
+    "limit_reset": null
+   }
+  },
+  {
+   "name": "limit_info_not_an_object",
+   "kind": "format_status",
+   "payload": {
+    "model": "claude-opus-5",
+    "rate_limit_info": "boom"
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "error": true
+   }
+  },
+  {
+   "name": "limit_rejected_negative_epoch",
+   "kind": "format_status",
+   "payload": {
+    "rate_limit_info": {
+     "status": "rejected",
+     "resetsAt": -3600
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "now": 1800000000.0,
+   "expected": {
+    "status_line": null,
+    "limit_reset": "20:00"
+   }
+  }
+ ]
+}

@@ -33,6 +33,7 @@ describe('recusas novas dos mods', () => {
     'erro_mod_fechar_recusado',
     'erro_mod_guarda_indisponivel',
     'session_transfer_busy',
+    'session_transfer_gate_unavailable',
     'erro_mod_painel_inexistente',
     'erro_mod_convidado',
   ])('%s vira frase do app, não o texto do servidor', (code) => {

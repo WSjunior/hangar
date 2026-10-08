@@ -117,6 +117,14 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
             return true;
         }
     }
+    // Escritas Claude: o Rust decide por pedido; o que não é dele ele repassa (os contadores mostram).
+    let tail = path.strip_prefix("/api/sessions/").and_then(|r| r.split_once('/')).map(|(_, t)| t);
+    if *method == Method::POST && matches!(tail, Some("input" | "steer" | "interrupt" | "select" | "select/submit" | "answer" | "keys" | "term-input")) {
+        return true;
+    }
+    if *method == Method::DELETE && tail.and_then(|t| t.strip_prefix("queue/")).is_some_and(|id| !id.is_empty() && !id.contains('/')) {
+        return true;
+    }
     crate::workspace_routes::matches(method, path) || crate::worktree_routes::matches(method, path)
 }
 
@@ -125,6 +133,8 @@ const PROBES: &[(&str, &str)] = &[
     ("GET", "/api/sessions/x/history"), ("GET", "/api/sessions/x/events"),
     ("GET", "/api/sessions"), ("GET", "/api/sessions/events"), ("POST", "/api/sessions"),
     ("POST", "/api/sessions/x/input"), ("POST", "/api/sessions/x/interrupt"), ("POST", "/api/sessions/x/answer"),
+    ("POST", "/api/sessions/x/steer"), ("POST", "/api/sessions/x/select"), ("POST", "/api/sessions/x/select/submit"),
+    ("POST", "/api/sessions/x/term-input"), ("DELETE", "/api/sessions/x/queue/e1"),
     ("POST", "/api/sessions/x/model"), ("POST", "/api/sessions/x/rename"), ("DELETE", "/api/sessions/x"),
     ("GET", "/api/sessions/x/term"), ("POST", "/api/sessions/x/keys"),
     ("GET", "/api/sessions/x/git/log"), ("GET", "/api/sessions/x/files/list"), ("POST", "/api/sessions/x/git/commit"),
@@ -311,7 +321,8 @@ mod tests {
         let get = |p| rust_route(&Method::GET, p);
         assert!(get("/api/sessions/a/history") && get("/api/sessions") && get("/api/uso"));
         assert!(get("/api/sessions/a/git/log") && get("/api/worktrees"), "Git e worktrees vêm dos matches");
-        assert!(!rust_route(&Method::POST, "/api/sessions/a/input") && !get("/api/cotas") && !rust_route(&Method::POST, "/api/worktrees/create"));
+        assert!(rust_route(&Method::POST, "/api/sessions/a/input") && rust_route(&Method::DELETE, "/api/sessions/a/queue/e1")
+            && !rust_route(&Method::POST, "/api/sessions/a/queue/e1") && !get("/api/cotas") && !rust_route(&Method::POST, "/api/worktrees/create"));
         assert_eq!(AREAS[area_of("/api/sessions/a/git/commit/abc/files")], "workspace");
         assert_eq!(AREAS[area_of("/api/sessions-x")], "other", "prefixo só casa por segmento inteiro");
         assert_eq!(AREAS[area_of("/assets/index.js")], "static");
@@ -331,7 +342,7 @@ mod tests {
             seen += 1;
             let path = line.split('"').nth(1).unwrap().replace("{name}", "x");
             if !path.starts_with("/api/") { continue; }
-            let method = if line.contains("post(") { Method::POST } else if line.contains("get(") { Method::GET }
+            let method = if line.contains("post(") { Method::POST } else if line.contains("delete(") { Method::DELETE } else if line.contains("get(") { Method::GET }
                 else { panic!("método que o leitor não conhece: {line}") };
             assert!(!line.contains(").get(") && !line.contains(").post("), "dois métodos numa rota: {line}");
             assert!(rust_route(&method, &path), "rota do roteador fora da tabela: {method} {path}");
