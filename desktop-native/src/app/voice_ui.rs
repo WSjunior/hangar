@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use serde::Deserialize;
 use gpui_kit::component::{select::{Select, SelectEvent, SelectState}, searchable_list::SearchableListItem};
 use crate::voice::{Activity as CallActivity, CallId, Phase, Voice, VoiceEvent, VoiceFailure, VoiceOptions, rpc::Codex,
-    organizer::{ConfirmGate, DEFAULT_EFFORT, Mode, ModeModel, ModeModels, OpenRequest, OrganizerAction, session_context, tool_reply}, usage::RateWindow};
+    organizer::{ConfirmGate, DEFAULT_EFFORT, Mode, ModeModel, ModeModels, OpenRequest, OrganizerAction, session_context, squash, tool_reply}, usage::RateWindow};
 use super::{create::choices::{PERMISSIONS, checked_choice, creation_defaults}, grouping::{can_leave, can_pair}, sidebar::Target};
 
 /// Vozes do Realtime; vazio é o padrão do Codex.
@@ -171,10 +171,13 @@ pub(super) struct VoiceUi {
     /// Fechar por voz: o pedido armado à espera do sim falado e a chamada que espera a resposta do servidor.
     pub(super) close_gate: ConfirmGate<Target>,
     pub(super) close_reply: Option<(Target, CallId)>,
+    /// Últimos nomes de sessão passados à chamada; só lista diferente vai de novo.
+    pub(super) session_names: Vec<String>,
 }
 
 /// Resultado assíncrono de uma ferramenta de sessão; volta à tela com a chamada que espera a resposta.
-pub(super) enum VoiceDone { Opened(String, Result<SessionInfo, String>), Grouped(&'static str, Result<PairResult, Failure>) }
+/// `Opened`: máquina, criação e, com `request`, o pedido e a entrega dele à sessão nova.
+pub(super) enum VoiceDone { Opened(String, Result<SessionInfo, String>, Option<(String, Result<Delivery, Failure>)>), Grouped(&'static str, Result<PairResult, Failure>) }
 
 /// Uma linha do `list_sessions`.
 pub(super) struct Listed { pub(super) name: String, pub(super) machine: Option<String>, pub(super) provider: String, pub(super) state: String,
@@ -262,14 +265,6 @@ async fn create_by_voice(api: &Api, request: OpenRequest) -> Result<SessionInfo,
 
 #[derive(Debug, PartialEq)]
 pub(super) enum SessionMatch { One(usize), Many(Vec<usize>), None }
-
-/// Só letras e números em minúsculas, sem acento comum do português: "minha loja" casa com `minha-loja`.
-fn squash(text: &str) -> String {
-    text.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).map(|c| match c {
-        'á' | 'à' | 'â' | 'ã' | 'ä' => 'a', 'é' | 'è' | 'ê' | 'ë' => 'e', 'í' | 'ì' | 'î' | 'ï' => 'i',
-        'ó' | 'ò' | 'ô' | 'õ' | 'ö' => 'o', 'ú' | 'ù' | 'û' | 'ü' => 'u', 'ç' => 'c', other => other,
-    }).collect()
-}
 
 /// Nome falado → sessão. Igual vence parcial; o mesmo nome em duas máquinas fica com o da ativa (`on_active`).
 pub(super) fn match_session(query: &str, names: &[&str], on_active: &[bool]) -> SessionMatch {
@@ -458,6 +453,28 @@ pub(super) fn send_reply(session: &str, result: &Result<Delivery, Failure>) -> V
     }
 }
 
+/// Resposta do `open_session`: `shown` = abriu na tela; `sent` = entrega do pedido ditado junto. `Err` vira falha visível.
+pub(super) fn opened_reply(name: &str, shown: bool, sent: Option<&Result<Delivery, Failure>>) -> Result<String, String> {
+    let failed = |result: &Result<Delivery, Failure>| match result {
+        Ok(d) if d.ok => None,
+        Ok(_) => Some("a sessão recusou o pedido".to_owned()),
+        Err(error) => Some(Hangar::fetch_failure(error)),
+    };
+    match (shown, sent) {
+        (true, None) => Ok(format!("Sessão {name} criada e aberta na tela; a troca já foi anunciada, não repita.")),
+        (false, None) => Err(format!("A sessão {name} foi criada, mas a máquina dela não está conectada para abri-la.")),
+        (true, Some(result)) => match (failed(result), result) {
+            (None, Ok(d)) if d.delivered => Ok(format!("Sessão {name} aberta e pedido enviado. A troca já foi anunciada, não repita; aguarde o resultado real.")),
+            (None, _) => Ok(format!("Sessão {name} aberta e pedido enviado; ele entrou na fila da sessão. A troca já foi anunciada, não repita.")),
+            (Some(why), _) => Err(format!("Sessão {name} aberta, mas o pedido não chegou a ela: {why}. Não reenvie; peça para o usuário conferir o chat.")),
+        },
+        (false, Some(result)) => Err(match failed(result) {
+            None => format!("Sessão {name} criada e pedido enviado, mas a máquina dela não está conectada para abri-la na tela."),
+            Some(why) => format!("Sessão {name} criada, mas não abriu na tela e o pedido não chegou a ela: {why}."),
+        }),
+    }
+}
+
 fn triples(events: &[ChatEvent]) -> Vec<(String, String, String)> {
     events.iter().filter(|e| matches!(e.kind.as_str(), "user_msg" | "assistant_msg"))
         .map(|e| (e.id.clone(), e.kind.as_str().to_owned(), e.text.clone().unwrap_or_default())).collect()
@@ -582,6 +599,8 @@ impl Hangar {
             organizer: self.voice.organizer.clone() };
         self.voice.generation += 1;
         self.voice.call = Some(Voice::start(self.runtime.handle(), options, events_tx));
+        self.voice.session_names.clear();
+        self.voice_push_names();
         self.voice.target = self.selected.as_ref().map(|s| s.name.clone());
         self.voice.target_key = self.selected_key();
         self.voice.spoken.clear();
@@ -739,11 +758,19 @@ impl Hangar {
             }
         };
         let Some(api) = self.machine_api(&key) else { let reason = self.machine_error(&key); self.voice_fail(call, reason); return };
-        crate::voice::log(format!("open_session start provider={}", request.provider));
+        crate::voice::log(format!("open_session start provider={} request={}", request.provider, request.request.is_some()));
         let (generation, connection, tx) = (self.voice.generation, self.connection, self.tx.clone());
         self.runtime.spawn(async move {
+            let work = request.request.clone();
             let result = create_by_voice(&api, request).await;
-            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::VoiceDone(generation, call, VoiceDone::Opened(key, result)) }).await;
+            // Como a primeira mensagem da tela de criação: o pedido sai logo que a sessão nasce, sem a espera do microfone
+            // (a fala já acabou), e a resposta ao organizador espera a entrega.
+            let (result, sent) = match (result, work) {
+                (Ok(session), Some(work)) => { let delivery = api.send(&session.name, &work).await; (Ok(session), Some((work, delivery))) }
+                (Err(text), Some(_)) => (Err(format!("{text} O pedido não foi enviado.")), None),
+                (result, None) => (result, None),
+            };
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::VoiceDone(generation, call, VoiceDone::Opened(key, result, sent)) }).await;
         });
     }
 
@@ -826,20 +853,29 @@ impl Hangar {
     pub(super) fn voice_done(&mut self, generation: u64, call: CallId, done: VoiceDone, window: &mut Window, cx: &mut Context<Self>) {
         if generation != self.voice.generation { return; }
         match done {
-            VoiceDone::Opened(key, Ok(session)) => {
+            VoiceDone::Opened(key, Ok(session), sent) => {
                 crate::voice::log("open_session created");
                 let name = session.name.clone();
                 // Como na tela de criação: a lista guardada da outra máquina já a inclui, para a leitura seguinte não fechá-la.
                 if let Some(list) = self.remote.get_mut(&key).filter(|l| l.loaded && !l.sessions.iter().any(|s| s.name == name)) {
                     list.sessions.push(session.clone());
                 }
-                if self.select_on(&key, session, window, cx) {
-                    self.voice_reply(call, tool_reply(format!("Sessão {name} criada e aberta na tela; a troca já foi anunciada, não repita."), true));
-                } else {
-                    self.voice_fail(call, format!("A sessão {name} foi criada, mas a máquina dela não está conectada para abri-la."));
+                let shown = self.select_on(&key, session, window, cx);
+                if let Some((work, result)) = &sent {
+                    crate::voice::log(format!("open_session request {}", match result { Ok(d) if d.ok && d.delivered => "sent", Ok(d) if d.ok => "queued", _ => "failed" }));
+                    // A entrega entra no rastreio da sessão nova como a primeira mensagem da tela de criação: bolha e falha no chat.
+                    if shown && let Some(session_key) = self.selected_key().filter(|k| k.name == name) {
+                        self.voice.watched.insert(session_key.clone(), false);
+                        self.delivery.begin(session_key.clone(), work.clone(), HashSet::new());
+                        self.receive_sent(session_key, work.clone(), String::new(), result.clone(), window, cx);
+                    }
+                }
+                match opened_reply(&name, shown, sent.as_ref().map(|(_, result)| result)) {
+                    Ok(text) => self.voice_reply(call, tool_reply(text, true)),
+                    Err(text) => self.voice_fail(call, text),
                 }
             }
-            VoiceDone::Opened(_, Err(text)) => { crate::voice::log("open_session failed"); self.voice_fail(call, text); }
+            VoiceDone::Opened(_, Err(text), _) => { crate::voice::log("open_session failed"); self.voice_fail(call, text); }
             VoiceDone::Grouped(_, Ok(result)) => {
                 crate::voice::log(format!("group done warning={}", result.warning.is_some()));
                 // O vínculo mudou, mas alguém não foi avisado: o organizador precisa dizer isso.
@@ -1131,7 +1167,9 @@ impl Hangar {
 
     /// Sessão que recebeu pedido e não está na tela: a lista diz quando o turno dela acabou, e a resposta vem do histórico.
     pub(super) fn voice_sessions(&mut self) {
-        if self.voice.call.is_none() || self.voice.watched.is_empty() { return; }
+        if self.voice.call.is_none() { return; }
+        self.voice_push_names();
+        if self.voice.watched.is_empty() { return; }
         let open = self.selected_key();
         let rows: Vec<(SessionKey, String)> = self.voice.watched.keys()
             .filter(|key| Some(*key) != open.as_ref()) // a aberta é tratada pelo SSE
@@ -1154,6 +1192,14 @@ impl Hangar {
                 let _ = tx.send(Envelope { connection, selection: None, payload: Payload::VoiceHistory(generation, key, result) }).await;
             });
         }
+    }
+
+    /// A chamada conhece os nomes para o `set_mode` não confundir sessão com modo.
+    fn voice_push_names(&mut self) {
+        let names: Vec<String> = self.voice_candidates().into_iter().map(|(_, s)| s.name).collect();
+        if names == self.voice.session_names { return; }
+        if let Some(call) = &self.voice.call { call.set_sessions(names.clone()); }
+        self.voice.session_names = names;
     }
 
     pub(super) fn voice_history(&mut self, generation: u64, key: SessionKey, result: Result<api::History, Failure>) {
@@ -1525,6 +1571,21 @@ mod tests {
     use core::prelude::v1::test;
 
     fn ev(id: &str, kind: &str, text: &str) -> (String, String, String) { (id.into(), kind.into(), text.into()) }
+
+    #[test]
+    fn open_with_request_answers_only_after_delivery() {
+        let delivered = Ok(Delivery { ok: true, delivered: true });
+        let queued = Ok(Delivery { ok: true, delivered: false });
+        let failed: Result<Delivery, Failure> = Err(Failure::local("x"));
+        assert!(opened_reply("s", true, None).unwrap().contains("criada e aberta"), "sem request, como antes");
+        assert!(opened_reply("s", false, None).is_err());
+        assert!(opened_reply("s", true, Some(&delivered)).unwrap().starts_with("Sessão s aberta e pedido enviado"));
+        assert!(opened_reply("s", true, Some(&queued)).unwrap().contains("fila"));
+        let both = opened_reply("s", true, Some(&failed)).unwrap_err();
+        assert!(both.contains("aberta") && both.contains("não chegou"), "diz as duas coisas");
+        assert!(opened_reply("s", true, Some(&Ok(Delivery { ok: false, delivered: false }))).is_err());
+        assert!(opened_reply("s", false, Some(&delivered)).unwrap_err().contains("pedido enviado"));
+    }
 
     #[test]
     fn thought_keeps_a_short_tail_and_shows_last_lines() {

@@ -1,7 +1,7 @@
 //! O organizador: uma thread efêmera do Codex que decide o que da fala vira pedido para a sessão.
 use super::plan::{PlanFile, new_plan};
 use serde_json::{Value, json};
-use std::{collections::{HashSet, VecDeque}, path::Path, time::{Duration, Instant}};
+use std::{collections::{HashMap, HashSet, VecDeque}, path::Path, time::{Duration, Instant}};
 
 pub const SETTLE: Duration = Duration::from_millis(1500);
 /// Silêncio do microfone exigido antes de soltar o envio.
@@ -45,12 +45,15 @@ Há dois modos. No modo Direto, siga as regras acima. No modo Planejar, NADA vai
 - Quando o usuário disser que terminou, leia um resumo do plano em até três frases e pergunte se deve mandar
   para executar ou para escrever o plano de implementação; só então chame finish_plan com a escolha.
   Depois que ele confirmar, chame finish_plan de novo.
-- O usuário troca de modo falando ('modo planejar', 'modo direto'; 'pensa mais' é planejar, 'modo rápido' é direto); use set_mode,
-  que troca também o modelo que pensa.
+- O modo só muda quando o usuário fala 'modo …' ('modo planejar', 'modo direto') ou 'pensa mais' (planejar) / 'modo rápido' (direto);
+  use set_mode, que troca também o modelo que pensa. Nome de sessão com 'planejar' ou 'direto' (como voz-planejar) é uma sessão: use switch_session.
 Quando o usuário pedir para trocar, ir ou abrir outra sessão, chame switch_session com o nome falado, mesmo que seja
 só um pedaço do nome ('abre a grupos' é a sessão grupos-rust-plano). Na dúvida, chame list_sessions antes.
 open_session só quando ele pedir sessão NOVA ou falar em pasta ('abre uma sessão nova na pasta hangar'); pair_sessions e
-unpair_session agrupam e desagrupam. Nome ambíguo volta com as opções: pergunte qual, nunca escolha por conta própria.
+unpair_session agrupam e desagrupam.
+Abrir sessão e descrever o trabalho dela (na mesma fala ou na seguinte) é UMA intenção: chame open_session com request = o trabalho
+inteiro como o usuário ditou (objetivo, restrições, detalhes; não resuma tirando detalhes). Nunca encerre o turno só abrindo quando
+houve trabalho ditado. Se o trabalho chegar numa fala logo depois de abrir, mande com send_to_session à sessão nova sem esperar ele pedir de novo. Nome ambíguo volta com as opções: pergunte qual, nunca escolha por conta própria.
 Fechar sessão é irreversível: chame close_session sem confirmed, pergunte ao usuário e só chame com confirmed true
 depois de um sim explícito dele.
 Responda sempre em português, em texto curto, porque a resposta final vira fala.";
@@ -95,9 +98,10 @@ pub fn tools() -> Value {
         tool("switch_session", "Troca a sessão aberta no Hangar para a sessão com esse nome; use quando o usuário pedir para trocar, ir ou abrir outra sessão.",
             json!({"name": {"type": "string"}})),
         tool("list_sessions", "Lista as sessões de todas as máquinas: nome, máquina, provider, estado, pasta e qual está na tela.", json!({})),
-        tool_with("open_session", "Cria uma sessão nova na pasta falada (nome ou caminho) e a abre na tela. Pasta ambígua volta com as opções.",
+        tool_with("open_session", "Cria uma sessão nova na pasta falada (nome ou caminho) e a abre na tela. Pasta ambígua volta com as opções. \
+            Com request, o trabalho ditado para ela é enviado assim que ela abre.",
             json!({"folder": {"type": "string"}, "name": {"type": "string"}, "provider": {"type": "string", "enum": ["claude", "codex"]},
-                "server": {"type": "string"}}), &["folder"]),
+                "server": {"type": "string"}, "request": {"type": "string"}}), &["folder"]),
         tool_with("close_session", "Fecha uma sessão. Sem confirmed só prepara; depois do sim explícito do usuário, chame de novo com confirmed true.",
             json!({"name": {"type": "string"}, "confirmed": {"type": "boolean"}}), &["name"]),
         tool("pair_sessions", "Agrupa duas sessões da mesma máquina para trabalharem juntas.", json!({"a": {"type": "string"}, "b": {"type": "string"}})),
@@ -195,7 +199,9 @@ pub enum ToolCall {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct OpenRequest { pub folder: String, pub name: Option<String>, pub provider: &'static str, pub server: Option<String> }
+pub struct OpenRequest { pub folder: String, pub name: Option<String>, pub provider: &'static str, pub server: Option<String>,
+    /// Trabalho ditado junto com o pedido de abrir: vai à sessão nova no mesmo passo.
+    pub request: Option<String> }
 
 pub fn parse_tool(params: &Value) -> ToolCall {
     let name = params["tool"].as_str().unwrap_or_default();
@@ -218,7 +224,7 @@ pub fn parse_tool(params: &Value) -> ToolCall {
         "list_sessions" => ToolCall::ListSessions,
         "open_session" => {
             let provider = match arg("provider").as_deref() { None | Some("claude") => "claude", Some("codex") => "codex", Some(_) => return unknown() };
-            arg("folder").map_or_else(unknown, |folder| ToolCall::OpenSession(OpenRequest { folder, name: arg("name"), provider, server: arg("server") }))
+            arg("folder").map_or_else(unknown, |folder| ToolCall::OpenSession(OpenRequest { folder, name: arg("name"), provider, server: arg("server"), request: arg("request") }))
         }
         "close_session" => arg("name").map_or_else(unknown, |name| ToolCall::CloseSession { name, confirmed: params["arguments"]["confirmed"] == true }),
         "pair_sessions" => match (arg("a"), arg("b")) { (Some(a), Some(b)) => ToolCall::PairSessions(a, b), _ => unknown() },
@@ -233,6 +239,25 @@ pub fn parse_tool(params: &Value) -> ToolCall {
 }
 
 pub fn send_allowed(mode: Mode) -> bool { mode == Mode::Direct }
+
+/// Só letras e números em minúsculas, sem acento comum do português: "minha loja" casa com `minha-loja`.
+pub fn squash(text: &str) -> String {
+    text.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).map(|c| match c {
+        'á' | 'à' | 'â' | 'ã' | 'ä' => 'a', 'é' | 'è' | 'ê' | 'ë' => 'e', 'í' | 'ì' | 'î' | 'ï' => 'i',
+        'ó' | 'ò' | 'ô' | 'õ' | 'ö' => 'o', 'ú' | 'ù' | 'û' | 'ü' => 'u', 'ç' => 'c', other => other,
+    }).collect()
+}
+
+/// `set_mode` vindo de uma fala sem "modo" que cita uma sessão com palavra de modo no nome ("volta pra voz-planejar"):
+/// o usuário falou da sessão. Devolve o nome dela para a recusa.
+pub fn mode_word_session<'a>(spoken: &str, sessions: &'a [String]) -> Option<&'a str> {
+    if spoken.split(|c: char| !c.is_alphanumeric()).any(|word| squash(word) == "modo") { return None; }
+    let said = squash(spoken);
+    sessions.iter().map(String::as_str).find(|name| {
+        let name_squashed = squash(name);
+        ["planejar", "direto", "plano"].iter().any(|w| name_squashed.contains(w)) && said.contains(&name_squashed)
+    })
+}
 
 pub fn mode_note(mode: Mode, plan_path: Option<&Path>) -> String {
     match (mode, plan_path) {
@@ -376,8 +401,9 @@ impl<T> SendGate<T> {
 
 /// Turnos que nasceram de uma fala do usuário: só neles o organizador pode pedir envio ou segurar.
 /// O resumo de um resultado carrega texto cru da sessão e não pode gerar envio.
+/// Guarda a fala de cada turno: o `set_mode` confere nela se o usuário disse "modo".
 #[derive(Default)]
-pub struct SpokenTurns(HashSet<String>);
+pub struct SpokenTurns(HashMap<String, String>);
 
 impl SpokenTurns {
     /// `item/started` ou `item/completed` (o Codex pode emitir a fala só no segundo): guarda o turno se o item é uma fala (não o `[RESULTADO DA SESSÃO` que nós mesmos mandamos).
@@ -389,9 +415,14 @@ impl SpokenTurns {
         if head.starts_with("[RESULTADO DA SESSÃO") || head.starts_with(ANSWER_PREFIX) { return; }
         // Teto de segurança caso algum turn/completed se perca.
         if self.0.len() >= 64 { self.0.clear(); }
-        if let Some(turn) = params["turnId"].as_str() { self.0.insert(turn.to_owned()); }
+        // O started pode vir sem o texto e o completed com ele; um item vazio não apaga a fala já guardada.
+        if let Some(turn) = params["turnId"].as_str() {
+            let said = self.0.entry(turn.to_owned()).or_default();
+            if !text.trim().is_empty() { *said = spoken_input(&text).to_owned(); }
+        }
     }
-    pub fn allows(&self, params: &Value) -> bool { params["turnId"].as_str().is_some_and(|turn| self.0.contains(turn)) }
+    pub fn allows(&self, params: &Value) -> bool { params["turnId"].as_str().is_some_and(|turn| self.0.contains_key(turn)) }
+    pub fn text(&self, params: &Value) -> Option<&str> { params["turnId"].as_str().and_then(|turn| self.0.get(turn)).map(String::as_str) }
     pub fn turn_completed(&mut self, params: &Value) {
         if let Some(turn) = params["turn"]["id"].as_str().or_else(|| params["turnId"].as_str()) { self.0.remove(turn); }
     }
@@ -480,7 +511,10 @@ mod tests {
         let call = |tool: &str, args: Value| parse_tool(&json!({"tool": tool, "arguments": args}));
         assert!(matches!(call("list_sessions", json!({})), ToolCall::ListSessions));
         assert!(matches!(call("open_session", json!({"folder": "hangar"})),
-            ToolCall::OpenSession(r) if r == OpenRequest { folder: "hangar".into(), name: None, provider: "claude", server: None }));
+            ToolCall::OpenSession(r) if r == OpenRequest { folder: "hangar".into(), name: None, provider: "claude", server: None, request: None }));
+        assert!(matches!(call("open_session", json!({"folder": "hangar", "request": "Criar a tela de login com Google e testes"})),
+            ToolCall::OpenSession(r) if r.request.as_deref() == Some("Criar a tela de login com Google e testes")));
+        assert!(matches!(call("open_session", json!({"folder": "hangar", "request": "  "})), ToolCall::OpenSession(r) if r.request.is_none()));
         assert!(matches!(call("open_session", json!({"folder": "/p/x", "name": "x2", "provider": "codex", "server": "casa"})),
             ToolCall::OpenSession(r) if r.provider == "codex" && r.name.as_deref() == Some("x2") && r.server.as_deref() == Some("casa")));
         assert!(matches!(call("open_session", json!({"folder": "x", "provider": "pi"})), ToolCall::Unknown(_)));
@@ -707,6 +741,36 @@ mod tests {
         assert!(ORGANIZER_PROMPT.contains("send_to_session só para uma instrução clara dirigida ao trabalho da sessão"));
         assert!(ORGANIZER_PROMPT.contains("pensar em voz alta e ideias pela metade se respondem na conversa e nunca vão à sessão"));
         assert!(ORGANIZER_PROMPT.contains("Na dúvida, pergunte 'mando isso para a sessão?' e espere"));
+    }
+
+    #[test]
+    fn session_name_with_mode_word_is_not_a_mode_switch() {
+        let sessions = vec!["voz-planejar".to_owned(), "grupos-rust-plano".to_owned()];
+        assert_eq!(mode_word_session("volta pra voz-planejar", &sessions), Some("voz-planejar"));
+        assert_eq!(mode_word_session("vai na voz planejar", &sessions), Some("voz-planejar"));
+        assert_eq!(mode_word_session("abre a grupos rust plano", &sessions), Some("grupos-rust-plano"));
+        assert_eq!(mode_word_session("modo planejar", &sessions), None);
+        assert_eq!(mode_word_session("Modo direto na voz-planejar", &sessions), None, "falou 'modo': é o modo");
+        assert_eq!(mode_word_session("pensa mais", &sessions), None);
+        assert_eq!(mode_word_session("planejar", &sessions), None, "a palavra sozinha não é o nome inteiro");
+    }
+
+    #[test]
+    fn spoken_turn_keeps_the_utterance() {
+        let mut turns = SpokenTurns::default();
+        let item = |text: &str| json!({"turnId": "t1", "item": {"type": "userMessage", "content": [{"type": "text", "text": text}]}});
+        turns.item_started(&item("<realtime_delegation><input>volta pra voz-planejar</input></realtime_delegation>"));
+        turns.item_started(&item(""));
+        assert_eq!(turns.text(&json!({"turnId": "t1"})), Some("volta pra voz-planejar"), "o item vazio não apaga");
+        assert_eq!(turns.text(&json!({"turnId": "t2"})), None);
+    }
+
+    #[test]
+    fn prompt_ties_open_with_work_and_mode_to_the_word_modo() {
+        assert!(ORGANIZER_PROMPT.contains("Abrir sessão e descrever o trabalho dela (na mesma fala ou na seguinte) é UMA intenção: chame open_session com request"));
+        assert!(ORGANIZER_PROMPT.contains("Nunca encerre o turno só abrindo quando\nhouve trabalho ditado"));
+        assert!(ORGANIZER_PROMPT.contains("O modo só muda quando o usuário fala 'modo …'"));
+        assert!(ORGANIZER_PROMPT.contains("Nome de sessão com 'planejar' ou 'direto' (como voz-planejar) é uma sessão: use switch_session"));
     }
 
     #[test]
