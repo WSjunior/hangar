@@ -1754,7 +1754,7 @@ Roteiro de medição (sem números ainda, vêm do uso real):
 
 ## Grupos: o Rust grava
 
-(08/10/2026, parte 6 entrega 1a, branch `hangar-server-parte6-grupos`; contrato interno 39.) No
+(08/10/2026, parte 6 entrega 1a, branch `hangar-server-parte6-grupos`; contrato interno 40.) No
 modo `rust`/`pending` o `hangar-server` é o único que grava `.hangar-pair`: sidecars, fusão e
 arquivo de contrato (`groups/service.rs`, `groups/store.rs`) e a varredura de membro morto
 (`groups/sweep.rs`). `/pair`, `DELETE /pair`, `/group-message`, `/pair/contract`, `/pair-remote`
@@ -1787,5 +1787,6 @@ segue como antes. Desenho: [desenho.md](../migracao-rust/parte6-grupos/desenho.m
   sem resposta do Python (prazo, 5xx, rota ausente) é 503 `erro_grupo_indisponivel` com o código,
   não 409 "o arquivo mudou"; o diário guarda `rust.groups_orq_promote_uncertain` com o gid, porque
   o Python pode ter promovido antes de falhar.
-- **Contrato interno 39** (`RUST_SERVER_PROTOCOL` e `INTERNAL_PROTOCOL`): a saúde ganhou `groups`,
-  e o filho recebe `HANGAR_SERVER_ID`, `HANGAR_PEERS_FILE` e `HANGAR_PAIR_ARCHIVE`.
+- **Contrato interno 40** (`RUST_SERVER_PROTOCOL` e `INTERNAL_PROTOCOL`; o 39 é o da 5B, juntada
+  antes): a saúde ganhou `groups`, e o filho recebe `HANGAR_SERVER_ID`, `HANGAR_PEERS_FILE` e
+  `HANGAR_PAIR_ARCHIVE`.
