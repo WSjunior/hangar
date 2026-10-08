@@ -284,6 +284,7 @@ pub fn headless_answer(codex: bool, sent: &Result<RuntimeReply, RuntimeError>) -
     let invalid = || (StatusCode::CONFLICT, detail_body("erro_codex_resposta_invalida", MSG_HEADLESS_INVALID, json!({})));
     let unsent = || (StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_codex_resposta_envio",
         if codex { MSG_CODEX_SEND } else { MSG_HEADLESS_SEND }, json!({})));
+    if codex { super::codex::log_outcome(None, "answer", sent, "resposta da pergunta do Codex não aceita"); }
     match sent {
         Err(error) if error.code == ACTOR_REFUSAL && !codex => invalid(),
         Err(_) => unsent(),

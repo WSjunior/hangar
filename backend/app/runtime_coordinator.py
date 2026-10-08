@@ -1964,7 +1964,10 @@ class RuntimeCoordinator:
                 except BaseException:
                     # Recusada (ocupada, pergunta aberta…) com o cliente religado: só a ligação fecha,
                     # e a reabertura devolve a sessão ao Rust no mesmo processo.
-                    await adapter.release_client(name)
+                    try:
+                        await adapter.release_client(name)
+                    except Exception:
+                        _log.warning("release_client falhou name=%s; segue a recusa original", name, exc_info=True)
                     raise
                 finally:
                     self.python_client_released.discard(name)

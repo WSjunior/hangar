@@ -6180,6 +6180,7 @@ async def interrupt(name: str, clear: bool = False):
             # Sem terminal o ator do Rust recusou ou não respondeu: código do Codex, não 500.
             if not _codex_sem_terminal(name):
                 raise
+            _log.warning("codex interrupt falhou name=%s", name, exc_info=True)
             raise HTTPException(409, detail=erro("erro_codex_controle", "O Codex não aceitou a alteração; atualize a sessão e tente novamente.")) from None
         if not interrompeu:
             raise HTTPException(409, detail=erro(

@@ -111,7 +111,10 @@ pub(super) fn codex_control(msg: &str) -> (StatusCode, Value) { (StatusCode::CON
 /// recusa é `erro_codex_controle`.
 pub fn steer_headless(with_text: bool, codex: bool, control: &Result<RuntimeReply, RuntimeError>) -> (StatusCode, Value) {
     let answer = steer_headless_claude(with_text, control);
-    if codex && answer.0 != StatusCode::OK { return codex_control(MSG_CODEX_CONTROL); }
+    if codex && answer.0 != StatusCode::OK {
+        super::codex::log_outcome(None, "steer", control, "orientação do Codex não aceita; a rota responde 409 erro_codex_controle");
+        return codex_control(MSG_CODEX_CONTROL);
+    }
     answer
 }
 

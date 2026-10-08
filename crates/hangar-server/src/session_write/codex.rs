@@ -34,30 +34,43 @@ fn accepted(sent: &Result<RuntimeReply, RuntimeError>) -> Option<&Value> {
     sent.as_ref().ok().filter(|reply| reply.disposition == Disposition::Accepted).map(|reply| &reply.payload)
 }
 
-fn refused() -> Answer { codex_control(MSG_CODEX_CONTROL) }
+/// Resposta fixa 409 do Codex; o motivo real (ator morto, cano fechado, prazo) vai ao log.
+fn refused(what: &str, sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
+    log_outcome(None, what, sent, "o Codex não aceitou; a rota responde 409 erro_codex_controle");
+    codex_control(MSG_CODEX_CONTROL)
+}
+
+/// Registra o código/disposição real de um desfecho que não foi `Accepted`.
+pub(super) fn log_outcome(name: Option<&str>, what: &str, sent: &Result<RuntimeReply, RuntimeError>, why: &str) {
+    if accepted(sent).is_some() { return; }
+    let code = match sent { Err(error) => format!("{}: {}", error.code, error.message), Ok(reply) => format!("{:?}", reply.disposition).to_lowercase() };
+    if crate::warn_limit::allow(name, &format!("{what}:{code}")) {
+        tracing::warn!(session = name.unwrap_or("-"), what, code = %code, "{why}");
+    }
+}
 
 // ── corpos de resposta, sem E/S ─────────────────────────────────────────────────────────────────
 
 /// `/models`: configuração lida antes; a lista que falha sai vazia, como no adapter Python.
 pub fn models_answer(settings: &Result<RuntimeReply, RuntimeError>, models: &Result<RuntimeReply, RuntimeError>) -> Answer {
-    let Some(current) = accepted(settings) else { return refused() };
+    let Some(current) = accepted(settings) else { return refused("settings", settings) };
     let models = accepted(models).filter(|m| m.is_array()).cloned().unwrap_or_else(|| json!([]));
     (StatusCode::OK, json!({"models": models, "current": current}))
 }
 
 pub fn model_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
-    if accepted(sent).is_some() { (StatusCode::OK, json!({"ok": true})) } else { refused() }
+    if accepted(sent).is_some() { (StatusCode::OK, json!({"ok": true})) } else { refused("model", sent) }
 }
 
 pub fn service_tier_answer(tier: &str, sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
     match accepted(sent) {
         Some(done) if done["service_tier"] == tier => (StatusCode::OK, json!({"ok": true, "service_tier": tier})),
-        _ => refused(),
+        _ => refused("service_tier", sent),
     }
 }
 
 pub fn mode_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
-    accepted(sent).map_or_else(refused, |settings| (StatusCode::OK, settings.clone()))
+    accepted(sent).map_or_else(|| refused("mode", sent), |settings| (StatusCode::OK, settings.clone()))
 }
 
 /// `_normalize_rate_window`: só os três campos que o app lê.
@@ -80,13 +93,16 @@ pub fn skip_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
         Ok(reply) if reply.disposition == Disposition::Accepted => (StatusCode::OK, json!({"ok": true})),
         Ok(reply) if reply.disposition == Disposition::Rejected => invalid(),
         Err(error) if error.code == "codex_command" => invalid(),
-        _ => (StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_codex_resposta_envio", MSG_ANSWER_UNSENT, json!({}))),
+        _ => {
+            log_outcome(None, "question_skip", sent, "resposta da pergunta do Codex não confirmada; a rota responde 503");
+            (StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_codex_resposta_envio", MSG_ANSWER_UNSENT, json!({})))
+        }
     }
 }
 
 /// `/commands`: o `/compact` embutido primeiro; skill homônima dele sai, `path` e `native_name` não vão ao app.
 pub fn commands_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
-    let Some(catalog) = accepted(sent) else { return refused() };
+    let Some(catalog) = accepted(sent) else { return refused("commands", sent) };
     let mut commands = vec![json!({"name": "compact", "display": "/compact", "source": "builtin",
         "description": "Resume e compacta o contexto", "destructive": true})];
     for mut skill in crate::runtime::local_policy::skills(catalog) {
@@ -106,6 +122,7 @@ pub fn permission_modes(current: Option<&str>) -> Value {
 }
 
 pub fn permission_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
+    log_outcome(None, "permission", sent, "troca de permissão do Codex não aceita");
     let picker = |status: StatusCode, msg: &str| (status, detail_body("erro_permissao_picker", msg, json!({})));
     match sent {
         Ok(reply) if reply.disposition == Disposition::Accepted => (StatusCode::OK, reply.payload.clone()),
@@ -179,7 +196,7 @@ macro_rules! admitted {
 pub async fn models(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let (ctx, _) = admitted!(st, peer, req);
     let settings = run(&ctx, OperationKind::ReadSettings, json!({"include_turns": false})).await;
-    if accepted(&settings).is_none() { return answer(&ctx, refused()); }
+    if accepted(&settings).is_none() { return answer(&ctx, refused("settings", &settings)); }
     let models = run(&ctx, OperationKind::ListModels, json!({})).await;
     note(&ctx.name, "model_list", &models);
     answer(&ctx, models_answer(&settings, &models))

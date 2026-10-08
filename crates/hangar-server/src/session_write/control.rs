@@ -156,7 +156,10 @@ pub fn interrupt_headless_answer(codex: bool, sent: &Result<RuntimeReply, Runtim
         return match sent {
             Ok(reply) if reply.disposition == Disposition::Accepted && reply.payload["interrupted"] == false => codex_control(MSG_CODEX_NO_TURN),
             Ok(reply) if reply.disposition == Disposition::Accepted => ok(),
-            _ => codex_control(MSG_CODEX_CONTROL),
+            _ => {
+                super::codex::log_outcome(None, "interrupt", sent, "interrupção do Codex não confirmada; a rota responde 409 erro_codex_controle");
+                codex_control(MSG_CODEX_CONTROL)
+            }
         };
     }
     let reply = match sent {

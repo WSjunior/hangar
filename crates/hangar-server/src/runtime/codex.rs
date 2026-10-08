@@ -178,8 +178,10 @@ fn service_tier(value:&Value) -> Option<String> {
 }
 /// Os modos da tela, como em `sem_terminal.MODOS`.
 const MODES:[&str;3] = ["Ask for approval","Approve for me","Full Access"];
-fn approval(mode:&str) -> &str { if mode == "Full Access" { "never" } else { "on-request" } }
-fn sandbox(mode:&str) -> &str { match mode { "Ask for approval"=>"read-only","Approve for me"=>"workspace-write",_=>"danger-full-access" } }
+/// Nome canônico do modo (sem caixa nem espaços, como `sem_terminal.politica`); desconhecido cai em Full Access.
+fn canonical_mode(mode:&str) -> &'static str { let mode = mode.trim(); MODES.iter().copied().find(|known|known.eq_ignore_ascii_case(mode)).unwrap_or("Full Access") }
+fn approval(mode:&str) -> &'static str { if canonical_mode(mode) == "Full Access" { "never" } else { "on-request" } }
+fn sandbox(mode:&str) -> &'static str { match canonical_mode(mode) { "Ask for approval"=>"read-only","Approve for me"=>"workspace-write",_=>"danger-full-access" } }
 
 /// Código do problema pelo `codexErrorInfo` (texto, ou objeto de chave única); None = sem classe própria.
 fn error_class(info:&Value) -> Option<&'static str> {
@@ -343,7 +345,7 @@ impl Engine {
                 status_line:string(&metadata["status_line"]),..StateEvent::default() },state_revision:metadata["state_revision"].as_u64().unwrap_or(0),settings_revision:metadata["settings_revision"].as_u64().unwrap_or(0),
             model:string(&metadata["model"]),effort:string(&metadata["effort"]),mode:string(&metadata["mode"]),
             service_tier:metadata.get("service_tier").and_then(service_tier),service_tier_pending:None,
-            permission_mode:metadata["permission_mode"].as_str().unwrap_or("Full Access").into(),token_usage:Value::Null,rate_limits:Value::Null,
+            permission_mode:canonical_mode(metadata["permission_mode"].as_str().unwrap_or("Full Access")).into(),token_usage:Value::Null,rate_limits:Value::Null,
             preview:LiveBuffer::default(),response_started:false,first_response_start:None,compacting:false,
             running_commands:BTreeMap::new(),thinking:LiveBuffer::default(),was_working:metadata["in_progress"] == true,
             rpc:BTreeMap::new(),server_requests:Vec::new(),
@@ -699,7 +701,10 @@ impl Engine {
             params["modelProvider"] = json!("openai");
             self.rpc(format!("{parent}:thread"),"thread/resume",params,Some(next.clone()),effects);
             return true;
-        } else if message.contains("no rollout found") { self.bootstrap_start() } else { return false };
+        } else if message.contains("no rollout found") {
+            tracing::warn!(session = %self.metadata["name"].as_str().unwrap_or("-"), thread_id = %self.thread_id, "Codex sem rollout para retomar; abrindo conversa nova (thread/start)");
+            self.bootstrap_start()
+        } else { return false };
         self.send(format!("{parent}:thread"),request,Some(next.clone()),effects);
         true
     }

@@ -728,6 +728,13 @@ fn resume_carries_cwd_policy_sandbox_and_tier_like_python() {
 }
 
 #[test]
+fn permission_mode_matches_case_insensitively_like_python() {
+    let (_,sent) = bootstrapped(json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p","permission_mode":" ask for approval "}));
+    let params = find_method(&sent,"thread/resume")["params"].clone();
+    assert_eq!((params["sandbox"].clone(),params["approvalPolicy"].clone()),(json!("read-only"),json!("on-request")));
+}
+
+#[test]
 fn missing_model_provider_retries_resume_with_openai() {
     let (mut engine,sent) = bootstrapped(json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p"}));
     let resume = find_method(&sent,"thread/resume");

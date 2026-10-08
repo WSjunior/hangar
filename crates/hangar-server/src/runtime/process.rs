@@ -106,10 +106,12 @@ fn identify(pid: u32, key: &str) -> Liveness {
 pub fn liveness(pid: u32, key: &str) -> Liveness { identify(pid, key) }
 
 /// `CP_RUST_CANO_BIN`, senão a pasta do `hangar-server`, senão `~/.hangar/bin`; sondado uma vez
-/// por processo (sem argumentos o cano sai com 2). Caminho errado na variável não vira outro binário.
+/// por processo quando acha (sem argumentos o cano sai com 2); falha não fica guardada, a próxima chamada
+/// sonda de novo. Caminho errado na variável não vira outro binário.
 pub fn cano_binary() -> Result<PathBuf, ProcessError> {
-    static FOUND: OnceLock<Option<PathBuf>> = OnceLock::new();
-    FOUND.get_or_init(|| {
+    static FOUND: OnceLock<PathBuf> = OnceLock::new();
+    if let Some(path) = FOUND.get() { return Ok(path.clone()); }
+    let found = {
         let name = if cfg!(windows) { "hangar-cano.exe" } else { "hangar-cano" };
         let chosen = std::env::var_os("CP_RUST_CANO_BIN").filter(|v| !v.is_empty()).map(PathBuf::from);
         let candidates: Vec<PathBuf> = match chosen {
@@ -119,9 +121,10 @@ pub fn cano_binary() -> Result<PathBuf, ProcessError> {
                 .into_iter().flatten().collect(),
         };
         let found = candidates.into_iter().find(|bin| probe_binary(bin));
-        if found.is_none() { tracing::warn!("hangar-cano ausente ou não roda nesta máquina"); }
+        if found.is_none() && crate::warn_limit::allow(None, "cano_binary") { tracing::warn!("hangar-cano ausente ou não roda nesta máquina"); }
         found
-    }).clone().ok_or(ProcessError::NoCano)
+    };
+    found.map(|path| FOUND.get_or_init(|| path).clone()).ok_or(ProcessError::NoCano)
 }
 
 fn probe_binary(bin: &Path) -> bool {
@@ -181,7 +184,10 @@ fn new_listen(key: &str, dir: &Path) -> String {
     if cfg!(unix) && socket.as_os_str().len() < 100 {
         return format!("unix:{}", socket.display());
     }
-    let port = std::net::TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr()).map(|a| a.port()).unwrap_or(0);
+    let port = std::net::TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr()).map(|a| a.port()).unwrap_or_else(|e| {
+        tracing::warn!(kind = ?e.kind(), "não consegui reservar porta de loopback para o cano; a escuta sobe com porta 0");
+        0
+    });
     format!("tcp:127.0.0.1:{port}")
 }
 
@@ -189,7 +195,10 @@ fn new_listen(key: &str, dir: &Path) -> String {
 pub async fn spawn(spec: &LaunchSpec) -> Result<Cano, ProcessError> {
     let bin = tokio::task::spawn_blocking(cano_binary).await.map_err(|_| ProcessError::NoCano)??;
     #[cfg(unix)]
-    let prefix = tokio::task::spawn_blocking(scope_prefix).await.unwrap_or(&[]);
+    let prefix = tokio::task::spawn_blocking(scope_prefix).await.unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "sondagem do escopo systemd falhou; o cano sobe sem o escopo");
+        &[]
+    });
     #[cfg(not(unix))]
     let prefix: &[&str] = &[];
     let program = spec.program.first().ok_or_else(|| ProcessError::Spawn("comando vazio".into()))?;
@@ -290,9 +299,15 @@ fn remove_traces(dir: &Path, key: &str) {
     // Chave vazia ou curta casaria `cano-*` de outras sessões e levaria o socket delas.
     if key.len() < 16 { return; }
     let prefix = format!("cano-{}", key16(key));
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => { tracing::debug!(dir = %dir.display(), kind = ?e.kind(), "rastros do cano: pasta ilegível"); return; }
+    };
     for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().starts_with(&prefix) { let _ = std::fs::remove_file(entry.path()); }
+        if entry.file_name().to_string_lossy().starts_with(&prefix)
+            && let Err(e) = std::fs::remove_file(entry.path()) && e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(file = %entry.path().display(), kind = ?e.kind(), "rastro do cano não removido");
+        }
     }
 }
 
@@ -318,7 +333,12 @@ pub fn sweep_orphans(claude_dir: &Path, codex_dir: &Path, owner: &str) -> Option
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => { tracing::warn!(dir = %dir.display(), kind = ?e.kind(), "pasta de sessões ilegível; varredura de órfãos cancelada"); return None; }
         };
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                // Entrada perdida deixaria a chave dela fora do conjunto de vivas, e o cano real seria morto.
+                Err(e) => { tracing::warn!(dir = %dir.display(), kind = ?e.kind(), "entrada da pasta de sessões ilegível; varredura de órfãos cancelada"); return None; }
+            };
             if entry.path().extension().is_none_or(|ext| ext != "json") { continue; }
             let meta: Value = match std::fs::read(entry.path()).ok().and_then(|raw| serde_json::from_slice(&raw).ok()) {
                 Some(meta) => meta,
