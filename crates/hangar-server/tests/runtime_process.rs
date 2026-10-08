@@ -131,3 +131,21 @@ fn startup_sweep_keeps_the_keys_of_both_session_folders() {
     assert_eq!(children[3].wait().unwrap().signal(), Some(libc::SIGTERM));
     for child in &mut children[..2] { child.kill().unwrap(); child.wait().unwrap(); }
 }
+
+#[test]
+fn startup_sweep_keeps_the_keys_of_a_transfer_in_progress() {
+    let home = tempfile::tempdir().unwrap();
+    let owner = home.path().to_string_lossy().into_owned();
+    let (claude, codex) = (home.path().join("claude-headless"), home.path().join("codex-sessions"));
+    std::fs::create_dir_all(codex.join("prepared")).unwrap();
+    // Transferência para Codex sem terminal em curso: o processo novo só aparece em `prepared/`.
+    let prepared_key = unique_key() + "e";
+    std::fs::write(codex.join("prepared").join("t1.json"),
+        serde_json::json!({"name":"c1","key":prepared_key,"headless":true,"transfer_id":"t1"}).to_string()).unwrap();
+    let mut child = std::process::Command::new("/bin/sleep").arg("300").env("HANGAR_CANO_KEY", &prepared_key)
+        .env("HANGAR_CANO_OWNER", &owner).spawn().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_eq!(sweep_orphans(&claude, &codex, &owner), Some(0));
+    assert!(child.try_wait().unwrap().is_none(), "o processo da transferência em curso fica");
+    child.kill().unwrap(); child.wait().unwrap();
+}

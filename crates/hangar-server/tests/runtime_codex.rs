@@ -924,3 +924,13 @@ fn mode_change_is_written_to_the_session_file() {
     let patch = effects.iter().find_map(|e|match e { Effect::Policy { kind,payload,.. } if kind == "session.patch_meta" => Some(payload.clone()),_=>None }).unwrap();
     assert!(patch.get("mode").is_none());
 }
+
+#[test]
+fn stop_whose_turn_read_fails_still_answers() {
+    // Sem turno conhecido o Stop lê a conversa antes; a leitura recusada responde a operação de cima.
+    let mut engine = engine();
+    let read = frames(&engine.command(command(OperationKind::Interrupt,json!({})),clock(11.0)).unwrap())[0].clone();
+    assert_eq!(read["method"],"thread/read");
+    let effects = line(&mut engine,json!({"id":read["id"],"error":{"code":-32603,"message":"boom"}}),11.1);
+    assert!(effects.iter().any(|e|matches!(e,Effect::Reply { operation_id,disposition:Disposition::Rejected,.. } if operation_id == "op-1")));
+}

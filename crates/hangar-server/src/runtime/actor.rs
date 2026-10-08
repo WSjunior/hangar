@@ -987,8 +987,9 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                             respawn.kill = true;
                         }
                         respawn.last = Some(failure.clone());
-                        // Pedido da pessoa que falhou antes de derrubar o processo (gravar o modo, encerrar):
-                        // a sessão segue como estava. Se a queda chegar depois, ela agenda pelo caminho normal.
+                        // Pedido da pessoa (gravar o modo, encerrar) que falhou no kill: o processo segue vivo e a
+                        // sessão como estava. Falha depois do kill (gravação) já o derrubou: a queda engolida
+                        // (`gone`) ou a que chegar depois agenda pelo caminho normal.
                         if user.is_none() || gone {
                             effects.extend(engine.set_problem("codex_headless_nao_subiu",Some(failure.message)));
                             effects.extend(after_exit(&mut respawn,&mut engine,&target,clock(start).monotonic_s,closed.load(Ordering::Acquire)));

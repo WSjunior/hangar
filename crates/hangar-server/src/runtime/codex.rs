@@ -1019,8 +1019,8 @@ impl Engine {
                 self.changed(effects,true);
                 return Ok(());
             }
-            // A leitura que antecede a troca de modo falhou: quem espera é a operação de cima.
-            let operation_id = rpc.continuation.as_ref().filter(|next|next["kind"] == "set_mode")
+            // A leitura que antecede a troca de modo ou o Stop falhou: quem espera é a operação de cima.
+            let operation_id = rpc.continuation.as_ref().filter(|next|next["kind"] == "set_mode" || next["kind"] == "interrupt")
                 .and_then(|next|next["parent"].as_str()).map_or(rpc.operation_id,str::to_owned);
             effects.push(Effect::Reply { operation_id,disposition:Disposition::Rejected,payload:json!({"error":line["error"]}) });
             return Ok(());

@@ -347,10 +347,12 @@ impl RuntimeRegistry {
                 return Err(error);
             }
             if kill {
-                // O ator parou e soltou a trava; quem falhou foi o fim do processo, e isso sobe com o código.
+                // O ator parou e soltou a trava: a sessão saiu daqui, só o processo não morreu. Responder
+                // erro deixava o Python achando que ela seguia aqui; `killed: false` e quem pediu decide.
+                tracing::warn!(key,code=%error.code,"sessão fechada sem encerrar o processo");
                 self.entries.lock().await.remove(key);
                 if let Some(mods) = &self.mods { mods.forget(&name,life); }
-                return Err(error);
+                return Ok(json!({"closed":true,"killed":false}));
             }
             tracing::warn!(key,code=%error.code,"ator do runtime já tinha terminado; sessão liberada");
         }
@@ -623,7 +625,9 @@ fn descriptor(value:&Value,launch:bool) -> Result<Target,RuntimeError> {
     else { CanoBinding { pid:cano["pid"].as_u64().and_then(|pid|u32::try_from(pid).ok()).ok_or_else(||failure("cano_pid"))?,
         escuta:cano["escuta"].as_str().ok_or_else(||failure("cano_address"))?.into(),
         token:cano["token"].as_str().ok_or_else(||failure("cano_token"))?.into(),
-        versao:cano["versao"].as_u64().and_then(|version|u32::try_from(version).ok()).ok_or_else(||failure("cano_version"))? } };
+        // O Codex subido pelo Python grava o `cano` antes de conectar, sem `versao`, e já fala a 2.
+        versao:match cano["versao"].as_u64().and_then(|version|u32::try_from(version).ok()) {
+            Some(version)=>version, None if descriptor.provider == "codex"=>2, None=>return Err(failure("cano_version")) } } };
     Ok(Target::Headless(RuntimeTarget { key:descriptor.key,generation:descriptor.generation,name:descriptor.name,provider:descriptor.provider,
         created:descriptor.meta["created"].as_f64().unwrap_or(0.0),metadata:descriptor.meta,binding,
         lease_path:descriptor.lock_path,state_path:descriptor.state_path,projection_dir:descriptor.projection_dir,transcript:descriptor.jsonl.into() },
