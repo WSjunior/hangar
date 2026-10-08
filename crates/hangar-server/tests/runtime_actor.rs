@@ -831,10 +831,11 @@ for line in sys.stdin:
                             if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") { length = value.trim().parse().unwrap(); }
                         }
                         let mut body = vec![0;length]; reader.read_exact(&mut body).await.unwrap();
-                        let body:Value = serde_json::from_slice(&body).unwrap();
-                        let kind = body["kind"].as_str().unwrap().to_owned();
+                        // Só as políticas interessam; o resto (diário) recebe `{}`.
+                        let body:Value = serde_json::from_slice(&body).unwrap_or_default();
+                        let kind = body["kind"].as_str().unwrap_or("").to_owned();
                         seen.lock().unwrap().push((kind.clone(),body["payload"].clone()));
-                        let data = if kind == "launch_env" { launch.clone() } else { json!({}) };
+                        let data = if kind == "launch_env" { launch.clone() } else if kind == "session.patch_meta" { json!({"updated":true}) } else { json!({}) };
                         let reply = json!({"ok":true,"data":data}).to_string();
                         let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",reply.len());
                         if reader.get_mut().write_all(response.as_bytes()).await.is_err() { return; }
@@ -907,5 +908,231 @@ for line in sys.stdin:
         assert!(calls.lock().unwrap().iter().all(|(kind,_)|kind != "launch_env"),"cano vivo da sessão: conecta e não sobe outro");
         registry.close(&key,1).await.unwrap();
         process::kill(&live,&key,dir.path()).await.unwrap();
+    }
+
+    // --- Ciclo de vida no Rust (5B Task 5) ---
+
+    #[tokio::test]
+    async fn open_without_launch_still_manages_the_process() {
+        use_cano_bin();
+        let dir = tempfile::tempdir().unwrap();
+        let key = unique_key();
+        let owner = dir.path().to_string_lossy().into_owned();
+        let codex = fake_codex(dir.path());
+        let env:Vec<(String,String)> = env(&key,&owner).as_object().unwrap().iter().map(|(k,v)|(k.clone(),v.as_str().unwrap().to_owned())).collect();
+        let live = process::spawn(&process::LaunchSpec { provider:process::Provider::Codex,key:key.clone(),cwd:dir.path().into(),
+            program:vec![codex.to_string_lossy().into_owned(),"app-server".into(),"--stdio".into()],env,
+            cano_extra:Default::default(),sidecar_dir:dir.path().into() }).await.unwrap();
+        let (address,_calls) = policy(json!({})).await;
+        let registry = RuntimeRegistry::new(address,"secret".into(),"instance".into());
+        let binding = CanoBinding { pid:live.pid,escuta:live.escuta.clone(),token:live.token.clone(),versao:2 };
+        // Reaberta sem subir (a administração do Python): encerrar ainda mata o processo.
+        registry.open_managed(target(dir.path(),&key,binding),dir.path().into()).await.unwrap();
+        until_ready(&registry,&key).await;
+        assert_eq!(registry.close_with_kill(&key,1).await.unwrap(),json!({"closed":true,"killed":true}));
+        assert!(matches!(process::liveness(live.pid,&key),process::Liveness::Dead));
+    }
+
+    /// `codex` falso que anota cada subida e cada pedido em `calls.jsonl`. Com `crash` na pasta cai no
+    /// primeiro pedido (antes de ficar pronto); sem ele, cai quando `die` aparece na pasta. `turn/start` abre um
+    /// turno que só `turn/interrupt` fecha.
+    fn lifecycle_codex(dir:&std::path::Path) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("codex");
+        std::fs::write(&path,format!(r#"#!/usr/bin/env python3
+import json, os, sys, threading, time
+d = os.path.dirname(os.path.abspath(__file__))
+def note(entry):
+    with open(os.path.join(d, "calls.jsonl"), "a") as f:
+        f.write(json.dumps(entry) + "\n")
+note({{"start": time.time(), "pid": os.getpid()}})
+crash = os.path.exists(os.path.join(d, "crash"))
+def watch():
+    while not os.path.exists(os.path.join(d, "die")):
+        time.sleep(0.02)
+    os._exit(1)
+if not crash:
+    threading.Thread(target=watch, daemon=True).start()
+def send(obj):
+    print(json.dumps(obj), flush=True)
+for line in sys.stdin:
+    msg = json.loads(line)
+    if "method" not in msg:
+        continue
+    method = msg["method"]
+    note({{"method": method, "params": msg.get("params") or {{}}}})
+    if crash:
+        os._exit(1)
+    if "id" not in msg:
+        continue
+    if method == "initialize":
+        result = {{"userAgent": "hangar/{} (x)"}}
+    elif method in ("thread/start", "thread/resume"):
+        result = {{"thread": {{"id": "thread-new", "path": "/tmp/rollout-thread-new.jsonl"}}, "model": "gpt-test"}}
+    elif method == "turn/start":
+        result = {{"turn": {{"id": "turn-1", "status": "inProgress"}}}}
+    elif method == "turn/interrupt":
+        send({{"id": msg["id"], "result": {{}}}})
+        send({{"method": "turn/completed", "params": {{"threadId": "thread-new", "turn": {{"id": "turn-1", "status": "interrupted"}}}}}})
+        continue
+    else:
+        result = {{}}
+    send({{"id": msg["id"], "result": result}})
+"#,hangar_codex::version::CHECKED)).unwrap();
+        std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    fn calls(dir:&std::path::Path) -> Vec<Value> {
+        std::fs::read_to_string(dir.join("calls.jsonl")).unwrap_or_default().lines().map(|line|serde_json::from_str(line).unwrap()).collect()
+    }
+    fn starts(dir:&std::path::Path) -> Vec<f64> { calls(dir).iter().filter_map(|call|call["start"].as_f64()).collect() }
+
+    /// Pids de cano gravados pelo `session.patch_meta {cano}`, na ordem.
+    fn recorded(policy:&Arc<Mutex<Vec<(String,Value)>>>) -> Vec<process::Cano> {
+        policy.lock().unwrap().iter().filter(|(kind,payload)|kind == "session.patch_meta" && payload.get("cano").is_some())
+            .map(|(_,payload)|serde_json::from_value(payload["cano"].clone()).unwrap()).collect()
+    }
+
+    async fn lifecycle_session(dir:&std::path::Path,key:&str,mode:&str,base:std::time::Duration) -> (Arc<RuntimeRegistry>,Arc<Mutex<Vec<(String,Value)>>>) {
+        use_cano_bin();
+        let owner = dir.to_string_lossy().into_owned();
+        let codex = lifecycle_codex(dir);
+        let (address,calls) = policy(json!({"program":[codex,"app-server","--stdio"],"env":env(key,&owner),"cano_extra":{}})).await;
+        let registry = Arc::new(RuntimeRegistry::new(address,"secret".into(),"instance".into()).with_respawn_base(base));
+        let mut target = target(dir,key,no_cano());
+        target.metadata["permission_mode"] = json!(mode);
+        registry.open_with_launch(target,dir.into()).await.unwrap();
+        until_ready(&registry,key).await;
+        (registry,calls)
+    }
+
+    async fn until<F:Fn()->bool>(what:&str,check:F) {
+        tokio::time::timeout(std::time::Duration::from_secs(20),async { while !check() { tokio::time::sleep(std::time::Duration::from_millis(20)).await; } })
+            .await.unwrap_or_else(|_|panic!("{what}"));
+    }
+
+    fn control(id:&str,kind:OperationKind,payload:Value) -> RuntimeCommand { RuntimeCommand { operation_id:id.into(),kind,payload } }
+
+    async fn cleanup(registry:&RuntimeRegistry,key:&str,dir:&std::path::Path,calls:&Arc<Mutex<Vec<(String,Value)>>>) {
+        let _ = registry.close(key,1).await;
+        for cano in recorded(calls) { let _ = process::kill(&cano,key,dir).await; }
+    }
+
+    #[tokio::test]
+    async fn cano_exit_respawns_with_backoff_up_to_three() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = unique_key();
+        let base = std::time::Duration::from_millis(300);
+        let (registry,policy) = lifecycle_session(dir.path(),&key,"Full Access",base).await;
+        // A partir daqui toda subida cai antes de ficar pronta.
+        std::fs::write(dir.path().join("crash"),"").unwrap();
+        std::fs::write(dir.path().join("die"),"").unwrap();
+        until("três subidas depois da queda",||starts(dir.path()).len() >= 4).await;
+        tokio::time::sleep(base * 8 + std::time::Duration::from_secs(1)).await;
+        let starts = starts(dir.path());
+        assert_eq!(starts.len(),4,"teto de 3 subidas seguidas: {starts:?}");
+        for (index,pair) in starts.windows(2).enumerate() {
+            let wanted = base.as_secs_f64() * f64::from(1u32 << index);
+            assert!(pair[1] - pair[0] >= wanted * 0.9,"espera {index} cresce dobrando: {:?} < {wanted}",pair[1] - pair[0]);
+        }
+        let handle = registry.handle(&key,1).await.unwrap();
+        let snapshot = handle.snapshot().await.unwrap();
+        assert_eq!(snapshot["view"]["public_state"]["problema"],"codex_headless_nao_subiu",
+            "teto esgotado deixa a sessão com o problema: {}",snapshot["view"]["public_state"]);
+        assert_eq!(recorded(&policy).len(),4,"cada subida grava o cano novo");
+        cleanup(&registry,&key,dir.path(),&policy).await;
+    }
+
+    #[tokio::test]
+    async fn restart_kills_and_respawns_on_the_same_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = unique_key();
+        let (registry,policy) = lifecycle_session(dir.path(),&key,"Full Access",std::time::Duration::from_secs(5)).await;
+        let old = recorded(&policy)[0].clone();
+        let handle = registry.handle(&key,1).await.unwrap();
+        let reply = handle.command(control("restart-1",OperationKind::Restart,json!({}))).await.unwrap();
+        assert!(reply.disposition == Disposition::Accepted,"reiniciar responde aceito");
+        assert!(matches!(process::liveness(old.pid,&key),process::Liveness::Dead),"o processo antigo morreu");
+        let canos = recorded(&policy);
+        assert_eq!(canos.len(),2);
+        assert!(matches!(process::liveness(canos[1].pid,&key),process::Liveness::Ours));
+        until_ready(&registry,&key).await;
+        let resumed:Vec<Value> = calls(dir.path()).into_iter().filter(|call|call["method"] == "thread/resume").collect();
+        assert_eq!(resumed.last().unwrap()["params"]["threadId"],"thread-new","a conversa continua na mesma thread");
+        assert_eq!(starts(dir.path()).len(),2,"um processo novo, nunca dois");
+        cleanup(&registry,&key,dir.path(),&policy).await;
+    }
+
+    #[tokio::test]
+    async fn permission_same_sandbox_only_patches_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = unique_key();
+        let (registry,policy) = lifecycle_session(dir.path(),&key,"Full Access",std::time::Duration::from_secs(5)).await;
+        let handle = registry.handle(&key,1).await.unwrap();
+        let reply = handle.command(control("perm-1",OperationKind::SetPermissionMode,json!({"mode":"full access"}))).await.unwrap();
+        assert!(reply.disposition == Disposition::Accepted);
+        assert_eq!(reply.payload,json!({"current":"Full Access"}));
+        until("modo gravado no arquivo da sessão",||policy.lock().unwrap().iter()
+            .any(|(kind,payload)|kind == "session.patch_meta" && payload == &json!({"permission_mode":"Full Access"})))
+            .await;
+        assert_eq!(starts(dir.path()).len(),1,"mesmo sandbox: nenhum processo novo");
+        let unknown = handle.command(control("perm-2",OperationKind::SetPermissionMode,json!({"mode":"turbo"}))).await;
+        assert_eq!(unknown.err().unwrap().code,"erro_modo_desconhecido");
+        cleanup(&registry,&key,dir.path(),&policy).await;
+    }
+
+    #[tokio::test]
+    async fn permission_other_sandbox_respawns_when_idle_and_refuses_when_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = unique_key();
+        let (registry,policy) = lifecycle_session(dir.path(),&key,"Full Access",std::time::Duration::from_secs(5)).await;
+        let handle = registry.handle(&key,1).await.unwrap();
+        let input = handle.command(RuntimeCommand { operation_id:"in-1".into(),kind:OperationKind::Input,payload:json!({"text":"oi"}) }).await.unwrap();
+        assert!(input.disposition == Disposition::Accepted);
+        until("turno aberto",||calls(dir.path()).iter().any(|call|call["method"] == "turn/start")).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let busy = handle.command(control("perm-busy",OperationKind::SetPermissionMode,json!({"mode":"Ask for approval"}))).await;
+        assert_eq!(busy.err().unwrap().code,"erro_permissao_ocupada");
+        assert_eq!(starts(dir.path()).len(),1,"ocupada: nada morre, nada sobe");
+        assert!(matches!(process::liveness(recorded(&policy)[0].pid,&key),process::Liveness::Ours));
+        handle.command(control("stop-1",OperationKind::Interrupt,json!({}))).await.unwrap();
+        until_idle(&handle).await;
+        let reply = handle.command(control("perm-idle",OperationKind::SetPermissionMode,json!({"mode":"Ask for approval"}))).await.unwrap();
+        assert_eq!(reply.payload,json!({"current":"Ask for approval"}));
+        let canos = recorded(&policy);
+        assert_eq!(canos.len(),2,"ocioso: processo novo");
+        assert!(matches!(process::liveness(canos[0].pid,&key),process::Liveness::Dead));
+        let order:Vec<String> = policy.lock().unwrap().iter().map(|(kind,payload)|
+            if kind == "session.patch_meta" && payload.get("permission_mode").is_some() { "permission".into() } else { kind.clone() }).collect();
+        let patched = order.iter().position(|kind|kind == "permission").expect("modo novo gravado");
+        assert!(order[patched..].iter().any(|kind|kind == "launch_env"),"o comando novo é pedido depois de o modo ser gravado: {order:?}");
+        until_ready(&registry,&key).await;
+        let resumed:Vec<Value> = calls(dir.path()).into_iter().filter(|call|call["method"] == "thread/resume").collect();
+        assert_eq!(resumed.last().unwrap()["params"]["sandbox"],"read-only");
+        assert_eq!(resumed.last().unwrap()["params"]["threadId"],"thread-new");
+        cleanup(&registry,&key,dir.path(),&policy).await;
+    }
+
+    async fn until_idle(handle:&RuntimeHandle) {
+        tokio::time::timeout(std::time::Duration::from_secs(20),async {
+            while handle.snapshot().await.unwrap()["view"]["in_progress"] != false { tokio::time::sleep(std::time::Duration::from_millis(20)).await; }
+        }).await.expect("turno fechado");
+    }
+
+    #[tokio::test]
+    async fn close_with_kill_ends_the_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = unique_key();
+        let (registry,policy) = lifecycle_session(dir.path(),&key,"Full Access",std::time::Duration::from_secs(5)).await;
+        let cano = recorded(&policy)[0].clone();
+        let traces = ||std::fs::read_dir(dir.path()).unwrap().flatten()
+            .filter(|entry|entry.file_name().to_string_lossy().starts_with(&format!("cano-{}",&key[..16]))).count();
+        assert!(traces() > 0,"o cano vivo tem socket e log na pasta");
+        let closed = registry.close_with_kill(&key,1).await.unwrap();
+        assert_eq!(closed,json!({"closed":true,"killed":true}));
+        assert!(matches!(process::liveness(cano.pid,&key),process::Liveness::Dead));
+        assert_eq!(traces(),0,"socket e log do cano apagados");
+        assert!(registry.handle(&key,1).await.is_err(),"a sessão saiu do Rust");
     }
 }

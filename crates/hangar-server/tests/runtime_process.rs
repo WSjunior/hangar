@@ -104,3 +104,30 @@ fn orphans_are_processes_with_a_dead_key_and_our_owner() {
     assert!(foreign.try_wait().unwrap().is_none());
     for c in [&mut alive, &mut foreign] { c.kill().unwrap(); c.wait().unwrap(); }
 }
+
+#[test]
+fn startup_sweep_keeps_the_keys_of_both_session_folders() {
+    let home = tempfile::tempdir().unwrap();
+    let owner = home.path().to_string_lossy().into_owned();
+    let (claude, codex) = (home.path().join("claude-headless"), home.path().join("codex-sessions"));
+    std::fs::create_dir_all(&claude).unwrap();
+    std::fs::create_dir_all(&codex).unwrap();
+    let (claude_key, codex_key, terminal_key, gone_key) = (unique_key() + "a", unique_key() + "b", unique_key() + "c", unique_key() + "d");
+    std::fs::write(claude.join("s1.json"), serde_json::json!({"name":"s1","key":claude_key}).to_string()).unwrap();
+    std::fs::write(codex.join("c1.json"), serde_json::json!({"name":"c1","key":codex_key,"headless":true}).to_string()).unwrap();
+    // Codex com terminal não tem cano: a chave dele não protege processo nenhum.
+    std::fs::write(codex.join("c2.json"), serde_json::json!({"name":"c2","key":terminal_key,"headless":false}).to_string()).unwrap();
+    let spawn = |key: &str| std::process::Command::new("/bin/sleep").arg("300").env("HANGAR_CANO_KEY", key)
+        .env("HANGAR_CANO_OWNER", &owner).spawn().unwrap();
+    let mut children: Vec<_> = [&claude_key, &codex_key, &terminal_key, &gone_key].into_iter().map(|key| spawn(key)).collect();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    // Pasta ilegível: nada é varrido, porque a sessão viva dela pareceria órfã.
+    assert_eq!(sweep_orphans(&claude.join("s1.json"), &codex, &owner), None);
+    assert!(children.iter_mut().all(|child| child.try_wait().unwrap().is_none()));
+    assert_eq!(sweep_orphans(&claude, &codex, &owner), Some(2));
+    use std::os::unix::process::ExitStatusExt;
+    assert!(children[0].try_wait().unwrap().is_none() && children[1].try_wait().unwrap().is_none());
+    assert_eq!(children[2].wait().unwrap().signal(), Some(libc::SIGTERM));
+    assert_eq!(children[3].wait().unwrap().signal(), Some(libc::SIGTERM));
+    for child in &mut children[..2] { child.kill().unwrap(); child.wait().unwrap(); }
+}

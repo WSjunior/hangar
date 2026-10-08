@@ -176,6 +176,8 @@ fn service_tier(value:&Value) -> Option<String> {
     if value.is_null() { Some("default".into()) }
     else { value.as_str().filter(|tier|["priority","default"].contains(tier)).map(str::to_owned) }
 }
+/// Os modos da tela, como em `sem_terminal.MODOS`.
+const MODES:[&str;3] = ["Ask for approval","Approve for me","Full Access"];
 fn approval(mode:&str) -> &str { if mode == "Full Access" { "never" } else { "on-request" } }
 fn sandbox(mode:&str) -> &str { match mode { "Ask for approval"=>"read-only","Approve for me"=>"workspace-write",_=>"danger-full-access" } }
 
@@ -625,6 +627,16 @@ impl Engine {
     /// Anexar a um cano vivo mantém o resume só com `threadId`.
     pub fn set_fresh_process(&mut self,fresh:bool) { self.fresh_process = fresh; }
 
+    pub fn problem(&self) -> Option<&str> { self.state.problema.as_deref() }
+    /// Problema que o ator conhece e o motor não (a religação desistiu, o processo não subiu).
+    pub fn set_problem(&mut self,code:&str,detail:Option<String>) -> Vec<Effect> {
+        self.state.problema = Some(code.into());
+        self.state.problema_detalhe = detail.map(|detail|detail.chars().take(300).collect());
+        let mut effects = Vec::new();
+        self.changed(&mut effects,false);
+        effects
+    }
+
     pub fn bootstrap(&mut self,reconnect:bool,operation_id:String) -> Result<Vec<Effect>,RuntimeError> {
         if !self.headless { return Err(error("Codex com terminal conserva o adapter existente")); }
         self.reconnect = reconnect;
@@ -708,6 +720,10 @@ impl Engine {
 
     pub fn command(&mut self,command:RuntimeCommand,clock:ClockSample) -> Result<Vec<Effect>,RuntimeError> {
         self.clock = clock;
+        // Reiniciar é a saída de um turno que nunca fecha e de um processo caído: vale trabalhando e morto.
+        if self.headless && matches!(command.kind,OperationKind::Restart | OperationKind::Reload) {
+            return Ok(vec![Effect::Respawn { operation_id:command.operation_id,reason:"restart".into(),patch:Value::Null,reply:json!({}) }]);
+        }
         if !self.headless || !self.alive { return Err(error("runtime sem terminal indisponível")); }
         let id = command.operation_id;
         let payload = command.payload;
@@ -844,7 +860,25 @@ impl Engine {
                     effects.push(Effect::Reply { operation_id:id,disposition:Disposition::Accepted,payload:json!({}) });
                 }
             }
-            OperationKind::SetPermissionMode | OperationKind::Restart | OperationKind::OpenTerminal | OperationKind::Reload => {
+            OperationKind::SetPermissionMode => {
+                let wanted = payload["mode"].as_str().unwrap_or("").trim();
+                let mode = *MODES.iter().find(|mode|mode.eq_ignore_ascii_case(wanted)).ok_or_else(||RuntimeError::new("erro_modo_desconhecido",
+                    &format!("modo desconhecido: {wanted} (os modos são: {})",MODES.join(", "))))?;
+                // O `approvalPolicy` vale no próximo turno; o sandbox só muda subindo o processo de novo.
+                if sandbox(mode) != sandbox(&self.permission_mode) {
+                    if !self.ready { return Err(error("não foi possível confirmar o estado do turno; permissão mantida")); }
+                    if self.in_progress || !self.server_requests.is_empty() {
+                        return Err(RuntimeError::new("erro_permissao_ocupada","a sessão está trabalhando; mudar o sandbox reiniciaria o Codex — espere ela terminar"));
+                    }
+                    // O modo novo entra na vida nova; a falha antes dela deixa tudo como estava.
+                    return Ok(vec![Effect::Respawn { operation_id:id,reason:"permission".into(),
+                        patch:json!({"permission_mode":mode}),reply:json!({"current":mode}) }]);
+                }
+                self.permission_mode = mode.into();
+                self.policy("session.patch_meta",json!({"permission_mode":mode}),&mut effects);
+                effects.push(Effect::Reply { operation_id:id,disposition:Disposition::Accepted,payload:json!({"current":mode}) });
+            }
+            OperationKind::OpenTerminal => {
                 if !self.idle() { return Err(error("aguarde a sessão ficar ociosa antes de mudar o sandbox ou o modo")); }
                 return Err(RuntimeError::new("lifecycle_required","operação exige a barreira de lifecycle sob a mesma posse"));
             }

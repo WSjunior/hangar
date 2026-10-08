@@ -116,8 +116,33 @@ impl PolicyClient {
     }
 }
 
+/// Sessão cujo processo o Rust sobe: pasta do arquivo dela e a primeira espera da religação.
+#[derive(Clone)]
+pub struct LaunchConfig { pub sidecar_dir:std::path::PathBuf, pub backoff:Duration }
+
+/// Religação depois da queda do cano: um timer por sessão (`next_at`, no relógio do ator), até 3
+/// subidas seguidas sem ficar pronta, cada espera o dobro da anterior.
+#[derive(Default)]
+struct Respawn {
+    failures:u8,
+    next_at:Option<f64>,
+    task:Option<JoinHandle<Result<Relaunched,RuntimeError>>>,
+    /// Operação da pessoa (reiniciar, trocar o sandbox) e o que ela recebe quando o processo novo conecta.
+    user:Option<(String,Value)>,
+    /// A queda entregou `cano_saiu`: o processo filho morreu e o cano que ficou pode ser encerrado.
+    kill:bool,
+    /// O cano caiu durante uma subida pedida: a queda é dela, não agenda outra.
+    swallowed:bool,
+    was_working:bool,
+    last:Option<RuntimeError>,
+}
+const RESPAWN_MAX:u8 = 3;
+
+struct Relaunched { target:RuntimeTarget, spawned:bool, connection:CanoConnection, patch:Value }
+
 pub struct RuntimeEngine {
     core:Core,
+    launch:Option<LaunchConfig>,
     policy:Option<PolicyClient>,
     publisher:Option<broadcast::Sender<RuntimeEvent>>,
     revision:Arc<AtomicU64>,
@@ -130,7 +155,20 @@ impl RuntimeEngine {
     pub fn new(provider:&str,metadata:Value,generation:u64,clock:ClockSample) -> Result<Self,RuntimeError> {
         let core = match provider { "claude"=>Core::Claude(ClaudeEngine::new(metadata,generation,clock)),
             "codex"=>Core::Codex(CodexEngine::new(metadata,generation,clock)),_=>return Err(failure("provider")) };
-        Ok(Self { core,policy:None,publisher:None,revision:Arc::new(AtomicU64::new(0)),mods:None,mods_life:0 })
+        Ok(Self { core,launch:None,policy:None,publisher:None,revision:Arc::new(AtomicU64::new(0)),mods:None,mods_life:0 })
+    }
+    /// O ator sobe o processo de novo quando ele cai, e reinicia/troca o sandbox (só Codex).
+    pub fn with_launch(mut self,launch:LaunchConfig) -> Self { if matches!(self.core,Core::Codex(_)) { self.launch = Some(launch); } self }
+    /// Motor da vida nova do processo, com as ligações desta.
+    fn renewed(&self,metadata:Value,generation:u64,clock:ClockSample) -> Result<Self,RuntimeError> {
+        let provider = match self.core { Core::Claude(_)=>"claude",Core::Codex(_)=>"codex" };
+        let mut next = Self::new(provider,metadata,generation,clock)?;
+        (next.launch,next.policy,next.publisher,next.revision) = (self.launch.clone(),self.policy.clone(),self.publisher.clone(),self.revision.clone());
+        Ok(next)
+    }
+    fn problem(&self) -> Option<String> { match &self.core { Core::Codex(core)=>core.problem().map(str::to_owned),Core::Claude(_)=>None } }
+    fn set_problem(&mut self,code:&str,detail:Option<String>) -> Vec<Effect> {
+        match &mut self.core { Core::Codex(core)=>core.set_problem(code,detail),Core::Claude(_)=>Vec::new() }
     }
     pub fn with_policy(mut self,policy:PolicyClient) -> Self { self.policy = Some(policy); self }
     pub fn with_publisher(mut self,publisher:broadcast::Sender<RuntimeEvent>) -> Self { self.publisher = Some(publisher); self }
@@ -233,7 +271,8 @@ enum Message {
     /// `deadline`: quando quem pediu deixa de esperar (o prazo da rota, limitado ao teto do ator). Pedido
     /// que chega à vez depois disso não roda, e a superfície recebe o que sobra dele.
     Mods { call:ModsCall,deadline:Instant,response:oneshot::Sender<Result<Value,ModsError>> },
-    Stop(oneshot::Sender<Result<(),RuntimeError>>),
+    /// `kill`: o processo da sessão morre junto (encerrar a sessão).
+    Stop { response:oneshot::Sender<Result<(),RuntimeError>>,kill:bool },
 }
 
 #[derive(Clone)]
@@ -292,12 +331,15 @@ impl RuntimeHandle {
         failure(code)
     }
     pub fn subscribe(&self) -> broadcast::Receiver<RuntimeEvent> { self.events.subscribe() }
-    pub async fn stop(&self) -> Result<(),RuntimeError> {
+    pub async fn stop(&self) -> Result<(),RuntimeError> { self.stop_with(false).await }
+    /// Para o ator e mata o processo da sessão, com os arquivos do cano.
+    pub async fn stop_killing(&self) -> Result<(),RuntimeError> { self.stop_with(true).await }
+    async fn stop_with(&self,kill:bool) -> Result<(),RuntimeError> {
         let mut stopped = self.stopped.lock().await;
         if let Some(result) = &*stopped { return result.clone(); }
         self.closed.store(true,Ordering::Release);
         let (send,receive) = oneshot::channel();
-        let mut result = match self.sender.send(Message::Stop(send)).await {
+        let mut result = match self.sender.send(Message::Stop { response:send,kill }).await {
             Ok(())=>receive.await.map_err(|_|self.gone("runtime_closed")).and_then(|result|result),
             Err(_)=>Err(self.gone("runtime_closed")),
         };
@@ -415,7 +457,7 @@ impl Drop for ClearOnDrop {
     }
 }
 
-async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut engine:RuntimeEngine,
+async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut engine:RuntimeEngine,
     mut receiver:mpsc::Receiver<Message>,internal:mpsc::Sender<Message>,closed:Arc<AtomicBool>,events:broadcast::Sender<RuntimeEvent>) -> Result<(),RuntimeError> {
     let start = Instant::now();
     let initial = queue.initial_state().clone();
@@ -454,6 +496,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
     let mut mods_waiters:ModsWaiters = BTreeMap::new();
     let mut mods_token = 0u64;
     let mut ui_writes = 0u64;
+    let mut respawn = Respawn::default();
     effects.extend(engine.hydrate(snapshot)?);
     if engine.view()["initialized"] != true || target.provider == "codex" && engine.view()["ready"] != true {
         let id = format!("bootstrap:{}:{}",target.key,target.generation);
@@ -571,6 +614,8 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                 }
                 Effect::StateChanged => {
                     let view = engine.view();
+                    // Subida boa zera o teto: só a que nunca fica pronta conta como seguida.
+                    if view["ready"] == true && respawn.failures > 0 { respawn.failures = 0; respawn.last = None; }
                     state_version += 1;
                     let version = state_version;
                     let queue = queue.clone(); let generation = target.generation; let sample = clock(start);
@@ -609,7 +654,8 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                     sequence += 1;
                     let phase_id = format!("policy:{}:{sequence}",target.generation);
                     let target = target.clone(); let policy = engine.policy.clone();
-                    let save = if kind == "session.patch_meta" && payload.get("service_tier").is_some() {
+                    // O Python recusa como velho o campo que difere da vista salva: ela vai antes.
+                    let save = if kind == "session.patch_meta" && (payload.get("service_tier").is_some() || payload.get("permission_mode").is_some()) {
                         state_version += 1;
                         Some((state_version,engine.view()))
                     } else { None };
@@ -678,6 +724,26 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                     if let Some(policy) = &engine.policy { policy.diag.report(event.event(),session,&code,event.reason()); }
                 }
                 Effect::Stop { .. } => { closed.store(true,Ordering::Release); },
+                Effect::Respawn { operation_id,reason,patch,reply } => {
+                    if respawn.task.is_some() {
+                        fail_root(&mut roots,&operation_id,RuntimeError::new("erro_codex_reiniciando","o Codex já está subindo de novo; tente em instantes"));
+                        continue;
+                    }
+                    // Ação da pessoa: nova rodada de tentativas.
+                    (respawn.failures,respawn.next_at,respawn.user) = (0,None,Some((operation_id.clone(),reply)));
+                    // O Python recusa como velho o campo que difere da vista salva: ela vai com o valor novo.
+                    let saved = patch.as_object().map(|fields|{
+                        let mut view = engine.view();
+                        for (key,value) in fields { view[key] = value.clone(); }
+                        state_version += 1;
+                        (queue.clone(),clock(start),state_gate.clone(),state_version,view)
+                    });
+                    tracing::info!(key=%target.key,session=%target.name,reason=%reason,"processo da sessão sobe de novo a pedido");
+                    if let Err(failure) = start_respawn(&mut respawn,&engine,&target,true,patch,saved) {
+                        respawn.user = None;
+                        fail_root(&mut roots,&operation_id,failure);
+                    }
+                }
             }
         }
         while let Some((wire,result)) = prepared_writes.remove(&next_write) {
@@ -714,7 +780,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                 Job::Drained(result)
             });
         }
-        let deadline = engine.deadline().into_iter().chain(roots.values().filter(|root|root.result.is_none() && !root.timed_out).map(|root|root.deadline))
+        let deadline = engine.deadline().into_iter().chain(respawn.next_at).chain(roots.values().filter(|root|root.result.is_none() && !root.timed_out).map(|root|root.deadline))
             .min_by(f64::total_cmp).map(|seconds|start + Duration::from_secs_f64(seconds.max(0.0)))
             .unwrap_or_else(||Instant::now()+Duration::from_secs(3600));
         tokio::select! {
@@ -810,11 +876,13 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                         let job = confirm_inputs(queue.clone(),receipt.clone(),target.transcript.clone(),target.generation,clock(start));
                         jobs.spawn(async move { Job::Confirmed { response:Some(response),result:job.await } });
                     }
-                    Message::Stop(response) => {
+                    Message::Stop { response,kill } => {
                         closed.store(true,Ordering::Release);
+                        finish_respawn(&mut respawn,&mut target).await;
                         jobs.abort_all();
                         while jobs.join_next().await.is_some() {}
                         io.stop().await;
+                        let killed = if kill { kill_process(&engine,&target).await } else { Ok(()) };
                         let result = queue.exec(target.generation,&format!("stop-repair:{}",unique()),clock(start),Action::EnsureProjection).await
                             .and_then(|_|Ok(())).map_err(io_failure);
                         if let Err(error) = result { let _ = response.send(Err(error.clone())); return Err(error); }
@@ -822,7 +890,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                         for pending in roots.values_mut() { for waiter in pending.responses.drain(..) { let _ = waiter.send(Err(failure("runtime_stopped"))); } }
                         let queue = Arc::try_unwrap(queue).map_err(|_|failure("queue_busy"))?;
                         queue.shutdown().await.map_err(io_failure)?;
-                        let _ = response.send(Ok(()));
+                        let _ = response.send(killed);
                         return Ok(());
                     }
                 }
@@ -854,11 +922,72 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                         }
                     }
                     Some(IoEvent::Stderr(_)) => {},
-                    Some(IoEvent::End { code }) => effects.extend(engine.apply(EngineInput::Line(json!({"type":"cano_saiu","rc":code})),clock(start))?),
+                    // Queda durante uma subida pedida é a do processo que ela encerrou: não agenda outra.
+                    Some(IoEvent::End { .. }) if respawn.task.is_some() => respawn.swallowed = true,
+                    Some(IoEvent::End { code }) => {
+                        if respawn.next_at.is_none() { respawn.was_working = engine.view()["in_progress"] == true; }
+                        effects.extend(engine.apply(EngineInput::Line(json!({"type":"cano_saiu","rc":code})),clock(start))?);
+                        respawn.kill = true;
+                        effects.extend(after_exit(&mut respawn,&mut engine,&target,clock(start).monotonic_s,closed.load(Ordering::Acquire)));
+                    }
+                    None if respawn.task.is_some() => { io_open = false; respawn.swallowed = true; },
                     None => {
                         io_open = false; enter_error(&mut error,&target,failure("cano_closed"));
+                        if respawn.next_at.is_none() && !respawn.kill { respawn.was_working = engine.view()["in_progress"] == true; }
                         effects.extend(engine.apply(EngineInput::Line(json!({"type":"cano_saiu","rc":null})),clock(start))?);
+                        effects.extend(after_exit(&mut respawn,&mut engine,&target,clock(start).monotonic_s,closed.load(Ordering::Acquire)));
                     },
+                }
+            }
+            relaunched = async { respawn.task.as_mut().unwrap().await }, if respawn.task.is_some() => {
+                respawn.task = None;
+                match relaunched.unwrap_or_else(|_|Err(failure("respawn_panic"))) {
+                    Ok(Relaunched { target:next,spawned,connection,patch }) => {
+                        io.stop().await;
+                        let snapshot = connection.snapshot.clone();
+                        io = connection.start(next.generation,128).hold_lease(queue.lease());
+                        io_open = true;
+                        if error.as_ref().is_some_and(|current|current.code == "cano_closed") { error = None; }
+                        // A vida nova parte da vista desta (conversa, modelo, modo) e do que a pessoa trocou.
+                        let mut metadata = next.metadata.clone();
+                        if let Some(fields) = engine.view().as_object() {
+                            for (key,value) in fields { if key != "public_state" && key != "conversation" { metadata[key] = value.clone(); } }
+                        }
+                        if let Some(fields) = patch.as_object() { for (key,value) in fields { metadata[key] = value.clone(); } }
+                        metadata["in_progress"] = json!(std::mem::take(&mut respawn.was_working));
+                        target = next;
+                        let mut renewed = engine.renewed(metadata,target.generation,clock(start))?;
+                        renewed.set_fresh_process(spawned);
+                        engine = renewed;
+                        (respawn.kill,respawn.swallowed) = (false,false);
+                        effects.extend(engine.hydrate(snapshot)?);
+                        let id = format!("bootstrap:{}:{}:{}",target.key,target.generation,unique());
+                        match queue.exec(target.generation,&format!("prepare:{id}"),clock(start),Action::Prepare { id:id.clone(),payload:json!({"kind":"bootstrap"}),entry_id:None }).await {
+                            Ok(_)=>effects.extend(engine.initialize(id)?),
+                            Err(failure)=>enter_error(&mut error,&target,io_failure(failure)),
+                        }
+                        if let Some((operation_id,payload)) = respawn.user.take() {
+                            effects.push_back(Effect::Reply { operation_id,disposition:Disposition::Accepted,payload });
+                        }
+                        drain_requested = true;
+                    }
+                    Err(failure) => {
+                        tracing::warn!(key=%target.key,session=%target.name,code=%failure.code,reason=%failure.message,attempt=respawn.failures,"processo da sessão não subiu de novo");
+                        let user = respawn.user.take();
+                        if let Some((operation_id,_)) = &user { fail_root(&mut roots,operation_id,failure.clone()); }
+                        let gone = std::mem::take(&mut respawn.swallowed);
+                        if gone {
+                            effects.extend(engine.apply(EngineInput::Line(json!({"type":"cano_saiu","rc":null})),clock(start))?);
+                            respawn.kill = true;
+                        }
+                        respawn.last = Some(failure.clone());
+                        // Pedido da pessoa que falhou antes de derrubar o processo (gravar o modo, encerrar):
+                        // a sessão segue como estava. Se a queda chegar depois, ela agenda pelo caminho normal.
+                        if user.is_none() || gone {
+                            effects.extend(engine.set_problem("codex_headless_nao_subiu",Some(failure.message)));
+                            effects.extend(after_exit(&mut respawn,&mut engine,&target,clock(start).monotonic_s,closed.load(Ordering::Acquire)));
+                        }
+                    }
                 }
             }
             result = jobs.join_next(), if !jobs.is_empty() => {
@@ -1117,13 +1246,94 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                             payload:json!({"error":"operação sem resposta"}) });
                     }
                 }
+                if respawn.task.is_none() && respawn.next_at.is_some_and(|at|sample.monotonic_s >= at) {
+                    respawn.next_at = None;
+                    respawn.failures += 1;
+                    let kill = std::mem::take(&mut respawn.kill);
+                    if let Err(failure) = start_respawn(&mut respawn,&engine,&target,kill,Value::Null,None) {
+                        tracing::warn!(key=%target.key,session=%target.name,code=%failure.code,"religação sem como subir o processo");
+                    }
+                }
             },
         }
     }
     closed.store(true,Ordering::Release);
+    finish_respawn(&mut respawn,&mut target).await;
     jobs.abort_all(); while jobs.join_next().await.is_some() {}
     io.stop().await;
     Arc::try_unwrap(queue).map_err(|_|failure("queue_busy"))?.shutdown().await.map_err(io_failure)
+}
+
+type SavedState = (Arc<QueueActor>,ClockSample,Arc<Mutex<SavedView>>,u64,Value);
+
+fn start_respawn(respawn:&mut Respawn,engine:&RuntimeEngine,target:&RuntimeTarget,kill:bool,patch:Value,saved:Option<SavedState>) -> Result<(),RuntimeError> {
+    let (Some(launch),Some(policy)) = (&engine.launch,&engine.policy) else {
+        return Err(RuntimeError::new("lifecycle_required","esta sessão não sobe o próprio processo"));
+    };
+    respawn.swallowed = false;
+    respawn.task = Some(tokio::spawn(relaunch(policy.clone(),target.clone(),launch.sidecar_dir.clone(),kill,patch,saved)));
+    Ok(())
+}
+
+/// Subida em curso termina antes de o ator parar: abortada no meio, deixaria um processo que ninguém
+/// conhece. O que ela subiu fica gravado no arquivo da sessão e é o que um `kill` encerra.
+async fn finish_respawn(respawn:&mut Respawn,target:&mut RuntimeTarget) {
+    if let Some(task) = respawn.task.take() {
+        if let Ok(Ok(relaunched)) = task.await { target.binding = relaunched.target.binding; }
+    }
+}
+
+/// Queda do cano de sessão que o Rust sobe: um timer, com espera dobrando; passado o teto, desiste.
+fn after_exit(respawn:&mut Respawn,engine:&mut RuntimeEngine,target:&RuntimeTarget,now:f64,closed:bool) -> Vec<Effect> {
+    let Some(launch) = &engine.launch else { return Vec::new() };
+    if closed || respawn.next_at.is_some() || respawn.task.is_some() { return Vec::new(); }
+    if respawn.failures < RESPAWN_MAX {
+        respawn.next_at = Some(now + launch.backoff.as_secs_f64() * f64::from(1u32 << respawn.failures));
+        return Vec::new();
+    }
+    if crate::warn_limit::allow(Some(&target.key),"respawn_gave_up") {
+        tracing::warn!(key=%target.key,session=%target.name,code=%respawn.last.as_ref().map_or("",|last|last.code.as_str()),
+            "religação desistiu depois de 3 subidas seguidas; só ação da pessoa abre outra rodada");
+    }
+    // Regra 6: problema mais específico que a última subida deixou fica; a queda genérica vira o do teto.
+    if engine.problem().is_none_or(|problem|problem == "headless_caiu") {
+        let detail = respawn.last.as_ref().map_or_else(||"o Codex caiu 3 vezes seguidas ao subir".to_owned(),|last|last.message.clone());
+        return engine.set_problem("codex_headless_nao_subiu",Some(detail));
+    }
+    Vec::new()
+}
+
+fn cano_of(binding:&CanoBinding) -> super::process::Cano {
+    super::process::Cano { pid:binding.pid,escuta:binding.escuta.clone(),token:binding.token.clone(),ts:0.0,versao:binding.versao,extra:Default::default() }
+}
+
+/// Grava o que a pessoa trocou, encerra o processo de antes (quando ele já não serve) e sobe outro
+/// pela regra 1: cano vivo e da sessão é reaproveitado, nunca dois.
+async fn relaunch(policy:PolicyClient,mut target:RuntimeTarget,sidecar_dir:std::path::PathBuf,kill:bool,patch:Value,saved:Option<SavedState>) -> Result<Relaunched,RuntimeError> {
+    if let Some((queue,sample,gate,version,view)) = saved { save_view(&queue,target.generation,sample,&gate,version,&view,true).await?; }
+    if !patch.is_null() {
+        let written = super::gateway::launch_policy(&policy,&target,"session.patch_meta",patch.clone()).await?;
+        if written["updated"] != true { return Err(RuntimeError::new("session_patch_stale","o arquivo da sessão não aceitou o modo novo")); }
+    }
+    if kill && target.binding.pid != 0 {
+        super::process::kill(&cano_of(&target.binding),&target.key,&sidecar_dir).await
+            .map_err(|error|RuntimeError::new(error.code(),"o processo antigo da sessão não encerrou"))?;
+    }
+    let spawned = super::gateway::launch_if_needed(&policy,&mut target,&sidecar_dir).await?;
+    match super::cano::connect(&target.binding).await {
+        Ok(connection)=>Ok(Relaunched { target,spawned:spawned.is_some(),connection,patch }),
+        Err(error)=>{
+            if let Some(cano) = spawned { super::gateway::discard(&policy,&target,&cano,&sidecar_dir).await; }
+            Err(error)
+        }
+    }
+}
+
+async fn kill_process(engine:&RuntimeEngine,target:&RuntimeTarget) -> Result<(),RuntimeError> {
+    let Some(launch) = &engine.launch else { return Err(RuntimeError::new("close_kill","esta sessão não sobe o próprio processo")) };
+    if target.binding.pid == 0 { return Ok(()); }
+    super::process::kill(&cano_of(&target.binding),&target.key,&launch.sidecar_dir).await
+        .map_err(|error|RuntimeError::new(error.code(),"o processo da sessão não encerrou; arquivo e fila conservados"))
 }
 
 /// Prova cada entrada despachada e ainda não confirmada contra o transcript, a partir do cursor do

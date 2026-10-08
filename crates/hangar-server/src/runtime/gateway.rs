@@ -1,4 +1,4 @@
-use super::{actor::{PolicyClient,RuntimeActor,RuntimeEngine,RuntimeHandle},cano,process,protocol::*,queue::{Action,QueueActor,State as QueueState,Store,acquire_lease}};
+use super::{actor::{LaunchConfig,PolicyClient,RuntimeActor,RuntimeEngine,RuntimeHandle},cano,process,protocol::*,queue::{Action,QueueActor,State as QueueState,Store,acquire_lease}};
 use axum::{Router,body::to_bytes,extract::{ConnectInfo,State,Request},http::StatusCode,
     middleware::{self,Next},response::{IntoResponse,Response,sse::{Event,KeepAlive,Sse}},routing::{get,post}};
 use serde::Deserialize;
@@ -40,6 +40,8 @@ pub struct RuntimeRegistry {
     revisions:Mutex<BTreeMap<String,Arc<AtomicU64>>>,
     mods:Option<crate::mods::state::Mods>,
     ingress:super::ingress::IngressGates,
+    /// Primeira espera da religação do processo que cai (dobra a cada subida seguida).
+    respawn_base:Duration,
 }
 
 /// A trava pode demorar a soltar: as tarefas de E/S de um ator que saiu, ou o `LockFileEx` de um
@@ -90,6 +92,63 @@ fn healthy(terminal:bool,view:&Value)->bool {
 
 fn failure(code:&str) -> RuntimeError { RuntimeError::new(code,"runtime indisponível para esta chave ou geração") }
 
+/// Regra 1 do módulo de processo: cano gravado `Ours` conecta (mesmo sem `versao`); morto, de outro
+/// programa ou ausente, sobe outro com o ambiente que o Python calcula agora (nunca guardado).
+pub(super) async fn launch_if_needed(policy:&PolicyClient,target:&mut RuntimeTarget,sidecar_dir:&std::path::Path) -> Result<Option<process::Cano>,RuntimeError> {
+    let recorded = target.binding.pid;
+    if recorded != 0 {
+        let key = target.key.clone();
+        let state = tokio::task::spawn_blocking(move||process::liveness(recorded,&key)).await.map_err(|_|failure("launch_job"))?;
+        if state == process::Liveness::Ours { return Ok(None); }
+    }
+    let env = launch_policy(policy,target,"launch_env",json!({})).await?;
+    if let Some(code) = env["error"].as_str() { return Err(RuntimeError::new(code,"o Python não montou o comando da sessão")); }
+    let shape = ||failure("launch_env_shape");
+    let program:Vec<String> = serde_json::from_value(env["program"].clone()).map_err(|_|shape())?;
+    let vars:BTreeMap<String,String> = serde_json::from_value(env["env"].clone()).map_err(|_|shape())?;
+    let cano_extra = match &env["cano_extra"] { Value::Null=>Default::default(),Value::Object(extra)=>extra.clone(),_=>return Err(shape()) };
+    let cwd = target.metadata["cwd"].as_str().filter(|cwd|!cwd.is_empty()).ok_or_else(||failure("launch_cwd"))?;
+    let spec = process::LaunchSpec { provider:process::Provider::from_str(&target.provider).ok_or_else(||failure("runtime_provider"))?,
+        key:target.key.clone(),cwd:cwd.into(),program,env:vars.into_iter().collect(),cano_extra,sidecar_dir:sidecar_dir.to_owned() };
+    let cano = match process::spawn(&spec).await {
+        Ok(cano)=>cano,
+        Err(error)=>{
+            // O gravado já não serve (morto ou de outro programa): o arquivo da sessão para de apontá-lo.
+            if recorded != 0 && matches!(error,process::ProcessError::NotListening) { clear_cano(policy,target,recorded).await; }
+            let detail = match &error { process::ProcessError::Spawn(detail)=>detail.as_str(),_=>"o processo da sessão não subiu" };
+            return Err(RuntimeError::new(error.code(),detail));
+        }
+    };
+    let value = serde_json::to_value(&cano).map_err(|_|failure("cano_json"))?;
+    if let Err(error) = launch_policy(policy,target,"session.patch_meta",json!({"cano":value})).await {
+        // Sem o arquivo da sessão apontando para ele, o processo ficaria sem dono.
+        if let Err(stop) = process::kill(&cano,&target.key,sidecar_dir).await {
+            tracing::warn!(key=%target.key,code=stop.code(),"cano não gravado não foi encerrado");
+        }
+        return Err(error);
+    }
+    target.binding = CanoBinding { pid:cano.pid,escuta:cano.escuta.clone(),token:cano.token.clone(),versao:cano.versao };
+    target.metadata["cano"] = value;
+    Ok(Some(cano))
+}
+pub(super) async fn launch_policy(policy:&PolicyClient,target:&RuntimeTarget,kind:&str,payload:Value) -> Result<Value,RuntimeError> {
+    let phase = format!("launch:{}",crate::mods::state::random_hex(8));
+    policy.run_for(&target.key,target.generation,kind,&RequestId::String(phase.clone()),payload,&phase).await
+}
+async fn clear_cano(policy:&PolicyClient,target:&RuntimeTarget,pid:u32) {
+    if let Err(error) = launch_policy(policy,target,"session.clear_cano",json!({"pid":pid})).await {
+        tracing::warn!(key=%target.key,code=%error.code,"cano não saiu do arquivo da sessão");
+    }
+}
+/// O cano subido agora e que não deu conexão: morre e sai do arquivo da sessão.
+pub(super) async fn discard(policy:&PolicyClient,target:&RuntimeTarget,cano:&process::Cano,sidecar_dir:&std::path::Path) {
+    if let Err(stop) = process::kill(cano,&target.key,sidecar_dir).await {
+        tracing::warn!(key=%target.key,code=stop.code(),"cano sem conexão não foi encerrado");
+        return;
+    }
+    clear_cano(policy,target,cano.pid).await;
+}
+
 /// Prazo da devolução da janela esticada ao abrir a sessão com terminal (`unstretch`).
 const UNSTRETCH_MAX:Duration = Duration::from_secs(2);
 
@@ -115,8 +174,10 @@ async fn attach_terminal_mods(mods:&crate::mods::state::Mods,target:&super::term
 impl RuntimeRegistry {
     pub fn new(upstream:SocketAddr,secret:String,instance:String) -> Self {
         Self { entries:Mutex::new(BTreeMap::new()),events:broadcast::channel(1024).0,
-            policy:PolicyClient::new(upstream,secret,instance.clone()),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()),mods:None,ingress:Default::default() }
+            policy:PolicyClient::new(upstream,secret,instance.clone()),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()),mods:None,ingress:Default::default(),
+            respawn_base:Duration::from_secs(5) }
     }
+    pub fn with_respawn_base(mut self,base:Duration) -> Self { self.respawn_base = base; self }
     /// Interface dos mods: sessão Claude sem terminal aberta aqui vira superfície remota e publica no `Mods`.
     pub fn with_mods(mut self,mods:crate::mods::state::Mods) -> Self { self.mods = Some(mods); self }
     pub fn ingress(&self) -> &super::ingress::IngressGates { &self.ingress }
@@ -130,12 +191,17 @@ impl RuntimeRegistry {
     }
     /// Abre a sessão no Rust: trava, fila com `Recover`, conexão ao cano e ator. Responde sem
     /// esperar o `initialize`; o ator o faz e drena a fila quando a sessão fica entregável.
-    pub async fn open(&self,target:RuntimeTarget) -> Result<Value,RuntimeError> { self.open_inner(target,None).await }
+    pub async fn open(&self,target:RuntimeTarget) -> Result<Value,RuntimeError> { self.open_inner(target,None,false).await }
     /// `open` que pode subir o processo: sobe só se o cano gravado não for `Ours` (vivo e da chave).
     pub async fn open_with_launch(&self,target:RuntimeTarget,sidecar_dir:std::path::PathBuf) -> Result<Value,RuntimeError> {
-        self.open_inner(target,Some(sidecar_dir)).await
+        self.open_inner(target,Some(sidecar_dir),true).await
     }
-    async fn open_inner(&self,mut target:RuntimeTarget,launch:Option<std::path::PathBuf>) -> Result<Value,RuntimeError> {
+    /// `open` de sessão cujo processo o Rust administra (religar, reiniciar, encerrar) sem subir agora.
+    pub async fn open_managed(&self,target:RuntimeTarget,sidecar_dir:std::path::PathBuf) -> Result<Value,RuntimeError> {
+        self.open_inner(target,Some(sidecar_dir),false).await
+    }
+    async fn open_inner(&self,mut target:RuntimeTarget,managed:Option<std::path::PathBuf>,spawn:bool) -> Result<Value,RuntimeError> {
+        let launch = managed.as_ref().filter(|_|spawn);
         let barrier = self.barrier(&target.key).await;
         let _guard = barrier.lock().await;
         let existing = self.entries.lock().await.get(&target.key).map(|entry|(entry.generation,entry.handle.clone()));
@@ -155,7 +221,7 @@ impl RuntimeRegistry {
         let queue = QueueActor::start(store,lease);
         // Depois da fila: o `session.patch_meta` do Python lê o estado dela.
         let launched = match &launch {
-            Some(sidecar_dir)=>self.launch_if_needed(&mut target,sidecar_dir).await,
+            Some(sidecar_dir)=>launch_if_needed(&self.policy,&mut target,sidecar_dir).await,
             None=>Ok(None),
         };
         let connection = match &launched {
@@ -169,7 +235,7 @@ impl RuntimeRegistry {
                     tracing::warn!(key=%target.key,code=%error.code,stop=?stop.kind(),"fila não fechou depois da falha ao conectar no cano");
                 }
                 // Só o cano subido nesta chamada morre: um vivo de antes pode estar no meio de um turno.
-                if let (Ok(Some(cano)),Some(sidecar_dir)) = (launched,&launch) { self.discard(&target,&cano,sidecar_dir).await; }
+                if let (Ok(Some(cano)),Some(sidecar_dir)) = (launched,launch) { discard(&self.policy,&target,&cano,sidecar_dir).await; }
                 return Err(error);
             },
         };
@@ -179,6 +245,7 @@ impl RuntimeRegistry {
         let mut engine = RuntimeEngine::new(&target.provider,metadata,target.generation,ClockSample { monotonic_s:0.0,epoch_s })?
             .with_policy(self.policy.clone()).with_publisher(self.events.clone()).with_revision(revision);
         engine.set_fresh_process(fresh);
+        if let Some(sidecar_dir) = &managed { engine = engine.with_launch(LaunchConfig { sidecar_dir:sidecar_dir.clone(),backoff:self.respawn_base }); }
         if let Some(mods) = &self.mods { engine = engine.with_mods(mods.clone()); }
         // Dono único dos pedidos dos apps até o `close` (S9). Só o Claude tem superfície. Registrado antes
         // de a tarefa do ator existir: a primeira faixa publicada já encontra a sessão no `Mods`.
@@ -202,69 +269,13 @@ impl RuntimeRegistry {
                     Err(error)=>error,
                     Ok(snapshot)=>snapshot["error"].as_str().map_or_else(||failure("cano_exited"),|code|RuntimeError::new(code,"ator do runtime terminou ao abrir")),
                 };
-                if let Err(close) = self.close_locked(&target.key,target.generation).await {
+                if let Err(close) = self.close_locked(&target.key,target.generation,false).await {
                     tracing::warn!(key=%target.key,code=%close.code,"sessão não fechou depois de abrir com erro");
                 }
                 return Err(error);
             }
         };
         Ok(json!({"opened":true,"instance":self.instance,"key":target.key,"generation":target.generation,"state":snapshot}))
-    }
-    /// Regra 1 do módulo de processo: cano gravado `Ours` conecta (mesmo sem `versao`); morto, de outro
-    /// programa ou ausente, sobe outro com o ambiente que o Python calcula agora (nunca guardado).
-    async fn launch_if_needed(&self,target:&mut RuntimeTarget,sidecar_dir:&std::path::Path) -> Result<Option<process::Cano>,RuntimeError> {
-        let recorded = target.binding.pid;
-        if recorded != 0 {
-            let key = target.key.clone();
-            let state = tokio::task::spawn_blocking(move||process::liveness(recorded,&key)).await.map_err(|_|failure("launch_job"))?;
-            if state == process::Liveness::Ours { return Ok(None); }
-        }
-        let env = self.launch_policy(target,"launch_env",json!({})).await?;
-        if let Some(code) = env["error"].as_str() { return Err(RuntimeError::new(code,"o Python não montou o comando da sessão")); }
-        let shape = ||failure("launch_env_shape");
-        let program:Vec<String> = serde_json::from_value(env["program"].clone()).map_err(|_|shape())?;
-        let vars:BTreeMap<String,String> = serde_json::from_value(env["env"].clone()).map_err(|_|shape())?;
-        let cano_extra = match &env["cano_extra"] { Value::Null=>Default::default(),Value::Object(extra)=>extra.clone(),_=>return Err(shape()) };
-        let cwd = target.metadata["cwd"].as_str().filter(|cwd|!cwd.is_empty()).ok_or_else(||failure("launch_cwd"))?;
-        let spec = process::LaunchSpec { provider:process::Provider::from_str(&target.provider).ok_or_else(||failure("runtime_provider"))?,
-            key:target.key.clone(),cwd:cwd.into(),program,env:vars.into_iter().collect(),cano_extra,sidecar_dir:sidecar_dir.to_owned() };
-        let cano = match process::spawn(&spec).await {
-            Ok(cano)=>cano,
-            Err(error)=>{
-                // O gravado já não serve (morto ou de outro programa): o arquivo da sessão para de apontá-lo.
-                if recorded != 0 && matches!(error,process::ProcessError::NotListening) { self.clear_cano(target,recorded).await; }
-                let detail = match &error { process::ProcessError::Spawn(detail)=>detail.as_str(),_=>"o processo da sessão não subiu" };
-                return Err(RuntimeError::new(error.code(),detail));
-            }
-        };
-        let value = serde_json::to_value(&cano).map_err(|_|failure("cano_json"))?;
-        if let Err(error) = self.launch_policy(target,"session.patch_meta",json!({"cano":value})).await {
-            // Sem o arquivo da sessão apontando para ele, o processo ficaria sem dono.
-            if let Err(stop) = process::kill(&cano,&target.key,sidecar_dir).await {
-                tracing::warn!(key=%target.key,code=stop.code(),"cano não gravado não foi encerrado");
-            }
-            return Err(error);
-        }
-        target.binding = CanoBinding { pid:cano.pid,escuta:cano.escuta.clone(),token:cano.token.clone(),versao:cano.versao };
-        target.metadata["cano"] = value;
-        Ok(Some(cano))
-    }
-    async fn launch_policy(&self,target:&RuntimeTarget,kind:&str,payload:Value) -> Result<Value,RuntimeError> {
-        let phase = format!("launch:{}",crate::mods::state::random_hex(8));
-        self.policy.run_for(&target.key,target.generation,kind,&RequestId::String(phase.clone()),payload,&phase).await
-    }
-    async fn clear_cano(&self,target:&RuntimeTarget,pid:u32) {
-        if let Err(error) = self.launch_policy(target,"session.clear_cano",json!({"pid":pid})).await {
-            tracing::warn!(key=%target.key,code=%error.code,"cano não saiu do arquivo da sessão");
-        }
-    }
-    /// O cano subido agora e que não deu conexão: morre e sai do arquivo da sessão.
-    async fn discard(&self,target:&RuntimeTarget,cano:&process::Cano,sidecar_dir:&std::path::Path) {
-        if let Err(stop) = process::kill(cano,&target.key,sidecar_dir).await {
-            tracing::warn!(key=%target.key,code=stop.code(),"cano sem conexão não foi encerrado");
-            return;
-        }
-        self.clear_cano(target,cano.pid).await;
     }
     pub async fn open_terminal(&self,target:super::terminal::TerminalTarget)->Result<Value,RuntimeError> {
         let barrier=self.barrier(&target.key).await; let _guard=barrier.lock().await;
@@ -307,20 +318,38 @@ impl RuntimeRegistry {
     pub async fn close(&self,key:&str,generation:u64) -> Result<Value,RuntimeError> {
         let barrier = self.barrier(key).await;
         let _guard = barrier.lock().await;
-        self.close_locked(key,generation).await
+        self.close_locked(key,generation,false).await
     }
-    async fn close_locked(&self,key:&str,generation:u64) -> Result<Value,RuntimeError> {
+    /// Encerrar a sessão: o ator para e o processo dela morre, com os arquivos do cano. Sem a sessão
+    /// aberta aqui não há o que matar (`killed: false`): quem pediu decide.
+    pub async fn close_with_kill(&self,key:&str,generation:u64) -> Result<Value,RuntimeError> {
+        let barrier = self.barrier(key).await;
+        let _guard = barrier.lock().await;
+        self.close_locked(key,generation,true).await
+    }
+    async fn close_locked(&self,key:&str,generation:u64,kill:bool) -> Result<Value,RuntimeError> {
         let (handle,lease_path,name,life) = match self.entries.lock().await.get(key) {
-            None=>return Ok(json!({"closed":true})),
+            None=>return Ok(if kill { json!({"closed":true,"killed":false}) } else { json!({"closed":true}) }),
             Some(entry) if entry.generation == generation=>(entry.handle.clone(),entry.lease_path.clone(),entry.name.clone(),entry.mods_life),
             _=>return Err(failure("runtime_generation")),
         };
-        if let Err(error) = handle.stop().await {
+        let stopped = match (&handle,kill) {
+            (EntryHandle::Headless(handle),true)=>handle.stop_killing().await,
+            (EntryHandle::Terminal {..},true)=>return Err(failure("close_kill")),
+            _=>handle.stop().await,
+        };
+        if let Err(error) = stopped {
             // `stop` sempre junta a tarefa do ator: se ele saiu por erro, a posse acaba com ele. Sem
             // isto a entrada morta ficava para sempre, a sessão não reabria e o retrato de eventos
             // de todas as sessões caía. Só solta depois de a trava estar livre de fato.
             if wait_lease(&lease_path).await.is_err() {
                 tracing::warn!(key,code=%error.code,"ator terminou mas a trava não liberou em 3 s; sessão segue presa");
+                return Err(error);
+            }
+            if kill {
+                // O ator parou e soltou a trava; quem falhou foi o fim do processo, e isso sobe com o código.
+                self.entries.lock().await.remove(key);
+                if let Some(mods) = &self.mods { mods.forget(&name,life); }
                 return Err(error);
             }
             tracing::warn!(key,code=%error.code,"ator do runtime já tinha terminado; sessão liberada");
@@ -329,7 +358,7 @@ impl RuntimeRegistry {
         // A sessão saiu do Rust: os apps perdem a faixa e os pedidos voltam a não ter dono (S9). Com ou sem
         // terminal, esquece só esta vida: outra sessão que tenha tomado o nome (outra vida) fica.
         if let Some(mods) = &self.mods { mods.forget(&name,life); }
-        Ok(json!({"closed":true}))
+        Ok(if kill { json!({"closed":true,"killed":true}) } else { json!({"closed":true}) })
     }
     async fn barrier(&self,key:&str) -> Arc<Mutex<()>> {
         self.lifecycle.lock().await.entry(key.into()).or_insert_with(||Arc::new(Mutex::new(()))).clone()
@@ -477,7 +506,8 @@ async fn dispatch(registry:&RuntimeRegistry,envelope:&Envelope) -> Result<Value,
         "control"=>&["kind","control","payload"],
         "queue"=>&["kind","action"],
         "ingress"=>&["kind","name","closed","held"],
-        "close" | "snapshot" | "drain" | "confirm" | "ensure_projection"=>&["kind"],
+        "close"=>&["kind","kill"],
+        "snapshot" | "drain" | "confirm" | "ensure_projection"=>&["kind"],
         _=>return Err(failure("command_kind")),
     };
     if !command.as_object().is_some_and(|object|object.keys().all(|key|fields.contains(&key.as_str()))) {
@@ -506,6 +536,11 @@ async fn dispatch(registry:&RuntimeRegistry,envelope:&Envelope) -> Result<Value,
                 let sidecar_dir = sidecar_dir.filter(|dir|!dir.as_os_str().is_empty()).ok_or_else(||failure("launch_sidecar_dir"))?;
                 registry.open_with_launch(target,sidecar_dir).await
             },
+            // Codex sem terminal com a pasta do arquivo: o Rust administra o processo mesmo sem subir agora.
+            Target::Headless(target,Some(sidecar_dir)) if target.provider == "codex" && !sidecar_dir.as_os_str().is_empty()=>{
+                if target.key!=envelope.key || target.generation!=envelope.generation{return Err(failure("runtime_binding"));}
+                registry.open_managed(target,sidecar_dir).await
+            },
             Target::Headless(target,_)=>{
                 if target.key!=envelope.key || target.generation!=envelope.generation{return Err(failure("runtime_binding"));}
                 registry.open(target).await
@@ -517,7 +552,10 @@ async fn dispatch(registry:&RuntimeRegistry,envelope:&Envelope) -> Result<Value,
             }
         };
     }
-    if kind == "close" { return registry.close(&envelope.key,envelope.generation).await; }
+    if kind == "close" {
+        let kill = match &command["kill"] { Value::Null=>false, value=>value.as_bool().ok_or_else(||failure("close_kill"))? };
+        return if kill { registry.close_with_kill(&envelope.key,envelope.generation).await } else { registry.close(&envelope.key,envelope.generation).await };
+    }
     let handle = registry.entry(&envelope.key,envelope.generation).await?;
     match kind {
         "submit"=> {

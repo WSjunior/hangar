@@ -36,6 +36,18 @@ async fn run() {
         let term = state.term.clone();
         async move { term.restore_after_crash().await }
     });
+    // Órfãos do cano têm dono só: com o runtime ligado, o Rust varre uma vez, antes de anunciar o
+    // gateway (o Python só abre sessões depois do anúncio). Só aqui, pelo mesmo motivo do tmux acima.
+    if matches!(hangar_server::config::Config::runtime_instance(), Ok(Some(_))) {
+        if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+            let swept = tokio::task::spawn_blocking(move || {
+                let base = home.join(".hangar");
+                hangar_server::runtime::process::sweep_orphans(&base.join("claude-headless"), &base.join("codex-sessions"),
+                    &home.to_string_lossy())
+            }).await.ok().flatten();
+            if let Some(count) = swept.filter(|count| *count > 0) { tracing::info!(count, "canos de sessão já encerrada finalizados"); }
+        }
+    }
     match hangar_server::serve_until_with_state(listener, state, stop).await {
         Ok(()) => {
             tracing::info!("stdin fechou: o backend saiu, hangar-server sai junto");

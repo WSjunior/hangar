@@ -305,6 +305,30 @@ pub fn kill_orphans(live: &HashSet<String>, owner: &str) -> usize {
     { let _ = (live, owner); 0 }
 }
 
+/// Varredura da subida do Rust (regra 10): vivas são as chaves de `claude-headless/` e as do Codex sem
+/// terminal de `codex-sessions/`. Pasta ausente conta como vazia; pasta que não se lê cancela a
+/// varredura (`None`), porque a sessão viva dela pareceria órfã. Arquivo ilegível também cancela.
+pub fn sweep_orphans(claude_dir: &Path, codex_dir: &Path, owner: &str) -> Option<usize> {
+    let mut live = HashSet::new();
+    for (dir, codex) in [(claude_dir, false), (codex_dir, true)] {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => { tracing::warn!(dir = %dir.display(), kind = ?e.kind(), "pasta de sessões ilegível; varredura de órfãos cancelada"); return None; }
+        };
+        for entry in entries.flatten() {
+            if entry.path().extension().is_none_or(|ext| ext != "json") { continue; }
+            let meta: Value = match std::fs::read(entry.path()).ok().and_then(|raw| serde_json::from_slice(&raw).ok()) {
+                Some(meta) => meta,
+                None => { tracing::warn!(file = %entry.path().display(), "arquivo de sessão ilegível; varredura de órfãos cancelada"); return None; }
+            };
+            if codex && meta["headless"] != true { continue; }
+            if let Some(key) = meta["key"].as_str().filter(|key| !key.is_empty()) { live.insert(key.to_owned()); }
+        }
+    }
+    Some(kill_orphans(&live, owner))
+}
+
 #[cfg(target_os = "linux")]
 fn linux_orphans(live: &HashSet<String>, owner: &str) -> usize {
     use std::os::unix::fs::MetadataExt;

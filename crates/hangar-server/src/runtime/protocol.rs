@@ -89,6 +89,9 @@ pub enum Effect {
     /// Linha no diário exportável (`/internal/diag`), uma por minuto por código.
     Diag { event: DiagEvent, code: String },
     Stop { reason: String },
+    /// O processo da sessão sobe de novo na mesma conversa (reiniciar, trocar o sandbox). Quem sobe é
+    /// o ator; `patch` vai ao arquivo da sessão antes de pedir o comando novo ao Python.
+    Respawn { operation_id: String, reason: String, patch: Value, reply: Value },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
