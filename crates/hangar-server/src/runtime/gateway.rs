@@ -212,7 +212,18 @@ impl RuntimeRegistry {
     pub async fn open_managed(&self,target:RuntimeTarget,sidecar_dir:std::path::PathBuf) -> Result<Value,RuntimeError> {
         self.open_inner(target,Some(sidecar_dir),false).await
     }
-    async fn open_inner(&self,mut target:RuntimeTarget,managed:Option<std::path::PathBuf>,spawn:bool) -> Result<Value,RuntimeError> {
+    /// Abertura de Codex que falha fica no canal do hub até a próxima abertura (a mesma regra do
+    /// `close` com erro): sem isso o chat mostraria a sessão parada. Geração ou provedor errado é
+    /// pedido torto, não a sessão falhando.
+    async fn open_inner(&self,target:RuntimeTarget,managed:Option<std::path::PathBuf>,spawn:bool) -> Result<Value,RuntimeError> {
+        let (codex,name) = (target.provider == "codex",target.name.clone());
+        let result = self.open_attempt(target,managed,spawn).await;
+        if let Err(error) = &result && codex && !["runtime_generation","runtime_provider"].contains(&error.code.as_str()) {
+            super::actor::mark_live_error(&self.live_sender(&name),&error.code,&error.message);
+        }
+        result
+    }
+    async fn open_attempt(&self,mut target:RuntimeTarget,managed:Option<std::path::PathBuf>,spawn:bool) -> Result<Value,RuntimeError> {
         let launch = managed.as_ref().filter(|_|spawn);
         let barrier = self.barrier(&target.key).await;
         let _guard = barrier.lock().await;
@@ -726,6 +737,26 @@ mod tests {
         registry.live_sender("a").send_replace(None);
         let _ = registry.live_sender("c");
         assert!(!registry.live.lock().unwrap().contains_key("a"),"vazio, sem dono e sem receptor: sai");
+    }
+
+    #[tokio::test]
+    async fn failed_codex_open_shows_its_error_until_the_next_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into());
+        let rx = registry.live("cx");
+        // Cano gravado que não atende: a conexão falha.
+        let target = RuntimeTarget { key:"k".into(),generation:1,name:"cx".into(),provider:"codex".into(),
+            metadata:json!({"name":"cx","key":"k","headless":true}),
+            binding:CanoBinding { pid:42,escuta:"tcp:127.0.0.1:9".into(),token:"t".into(),versao:2 },
+            lease_path:dir.path().join("q.lock"),state_path:dir.path().join("q.json"),projection_dir:dir.path().join("projection"),
+            transcript:dir.path().join("rollout.jsonl"),created:0.0 };
+        let error = registry.open(target.clone()).await.unwrap_err();
+        assert_eq!(rx.borrow().as_ref().and_then(|s|s.error.clone()).map(|(code,_)|code),Some(error.code.clone()));
+        // Pedido torto (provedor de fora) não acende problema.
+        registry.live_sender("cx").send_replace(None);
+        let other = RuntimeTarget { provider:"pi".into(),..target };
+        assert_eq!(registry.open(other).await.unwrap_err().code,"runtime_provider");
+        assert!(rx.borrow().is_none());
     }
 
     #[tokio::test]

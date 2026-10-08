@@ -84,8 +84,9 @@ impl RuntimeFeed {
         let value = self.live.as_mut().map(|rx| rx.borrow_and_update().clone());
         let (state, texts) = match &value {
             None => (feed_problem(&self.name, "runtime_absent", "o servidor não tem o runtime ligado"), Default::default()),
-            // A sessão não está aberta no runtime (ainda não abriu, ou a abertura falhou).
-            Some(None) => (feed_problem(&self.name, "runtime_absent", "a sessão não está aberta no runtime"), Default::default()),
+            // Sessão parada (não aberta no Rust, encerrada, ou abrindo): `idle`, como o Python. Abertura
+            // que falhou e vida que acabou com erro chegam como `Some` com o erro.
+            Some(None) => (idle(&self.name), Default::default()),
             Some(Some(live)) => {
                 let mut state = if live.public_state.is_null() { idle(&self.name) } else {
                     serde_json::from_value(live.public_state.clone()).unwrap_or_else(|_| {
@@ -269,16 +270,16 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn absent_entry_shows_the_runtime_is_down() {
-        // Sem entrada (abertura que não veio ou falhou) a sessão não está parada calada.
+    async fn absent_entry_is_idle() {
+        // Sessão parada não é falha: reiniciar, encerrar ou reabrir não pode acender o problema.
         let f = fixture();
         let mut rx = f.lease.hub.tx.subscribe();
         let (_tx, live_rx) = channel(None);
         let _feed = spawn(&f, Some(live_rx));
         let got = collect(&mut rx, Duration::from_millis(50)).await;
         let state = &of(&got, "state")[0].2;
-        assert_eq!((state["state"].as_str(), state["problema"].as_str()), (Some("idle"), Some("runtime_falhou")));
-        assert!(state["problema_detalhe"].as_str().unwrap().starts_with("runtime_absent:"), "{state}");
+        assert_eq!(state["state"], "idle");
+        assert!(state["problema"].is_null(), "{state}");
     }
 
     #[tokio::test(start_paused = true)]

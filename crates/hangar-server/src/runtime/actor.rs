@@ -459,7 +459,7 @@ impl RuntimeActor {
 }
 
 /// Erro durável no canal do hub, sobre o último valor.
-fn mark_live_error(live:&LiveSender,code:&str,message:&str) {
+pub(crate) fn mark_live_error(live:&LiveSender,code:&str,message:&str) {
     live.send_modify(|value| {
         let mut next = value.as_deref().cloned().unwrap_or_default();
         next.error = Some((code.to_owned(),message.to_owned()));
