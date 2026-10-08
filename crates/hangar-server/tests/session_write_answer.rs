@@ -123,7 +123,7 @@ fn headless_answers_match_the_python_golden() {
         let mut want = case["sent"][0]["payload"].clone();
         for answer in want["answers"].as_array_mut().unwrap() { if answer["indices"].is_null() { answer["indices"] = json!([]); } }
         assert_eq!(command, want, "{name}: o controle que o ator recebe");
-        check(name, headless_answer(&reply(&case["reply"])), &case);
+        check(name, headless_answer(case["provider"] == "codex", &reply(&case["reply"])), &case);
     }
     assert!(seen >= 6);
 }

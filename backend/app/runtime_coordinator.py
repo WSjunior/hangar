@@ -213,9 +213,11 @@ def _has_pending(state_path):
     return any(not row.get("delivered") for row in rows)
 
 
-def _codex_session(name):
+def _codex_mode(name):
+    """`None` sem sessão Codex com esse nome; senão se ela é sem terminal."""
     from app.adapters.codex import sessions as codex_sessions
-    return codex_sessions.load(name) is not None
+    meta = codex_sessions.load(name)
+    return None if meta is None else bool(meta.get("headless"))
 
 
 def _headless_provider(name):
@@ -402,7 +404,8 @@ class RuntimeCoordinator:
         """`launch`: quem chama pode subir o processo (envio, acordar); leitura e parada nunca sobem."""
         if self.legacy is None:
             return self.managed_runtime(name)
-        if provider == "claude" or self.rust_owns(provider, True):
+        # Só espera o desfecho do Rust quem ele atende no modo da própria sessão: Codex com terminal é do Python.
+        if provider == "claude" or self.rust_owns(provider, bool(await asyncio.to_thread(_codex_mode, name))):
             await self.await_mode()
         async with self.registration_locks.setdefault(name, asyncio.Lock()):
             binding = await asyncio.to_thread(self.legacy.binding, name, provider)
@@ -1349,7 +1352,7 @@ class RuntimeCoordinator:
         owner = self.slots.get(self.names.get(name, ""))
         if (self.mode == "pending" or self._settling) and (
                 self.rust_owns(owner.binding.provider, owner.binding.headless) if owner is not None
-                else self.rust_owns("codex", True) or not await asyncio.to_thread(_codex_session, name)):
+                else (codex := await asyncio.to_thread(_codex_mode, name)) is None or self.rust_owns("codex", codex)):
             await self.await_mode()
         if self.legacy is not None and self.managed_queue(name):
             slot = self.slot(name)

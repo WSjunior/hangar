@@ -15,8 +15,8 @@ use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode
 use serde_json::{Value, json};
 
 use super::input::{
-    Diary, MSG_CONTROL_DEFERRED, MSG_CONTROL_UNCONFIRMED, MSG_STEER_REFUSED, MSG_STEER_UNKNOWN, answer, control_failed,
-    diary_code, json_content_type, payload_code, runtime_failed, sem_turno,
+    Diary, MSG_CODEX_CONTROL, MSG_CONTROL_DEFERRED, MSG_CONTROL_UNCONFIRMED, MSG_STEER_REFUSED, MSG_STEER_UNKNOWN, answer, codex_control,
+    control_failed, diary_code, json_content_type, payload_code, runtime_failed, sem_turno,
 };
 use super::{Ctx, WriteRoute, admit, detail_body, relay};
 use crate::mods::state::random_hex;
@@ -32,6 +32,7 @@ const PLUGIN_TIMEOUT: Duration = Duration::from_secs(5);
 const PLUGIN_BODY_LIMIT: usize = 64 * 1024;
 
 const MSG_NO_TURN: &str = "Não há turno ativo para interromper.";
+const MSG_CODEX_NO_TURN: &str = "Não há turno Codex ativo para interromper.";
 const MSG_PERM_OPTION: &str = "opção fora do pedido de permissão";
 const MSG_PANEL_OPEN: &str = "Terminal aberto nesta sessao. Feche o painel pra responder por aqui.";
 const MSG_NOT_SENT: &str = "não consegui responder pelo terminal — opção NÃO enviada";
@@ -148,8 +149,16 @@ pub fn interrupt_terminal_answer(sent: &Result<RuntimeReply, RuntimeError>) -> A
     control_step_answer(sent).map_or_else(|refused| refused, |()| ok())
 }
 
-/// Sem turno em voo não há o que interromper; responder ok seria fingir.
-pub fn interrupt_headless_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
+/// Sem turno em voo não há o que interromper; responder ok seria fingir. O Codex responde com o
+/// código e a frase dele (`api.interrupt`).
+pub fn interrupt_headless_answer(codex: bool, sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
+    if codex {
+        return match sent {
+            Ok(reply) if reply.disposition == Disposition::Accepted && reply.payload["interrupted"] == false => codex_control(MSG_CODEX_NO_TURN),
+            Ok(reply) if reply.disposition == Disposition::Accepted => ok(),
+            _ => codex_control(MSG_CODEX_CONTROL),
+        };
+    }
     let reply = match sent {
         Ok(reply) => reply,
         Err(error) => return sem_turno(&error.to_string()),
@@ -323,7 +332,7 @@ pub async fn interrupt(State(st): State<Arc<AppState>>, ConnectInfo(peer): Conne
                 interrupted
             }
         },
-        headless => interrupt_headless_answer(&headless.command(RuntimeCommand { operation_id, kind: OperationKind::Interrupt, payload: json!({}) }).await),
+        headless => interrupt_headless_answer(ctx.target.provider == "codex", &headless.command(RuntimeCommand { operation_id, kind: OperationKind::Interrupt, payload: json!({}) }).await),
     };
     answer(&ctx, result)
 }

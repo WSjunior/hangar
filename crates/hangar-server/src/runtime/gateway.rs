@@ -501,12 +501,12 @@ async fn dispatch(registry:&RuntimeRegistry,envelope:&Envelope) -> Result<Value,
         // `launch`: quem abre pode subir o processo (só sem terminal, e só se o gravado não for nosso).
         let launch = match &command["launch"] { Value::Null=>false, value=>value.as_bool().ok_or_else(||failure("open_launch"))? };
         return match descriptor(&command["descriptor"],launch)? {
-            Target::Headless(target) if launch=>{
+            Target::Headless(target,sidecar_dir) if launch=>{
                 if target.key!=envelope.key || target.generation!=envelope.generation{return Err(failure("runtime_binding"));}
-                let sidecar_dir = command["descriptor"]["sidecar_dir"].as_str().filter(|dir|!dir.is_empty()).ok_or_else(||failure("launch_sidecar_dir"))?;
-                registry.open_with_launch(target,sidecar_dir.into()).await
+                let sidecar_dir = sidecar_dir.filter(|dir|!dir.as_os_str().is_empty()).ok_or_else(||failure("launch_sidecar_dir"))?;
+                registry.open_with_launch(target,sidecar_dir).await
             },
-            Target::Headless(target)=>{
+            Target::Headless(target,_)=>{
                 if target.key!=envelope.key || target.generation!=envelope.generation{return Err(failure("runtime_binding"));}
                 registry.open(target).await
             },
@@ -555,10 +555,11 @@ struct Descriptor {
     name:String,key:String,provider:String,headless:bool,meta:Value,jsonl:String,
     projection_dir:std::path::PathBuf,state_path:std::path::PathBuf,lock_path:std::path::PathBuf,generation:u64,
     /// Pasta do arquivo da sessão, onde o cano subido pelo Rust põe socket e log; só no `open` com `launch`.
-    #[serde(default)] #[allow(dead_code)] sidecar_dir:Option<std::path::PathBuf>,
+    #[serde(default)] sidecar_dir:Option<std::path::PathBuf>,
 }
 
-enum Target {Headless(RuntimeTarget),Terminal(super::terminal::TerminalTarget)}
+/// Sem terminal leva a pasta do arquivo da sessão (`sidecar_dir`), que só o `open` com `launch` usa.
+enum Target {Headless(RuntimeTarget,Option<std::path::PathBuf>),Terminal(super::terminal::TerminalTarget)}
 fn descriptor(value:&Value,launch:bool) -> Result<Target,RuntimeError> {
     let descriptor:Descriptor = serde_json::from_value(value.clone()).map_err(|_|failure("descriptor_shape"))?;
     if descriptor.meta["key"] != descriptor.key || descriptor.key.is_empty() { return Err(failure("descriptor_binding")); }
@@ -587,7 +588,8 @@ fn descriptor(value:&Value,launch:bool) -> Result<Target,RuntimeError> {
         versao:cano["versao"].as_u64().and_then(|version|u32::try_from(version).ok()).ok_or_else(||failure("cano_version"))? } };
     Ok(Target::Headless(RuntimeTarget { key:descriptor.key,generation:descriptor.generation,name:descriptor.name,provider:descriptor.provider,
         created:descriptor.meta["created"].as_f64().unwrap_or(0.0),metadata:descriptor.meta,binding,
-        lease_path:descriptor.lock_path,state_path:descriptor.state_path,projection_dir:descriptor.projection_dir,transcript:descriptor.jsonl.into() }))
+        lease_path:descriptor.lock_path,state_path:descriptor.state_path,projection_dir:descriptor.projection_dir,transcript:descriptor.jsonl.into() },
+        descriptor.sidecar_dir))
 }
 
 async fn events(State(state):State<Gateway>) -> Response {
@@ -637,8 +639,9 @@ mod tests {
         let value = json!({"name":"session","key":"key","provider":"codex","headless":true,"meta":{"key":"key","cano":null},
             "jsonl":"","projection_dir":"projection","state_path":"state","lock_path":"lock","generation":1,"sidecar_dir":"dir"});
         assert!(descriptor(&value,false).is_err(),"sem `launch`, sem cano não abre");
-        let Ok(Target::Headless(target)) = descriptor(&value,true) else { panic!("subida sem cano gravado") };
+        let Ok(Target::Headless(target,sidecar_dir)) = descriptor(&value,true) else { panic!("subida sem cano gravado") };
         assert_eq!((target.binding.pid,target.binding.versao),(0,2));
+        assert_eq!(sidecar_dir.as_deref(),Some(std::path::Path::new("dir")));
     }
 
     #[tokio::test]

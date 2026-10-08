@@ -76,7 +76,7 @@ fn steer_answers_match_the_python_golden() {
                 }),
             }
         } else {
-            steer_headless(!case["text"].is_null(), &control)
+            steer_headless(!case["text"].is_null(), case["provider"] == "codex", &control)
         };
         assert_eq!((status.as_u16(), body), (case["expect"]["status"].as_u64().unwrap() as u16, case["expect"]["body"].clone()), "{name}");
     }
@@ -320,4 +320,11 @@ async fn clear_on_a_terminal_session_is_forwarded_before_the_gate() {
     assert_eq!(post(server, "t", "input", r#"{"text":"oi"}"#).await.0, 409);
     assert_eq!(post(server, "h", "input", r#"{"text":"/clear"}"#).await.0, 409);
     assert_eq!(python.hits_to("/api/sessions/h/input"), 0);
+}
+
+#[test]
+fn codex_compact_goes_to_the_python_control() {
+    // O Python manda `/compact` do Codex como controle (e recusa argumento com 400); texto nunca vira turno.
+    assert!(relays_codex_input("codex", "/compact") && relays_codex_input("codex", "  /compact agora"));
+    assert!(!relays_codex_input("claude", "/compact") && !relays_codex_input("codex", "oi /compact"));
 }

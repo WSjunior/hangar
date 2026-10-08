@@ -1073,3 +1073,22 @@ def test_rust_up_registers_live_codex_headless_in_rust(codex_birth):
     asyncio.run(scenario())
     assert transport.kinds() == ["open"] and transport.commands[0]["descriptor"]["name"] == "cx"
     assert owner.slot("cx").phase == runtime_coordinator.Phase.Rust
+
+
+def test_codex_with_terminal_never_waits_for_the_rust_in_pending(codex_birth, tmp_path):
+    codex_birth.codex_sessions.save("ct", "thread", "", str(tmp_path), key="t" * 32)
+    owner = codex_birth.build_codex(Transport(), mode="pending")
+    waited = []
+    async def await_mode():
+        waited.append(True)
+        return owner.mode
+    owner.await_mode = await_mode
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        assert await owner.prepare_session("ct", "codex") is False
+        with pytest.raises(RuntimeError, match="sem responsável"):
+            await owner.op("ct", {"kind":"drain"}, "op")
+        assert waited == [], "Codex com terminal é do Python até a 5C"
+        await owner.prepare_session("cx", "codex")
+        assert waited, "o sem terminal espera o desfecho do Rust"
+    asyncio.run(scenario())

@@ -103,8 +103,19 @@ pub fn input_answer(sent: &Sent, steered: bool) -> (StatusCode, Value) {
 
 pub(super) fn sem_turno(msg: &str) -> (StatusCode, Value) { (StatusCode::CONFLICT, detail_body("erro_sem_turno", msg, json!({}))) }
 
-/// `/steer` sem terminal: com texto vai ao turno em voo; sem texto promove a fila.
-pub fn steer_headless(with_text: bool, control: &Result<RuntimeReply, RuntimeError>) -> (StatusCode, Value) {
+pub(super) const MSG_CODEX_CONTROL: &str = "O Codex não aceitou a alteração; atualize a sessão e tente novamente.";
+/// Recusa de controle do Codex sem terminal: código e frase próprios, iguais aos do Python.
+pub(super) fn codex_control(msg: &str) -> (StatusCode, Value) { (StatusCode::CONFLICT, detail_body("erro_codex_controle", msg, json!({}))) }
+
+/// `/steer` sem terminal: com texto vai ao turno em voo; sem texto promove a fila. No Codex toda
+/// recusa é `erro_codex_controle`.
+pub fn steer_headless(with_text: bool, codex: bool, control: &Result<RuntimeReply, RuntimeError>) -> (StatusCode, Value) {
+    let answer = steer_headless_claude(with_text, control);
+    if codex && answer.0 != StatusCode::OK { return codex_control(MSG_CODEX_CONTROL); }
+    answer
+}
+
+fn steer_headless_claude(with_text: bool, control: &Result<RuntimeReply, RuntimeError>) -> (StatusCode, Value) {
     let reply = match control {
         Ok(reply) => reply,
         Err(error) => return sem_turno(&error.to_string()),
@@ -145,6 +156,9 @@ pub fn steer_terminal_done(promoted: bool, confirm: &Result<Value, RuntimeError>
         Err(error) => runtime_failed(error),
     }
 }
+
+/// O `/compact` do Codex é controle (`thread/compact/start`), não texto: quem decide é o `_send_managed` do Python.
+pub fn relays_codex_input(provider: &str, text: &str) -> bool { provider == "codex" && text.split_whitespace().next() == Some("/compact") }
 
 /// Corpo do `InputBody` do FastAPI: só `text` (texto) e `steer` (booleano); o resto é 422 dele.
 fn parse_body(bytes: &Bytes) -> Option<(String, bool)> {
@@ -195,6 +209,7 @@ pub async fn input(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
         Err(response) => return response,
     };
     let Some((text, steer)) = parse_body(&bytes).filter(|_| json_content_type(ctx.headers())) else { return relay(ctx, bytes).await };
+    if relays_codex_input(&ctx.target.provider, &text) { return relay(ctx, bytes).await; }
     let operation_id = random_hex(16);
     let params = Params { text: &text, steer, terminal: ctx.target.terminal, operation_id: &operation_id };
     let sent = ctx.target.handle.command(RuntimeCommand { operation_id: operation_id.clone(), kind: OperationKind::Input,
@@ -235,7 +250,7 @@ pub async fn steer(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
                 Some(text) => (OperationKind::Steer, json!({"text": text, "turn_id": null})),
                 None => (OperationKind::SteerQueue, json!({"entry_id": null})),
             };
-            steer_headless(text.is_some(), &headless.command(RuntimeCommand { operation_id, kind, payload }).await)
+            steer_headless(text.is_some(), ctx.target.provider == "codex", &headless.command(RuntimeCommand { operation_id, kind, payload }).await)
         }
     };
     answer(&ctx, result)

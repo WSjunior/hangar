@@ -6168,7 +6168,16 @@ async def interrupt(name: str, clear: bool = False):
     await asyncio.to_thread(_recusa_orq, name)
     # Codex: interrompe a propria TUI pelo tmux, mantendo celular e terminal no mesmo controlador.
     if _provider_of(name) == "codex":
-        if not await get_adapter("codex").interrupt(name):
+        try:
+            interrompeu = await get_adapter("codex").interrupt(name)
+        except TransferInProgress:
+            raise
+        except (ValueError, RuntimeError):
+            # Sem terminal o ator do Rust recusou ou não respondeu: código do Codex, não 500.
+            if not _codex_sem_terminal(name):
+                raise
+            raise HTTPException(409, detail=erro("erro_codex_controle", "O Codex não aceitou a alteração; atualize a sessão e tente novamente.")) from None
+        if not interrompeu:
             raise HTTPException(409, detail=erro(
                 "erro_codex_controle", "Não há turno Codex ativo para interromper."))
         return {"ok": True}

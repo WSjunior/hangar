@@ -37,6 +37,7 @@ const MSG_CHANGED: &str = "a pergunta mudou; resposta conservada";
 const MSG_CHAT_UNCONFIRMED: &str = "a pergunta foi fechada, mas a resposta por texto não foi confirmada — confira na sessão antes de responder de novo";
 const MSG_HEADLESS_INVALID: &str = "A pergunta mudou ou não aceita essas respostas. Confira as opções e tente novamente.";
 const MSG_HEADLESS_SEND: &str = "Não foi possível enviar a resposta.";
+const MSG_CODEX_SEND: &str = "Não foi possível confirmar o envio da resposta ao Codex.";
 /// Código com que o ator sem terminal recusa uma resposta inválida (`claude.rs::error`).
 const ACTOR_REFUSAL: &str = "claude_command";
 
@@ -278,11 +279,13 @@ pub fn headless_command(body: &Body) -> Value { json!({"request_id": body.reques
 /// O ator exige o id da pergunta; sem ele quem decide é o Python, que não confere.
 pub fn relays_headless(body: &Body) -> bool { body.request_id.is_null() }
 
-pub fn headless_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
+/// No Codex a recusa do ator (`codex_command`) é falha de envio, como no Python, com a frase do Codex.
+pub fn headless_answer(codex: bool, sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
     let invalid = || (StatusCode::CONFLICT, detail_body("erro_codex_resposta_invalida", MSG_HEADLESS_INVALID, json!({})));
-    let unsent = || (StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_codex_resposta_envio", MSG_HEADLESS_SEND, json!({})));
+    let unsent = || (StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_codex_resposta_envio",
+        if codex { MSG_CODEX_SEND } else { MSG_HEADLESS_SEND }, json!({})));
     match sent {
-        Err(error) if error.code == ACTOR_REFUSAL => invalid(),
+        Err(error) if error.code == ACTOR_REFUSAL && !codex => invalid(),
         Err(_) => unsent(),
         Ok(reply) => match reply.disposition {
             Disposition::Accepted => success(),
@@ -369,7 +372,7 @@ pub async fn answer(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
         EntryHandle::Terminal { target, handle } => terminal(&ctx, &body, target, handle).await,
         // Sem pergunta pendente de referência, o Python decide o que `request_id` ausente significa.
         _ if relays_headless(&body) => return relay(ctx, bytes).await,
-        headless => headless_answer(&headless.command(RuntimeCommand { operation_id: random_hex(16), kind: OperationKind::AnswerQuestions, payload: headless_command(&body) }).await),
+        headless => headless_answer(ctx.target.provider == "codex", &headless.command(RuntimeCommand { operation_id: random_hex(16), kind: OperationKind::AnswerQuestions, payload: headless_command(&body) }).await),
     };
     respond(&ctx, result)
 }
