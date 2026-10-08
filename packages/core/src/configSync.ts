@@ -5,6 +5,7 @@ import * as m from './paraglide/messages';
 export const CONFIG_SYNC_ITEMS = [
   'claude_instructions', 'claude_skills', 'claude_agents', 'claude_hooks', 'claude_plugins',
   'claude_mcp', 'claude_env', 'claude_settings', 'codex', 'engines', 'hangar_prefs',
+  'claude_accounts', 'hangar_appearance',
 ] as const;
 export type ConfigSyncItem = (typeof CONFIG_SYNC_ITEMS)[number];
 
@@ -112,6 +113,8 @@ const ITEM_LABEL: Record<ConfigSyncItem, () => string> = {
   codex: m.shared_config_item_codex,
   engines: m.shared_config_item_engines,
   hangar_prefs: m.shared_config_item_hangar_prefs,
+  claude_accounts: m.shared_config_item_claude_accounts,
+  hangar_appearance: m.shared_config_item_hangar_appearance,
 };
 
 export function configSyncItemLabel(item: ConfigSyncItem): string {
@@ -138,6 +141,9 @@ const WARNING: Record<string, (p: P) => string> = {
   config_sync_item_missing: () => m.config_sync_item_missing(),
   config_sync_unsupported_value: (p) => m.config_sync_unsupported_value({ key: p.key ?? '' }),
   config_sync_link_replaced: (p) => m.config_sync_link_replaced({ entry: p.entry ?? '', target: p.target ?? '' }),
+  config_sync_account_needs_login: (p) => m.config_sync_account_needs_login({ account: p.account ?? '' }),
+  config_sync_account_not_hangar: (p) => m.config_sync_account_not_hangar({ account: p.account ?? '' }),
+  config_sync_account_failed: (p) => m.config_sync_account_failed({ account: p.account ?? '', error: p.error ?? '' }),
 };
 
 /** Linha `progress` do NDJSON do manifesto e da aplicação. `index`/`total` só vêm na troca de item. */

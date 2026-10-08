@@ -2,6 +2,41 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 
+#[non_exhaustive]
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ClaudeCustomizationSkill {
+    pub name: String,
+    #[serde(default)] pub description: String,
+    pub enabled: bool,
+    #[serde(default)] pub blocked: bool,
+}
+
+#[non_exhaustive]
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ClaudeCustomizationPlugin {
+    pub id: String,
+    pub name: String,
+    #[serde(default)] pub description: String,
+    pub enabled: bool,
+    #[serde(default)] pub skills: Vec<ClaudeCustomizationSkill>,
+}
+
+#[non_exhaustive]
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ClaudeCustomizationCatalog {
+    pub plugins: Vec<ClaudeCustomizationPlugin>,
+    pub skills: Vec<ClaudeCustomizationSkill>,
+    #[serde(default)] pub warnings: Vec<String>,
+}
+
+#[non_exhaustive]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ClaudeCustomizations {
+    pub plugins: std::collections::BTreeMap<String, bool>,
+    pub skills: std::collections::BTreeMap<String, bool>,
+    pub blocked_skills: Vec<String>,
+}
+
 // Os formatos da conversa vêm do crate que o hangar-server também usa; os nomes antigos ficam para o
 // resto do app não mudar.
 pub use hangar_api::chat::{ChatEvent, PatchHunk};

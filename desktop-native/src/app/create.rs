@@ -1,6 +1,7 @@
 //! Criar sessão (`CreateSessionSheet.svelte` + `FolderScanner.svelte` do web, no desenho de duas colunas do desktop): a pasta à
 //! esquerda, o formulário à direita. As escolhas finas moram em `choices`; continuar uma conversa antiga, em `resume`.
 pub(super) mod choices;
+mod customizations;
 mod folder_git;
 mod resume;
 
@@ -247,6 +248,7 @@ pub(super) enum CreateReply {
     Providers(u64, Result<Value, Failure>),
     Configs(u64, Result<Value, Failure>),
     ConfigSuggestion(u64, u64, Result<Value, Failure>),
+    Customizations(u64, customizations::CustomizationContext, Result<Value, Failure>),
     Codex(u64, Result<Value, Failure>),
     /// Passo da criação em voo; `None` é consulta que falhou, e o passo anterior fica.
     Step(u64, Option<String>),
@@ -470,6 +472,9 @@ pub(in crate::app) struct NewSession {
     configs: Remote<Vec<ConfigDir>>,
     config: Option<String>,
     config_pick: Option<Picker<choices::AccountChoice>>,
+    customizations: customizations::CustomizationSelection,
+    customizations_search: Entity<InputState>,
+    customizations_focus: FocusHandle,
     codex: Remote<Vec<CodexAccount>>,
     codex_account: String,
     codex_pick: Option<Picker>,
@@ -562,6 +567,7 @@ impl NewSession {
         let menu_query = cx.new(|cx| InputState::new(window, cx).placeholder(tr("ctl_search")));
         let git_name = cx.new(|cx| InputState::new(window, cx).placeholder(tr("folder_git_name")));
         let new_branch_name = cx.new(|cx| InputState::new(window, cx).placeholder(tr_shared("worktree_nome_branch", &[])));
+        let customizations_search = cx.new(|cx| InputState::new(window, cx).placeholder(tr("create_customizations_search")));
         // Com a pasta escolhida e o formulário à vista, o Enter na busca e no Nome começa a sessão, como o botão de baixo.
         let subscriptions = vec![
             cx.subscribe_in(&query, window, |this: &mut Self, _, event: &InputEvent, window, cx| match event {
@@ -580,6 +586,9 @@ impl NewSession {
                 cx.notify()
             }),
             cx.subscribe(&menu_query, |_, _, event: &InputEvent, cx| if matches!(event, InputEvent::Change) { cx.notify() }),
+            cx.subscribe(&customizations_search, |this: &mut Self, _, event: &InputEvent, cx| if matches!(event, InputEvent::Change) {
+                this.refilter_customizations(cx); cx.notify();
+            }),
             cx.subscribe(&git_name, |this: &mut Self, _, event: &InputEvent, cx| match event {
                 InputEvent::Change => cx.notify(),
                 InputEvent::PressEnter { .. } => this.git_create(cx),
@@ -608,7 +617,8 @@ impl NewSession {
             preset: None, new_branch: false, base: String::new(), new_branch_name,
             git: Default::default(), git_name,
             sessions: Remote::default(), same_folder: false, name, provider: "claude", provider_touched: false, providers: Remote::default(), configs: Remote::default(),
-            config: None, config_pick: None, codex: Remote::default(), codex_account: String::new(), codex_pick: None, headless: true, headless_owner: None, headless_touched: false, headless_saving: false,
+            config: None, config_pick: None, customizations: Default::default(), customizations_search,
+            customizations_focus: cx.focus_handle().tab_stop(true), codex: Remote::default(), codex_account: String::new(), codex_pick: None, headless: true, headless_owner: None, headless_touched: false, headless_saving: false,
             difference: false, manual_open: false, manual, choosing: false, choose_error: None, create_seq: 0, creating: false, started: None,
             step: String::new(), error: None, clock: None, models: Remote::default(), model: String::new(), model_choice_touched: false, account_touched: false, effort: String::new(), service_tier: None,
             permission: "bypassPermissions".into(), saved_default: None, permission_touched: false, subagent: String::new(), engine: String::new(), engine_account: String::new(), engine_account_pick: None, model_pick: None, effort_pick: None,
@@ -787,6 +797,7 @@ impl NewSession {
         self.engine_account_pick = None;
         // O catálogo da outra máquina não vale aqui; o novo vem depois das contas.
         self.models.reset();
+        self.sync_customizations(window, cx);
         self.service_tier = None;
         self.before = None;
         self.load_target(cx);
@@ -939,6 +950,7 @@ impl NewSession {
         let seq = self.sessions.start();
         self.request(cx, move |api, send| Box::pin(async move { send(CreateReply::Sessions(seq, api.sessions().await)).await }));
         self.load_archive(window, cx);
+        self.sync_customizations(window, cx);
         cx.notify();
     }
 
@@ -1091,7 +1103,7 @@ impl NewSession {
     }
 
     pub(super) fn can_create(&self, cx: &App) -> bool {
-        !self.is_transfer() && !self.creating && !self.headless_saving && !self.jev.loading && self.picked.is_some() && !self.sessions.loading && (self.compact || !self.name.read(cx).value().trim().is_empty())
+        !self.is_transfer() && !self.customizations.is_open() && !self.creating && !self.headless_saving && !self.jev.loading && self.picked.is_some() && !self.sessions.loading && (self.compact || !self.name.read(cx).value().trim().is_empty())
             && self.provider_ready() == Some(true) && self.codex_ready() && self.engine_ready() && !(self.provider == "codex" && self.context_busy)
             && (!self.compact || ((self.provider != "claude" || (!self.configs.loading && self.configs.ok().is_some_and(|list| !list.is_empty())))
                 && !self.models.loading && self.models.ok().is_some()
@@ -1155,6 +1167,7 @@ impl NewSession {
             if claude && self.proxy_accounts().is_some() { body["engine_account"] = json!(self.engine_account); }
             if self.headless_inherited() { body.as_object_mut().unwrap().remove("headless"); }
         }
+        if let Some(customizations) = self.customization_payload() { body["claude_customizations"] = json!(customizations); }
         // Sonda falhada deixa o Claude por omissão, e isso não é escolha a lembrar.
         if self.provider_touched || self.providers.ok().is_some() {
             body["remember_provider"] = json!(true);
@@ -1328,6 +1341,7 @@ impl NewSession {
                     self.load_models(window, cx);
                 }
             }
+            CreateReply::Customizations(seq, context, result) => self.receive_customizations(seq, context, result, cx),
             CreateReply::Codex(seq, result) => {
                 let list = result.map_err(|e| Hangar::fetch_failure(&e))
                     .and_then(|v| serde_json::from_value::<Vec<CodexAccount>>(v).map_err(|_| tr("invalid_response")));
@@ -1375,6 +1389,7 @@ impl NewSession {
                 }
             }
         }
+        self.sync_customizations(window, cx);
         cx.notify();
         None
     }
@@ -1941,6 +1956,7 @@ impl NewSession {
             self.render_engine_context(cx).map(IntoElement::into_any_element),
             fresh.then(|| self.render_default_check(cx)).flatten().map(IntoElement::into_any_element),
             (fresh && self.provider == "codex").then(|| self.render_context(cx).into_any_element()),
+            self.render_customizations_row(cx).map(IntoElement::into_any_element),
             self.render_more(cx).map(IntoElement::into_any_element),
         ];
         let groups = [("create_group_session", session.into_iter().flatten().collect()), ("create_group_run", run.into_iter().flatten().collect()),
@@ -2427,6 +2443,7 @@ impl Render for NewSession {
         // Topo, margem de baixo do kit e o preenchimento do diálogo: o resto da janela, até a altura do web.
         let height = (window.viewport_size().height - px(DIALOG_TOP + 16. + 40.)).min(px(760.)).max(px(320.));
         let right = match self.picked.clone() {
+            _ if self.customizations.is_open() => self.render_customizations(cx),
             Some(path) => self.render_form(&path, cx),
             None => div().flex_1().min_w_0().h_full().pl(px(20.)).flex().flex_col().items_center().justify_center().gap(px(6.))
                 .child(div().size(px(88.)).mb(px(12.)).rounded_full().bg(theme::hover()).flex().items_center().justify_center()
@@ -2652,8 +2669,10 @@ impl Hangar {
             // Criando, o diálogo não fecha: ele é o único lugar onde o resultado aparece, como o Adicionar de Máquinas.
             let busy = dialog.read(cx).creating || dialog.read(cx).headless_saving;
             let (weak, me) = (weak.clone(), dialog.entity_id());
+            let cancel = dialog.clone();
             popup::dialog(d).w(width).margin_top(px(DIALOG_TOP)).child(dialog.clone()).keyboard(!busy).overlay_closable(!busy).close_button(!busy)
                 .on_ok(enter_to_focused)
+                .on_cancel(move |_, window, cx| !cancel.update(cx, |dialog, cx| dialog.cancel_customizations(window, cx)))
                 .on_close(move |_, _, cx| { let _ = weak.update(cx, |this, _| {
                     if this.new_session.as_ref().is_some_and(|d| d.entity_id() == me) { this.new_session = None; }
                 }); })

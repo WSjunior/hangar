@@ -8,8 +8,8 @@ use gpui_kit::component::progress::Progress;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
-const ITEMS: [&str; 11] = ["claude_instructions", "claude_skills", "claude_agents", "claude_hooks", "claude_plugins",
-    "claude_mcp", "claude_env", "claude_settings", "codex", "engines", "hangar_prefs"];
+const ITEMS: [&str; 13] = ["claude_instructions", "claude_skills", "claude_agents", "claude_hooks", "claude_plugins",
+    "claude_mcp", "claude_env", "claude_settings", "codex", "engines", "hangar_prefs", "claude_accounts", "hangar_appearance"];
 
 fn item_label(item: &str) -> String { tr_shared(&format!("shared_config_item_{item}"), &[]) }
 
@@ -123,6 +123,8 @@ fn warning_text(w: &Warning) -> String {
         ("config_sync_hook_replaced", &["event", "command"]), ("config_sync_invalid_entry", &["entry"]),
         ("config_sync_pref_rejected", &["key", "error"]), ("config_sync_after_failed", &["step", "error"]),
         ("config_sync_item_missing", &[]), ("config_sync_unsupported_value", &["key"]), ("config_sync_link_replaced", &["entry", "target"]),
+        ("config_sync_account_needs_login", &["account"]), ("config_sync_account_not_hangar", &["account"]),
+        ("config_sync_account_failed", &["account", "error"]),
     ];
     let Some((_, names)) = PARAMS.iter().find(|(code, _)| *code == w.code) else { return w.code.clone() };
     let params = names.iter().map(|&n| (n.to_owned(), w.params.get(n).map_or_else(String::new, |v| v.as_str().map_or_else(|| v.to_string(), str::to_owned))))

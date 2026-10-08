@@ -38,7 +38,7 @@ import uuid
 from pathlib import Path
 from typing import AsyncIterator, Callable, Optional
 
-from app import atomico, cotas, diag, log_paths, model_args, pensamento, plugin_bridge, runtime_config, rust_bins
+from app import atomico, claude_customizations, cotas, diag, log_paths, model_args, pensamento, plugin_bridge, runtime_config, rust_bins
 from app.adapters.claude_headless import cano as cano_mod
 from app.adapters.claude_headless import sessions as hl_sessions
 from app.adapters.codex.adapter import _fmt_tok, _format_reset
@@ -977,7 +977,7 @@ class ClaudeHeadlessAdapter:
             raise
 
     def _argv(self, sid: str, *, resume: bool, model=None, effort=None, permission_mode=None,
-              permitir_bypass: bool = False) -> list[str]:
+              permitir_bypass: bool = False, claude_settings: dict | None = None) -> list[str]:
         base = ["claude", "-p", "--output-format", "stream-json", "--input-format", "stream-json",
                 "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio",
                 "--setting-sources", "user,project,local"]
@@ -998,7 +998,8 @@ class ClaudeHeadlessAdapter:
             base.append("--allow-dangerously-skip-permissions")
         # A CLI nasce no `permissions.defaultMode` do settings.json da conta, não num padrão dela;
         # passar o modo explícito é o que faz a sessão nascer no modo que o Hangar mostra.
-        return base + model_args.args_de("claude", model, effort, permission_mode)
+        return claude_customizations.apply_settings(
+            base + model_args.args_de("claude", model, effort, permission_mode), claude_settings)
 
     async def _spawn(self, sess: _Sessao, *, so_reconectar: bool = False) -> bool:
         from app.runtime_adapter import assert_legacy
@@ -1138,7 +1139,8 @@ class ClaudeHeadlessAdapter:
             meta = sess.meta = hl_sessions.update(sess.name, context_window=sess.context_window) or meta
         argv = self._argv(sess.sid, resume=resume, model=sess.model, effort=sess.effort,
                           permission_mode=sess.permission_mode,
-                          permitir_bypass=sess.modo_nao_plan == "bypassPermissions")
+                          permitir_bypass=sess.modo_nao_plan == "bypassPermissions",
+                          claude_settings=meta.get("claude_settings"))
         if meta.get("engine"):
             pre = ["hangar-engine", "--exec", meta["engine"]]
             if meta.get("engine_account"):
@@ -1162,6 +1164,7 @@ class ClaudeHeadlessAdapter:
         env.pop("CP_ENGINE_ACCOUNT_BASE_URL", None)
         env.pop("CP_ENGINE_SERVICE_TIER", None)
         env["CP_SESSION_NAME"] = sess.name
+        env.update(claude_customizations.environment(meta.get("claude_settings")))
         # A ponte do plugin do Hangar desta sessão (S7). No `claude -p` ela serve só ao clique do app pela
         # superfície `desktop` (`press-start` e `opened`, atendidos pelo hangar-server): o aviso e a cópia
         # já chegam ao Hangar pelo canal da superfície. Com os mods desligados, volta vazio. A ponte que o
@@ -1649,6 +1652,10 @@ class ClaudeHeadlessAdapter:
                 # /clear (ou resume que trocou de id): o transcript agora é outro arquivo. O
                 # sidecar é a fonte da lista, e o jsonl_watcher do SSE faz o reset a partir dela.
                 sess.meta = hl_sessions.update(sess.name, session_id=sid) or {**sess.meta, "session_id": sid}
+                try:
+                    await asyncio.to_thread(claude_customizations.remember, sid, sess.meta.get("claude_settings"))
+                except claude_customizations.CustomizationsError as exc:
+                    self._registrar_problema(sess, exc.code, exc.detail)
             # O proxy pode devolver só o modelo base; a rota fixa é a escolha guardada da sessão.
             if ev.get("model") and not sess.meta.get("engine_account"):
                 sess.model = ev["model"]

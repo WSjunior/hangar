@@ -16,6 +16,7 @@ from app import agentpane
 from app import permission_mode as modo_permissao
 from app.config import settings
 from app.mensagens import erro
+from app import claude_customizations as session_customizations
 from app import plugin_bridge
 from app import runtime_config
 from app.names import sanitize_session_name
@@ -328,8 +329,9 @@ def _claude_service_tier(engine: str | None, model: str | None, tier: str | None
 
 
 def _env_sessao(modelo: str | None, jev: bool, provider: str = "claude",
-                nome: str | None = None) -> dict:
+                nome: str | None = None, claude_settings: dict | None = None) -> dict:
     env = runtime_config.env_jev(jev)
+    env.update(session_customizations.environment(claude_settings if provider == "claude" else None))
     # Quem lê a variável é o binário `claude` — com ou sem motor, que só troca o provedor do modelo.
     # Nos outros providers ela não seria lida por ninguém.
     if provider == "claude":
@@ -2143,7 +2145,10 @@ class SessionRegistry:
                tool_output_token_limit: int | None = None,
                transfer_rollout_path: str | None = None,
                engine_account: str | None = None, engine_models: list[dict] | None = None,
-               service_tier: str | None = None) -> SessionInfo:
+               service_tier: str | None = None,
+               claude_customizations: dict | None = None) -> SessionInfo:
+        if claude_customizations is not None and provider != "claude":
+            raise ValueError("plugins e skills por sessão só valem para Claude")
         if service_tier is not None:
             if service_tier not in ("default", "priority"):
                 raise ValueError("service_tier: use default ou priority")
@@ -2214,7 +2219,8 @@ class SessionRegistry:
                                          jev, engine_account,
                                          fixed_account["credential_id"] if fixed_account else None,
                                          fixed_account["base_url"] if fixed_account else None,
-                                         service_tier=service_tier)
+                                         service_tier=service_tier, claude_customizations=claude_customizations)
+        claude_settings = None
         codex_home = None
         if provider == "codex":
             try:
@@ -2350,10 +2356,16 @@ class SessionRegistry:
                 # Retomada de conversa MORTA (vinda do Arquivo): nao existe sessao antiga nem pid
                 # pra consultar. A escolha que vale e a que este create() recebeu.
                 # permission_mode NÃO entra no resume (a sessão retoma no estado dela).
-                cmd = tmux.join_cmd(["claude", "--resume", sid]
-                                 + model_args.args_de(provider, model, effort))
+                claude_settings = session_customizations.prepare(
+                    sid, cwd, tmux.config_dir_de(config_dir), claude_customizations, resume=True)
+                cmd = tmux.join_cmd(session_customizations.apply_settings(
+                    ["claude", "--resume", sid] + model_args.args_de(provider, model, effort),
+                    claude_settings, cwd=cwd))
         else:
             sid = str(uuid.uuid4())
+            if provider == "claude":
+                claude_settings = session_customizations.prepare(
+                    sid, cwd, tmux.config_dir_de(config_dir), claude_customizations, resume=False)
             # spawn_command vem do Adapter do provider (import local: get_adapter->ClaudeAdapter nao
             # importa registry, mas evita qualquer ciclo se um adapter futuro vier a importar daqui).
             from app.adapters import get_adapter
@@ -2361,6 +2373,8 @@ class SessionRegistry:
             # que estar no comando do pane. Os outros providers recebem prompt inicial por /input,
             # e aceitar o argumento neles seria escolha que some calada.
             extra = {"initial_prompt": initial_prompt} if provider == "codex" else {}
+            if claude_settings is not None:
+                extra["claude_settings"] = claude_settings
             if provider == "codex":
                 extra["codex_home"] = codex_home
                 extra["codex_account"] = account.id
@@ -2433,7 +2447,7 @@ class SessionRegistry:
         # a sessao nova, e a limpeza esbarrava na posse em transferencia.
         _retire_waiting_runtime(name)
         PromptQueue(name).clear()
-        env_pane = _env_sessao(subagent_model, jev, provider, nome=name)
+        env_pane = _env_sessao(subagent_model, jev, provider, nome=name, claude_settings=claude_settings)
         if transfer_id is not None:
             key = uuid.uuid4().hex
             codex_sessions.save(name, sid, transfer_rollout_path, cwd, model=model, effort=effort,
@@ -2478,7 +2492,8 @@ class SessionRegistry:
                          jev: bool = False, engine_account: str | None = None,
                          engine_credential_id: str | None = None,
                          engine_account_base_url: str | None = None,
-                         service_tier: str | None = None) -> SessionInfo:
+                         service_tier: str | None = None,
+                         claude_customizations: dict | None = None) -> SessionInfo:
         """Sessão Claude SEM terminal: criar é gravar o sidecar. O processo `claude` sobe no
         primeiro prompt (e de novo, com --resume, depois de um restart do backend) — abrir a
         sessão não custa um processo, e nada aqui depende de tmux."""
@@ -2501,6 +2516,9 @@ class SessionRegistry:
         else:
             sid = str(uuid.uuid4())
         model_args.validar("claude", model, effort, permission_mode)
+        claude_settings = session_customizations.prepare(
+            sid, cwd, tmux.config_dir_de(config_dir), claude_customizations,
+            resume=resume_session_id is not None)
         diag.registrar("sessao.criar_etapa", sessao=name, provider="claude", etapa="confiar_pasta")
         _pretrust_cwd(cwd, config_dir)
         self._forget(name, required=True)
@@ -2517,7 +2535,7 @@ class SessionRegistry:
                                       engine_account=engine_account,
                                       engine_credential_id=engine_credential_id,
                                       engine_account_base_url=engine_account_base_url,
-                                      service_tier=service_tier)
+                                      service_tier=service_tier, claude_settings=claude_settings)
         ThenLink(name).clear()
         # Nome reusado não herda o par externo da sessão antiga.
         _encerrar_pares_externos(name)
@@ -2610,7 +2628,8 @@ class SessionRegistry:
         _esperar_saida([int(cano_pid)] if cano_pid else [])
         self._forget(name)
         if not tmux.new_session(name, meta["cwd"], cmd, meta.get("config_dir"), provider="claude",
-                                **_env_sessao(meta.get("subagent_model"), bool(meta.get("jev")))):
+                                **_env_sessao(meta.get("subagent_model"), bool(meta.get("jev")),
+                                              claude_settings=meta.get("claude_settings"))):
             headless_sessions.restaurar(meta)
             raise ValueError("falha ao criar o terminal; a sessao segue sem terminal")
         self._seed(name, jsonl)
@@ -2671,6 +2690,7 @@ class SessionRegistry:
         service_tier = _claude_service_tier(meta.get("engine"), model, meta.get("service_tier"))
         argv = ["claude", "--resume" if resume else "--session-id", sid] + model_args.args_de(
             "claude", model, meta.get("effort"), meta.get("permission_mode"))
+        argv = session_customizations.apply_settings(argv, meta.get("claude_settings"), cwd=meta.get("cwd"))
         cmd = tmux.join_cmd(argv)
         if meta.get("engine"):
             from app import engines
@@ -2712,6 +2732,10 @@ class SessionRegistry:
         uuid.UUID(sid)
         # Tudo lido do processo vivo ANTES do kill: o /proc (ou o psutil) some com ele.
         ag = _pid_do_agente(pid)
+        claude_settings = session_customizations.from_environment(
+            procinfo._env_var_of(ag, session_customizations.SESSION_SETTINGS_ENV) if ag else None)
+        if claude_settings is None:
+            claude_settings = session_customizations.stored_settings(sid)
         cdir = _config_dir_of(ag) if ag else None
         motor = _engine_of(ag) if ag else None
         engine_account = procinfo._env_var_of(ag, "CP_ENGINE_ACCOUNT") if ag and motor else None
@@ -2774,7 +2798,7 @@ class SessionRegistry:
                                           service_tier=service_tier,
                                           context_window=int(janela) if janela and janela.isdigit() else None,
                                           permission_mode=permission_mode, subagent_model=subagente,
-                                          jev=jev,
+                                          claude_settings=claude_settings, jev=jev,
                                           **({"key": transfer_meta["key"], "transfer_id": transfer_meta["transfer_id"]}
                                              if transfer_meta else {}),
                                           previous_non_plan=((modo_permissao.session_non_plan_mode(jsonl)
@@ -2784,10 +2808,11 @@ class SessionRegistry:
             meta = {"name": name, "cwd": cwd, "session_id": sid, "config_dir": str(cdir) if cdir else None,
                     "engine": motor, "model": modelo, "effort": esforco, "permission_mode": permission_mode,
                     "engine_account": engine_account, "engine_credential_id": engine_credential_id,
-                    "engine_account_base_url": engine_account_base_url, "service_tier": service_tier}
+                    "engine_account_base_url": engine_account_base_url, "service_tier": service_tier,
+                    "claude_settings": claude_settings}
             if not tmux.new_session(name, cwd, self._comando_terminal(meta, resume=Path(jsonl).exists()),
                                     meta["config_dir"], provider="claude",
-                                    **_env_sessao(subagente, jev)):
+                                    **_env_sessao(subagente, jev, claude_settings=claude_settings)):
                 _log.error("troca para sem terminal: sidecar e pane falharam, sessao %s ficou sem nada", name)
             raise
         self._seed(name, jsonl)
@@ -2824,6 +2849,10 @@ class SessionRegistry:
                     "pane_pid": root, "pane_id": pane.get("pane_id"),
                     "subagent_model": procinfo._env_var_of(agent, "CLAUDE_CODE_SUBAGENT_MODEL") if agent else None,
                     "jev": _jev_do_processo(agent)}
+            claude_settings = session_customizations.from_environment(
+                procinfo._env_var_of(agent, session_customizations.SESSION_SETTINGS_ENV) if agent else None)
+            if claude_settings is not None:
+                meta["claude_settings"] = claude_settings
             original = dict(meta)
         from app.conversation_transfer import _META_FIELDS
         public = prepare_origin({key: value for key, value in meta.items() if key in _META_FIELDS})
@@ -3379,7 +3408,13 @@ class SessionRegistry:
         # anexa ao nome. Nada aqui toca o tmux.
         # "claude" literal: esta funcao ja recusa provider nao-Claude acima
         # (_refuse_non_claude_resume), e nao ha variavel `provider` neste escopo.
+        current_jsonl, current_tracked = self.resolve_tracked(name, cwd, pid=pane.get("pid"))
+        current_sid = Path(current_jsonl).stem if current_jsonl and current_tracked else None
+        process_settings = session_customizations.from_environment(
+            procinfo._env_var_of(ag, session_customizations.SESSION_SETTINGS_ENV) if ag else None)
+        claude_settings = session_customizations.resume_settings(session_id, current_sid, process_settings)
         argv = ["claude", "--resume", session_id] + model_args.args_de("claude", modelo, esforco)
+        argv = session_customizations.apply_settings(argv, claude_settings, cwd=cwd)
         cmd = tmux.join_cmd(argv)
         if motor:
             # Prefixo remontado JUNTO com a escolha: preservar so a flag deixaria a sessao
@@ -3405,7 +3440,7 @@ class SessionRegistry:
             cmd = tmux.join_cmd(pre + ["--"]) + " " + cmd
         tmux.kill_session(name)
         self._forget(name)
-        env_pane = _env_sessao(subagente, jev)
+        env_pane = _env_sessao(subagente, jev, claude_settings=claude_settings)
         if not tmux.new_session(name, cwd, cmd, str(cdir) if cdir else None, **env_pane):
             raise ValueError("falha ao relançar a sessao")
         if service_tier is not None:
