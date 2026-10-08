@@ -1,0 +1,284 @@
+[
+ {
+  "name": "one_chat_one_answer",
+  "answers": [
+   {
+    "kind": "option",
+    "value": null,
+    "labels": [
+     "A"
+    ]
+   },
+   {
+    "kind": "chat",
+    "value": null,
+    "labels": []
+   }
+  ],
+  "questions": [
+   "Cor?",
+   "Tamanho?"
+  ],
+  "expect": "Sobre \u00abTamanho?\u00bb prefiro conversar antes de responder.\nJ\u00e1 respondi:\n- Cor? \u2192 A"
+ },
+ {
+  "name": "several_chats",
+  "answers": [
+   {
+    "kind": "option",
+    "value": null,
+    "labels": [
+     "A"
+    ]
+   },
+   {
+    "kind": "chat",
+    "value": null,
+    "labels": []
+   },
+   {
+    "kind": "chat",
+    "value": null,
+    "labels": []
+   }
+  ],
+  "questions": [
+   "Cor?",
+   "Tamanho?",
+   "Forma?"
+  ],
+  "expect": "Sobre estas perguntas prefiro conversar antes de responder:\n- Tamanho?\n- Forma?\nJ\u00e1 respondi:\n- Cor? \u2192 A"
+ },
+ {
+  "name": "no_sidecar",
+  "answers": [
+   {
+    "kind": "option",
+    "value": null,
+    "labels": [
+     "A"
+    ]
+   },
+   {
+    "kind": "chat",
+    "value": null,
+    "labels": []
+   }
+  ],
+  "questions": null,
+  "expect": "Sobre uma das perguntas prefiro conversar antes de responder.\nJ\u00e1 respondi:\n- A"
+ },
+ {
+  "name": "sidecar_shorter_than_answers",
+  "answers": [
+   {
+    "kind": "option",
+    "value": null,
+    "labels": [
+     "A"
+    ]
+   },
+   {
+    "kind": "text",
+    "value": "oi",
+    "labels": []
+   },
+   {
+    "kind": "chat",
+    "value": null,
+    "labels": []
+   }
+  ],
+  "questions": [
+   "Cor?"
+  ],
+  "expect": "Sobre uma das perguntas prefiro conversar antes de responder.\nJ\u00e1 respondi:\n- Cor? \u2192 A\n- oi"
+ },
+ {
+  "name": "chat_without_question_text",
+  "answers": [
+   {
+    "kind": "option",
+    "value": null,
+    "labels": [
+     "A"
+    ]
+   },
+   {
+    "kind": "chat",
+    "value": null,
+    "labels": []
+   }
+  ],
+  "questions": [
+   "Cor?",
+   ""
+  ],
+  "expect": "Sobre uma das perguntas prefiro conversar antes de responder.\nJ\u00e1 respondi:\n- Cor? \u2192 A"
+ },
+ {
+  "name": "only_chat",
+  "answers": [
+   {
+    "kind": "chat",
+    "value": null,
+    "labels": []
+   }
+  ],
+  "questions": [
+   "Cor?"
+  ],
+  "expect": ""
+ },
+ {
+  "name": "only_empty_answers",
+  "answers": [
+   {
+    "kind": "text",
+    "value": "",
+    "labels": []
+   },
+   {
+    "kind": "chat",
+    "value": null,
+    "labels": []
+   }
+  ],
+  "questions": [
+   "Cor?"
+  ],
+  "expect": ""
+ },
+ {
+  "name": "text_answer",
+  "answers": [
+   {
+    "kind": "text",
+    "value": "oi",
+    "labels": []
+   },
+   {
+    "kind": "chat",
+    "value": null,
+    "labels": []
+   }
+  ],
+  "questions": [
+   "Cor?",
+   "Tamanho?"
+  ],
+  "expect": "Sobre \u00abTamanho?\u00bb prefiro conversar antes de responder.\nJ\u00e1 respondi:\n- Cor? \u2192 oi"
+ },
+ {
+  "name": "multi_labels_joined",
+  "answers": [
+   {
+    "kind": "option",
+    "value": null,
+    "labels": [
+     "A",
+     "C"
+    ]
+   },
+   {
+    "kind": "chat",
+    "value": null,
+    "labels": []
+   }
+  ],
+  "questions": [
+   "Cor?",
+   "Tamanho?"
+  ],
+  "expect": "Sobre \u00abTamanho?\u00bb prefiro conversar antes de responder.\nJ\u00e1 respondi:\n- Cor? \u2192 A, C"
+ },
+ {
+  "name": "option_without_labels_is_skipped",
+  "answers": [
+   {
+    "kind": "option",
+    "value": null,
+    "labels": []
+   },
+   {
+    "kind": "option",
+    "value": null,
+    "labels": [
+     "A"
+    ]
+   },
+   {
+    "kind": "chat",
+    "value": null,
+    "labels": []
+   }
+  ],
+  "questions": [
+   "Cor?",
+   "Tamanho?",
+   "Forma?"
+  ],
+  "expect": "Sobre \u00abForma?\u00bb prefiro conversar antes de responder.\nJ\u00e1 respondi:\n- Tamanho? \u2192 A"
+ },
+ {
+  "name": "answer_without_question_is_a_bare_line",
+  "answers": [
+   {
+    "kind": "option",
+    "value": null,
+    "labels": [
+     "A"
+    ]
+   },
+   {
+    "kind": "text",
+    "value": "oi",
+    "labels": []
+   }
+  ],
+  "questions": null,
+  "expect": "Sobre uma das perguntas prefiro conversar antes de responder.\nJ\u00e1 respondi:\n- A\n- oi"
+ },
+ {
+  "name": "no_chat_at_all",
+  "answers": [
+   {
+    "kind": "option",
+    "value": null,
+    "labels": [
+     "A"
+    ]
+   },
+   {
+    "kind": "text",
+    "value": "oi",
+    "labels": []
+   }
+  ],
+  "questions": [
+   "Cor?",
+   "Tamanho?"
+  ],
+  "expect": "Sobre uma das perguntas prefiro conversar antes de responder.\nJ\u00e1 respondi:\n- Cor? \u2192 A\n- Tamanho? \u2192 oi"
+ },
+ {
+  "name": "accents_and_quotes",
+  "answers": [
+   {
+    "kind": "text",
+    "value": "n\u00e3o \u00absei\u00bb",
+    "labels": []
+   },
+   {
+    "kind": "chat",
+    "value": null,
+    "labels": []
+   }
+  ],
+  "questions": [
+   "Qual \u00e9 o \u00f4nus?",
+   "Tamanho?"
+  ],
+  "expect": "Sobre \u00abTamanho?\u00bb prefiro conversar antes de responder.\nJ\u00e1 respondi:\n- Qual \u00e9 o \u00f4nus? \u2192 n\u00e3o \u00absei\u00bb"
+ }
+]

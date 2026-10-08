@@ -422,3 +422,274 @@ fn bootstrap_new_process_preserves_tier_but_live_resume_does_not_override() {
         else { assert_eq!(requests[1]["params"]["serviceTier"],"priority"); }
     }
 }
+
+fn published(effects:&[Effect],name:&str) -> Vec<String> {
+    effects.iter().filter_map(|e|match e { Effect::Publish { channel,data } if channel == name=>data["text"].as_str().map(str::to_owned),_=>None }).collect()
+}
+
+#[test]
+fn stop_terminates_the_commands_the_interrupted_turn_was_running() {
+    let mut engine = engine();
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),10.0);
+    line(&mut engine,json!({"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-1",
+        "item":{"type":"commandExecution","id":"exec-1","processId":"43041","command":"sleep 300"}}}),10.5);
+    line(&mut engine,json!({"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-1",
+        "item":{"type":"commandExecution","id":"exec-2","processId":"43042","command":"true"}}}),10.6);
+    line(&mut engine,json!({"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1",
+        "item":{"type":"commandExecution","id":"exec-2","processId":"43042"}}}),10.7);
+    let interrupt = frames(&engine.command(command(OperationKind::Interrupt,json!({})),clock(11.0)).unwrap())[0].clone();
+    assert_eq!(interrupt["method"],"turn/interrupt");
+    let effects = line(&mut engine,json!({"id":interrupt["id"],"result":{}}),11.1);
+    let terminate:Vec<_> = frames(&effects).into_iter().filter(|f|f["method"] == "thread/backgroundTerminals/terminate").collect();
+    assert_eq!(terminate.len(),1);
+    assert_eq!(terminate[0]["params"],json!({"threadId":"thread-1","processId":"43041"}));
+    assert!(effects.iter().any(|e|matches!(e,Effect::Reply { operation_id,disposition:Disposition::Accepted,.. } if operation_id == "op-1")));
+}
+
+#[test]
+fn usage_limit_has_its_own_problem_and_survives_the_failed_turn() {
+    let mut engine = engine();
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),10.0);
+    line(&mut engine,json!({"method":"error","params":{"threadId":"thread-1","turnId":"turn-1","willRetry":true,
+        "error":{"message":"Rate limit reached","codexErrorInfo":"rateLimitExceeded"}}}),10.5);
+    assert_eq!(engine.view()["problema"],"codex_limite_uso");
+    line(&mut engine,json!({"method":"error","params":{"threadId":"thread-1","turnId":"turn-1","willRetry":false,
+        "error":{"message":"You've hit your usage limit.","codexErrorInfo":"usageLimitExceeded"}}}),11.0);
+    line(&mut engine,json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"failed",
+        "error":{"message":"turn failed"}}}}),11.5);
+    assert_eq!(engine.view()["problema"],"codex_limite_uso");
+    assert_eq!(engine.view()["problema_detalhe"],"You've hit your usage limit.");
+}
+
+#[test]
+fn reasoning_summary_streams_on_the_thinking_channel_and_input_asks_for_it() {
+    let mut engine = engine();
+    let start = frames(&engine.command(command(OperationKind::Input,json!({"text":"oi"})),clock(9.0)).unwrap())[0].clone();
+    assert_eq!(start["params"]["summary"],"detailed");
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),10.0);
+    let first = line(&mut engine,json!({"method":"item/reasoning/summaryTextDelta","params":{"threadId":"thread-1","turnId":"turn-1",
+        "itemId":"rs-1","summaryIndex":0,"delta":"**Plano**"}}),10.1);
+    assert_eq!(published(&first,"thinking"),vec!["**Plano**"]);
+    line(&mut engine,json!({"method":"item/reasoning/summaryPartAdded","params":{"threadId":"thread-1","turnId":"turn-1",
+        "itemId":"rs-1","summaryIndex":1}}),11.0);
+    let second = line(&mut engine,json!({"method":"item/reasoning/summaryTextDelta","params":{"threadId":"thread-1","turnId":"turn-1",
+        "itemId":"rs-1","summaryIndex":1,"delta":"Depois"}}),11.3);
+    assert_eq!(published(&second,"thinking"),vec!["**Plano**\n\nDepois"]);
+    let answer = line(&mut engine,json!({"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-1",
+        "item":{"type":"agentMessage","id":"msg-1","text":""}}}),12.0);
+    assert_eq!(published(&answer,"thinking"),vec![""]);
+}
+
+#[test]
+fn turn_cut_by_a_dead_app_server_is_reported_after_reconnect() {
+    let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true,"in_progress":true,"turn_id":"turn-1"}),2,clock(10.0));
+    let init = frames(&engine.bootstrap(true,"boot".into()).unwrap())[0].clone();
+    let resume = frames(&line(&mut engine,json!({"id":init["id"],"result":{}}),10.1))[1].clone();
+    assert_eq!(resume["method"],"thread/resume");
+    let effects = line(&mut engine,json!({"id":resume["id"],"result":{"thread":{"id":"thread-1","status":{"type":"idle"}}}}),10.2);
+    let read = frames(&effects).into_iter().find(|f|f["method"] == "thread/read").unwrap();
+    assert_eq!(read["params"]["includeTurns"],true);
+    line(&mut engine,json!({"id":read["id"],"result":{"thread":{"id":"thread-1","status":{"type":"idle"},
+        "turns":[{"id":"turn-1","status":"interrupted"}]}}}),10.3);
+    assert_eq!(engine.view()["problema"],"codex_turno_cortado");
+}
+
+#[test]
+fn finished_turn_after_reconnect_is_not_reported_as_cut() {
+    let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true,"in_progress":true}),2,clock(10.0));
+    let init = frames(&engine.bootstrap(true,"boot".into()).unwrap())[0].clone();
+    let resume = frames(&line(&mut engine,json!({"id":init["id"],"result":{}}),10.1))[1].clone();
+    let effects = line(&mut engine,json!({"id":resume["id"],"result":{"thread":{"id":"thread-1","status":{"type":"idle"}}}}),10.2);
+    let read = frames(&effects).into_iter().find(|f|f["method"] == "thread/read").unwrap();
+    line(&mut engine,json!({"id":read["id"],"result":{"thread":{"id":"thread-1","status":{"type":"idle"},
+        "turns":[{"id":"turn-1","status":"completed"}]}}}),10.3);
+    assert!(engine.view()["problema"].is_null());
+}
+
+fn diags(effects:&[Effect]) -> Vec<(DiagEvent,String)> {
+    effects.iter().filter_map(|e|match e { Effect::Diag { event,code }=>Some((*event,code.clone())),_=>None }).collect()
+}
+
+#[test]
+fn other_codex_version_warns_once_on_initialize() {
+    let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true}),1,clock(10.0));
+    let effects = engine.bootstrap(true,"boot".into()).unwrap();
+    let id = frames(&effects)[0]["id"].clone();
+    let effects = line(&mut engine,json!({"id":id,"result":{"userAgent":"hangar/9.1.0 (x)"}}),11.0);
+    assert_eq!(diags(&effects),vec![(DiagEvent::CodexVersion,"codex_9_1".into())]);
+    assert_eq!(engine.view()["problema"],"codex_versao_nao_conferida");
+    assert!(engine.view()["problema_detalhe"].as_str().unwrap().contains("9.1.0"));
+}
+
+#[test]
+fn checked_codex_version_is_silent() {
+    let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true}),1,clock(10.0));
+    let effects = engine.bootstrap(true,"boot".into()).unwrap();
+    let id = frames(&effects)[0]["id"].clone();
+    let ua = format!("hangar/{} (x)",hangar_codex::version::CHECKED);
+    let effects = line(&mut engine,json!({"id":id,"result":{"userAgent":ua}}),11.0);
+    assert!(diags(&effects).is_empty());
+    assert!(engine.view()["problema"].is_null());
+}
+
+#[test]
+fn notification_with_wrong_type_is_dropped_and_reported() {
+    let mut engine = engine();
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),10.0);
+    let effects = line(&mut engine,json!({"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","delta":5}}),11.0);
+    assert_eq!(diags(&effects),vec![(DiagEvent::CodexDecode,"item_agentmessage_delta".into())]);
+    assert!(effects.iter().any(|e|matches!(e,Effect::Policy { kind,.. } if kind == "unknown_private")));
+    let effects = line(&mut engine,json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}),12.0);
+    assert!(effects.iter().any(|e|matches!(e,Effect::WakeQueue)));
+    assert_eq!(engine.view()["state"],"idle");
+}
+
+#[test]
+fn repeated_malformed_notification_reports_privately_once() {
+    let mut engine = engine();
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),10.0);
+    let mut effects = line(&mut engine,json!({"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","delta":5}}),11.0);
+    effects.extend(line(&mut engine,json!({"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","delta":6}}),11.1));
+    assert_eq!(effects.iter().filter(|e|matches!(e,Effect::Policy { kind,.. } if kind == "unknown_private")).count(),1);
+    assert_eq!(diags(&effects).len(),2);
+}
+
+#[test]
+fn malformed_reply_reports_only_its_shape() {
+    let mut engine = engine();
+    let request = frames(&engine.command(command(OperationKind::ReadSettings,json!({})),clock(10.0)).unwrap())[0].clone();
+    let effects = line(&mut engine,json!({"id":request["id"],"result":{"thread":"x","b":1}}),11.0);
+    let payload = effects.iter().find_map(|e|match e { Effect::Policy { kind,payload,.. } if kind == "unknown_private" => Some(payload.clone()),_=>None }).unwrap();
+    assert_eq!(payload["event"],json!({"method":"thread/read","result_keys":["thread","b"]}));
+    let mut engine = self::engine();
+    let request = frames(&engine.command(command(OperationKind::ReadSettings,json!({})),clock(12.0)).unwrap())[0].clone();
+    let effects = line(&mut engine,json!({"id":request["id"],"result":"texto"}),13.0);
+    let payload = effects.iter().find_map(|e|match e { Effect::Policy { kind,payload,.. } if kind == "unknown_private" => Some(payload.clone()),_=>None }).unwrap();
+    assert_eq!(payload["event"],json!({"method":"thread/read","result_type":"string"}));
+}
+
+#[test]
+fn unknown_notification_is_silent() {
+    let mut engine = engine();
+    let effects = line(&mut engine,json!({"method":"thread/novidade","params":{"threadId":"thread-1"}}),10.0);
+    assert!(diags(&effects).is_empty());
+    assert!(effects.is_empty());
+}
+
+#[test]
+fn unknown_server_request_still_gets_method_not_found() {
+    let mut engine = engine();
+    let effects = line(&mut engine,json!({"id":77,"method":"foo/bar","params":{"threadId":"thread-1"}}),10.0);
+    let reply = frames(&effects).into_iter().find(|f|f["id"] == 77).unwrap();
+    assert_eq!(reply["error"]["code"],-32601);
+    assert!(reply["error"]["message"].as_str().unwrap().contains("foo/bar"));
+}
+
+#[test]
+fn reply_with_wrong_type_is_reported_and_engine_stays_usable() {
+    let mut engine = engine();
+    let request = frames(&engine.command(command(OperationKind::ReadSettings,json!({})),clock(10.0)).unwrap())[0].clone();
+    assert_eq!(request["method"],"thread/read");
+    let effects = line(&mut engine,json!({"id":request["id"],"result":{"thread":"x"}}),11.0);
+    assert_eq!(diags(&effects),vec![(DiagEvent::CodexDecode,"thread_read".into())]);
+    assert!(effects.iter().any(|e|matches!(e,Effect::Policy { kind,payload,.. } if kind == "unknown_private" && payload["kind"] == "decode:thread/read")));
+    assert!(effects.iter().any(|e|matches!(e,Effect::Reply { disposition:Disposition::Accepted,.. })));
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),12.0);
+    assert_eq!(engine.view()["state"],"working");
+}
+
+#[test]
+fn undecodable_cut_check_read_is_reported_once() {
+    let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true,"in_progress":true}),2,clock(10.0));
+    let init = frames(&engine.bootstrap(true,"boot".into()).unwrap())[0].clone();
+    let resume = frames(&line(&mut engine,json!({"id":init["id"],"result":{}}),10.1))[1].clone();
+    let effects = line(&mut engine,json!({"id":resume["id"],"result":{"thread":{"id":"thread-1","status":{"type":"idle"}}}}),10.2);
+    let read = frames(&effects).into_iter().find(|f|f["method"] == "thread/read").unwrap();
+    let effects = line(&mut engine,json!({"id":read["id"],"result":{"thread":"x"}}),10.3);
+    assert_eq!(effects.iter().filter(|e|matches!(e,Effect::Policy { kind,.. } if kind == "unknown_private")).count(),1);
+    assert_eq!(diags(&effects),vec![(DiagEvent::CodexDecode,"thread_read".into())]);
+    assert!(engine.view()["problema"].is_null());
+}
+
+#[test]
+fn undecodable_user_input_request_still_asks_from_the_raw_line() {
+    let mut engine = engine();
+    let effects = line(&mut engine,json!({"id":5,"method":"item/tool/requestUserInput","params":{"threadId":"thread-1",
+        "questions":[{"id":"q1","header":"H","question":"Qual?","isOther":"sim"}]}}),10.0);
+    assert_eq!(diags(&effects),vec![(DiagEvent::CodexDecode,"item_tool_requestuserinput".into())]);
+    let view = engine.view();
+    assert_eq!(view["state"],"awaiting_input");
+    assert_eq!(view["codex_question"]["questions"][0]["id"],"q1");
+    assert_eq!(view["codex_question"]["questions"][0]["isOther"],false);
+    assert_eq!(view["codex_question"]["questions"][0]["options"],json!([]));
+    assert!(diags(&line(&mut engine,json!({"method":"thread/novidade","params":{"threadId":"thread-1"}}),10.1)).is_empty());
+}
+
+#[test]
+fn user_input_request_without_questions_asks_nothing() {
+    let mut engine = engine();
+    line(&mut engine,json!({"id":6,"method":"item/tool/requestUserInput","params":{"threadId":"thread-1"}}),10.0);
+    assert!(engine.view()["codex_question"].is_null());
+}
+
+#[test]
+fn undecodable_turn_completed_still_closes_the_turn() {
+    let mut engine = engine();
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),10.0);
+    let effects = line(&mut engine,json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":5}}}),11.0);
+    assert_eq!(diags(&effects),vec![(DiagEvent::CodexDecode,"turn_completed".into())]);
+    assert!(effects.iter().any(|e|matches!(e,Effect::WakeQueue)));
+    assert_eq!(engine.view()["state"],"idle");
+}
+
+#[test]
+fn undecodable_approval_shows_the_raw_command() {
+    let mut engine = engine();
+    line(&mut engine,json!({"id":3,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-1",
+        "command":"rm -rf build","cwd":"/repo","reason":5}}),10.0);
+    assert_eq!(engine.view()["question"],"Rodar `rm -rf build` em /repo?");
+}
+
+#[test]
+fn unreadable_codex_version_is_reported_without_problem() {
+    let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true}),1,clock(10.0));
+    let effects = engine.bootstrap(true,"boot".into()).unwrap();
+    let id = frames(&effects)[0]["id"].clone();
+    let effects = line(&mut engine,json!({"id":id,"result":{"userAgent":"sem versão"}}),11.0);
+    assert_eq!(diags(&effects),vec![(DiagEvent::CodexVersion,"codex_desconhecida".into())]);
+    assert!(engine.view()["problema"].is_null());
+}
+
+#[test]
+fn undecodable_turn_completed_keeps_the_retry_problem() {
+    let mut engine = engine();
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),10.0);
+    line(&mut engine,json!({"method":"error","params":{"threadId":"thread-1","turnId":"turn-1","willRetry":true,
+        "error":{"message":"stream disconnected"}}}),10.5);
+    assert_eq!(engine.view()["problema"],"codex_sem_conexao");
+    let effects = line(&mut engine,json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":5}}}),11.0);
+    assert!(effects.iter().any(|e|matches!(e,Effect::WakeQueue)));
+    assert_eq!(engine.view()["state"],"idle");
+    assert_eq!(engine.view()["problema"],"codex_sem_conexao");
+}
+
+#[test]
+fn undecodable_turn_completed_of_another_turn_is_ignored() {
+    let mut engine = engine();
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-2"}}}),10.0);
+    line(&mut engine,json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":5}}}),11.0);
+    assert_eq!(engine.view()["state"],"working");
+}
+
+#[test]
+fn unreadable_command_approval_offers_no_session_wide_grant() {
+    let mut engine = engine();
+    line(&mut engine,json!({"id":4,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-1",
+        "command":["rm","-rf","build"],"cwd":"/repo"}}),10.0);
+    let view = engine.view();
+    assert_eq!(view["question"],"Rodar um comando que o Hangar não conseguiu ler em /repo?");
+    assert_eq!(view["options"],json!(["Permitir","Negar"]));
+    assert!(engine.command(command(OperationKind::Select,json!({"option":3})),clock(10.1)).is_err());
+    let answer = frames(&engine.command(command(OperationKind::Select,json!({"option":2})),clock(10.2)).unwrap());
+    assert_eq!(answer[0]["result"]["decision"],"decline");
+}

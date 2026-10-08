@@ -7,7 +7,6 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from types import SimpleNamespace
 
 from app import diag, log_paths
 
@@ -37,12 +36,12 @@ async def execute(kind: str, payload: dict, metadata: dict) -> dict:
         return {"ok": False, "error_type": type(exc).__name__}
 
 
-def _quota(metadata):
+def _quota(metadata, fresh=False):
     from app import cotas
     root = Path(metadata.get("config_dir") or Path.home() / ".claude").resolve()
     with _quota_lock:
         cached = _quota_cache.get(root)
-        if cached is not None and time.monotonic() - cached[0] < 300:
+        if not fresh and cached is not None and time.monotonic() - cached[0] < 300:
             return cached[1]
         try:
             value = next((account.model_dump() for account in cotas.listar_cotas()
@@ -53,6 +52,13 @@ def _quota(metadata):
             value = cached[1] if cached else None
         _quota_cache[root] = (time.monotonic(), value)
         return value
+
+
+def quota_windows(config_dir):
+    """Janelas da conta que o ator Rust põe na linha de status (as por modelo ficam fora).
+    Sem cache de 300 s aqui: o do ator Rust é o único."""
+    quota = _quota({"config_dir": config_dir}, fresh=True)
+    return [window for window in (quota or {}).get("janelas", []) if not window.get("por_modelo")]
 
 
 def _unknown(payload, metadata):
@@ -156,38 +162,6 @@ def run(kind: str, payload: dict, metadata: dict) -> dict:
         from app import runtime_terminal
         return {"terminal_facts":runtime_terminal.facts, "terminal_publish":runtime_terminal.publish,
             "terminal_plugin_control":runtime_terminal.plugin_control}[kind](payload, metadata)
-    if kind == "prepare_prompt":
-        text = payload.get("text")
-        if not isinstance(text, str):
-            raise ValueError("entrada sem texto")
-        if provider == "claude":
-            from app.adapters.claude_headless.adapter import _blocos_do_prompt
-            from app import uds_messaging
-            content, notices = _blocos_do_prompt(text)
-            sender, _ = uds_messaging.separar_prefixo(text)
-            return {"content": content, "notices": notices, "native_candidate":sender is not None}
-        return {"input": [{"type": "text", "text": text}],
-                "skill_name":text.lstrip().split()[0][1:] if text.lstrip().startswith("/") else None}
-    if kind == "skill_catalog":
-        from app.adapters.codex.chat_controls import skills_do_catalogo
-        skills = skills_do_catalogo(payload["catalog"])
-        return {"skill":next((skill for skill in skills if skill["name"] == payload.get("name")), None)}
-    if kind == "answer_body":
-        from app.adapters.claude_headless.adapter import respostas_do_app
-        body, conversation = respostas_do_app(payload["questions"], payload["answers"])
-        return {"body": body, "conversation": conversation}
-    if kind == "format_status":
-        if provider == "codex":
-            from app.adapters.codex.adapter import format_status_line
-            return {"status_line": format_status_line(payload.get("model"), payload.get("effort"), payload.get("token_usage"), payload.get("rate_limits"))}
-        from app.adapters.claude_headless.adapter import ClaudeHeadlessAdapter, _hora_local
-        quota = _quota(metadata)
-        windows = [SimpleNamespace(**window) for window in (quota or {}).get("janelas", []) if not window.get("por_modelo")]
-        data = SimpleNamespace(model=payload.get("model"), effort=payload.get("effort"), usage=payload.get("usage"),
-            context_window=payload.get("context_window"), cost=payload.get("cost"), meta=metadata, janelas=windows)
-        rate = payload.get("rate_limit_info") or {}
-        return {"status_line": ClaudeHeadlessAdapter.status_line(None, data),
-                "limit_reset": _hora_local(rate.get("resetsAt")) if rate.get("status") == "rejected" else None}
     if kind == "last_usage":
         from app.adapters.claude_headless.adapter import _uso_da_ultima_chamada
         path = Path(metadata["jsonl"])
@@ -201,8 +175,6 @@ def run(kind: str, payload: dict, metadata: dict) -> dict:
         from app.adapters.claude_headless.adapter import _marca_config
         recorded = (metadata.get("cano") or {}).get("config_marca")
         return {"reason": "config" if recorded and _marca_config(metadata.get("config_dir")) != recorded else None}
-    if kind == "quota":
-        return {"account": _quota(metadata)}
     if kind == "native_message":
         return native_message(payload, metadata)
     if kind == "unknown_private":
@@ -238,17 +210,4 @@ def run(kind: str, payload: dict, metadata: dict) -> dict:
             if updated is None:
                 raise RuntimeError("sidecar desapareceu durante a alteração")
         return {"updated": True}
-    if kind == "session.marker":
-        if provider != "claude" or payload:
-            raise ValueError("marcador inválido")
-        metadata["validate"]()
-        from app.adapters.claude_headless import sessions
-        sessions.marcar_troca(metadata["name"])
-        return {"marked": True}
-    if kind == "diag.error":
-        code = payload.get("error_type")
-        if not isinstance(code, str) or not code.isidentifier() or len(code) > 128:
-            raise ValueError("tipo de falha inválido")
-        diag.registrar("runtime.service_failed", "erro", codigo=code)
-        return {"recorded": True}
     raise ValueError("serviço não permitido")

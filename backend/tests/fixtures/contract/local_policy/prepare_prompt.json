@@ -1,0 +1,962 @@
+{
+ "tz": "BRT3",
+ "cases": [
+  {
+   "name": "plain",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "só texto, sem imagem"
+   },
+   "files": null,
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "só texto, sem imagem"
+     }
+    ],
+    "notices": [],
+    "native_candidate": false
+   }
+  },
+  {
+   "name": "one_image",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "veja 📎 imagem: {ROOT}/a.png"
+   },
+   "files": {
+    "a.png": {
+     "b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "veja 📎 imagem: {ROOT}/a.png"
+     },
+     {
+      "type": "image",
+      "source": {
+       "type": "base64",
+       "media_type": "image/png",
+       "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+      }
+     }
+    ],
+    "notices": [],
+    "native_candidate": false
+   }
+  },
+  {
+   "name": "two_images",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "x 📎 imagem: {ROOT}/a.jpg 📎 imagem: {ROOT}/b.webp"
+   },
+   "files": {
+    "a.jpg": {
+     "b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+    },
+    "b.webp": {
+     "b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "x 📎 imagem: {ROOT}/a.jpg 📎 imagem: {ROOT}/b.webp"
+     },
+     {
+      "type": "image",
+      "source": {
+       "type": "base64",
+       "media_type": "image/jpeg",
+       "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+      }
+     },
+     {
+      "type": "image",
+      "source": {
+       "type": "base64",
+       "media_type": "image/webp",
+       "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+      }
+     }
+    ],
+    "notices": [],
+    "native_candidate": false
+   }
+  },
+  {
+   "name": "uppercase_suffix",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "📎 imagem: {ROOT}/A.PNG"
+   },
+   "files": {
+    "A.PNG": {
+     "b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "📎 imagem: {ROOT}/A.PNG"
+     },
+     {
+      "type": "image",
+      "source": {
+       "type": "base64",
+       "media_type": "image/png",
+       "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+      }
+     }
+    ],
+    "notices": [],
+    "native_candidate": false
+   }
+  },
+  {
+   "name": "missing_file",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "📎 imagem: {ROOT}/nope.png"
+   },
+   "files": null,
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "📎 imagem: {ROOT}/nope.png"
+     }
+    ],
+    "notices": [
+     "⚠️ Imagem não anexada (não abre: No such file or directory); só o path foi: nope.png"
+    ],
+    "native_candidate": false
+   }
+  },
+  {
+   "name": "one_ok_one_missing",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "📎 imagem: {ROOT}/a.gif 📎 imagem: {ROOT}/nope.jpeg"
+   },
+   "files": {
+    "a.gif": {
+     "b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "📎 imagem: {ROOT}/a.gif 📎 imagem: {ROOT}/nope.jpeg"
+     },
+     {
+      "type": "image",
+      "source": {
+       "type": "base64",
+       "media_type": "image/gif",
+       "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+      }
+     }
+    ],
+    "notices": [
+     "⚠️ Imagem não anexada (não abre: No such file or directory); só o path foi: nope.jpeg"
+    ],
+    "native_candidate": false
+   }
+  },
+  {
+   "name": "directory_named_like_image",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "📎 imagem: {ROOT}/dir.png"
+   },
+   "files": {
+    "dir.png": {
+     "dir": true
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "📎 imagem: {ROOT}/dir.png"
+     }
+    ],
+    "notices": [
+     "⚠️ Imagem não anexada (não abre: Is a directory); só o path foi: dir.png"
+    ],
+    "native_candidate": false
+   }
+  },
+  {
+   "name": "over_cap_7mb",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "📎 imagem: {ROOT}/big.png"
+   },
+   "files": {
+    "big.png": {
+     "size": 7340032
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "📎 imagem: {ROOT}/big.png"
+     }
+    ],
+    "notices": [
+     "⚠️ Imagem não anexada (7 MB, teto 5 MB); só o path foi: big.png"
+    ],
+    "native_candidate": false
+   }
+  },
+  {
+   "name": "over_cap_by_one_byte",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "📎 imagem: {ROOT}/big.png"
+   },
+   "files": {
+    "big.png": {
+     "size": 5242881
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "📎 imagem: {ROOT}/big.png"
+     }
+    ],
+    "notices": [
+     "⚠️ Imagem não anexada (5 MB, teto 5 MB); só o path foi: big.png"
+    ],
+    "native_candidate": false
+   }
+  },
+  {
+   "name": "trailing_punctuation",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "olha (📎 imagem: {ROOT}/a.png)."
+   },
+   "files": {
+    "a.png": {
+     "b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "olha (📎 imagem: {ROOT}/a.png)."
+     },
+     {
+      "type": "image",
+      "source": {
+       "type": "base64",
+       "media_type": "image/png",
+       "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+      }
+     }
+    ],
+    "notices": [],
+    "native_candidate": false
+   }
+  },
+  {
+   "name": "path_with_space",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "📎 imagem: {ROOT}/with space.png"
+   },
+   "files": {
+    "with space.png": {
+     "b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "📎 imagem: {ROOT}/with space.png"
+     },
+     {
+      "type": "image",
+      "source": {
+       "type": "base64",
+       "media_type": "image/png",
+       "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+      }
+     }
+    ],
+    "notices": [],
+    "native_candidate": false
+   }
+  },
+  {
+   "name": "first_word_fallback",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "📎 imagem: {ROOT}/a.png e mais texto colado"
+   },
+   "files": {
+    "a.png": {
+     "b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "📎 imagem: {ROOT}/a.png e mais texto colado"
+     },
+     {
+      "type": "image",
+      "source": {
+       "type": "base64",
+       "media_type": "image/png",
+       "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+      }
+     }
+    ],
+    "notices": [],
+    "native_candidate": false
+   }
+  },
+  {
+   "name": "unsupported_suffix",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "📎 imagem: {ROOT}/a.txt"
+   },
+   "files": {
+    "a.txt": {
+     "b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "📎 imagem: {ROOT}/a.txt"
+     }
+    ],
+    "notices": [],
+    "native_candidate": false
+   }
+  },
+  {
+   "name": "no_suffix",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "📎 imagem: {ROOT}/semsufixo"
+   },
+   "files": {
+    "semsufixo": {
+     "b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "📎 imagem: {ROOT}/semsufixo"
+     }
+    ],
+    "notices": [],
+    "native_candidate": false
+   }
+  },
+  {
+   "name": "multiline",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "legenda\n📎 imagem: {ROOT}/a.png\noutra linha 📎 imagem: {ROOT}/b.png"
+   },
+   "files": {
+    "a.png": {
+     "b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+    },
+    "b.png": {
+     "b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "legenda\n📎 imagem: {ROOT}/a.png\noutra linha 📎 imagem: {ROOT}/b.png"
+     },
+     {
+      "type": "image",
+      "source": {
+       "type": "base64",
+       "media_type": "image/png",
+       "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+      }
+     },
+     {
+      "type": "image",
+      "source": {
+       "type": "base64",
+       "media_type": "image/png",
+       "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+      }
+     }
+    ],
+    "notices": [],
+    "native_candidate": false
+   }
+  },
+  {
+   "name": "newline_after_marker",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "📎 imagem:\n {ROOT}/a.png"
+   },
+   "files": {
+    "a.png": {
+     "b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "📎 imagem:\n {ROOT}/a.png"
+     },
+     {
+      "type": "image",
+      "source": {
+       "type": "base64",
+       "media_type": "image/png",
+       "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+      }
+     }
+    ],
+    "notices": [],
+    "native_candidate": false
+   }
+  },
+  {
+   "name": "marker_without_path",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "📎 imagem:"
+   },
+   "files": null,
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "📎 imagem:"
+     }
+    ],
+    "notices": [],
+    "native_candidate": false
+   }
+  },
+  {
+   "name": "marker_blanks_only",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "📎 imagem:   \n"
+   },
+   "files": null,
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "📎 imagem:   \n"
+     }
+    ],
+    "notices": [],
+    "native_candidate": false
+   }
+  },
+  {
+   "name": "marker_no_space",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "📎imagem:{ROOT}/a.png"
+   },
+   "files": {
+    "a.png": {
+     "b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "📎imagem:{ROOT}/a.png"
+     },
+     {
+      "type": "image",
+      "source": {
+       "type": "base64",
+       "media_type": "image/png",
+       "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+      }
+     }
+    ],
+    "notices": [],
+    "native_candidate": false
+   }
+  },
+  {
+   "name": "emoji_without_label",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "📎 {ROOT}/a.png"
+   },
+   "files": {
+    "a.png": {
+     "b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "📎 {ROOT}/a.png"
+     }
+    ],
+    "notices": [],
+    "native_candidate": false
+   }
+  },
+  {
+   "name": "prefix_de",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "[de: sessao-x] oi"
+   },
+   "files": null,
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "[de: sessao-x] oi"
+     }
+    ],
+    "notices": [],
+    "native_candidate": true
+   }
+  },
+  {
+   "name": "prefix_grupo",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "[grupo: g1]\nmsg"
+   },
+   "files": null,
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "[grupo: g1]\nmsg"
+     }
+    ],
+    "notices": [],
+    "native_candidate": true
+   }
+  },
+  {
+   "name": "prefix_painel",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "[painel: Meu painel] aviso"
+   },
+   "files": null,
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "[painel: Meu painel] aviso"
+     }
+    ],
+    "notices": [],
+    "native_candidate": true
+   }
+  },
+  {
+   "name": "prefix_blank_name",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "[de:  ] x"
+   },
+   "files": null,
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "[de:  ] x"
+     }
+    ],
+    "notices": [],
+    "native_candidate": true
+   }
+  },
+  {
+   "name": "prefix_not_at_start",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "texto [de: x] oi"
+   },
+   "files": null,
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "texto [de: x] oi"
+     }
+    ],
+    "notices": [],
+    "native_candidate": false
+   }
+  },
+  {
+   "name": "prefix_leading_space",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": " [de: x] oi"
+   },
+   "files": null,
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": " [de: x] oi"
+     }
+    ],
+    "notices": [],
+    "native_candidate": false
+   }
+  },
+  {
+   "name": "prefix_unknown_tag",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "[para: x] oi"
+   },
+   "files": null,
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "[para: x] oi"
+     }
+    ],
+    "notices": [],
+    "native_candidate": false
+   }
+  },
+  {
+   "name": "prefix_with_image",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "[de: x] 📎 imagem: {ROOT}/a.png"
+   },
+   "files": {
+    "a.png": {
+     "b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "[de: x] 📎 imagem: {ROOT}/a.png"
+     },
+     {
+      "type": "image",
+      "source": {
+       "type": "base64",
+       "media_type": "image/png",
+       "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+      }
+     }
+    ],
+    "notices": [],
+    "native_candidate": true
+   }
+  },
+  {
+   "name": "unicode_text",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "ação — 日本語 📎 imagem: {ROOT}/ü.png"
+   },
+   "files": {
+    "ü.png": {
+     "b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+    }
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "content": [
+     {
+      "type": "text",
+      "text": "ação — 日本語 📎 imagem: {ROOT}/ü.png"
+     },
+     {
+      "type": "image",
+      "source": {
+       "type": "base64",
+       "media_type": "image/png",
+       "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+      }
+     }
+    ],
+    "notices": [],
+    "native_candidate": false
+   }
+  },
+  {
+   "name": "text_not_a_string",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": 5
+   },
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "error": true
+   }
+  },
+  {
+   "name": "text_missing",
+   "kind": "prepare_prompt",
+   "payload": {},
+   "meta": {
+    "provider": "claude"
+   },
+   "expected": {
+    "error": true
+   }
+  },
+  {
+   "name": "codex_plain",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "olá"
+   },
+   "files": null,
+   "meta": {
+    "provider": "codex"
+   },
+   "expected": {
+    "input": [
+     {
+      "type": "text",
+      "text": "olá"
+     }
+    ],
+    "skill_name": null
+   }
+  },
+  {
+   "name": "codex_slash",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "/minha-skill arg1 arg2"
+   },
+   "files": null,
+   "meta": {
+    "provider": "codex"
+   },
+   "expected": {
+    "input": [
+     {
+      "type": "text",
+      "text": "/minha-skill arg1 arg2"
+     }
+    ],
+    "skill_name": "minha-skill"
+   }
+  },
+  {
+   "name": "codex_slash_leading_blank",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "  \n /outra\tx"
+   },
+   "files": null,
+   "meta": {
+    "provider": "codex"
+   },
+   "expected": {
+    "input": [
+     {
+      "type": "text",
+      "text": "  \n /outra\tx"
+     }
+    ],
+    "skill_name": "outra"
+   }
+  },
+  {
+   "name": "codex_slash_only",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "/"
+   },
+   "files": null,
+   "meta": {
+    "provider": "codex"
+   },
+   "expected": {
+    "input": [
+     {
+      "type": "text",
+      "text": "/"
+     }
+    ],
+    "skill_name": ""
+   }
+  },
+  {
+   "name": "codex_slash_with_image_marker",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "/s 📎 imagem: {ROOT}/a.png"
+   },
+   "files": {
+    "a.png": {
+     "b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAAB4iG8MwAAAABJRU5ErkJggg=="
+    }
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "expected": {
+    "input": [
+     {
+      "type": "text",
+      "text": "/s 📎 imagem: {ROOT}/a.png"
+     }
+    ],
+    "skill_name": "s"
+   }
+  },
+  {
+   "name": "codex_prefix_is_not_native",
+   "kind": "prepare_prompt",
+   "payload": {
+    "text": "[de: x] oi"
+   },
+   "files": null,
+   "meta": {
+    "provider": "codex"
+   },
+   "expected": {
+    "input": [
+     {
+      "type": "text",
+      "text": "[de: x] oi"
+     }
+    ],
+    "skill_name": null
+   }
+  }
+ ]
+}

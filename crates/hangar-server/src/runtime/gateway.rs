@@ -13,17 +13,24 @@ use subtle::ConstantTimeEq;
 use tokio::sync::{broadcast,Mutex};
 
 #[derive(Clone)]
-enum EntryHandle { Headless(RuntimeHandle), Terminal {target:super::terminal::TerminalTarget,handle:super::terminal::TerminalHandle} }
+pub(crate) enum EntryHandle { Headless(RuntimeHandle), Terminal {target:super::terminal::TerminalTarget,handle:super::terminal::TerminalHandle} }
 impl EntryHandle {
-    async fn snapshot(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.snapshot().await,Self::Terminal {handle,..}=>handle.snapshot().await}}
-    async fn stop(&self)->Result<(),RuntimeError> {match self {Self::Headless(h)=>h.stop().await,Self::Terminal {handle,..}=>handle.stop().await}}
-    async fn command(&self,command:RuntimeCommand)->Result<RuntimeReply,RuntimeError> {match self {Self::Headless(h)=>h.command(command).await,Self::Terminal {handle,..}=>handle.command(command).await}}
-    async fn queue(&self,id:String,action:Action)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.queue(id,action).await,Self::Terminal {handle,..}=>handle.queue(id,action).await}}
-    async fn drain(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.drain().await,Self::Terminal {handle,..}=>handle.drain().await}}
-    async fn confirm(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.confirm().await,Self::Terminal {handle,..}=>handle.confirm().await}}
-    async fn ensure_projection(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.ensure_projection().await,Self::Terminal {handle,..}=>handle.ensure_projection().await}}
+    pub(crate) async fn snapshot(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.snapshot().await,Self::Terminal {handle,..}=>handle.snapshot().await}}
+    pub(crate) async fn stop(&self)->Result<(),RuntimeError> {match self {Self::Headless(h)=>h.stop().await,Self::Terminal {handle,..}=>handle.stop().await}}
+    pub(crate) async fn command(&self,command:RuntimeCommand)->Result<RuntimeReply,RuntimeError> {match self {Self::Headless(h)=>h.command(command).await,Self::Terminal {handle,..}=>handle.command(command).await}}
+    pub(crate) async fn queue(&self,id:String,action:Action)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.queue(id,action).await,Self::Terminal {handle,..}=>handle.queue(id,action).await}}
+    pub(crate) async fn drain(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.drain().await,Self::Terminal {handle,..}=>handle.drain().await}}
+    pub(crate) async fn confirm(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.confirm().await,Self::Terminal {handle,..}=>handle.confirm().await}}
+    pub(crate) async fn ensure_projection(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.ensure_projection().await,Self::Terminal {handle,..}=>handle.ensure_projection().await}}
 }
-struct Entry { generation:u64,handle:EntryHandle,lease_path:std::path::PathBuf,name:String,mods_life:u64 }
+struct Entry { generation:u64,handle:EntryHandle,lease_path:std::path::PathBuf,name:String,mods_life:u64,provider:String }
+
+/// Entrada aberta de uma sessão, achada por nome, para as rotas de escrita do Rust.
+#[allow(dead_code)] // o `handle` é lido pelas rotas de escrita que entram depois
+pub struct WriteTarget { pub key:String,pub generation:u64,pub provider:String,pub terminal:bool,pub healthy:bool,pub(crate) handle:EntryHandle }
+
+/// Prazo do fechamento da porta: abaixo do `OP_TIMEOUT_S` (75 s) do transporte no Python.
+const INGRESS_CLOSE_WAIT:Duration = Duration::from_secs(60);
 pub struct RuntimeRegistry {
     entries:Mutex<BTreeMap<String,Entry>>,
     events:broadcast::Sender<RuntimeEvent>,
@@ -32,6 +39,7 @@ pub struct RuntimeRegistry {
     lifecycle:Mutex<BTreeMap<String,Arc<Mutex<()>>>>,
     revisions:Mutex<BTreeMap<String,Arc<AtomicU64>>>,
     mods:Option<crate::mods::state::Mods>,
+    ingress:super::ingress::IngressGates,
 }
 
 /// A trava pode demorar a soltar: as tarefas de E/S de um ator que saiu, ou o `LockFileEx` de um
@@ -74,6 +82,12 @@ async fn open_store(state_path:&std::path::Path,projection_dir:&std::path::Path,
         })?
 }
 
+/// Negação do `_rust_failed` do Python (erro vazio não é erro), exceto `terminal_facts`, que aqui é doente.
+fn healthy(terminal:bool,view:&Value)->bool {
+    let failed = match &view["error"] {Value::Null=>false,Value::String(code)=>!code.is_empty(),_=>true};
+    if terminal { !failed || view["error"]=="receipt_scan" } else { !failed && view["view"]["alive"] != false }
+}
+
 fn failure(code:&str) -> RuntimeError { RuntimeError::new(code,"runtime indisponível para esta chave ou geração") }
 
 /// Prazo da devolução da janela esticada ao abrir a sessão com terminal (`unstretch`).
@@ -101,10 +115,11 @@ async fn attach_terminal_mods(mods:&crate::mods::state::Mods,target:&super::term
 impl RuntimeRegistry {
     pub fn new(upstream:SocketAddr,secret:String,instance:String) -> Self {
         Self { entries:Mutex::new(BTreeMap::new()),events:broadcast::channel(1024).0,
-            policy:PolicyClient::new(upstream,secret,instance.clone()),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()),mods:None }
+            policy:PolicyClient::new(upstream,secret,instance.clone()),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()),mods:None,ingress:Default::default() }
     }
     /// Interface dos mods: sessão Claude sem terminal aberta aqui vira superfície remota e publica no `Mods`.
     pub fn with_mods(mut self,mods:crate::mods::state::Mods) -> Self { self.mods = Some(mods); self }
+    pub fn ingress(&self) -> &super::ingress::IngressGates { &self.ingress }
     pub fn subscribe(&self) -> broadcast::Receiver<RuntimeEvent> { self.events.subscribe() }
     pub async fn handle(&self,key:&str,generation:u64) -> Result<RuntimeHandle,RuntimeError> {
         match self.entry(key,generation).await? {EntryHandle::Headless(handle)=>Ok(handle),_=>Err(failure("runtime_provider"))}
@@ -158,7 +173,7 @@ impl RuntimeRegistry {
             }
         });
         self.entries.lock().await.insert(target.key.clone(),Entry { generation:target.generation,handle:EntryHandle::Headless(handle.clone()),
-            lease_path:target.lease_path.clone(),name:target.name.clone(),mods_life:life });
+            lease_path:target.lease_path.clone(),name:target.name.clone(),mods_life:life,provider:target.provider.clone() });
         handle
         };
         let snapshot = match handle.snapshot().await {
@@ -208,7 +223,7 @@ impl RuntimeRegistry {
                     },
                     None=>0,
                 };
-                self.entries.lock().await.insert(target.key.clone(),Entry {generation:target.generation,handle:EntryHandle::Terminal {target:target.clone(),handle:handle.clone()},lease_path:target.lease_path.clone(),name:target.name.clone(),mods_life:life});handle
+                self.entries.lock().await.insert(target.key.clone(),Entry {generation:target.generation,handle:EntryHandle::Terminal {target:target.clone(),handle:handle.clone()},lease_path:target.lease_path.clone(),name:target.name.clone(),mods_life:life,provider:"claude".into()});handle
             }
         };
         let snapshot=handle.snapshot().await?;
@@ -256,6 +271,26 @@ impl RuntimeRegistry {
             Ok(view)=>Some((key,view)),
             Err(error)=>Some((key,json!({"error":error.code,"view":{}}))),
         }
+    }
+    /// Entrada aberta da sessão `name`, para escrever. Chamar depois do `ingress().enter`: a procurada
+    /// antes de esperar a porta pode ser a que o relançamento parou.
+    /// `healthy` é a negação do `_rust_failed` do Python; `terminal_facts` conta como doente aqui
+    /// (vínculo trocado, só o `prepare_session` refaz), `receipt_scan` não.
+    pub async fn writable(&self,name:&str) -> Option<WriteTarget> {
+        // Nome repetido é defeito de quem abriu a entrada; a escrita vai para a geração mais nova.
+        let (key,generation,provider,handle) = self.entries.lock().await.iter().filter(|(_,e)|e.name==name).max_by_key(|(_,e)|e.generation)
+            .map(|(key,e)|(key.clone(),e.generation,e.provider.clone(),e.handle.clone()))?;
+        let terminal = matches!(&handle,EntryHandle::Terminal {..});
+        let healthy = match tokio::time::timeout(Duration::from_secs(1),handle.snapshot()).await {
+            Ok(Ok(view))=>healthy(terminal,&view),
+            _=>false,
+        };
+        Some(WriteTarget { key,generation,provider,terminal,healthy,handle })
+    }
+    /// A entrada mais nova do nome é de terminal? Sem retrato: serve a decisão que vem antes da porta.
+    pub async fn is_terminal(&self,name:&str) -> bool {
+        self.entries.lock().await.values().filter(|e|e.name==name).max_by_key(|e|e.generation)
+            .is_some_and(|e|matches!(e.handle,EntryHandle::Terminal {..}))
     }
     /// Sessão do ator de entrada terminal de chave `key`.
     pub async fn terminal_name(&self,key:&str) -> Option<String> {
@@ -367,11 +402,26 @@ async fn dispatch(registry:&RuntimeRegistry,envelope:&Envelope) -> Result<Value,
         "submit"=>&["kind","text","steer","pre_transcript"],
         "control"=>&["kind","control","payload"],
         "queue"=>&["kind","action"],
+        "ingress"=>&["kind","name","closed","held"],
         "close" | "snapshot" | "drain" | "confirm" | "ensure_projection"=>&["kind"],
         _=>return Err(failure("command_kind")),
     };
     if !command.as_object().is_some_and(|object|object.keys().all(|key|fields.contains(&key.as_str()))) {
         return Err(failure("command_fields"));
+    }
+    if kind == "ingress" {
+        let name = command["name"].as_str().filter(|n|!n.is_empty()).ok_or_else(||failure("ingress_payload"))?;
+        let closed = command["closed"].as_bool().ok_or_else(||failure("ingress_payload"))?;
+        // `held`: fechamento da troca de conversa; a reabertura correspondente leva o mesmo `held`.
+        let held = match &command["held"] { Value::Null=>false, value=>value.as_bool().ok_or_else(||failure("ingress_payload"))? };
+        let gates = registry.ingress();
+        match (closed,held) {
+            (true,false)=>gates.close(name,INGRESS_CLOSE_WAIT).await.map_err(|_|failure("ingress_busy"))?,
+            (true,true)=>gates.hold(name,INGRESS_CLOSE_WAIT).await.map_err(|_|failure("ingress_busy"))?,
+            (false,false)=>gates.open(name),
+            (false,true)=>gates.release(name),
+        }
+        return Ok(json!({"closed":closed}));
     }
     if kind == "open" {
         return match descriptor(&command["descriptor"])? {
@@ -468,6 +518,18 @@ async fn events(State(state):State<Gateway>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn healthy_follows_python_rust_failed() {
+        assert!(!healthy(true,&json!({"error":"terminal_facts","view":{}})));
+        assert!(healthy(true,&json!({"error":"receipt_scan","view":{}})));
+        assert!(!healthy(true,&json!({"error":"queue_io","view":{}})));
+        assert!(healthy(true,&json!({"error":null,"view":{}})));
+        assert!(!healthy(false,&json!({"error":null,"view":{"alive":false}})));
+        assert!(!healthy(false,&json!({"error":"cano_exited","view":{"alive":true}})));
+        assert!(healthy(false,&json!({"error":null,"view":{"alive":true}})));
+        assert!(healthy(false,&json!({"error":"","view":{}})));
+    }
 
     #[test]
     fn terminal_and_headless_sources_do_not_overlap() {

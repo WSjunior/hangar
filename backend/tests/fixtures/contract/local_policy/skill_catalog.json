@@ -1,0 +1,479 @@
+{
+ "tz": "BRT3",
+ "cases": [
+  {
+   "name": "found",
+   "kind": "skill_catalog",
+   "payload": {
+    "catalog": {
+     "data": [
+      {
+       "skills": [
+        {
+         "name": "beta",
+         "path": "/s/beta",
+         "enabled": true,
+         "description": "B"
+        },
+        {
+         "name": "alpha",
+         "path": "/s/alpha",
+         "enabled": true
+        }
+       ]
+      }
+     ]
+    },
+    "name": "alpha"
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "expected": {
+    "skill": {
+     "name": "alpha",
+     "native_name": "alpha",
+     "path": "/s/alpha",
+     "display": "/alpha",
+     "description": null,
+     "source": "skill",
+     "destructive": false
+    }
+   }
+  },
+  {
+   "name": "not_found",
+   "kind": "skill_catalog",
+   "payload": {
+    "catalog": {
+     "data": [
+      {
+       "skills": [
+        {
+         "name": "beta",
+         "path": "/s/beta",
+         "enabled": true,
+         "description": "B"
+        },
+        {
+         "name": "alpha",
+         "path": "/s/alpha",
+         "enabled": true
+        }
+       ]
+      }
+     ]
+    },
+    "name": "gamma"
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "expected": {
+    "skill": null
+   }
+  },
+  {
+   "name": "name_null",
+   "kind": "skill_catalog",
+   "payload": {
+    "catalog": {
+     "data": [
+      {
+       "skills": [
+        {
+         "name": "beta",
+         "path": "/s/beta",
+         "enabled": true,
+         "description": "B"
+        },
+        {
+         "name": "alpha",
+         "path": "/s/alpha",
+         "enabled": true
+        }
+       ]
+      }
+     ]
+    },
+    "name": null
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "expected": {
+    "skill": null
+   }
+  },
+  {
+   "name": "homonyms_first",
+   "kind": "skill_catalog",
+   "payload": {
+    "catalog": {
+     "data": [
+      {
+       "skills": [
+        {
+         "name": "dup",
+         "path": "/a/dup",
+         "enabled": true
+        },
+        {
+         "name": "solo",
+         "path": "/s/solo",
+         "enabled": true
+        }
+       ]
+      },
+      {
+       "skills": [
+        {
+         "name": "dup",
+         "path": "/b/dup",
+         "enabled": true
+        }
+       ]
+      }
+     ]
+    },
+    "name": "dup:36ad88de"
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "expected": {
+    "skill": {
+     "name": "dup:36ad88de",
+     "native_name": "dup",
+     "path": "/a/dup",
+     "display": "/dup:36ad88de",
+     "description": null,
+     "source": "skill",
+     "destructive": false
+    }
+   }
+  },
+  {
+   "name": "homonyms_second",
+   "kind": "skill_catalog",
+   "payload": {
+    "catalog": {
+     "data": [
+      {
+       "skills": [
+        {
+         "name": "dup",
+         "path": "/a/dup",
+         "enabled": true
+        },
+        {
+         "name": "solo",
+         "path": "/s/solo",
+         "enabled": true
+        }
+       ]
+      },
+      {
+       "skills": [
+        {
+         "name": "dup",
+         "path": "/b/dup",
+         "enabled": true
+        }
+       ]
+      }
+     ]
+    },
+    "name": "dup:dd40cb77"
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "expected": {
+    "skill": {
+     "name": "dup:dd40cb77",
+     "native_name": "dup",
+     "path": "/b/dup",
+     "display": "/dup:dd40cb77",
+     "description": null,
+     "source": "skill",
+     "destructive": false
+    }
+   }
+  },
+  {
+   "name": "homonyms_bare_name_not_found",
+   "kind": "skill_catalog",
+   "payload": {
+    "catalog": {
+     "data": [
+      {
+       "skills": [
+        {
+         "name": "dup",
+         "path": "/a/dup",
+         "enabled": true
+        },
+        {
+         "name": "solo",
+         "path": "/s/solo",
+         "enabled": true
+        }
+       ]
+      },
+      {
+       "skills": [
+        {
+         "name": "dup",
+         "path": "/b/dup",
+         "enabled": true
+        }
+       ]
+      }
+     ]
+    },
+    "name": "dup"
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "expected": {
+    "skill": null
+   }
+  },
+  {
+   "name": "disabled_and_incomplete_skipped",
+   "kind": "skill_catalog",
+   "payload": {
+    "catalog": {
+     "data": [
+      {
+       "skills": [
+        {
+         "name": "off",
+         "path": "/s/off",
+         "enabled": false
+        },
+        {
+         "name": "",
+         "path": "/s/x",
+         "enabled": true
+        },
+        {
+         "name": "nopath",
+         "path": "",
+         "enabled": true
+        },
+        {
+         "name": "nokey",
+         "path": "/s/nokey"
+        },
+        {
+         "name": "on",
+         "path": "/s/on",
+         "enabled": true
+        }
+       ]
+      }
+     ]
+    },
+    "name": "on"
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "expected": {
+    "skill": {
+     "name": "on",
+     "native_name": "on",
+     "path": "/s/on",
+     "display": "/on",
+     "description": null,
+     "source": "skill",
+     "destructive": false
+    }
+   }
+  },
+  {
+   "name": "disabled_not_found",
+   "kind": "skill_catalog",
+   "payload": {
+    "catalog": {
+     "data": [
+      {
+       "skills": [
+        {
+         "name": "off",
+         "path": "/s/off",
+         "enabled": false
+        }
+       ]
+      }
+     ]
+    },
+    "name": "off"
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "expected": {
+    "skill": null
+   }
+  },
+  {
+   "name": "same_path_listed_twice_last_wins",
+   "kind": "skill_catalog",
+   "payload": {
+    "catalog": {
+     "data": [
+      {
+       "skills": [
+        {
+         "name": "old",
+         "path": "/s/p",
+         "enabled": true,
+         "description": "1"
+        }
+       ]
+      },
+      {
+       "skills": [
+        {
+         "name": "new",
+         "path": "/s/p",
+         "enabled": true,
+         "description": "2"
+        }
+       ]
+      }
+     ]
+    },
+    "name": "new"
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "expected": {
+    "skill": {
+     "name": "new",
+     "native_name": "new",
+     "path": "/s/p",
+     "display": "/new",
+     "description": "2",
+     "source": "skill",
+     "destructive": false
+    }
+   }
+  },
+  {
+   "name": "empty_data",
+   "kind": "skill_catalog",
+   "payload": {
+    "catalog": {
+     "data": []
+    },
+    "name": "x"
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "expected": {
+    "skill": null
+   }
+  },
+  {
+   "name": "no_data_key",
+   "kind": "skill_catalog",
+   "payload": {
+    "catalog": {},
+    "name": "x"
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "expected": {
+    "skill": null
+   }
+  },
+  {
+   "name": "group_without_skills",
+   "kind": "skill_catalog",
+   "payload": {
+    "catalog": {
+     "data": [
+      {}
+     ]
+    },
+    "name": "x"
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "expected": {
+    "skill": null
+   }
+  },
+  {
+   "name": "unicode_name_sorted_by_code_point",
+   "kind": "skill_catalog",
+   "payload": {
+    "catalog": {
+     "data": [
+      {
+       "skills": [
+        {
+         "name": "zé",
+         "path": "/s/1",
+         "enabled": true
+        },
+        {
+         "name": "Zebra",
+         "path": "/s/2",
+         "enabled": true
+        },
+        {
+         "name": "ze",
+         "path": "/s/3",
+         "enabled": true
+        },
+        {
+         "name": "é",
+         "path": "/s/4",
+         "enabled": true
+        }
+       ]
+      }
+     ]
+    },
+    "name": "zé"
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "expected": {
+    "skill": {
+     "name": "zé",
+     "native_name": "zé",
+     "path": "/s/1",
+     "display": "/zé",
+     "description": null,
+     "source": "skill",
+     "destructive": false
+    }
+   }
+  },
+  {
+   "name": "catalog_missing",
+   "kind": "skill_catalog",
+   "payload": {
+    "name": "x"
+   },
+   "meta": {
+    "provider": "codex"
+   },
+   "expected": {
+    "error": true
+   }
+  }
+ ]
+}

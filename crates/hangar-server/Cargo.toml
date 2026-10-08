@@ -9,6 +9,7 @@ publish = false
 serde_json = { workspace = true, features = ["float_roundtrip"] }
 indexmap.workspace = true
 hangar-api.workspace = true
+hangar-codex.workspace = true
 hangar-workspace = { path = "../hangar-workspace" }
 regex.workspace = true
 # Largura em células para cortar o pane na coluna da conversa (`plugin_screen.cell_width`).
@@ -46,7 +47,7 @@ reqwest = { workspace = true, features = ["rustls"] }
 portable-pty = "=0.9.0"
 # Perfil temporário e CDP do Chromium que mede e fotografa as páginas (`pages/chrome.rs`); mesma versão que o axum puxa.
 tempfile.workspace = true
-tokio-tungstenite = "=0.29.0"
+tokio-tungstenite.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

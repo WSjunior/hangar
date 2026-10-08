@@ -711,6 +711,14 @@ def test_menu_codex_le_o_aviso_de_atualizacao_do_pane_real():
     assert "release notes" in (pergunta or "").lower()
 
 
+def test_menu_codex_le_o_aviso_de_atualizacao_com_rodape_curto():
+    # Pane real do Codex 0.159: o rodape do aviso virou "enter continue · esc skip". Sem reconhecer
+    # essa forma, o app ficava em "subindo o app-server" sem cartao, e a sessao parecia travada.
+    pane = (Path(__file__).parent / "fixtures" / "pane_codex_update_rodape_curto.txt").read_text(encoding="utf-8")
+    _, opcoes = state_mod.menu_codex(pane)
+    assert opcoes == ["Update now (runs `npm install -g @openai/codex`)", "Skip", "Skip until next version"]
+
+
 def test_menu_codex_junta_opcao_quebrada_pela_largura_do_pane():
     # Com o terminal do celular anexado o pane encolhe e a opcao 1 quebra em tres linhas; as
     # continuacoes sao parte da opcao, nao o fim do bloco.

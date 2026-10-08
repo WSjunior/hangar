@@ -451,7 +451,13 @@ pub struct PoolCapture { pool: TerminalPool, request: CaptureRequest }
 impl PoolCapture {
     /// `binding` é o session-id da conversa; `target` o pane do agente ou `=nome:`.
     pub fn new(pool: TerminalPool, name: &str, binding: &str, target: String) -> Self {
-        let request = CaptureRequest { consumer: format!("monitor:{name}"), name: name.to_owned(), provider: "claude".into(),
+        Self::with_consumer(pool, format!("monitor:{name}"), name, binding, target)
+    }
+
+    /// Consumidor próprio: quem solta o vínculo ao terminar não pode ser o do `Monitor` vivo da sessão,
+    /// que dividiria o mesmo observador.
+    pub fn with_consumer(pool: TerminalPool, consumer: String, name: &str, binding: &str, target: String) -> Self {
+        let request = CaptureRequest { consumer, name: name.to_owned(), provider: "claude".into(),
             binding: binding.to_owned(), target, started: 0.0, lines: 200, colors: false, join: false };
         Self { pool, request }
     }

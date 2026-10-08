@@ -1070,10 +1070,13 @@ def answer_sync(name, answers, request_id, jsonl):
                     ti.TerminalInput().interrupt(name)
                     api._espera_picker_fechar(name)
                 await run_admin(owner, name, 'answer_chat', payload, close_question)
+                # `owner.op` direto: o teclado já voltou ao Rust (o empréstimo acabou em `run_admin`), e `route`
+                # transformaria `unknown`/`rejected` em exceções de tipos diferentes.
                 # Na fila do Rust (`deferred`) a resposta sai quando o terminal ficar livre.
-                reply = await route(owner, name, {'kind':'submit','text':text})
-                if reply is None or reply.get('disposition') not in {'accepted', 'deferred'}:
-                    raise RuntimeError('a pergunta foi fechada, mas a resposta por texto não foi confirmada')
+                reply = await owner.op(name, {'kind':'submit','text':text}, uuid.uuid4().hex)
+                if reply.get('disposition') not in {'accepted', 'deferred'}:
+                    # 502, não 409: o app trata 409 como "nada digitado", e aqui a pergunta já fechou e o texto pode ter entrado.
+                    raise RuntimeError('a pergunta foi fechada, mas a resposta por texto não foi confirmada — confira na sessão antes de responder de novo')
                 return reply
             def compound():
                 ti.TerminalInput().interrupt(name)
