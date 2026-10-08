@@ -1239,6 +1239,37 @@ def test_codex_switch_to_terminal_hands_the_session_to_python(codex_birth, monke
         runtime_coordinator.refuse_python_client("cx", "codex")
 
 
+def test_codex_refused_terminal_switch_returns_the_session_to_rust(codex_birth, monkeypatch):
+    # A troca liga cliente Python no cano para ler o estado e recusa (ocupada): o cliente sai e o Rust reabre.
+    import os
+    from app.adapters.codex import sem_terminal
+    from app.adapters.codex.appserver import AppServerClient
+    owner, transport = _lifecycle_owner(codex_birth, monkeypatch)
+    async def request(method, params=None, **kwargs):
+        return {"thread": {"status": {"type": "active"}, "model": "gpt-test"}} if method == "thread/read" else {}
+    async def conectar(cano, esperar=0.0):
+        client = AppServerClient()
+        client.request = request
+        return client, {"saiu": None}
+    monkeypatch.setattr(sem_terminal, "conectar", conectar)
+    async def open_terminal(adapter, name):
+        await adapter.read_settings(name)
+        assert name in adapter._sessions, "o cliente Python religou no cano"
+        raise ValueError("Espere a sessão ficar ociosa antes de abrir o terminal.")
+    monkeypatch.setattr(codex_birth.codex, "open_terminal", open_terminal, raising=False)
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.ensure_open("cx")
+        codex_birth.codex_sessions.update("cx", thread_id="thread-1",
+            cano={"pid":os.getpid(), "escuta":"unix:/tmp/vivo.sock", "token":"t", "ts":1.0, "versao":2})
+        with pytest.raises(ValueError, match="ociosa"):
+            await owner.lifecycle_call("cx", "open_terminal", {})
+    asyncio.run(scenario())
+    assert "cx" not in codex_birth.codex._sessions, "nenhum cliente Python fica no cano do Rust"
+    assert owner.slot("cx").phase == runtime_coordinator.Phase.Rust
+    assert transport.kinds().count("open") == 2
+
+
 @pytest.mark.parametrize("code,status,api_code", [
     ("erro_permissao_ocupada", 409, "erro_permissao_ocupada"),
     ("erro_modo_desconhecido", 400, "erro_permissao_picker"),

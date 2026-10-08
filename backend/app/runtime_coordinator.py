@@ -1961,6 +1961,11 @@ class RuntimeCoordinator:
                 self.python_client_released.add(name)
                 try:
                     return await original(adapter, name, **params)
+                except BaseException:
+                    # Recusada (ocupada, pergunta aberta…) com o cliente religado: só a ligação fecha,
+                    # e a reabertura devolve a sessão ao Rust no mesmo processo.
+                    await adapter.release_client(name)
+                    raise
                 finally:
                     self.python_client_released.discard(name)
         return await self.change(name, action, new_name=params.get("new") if method == "rename" else None,
