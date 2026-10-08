@@ -549,10 +549,10 @@ Commit: `feat(codex): Codex-only routes served by Rust for headless sessions`.
 **Files:**
 - Modify: `docs/decisoes/harnesses.md` (regra "Codex sem terminal: o app-server é do CANO" passa a "…o cano é do Rust"; regra do `-32601` restrita à última linha da tabela da 5B; regra nova do módulo de processo), `docs/decisoes/superado.md` (decisão 2 do dono único), `docs/migracao-rust/README.md` ("Ainda no Python" sem o Codex sem terminal), `docs/migracao-rust/parte5-codex/pendencias-5b.md` (riscar o que a 5B fechou)
 
-- [ ] **Step 1: Docs** — as quatro mudanças acima, cada regra com o porquê curto.
+- [x] **Step 1: Docs** — as quatro mudanças acima, cada regra com o porquê curto.
 - [ ] **Step 2: Medição** — release, backend isolado (lançador com no-op, regra da memória "backend isolado mata canos reais"), 5 sessões Codex sem terminal trabalhando: CPU e RSS do Rust × Python (mesmo roteiro da `parte4/medicao.md`). Gravar em `docs/migracao-rust/parte5-codex/medicao-5b.md`.
 - [ ] **Step 3: Uso real (verificação manual)** — no PC de casa, Hangar instalado pelo canal de testes na branch: criar Codex sem terminal pelo app nativo e pelo celular; conversar; aprovar comando, arquivo e permissão; responder formulário MCP; Stop com comando longo; trocar modelo, Fast, modo e permissão; `/recarregar`; matar o `hangar-cano` à mão (religa); reiniciar o backend com turno rodando; apagar a sessão (processo some). `CP_RUST_SERVER=0` continua abrindo pelo Python.
-- [ ] **Step 4: Commit** `docs(codex): rules and status after Codex headless moved to Rust`.
+- [x] **Step 4: Commit** `docs(codex): rules and status after Codex headless moved to Rust`.
 
 ---
 
