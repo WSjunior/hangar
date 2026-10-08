@@ -22,7 +22,7 @@ def test_metadata_patch_has_a_strict_catalog(monkeypatch):
     from app.adapters.codex import sessions
     monkeypatch.setattr(sessions, "update", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("escrita indevida")))
     with pytest.raises(ValueError):
-        runtime_policy.run("session.patch_meta", {"cano":{"token":"changed"}}, {"provider":"codex", "name":"session"})
+        runtime_policy.run("session.patch_meta", {"key":"changed"}, {"provider":"codex", "name":"session"})
 
 
 @pytest.mark.parametrize("kind", ["prepare_prompt", "format_status", "skill_catalog", "answer_body", "quota",
@@ -88,3 +88,65 @@ def test_codex_service_tier_skips_sidecar_of_another_thread(tmp_path, monkeypatc
     result, writes = _codex_patch(tmp_path, monkeypatch, "t2")
     assert result == {"updated": False, "stale": True}
     assert writes == []
+
+
+def _fake_codex(tmp_path, monkeypatch):
+    directory = tmp_path / "bin"
+    directory.mkdir()
+    exe = directory / "codex"
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+    monkeypatch.setenv("PATH", str(directory))
+    return exe
+
+
+def test_launch_env_da_sessao_codex(monkeypatch, tmp_path):
+    from pathlib import Path
+    exe = _fake_codex(tmp_path, monkeypatch)
+    monkeypatch.setenv("TMUX", "x")
+    monkeypatch.setenv("TMUX_PANE", "%1")
+    meta = {"name": "cx", "key": "k" * 32, "codex_account": "default", "jev": False, "cwd": str(tmp_path)}
+    out = runtime_policy.run("launch_env", {}, {"provider": "codex", **meta})
+    env = out["env"]
+    assert env["CP_SESSION_KEY"] == env["HANGAR_CANO_KEY"] == "k" * 32
+    assert env["HANGAR_CANO_OWNER"] == str(Path.home())
+    assert "TMUX" not in env and "TMUX_PANE" not in env and "CODEX_HOME" in env
+    assert Path(out["program"][0]).name.startswith("codex") and out["program"][1:3] == ["app-server", "--stdio"]
+    assert out["program"][0] == str(exe), "caminho resolvido: o Rust não procura o codex"
+    assert 'sandbox_mode="danger-full-access"' in out["program"], "os -c do modo da sessão"
+    assert out["cano_extra"] == {}
+
+
+def test_launch_env_without_codex_is_a_code(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATH", str(tmp_path))
+    meta = {"name": "cx", "key": "k" * 32, "cwd": str(tmp_path)}
+    assert runtime_policy.run("launch_env", {}, {"provider": "codex", **meta}) == {"error": "codex_ausente"}
+
+
+def test_patch_meta_records_the_cano_rust_launched(tmp_path, monkeypatch):
+    import json
+    from app.adapters.codex import sessions
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    (tmp_path / "cx.json").write_text(json.dumps({"name": "cx", "key": "k", "headless": True}))
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"runtime_state": {"view": {}}}))
+    cano = {"pid": 5, "escuta": "unix:/x", "token": "t", "ts": 1.0, "versao": 2}
+    assert runtime_policy.run("session.patch_meta", {"cano": cano}, {"provider": "codex", "name": "cx", "key": "k",
+        "validate": lambda: None, "state_path": str(state)}) == {"updated": True}
+    assert sessions.load("cx")["cano"] == cano
+
+
+def test_clear_cano_only_for_the_same_pid_and_never_recreates(tmp_path, monkeypatch):
+    import json
+    from app.adapters.codex import sessions
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    path = tmp_path / "cx.json"
+    path.write_text(json.dumps({"name": "cx", "key": "k", "headless": True, "cano": {"pid": 5}}))
+    meta = {"provider": "codex", "name": "cx", "key": "k", "validate": lambda: None}
+    assert runtime_policy.run("session.clear_cano", {"pid": 6}, meta) == {"cleared": False}
+    assert sessions.load("cx")["cano"] == {"pid": 5}, "outro processo já foi gravado: fica"
+    assert runtime_policy.run("session.clear_cano", {"pid": 5}, meta) == {"cleared": True}
+    assert sessions.load("cx")["cano"] is None
+    path.unlink()
+    assert runtime_policy.run("session.clear_cano", {"pid": 5}, meta) == {"cleared": False}
+    assert not path.exists(), "arquivo apagado não volta"

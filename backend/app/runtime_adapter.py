@@ -1159,8 +1159,13 @@ def install_adapter(cls, provider):
                 context = _legacy_operation.get()
                 if context is not None and coordinator is not None and context.get("operation_id") in coordinator.legacy_active:
                     return await _original(self, *args, **kwargs)
-                if (_method == "ensure_running" and _facade.provider == "claude" and coordinator is not None
-                        and getattr(coordinator, "legacy", None) is not None and getattr(coordinator, "transport", None) is not None
+                managed = coordinator is not None and getattr(coordinator, "legacy", None) is not None
+                if (managed and _method == "ensure_running" and _facade.provider == "codex" and coordinator.mode != "python"
+                        and await asyncio.to_thread(_hands_over, "codex", name)):
+                    await coordinator.await_mode()      # Rust esperado: o dono da sessão sai do desfecho dele
+                if (_method == "ensure_running" and managed and getattr(coordinator, "transport", None) is not None
+                        and (_facade.provider == "claude" or coordinator.rust_owns("codex", True)
+                             and await asyncio.to_thread(_hands_over, "codex", name))
                         and not bound.arguments.get("so_reconectar") and bound.arguments.get("transfer_id") is None):
                     # Subir a sessão é abri-la no Rust, com a conta/motor pedidos e a espera do initialize;
                     # dentro da barreira (troca de conta) é reabrir já o que a administração fechou.
