@@ -6,7 +6,7 @@ pub mod rpc;
 pub mod rtc;
 pub mod usage;
 
-use organizer::{FinishStep, MIC_VOICE_LEVEL, Mode, Planner, Results, SendGate, SpokenTurns, ToolCall, finish_request, parse_tool, send_allowed, tool_reply, organizer_start, ORGANIZER_PROMPT, VOICE_PROMPT};
+use organizer::{FinishStep, MIC_VOICE_LEVEL, Mode, ModeModel, ModeModels, Planner, Results, SendGate, SpokenTurns, ToolCall, finish_request, parse_tool, send_allowed, settings_update, tool_reply, organizer_start, ORGANIZER_PROMPT, VOICE_PROMPT};
 use rpc::{Codex, Incoming, Rpc, RpcError, handshake};
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
@@ -15,7 +15,7 @@ use tokio::{runtime::Handle, sync::{Notify, mpsc}};
 pub struct CallId(Value);
 pub enum Phase { Connecting, Live, Closed }
 #[derive(Debug, Clone)]
-pub enum VoiceFailure { Microphone, Speaker, AppServer, Realtime(String), Network, Timeout, Organizer, Closed }
+pub enum VoiceFailure { Microphone, Speaker, AppServer, Realtime(String), Network, Timeout, Organizer, ModelSwitch, Closed }
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Activity { #[default] Idle, Thinking, Searching, Working }
 pub enum VoiceEvent {
@@ -33,11 +33,11 @@ pub enum VoiceEvent {
     Thought(String), Action(Option<organizer::OrganizerAction>), TurnDone,
 }
 /// `cwd`: pasta da sessão na tela quando é desta máquina (o organizador lê o código dela); `target`: nome dessa sessão.
-/// `organizer_model`: `None` = o modelo do config do Codex.
+/// `organizer`: modelo e esforço do organizador por modo; a chamada nasce no Direto.
 pub struct VoiceOptions { pub codex: Codex, pub voice: Option<String>, pub context: String, pub cwd: Option<PathBuf>, pub target: String,
-    pub codex_home: Option<PathBuf>, pub organizer_model: Option<String>, pub organizer_effort: String }
+    pub codex_home: Option<PathBuf>, pub organizer: ModeModels }
 
-enum Command { Retarget(String, String, Option<PathBuf>), Result(String, String), Reply(Value, Value), SetMode(Mode), Answer(String), PlanDelivered }
+enum Command { Retarget(String, String, Option<PathBuf>), Result(String, String), Reply(Value, Value), SetMode(Mode), Models(ModeModels), Answer(String), PlanDelivered }
 
 pub struct Voice { commands: mpsc::UnboundedSender<Command>, muted: Arc<AtomicBool>, stopped: Arc<AtomicBool>, stop: Arc<Notify> }
 
@@ -54,6 +54,8 @@ impl Voice {
     pub fn session_result(&self, session: String, text: String) { let _ = self.commands.send(Command::Result(session, text)); }
     pub fn reply(&self, call: CallId, reply: Value) { let _ = self.commands.send(Command::Reply(call.0, reply)); }
     pub fn set_mode(&self, mode: Mode) { let _ = self.commands.send(Command::SetMode(mode)); }
+    /// Pares editados no cartão durante a chamada: o do modo atual vale já no próximo turno.
+    pub fn set_models(&self, models: ModeModels) { let _ = self.commands.send(Command::Models(models)); }
     /// Resposta, recusa ou estouro de um `ask_session`: chega ao organizador como turno marcado.
     pub fn session_answer(&self, text: String) { let _ = self.commands.send(Command::Answer(text)); }
     /// A sessão aceitou o plano enviado: o organizador o esquece.
@@ -129,8 +131,10 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
     // Pasta própria e fixa: o que o organizador grava fica entre chamadas, nada aqui a apaga.
     let own = plan::files_dir();
     if let Err(error) = std::fs::create_dir_all(&own) { log(format!("own folder create failed kind={:?}", error.kind())); }
-    let start = organizer_start(&config, &own, options.cwd.as_deref(), &options.context, options.organizer_model.as_deref(), &options.organizer_effort);
-    log(format!("organizer model={} effort={}", if options.organizer_model.is_some() { "chosen" } else { "config" }, options.organizer_effort));
+    let mut models = options.organizer.clone();
+    let mut applied = models.direct.clone();
+    let start = organizer_start(&config, &own, options.cwd.as_deref(), &options.context, applied.model.as_deref(), &applied.effort);
+    log(format!("organizer model={} effort={}", if applied.model.is_some() { "chosen" } else { "config" }, applied.effort));
     // A conta lida em paralelo, com prazo curto: falhar só deixa os limites ocultos até a primeira atualização.
     let limits = async {
         match tokio::time::timeout(Duration::from_secs(3), rpc.request("account/rateLimits/read", json!({}))).await {
@@ -140,7 +144,10 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
         }
     };
     let (started, ()) = tokio::join!(rpc.request("thread/start", start), limits);
-    let thread = started.map_err(rpc_failure).map_err(failed("thread/start"))?["thread"]["id"].as_str().unwrap_or_default().to_owned();
+    let started = started.map_err(rpc_failure).map_err(failed("thread/start"))?;
+    let thread = started["thread"]["id"].as_str().unwrap_or_default().to_owned();
+    // Voltar ao modelo do config pede o nome dele: o do config, senão o que a thread abriu sem escolha.
+    let default_model = config["model"].as_str().or_else(|| started["model"].as_str().filter(|_| applied.model.is_none())).map(str::to_owned);
     log(format!("thread started id={thread}"));
 
     let offer = tokio::task::spawn_blocking(rtc::offer).await.map_err(|_| VoiceFailure::Network)
@@ -305,8 +312,10 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                                 log(format!("plan sent bytes={}", text.len()));
                                 let session = planner.session().unwrap_or(&target).to_owned();
                                 let _ = events.send(VoiceEvent::SendPlan { session, text }).await;
-                                let _ = rpc.respond(id, tool_reply("Plano enviado à sessão; o resultado chega depois.", true)).await;
                                 planner.sent();
+                                let warn = apply_models(&rpc, &thread, &mut applied, &models, Mode::Direct, default_model.as_deref(), events).await;
+                                let reply = format!("Plano enviado à sessão; o resultado chega depois. {}", warn.unwrap_or_default());
+                                let _ = rpc.respond(id, tool_reply(reply.trim_end(), true)).await;
                                 let _ = events.send(VoiceEvent::Mode(Mode::Direct)).await;
                                 "plan-sent"
                             }
@@ -323,7 +332,8 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                         ToolCall::PairSessions(a, b) => { let _ = events.send(VoiceEvent::PairSessions(CallId(id), a, b)).await; "pair" }
                         ToolCall::UnpairSession(name) => { let _ = events.send(VoiceEvent::UnpairSession(CallId(id), name)).await; "unpair" }
                         ToolCall::SetMode(mode) => {
-                            let note = switch_mode(&mut planner, mode, &target, &mut gate, &rpc, events).await;
+                            let mut note = switch_mode(&mut planner, mode, &target, &mut gate, &rpc, events).await;
+                            if let Some(warn) = apply_models(&rpc, &thread, &mut applied, &models, mode, default_model.as_deref(), events).await { note = format!("{note} {warn}"); }
                             let _ = rpc.respond(id, tool_reply(note, true)).await;
                             "mode-set"
                         }
@@ -441,10 +451,16 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                 }
                 Some(Command::SetMode(mode)) => {
                     log(format!("mode set {mode:?}"));
-                    let note = switch_mode(&mut planner, mode, &target, &mut gate, &rpc, events).await;
+                    let mut note = switch_mode(&mut planner, mode, &target, &mut gate, &rpc, events).await;
+                    if let Some(warn) = apply_models(&rpc, &thread, &mut applied, &models, mode, default_model.as_deref(), events).await { note = format!("{note} {warn}"); }
                     let _ = rpc.request("thread/realtime/appendText", json!({"threadId": thread, "role": "developer", "text": note})).await;
                     let speech = if mode == Mode::Plan { "Modo planejar." } else { "Modo direto." };
                     let _ = rpc.request("thread/realtime/appendSpeech", json!({"threadId": thread, "text": speech})).await;
+                }
+                Some(Command::Models(edited)) => {
+                    models = edited;
+                    // A falha já aparece no cartão; o modo não mudou, não há o que dizer ao organizador.
+                    let _ = apply_models(&rpc, &thread, &mut applied, &models, planner.mode, default_model.as_deref(), events).await;
                 }
                 Some(Command::PlanDelivered) => planner.delivered(),
                 Some(Command::Answer(text)) => {
@@ -495,6 +511,21 @@ async fn switch_mode(planner: &mut Planner, mode: Mode, target: &str, gate: &mut
     let note = planner.set_mode(mode, target);
     let _ = events.send(VoiceEvent::Mode(mode)).await;
     note
+}
+
+/// Leva a thread ao par do modo; vale a partir do próximo turno. Falha aparece na tela e o texto devolvido avisa o organizador.
+async fn apply_models(rpc: &Rpc, thread: &str, applied: &mut ModeModel, models: &ModeModels, mode: Mode, default_model: Option<&str>,
+    events: &async_channel::Sender<VoiceEvent>) -> Option<&'static str> {
+    let wanted = models.get(mode);
+    let Some(update) = settings_update(thread, applied, wanted, default_model) else { *applied = wanted.clone(); return None };
+    if rpc.request("thread/settings/update", update).await.is_ok() {
+        log(format!("settings update ok mode={mode:?}"));
+        *applied = wanted.clone();
+        return None;
+    }
+    log(format!("settings update failed mode={mode:?}"));
+    let _ = events.send(VoiceEvent::Failed(VoiceFailure::ModelSwitch)).await;
+    Some("O modo mudou, mas o modelo que pensa não trocou; segue o anterior.")
 }
 
 async fn start_summary(rpc: &Rpc, thread: &str, first: Value, results: &mut Results, organizer_busy: bool) {

@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use serde::Deserialize;
 use gpui_kit::component::{select::{Select, SelectEvent, SelectState}, searchable_list::SearchableListItem};
 use crate::voice::{Activity as CallActivity, CallId, Phase, Voice, VoiceEvent, VoiceFailure, VoiceOptions, rpc::Codex,
-    organizer::{ConfirmGate, DEFAULT_EFFORT, Mode, OpenRequest, OrganizerAction, session_context, tool_reply}, usage::RateWindow};
+    organizer::{ConfirmGate, DEFAULT_EFFORT, Mode, ModeModel, ModeModels, OpenRequest, OrganizerAction, session_context, tool_reply}, usage::RateWindow};
 use super::{create::choices::{PERMISSIONS, checked_choice, creation_defaults}, grouping::{can_leave, can_pair}, sidebar::Target};
 
 /// Vozes do Realtime; vazio é o padrão do Codex.
@@ -85,14 +85,22 @@ fn fit_effort(efforts: &[String], current: Option<&str>) -> String {
         .or_else(|| efforts.first().cloned()).unwrap_or_else(|| DEFAULT_EFFORT.to_owned())
 }
 
-/// Preferências da voz gravadas neste computador; `effort` `None` = `DEFAULT_EFFORT`.
+/// Preferências da voz gravadas neste computador.
 #[derive(Debug, Default, PartialEq)]
-pub(super) struct SavedVoice { voice: Option<String>, account: Option<String>, model: Option<String>, effort: Option<String> }
+pub(super) struct SavedVoice { voice: Option<String>, account: Option<String>, organizer: ModeModels }
 
+/// O par do Direto mora nas chaves antigas (`organizer_model`/`organizer_effort`); sem `organizer_plan` gravado, o Planejar
+/// nasce igual ao Direto, e assim o arquivo de um par só vale para os dois modos.
 fn parse_saved_voice(value: &Value) -> SavedVoice {
-    let text = |k: &str| value[k].as_str().filter(|v| !v.is_empty()).map(str::to_owned);
-    SavedVoice { voice: text("voice"), account: text("codex_home"), model: text("organizer_model"), effort: text("organizer_effort") }
+    let text = |v: &Value, k: &str| v[k].as_str().filter(|v| !v.is_empty()).map(str::to_owned);
+    let pair = |v: &Value, model: &str, effort: &str| ModeModel { model: text(v, model), effort: text(v, effort).unwrap_or_else(|| DEFAULT_EFFORT.to_owned()) };
+    let direct = pair(value, "organizer_model", "organizer_effort");
+    let plan = value["organizer_plan"].is_object().then(|| pair(&value["organizer_plan"], "model", "effort")).unwrap_or_else(|| direct.clone());
+    SavedVoice { voice: text(value, "voice"), account: text(value, "codex_home"), organizer: ModeModels { direct, plan } }
 }
+
+/// Posição do modo nos seletores do cartão.
+fn slot(mode: Mode) -> usize { match mode { Mode::Direct => 0, Mode::Plan => 1 } }
 
 #[derive(Default)]
 pub(super) struct VoiceUi {
@@ -100,14 +108,14 @@ pub(super) struct VoiceUi {
     /// Escolha gravada (home da conta); só vale enquanto estiver em `accounts`.
     pub(super) account: Option<String>,
     pub(super) account_select: Option<(Entity<SelectState<Vec<CodexAccount>>>, Subscription)>,
-    /// Modelo e esforço do organizador gravados; valem na próxima chamada. `None` = config do Codex / `DEFAULT_EFFORT`.
-    pub(super) organizer_model: Option<String>,
-    pub(super) organizer_effort: Option<String>,
+    /// Modelo e esforço do organizador por modo, gravados; editar na chamada vale já para o modo atual.
+    pub(super) organizer: ModeModels,
     /// Catálogo da conta escolhida: `None` = lendo (ou nunca pedido, com `models_seq` 0).
     pub(super) organizer_models: Option<Result<Vec<OrganizerModel>, String>>,
     pub(super) models_seq: u64,
-    pub(super) model_select: Option<(Entity<SelectState<Vec<OrganizerChoice>>>, Subscription)>,
-    pub(super) effort_select: Option<(Entity<SelectState<Vec<OrganizerChoice>>>, Subscription)>,
+    /// Um seletor por modo, na ordem de `slot`.
+    pub(super) model_select: [Option<(Entity<SelectState<Vec<OrganizerChoice>>>, Subscription)>; 2],
+    pub(super) effort_select: [Option<(Entity<SelectState<Vec<OrganizerChoice>>>, Subscription)>; 2],
     pub(super) enabled: bool,
     pub(super) codex: Option<Codex>,
     pub(super) call: Option<Voice>,
@@ -464,6 +472,7 @@ fn failure_text(failure: &VoiceFailure) -> String {
         VoiceFailure::Network => tr("voice_network"),
         VoiceFailure::Timeout => tr_shared("codex_voice_timeout", &[]),
         VoiceFailure::Organizer => tr("voice_organizer"),
+        VoiceFailure::ModelSwitch => tr("voice_model_switch_failed"),
         VoiceFailure::Closed => tr("voice_server_closed"),
     }
 }
@@ -480,8 +489,10 @@ fn save_voice(saved: &SavedVoice) -> Result<(), String> {
     let dir = path.parent().ok_or_else(|| tr("keyboard_no_directory"))?;
     std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
     let temporary = path.with_extension("json.tmp");
+    let (direct, plan) = (&saved.organizer.direct, &saved.organizer.plan);
     let bytes = serde_json::to_vec(&json!({"voice": saved.voice, "codex_home": saved.account,
-        "organizer_model": saved.model, "organizer_effort": saved.effort})).map_err(|error| error.to_string())?;
+        "organizer_model": direct.model, "organizer_effort": direct.effort,
+        "organizer_plan": {"model": plan.model, "effort": plan.effort}})).map_err(|error| error.to_string())?;
     std::fs::write(&temporary, bytes).and_then(|_| std::fs::rename(&temporary, &path)).map_err(|error| error.to_string())
 }
 
@@ -523,7 +534,7 @@ impl Hangar {
         self.voice.codex = codex;
         if self.voice.call.is_none() {
             (self.voice.voice, self.voice.account) = (saved.voice, saved.account);
-            (self.voice.organizer_model, self.voice.organizer_effort) = (saved.model, saved.effort);
+            self.voice.organizer = saved.organizer;
             // Lista que não veio fica como estava: leitura falha não é "sem contas".
             if let Some(accounts) = accounts { self.voice.accounts = accounts; }
             // O seletor aberto segue a lista que `chosen_home` usa.
@@ -567,7 +578,7 @@ impl Hangar {
         }
         crate::voice::log(format!("voice: account chosen {}", if codex_home.is_some() { "custom" } else { "default" }));
         let options = VoiceOptions { codex, voice: self.voice.voice.clone(), context: self.voice_context(), cwd: self.local_session_dir(), target, codex_home,
-            organizer_model: self.voice.organizer_model.clone(), organizer_effort: self.voice.organizer_effort.clone().unwrap_or_else(|| DEFAULT_EFFORT.to_owned()) };
+            organizer: self.voice.organizer.clone() };
         self.voice.generation += 1;
         self.voice.call = Some(Voice::start(self.runtime.handle(), options, events_tx));
         self.voice.target = self.selected.as_ref().map(|s| s.name.clone());
@@ -890,8 +901,8 @@ impl Hangar {
             VoiceEvent::Draft(draft) => self.voice.draft = draft,
             VoiceEvent::Failed(failure) => {
                 self.voice.error = Some(failure_text(&failure));
-                // O erro do organizador é de uma fala e a conversa segue: aparece na pílula e no painel, sem abrir.
-                if !matches!(failure, VoiceFailure::Organizer) { self.voice.open = true; }
+                // Erro do organizador ou da troca de modelo não para a conversa: aparece na pílula e no painel, sem abrir.
+                if !matches!(failure, VoiceFailure::Organizer | VoiceFailure::ModelSwitch) { self.voice.open = true; }
             }
             VoiceEvent::Mode(mode) => self.voice.mode = mode,
             VoiceEvent::Plan { path, markdown } => self.voice.plan = Some((path, markdown)),
@@ -1198,7 +1209,7 @@ impl Hangar {
 
     fn load_organizer_models(&mut self, cx: &mut Context<Self>) {
         self.voice.models_seq += 1;
-        (self.voice.organizer_models, self.voice.model_select, self.voice.effort_select) = (None, None, None);
+        (self.voice.organizer_models, self.voice.model_select, self.voice.effort_select) = (None, Default::default(), Default::default());
         let Some(api) = self.local_api() else { self.voice.organizer_models = Some(Err(String::new())); cx.notify(); return };
         let account = self.voice.accounts.get(self.account_index()).map_or_else(|| "default".to_owned(), |a| a.id.clone());
         let (seq, connection, tx) = (self.voice.models_seq, self.connection, self.tx.clone());
@@ -1214,51 +1225,62 @@ impl Hangar {
     pub(super) fn receive_organizer_models(&mut self, seq: u64, result: Result<Vec<OrganizerModel>, String>, window: &mut Window, cx: &mut Context<Self>) {
         if seq != self.voice.models_seq { return; }
         self.voice.organizer_models = Some(result);
-        self.build_model_pick(window, cx);
-        self.build_effort_pick(window, cx);
+        for mode in [Mode::Direct, Mode::Plan] {
+            self.build_model_pick(mode, window, cx);
+            self.build_effort_pick(mode, window, cx);
+        }
         cx.notify();
     }
 
-    fn build_model_pick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn organizer_pair(&mut self, mode: Mode) -> &mut ModeModel {
+        match mode { Mode::Direct => &mut self.voice.organizer.direct, Mode::Plan => &mut self.voice.organizer.plan }
+    }
+
+    /// Grava os pares e, com a chamada no ar, os entrega a ela: o do modo atual troca já no próximo turno.
+    fn organizer_changed(&mut self, cx: &mut Context<Self>) {
+        self.persist_voice_prefs(cx);
+        if let Some(call) = &self.voice.call { call.set_models(self.voice.organizer.clone()); }
+        cx.notify();
+    }
+
+    fn build_model_pick(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
         let Some(Ok(models)) = &self.voice.organizer_models else { return };
-        let chosen = self.voice.organizer_model.clone();
+        let chosen = self.voice.organizer.get(mode).model.clone();
         let mut items: Vec<OrganizerChoice> = std::iter::once(OrganizerChoice { id: String::new(), label: tr("voice_organizer_default") })
             .chain(models.iter().map(|m| OrganizerChoice { id: m.id.clone(), label: m.name.clone().unwrap_or_else(|| m.id.clone()) })).collect();
         // Gravado que saiu do catálogo continua à vista: a próxima chamada ainda o usa.
         if let Some(model) = chosen.as_ref().filter(|m| !items.iter().any(|i| &i.id == *m)) { items.push(OrganizerChoice { id: model.clone(), label: model.clone() }); }
         let at = items.iter().position(|i| Some(&i.id) == chosen.as_ref()).unwrap_or(0);
         let picker = cx.new(|cx| SelectState::new(items, Some(gpui_kit::component::IndexPath::new(at)), window, cx));
-        let sub = cx.subscribe_in(&picker, window, |this: &mut Hangar, _, event: &SelectEvent<Vec<OrganizerChoice>>, window, cx| {
+        let sub = cx.subscribe_in(&picker, window, move |this: &mut Hangar, _, event: &SelectEvent<Vec<OrganizerChoice>>, window, cx| {
             let SelectEvent::Confirm(Some(id)) = event else { return };
-            this.voice.organizer_model = (!id.is_empty()).then(|| id.clone());
-            this.build_effort_pick(window, cx);
-            this.persist_voice_prefs(cx);
-            cx.notify();
+            this.organizer_pair(mode).model = (!id.is_empty()).then(|| id.clone());
+            this.build_effort_pick(mode, window, cx);
+            this.organizer_changed(cx);
         });
-        self.voice.model_select = Some((picker, sub));
+        self.voice.model_select[slot(mode)] = Some((picker, sub));
     }
 
     /// Refeito a cada troca de modelo: os esforços são do modelo, e o que ele não aceita vira o padrão.
-    fn build_effort_pick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn build_effort_pick(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
         let Some(Ok(models)) = &self.voice.organizer_models else { return };
-        let efforts = organizer_efforts(models, self.voice.organizer_model.as_deref());
-        let effort = fit_effort(&efforts, self.voice.organizer_effort.as_deref());
+        let pair = self.voice.organizer.get(mode);
+        let efforts = organizer_efforts(models, pair.model.as_deref());
+        let effort = fit_effort(&efforts, Some(&pair.effort));
         let at = efforts.iter().position(|e| *e == effort).unwrap_or(0);
-        self.voice.organizer_effort = Some(effort);
+        self.organizer_pair(mode).effort = effort;
         let items: Vec<OrganizerChoice> = efforts.into_iter().map(|e| OrganizerChoice { label: e.clone(), id: e }).collect();
         let picker = cx.new(|cx| SelectState::new(items, Some(gpui_kit::component::IndexPath::new(at)), window, cx));
-        let sub = cx.subscribe_in(&picker, window, |this: &mut Hangar, _, event: &SelectEvent<Vec<OrganizerChoice>>, _, cx| {
+        let sub = cx.subscribe_in(&picker, window, move |this: &mut Hangar, _, event: &SelectEvent<Vec<OrganizerChoice>>, _, cx| {
             let SelectEvent::Confirm(Some(id)) = event else { return };
-            this.voice.organizer_effort = Some(id.clone());
-            this.persist_voice_prefs(cx);
-            cx.notify();
+            this.organizer_pair(mode).effort = id.clone();
+            this.organizer_changed(cx);
         });
-        self.voice.effort_select = Some((picker, sub));
+        self.voice.effort_select[slot(mode)] = Some((picker, sub));
     }
 
     fn persist_voice_prefs(&mut self, cx: &mut Context<Self>) {
-        let saved = SavedVoice { voice: self.voice.voice.clone(), account: self.voice.account.clone(),
-            model: self.voice.organizer_model.clone(), effort: self.voice.organizer_effort.clone() };
+        let saved = SavedVoice { voice: self.voice.voice.clone(), account: self.voice.account.clone(), organizer: self.voice.organizer.clone() };
         let write = cx.background_executor().spawn(async move { save_voice(&saved) });
         cx.spawn(async move |this, cx| {
             if let Err(error) = write.await {
@@ -1443,11 +1465,18 @@ impl Hangar {
                 .child(div().text_xs().text_color(theme::muted()).child(tr("voice_account")))
                 .child(div().w(px(200.)).child(Select::new(picker).small().disabled(live).accessibility_label(tr("voice_account")))));
         }
-        for (select, key) in [(&self.voice.model_select, "voice_organizer_model"), (&self.voice.effort_select, "voice_organizer_effort")] {
-            let Some((picker, _)) = select else { continue };
-            body = body.child(div().flex().items_center().justify_between().gap(px(12.))
-                .child(div().text_xs().text_color(theme::muted()).child(tr(key)))
-                .child(div().w(px(200.)).child(Select::new(picker).small().disabled(live).accessibility_label(tr(key)))));
+        // Abertos também na chamada: o par do modo atual troca já no próximo turno.
+        for (mode, title) in [(Mode::Direct, "voice_mode_direct"), (Mode::Plan, "voice_mode_plan")] {
+            let at = slot(mode);
+            if self.voice.model_select[at].is_none() && self.voice.effort_select[at].is_none() { continue; }
+            body = body.child(div().text_xs().font_weight(FontWeight::MEDIUM).text_color(theme::muted()).child(tr(title)));
+            for (select, key) in [(&self.voice.model_select[at], "voice_organizer_model"), (&self.voice.effort_select[at], "voice_organizer_effort")] {
+                let Some((picker, _)) = select else { continue };
+                let label = format!("{} · {}", tr(title), tr(key));
+                body = body.child(div().flex().items_center().justify_between().gap(px(12.))
+                    .child(div().text_xs().text_color(theme::muted()).child(tr(key)))
+                    .child(div().w(px(200.)).child(Select::new(picker).small().accessibility_label(label))));
+            }
         }
         match &self.voice.organizer_models {
             Some(Ok(_)) => body = body.child(div().text_xs().text_color(theme::faint()).whitespace_normal().child(tr("voice_organizer_hint"))),
@@ -1553,10 +1582,17 @@ mod tests {
     fn saved_voice_defaults_and_reads_organizer_choice() {
         // Arquivo antigo, sem as chaves do organizador: modelo do config e esforço padrão.
         let old = parse_saved_voice(&json!({"voice": "ash", "codex_home": "/h/.codex-b"}));
-        assert_eq!(old, SavedVoice { voice: Some("ash".into()), account: Some("/h/.codex-b".into()), model: None, effort: None });
+        assert_eq!(old, SavedVoice { voice: Some("ash".into()), account: Some("/h/.codex-b".into()), organizer: ModeModels::default() });
         assert_eq!(parse_saved_voice(&json!({})), SavedVoice::default());
-        let chosen = parse_saved_voice(&json!({"organizer_model": "gpt-x", "organizer_effort": "high"}));
-        assert_eq!((chosen.model.as_deref(), chosen.effort.as_deref()), (Some("gpt-x"), Some("high")));
+        assert_eq!(ModeModels::default().plan, ModeModel { model: None, effort: "low".into() });
+        // Um par só (antes dos modos) vale para os dois.
+        let single = parse_saved_voice(&json!({"organizer_model": "gpt-x", "organizer_effort": "high"})).organizer;
+        let pair = ModeModel { model: Some("gpt-x".into()), effort: "high".into() };
+        assert_eq!(single, ModeModels { direct: pair.clone(), plan: pair.clone() });
+        // Planejar gravado vence, inclusive "modelo do config" (null).
+        let both = parse_saved_voice(&json!({"organizer_model": "gpt-x", "organizer_effort": "high",
+            "organizer_plan": {"model": null, "effort": "xhigh"}})).organizer;
+        assert_eq!(both, ModeModels { direct: pair, plan: ModeModel { model: None, effort: "xhigh".into() } });
     }
 
     #[test]

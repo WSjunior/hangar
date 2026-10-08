@@ -45,7 +45,8 @@ Há dois modos. No modo Direto, siga as regras acima. No modo Planejar, NADA vai
 - Quando o usuário disser que terminou, leia um resumo do plano em até três frases e pergunte se deve mandar
   para executar ou para escrever o plano de implementação; só então chame finish_plan com a escolha.
   Depois que ele confirmar, chame finish_plan de novo.
-- O usuário troca de modo falando; use set_mode quando ele pedir.
+- O usuário troca de modo falando ('modo planejar', 'modo direto'; 'pensa mais' é planejar, 'modo rápido' é direto); use set_mode,
+  que troca também o modelo que pensa.
 Quando o usuário pedir para trocar, ir ou abrir outra sessão, chame switch_session com o nome falado, mesmo que seja
 só um pedaço do nome ('abre a grupos' é a sessão grupos-rust-plano). Na dúvida, chame list_sessions antes.
 open_session só quando ele pedir sessão NOVA ou falar em pasta ('abre uma sessão nova na pasta hangar'); pair_sessions e
@@ -115,6 +116,30 @@ pub fn organizer_start(config: &Value, own: &Path, session: Option<&Path>, conte
         "config": thread_config(config, effort), "dynamicTools": tools()});
     if let Some(model) = model.or_else(|| config["model"].as_str()) { start["model"] = json!(model); }
     start
+}
+
+/// Modelo e esforço do organizador num modo; `model` `None` = o modelo do config do Codex.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModeModel { pub model: Option<String>, pub effort: String }
+
+impl Default for ModeModel { fn default() -> Self { Self { model: None, effort: DEFAULT_EFFORT.to_owned() } } }
+
+/// Um par por modo: trocar de modo na chamada troca o modelo da thread.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ModeModels { pub direct: ModeModel, pub plan: ModeModel }
+
+impl ModeModels {
+    pub fn get(&self, mode: Mode) -> &ModeModel { match mode { Mode::Direct => &self.direct, Mode::Plan => &self.plan } }
+}
+
+/// `thread/settings/update` de `from` para `to`, só com o que muda; `None` = nada a mandar. Voltar ao modelo do config
+/// exige mandá-lo pelo nome (`default_model`); sem ele, o modelo fica como está.
+pub fn settings_update(thread: &str, from: &ModeModel, to: &ModeModel, default_model: Option<&str>) -> Option<Value> {
+    let resolved = |m: &ModeModel| m.model.clone().or_else(|| default_model.map(str::to_owned));
+    let mut update = json!({"threadId": thread});
+    if let Some(model) = resolved(to).filter(|m| Some(m) != resolved(from).as_ref()) { update["model"] = json!(model); }
+    if to.effort != from.effort { update["effort"] = json!(to.effort); }
+    (update.as_object().is_some_and(|o| o.len() > 1)).then_some(update)
 }
 
 pub fn thread_config(config: &Value, effort: &str) -> Value {
@@ -699,6 +724,19 @@ mod tests {
         assert_eq!(reasoning_delta("item/reasoning/summaryPartAdded", &json!({})).as_deref(), Some("\n"));
         assert_eq!(reasoning_delta("item/reasoning/textDelta", &json!({"delta": "cru"})), None, "só o resumo aparece");
         assert_eq!(thread_config(&json!({}), DEFAULT_EFFORT)["model_reasoning_summary"], json!("concise"));
+    }
+
+    #[test]
+    fn mode_switch_sends_only_what_changes() {
+        let pair = |model: Option<&str>, effort: &str| ModeModel { model: model.map(str::to_owned), effort: effort.to_owned() };
+        let (direct, plan) = (ModeModel::default(), pair(Some("gpt-big"), "high"));
+        assert_eq!(settings_update("t", &direct, &plan, Some("gpt-cfg")), Some(json!({"threadId": "t", "model": "gpt-big", "effort": "high"})));
+        assert_eq!(settings_update("t", &plan, &direct, Some("gpt-cfg")), Some(json!({"threadId": "t", "model": "gpt-cfg", "effort": "low"})),
+            "volta ao modelo do config pelo nome");
+        assert_eq!(settings_update("t", &direct, &pair(None, "high"), Some("gpt-cfg")), Some(json!({"threadId": "t", "effort": "high"})));
+        assert_eq!(settings_update("t", &plan, &direct, None), Some(json!({"threadId": "t", "effort": "low"})), "sem o nome do config o modelo fica");
+        assert_eq!(settings_update("t", &pair(Some("gpt-cfg"), "low"), &direct, Some("gpt-cfg")), None, "mesmo modelo resolvido não manda nada");
+        assert_eq!(settings_update("t", &direct, &direct, None), None);
     }
 
     #[test]
