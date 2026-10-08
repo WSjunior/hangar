@@ -222,7 +222,7 @@ fn age(seconds: f64) -> String {
 }
 
 /// Até o reinício: na janela curta, quanto falta ("1h20", "35m"); passando de um dia, o dia ("sáb 27/09 15h").
-fn reset_text(at: Option<f64>, now: f64) -> String {
+pub(super) fn reset_text(at: Option<f64>, now: f64) -> String {
     let Some(at) = at.filter(|at| at.is_finite() && *at > now) else { return String::new() };
     let left = at - now;
     if left > 86_400. {

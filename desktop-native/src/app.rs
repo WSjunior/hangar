@@ -81,7 +81,8 @@ mod worktrees;
 mod stats;
 mod search;
 mod topbar;
-mod setup;
+mod voice_ui;
+pub(crate) mod setup;
 /// Variável do ambiente do script com o código de uso único do askpass (`setup::askpass`).
 pub(crate) const ASKPASS_CODE_ENV: &str = "HANGAR_ASKPASS_CODE";
 
@@ -245,6 +246,12 @@ enum Payload {
     Mentions(u64, Result<Vec<String>, Failure>),
     // Resumo do bastão (`GET …/bastao/dossie`), amarrado ao estado da tela que o pediu e ao número do pedido.
     Dossier(EntityId, u64, Result<String, Failure>),
+    // Evento da chamada de voz com o número dela: o da chamada parada é descartado.
+    Voice(u64, crate::voice::VoiceEvent),
+    // Opção beta do servidor local, o Codex achado e a voz gravada neste computador.
+    VoiceGate(Option<bool>, Option<crate::voice::rpc::Codex>, (Option<String>, Option<String>), Option<Vec<voice_ui::CodexAccount>>),
+    // Histórico da sessão que recebeu pedido da voz e terminou fora da tela.
+    VoiceHistory(u64, SessionKey, Result<api::History, Failure>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -638,6 +645,7 @@ pub struct Hangar {
     attached: HashSet<(String, String, String)>,
     external_seq: u64,
     dictation: dictation::Dictation,
+    voice: voice_ui::VoiceUi,
     player: player::Player,
     connection_origin: Option<WeakFocusHandle>,
     /// Primeira abertura com o app Electron neste computador: a tela de conexão oferece trazer as configurações dele.
@@ -877,6 +885,7 @@ impl Hangar {
             servers: known_servers, remote: HashMap::new(), remote_tasks: Vec::new(), remote_gen: 0, servers_rev: 0, invite_ended: HashSet::new(), pending_open: None, pending_remote: None,
             external_pairs: Vec::new(), external_seen: None, attached: HashSet::new(), external_seq: 0,
             dictation: Default::default(),
+            voice: Default::default(),
             player: Default::default(),
             connection_origin: None,
             electron_offer: saved.is_none() && crate::electron::exists(),
@@ -1316,6 +1325,7 @@ impl Hangar {
         self.controls.on_select();
         self.reset_subagent_count();
         self.selected = Some(session.clone());
+        self.voice_session_opened(cx);
         if !same_server || session.engine.as_deref().is_some_and(|e| !e.is_empty()) || session.uses_engine_account() {
             self.load_session_accounts(cx);
         }
@@ -1420,10 +1430,15 @@ impl Hangar {
         // Resultados amarrados à identidade da sessão valem mesmo depois de trocar a seleção.
         let payload = match envelope.payload {
             Payload::Sent(key, text, draft, result) => {
+                self.voice_sent(&key, &text, &result);
                 self.receive_sent(key, text, draft, result, window, cx);
                 cx.notify();
                 return;
             }
+            // A chamada é deste computador: a troca de servidor não a derruba, só a geração dela decide.
+            Payload::Voice(generation, event) => { self.receive_voice(generation, event, window, cx); return; }
+            Payload::VoiceGate(enabled, codex, saved, accounts) => { self.receive_voice_gate(enabled, codex, saved, accounts, window, cx); return; }
+            Payload::VoiceHistory(generation, key, result) => { self.voice_history(generation, key, result); return; }
             Payload::Files(key, owner, generation, files) => { self.receive_files(key, owner, generation, files, cx); cx.notify(); return; }
             Payload::UploadStep(key, id, result) => { let key = self.delivery.current(key); self.receive_upload(key, id, result); cx.notify(); return; }
             Payload::UploadsDone(key, draft, steer, known, group) => {
@@ -1487,6 +1502,7 @@ impl Hangar {
                         || matches!(&update, servers::RemoteUpdate::Stream(Update::Frame(frame)) if frame.event == "shortcut_terminals");
                     // Menu, renomear, fechar e grupo das linhas desta máquina acompanham a lista dela como os da ativa.
                     if self.receive_remote(generation, key.clone(), update, cx) { self.sidebar_sessions_changed(window, cx); }
+                    self.voice_sessions();
                     self.remote_changed(&key, window, cx);
                     if live { self.live_changed(&key, window, cx); }
                 }
@@ -1515,6 +1531,9 @@ impl Hangar {
                     self.sync_updater(cx);
                 }
                 self.replace_sessions(sessions, window, cx);
+                self.voice_sessions();
+                // Primeira lista desta conexão: liga a troca de servidor e a abertura do app.
+                self.refresh_voice_gate(cx);
                 if let Some(name) = self.pending_open.take()
                     && let Some(session) = self.sessions.iter().find(|s| s.name == name).cloned() {
                     self.select(session, window, cx);
@@ -1567,6 +1586,7 @@ impl Hangar {
                             visible = self.list_error.is_some() || self.sessions != sessions;
                             self.list_error = None;
                             self.replace_sessions(sessions, window, cx);
+                            self.voice_sessions();
                             true
                         }
                         Err(_) => { self.list_error = Some(tr("invalid_response")); false }
@@ -1740,7 +1760,7 @@ impl Hangar {
             Payload::Sent(..) | Payload::Interrupted(..) | Payload::Acted(..) | Payload::Files(..) | Payload::UploadStep(..)
                 | Payload::UploadsDone(..) | Payload::Saved(..) | Payload::ConnectionNotSaved(..) | Payload::Reply(..) | Payload::HeadlessPlan(..)
                 | Payload::AppearanceSaved(..) | Payload::Backdrop(..) | Payload::BackdropPicked(..) | Payload::BackdropRemoved(..)
-                | Payload::Remote(..) | Payload::Lan(..) => unreachable!(),
+                | Payload::Remote(..) | Payload::Lan(..) | Payload::Voice(..) | Payload::VoiceGate(..) | Payload::VoiceHistory(..) => unreachable!(),
         }
         // Lista que trocou ou tirou a sessão aberta refaz a conversa.
         if rows || self.selection != selection { self.sync_rows(cx); }
@@ -1995,7 +2015,9 @@ impl Hangar {
                         self.delivery.confirm_real(&key, &event.id, text);
                     }
                 }
+                let assistant = event.kind == "assistant_msg";
                 self.chat.apply(event);
+                if assistant { self.voice_message(); }
                 if self.chat.preview.text.is_empty() {
                     self.cancel_preview_drop();
                     self.clear_visible_preview();
@@ -2028,6 +2050,7 @@ impl Hangar {
                 // Estado vazio é a conversa recém-aberta: o turno já corria, e quem conta é o último envio.
                 if turned { self.turn_seen = (state.state == "working" && !self.chat.state.state.is_empty()).then(Instant::now); }
                 if state.state == "working" { self.sent_until = None; }
+                if finished { self.voice_turn_finished(&state.state, cx); }
                 self.chat.update_state(state);
                 self.sync_working_row(cx);
                 if turned { self.restart_subagent_count(cx); }

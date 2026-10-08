@@ -277,6 +277,8 @@ pub(super) struct Dictation {
 }
 
 impl Dictation {
+    pub(super) fn recording(&self) -> bool { self.recorder.is_some() }
+
     fn observe_file_owner(&mut self, owner: Option<SessionOwner>) -> u64 {
         if self.file_owner != owner {
             // `error` é da tela que ficou para trás; o ditado em curso segue, então só a troca o limpa.
@@ -536,6 +538,8 @@ impl Hangar {
     }
 
     pub(super) fn toggle_dictation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Um microfone só: com a voz ligada, o ditado espera.
+        if self.voice.call.is_some() { return; }
         self.cancel_dictation_countdown(cx);
         if self.dictation.request.is_some() { return; }
         if self.dictation.recorder.is_some() {
@@ -874,10 +878,11 @@ impl Hangar {
             Button::new("dictation-toggle").ghost().size_7().rounded_md()
                 .child(div().size_3().rounded_sm().bg(theme::danger()))
         } else { chrome::icon_button("dictation-toggle", IconName::Mic, label.clone(), cx) };
+        let voice = self.voice.call.is_some();
         let mic = mic.accessibility_label(label.clone())
-            .disabled(in_flight || (!recording && (!readable || !self.dictation_ready())))
+            .disabled(voice || in_flight || (!recording && (!readable || !self.dictation_ready())))
             .loading(transcribing)
-            .tooltip(format!("{label} · {}", tr("dictation_shortcut")))
+            .tooltip(if voice { tr("voice_dictation_blocked") } else { format!("{label} · {}", tr("dictation_shortcut")) })
             .on_click(cx.listener(|this, _, window, cx| this.toggle_dictation(window, cx)));
         let owner = here && self.dictation.owner.is_some();
         let style = self.dictation.style(self.connection).unwrap_or("prosa");
