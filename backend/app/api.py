@@ -5603,8 +5603,13 @@ class OrqGroupBody(_StrictBody):
 @app.post("/api/sessions/{name}/orq/grupo", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 async def orq_group_set(name: str, body: OrqGroupBody):
     """Associa o time da planejadora ao grupo real, inclusive com um árbitro novo."""
+    return await _orq_associate(orq_context.associate, name, body.gid, body.mtime)
+
+
+async def _orq_associate(associate, name: str, gid: str, mtime: float) -> dict:
+    """Resposta e erros da associação, iguais na rota pública e na interna do Rust."""
     try:
-        context = await asyncio.to_thread(orq_context.associate, name, body.gid, body.mtime)
+        context = await asyncio.to_thread(associate, name, gid, mtime)
     except orq_md.Conflito:
         raise HTTPException(409, detail=erro("erro_orq_arquivo_mudou",
                                              "o time mudou desde a leitura — recarregue"))

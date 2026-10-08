@@ -48,10 +48,6 @@ impl Ctx {
 }
 
 /// Envelope do `HTTPException(detail=erro(...))` do Python (`mensagens.py`).
-pub(crate) fn detail(status: StatusCode, code: &str, msg: &str, params: Value) -> Response {
-    json_response(status, detail_body(code, msg, params))
-}
-
 pub fn detail_body(code: &str, msg: &str, params: Value) -> Value {
     json!({"detail": {"code": code, "params": params, "msg": msg}})
 }
@@ -95,24 +91,33 @@ pub(crate) async fn admit(st: &Arc<AppState>, peer: SocketAddr, req: Request, ro
     if !table::body_ok(route, &bytes) || early(&bytes) {
         return Err(forward_whole(st, parts, bytes, &fwd).await);
     }
-    let found = match enter_then_find(&runtime, &name, st.write_gate_wait).await {
-        Ok(found) => found,
-        Err(GateClosed) => {
-            let mut response = detail(StatusCode::CONFLICT, "session_transfer_busy", BUSY_MSG, json!({}));
+    match route_write(&runtime, &name, route, st.write_gate_wait).await {
+        Write::Rust(pass_in, target) => Ok((Ctx { st: st.clone(), name, target, pass: pass_in, parts, fwd }, bytes)),
+        Write::Python => Err(forward_whole(st, parts, bytes, &fwd).await),
+        Write::Busy => {
+            let mut response = json_response(StatusCode::CONFLICT, busy_body());
             cors(&parts.headers, response.headers_mut());
-            return Err(response);
+            Err(response)
         }
-    };
-    let Some((pass_in, target)) = found else {
-        return Err(forward_whole(st, parts, bytes, &fwd).await);
-    };
-    let rust = Provider::from_str(&target.provider).is_some_and(|p| decide(route, p, target.terminal, target.healthy) == Owner::Rust);
-    if !rust {
-        drop(pass_in);
-        return Err(forward_whole(st, parts, bytes, &fwd).await);
     }
-    Ok((Ctx { st: st.clone(), name, target, pass: pass_in, parts, fwd }, bytes))
 }
+
+/// Quem atende uma escrita de corpo já aceito.
+pub(crate) enum Write { Rust(IngressPass, WriteTarget), Python, Busy }
+
+/// Porta, entrada e tabela, nessa ordem. O passe só volta com `Rust`: repasse nunca o segura.
+pub(crate) async fn route_write(runtime: &RuntimeRegistry, name: &str, route: WriteRoute, wait: Duration) -> Write {
+    match enter_then_find(runtime, name, wait).await {
+        Err(GateClosed) => Write::Busy,
+        Ok(None) => Write::Python,
+        Ok(Some((pass_in, target))) => {
+            let rust = Provider::from_str(&target.provider).is_some_and(|p| decide(route, p, target.terminal, target.healthy) == Owner::Rust);
+            if rust { Write::Rust(pass_in, target) } else { Write::Python }
+        }
+    }
+}
+
+pub(crate) fn busy_body() -> Value { detail_body("session_transfer_busy", BUSY_MSG, json!({})) }
 
 /// Repassa ao Python o que o Rust admitiu mas não atende (corpo que o FastAPI recusa), soltando
 /// antes o passe.
