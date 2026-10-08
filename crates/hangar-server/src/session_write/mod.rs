@@ -1,12 +1,14 @@
 //! Rotas de escrita de sessão Claude. O Rust as reivindica na tabela (`table`) e decide por pedido;
 //! `/input` e `/steer` (`input`), o controle (`control`) e `/answer` (`answer`) têm corpo no Rust;
-//! o que o Rust admite mas não atende (corpo que o FastAPI recusa) volta ao Python por `relay`.
+//! as rotas só do Codex sem terminal moram em `codex`; o que o Rust admite mas não atende (corpo que o
+//! FastAPI recusa) volta ao Python por `relay`.
 //!
 //! Ordem fixa de `admit`: dono → corpo → porta (`enter`) → entrada (`writable`) → decisão. A entrada
 //! é procurada DEPOIS da porta: a achada antes de esperar pode ser a que o relançamento parou.
 //! Repasse nunca acontece com o passe na mão: o `freeze` do Python fecha a porta e esperaria o
 //! nosso próprio passe.
 pub mod answer;
+pub mod codex;
 pub mod control;
 pub mod input;
 pub mod table;

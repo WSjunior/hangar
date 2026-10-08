@@ -875,6 +875,8 @@ impl Engine {
                         patch:json!({"permission_mode":mode}),reply:json!({"current":mode}) }]);
                 }
                 self.permission_mode = mode.into();
+                // A vista publicada é de onde a lista de modos lê o atual.
+                self.changed(&mut effects,false);
                 self.policy("session.patch_meta",json!({"permission_mode":mode}),&mut effects);
                 effects.push(Effect::Reply { operation_id:id,disposition:Disposition::Accepted,payload:json!({"current":mode}) });
             }
@@ -1019,7 +1021,10 @@ impl Engine {
                 self.changed(effects,true);
                 return Ok(());
             }
-            effects.push(Effect::Reply { operation_id:rpc.operation_id,disposition:Disposition::Rejected,payload:json!({"error":line["error"]}) });
+            // A leitura que antecede a troca de modo falhou: quem espera é a operação de cima.
+            let operation_id = rpc.continuation.as_ref().filter(|next|next["kind"] == "set_mode")
+                .and_then(|next|next["parent"].as_str()).map_or(rpc.operation_id,str::to_owned);
+            effects.push(Effect::Reply { operation_id,disposition:Disposition::Rejected,payload:json!({"error":line["error"]}) });
             return Ok(());
         }
         let result = line.get("result").cloned().unwrap_or_else(||json!({}));
@@ -1195,6 +1200,9 @@ impl Engine {
                 "efforts":model.supported_reasoning_efforts.into_iter().map(|e|json!({"value":e.reasoning_effort,"description":e.description})).collect::<Vec<_>>(),
                 "defaultEffort":model.default_reasoning_effort,"serviceTiers":model.service_tiers.unwrap_or_default(),
                 "defaultServiceTier":model.default_service_tier})).collect::<Vec<_>>())
+        } else if rpc.continuation.is_none() && matches!(rpc.method.as_str(),"thread/read" | "thread/settings/update") {
+            // Ler ou trocar a configuração responde com a configuração que vale depois dela, como o adapter Python.
+            json!({"model":self.model,"effort":self.effort,"service_tier":self.service_tier,"mode":self.mode})
         } else { result };
         effects.push(Effect::Reply { operation_id:rpc.operation_id,disposition:Disposition::Accepted,payload });
         self.changed(effects,true);

@@ -14,7 +14,11 @@ impl Provider {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WriteRoute { Input, Steer, Interrupt, Select, SelectSubmit, Answer, Keys, TermInput, QueueRemove }
+pub enum WriteRoute {
+    Input, Steer, Interrupt, Select, SelectSubmit, Answer, Keys, TermInput, QueueRemove,
+    /// Rotas só do Codex (`/models`, `/model`, `/limits`, `/commands`…): o Rust só atende o sem terminal.
+    CodexControl,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Owner { Rust, Python }
@@ -24,6 +28,7 @@ pub enum Owner { Rust, Python }
 pub fn decide(route: WriteRoute, provider: Provider, terminal: bool, healthy: bool) -> Owner {
     if !healthy || provider == Provider::Codex && terminal { return Owner::Python; }
     match route {
+        WriteRoute::CodexControl if provider != Provider::Codex => Owner::Python,
         // Teclas cruas e a aba Submit só existem num pane: sem terminal quem responde é o Python, como hoje.
         WriteRoute::Keys | WriteRoute::TermInput | WriteRoute::SelectSubmit if !terminal => Owner::Python,
         _ => Owner::Rust,
@@ -54,7 +59,7 @@ pub(crate) fn body_ok(route: WriteRoute, body: &Bytes) -> bool {
     match route {
         Input | Select | Answer | Keys | TermInput => object(),
         Steer => body.is_empty() || object(),
-        Interrupt | SelectSubmit | QueueRemove => true,
+        Interrupt | SelectSubmit | QueueRemove | CodexControl => true,
     }
 }
 
@@ -96,6 +101,14 @@ mod tests {
     #[test]
     fn codex_with_terminal_is_python() {
         for route in ALL { assert_eq!(decide(route, Provider::Codex, true, true), Owner::Python, "{route:?}"); }
+    }
+
+    #[test]
+    fn codex_control_is_rust_only_for_healthy_codex_without_terminal() {
+        assert_eq!(decide(CodexControl, Provider::Codex, false, true), Owner::Rust);
+        assert_eq!(decide(CodexControl, Provider::Codex, true, true), Owner::Python);
+        assert_eq!(decide(CodexControl, Provider::Codex, false, false), Owner::Python);
+        for terminal in [true, false] { assert_eq!(decide(CodexControl, Provider::Claude, terminal, true), Owner::Python); }
     }
 
     #[test]
