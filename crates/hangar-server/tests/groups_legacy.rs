@@ -235,3 +235,49 @@ async fn delete_pair_ends_external_pair() {
     assert_eq!(body["warning"]["params"]["avisos"][0]["erro"]["code"], "erro_peer_nao_avisado");
     assert!(!casa.pair.join("s1.json").exists());
 }
+
+/// O temporário da sessão vira pasta: a volta atrás do vínculo não consegue apagá-lo. Cada teste usa
+/// uma sessão: o diário só passa uma vez por sessão e código no processo.
+fn break_undo(m: &Machine, name: &str) { std::fs::create_dir(m.pair.join(format!("{name}.json.tmp"))).unwrap(); }
+
+async fn restore_failed_in_diary(m: &Machine) {
+    let python = m.python.clone();
+    fake::wait_until(move || python.diag().iter().any(|d| d["evento"] == "rust.groups_restore_failed")).await;
+}
+
+/// Quem inicia e não desfaz o lado daqui quando o outro não confirma: o 500 do Python, nunca "desfeito".
+#[tokio::test(flavor = "multi_thread")]
+async fn pair_cross_whose_undo_fails_is_500() {
+    let dir = tempfile::tempdir().unwrap();
+    let casa = machine(dir.path(), "casa").await;
+    let off = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let off_addr = off.local_addr().unwrap();
+    peers_json(dir.path(), off_addr, off_addr);
+    let addr = casa.addr;
+    let asked = tokio::spawn(async move { call(addr, "POST", "s0/pair", Some(&json!({"peers": ["off::x"]}))).await });
+    let (sock, _) = off.accept().await.unwrap();
+    assert!(casa.pair.join("s0.json").is_file(), "o lado daqui grava antes de chamar o outro");
+    break_undo(&casa, "s0");
+    drop((sock, off));
+    assert_eq!(asked.await.unwrap(), (500, json!("Internal Server Error")));
+    restore_failed_in_diary(&casa).await;
+}
+
+/// Quem recebe e não avisa a sessão nem desfaz: o 500 do Python, nunca "pareamento desfeito".
+#[tokio::test(flavor = "multi_thread")]
+async fn pair_remote_whose_undo_fails_is_500() {
+    let dir = tempfile::tempdir().unwrap();
+    let casa = machine(dir.path(), "casa").await;
+    casa.python.set_input_reply(Some((StatusCode::BAD_REQUEST,
+        json!({"detail": {"code": "erro_fila_nao_digitada", "params": {}, "msg": "composer ilegível"}}))));
+    casa.python.hold_input(true);
+    let addr = casa.addr;
+    let asked = tokio::spawn(async move { call(addr, "POST", "s1/pair-remote", Some(&json!({"initiator": "lab::s1"}))).await });
+    let s1 = casa.pair.join("s1.json");
+    fake::wait_until(move || s1.is_file()).await;
+    break_undo(&casa, "s1");
+    casa.python.hold_input(false);
+    casa.python.release.notify_one();
+    assert_eq!(asked.await.unwrap(), (500, json!("Internal Server Error")));
+    restore_failed_in_diary(&casa).await;
+}

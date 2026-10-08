@@ -17,7 +17,7 @@ use super::exit::{leave_and_notify, segment};
 use super::local::JoinRefusal;
 use super::orq::PythonOrq;
 use super::routes::Bridged;
-use super::service::{GroupError, GroupService};
+use super::service::{GroupError, GroupService, PromoteError};
 use crate::routes::AppState;
 
 const MAX_BODY: usize = 1 << 20;
@@ -49,7 +49,8 @@ fn group_failed(e: GroupError) -> Failed {
     match e {
         GroupError::Refused(JoinRefusal::Mix | JoinRefusal::AlreadyGrouped) => fail("erro_pareamento_mistura_cross", super::routes::MIX_MSG),
         GroupError::Refused(JoinRefusal::TaskConflict { existing }) => fail("erro_pareamento_tarefa_existente", existing),
-        GroupError::Orq(text) => fail("erro_orq_arquivo_mudou", text),
+        GroupError::Orq(PromoteError::Conflict(text)) => fail("erro_orq_arquivo_mudou", text),
+        GroupError::Orq(PromoteError::Unavailable(code)) => fail("erro_grupo_indisponivel", code),
         GroupError::Store(e) => fail("groups_store_failed", e.to_string()),
     }
 }

@@ -1,6 +1,6 @@
 use hangar_server::groups::local::*;
 use hangar_server::groups::model::Sidecar;
-use hangar_server::groups::service::{BoxFuture, GroupError, GroupService, JoinOwned, OrqFacts, OrqPhase};
+use hangar_server::groups::service::{BoxFuture, GroupError, GroupService, JoinOwned, OrqFacts, OrqPhase, PromoteError};
 use hangar_server::groups::store::PairDir;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -184,10 +184,10 @@ impl FakeOrq {
 }
 impl OrqFacts for FakeOrq {
     fn phase<'a>(&'a self, _gid: &'a str) -> BoxFuture<'a, OrqPhase> { Box::pin(async move { self.phase }) }
-    fn promote<'a>(&'a self, _name: &'a str, _gid: &'a str) -> BoxFuture<'a, Result<(), String>> {
+    fn promote<'a>(&'a self, _name: &'a str, _gid: &'a str) -> BoxFuture<'a, Result<(), PromoteError>> {
         Box::pin(async move {
             self.promotes.fetch_add(1, Ordering::SeqCst);
-            self.conflict.clone().map_or(Ok(()), Err)
+            self.conflict.clone().map_or(Ok(()), |text| Err(PromoteError::Conflict(text)))
         })
     }
 }
@@ -221,7 +221,7 @@ async fn orq_join_promotes_once_and_restores_on_conflict() {
     let orq = FakeOrq::new(OrqPhase::Ended, Some("arquivo mudou"));
     let (svc, dir) = service(&tmp, orq.clone());
     match svc.join(owned("arb", &["exec"], true)).await {
-        Err(GroupError::Orq(text)) => assert_eq!(text, "arquivo mudou"),
+        Err(GroupError::Orq(failed)) => assert_eq!(failed, PromoteError::Conflict("arquivo mudou".into())),
         _ => panic!("conflito na promoção precisa voltar como GroupError::Orq"),
     }
     assert!(dir.sidecar("arb").unwrap().is_none() && dir.sidecar("exec").unwrap().is_none());

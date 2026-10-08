@@ -7,7 +7,7 @@ use axum::body::Body;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 
-use super::service::{BoxFuture, OrqFacts, OrqPhase};
+use super::service::{BoxFuture, OrqFacts, OrqPhase, PromoteError};
 use crate::proxy::HttpClient;
 use crate::routes::AppState;
 
@@ -67,18 +67,24 @@ impl OrqFacts for PythonOrq {
         })
     }
 
-    fn promote<'a>(&'a self, name: &'a str, gid: &'a str) -> BoxFuture<'a, Result<(), String>> {
+    fn promote<'a>(&'a self, name: &'a str, gid: &'a str) -> BoxFuture<'a, Result<(), PromoteError>> {
         Box::pin(async move {
-            let (status, reply) = match self.post("orq/promote", json!({"name": name, "gid": gid})).await {
-                Ok(answer) => answer,
-                Err(code) => { self.uncertain(gid, &code); return Err(code) }
-            };
-            if status == 200 { return Ok(()); }
             // Sem resposta ou com 5xx o Python pode ter promovido antes de falhar; o join volta atrás
             // mesmo assim, e o diário guarda o gid para quem for conferir o time.
-            if status >= 500 { self.uncertain(gid, &format!("groups_orq_promote_status_{status}")); }
-            // 409 traz o texto do conflito, como a rota `/pair` do Python.
-            Err(reply["detail"]["msg"].as_str().map(str::to_owned).unwrap_or_else(|| format!("groups_orq_promote_status:{status}")))
+            let (status, reply) = match self.post("orq/promote", json!({"name": name, "gid": gid})).await {
+                Ok(answer) => answer,
+                Err(code) => { self.uncertain(gid, &code); return Err(PromoteError::Unavailable(code)) }
+            };
+            match status {
+                200 => Ok(()),
+                // 409 traz o texto do conflito, como a rota `/pair` do Python.
+                409 => Err(PromoteError::Conflict(reply["detail"]["msg"].as_str().map_or_else(|| "groups_orq_promote_status_409".to_owned(), str::to_owned))),
+                _ => {
+                    let code = format!("groups_orq_promote_status_{status}");
+                    if status >= 500 { self.uncertain(gid, &code); }
+                    Err(PromoteError::Unavailable(code))
+                }
+            }
         })
     }
 }

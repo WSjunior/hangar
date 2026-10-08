@@ -19,18 +19,26 @@ pub enum OrqPhase { Live, Ended, NotStarted, Unknown }
 pub trait OrqFacts: Send + Sync {
     /// Falha em descobrir = `Unknown`.
     fn phase<'a>(&'a self, gid: &'a str) -> BoxFuture<'a, OrqPhase>;
-    /// `Err` = texto do conflito.
-    fn promote<'a>(&'a self, name: &'a str, gid: &'a str) -> BoxFuture<'a, Result<(), String>>;
+    fn promote<'a>(&'a self, name: &'a str, gid: &'a str) -> BoxFuture<'a, Result<(), PromoteError>>;
+}
+
+/// Python sem resposta não é conflito: "o arquivo mudou, recarregue" seria mentira.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PromoteError {
+    /// Texto do 409 do Python.
+    Conflict(String),
+    /// Código do motivo (prazo, 5xx, rota ausente).
+    Unavailable(String),
 }
 
 #[derive(Debug)]
-pub enum GroupError { Refused(JoinRefusal), Orq(String), Store(StoreError) }
+pub enum GroupError { Refused(JoinRefusal), Orq(PromoteError), Store(StoreError) }
 impl From<StoreError> for GroupError { fn from(e: StoreError) -> Self { GroupError::Store(e) } }
 impl std::fmt::Display for GroupError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             GroupError::Refused(r) => write!(f, "refused: {r:?}"),
-            GroupError::Orq(text) => write!(f, "orq: {text}"),
+            GroupError::Orq(e) => write!(f, "orq: {e:?}"),
             GroupError::Store(e) => write!(f, "{e}"),
         }
     }
@@ -114,10 +122,10 @@ impl GroupService {
             Ok(plan)
         }).await??;
         // Promover sob o mesmo lock: um join concorrente não enxerga o grupo meio configurado.
-        if plan.orq && plan.new_gid && let Err(conflict) = self.orq.promote(&name, &plan.gid).await {
+        if plan.orq && plan.new_gid && let Err(failed) = self.orq.promote(&name, &plan.gid).await {
             self.restore_blocking(plan.before.clone()).await;
             self.changed();
-            return Err(GroupError::Orq(conflict));
+            return Err(GroupError::Orq(failed));
         }
         self.changed();
         let newcomers = plan.members.iter().filter(|m| matches!(plan.before.get(*m), Some(None))).cloned().collect();

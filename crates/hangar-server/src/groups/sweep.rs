@@ -1,7 +1,7 @@
 //! Membro de grupo cuja sessão morreu fora do app (`registry._varrer_pares_mortos`) e grupo `orq`
 //! sozinho sem execução (`pair.dissolve_lone_orq`). Morto = ausente da lista viva há pelo menos
 //! `MIN_ABSENCE`: `kill` e `rename` deixam o nome ausente de propósito por um instante, e só o
-//! tempo separa isso de morte. Lista com erro ou vazia nunca varre.
+//! tempo separa isso de morte. Lista com erro, vazia ou sem fatos nunca varre.
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,6 +12,7 @@ use tokio::time::Instant;
 use super::exit::leave_and_notify;
 use super::service::{BoxFuture, GroupError, GroupService};
 use super::store::file_stem;
+use crate::list::bridge::Produced;
 use crate::routes::AppState;
 
 pub const TICK: Duration = Duration::from_secs(2);
@@ -125,6 +126,15 @@ fn warn_once(code: &'static str, error: &GroupError) {
     }
 }
 
+/// Nomes vivos do retrato da lista. Sem nenhuma resposta dos fatos, a sessão vista só por eles
+/// (transferência, `orq`) é desconhecida, não ausente: a rodada falha, como na ponte da lista.
+pub fn live_names_of(produced: &Produced) -> Result<Vec<String>, String> {
+    if produced.facts.unknown {
+        return Err("list_facts_unknown".to_owned());
+    }
+    Ok(produced.rows.iter().map(|row| row.name.clone()).collect())
+}
+
 struct AppEnv { st: Arc<AppState>, groups: Arc<GroupService> }
 
 impl SweepEnv for AppEnv {
@@ -132,7 +142,7 @@ impl SweepEnv for AppEnv {
         Box::pin(async move {
             // O retrato, não a descoberta: as linhas de transferência e as `orq` vêm dos fatos.
             let produced = self.st.list.snapshot().await.map_err(|e| e.code.to_owned())?;
-            Ok(produced.rows.iter().map(|row| row.name.clone()).collect())
+            live_names_of(&produced)
         })
     }
 

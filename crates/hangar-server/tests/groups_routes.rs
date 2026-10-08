@@ -141,6 +141,28 @@ async fn pair_is_undone_when_no_notice_arrives() {
     assert!(left.is_empty(), "nenhum sidecar: {left:?}");
 }
 
+/// Ninguém avisado e a volta atrás que falha no disco: o 500 do Python (o `pair.restore` dele
+/// levantava), nunca "pareamento desfeito".
+#[tokio::test(flavor = "multi_thread")]
+async fn pair_whose_undo_fails_is_500_not_undone() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 2).await;
+    let refusal = json!({"code": "erro_fila_nao_digitada", "params": {}, "msg": "composer ilegível"});
+    srv.python.set_input_reply(Some((StatusCode::BAD_REQUEST, json!({"detail": refusal}))));
+    srv.python.hold_input(true);
+    let addr = srv.addr;
+    let pairing = tokio::spawn(async move { call(addr, "POST", "s0/pair", Some(&json!({"peers": ["s1"]})), OWNER).await });
+    let (s0, s1) = (srv.pair.join("s0.json"), srv.pair.join("s1.json"));
+    fake::wait_until(move || s0.is_file() && s1.is_file()).await;
+    // O temporário de s0 vira pasta: a restauração não consegue apagá-lo.
+    std::fs::create_dir(srv.pair.join("s0.json.tmp")).unwrap();
+    srv.python.hold_input(false);
+    srv.python.release.notify_one();
+    assert_eq!(pairing.await.unwrap(), (500, json!("Internal Server Error")));
+    let python = srv.python.clone();
+    fake::wait_until(move || python.diag().iter().any(|d| d["evento"] == "rust.groups_restore_failed")).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn partial_notice_failure_is_a_warning() {
     let dir = tempfile::tempdir().unwrap();
@@ -241,7 +263,9 @@ async fn uncertain_promotion_restores_and_goes_to_the_diary() {
     assert_eq!((status, body["detail"]["msg"].clone()), (409, json!("o time já pertence a outro grupo")));
     srv.python.set_internal("orq/promote", StatusCode::INTERNAL_SERVER_ERROR, json!({}));
     let (status, body) = call(srv.addr, "POST", "s0/pair", Some(&json!({"orq": true})), OWNER).await;
-    assert_eq!((status, body["detail"]["code"].clone()), (409, json!("erro_orq_arquivo_mudou")));
+    // Python sem resposta não é "o arquivo mudou": indisponível, com o código.
+    assert_eq!((status, body["detail"]["code"].clone(), body["detail"]["params"]["detalhe"].clone()),
+        (503, json!("erro_grupo_indisponivel"), json!("groups_orq_promote_status_500")));
     assert!(!srv.pair.join("s0.json").exists(), "o join volta atrás nos dois casos");
     let python = srv.python.clone();
     fake::wait_until(move || python.diag().iter().any(|d| d["evento"] == "rust.groups_orq_promote_uncertain"

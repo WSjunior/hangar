@@ -10,7 +10,7 @@ use axum::http::StatusCode;
 use fake::*;
 use hangar_server::groups::deliver::{ProtocolArgs, protocol_text};
 use hangar_server::groups::orq::{PythonOrq, is_orchestrator};
-use hangar_server::groups::service::{OrqFacts, OrqPhase};
+use hangar_server::groups::service::{OrqFacts, OrqPhase, PromoteError};
 use hangar_server::routes::AppState;
 use hangar_server::runtime::gateway::RuntimeRegistry;
 use hangar_server::runtime::protocol::{CanoBinding, RuntimeTarget};
@@ -219,9 +219,12 @@ async fn orq_promote_ok_and_conflict_text() {
     assert_eq!(python.internal_bodies("orq/promote"), vec![json!({"name": "a", "gid": "g1"})]);
     python.set_internal("orq/promote", StatusCode::CONFLICT,
         json!({"detail": {"code": "erro_orq_arquivo_mudou", "params": {}, "msg": "o time já pertence a outro grupo"}}));
-    assert_eq!(orq.promote("a", "g1").await, Err("o time já pertence a outro grupo".to_owned()));
-    python.set_internal("orq/promote", StatusCode::INTERNAL_SERVER_ERROR, json!({}));
-    assert!(orq.promote("a", "g1").await.is_err());
+    assert_eq!(orq.promote("a", "g1").await, Err(PromoteError::Conflict("o time já pertence a outro grupo".to_owned())));
+    // Só o 409 é conflito; o resto é o Python indisponível, com o código.
+    for (status, code) in [(StatusCode::INTERNAL_SERVER_ERROR, "groups_orq_promote_status_500"), (StatusCode::NOT_FOUND, "groups_orq_promote_status_404")] {
+        python.set_internal("orq/promote", status, json!({}));
+        assert_eq!(orq.promote("a", "g1").await, Err(PromoteError::Unavailable(code.to_owned())));
+    }
 }
 
 #[tokio::test]

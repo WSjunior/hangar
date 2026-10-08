@@ -23,9 +23,9 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use super::deliver::{ProtocolArgs, protocol_text};
-use super::local::{JoinRefusal, is_remote};
+use super::local::{JoinRefusal, Snapshot, is_remote};
 use super::orq::{is_orchestrator, list_unavailable};
-use super::service::{GroupError, GroupService, JoinOutcome, JoinOwned};
+use super::service::{GroupError, GroupService, JoinOutcome, JoinOwned, PromoteError};
 use crate::proxy::Forward;
 use crate::routes::{AppState, cors, gate, pass, pass_any};
 use crate::runtime::ingress::IngressPass;
@@ -37,6 +37,8 @@ use crate::transcript::py::{py_repr, py_str};
 pub(super) const PREFIX: &str = "[painel: grupo de trabalho]";
 pub(super) const MIX_MSG: &str = "pareamento cross-server é 1:1 (uma sessão local + um peer remoto); uma sessão já pareada cross-server não entra em grupo local nem pareia com outro remoto";
 const ORQ_MSG: &str = "o orquestrador não recebe mensagens; fale com o árbitro";
+/// `_group_unavailable` do Python.
+const UNAVAILABLE_MSG: &str = "os grupos estão indisponíveis agora";
 const STORM_MAX: usize = 5;
 const STORM_WINDOW: Duration = Duration::from_secs(60);
 
@@ -59,7 +61,7 @@ pub(crate) struct Bridged;
 
 fn relay_refused() -> Response {
     json_response(StatusCode::INTERNAL_SERVER_ERROR, detail_body("erro_grupo_indisponivel",
-        "os grupos estão indisponíveis agora", json!({"detalhe": "groups_bridge_relay"})))
+        UNAVAILABLE_MSG, json!({"detalhe": "groups_bridge_relay"})))
 }
 
 impl Asked {
@@ -122,6 +124,19 @@ impl Asked {
     pub(super) fn store_failed(&self, error: &GroupError) -> Response {
         tracing::error!(code = "groups_store_failed", session = %self.name, %error, "groups: o grupo não foi lido ou gravado");
         self.st.diag.report("rust.groups_store_failed", &self.name, "groups_store_failed", "o grupo não foi lido ou gravado no disco");
+        self.internal_error()
+    }
+
+    /// Volta o grupo ao de antes do join. Se o disco falha, o 500 do Python (o `pair.restore` dele
+    /// levantava): responder "desfeito" seria mentira.
+    pub(super) async fn restore(&self, before: Snapshot) -> Result<(), Response> {
+        let Err(error) = self.groups.restore(before).await else { return Ok(()) };
+        tracing::error!(code = "groups_restore_failed", session = %self.name, %error, "groups: o pareamento não foi desfeito por inteiro");
+        self.st.diag.report("rust.groups_restore_failed", &self.name, "groups_restore_failed", "o pareamento não voltou ao estado anterior");
+        Err(self.internal_error())
+    }
+
+    fn internal_error(&self) -> Response {
         let mut response = (StatusCode::INTERNAL_SERVER_ERROR, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "Internal Server Error").into_response();
         cors(&self.parts.headers, response.headers_mut());
         response
@@ -202,7 +217,9 @@ pub(super) async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
         Err(GroupError::Refused(JoinRefusal::Mix)) => return asked.refuse(StatusCode::BAD_REQUEST, "erro_pareamento_mistura_cross", MIX_MSG, json!({})),
         Err(GroupError::Refused(JoinRefusal::TaskConflict { existing })) => return asked.refuse(StatusCode::CONFLICT, "erro_pareamento_tarefa_existente",
             &format!("o grupo já tem tarefa: {} — repita com --substituir-tarefa pra trocar", py_repr(&json!(existing))), json!({"existente": existing})),
-        Err(GroupError::Orq(text)) => return asked.refuse(StatusCode::CONFLICT, "erro_orq_arquivo_mudou", &text, json!({})),
+        Err(GroupError::Orq(PromoteError::Conflict(text))) => return asked.refuse(StatusCode::CONFLICT, "erro_orq_arquivo_mudou", &text, json!({})),
+        Err(GroupError::Orq(PromoteError::Unavailable(code))) => return asked.refuse(StatusCode::SERVICE_UNAVAILABLE,
+            "erro_grupo_indisponivel", UNAVAILABLE_MSG, json!({"detalhe": code})),
         Err(error) => return asked.store_failed(&error),
     };
     drop(held);
@@ -222,10 +239,7 @@ pub(super) async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
     }
     if !notices.is_empty() && errs.len() == notices.len() {
         // Ninguém avisado: grupo fantasma. Volta ao que era antes do join.
-        if let Err(error) = asked.groups.restore(before).await {
-            tracing::error!(code = "groups_restore_failed", session = %asked.name, %error, "groups: o pareamento não avisado não foi desfeito por inteiro");
-            asked.st.diag.report("rust.groups_restore_failed", &asked.name, "groups_restore_failed", "o pareamento sem aviso não voltou ao estado anterior");
-        }
+        if let Err(failed) = asked.restore(before).await { return failed; }
         let msg = format!("pareamento desfeito: falha ao avisar as sessões ({})", failures_text(&errs));
         return asked.refuse(StatusCode::BAD_GATEWAY, "erro_pareamento_desfeito", &msg, json!({"avisos": errs}));
     }

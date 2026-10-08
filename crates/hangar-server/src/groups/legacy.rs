@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use super::deliver::{ProtocolArgs, protocol_text};
 use super::exit::{NO_SERVER_ID, segment};
-use super::local::{JoinRefusal, Snapshot, is_remote};
+use super::local::{JoinRefusal, is_remote};
 use super::routes::{Asked, MIX_MSG, PREFIX, envelope, error_text, providers};
 use super::service::{GroupError, JoinOutcome, JoinOwned};
 use crate::routes::AppState;
@@ -29,13 +29,6 @@ async fn notify(asked: &Asked, peer: &str, task: &str, harness: &BTreeMap<String
         harness: harness.iter().filter(|(n, _)| *n == name).map(|(n, p)| (n.clone(), p.clone())).collect(), ..Default::default() };
     let text = protocol_text(&asked.st, "group", &args).await?;
     deliver_text(&asked.st, name, &text).await
-}
-
-async fn restore(asked: &Asked, before: Snapshot) {
-    if let Err(error) = asked.groups.restore(before).await {
-        tracing::error!(code = "groups_restore_failed", session = %asked.name, %error, "groups: o pareamento entre máquinas não foi desfeito por inteiro");
-        asked.st.diag.report("rust.groups_restore_failed", &asked.name, "groups_restore_failed", "o pareamento entre máquinas não voltou ao estado anterior");
-    }
 }
 
 fn joined(asked: &Asked, result: Result<JoinOutcome, GroupError>, mix: StatusCode) -> Result<JoinOutcome, Response> {
@@ -75,7 +68,7 @@ pub(super) async fn pair_cross(asked: Asked, held: Option<IngressPass>, others: 
     let asked_remote = asked.st.peers.call(srv, reqwest::Method::POST, &format!("/api/sessions/{}/pair-remote", segment(sess)),
         Some(&json!({"initiator": initiator, "task": task}))).await;
     if let Err(e) = asked_remote {
-        restore(&asked, before).await;
+        if let Err(failed) = asked.restore(before).await { return failed; }
         let text = e.text(srv);
         if e.is_transport() {
             // O outro lado pode ter gravado antes de a resposta se perder: tenta desfazer lá também.
@@ -125,7 +118,7 @@ pub(super) async fn pair_remote(State(st): State<Arc<AppState>>, ConnectInfo(pee
     let JoinOutcome { members, before, .. } = match joined(&asked, result, StatusCode::CONFLICT) { Ok(o) => o, Err(r) => return r };
     drop(held);
     if let Err(e) = notify(&asked, &body.initiator, &body.task, &harness).await {
-        restore(&asked, before).await;
+        if let Err(failed) = asked.restore(before).await { return failed; }
         return asked.refuse(StatusCode::BAD_GATEWAY, "erro_pareamento_aviso_falhou",
             &format!("pareamento desfeito: falha ao avisar '{name}': {}", error_text(&e)), json!({"nome": name, "erro": e}));
     }

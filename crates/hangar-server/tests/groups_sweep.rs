@@ -9,16 +9,18 @@ use std::time::{Duration, SystemTime};
 
 use hangar_server::groups::exit::leave_and_notify;
 use hangar_server::groups::orq::PythonOrq;
-use hangar_server::groups::service::{BoxFuture, GroupError, GroupService, JoinOwned, OrqFacts, OrqPhase};
+use hangar_server::groups::service::{BoxFuture, GroupError, GroupService, JoinOwned, OrqFacts, OrqPhase, PromoteError};
 use hangar_server::groups::store::PairDir;
-use hangar_server::groups::sweep::{FAILED_EVENT, RECOVERED_EVENT, SweepEnv, Sweeper};
+use hangar_server::groups::sweep::{FAILED_EVENT, RECOVERED_EVENT, SweepEnv, Sweeper, live_names_of};
+use hangar_server::list::bridge::Produced;
+use hangar_server::list::facts::ListFacts;
 
 struct Phase(Mutex<BTreeMap<String, OrqPhase>>);
 impl OrqFacts for Phase {
     fn phase<'a>(&'a self, gid: &'a str) -> BoxFuture<'a, OrqPhase> {
         Box::pin(async move { self.0.lock().unwrap().get(gid).copied().unwrap_or(OrqPhase::NotStarted) })
     }
-    fn promote<'a>(&'a self, _: &'a str, _: &'a str) -> BoxFuture<'a, Result<(), String>> { Box::pin(async { Ok(()) }) }
+    fn promote<'a>(&'a self, _: &'a str, _: &'a str) -> BoxFuture<'a, Result<(), PromoteError>> { Box::pin(async { Ok(()) }) }
 }
 
 struct Env {
@@ -117,6 +119,17 @@ async fn sweep_skips_failed_or_empty_list() {
     r.sweeper.round().await;
     assert_eq!(r.env.reports.lock().unwrap().last(), Some(&(RECOVERED_EVENT, "list_empty".to_owned())));
     assert_eq!(r.env.reports.lock().unwrap().len(), 3);
+}
+
+/// Sem nenhuma resposta dos fatos, a sessão vista só por eles (transferência, `orq`) é desconhecida,
+/// não ausente: a rodada falha como a lista que não respondeu.
+#[test]
+fn list_without_facts_is_a_failed_round() {
+    let rows = Arc::new(vec![serde_json::from_value::<hangar_api::session::SessionRow>(serde_json::json!({"name": "a", "provider": "claude"})).unwrap()]);
+    let unknown = Produced { rows: rows.clone(), facts: Arc::new(ListFacts::default()), facts_ok: false };
+    assert_eq!(live_names_of(&unknown), Err("list_facts_unknown".to_owned()));
+    let known = Produced { rows, facts: Arc::new(ListFacts { unknown: false, ..Default::default() }), facts_ok: true };
+    assert_eq!(live_names_of(&known), Ok(vec!["a".to_owned()]));
 }
 
 #[tokio::test(start_paused = true)]
