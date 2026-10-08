@@ -2,7 +2,7 @@
 use super::*;
 use std::collections::VecDeque;
 use gpui_kit::component::{select::{Select, SelectEvent, SelectState}, searchable_list::SearchableListItem};
-use crate::voice::{Activity as CallActivity, CallId, Phase, Voice, VoiceEvent, VoiceFailure, VoiceOptions, rpc::Codex, organizer::{session_context, tool_reply}};
+use crate::voice::{Activity as CallActivity, CallId, Phase, Voice, VoiceEvent, VoiceFailure, VoiceOptions, rpc::Codex, organizer::{Mode, session_context, tool_reply}};
 
 /// Vozes do Realtime; vazio é o padrão do Codex.
 const VOICES: [&str; 19] = ["alloy", "arbor", "ash", "ballad", "breeze", "cedar", "coral", "cove", "echo", "ember", "juniper", "maple",
@@ -55,6 +55,10 @@ pub(super) struct VoiceUi {
     /// Sessão que recebeu pedido da voz → já foi vista trabalhando.
     pub(super) watched: HashMap<SessionKey, bool>,
     pub(super) voice_select: Option<(Entity<SelectState<Vec<VoiceChoice>>>, Subscription)>,
+    pub(super) mode: Mode,
+    /// Arquivo e texto do plano; fica na tela depois da chamada, até a próxima começar.
+    pub(super) plan: Option<(std::path::PathBuf, String)>,
+    pub(super) plan_scroll: ScrollHandle,
 }
 
 pub(super) fn conversation_pairs(events: &[ChatEvent]) -> Vec<(String, String)> {
@@ -260,6 +264,8 @@ impl Hangar {
         self.voice.pending_question = None;
         self.voice.watched.clear();
         self.voice.error = None;
+        self.voice.mode = Mode::Direct;
+        self.voice.plan = None;
         self.voice.muted = false;
         self.voice.draft = None;
         self.voice.levels = (0., 0.);
@@ -278,6 +284,7 @@ impl Hangar {
         if let Some(mut call) = self.voice.call.take() { call.stop(); }
         self.voice.generation += 1; // eventos atrasados da chamada parada não mexem na próxima
         self.voice.phase = None;
+        self.voice.mode = Mode::Direct;
         self.voice.draft = None;
         self.voice.levels = (0., 0.);
         (self.voice.live_since, self.voice.ticker) = (None, None);
@@ -297,6 +304,13 @@ impl Hangar {
         }));
     }
 
+    /// O selo só muda quando o organizador confirma com `VoiceEvent::Mode`.
+    fn set_voice_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
+        if self.voice.mode == mode { return; }
+        if let Some(call) = &self.voice.call { call.set_mode(mode); }
+        cx.notify();
+    }
+
     fn voice_reply(&self, call: CallId, reply: Value) {
         if let Some(voice) = &self.voice.call { voice.reply(call, reply); }
     }
@@ -307,6 +321,7 @@ impl Hangar {
             VoiceEvent::Phase(Phase::Closed) => {
                 self.voice.call = None;
                 self.voice.phase = None;
+                self.voice.mode = Mode::Direct;
                 self.voice.draft = None;
                 self.voice.levels = (0., 0.);
                 self.voice.shown = None;
@@ -344,8 +359,8 @@ impl Hangar {
                 // O erro do organizador é de uma fala e a conversa segue: aparece na pílula e no painel, sem abrir.
                 if !matches!(failure, VoiceFailure::Organizer) { self.voice.open = true; }
             }
-            // Provisórios: o painel do plano e a pergunta à sessão entram nas próximas tarefas.
-            VoiceEvent::Mode(_) | VoiceEvent::Plan { .. } => {}
+            VoiceEvent::Mode(mode) => self.voice.mode = mode,
+            VoiceEvent::Plan { path, markdown } => self.voice.plan = Some((path, markdown)),
             VoiceEvent::AskSession(question) => self.voice_ask(&question, cx),
             VoiceEvent::SendPlan { session, text } => {
                 // O plano foi escrito para uma sessão; se a tela mudou, não vai para outra.
@@ -621,6 +636,8 @@ impl Hangar {
                 .child(self.render_equalizer(3., 16., 2.))
                 .children(self.call_time().map(|time| div().text_color(theme::text()).child(time)))
                 .child(div().text_color(theme::muted()).child(self.voice_status()))
+                .when(self.voice.mode == Mode::Plan, |el| el.child(div().flex_shrink_0().px(px(5.)).rounded(px(4.)).border_1().border_color(theme::border())
+                    .text_size(px(10.)).text_color(theme::muted()).child(tr("voice_planning"))))
                 .children(target.map(|name| div().text_color(theme::faint()).child(name)))
                 .when(self.voice.draft.is_some(), |el| el.child(div().size(px(6.)).rounded_full().bg(theme::warning())))
                 .when(self.voice.error.is_some(), |el| el.child(div().size(px(6.)).rounded_full().bg(theme::danger())))
@@ -682,6 +699,25 @@ impl Hangar {
                     .child(self.render_equalizer(4., 32., 4.).gap(px(3.)))
                     .children(self.call_time().map(|time| div().text_lg().text_color(theme::text()).child(time))))
                 .child(div().text_xs().text_color(theme::muted()).child(status));
+        }
+        let ready = live && matches!(self.voice.phase, Some(Phase::Live));
+        body = body.child(div().flex().items_center().gap(px(6.))
+            .child(Button::new("voice-mode-direct").ghost().small().rounded_full().label(tr("voice_mode_direct"))
+                .selected(self.voice.mode == Mode::Direct).disabled(!ready)
+                .on_click(cx.listener(|this, _, _, cx| this.set_voice_mode(Mode::Direct, cx))))
+            .child(Button::new("voice-mode-plan").ghost().small().rounded_full().label(tr("voice_mode_plan"))
+                .selected(self.voice.mode == Mode::Plan).disabled(!ready)
+                .on_click(cx.listener(|this, _, _, cx| this.set_voice_mode(Mode::Plan, cx)))));
+        if let Some((path, markdown)) = &self.voice.plan {
+            let open = path.clone();
+            body = body.child(div().flex().flex_col().gap(px(6.))
+                .child(div().text_xs().font_weight(FontWeight::MEDIUM).text_color(theme::muted()).child(tr("voice_plan_title")))
+                .child(scrolled("voice-plan-scroll", &self.voice.plan_scroll, 320.,
+                    div().text_sm().child(TextView::markdown("voice-plan", markdown.clone()).selectable(true).scrollable(false))))
+                .child(div().flex().items_center().justify_between().gap(px(8.))
+                    .child(div().min_w_0().overflow_hidden().text_size(px(10.5)).text_color(theme::faint()).child(path.display().to_string()))
+                    .child(Button::new("voice-plan-open").ghost().small().label(tr("voice_plan_open"))
+                        .on_click(cx.listener(move |_, _, _, cx| cx.open_with_system(&open))))));
         }
         if let Some((picker, _)) = &self.voice.voice_select {
             body = body.child(div().flex().items_center().justify_between().gap(px(12.))
