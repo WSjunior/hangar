@@ -1,4 +1,4 @@
-use super::{actor::{PolicyClient,RuntimeActor,RuntimeEngine,RuntimeHandle},cano,protocol::*,queue::{Action,QueueActor,State as QueueState,Store,acquire_lease}};
+use super::{actor::{PolicyClient,RuntimeActor,RuntimeEngine,RuntimeHandle},cano,process,protocol::*,queue::{Action,QueueActor,State as QueueState,Store,acquire_lease}};
 use axum::{Router,body::to_bytes,extract::{ConnectInfo,State,Request},http::StatusCode,
     middleware::{self,Next},response::{IntoResponse,Response,sse::{Event,KeepAlive,Sse}},routing::{get,post}};
 use serde::Deserialize;
@@ -130,7 +130,12 @@ impl RuntimeRegistry {
     }
     /// Abre a sessão no Rust: trava, fila com `Recover`, conexão ao cano e ator. Responde sem
     /// esperar o `initialize`; o ator o faz e drena a fila quando a sessão fica entregável.
-    pub async fn open(&self,target:RuntimeTarget) -> Result<Value,RuntimeError> {
+    pub async fn open(&self,target:RuntimeTarget) -> Result<Value,RuntimeError> { self.open_inner(target,None).await }
+    /// `open` que pode subir o processo: sobe só se o cano gravado não for `Ours` (vivo e da chave).
+    pub async fn open_with_launch(&self,target:RuntimeTarget,sidecar_dir:std::path::PathBuf) -> Result<Value,RuntimeError> {
+        self.open_inner(target,Some(sidecar_dir)).await
+    }
+    async fn open_inner(&self,mut target:RuntimeTarget,launch:Option<std::path::PathBuf>) -> Result<Value,RuntimeError> {
         let barrier = self.barrier(&target.key).await;
         let _guard = barrier.lock().await;
         let existing = self.entries.lock().await.get(&target.key).map(|entry|(entry.generation,entry.handle.clone()));
@@ -148,19 +153,32 @@ impl RuntimeRegistry {
             }
         }
         let queue = QueueActor::start(store,lease);
-        let connection = match cano::connect(&target.binding).await {
+        // Depois da fila: o `session.patch_meta` do Python lê o estado dela.
+        let launched = match &launch {
+            Some(sidecar_dir)=>self.launch_if_needed(&mut target,sidecar_dir).await,
+            None=>Ok(None),
+        };
+        let connection = match &launched {
+            Err(error)=>Err(error.clone()),
+            Ok(_)=>cano::connect(&target.binding).await,
+        };
+        let connection = match connection {
             Ok(connection)=>connection,
             Err(error)=>{
                 if let Err(stop) = queue.shutdown().await {
                     tracing::warn!(key=%target.key,code=%error.code,stop=?stop.kind(),"fila não fechou depois da falha ao conectar no cano");
                 }
+                // Só o cano subido nesta chamada morre: um vivo de antes pode estar no meio de um turno.
+                if let (Ok(Some(cano)),Some(sidecar_dir)) = (launched,&launch) { self.discard(&target,&cano,sidecar_dir).await; }
                 return Err(error);
             },
         };
+        let fresh = matches!(launched,Ok(Some(_)));
         let epoch_s = SystemTime::now().duration_since(UNIX_EPOCH).map(|d|d.as_secs_f64()).unwrap_or(0.0);
         let revision = self.revisions.lock().await.entry(target.key.clone()).or_insert_with(||Arc::new(AtomicU64::new(0))).clone();
         let mut engine = RuntimeEngine::new(&target.provider,metadata,target.generation,ClockSample { monotonic_s:0.0,epoch_s })?
             .with_policy(self.policy.clone()).with_publisher(self.events.clone()).with_revision(revision);
+        engine.set_fresh_process(fresh);
         if let Some(mods) = &self.mods { engine = engine.with_mods(mods.clone()); }
         // Dono único dos pedidos dos apps até o `close` (S9). Só o Claude tem superfície. Registrado antes
         // de a tarefa do ator existir: a primeira faixa publicada já encontra a sessão no `Mods`.
@@ -191,6 +209,62 @@ impl RuntimeRegistry {
             }
         };
         Ok(json!({"opened":true,"instance":self.instance,"key":target.key,"generation":target.generation,"state":snapshot}))
+    }
+    /// Regra 1 do módulo de processo: cano gravado `Ours` conecta (mesmo sem `versao`); morto, de outro
+    /// programa ou ausente, sobe outro com o ambiente que o Python calcula agora (nunca guardado).
+    async fn launch_if_needed(&self,target:&mut RuntimeTarget,sidecar_dir:&std::path::Path) -> Result<Option<process::Cano>,RuntimeError> {
+        let recorded = target.binding.pid;
+        if recorded != 0 {
+            let key = target.key.clone();
+            let state = tokio::task::spawn_blocking(move||process::liveness(recorded,&key)).await.map_err(|_|failure("launch_job"))?;
+            if state == process::Liveness::Ours { return Ok(None); }
+        }
+        let env = self.launch_policy(target,"launch_env",json!({})).await?;
+        if let Some(code) = env["error"].as_str() { return Err(RuntimeError::new(code,"o Python não montou o comando da sessão")); }
+        let shape = ||failure("launch_env_shape");
+        let program:Vec<String> = serde_json::from_value(env["program"].clone()).map_err(|_|shape())?;
+        let vars:BTreeMap<String,String> = serde_json::from_value(env["env"].clone()).map_err(|_|shape())?;
+        let cano_extra = match &env["cano_extra"] { Value::Null=>Default::default(),Value::Object(extra)=>extra.clone(),_=>return Err(shape()) };
+        let cwd = target.metadata["cwd"].as_str().filter(|cwd|!cwd.is_empty()).ok_or_else(||failure("launch_cwd"))?;
+        let spec = process::LaunchSpec { provider:process::Provider::from_str(&target.provider).ok_or_else(||failure("runtime_provider"))?,
+            key:target.key.clone(),cwd:cwd.into(),program,env:vars.into_iter().collect(),cano_extra,sidecar_dir:sidecar_dir.to_owned() };
+        let cano = match process::spawn(&spec).await {
+            Ok(cano)=>cano,
+            Err(error)=>{
+                // O gravado já não serve (morto ou de outro programa): o arquivo da sessão para de apontá-lo.
+                if recorded != 0 && matches!(error,process::ProcessError::NotListening) { self.clear_cano(target,recorded).await; }
+                let detail = match &error { process::ProcessError::Spawn(detail)=>detail.as_str(),_=>"o processo da sessão não subiu" };
+                return Err(RuntimeError::new(error.code(),detail));
+            }
+        };
+        let value = serde_json::to_value(&cano).map_err(|_|failure("cano_json"))?;
+        if let Err(error) = self.launch_policy(target,"session.patch_meta",json!({"cano":value})).await {
+            // Sem o arquivo da sessão apontando para ele, o processo ficaria sem dono.
+            if let Err(stop) = process::kill(&cano,&target.key,sidecar_dir).await {
+                tracing::warn!(key=%target.key,code=stop.code(),"cano não gravado não foi encerrado");
+            }
+            return Err(error);
+        }
+        target.binding = CanoBinding { pid:cano.pid,escuta:cano.escuta.clone(),token:cano.token.clone(),versao:cano.versao };
+        target.metadata["cano"] = value;
+        Ok(Some(cano))
+    }
+    async fn launch_policy(&self,target:&RuntimeTarget,kind:&str,payload:Value) -> Result<Value,RuntimeError> {
+        let phase = format!("launch:{}",crate::mods::state::random_hex(8));
+        self.policy.run_for(&target.key,target.generation,kind,&RequestId::String(phase.clone()),payload,&phase).await
+    }
+    async fn clear_cano(&self,target:&RuntimeTarget,pid:u32) {
+        if let Err(error) = self.launch_policy(target,"session.clear_cano",json!({"pid":pid})).await {
+            tracing::warn!(key=%target.key,code=%error.code,"cano não saiu do arquivo da sessão");
+        }
+    }
+    /// O cano subido agora e que não deu conexão: morre e sai do arquivo da sessão.
+    async fn discard(&self,target:&RuntimeTarget,cano:&process::Cano,sidecar_dir:&std::path::Path) {
+        if let Err(stop) = process::kill(cano,&target.key,sidecar_dir).await {
+            tracing::warn!(key=%target.key,code=stop.code(),"cano sem conexão não foi encerrado");
+            return;
+        }
+        self.clear_cano(target,cano.pid).await;
     }
     pub async fn open_terminal(&self,target:super::terminal::TerminalTarget)->Result<Value,RuntimeError> {
         let barrier=self.barrier(&target.key).await; let _guard=barrier.lock().await;
@@ -398,7 +472,7 @@ async fn dispatch(registry:&RuntimeRegistry,envelope:&Envelope) -> Result<Value,
     let command = &envelope.command;
     let kind = command["kind"].as_str().ok_or_else(||failure("command_kind"))?;
     let fields:&[&str] = match kind {
-        "open"=>&["kind","descriptor"],
+        "open"=>&["kind","descriptor","launch"],
         "submit"=>&["kind","text","steer","pre_transcript"],
         "control"=>&["kind","control","payload"],
         "queue"=>&["kind","action"],
@@ -424,11 +498,19 @@ async fn dispatch(registry:&RuntimeRegistry,envelope:&Envelope) -> Result<Value,
         return Ok(json!({"closed":closed}));
     }
     if kind == "open" {
-        return match descriptor(&command["descriptor"])? {
+        // `launch`: quem abre pode subir o processo (só sem terminal, e só se o gravado não for nosso).
+        let launch = match &command["launch"] { Value::Null=>false, value=>value.as_bool().ok_or_else(||failure("open_launch"))? };
+        return match descriptor(&command["descriptor"],launch)? {
+            Target::Headless(target) if launch=>{
+                if target.key!=envelope.key || target.generation!=envelope.generation{return Err(failure("runtime_binding"));}
+                let sidecar_dir = command["descriptor"]["sidecar_dir"].as_str().filter(|dir|!dir.is_empty()).ok_or_else(||failure("launch_sidecar_dir"))?;
+                registry.open_with_launch(target,sidecar_dir.into()).await
+            },
             Target::Headless(target)=>{
                 if target.key!=envelope.key || target.generation!=envelope.generation{return Err(failure("runtime_binding"));}
                 registry.open(target).await
             },
+            Target::Terminal(_) if launch=>Err(failure("open_launch")),
             Target::Terminal(target)=>{
                 if target.key!=envelope.key || target.generation!=envelope.generation{return Err(failure("runtime_binding"));}
                 registry.open_terminal(target).await
@@ -472,10 +554,12 @@ async fn dispatch(registry:&RuntimeRegistry,envelope:&Envelope) -> Result<Value,
 struct Descriptor {
     name:String,key:String,provider:String,headless:bool,meta:Value,jsonl:String,
     projection_dir:std::path::PathBuf,state_path:std::path::PathBuf,lock_path:std::path::PathBuf,generation:u64,
+    /// Pasta do arquivo da sessão, onde o cano subido pelo Rust põe socket e log; só no `open` com `launch`.
+    #[serde(default)] #[allow(dead_code)] sidecar_dir:Option<std::path::PathBuf>,
 }
 
 enum Target {Headless(RuntimeTarget),Terminal(super::terminal::TerminalTarget)}
-fn descriptor(value:&Value) -> Result<Target,RuntimeError> {
+fn descriptor(value:&Value,launch:bool) -> Result<Target,RuntimeError> {
     let descriptor:Descriptor = serde_json::from_value(value.clone()).map_err(|_|failure("descriptor_shape"))?;
     if descriptor.meta["key"] != descriptor.key || descriptor.key.is_empty() { return Err(failure("descriptor_binding")); }
     if !descriptor.headless {
@@ -491,10 +575,16 @@ fn descriptor(value:&Value) -> Result<Target,RuntimeError> {
     }
     if descriptor.meta.get("terminal").is_some(){return Err(failure("descriptor_provider"));}
     let cano = &descriptor.meta["cano"];
-    let binding = CanoBinding { pid:cano["pid"].as_u64().and_then(|pid|u32::try_from(pid).ok()).ok_or_else(||failure("cano_pid"))?,
+    // Subida pedida sem cano gravado: pid 0 é "nenhum", e a subida grava o novo antes de conectar.
+    let binding = if launch && cano["pid"].as_u64().is_none_or(|pid|pid == 0) { CanoBinding { pid:0,escuta:String::new(),token:String::new(),versao:2 } }
+    else if launch { CanoBinding { pid:cano["pid"].as_u64().and_then(|pid|u32::try_from(pid).ok()).ok_or_else(||failure("cano_pid"))?,
+        escuta:cano["escuta"].as_str().unwrap_or_default().into(),token:cano["token"].as_str().unwrap_or_default().into(),
+        // Cano vivo da sessão sem `versao` gravada já fala a 2.
+        versao:cano["versao"].as_u64().and_then(|version|u32::try_from(version).ok()).unwrap_or(2) } }
+    else { CanoBinding { pid:cano["pid"].as_u64().and_then(|pid|u32::try_from(pid).ok()).ok_or_else(||failure("cano_pid"))?,
         escuta:cano["escuta"].as_str().ok_or_else(||failure("cano_address"))?.into(),
         token:cano["token"].as_str().ok_or_else(||failure("cano_token"))?.into(),
-        versao:cano["versao"].as_u64().and_then(|version|u32::try_from(version).ok()).ok_or_else(||failure("cano_version"))? };
+        versao:cano["versao"].as_u64().and_then(|version|u32::try_from(version).ok()).ok_or_else(||failure("cano_version"))? } };
     Ok(Target::Headless(RuntimeTarget { key:descriptor.key,generation:descriptor.generation,name:descriptor.name,provider:descriptor.provider,
         created:descriptor.meta["created"].as_f64().unwrap_or(0.0),metadata:descriptor.meta,binding,
         lease_path:descriptor.lock_path,state_path:descriptor.state_path,projection_dir:descriptor.projection_dir,transcript:descriptor.jsonl.into() }))
@@ -536,10 +626,19 @@ mod tests {
         let value = json!({"name":"session","key":"key","provider":"codex","headless":false,
             "meta":{"key":"key","cano":{"pid":42,"escuta":"tcp:127.0.0.1:1","token":"test","versao":2}},
             "jsonl":"chat.jsonl","projection_dir":"projection","state_path":"state","lock_path":"lock","generation":1});
-        assert!(descriptor(&value).is_err());
+        assert!(descriptor(&value,false).is_err());
         let mut headless = value;
         headless["headless"] = json!(true);
-        assert!(descriptor(&headless).is_ok());
+        assert!(descriptor(&headless,false).is_ok());
+    }
+
+    #[test]
+    fn launch_accepts_a_session_without_cano() {
+        let value = json!({"name":"session","key":"key","provider":"codex","headless":true,"meta":{"key":"key","cano":null},
+            "jsonl":"","projection_dir":"projection","state_path":"state","lock_path":"lock","generation":1,"sidecar_dir":"dir"});
+        assert!(descriptor(&value,false).is_err(),"sem `launch`, sem cano não abre");
+        let Ok(Target::Headless(target)) = descriptor(&value,true) else { panic!("subida sem cano gravado") };
+        assert_eq!((target.binding.pid,target.binding.versao),(0,2));
     }
 
     #[tokio::test]

@@ -19,17 +19,14 @@ pub enum WriteRoute { Input, Steer, Interrupt, Select, SelectSubmit, Answer, Key
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Owner { Rust, Python }
 
-/// Entrada doente sempre vai ao Python (ele relança e responde como hoje). A metade Codex ainda é
-/// toda dele.
+/// Entrada doente sempre vai ao Python (ele relança e responde como hoje). O Codex com terminal
+/// ainda é todo dele.
 pub fn decide(route: WriteRoute, provider: Provider, terminal: bool, healthy: bool) -> Owner {
-    if !healthy { return Owner::Python; }
-    match provider {
-        Provider::Codex => Owner::Python,
+    if !healthy || provider == Provider::Codex && terminal { return Owner::Python; }
+    match route {
         // Teclas cruas e a aba Submit só existem num pane: sem terminal quem responde é o Python, como hoje.
-        Provider::Claude => match route {
-            WriteRoute::Keys | WriteRoute::TermInput | WriteRoute::SelectSubmit if !terminal => Owner::Python,
-            _ => Owner::Rust,
-        },
+        WriteRoute::Keys | WriteRoute::TermInput | WriteRoute::SelectSubmit if !terminal => Owner::Python,
+        _ => Owner::Rust,
     }
 }
 
@@ -89,15 +86,21 @@ mod tests {
     }
 
     #[test]
-    fn codex_is_python_for_now() {
-        for route in ALL { for terminal in [true, false] {
-            assert_eq!(decide(route, Provider::Codex, terminal, true), Owner::Python, "{route:?}");
-        } }
+    fn codex_without_terminal_is_rust() {
+        for route in ALL {
+            let want = if matches!(route, Keys | TermInput | SelectSubmit) { Owner::Python } else { Owner::Rust };
+            assert_eq!(decide(route, Provider::Codex, false, true), want, "{route:?}");
+        }
+    }
+
+    #[test]
+    fn codex_with_terminal_is_python() {
+        for route in ALL { assert_eq!(decide(route, Provider::Codex, true, true), Owner::Python, "{route:?}"); }
     }
 
     #[test]
     fn owned_modes_come_from_the_table() {
-        assert_eq!(owned_modes(), vec![(Provider::Claude, true), (Provider::Claude, false)]);
+        assert_eq!(owned_modes(), vec![(Provider::Claude, true), (Provider::Claude, false), (Provider::Codex, true)]);
     }
 
     #[test]

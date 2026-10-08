@@ -135,6 +135,8 @@ impl RuntimeEngine {
     pub fn with_policy(mut self,policy:PolicyClient) -> Self { self.policy = Some(policy); self }
     pub fn with_publisher(mut self,publisher:broadcast::Sender<RuntimeEvent>) -> Self { self.publisher = Some(publisher); self }
     pub fn with_revision(mut self,revision:Arc<AtomicU64>) -> Self { self.revision = revision; self }
+    /// Processo subido agora pelo Rust: a abertura do Codex repete a política (ver `codex::Engine`).
+    pub fn set_fresh_process(&mut self,fresh:bool) { if let Core::Codex(core) = &mut self.core { core.set_fresh_process(fresh); } }
     /// Liga a interface dos mods: o Claude sem terminal vira superfície `desktop` e publica no `Mods`.
     /// O prefixo dos pedidos é único por ator, para a resposta de uma vida anterior não casar.
     pub fn with_mods(mut self,mods:crate::mods::state::Mods) -> Self {

@@ -752,3 +752,160 @@ async fn the_deadline_never_puts_back_a_native_message_that_may_have_been_sent()
     handle.stop().await.unwrap();
     assert_eq!(server.await.unwrap(),0,"nada foi escrito no cano: o recado foi pelo Python");
 }
+
+// --- Codex sem terminal nasce e religa no Rust (5B Task 4) ---
+
+#[cfg(target_os = "linux")]
+mod launch {
+    use super::*;
+    use hangar_server::runtime::gateway::RuntimeRegistry;
+    use hangar_server::runtime::process;
+    use std::sync::{Arc,Mutex};
+    use tokio::io::AsyncReadExt;
+
+    fn unique_key() -> String {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
+        format!("{:016x}{:04x}",nanos ^ ((std::process::id() as u64) << 32),rand_suffix())
+    }
+    fn rand_suffix() -> u16 { static N:std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0); N.fetch_add(1,std::sync::atomic::Ordering::Relaxed) }
+
+    /// O `hangar-cano` de outro crate mora em `target/<perfil>/`, ao lado de `deps/`.
+    fn use_cano_bin() {
+        static ONCE:std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(||{
+            let bin = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().join("hangar-cano");
+            assert!(bin.exists(),"rode `cargo build -p hangar-cano` antes: {}",bin.display());
+            // SAFETY: valor único, posto antes de qualquer sonda do binário neste processo.
+            unsafe { std::env::set_var("CP_RUST_CANO_BIN",bin); }
+        });
+    }
+
+    /// `codex app-server --stdio` falso: responde `initialize` e a abertura da conversa.
+    fn fake_codex(dir:&std::path::Path) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("codex");
+        std::fs::write(&path,format!(r#"#!/usr/bin/env python3
+import json, sys
+for line in sys.stdin:
+    msg = json.loads(line)
+    if "id" not in msg or "method" not in msg:
+        continue
+    method = msg["method"]
+    if method == "initialize":
+        result = {{"userAgent": "hangar/{} (x)"}}
+    elif method in ("thread/start", "thread/resume"):
+        result = {{"thread": {{"id": "thread-new", "path": "/tmp/rollout-thread-new.jsonl"}}, "model": "gpt-test"}}
+    else:
+        result = {{}}
+    print(json.dumps({{"id": msg["id"], "result": result}}), flush=True)
+"#,hangar_codex::version::CHECKED)).unwrap();
+        std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    fn env(key:&str,owner:&str) -> Value {
+        let mut env:serde_json::Map<String,Value> = std::env::vars().filter(|(k,_)|!k.starts_with("HANGAR_CANO_")).map(|(k,v)|(k,json!(v))).collect();
+        env.insert("HANGAR_CANO_KEY".into(),json!(key));
+        env.insert("HANGAR_CANO_OWNER".into(),json!(owner));
+        Value::Object(env)
+    }
+
+    /// Python falso da política: `launch_env` devolve o `codex` falso; o resto só é anotado.
+    async fn policy(launch:Value) -> (std::net::SocketAddr,Arc<Mutex<Vec<(String,Value)>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = calls.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream,_)) = listener.accept().await else { return };
+                let (seen,launch) = (seen.clone(),launch.clone());
+                tokio::spawn(async move {
+                    let mut reader = BufReader::new(stream);
+                    loop {
+                        let mut length = 0usize;
+                        loop {
+                            let mut line = String::new();
+                            if reader.read_line(&mut line).await.unwrap_or(0) == 0 { return; }
+                            if line == "\r\n" { break; }
+                            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") { length = value.trim().parse().unwrap(); }
+                        }
+                        let mut body = vec![0;length]; reader.read_exact(&mut body).await.unwrap();
+                        let body:Value = serde_json::from_slice(&body).unwrap();
+                        let kind = body["kind"].as_str().unwrap().to_owned();
+                        seen.lock().unwrap().push((kind.clone(),body["payload"].clone()));
+                        let data = if kind == "launch_env" { launch.clone() } else { json!({}) };
+                        let reply = json!({"ok":true,"data":data}).to_string();
+                        let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",reply.len());
+                        if reader.get_mut().write_all(response.as_bytes()).await.is_err() { return; }
+                    }
+                });
+            }
+        });
+        (address,calls)
+    }
+
+    fn target(dir:&std::path::Path,key:&str,binding:CanoBinding) -> RuntimeTarget {
+        RuntimeTarget { key:key.into(),generation:1,name:"cx".into(),provider:"codex".into(),
+            metadata:json!({"name":"cx","key":key,"headless":true,"cwd":dir}),binding,
+            lease_path:dir.join("q.lock"),state_path:dir.join("q.json"),projection_dir:dir.join("projection"),
+            transcript:dir.join("rollout.jsonl"),created:0.0 }
+    }
+
+    async fn until_ready(registry:&RuntimeRegistry,key:&str) {
+        let handle = registry.handle(key,1).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(15),async {
+            loop {
+                if handle.snapshot().await.unwrap()["view"]["ready"] == true { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }).await.expect("o motor chega a ready no processo novo");
+    }
+
+    fn no_cano() -> CanoBinding { CanoBinding { pid:0,escuta:String::new(),token:String::new(),versao:2 } }
+
+    #[tokio::test]
+    async fn open_with_launch_and_no_cano_spawns_records_and_gets_ready() {
+        use_cano_bin();
+        let dir = tempfile::tempdir().unwrap();
+        let key = unique_key();
+        let owner = dir.path().to_string_lossy().into_owned();
+        let codex = fake_codex(dir.path());
+        let (address,calls) = policy(json!({"program":[codex,"app-server","--stdio"],"env":env(&key,&owner),"cano_extra":{"marca":"m1"}})).await;
+        let registry = RuntimeRegistry::new(address,"secret".into(),"instance".into());
+        let opened = registry.open_with_launch(target(dir.path(),&key,no_cano()),dir.path().into()).await.unwrap();
+        assert_eq!(opened["opened"],true);
+        until_ready(&registry,&key).await;
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(calls[0].0,"launch_env","o ambiente é pedido ao Python a cada subida");
+        let patch = calls.iter().find(|(kind,payload)|kind == "session.patch_meta" && payload.get("cano").is_some()).expect("o cano novo vai para o arquivo da sessão");
+        let pid = patch.1["cano"]["pid"].as_u64().unwrap() as u32;
+        assert_eq!(patch.1["cano"]["versao"],2);
+        assert_eq!(patch.1["cano"]["marca"],"m1");
+        assert!(matches!(process::liveness(pid,&key),process::Liveness::Ours));
+        registry.close(&key,1).await.unwrap();
+        let cano:process::Cano = serde_json::from_value(patch.1["cano"].clone()).unwrap();
+        process::kill(&cano,&key,dir.path()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn open_with_launch_and_live_cano_connects_without_spawning() {
+        use_cano_bin();
+        let dir = tempfile::tempdir().unwrap();
+        let key = unique_key();
+        let owner = dir.path().to_string_lossy().into_owned();
+        let codex = fake_codex(dir.path());
+        let env:Vec<(String,String)> = env(&key,&owner).as_object().unwrap().iter().map(|(k,v)|(k.clone(),v.as_str().unwrap().to_owned())).collect();
+        let live = process::spawn(&process::LaunchSpec { provider:process::Provider::Codex,key:key.clone(),cwd:dir.path().into(),
+            program:vec![codex.to_string_lossy().into_owned(),"app-server".into(),"--stdio".into()],env,
+            cano_extra:Default::default(),sidecar_dir:dir.path().into() }).await.unwrap();
+        let (address,calls) = policy(json!({})).await;
+        let registry = RuntimeRegistry::new(address,"secret".into(),"instance".into());
+        let binding = CanoBinding { pid:live.pid,escuta:live.escuta.clone(),token:live.token.clone(),versao:2 };
+        registry.open_with_launch(target(dir.path(),&key,binding),dir.path().into()).await.unwrap();
+        until_ready(&registry,&key).await;
+        assert!(calls.lock().unwrap().iter().all(|(kind,_)|kind != "launch_env"),"cano vivo da sessão: conecta e não sobe outro");
+        registry.close(&key,1).await.unwrap();
+        process::kill(&live,&key,dir.path()).await.unwrap();
+    }
+}
