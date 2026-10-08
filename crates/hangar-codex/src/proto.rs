@@ -47,7 +47,14 @@ wire!(pub struct ThreadStartParams {
     #[serde(skip_serializing_if = "Option::is_none")] pub sandbox:Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")] pub service_tier:Option<String>,
 });
-wire!(pub struct ThreadResumeParams { pub thread_id:String });
+wire!(pub struct ThreadResumeParams {
+    pub thread_id:String,
+    #[serde(skip_serializing_if = "Option::is_none")] pub cwd:Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub approval_policy:Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub sandbox:Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub service_tier:Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub model_provider:Option<String>,
+});
 wire!(pub struct ThreadReadParams { pub thread_id:String, pub include_turns:bool });
 wire!(pub struct ThreadCompactStartParams { pub thread_id:String });
 wire!(pub struct ThreadUnsubscribeParams { pub thread_id:String });

@@ -428,7 +428,7 @@ impl Engine {
         if !pending.acknowledged || !pending.candidate || pending.verifying { return; }
         pending.candidate = false; pending.verifying = true;
         let parent = pending.operation_id.clone(); let thread = pending.thread_id.clone();
-        self.send(format!("{parent}:verify:{}",self.counter+1),ClientRequest::ThreadResume(wire::ThreadResumeParams { thread_id:thread }),
+        self.send(format!("{parent}:verify:{}",self.counter+1),ClientRequest::ThreadResume(wire::ThreadResumeParams { thread_id:thread,..Default::default() }),
             Some(json!({"kind":"service_tier_confirm","parent":parent})),effects);
     }
 
@@ -573,6 +573,27 @@ impl Engine {
         if let Some(text) = self.thinking.clear() { self.publish_on("thinking",text,effects); }
     }
 
+    fn bootstrap_start(&self) -> ClientRequest {
+        ClientRequest::ThreadStart(wire::ThreadStartParams { cwd:string(&self.metadata["cwd"]),model:self.model.clone(),
+            approval_policy:Some(approval(&self.permission_mode).into()),sandbox:Some(sandbox(&self.permission_mode).into()),
+            service_tier:self.service_tier.clone() })
+    }
+
+    /// Mesmos recuos da subida do Python: provedor sumido da config e conversa sem rollout. Transferência nunca recua.
+    fn bootstrap_fallback(&mut self,rpc:&Rpc,message:&str,effects:&mut Vec<Effect>) -> bool {
+        let Some(next) = rpc.continuation.as_ref().filter(|next|next["kind"] == "bootstrap_thread") else { return false };
+        if rpc.method != "thread/resume" || self.metadata["transfer_id"].as_str().is_some_and(|id|!id.is_empty()) { return false }
+        let parent = next["parent"].as_str().unwrap_or("");
+        let request = if message.contains("Model provider") && message.contains("not found") && rpc.params.get("modelProvider").is_none() {
+            let mut params = rpc.params.clone();
+            params["modelProvider"] = json!("openai");
+            self.rpc(format!("{parent}:thread"),"thread/resume",params,Some(next.clone()),effects);
+            return true;
+        } else if message.contains("no rollout found") { self.bootstrap_start() } else { return false };
+        self.send(format!("{parent}:thread"),request,Some(next.clone()),effects);
+        true
+    }
+
     fn thread_read(&self,include_turns:bool) -> ClientRequest {
         ClientRequest::ThreadRead(wire::ThreadReadParams { thread_id:self.thread_id.clone(),include_turns })
     }
@@ -671,7 +692,7 @@ impl Engine {
             OperationKind::Select => {
                 let (request_id,request) = self.server_requests.iter().find(|(id,request)|!self.answering.contains(id)
                     && ["item/commandExecution/requestApproval","item/fileChange/requestApproval"].contains(&request["method"].as_str().unwrap_or("")))
-                    .cloned().ok_or_else(||error("nenhuma aprovação pendente"))?;
+                    .cloned().ok_or_else(||RuntimeError::new("no_pending_permission","nenhuma aprovação pendente"))?;
                 let option = payload["option"].as_u64().ok_or_else(||error("opção inválida"))?;
                 let decision = match option { 1=>"accept",2=>"decline",3 if !unreadable_command(&request)=>"acceptForSession",_=>return Err(error("opção inválida")) };
                 self.answer(id,request_id,json!({"decision":decision}),None,&mut effects)?;
@@ -831,6 +852,19 @@ impl Engine {
                     voice.starting = false;
                 }
             }
+            let message = line["error"]["message"].as_str().unwrap_or("");
+            if self.bootstrap_fallback(&rpc,message,effects) { return Ok(()); }
+            let transfer = self.metadata["transfer_id"].as_str().is_some_and(|id|!id.is_empty());
+            if let Some(parent) = rpc.continuation.as_ref().filter(|next|next["kind"] == "bootstrap_ready" && !transfer).and_then(|next|next["parent"].as_str()) {
+                // A conversa já está aberta: perder o nível escolhido é melhor que perder a sessão, mas aparece.
+                self.state.problema = Some("codex_esforco_nao_aplicado".into());
+                self.state.problema_detalhe = Some(message.chars().take(300).collect());
+                self.ready = true;
+                effects.push(Effect::Reply { operation_id:parent.into(),disposition:Disposition::Accepted,payload:json!({"ready":true}) });
+                effects.push(Effect::WakeQueue);
+                self.changed(effects,true);
+                return Ok(());
+            }
             effects.push(Effect::Reply { operation_id:rpc.operation_id,disposition:Disposition::Rejected,payload:json!({"error":line["error"]}) });
             return Ok(());
         }
@@ -932,12 +966,10 @@ impl Engine {
                     effects.push(Effect::Write { operation_id:Some(notification),
                         frame:json!({"jsonrpc":"2.0","method":"initialized","params":{}}) });
                     let request = if self.reconnect && !self.thread_id.is_empty() {
-                        ClientRequest::ThreadResume(wire::ThreadResumeParams { thread_id:self.thread_id.clone() })
-                    } else {
-                        ClientRequest::ThreadStart(wire::ThreadStartParams { cwd:string(&self.metadata["cwd"]),model:self.model.clone(),
+                        ClientRequest::ThreadResume(wire::ThreadResumeParams { thread_id:self.thread_id.clone(),cwd:string(&self.metadata["cwd"]),
                             approval_policy:Some(approval(&self.permission_mode).into()),sandbox:Some(sandbox(&self.permission_mode).into()),
-                            service_tier:self.service_tier.clone() })
-                    };
+                            service_tier:self.service_tier.clone(),model_provider:None })
+                    } else { self.bootstrap_start() };
                     self.send(format!("{parent}:thread"),request,Some(json!({"kind":"bootstrap_thread","parent":parent})),effects);
                 }
                 Some("bootstrap_thread") => {

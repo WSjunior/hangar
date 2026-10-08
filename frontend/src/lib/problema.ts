@@ -14,6 +14,7 @@ export function textoProblema(codigo: string | null | undefined): string | null 
     case 'codex_limite_uso': return m.problema_codex_limite_uso();
     case 'codex_sem_login': return m.problema_codex_sem_login();
     case 'codex_turno_cortado': return m.problema_codex_turno_cortado();
+    case 'codex_esforco_nao_aplicado': return m.problema_codex_esforco_nao_aplicado();
     case 'headless_caiu': return m.problema_headless_caiu();
     case 'codex_prompt_bloqueado': return m.problema_codex_prompt_bloqueado();
     case 'headless_sem_resposta': return m.problema_headless_sem_resposta();

@@ -413,13 +413,14 @@ fn resume_uses_external_tier_and_thread_change_cancels_pending_choice() {
 }
 
 #[test]
-fn bootstrap_new_process_preserves_tier_but_live_resume_does_not_override() {
+fn bootstrap_resume_and_start_both_carry_the_chosen_tier() {
     for reconnect in [false,true] {
         let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true,"service_tier":"priority"}),1,clock(10.0));
         let init = frames(&engine.bootstrap(reconnect,"boot".into()).unwrap())[0].clone();
         let requests = frames(&line(&mut engine,json!({"id":init["id"],"result":{}}),10.1));
-        if reconnect { assert!(requests[1]["params"].get("serviceTier").is_none()); }
-        else { assert_eq!(requests[1]["params"]["serviceTier"],"priority"); }
+        // A subida repete a escolha como o Python; só a verificação do Fast retoma sem ela.
+        assert_eq!(requests[1]["params"]["serviceTier"],"priority",
+            "reconnect={reconnect}");
     }
 }
 
@@ -692,4 +693,70 @@ fn unreadable_command_approval_offers_no_session_wide_grant() {
     assert!(engine.command(command(OperationKind::Select,json!({"option":3})),clock(10.1)).is_err());
     let answer = frames(&engine.command(command(OperationKind::Select,json!({"option":2})),clock(10.2)).unwrap());
     assert_eq!(answer[0]["result"]["decision"],"decline");
+}
+
+fn bootstrapped(meta:Value) -> (Engine,Vec<Value>) {
+    let mut engine = Engine::new(meta,1,clock(10.0));
+    let effects = engine.bootstrap(true,"boot".into()).unwrap();
+    let id = frames(&effects)[0]["id"].clone();
+    let effects = line(&mut engine,json!({"id":id,"result":{"userAgent":format!("hangar/{} (x)",hangar_codex::version::CHECKED)}}),11.0);
+    (engine,frames(&effects))
+}
+
+fn find_method(sent:&[Value],method:&str) -> Value { sent.iter().find(|f|f["method"] == method).unwrap().clone() }
+
+#[test]
+fn resume_carries_cwd_policy_sandbox_and_tier_like_python() {
+    let (_,sent) = bootstrapped(json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p",
+        "permission_mode":"Ask for approval","service_tier":"priority"}));
+    assert_eq!(find_method(&sent,"thread/resume")["params"],
+        json!({"threadId":"t1","cwd":"/p","approvalPolicy":"on-request","sandbox":"read-only","serviceTier":"priority"}));
+}
+
+#[test]
+fn missing_model_provider_retries_resume_with_openai() {
+    let (mut engine,sent) = bootstrapped(json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p"}));
+    let resume = find_method(&sent,"thread/resume");
+    let effects = line(&mut engine,json!({"id":resume["id"],"error":{"code":-32600,"message":"Model provider `x` not found"}}),12.0);
+    let retry = find_method(&frames(&effects),"thread/resume");
+    assert_eq!(retry["params"]["modelProvider"],"openai");
+    // Segunda recusa igual não repete: vira erro da subida.
+    let effects = line(&mut engine,json!({"id":retry["id"],"error":{"code":-32600,"message":"Model provider `x` not found"}}),13.0);
+    assert!(frames(&effects).is_empty());
+    assert!(effects.iter().any(|e|matches!(e,Effect::Reply { disposition:Disposition::Rejected,.. })));
+}
+
+#[test]
+fn provider_retry_and_start_fallback_skip_transfers() {
+    let (mut engine,sent) = bootstrapped(json!({"name":"s","thread_id":"t1","headless":true,"transfer_id":"tr"}));
+    let resume = find_method(&sent,"thread/resume");
+    let effects = line(&mut engine,json!({"id":resume["id"],"error":{"code":-32600,"message":"no rollout found for thread id t1"}}),12.0);
+    assert!(frames(&effects).is_empty());
+}
+
+#[test]
+fn no_rollout_falls_back_to_thread_start() {
+    let (mut engine,sent) = bootstrapped(json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p","model":"gpt-6"}));
+    let resume = find_method(&sent,"thread/resume");
+    let effects = line(&mut engine,json!({"id":resume["id"],"error":{"code":-32600,"message":"no rollout found for thread id t1"}}),12.0);
+    assert!(frames(&effects).iter().any(|f|f["method"] == "thread/start" && f["params"]["model"] == "gpt-6"));
+}
+
+#[test]
+fn refused_effort_is_a_problem_not_a_failure() {
+    let (mut engine,sent) = bootstrapped(json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p","effort":"max"}));
+    let resume = find_method(&sent,"thread/resume");
+    let effects = line(&mut engine,json!({"id":resume["id"],"result":{"thread":{"id":"t1","status":{"type":"idle"},"turns":[]},"model":"gpt-6"}}),12.0);
+    let update = find_method(&frames(&effects),"thread/settings/update");
+    let effects = line(&mut engine,json!({"id":update["id"],"error":{"code":-32600,"message":"effort max not supported"}}),13.0);
+    assert_eq!(engine.view()["problema"],"codex_esforco_nao_aplicado");
+    assert_eq!(engine.control_view()["ready"],true);
+    assert!(effects.iter().any(|e|matches!(e,Effect::WakeQueue)));
+}
+
+#[test]
+fn select_without_pending_approval_says_no_pending_permission() {
+    let mut engine = engine();
+    let Err(error) = engine.command(command(OperationKind::Select,json!({"option":1})),clock(10.0)) else { panic!("devia recusar") };
+    assert_eq!(error.code,"no_pending_permission");
 }
