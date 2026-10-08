@@ -27,7 +27,7 @@ fn materialize(files: &Value, root: &Path) {
         } else if let Some(size) = spec["size"].as_u64() {
             std::fs::write(&path, vec![0u8; size as usize]).unwrap();
         } else {
-            std::fs::write(&path, spec["text"].as_str().unwrap()).unwrap();
+            std::fs::write(&path, spec["text"].as_str().unwrap().repeat(spec["times"].as_u64().unwrap_or(1) as usize)).unwrap();
         }
     }
 }
@@ -37,14 +37,17 @@ fn materialize(files: &Value, root: &Path) {
 fn local_policies_match_the_python_golden() {
     let mut failures = Vec::new();
     let mut total = 0;
-    for file in ["prepare_prompt.json", "format_status_claude.json", "format_status_codex.json", "skill_catalog.json"] {
+    for file in ["prepare_prompt.json", "format_status_claude.json", "format_status_codex.json", "skill_catalog.json",
+        "last_usage.json", "reload_stamp.json", "unknown_private.json"] {
         let document = golden(file);
         // SAFETY: o outro teste deste binário só chama tipos remotos, que devolvem `None` sem tocar no
         // ambiente; só este teste lê ou escreve TZ, HOME e a variável de esforço.
         unsafe { std::env::set_var("TZ", document["tz"].as_str().unwrap()); }
         for case in document["cases"].as_array().unwrap() {
             // O golden sai do Linux: o Windows ignora o TZ do processo e abre pasta como "Permission denied".
-            if cfg!(windows) && case["name"].as_str().is_some_and(|n| n.starts_with("limit_rejected") || n == "directory_named_like_image") {
+            // No Windows o log privado mora em LOCALAPPDATA, não no HOME do golden.
+            if cfg!(windows) && (case["kind"] == "unknown_private"
+                || case["name"].as_str().is_some_and(|n| n.starts_with("limit_rejected") || n == "directory_named_like_image")) {
                 continue;
             }
             total += 1;
@@ -65,11 +68,26 @@ fn local_policies_match_the_python_golden() {
             let meta = substitute(&case["meta"], root);
             let quota = case.get("quota");
             let now = case["now"].as_f64().unwrap_or(0.0);
-            let actual = match run_at(kind, &payload, &meta, quota, now) {
+            let call = |payload: &Value| match run_at(kind, payload, &meta, quota, now) {
                 Some(Ok(value)) => value,
                 Some(Err(_)) => json!({"error": true}),
                 None => json!("not local"),
             };
+            // `unknown_private` é uma sequência de chamadas (o teto é por chave) e o resultado inclui o arquivo gravado.
+            let actual = if let Some(steps) = case["steps"].as_array() {
+                let results: Vec<Value> = steps.iter().map(|step| call(&substitute(step, root))).collect();
+                let files: serde_json::Map<String, Value> = case["read"].as_array().into_iter().flatten().map(|rel| {
+                    let rel = rel.as_str().unwrap();
+                    (rel.to_owned(), std::fs::read_to_string(dir.path().join(rel)).map_or(Value::Null, Value::String))
+                }).collect();
+                json!({"results": results, "files": files})
+            } else { call(&payload) };
+            #[cfg(unix)]
+            if case["name"] == "claude_first_line" {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(dir.path().join("home/.hangar/logs/privado")).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o700, "a pasta do log privado é só do dono");
+            }
             let expected = substitute(&case["expected"], root);
             if actual != expected {
                 failures.push(format!("{file}/{}: Rust {actual}; Python {expected}", case["name"]));
@@ -82,7 +100,7 @@ fn local_policies_match_the_python_golden() {
 
 #[test]
 fn remote_kinds_are_not_local() {
-    for kind in ["native_message", "last_usage", "reload_stamp", "session.patch_meta", "unknown_private", "terminal_facts", "quota", "answer_body"] {
+    for kind in ["native_message", "session.patch_meta", "terminal_facts", "quota", "answer_body"] {
         assert!(!is_local(kind), "{kind} continua no Python ou saiu do serviço");
         assert!(run_at(kind, &json!({}), &json!({"provider": "claude"}), None, 0.0).is_none());
     }

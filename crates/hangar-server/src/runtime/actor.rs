@@ -1181,7 +1181,9 @@ const COSMETIC_POLICIES:[&str;4] = ["format_status","reload_stamp","last_usage",
 /// Serviço puro do ator: roda fora do laço, já que `prepare_prompt` lê imagem e `format_status` lê o `settings.json`.
 async fn run_local(kind:String,payload:Value,target:&RuntimeTarget,quota:Option<Value>) -> Result<Value,RuntimeError> {
     let mut meta = target.metadata.clone();
-    meta["provider"] = json!(target.provider);
+    // Os mesmos campos que o Python juntava ao sidecar antes de rodar o serviço.
+    meta["provider"] = json!(target.provider); meta["name"] = json!(target.name); meta["key"] = json!(target.key);
+    meta["generation"] = json!(target.generation); meta["jsonl"] = json!(target.transcript.to_string_lossy());
     tokio::task::spawn_blocking(move||local_policy::run(&kind,&payload,&meta,quota.as_ref()).unwrap_or_else(||Err(failure("policy_unavailable"))))
         .await.map_err(|_|failure("policy_job"))?
 }

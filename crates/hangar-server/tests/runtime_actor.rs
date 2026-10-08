@@ -513,6 +513,7 @@ async fn status_turn(bad_rate:bool) -> Vec<Value> {
         }
     });
     let (policy,calls) = policy_server().await;
+    let _ = &calls;
     let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
         metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true}),
         binding:CanoBinding { pid:42,escuta:format!("tcp:{address}"),token:"secret-test".into(),versao:2 },
@@ -538,8 +539,8 @@ async fn status_turn(bad_rate:bool) -> Vec<Value> {
                 if event.channel == "problem" { problems.push(event.data.clone()); }
                 if event.channel == "state" && event.data["state"] == "idle" { idle_seen = true; }
             }
-            // Os serviços do Python que sobraram (uso, carimbo, sidecar) já foram pedidos; o preparo e o status são locais.
-            if idle_seen && calls.load(std::sync::atomic::Ordering::SeqCst) > 0 && (!bad_rate || !problems.is_empty()) { break; }
+            // Preparo, status, uso, carimbo e evento desconhecido são locais: o Python não é chamado neste turno.
+            if idle_seen && (!bad_rate || !problems.is_empty()) { break; }
         }
     }).await.expect("o turno precisa terminar");
     handle.stop().await.unwrap();
