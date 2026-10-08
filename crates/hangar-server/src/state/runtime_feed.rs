@@ -16,7 +16,7 @@ use crate::state::published::Published;
 /// Mesma janela da lista: rajada de deltas vira uma publicação.
 pub const COALESCE: Duration = Duration::from_millis(150);
 /// Retrato que falhou: tenta de novo sem martelar o Python.
-const RETRY: Duration = Duration::from_secs(5);
+const RETRY: Duration = if cfg!(test) { Duration::from_millis(300) } else { Duration::from_secs(5) };
 
 /// De onde o feed do Claude lê a sugestão do plugin: os fatos que o Python empurra, com o interesse
 /// renovado como o `Monitor` faz.
@@ -94,7 +94,7 @@ impl RuntimeFeed {
     async fn refresh_facts(&mut self) -> Option<Duration> {
         let w = self.facts.as_mut()?;
         let failed = w.error.is_some();
-        if refresh_in(w.at, failed, Instant::now()).is_zero() || w.src.store.needs_snapshot(&self.name) {
+        if failed || refresh_in(w.at, false, Instant::now()).is_zero() ||w.src.store.needs_snapshot(&self.name) {
             match w.src.client.snapshot(&self.name).await {
                 Ok(facts) => {
                     w.src.store.snapshot(&self.name, facts, std::time::Instant::now());
@@ -462,7 +462,10 @@ mod tests {
     /// Python de mentira: responde o retrato de fatos e conta os pedidos.
     struct FakePython { addr: std::net::SocketAddr, hits: Arc<std::sync::atomic::AtomicUsize> }
 
-    async fn fake_python() -> FakePython {
+    async fn fake_python() -> FakePython { fake_python_with(0, "").await }
+
+    /// Os primeiros `fail_first` pedidos levam 503; depois responde o retrato com `suggestion`.
+    async fn fake_python_with(fail_first: usize, suggestion: &'static str) -> FakePython {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -470,10 +473,14 @@ mod tests {
         let counted = hits.clone();
         tokio::spawn(async move {
             while let Ok((mut s, _)) = listener.accept().await {
-                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let n = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let mut buf = [0u8; 4096];
                 let _ = s.read(&mut buf).await;
-                let body = serde_json::to_string(&facts_json(1, "")).unwrap();
+                if n < fail_first {
+                    let _ = s.write_all(b"HTTP/1.1 503 X\r\ncontent-length: 0\r\n\r\n").await;
+                    continue;
+                }
+                let body = serde_json::to_string(&facts_json(1, suggestion)).unwrap();
                 let _ = s.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}", body.len()).as_bytes()).await;
             }
         });
@@ -524,6 +531,19 @@ mod tests {
         store.push("s", facts(4, ""), now);
         assert_eq!(texts(&collect(&mut rx, Duration::from_millis(400)).await), [json!({"text": ""})], "turno novo zera a sugestão");
         assert_eq!(hits(&py), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_snapshot_is_retried() {
+        let f = claude_fixture();
+        let py = fake_python_with(1, "depois da falha").await;
+        let store = Arc::new(crate::state::facts::FactsStore::default());
+        let mut rx = f.lease.hub.tx.subscribe();
+        let (_tx, live_rx) = channel(Some(live("idle")));
+        let _feed = tokio::spawn(RuntimeFeed::new(&f.lease.hub, Some(live_rx), f.published.clone(), Some(feed_facts(&py, &store))).run());
+        let got = collect(&mut rx, RETRY + Duration::from_millis(800)).await;
+        assert_eq!(hits(&py), 2, "a primeira falhou e a segunda registrou o interesse");
+        assert_eq!(texts(&got), [json!({"text": "depois da falha"})]);
     }
 
     #[tokio::test]
