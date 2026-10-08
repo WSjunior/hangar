@@ -186,7 +186,7 @@ Commit: `feat(codex): Rust bootstrap matches the Python fallbacks and error code
 - Consumes: tabela de pedidos da spec 5B.
 - Produces: cartão de permissão com opções `["Permitir neste turno","Permitir na sessão","Negar"]`; pergunta nativa para formulário MCP (`provider:"codex"`, `request_id`, `questions`); cartão de link `["Concluí","Cancelar"]` com a URL no texto.
 
-- [ ] **Step 1: Tipos**
+- [x] **Step 1: Tipos**
 
 Em `proto.rs`, trocar `ThreadOnlyParams` por:
 
@@ -201,7 +201,7 @@ wire!(pub struct McpServerElicitationRequestParams { pub thread_id:String, pub s
 
 Conferir com o schema 0.161 (`scripts/conferir-codex-schema`) os nomes `fileSystem`, `read`, `write`, `network.enabled`, `serverName`, `mode`, `message`, `url`, `requestedSchema`; o campo que divergir segue o schema. `LOCAL_NAMES` perde `ThreadOnlyParams`. `ServerRequest` ganha `CurrentTimeRead` (`"currentTime/read"`, params livres) e as variantes passam a carregar os tipos acima.
 
-- [ ] **Step 2: Testes (falham)**
+- [x] **Step 2: Testes (falham)**
 
 ```rust
 fn request(engine:&mut Engine,id:i64,method:&str,params:Value) -> Vec<Effect> {
@@ -282,12 +282,12 @@ fn request_from_a_subagent_thread_is_not_dropped() {
 }
 ```
 
-- [ ] **Step 3: Rodar e ver falhar**
+- [x] **Step 3: Rodar e ver falhar**
 
 Run: `cd crates && CARGO_BUILD_JOBS=4 cargo test -p hangar-server --test runtime_codex`
 Expected: FAIL nos 7 testes novos.
 
-- [ ] **Step 4: Implementar**
+- [x] **Step 4: Implementar**
 
 - No `notification`, o ramo de pedidos (`line.get("id")`) passa para **antes** do desvio por outra thread: pedido de qualquer thread entra em `server_requests` (voz continua desviada antes, pela thread organizadora).
 - `APPROVALS` (lista dos métodos que viram cartão) = comando, arquivo, permissões, formulário MCP em modo URL. `view()` monta o texto:
@@ -303,7 +303,7 @@ Expected: FAIL nos 7 testes novos.
 - Cancelar o formulário MCP pelo app (`SkipQuestion` com o `request_id` de um formulário) → `{"action":"cancel"}`.
 - Herdado da 5A (`pendencias-5b.md`): aprovação de comando com `command` vazio ou só espaços é tratada como ilegível (texto fixo, sem "Sempre permitir"); `turn/completed` lido cru com `status: "failed"` marca `headless_turno_erro` sem detalhe. Um teste para cada, no estilo dos de cima.
 
-- [ ] **Step 5: Rodar e ver passar; commit**
+- [x] **Step 5: Rodar e ver passar; commit**
 
 Run: o mesmo do Step 3 + `cargo test -p hangar-codex --lib`.
 Commit: `feat(codex): answer permission and MCP form/link requests, keep subagent requests`.
