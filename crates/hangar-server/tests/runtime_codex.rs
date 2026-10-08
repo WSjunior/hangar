@@ -772,3 +772,124 @@ fn live_attach_resumes_with_thread_id_only_and_effort_refusal_stays_a_failure() 
     assert!(frames(&effects).is_empty());
     assert!(effects.iter().any(|e|matches!(e,Effect::Reply { disposition:Disposition::Rejected,.. })));
 }
+
+fn request(engine:&mut Engine,id:i64,method:&str,params:Value) -> Vec<Effect> {
+    line(engine,json!({"id":id,"method":method,"params":params}),10.0)
+}
+fn reply_to(effects:&[Effect],id:i64) -> Value { frames(effects).into_iter().find(|f|f["id"] == id && f.get("method").is_none()).unwrap() }
+
+#[test]
+fn permissions_request_is_a_card_and_answers_with_scope() {
+    let mut engine = engine();
+    request(&mut engine,5,"item/permissions/requestApproval",json!({"threadId":"thread-1","cwd":"/p","reason":"ler config",
+        "permissions":{"fileSystem":{"read":["/etc/x"],"write":["/p/out"]},"network":{"enabled":true}}}));
+    let view = engine.view();
+    assert_eq!(view["state"],"awaiting_input");
+    assert_eq!(view["options"],json!(["Permitir neste turno","Permitir na sessão","Negar"]));
+    let text = view["question"].as_str().unwrap();
+    assert!(text.contains("/etc/x") && text.contains("/p/out") && text.contains("rede"));
+    let effects = engine.command(command(OperationKind::Select,json!({"option":2})),clock(11.0)).unwrap();
+    let answer = reply_to(&effects,5);
+    assert_eq!(answer["result"]["scope"],"session");
+    assert_eq!(answer["result"]["permissions"]["fileSystem"]["read"],json!(["/etc/x"]));
+}
+
+#[test]
+fn denied_permissions_grant_nothing() {
+    let mut engine = engine();
+    request(&mut engine,5,"item/permissions/requestApproval",json!({"threadId":"thread-1","permissions":{"network":{"enabled":true}}}));
+    let effects = engine.command(command(OperationKind::Select,json!({"option":3})),clock(11.0)).unwrap();
+    assert_eq!(reply_to(&effects,5)["result"],json!({"permissions":{},"scope":"turn"}));
+}
+
+#[test]
+fn elicitation_form_becomes_a_native_question() {
+    let mut engine = engine();
+    request(&mut engine,6,"mcpServer/elicitation/request",json!({"threadId":"thread-1","serverName":"db","mode":"form","message":"Qual ambiente?",
+        "requestedSchema":{"type":"object","properties":{"env":{"type":"string","enum":["dev","prod"],"title":"Ambiente"},"note":{"type":"string","title":"Nota"}},"required":["env"]}}));
+    let view = engine.view();
+    let question = &view["codex_question"];
+    assert_eq!(question["request_id"],6);
+    assert_eq!(question["questions"][0]["options"],json!([{"label":"dev","description":""},{"label":"prod","description":""}]));
+    assert_eq!(question["questions"][1]["options"],json!([]));
+    let effects = engine.command(command(OperationKind::AnswerQuestions,json!({"request_id":6,"answers":[
+        {"question_id":"env","kind":"option","indices":[1]},{"question_id":"note","kind":"text","value":"urgente"}]})),clock(11.0)).unwrap();
+    assert_eq!(reply_to(&effects,6)["result"],json!({"action":"accept","content":{"env":"prod","note":"urgente"}}));
+}
+
+#[test]
+fn elicitation_converts_number_and_boolean_answers() {
+    let mut engine = engine();
+    request(&mut engine,6,"mcpServer/elicitation/request",json!({"threadId":"thread-1","serverName":"db","mode":"form","message":"x",
+        "requestedSchema":{"type":"object","properties":{"n":{"type":"integer"},"ok":{"type":"boolean"}}}}));
+    assert_eq!(engine.view()["codex_question"]["questions"][1]["options"][0]["label"],"sim");
+    let effects = engine.command(command(OperationKind::AnswerQuestions,json!({"request_id":6,"answers":[
+        {"question_id":"n","kind":"text","value":"42"},{"question_id":"ok","kind":"option","indices":[1]}]})),clock(11.0)).unwrap();
+    assert_eq!(reply_to(&effects,6)["result"]["content"],json!({"n":42,"ok":false}));
+}
+
+#[test]
+fn skipping_an_elicitation_form_cancels_it() {
+    let mut engine = engine();
+    request(&mut engine,6,"mcpServer/elicitation/request",json!({"threadId":"thread-1","serverName":"db","mode":"form","message":"x",
+        "requestedSchema":{"type":"object","properties":{"n":{"type":"string"}}}}));
+    let effects = engine.command(command(OperationKind::SkipQuestion,json!({"request_id":6})),clock(11.0)).unwrap();
+    assert_eq!(reply_to(&effects,6)["result"],json!({"action":"cancel"}));
+}
+
+#[test]
+fn elicitation_schema_that_does_not_fit_is_declined_with_a_note() {
+    let mut engine = engine();
+    let effects = request(&mut engine,7,"mcpServer/elicitation/request",json!({"threadId":"thread-1","serverName":"db","mode":"form","message":"x",
+        "requestedSchema":{"type":"object","properties":{"deep":{"type":"object"}}}}));
+    assert_eq!(reply_to(&effects,7)["result"]["action"],"decline");
+    assert!(effects.iter().any(|e|matches!(e,Effect::Policy { kind,.. } if kind == "local_output")));
+}
+
+#[test]
+fn elicitation_url_is_a_link_card() {
+    let mut engine = engine();
+    request(&mut engine,8,"mcpServer/elicitation/request",json!({"threadId":"thread-1","serverName":"gh","mode":"url","message":"Autorize","url":"https://example.com/auth","elicitationId":"e1"}));
+    let view = engine.view();
+    assert!(view["question"].as_str().unwrap().contains("https://example.com/auth"));
+    assert_eq!(view["options"],json!(["Concluí","Cancelar"]));
+    let effects = engine.command(command(OperationKind::Select,json!({"option":2})),clock(11.0)).unwrap();
+    assert_eq!(reply_to(&effects,8)["result"],json!({"action":"cancel"}));
+}
+
+#[test]
+fn current_time_is_answered() {
+    let mut engine = engine();
+    let effects = request(&mut engine,9,"currentTime/read",json!({"threadId":"thread-1"}));
+    // O schema 0.161 chama o campo `currentTimeAt` (segundos Unix inteiros).
+    assert_eq!(reply_to(&effects,9)["result"]["currentTimeAt"],1_800_000_010);
+}
+
+#[test]
+fn request_from_a_subagent_thread_is_not_dropped() {
+    let mut engine = engine();
+    request(&mut engine,10,"item/commandExecution/requestApproval",json!({"threadId":"subagent-thread","command":"ls"}));
+    assert_eq!(engine.view()["state"],"awaiting_input");
+    let effects = engine.command(command(OperationKind::Select,json!({"option":1})),clock(11.0)).unwrap();
+    assert_eq!(reply_to(&effects,10)["result"]["decision"],"accept");
+}
+
+#[test]
+fn blank_command_approval_is_unreadable() {
+    let mut engine = engine();
+    request(&mut engine,11,"item/commandExecution/requestApproval",json!({"threadId":"thread-1","command":"   ","cwd":"/repo"}));
+    let view = engine.view();
+    assert_eq!(view["question"],"Rodar um comando que o Hangar não conseguiu ler em /repo?");
+    assert_eq!(view["options"],json!(["Permitir","Negar"]));
+}
+
+#[test]
+fn undecodable_failed_turn_completed_marks_the_turn_error() {
+    let mut engine = engine();
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),10.0);
+    line(&mut engine,json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"failed","error":"boom"}}}),11.0);
+    let view = engine.view();
+    assert_eq!(view["state"],"idle");
+    assert_eq!(view["problema"],"headless_turno_erro");
+    assert!(view["problema_detalhe"].is_null());
+}

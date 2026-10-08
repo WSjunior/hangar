@@ -219,10 +219,12 @@ fn lifecycle_from_raw(method:&str,params:&Value) -> Option<wire::ServerNotificat
 /// Comando, pasta e motivo do pedido de aprovação; fora do formato saem da linha crua, e comando que não é texto fica None.
 fn command_approval(request:&Value) -> (Option<String>,Option<String>,Option<String>) {
     let raw = |key:&str|request["params"][key].as_str().map(str::to_owned);
-    match decoded(request) {
+    let (command,cwd,reason) = match decoded(request) {
         wire::ServerRequest::CommandExecutionApproval(p) => (p.command,p.cwd,p.reason),
         _ => (raw("command"),raw("cwd"),raw("reason")),
-    }
+    };
+    // Comando em branco não diz o que vai rodar: tratado como ilegível.
+    (command.filter(|c|!c.trim().is_empty()),cwd,reason)
 }
 
 /// "Sempre permitir" um comando que ninguém leu liberaria qualquer coisa pelo resto da sessão.
@@ -230,9 +232,84 @@ fn unreadable_command(request:&Value) -> bool {
     request["method"] == "item/commandExecution/requestApproval" && command_approval(request).0.is_none()
 }
 
+const ELICITATION:&str = "mcpServer/elicitation/request";
+
+fn is_url_elicitation(request:&Value) -> bool { request["method"] == ELICITATION && request["params"]["mode"] == "url" }
+
+/// Pedidos que viram cartão de opções (permitir/negar); o resto é pergunta nativa ou resposta automática.
+fn is_card(request:&Value) -> bool {
+    matches!(request["method"].as_str(),Some("item/commandExecution/requestApproval" | "item/fileChange/requestApproval" | "item/permissions/requestApproval"))
+        || is_url_elicitation(request)
+}
+
+enum FieldKind { Choice(Vec<(String,Value)>), Bool, Number(bool), Text }
+struct Field { id:String, header:String, question:String, kind:FieldKind }
+
+/// Campos do formulário MCP; `None` quando o pedido não é um formulário ou alguma propriedade foge do que a tela mostra.
+fn form_fields(request:&Value) -> Option<Vec<Field>> {
+    if request["method"] != ELICITATION || is_url_elicitation(request) { return None; }
+    let properties = request["params"]["requestedSchema"]["properties"].as_object().filter(|p|!p.is_empty())?;
+    let message = request["params"]["message"].as_str().unwrap_or("");
+    properties.iter().map(|(id,prop)| {
+        let label = |value:&Value|value.as_str().map_or_else(||value.to_string(),str::to_owned);
+        let choices:Vec<(String,Value)> = if let Some(values) = prop["enum"].as_array() {
+            values.iter().map(|v|(label(v),v.clone())).collect()
+        } else if let Some(options) = prop["oneOf"].as_array() {
+            options.iter().filter_map(|o|o.get("const").map(|c|(o["title"].as_str().map_or_else(||label(c),str::to_owned),c.clone()))).collect()
+        } else { Vec::new() };
+        let kind = if !choices.is_empty() { FieldKind::Choice(choices) } else { match prop["type"].as_str()? {
+            "boolean" => FieldKind::Bool, "string" => FieldKind::Text,
+            "integer" => FieldKind::Number(true), "number" => FieldKind::Number(false), _ => return None } };
+        Some(Field { id:id.clone(),header:prop["title"].as_str().unwrap_or(id).into(),
+            question:prop["description"].as_str().unwrap_or(message).into(),kind })
+    }).collect()
+}
+
+fn field_question(field:&Field) -> Value {
+    let option = |label:&str|json!({"label":label,"description":""});
+    let options:Vec<Value> = match &field.kind {
+        FieldKind::Choice(choices) => choices.iter().map(|(label,_)|option(label)).collect(),
+        FieldKind::Bool => vec![option("sim"),option("não")],
+        _ => Vec::new(),
+    };
+    json!({"id":field.id,"header":field.header,"question":field.question,"multiSelect":false,
+        "isOther":matches!(field.kind,FieldKind::Text | FieldKind::Number(_)),"isSecret":false,"options":options})
+}
+
+/// Resposta já validada (`question_response`) → `content` do formulário, com número e booleano de volta ao tipo.
+fn form_content(fields:&[Field],response:&Value) -> Result<Value,RuntimeError> {
+    let mut content = serde_json::Map::new();
+    for field in fields {
+        let text = response["answers"][&field.id]["answers"][0].as_str().ok_or_else(||error("responda a todas as perguntas"))?;
+        let value = match &field.kind {
+            FieldKind::Choice(choices) => choices.iter().find(|(label,_)|label == text).map(|(_,v)|v.clone()).ok_or_else(||error("opção inválida"))?,
+            FieldKind::Bool => json!(text == "sim"),
+            FieldKind::Number(true) => json!(text.trim().parse::<i64>().map_err(|_|error("informe um número inteiro"))?),
+            FieldKind::Number(false) => json!(text.trim().parse::<f64>().ok().filter(|n|n.is_finite()).ok_or_else(||error("informe um número"))?),
+            FieldKind::Text => json!(text),
+        };
+        content.insert(field.id.clone(),value);
+    }
+    Ok(Value::Object(content))
+}
+
+/// Texto do cartão de permissões: o que pede (leitura, escrita, rede) e o motivo.
+fn permissions_text(request:&Value) -> String {
+    let params = &request["params"];
+    let list = |key:&str|params["permissions"]["fileSystem"][key].as_array().map(|items|items.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).filter(|l|!l.is_empty());
+    let mut parts = Vec::new();
+    if let Some(read) = list("read") { parts.push(format!("leitura de {read}")); }
+    if let Some(write) = list("write") { parts.push(format!("escrita em {write}")); }
+    if params["permissions"]["network"]["enabled"] == true { parts.push("rede".into()); }
+    let what = if parts.is_empty() { "acesso extra".into() } else { parts.join("; ") };
+    let reason = params["reason"].as_str().map_or(String::new(),|r|format!(" {r}"));
+    format!("Permitir {what}?{reason}")
+}
+
 fn unsupported_notice(request:&Value) -> Option<String> {
     let method = request["method"].as_str()?;
-    if matches!(method,"item/commandExecution/requestApproval" | "item/fileChange/requestApproval" | "item/tool/requestUserInput") { return None; }
+    if matches!(method,"item/commandExecution/requestApproval" | "item/fileChange/requestApproval" | "item/tool/requestUserInput"
+        | "item/permissions/requestApproval" | ELICITATION | "currentTime/read") { return None; }
     Some(format!("O Codex pediu `{method}`, que a sessão sem terminal não atende; o pedido foi recusado."))
 }
 
@@ -274,7 +351,7 @@ impl Engine {
     pub fn view(&self) -> Value {
         let mut state = self.state.clone();
         let question = self.blocking_question().or_else(||self.async_questions.pending.first().map(|(_,q)|q.clone()));
-        let pending_approval = self.server_requests.iter().find(|(_,r)|["item/commandExecution/requestApproval","item/fileChange/requestApproval"].contains(&r["method"].as_str().unwrap_or("")));
+        let pending_approval = self.server_requests.iter().find(|(_,r)|is_card(r));
         state.state = if !self.alive { "dead" } else if self.blocking_question().is_some() || pending_approval.is_some()
             || question.is_some() && !self.in_progress { "awaiting_input" } else if self.in_progress { "working" } else { "idle" }.into();
         state.codex_question = question.and_then(|q|q.as_object().cloned());
@@ -286,6 +363,19 @@ impl Engine {
             let place = |path:Option<String>|path.map_or(String::new(),|p|format!(" em {p}"));
             // Fora do formato os detalhes saem da linha crua: aprovar às cegas não é opção.
             let raw = |key:&str|request["params"][key].as_str().map(str::to_owned);
+            let method = request["method"].as_str().unwrap_or("");
+            if method == "item/permissions/requestApproval" {
+                state.question = Some(permissions_text(request));
+                state.options = Some(["Permitir neste turno","Permitir na sessão","Negar"].map(String::from).to_vec());
+                return serde_json::to_value(state).unwrap();
+            }
+            if method == ELICITATION {
+                let p = &request["params"];
+                state.question = Some(format!("{} pede para abrir {}: {}",p["serverName"].as_str().unwrap_or("Um servidor MCP"),
+                    p["url"].as_str().unwrap_or(""),p["message"].as_str().unwrap_or("")));
+                state.options = Some(["Concluí","Cancelar"].map(String::from).to_vec());
+                return serde_json::to_value(state).unwrap();
+            }
             let (target,reason) = if request["method"] == "item/fileChange/requestApproval" {
                 let (root,reason) = match decoded(request) {
                     wire::ServerRequest::FileChangeApproval(p) => (p.grant_root,p.reason),
@@ -319,7 +409,10 @@ impl Engine {
     }
 
     fn blocking_question(&self) -> Option<Value> {
-        let (id,request) = self.server_requests.iter().find(|(_,r)|r["method"] == "item/tool/requestUserInput")?;
+        let (id,request) = self.server_requests.iter().find(|(_,r)|r["method"] == "item/tool/requestUserInput" || form_fields(r).is_some())?;
+        if let Some(fields) = form_fields(request) {
+            return Some(json!({"provider":"codex","request_id":id,"questions":fields.iter().map(field_question).collect::<Vec<_>>()}));
+        }
         let raw = request["params"]["questions"].as_array()?;
         let questions:Vec<_> = match decoded(request) {
             wire::ServerRequest::ToolRequestUserInput(params) => params.questions.into_iter().map(|q|json!({
@@ -695,12 +788,24 @@ impl Engine {
                 self.send(format!("{id}:settings"),self.thread_read(false),Some(json!({"kind":"set_mode","parent":id,"mode":mode})),&mut effects);
             }
             OperationKind::Select => {
-                let (request_id,request) = self.server_requests.iter().find(|(id,request)|!self.answering.contains(id)
-                    && ["item/commandExecution/requestApproval","item/fileChange/requestApproval"].contains(&request["method"].as_str().unwrap_or("")))
+                let (request_id,request) = self.server_requests.iter().find(|(id,request)|!self.answering.contains(id) && is_card(request))
                     .cloned().ok_or_else(||RuntimeError::new("no_pending_permission","nenhuma aprovação pendente"))?;
                 let option = payload["option"].as_u64().ok_or_else(||error("opção inválida"))?;
-                let decision = match option { 1=>"accept",2=>"decline",3 if !unreadable_command(&request)=>"acceptForSession",_=>return Err(error("opção inválida")) };
-                self.answer(id,request_id,json!({"decision":decision}),None,&mut effects)?;
+                let invalid = || error("opção inválida");
+                let result = match request["method"].as_str().unwrap_or("") {
+                    "item/permissions/requestApproval" => {
+                        let granted = request["params"]["permissions"].clone();
+                        match option {
+                            1 => json!({"permissions":granted,"scope":"turn"}),
+                            2 => json!({"permissions":granted,"scope":"session"}),
+                            3 => json!({"permissions":{},"scope":"turn"}),
+                            _ => return Err(invalid()),
+                        }
+                    }
+                    ELICITATION => match option { 1=>json!({"action":"accept"}),2=>json!({"action":"cancel"}),_=>return Err(invalid()) },
+                    _ => json!({"decision":match option { 1=>"accept",2=>"decline",3 if !unreadable_command(&request)=>"acceptForSession",_=>return Err(invalid()) }}),
+                };
+                self.answer(id,request_id,result,None,&mut effects)?;
             }
             OperationKind::AnswerQuestions => {
                 let request_id:RequestId = serde_json::from_value(payload["request_id"].clone()).map_err(|_|error("ID da resposta inválido"))?;
@@ -720,15 +825,24 @@ impl Engine {
                 }
                 let question = self.blocking_question().ok_or_else(||error("a pergunta já foi respondida ou cancelada"))?;
                 if question["request_id"] != serde_json::to_value(&request_id).unwrap() { return Err(error("a pergunta mudou")); }
-                let response = question_response(&question,&payload["answers"])?;
+                let mut response = question_response(&question,&payload["answers"])?;
+                if let Some(fields) = self.server_requests.iter().find(|(key,_)|key == &request_id).and_then(|(_,r)|form_fields(r)) {
+                    response = json!({"action":"accept","content":form_content(&fields,&response)?});
+                }
                 self.answer(id,request_id,response,None,&mut effects)?;
             }
             OperationKind::SkipQuestion => {
-                let request = payload["request_id"].as_str().ok_or_else(||error("ID da pergunta inválido"))?;
-                if !self.async_questions.pending.iter().any(|(id,_)|id == request) { return Err(error("a pergunta já foi respondida ou pertence a outra conversa")); }
-                self.async_questions.skipped.insert(request.into()); self.async_questions.resolve(request);
-                self.policy("session.patch_meta",json!({"skipped_async_questions":self.async_questions.skipped}),&mut effects);
-                effects.push(Effect::Reply { operation_id:id,disposition:Disposition::Accepted,payload:json!({}) });
+                let form = serde_json::from_value::<RequestId>(payload["request_id"].clone()).ok()
+                    .filter(|rid|self.server_requests.iter().any(|(key,r)|key == rid && form_fields(r).is_some()));
+                if let Some(request_id) = form {
+                    self.answer(id,request_id,json!({"action":"cancel"}),None,&mut effects)?;
+                } else {
+                    let request = payload["request_id"].as_str().ok_or_else(||error("ID da pergunta inválido"))?;
+                    if !self.async_questions.pending.iter().any(|(id,_)|id == request) { return Err(error("a pergunta já foi respondida ou pertence a outra conversa")); }
+                    self.async_questions.skipped.insert(request.into()); self.async_questions.resolve(request);
+                    self.policy("session.patch_meta",json!({"skipped_async_questions":self.async_questions.skipped}),&mut effects);
+                    effects.push(Effect::Reply { operation_id:id,disposition:Disposition::Accepted,payload:json!({}) });
+                }
             }
             OperationKind::SetPermissionMode | OperationKind::Restart | OperationKind::OpenTerminal | OperationKind::Reload => {
                 if !self.idle() { return Err(error("aguarde a sessão ficar ociosa antes de mudar o sandbox ou o modo")); }
@@ -1181,18 +1295,22 @@ impl Engine {
             effects.push(Effect::Publish { channel:"voice".into(),data:json!({"call_id":call_id,"event":line}) });
             return Ok(());
         }
-        if let Some(thread) = params["threadId"].as_str().filter(|thread|*thread != self.thread_id) {
+        // Pedido de outra thread (subagente) entra na fila como os da principal; só o "resolvido" dele
+        // também passa, para o pedido sair da fila. O resto vindo de outra thread é descartado.
+        let foreign = params["threadId"].as_str().filter(|thread|*thread != self.thread_id);
+        if let Some(thread) = foreign {
             if line.get("id").is_some() && self.voices.values().any(|voice|voice.starting) {
                 let size = line.to_string().len();
                 if self.early_voice_bytes + size > MAX_FRAME { return Err(error("pedidos iniciais da voz excederam o orçamento")); }
                 let pending = self.early_voice.entry(thread.into()).or_default();
                 if !pending.contains(&line) { pending.push(line.clone()); self.early_voice_bytes += size; }
+                return Ok(());
             }
-            return Ok(());
+            if !line.get("id").is_some_and(|id|!id.is_null()) && method != "serverRequest/resolved" { return Ok(()); }
         }
         let item = &params["item"];
-        if method == "turn/completed" || ["item/started","item/completed"].contains(&method) && ["userMessage","agentMessage"].contains(&item["type"].as_str().unwrap_or(""))
-            || method == "item/tool/requestUserInput" || method.ends_with("/requestApproval") {
+        if foreign.is_none() && (method == "turn/completed" || ["item/started","item/completed"].contains(&method) && ["userMessage","agentMessage"].contains(&item["type"].as_str().unwrap_or(""))
+            || method == "item/tool/requestUserInput" || method.ends_with("/requestApproval")) {
             for (call_id,_) in self.voices.iter().filter(|(_,voice)|!voice.closed) {
                 effects.push(Effect::Publish { channel:"voice_target".into(),data:json!({"call_id":call_id,"event":line}) });
             }
@@ -1210,9 +1328,17 @@ impl Engine {
                 tracing::warn!(session=%self.state.session,method=%failure.method,error=wire::error_kind(&failure.error),"pedido do Codex fora do formato");
                 effects.push(Effect::Diag { event:DiagEvent::CodexDecode,code:decode_code(&failure.method) });
             }
-            if !["item/commandExecution/requestApproval","item/fileChange/requestApproval","item/tool/requestUserInput"].contains(&method) {
-                self.counter += 1;
-                self.answer(format!("server:{}:{}",self.generation,self.counter),request_id,Value::Null,
+            let operation_id = format!("server:{}:{}",self.generation,self.counter);
+            if method == "currentTime/read" {
+                self.answer(operation_id,request_id,json!({"currentTimeAt":self.clock.epoch_s as i64}),None,effects)?;
+            } else if method == ELICITATION {
+                if !is_url_elicitation(&line) && form_fields(&line).is_none() {
+                    self.answer(operation_id,request_id,json!({"action":"decline"}),None,effects)?;
+                    let server = params["serverName"].as_str().unwrap_or("");
+                    self.policy("local_output",json!({"text":format!("O servidor MCP `{server}` pediu um formulário que o Hangar não sabe mostrar; o pedido foi recusado.")}),effects);
+                }
+            } else if !is_card(&line) && method != "item/tool/requestUserInput" {
+                self.answer(operation_id,request_id,Value::Null,
                     Some(json!({"code":-32601,"message":format!("{method} não é atendido pelo Hangar sem terminal")})),effects)?;
                 self.policy("unknown_private",json!({"kind":method,"event":line}),effects);
             }
@@ -1254,6 +1380,10 @@ impl Engine {
                 self.server_requests.clear(); self.answering.clear(); self.request_epochs.clear();
                 // Status lido cru não é confiável: não apaga nem cria problema, só fecha o turno.
                 if from_raw {
+                    // Sem o detalhe (não decodificou), mas um turno que falhou não pode parecer concluído.
+                    if n.turn.status == "failed" && !matches!(self.state.problema.as_deref(),Some("codex_limite_uso" | "codex_sem_login")) {
+                        self.state.problema = Some("headless_turno_erro".into()); self.state.problema_detalhe = None;
+                    }
                 } else if n.turn.status == "failed" {
                     let error = n.turn.error.unwrap_or_default();
                     let class = error.codex_error_info.as_ref().and_then(error_class);

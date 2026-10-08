@@ -5890,6 +5890,1067 @@
       "title": "ThreadReadParams",
       "type": "object"
     },
+    "ThreadCompactStartParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "title": "ThreadCompactStartParams",
+      "type": "object"
+    },
+    "ThreadBackgroundTerminalsTerminateParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "processId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "processId",
+        "threadId"
+      ],
+      "title": "ThreadBackgroundTerminalsTerminateParams",
+      "type": "object"
+    },
+    "SkillsListParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "cwds": {
+          "description": "When empty, defaults to the current session working directory.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "forceReload": {
+          "description": "When true, bypass the skills cache and re-scan skills from disk.",
+          "type": "boolean"
+        }
+      },
+      "title": "SkillsListParams",
+      "type": "object"
+    },
+    "ServerRequestResolvedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "requestId",
+        "threadId"
+      ],
+      "title": "ServerRequestResolvedNotification"
+    },
+    "RequestId": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "format": "int64",
+          "type": "integer"
+        }
+      ]
+    },
+    "RequestPermissionProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "fileSystem": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AdditionalFileSystemPermissions"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "network": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AdditionalNetworkPermissions"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "AdditionalNetworkPermissions": {
+      "properties": {
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "AdditionalFileSystemPermissions": {
+      "properties": {
+        "entries": {
+          "items": {
+            "$ref": "#/definitions/FileSystemSandboxEntry"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "globScanMaxDepth": {
+          "format": "uint",
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "read": {
+          "description": "This will be removed in favor of `entries`.",
+          "items": {
+            "$ref": "#/definitions/LegacyAppPathString"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "write": {
+          "description": "This will be removed in favor of `entries`.",
+          "items": {
+            "$ref": "#/definitions/LegacyAppPathString"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "FileSystemSandboxEntry": {
+      "properties": {
+        "access": {
+          "$ref": "#/definitions/FileSystemAccessMode"
+        },
+        "path": {
+          "$ref": "#/definitions/FileSystemPath"
+        }
+      },
+      "required": [
+        "access",
+        "path"
+      ],
+      "type": "object"
+    },
+    "FileSystemPath": {
+      "oneOf": [
+        {
+          "properties": {
+            "path": {
+              "$ref": "#/definitions/LegacyAppPathString"
+            },
+            "type": {
+              "enum": [
+                "path"
+              ],
+              "title": "PathFileSystemPathType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "type"
+          ],
+          "title": "PathFileSystemPath",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "pattern": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "glob_pattern"
+              ],
+              "title": "GlobPatternFileSystemPathType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern",
+            "type"
+          ],
+          "title": "GlobPatternFileSystemPath",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "special"
+              ],
+              "title": "SpecialFileSystemPathType",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/definitions/FileSystemSpecialPath"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "title": "SpecialFileSystemPath",
+          "type": "object"
+        }
+      ]
+    },
+    "FileSystemSpecialPath": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "root"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "title": "RootFileSystemSpecialPath",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "minimal"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "title": "MinimalFileSystemSpecialPath",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "project_roots"
+              ],
+              "type": "string"
+            },
+            "subpath": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/LegacyAppPathString"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "title": "KindFileSystemSpecialPath",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "tmpdir"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "title": "TmpdirFileSystemSpecialPath",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "slash_tmp"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "title": "SlashTmpFileSystemSpecialPath",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "unknown"
+              ],
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "subpath": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/LegacyAppPathString"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FileSystemAccessMode": {
+      "enum": [
+        "read",
+        "write",
+        "deny"
+      ],
+      "type": "string"
+    },
+    "ReasoningTextDeltaNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "contentIndex": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "delta": {
+          "type": "string"
+        },
+        "itemId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "contentIndex",
+        "delta",
+        "itemId",
+        "threadId",
+        "turnId"
+      ],
+      "title": "ReasoningTextDeltaNotification",
+      "type": "object"
+    },
+    "ReasoningSummaryTextDeltaNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "delta": {
+          "type": "string"
+        },
+        "itemId": {
+          "type": "string"
+        },
+        "summaryIndex": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "delta",
+        "itemId",
+        "summaryIndex",
+        "threadId",
+        "turnId"
+      ],
+      "title": "ReasoningSummaryTextDeltaNotification",
+      "type": "object"
+    },
+    "ReasoningSummaryPartAddedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "itemId": {
+          "type": "string"
+        },
+        "summaryIndex": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "itemId",
+        "summaryIndex",
+        "threadId",
+        "turnId"
+      ],
+      "title": "ReasoningSummaryPartAddedNotification",
+      "type": "object"
+    },
+    "ReasoningEffortOption": {
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "reasoningEffort": {
+          "$ref": "#/definitions/ReasoningEffort"
+        }
+      },
+      "required": [
+        "description",
+        "reasoningEffort"
+      ],
+      "type": "object"
+    },
+    "RateLimitWindow": {
+      "properties": {
+        "resetsAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "usedPercent": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "windowDurationMins": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "usedPercent"
+      ],
+      "type": "object"
+    },
+    "RateLimitSnapshot": {
+      "properties": {
+        "credits": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CreditsSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "individualLimit": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SpendControlLimitSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limitId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limitName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "normalModelSlug": {
+          "description": "Normal model whose display name and reasoning options describe this quota alias.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "planType": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PlanType"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "primary": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RateLimitWindow"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rateLimitReachedType": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RateLimitReachedType"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "secondary": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RateLimitWindow"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "spendControlReached": {
+          "description": "Backend-reported spend-control state. `None` is unavailable, not a sparse-update recovery.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RateLimitReachedType": {
+      "enum": [
+        "rate_limit_reached",
+        "workspace_owner_credits_depleted",
+        "workspace_member_credits_depleted",
+        "workspace_owner_usage_limit_reached",
+        "workspace_member_usage_limit_reached"
+      ],
+      "type": "string"
+    },
+    "PlanType": {
+      "enum": [
+        "free",
+        "go",
+        "plus",
+        "pro",
+        "prolite",
+        "promax",
+        "team",
+        "self_serve_business_prolite",
+        "self_serve_business_usage_based",
+        "business",
+        "ent26",
+        "enterprise_cbp_automation",
+        "enterprise_cbp_usage_based",
+        "enterprise",
+        "edu",
+        "edu_plus",
+        "edu_pro",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "SpendControlLimitSnapshot": {
+      "properties": {
+        "limit": {
+          "type": "string"
+        },
+        "remainingPercent": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "resetsAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "used": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "limit",
+        "remainingPercent",
+        "resetsAt",
+        "used"
+      ],
+      "type": "object"
+    },
+    "CreditsSnapshot": {
+      "properties": {
+        "balance": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hasCredits": {
+          "type": "boolean"
+        },
+        "unlimited": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "hasCredits",
+        "unlimited"
+      ],
+      "type": "object"
+    },
+    "PermissionsRequestApprovalParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "cwd": {
+          "$ref": "#/definitions/LegacyAppPathString"
+        },
+        "environmentId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "itemId": {
+          "type": "string"
+        },
+        "permissions": {
+          "$ref": "#/definitions/RequestPermissionProfile"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "startedAtMs": {
+          "description": "Unix timestamp (in milliseconds) when this approval request started.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cwd",
+        "itemId",
+        "permissions",
+        "startedAtMs",
+        "threadId",
+        "turnId"
+      ],
+      "title": "PermissionsRequestApprovalParams"
+    },
+    "ModelSafetyBufferingUpdatedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "fasterModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "reasons": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "showBufferingUi": {
+          "type": "boolean"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "useCases": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "model",
+        "reasons",
+        "showBufferingUi",
+        "threadId",
+        "turnId",
+        "useCases"
+      ],
+      "title": "ModelSafetyBufferingUpdatedNotification",
+      "type": "object"
+    },
+    "ModelReroutedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "fromModel": {
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/definitions/ModelRerouteReason"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "toModel": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "fromModel",
+        "reason",
+        "threadId",
+        "toModel",
+        "turnId"
+      ],
+      "title": "ModelReroutedNotification"
+    },
+    "ModelRerouteReason": {
+      "enum": [
+        "highRiskCyberActivity"
+      ],
+      "type": "string"
+    },
+    "ModelListResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "data": {
+          "items": {
+            "$ref": "#/definitions/Model"
+          },
+          "type": "array"
+        },
+        "nextCursor": {
+          "description": "Opaque cursor to pass to the next call to continue after the last item. If None, there are no more items to return.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "title": "ModelListResponse"
+    },
+    "Model": {
+      "properties": {
+        "additionalSpeedTiers": {
+          "default": [],
+          "description": "Deprecated: use `serviceTiers` instead.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "availabilityNux": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelAvailabilityNux"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "availableAccessPrograms": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelAccessPrograms"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Null when the catalog does not provide access-program metadata."
+        },
+        "defaultReasoningEffort": {
+          "$ref": "#/definitions/ReasoningEffort"
+        },
+        "defaultServiceTier": {
+          "default": null,
+          "description": "Catalog default service tier id for this model, when one is configured.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": "string"
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "hidden": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "inputModalities": {
+          "default": [
+            "text",
+            "image"
+          ],
+          "items": {
+            "$ref": "#/definitions/InputModality"
+          },
+          "type": "array"
+        },
+        "isDefault": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "modelSpecialty": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "multiAgentVersion": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MultiAgentVersion"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Multi-agent runtime declared by this model, when available."
+        },
+        "serviceTiers": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/ModelServiceTier"
+          },
+          "type": "array"
+        },
+        "supportedReasoningEfforts": {
+          "items": {
+            "$ref": "#/definitions/ReasoningEffortOption"
+          },
+          "type": "array"
+        },
+        "supportsPersonality": {
+          "default": false,
+          "description": "@deprecated Always false; models no longer support personality selection.",
+          "type": "boolean"
+        },
+        "upgrade": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "upgradeInfo": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelUpgradeInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "defaultReasoningEffort",
+        "description",
+        "displayName",
+        "hidden",
+        "id",
+        "isDefault",
+        "model",
+        "supportedReasoningEfforts"
+      ],
+      "type": "object"
+    },
+    "ModelUpgradeInfo": {
+      "properties": {
+        "migrationMarkdown": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "modelLink": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retirementAt": {
+          "description": "Informational Unix timestamp for this upgrade's scheduled retirement, if known.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "upgradeCopy": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "model"
+      ],
+      "type": "object"
+    },
+    "ModelServiceTier": {
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "description",
+        "id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "MultiAgentVersion": {
+      "description": "Multi-agent runtime supported by a model.",
+      "enum": [
+        "disabled",
+        "v1",
+        "v2"
+      ],
+      "type": "string"
+    },
+    "InputModality": {
+      "description": "Canonical user-input modality tags advertised by a model.",
+      "oneOf": [
+        {
+          "description": "Plain text turns and tool payloads.",
+          "enum": [
+            "text"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Image attachments included in user turns.",
+          "enum": [
+            "image"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Audio attachments included in user turns.",
+          "enum": [
+            "audio"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "ModelAccessPrograms": {
+      "description": "Caller-specific explicit access programs advertised by model discovery.",
+      "properties": {
+        "cyber": {
+          "description": "Accepted explicit selections.",
+          "items": {
+            "$ref": "#/definitions/CyberAccessProgram"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "cyber"
+      ],
+      "type": "object"
+    },
+    "ModelAvailabilityNux": {
+      "properties": {
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "type": "object"
+    },
     "McpServerElicitationRequestParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "type": "object",
@@ -6567,1067 +7628,6 @@
       ],
       "type": "object"
     },
-    "PermissionsRequestApprovalParams": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
-      "type": "object",
-      "properties": {
-        "cwd": {
-          "$ref": "#/definitions/LegacyAppPathString"
-        },
-        "environmentId": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "itemId": {
-          "type": "string"
-        },
-        "permissions": {
-          "$ref": "#/definitions/RequestPermissionProfile"
-        },
-        "reason": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "startedAtMs": {
-          "description": "Unix timestamp (in milliseconds) when this approval request started.",
-          "format": "int64",
-          "type": "integer"
-        },
-        "threadId": {
-          "type": "string"
-        },
-        "turnId": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "cwd",
-        "itemId",
-        "permissions",
-        "startedAtMs",
-        "threadId",
-        "turnId"
-      ],
-      "title": "PermissionsRequestApprovalParams"
-    },
-    "RequestPermissionProfile": {
-      "additionalProperties": false,
-      "properties": {
-        "fileSystem": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/AdditionalFileSystemPermissions"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "network": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/AdditionalNetworkPermissions"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "type": "object"
-    },
-    "AdditionalNetworkPermissions": {
-      "properties": {
-        "enabled": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        }
-      },
-      "type": "object"
-    },
-    "AdditionalFileSystemPermissions": {
-      "properties": {
-        "entries": {
-          "items": {
-            "$ref": "#/definitions/FileSystemSandboxEntry"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "globScanMaxDepth": {
-          "format": "uint",
-          "minimum": 1.0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "read": {
-          "description": "This will be removed in favor of `entries`.",
-          "items": {
-            "$ref": "#/definitions/LegacyAppPathString"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "write": {
-          "description": "This will be removed in favor of `entries`.",
-          "items": {
-            "$ref": "#/definitions/LegacyAppPathString"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        }
-      },
-      "type": "object"
-    },
-    "FileSystemSandboxEntry": {
-      "properties": {
-        "access": {
-          "$ref": "#/definitions/FileSystemAccessMode"
-        },
-        "path": {
-          "$ref": "#/definitions/FileSystemPath"
-        }
-      },
-      "required": [
-        "access",
-        "path"
-      ],
-      "type": "object"
-    },
-    "FileSystemPath": {
-      "oneOf": [
-        {
-          "properties": {
-            "path": {
-              "$ref": "#/definitions/LegacyAppPathString"
-            },
-            "type": {
-              "enum": [
-                "path"
-              ],
-              "title": "PathFileSystemPathType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "path",
-            "type"
-          ],
-          "title": "PathFileSystemPath",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "pattern": {
-              "type": "string"
-            },
-            "type": {
-              "enum": [
-                "glob_pattern"
-              ],
-              "title": "GlobPatternFileSystemPathType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "pattern",
-            "type"
-          ],
-          "title": "GlobPatternFileSystemPath",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "type": {
-              "enum": [
-                "special"
-              ],
-              "title": "SpecialFileSystemPathType",
-              "type": "string"
-            },
-            "value": {
-              "$ref": "#/definitions/FileSystemSpecialPath"
-            }
-          },
-          "required": [
-            "type",
-            "value"
-          ],
-          "title": "SpecialFileSystemPath",
-          "type": "object"
-        }
-      ]
-    },
-    "FileSystemSpecialPath": {
-      "oneOf": [
-        {
-          "properties": {
-            "kind": {
-              "enum": [
-                "root"
-              ],
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind"
-          ],
-          "title": "RootFileSystemSpecialPath",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "kind": {
-              "enum": [
-                "minimal"
-              ],
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind"
-          ],
-          "title": "MinimalFileSystemSpecialPath",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "kind": {
-              "enum": [
-                "project_roots"
-              ],
-              "type": "string"
-            },
-            "subpath": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/LegacyAppPathString"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "kind"
-          ],
-          "title": "KindFileSystemSpecialPath",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "kind": {
-              "enum": [
-                "tmpdir"
-              ],
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind"
-          ],
-          "title": "TmpdirFileSystemSpecialPath",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "kind": {
-              "enum": [
-                "slash_tmp"
-              ],
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind"
-          ],
-          "title": "SlashTmpFileSystemSpecialPath",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "kind": {
-              "enum": [
-                "unknown"
-              ],
-              "type": "string"
-            },
-            "path": {
-              "type": "string"
-            },
-            "subpath": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/LegacyAppPathString"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "kind",
-            "path"
-          ],
-          "type": "object"
-        }
-      ]
-    },
-    "FileSystemAccessMode": {
-      "enum": [
-        "read",
-        "write",
-        "deny"
-      ],
-      "type": "string"
-    },
-    "ThreadCompactStartParams": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
-      "properties": {
-        "threadId": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "threadId"
-      ],
-      "title": "ThreadCompactStartParams",
-      "type": "object"
-    },
-    "ThreadBackgroundTerminalsTerminateParams": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
-      "properties": {
-        "processId": {
-          "type": "string"
-        },
-        "threadId": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "processId",
-        "threadId"
-      ],
-      "title": "ThreadBackgroundTerminalsTerminateParams",
-      "type": "object"
-    },
-    "SkillsListParams": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
-      "properties": {
-        "cwds": {
-          "description": "When empty, defaults to the current session working directory.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "forceReload": {
-          "description": "When true, bypass the skills cache and re-scan skills from disk.",
-          "type": "boolean"
-        }
-      },
-      "title": "SkillsListParams",
-      "type": "object"
-    },
-    "ServerRequestResolvedNotification": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
-      "type": "object",
-      "properties": {
-        "requestId": {
-          "$ref": "#/definitions/RequestId"
-        },
-        "threadId": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "requestId",
-        "threadId"
-      ],
-      "title": "ServerRequestResolvedNotification"
-    },
-    "RequestId": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "format": "int64",
-          "type": "integer"
-        }
-      ]
-    },
-    "ReasoningTextDeltaNotification": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
-      "properties": {
-        "contentIndex": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "delta": {
-          "type": "string"
-        },
-        "itemId": {
-          "type": "string"
-        },
-        "threadId": {
-          "type": "string"
-        },
-        "turnId": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "contentIndex",
-        "delta",
-        "itemId",
-        "threadId",
-        "turnId"
-      ],
-      "title": "ReasoningTextDeltaNotification",
-      "type": "object"
-    },
-    "ReasoningSummaryTextDeltaNotification": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
-      "properties": {
-        "delta": {
-          "type": "string"
-        },
-        "itemId": {
-          "type": "string"
-        },
-        "summaryIndex": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "threadId": {
-          "type": "string"
-        },
-        "turnId": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "delta",
-        "itemId",
-        "summaryIndex",
-        "threadId",
-        "turnId"
-      ],
-      "title": "ReasoningSummaryTextDeltaNotification",
-      "type": "object"
-    },
-    "ReasoningSummaryPartAddedNotification": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
-      "properties": {
-        "itemId": {
-          "type": "string"
-        },
-        "summaryIndex": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "threadId": {
-          "type": "string"
-        },
-        "turnId": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "itemId",
-        "summaryIndex",
-        "threadId",
-        "turnId"
-      ],
-      "title": "ReasoningSummaryPartAddedNotification",
-      "type": "object"
-    },
-    "ReasoningEffortOption": {
-      "properties": {
-        "description": {
-          "type": "string"
-        },
-        "reasoningEffort": {
-          "$ref": "#/definitions/ReasoningEffort"
-        }
-      },
-      "required": [
-        "description",
-        "reasoningEffort"
-      ],
-      "type": "object"
-    },
-    "RateLimitWindow": {
-      "properties": {
-        "resetsAt": {
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "usedPercent": {
-          "format": "int32",
-          "type": "integer"
-        },
-        "windowDurationMins": {
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "usedPercent"
-      ],
-      "type": "object"
-    },
-    "RateLimitSnapshot": {
-      "properties": {
-        "credits": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/CreditsSnapshot"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "individualLimit": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/SpendControlLimitSnapshot"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "limitId": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "limitName": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "normalModelSlug": {
-          "description": "Normal model whose display name and reasoning options describe this quota alias.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "planType": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/PlanType"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "primary": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/RateLimitWindow"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "rateLimitReachedType": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/RateLimitReachedType"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "secondary": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/RateLimitWindow"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "spendControlReached": {
-          "description": "Backend-reported spend-control state. `None` is unavailable, not a sparse-update recovery.",
-          "type": [
-            "boolean",
-            "null"
-          ]
-        }
-      },
-      "type": "object"
-    },
-    "RateLimitReachedType": {
-      "enum": [
-        "rate_limit_reached",
-        "workspace_owner_credits_depleted",
-        "workspace_member_credits_depleted",
-        "workspace_owner_usage_limit_reached",
-        "workspace_member_usage_limit_reached"
-      ],
-      "type": "string"
-    },
-    "PlanType": {
-      "enum": [
-        "free",
-        "go",
-        "plus",
-        "pro",
-        "prolite",
-        "promax",
-        "team",
-        "self_serve_business_prolite",
-        "self_serve_business_usage_based",
-        "business",
-        "ent26",
-        "enterprise_cbp_automation",
-        "enterprise_cbp_usage_based",
-        "enterprise",
-        "edu",
-        "edu_plus",
-        "edu_pro",
-        "unknown"
-      ],
-      "type": "string"
-    },
-    "SpendControlLimitSnapshot": {
-      "properties": {
-        "limit": {
-          "type": "string"
-        },
-        "remainingPercent": {
-          "format": "int32",
-          "type": "integer"
-        },
-        "resetsAt": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "used": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "limit",
-        "remainingPercent",
-        "resetsAt",
-        "used"
-      ],
-      "type": "object"
-    },
-    "CreditsSnapshot": {
-      "properties": {
-        "balance": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "hasCredits": {
-          "type": "boolean"
-        },
-        "unlimited": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "hasCredits",
-        "unlimited"
-      ],
-      "type": "object"
-    },
-    "ModelSafetyBufferingUpdatedNotification": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
-      "properties": {
-        "fasterModel": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "model": {
-          "type": "string"
-        },
-        "reasons": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "showBufferingUi": {
-          "type": "boolean"
-        },
-        "threadId": {
-          "type": "string"
-        },
-        "turnId": {
-          "type": "string"
-        },
-        "useCases": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "model",
-        "reasons",
-        "showBufferingUi",
-        "threadId",
-        "turnId",
-        "useCases"
-      ],
-      "title": "ModelSafetyBufferingUpdatedNotification",
-      "type": "object"
-    },
-    "ModelReroutedNotification": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
-      "type": "object",
-      "properties": {
-        "fromModel": {
-          "type": "string"
-        },
-        "reason": {
-          "$ref": "#/definitions/ModelRerouteReason"
-        },
-        "threadId": {
-          "type": "string"
-        },
-        "toModel": {
-          "type": "string"
-        },
-        "turnId": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "fromModel",
-        "reason",
-        "threadId",
-        "toModel",
-        "turnId"
-      ],
-      "title": "ModelReroutedNotification"
-    },
-    "ModelRerouteReason": {
-      "enum": [
-        "highRiskCyberActivity"
-      ],
-      "type": "string"
-    },
-    "ModelListResponse": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
-      "type": "object",
-      "properties": {
-        "data": {
-          "items": {
-            "$ref": "#/definitions/Model"
-          },
-          "type": "array"
-        },
-        "nextCursor": {
-          "description": "Opaque cursor to pass to the next call to continue after the last item. If None, there are no more items to return.",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "data"
-      ],
-      "title": "ModelListResponse"
-    },
-    "Model": {
-      "properties": {
-        "additionalSpeedTiers": {
-          "default": [],
-          "description": "Deprecated: use `serviceTiers` instead.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "availabilityNux": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/ModelAvailabilityNux"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "availableAccessPrograms": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/ModelAccessPrograms"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Null when the catalog does not provide access-program metadata."
-        },
-        "defaultReasoningEffort": {
-          "$ref": "#/definitions/ReasoningEffort"
-        },
-        "defaultServiceTier": {
-          "default": null,
-          "description": "Catalog default service tier id for this model, when one is configured.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "description": {
-          "type": "string"
-        },
-        "displayName": {
-          "type": "string"
-        },
-        "hidden": {
-          "type": "boolean"
-        },
-        "id": {
-          "type": "string"
-        },
-        "inputModalities": {
-          "default": [
-            "text",
-            "image"
-          ],
-          "items": {
-            "$ref": "#/definitions/InputModality"
-          },
-          "type": "array"
-        },
-        "isDefault": {
-          "type": "boolean"
-        },
-        "model": {
-          "type": "string"
-        },
-        "modelSpecialty": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "multiAgentVersion": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/MultiAgentVersion"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Multi-agent runtime declared by this model, when available."
-        },
-        "serviceTiers": {
-          "default": [],
-          "items": {
-            "$ref": "#/definitions/ModelServiceTier"
-          },
-          "type": "array"
-        },
-        "supportedReasoningEfforts": {
-          "items": {
-            "$ref": "#/definitions/ReasoningEffortOption"
-          },
-          "type": "array"
-        },
-        "supportsPersonality": {
-          "default": false,
-          "description": "@deprecated Always false; models no longer support personality selection.",
-          "type": "boolean"
-        },
-        "upgrade": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "upgradeInfo": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/ModelUpgradeInfo"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "defaultReasoningEffort",
-        "description",
-        "displayName",
-        "hidden",
-        "id",
-        "isDefault",
-        "model",
-        "supportedReasoningEfforts"
-      ],
-      "type": "object"
-    },
-    "ModelUpgradeInfo": {
-      "properties": {
-        "migrationMarkdown": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "model": {
-          "type": "string"
-        },
-        "modelLink": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "retirementAt": {
-          "description": "Informational Unix timestamp for this upgrade's scheduled retirement, if known.",
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "upgradeCopy": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "model"
-      ],
-      "type": "object"
-    },
-    "ModelServiceTier": {
-      "properties": {
-        "description": {
-          "type": "string"
-        },
-        "id": {
-          "type": "string"
-        },
-        "name": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "description",
-        "id",
-        "name"
-      ],
-      "type": "object"
-    },
-    "MultiAgentVersion": {
-      "description": "Multi-agent runtime supported by a model.",
-      "enum": [
-        "disabled",
-        "v1",
-        "v2"
-      ],
-      "type": "string"
-    },
-    "InputModality": {
-      "description": "Canonical user-input modality tags advertised by a model.",
-      "oneOf": [
-        {
-          "description": "Plain text turns and tool payloads.",
-          "enum": [
-            "text"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "Image attachments included in user turns.",
-          "enum": [
-            "image"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "Audio attachments included in user turns.",
-          "enum": [
-            "audio"
-          ],
-          "type": "string"
-        }
-      ]
-    },
-    "ModelAccessPrograms": {
-      "description": "Caller-specific explicit access programs advertised by model discovery.",
-      "properties": {
-        "cyber": {
-          "description": "Accepted explicit selections.",
-          "items": {
-            "$ref": "#/definitions/CyberAccessProgram"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "cyber"
-      ],
-      "type": "object"
-    },
-    "ModelAvailabilityNux": {
-      "properties": {
-        "message": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "message"
-      ],
-      "type": "object"
-    },
     "ItemStartedNotification": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "type": "object",
@@ -8171,6 +8171,19 @@
         "willRetry"
       ],
       "title": "ErrorNotification"
+    },
+    "CurrentTimeReadParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "title": "CurrentTimeReadParams",
+      "type": "object"
     },
     "CommandExecutionRequestApprovalParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
