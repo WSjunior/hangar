@@ -44,6 +44,11 @@ pub struct RuntimeFeed {
     facts_wake: Arc<Notify>,
     /// Último dado publicado de cada evento, na época `generation`: troca de ligação republica tudo.
     sent: Sent,
+    claude: bool,
+    /// Estado da sessão Claude parada, lido do sidecar quando o feed acorda com ela parada.
+    parked: Option<StateEvent>,
+    /// Pasta do sidecar; `None` = o HOME do processo.
+    home: Option<std::path::PathBuf>,
 }
 
 #[derive(Default)]
@@ -71,7 +76,23 @@ impl RuntimeFeed {
         let facts = facts.filter(|_| claude);
         let facts_wake = facts.as_ref().map_or_else(Arc::default, |f| f.store.watch(&name));
         Self { hub: Arc::downgrade(hub), name, wake: hub.wake(), live, published, owner: super::live::next_owner(),
-            facts: facts.map(|src| Watching { src, at: None, error: None }), facts_wake, sent: Sent::default() }
+            facts: facts.map(|src| Watching { src, at: None, error: None }), facts_wake, sent: Sent::default(),
+            claude, parked: None, home: None }
+    }
+
+    #[cfg(test)]
+    fn with_home(mut self, home: &std::path::Path) -> Self {
+        self.home = Some(home.to_path_buf());
+        self
+    }
+
+    /// Sessão Claude parada: o que o sidecar diz dela. Roda quando o feed acorda, não por tique, e fora do executor.
+    async fn load_parked(&self) -> Option<StateEvent> {
+        if !self.claude || !self.live.as_ref().is_some_and(|rx| rx.borrow().is_none()) {
+            return None;
+        }
+        let (name, home) = (self.name.clone(), self.home.clone().or_else(std::env::home_dir)?);
+        tokio::task::spawn_blocking(move || super::parked::parked_state_at(&name, &home)).await.ok().flatten()
     }
 
     pub async fn run(mut self) {
@@ -81,6 +102,7 @@ impl RuntimeFeed {
             let mut pushed = std::pin::pin!(wake.notified());
             pushed.as_mut().enable();
             let retry_in = self.refresh_facts().await;
+            self.parked = self.load_parked().await;
             if !self.round() {
                 return;
             }
@@ -144,7 +166,8 @@ impl RuntimeFeed {
             None => (feed_problem(&self.name, "runtime_absent", "o servidor não tem o runtime ligado"), Default::default()),
             // Sessão parada (não aberta no Rust, encerrada, ou abrindo): `idle`, como o Python. Abertura
             // que falhou e vida que acabou com erro chegam como `Some` com o erro.
-            Some(None) => (idle(&self.name), Default::default()),
+            // Claude parado leva o que o sidecar diz dele; sem sidecar (ou Codex) fica o `idle` puro.
+            Some(None) => (self.parked.clone().unwrap_or_else(|| idle(&self.name)), Default::default()),
             Some(Some(live)) => {
                 let mut state = if live.public_state.is_null() { idle(&self.name) } else {
                     serde_json::from_value(live.public_state.clone()).unwrap_or_else(|_| {
@@ -607,6 +630,57 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(400)).await;
         assert_eq!(hits(&py), 0, "Codex não tem plugin");
         assert_eq!(store.push("s", facts(1, "x"), std::time::Instant::now()), crate::state::facts::Push::Unwatched);
+    }
+
+    fn write_sidecar(home: &std::path::Path, body: Value) {
+        let dir = home.join(".hangar").join("claude-headless");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("s.json"), body.to_string()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stopped_claude_state_carries_the_sidecar() {
+        let f = claude_fixture();
+        let home = tempfile::tempdir().unwrap();
+        write_sidecar(home.path(), json!({"cwd": "/w", "session_id": "x", "model": "claude-opus-5", "effort": "high",
+            "permission_mode": "plan", "previous_non_plan": "acceptEdits", "problema": ["limite_de_uso", "volta às 14:00"]}));
+        let mut rx = f.lease.hub.tx.subscribe();
+        let (_tx, live_rx) = channel(None);
+        let _feed = tokio::spawn(RuntimeFeed::new(&f.lease.hub, Some(live_rx), f.published.clone(), None).with_home(home.path()).run());
+        let got = collect(&mut rx, Duration::from_millis(500)).await;
+        let state = &of(&got, "state")[0].2;
+        assert_eq!(state["state"], "idle");
+        assert_eq!(state["status_line"], "🤖 Opus5 (high)");
+        assert_eq!(state["claude_permission_mode"], "plan");
+        assert_eq!(state["claude_previous_non_plan"], "acceptEdits");
+        assert_eq!(state["problema"], "limite_de_uso");
+        assert_eq!(state["problema_detalhe"], "volta às 14:00");
+    }
+
+    #[tokio::test]
+    async fn stopped_claude_without_sidecar_stays_bare_idle() {
+        let f = claude_fixture();
+        let home = tempfile::tempdir().unwrap();
+        let mut rx = f.lease.hub.tx.subscribe();
+        let (_tx, live_rx) = channel(None);
+        let _feed = tokio::spawn(RuntimeFeed::new(&f.lease.hub, Some(live_rx), f.published.clone(), None).with_home(home.path()).run());
+        let got = collect(&mut rx, Duration::from_millis(500)).await;
+        let state = &of(&got, "state")[0].2;
+        assert_eq!(state["state"], "idle");
+        assert!(state["status_line"].is_null());
+    }
+
+    #[tokio::test]
+    async fn stopped_codex_stays_bare_idle() {
+        let f = fixture();
+        let home = tempfile::tempdir().unwrap();
+        write_sidecar(home.path(), json!({"cwd": "/w", "session_id": "x", "model": "claude-opus-5", "permission_mode": "plan"}));
+        let mut rx = f.lease.hub.tx.subscribe();
+        let (_tx, live_rx) = channel(None);
+        let _feed = tokio::spawn(RuntimeFeed::new(&f.lease.hub, Some(live_rx), f.published.clone(), None).with_home(home.path()).run());
+        let got = collect(&mut rx, Duration::from_millis(500)).await;
+        let state = &of(&got, "state")[0].2;
+        assert!(state["status_line"].is_null() && state["claude_permission_mode"].is_null(), "{state}");
     }
 
     #[test]

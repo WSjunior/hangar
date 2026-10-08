@@ -97,10 +97,33 @@ def _unknown_reference(case, root):
     return {"results": results, "files": files}
 
 
+def _parked_reference(case, root):
+    """O `state` que o `_state_stream` do Python emite para a sessão Claude parada: `dead` sem sidecar, senão
+    `idle` com modo, linha de status e o problema da última vida (que o sidecar guarda)."""
+    from app.adapters.claude_headless import sessions as hl_sessions
+    from app.adapters.claude_headless.adapter import ClaudeHeadlessAdapter, _linha_parada
+    from app.config import settings
+    name = case["name"]
+    if case.get("sidecar") is not None:
+        hl_sessions._write(name, case["sidecar"])
+    with patch.object(settings, "projects_dir", Path(root) / "home" / ".claude" / "projects"):
+        if not hl_sessions.exists(name):
+            return {"state": "dead"}
+        adapter = ClaudeHeadlessAdapter()
+        meta = hl_sessions.load(name) or {}
+        prob = adapter.problema_de(name)
+        return {"state": "idle", "claude_permission_mode": meta.get("permission_mode"),
+                "claude_previous_non_plan": meta.get("previous_non_plan"),
+                "status_line": _linha_parada(meta, adapter.transcript_path_de(meta)),
+                "problema": prob[0] if prob else None, "problema_detalhe": prob[1] if prob else None}
+
+
 def reference(case, root):
     """O que o `runtime_policy.run` devolvia antes da migração, chamando as funções que ficaram."""
     kind, payload, meta = case["kind"], case["payload"], case["meta"]
     now = case.get("now", NOW)
+    if kind == "parked_state":
+        return _parked_reference(case, root)
     if kind == "unknown_private":
         return _unknown_reference(case, root)
     try:
@@ -520,6 +543,51 @@ def unknown_cases():
     return out
 
 
+def parked_cases():
+    out = []
+    usage = json.dumps({"type": "assistant", "message": {"usage": {
+        "input_tokens": 1500, "cache_creation_input_tokens": 1000, "cache_read_input_tokens": 0, "output_tokens": 500}}}) + "\n"
+    sid = "11111111-2222-3333-4444-555555555555"
+    base = {"cwd": "/work/proj", "session_id": sid, "provider": "claude", "headless": True}
+
+    def add(name, sidecar, files=None, env=None):
+        case = {"name": name, "kind": "parked_state", "payload": {}, "meta": {},
+                "sidecar": None if sidecar is None else {**base, "name": name, **sidecar}}
+        if files:
+            case["files"] = files
+        if env:
+            case["env"] = env
+        out.append(case)
+
+    home_t = f"home/.claude/projects/-work-proj/{sid}.jsonl"
+    add("plan_mode_with_previous", {"model": "claude-opus-5[1m]", "effort": "high", "context_window": 1000000,
+        "permission_mode": "plan", "previous_non_plan": "acceptEdits"}, {home_t: {"text": usage}})
+    add("default_mode_no_previous", {"model": "claude-sonnet-4-5-20250929", "effort": "low", "permission_mode": "default",
+        "previous_non_plan": None})
+    add("plan_without_previous", {"model": "claude-haiku-5", "permission_mode": "plan"})
+    add("problem_with_detail", {"model": "claude-opus-5", "problema": ["limite_de_uso", "volta às 14:00"]})
+    add("problem_without_detail", {"model": "claude-opus-5", "problema": ["credencial", None]})
+    add("engine_with_account_prefix", {"model": "deepseek/deepseek-v4", "effort": "low", "engine": "ds", "engine_account": "ds",
+        "context_window": 128000}, {home_t: {"text": usage}})
+    add("engine_without_account_keeps_prefix", {"model": "deepseek/deepseek-v4", "effort": "low"})
+    add("effort_from_account_settings", {"model": "claude-opus-5", "config_dir": "{ROOT}/cfg", "context_window": 200000},
+        {"cfg/settings.json": {"text": json.dumps({"effortLevel": "medium"})},
+         f"cfg/projects/-work-proj/{sid}.jsonl": {"text": usage}})
+    add("effort_from_env", {"model": "claude-opus-5"}, env={"CLAUDE_CODE_EFFORT_LEVEL": "xhigh"})
+    add("effort_from_home_settings", {"model": "claude-opus-5"},
+        {"home/.claude/settings.json": {"text": json.dumps({"effortLevel": "max"})}})
+    add("no_model_no_status", {"permission_mode": "default"})
+    add("context_window_transcript_missing", {"model": "claude-opus-5", "context_window": 200000})
+    add("context_window_transcript_without_usage", {"model": "claude-opus-5", "context_window": 200000},
+        {home_t: {"text": json.dumps({"type": "user", "message": {"content": "oi"}}) + "\n"}})
+    add("transcript_without_context_window", {"model": "claude-opus-5"}, {home_t: {"text": usage}})
+    add("transcript_moved_to_worktree_folder", {"model": "claude-opus-5", "context_window": 1000000},
+        {f"home/.claude/projects/-work-proj--worktrees-x/{sid}.jsonl": {"text": usage}})
+    add("cwd_with_trailing_slash", {"model": "claude-opus-5", "context_window": 1000000, "cwd": "/work/proj/"}, {home_t: {"text": usage}})
+    add("missing_sidecar_is_dead", None)
+    return out
+
+
 LOG_REL_CLAUDE = "home/.hangar/logs/privado/claude-headless-desconhecidos.jsonl"
 CLAUDE_LOG = LOG_REL_CLAUDE
 CODEX_LOG = "home/.hangar/logs/privado/codex-headless-desconhecidos.jsonl"
@@ -532,7 +600,8 @@ def write(out_dir):
     time.tzset()
     groups = {"last_usage.json": last_usage_cases(), "reload_stamp.json": reload_cases(), "unknown_private.json": unknown_cases(),
               "prepare_prompt.json": prepare_cases(), "format_status_claude.json": status_cases(),
-              "format_status_codex.json": codex_cases(), "skill_catalog.json": catalog_cases()}
+              "format_status_codex.json": codex_cases(), "skill_catalog.json": catalog_cases(),
+              "parked_state.json": parked_cases()}
     for name, cases in groups.items():
         rows = [run_case(case) for case in cases]
         (out_dir / name).write_text(json.dumps({"tz": TZ, "cases": rows}, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
