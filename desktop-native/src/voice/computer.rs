@@ -62,10 +62,27 @@ pub fn launch() -> Result<Launch, String> {
         .filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with("-agent.json"))
         .map(|name| { let config = read_json(&dir.join(&name)); (name, config) }).collect();
     configs.sort_by(|a, b| a.0.cmp(&b.0));
-    let agent = pick_agent_config(&configs, cfg!(windows)).map(|name| dir.join(name))
-        .ok_or_else(|| format!("Sem configuração de agente local em {} ({}).", dir.display(), if cfg!(windows) { "um *-agent.json com transport local" } else { "linux-agent.json" }))?;
+    // O linux-agent.json do repositório é exemplo (caminho fictício): no Linux o app grava o seu, apontando para este checkout.
+    let own = (!cfg!(windows) && dir.join("linux_agent.py").is_file()).then(|| write_linux_config(&dir)).transpose()?;
+    let agent = match own {
+        Some(path) => path,
+        None => pick_agent_config(&configs, cfg!(windows)).map(|name| dir.join(name))
+            .ok_or_else(|| format!("Sem configuração de agente local em {} ({}).", dir.display(), if cfg!(windows) { "um *-agent.json com transport local" } else { "linux-agent.json" }))?,
+    };
     let env = child_env(stored_keys(), &dir, &agent)?;
     Ok(Launch { python, script, env })
+}
+
+pub fn linux_agent_config(hcc: &Path) -> Value {
+    json!({"transport": "local", "command": ["/usr/bin/python3", hcc.join("linux_agent.py")], "request_timeout": 15})
+}
+
+fn write_linux_config(hcc: &Path) -> Result<PathBuf, String> {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let path = home.join(".hangar").join("computer-control").join("linux-agent.json");
+    std::fs::create_dir_all(path.parent().unwrap_or(&home)).map_err(|e| format!("Não consegui criar {}: {e}", path.display()))?;
+    std::fs::write(&path, linux_agent_config(hcc).to_string()).map_err(|e| format!("Não consegui gravar {}: {e}", path.display()))?;
+    Ok(path)
 }
 
 pub fn initialize_params() -> Value {
@@ -137,6 +154,13 @@ mod tests {
         let env = child_env(vec![(JEV_KEY, "k".into())], dir, agent).unwrap();
         assert!(env.contains(&("HCC_AGENT_CONFIG", OsString::from("/p/hcc/linux-agent.json"))));
         assert!(env.contains(&("PYTHONPATH", OsString::from("/p/hcc"))) && env.contains(&("VIRTUAL_ENV", OsString::new())));
+    }
+
+    #[test]
+    fn linux_config_points_to_this_checkout() {
+        let config = linux_agent_config(Path::new("/p/hcc"));
+        assert_eq!(config["transport"], "local");
+        assert_eq!(config["command"], json!(["/usr/bin/python3", "/p/hcc/linux_agent.py"]));
     }
 
     #[test]
