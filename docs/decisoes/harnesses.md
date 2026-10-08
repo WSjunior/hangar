@@ -401,7 +401,7 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   falar. Medição em "Voz no app nativo".
 - **Voz: modo Planejar:** nada vai à sessão até o fim; `finish_plan`, `ask_session` e `set_mode` só
   saem de fala do usuário, `finish_plan` em dois passos, e o envio só sai após silêncio do
-  microfone. A leitura de arquivos fora do projeto está em aberto. Medição em "Voz: modo Planejar".
+  microfone. A leitura fora do projeto fica liberada (mesmo acesso da sessão). Medição em "Voz: modo Planejar".
 
 ## O /clear e o rodapé do Claude Code
 
@@ -2715,11 +2715,11 @@ do microfone, com teto de 8 s.
 **RTP.** O pacote solto inicial que a OpenAI manda é descartado pelo `RtpStart`; a reserva de áudio
 é de 240 ms porque o socket mostrou buracos de 66 a 190 ms com o laço rodando em 12 a 52 ms.
 
-**EM ABERTO (decisão do Jefferson): o shell lê fora do projeto.** Medido: `ls ~/.ssh` lista 10
-entradas e `~/.codex/auth.json` é legível (conteúdo não impresso). Hoje a única proteção é uma linha
-do prompt ("leia só dentro da pasta do projeto; nunca abra credenciais"), que não é barreira.
-Opções: A) manter só o prompt; B) trocar o shell por ferramentas do app de ler, listar e buscar,
-restritas à pasta da sessão; C) desligar a pesquisa na web enquanto o shell estiver ligado.
+**O shell lê fora do projeto, e fica assim (decisão do Jefferson, 07/10).** Medido: `ls ~/.ssh` lista
+10 entradas e `~/.codex/auth.json` é legível (conteúdo não impresso). A proteção é só a linha do
+prompt ("leia só dentro da pasta do projeto; nunca abra credenciais"). Motivo: a sessão roda na
+mesma máquina, com o mesmo acesso e com internet; restringir só o organizador não muda o risco.
+Descartados: ferramentas de leitura restritas à pasta e desligar a pesquisa com o shell ligado.
 
 - `adapters/kimi/` + `hooks/kimi_state_hook.py` + `kimi_hook_installer.py` — Kimi Code runs in the
   same tmux-native shape as Pi: TUI in the pane, chat from
