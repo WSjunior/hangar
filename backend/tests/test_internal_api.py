@@ -208,7 +208,7 @@ def test_pure_policy_runs_without_a_journal_attempt(tmp_path, monkeypatch):
     client = _client()
     for _ in range(2):
         # Catálogo estrito do sidecar: recusa sem tocar no diário (só `native_message` exige tentativa).
-        response = _policy(client, "session.patch_meta", "op-1:patch", {"cano": {}})
+        response = _policy(client, "session.patch_meta", "op-1:patch", {"campo_inexistente": {}})
         assert response.status_code == 200 and response.json() == {"ok": False, "error_type": "ValueError"}
     assert internal_api._policy_calls == {}
     coordinator.close_python_leases()
