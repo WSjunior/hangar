@@ -22,7 +22,10 @@ impl Page {
     const SERVER: [Page; 14] = [Page::Servers, Page::Sync, Page::Connect, Page::SharedConfig, Page::Accounts, Page::Orchestration, Page::Harnesses, Page::Voice,
         Page::Jev, Page::Windows, Page::Notifications, Page::Shortcuts, Page::Attachments, Page::Advanced];
 
-    fn key(self) -> &'static str {
+    /// As seções da navegação, na ordem dela; a voz abre uma pelo `key`.
+    pub(super) fn sections() -> impl Iterator<Item = Page> { Self::DEVICE.into_iter().chain(Self::SERVER) }
+
+    pub(super) fn key(self) -> &'static str {
         match self {
             Page::General => "general", Page::Appearance => "appearance", Page::Diary => "diary", Page::About => "about", Page::Migration => "migration",
             Page::Servers => "servers", Page::Sync => "sync", Page::Connect => "connect", Page::SharedConfig => "shared_config", Page::Accounts => "accounts", Page::Orchestration => "orchestration",

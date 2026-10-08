@@ -1,5 +1,6 @@
 //! Conversa por voz: o Codex local fala, a sessão aberta na tela trabalha.
 pub mod audio;
+pub mod computer;
 pub mod organizer;
 pub mod plan;
 pub mod rpc;
@@ -21,7 +22,10 @@ pub enum Activity { #[default] Idle, Thinking, Searching, Working }
 pub enum VoiceEvent {
     Phase(Phase), Levels(f32, f32), Draft(Option<String>), Activity(Activity), ReadSession(CallId), Send(CallId, String), Failed(VoiceFailure),
     Mode(Mode), Plan { path: PathBuf, markdown: String }, AskSession(String), SendPlan { session: String, text: String },
-    SwitchSession(CallId, String),
+    /// Nome pedido e a fala do turno: a tela só troca quando a fala pede essa sessão.
+    SwitchSession { call: CallId, name: String, spoken: String },
+    /// Ações da tela do Hangar (catálogo e execução) e o `computer` para os outros programas.
+    HangarActions(CallId), HangarAction { call: CallId, id: String, arg: Option<String> }, Computer(CallId, String),
     /// Ferramentas de sessão: a tela resolve os nomes falados e responde por `Voice::reply`. `turn` separa o pedido do sim.
     ListSessions(CallId), OpenSession(CallId, organizer::OpenRequest),
     CloseSession { call: CallId, name: String, confirmed: bool, turn: String },
@@ -238,7 +242,8 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                             "refused-not-spoken"
                         }
                         ToolCall::FinishPlan { .. } | ToolCall::AskSession(_) | ToolCall::SetMode(_) | ToolCall::SwitchSession(_)
-                            | ToolCall::OpenSession(_) | ToolCall::CloseSession { .. } | ToolCall::PairSessions(..) | ToolCall::UnpairSession(_) if !spoken.allows(&params) => {
+                            | ToolCall::OpenSession(_) | ToolCall::CloseSession { .. } | ToolCall::PairSessions(..) | ToolCall::UnpairSession(_)
+                            | ToolCall::HangarAction { .. } | ToolCall::Computer(_) if !spoken.allows(&params) => {
                             let _ = rpc.respond(id, tool_reply("Só a pedido falado do usuário.", false)).await;
                             "refused-not-spoken"
                         }
@@ -328,7 +333,14 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                             }
                         }
                         // A resposta vem da tela (`Voice::reply`), depois de resolver o nome.
-                        ToolCall::SwitchSession(name) => { let _ = events.send(VoiceEvent::SwitchSession(CallId(id), name)).await; "switch" }
+                        ToolCall::SwitchSession(name) => {
+                            let spoken = spoken.text(&params).unwrap_or_default().to_owned();
+                            let _ = events.send(VoiceEvent::SwitchSession { call: CallId(id), name, spoken }).await;
+                            "switch"
+                        }
+                        ToolCall::HangarActions => { let _ = events.send(VoiceEvent::HangarActions(CallId(id))).await; "hangar-actions" }
+                        ToolCall::HangarAction { id: action, arg } => { let _ = events.send(VoiceEvent::HangarAction { call: CallId(id), id: action, arg }).await; "hangar-action" }
+                        ToolCall::Computer(objective) => { let _ = events.send(VoiceEvent::Computer(CallId(id), objective)).await; "computer" }
                         ToolCall::ListSessions => { let _ = events.send(VoiceEvent::ListSessions(CallId(id))).await; "list" }
                         ToolCall::OpenSession(request) => { let _ = events.send(VoiceEvent::OpenSession(CallId(id), request)).await; "open" }
                         ToolCall::CloseSession { name, confirmed } => {

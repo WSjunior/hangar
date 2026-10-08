@@ -4,12 +4,11 @@ use std::collections::VecDeque;
 use serde::Deserialize;
 use gpui_kit::component::{select::{Select, SelectEvent, SelectState}, searchable_list::SearchableListItem};
 use crate::voice::{Activity as CallActivity, CallId, Phase, Voice, VoiceEvent, VoiceFailure, VoiceOptions, rpc::Codex,
-    organizer::{ConfirmGate, DEFAULT_EFFORT, Mode, ModeModel, ModeModels, OpenRequest, OrganizerAction, session_context, squash, tool_reply}, usage::RateWindow};
+    organizer::{ConfirmGate, DEFAULT_EFFORT, Mode, ModeModel, ModeModels, OpenRequest, OrganizerAction, SWITCH_REFUSED, session_context, squash, switch_asked, tool_reply}, usage::RateWindow};
 use super::{create::choices::{PERMISSIONS, checked_choice, creation_defaults}, grouping::{can_leave, can_pair}, sidebar::Target};
 
-/// Vozes do Realtime; vazio é o padrão do Codex.
-const VOICES: [&str; 19] = ["alloy", "arbor", "ash", "ballad", "breeze", "cedar", "coral", "cove", "echo", "ember", "juniper", "maple",
-    "marin", "sage", "shimmer", "sol", "spruce", "vale", "verse"];
+/// Só as vozes que o Realtime v3 aceita; as outras do esquema do Codex derrubam a chamada. Vazio é o padrão do Codex.
+const VOICES: [&str; 9] = ["arbor", "breeze", "cove", "ember", "juniper", "maple", "sol", "spruce", "vale"];
 
 #[derive(Clone)]
 pub(super) struct VoiceChoice { id: String }
@@ -178,11 +177,42 @@ pub(super) struct VoiceUi {
     pub(super) close_reply: Option<(Target, CallId)>,
     /// Últimos nomes de sessão passados à chamada; só lista diferente vai de novo.
     pub(super) session_names: Vec<String>,
+    /// Objetivo do `computer` em curso; abortar mata o HCC (parar a chamada usa isto).
+    pub(super) computer: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// Uma ação da tela do Hangar que a voz executa pelo mesmo caminho do botão; o id é o de acessibilidade dele.
+pub(super) struct UiAction { pub(super) id: &'static str, pub(super) label: &'static str, pub(super) description: &'static str }
+
+pub(super) const HANGAR_ACTIONS: [UiAction; 16] = [
+    UiAction { id: "topbar-settings", label: "Abrir configurações", description: "Abre a tela de configurações; arg opcional = seção (veja as seções abaixo)." },
+    UiAction { id: "settings-back", label: "Fechar configurações", description: "Fecha a tela de configurações e volta à conversa." },
+    UiAction { id: "sidebar-new-session", label: "Nova sessão", description: "Abre o diálogo de criar sessão (a pessoa escolhe e confirma)." },
+    UiAction { id: "sidebar-fold", label: "Recolher ou mostrar a barra de sessões", description: "Alterna a barra lateral de sessões entre recolhida e aberta." },
+    UiAction { id: "side-toggle", label: "Mostrar ou esconder o painel lateral", description: "Alterna o painel lateral da sessão (Contexto, Arquivos, Atividade, Git)." },
+    UiAction { id: "side-tab-context", label: "Painel: Contexto", description: "Abre o painel lateral na aba Contexto da sessão ativa." },
+    UiAction { id: "side-tab-files", label: "Painel: Arquivos", description: "Abre o painel lateral na aba Arquivos da sessão ativa." },
+    UiAction { id: "side-tab-activity", label: "Painel: Atividade", description: "Abre o painel lateral na aba Atividade, quando a sessão tem." },
+    UiAction { id: "side-tab-git", label: "Painel: Git", description: "Abre o painel lateral na aba Git, quando a pasta é um repositório." },
+    UiAction { id: "terminal-show", label: "Abrir o terminal", description: "Abre o painel de terminal da sessão ativa." },
+    UiAction { id: "terminal-close", label: "Fechar o terminal", description: "Fecha o painel de terminal." },
+    UiAction { id: "topbar-voice", label: "Abrir o cartão da voz", description: "Mostra o cartão desta conversa por voz." },
+    UiAction { id: "voice-panel-close", label: "Fechar o cartão da voz", description: "Esconde o cartão da voz; a conversa continua." },
+    UiAction { id: "topbar-cost", label: "Abrir custos", description: "Abre a página de custos." },
+    UiAction { id: "costs-usage", label: "Abrir estatísticas de uso", description: "Abre as estatísticas de uso (na página de custos)." },
+    UiAction { id: "costs-back", label: "Fechar custos", description: "Fecha a página de custos e estatísticas." },
+];
+
+pub(super) fn hangar_actions_text(sections: &[&str]) -> String {
+    let mut lines: Vec<String> = HANGAR_ACTIONS.iter().map(|a| format!("- {}: {}. {}", a.id, a.label, a.description)).collect();
+    lines.push(format!("Seções de configurações (arg de topbar-settings): {}.", sections.join(", ")));
+    lines.join("\n")
 }
 
 /// Resultado assíncrono de uma ferramenta de sessão; volta à tela com a chamada que espera a resposta.
 /// `Opened`: máquina, criação e, com `request`, o pedido e a entrega dele à sessão nova.
-pub(super) enum VoiceDone { Opened(String, Result<SessionInfo, String>, Option<(String, Result<Delivery, Failure>)>), Grouped(&'static str, Result<PairResult, Failure>) }
+pub(super) enum VoiceDone { Opened(String, Result<SessionInfo, String>, Option<(String, Result<Delivery, Failure>)>), Grouped(&'static str, Result<PairResult, Failure>),
+    Computer(Result<String, String>) }
 
 /// Uma linha do `list_sessions`.
 pub(super) struct Listed { pub(super) name: String, pub(super) machine: Option<String>, pub(super) provider: String, pub(super) state: String,
@@ -411,6 +441,9 @@ pub(super) fn action_text(action: &OrganizerAction) -> String {
             "close_session" => tr("voice_tool_close_session"),
             "pair_sessions" => tr("voice_tool_pair_sessions"),
             "unpair_session" => tr("voice_tool_unpair_session"),
+            "hangar_actions" => tr("voice_tool_hangar_actions"),
+            "hangar_action" => tr("voice_tool_hangar_action"),
+            "computer" => tr("voice_tool_computer"),
             other => tr("voice_tool_other").replace("{tool}", other),
         },
         OrganizerAction::Search(query) if query.trim().is_empty() => tr("voice_action_search"),
@@ -600,7 +633,9 @@ impl Hangar {
             return;
         }
         crate::voice::log(format!("voice: account chosen {}", if codex_home.is_some() { "custom" } else { "default" }));
-        let options = VoiceOptions { codex, voice: self.voice.voice.clone(), context: self.voice_context(), cwd: self.local_session_dir(), target, codex_home,
+        // Voz salva que o v3 não aceita (escolhida antes do filtro) cai no padrão em vez de derrubar a chamada.
+        let voice = self.voice.voice.clone().filter(|v| VOICES.contains(&v.as_str()));
+        let options = VoiceOptions { codex, voice, context: self.voice_context(), cwd: self.local_session_dir(), target, codex_home,
             organizer: self.voice.organizer.clone() };
         self.voice.generation += 1;
         self.voice.call = Some(Voice::start(self.runtime.handle(), options, events_tx));
@@ -638,6 +673,7 @@ impl Hangar {
 
     pub(super) fn stop_voice(&mut self, cx: &mut Context<Self>) {
         if let Some(mut call) = self.voice.call.take() { call.stop(); }
+        self.stop_computer();
         self.voice.generation += 1; // eventos atrasados da chamada parada não mexem na próxima
         self.voice.phase = None;
         self.voice.mode = Mode::Direct;
@@ -704,11 +740,15 @@ impl Hangar {
     }
 
     /// `switch_session`: as sessões que a busca enxerga, pelo nome falado.
-    fn voice_switch(&mut self, call: CallId, spoken: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// `said`: a fala do turno; sem pedido de troca para essa sessão, nada muda (o pedido segue para a sessão ativa).
+    fn voice_switch(&mut self, call: CallId, spoken: &str, said: &str, window: &mut Window, cx: &mut Context<Self>) {
         let reply = match self.voice_resolve("switch_session", spoken, cx) {
             Ok((key, session)) => {
                 if self.selected.as_ref().is_some_and(|s| s.name == session.name) && self.open_server() == key {
                     tool_reply("Já estou nessa sessão.", true)
+                } else if !switch_asked(said, &session.name) {
+                    crate::voice::log("switch_session refused not asked");
+                    tool_reply(format!("{SWITCH_REFUSED}."), false)
                 } else {
                     let name = session.name.clone();
                     if self.select_on(&key, session, window, cx) { tool_reply(format!("Sessão {name} aberta; a troca já foi anunciada, não repita."), true) }
@@ -846,6 +886,93 @@ impl Hangar {
         self.voice_group(call, "grupo_drop_sair_falhou", async move { api.unpair(&session.name).await });
     }
 
+    /// Uma ação de `HANGAR_ACTIONS` pelo mesmo método do botão. Nenhuma troca a sessão ativa; `Err` é o motivo real.
+    pub(super) fn run_hangar_action(&mut self, id: &str, arg: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> Result<String, String> {
+        use crate::appearance::SideTab;
+        if self.connection_dialog { return Err("A janela de conexão está aberta; feche-a antes.".into()); }
+        let side_tab = |tab| match tab { SideTab::Files => "Arquivos", SideTab::Activity => "Atividade", SideTab::Git => "Git", _ => "Contexto" };
+        match id {
+            "topbar-settings" => {
+                let page = match arg {
+                    None => settings::Page::Appearance,
+                    Some(spoken) => {
+                        let sections: Vec<settings::Page> = settings::Page::sections().collect();
+                        let keys: Vec<&str> = sections.iter().map(|p| p.key()).collect();
+                        match match_session(spoken, &keys, &[]) {
+                            SessionMatch::One(i) => sections[i],
+                            _ => return Err(format!("Seção desconhecida: {spoken}. Seções: {}.", keys.join(", "))),
+                        }
+                    }
+                };
+                self.open_settings(page, window, cx);
+                Ok(format!("Configurações abertas na seção {}.", page.key()))
+            }
+            "settings-back" if self.settings.is_none() => Ok("As configurações já estavam fechadas.".into()),
+            "settings-back" => { self.close_settings(window, cx); Ok("Configurações fechadas.".into()) }
+            "sidebar-new-session" if self.create_blocked(window, cx) => Err("Não dá para abrir o diálogo agora: sem servidor conectado ou outro diálogo aberto.".into()),
+            "sidebar-new-session" => { self.open_new_session(None, window, cx); Ok("Diálogo de nova sessão aberto; a pessoa escolhe e confirma.".into()) }
+            "sidebar-fold" if appearance::get().navigation.tabs() => Err("Com a navegação em abas não há barra de sessões para recolher.".into()),
+            "sidebar-fold" => { self.toggle_rail(cx); Ok(if self.rail() { "Barra de sessões recolhida." } else { "Barra de sessões aberta." }.into()) }
+            "side-toggle" | "side-tab-context" | "side-tab-files" | "side-tab-activity" | "side-tab-git" if self.selected.is_none() =>
+                Err("Nenhuma sessão aberta; o painel lateral é da sessão.".into()),
+            "side-toggle" => { self.toggle_side(cx); Ok(if self.side.open { "Painel lateral aberto." } else { "Painel lateral escondido." }.into()) }
+            "side-tab-context" | "side-tab-files" | "side-tab-activity" | "side-tab-git" => {
+                let tab = match id { "side-tab-files" => SideTab::Files, "side-tab-activity" => SideTab::Activity, "side-tab-git" => SideTab::Git, _ => SideTab::Context };
+                if !self.side.open { self.toggle_side(cx); }
+                self.choose_side_tab(tab, window, cx);
+                // A aba que a sessão não tem cai em outra: dizer, em vez de fingir.
+                if self.side_tab() == tab { Ok(format!("Painel lateral na aba {}.", side_tab(tab))) }
+                else { Err(format!("A aba {} não está disponível nesta sessão; o painel ficou em {}.", side_tab(tab), side_tab(self.side_tab()))) }
+            }
+            "terminal-show" if self.terminal.is_some() => Ok("O terminal já está aberto.".into()),
+            "terminal-show" => {
+                if !self.selected.as_ref().is_some_and(|s| super::terminal::terminal_offered(s, self.has_shortcut_terms())) {
+                    return Err("Esta sessão não tem terminal (nenhuma aberta, orquestrador ou só leitura).".into());
+                }
+                self.toggle_terminal(window, cx);
+                if self.terminal.is_some() { Ok("Terminal aberto.".into()) } else { Err("O terminal não abriu.".into()) }
+            }
+            "terminal-close" if self.terminal.is_none() => Ok("O terminal já estava fechado.".into()),
+            "terminal-close" => { self.close_terminal(true, window, cx); Ok("Terminal fechado.".into()) }
+            "topbar-voice" if self.voice.open => Ok("O cartão da voz já está aberto.".into()),
+            "topbar-voice" => { self.toggle_voice_panel(window, cx); Ok("Cartão da voz aberto.".into()) }
+            "voice-panel-close" => { self.voice.open = false; cx.notify(); Ok("Cartão da voz fechado; a conversa continua.".into()) }
+            "topbar-cost" | "costs-usage" if self.api.is_none() => Err("Sem servidor conectado.".into()),
+            "topbar-cost" => { self.open_costs(window, cx); Ok("Página de custos aberta.".into()) }
+            "costs-usage" => {
+                if self.costs.view.is_none() { self.open_costs(window, cx); }
+                self.show_costs_view(super::costs::View::Usage, window, cx);
+                Ok("Estatísticas de uso abertas.".into())
+            }
+            "costs-back" if self.costs.view.is_none() => Ok("A página de custos já estava fechada.".into()),
+            "costs-back" => { self.close_costs(window, cx); Ok("Página de custos fechada.".into()) }
+            other => Err(format!("Ação desconhecida: {other}. Veja os ids com hangar_actions.")),
+        }
+    }
+
+    /// `computer`: o HCC roda fora da tela e responde quando acaba; um objetivo por vez.
+    fn voice_computer(&mut self, call: CallId, objective: String) {
+        if self.voice.computer.as_ref().is_some_and(|task| !task.is_finished()) {
+            self.voice_reply(call, tool_reply("Já há um objetivo no computador em andamento; espere o resultado.", false));
+            return;
+        }
+        crate::voice::log("computer start");
+        let (generation, connection, tx) = (self.voice.generation, self.connection, self.tx.clone());
+        self.voice.computer = Some(self.runtime.spawn(async move {
+            let result = match tokio::task::spawn_blocking(crate::voice::computer::launch).await {
+                Ok(Ok(launch)) => crate::voice::computer::run_objective(launch, &objective).await,
+                Ok(Err(text)) => Err(text),
+                Err(_) => Err("Não consegui preparar o hangar-computer-control.".into()),
+            };
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::VoiceDone(generation, call, VoiceDone::Computer(result)) }).await;
+        }));
+    }
+
+    /// Parar a chamada para também o objetivo: o Python cai junto com a tarefa.
+    fn stop_computer(&mut self) {
+        if let Some(task) = self.voice.computer.take() && !task.is_finished() { crate::voice::log("computer aborted"); task.abort(); }
+    }
+
     /// `fallback`: a frase do web quando o servidor não diz o motivo.
     fn voice_group(&self, call: CallId, fallback: &'static str, work: impl std::future::Future<Output = Result<PairResult, Failure>> + Send + 'static) {
         let (generation, connection, tx) = (self.voice.generation, self.connection, self.tx.clone());
@@ -887,6 +1014,18 @@ impl Hangar {
                 let text = result.warning.map_or_else(|| "Feito.".to_owned(), |w| format!("Feito, mas com aviso: {w}"));
                 self.voice_reply(call, tool_reply(text, true));
             }
+            VoiceDone::Computer(result) => {
+                self.voice.computer = None;
+                match result {
+                    // "parou: …" é resultado do HCC, não falha do app: volta como está, sem sucesso.
+                    Ok(text) => {
+                        let done = !text.trim_start().starts_with("parou");
+                        crate::voice::log(format!("computer done completed={done}"));
+                        self.voice_reply(call, tool_reply(text, done));
+                    }
+                    Err(text) => { crate::voice::log("computer failed"); self.voice_fail(call, text); }
+                }
+            }
             VoiceDone::Grouped(fallback, Err(error)) => {
                 crate::voice::log(format!("group failed status={:?}", error.status));
                 self.voice_fail(call, super::grouping::failed(&error, fallback));
@@ -900,6 +1039,7 @@ impl Hangar {
         match event {
             VoiceEvent::Phase(Phase::Closed) => {
                 self.voice.call = None;
+                self.stop_computer();
                 self.voice.phase = None;
                 self.voice.mode = Mode::Direct;
                 self.voice.draft = None;
@@ -955,7 +1095,17 @@ impl Hangar {
                 self.voice.five_hour = five_hour.or(self.voice.five_hour);
                 self.voice.seven_day = seven_day.or(self.voice.seven_day);
             }
-            VoiceEvent::SwitchSession(call, name) => self.voice_switch(call, &name, window, cx),
+            VoiceEvent::SwitchSession { call, name, spoken } => self.voice_switch(call, &name, &spoken, window, cx),
+            VoiceEvent::HangarActions(call) => {
+                let sections: Vec<&str> = settings::Page::sections().map(settings::Page::key).collect();
+                self.voice_reply(call, tool_reply(hangar_actions_text(&sections), true));
+            }
+            VoiceEvent::HangarAction { call, id, arg } => {
+                let result = self.run_hangar_action(&id, arg.as_deref(), window, cx);
+                crate::voice::log(format!("hangar_action ok={}", result.is_ok()));
+                match result { Ok(text) => self.voice_reply(call, tool_reply(text, true)), Err(text) => self.voice_fail(call, text) }
+            }
+            VoiceEvent::Computer(call, objective) => self.voice_computer(call, objective),
             VoiceEvent::ListSessions(call) => self.voice_list(call, cx),
             VoiceEvent::OpenSession(call, request) => self.voice_open(call, request, cx),
             VoiceEvent::CloseSession { call, name, confirmed, turn } => self.voice_close(call, &name, confirmed, &turn, cx),
@@ -1646,6 +1796,18 @@ mod tests {
         assert!(both.contains("aberta") && both.contains("não chegou"), "diz as duas coisas");
         assert!(opened_reply("s", true, Some(&Ok(Delivery { ok: false, delivered: false }))).is_err());
         assert!(opened_reply("s", false, Some(&delivered)).unwrap_err().contains("pedido enviado"));
+    }
+
+    #[test]
+    fn hangar_action_ids_are_unique_and_stable() {
+        let ids: Vec<&str> = HANGAR_ACTIONS.iter().map(|a| a.id).collect();
+        assert_eq!(ids, ["topbar-settings", "settings-back", "sidebar-new-session", "sidebar-fold", "side-toggle", "side-tab-context", "side-tab-files",
+            "side-tab-activity", "side-tab-git", "terminal-show", "terminal-close", "topbar-voice", "voice-panel-close", "topbar-cost", "costs-usage", "costs-back"],
+            "o organizador guarda estes ids: mudar um quebra o que ele já aprendeu na chamada");
+        assert_eq!(ids.iter().collect::<HashSet<_>>().len(), ids.len());
+        assert!(HANGAR_ACTIONS.iter().all(|a| !a.label.is_empty() && !a.description.is_empty()));
+        let text = hangar_actions_text(&["general", "voice"]);
+        assert!(text.contains("- topbar-settings: Abrir configurações.") && text.ends_with("general, voice."));
     }
 
     #[test]
