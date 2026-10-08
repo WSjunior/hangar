@@ -708,7 +708,7 @@ def _confirm_codex_queue(name: str, jsonl: str) -> None:
 
 
 # Com o Rust de pé, estes saem do hub: os quatro primeiros do `Monitor` (Claude com terminal), os
-# seis do feed do Codex sem terminal e, do Claude sem terminal, todos menos `suggest`.
+# seis do feed do Claude e do Codex sem terminal.
 _RUST_STATE_EVENTS = ("state", "preview", "ask_question", "suggest", "pensamento", "ferramenta")
 # O hub pinga o canal a cada 10 s: três calados = conexão morta.
 _RUST_CHANNEL_IDLE_S = 30.0
@@ -1088,21 +1088,6 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                            codigo=getattr(exc, "code", type(exc).__name__))
             await queue.put(("__error__", exc))
 
-    async def suggest_pump():
-        # Claude sem terminal com o estado no hub: a sugestão pegava carona no `state` do Python,
-        # que não sobe mais; sai quando muda, como antes.
-        vista = ""
-        try:
-            while True:
-                atual = await plugin_bridge.wait_suggestion(name, vista, 30)
-                if atual != vista:
-                    vista = atual
-                    await queue.put(("suggest", json.dumps({"text": atual}, ensure_ascii=False)))
-        except Exception as exc:  # surface, never swallow
-            diag.registrar("sse.pump_falhou", "erro", sessao=name, provider=current_provider,
-                           etapa="sugestao", erro_tipo=type(exc).__name__)
-            await queue.put(("__error__", exc))
-
     def _fontes_do_estado(prov, rust):
         """Tarefas do estado ao vivo por chave: as do Python, o canal do hub, ou nada (conexão interna
         de sessão do Rust, que é o próprio hub). `rust` vem de quem montou o `broker`: reler o modo
@@ -1113,8 +1098,6 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
         else:
             fontes = {"state": asyncio.create_task(pump("state", _monitor_de(prov))),
                       "preview": asyncio.create_task(preview_pump(broker))}
-        if rust and prov == CLAUDE_HEADLESS:
-            fontes["suggest"] = asyncio.create_task(suggest_pump())
         if not (rust and prov in ("codex", CLAUDE_HEADLESS)):
             fontes["pensamento"] = asyncio.create_task(em_voo_pump("pensamento", fonte_pensamento(name)))
             fontes["ferramenta"] = asyncio.create_task(em_voo_pump("ferramenta", fonte_ferramenta(name)))
@@ -1248,7 +1231,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                 motivo_diag = "falha_pump"
                 raise data
             if event == "__rust__":
-                # Do `Monitor` do hub: já saiu com sugestão, pergunta, problema e entrega resolvidos.
+                # Do hub (`Monitor` ou feed do runtime): já saiu com sugestão, pergunta, problema e entrega resolvidos.
                 rust_event, rust_data = data
                 _sent[rust_event if rust_event in _sent else "other"] += 1
                 yield {"event": rust_event, "data": rust_data}
