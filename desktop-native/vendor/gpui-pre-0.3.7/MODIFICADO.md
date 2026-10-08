@@ -52,5 +52,5 @@ Acessibilidade estável: a view em cache (`view.rs`, `prepaint_view`) que reapro
 o paint dos filhos, e os nós de acessibilidade dela sumiam da árvore até a view repintar; leitores de tela e agentes
 viam a árvore oscilar. Agora a view guarda os nós que emitiu (`A11yCapture`, `window/a11y.rs`) e os reemite no
 reaproveitamento, com limites, foco e ações do quadro anterior (`prev_*` no `A11y`). Sem `author_id` explícito, o nó
-recebe o caminho de ids do elemento sem os de view (`element.rs`), que vira `AccessibleId` no AT-SPI e `AutomationId`
+recebe o caminho dos ids nomeados do elemento, sem ids de view, números e nomes de tipo dos componentes (`element.rs`), que vira `AccessibleId` no AT-SPI e `AutomationId`
 no UIA.

@@ -56,7 +56,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 +o paint dos filhos, e os nós de acessibilidade dela sumiam da árvore até a view repintar; leitores de tela e agentes
 +viam a árvore oscilar. Agora a view guarda os nós que emitiu (`A11yCapture`, `window/a11y.rs`) e os reemite no
 +reaproveitamento, com limites, foco e ações do quadro anterior (`prev_*` no `A11y`). Sem `author_id` explícito, o nó
-+recebe o caminho de ids do elemento sem os de view (`element.rs`), que vira `AccessibleId` no AT-SPI e `AutomationId`
++recebe o caminho dos ids nomeados do elemento, sem ids de view, números e nomes de tipo dos componentes (`element.rs`), que vira `AccessibleId` no AT-SPI e `AutomationId`
 +no UIA.
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-0.3.7/src/element.rs gpui-pre-0.3.7/src/element.rs
 --- gpui-pre-0.3.7/src/element.rs
@@ -83,17 +83,22 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
                  let mut pushed_a11y_node = false;
                  if window.a11y.is_active() {
                      if let Some(global_id) = global_id.as_ref() {
-@@ -378,6 +389,17 @@
+@@ -378,6 +389,22 @@
                                  y1: ((bounds.origin.y.0 + bounds.size.height.0) * scale) as f64,
                              });
                              self.element.write_a11y_info(&mut node);
-+                            // Sem id de autor, o caminho de ids do elemento (sem os de view, que mudam a cada execução):
-+                            // estável entre quadros, e é o que agentes de automação usam para achar o controle.
++                            // Sem id de autor, o caminho de ids que o app escreveu: estável entre quadros e execuções, e é o
++                            // que agentes de automação usam para achar o controle. Saem ids de view e números (mudam a cada
++                            // execução) e nomes de tipo que os componentes empilham (ruído igual em todo controle).
 +                            if node.author_id().is_none() {
 +                                let path: Vec<String> = global_id
 +                                    .0
 +                                    .iter()
-+                                    .filter(|id| !matches!(id, ElementId::View(_)))
++                                    .filter(|id| match id {
++                                        ElementId::Name(name) => !name.contains("::"),
++                                        ElementId::NamedInteger(..) | ElementId::NamedChild(..) | ElementId::Uuid(_) => true,
++                                        _ => false,
++                                    })
 +                                    .map(|id| id.to_string())
 +                                    .collect();
 +                                node.set_author_id(path.join("/"));
