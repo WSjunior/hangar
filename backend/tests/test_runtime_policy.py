@@ -25,11 +25,13 @@ def test_metadata_patch_has_a_strict_catalog(monkeypatch):
         runtime_policy.run("session.patch_meta", {"cano":{"token":"changed"}}, {"provider":"codex", "name":"session"})
 
 
-def test_prepare_prompt_does_not_open_client_or_queue(monkeypatch):
-    from app.adapters.claude_headless import adapter
-    monkeypatch.setattr(adapter, "_blocos_do_prompt", lambda text: ([{"type":"text", "text":text}], []))
-    result = runtime_policy.run("prepare_prompt", {"text":"Olá"}, {"provider":"claude"})
-    assert result["content"] == [{"type":"text", "text":"Olá"}]
+@pytest.mark.parametrize("kind", ["prepare_prompt", "format_status", "skill_catalog", "answer_body", "quota",
+                                  "session.marker", "diag.error"])
+def test_services_that_moved_to_rust_are_gone(kind):
+    # O ator Rust roda estes por conta própria; o Python não responde mais.
+    for provider in ("claude", "codex"):
+        with pytest.raises(ValueError):
+            runtime_policy.run(kind, {"text": "Olá", "catalog": {}, "questions": [], "answers": []}, {"provider": provider})
 
 
 def test_native_message_has_journal_before_uds(monkeypatch):
@@ -47,20 +49,19 @@ def test_native_message_has_journal_before_uds(monkeypatch):
     assert result["outcome"] == "unknown"
 
 
-def test_quota_status_keeps_existing_window_format(tmp_path, monkeypatch):
+def test_quota_windows_drops_per_model_windows(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from app import cotas
-    account = SimpleNamespace(provedor="claude", id="claude:" + str(tmp_path),
-        model_dump=lambda: {"janelas":[{"rotulo":"5h", "pct":42, "reset_ts":None, "por_modelo":False}]})
+    runtime_policy._quota_cache.clear()
+    account = SimpleNamespace(provedor="claude", id="claude:" + str(tmp_path), model_dump=lambda: {"janelas": [
+        {"rotulo": "5h", "pct": 42, "reset_ts": None, "por_modelo": False},
+        {"rotulo": "7d", "pct": 9, "reset_ts": None, "por_modelo": True}]})
     monkeypatch.setattr(cotas, "listar_cotas", lambda: [account])
-    data = runtime_policy.run("format_status", {}, {"provider":"claude", "config_dir":str(tmp_path)})
-    assert "⚡5h:42%" in data["status_line"]
-
-
-def test_skill_catalog_is_data_only():
-    catalog = {"data":[{"skills":[{"name":"skill", "path":"/fake/skill", "enabled":True}]}]}
-    data = runtime_policy.run("skill_catalog", {"catalog":catalog, "name":"skill"}, {"provider":"codex"})
-    assert data["skill"]["native_name"] == "skill"
+    assert runtime_policy.quota_windows(str(tmp_path)) == [{"rotulo": "5h", "pct": 42, "reset_ts": None, "por_modelo": False}]
+    # Sem cache próprio: uma segunda chamada lê de novo.
+    account.model_dump = lambda: {"janelas": [{"rotulo": "5h", "pct": 50, "reset_ts": None}]}
+    assert runtime_policy.quota_windows(str(tmp_path))[0]["pct"] == 50
+    runtime_policy._quota_cache.clear()
 
 
 def _codex_patch(tmp_path, monkeypatch, sidecar_thread):

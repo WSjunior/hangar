@@ -37,12 +37,7 @@ impl FormatGate {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum RequestId {
-    Integer(i64),
-    String(String),
-}
+pub use hangar_codex::proto::RequestId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -91,7 +86,23 @@ pub enum Effect {
     StateChanged,
     /// Interface dos mods (superfície remota): quadro fora do diário, publicação, aviso e resposta aos apps.
     Surface { effect: crate::mods::model::SurfaceEffect },
+    /// Linha no diário exportável (`/internal/diag`), uma por minuto por código.
+    Diag { event: DiagEvent, code: String },
     Stop { reason: String },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagEvent { CodexVersion, CodexDecode }
+
+impl DiagEvent {
+    pub fn event(self) -> &'static str { match self { Self::CodexVersion => "rust.codex_version", Self::CodexDecode => "rust.codex_decode" } }
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::CodexVersion => "versão do Codex diferente da conferida ou ilegível; campo renomeado pode faltar",
+            Self::CodexDecode => "formato inesperado do Codex: notificação ignorada (ciclo de vida lido cru), resposta com o padrão, pedido mostrado pela linha crua",
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]

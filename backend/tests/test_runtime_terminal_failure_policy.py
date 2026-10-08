@@ -25,6 +25,8 @@ class Gateway:
                 'channels': {}, 'error': error}
 
     async def op(self, target, command, operation_id, clock):
+        if command['kind'] == 'ingress':
+            return {'closed': command['closed']}
         name, kind = target['name'], command['kind']
         if kind == 'open':
             self.leases[name] = WriterLease(target['lock_path'])
@@ -225,7 +227,8 @@ def test_terminal_unknown_delivery_reopens_in_rust(monkeypatch, tmp_path):
         gateway.kinds.clear()
         result = await owner.op('session', {'kind': 'submit', 'text': 'next-input'}, 'next')
         assert result['disposition'] == 'accepted'
-        assert gateway.kinds == ['snapshot', 'close', 'open', 'submit']
+        # A reabertura congela a sessão: a porta do Rust fecha antes do `close` e reabre depois do `open`.
+        assert gateway.kinds == ['snapshot', 'ingress', 'close', 'open', 'ingress', 'submit']
         assert slot.phase == Phase.Rust and effects == []
         assert ra.runtime_problem('session') is None
         assert any(event == 'runtime.reopened' for event, _, _ in records)

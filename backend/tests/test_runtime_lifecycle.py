@@ -179,6 +179,7 @@ def test_stop_error_is_raised_before_cano_cleanup(monkeypatch):
     from app.adapters.claude_headless import adapter
     if adapter.os.name == "nt":
         pytest.skip("caminho POSIX")
+    monkeypatch.setattr(adapter, "_e_cano", lambda pid: True)
     monkeypatch.setattr(adapter.os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(adapter.os, "killpg", lambda *args: (_ for _ in ()).throw(PermissionError("synthetic")))
     with pytest.raises(RuntimeError):
@@ -242,6 +243,8 @@ def rust_owner(tmp_path, monkeypatch, state):
                 "view": {"alive": True, "initialized": True, "in_progress": state == "working",
                          "public_state": {"session": target.name, "state": state, "headless": True}}}
     async def op(descriptor, command, operation_id, clock):
+        if command["kind"] == "ingress":
+            return {"closed": command["closed"]}
         calls.append(command["kind"])
         assert command["kind"] == "snapshot"
         assert slot.phase == Phase.Rust and slot.lease is None

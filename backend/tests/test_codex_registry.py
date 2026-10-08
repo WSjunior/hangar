@@ -658,10 +658,26 @@ def test_kill_manda_sigterm_no_pid_do_app_server(tmp_path):
     codex_sessions.save("cx", "tid-1", "/x/rollout.jsonl", "/tmp/a",
                         endpoint="ws://127.0.0.1:45999", app_pid=4242)
     mortos = []
+    argv = ["codex", "app-server", "--listen", "ws://127.0.0.1:45999"]
     with patch.object(codex_adapter, "pid_vivo", return_value=True), \
+         patch.object(codex_adapter, "_argv", return_value=argv), \
          patch.object(codex_adapter.os, "kill", lambda pid, sig: mortos.append((pid, sig))):
         codex_adapter.matar_app_server("cx")
     assert mortos == [(4242, codex_adapter.signal.SIGTERM)]
+
+
+@pytest.mark.parametrize("argv", [["/usr/bin/firefox"],
+                                  ["codex", "app-server", "--listen", "ws://127.0.0.1:1111"]])
+def test_kill_nao_mata_pid_reaproveitado_vivo(tmp_path, argv):
+    """Depois de reiniciar a máquina o pid do sidecar pode estar vivo em outro processo."""
+    codex_sessions.save("cx", "tid-1", "/x/rollout.jsonl", "/tmp/a",
+                        endpoint="ws://127.0.0.1:45999", app_pid=4242)
+    mortos = []
+    with patch.object(codex_adapter, "pid_vivo", return_value=True), \
+         patch.object(codex_adapter, "_argv", return_value=argv), \
+         patch.object(codex_adapter.os, "kill", lambda pid, sig: mortos.append((pid, sig))):
+        codex_adapter.matar_app_server("cx")
+    assert mortos == []
 
 
 def test_kill_nao_manda_sinal_pra_pid_morto(tmp_path):

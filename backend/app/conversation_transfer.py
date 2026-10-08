@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import tempfile
 import threading
 import uuid
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
@@ -19,6 +20,9 @@ from pathlib import Path
 
 from app import atomico
 from app.share_life import session_life
+
+
+_log = logging.getLogger("hangar.transfer")
 
 
 class TransferError(ValueError):
@@ -314,6 +318,8 @@ def save_transfer(record: TransferRecord) -> None:
         if previous and previous.source_life != record.source_life:
             raise ValueError("a vida da origem da transferência mudou")
         _save_locked(record)
+    if record.phase in _TERMINAL:
+        release_gate(record.name)
 
 
 def capture_snapshot(record: TransferRecord, source_path: str | Path,
@@ -457,6 +463,72 @@ def session_operation(name: str):
         operation.release()
 
 
+# Nomes cuja porta do Rust segue fechada porque a troca ficou em fase não terminal; o
+# `save_transfer` terminal reabre.
+_gate_held: set[str] = set()
+
+
+def hold_gate(name: str) -> None:
+    with _lock:
+        _gate_held.add(name)
+
+
+def release_gate(name: str) -> None:
+    """Chamado de thread (save_transfer): reabre a porta que a troca deixou fechada."""
+    with _lock:
+        if name not in _gate_held:
+            return
+    from app import runtime_coordinator
+    coordinator = runtime_coordinator.current()
+    try:
+        if coordinator is not None:
+            coordinator.ingress_sync(name, False, held=True)
+    except Exception:
+        # O Rust segue fechado: o nome fica retido para a próxima chance de reabrir.
+        _log.warning("porta do Rust não reabriu ao fim da troca de %s", name, exc_info=True)
+        return
+    with _lock:
+        _gate_held.discard(name)
+
+
+@asynccontextmanager
+async def transfer_operation(name: str):
+    """`session_operation` que também fecha a porta do Rust. Roda no laço (as rotas e os dois
+    pontos da troca são corrotinas), então usa `await`. Troca não terminal ao sair mantém fechada."""
+    import asyncio
+    from app import runtime_coordinator
+    with session_operation(name):
+        coordinator = runtime_coordinator.current()
+        own = False
+        if coordinator is not None and coordinator.transport is not None and name not in _gate_held:
+            try:
+                await coordinator.close_ingress(name, held=True)
+            except Exception:
+                _log.warning("porta do Rust não fechou para a troca de %s", name, exc_info=True)
+                raise TransferError("session_transfer_gate_unavailable", status=503) from None
+            own = True
+        ok = False
+        try:
+            yield
+            ok = True
+        finally:
+            if own:
+                try:
+                    active = await asyncio.to_thread(transfer_active, name)
+                except Exception:
+                    active = True       # sem ler a fase não dá para soltar: a troca retém a porta
+                if active:
+                    hold_gate(name)
+                else:
+                    try:
+                        await coordinator.ingress(name, False, held=True)
+                    except Exception:
+                        _log.warning("porta do Rust não reabriu para %s", name, exc_info=True)
+                        hold_gate(name)
+                        if ok:
+                            raise TransferError("session_transfer_gate_unavailable", status=503) from None
+
+
 @contextmanager
 def session_ingress(name: str):
     """Ingressos coexistem; a troca exclusiva só começa depois de seus recibos."""
@@ -489,6 +561,7 @@ def public_error(error: TransferError) -> dict:
         "session_transfer_source_changed": "A conversa mudou; abra a seleção de conta novamente.",
         "session_transfer_restore_failed": "A troca falhou e o Claude não voltou. Use Recarregar para tentar recuperar.",
         "session_transfer_busy": "A sessão está trocando de agente; tente novamente quando terminar.",
+        "session_transfer_gate_unavailable": "A sessão está terminando uma escrita; tente de novo em instantes.",
         "session_transfer_context_budget_exceeded": "O histórico completo excede a capacidade disponível do modelo escolhido. Escolha outro modelo.",
         "session_transfer_model_capacity_unknown": "Não foi possível confirmar a capacidade de contexto do modelo escolhido.",
         "session_transfer_model_media_unsupported": "O modelo escolhido não aceita as imagens presentes na conversa.",
@@ -816,7 +889,7 @@ async def transfer_claude_to_codex(registry, name: str, credential_id: str, sour
     from app.adapters.codex import transfer as importer
     from app.claude_to_codex import convert_snapshot, ConversionError
     from app import terminal_input
-    with session_operation(name):
+    async with transfer_operation(name):
         require_available(name)
         await asyncio.to_thread(_source_info, registry, name, source_life, source_jsonl)
         account = await asyncio.to_thread(_resolve_target, credential_id)
@@ -904,7 +977,7 @@ async def _restore_transfer(registry, record: TransferRecord, cause: str) -> dic
 async def recover_transfer(registry, record: TransferRecord) -> dict:
     from app.adapters import get_adapter, CLAUDE_HEADLESS
     from app import terminal_input
-    with session_operation(record.name):
+    async with transfer_operation(record.name):
         async with get_adapter(CLAUDE_HEADLESS).delivery_lock(record.name):
             terminal_lock = terminal_input._send_lock(record.name)
             if not terminal_lock.acquire(blocking=False):

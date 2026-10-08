@@ -1,4 +1,4 @@
-use super::{cano::{CanoConnection,IoEvent,WireFrame},claude::ClaudeEngine,codex::Engine as CodexEngine,
+use super::{cano::{CanoConnection,IoEvent,WireFrame},claude::ClaudeEngine,codex::Engine as CodexEngine,local_policy,
     protocol::*,queue::{Action,QueueActor,Status},receipt::ReceiptIndex};
 use crate::mods::model::{ModsCall,ModsError,SurfaceEffect};
 use serde_json::{Value,json};
@@ -19,17 +19,68 @@ const PUBLISH_POLICY_TIMEOUT:Duration=Duration::from_secs(40);
 /// pedidos da sessão, então um pedido sem teto prenderia os seguintes.
 const MODS_CALL_LIMIT:Duration=Duration::from_secs(crate::mods::surface::APP_CALL_MAX_S as u64 + 1);
 
+/// A cota do Claude muda devagar: uma consulta ao Python por conta a cada 5 minutos basta.
+const QUOTA_TTL:Duration=Duration::from_secs(300);
+const QUOTA_ACCOUNTS:usize=16;
+/// Python fora do ar: sem isto cada linha de status esperaria o prazo inteiro de novo.
+const QUOTA_DOWN_TTL:Duration=Duration::from_secs(30);
+
 #[derive(Clone)]
 pub struct PolicyClient {
     upstream:std::net::SocketAddr,
     secret:String,
     instance:String,
     http:crate::proxy::HttpClient,
+    /// `config_dir` -> (quando veio, `{"windows":[…]}`).
+    quota:Arc<std::sync::Mutex<BTreeMap<String,(Instant,Value)>>>,
+    /// `config_dir` -> quando a consulta não chegou ao Python (transporte ou prazo).
+    quota_down:Arc<std::sync::Mutex<BTreeMap<String,(Instant,())>>>,
+    diag:crate::diag::DiagClient,
+}
+
+/// Guarda no mapa limitado a `QUOTA_ACCOUNTS`, tirando a entrada mais antiga para caber a nova.
+fn remember<T>(cache:&std::sync::Mutex<BTreeMap<String,(Instant,T)>>,config_dir:&str,value:T) {
+    let Ok(mut cache) = cache.lock() else { return };
+    if !cache.contains_key(config_dir) && cache.len() >= QUOTA_ACCOUNTS {
+        if let Some(oldest) = cache.iter().min_by_key(|(_,(at,_))|*at).map(|(dir,_)|dir.clone()) { cache.remove(&oldest); }
+    }
+    cache.insert(config_dir.to_owned(),(Instant::now(),value));
 }
 
 impl PolicyClient {
     pub fn new(upstream:std::net::SocketAddr,secret:String,instance:String) -> Self {
-        Self { upstream,secret,instance,http:crate::proxy::client() }
+        Self { upstream,diag:crate::diag::DiagClient::new(upstream,secret.clone()),secret,instance,http:crate::proxy::client(),
+            quota:Default::default(),quota_down:Default::default() }
+    }
+    /// Janelas de cota da conta, só quando vai formatar. Falha formata sem janelas e deixa o cache
+    /// anterior como está; o log leva o código, nunca o dado.
+    pub async fn quota_windows(&self,key:&str,config_dir:&str) -> Option<Value> {
+        let cached = self.quota.lock().ok().and_then(|cache|cache.get(config_dir).cloned());
+        if let Some((at,value)) = &cached { if at.elapsed() < QUOTA_TTL { return Some(value.clone()); } }
+        let down = self.quota_down.lock().ok().and_then(|down|down.get(config_dir).map(|(at,_)|at.elapsed() < QUOTA_DOWN_TTL));
+        if down == Some(true) { return None; }
+        let query = form_urlencoded::Serializer::new(String::new()).append_pair("config_dir",config_dir).finish();
+        let fetched = tokio::time::timeout(POLICY_TIMEOUT,async {
+            let request = axum::http::Request::get(format!("http://{}/internal/quota?{query}",self.upstream))
+                .header("x-hangar-internal",&self.secret).body(axum::body::Body::empty()).map_err(|_|"quota_request")?;
+            let response = self.http.request(request).await.map_err(|_|"quota_transport")?;
+            if !response.status().is_success() { return Err("quota_refused"); }
+            let bytes = axum::body::to_bytes(axum::body::Body::new(response.into_body()),MAX_ENVELOPE).await.map_err(|_|"quota_limit")?;
+            let value:Value = serde_json::from_slice(&bytes).map_err(|_|"quota_json")?;
+            if value["windows"].is_array() { Ok(value) } else { Err("quota_shape") }
+        }).await.unwrap_or(Err("quota_timeout"));
+        match fetched {
+            Ok(value) => {
+                if let Ok(mut down) = self.quota_down.lock() { down.remove(config_dir); }
+                remember(&self.quota,config_dir,value.clone());
+                Some(value)
+            }
+            Err(code) => {
+                if matches!(code,"quota_transport" | "quota_timeout") { remember(&self.quota_down,config_dir,()); }
+                if crate::warn_limit::allow(Some(key),code) { tracing::warn!(key=%key,code=%code,"cota do Claude indisponível; a linha sai sem janelas"); }
+                None
+            }
+        }
     }
     async fn run(&self,target:&RuntimeTarget,kind:&str,request_id:&RequestId,payload:Value,phase_id:&str) -> Result<Value,RuntimeError> {
         self.run_for(&target.key,target.generation,kind,request_id,payload,phase_id).await
@@ -569,6 +620,14 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                             if let Some((version,view)) = save {
                                 save_view(&queue,target.generation,sample,&gate,version,&view,false).await?;
                             }
+                            if local_policy::is_local(&kind) {
+                                let quota = match &policy {
+                                    Some(policy) if kind == "format_status" && target.provider == "claude" =>
+                                        policy.quota_windows(&target.key,target.metadata["config_dir"].as_str().unwrap_or("")).await,
+                                    _ => None,
+                                };
+                                return run_local(kind.clone(),payload,&target,quota).await;
+                            }
                             match policy {
                                 Some(policy) => policy.run(&target,&kind,&request_id,payload,&phase_id).await,
                                 None => Err(failure("policy_unavailable")),
@@ -611,6 +670,11 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                     SurfaceEffect::Copied { plugin,text } => { if let Some(mods) = &engine.mods { mods.copied(&target.name,engine.mods_life,&plugin,&text); } }
                     SurfaceEffect::Reply { token,result } => { if let Some(waiter) = mods_waiters.remove(&token) { let _ = waiter.send(result); } }
                 },
+                Effect::Diag { event,code } => {
+                    // Versão é do servidor, não da sessão: sem nome, o limite de 1/min vale para todos.
+                    let session = if event == DiagEvent::CodexVersion { "" } else { target.name.as_str() };
+                    if let Some(policy) = &engine.policy { policy.diag.report(event.event(),session,&code,event.reason()); }
+                }
                 Effect::Stop { .. } => { closed.store(true,Ordering::Release); },
             }
         }
@@ -816,11 +880,11 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                                 payload:json!({"error":"input cancelado antes do envio"}) });
                             continue;
                         }
-                        if matches!(pending.command.kind,OperationKind::Input | OperationKind::Steer) && engine.policy.is_some() {
-                            let policy = engine.policy.clone().unwrap(); let target = target.clone(); let command = pending.command.clone();
+                        if matches!(pending.command.kind,OperationKind::Input | OperationKind::Steer) {
+                            let target = target.clone(); let command = pending.command.clone();
                             jobs.spawn(async move {
                                 // Cálculo puro (texto → blocos): sem efeito, não entra no diário e pode repetir.
-                                let result = policy.run(&target,"prepare_prompt",&RequestId::String(id.clone()),command.payload,&format!("{id}:prepare_prompt")).await;
+                                let result = run_local("prepare_prompt".into(),command.payload,&target,None).await;
                                 Job::PreparedInput { id,result }
                             });
                         } else {
@@ -1112,7 +1176,15 @@ async fn capture_cursor(target:&RuntimeTarget,view:&Value) -> Result<Value,Runti
         .await.map_err(|_|failure("cursor_job"))?.map_err(io_failure).and_then(|cursor|serde_json::to_value(cursor).map_err(|_|failure("cursor_json")))
 }
 
-const COSMETIC_POLICIES:[&str;5] = ["format_status","reload_stamp","last_usage","quota","unknown_private"];
+const COSMETIC_POLICIES:[&str;4] = ["format_status","reload_stamp","last_usage","unknown_private"];
+
+/// Serviço puro do ator: roda fora do laço, já que `prepare_prompt` lê imagem e `format_status` lê o `settings.json`.
+async fn run_local(kind:String,payload:Value,target:&RuntimeTarget,quota:Option<Value>) -> Result<Value,RuntimeError> {
+    let mut meta = target.metadata.clone();
+    meta["provider"] = json!(target.provider);
+    tokio::task::spawn_blocking(move||local_policy::run(&kind,&payload,&meta,quota.as_ref()).unwrap_or_else(||Err(failure("policy_unavailable"))))
+        .await.map_err(|_|failure("policy_job"))?
+}
 
 #[derive(Default)]
 struct SavedView { version:u64, durable:Option<Value>, latest:Value }

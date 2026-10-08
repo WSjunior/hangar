@@ -143,8 +143,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   a sessão parada), e o main fica mudo quando delega. Quem decide é a fronteira de turno, não o
   mtime. `tool.result` não tem `uuid` — id é `res:<toolCallId>`.
 - **Integração nativa do Codex: o Codex converte, o backend decide quando, o lançador só avisa.**
-  Dois gatilhos, e só: abertura de sessão Codex e o botão Reconciliar. Nunca gravar confiança
-  para autoaprovar hooks. Fonte inválida nunca significa remoção.
+  Dois gatilhos, e só: abertura de sessão Codex e o botão Reconciliar. A integração não grava
+  confiança de hooks; quem confia nos pendentes é o lançador, na abertura (regra abaixo). Fonte
+  inválida nunca significa remoção.
 - **Triagem do Claude não atravessa a importação para o Codex.** `skill-suggester.py`,
   `jev-command-gate.py` e `jev-answer-check.py` são excluídos pelo nome exato do arquivo,
   inclusive em caminhos Windows. O manifesto anterior retira só entradas já importadas;
@@ -156,6 +157,13 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   Só `on-request` e `never` existem (`untrusted` morreu); o sandbox vai no `-c` da subida e trocar
   de modo reabre o servidor ocioso. Pedido do servidor sem tela recebe `-32601` + nota, nunca
   sucesso vazio. Um cliente por cano.
+- **Protocolo do Codex no Rust é tipado e tolerante** (`crates/hangar-codex`): todo campo usado
+  existe no recorte do schema da versão conferida (`schema/<versão>.json`, teste
+  `schema_check`); campo novo é ignorado; formato inesperado num método conhecido: a
+  notificação é ignorada, a resposta segue com o padrão, e as duas vão ao diário
+  (`rust.codex_decode`); item ruim do histórico vira desconhecido sem derrubar o turno; outra
+  major.minor no `initialize` vira
+  `codex_versao_nao_conferida`. Atualizar a versão conferida: `scripts/conferir-codex-schema`.
 - **A rota do terminal Claude só recebe sessão Claude.** `route_sync`, `run_admin` e
   `answer_sync` abrem `prepare_session(name, "claude")`, que suspende a escrita sem vínculo
   Claude nem pane. Rota que atende outros provedores filtra pelo provedor antes (`/answer`,
@@ -260,6 +268,13 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **Quem segura a abertura de uma sessão Codex é a TUI parada num widget**, não a
   sincronização. Sem thread não há sidecar, e o app fica esperando para sempre — o cartão de
   seletor pré-thread existe para isso.
+- **A abertura com terminal não pergunta nada que o Hangar já sabe responder** (decisão do
+  dono): a TUI sobe com `check_for_update_on_startup=false`; o lançador atualiza o Codex do npm
+  antes do app-server (versão publicada consultada no máximo uma vez por hora, a tela mostra
+  "atualizando o Codex"), e confia nos hooks pendentes pelo app-server (`hooks/list` +
+  `config/batchWrite` do `trusted_hash`), porque eles vêm da sincronização do próprio Hangar.
+  Falha em qualquer dos dois só registra na tela e a abertura segue. O cartão pré-thread
+  reconhece o rodapé curto (`enter continue · esc skip`) além do antigo.
 - **Pergunta assíncrona do Codex chega como `agentMessage` com `delivery: "async"`**, não como
   pedido JSON-RPC. Cada pergunta é independente; o eco da resposta local não responde outra de
   título igual.
@@ -270,6 +285,23 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   Some quando a resposta chega ou outro turno começa. Sem terminal a faixa oferece Reiniciar, e
   a retomada cai no provedor nativo quando o da thread não existe mais. Medição:
   [provedor fora do ar](#codex-provedor-fora-do-ar-o-turno-nunca-fecha).
+  O `codexErrorInfo` decide antes do `willRetry`: `usageLimitExceeded`/`rateLimitExceeded` é
+  `codex_limite_uso` e `unauthorized` é `codex_sem_login`, no Python e no Rust. Turno `failed`
+  sem `codexErrorInfo` não apaga essas duas causas, que vieram no `error` anterior.
+- **Stop do Codex encerra os comandos que o turno interrompido rodava.** `turn/interrupt` fecha
+  o turno e deixa o processo vivo; depois dele vai um `thread/backgroundTerminals/terminate` por
+  `processId` de item `commandExecution` ainda aberto DAQUELE turno. Comando de turno anterior
+  (servidor de dev deixado de propósito) não é tocado. O `processId` é id do Codex, não pid. Ver
+  [Stop, queda e pensamento](#codex-stop-queda-no-meio-do-turno-e-pensamento-medido-07102026).
+- **Pensamento do Codex só existe com `summary` no `turn/start`**: sem ele o rollout guarda o
+  raciocínio cifrado e o resumo vazio. Sem terminal todo turno pede `"detailed"`; com terminal
+  quem decide é a config da TUI (o pedido vale para os turnos seguintes da conversa). O delta vai
+  ao canal `thinking` e o `summary_text` do rollout vira bolha `thinking`, nos dois parsers.
+- **Turno cortado pela queda do app-server vira `codex_turno_cortado`.** A vida anterior estava
+  trabalhando, a reconexão relê a conversa e o último turno voltou `interrupted`.
+- **Matar por pid de sidecar confere a identidade antes.** O cano tem `--escuta` e
+  `--log …/cano-*` no argv; o app-server tem `app-server` e o `endpoint` da sessão. Pid vivo que
+  não bate é outro processo (número reaproveitado depois de reiniciar a máquina): não mata.
 - **Hook de fim de turno que reabre o turno vira aviso (`notice` `hook_prompt`), nunca fala da
   pessoa.** No Codex é a mensagem de usuário `<hook_prompt …>`; no Claude, o anexo
   `hook_additional_context` de `Stop`. O de `UserPromptSubmit` fica fora: vem em todo prompt.
@@ -813,9 +845,10 @@ Sem a ponte, cada um mantinha uma fazenda de symlinks à mão apontando pro
   `CODEX_HOME`; o lock em `CODEX_HOME/.hangar-integracao.lock` serializa os escritores do Hangar
   mesmo quando seus valores de `HOME` diferem. `GET` do painel é só
   leitura, `POST` inicia ou acompanha a operação existente (202). O painel consulta enquanto a
-  operação executa e descarta respostas ao trocar servidor/desmontar. **Nunca gravar confiança
-  para autoaprovar hooks**: normalizar RTK/`SessionEnd` pode invalidar aprovação, então o painel
-  e a TUI avisam. Instruções globais usam bloco gerenciado no `AGENTS.md`; fallbacks `CLAUDE.md`
+  operação executa e descarta respostas ao trocar servidor/desmontar. A integração não grava
+  confiança de hooks: normalizar RTK/`SessionEnd` pode invalidar aprovação, e quem confia de novo
+  é o lançador, na abertura da sessão (decisão do dono, 07/10/2026: os hooks vêm da sincronização
+  do próprio Hangar e a pergunta da TUI travava a abertura pelo app). Instruções globais usam bloco gerenciado no `AGENTS.md`; fallbacks `CLAUDE.md`
   e `CLAUDE.MD` são acrescentados à config sem substituir os já existentes.
   `settings.env` entra pelo item nativo `CONFIG` em HOME temporário; somente
   `shell_environment_policy.set` é mesclado por variável e registrado no manifesto. As políticas
@@ -1082,6 +1115,25 @@ Reiniciar sozinho não bastava: `thread/resume` de uma thread cujo provedor saiu
 tentativas. Com `"modelProvider": "openai"` no mesmo pedido a thread volta e o turno seguinte
 responde. O `-c model_provider=…` da linha de comando do processo antigo não sobrevive à subida
 nova, que é montada pelo `sem_terminal` de hoje.
+
+## Codex: Stop, queda no meio do turno e pensamento (medido 07/10/2026)
+
+codex-cli 0.160.1, `app-server` em stdio, `gpt-5.6-luna`, conversa descartável. Os três métodos
+abaixo só aparecem no esquema com `generate-json-schema --experimental`; o Hangar já pede
+`experimentalApi`.
+
+- **Stop:** turno rodando `sleep 3017`; `turn/interrupt` respondeu, o turno fechou `interrupted`
+  e, 3 s depois, o `sleep` seguia vivo. `thread/backgroundTerminals/list` listou o comando com
+  `processId: "43041"` (id do Codex, `osPid` nulo); `terminate` respondeu `terminated: true` e o
+  processo sumiu. O T3 Code faz o mesmo e só para os comandos do turno interrompido.
+- **Queda:** `SIGKILL` no grupo do app-server com o comando rodando; outro app-server, `thread/resume`
+  e `thread/read` com `includeTurns`: conversa `idle`, turno `interrupted`, sem erro. É a mesma
+  marca de um Stop, por isso a regra exige que a vida anterior estivesse trabalhando.
+- **Pensamento:** os rollouts recentes desta máquina tinham `reasoning` com `summary: []` e só o
+  `encrypted_content`. Com `summary: "detailed"` no `turn/start` chegaram
+  `item/reasoning/summaryPartAdded` e `item/reasoning/summaryTextDelta`, e o rollout gravou
+  `summary: [{"type":"summary_text","text":"**Confirming 391 is composite**"}]`. No luna o resumo
+  é uma linha; modelos maiores escrevem mais.
 
 ## Codex sem terminal: `thread/start` leva o modelo, o esforço precisa de outro pedido
 

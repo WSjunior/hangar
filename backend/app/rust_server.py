@@ -32,7 +32,7 @@ _log = logging.getLogger("hangar.rust_server")
 HEALTH_PATH = "/__hangar_server/health"
 # Versão do contrato interno (rotas /internal, side-events, ambiente). Tem de casar com o
 # `protocol` da saúde (hangar_server::INTERNAL_PROTOCOL); outro número = o Python atende sozinho.
-RUST_SERVER_PROTOCOL = 36
+RUST_SERVER_PROTOCOL = 37
 START_TIMEOUT = 10.0
 OP_TIMEOUT_S = 75
 CRASH_WINDOW = 60.0
@@ -113,6 +113,17 @@ def _health(host: str, port: int) -> dict | None:
     except (OSError, ValueError):
         return None
     return body if isinstance(body, dict) and body.get("ok") is True else None
+
+
+def parse_owns(value) -> list[dict] | None:
+    """`owns` da saúde: provedor+modo que o Rust atende. Forma inválida = None (falha de partida)."""
+    if not isinstance(value, list):
+        return None
+    for item in value:
+        if not (isinstance(item, dict) and isinstance(item.get("provider"), str)
+                and type(item.get("headless")) is bool):
+            return None
+    return [{"provider": item["provider"], "headless": item["headless"]} for item in value]
 
 
 def _spawn(binary: Path, env: dict[str, str]) -> subprocess.Popen:
@@ -392,7 +403,12 @@ class Supervisor:
                     _log.error("hangar-server sem endereço privado válido na saúde")
                     diag.registrar("hangar_server.partida", "erro", codigo="endereco_invalido")
                     return "address"
-                self.configure_runtime(ready, env["HANGAR_INTERNAL_SECRET"], env["HANGAR_RUNTIME_INSTANCE"])
+                owns = parse_owns(health.get("owns"))
+                if owns is None:
+                    _log.error("hangar-server sem owns válido na saúde")
+                    diag.registrar("hangar_server.partida", "erro", codigo="capacidade_invalida")
+                    return "address"
+                self.configure_runtime(ready, env["HANGAR_INTERNAL_SECRET"], env["HANGAR_RUNTIME_INSTANCE"], owns)
                 return "up"
             await asyncio.sleep(_POLL)
         return "silent"
@@ -482,7 +498,7 @@ class Supervisor:
         _close_stdin(proc)
         await self.deactivate_runtime(confirmed_dead=proc.poll() is not None)
 
-    def configure_runtime(self, ready: dict, secret: str, instance: str) -> None:
+    def configure_runtime(self, ready: dict, secret: str, instance: str, owns: list[dict]) -> None:
         from app import runtime_coordinator
         self.runtime_ready = dict(ready)
         self.runtime_secret, self.runtime_instance = secret, instance
@@ -491,7 +507,7 @@ class Supervisor:
             lambda: bool(self.proc is not None and getattr(self.proc, "runtime_containment", None)
                 and self.proc.runtime_containment.cleaned))
         coordinator = runtime_coordinator.ensure()
-        coordinator.configure_transport(self.runtime_transport)
+        coordinator.configure_transport(self.runtime_transport, owns)
 
     async def deactivate_runtime(self, confirmed_dead: bool) -> None:
         """O filho morreu: as sessões ficam sem dono até o próximo subir (modo `pending`). Nada

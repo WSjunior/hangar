@@ -70,6 +70,8 @@ if args[:1] == ["app-server"]:
                     ws.send(json.dumps({"jsonrpc": "2.0", "method": "thread/started", "params": {"thread": thread}}))
                 if os.environ.get("FAKE_EVENTS_DONE"):
                     open(os.environ["FAKE_EVENTS_DONE"], "w").close()
+            elif "id" in msg:
+                ws.send(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"data": []}}))
 
     with serve(handler, "127.0.0.1", porta) as servidor:
         servidor.serve_forever()
@@ -580,7 +582,9 @@ def test_lancador_traduz_a_escolha_de_modelo(tmp_path):
             proc.wait(timeout=20)
     argv = (tmp_path / "tui-argv.txt").read_text().split("\n")
     assert argv[argv.index("-m") + 1] == "gpt-5.6-luna"
-    assert argv[argv.index("-c") + 1] == 'model_reasoning_effort="xhigh"'
+    assert 'model_reasoning_effort="xhigh"' in argv
+    # A checagem de atualização sai sempre: o aviso dela trava a TUI antes da thread.
+    assert "check_for_update_on_startup=false" in argv
     assert "--effort" not in argv
     # A escolha tambem vai pro SIDECAR: e de la que a pill do app le o modelo da sessao. Sem isto a
     # sessao nascia no modelo certo e a pill mostrava vazio (medido ao vivo em 30/08/2026) — o ramo
@@ -601,7 +605,8 @@ def test_lancador_sem_escolha_e_o_comando_de_hoje(tmp_path):
     )
     proc.wait(timeout=30)
     argv = (tmp_path / "tui-argv.txt").read_text().split("\n")
-    assert "-m" not in argv and "-c" not in argv
+    assert "-m" not in argv
+    assert [argv[i + 1] for i, x in enumerate(argv) if x == "-c"] == ["check_for_update_on_startup=false"]
 
 
 @pytest.mark.skipif(os.name != "posix", reason="o lancador so e usado em pane POSIX por ora")
@@ -817,3 +822,214 @@ def test_non_imported_resume_keeps_legacy_independent_permission_flags(tmp_path)
     assert result.returncode == 0, result.stderr
     server_args = json.loads(Path(env["FAKE_SERVER_OUT"]).read_text())
     assert 'approval_policy="never"' in server_args and 'sandbox_mode="read-only"' in server_args
+
+
+def _atualizacao(monkeypatch, tmp_path, publicada="0.161.0", npm_install_rc=0, view_rc=0,
+                install_stderr="", install=None, instalado="/lib/node_modules/@openai/codex/bin/codex.js"):
+    lancador = runpy.run_path(str(_LANCADOR))
+    globais = lancador["_atualizar_codex"].__globals__
+    chamadas = []
+
+    def run(argv, **_):
+        chamadas.append(argv[1:])
+        if argv[1] == "install" and install is not None:
+            return install(argv)
+        saida = {"--version": "codex-cli 0.159.3\n", "view": f"{publicada}\n"}.get(argv[1], "")
+        rc = {"install": npm_install_rc, "view": view_rc}.get(argv[1], 0)
+        erro = install_stderr if argv[1] == "install" else ""
+        return subprocess.CompletedProcess(argv, rc, stdout=saida, stderr=erro)
+
+    monkeypatch.setattr(globais["shutil"], "which", lambda nome: f"/bin/{nome}")
+    monkeypatch.setattr(globais["os"].path, "realpath", lambda _: instalado)
+    monkeypatch.setattr(globais["subprocess"], "run", run)
+    monkeypatch.setattr(globais["Path"], "home", lambda: tmp_path)
+    return lancador["_atualizar_codex"], chamadas
+
+
+def test_atualiza_o_codex_desatualizado_e_avisa_na_tela(monkeypatch, tmp_path, capsys):
+    atualizar, chamadas = _atualizacao(monkeypatch, tmp_path)
+    atualizar()
+    assert ["install", "-g", "@openai/codex@0.161.0"] in chamadas
+    err = capsys.readouterr().err
+    assert "conferindo a versão do Codex…" in err
+    assert "atualizando o Codex 0.159.3 → 0.161.0" in err
+
+
+def test_consulta_a_versao_no_maximo_uma_vez_por_hora(monkeypatch, tmp_path):
+    atualizar, chamadas = _atualizacao(monkeypatch, tmp_path, publicada="0.159.3")
+    atualizar()
+    feitas = len(chamadas)
+    atualizar()
+    assert len(chamadas) == feitas
+
+
+def test_falha_do_npm_nao_impede_a_abertura(monkeypatch, tmp_path, capsys):
+    atualizar, _ = _atualizacao(monkeypatch, tmp_path, npm_install_rc=1)
+    atualizar()
+    assert "a sessão abre na 0.159.3" in capsys.readouterr().err
+
+
+def test_cache_que_nao_e_objeto_nao_derruba_o_lancador(monkeypatch, tmp_path, capsys):
+    atualizar, chamadas = _atualizacao(monkeypatch, tmp_path, publicada="0.159.3")
+    (tmp_path / ".hangar").mkdir()
+    for conteudo in ("[]", '"x"', '{"proxima_em": "amanhã"}'):
+        (tmp_path / ".hangar" / "codex-atualizacao.json").write_text(conteudo)
+        atualizar()
+    assert chamadas.count(["view", "@openai/codex", "version"]) == 3
+    assert "não deu" not in capsys.readouterr().err
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a trava usa fcntl")
+def test_trava_ocupada_avisa_e_nao_instala(monkeypatch, tmp_path, capsys):
+    import fcntl
+    atualizar, chamadas = _atualizacao(monkeypatch, tmp_path)
+    (tmp_path / ".hangar").mkdir()
+    with open(tmp_path / ".hangar" / "codex-atualizacao.lock", "w") as outra:
+        fcntl.flock(outra, fcntl.LOCK_EX)
+        atualizar()
+    assert chamadas == []
+    assert "outra sessão está atualizando o Codex" in capsys.readouterr().err
+
+
+def test_falha_do_npm_view_avisa_e_tenta_de_novo_em_5_min(monkeypatch, tmp_path, capsys):
+    atualizar, chamadas = _atualizacao(monkeypatch, tmp_path, view_rc=1)
+    atualizar()
+    assert "tenta de novo em 5 min" in capsys.readouterr().err
+    feitas = len(chamadas)
+    atualizar()
+    assert len(chamadas) == feitas
+    agora = time.time()
+    monkeypatch.setattr(time, "time", lambda: agora + 301)
+    atualizar()
+    assert len(chamadas) > feitas
+
+
+def test_install_que_passa_do_prazo_tem_mensagem_propria(monkeypatch, tmp_path, capsys):
+    def estoura(argv):
+        raise subprocess.TimeoutExpired(argv, 600)
+    atualizar, _ = _atualizacao(monkeypatch, tmp_path, install=estoura)
+    atualizar()
+    err = capsys.readouterr().err
+    assert "passou de 10 min e foi interrompida" in err
+    assert "não deu para conferir" not in err
+
+
+@pytest.mark.parametrize("stderr,classe", [
+    ("npm ERR! code EACCES /usr/lib/node_modules", "sem permissão para instalar"),
+    ("npm ERR! code ENOTFOUND registry.npmjs.org", "falha de rede"),
+    ("npm ERR! algo estranho", "outro erro do npm"),
+])
+def test_falha_do_install_mostra_so_a_classe(monkeypatch, tmp_path, capsys, stderr, classe):
+    atualizar, _ = _atualizacao(monkeypatch, tmp_path, npm_install_rc=1, install_stderr=stderr)
+    atualizar()
+    err = capsys.readouterr().err
+    assert f"({classe})" in err and "tenta de novo em 1 h" in err
+    assert "npm ERR!" not in err
+
+
+def test_instalacao_fora_do_npm_avisa_uma_vez_por_hora(monkeypatch, tmp_path, capsys):
+    atualizar, chamadas = _atualizacao(monkeypatch, tmp_path, instalado="/usr/local/bin/codex")
+    atualizar()
+    atualizar()
+    assert capsys.readouterr().err.count("atualização automática do Codex indisponível") == 1
+    assert ["view", "@openai/codex", "version"] not in chamadas
+
+
+def _hooks_server(respostas_batch):
+    """App-server falso: responde initialize, hooks/list e config/batchWrite."""
+    from websockets.sync.server import serve
+
+    gravado = []
+    hooks = [
+        {"key": "user:Stop:0", "source": "user", "enabled": True, "trustStatus": "untrusted",
+         "currentHash": "h1"},
+        {"key": "plugin:x:Stop:0", "source": "plugin", "enabled": True, "trustStatus": "modified",
+         "currentHash": "h2"},
+        {"key": "project:Stop:0", "source": "project", "enabled": True, "trustStatus": "untrusted",
+         "currentHash": "h3"},
+    ]
+
+    def atender(ws):
+        for bruto in ws:
+            msg = json.loads(bruto)
+            ws.send(json.dumps({"jsonrpc": "2.0", "method": "aviso", "params": {}}))
+            if msg["method"] == "hooks/list":
+                ws.send(json.dumps({"id": msg["id"], "result": {"data": [{"hooks": hooks}]}}))
+            elif msg["method"] == "config/batchWrite":
+                gravado.extend(msg["params"]["edits"])
+                ws.send(json.dumps({"id": msg["id"], **respostas_batch}))
+            else:
+                ws.send(json.dumps({"id": msg["id"], "result": {}}))
+
+    servidor = serve(atender, "127.0.0.1", 0)
+    threading.Thread(target=servidor.serve_forever, daemon=True).start()
+    return servidor, f"ws://127.0.0.1:{servidor.socket.getsockname()[1]}", gravado
+
+
+@pytest.mark.parametrize("resposta", [{"result": {}}, {"error": {"code": -32603, "message": "segredo"}}])
+def test_confia_so_nos_hooks_do_usuario_e_de_plugin(capsys, resposta):
+    confiar = runpy.run_path(str(_LANCADOR))["_confiar_hooks"]
+    servidor, endpoint, gravado = _hooks_server(resposta)
+    try:
+        confiar(endpoint, "/tmp")
+    finally:
+        servidor.shutdown()
+    chaves = [json.loads("[" + e["keyPath"].replace('"."', '","') + "]")[2] for e in gravado]
+    assert chaves == ["user:Stop:0", "plugin:x:Stop:0"]
+    err = capsys.readouterr().err
+    assert "segredo" not in err
+    if "error" in resposta:
+        assert "aceitos" not in err
+        assert "config/batchWrite, código -32603" in err
+    else:
+        assert "2 hooks sincronizados pelo Hangar foram aceitos: user:Stop:0, plugin:x:Stop:0" in err
+        assert "1 hooks de outra origem" in err
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a trava usa fcntl")
+def test_falha_fora_da_consulta_grava_nova_tentativa_em_5_min(monkeypatch, tmp_path, capsys):
+    import errno
+    import fcntl
+    atualizar, chamadas = _atualizacao(monkeypatch, tmp_path)
+
+    def falha(*_):
+        raise OSError(errno.EIO, "io")
+    monkeypatch.setattr(fcntl, "flock", falha)
+    atualizar()
+    assert "não deu para preparar a atualização do Codex" in capsys.readouterr().err
+    proxima = json.loads((tmp_path / ".hangar" / "codex-atualizacao.json").read_text())["proxima_em"]
+    assert 0 < proxima - time.time() <= 300
+    assert chamadas == []
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="permissão de pasta POSIX")
+def test_pasta_sem_escrita_ainda_atualiza_e_avisa(monkeypatch, tmp_path, capsys):
+    atualizar, chamadas = _atualizacao(monkeypatch, tmp_path)
+    pasta = tmp_path / ".hangar"
+    pasta.mkdir()
+    pasta.chmod(0o500)
+    try:
+        atualizar()
+    finally:
+        pasta.chmod(0o700)
+    assert ["install", "-g", "@openai/codex@0.161.0"] in chamadas
+    assert "não deu para criar a trava da atualização do Codex" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("conteudo", ['{"proxima_em": NaN}', '{"proxima_em": 1e999}',
+                                      '{"proxima_em": 99999999999}'])
+def test_prazo_absurdo_no_cache_nao_desliga_a_atualizacao(monkeypatch, tmp_path, conteudo):
+    atualizar, chamadas = _atualizacao(monkeypatch, tmp_path, publicada="0.159.3")
+    (tmp_path / ".hangar").mkdir()
+    (tmp_path / ".hangar" / "codex-atualizacao.json").write_text(conteudo)
+    atualizar()
+    assert ["view", "@openai/codex", "version"] in chamadas
+
+
+@pytest.mark.parametrize("publicada", ["0.161.0 --foo", "9.9.9.9", "v0.161.0", "0.161.0\x1b[2J"])
+def test_versao_publicada_malformada_nao_e_instalada(monkeypatch, tmp_path, capsys, publicada):
+    atualizar, chamadas = _atualizacao(monkeypatch, tmp_path, publicada=publicada)
+    atualizar()
+    assert not any(c[0] == "install" for c in chamadas)
+    err = capsys.readouterr().err
+    assert "tenta de novo em 5 min" in err and "\x1b" not in err
