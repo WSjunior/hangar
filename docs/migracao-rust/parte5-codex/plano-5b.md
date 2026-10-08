@@ -556,7 +556,83 @@ Commit: `feat(codex): Codex-only routes served by Rust for headless sessions`.
 
 ---
 
+### Task 9: O Rust publica estado e prévia do Codex sem terminal
+
+**Decisão do dono (08/10):** entra nesta branch o item da spec 5B que o plano deixou de fora ("Estado, prévia e `ask_question` publicados pelo Rust… coalescimento de 150 ms… A lista lê o estado do Rust"). **Por quê** ([`medicao-5b.md`](medicao-5b.md)): com 10 sessões trabalhando, Python + Rust sobem de 62,5–65,5 ms/s (base `6186ce136`) para 91–92. Cada prévia (~6,65/s por sessão) vai ao Python por `/runtime/events` (`gateway.rs` `events`, sem filtro), sobe a `revision`, faz o `RuntimeAdapter.state_stream` emitir um `StateEvent` inteiro (`deepcopy` + `model_validate`, `sse.py` `state`) e volta ao Rust pela conexão interna: dois eventos por prévia, os dois processos pagam.
+
+**Desenho:**
+- **Um canal em processo por sessão, com o último valor.** O registro do runtime guarda por nome um `watch::Sender<Option<Arc<LiveState>>>` (`LiveState { public_state, channels: preview/thinking/tool, error: Option<(código, frase)> }`). O ator do Codex sem terminal escreve nele a vista, o erro durável do ator e as três prévias. **Prévia do Codex sai só daí**: não vai ao `events`, não sobe a `revision` (o espelho do Python continua consecutivo e nunca pede `snapshot` por buraco). `view`, `state`, `problem`, `rate` e voz seguem no `events` como hoje: o Python ainda precisa do espelho para controles, `current_model`, `/commands`, religação de conversa e fatos da lista.
+- **O hub publica.** `ensure_monitor` liga, para hub de Codex sem terminal, o `RuntimeFeed` (`state/runtime_feed.rs`) no lugar do `Monitor`, pelo mesmo `SpawnMonitor` (o `live::spawner` escolhe pelo binding). O feed acorda pelo `watch` (ou pela resposta gravada, `hub.wake`), espera 150 ms (`COALESCE`, a regra da lista), lê o último valor e publica pelo `publish_own` só o que mudou: `ask_question` (o `codex_question` ou `null`, como o `sse.py`), `state` (`public_state`; erro do ator vira `problema = runtime_falhou`, `problema_detalhe = "<código>: <frase>"`, como `runtime_problem`), `preview` (`PreviewEvent` com `vivo: true`, vazia quando igual à resposta gravada: `watch_commits` + `preview::is_committed`, como o `Monitor`), `pensamento` e `ferramenta` (`{"text"}`). `suggest` nunca: é do plugin Claude (`plugin_bridge.sugestao` é sempre vazio no Codex). Sem entrada no registro: `state` `idle` sem problema (a "parada" da lista). Sem registro (`StateEnv.runtime` vazio): `problema = runtime_absent`.
+- **Dono único dos eventos.** `Binding` ganha `headless` (do `info`). Hub com feed vivo descarta do Python `state`, `preview`, `ask_question`, `suggest`, `pensamento` e `ferramenta` e registra `state_python_leak` uma vez (a guarda do Claude, com os dois a mais). O Python não os produz: `_estado_do_rust(provider, name)` passa a valer também para Codex com sidecar `headless`, modo `pending`/`rust` e `rust_owns("codex", True)`; `_push_channels` não alimenta fonte de Codex.
+- **Troca de modo** (`/modo-execucao`): o `jsonl_watcher` do `sse.py` trata a mudança de `headless` do Codex como troca de provider (`__reprovider__`): reavalia `_estado_do_rust` e manda o `info` novo; o `headless` diferente religa o hub (`rebind`), que liga ou desliga o feed.
+- **Fila:** o ator já drena sozinho (`WakeQueue` em pronto/turno acabado/resposta, `Job::Queued` no append); o gatilho de entrega do `sse.py` some para o Codex sem prejuízo. A conexão interna do Codex **mantém** o `tail_pump` (é ele que chama `_confirm_codex_queue` no `user_msg`; linha de transcript, não delta), com `_enqueue_preview` desligado quando `rust_state`.
+- **Convidado e Connect (8766/8768):** `private_events` aceita hub de Codex sem terminal e repassa os seis eventos; `_canal_do_estado` aceita `pensamento`/`ferramenta`. Hub de Claude continua só com os quatro (lá o Python produz os dois em voo).
+- **Push:** não muda; sai do hook e do `stall_watch` pela lista, nunca do SSE do chat.
+- **Lista:** o feed grava em `Published` como o `Monitor`, com `sid` = stem do rollout (o `sid(row)` do `classify`; o `session_key` do Codex não é o stem). No `classify`, linha `codex` sem terminal com entrada viva vira `from_monitor` + o texto da `codex_question` (regra do `headless_state`); `pending_questions`, conta e `last_activity` seguem dos fatos do Python. Sem chat aberto, vale o fato do Python, que lê o mesmo espelho da vista do Rust.
+- **Fora:** Claude sem terminal paga o mesmo caminho (`RuntimeAdapter.state_stream`), e o feed não depende de provedor; ligar para ele é o ator escrever no `watch` e o predicado `ClaudeHeadless`. Não entra: é arquivo e prova da metade Claude ([`contrato-par.md`](../parte5-claude/contrato-par.md)) e lá ainda há `suggest`/faixa a conferir. Fica anotado em [`pendencias-5b.md`](pendencias-5b.md) com a mesma medida.
+- **Contrato interno:** muda (`info` ganha `headless`, o canal privado serve Codex, o side-events deixa de levar os seis eventos do Codex sem terminal). A branch está em 38, mas a `origin/main` já juntou outro 38 (`22b05a4ad`, pages): um Python da `main` e um Rust desta branch se aceitariam com contratos diferentes. Sobe para **39** nesta Task (`RUST_SERVER_PROTOCOL`, `INTERNAL_PROTOCOL`, `tests/proxy.rs`, `tests/terminal_routes.rs`), e a junção reconfere o próximo número livre (Global Constraints).
+
+**Files:**
+- Create: `crates/hangar-server/src/state/runtime_feed.rs`
+- Modify: `crates/hangar-server/src/runtime/protocol.rs` (`LiveState`), `runtime/gateway.rs` (`live(name)`, `Sender` no `open`, `None` no `close`/`close_with_kill`, entrada sai sem receptor), `runtime/actor.rs` (`Effect::Publish` de prévia do Codex → `watch`; `Job::View`/erro → `watch`; saída com erro do ator marca `error`)
+- Modify: `crates/hangar-server/src/state/mod.rs`, `state/live.rs` (`spawner` escolhe `Monitor` ou feed), `side.rs` (`Binding.headless`, `ensure_monitor`, guarda, `private_events`/`private_loop`), `transcript/history.rs` (`InternalInfo.headless`), `list/classify.rs`
+- Modify: `crates/hangar-server/src/lib.rs`, `crates/hangar-server/tests/proxy.rs`, `crates/hangar-server/tests/terminal_routes.rs`, `backend/app/rust_server.py` (39)
+- Modify: `backend/app/internal_api.py` (`info_payload`: `headless` do Codex), `backend/app/sse.py` (`_estado_do_rust`, `_RUST_STATE_EVENTS`, `tail_pump`, `jsonl_watcher`), `backend/app/runtime_coordinator.py` (`_push_channels`)
+- Modify: `docs/migracao-rust/parte5-codex/medicao-5b.md`, `docs/migracao-rust/parte5-codex/pendencias-5b.md`, `CLAUDE.md` + `docs/decisoes/plataforma.md` (regra do estado ao vivo: Codex sem terminal pelo feed)
+- Test: `crates/hangar-server/tests/runtime_actor.rs`, `state/runtime_feed.rs` (unitários), `side.rs` (unitários), `list/classify.rs` (unitários), `backend/tests/test_sse.py`, `test_internal_side_events.py`, `test_internal_api.py`, `test_runtime_adapter.py`
+
+**Interfaces:**
+- Consumes: ator e registro das Tasks 4–5; `Hub::publish_own`, `watch_commits`, `Published` (parte 4).
+- Produces: `RuntimeRegistry::live(name) -> watch::Receiver<Option<Arc<LiveState>>>`; `InternalInfo.headless: bool` (`#[serde(default)]`); `/__hangar_server/state/{name}/events` para Codex sem terminal com seis eventos; `sse._estado_do_rust(provider, name)`; contrato 39.
+
+- [ ] **Step 1: Testes Rust (falham)**
+
+`runtime_actor.rs`:
+- `codex_preview_goes_to_live_not_to_events`: delta do Codex → o receptor do `events` não vê `preview`/`thinking`/`tool` e a `revision` não anda; `live(name)` tem a prévia. (Risco: buraco de `revision` faria o Python pedir `snapshot` a cada evento.)
+- `codex_view_and_actor_error_reach_live`: `Job::View` atualiza `public_state`; erro durável aparece em `error` e some quando o ator volta; ator que sai com erro deixa `error` marcado. (Risco: estado calado.)
+- `claude_headless_preview_still_on_events` (fora do escopo continua igual).
+- `queued_input_drains_without_any_subscriber`: entrada na fila com turno rodando sai no fim do turno sem SSE nenhum aberto. (Risco: o gatilho de entrega do `sse.py` some.)
+
+`state/runtime_feed.rs` (`start_paused`, hub de teste com `idle_ctx`):
+- `burst_coalesces_into_one_round`: 20 prévias em 100 ms → uma `preview`, com o último texto, 150 ms depois.
+- `republishes_only_on_change`: a mesma vista duas vezes → um `state`; `ask_question` sai no primeiro retrato (`null`) e a cada mudança, inclusive de volta a `null`.
+- `actor_error_is_runtime_falhou`; `absent_entry_is_idle`; `no_registry_is_runtime_absent`.
+- `committed_preview_goes_out_empty`: prévia igual à última resposta gravada sai vazia.
+- `never_publishes_suggest`; `closed_hub_ends_feed`.
+- `publishes_to_list_with_rollout_stem`: `Published::get(name, Some(<stem do rollout>))` devolve o último `state`.
+
+`side.rs`: o teste "Sessão sem Monitor (Codex): o Python segue dono" vira dois: Codex **com** terminal → o Python segue dono; Codex **sem** terminal → os seis eventos do Python caem com um `state_python_leak`. Mais `private_channel_serves_codex_headless_six_events` (e o de Claude continua com quatro), `headless_flip_rebinds_and_swaps_owner` (o `info` com `headless` trocado religa o hub e liga/desliga o feed) e `feed_panic_reports_and_shows_problem` (diário `rust.state_feed_failed` e `state` com `problema = state_feed_failed`; volta com o próximo assinante). `one_monitor_per_session`: hub de Codex sem terminal conta um feed, com terminal nenhum.
+
+`list/classify.rs`: linha `codex` sem terminal com entrada em `Published` sai com o estado e a pergunta do feed; sem entrada, fica o fato do Python.
+
+- [ ] **Step 2: Testes Python (falham)**
+
+- `test_sse.py`: `_estado_do_rust("codex", nome)` só com sidecar `headless`, modo `pending`/`rust` e `rust_owns("codex", True)`; com terminal ou modo `python`, falso. Conexão interna de Codex sem terminal não emite nenhum dos seis eventos, mantém o `tail_pump` (o `user_msg` chama `_confirm_codex_queue`) e não chama `_enqueue_preview`. Conexão de convidado repassa os seis do canal privado falso. Sidecar que troca `headless` no meio do stream gera `__reprovider__` e um `info` novo.
+- `test_internal_api.py`: `info_payload` traz `headless` do sidecar Codex; Claude e Codex com terminal trazem `false`.
+- `test_runtime_adapter.py`: `_push_channels` de slot Codex não toca `PushPreviewSource`/`fonte_pensamento`/`fonte_ferramenta`; de Claude sem terminal, toca.
+- `test_internal_side_events.py`: o `info` da conexão interna leva `headless`.
+
+- [ ] **Step 3: Rodar e ver falhar**
+
+Run: `cd backend && uv run pytest tests/test_sse.py tests/test_internal_side_events.py tests/test_internal_api.py tests/test_runtime_adapter.py` e `cd crates && CARGO_BUILD_JOBS=4 cargo test -p hangar-server --lib side:: state::runtime_feed list::classify && CARGO_BUILD_JOBS=4 cargo test -p hangar-server --test runtime_actor`.
+
+- [ ] **Step 4: Implementar (Rust)** como no desenho. O feed roda sob `catch_unwind` como o `Monitor` (`live::spawner`); o `watch` sai do mapa no `close` quando ninguém mais o assina. Contrato 39.
+
+- [ ] **Step 5: Implementar (Python)** como no desenho; `RUST_SERVER_PROTOCOL = 39`.
+
+- [ ] **Step 6: Rodar e ver passar; commit**
+
+Run: os do Step 3, mais `CARGO_BUILD_JOBS=4 cargo test -p hangar-server --test proxy --test terminal_routes`.
+Commit: `feat(codex): Rust hub publishes headless Codex state and preview; Python leaves the delta path`.
+
+- [ ] **Step 7: Medição e regras**
+
+Release, backend isolado (`scripts/medir-codex-sem-terminal.py`, mesma máquina e roteiro da Task 8), `--rust 1` desta branch contra a base `6186ce136` já medida: 10 sessões, duas rodadas. **Aceite:** trabalhando, Python + Rust ≤ 62,5–65,5 ms/s (a base) e o total com canos e `codex` ≤ 88–91; parado, ~25 ms/s como antes; a prévia continua chegando nos chats (no máximo uma a cada 150 ms por chat, texto final igual) e o pico de RSS do Rust anotado. Não cumpriu → a Task não fecha: o relatório diz qual processo e a hipótese, sem trocar o alvo. Gravar em `medicao-5b.md` (seção "Depois da Task 9"); `CLAUDE.md` + `plataforma.md`: a regra do estado ao vivo cita o feed do Codex sem terminal; `pendencias-5b.md`: Claude sem terminal no mesmo caminho.
+Commit: `docs(codex): 5B Task 9 measurement and live-state rule`.
+
+---
+
 ## Self-review
 
-- Spec 5B coberta: nascimento e vida no Rust (Tasks 3–5), religar sem varrer (Task 5, `Respawn`), controles (Tasks 1, 5, 6), linha de status e skills (já no Rust pela 5-0; conferido na Task 6 via `/commands`), estado publicado (vem do slot em fase Rust, Task 4), tabela de pedidos (Task 2), rotas (Tasks 4 e 6), prova real (Task 8). Pendências herdadas: versão conferida (Task 1), `failed` cru e `command` vazio (Task 2), pedido de subagente (Task 2), `start_sessions` antes do `owns` (Task 4), `default_model/default_effort` (fica para a 5E, como combinado).
+- Spec 5B coberta: nascimento e vida no Rust (Tasks 3–5), religar sem varrer (Task 5, `Respawn`), controles (Tasks 1, 5, 6), linha de status e skills (já no Rust pela 5-0; conferido na Task 6 via `/commands`), estado, prévia e `ask_question` publicados pelo hub do Rust com a lista lendo o mesmo valor (Task 9; o plano original os dava como vindos do slot da Task 4, e a medida da Task 8 mostrou que não), tabela de pedidos (Task 2), rotas (Tasks 4 e 6), prova real (Task 8). Pendências herdadas: versão conferida (Task 1), `failed` cru e `command` vazio (Task 2), pedido de subagente (Task 2), `start_sessions` antes do `owns` (Task 4), `default_model/default_effort` (fica para a 5E, como combinado).
 - Fora: Codex com terminal (5C), contas/catálogo (5E), criação/rename/exclusão como rota (parte 6; aqui só o kill via Rust).
