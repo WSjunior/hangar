@@ -91,6 +91,8 @@ const WRITE_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Detecção de fim de fala pedida ao Realtime ao abrir o canal: o padrão decidia cedo demais que a pessoa terminou.
 const TURN_DETECTION: &str = r#"{"type":"semantic_vad","eagerness":"low"}"#;
+/// Desligado: o Realtime v3 recusa `session.audio.input` e o erro dele encerra a chamada inteira.
+const SEND_TURN_DETECTION: bool = false;
 
 /// `session.update` parcial no formato v3 (`audio.input`, como o `audio.output.voice` que o Codex manda).
 fn turn_detection_update() -> String {
@@ -156,7 +158,7 @@ fn drive(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: &async_ch
                     }
                     Event::ChannelOpen(id, label) => {
                         log(format!("rtc channel open id={id:?} label={label}"));
-                        if label == "oai-events" && let Some(mut channel) = rtc.channel(id) {
+                        if SEND_TURN_DETECTION && label == "oai-events" && let Some(mut channel) = rtc.channel(id) {
                             let update = turn_detection_update();
                             match channel.write(false, update.as_bytes()) {
                                 Ok(sent) => { update_pending = sent; log(format!("rtc turn detection update sent={sent} bytes={}", update.len())); }
