@@ -918,6 +918,8 @@ class CodexAdapter:
 
     async def _subir_sem_terminal(self, name: str, meta: dict) -> Optional[AppServerClient]:
         from app.runtime_adapter import assert_legacy, bind_client
+        from app.runtime_coordinator import refuse_python_client
+        refuse_python_client(name, "codex", spawn=True)
         assert_legacy(name)
         esforco_recusado = None
         falhas = self._falhas_subida.get(name, 0)

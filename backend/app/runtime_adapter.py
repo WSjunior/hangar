@@ -1109,6 +1109,7 @@ async def owner_state_stream(legacy, native, name):
 _ASYNC = {"ensure_running", "send_prompt", "deliverable", "drain", "steer", "steer_queue", "interrupt", "select",
     "answer_questions", "set_model", "set_service_tier", "set_permission_mode", "list_models", "read_settings", "read_rate_limits", "set_mode",
     "compact", "list_skills", "skip_question", "parar", "recarregar", "restart", "open_terminal", "open_headless", "set_permission_mode_sem_terminal"}
+_CODEX_OPENS_IN_RUST = {"restart", "set_permission_mode_sem_terminal", "open_terminal"}
 _SYNC = {"snapshot", "escolhas", "comandos", "problema_de", "current_model", "aprovacao_pendente", "permission_modes_sem_terminal", "rename", "close_sync"}
 
 
@@ -1183,10 +1184,13 @@ def install_adapter(cls, provider):
                 if context is not None and coordinator is not None and context.get("operation_id") in coordinator.legacy_active:
                     return await _original(self, *args, **kwargs)
                 managed = coordinator is not None and getattr(coordinator, "legacy", None) is not None
-                if (managed and _method == "ensure_running" and _facade.provider == "codex" and coordinator.mode != "python"
+                # Reiniciar, trocar o sandbox e passar para terminal precisam do processo: abrem no Rust
+                # como o envio, senão a sessão parada caía no Python, que não pode subir o cano.
+                opens = _method == "ensure_running" or _facade.provider == "codex" and _method in _CODEX_OPENS_IN_RUST
+                if (managed and opens and _facade.provider == "codex" and coordinator.mode != "python"
                         and await asyncio.to_thread(_hands_over, "codex", name)):
                     await coordinator.await_mode()      # Rust esperado: o dono da sessão sai do desfecho dele
-                if (_method == "ensure_running" and managed and getattr(coordinator, "transport", None) is not None
+                if (opens and managed and getattr(coordinator, "transport", None) is not None
                         and (_facade.provider == "claude" or coordinator.rust_owns("codex", True)
                              and await asyncio.to_thread(_hands_over, "codex", name))
                         and not bound.arguments.get("so_reconectar") and bound.arguments.get("transfer_id") is None):

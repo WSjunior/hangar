@@ -6428,7 +6428,8 @@ async def _aquecer_codex_sem_terminal(name: str) -> None:
     try:
         await get_adapter("codex").ensure_running(name)
     except Exception:
-        # O watch_sessions do adapter tenta de novo (até o teto de subidas); aqui só o log.
+        # Aqui só o log: no modo python o watch_sessions tenta de novo (até o teto de subidas); com o
+        # Rust dono, o próximo envio abre a sessão nele.
         _log.warning("codex sem terminal: aquecimento na criação falhou name=%s", name, exc_info=True)
     finally:
         _tarefas_soltas.discard(asyncio.current_task())

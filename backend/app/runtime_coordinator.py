@@ -48,10 +48,12 @@ def expect_rust(expected=True):
     _initial_mode = "pending" if expected else "python"
 
 
-def refuse_python_client(name, provider="claude"):
+def refuse_python_client(name, provider="claude", *, spawn=False):
     """Com o Rust esperado ou dono, as sessões sem terminal que ele anuncia são dele: cliente Python
-    no cano é defeito."""
-    if _current is not None and _current.mode in {"pending", "rust"} and _current.rust_owns(provider, True):
+    no cano é defeito. Exceção: a passagem para terminal (`python_client_released`) religa no cano
+    que o Rust soltou, mas nunca sobe outro (`spawn`)."""
+    if (_current is not None and _current.mode in {"pending", "rust"} and _current.rust_owns(provider, True)
+            and (spawn or name not in _current.python_client_released)):
         raise RuntimeError(f"cliente Python bloqueado em {name}: o Rust é o dono das sessões sem terminal")
 
 
@@ -263,6 +265,7 @@ class RuntimeCoordinator:
         self._mode_event = None
         # Antes da saúde do Rust vale o que se espera dele; depois, o que ele anuncia.
         self._owns = {("claude", True), ("claude", False)}
+        self.python_client_released = set()     # nomes em passagem de Codex sem terminal para terminal
 
     def rust_owns(self, provider, headless):
         return (provider, headless) in self._owns
@@ -1951,5 +1954,14 @@ class RuntimeCoordinator:
                 if (self.slot(name).change or {}).get("killed"):
                     return adapter.forget_memory(name, preserve_preview=params.get("preserve_preview", False))
                 return await asyncio.to_thread(original, adapter, name, **params)
+        if method == "open_terminal" and binding.provider == "codex" and binding.headless and self.rust_owns("codex", True):
+            async def action():
+                # Codex com terminal é do Python até a 5C: fechada no Rust sem matar, a troca religa o
+                # cliente Python no mesmo cano para conferir a ociosidade e passar a conversa ao pane.
+                self.python_client_released.add(name)
+                try:
+                    return await original(adapter, name, **params)
+                finally:
+                    self.python_client_released.discard(name)
         return await self.change(name, action, new_name=params.get("new") if method == "rename" else None,
             advance=method != "rename", remove=False, reopen=not stopped, stopped=stopped, kill=kill)
