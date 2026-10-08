@@ -225,6 +225,9 @@ pub fn summary(cwd: Option<&str>, diff: bool) -> Value {
                 parse_summary(&out.stdout)
             }
         }
+        // Repositório sem commit: `HEAD` não resolve e não há diferença a contar. Objeto vazio, não nulo:
+        // nulo é falha da consulta e iria ao diário a cada rodada. O primeiro commit liga o número.
+        Ok(out) if diff && (out.stderr.contains("ambiguous argument") || out.stderr.contains("unknown revision")) => json!({}),
         Ok(_) => Value::Null,
         Err(_) => {
             ttl = Duration::from_secs(10);

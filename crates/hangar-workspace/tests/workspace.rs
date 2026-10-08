@@ -174,3 +174,14 @@ fn copy_entry_in_status_does_not_misread_its_source_as_an_entry() {
     let done = op(dir.path(), "commit", json!({"message":"copia", "paths":["copia.txt"]}));
     assert_eq!(done["ok"], true);
 }
+
+/// Repositório recém-criado: o `diff HEAD` sai com erro, mas isso não é falha da consulta (nulo ia ao diário).
+#[test]
+fn diff_summary_of_repository_without_commits_is_empty_not_failed() {
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-b", "main"]);
+    fs::write(dir.path().join("novo.txt"), "x\n").unwrap();
+    let cwd = dir.path().to_string_lossy().into_owned();
+    assert_eq!(hangar_workspace::git::summary(Some(&cwd), true), json!({}));
+    assert!(!hangar_workspace::git::summary(Some(&cwd), false).is_null());
+}
