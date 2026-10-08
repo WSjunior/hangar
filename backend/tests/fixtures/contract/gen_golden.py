@@ -9,6 +9,7 @@ Uso, de backend/:  uv run python tests/fixtures/contract/gen_golden.py
 import json
 import logging
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -1166,6 +1167,46 @@ def write_session_write(out: Path | None = None) -> None:
         (out / name).write_text(json.dumps(rows, ensure_ascii=True, indent=1) + "\n", encoding="utf-8")
 
 
+CASOS_PAIR = {
+    "a": dict(peers=["b"], task="T-1 filtro", gid="ab12cd34", harness={"a": "claude", "b": "codex", "z": "pi"}),
+    "orq-solo": dict(peers=[], task="", gid="cd34ef56", harness={}, orq=True),
+    "nome com espaço": dict(peers=["a"], task="", gid="ab12cd34", harness={}),
+}
+
+# Escritos crus: o Python de hoje não grava `fed`, e os outros dois são formatos que ele só lê.
+CRUS_PAIR = {
+    "legado": {"peer": "x"},
+    "quebrado": [1, 2],
+    "fed": {"peers": ["b", "lab::c"], "task": "t", "gid": "ab12cd34", "harness": {},
+            "fed": {"owner": "casa", "local": True, "version": 7}},
+}
+
+
+def write_pair_sidecars() -> None:
+    """Sidecars de `.hangar-pair` como o `PairLink.set` os grava, e o que o `PairLink.get` lê deles."""
+    from app import pair
+
+    out = GOLDEN / "pair_sidecars"
+    out.mkdir(parents=True, exist_ok=True)
+    for old in out.glob("*.json"):
+        old.unlink()
+    antes = pair.settings.projects_dir
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            # Nunca o ~/.claude/.hangar-pair de verdade.
+            pair.settings.projects_dir = Path(tmp) / "projects"
+            for name, caso in CASOS_PAIR.items():
+                pair.PairLink(name).set(**caso)
+            for name, corpo in CRUS_PAIR.items():
+                (pair._pair_dir() / f"{name}.json").write_text(json.dumps(corpo), encoding="utf-8")
+            for f in sorted(pair._pair_dir().glob("*.json")):
+                shutil.copy(f, out / f.name)
+            nomes = [*CASOS_PAIR, *CRUS_PAIR]
+            write_golden("pair_sidecars/expected.json", {n: pair.PairLink(n).get() for n in nomes})
+    finally:
+        pair.settings.projects_dir = antes
+
+
 def main() -> None:
     claude = TRANSCRIPTS / "claude.jsonl"
     rewrite = TRANSCRIPTS / "claude_rewrite_surrogate.jsonl"
@@ -1192,6 +1233,7 @@ def main() -> None:
     write_golden("ask_question.json", ask_rows())
     write_golden("preview.json", preview_rows())
     write_session_write()
+    write_pair_sidecars()
 
 
 if __name__ == "__main__":

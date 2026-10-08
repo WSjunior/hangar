@@ -2,6 +2,8 @@
 //! (`registry.py:1376-1431`), e a guarda de colisão de transcript (`:1219-1262`).
 use super::discover_other::{Dirs, config_dir_of, env, truthy};
 use super::procs::ProcessView;
+use crate::groups::model::Sidecar;
+use crate::groups::store::file_stem;
 use hangar_api::session::SessionRow;
 use hangar_workspace::git::head_info;
 use hangar_workspace::worktrees::{main_repo_of, normpath, repo_root_of, try_removed_at, worktree_paths};
@@ -58,10 +60,9 @@ fn verbatim_stripped(text: &str) -> Option<String> {
     text.strip_prefix(r"\\?\").filter(|rest| rest.as_bytes().get(1) == Some(&b':')).map(str::to_owned)
 }
 
-/// `pqueue._sanitize`: nome do sidecar de vínculo (mantém o ponto, ao contrário do da sessão).
+/// Nome do sidecar de vínculo (mantém o ponto, ao contrário do da sessão).
 fn link_file(dir: &Path, name: &str) -> PathBuf {
-    let safe: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || "_.-".contains(c) { c } else { '-' }).collect();
-    dir.join(format!("{safe}.json"))
+    dir.join(format!("{}.json", file_stem(name)))
 }
 
 /// JSON-objeto do sidecar; ausente, torto ou de outro tipo é "sem vínculo", como no Python. Só o
@@ -84,34 +85,11 @@ fn read_object(path: &Path, problems: &mut Problems) -> Option<Map<String, Value
     }
 }
 
-struct Pair {
-    peers: Vec<String>,
-    /// `None` só quando o arquivo grava `task: null`; ausente é `""`.
-    task: Option<String>,
-    gid: String,
-}
-
 /// `PairLink.get`: legado `{"peer": x}` vira `peers`; sem membros só vale o grupo `orq`; sem `gid`
 /// deriva um do conjunto, igual em todos os membros.
-fn pair_of(name: &str, dirs: &Dirs, problems: &mut Problems) -> Option<Pair> {
+fn pair_of(name: &str, dirs: &Dirs, problems: &mut Problems) -> Option<Sidecar> {
     let data = read_object(&link_file(&dirs.claude.join(".hangar-pair"), name), problems)?;
-    let raw = match data.get("peers") {
-        Some(p) => p.clone(),
-        None => data.get("peer").filter(|p| truthy(p)).map(|p| Value::Array(vec![p.clone()])).unwrap_or(Value::Null),
-    };
-    let peers: Vec<String> = raw.as_array().map(|a| a.iter().filter_map(Value::as_str).filter(|p| !p.is_empty()).map(str::to_owned).collect()).unwrap_or_default();
-    if peers.is_empty() && data.get("orq") != Some(&Value::Bool(true)) {
-        return None;
-    }
-    let task = match data.get("task") { None => Some(String::new()), Some(t) => t.as_str().map(str::to_owned) };
-    let gid = data.get("gid").and_then(Value::as_str).filter(|g| !g.is_empty()).map(str::to_owned).unwrap_or_else(|| legacy_gid(name, &peers));
-    Some(Pair { peers, task, gid })
-}
-
-fn legacy_gid(name: &str, peers: &[String]) -> String {
-    let mut all: Vec<&str> = std::iter::once(name).chain(peers.iter().map(String::as_str)).collect();
-    all.sort_unstable();
-    sha1_smol::Sha1::from(all.join("\n")).digest().to_string()[..8].to_owned()
+    Sidecar::parse(name, &data)
 }
 
 /// Campos do `ExternalPair`: faltando um, o Python recusa o arquivo inteiro.

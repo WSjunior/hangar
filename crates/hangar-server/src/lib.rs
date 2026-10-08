@@ -5,6 +5,7 @@ pub mod costs;
 pub mod costs_routes;
 pub mod costs_failure;
 pub mod diag;
+pub mod groups;
 pub mod list;
 pub mod migration_status;
 pub mod mods;
