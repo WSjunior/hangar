@@ -222,6 +222,15 @@ impl Classifier {
                 }
                 continue;
             }
+            // Sem feed, a linha de status sai da vista do ator, a mesma do chat: a do fato vem do
+            // rollout, com cache, e só vê o modelo novo no turno seguinte.
+            if row.provider == "codex" && row.headless
+                && let Some(line) = facts.headless.and_then(|r| r.get(&row.name))
+                    .filter(|s| s["error"].is_null() && s["view"]["alive"] == true)
+                    .and_then(|s| s["view"]["public_state"]["status_line"].as_str())
+            {
+                row.status_line = Some(line.to_owned());
+            }
             if row.provider != "claude" {
                 continue;
             }
@@ -686,6 +695,36 @@ mod tests {
                    ("awaiting_input", Some("Qual caminho?"), Some("gpt")));
         assert_eq!(with.pending_questions, without.pending_questions, "contagem segue dos fatos");
         assert_eq!(*io.calls.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn codex_headless_status_line_follows_the_runtime_within_a_life() {
+        // Sem chat aberto (sem feed), a linha de status vem da vista do ator, a mesma do chat: o fato do
+        // Python lê o rollout com cache e só vê o modelo novo no turno seguinte.
+        let row = || -> SessionRow { serde_json::from_value(serde_json::json!({"name": "cx", "provider": "codex", "headless": true,
+            "state": "idle", "jsonl": "/x/rollout-abc.jsonl", "status_line": "🤖 gpt-6.1-sol (high) │ 💬 46k/95 46k/828k"})).unwrap() };
+        let hooks = HookStates::default();
+        let problems = BTreeMap::new();
+        let monitors = Published::default();
+        let io = Fixed { frame: Ok(String::new()), wall: 1000.0, calls: Mutex::new(0) };
+        let view = |line: &str| BTreeMap::from([("cx".to_owned(), serde_json::json!({"error": null,
+            "view": {"alive": true, "public_state": {"state": "idle", "status_line": line}}}))]);
+        let mut classifier = Classifier::default();
+        for line in ["🤖 gpt-6-luna (medium) │ 💬 46k/95 46k/828k", "🤖 gpt-6-luna (medium) │ 💬 50k/5 50k/828k"] {
+            let headless = view(line);
+            let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: Some(&headless),
+                                problems: &problems, stall_seconds: 1e12, held: &BTreeMap::new(), monitors: &monitors };
+            let mut r = row();
+            classifier.classify(std::slice::from_mut(&mut r), &facts, &io).await;
+            assert_eq!(r.status_line.as_deref(), Some(line));
+        }
+        // Ator parado: fica o fato do Python.
+        let stopped = BTreeMap::from([("cx".to_owned(), serde_json::json!({"error": null, "view": {"alive": false}}))]);
+        let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: Some(&stopped),
+                            problems: &problems, stall_seconds: 1e12, held: &BTreeMap::new(), monitors: &monitors };
+        let mut r = row();
+        classifier.classify(std::slice::from_mut(&mut r), &facts, &io).await;
+        assert_eq!(r.status_line.as_deref(), Some("🤖 gpt-6.1-sol (high) │ 💬 46k/95 46k/828k"));
     }
 
     #[tokio::test]
