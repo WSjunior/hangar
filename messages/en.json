@@ -7604,6 +7604,7 @@
   "native_voice_own_folder_failed": "Couldn't create the organizer folder (~/.hangar/voz/arquivos); it can talk but can't write files.",
   "native_voice_models_loading": "Loading Codex models…",
   "native_voice_models_failed": "Could not load the Codex models.",
+  "native_voice_settings": "Settings",
   "page_loading": "Loading {title}…",
   "page_error": "Couldn't load “{title}”",
   "page_retry": "Try again",

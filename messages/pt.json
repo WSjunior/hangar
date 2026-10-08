@@ -7604,6 +7604,7 @@
   "native_voice_own_folder_failed": "Não consegui criar a pasta do organizador (~/.hangar/voz/arquivos); ele conversa, mas não consegue gravar arquivos.",
   "native_voice_models_loading": "Carregando os modelos do Codex…",
   "native_voice_models_failed": "Não foi possível carregar os modelos do Codex.",
+  "native_voice_settings": "Ajustes",
   "page_loading": "Carregando {title}…",
   "page_error": "Não foi possível carregar «{title}»",
   "page_retry": "Tentar de novo",

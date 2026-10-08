@@ -164,6 +164,11 @@ pub(super) struct VoiceUi {
     /// Arquivo e texto do plano; fica na tela depois da chamada, até a próxima começar.
     pub(super) plan: Option<(std::path::PathBuf, String)>,
     pub(super) plan_scroll: ScrollHandle,
+    /// Plano aberto ou fechado pelo usuário; `None` segue o modo (aberto só no Planejar).
+    pub(super) plan_open: Option<bool>,
+    pub(super) settings_open: bool,
+    /// Rolagem do miolo do cartão, entre o estado da chamada e os botões.
+    pub(super) body_scroll: ScrollHandle,
     /// Contexto usado e janela do organizador; fica depois da chamada, até a próxima começar.
     pub(super) context: Option<(u64, Option<u64>)>,
     pub(super) five_hour: RateWindow,
@@ -615,7 +620,7 @@ impl Hangar {
         self.voice.watched.clear();
         self.voice.error = None;
         self.voice.mode = Mode::Direct;
-        self.voice.plan = None;
+        (self.voice.plan, self.voice.plan_open) = (None, None);
         (self.voice.context, self.voice.five_hour, self.voice.seven_day) = (None, None, None);
         self.voice.muted = false;
         self.voice.draft = None;
@@ -1461,17 +1466,38 @@ impl Hangar {
     }
 
     /// Conteúdo cru do painel: o `render_popup` já põe a superfície.
-    pub(super) fn render_voice_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// Uma linha com o que os Ajustes fechados escondem: voz, conta e o par de cada modo.
+    fn voice_settings_summary(&self) -> String {
+        let mut parts = vec![self.voice.voice.clone().unwrap_or_else(|| tr_shared("codex_voice_default", &[]).to_string())];
+        if self.voice.accounts.len() > 1 { parts.extend(self.voice.accounts.get(self.account_index()).map(|a| a.title().to_string())); }
+        for (mode, title) in [(Mode::Direct, "voice_mode_direct"), (Mode::Plan, "voice_mode_plan")] {
+            let pair = self.voice.organizer.get(mode);
+            let model = match (&pair.model, &self.voice.organizer_models) {
+                (None, _) => tr("voice_organizer_default"),
+                (Some(id), Some(Ok(models))) => models.iter().find(|m| &m.id == id).and_then(|m| m.name.clone()).unwrap_or_else(|| id.clone()),
+                (Some(id), _) => id.clone(),
+            };
+            parts.push(format!("{}: {model} {}", tr(title), pair.effort));
+        }
+        parts.join(" · ")
+    }
+
+    /// Conteúdo cru do painel: o `render_popup` já põe a superfície. Estado da chamada em cima e botões embaixo ficam
+    /// presos; o miolo rola quando o cartão não cabe na janela.
+    pub(super) fn render_voice_panel(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let live = self.voice.call.is_some();
-        let mut body = div().flex().flex_col().gap(px(12.)).p(px(16.))
+        let top = popup::anchor_bounds("topbar-voice").map_or(px(0.), |t| t.bottom());
+        let height = (window.viewport_size().height - top - px(32.)).max(px(240.));
+        let mut header = div().flex_none().flex().flex_col().gap(px(12.)).p(px(16.)).pb(px(12.))
             .child(div().flex().items_center().gap(px(8.))
                 .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(tr_shared("codex_voice_title", &[])))
                 .child(beta_badge()));
+        let mut body = div().flex().flex_col().gap(px(12.)).px(px(16.)).pb(px(4.));
         if live {
             // O estado em destaque, e logo abaixo o que o organizador faz e pensa neste turno.
             let action = self.voice.action.as_ref().map(action_text);
             let thought = thought_tail(&self.voice.thought, 3, 140);
-            body = body.child(div().flex().flex_col().gap(px(8.)).p(px(12.)).rounded(px(10.)).border_1().border_color(theme::border())
+            header = header.child(div().flex().flex_col().gap(px(8.)).p(px(12.)).rounded(px(10.)).border_1().border_color(theme::border())
                 .child(div().flex().items_center().gap(px(12.))
                     .child(self.render_equalizer(4., 28., 4.).gap(px(3.)))
                     .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
@@ -1492,16 +1518,77 @@ impl Hangar {
                 .on_click(cx.listener(|this, _, _, cx| this.set_voice_mode(Mode::Plan, cx)))));
         if let Some((path, markdown)) = &self.voice.plan {
             let open = path.clone();
-            body = body.child(div().flex().flex_col().gap(px(6.))
-                .child(div().text_xs().font_weight(FontWeight::MEDIUM).text_color(theme::muted()).child(tr("voice_plan_title")))
-                .child(scrolled("voice-plan-scroll", &self.voice.plan_scroll, 320.,
-                    div().text_sm().child(TextView::markdown("voice-plan", markdown.clone()).selectable(true).scrollable(false))))
-                .child(div().flex().items_center().justify_between().gap(px(8.))
-                    .child(div().min_w_0().overflow_hidden().text_size(px(10.5)).text_color(theme::faint()).child(path.display().to_string()))
-                    .child(Button::new("voice-plan-open").ghost().small().label(tr("voice_plan_open"))
-                        .on_click(cx.listener(move |_, _, _, cx| cx.open_with_system(&open))))));
+            let expanded = self.voice.plan_open.unwrap_or(self.voice.mode == Mode::Plan);
+            let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+            let first = markdown.lines().map(|l| l.trim().trim_start_matches('#').trim()).find(|l| !l.is_empty()).unwrap_or_default().to_owned();
+            // Documento lido numa caixa pequena: títulos no tamanho do texto, como nos relatórios da conversa.
+            let style = gpui_kit::component::text::TextViewStyle::default().heading_font_size(|level, _| px(if level <= 1 { 13. } else { 12. }));
+            body = body.child(div().flex().flex_col().gap(px(4.))
+                .child(div().flex().items_center().gap(px(6.))
+                    .child(Button::new("voice-plan-toggle").ghost().small().flex_shrink_0().toggled(expanded)
+                        .icon(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }).label(tr("voice_plan_title"))
+                        .on_click(cx.listener(move |this, _, _, cx| { this.voice.plan_open = Some(!expanded); cx.notify(); })))
+                    .child(div().flex_1().min_w_0().truncate().text_size(px(10.5)).text_color(theme::faint()).child(name))
+                    .child(Button::new("voice-plan-open").ghost().small().flex_shrink_0().label(tr("voice_plan_open"))
+                        .on_click(cx.listener(move |_, _, _, cx| cx.open_with_system(&open)))))
+                .child(if expanded {
+                    scrolled("voice-plan-scroll", &self.voice.plan_scroll, 180.,
+                        div().text_xs().text_color(theme::text()).child(TextView::markdown("voice-plan", markdown.clone()).selectable(true).scrollable(false).style(style)))
+                } else {
+                    div().px(px(8.)).text_xs().text_color(theme::muted()).truncate().child(first).into_any_element()
+                }));
         }
         body = body.children(self.render_voice_usage());
+        let settings_open = self.voice.settings_open;
+        body = body.child(div().flex().flex_col().gap(px(2.))
+            .child(Button::new("voice-settings-toggle").ghost().small().w_full().toggled(settings_open)
+                .icon(if settings_open { IconName::ChevronDown } else { IconName::ChevronRight })
+                .child(div().flex_1().min_w_0().flex().items_center().gap(px(8.))
+                    .child(div().flex_shrink_0().text_xs().font_weight(FontWeight::MEDIUM).text_color(theme::muted()).child(tr("voice_settings")))
+                    .when(!settings_open, |el| el.child(div().flex_1().min_w_0().truncate().text_xs().text_color(theme::faint())
+                        .child(self.voice_settings_summary()))))
+                .on_click(cx.listener(move |this, _, _, cx| { this.voice.settings_open = !settings_open; cx.notify(); }))));
+        if settings_open {
+            body = self.render_voice_settings(body, live);
+        }
+        // Falha do catálogo aparece com os Ajustes fechados também.
+        if let Some(Err(error)) = &self.voice.organizer_models {
+            body = body.child(div().text_xs().text_color(theme::danger()).whitespace_normal()
+                .child(format!("{} {error}", tr("voice_models_failed")).trim_end().to_owned()));
+        }
+        if let Some(draft) = &self.voice.draft {
+            body = body.child(div().flex().flex_col().gap(px(4.)).p(px(10.)).rounded(px(8.)).border_1().border_color(theme::warning())
+                .child(div().text_xs().text_color(theme::warning()).child(tr("voice_draft_held")))
+                .child(div().text_sm().text_color(theme::text()).whitespace_normal().child(draft.clone())));
+        }
+        let mut footer = div().flex_none().flex().flex_col().gap(px(8.)).p(px(16.)).pt(px(12.)).border_t_1().border_color(theme::border());
+        if let Some(error) = &self.voice.error {
+            footer = footer.child(div().text_xs().text_color(theme::danger()).whitespace_normal().child(error.clone()));
+        }
+        let actions = if live {
+            let mute = if self.voice.muted { "codex_voice_unmute_short" } else { "codex_voice_mute_short" };
+            div().flex().justify_end().gap(px(8.))
+                .child(Button::new("voice-mute").ghost().small().label(tr_shared(mute, &[]))
+                    .disabled(!matches!(self.voice.phase, Some(Phase::Live)))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.voice.muted = !this.voice.muted;
+                        if let Some(call) = &this.voice.call { call.set_muted(this.voice.muted); }
+                        cx.notify();
+                    })))
+                .child(Button::new("voice-stop").danger().small().label(tr_shared("codex_voice_stop_short", &[]))
+                    .on_click(cx.listener(|this, _, _, cx| this.stop_voice(cx))))
+        } else {
+            div().flex().justify_end().child(Button::new("voice-connect").primary().small().label(tr_shared("codex_voice_connect_short", &[]))
+                .on_click(cx.listener(|this, _, _, cx| this.start_voice(cx))))
+        };
+        let middle = div().relative().flex_shrink(1.).min_h_0().flex().flex_col()
+            .child(div().id("voice-card-body").flex_shrink(1.).min_h_0().overflow_y_scroll().track_scroll(&self.voice.body_scroll).child(body))
+            .child(div().absolute().inset_0().child(Scrollbar::vertical(&self.voice.body_scroll).mode(ScrollbarMode::Always)));
+        div().max_h(height).flex().flex_col().child(header).child(middle).child(footer.child(actions)).into_any_element()
+    }
+
+    /// Voz, conta e o par do organizador de cada modo, dentro dos Ajustes abertos.
+    fn render_voice_settings(&self, mut body: Div, live: bool) -> Div {
         if let Some((picker, _)) = &self.voice.voice_select {
             body = body.child(div().flex().items_center().justify_between().gap(px(12.))
                 .child(div().text_xs().text_color(theme::muted()).child(tr_shared("codex_voice_label", &[])))
@@ -1527,36 +1614,10 @@ impl Hangar {
         }
         match &self.voice.organizer_models {
             Some(Ok(_)) => body = body.child(div().text_xs().text_color(theme::faint()).whitespace_normal().child(tr("voice_organizer_hint"))),
-            Some(Err(error)) => body = body.child(div().text_xs().text_color(theme::danger()).whitespace_normal()
-                .child(format!("{} {error}", tr("voice_models_failed")).trim_end().to_owned())),
             None if self.voice.models_seq > 0 => body = body.child(div().text_xs().text_color(theme::muted()).child(tr("voice_models_loading"))),
-            None => {}
+            _ => {}
         }
-        if let Some(draft) = &self.voice.draft {
-            body = body.child(div().flex().flex_col().gap(px(4.)).p(px(10.)).rounded(px(8.)).border_1().border_color(theme::warning())
-                .child(div().text_xs().text_color(theme::warning()).child(tr("voice_draft_held")))
-                .child(div().text_sm().text_color(theme::text()).whitespace_normal().child(draft.clone())));
-        }
-        if let Some(error) = &self.voice.error {
-            body = body.child(div().text_xs().text_color(theme::danger()).whitespace_normal().child(error.clone()));
-        }
-        let actions = if live {
-            let mute = if self.voice.muted { "codex_voice_unmute_short" } else { "codex_voice_mute_short" };
-            div().flex().justify_end().gap(px(8.))
-                .child(Button::new("voice-mute").ghost().small().label(tr_shared(mute, &[]))
-                    .disabled(!matches!(self.voice.phase, Some(Phase::Live)))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.voice.muted = !this.voice.muted;
-                        if let Some(call) = &this.voice.call { call.set_muted(this.voice.muted); }
-                        cx.notify();
-                    })))
-                .child(Button::new("voice-stop").danger().small().label(tr_shared("codex_voice_stop_short", &[]))
-                    .on_click(cx.listener(|this, _, _, cx| this.stop_voice(cx))))
-        } else {
-            div().flex().justify_end().child(Button::new("voice-connect").primary().small().label(tr_shared("codex_voice_connect_short", &[]))
-                .on_click(cx.listener(|this, _, _, cx| this.start_voice(cx))))
-        };
-        body.child(actions).into_any_element()
+        body
     }
 }
 

@@ -120,7 +120,7 @@ impl Hangar {
                 Some(self.render_usage_card(window, cx))),
             Floating::Context => ("composer-ctx".to_owned(), Align::End, true, Some(self.render_context_card())),
             Floating::Hangar => ("hangar-chip".to_owned(), Align::Start, true, Some(self.render_hangar_popover(window, cx))),
-            Floating::Voice => ("topbar-voice".to_owned(), Align::End, true, Some(self.render_voice_panel(cx))),
+            Floating::Voice => ("topbar-voice".to_owned(), Align::End, true, Some(self.render_voice_panel(window, cx))),
             Floating::Recent(recent) => {
                 let live = self.recent.replace(recent);
                 let content = self.render_recent(cx);
