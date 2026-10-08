@@ -1463,9 +1463,11 @@ para 91–92 ms/s ([medicao-5b.md](../migracao-rust/parte5-codex/medicao-5b.md))
 - O hub de Codex sem terminal (`Binding.headless`, vindo do `info`) liga o `RuntimeFeed` pelo
   mesmo `SpawnMonitor`: acorda pelo `watch` ou pela resposta gravada, espera 150 ms e publica só o
   que mudou (`ask_question`, `state`, `preview`, `pensamento`, `ferramenta`; `suggest` nunca).
-  Sem entrada no registro é `idle`; sem registro, `problema=runtime_absent`; erro do ator,
-  `runtime_falhou` com `<código>: <frase>`; pânico, diário `rust.state_feed_failed` e
-  `problema=state_feed_failed` até o próximo assinante.
+  Todo problema sai como `problema=runtime_falhou` (o código que web, app e nativo traduzem) com
+  `<código>: <frase>` no detalhe: erro do ator, pânico do ator (`runtime_panic`), sessão fora do
+  registro ou sem registro (`runtime_absent`) e pânico do feed (`state_feed_failed`, também no
+  diário `rust.state_feed_failed`, até o próximo assinante). O `close` de uma vida que acabou com
+  erro não apaga o erro: ele fica até a próxima abertura.
 - Dono único: o hub descarta os seis do Python com `state_python_leak`; o Python não os produz
   (`_estado_do_rust(provider, name)`), mantém o `tail_pump` da conexão interna (confirma a fila) e
   não alimenta as fontes de prévia do Codex (`_push_channels`). Trocar de modo é troca de provider

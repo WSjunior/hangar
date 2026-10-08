@@ -439,18 +439,14 @@ impl RuntimeActor {
         let run = run(target,queue,connection,engine,receiver,sender,closed,events);
         *slot = Some(tokio::spawn(async move {
             let mut guard = ClearOnDrop { mods,name,life };
+            let mut panic = LivePanicMark(live);
             let result = run.await;
+            let live = panic.0.take();
             // Saída por `?` deixava o ator mudo: só sobrava o runtime_closed de quem chamasse depois.
             if let Err(error) = &result {
                 tracing::warn!(key=%key,session=%guard.name,code=%error.code,reason=%error.message,"ator do runtime terminou com erro");
-                // O hub mostra a saída com erro até o `close` esvaziar o canal.
-                if let Some(live) = &live {
-                    live.send_modify(|value| {
-                        let mut next = value.as_deref().cloned().unwrap_or_default();
-                        next.error = Some((error.code.clone(),error.message.clone()));
-                        *value = Some(Arc::new(next));
-                    });
-                }
+                // O hub mostra a saída com erro, inclusive depois do `close`.
+                if let Some(live) = &live { mark_live_error(live,&error.code,&error.message); }
             } else {
                 // Saída normal (`stop` ou caixa fechada): quem limpa a faixa é o `close`, com o `forget`.
                 guard.mods = None;
@@ -459,6 +455,25 @@ impl RuntimeActor {
         }));
         drop(slot);
         handle
+    }
+}
+
+/// Erro durável no canal do hub, sobre o último valor.
+fn mark_live_error(live:&LiveSender,code:&str,message:&str) {
+    live.send_modify(|value| {
+        let mut next = value.as_deref().cloned().unwrap_or_default();
+        next.error = Some((code.to_owned(),message.to_owned()));
+        *value = Some(Arc::new(next));
+    });
+}
+
+/// Armada durante a vida do ator: em pânico ela é solta sem desarmar, e o hub passa a mostrar o
+/// problema em vez do último estado (o canal não fecha, o registro ainda segura o emissor).
+struct LivePanicMark(Option<LiveSender>);
+
+impl Drop for LivePanicMark {
+    fn drop(&mut self) {
+        if let Some(live) = &self.0 { mark_live_error(live,"runtime_panic","o ator do runtime caiu"); }
     }
 }
 
@@ -1597,6 +1612,22 @@ mod tests {
         let second = tokio::time::timeout(Duration::from_secs(2),handle.mods(call(),soon())).await.unwrap();
         assert_eq!(second.unwrap_err().code,"erro_mod_clique_sem_resposta");
         assert_eq!(MODS_CALL_LIMIT,Duration::from_secs(7));
+    }
+
+    #[test]
+    fn an_actor_panic_marks_the_live_channel_and_a_finished_run_does_not() {
+        let (live,rx) = tokio::sync::watch::channel(Some(Arc::new(LiveState { public_state:json!({"state":"working"}),..Default::default() })));
+        // Saída que chegou ao fim: desarmada, o valor fica como o ator deixou.
+        let mut done = LivePanicMark(Some(live.clone()));
+        let _ = done.0.take();
+        drop(done);
+        assert!(rx.borrow().as_ref().unwrap().error.is_none());
+        let armed = LivePanicMark(Some(live));
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || { let _armed = armed; panic!("pânico simulado do ator"); }));
+        assert!(panicked.is_err());
+        let state = rx.borrow().clone().unwrap();
+        assert_eq!(state.error.as_ref().map(|(code,_)|code.as_str()),Some("runtime_panic"));
+        assert_eq!(state.public_state["state"],"working","o problema vai sobre o último estado");
     }
 
     #[test]

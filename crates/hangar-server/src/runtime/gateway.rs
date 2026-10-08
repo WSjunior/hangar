@@ -383,6 +383,9 @@ impl RuntimeRegistry {
         if self.entries.lock().await.values().any(|entry|entry.name == name) { return; }
         let mut map = self.live.lock().unwrap_or_else(|e|e.into_inner());
         if let Some(sender) = map.get(name) {
+            // Vida que acabou com erro: o problema fica até a próxima abertura, que escreve por cima.
+            // ponytail: o canal com erro de sessão apagada fica no mapa; um por nome, sem crescer.
+            if sender.borrow().as_ref().is_some_and(|state|state.error.is_some()) { return; }
             sender.send_replace(None);
             if sender.receiver_count() == 0 { map.remove(name); }
         }
@@ -723,6 +726,19 @@ mod tests {
         registry.live_sender("a").send_replace(None);
         let _ = registry.live_sender("c");
         assert!(!registry.live.lock().unwrap().contains_key("a"),"vazio, sem dono e sem receptor: sai");
+    }
+
+    #[tokio::test]
+    async fn close_keeps_the_error_of_a_life_that_failed() {
+        let registry = RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into());
+        let rx = registry.live("a");
+        let failed = LiveState { error:Some(("queue_io".into(),"fila recusou".into())),..Default::default() };
+        registry.live_sender("a").send_replace(Some(Arc::new(failed)));
+        registry.clear_live("a").await;
+        assert!(rx.borrow().as_ref().is_some_and(|s|s.error.is_some()),"o hub segue mostrando a falha depois do close");
+        registry.live_sender("a").send_replace(Some(Arc::new(LiveState::default())));
+        registry.clear_live("a").await;
+        assert!(rx.borrow().is_none(),"vida que acabou bem: o canal esvazia");
     }
 
     #[tokio::test]

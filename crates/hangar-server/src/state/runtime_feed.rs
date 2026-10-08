@@ -36,6 +36,12 @@ fn actor_problem(code: &str, message: &str) -> String {
 
 fn idle(name: &str) -> StateEvent { StateEvent { session: name.into(), state: "idle".into(), headless: true, ..Default::default() } }
 
+/// Problema do próprio feed. Sai como `runtime_falhou`, o código que web, app e nativo traduzem;
+/// o motivo vai no detalhe. Código novo sem tradução some da tela do web.
+fn feed_problem(name: &str, code: &str, message: &str) -> StateEvent {
+    StateEvent { problema: Some("runtime_falhou".into()), problema_detalhe: Some(actor_problem(code, message)), ..idle(name) }
+}
+
 impl RuntimeFeed {
     /// `live`: `None` quando o servidor não tem o runtime ligado.
     pub fn new(hub: &Arc<Hub>, live: Option<LiveReceiver>, published: Arc<Published>) -> Self {
@@ -77,15 +83,16 @@ impl RuntimeFeed {
         }
         let value = self.live.as_mut().map(|rx| rx.borrow_and_update().clone());
         let (state, texts) = match &value {
-            None => (StateEvent { problema: Some("runtime_absent".into()), ..idle(&self.name) }, Default::default()),
-            Some(None) => (idle(&self.name), Default::default()),
+            None => (feed_problem(&self.name, "runtime_absent", "o servidor não tem o runtime ligado"), Default::default()),
+            // A sessão não está aberta no runtime (ainda não abriu, ou a abertura falhou).
+            Some(None) => (feed_problem(&self.name, "runtime_absent", "a sessão não está aberta no runtime"), Default::default()),
             Some(Some(live)) => {
                 let mut state = if live.public_state.is_null() { idle(&self.name) } else {
                     serde_json::from_value(live.public_state.clone()).unwrap_or_else(|_| {
                         if crate::warn_limit::allow(Some(&self.name), "state_feed_invalid") {
                             tracing::warn!(session = self.name.as_str(), code = "state_feed_invalid", "estado: vista do ator não é um estado");
                         }
-                        StateEvent { problema: Some("state_feed_invalid".into()), ..idle(&self.name) }
+                        feed_problem(&self.name, "state_feed_invalid", "a vista do ator não é um estado")
                     })
                 };
                 if let Some((code, message)) = &live.error {
@@ -146,8 +153,7 @@ pub async fn guarded(hub: Weak<Hub>, run: impl std::future::Future<Output = ()>,
     let Some(hub) = hub.upgrade() else { return };
     tracing::error!(session = hub.name.as_str(), code = "state_feed_panic", "estado: feed do Codex caiu");
     on_panic(&hub.name);
-    let state = StateEvent { problema: Some("state_feed_failed".into()),
-        problema_detalhe: Some("o estado da sessão caiu; volta ao reabrir o chat".into()), ..idle(&hub.name) };
+    let state = feed_problem(&hub.name, "state_feed_failed", "o estado da sessão caiu; volta ao reabrir o chat");
     if let Ok(data) = serde_json::to_string(&state) {
         hub.publish_own("state", &data);
     }
@@ -263,15 +269,16 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn absent_entry_is_idle() {
+    async fn absent_entry_shows_the_runtime_is_down() {
+        // Sem entrada (abertura que não veio ou falhou) a sessão não está parada calada.
         let f = fixture();
         let mut rx = f.lease.hub.tx.subscribe();
         let (_tx, live_rx) = channel(None);
         let _feed = spawn(&f, Some(live_rx));
         let got = collect(&mut rx, Duration::from_millis(50)).await;
         let state = &of(&got, "state")[0].2;
-        assert_eq!(state["state"], "idle");
-        assert!(state["problema"].is_null(), "{state}");
+        assert_eq!((state["state"].as_str(), state["problema"].as_str()), (Some("idle"), Some("runtime_falhou")));
+        assert!(state["problema_detalhe"].as_str().unwrap().starts_with("runtime_absent:"), "{state}");
     }
 
     #[tokio::test(start_paused = true)]
@@ -280,7 +287,9 @@ mod tests {
         let mut rx = f.lease.hub.tx.subscribe();
         let _feed = spawn(&f, None);
         let got = collect(&mut rx, Duration::from_millis(50)).await;
-        assert_eq!(of(&got, "state")[0].2["problema"], "runtime_absent");
+        let state = &of(&got, "state")[0].2;
+        assert_eq!(state["problema"], "runtime_falhou");
+        assert!(state["problema_detalhe"].as_str().unwrap().starts_with("runtime_absent:"), "{state}");
     }
 
     #[tokio::test(start_paused = true)]
