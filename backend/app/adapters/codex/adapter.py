@@ -1557,6 +1557,11 @@ class CodexAdapter:
             _esperar_saida(pids)
             if any(pid_vivo(pid) for pid in pids):
                 raise RuntimeError("o processo antigo continua vivo; sidecar e fila conservados")
+        self.forget_memory(name, preserve_preview=preserve_preview)
+
+    def forget_memory(self, name: str, *, preserve_preview: bool = False) -> None:
+        """Esquece a sessão na memória do adapter, sem matar processo: o encerramento pelo Rust também
+        passa aqui, senão um problema velho voltava na sessão recriada com o mesmo nome."""
         self._falhas_subida.pop(name, None)
         self._problemas.pop(name, None)
         sess = self._sessions.pop(name, None)

@@ -126,7 +126,9 @@ pub struct LaunchConfig { pub sidecar_dir:std::path::PathBuf, pub backoff:Durati
 struct Respawn {
     failures:u8,
     next_at:Option<f64>,
-    task:Option<JoinHandle<Result<Relaunched,RuntimeError>>>,
+    task:Option<JoinHandle<Result<Relaunched,(RuntimeError,Value)>>>,
+    /// O que uma subida que falhou já gravou no arquivo da sessão: a próxima vida parte dele.
+    carried:Value,
     /// Operação da pessoa (reiniciar, trocar o sandbox) e o que ela recebe quando o processo novo conecta.
     user:Option<(String,Value)>,
     /// A queda entregou `cano_saiu`: o processo filho morreu e o cano que ficou pode ser encerrado.
@@ -941,7 +943,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
             }
             relaunched = async { respawn.task.as_mut().unwrap().await }, if respawn.task.is_some() => {
                 respawn.task = None;
-                match relaunched.unwrap_or_else(|_|Err(failure("respawn_panic"))) {
+                match relaunched.unwrap_or_else(|_|Err((failure("respawn_panic"),Value::Null))) {
                     Ok(Relaunched { target:next,spawned,connection,patch }) => {
                         io.stop().await;
                         let snapshot = connection.snapshot.clone();
@@ -953,7 +955,10 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                         if let Some(fields) = engine.view().as_object() {
                             for (key,value) in fields { if key != "public_state" && key != "conversation" { metadata[key] = value.clone(); } }
                         }
-                        if let Some(fields) = patch.as_object() { for (key,value) in fields { metadata[key] = value.clone(); } }
+                        // O que uma subida anterior gravou no arquivo vale aqui também: o comando já saiu dele.
+                        for fields in [std::mem::take(&mut respawn.carried),patch].iter().filter_map(Value::as_object) {
+                            for (key,value) in fields { metadata[key] = value.clone(); }
+                        }
                         metadata["in_progress"] = json!(std::mem::take(&mut respawn.was_working));
                         target = next;
                         let mut renewed = engine.renewed(metadata,target.generation,clock(start))?;
@@ -971,7 +976,8 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                         }
                         drain_requested = true;
                     }
-                    Err(failure) => {
+                    Err((failure,written)) => {
+                        if !written.is_null() { respawn.carried = written; }
                         tracing::warn!(key=%target.key,session=%target.name,code=%failure.code,reason=%failure.message,attempt=respawn.failures,"processo da sessão não subiu de novo");
                         let user = respawn.user.take();
                         if let Some((operation_id,_)) = &user { fail_root(&mut roots,operation_id,failure.clone()); }
@@ -1309,22 +1315,24 @@ fn cano_of(binding:&CanoBinding) -> super::process::Cano {
 
 /// Grava o que a pessoa trocou, encerra o processo de antes (quando ele já não serve) e sobe outro
 /// pela regra 1: cano vivo e da sessão é reaproveitado, nunca dois.
-async fn relaunch(policy:PolicyClient,mut target:RuntimeTarget,sidecar_dir:std::path::PathBuf,kill:bool,patch:Value,saved:Option<SavedState>) -> Result<Relaunched,RuntimeError> {
-    if let Some((queue,sample,gate,version,view)) = saved { save_view(&queue,target.generation,sample,&gate,version,&view,true).await?; }
-    if !patch.is_null() {
-        let written = super::gateway::launch_policy(&policy,&target,"session.patch_meta",patch.clone()).await?;
-        if written["updated"] != true { return Err(RuntimeError::new("session_patch_stale","o arquivo da sessão não aceitou o modo novo")); }
-    }
+/// O erro leva o que já foi gravado no arquivo: o processo antigo morre ANTES da gravação, então falha
+/// no kill ou na gravação deixa tudo no modo de antes, e só a falha da subida deixa o modo novo gravado.
+async fn relaunch(policy:PolicyClient,mut target:RuntimeTarget,sidecar_dir:std::path::PathBuf,kill:bool,patch:Value,saved:Option<SavedState>) -> Result<Relaunched,(RuntimeError,Value)> {
     if kill && target.binding.pid != 0 {
         super::process::kill(&cano_of(&target.binding),&target.key,&sidecar_dir).await
-            .map_err(|error|RuntimeError::new(error.code(),"o processo antigo da sessão não encerrou"))?;
+            .map_err(|error|(RuntimeError::new(error.code(),"o processo antigo da sessão não encerrou"),Value::Null))?;
     }
-    let spawned = super::gateway::launch_if_needed(&policy,&mut target,&sidecar_dir).await?;
+    if let Some((queue,sample,gate,version,view)) = saved { save_view(&queue,target.generation,sample,&gate,version,&view,true).await.map_err(|error|(error,Value::Null))?; }
+    if !patch.is_null() {
+        let written = super::gateway::launch_policy(&policy,&target,"session.patch_meta",patch.clone()).await.map_err(|error|(error,Value::Null))?;
+        if written["updated"] != true { return Err((RuntimeError::new("session_patch_stale","o arquivo da sessão não aceitou o modo novo"),Value::Null)); }
+    }
+    let spawned = super::gateway::launch_if_needed(&policy,&mut target,&sidecar_dir).await.map_err(|error|(error,patch.clone()))?;
     match super::cano::connect(&target.binding).await {
         Ok(connection)=>Ok(Relaunched { target,spawned:spawned.is_some(),connection,patch }),
         Err(error)=>{
             if let Some(cano) = spawned { super::gateway::discard(&policy,&target,&cano,&sidecar_dir).await; }
-            Err(error)
+            Err((error,patch))
         }
     }
 }

@@ -38,7 +38,9 @@ async fn run() {
     });
     // Órfãos do cano têm dono só: com o runtime ligado, o Rust varre uma vez, antes de anunciar o
     // gateway (o Python só abre sessões depois do anúncio). Só aqui, pelo mesmo motivo do tmux acima.
-    if matches!(hangar_server::config::Config::runtime_instance(), Ok(Some(_))) {
+    // `CP_RUST_NO_ORPHAN_SWEEP=1`: o teste que sobe este binário de verdade nunca varre processos da máquina.
+    if matches!(hangar_server::config::Config::runtime_instance(), Ok(Some(_)))
+        && std::env::var_os("CP_RUST_NO_ORPHAN_SWEEP").is_none_or(|value| value != "1") {
         if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
             let swept = tokio::task::spawn_blocking(move || {
                 let base = home.join(".hangar");

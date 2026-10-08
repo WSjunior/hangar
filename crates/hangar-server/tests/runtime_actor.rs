@@ -812,6 +812,10 @@ for line in sys.stdin:
 
     /// Python falso da política: `launch_env` devolve o `codex` falso; o resto só é anotado.
     async fn policy(launch:Value) -> (std::net::SocketAddr,Arc<Mutex<Vec<(String,Value)>>>) {
+        policy_failing(launch,Arc::new(std::sync::atomic::AtomicUsize::new(0))).await
+    }
+    /// Como `policy`, mas os próximos `fail` pedidos de `launch_env` respondem `codex_ausente`.
+    async fn policy_failing(launch:Value,fail:Arc<std::sync::atomic::AtomicUsize>) -> (std::net::SocketAddr,Arc<Mutex<Vec<(String,Value)>>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let calls = Arc::new(Mutex::new(Vec::new()));
@@ -819,7 +823,7 @@ for line in sys.stdin:
         tokio::spawn(async move {
             loop {
                 let Ok((stream,_)) = listener.accept().await else { return };
-                let (seen,launch) = (seen.clone(),launch.clone());
+                let (seen,launch,fail) = (seen.clone(),launch.clone(),fail.clone());
                 tokio::spawn(async move {
                     let mut reader = BufReader::new(stream);
                     loop {
@@ -835,7 +839,8 @@ for line in sys.stdin:
                         let body:Value = serde_json::from_slice(&body).unwrap_or_default();
                         let kind = body["kind"].as_str().unwrap_or("").to_owned();
                         seen.lock().unwrap().push((kind.clone(),body["payload"].clone()));
-                        let data = if kind == "launch_env" { launch.clone() } else if kind == "session.patch_meta" { json!({"updated":true}) } else { json!({}) };
+                        let failing = kind == "launch_env" && fail.fetch_update(std::sync::atomic::Ordering::SeqCst,std::sync::atomic::Ordering::SeqCst,|left|left.checked_sub(1)).is_ok();
+                        let data = if failing { json!({"error":"codex_ausente"}) } else if kind == "launch_env" { launch.clone() } else if kind == "session.patch_meta" { json!({"updated":true}) } else { json!({}) };
                         let reply = json!({"ok":true,"data":data}).to_string();
                         let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",reply.len());
                         if reader.get_mut().write_all(response.as_bytes()).await.is_err() { return; }
@@ -971,6 +976,8 @@ for line in sys.stdin:
         result = {{"thread": {{"id": "thread-new", "path": "/tmp/rollout-thread-new.jsonl"}}, "model": "gpt-test"}}
     elif method == "turn/start":
         result = {{"turn": {{"id": "turn-1", "status": "inProgress"}}}}
+    elif method == "thread/read" and os.path.exists(os.path.join(d, "cut")):
+        result = {{"thread": {{"id": "thread-new", "status": {{"type": "idle"}}, "turns": [{{"id": "turn-1", "status": "interrupted", "items": []}}]}}}}
     elif method == "turn/interrupt":
         send({{"id": msg["id"], "result": {{}}}})
         send({{"method": "turn/completed", "params": {{"threadId": "thread-new", "turn": {{"id": "turn-1", "status": "interrupted"}}}}}})
@@ -995,10 +1002,14 @@ for line in sys.stdin:
     }
 
     async fn lifecycle_session(dir:&std::path::Path,key:&str,mode:&str,base:std::time::Duration) -> (Arc<RuntimeRegistry>,Arc<Mutex<Vec<(String,Value)>>>) {
+        lifecycle_session_failing(dir,key,mode,base,Arc::new(std::sync::atomic::AtomicUsize::new(0))).await
+    }
+    async fn lifecycle_session_failing(dir:&std::path::Path,key:&str,mode:&str,base:std::time::Duration,fail:Arc<std::sync::atomic::AtomicUsize>)
+        -> (Arc<RuntimeRegistry>,Arc<Mutex<Vec<(String,Value)>>>) {
         use_cano_bin();
         let owner = dir.to_string_lossy().into_owned();
         let codex = lifecycle_codex(dir);
-        let (address,calls) = policy(json!({"program":[codex,"app-server","--stdio"],"env":env(key,&owner),"cano_extra":{}})).await;
+        let (address,calls) = policy_failing(json!({"program":[codex,"app-server","--stdio"],"env":env(key,&owner),"cano_extra":{}}),fail).await;
         let registry = Arc::new(RuntimeRegistry::new(address,"secret".into(),"instance".into()).with_respawn_base(base));
         let mut target = target(dir,key,no_cano());
         target.metadata["permission_mode"] = json!(mode);
@@ -1118,6 +1129,55 @@ for line in sys.stdin:
         tokio::time::timeout(std::time::Duration::from_secs(20),async {
             while handle.snapshot().await.unwrap()["view"]["in_progress"] != false { tokio::time::sleep(std::time::Duration::from_millis(20)).await; }
         }).await.expect("turno fechado");
+    }
+
+    #[tokio::test]
+    async fn sandbox_switch_that_fails_to_start_keeps_the_new_mode_for_the_next_life() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = unique_key();
+        let fail = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (registry,policy) = lifecycle_session_failing(dir.path(),&key,"Full Access",std::time::Duration::from_millis(300),fail.clone()).await;
+        let handle = registry.handle(&key,1).await.unwrap();
+        fail.store(1,std::sync::atomic::Ordering::SeqCst);
+        let failed = handle.command(control("perm-1",OperationKind::SetPermissionMode,json!({"mode":"Ask for approval"}))).await;
+        assert_eq!(failed.err().unwrap().code,"codex_ausente");
+        assert!(matches!(process::liveness(recorded(&policy)[0].pid,&key),process::Liveness::Dead),"o processo antigo já tinha morrido");
+        // A religação automática sobe com o modo gravado no arquivo, no comando e no `thread/resume`.
+        until("religou depois da falha",||recorded(&policy).len() >= 2).await;
+        until_ready(&registry,&key).await;
+        let resumed:Vec<Value> = calls(dir.path()).into_iter().filter(|call|call["method"] == "thread/resume").collect();
+        assert_eq!(resumed.last().unwrap()["params"]["sandbox"],"read-only");
+        let view = handle_view(&registry,&key).await;
+        assert_eq!(view["permission_mode"],"Ask for approval");
+        assert!(view["public_state"]["problema"].is_null(),"a vida nova pronta não carrega o problema da subida que falhou: {}",view["public_state"]);
+        cleanup(&registry,&key,dir.path(),&policy).await;
+    }
+
+    async fn handle_view(registry:&RuntimeRegistry,key:&str) -> Value {
+        registry.handle(key,1).await.unwrap().snapshot().await.unwrap()["view"].clone()
+    }
+
+    #[tokio::test]
+    async fn process_killed_mid_turn_respawns_and_shows_the_cut_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = unique_key();
+        let (registry,policy) = lifecycle_session(dir.path(),&key,"Full Access",std::time::Duration::from_millis(300)).await;
+        let handle = registry.handle(&key,1).await.unwrap();
+        handle.command(RuntimeCommand { operation_id:"in-1".into(),kind:OperationKind::Input,payload:json!({"text":"oi"}) }).await.unwrap();
+        until("turno aberto",||calls(dir.path()).iter().any(|call|call["method"] == "turn/start")).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        std::fs::write(dir.path().join("cut"),"").unwrap();
+        // O app-server morre no meio do turno.
+        process::kill(&recorded(&policy)[0],&key,dir.path()).await.unwrap();
+        until("religou sozinho",||recorded(&policy).len() >= 2).await;
+        until_ready(&registry,&key).await;
+        tokio::time::timeout(std::time::Duration::from_secs(20),async {
+            while handle_view(&registry,&key).await["public_state"]["problema"] != "codex_turno_cortado" {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }).await.expect("a sessão mostra o turno cortado depois de religar");
+        assert_eq!(starts(dir.path()).len(),2,"um processo novo, nunca dois");
+        cleanup(&registry,&key,dir.path(),&policy).await;
     }
 
     #[tokio::test]

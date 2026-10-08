@@ -1806,7 +1806,13 @@ class RuntimeCoordinator:
                 # Cliente religado no boot: segue pela adoção até a Task 5.
                 diag.registrar("runtime.reopen_skipped", "aviso", sessao=name, codigo="python_client")
                 return
-            if not launch and not await asyncio.to_thread(_cano_alive, binding.meta):
+            meta = binding.meta
+            if binding.provider == "codex":
+                # O Rust pode ter subido outro processo nesta vida: vale o cano gravado no arquivo.
+                fresh = await asyncio.to_thread(self.legacy.binding, name, "codex")
+                if fresh is not None and fresh.key == binding.key:
+                    meta = fresh.meta
+            if not launch and not await asyncio.to_thread(_cano_alive, meta):
                 # Processo parado: fica como sessão parada, e o próximo envio a sobe no Rust.
                 diag.registrar("runtime.reopen_skipped", "aviso", sessao=name, codigo="cano_parado")
                 return
@@ -1943,7 +1949,7 @@ class RuntimeCoordinator:
                 # O Rust matou o processo que ele subiu no `close`; sem a sessão aberta lá, o processo
                 # não tem outro dono e o Python o encerra.
                 if (self.slot(name).change or {}).get("killed"):
-                    return None
+                    return adapter.forget_memory(name, preserve_preview=params.get("preserve_preview", False))
                 return await asyncio.to_thread(original, adapter, name, **params)
         return await self.change(name, action, new_name=params.get("new") if method == "rename" else None,
             advance=method != "rename", remove=False, reopen=not stopped, stopped=stopped, kill=kill)

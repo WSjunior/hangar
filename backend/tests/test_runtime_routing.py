@@ -1135,10 +1135,30 @@ def test_codex_close_with_rust_owner_kills_in_rust(codex_birth, monkeypatch):
     async def scenario():
         owner.loop = asyncio.get_running_loop()
         await owner.ensure_open("cx")
+        codex_birth.codex._problemas["cx"] = ("codex_headless_nao_subiu", "velho")
         await asyncio.to_thread(codex_birth.codex.close_sync, "cx")
     asyncio.run(scenario())
     closes = [command for command in transport.commands if command["kind"] == "close"]
     assert closes[0].get("kill") is True, "o Rust encerra o processo que ele subiu"
+    assert "cx" not in codex_birth.codex._problemas, "a memória do adapter é esquecida mesmo sem matar nada no Python"
+
+
+def test_codex_reopen_after_change_reads_the_cano_the_rust_recorded(codex_birth, monkeypatch):
+    import os
+    owner, transport = _lifecycle_owner(codex_birth, monkeypatch)
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.ensure_open("cx")
+        # O Rust religou: o arquivo aponta o processo novo, o registro em memória ainda o antigo (morto).
+        codex_birth.codex_sessions.update("cx", cano={"pid":os.getpid(), "escuta":"unix:/tmp/vivo.sock", "token":"t", "ts":1.0, "versao":2})
+        owner.slot("cx").binding.meta["cano"] = {"pid":999_999_999, "escuta":"unix:/tmp/morto.sock", "token":"t", "ts":1.0, "versao":2}
+        async def failing():
+            raise RuntimeError("ação da administração falhou")
+        # A ação que falha devolve a sessão ao Rust na vida de antes, sem regravar o registro.
+        with pytest.raises(RuntimeError, match="administração falhou"):
+            await owner.change("cx", failing)
+    asyncio.run(scenario())
+    assert transport.kinds().count("open") == 2, "processo vivo no arquivo: a sessão volta ao Rust, não fica parada"
 
 
 def test_codex_close_falls_back_to_python_kill_when_rust_had_no_process(codex_birth, monkeypatch):

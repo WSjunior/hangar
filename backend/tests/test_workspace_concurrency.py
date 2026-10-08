@@ -21,6 +21,9 @@ def test_supervisor_starts_runtime_and_workspace_bridges_together(tmp_path, monk
     monkeypatch.setattr(runtime_coordinator, "_current", None)
     monkeypatch.setattr(runtime_queue, "_coordinator", None)
     monkeypatch.setattr(rust_server, "server_log_path", lambda: tmp_path / "server.log")
+    # O binário real varre canos órfãos ao subir: nunca com o HOME e os processos desta máquina.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("CP_RUST_NO_ORPHAN_SWEEP", "1")
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
