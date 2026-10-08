@@ -498,7 +498,7 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   `problema=state_facts_unavailable`, nunca estado inventado. O `Sources` não tem método com corpo
   padrão: fonte que esquece um não compila. A lista lê o último `state` do `Monitor` vivo
   (`state/published.rs`) e não captura o pane dessa sessão. No modo `python` tudo roda como antes.
-  Codex e Claude sem terminal no Rust (`info.headless`) têm no lugar do `Monitor` o feed do runtime
+  Codex (`info.headless`) e Claude (provider `ClaudeHeadless`) sem terminal no Rust têm no lugar do `Monitor` o feed do runtime
   (`state/runtime_feed.rs`): o ator escreve vista, erro e prévia num canal em processo
   (`RuntimeRegistry::live`), fora do `/runtime/events`, e o feed publica os seis eventos (os quatro
   mais `pensamento`/`ferramenta`) coalescidos em 150 ms; o Python não os produz nem os repassa. No

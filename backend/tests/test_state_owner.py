@@ -320,15 +320,16 @@ async def test_nav_marker_only_reaches_owner_connections(rust, count_app):
         assert not any("segredo" in str(e.get("data", "")) for e in vistos)
 
 
-# --- Claude sem terminal: o feed do hub é dono de cinco; a sugestão segue do Python (C1 Task 1) ---
+# --- Claude sem terminal: o feed do hub é dono dos seis, sugestão incluída ---
 
-_CINCO = {"state", "preview", "ask_question", "pensamento", "ferramenta"}
+_SEIS = {"state", "preview", "ask_question", "pensamento", "ferramenta", "suggest"}
 _HEADLESS_EVENTS = [
     ("ask_question", "null"),
     ("state", json.dumps({"session": "h", "state": "working", "headless": True})),
     ("preview", json.dumps({"session": "h", "text": "em voo", "md": True, "full": True, "vivo": True})),
     ("pensamento", json.dumps({"text": "pensando"})),
     ("ferramenta", json.dumps({"text": ""})),
+    ("suggest", json.dumps({"text": "do rust"})),
 ]
 
 
@@ -356,12 +357,11 @@ def test_claude_headless_state_is_rust_when_owned(monkeypatch, modo, owns, rust)
     assert sse._estado_do_rust(sse.CLAUDE_HEADLESS, "h") is rust
 
 
-async def test_claude_headless_internal_connection_sends_suggest_but_none_of_the_five(headless):
+async def test_claude_headless_internal_connection_sends_none_of_the_six(headless):
     adapter, jsonl = headless
     vistos = await _por(sse.merged_events("h", str(jsonl), provider="claude", side=True), 1.5)
     assert vistos[0]["event"] == "info" and json.loads(vistos[0]["data"])["provider"] == "claude-headless"
-    assert not _CINCO & set(_nomes(vistos)), _nomes(vistos)
-    assert [json.loads(e["data"]) for e in vistos if e["event"] == "suggest"] == [{"text": "roda os testes"}]
+    assert not _SEIS & set(_nomes(vistos)), _nomes(vistos)
     assert adapter.drains == [], "a fila do Claude sem terminal o ator drena sozinho"
     assert adapter.tails == [], "a prévia gravada é suprimida no hub"
 
@@ -373,10 +373,9 @@ async def test_claude_headless_python_mode_runs_python_state(headless, monkeypat
         await _coleta(sse.merged_events("h", str(jsonl), provider="claude", side=True), lambda v: False, limite=2.0)
 
 
-async def test_claude_headless_guest_reads_five_from_rust_channel(headless):
+async def test_claude_headless_guest_reads_six_from_rust_channel(headless):
     _adapter, jsonl = headless
     async with _CanalRust(_HEADLESS_EVENTS):
         gen = sse.merged_events("h", str(jsonl), provider="claude", count_app=False)
-        vistos = await _coleta(gen, lambda v: {"ferramenta", "suggest"} <= set(_nomes(v)))
-    assert [(e["event"], e["data"]) for e in vistos if e["event"] in _CINCO] == _HEADLESS_EVENTS
-    assert [json.loads(e["data"]) for e in vistos if e["event"] == "suggest"] == [{"text": "roda os testes"}]
+        vistos = await _por(gen, 1.5)
+    assert [(e["event"], e["data"]) for e in vistos if e["event"] in _SEIS] == _HEADLESS_EVENTS

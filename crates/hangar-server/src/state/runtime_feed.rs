@@ -129,7 +129,8 @@ impl RuntimeFeed {
     async fn refresh_facts(&mut self) -> Option<Duration> {
         let w = self.facts.as_mut()?;
         let failed = w.error.is_some();
-        if refresh_in(w.at, failed, Instant::now()).is_zero() || w.src.store.needs_snapshot(&self.name) {
+        // Pulo de sequência relê na hora, mas não fura a espera depois de falha.
+        if refresh_in(w.at, failed, Instant::now()).is_zero() || (!failed && w.src.store.needs_snapshot(&self.name)) {
             w.at = Some(Instant::now());
             match w.src.client.snapshot(&self.name).await {
                 Ok(facts) => {
@@ -610,6 +611,27 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         let windows = (Duration::from_millis(1000).as_millis() / RETRY.as_millis()) as usize + 1;
+        let attempts = py.snapshots.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(attempts >= 2 && attempts <= windows, "{attempts} tentativas em ~1 s com retentativa de {RETRY:?}");
+    }
+
+    #[tokio::test]
+    async fn failing_snapshot_with_a_gap_is_not_polled_on_every_wake() {
+        let f = claude_fixture();
+        let py = fake_python_with(usize::MAX, "").await;
+        let store = Arc::new(crate::state::facts::FactsStore::default());
+        let (tx, live_rx) = channel(Some(live("working")));
+        let _feed = tokio::spawn(RuntimeFeed::new(&f.lease.hub, Some(live_rx), f.published.clone(), Some(feed_facts(&py, &store))).run());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let now = std::time::Instant::now();
+        store.push("s", facts(1, ""), now);
+        assert_eq!(store.push("s", facts(3, ""), now), crate::state::facts::Push::Accepted { gap: true });
+        for i in 0..40 {
+            tx.send_replace(Some(Arc::new(LiveState { preview: format!("parte {i}"), ..live("working") })));
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(store.needs_snapshot("s"), "o retrato segue falhando: o pulo continua aberto");
+        let windows = (Duration::from_millis(1050).as_millis() / RETRY.as_millis()) as usize + 1;
         let attempts = py.snapshots.load(std::sync::atomic::Ordering::SeqCst);
         assert!(attempts >= 2 && attempts <= windows, "{attempts} tentativas em ~1 s com retentativa de {RETRY:?}");
     }

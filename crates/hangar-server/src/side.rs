@@ -212,6 +212,10 @@ struct Bound {
     tail: Arc<FileTail>,
 }
 
+/// Eventos do dono e o provider da ligação: o feed de Claude e o de Codex publicam os mesmos seis,
+/// mas cada um lê fatos diferentes, então a transferência de conversa troca o dono.
+type OwnerKey = (&'static [&'static str], Provider);
+
 pub struct Hub {
     pub name: String,
     pub tx: broadcast::Sender<Out>,
@@ -220,8 +224,8 @@ pub struct Hub {
     cache: Mutex<SideCache>,
     side: Mutex<Option<tokio::task::AbortHandle>>,
     /// Dono do estado (o `Monitor` de Claude com terminal ou o feed de quem não tem terminal), o leitor
-    /// das respostas gravadas e os eventos que esse dono publica.
-    pub(crate) monitor: Mutex<Option<(tokio::task::AbortHandle, tokio::task::AbortHandle, &'static [&'static str])>>,
+    /// das respostas gravadas e os eventos que esse dono publica, com o provider para o qual nasceu.
+    pub(crate) monitor: Mutex<Option<(tokio::task::AbortHandle, tokio::task::AbortHandle, OwnerKey)>>,
     /// Última resposta gravada no transcript desta ligação, normalizada (`preview::norm`).
     committed: Mutex<Option<Arc<str>>>,
     /// Acorda o `Monitor`: `rebind` (rodada já) ou resposta gravada (prévia sai já).
@@ -288,10 +292,10 @@ impl Hub {
     /// morta, pânico) volta quando alguém religa ou assina de novo.
     fn ensure_monitor(self: &Arc<Self>) {
         let Some(spawn) = self.ctx.monitors.clone() else { return };
-        let wanted = self.bound.lock().unwrap().as_ref().and_then(|b| b.binding.state_events());
+        let wanted = self.bound.lock().unwrap().as_ref().and_then(|b| b.binding.state_events().map(|e| (e, b.binding.provider)));
         let mut slot = self.monitor.lock().unwrap();
         // Dono que acabou conta como ausente.
-        let alive = slot.as_ref().filter(|(m, _, _)| !m.is_finished()).map(|(_, _, events)| *events);
+        let alive = slot.as_ref().filter(|(m, _, _)| !m.is_finished()).map(|(_, _, key)| *key);
         if wanted == alive {
             return;
         }
@@ -299,9 +303,9 @@ impl Hub {
             m.abort();
             c.abort();
         }
-        if let Some(events) = wanted {
+        if let Some(key) = wanted {
             let commits = tokio::spawn(watch_commits(Arc::downgrade(self), self.tx.subscribe())).abort_handle();
-            *slot = Some((spawn(self).abort_handle(), commits, events));
+            *slot = Some((spawn(self).abort_handle(), commits, key));
         }
     }
 
@@ -314,7 +318,7 @@ impl Hub {
 
     /// Eventos do dono vivo; o que acabou (sessão morta, pânico) não segura mais os do Python.
     fn owned_events(&self) -> &'static [&'static str] {
-        self.monitor.lock().unwrap().as_ref().filter(|(m, _, _)| !m.is_finished()).map_or(&[], |(_, _, events)| *events)
+        self.monitor.lock().unwrap().as_ref().filter(|(m, _, _)| !m.is_finished()).map_or(&[], |(_, _, (events, _))| *events)
     }
 
     #[cfg(test)]
@@ -750,7 +754,7 @@ async fn seed_committed(hub: &Weak<Hub>, only_if_empty: bool) {
 }
 
 /// `GET /__hangar_server/state/{name}/events` na porta privada: o Python lê daqui `state`,
-/// `preview`, `ask_question` e `suggest` (sem terminal, também `pensamento` e `ferramenta`; no Claude, sem `suggest`) de
+/// `preview`, `ask_question` e `suggest` (sem terminal, Claude ou Codex, também `pensamento` e `ferramenta`) de
 /// quem entrou pelas portas dele (convite, Connect). Conta
 /// como assinante do hub, então liga o `Monitor` igual a um aparelho do dono.
 pub async fn private_events(
@@ -1141,6 +1145,25 @@ mod tests {
         assert_eq!(lease.hub.owned_events(), &STATE_EVENTS[..], "de volta ao terminal: o Monitor");
         assert_eq!(count.load(Ordering::SeqCst), 3);
         assert!(!on_side_event(&lease.hub, "suggest", r#"{"text":"x"}"#));
+    }
+
+    #[tokio::test]
+    async fn conversation_transfer_between_providers_swaps_feed() {
+        // Transferência de conversa: mesmo nome, mesmos seis eventos, outro provider; o feed troca.
+        let dir = tempfile::tempdir().unwrap();
+        let (spawn, count) = fake_feeds();
+        let ctx = SideCtx { monitors: Some(spawn), ..idle_ctx() };
+        let claude = Binding { provider: Provider::ClaudeHeadless, jsonl: dir.path().join("h.jsonl"), key: "h".into(), headless: false };
+        let codex = Binding { provider: Provider::Codex, headless: true, ..claude.clone() };
+        let lease = ctx.hubs.acquire("s", claude.clone(), &ctx);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        lease.hub.rebind(codex.clone());
+        assert_eq!(count.load(Ordering::SeqCst), 2, "Claude → Codex: feed novo");
+        lease.hub.rebind(codex);
+        assert_eq!(count.load(Ordering::SeqCst), 2, "mesma ligação: o feed fica");
+        lease.hub.rebind(claude);
+        assert_eq!(count.load(Ordering::SeqCst), 3, "Codex → Claude: feed novo");
+        assert_eq!(lease.hub.owned_events(), &FEED_EVENTS[..]);
     }
 
     /// Fábrica que conta e liga um feed parado (só ocupa a vaga do dono do estado).

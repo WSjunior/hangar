@@ -32,16 +32,19 @@ fn materialize(files: &Value, root: &Path) {
     }
 }
 
-/// Um teste só: TZ, HOME e a variável de esforço são do processo, e testes paralelos se pisariam.
+/// Os goldens mexem em TZ, HOME e nas variáveis de pasta e de esforço, que são do processo: um por vez.
+static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn local_policies_match_the_python_golden() {
+    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let mut failures = Vec::new();
     let mut total = 0;
     for file in ["prepare_prompt.json", "format_status_claude.json", "format_status_codex.json", "skill_catalog.json",
         "last_usage.json", "reload_stamp.json", "unknown_private.json"] {
         let document = golden(file);
-        // SAFETY: o outro teste deste binário só chama tipos remotos, que devolvem `None` sem tocar no
-        // ambiente; só este teste lê ou escreve TZ, HOME e a variável de esforço.
+        // SAFETY: os outros testes deste binário que leem ou escrevem o ambiente seguram `ENV`; os demais
+        // só chamam tipos remotos ou recusam o caminho antes de ler o HOME.
         unsafe { std::env::set_var("TZ", document["tz"].as_str().unwrap()); }
         for case in document["cases"].as_array().unwrap() {
             // O golden sai do Linux: o Windows ignora o TZ do processo e abre pasta como "Permission denied".
@@ -95,6 +98,51 @@ fn local_policies_match_the_python_golden() {
         }
     }
     assert!(total > 150, "golden menor que o esperado: {total}");
+    assert!(failures.is_empty(), "{} divergências:\n{}", failures.len(), failures.join("\n"));
+}
+
+/// `parked_state_at` (sessão Claude sem terminal parada) contra o golden do `_state_stream` do Python.
+#[test]
+fn parked_state_matches_the_python_golden() {
+    use hangar_server::{list::discover_other::sanitize_session_name, state::parked::parked_state_at};
+    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut failures, mut total) = (Vec::new(), 0);
+    let document = golden("parked_state.json");
+    let saved_home = std::env::var_os("HOME");
+    // SAFETY: ver `ENV`; a status line lê TZ, HOME e as variáveis de pasta e de esforço.
+    unsafe { std::env::set_var("TZ", document["tz"].as_str().unwrap()); }
+    for case in document["cases"].as_array().unwrap() {
+        total += 1;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        materialize(&case["files"], dir.path());
+        let home = dir.path().join("home");
+        // SAFETY: idem.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            for key in ["CLAUDE_CODE_EFFORT_LEVEL", "CLAUDE_CONFIG_DIR", "CP_PROJECTS_DIR"] { std::env::remove_var(key); }
+            for (key, value) in case["env"].as_object().into_iter().flatten() { std::env::set_var(key, value.as_str().unwrap()); }
+        }
+        let name = case["name"].as_str().unwrap();
+        if !case["sidecar"].is_null() {
+            let sidecar = home.join(".hangar/claude-headless").join(format!("{}.json", sanitize_session_name(name)));
+            std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+            std::fs::write(sidecar, substitute(&case["sidecar"], root).to_string()).unwrap();
+        }
+        let actual = match parked_state_at(name, &home) {
+            None => json!({"state": "dead"}),
+            Some(state) => json!({"state": state.state, "claude_permission_mode": state.claude_permission_mode,
+                "claude_previous_non_plan": state.claude_previous_non_plan, "status_line": state.status_line,
+                "problema": state.problema, "problema_detalhe": state.problema_detalhe}),
+        };
+        if actual != case["expected"] { failures.push(format!("{name}: Rust {actual}; Python {}", case["expected"])); }
+    }
+    // SAFETY: idem.
+    unsafe {
+        for key in ["CLAUDE_CODE_EFFORT_LEVEL", "CLAUDE_CONFIG_DIR", "CP_PROJECTS_DIR"] { std::env::remove_var(key); }
+        match saved_home { Some(home) => std::env::set_var("HOME", home), None => std::env::remove_var("HOME") }
+    }
+    assert!(total >= 15, "golden menor que o esperado: {total}");
     assert!(failures.is_empty(), "{} divergências:\n{}", failures.len(), failures.join("\n"));
 }
 

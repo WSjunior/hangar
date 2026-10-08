@@ -1521,12 +1521,15 @@ descarta as cópias que o Python ainda mandar (`state_python_leak`). `last_usage
   +33 ms/s e o Rust +14 ms/s, e o `state` saía a 1,3/s contra 0,7/s da `preview`. Cada evento
   fazia a volta ator → Python → hub. Roteiro para repetir:
   [medicao-c1.md](../migracao-rust/parte5-claude/medicao-c1.md).
-- `suggest` vem dos fatos do plugin que o Python empurra (o plugin ainda é dele até a C2); o feed
-  só reage ao empurrão, não pergunta.
+- `suggest` vem dos fatos do plugin que o Python empurra (o plugin ainda é dele até a C2). O feed
+  reage ao empurrão e relê o retrato dos fatos a cada 25 s (o que renova o interesse no Python),
+  na hora quando falta sequência e, depois de falha, a cada 5 s.
 - Sessão parada (fora do registro do Rust) mostra o estado estacionado: linha de status
   (modelo, esforço, contexto), modo de permissão, último modo diferente de `plan` e o problema da
-  última vida. Sem sidecar e sem troca de conta em curso (`transfer_active`/`in_transfer_ms`
-  empurrados) o estado é `dead`.
+  última vida. Sem sidecar e sem troca de modo ou transferência de agente em curso
+  (`transfer_active`/`in_transfer_ms` empurrados) o estado é `dead`.
+- O dono do estado no hub é escolhido pelos eventos e pelo provider: Claude e Codex sem terminal
+  publicam os mesmos seis, e a transferência de conversa entre eles (mesmo nome) troca o feed.
 - `native_message` foi para a C3 e `session.patch_meta` fica no Python (a 5B decidiu que o Rust
   não grava o sidecar).
 
@@ -1536,6 +1539,8 @@ Limites conhecidos:
   reagia em cerca de 1 s.
 - Sem fatos empurrados ainda, o estado é `idle`, nunca `dead`.
 - O problema da última vida vem só do sidecar durável; erro que não chegou ao sidecar não aparece.
+- O retrato dos fatos é lido dentro do laço do feed, antes de publicar: um Python travado atrasa
+  o estado ao vivo em até 1 s (o prazo do pedido) a cada 25 s, ou a cada 5 s depois de uma falha.
 
 ## Observação terminal Rust: erro visível, sem captura Python
 
