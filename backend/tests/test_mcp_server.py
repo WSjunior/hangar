@@ -52,7 +52,7 @@ async def test_lista_tools_e_quem_sou(identidade):
     async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
         nomes = {t.name for t in (await s.list_tools()).tools}
         assert nomes == {"who_am_i", "sessions", "send", "group", "pair", "unpair", "new_session",
-                         "browser_open", "browser", "browser_batch"}
+                         "browser_open", "browser", "browser_batch", "html_render"}
         res = await s.call_tool("who_am_i", {})
         assert not res.is_error and res.structured_content == {"name": "eu", "origem": "pane"}
 
@@ -202,6 +202,24 @@ async def test_nav_lote_para_no_primeiro_erro(identidade, monkeypatch):
         assert not res.is_error and res.structured_content == {"feitos": ["ok: snapshot", "ok: text"]}
 
 
+async def test_browser_open_completa_pagina_propria_e_recusa_outro_caminho(identidade, monkeypatch):
+    from app import api
+    gravados = []
+    monkeypatch.setattr(api, "_session_exists", lambda name: True)
+    monkeypatch.setattr(api, "nav_pendente", lambda name, url: gravados.append((name, url)))
+    monkeypatch.setattr(api, "resolve_bind_ip", lambda s: "0.0.0.0")
+    monkeypatch.setattr(settings, "port", 8765)
+    async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
+        # O Rust codifica o nome inteiro (`%65u` é `eu`).
+        for url in ("/api/sessions/eu/pages/abc-1", "/api/sessions/%65u/pages/abc-1"):
+            assert not (await s.call_tool("browser_open", {"url": url})).is_error
+        for url in ("/api/sessions/outra/pages/abc-1", "/api/sessions/eu/files", "/api/sessions/eu/pages/../x"):
+            res = await s.call_tool("browser_open", {"url": url})
+            assert res.is_error and "página desta sessão" in res.content[0].text
+    assert gravados == [("eu", "http://127.0.0.1:8765/api/sessions/eu/pages/abc-1?token=secret"),
+                        ("eu", "http://127.0.0.1:8765/api/sessions/%65u/pages/abc-1?token=secret")]
+
+
 async def test_grupo_parear_nova_sessao_chamam_as_rotas_como_eu(identidade, monkeypatch):
     from app import api
     from app.models import CreatedSessionInfo
@@ -261,3 +279,25 @@ async def test_new_session_preserves_mode_omission(identidade, monkeypatch, mode
         result = await session.call_tool("new_session", args)
     assert not result.is_error
     assert received == [mode]
+
+
+async def test_html_render_sends_own_theme_only_when_asked(identidade, monkeypatch):
+    from app import pages_bridge
+    sent = []
+    monkeypatch.setattr(pages_bridge, "publish", lambda payload: sent.append(payload) or {"hangar_page": {"id": "a"}})
+    async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
+        assert not (await s.call_tool("html_render", {"html": "<p></p>", "title": "t"})).is_error
+        assert not (await s.call_tool("html_render", {"html": "<p></p>", "title": "t", "own_theme": True})).is_error
+    assert "own_theme" not in sent[0] and sent[1]["own_theme"] is True
+
+
+async def test_html_render_takes_html_or_url_never_both(identidade, monkeypatch):
+    from app import pages_bridge
+    sent = []
+    monkeypatch.setattr(pages_bridge, "publish", lambda payload: sent.append(payload) or {"hangar_page": {"id": "a"}})
+    async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
+        url = "http://localhost:3000/cidades"
+        assert not (await s.call_tool("html_render", {"url": url, "title": "t"})).is_error
+        assert (await s.call_tool("html_render", {"url": url, "html": "<p></p>", "title": "t"})).is_error
+        assert (await s.call_tool("html_render", {"title": "t"})).is_error
+    assert sent == [{"session": sent[0]["session"], "title": "t", "draft": False, "url": url}]

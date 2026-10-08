@@ -3,6 +3,7 @@
 // Mora aqui porque as duas views precisam da MESMA regra — a versao duplicada ja tinha divergido.
 import type { ChatEvent } from './types';
 import { chavesUnicas } from './messageKeys';
+import { isHtmlRenderTool } from './htmlPage';
 
 export type ItemConversa =
   | { type: 'event'; id: string; ev: ChatEvent }
@@ -39,12 +40,13 @@ export function agruparConversa(eventos: ChatEvent[], opts: OpcoesAgrupar): Item
     if (ev.kind === 'tool_result') continue;
     if (ev.kind === 'thinking') { flush(); pens.push(ev); continue; }
     // Busca so e engolida quando ha um pensamento ABERTO antes dela — busca solta continua card
-    // normal, senao sumiria numa linha que nao explica nada.
-    if (pens.length && ev.kind === 'tool_use' && opts.entraNoPensamento(ev.tool_name)) { pens.push(ev); continue; }
+    // normal, senão sumiria numa linha que não explica nada. A página publicada nunca é engolida:
+    // ela existe para ser vista.
+    if (pens.length && ev.kind === 'tool_use' && !isHtmlRenderTool(ev.tool_name) && opts.entraNoPensamento(ev.tool_name)) { pens.push(ev); continue; }
     flushPens();
-    // O agente fica fora do grupo, como no nativo: o cartão dele abre a conversa própria, e dentro de
-    // um grupo fechado o que ainda roda ficaria escondido.
-    if (ev.kind === 'tool_use' && ev.tool_name === 'Agent') { flush(); items.push({ type: 'tool', id: ev.id, ev }); continue; }
+    // O agente e a página publicada ficam fora do grupo: o cartão do agente abre a conversa própria
+    // (dentro de um grupo fechado o que ainda roda ficaria escondido) e a página é para ser vista.
+    if (ev.kind === 'tool_use' && (ev.tool_name === 'Agent' || isHtmlRenderTool(ev.tool_name))) { flush(); items.push({ type: 'tool', id: ev.id, ev }); continue; }
     if (ev.kind === 'tool_use') { run.push(ev); continue; }
     flush();
     items.push({ type: 'event', id: ev.id, ev });

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { useSessionServer } from '../lib/sessionServer';
+  import { provideFollowTail } from '../lib/followTail';
   import { agruparConversa, type ItemConversa } from '@hangar/core';
   import { toolLook } from '../lib/toolLook.svelte';
   import { tick } from 'svelte';
@@ -503,6 +504,9 @@
     if (i < windowStart) extra += windowStart - i + 10;
     tick().then(() => requestAnimationFrame(() => alvoEl?.scrollIntoView({ block: 'start' })));
   });
+
+  // Página viva mudou de altura: quem estava no fim continua no fim.
+  provideFollowTail(() => { if (atBottom) tick().then(scrollToBottom); });
 
   let rafScroll = 0;
   function scrollToBottom() {

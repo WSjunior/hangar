@@ -20,6 +20,16 @@ describe('agruparConversa', () => {
     expect(r.map((i) => `${i.type}:${i.id}`)).toEqual(['group:g-a', 'tool:g', 'group:g-b']);
   });
 
+  it('a página publicada fica fora do grupo e parte a sequência', () => {
+    const r = agruparConversa([tool('a'), tool('h', 'mcp__hangar__html_render'), tool('b')], { entraNoPensamento: semPensamento, groupMin: 1 });
+    expect(r.map((i) => `${i.type}:${i.id}`)).toEqual(['group:g-a', 'tool:h', 'group:g-b']);
+  });
+
+  it('a página publicada nunca some dentro do pensamento, nem quando tudo entra nele', () => {
+    const r = agruparConversa([ev('thinking', 'p1'), tool('h', 'mcp__hangar__html_render')], { entraNoPensamento: () => true });
+    expect(r.map((i) => `${i.type}:${i.id}`)).toEqual(['pensamento:p-p1', 'tool:h']);
+  });
+
   it('tool_result nunca vira item', () => {
     const r = agruparConversa([tool('a'), ev('tool_result', 'r', { tool_use_id: 'a' })], { entraNoPensamento: semPensamento });
     expect(r.map((i) => i.id)).toEqual(['a']);

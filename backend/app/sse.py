@@ -233,6 +233,7 @@ def _nav_gravar() -> None:
         arq.parent.mkdir(parents=True, exist_ok=True)
         tmp = arq.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps(_NAV_MARCADORES), encoding="utf-8")
+        os.chmod(tmp, 0o600)   # a url pode levar o token do dono
         atomico.substituir(tmp, arq)
     except OSError as e:
         _log.warning("nav: marcador nao gravado em disco: %s", e)
@@ -1155,15 +1156,16 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
         asyncio.create_task(pump("message", pqueue.follow(min_ts=start_ts, emit_confirmed=True))),
         *state_tasks.values(),
         asyncio.create_task(ping_loop()),
-        asyncio.create_task(nav_pump()),
         asyncio.create_task(em_voo_pump("pensamento", fonte_pensamento(name))),
         asyncio.create_task(em_voo_pump("ferramenta", fonte_ferramenta(name))),
         asyncio.create_task(jsonl_watcher()),
         asyncio.create_task(band_pump()),
     ]
-    # Aviso de mod pode trazer texto sensível do dono: convidado não recebe.
+    # Aviso de mod pode trazer texto sensível do dono: convidado não recebe. O marcador do navegador
+    # também não: a url da página de rascunho leva o token do dono.
     if count_app:
         tasks.append(asyncio.create_task(toast_pump()))
+        tasks.append(asyncio.create_task(nav_pump()))
     # NUCLEO (conexao): instrumentacao do CICLO DE VIDA do stream. O sintoma relatado é "a conversa
     # para e só volta fechando/abrindo o app", e o log de acesso do uvicorn só mostra a conexão
     # FECHANDO — sem duração, sem motivo, sem quanto foi entregue. Sem isso a causa (queda de rede

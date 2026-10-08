@@ -1,7 +1,7 @@
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-wgpu-0.3.7/MODIFICADO.md gpui-pre-wgpu-0.3.7/MODIFICADO.md
 --- gpui-pre-wgpu-0.3.7/MODIFICADO.md
 +++ gpui-pre-wgpu-0.3.7/MODIFICADO.md
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,34 @@
 +# Cópia do gpui-pre-wgpu 0.3.7
 +
 +Origem: crate `gpui-pre-wgpu` 0.3.7 do crates.io, licença Apache-2.0 (`LICENSE-APACHE`).
@@ -31,6 +31,11 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 +`PrimitiveBatch::Surfaces` como sprite policromático no pipeline `poly_sprites` (`draw_surfaces`), com a textura da
 +superfície no lugar do atlas. Opacidade negativa marca a textura como opaca e o `fs_poly_sprite` força alpha 1, porque
 +em XRGB/XR24 o byte X não é alpha. Fora do Linux, `Surfaces` continua sem desenho.
++
++Textura `Rgba8Unorm` é a exceção: vem de quadro decodificado (o screencast do Chromium) com alpha de verdade, não
++pré-multiplicado, e vai com opacidade 1; o `blend_color` multiplica o rgb pelo alpha quando o alvo é pré-multiplicado.
++A página da conversa usa isso para o fundo transparente; o JPEG do painel tem alpha 255 e sai igual. O DMA-BUF do WPE
++entrava como `Bgra8Unorm` e seguiria opaco.
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-wgpu-0.3.7/src/blur_kernel.rs gpui-pre-wgpu-0.3.7/src/blur_kernel.rs
 --- gpui-pre-wgpu-0.3.7/src/blur_kernel.rs
 +++ gpui-pre-wgpu-0.3.7/src/blur_kernel.rs
@@ -1991,7 +1996,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
              0..4,
              sprite_instances.first_instance + range.start
                  ..sprite_instances.first_instance + range.end,
-@@ -1780,6 +2831,68 @@
+@@ -1780,6 +2831,69 @@
          Ok(())
      }
  
@@ -2013,7 +2018,8 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 +                    pad: 0,
 +                    grayscale: false.into(),
 +                    // Negative opacity tells the shader the texture is opaque (XRGB: the X byte is not alpha).
-+                    opacity: -1.0,
++                    // Rgba8Unorm comes from decoded frames with real straight alpha, which blend_color handles.
++                    opacity: if texture.format() == wgpu::TextureFormat::Rgba8Unorm { 1.0 } else { -1.0 },
 +                    bounds: surface.bounds,
 +                    content_mask: surface.content_mask.clone(),
 +                    corner_radii: Default::default(),
@@ -2060,7 +2066,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      unsafe fn instance_bytes<T>(instances: &[T]) -> &[u8] {
          unsafe {
              std::slice::from_raw_parts(
-@@ -1794,6 +2907,7 @@
+@@ -1794,6 +2908,7 @@
          paths: &[Path<ScaledPixels>],
          instance_offset: &mut u64,
          pass: &mut wgpu::RenderPass<'_>,
@@ -2068,7 +2074,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      ) -> Result<()> {
          let first_path = &paths[0];
          let sprites: Vec<PathSprite> = if paths.last().map(|p| &p.order) == Some(&first_path.order)
-@@ -1826,7 +2940,9 @@
+@@ -1826,7 +2941,9 @@
          pass.set_bind_group(0, &resources.globals_bind_group, &[]);
          pass.set_bind_group(1, &instances.bind_group, &[]);
          pass.set_bind_group(2, &texture, &[]);
@@ -2079,7 +2085,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
              0..4,
              instances.first_instance..instances.first_instance + sprites.len() as u32,
          );
-@@ -2123,6 +3239,7 @@
+@@ -2123,6 +3240,7 @@
          // Drop intermediate textures since they reference the old surface size.
          if let Some(core) = self.core_mut() {
              core.resources.invalidate_intermediate_textures();
@@ -2087,7 +2093,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          }
      }
  
-@@ -2178,6 +3295,7 @@
+@@ -2178,6 +3296,7 @@
          };
          surface.configure(&core.resources.device, &self.surface_config);
          core.resources.invalidate_intermediate_textures();
@@ -2095,7 +2101,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          self.state = RendererState::Ready { surface, core };
  
          Ok(())
-@@ -2396,14 +3514,21 @@
+@@ -2396,14 +3515,21 @@
      fn render(&mut self, scene: &Scene, size: Size<DevicePixels>) -> anyhow::Result<()> {
          self.check_gpu_errors()?;
          self.ensure_render_target(size)?;

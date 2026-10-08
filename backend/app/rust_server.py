@@ -32,7 +32,7 @@ _log = logging.getLogger("hangar.rust_server")
 HEALTH_PATH = "/__hangar_server/health"
 # Versão do contrato interno (rotas /internal, side-events, ambiente). Tem de casar com o
 # `protocol` da saúde (hangar_server::INTERNAL_PROTOCOL); outro número = o Python atende sozinho.
-RUST_SERVER_PROTOCOL = 37
+RUST_SERVER_PROTOCOL = 38
 START_TIMEOUT = 10.0
 OP_TIMEOUT_S = 75
 CRASH_WINDOW = 60.0
@@ -346,9 +346,10 @@ class Supervisor:
         `address` (endereço privado ausente ou inválido na saúde)."""
         global terminal_panel
         terminal_panel = None
-        from app import list_bridge, workspace_bridge
+        from app import list_bridge, pages_bridge, workspace_bridge
         workspace_bridge.configure(None, None)
         list_bridge.configure(None, None)
+        pages_bridge.configure(None, None)
         terminal_observer.configure(None, None)
         if self.proc is not None:
             from app.runtime_process import cleanup
@@ -394,12 +395,14 @@ class Supervisor:
                     terminal_observer.configure(address, env["HANGAR_INTERNAL_SECRET"])
                     workspace_bridge.configure(address, env["HANGAR_INTERNAL_SECRET"])
                     list_bridge.configure(address, env["HANGAR_INTERNAL_SECRET"])
+                    pages_bridge.configure(address, env["HANGAR_INTERNAL_SECRET"])
                 except ValueError:
                     # Sem o endereço privado o Rust não tem as pontes: é falha de partida, e o Python
                     # assume a porta inteira em vez de atender metade por trás dele.
                     terminal_observer.configure(None, None)
                     workspace_bridge.configure(None, None)
                     list_bridge.configure(None, None)
+                    pages_bridge.configure(None, None)
                     _log.error("hangar-server sem endereço privado válido na saúde")
                     diag.registrar("hangar_server.partida", "erro", codigo="endereco_invalido")
                     return "address"
@@ -452,9 +455,10 @@ class Supervisor:
                             _log.warning("registro de contenção do hangar-server não gravou: %s", e)
                             diag.registrar("hangar_server.registro_falhou", "aviso", **diag.erro_campos(e))
                         record_failed = True
-                from app import list_bridge, workspace_bridge
+                from app import list_bridge, pages_bridge, workspace_bridge
                 workspace_bridge.configure(None, None)
                 list_bridge.configure(None, None)
+                pages_bridge.configure(None, None)
                 costs_sources.set_served_by_rust(False)
                 terminal_observer.configure(None, None)
                 # Parada normal (systemctl, Ctrl+C) leva o filho junto, no mesmo instante em que o uvicorn
@@ -479,9 +483,10 @@ class Supervisor:
             return "erro"
 
     async def stop(self) -> None:
-        from app import costs_sources, list_bridge, workspace_bridge
+        from app import costs_sources, list_bridge, pages_bridge, workspace_bridge
         workspace_bridge.configure(None, None)
         list_bridge.configure(None, None)
+        pages_bridge.configure(None, None)
         costs_sources.set_served_by_rust(False)
         terminal_observer.configure(None, None)
         proc = self.proc
