@@ -109,6 +109,33 @@ fn local_command_answer_confirms_the_command_outside_the_transcript() {
     assert!(state.operations["op"].status == Status::Confirmed);
 }
 
+/// Fila gravada antes da confirmação pela resposta local: a bolha do `/btw` ficava para sempre.
+#[test]
+fn reopening_confirms_command_answered_locally_before_the_fix() {
+    let dir = tempfile::tempdir().unwrap();
+    let state_path = dir.path().join("state");
+    let rows = vec![
+        json!({"id":"old","text":"/btw","ts":50.0,"delivered":true}),
+        json!({"id":"e1","text":"/btw","ts":100.0,"delivered":true}),
+        json!({"id":"local:1","text":"/btw isn't available in this environment.","ts":100.1,"delivered":true,"confirmed":true,"papel":"assistant"}),
+        json!({"id":"e2","text":"/context","ts":200.0,"delivered":true}),
+        json!({"id":"e3","text":"/compact","ts":300.0,"delivered":true}),
+        json!({"id":"local:2","text":"⚙️ A CLI pediu `x`; respondi vazio","ts":301.0,"delivered":true,"confirmed":true,"papel":"assistant"}),
+        json!({"id":"e4","text":"/btw","ts":400.0,"delivered":true,"desistiu":true}),
+        json!({"id":"local:3","text":"/btw isn't available in this environment.","ts":400.1,"delivered":true,"confirmed":true,"papel":"assistant"}),
+    ];
+    std::fs::write(&state_path,serde_json::to_vec(&State::new("key",1,"session",rows)).unwrap()).unwrap();
+    let store = Store::open(&state_path,&dir.path().join("projection"),State::new("key",1,"session",vec![])).unwrap();
+    let row = |state:&State,id:&str|state.rows.iter().find(|r|r["id"] == id).unwrap()["confirmed"].clone();
+    assert_eq!(row(store.state(),"e1"),true);
+    assert_ne!(row(store.state(),"old"),true, "confirma a linha do par, não a mais antiga com o mesmo texto");
+    assert_ne!(row(store.state(),"e2"),true, "sem resposta local logo depois, segue esperando o transcript");
+    assert_ne!(row(store.state(),"e3"),true, "aviso local que não nomeia o comando não é a resposta dele");
+    assert_ne!(row(store.state(),"e4"),true, "desistência continua visível");
+    let disk:serde_json::Value = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(disk["rows"][1]["confirmed"],true, "a confirmação vai ao disco na abertura");
+}
+
 #[test]
 fn same_operation_does_not_append_twice() {
     let dir = tempfile::tempdir().unwrap();
