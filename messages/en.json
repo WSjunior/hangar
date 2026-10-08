@@ -7605,6 +7605,7 @@
   "native_voice_organizer_hint": "Each mode has its own model and effort. In a call, switching modes switches the organizer right away, and changing the current mode's pair applies from the next turn.",
   "native_voice_model_switch_failed": "The organizer model did not change; it keeps the previous one until the next mode switch.",
   "native_voice_own_folder_failed": "Couldn't create the organizer folder (~/.hangar/voz/arquivos); it can talk but can't write files.",
+  "native_voice_audio_stopped": "The call audio stopped: the microphone may have been switched or disconnected. Connect again.",
   "native_voice_models_loading": "Loading Codex models…",
   "native_voice_models_failed": "Could not load the Codex models.",
   "native_voice_settings": "Settings",

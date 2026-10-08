@@ -16,7 +16,7 @@ use tokio::{runtime::Handle, sync::{Notify, mpsc}};
 pub struct CallId(Value);
 pub enum Phase { Connecting, Live, Closed }
 #[derive(Debug, Clone)]
-pub enum VoiceFailure { Microphone, Speaker, AppServer, Realtime(String), Network, Timeout, Organizer, ModelSwitch, OwnFolder, Closed }
+pub enum VoiceFailure { Microphone, Speaker, AppServer, Realtime(String), Network, Timeout, Organizer, ModelSwitch, OwnFolder, AudioStopped, Closed }
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Activity { #[default] Idle, Thinking, Searching, Working }
 pub enum VoiceEvent {
@@ -126,7 +126,9 @@ fn rpc_failure(error: RpcError) -> VoiceFailure {
 }
 
 fn rtc_failure(error: rtc::RtcError) -> VoiceFailure {
-    match error { rtc::RtcError::Microphone => VoiceFailure::Microphone, rtc::RtcError::Speaker => VoiceFailure::Speaker, _ => VoiceFailure::Network }
+    // Mídia parada é microfone trocado/desconectado ou codec, não rede: o texto de rede mandava olhar o firewall.
+    match error { rtc::RtcError::Microphone => VoiceFailure::Microphone, rtc::RtcError::Speaker => VoiceFailure::Speaker,
+        rtc::RtcError::Media => VoiceFailure::AudioStopped, _ => VoiceFailure::Network }
 }
 
 async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEvent>, inbox: &mut mpsc::UnboundedReceiver<Command>,

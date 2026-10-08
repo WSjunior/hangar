@@ -529,6 +529,7 @@ fn failure_text(failure: &VoiceFailure) -> String {
         VoiceFailure::Organizer => tr("voice_organizer"),
         VoiceFailure::ModelSwitch => tr("voice_model_switch_failed"),
         VoiceFailure::OwnFolder => tr("voice_own_folder_failed"),
+        VoiceFailure::AudioStopped => tr("voice_audio_stopped"),
         VoiceFailure::Closed => tr("voice_server_closed"),
     }
 }
