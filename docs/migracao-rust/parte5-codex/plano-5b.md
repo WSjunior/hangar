@@ -92,11 +92,11 @@ Fica no Python até a parte 6: o argv do Claude (`--resume`/`--session-id`, plug
 **Interfaces:**
 - Produces: problema `codex_esforco_nao_aplicado`; código `no_pending_permission` no `Select` sem aprovação; versão conferida 0.161.
 
-- [ ] **Step 1: Conferir a 0.161**
+- [x] **Step 1: Conferir a 0.161**
 
 Rodar `scripts/conferir-codex-schema` com o Codex desta máquina (0.161.0). O script recusa por versão: trocar `checked_version!()` para `"0.161.0"`, rodar de novo, olhar o `git status --short` do schema. Campo usado que sumiu → corrigir o tipo em `proto.rs` (nunca o recorte). Apagar o recorte 0.159.3. Commit: `chore(codex): check protocol against codex 0.161.0`.
 
-- [ ] **Step 2: Testes da subida (falham)**
+- [x] **Step 2: Testes da subida (falham)**
 
 Em `tests/runtime_codex.rs`:
 
@@ -155,12 +155,12 @@ fn select_without_pending_approval_says_no_pending_permission() {
 
 (`frames_of` = o `frames` já existente aplicado a `&[Effect]`; renomear se colidir.)
 
-- [ ] **Step 3: Rodar e ver falhar**
+- [x] **Step 3: Rodar e ver falhar**
 
 Run: `cd crates && CARGO_BUILD_JOBS=4 cargo test -p hangar-server --test runtime_codex`
 Expected: FAIL nos 5 testes novos.
 
-- [ ] **Step 4: Implementar**
+- [x] **Step 4: Implementar**
 
 - `thread/resume` da subida leva `cwd`, `approvalPolicy`, `sandbox` e `serviceTier` (quando houver), como `adapter.py:_subir_sem_terminal`; a verificação do Fast (`thread/resume` só com `threadId`) não muda.
 - Erro do `thread/resume` da subida: mensagem com "Model provider" e "not found" → repete com `modelProvider: "openai"` (uma vez); com "no rollout found" → `thread/start` com `cwd`, `approvalPolicy`, `sandbox`, `serviceTier` e `model` (só se o arquivo da sessão tiver modelo). Ambos só sem `transfer_id` no metadata. Os dois novos campos entram em `ThreadResumeParams` (`cwd`, `approval_policy`, `sandbox`, `service_tier`, `model_provider`) com `skip_serializing_if`, e o teste do recorte continua verde.
@@ -168,7 +168,7 @@ Expected: FAIL nos 5 testes novos.
 - `Select` sem aprovação pendente: `RuntimeError::new("no_pending_permission", "nenhuma aprovação pendente")`.
 - Texto do problema: `messages/pt.json` `problema_codex_esforco_nao_aplicado`: "O Codex não aceitou o nível de esforço escolhido; a sessão segue no padrão do modelo", `en.json`: "Codex did not accept the chosen effort level; the session keeps the model default"; mapear em `frontend/src/lib/problema.ts` e `mobile/src/chat/SessionProblem.tsx` (se a chave ainda não existir).
 
-- [ ] **Step 5: Rodar e ver passar; commit**
+- [x] **Step 5: Rodar e ver passar; commit**
 
 Run: `cd crates && CARGO_BUILD_JOBS=4 cargo test -p hangar-server --test runtime_codex --test runtime_contract && CARGO_BUILD_JOBS=4 cargo test -p hangar-codex --lib`
 Commit: `feat(codex): Rust bootstrap matches the Python fallbacks and error codes`.
