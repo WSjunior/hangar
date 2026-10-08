@@ -3,8 +3,9 @@
 //! grupo com sessão de outra máquina seguem ao Python. Texto do protocolo e avisos saem depois de
 //! soltar o lock do grupo.
 //!
-//! A troca de agente é conferida na porta de entrada da sessão e o passe é solto na hora: segurá-lo
-//! durante o aviso à própria sessão travaria contra um fechamento que espera esse passe.
+//! `/pair` e `DELETE /pair` seguram a porta de entrada da sessão até gravar o grupo (um rename não
+//! grava o nome velho por cima) e a soltam antes dos avisos: o aviso à própria sessão passa pela
+//! porta de novo e, com o passe na mão, travaria contra um fechamento que espera esse passe.
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -27,6 +28,7 @@ use super::orq::{is_orchestrator, list_unavailable};
 use super::service::{GroupError, GroupService, JoinOutcome, JoinOwned};
 use crate::proxy::Forward;
 use crate::routes::{AppState, cors, gate, pass, pass_any};
+use crate::runtime::ingress::IngressPass;
 use crate::session_write::input::{deliver_text, json_content_type};
 use crate::session_write::{BODY_LIMIT, busy_body, detail_body, json_response, session_name, too_large};
 use crate::transcript::py::{py_repr, py_str};
@@ -79,10 +81,13 @@ impl Asked {
     }
 
     /// `_transfer_guard`/`_transfer_check`: troca de agente em curso recusa com o código do Python.
-    async fn busy(&self) -> Option<Response> {
-        let runtime = self.st.state.runtime.get()?;
-        let closed = runtime.ingress().enter(&self.name, self.st.write_gate_wait).await.is_err();
-        closed.then(|| self.reply(StatusCode::CONFLICT, busy_body()))
+    /// O passe devolvido segura a porta (rename, troca de conta esperam por ele); sem runtime, nenhum.
+    async fn enter(&self) -> Result<Option<IngressPass>, Response> {
+        let Some(runtime) = self.st.state.runtime.get() else { return Ok(None) };
+        match runtime.ingress().enter(&self.name, self.st.write_gate_wait).await {
+            Ok(pass) => Ok(Some(pass)),
+            Err(_) => Err(self.reply(StatusCode::CONFLICT, busy_body())),
+        }
     }
 
     /// `_recusa_orq` para cada nome; a pergunta que falha nunca vira "não é orquestrador".
@@ -153,7 +158,7 @@ async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<So
     }
     // Par entre máquinas ainda é do Python.
     if others.iter().any(|o| is_remote(o)) { return asked.to_python().await; }
-    if let Some(busy) = asked.busy().await { return busy; }
+    let held = match asked.enter().await { Ok(held) => held, Err(busy) => return busy };
     let name = asked.name.clone();
     if others.is_empty() && !body.orq {
         return asked.refuse(StatusCode::BAD_REQUEST, "erro_peer_nao_informado", "informe peer ou peers", json!({}));
@@ -180,6 +185,7 @@ async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<So
         Err(GroupError::Orq(text)) => return asked.refuse(StatusCode::CONFLICT, "erro_orq_arquivo_mudou", &text, json!({})),
         Err(error) => return asked.store_failed(&error),
     };
+    drop(held);
     // Só quem estava solto recebe o protocolo; grupo de orquestração não recebe nada.
     let notices = if orq { Vec::new() } else { newcomers };
     let contract = asked.groups.contract_path(&gid).to_string_lossy().into_owned();
@@ -211,15 +217,16 @@ async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<So
 
 async fn unpair(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let asked = match Asked::take(st, peer, req).await { Ok(a) => a, Err(response) => return response };
-    if let Some(busy) = asked.busy().await { return busy; }
+    let held = match asked.enter().await { Ok(held) => held, Err(busy) => return busy };
     if let Some(refused) = asked.orchestrator(std::slice::from_ref(&asked.name)).await { return refused; }
-    // Avisar o par de outra máquina ainda é do Python.
+    // Avisar o par de outra máquina ainda é do Python; o passe sai antes, o Python confere a porta dele.
     match asked.groups.link(&asked.name).await {
-        Ok(Some(link)) if link.peers.iter().any(|p| is_remote(p)) => return asked.to_python().await,
+        Ok(Some(link)) if link.peers.iter().any(|p| is_remote(p)) => { drop(held); return asked.to_python().await }
         Ok(_) => {}
         Err(error) => return asked.store_failed(&error),
     }
     let ex = match asked.groups.leave(&asked.name).await { Ok(ex) => ex, Err(error) => return asked.store_failed(&error) };
+    drop(held);
     if ex.is_empty() { return asked.reply(StatusCode::OK, json!({"ok": true, "warning": null})); }
     let text = format!("{PREFIX} Você saiu do grupo de trabalho ({}). Volte a operar independente; use hangar-send só quando o usuário pedir.", ex.join(", "));
     let warning = match deliver_text(&asked.st, &asked.name, &text).await {
@@ -256,7 +263,8 @@ fn storm(gid: &str) -> bool {
 async fn group_message(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let asked = match Asked::take(st, peer, req).await { Ok(a) => a, Err(response) => return response };
     let Some(body) = asked.body::<GroupMessageBody>() else { return asked.to_python().await };
-    if let Some(busy) = asked.busy().await { return busy; }
+    // `_transfer_check`: só confere; cada entrega passa pela porta do membro.
+    if let Err(busy) = asked.enter().await { return busy; }
     let head = body.text.trim_start();
     if head.starts_with('/') {
         return asked.refuse(StatusCode::BAD_REQUEST, "erro_group_message_slash", "group-message não suporta slash-commands", json!({}));
