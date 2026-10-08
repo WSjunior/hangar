@@ -26,6 +26,43 @@ export function onResend(cb: () => void): void {
   resendListeners.add(cb);
 }
 
+// O `$.ui.open`/`$.ui.close` do próprio plugin não passa pelos hooks dele: quem abre ou fecha um painel do
+// plugin avisa aqui, e o espelho do `ui.ts` acompanha (sem isso o painel fechado fica no app).
+const ownPaneListeners = new Set<(id: string, open: boolean) => void>();
+
+export function onOwnPane(cb: (id: string, open: boolean) => void): void {
+  ownPaneListeners.add(cb);
+}
+
+export function ownPane(id: string, open: boolean): void {
+  for (const cb of ownPaneListeners) cb(id, open);
+}
+
+// O fim de um subagente que o plugin criou chega no `turn.complete` do state.ts (o único sem matcher);
+// quem esperava por ele (a bifurcação do `/btw`) recebe a resposta aqui.
+export type AgentDone = { answer: string; isAborted: boolean };
+const agentWaiters = new Map<string, (done: AgentDone) => void>();
+
+export function waitAgent(agentId: string): Promise<AgentDone> {
+  return new Promise((resolve) => agentWaiters.set(agentId, resolve));
+}
+
+export function agentDone(agentId: string, done: AgentDone): void {
+  agentWaiters.get(agentId)?.(done);
+  agentWaiters.delete(agentId);
+}
+
+// O estado do `/btw` mudou: sem terminal, o ui.ts o leva ao app pela ponte da superfície.
+const btwListeners = new Set<() => void>();
+
+export function onBtwChange(cb: () => void): void {
+  btwListeners.add(cb);
+}
+
+export function btwChange(): void {
+  for (const cb of btwListeners) cb();
+}
+
 export function clearBridge(): void {
   atual = null;
 }

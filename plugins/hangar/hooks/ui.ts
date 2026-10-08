@@ -1,8 +1,9 @@
 import type { EngineInterface, On } from "claude-code";
-import { type Bridge, bridge, onResend, setSurfaceBridge, surfaceBridge } from "./bridge";
+import { type Bridge, bridge, onBtwChange, onOwnPane, onResend, setSurfaceBridge, surfaceBridge } from "./bridge";
+import { BTW_PANE, btwSupported, btwView } from "./btw";
 import { focusElement, holding, HOLD_MS, type FocusTarget } from "./uiFocus";
 import { openerUrl } from "./uiIntercept";
-import { bandBody, scrollOffset, shownAfterClose, UNDRAWN, type PaneEntry } from "./uiPayload";
+import { bandBody, scrollOffset, shownAfterClose, stampOwn, UNDRAWN, type PaneEntry } from "./uiPayload";
 
 // A faixa redesenha a cada segundo enquanto um mod mostra relógio: o envio junta os quadros.
 const SEND_DELAY_MS = 500;
@@ -25,6 +26,8 @@ let lastPlacement: "dock" | "inline" = "dock";
 // Até quando o envio do composer fica segurado (reserva por teclado em curso).
 let holdUntil: number | null = null;
 let sent: string | null = null;
+// O que o plugin atende nesta sessão (`bandBody`), lido uma vez.
+let caps: string[] | null = null;
 let scheduled = false;
 // Reenvio pedido quando a ponte volta, fora de qualquer hook: o engine não deixa guardar o `$`
 // numa variável, só usá-lo num closure, como nos timers.
@@ -52,7 +55,8 @@ async function post($: EngineInterface, path: string, extra: string, ponte: Brid
 // ponte ou com recusa, a faixa sai de novo quando a ponte aparece ou o backend diz que não a tem.
 async function flush($: EngineInterface) {
   scheduled = false;
-  const body = bandBody(above, columns, [...panes.values()], shown, MAX_BODY_CHARS);
+  caps ??= await $.session.version().then((v) => (btwSupported(v.base) ? ["btw"] : []), () => []);
+  const body = bandBody(above, columns, [...panes.values()], shown, MAX_BODY_CHARS, caps);
   if (body === sent || !bridge()) return;
   sent = body;
   if ((await post($, "ui", body))?.status !== 200) sent = null;
@@ -70,6 +74,21 @@ function schedule($: EngineInterface) {
 }
 
 onResend(() => resend?.());
+
+// Fechar sai da lista do app como no hook de `ui.close`; abrir só libera o espelho, que o desenho preenche.
+function forget(id: string): boolean {
+  closed.add(id);
+  if (!panes.has(id)) return false;
+  shown = shownAfterClose([...panes.keys()], shown, id);
+  panes.delete(id);
+  drawn.delete(id);
+  return true;
+}
+
+onOwnPane((id, open) => {
+  if (open) closed.delete(id);
+  else if (forget(id)) resend?.();
+});
 
 // Janela do clique que o app pediu: abrir URL e copiar vão para o aparelho de quem clicou. Não acaba
 // no fim do `next`: o `onPress` do mod costuma disparar a cópia sem `await`. Só vale para chamadas do
@@ -147,6 +166,13 @@ export function registerUi(on: On) {
     const token = await $.env.get("HANGAR_PLUGIN_TOKEN");
     const sessao = await $.env.get("CP_SESSION_NAME");
     setSurfaceBridge(url && token && sessao ? { url, token, sessao } : null);
+    // Sem terminal a árvore chega ao app pela superfície; pela ponte vão só o que o plugin atende e o estado
+    // do `/btw`, que o Rust junta à vista dela. Agora e a cada mudança do painel.
+    if (surfaceBridge() && (await $.session.version().then((v) => btwSupported(v.base), () => false))) {
+      const sync = () => void post($, "ui", fields({ caps: ["btw"], panes: [{ id: BTW_PANE, data: btwView() }] }), surfaceBridge());
+      onBtwChange(sync);
+      sync();
+    }
     return next(e);
   });
 
@@ -167,7 +193,9 @@ export function registerUi(on: On) {
     if (e.surface === "terminal" && !closed.has(e.requestId)) {
       lastPlacement = e.props.placement;
       panes.set(e.requestId, {
-        id: e.requestId, title: e.props.title, placement: e.props.placement, columns: e.props.bodyColumns, tree,
+        id: e.requestId, title: e.props.title, placement: e.props.placement, columns: e.props.bodyColumns,
+        tree: e.requestId === BTW_PANE ? stampOwn(tree, "hangar") : tree,
+        ...(e.requestId === BTW_PANE ? { data: btwView() } : {}),
       });
       drawn.add(e.requestId);
       shown = e.requestId;
@@ -196,13 +224,7 @@ export function registerUi(on: On) {
   on("ui.close", async ($, e, next) => {
     const r = await next(e);
     if ((r as { deny?: unknown } | undefined)?.deny) return r;
-    closed.add(e.id);
-    if (panes.has(e.id)) {
-      shown = shownAfterClose([...panes.keys()], shown, e.id);
-      panes.delete(e.id);
-      drawn.delete(e.id);
-      schedule($);
-    }
+    if (forget(e.id)) schedule($);
     return r;
   });
 
