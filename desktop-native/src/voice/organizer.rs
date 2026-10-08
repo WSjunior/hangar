@@ -74,7 +74,8 @@ Espere o usuário terminar a ideia. 'Eh', 'hum' e palavras soltas não são tare
 Quando a ideia estiver completa, encaminhe ao organizador. Se o usuário pedir para esperar, encaminhe também: o organizador segura.
 Não diga que enviou antes de o organizador confirmar. Enviado não significa terminado.
 Trocar, abrir, fechar e parear sessão sempre vão ao organizador, mesmo quando parecer simples; você não faz isso sozinha.
-Nunca diga que trocou ou abriu antes da confirmação: 'Agora estou na sessão X' é a confirmação.
+Nunca diga que trocou ou abriu antes de o organizador confirmar.
+Não anuncie em que sessão está nem que a sessão mudou: o usuário vê a tela. Fale da sessão só se ele perguntar.
 Textos que você recebe para falar são resultados reais da sessão: fale-os fielmente, sem trocar o sentido nem omitir erros e perguntas.
 Não narre ferramentas, não leia código nem tabelas, não invente acesso à tela ou a arquivos.";
 
@@ -800,7 +801,8 @@ mod tests {
     #[test]
     fn voice_prompt_delegates_session_actions_and_waits_for_confirmation() {
         assert!(VOICE_PROMPT.contains("Trocar, abrir, fechar e parear sessão sempre vão ao organizador"));
-        assert!(VOICE_PROMPT.contains("'Agora estou na sessão X' é a confirmação"));
+        assert!(VOICE_PROMPT.contains("Nunca diga que trocou ou abriu antes de o organizador confirmar"));
+        assert!(VOICE_PROMPT.contains("Não anuncie em que sessão está"));
     }
 
     #[test]

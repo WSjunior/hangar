@@ -204,6 +204,7 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
     let mut planner = Planner::default();
     let mut target = options.target.clone();
     let mut target_cwd = options.cwd.clone();
+    let mut pending_context: Option<String> = None;
     let mut session_names: Vec<String> = Vec::new();
     let outcome = loop {
         // No Planejar nada sai pelo gate; ao entrar nele o envio pendente já foi cancelado.
@@ -403,6 +404,10 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                     // Limite da conta não leva threadId: tem de passar antes do filtro.
                     if method == "account/rateLimits/updated" { send_limits(events, usage::account_limits(&params["rateLimits"])).await; continue; }
                     if !ours { continue; }
+                    if method == "thread/realtime/transcript/delta" && params["role"] == "user" && let Some(text) = pending_context.take() {
+                        log("context delivered on user speech");
+                        let _ = rpc.request("thread/realtime/appendText", json!({"threadId": thread, "role": "developer", "text": text})).await;
+                    }
                     // A transcrição da fala chega atrasada e cancelava o próprio pedido: só uma fala nova
                     // encaminhada (outro userMessage) prova que o usuário continuou.
                     let user_spoke = method == "item/started" && params["item"]["type"] == "userMessage";
@@ -502,10 +507,8 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                     }
                     target = name.clone();
                     target_cwd = cwd;
-                    let note = organizer::code_note(target_cwd.as_deref(), &own);
-                    let _ = rpc.request("thread/realtime/appendText", json!({"threadId": thread, "role": "developer", "text": note})).await;
-                    let _ = rpc.request("thread/realtime/appendText", json!({"threadId": thread, "role": "developer", "text": context})).await;
-                    let _ = rpc.request("thread/realtime/appendSpeech", json!({"threadId": thread, "text": format!("Agora estou na sessão {name}.")})).await;
+                    // Sem anúncio falado: a pessoa vê a tela. O contexto da sessão só entra quando ela voltar a falar.
+                    pending_context = Some(format!("{}\n{context}", organizer::code_note(target_cwd.as_deref(), &own)));
                 }
                 Some(Command::Result(session, text)) => {
                     log(format!("session result bytes={}", text.len()));
