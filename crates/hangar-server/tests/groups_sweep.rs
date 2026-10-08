@@ -1,10 +1,14 @@
 //! Varredura de membro morto e de grupo `orq` sozinho: tempo de ausência, lista que falha e janela
 //! de lançamento, sobre arquivos reais e um ambiente falso.
+mod fake;
+
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+use hangar_server::groups::exit::leave_and_notify;
+use hangar_server::groups::orq::PythonOrq;
 use hangar_server::groups::service::{BoxFuture, GroupError, GroupService, JoinOwned, OrqFacts, OrqPhase};
 use hangar_server::groups::store::PairDir;
 use hangar_server::groups::sweep::{FAILED_EVENT, RECOVERED_EVENT, SweepEnv, Sweeper};
@@ -174,4 +178,26 @@ async fn no_sidecar_no_list_request() {
     join(&r.groups, "a", &["b"], false).await;
     r.sweeper.round().await;
     assert_eq!(*r.env.list_calls.lock().unwrap(), 1);
+}
+
+/// A varredura só conhece o stem saneado do sidecar; o Python acha o registro pelo nome cru.
+#[tokio::test(flavor = "multi_thread")]
+async fn dead_session_with_sanitized_name_ends_its_external_pair_by_the_raw_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("pair");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("nome-com-espa-o.json"), serde_json::json!({"peers": ["pc-ana::Y"], "task": "", "gid": "abababab", "harness": {}}).to_string()).unwrap();
+    std::fs::write(root.join("external_pairs.json"), serde_json::json!([{"share_id": "sh1", "local_session": "nome com espaço", "alias": "pc-ana",
+        "peer_owner": "Ana", "peer_session": "Y", "peer_address": "https://a.tail.ts.net:8443", "peer_token": "tok", "created_at": 1.0}]).to_string()).unwrap();
+    let (python, upstream) = fake::spawn_fake().await;
+    let mut state = hangar_server::routes::AppState::new(fake::config(upstream, ""));
+    let groups = Arc::new(GroupService::new(PairDir::new(root.clone(), tmp.path().join("arquivo")),
+        Arc::new(PythonOrq::from_state(&state)), "casa".into()));
+    state.groups = Some(groups.clone());
+    let (ex, warnings) = leave_and_notify(&state, &groups, "nome-com-espa-o").await.unwrap();
+    assert_eq!(ex, ["pc-ana::Y"]);
+    assert_eq!(python.internal_bodies("external-pairs/end"), vec![serde_json::json!({"name": "nome com espaço", "peer": "pc-ana::Y"})]);
+    // Tratado como máquina própria, o aviso falharia (nenhuma máquina cadastrada).
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(!root.join("nome-com-espa-o.json").exists());
 }

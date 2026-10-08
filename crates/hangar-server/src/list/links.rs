@@ -123,6 +123,24 @@ fn external_records(path: &Path) -> Option<Arc<ExternalRecords>> {
 /// `_pair_external`: o par de fora entre os peers da sessão, no `.hangar-pair` em `pair_dir`.
 /// Arquivo torto vale como vazio, como no Python; quem o põe de lado é o Python, aqui só se avisa.
 pub(crate) fn pair_external(name: &str, peers: &[String], pair_dir: &Path) -> Option<Map<String, Value>> {
+    external_record(peers, pair_dir, |local| local == name).map(|r| {
+        let mut out = Map::new();
+        for (out_key, key) in [("alias", "alias"), ("owner", "peer_owner"), ("session", "peer_session")] {
+            out.insert(out_key.to_owned(), r.get(key).cloned().unwrap_or(Value::Null));
+        }
+        out
+    })
+}
+
+/// Nome cru da sessão dona do par externo de `peers`. `name` pode ser o stem saneado do sidecar
+/// (a varredura só o conhece), como o `_encerrar_pares_externos` do Python aceitava.
+pub(crate) fn external_local_session(name: &str, peers: &[String], pair_dir: &Path) -> Option<String> {
+    let stem = |local: &str| crate::groups::store::file_stem(local);
+    external_record(peers, pair_dir, |local| local == name || stem(local) == name)
+        .and_then(|r| r.get("local_session").and_then(Value::as_str).map(str::to_owned))
+}
+
+fn external_record(peers: &[String], pair_dir: &Path, owned: impl Fn(&str) -> bool) -> Option<Map<String, Value>> {
     let path = pair_dir.join("external_pairs.json");
     let Some(records) = external_records(&path) else {
         // Ausente é o normal; existir e não ler é falha.
@@ -133,20 +151,11 @@ pub(crate) fn pair_external(name: &str, peers: &[String], pair_dir: &Path) -> Op
         Ok(records) => records,
         Err(field) => { external_unreadable(field); return None }
     };
-    records.iter().find_map(|r| {
+    records.iter().find(|r| {
         let field = |k: &str| r.get(k).and_then(Value::as_str);
-        if field("local_session")? != name {
-            return None;
-        }
-        let address = format!("{}::{}", field("alias")?, field("peer_session")?);
-        peers.contains(&address).then(|| {
-            let mut out = Map::new();
-            for (out_key, key) in [("alias", "alias"), ("owner", "peer_owner"), ("session", "peer_session")] {
-                out.insert(out_key.to_owned(), r.get(key).cloned().unwrap_or(Value::Null));
-            }
-            out
-        })
-    })
+        let (Some(local), Some(alias), Some(peer)) = (field("local_session"), field("alias"), field("peer_session")) else { return false };
+        owned(local) && peers.contains(&format!("{alias}::{peer}"))
+    }).cloned()
 }
 
 /// Encadeamento e par (`ThenLink`, `PairLink`, `_pair_external`).

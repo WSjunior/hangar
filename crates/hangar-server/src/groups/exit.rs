@@ -37,10 +37,11 @@ pub async fn notify_exit(st: &AppState, groups: &GroupService, name: &str, ex: &
     let mut errs = Vec::new();
     for p in ex.iter().filter(|p| is_remote(p)) {
         let (dir, owner, address) = (groups.pair_root().to_path_buf(), name.to_owned(), p.clone());
-        let external = tokio::task::spawn_blocking(move || crate::list::links::pair_external(&owner, &[address], &dir).is_some())
-            .await.unwrap_or(false);
-        if external {
-            match PythonOrq::from_state(st).post_within("external-pairs/end", json!({"name": name, "peer": p}), EXTERNAL_END_TIMEOUT).await {
+        let external = tokio::task::spawn_blocking(move || crate::list::links::external_local_session(&owner, &[address], &dir))
+            .await.unwrap_or(None);
+        if let Some(local) = external {
+            // O Python compara com o nome cru da sessão; `name` pode ser o stem saneado (sessão morta).
+            match PythonOrq::from_state(st).post_within("external-pairs/end", json!({"name": local, "peer": p}), EXTERNAL_END_TIMEOUT).await {
                 Ok((200, reply)) => errs.extend(reply["errors"].as_array().cloned().unwrap_or_default()),
                 Ok((status, _)) => errs.push(failed(p, "erro_peer_nao_avisado", format!("groups_external_end_status:{status}"), json!({"peer": p}))),
                 Err(code) => errs.push(failed(p, "erro_peer_nao_avisado", code, json!({"peer": p}))),
