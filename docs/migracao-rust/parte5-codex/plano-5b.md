@@ -417,7 +417,7 @@ Commit: `feat(runtime): shared cano process module (spawn, kill with identity, o
 - Consumes: `process::{spawn,LaunchSpec}` (Task 3); motor da Task 1.
 - Produces: política `launch_env` → `{"program": [...], "env": {k: v}, "cano_extra": {...}}` (os dois provedores; Codex: `sem_terminal.argv(meta)` com o caminho resolvido do `codex`); políticas `session.patch_meta {cano}` e `session.clear_cano {pid}`; descriptor do `open` aceita `"launch": true` (sobe só se o processo gravado não for `Ours`); `table::decide(_, Provider::Codex, false, true) == Owner::Rust` para as rotas de escrita.
 
-- [ ] **Step 1: Testes (falham)**
+- [x] **Step 1: Testes (falham)**
 
 Python, `test_runtime_policy`: `launch_env` para uma sessão Codex devolve `program` (app-server com os `-c` do modo, `codex` com caminho resolvido) e `env` com `CODEX_HOME` da conta, `CP_SESSION_KEY`, `HANGAR_CANO_KEY`, `HANGAR_CANO_OWNER`, sem `TMUX`/`TMUX_PANE`; `session.clear_cano` só zera com o pid igual e não recria arquivo apagado.
 
@@ -439,11 +439,11 @@ Rust, `table.rs`: `codex_without_terminal_is_rust` (Input/Steer/Interrupt/Select
 
 Rust, `runtime_actor.rs`: `open` Codex com `launch: true` e sem cano → pede `launch_env` (fake de política devolve env + `codex` = script falso que fala JSON-RPC mínimo), sobe pelo `process::spawn`, grava `cano` no arquivo da sessão e o motor chega a `ready`. `open` com cano vivo → conecta, não sobe outro.
 
-- [ ] **Step 2: Rodar e ver falhar**
+- [x] **Step 2: Rodar e ver falhar**
 
 Run: `cd backend && uv run pytest tests/test_runtime_policy.py tests/test_runtime_routing.py` e `cd crates && CARGO_BUILD_JOBS=4 cargo test -p hangar-server --lib session_write && CARGO_BUILD_JOBS=4 cargo test -p hangar-server --test runtime_actor`.
 
-- [ ] **Step 3: Implementar**
+- [x] **Step 3: Implementar**
 
 - `launch_env` (Python, `runtime_policy.run`): Codex → `program = sem_terminal.argv(meta)` com `argv[0]` resolvido (`shutil.which`), `env = sem_terminal._ambiente(meta)`, `cano_extra = {}`; sem binário → erro `codex_ausente`. (O lado Claude pluga depois devolvendo o argv do adapter Claude e `cano_extra = {config_marca}`.)
 - `session.patch_meta` aceita `cano` nos dois provedores; `session.clear_cano {pid}` zera só se o `cano.pid` gravado for o mesmo e nunca recria arquivo apagado.
@@ -454,7 +454,7 @@ Run: `cd backend && uv run pytest tests/test_runtime_policy.py tests/test_runtim
 - Tabela: `Provider::Codex => if terminal { Owner::Python } else { <mesma regra do Claude sem terminal> }`.
 - Contrato: subir para o próximo número livre.
 
-- [ ] **Step 4: Rodar e ver passar; commit**
+- [x] **Step 4: Rodar e ver passar; commit**
 
 Commit: `feat(codex): headless Codex is born and reconnected by Rust; Python only computes the environment`.
 
