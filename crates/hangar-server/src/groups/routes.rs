@@ -52,11 +52,22 @@ pub fn router() -> Router<Arc<AppState>> {
 /// Pedido do dono que o Rust atende, com o corpo já lido.
 pub(super) struct Asked { pub(super) st: Arc<AppState>, pub(super) groups: Arc<GroupService>, pub(super) name: String, parts: Parts, bytes: Bytes, fwd: Forward }
 
+/// Pedido que chegou pela ponte privada: o Python já autorizou quem pediu. O que a rota repassaria
+/// ao Python volta como erro, porque lá ele pediria à ponte de novo.
+#[derive(Clone, Copy)]
+pub(crate) struct Bridged;
+
+fn relay_refused() -> Response {
+    json_response(StatusCode::INTERNAL_SERVER_ERROR, detail_body("erro_grupo_indisponivel",
+        "os grupos estão indisponíveis agora", json!({"detalhe": "groups_bridge_relay"})))
+}
+
 impl Asked {
     pub(super) async fn take(st: Arc<AppState>, peer: SocketAddr, req: Request) -> Result<Asked, Response> {
+        let bridged = req.extensions().get::<Bridged>().is_some();
         let (fwd, owner) = gate(&st, peer, &req);
-        let (Some(groups), true, Some(name)) = (st.groups.clone(), owner, session_name(req.uri().path())) else {
-            return Err(pass(&st, req, &fwd).await);
+        let (Some(groups), true, Some(name)) = (st.groups.clone(), owner || bridged, session_name(req.uri().path())) else {
+            return Err(if bridged { relay_refused() } else { pass(&st, req, &fwd).await });
         };
         let (parts, body) = req.into_parts();
         let Ok(bytes) = to_bytes(body, BODY_LIMIT).await else { return Err(too_large(&parts.headers)) };
@@ -69,6 +80,12 @@ impl Asked {
     }
 
     pub(super) async fn to_python(self) -> Response {
+        if self.parts.extensions.get::<Bridged>().is_some() {
+            if crate::warn_limit::allow(Some(&self.name), "groups_bridge_relay") {
+                tracing::warn!(code = "groups_bridge_relay", session = %self.name, "groups: corpo da ponte que a rota não aceita");
+            }
+            return relay_refused();
+        }
         pass(&self.st, Request::from_parts(self.parts, Body::from(self.bytes)), &self.fwd).await
     }
 
@@ -150,7 +167,7 @@ struct PairBody {
     #[serde(default)] orq: bool,
 }
 
-async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
+pub(super) async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let asked = match Asked::take(st, peer, req).await { Ok(a) => a, Err(response) => return response };
     let Some(body) = asked.body::<PairBody>() else { return asked.to_python().await };
     let raw = if !body.peers.is_empty() { body.peers } else if !body.peer.is_empty() { vec![body.peer] } else { Vec::new() };
@@ -218,7 +235,7 @@ async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<So
     asked.reply(StatusCode::OK, json!({"ok": true, "members": members, "gid": gid, "warning": warning}))
 }
 
-async fn unpair(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
+pub(super) async fn unpair(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let asked = match Asked::take(st, peer, req).await { Ok(a) => a, Err(response) => return response };
     let held = match asked.enter().await { Ok(held) => held, Err(busy) => return busy };
     if let Some(refused) = asked.orchestrator(std::slice::from_ref(&asked.name)).await { return refused; }
@@ -257,7 +274,7 @@ fn storm(gid: &str) -> bool {
     times.len() > STORM_MAX
 }
 
-async fn group_message(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
+pub(super) async fn group_message(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let asked = match Asked::take(st, peer, req).await { Ok(a) => a, Err(response) => return response };
     let Some(body) = asked.body::<GroupMessageBody>() else { return asked.to_python().await };
     // `_transfer_check`: só confere; cada entrega passa pela porta do membro.
@@ -299,7 +316,7 @@ async fn group_message(State(st): State<Arc<AppState>>, ConnectInfo(peer): Conne
     asked.reply(StatusCode::OK, json!({"ok": true, "peers": link.peers, "pulados": [], "warning": warning}))
 }
 
-async fn contract(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
+pub(super) async fn contract(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let asked = match Asked::take(st, peer, req).await { Ok(a) => a, Err(response) => return response };
     let link = match asked.groups.link(&asked.name).await { Ok(link) => link, Err(error) => return asked.store_failed(&error) };
     let Some(link) = link else {

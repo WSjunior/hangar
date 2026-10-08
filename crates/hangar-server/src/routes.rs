@@ -236,6 +236,7 @@ pub fn terminal_router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/workspace", axum::routing::post(crate::workspace_routes::private))
         .route("/__hangar_server/list", axum::routing::post(crate::list::bridge::private))
         .route("/__hangar_server/pages", axum::routing::post(crate::pages::routes::publish_bridge))
+        .route("/__hangar_server/groups", axum::routing::post(crate::groups::bridge::private))
         .layer(axum::middleware::from_fn(crate::migration_status::count_bridge));
     // Painel e canal do estado ficam fora da contagem: conexões longas, não chamadas da ponte.
     router.route("/__hangar_server/term", get(crate::term::private_ws))
@@ -252,6 +253,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/workspace", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/list", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/pages", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
+        .route("/__hangar_server/groups", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/term", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/state/{name}/events", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         // Outro método nessas rotas (preflight OPTIONS, HEAD) segue ao Python.
@@ -283,6 +285,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/cotacao", get(crate::costs_routes::cotacao).fallback(pass_any))
         .route("/api/uso", get(crate::costs_routes::usage).fallback(pass_any))
         .route("/api/migration/status", get(crate::migration_status::status).fallback(pass_any))
+        // Grupos (`/pair`, `/group-message`, `/pair/contract`, `/pair-remote`, `/unpair-remote`).
+        .merge(crate::groups::routes::router())
         .fallback(pass_any)
         .layer(axum::middleware::from_fn(crate::migration_status::count_public))
         .with_state(state)
@@ -320,6 +324,8 @@ async fn health(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response
         "owns": owns,
         // O painel de terminal real é do Rust em todas as plataformas.
         "terminal_panel": true,
+        // Sem as pastas da lista não há serviço de grupos: as rotas seguem ao Python, que fica dono.
+        "groups": st.groups.is_some(),
         "terminal_address": st.terminal_address.map(|a| a.to_string())}).to_string();
     let mut resp = ([(header::CONTENT_TYPE, "application/json")], body).into_response();
     cors(&headers, resp.headers_mut());

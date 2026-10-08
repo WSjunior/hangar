@@ -8,6 +8,10 @@ use super::orq::PythonOrq;
 use super::service::{GroupError, GroupService};
 use crate::routes::AppState;
 
+/// O Python avisa o outro lado do par externo (até 8 s de conexão + 8 s de leitura) antes de
+/// responder: abaixo disso a saída daria o aviso por perdido com ele ainda a caminho.
+const EXTERNAL_END_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub(crate) const NO_SERVER_ID: &str = "CP_SERVER_ID ausente no backend/.env — obrigatório pra pareamento cross-server (é o endereço de resposta srv::sessao)";
 
 /// Segmento de caminho como o app mandaria: só os não reservados ficam crus.
@@ -36,7 +40,7 @@ pub async fn notify_exit(st: &AppState, groups: &GroupService, name: &str, ex: &
         let external = tokio::task::spawn_blocking(move || crate::list::links::pair_external(&owner, &[address], &dir).is_some())
             .await.unwrap_or(false);
         if external {
-            match PythonOrq::from_state(st).post("external-pairs/end", json!({"name": name, "peer": p})).await {
+            match PythonOrq::from_state(st).post_within("external-pairs/end", json!({"name": name, "peer": p}), EXTERNAL_END_TIMEOUT).await {
                 Ok((200, reply)) => errs.extend(reply["errors"].as_array().cloned().unwrap_or_default()),
                 Ok((status, _)) => errs.push(failed(p, "erro_peer_nao_avisado", format!("groups_external_end_status:{status}"), json!({"peer": p}))),
                 Err(code) => errs.push(failed(p, "erro_peer_nao_avisado", code, json!({"peer": p}))),

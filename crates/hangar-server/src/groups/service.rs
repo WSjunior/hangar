@@ -187,6 +187,12 @@ impl GroupService {
         Ok(())
     }
 
+    /// `work` sob o lock de grupo: a associação do time do `orq`, que mexe no grupo pelo Python.
+    pub async fn locked<T>(&self, work: impl Future<Output = T>) -> T {
+        let _guard = self.lock.lock().await;
+        work.await
+    }
+
     async fn restore_blocking(&self, before: Snapshot) {
         let dir = self.dir.clone();
         let _ = blocking(move || restore_logged(&dir, &before)).await;

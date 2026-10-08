@@ -1,4 +1,5 @@
 //! Grupos de sessões (pareamento): arquivos em `.hangar-pair` e as regras sobre eles.
+pub mod bridge;
 pub mod deliver;
 pub mod exit;
 pub mod legacy;

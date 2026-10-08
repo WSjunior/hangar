@@ -51,7 +51,7 @@ async fn machine(root: &Path, id: &str) -> Machine {
     state.groups = Some(Arc::new(GroupService::new(PairDir::new(pair.clone(), root.join("arquivo")), Arc::new(PythonOrq::from_state(&state)), id.into())));
     state.peers = Arc::new(PeerClient::new(PeerBook::new(Some(root.join("peers.json")))));
     let state = Arc::new(state);
-    let app = hangar_server::groups::routes::router().with_state(state.clone()).merge(router(state))
+    let app = router(state)
         .into_make_service_with_connect_info::<SocketAddr>();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

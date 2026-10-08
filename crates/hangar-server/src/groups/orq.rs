@@ -26,6 +26,10 @@ impl PythonOrq {
     /// `POST /internal/{path}` → status e corpo (`Null` se não for JSON). `Err` é só código: motivo,
     /// nunca o corpo.
     pub(crate) async fn post(&self, path: &str, body: Value) -> Result<(u16, Value), String> {
+        self.post_within(path, body, TIMEOUT).await
+    }
+
+    pub(crate) async fn post_within(&self, path: &str, body: Value, timeout: Duration) -> Result<(u16, Value), String> {
         let req = axum::http::Request::post(format!("http://{}/internal/{path}", self.upstream))
             .header("x-hangar-internal", &self.secret).header("content-type", "application/json")
             .body(Body::from(body.to_string())).map_err(|_| "groups_internal_request".to_owned())?;
@@ -37,7 +41,7 @@ impl PythonOrq {
                 .map_err(|_| "groups_internal_body".to_owned())?.to_bytes();
             Ok((status, serde_json::from_slice(&bytes).unwrap_or(Value::Null)))
         };
-        tokio::time::timeout(TIMEOUT, work).await.map_err(|_| "groups_internal_timeout".to_owned())?
+        tokio::time::timeout(timeout, work).await.map_err(|_| "groups_internal_timeout".to_owned())?
     }
 }
 

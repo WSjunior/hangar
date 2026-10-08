@@ -995,6 +995,23 @@ class KillFailed(Exception):
         self.name = name
 
 
+def _rename_pair_python(old: str, new: str) -> None:
+    """No modo Rust o grupo já foi renomeado pela rota antes do tmux e do sidecar (`group.rename`)."""
+    from app import groups_bridge
+    if not groups_bridge.rust_owns_groups():
+        rename_pair(old, new)
+
+
+class GroupCleanupFailed(ValueError):
+    """O nome reusado ainda tem o grupo da sessão antiga e o Rust não o desfez: criar agora faria
+    a sessão nova nascer dentro dele."""
+    code = "erro_grupo_limpeza_falhou"
+
+    def __init__(self, name: str):
+        super().__init__(f"o grupo da sessão antiga '{name}' não foi desfeito; tente de novo")
+        self.name = name
+
+
 def _retire_waiting_runtime(name: str) -> None:
     """Vida antiga do mesmo nome, ainda esperando identidade no runtime, não segura o nome novo."""
     from app import runtime_coordinator
@@ -2168,6 +2185,7 @@ class SessionRegistry:
             model = model if model is not None else target.get("model")
             effort = effort if effort is not None else target.get("effort")
             permission_mode = permission_mode if permission_mode is not None else target.get("permission_mode")
+        self._leave_old_group(name)
         if headless:
             if provider not in ("claude", "codex"):
                 raise ValueError("sessao sem terminal so vale para provider claude ou codex")
@@ -2969,7 +2987,7 @@ class SessionRegistry:
             self._rename_rust(old, new)
             PromptQueue(old).rename(new)
             ThenLink(old).rename(new)
-            rename_pair(old, new)
+            _rename_pair_python(old, new)
             shortcut_terminals.rename_owner(old, new)
             from app.conversation_transfer import rename_transfer
             rename_transfer(old, new)
@@ -3006,7 +3024,7 @@ class SessionRegistry:
         # Pareamento: move o próprio sidecar E re-aponta o do PAR (que referencia o nome velho) —
         # senão o par ficaria pareado com um fantasma e o unpair simétrico quebrava. Sob o lock do
         # módulo pair (rename_pair): sem ele, um unpair concorrente podia ser ressuscitado.
-        rename_pair(old, new)
+        _rename_pair_python(old, new)
         if apos_renomear_codex:
             apos_renomear_codex(old, new)
         # L71 da revisao final: o shell escondido e keyed por NOME (`term-<nome>`) e NAO acompanha o
@@ -3122,12 +3140,41 @@ class SessionRegistry:
         # Sessão morta SAI do grupo (leave: sob lock, atualiza os demais membros): sem isto os
         # companheiros apontariam pra um fantasma (badge preso). Best-effort, nunca bloqueia o
         # kill nem a criação — mas LOGA: engolir calado deixava o badge-fantasma indiagnosticável.
+        from app import groups_bridge
+        if groups_bridge.rust_owns_groups():
+            # O Rust já avisa as outras máquinas e o par externo; falha aqui a varredura dele resolve.
+            try:
+                out = groups_bridge.call("group.leave", name=name)
+            except groups_bridge.GroupsBridgeError as e:
+                _log.warning("_clear_pair(%s): o Rust não tirou a sessão do grupo: %s", name, e.code)
+                return
+            if out.get("warnings"):
+                _log.warning("_clear_pair(%s): saída do grupo com %d aviso(s) não entregue(s)",
+                             name, len(out["warnings"]))
+            return
         try:
             pair_leave(name)
         except Exception as e:
             # Sem "kill(...)" no texto: o create() também chama isto (nome reusado de sessão morta
             # fora do kill), e a falha aparecia no log como se fosse de um encerramento.
             _log.warning("_clear_pair(%s): falha ao sair do grupo de pareamento: %r", name, e)
+
+    @staticmethod
+    def _leave_old_group(name: str) -> None:
+        """Nome reusado no modo Rust: o grupo da sessão antiga sai antes de qualquer efeito da
+        criação. Sem limpeza e com o sidecar ainda lá, a criação é recusada."""
+        from app import groups_bridge
+        if not groups_bridge.rust_owns_groups():
+            return
+        if tmux.has_session(name) or codex_sessions.exists(name) or headless_sessions.exists(name):
+            return   # nome em uso: o ramo da criação recusa, e o grupo é de quem está viva
+        try:
+            groups_bridge.call("group.leave", name=name)
+        except groups_bridge.GroupsBridgeError as e:
+            if PairLink(name).path.exists():
+                _log.warning("criação de %s recusada: grupo antigo não desfeito (%s)", name, e.code)
+                raise GroupCleanupFailed(name) from e
+            _log.warning("criação de %s: ponte de grupos falhou sem grupo a desfazer (%s)", name, e.code)
 
     def sweep_pairs(self, list_fn: Callable[[], list[SessionInfo]], agora: float | None = None) -> None:
         """Lista que falha levanta antes de varrer: vazia por erro dissolveria grupos vivos. Sem

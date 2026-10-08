@@ -32,7 +32,7 @@ _log = logging.getLogger("hangar.rust_server")
 HEALTH_PATH = "/__hangar_server/health"
 # Versão do contrato interno (rotas /internal, side-events, ambiente). Tem de casar com o
 # `protocol` da saúde (hangar_server::INTERNAL_PROTOCOL); outro número = o Python atende sozinho.
-RUST_SERVER_PROTOCOL = 38
+RUST_SERVER_PROTOCOL = 39
 START_TIMEOUT = 10.0
 OP_TIMEOUT_S = 75
 CRASH_WINDOW = 60.0
@@ -331,7 +331,12 @@ class Supervisor:
             diag.registrar("hangar_server.pastas_lista", "erro", **diag.erro_campos(e))
             # Vazia, e não a herdada do ambiente: o Rust recusa com código em vez de usar pastas velhas.
             lists = {"HANGAR_LIST_DIRS": ""}
-        return {**os.environ, **lists,
+        from app import pair, peers
+        from app.config import settings
+        # Grupos: o id desta máquina, as outras máquinas e o arquivo de contratos são do Python.
+        groups = {"HANGAR_SERVER_ID": settings.server_id or "", "HANGAR_PEERS_FILE": str(peers._PEERS_FILE),
+                  "HANGAR_PAIR_ARCHIVE": str(pair._arquivo_dir())}
+        return {**os.environ, **lists, **groups,
                 "HANGAR_SERVER_LISTEN": listen_addr(self.host, self.port),
                 "HANGAR_SERVER_UPSTREAM": f"127.0.0.1:{self.upstream_port}",
                 "HANGAR_INTERNAL_SECRET": secret,
@@ -346,10 +351,11 @@ class Supervisor:
         `address` (endereço privado ausente ou inválido na saúde)."""
         global terminal_panel
         terminal_panel = None
-        from app import list_bridge, pages_bridge, workspace_bridge
+        from app import groups_bridge, list_bridge, pages_bridge, workspace_bridge
         workspace_bridge.configure(None, None)
         list_bridge.configure(None, None)
         pages_bridge.configure(None, None)
+        groups_bridge.configure(None, None)
         terminal_observer.configure(None, None)
         if self.proc is not None:
             from app.runtime_process import cleanup
@@ -396,6 +402,7 @@ class Supervisor:
                     workspace_bridge.configure(address, env["HANGAR_INTERNAL_SECRET"])
                     list_bridge.configure(address, env["HANGAR_INTERNAL_SECRET"])
                     pages_bridge.configure(address, env["HANGAR_INTERNAL_SECRET"])
+                    groups_bridge.configure(address, env["HANGAR_INTERNAL_SECRET"])
                 except ValueError:
                     # Sem o endereço privado o Rust não tem as pontes: é falha de partida, e o Python
                     # assume a porta inteira em vez de atender metade por trás dele.
@@ -403,6 +410,7 @@ class Supervisor:
                     workspace_bridge.configure(None, None)
                     list_bridge.configure(None, None)
                     pages_bridge.configure(None, None)
+                    groups_bridge.configure(None, None)
                     _log.error("hangar-server sem endereço privado válido na saúde")
                     diag.registrar("hangar_server.partida", "erro", codigo="endereco_invalido")
                     return "address"
@@ -411,6 +419,9 @@ class Supervisor:
                     _log.error("hangar-server sem owns válido na saúde")
                     diag.registrar("hangar_server.partida", "erro", codigo="capacidade_invalida")
                     return "address"
+                # Sem `groups: true` (pastas da lista sem resolver) o Rust repassa as rotas de
+                # grupo e o Python segue dono delas.
+                groups_bridge.set_capable(health.get("groups") is True)
                 self.configure_runtime(ready, env["HANGAR_INTERNAL_SECRET"], env["HANGAR_RUNTIME_INSTANCE"], owns)
                 return "up"
             await asyncio.sleep(_POLL)

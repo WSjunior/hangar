@@ -75,6 +75,8 @@ pub struct Fake {
     /// `/internal/`): resposta e corpos recebidos.
     internal_replies: Mutex<HashMap<String, (StatusCode, Value)>>,
     internal_bodies: Mutex<Vec<(String, Value)>>,
+    /// Demora dessas rotas depois de anotar o corpo (Python lento segurando quem chamou).
+    pub internal_delay: Mutex<Duration>,
 }
 
 impl Fake {
@@ -216,6 +218,7 @@ pub async fn spawn_fake() -> (Arc<Fake>, SocketAddr) {
             ("external-pairs/end".to_owned(), (StatusCode::OK, json!({"errors": []}))),
         ])),
         internal_bodies: Mutex::default(),
+        internal_delay: Mutex::default(),
     });
     let app = Router::new()
         .route("/internal/sessions/{name}/info", get(fake_info))
@@ -309,6 +312,8 @@ async fn fake_internal_json(State(f): State<Arc<Fake>>, req: Request) -> Respons
     let path = req.uri().path().trim_start_matches("/internal/").to_owned();
     let bytes = axum::body::to_bytes(req.into_body(), 1 << 20).await.unwrap_or_default();
     f.internal_bodies.lock().unwrap().push((path.clone(), serde_json::from_slice(&bytes).unwrap_or(Value::Null)));
+    let delay = *f.internal_delay.lock().unwrap();
+    tokio::time::sleep(delay).await;
     let Some((code, body)) = f.internal_replies.lock().unwrap().get(&path).cloned() else { return status(StatusCode::NOT_FOUND) };
     Response::builder().status(code).header("content-type", "application/json").body(Body::from(body.to_string())).unwrap()
 }

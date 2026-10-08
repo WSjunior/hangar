@@ -272,6 +272,8 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_peer_nao_informado: () => m.erro_peer_nao_informado(),
   erro_autopareamento: () => m.erro_autopareamento(),
   erro_grupo_sem_conversa: () => m.erro_grupo_sem_conversa(),
+  erro_grupo_limpeza_falhou: () => m.erro_grupo_limpeza_falhou(),
+  erro_grupo_indisponivel: (p) => m.erro_grupo_indisponivel({ detalhe: String(p.detalhe) }),
   erro_initiator_invalido: () => m.erro_initiator_invalido(),
   erro_pareamento_cross_1_1: () => m.erro_pareamento_cross_1_1(),
   erro_pareamento_server_id_ausente: () => m.erro_pareamento_server_id_ausente(),
