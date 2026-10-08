@@ -68,6 +68,12 @@ de pedidos, rotas só do Codex), contrato 38. Falta e fica para depois:
   (`state/runtime_feed.rs`) não depende de provedor: ligar é o ator Claude escrever no `watch` e o
   predicado do hub aceitar `ClaudeHeadless`. Fica com a metade Claude, que ainda tem `suggest` e a
   faixa a conferir.
+- **Problema cosmético some do chat do Codex sem terminal:** o feed só mostra `runtime_falhou` para
+  o erro durável do ator; os `problem` cosméticos (falha de `format_status`, `reload_stamp`,
+  `last_usage`, `unknown_private`; o `session_patch_stale` da conversa atual segue visível porque
+  o motor também o põe na vista), que o Python
+  mostrava até o retrato seguinte, não aparecem no chat (continuam indo ao Python, para os fatos
+  da lista).
 - **Contrato 39** nesta branch: a junção reconfere o próximo número livre na `main`.
 - **Renomear sessão Codex sem terminal** com chat aberto: o canal do feed é por nome e o hub
   também; conferir no uso real que o rename fecha e reabre os dois.

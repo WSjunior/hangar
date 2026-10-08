@@ -76,6 +76,10 @@ CPU em ms por segundo, mediana de 3 janelas de 20 s por rodada; `/` separa as ro
 | Python | 159,1 / 160,8 MB | 175,7 / 163,2 MB | 175,8 / 163,5 MB | 162,9 / 163,5 MB |
 | Rust | — | 24,9 / 24,8 MB | 50,0 / 52,0 MB | 56,5 / 57,7 MB |
 
+- Parte da queda de CPU vem de entregar menos eventos: os 10 chats recebem ~36 `preview` por
+  segundo no total, contra ~66,6 nas outras versões. E toda mudança de `state` e de
+  `ask_question` agora chega com até 150 ms de atraso (a janela do feed corre depois da
+  mudança), por desenho.
 - A prévia chega nos chats a ~3,6 eventos por segundo por chat (antes 6,65): o feed espera 150 ms
   depois de cada mudança e o ator já junta os deltas em 150 ms, então cada rodada cobre ~275 ms de
   texto. É o "no máximo uma a cada 150 ms por chat" do aceite; o último valor sempre sai (teste

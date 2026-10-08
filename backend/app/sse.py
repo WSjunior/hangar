@@ -737,6 +737,13 @@ def _estado_do_rust(provider: str, name: str) -> bool:
     return _codex_headless(name) and owner.rust_owns("codex", True)
 
 
+async def _estado_do_rust_async(provider: str, name: str) -> bool:
+    """O Codex lê o arquivo da sessão: fora do laço de eventos. Os outros não leem disco."""
+    if provider == "codex":
+        return await asyncio.to_thread(_estado_do_rust, provider, name)
+    return _estado_do_rust(provider, name)
+
+
 def _codex_headless(name: str) -> bool:
     from app.adapters.codex import sessions as codex_sessions
     return bool((codex_sessions.load(name) or {}).get("headless"))
@@ -827,7 +834,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
 
     # Claude com terminal e o Rust de pé: o Python não observa o pane nem lê a prévia, em nenhuma
     # porta. A conexão interna é o próprio hub; quem entrou pelo Python lê o canal privado dele.
-    rust_state = _estado_do_rust(provider, name)
+    rust_state = await _estado_do_rust_async(provider, name)
     pqueue = PromptQueue(name)
     # Fonte do preview ao vivo ramifica por provider: Claude nao tem push (o app-server manda os
     # deltas, o TUI do Claude nao) -> continua no PreviewBroker (poll do pane). Codex nao tem pane
@@ -1243,7 +1250,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                 current_provider = novo_prov
                 current_jsonl = novo_jsonl
                 committed["text"] = ""
-                rust_state = _estado_do_rust(novo_prov, name)
+                rust_state = await _estado_do_rust_async(novo_prov, name)
                 broker = None if rust_state else _broker_de(novo_prov)
                 # A prévia do provider anterior sai; na conexão interna de sessão do Rust quem
                 # limpa é o hub, e uma prévia do Python ali seria descartada como vazamento.

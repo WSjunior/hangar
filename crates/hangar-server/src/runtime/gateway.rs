@@ -187,10 +187,11 @@ impl RuntimeRegistry {
     /// Último valor da sessão `name` para o feed do hub; `None` enquanto ela não está aberta aqui.
     pub fn live(&self,name:&str) -> LiveReceiver { self.live_sender(name).subscribe() }
     /// Canal do nome, criado na primeira procura (feed ou ator, o que vier antes). Canal vazio e sem
-    /// receptor sai do mapa aqui: sem isto o mapa guardaria todo nome que já teve chat aberto.
+    /// receptor sai do mapa aqui: sem isto o mapa guardaria todo nome que já teve chat aberto. Canal
+    /// que um ator já segura (cópia fora do mapa) fica, mesmo vazio: o ator só escreve no primeiro passo.
     fn live_sender(&self,name:&str) -> LiveSender {
         let mut map = self.live.lock().unwrap_or_else(|e|e.into_inner());
-        map.retain(|key,sender|key == name || sender.receiver_count() > 0 || sender.borrow().is_some());
+        map.retain(|key,sender|key == name || sender.receiver_count() > 0 || sender.sender_count() > 1 || sender.borrow().is_some());
         map.entry(name.to_owned()).or_insert_with(||tokio::sync::watch::channel(None).0).clone()
     }
     pub async fn handle(&self,key:&str,generation:u64) -> Result<RuntimeHandle,RuntimeError> {
@@ -708,6 +709,20 @@ mod tests {
         let Ok(Target::Headless(target,sidecar_dir)) = descriptor(&value,true) else { panic!("subida sem cano gravado") };
         assert_eq!((target.binding.pid,target.binding.versao),(0,2));
         assert_eq!(sidecar_dir.as_deref(),Some(std::path::Path::new("dir")));
+    }
+
+    #[test]
+    fn held_empty_live_channel_survives_another_lookup() {
+        // O `open` pega o canal e o ator só escreve no primeiro passo: outra procura no meio não o apaga.
+        let registry = RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into());
+        let held = registry.live_sender("a");
+        let _other = registry.live_sender("b");
+        held.send_replace(Some(Arc::new(LiveState::default())));
+        assert!(registry.live("a").borrow().is_some(),"o feed lê o mesmo canal que o ator segura");
+        drop(held);
+        registry.live_sender("a").send_replace(None);
+        let _ = registry.live_sender("c");
+        assert!(!registry.live.lock().unwrap().contains_key("a"),"vazio, sem dono e sem receptor: sai");
     }
 
     #[tokio::test]
