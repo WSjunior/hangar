@@ -160,10 +160,13 @@ async fn specific_public_bind_advertises_private_loopback_and_stop_closes_both()
     assert_eq!(client.get(format!("http://{private}/__hangar_server/health")).send().await.unwrap().status(), StatusCode::NOT_FOUND);
     assert_eq!(client.post(format!("http://{public_addr}/__hangar_server/terminal")).header("x-hangar-internal", "internal")
         .body(release.to_string()).send().await.unwrap().status(), StatusCode::NOT_FOUND);
+    let plugin: std::net::SocketAddr = format!("127.0.0.1:{}", public_addr.port()).parse().unwrap();
+    assert_eq!(client.get(format!("http://{plugin}/api/sessions")).send().await.unwrap().status(), StatusCode::NOT_FOUND);
     stop.send(()).unwrap();
     task.await.unwrap();
     assert!(tokio::net::TcpStream::connect(public_addr).await.is_err());
     assert!(tokio::net::TcpStream::connect(private).await.is_err());
+    assert!(tokio::net::TcpStream::connect(plugin).await.is_err());
 }
 
 #[tokio::test]

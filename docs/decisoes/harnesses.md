@@ -65,6 +65,13 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   Windows over SSH"); a variável força a tela cheia mesmo sem `"tui": "fullscreen"` nas
   configurações. Sem ela, o clique dos botões de mod pelo app não tem onde chegar.
 
+- **A ponte do plugin mantém seu loopback na porta pública quando o Rust está ativo.** Bind
+  específico, inclusive na interface Tailscale, ganha uma entrada local só para `/api/plugin`;
+  wildcard e loopback já atendidos não ganham outro socket. A cobertura IPv6 é conferida no
+  socket, sem presumir dual stack. Nome MagicDNS, HTTPS e publicação do Tailscale não mudam.
+  Sem Rust, o bind específico mantém o limite da reserva Python. Ver
+  [ponte local com bind específico](#ponte-local-com-bind-específico-issue-80).
+
 - **Clique do app que copia ou abre URL acontece no aparelho de quem clicou.** O plugin responde
   no lugar do `ui.copy` e do `process.run` de abridor de URL só quando a chamada vem do mod dono
   do botão, até 1,5 s depois de um press que o backend confirmou como vindo do app. Cópia e
@@ -1866,6 +1873,76 @@ ao aparelho de quem clicou pelo `press-start` e pelo `opened`, que o Rust atende
 aviso e a cópia não passam pela ponte, para não chegarem em dobro. Com os mods desligados, o
 filho nunca herda `HANGAR_PLUGIN_*` do ambiente do backend.
 
+### Ponte local com bind específico (issue #80)
+
+A URL da ponte, no ambiente da sessão e no arquivo de descoberta, é
+`http://127.0.0.1:<porta pública>/api/plugin`. O bind público em um endereço específico não
+atende esse destino. Trocar a URL pelo endereço de rede também não basta: `whoami` e
+`submitted` exigem origem loopback, e processos vivos conservam o ambiente de lançamento.
+
+No modo Rust, `plugin_listener` confere o endereço e a porta efetivos do listener público e,
+quando necessário, abre `127.0.0.1` na mesma porta. `0.0.0.0` e `127.0.0.1` já cobrem o destino;
+outros IPv4, inclusive outro endereço do bloco loopback, não. Em IPv6, `IPV6_V6ONLY` vem do
+socket real: wildcard dual stack não ganha outro bind; v6-only e endereços específicos precisam
+garantir também o IPv4 anunciado. Não se altera essa opção do socket público.
+
+Essa entrada local só monta as rotas da ponte, compartilhadas com a entrada pública. Os
+handlers Rust usam o mesmo estado e as rotas ainda atendidas pelo Python seguem ao mesmo
+upstream, preservando corpo, método e origem. Token da sessão e chave de descoberta continuam
+obrigatórios; loopback não concede identidade de dono e o segredo interno não passa pelo proxy.
+Outros caminhos recebem 404, sem expor a API inteira nem as pontes privadas.
+
+Os binds terminam antes da saúde pública. Conflito de porta impede a partida, em vez de trocar a
+porta contratada ou aceitar outro processo como substituto. O serviço adicional participa da
+mesma seleção de serviço e parada; fechar o cano do pai ou falhar um listener encerra o conjunto.
+URL, sidecar, IPC e formato de evento não mudam.
+
+O nome HTTPS/MagicDNS usado pelo app é independente dessa conexão local. `tailscale serve`
+continua encaminhando ao backend como antes, e bind direto na interface Tailscale segue a mesma
+política de endereço específico. O adicional não torna a API inteira disponível em loopback
+numa configuração que antes não a atendia. Sem Rust, a reserva Python mantém o limite antigo.
+
+Prova de 07/10/2026, protocolo interno 36, com Claude Code real no Windows e dois clientes do
+app nativo acessando por HTTPS/MagicDNS do Tailscale, sem turnos de modelo:
+
+- Na base, bind IPv4 específico atendia a API pública, mas recusava loopback na mesma porta. A
+  faixa existia no terminal e faltava no app; o clique sem terminal não entregava URL ao cliente.
+- Com a entrada local, a faixa apareceu no app e o clique do terminal abriu a URL somente no
+  primeiro cliente; o clique sem terminal abriu somente no segundo. Cada cliente recebeu uma
+  abertura. Depois de reiniciar o servidor mantendo as sessões, outro clique do primeiro cliente
+  somou uma abertura somente nele.
+- Token inválido recebeu 403. API pública geral, saúde e pontes privadas receberam 404 pelo
+  adicional. A descoberta com a chave do sidecar e o UUID real da conversa devolveu a sessão e
+  seu token, sem trocar o endereço anunciado.
+- `0.0.0.0` e `127.0.0.1` mantiveram a API pública no loopback, com 401 sem credencial, sem bind
+  duplicado. `::1` e `::` no Windows abriram também a entrada IPv4 restrita; no wildcard IPv6
+  dessa máquina o socket era v6-only. Dual stack tem regressão de socket, mas não foi executada
+  nessa prova; não se presume seu resultado a partir do Windows.
+
+Os builds Linux e Windows foram executados. No fechamento Linux, com Rust 1.98.1 e ambiente
+isolado, passaram as regressões da ponte, incluindo os sockets dual stack e v6-only. O workspace
+teve 1.169 testes aprovados e uma falha em `failed_open_leaves_no_entry_and_frees_the_lease`
+(`cano_read` em vez de `cano_connect`); o teste passou na repetição isolada. Ele libera uma porta
+efêmera antes da conexão, deixando uma janela de reutilização. Não houve alteração desse teste.
+A suíte do backend teve 8.459 aprovados e 76 pulados; a contenção/runtime teve 113 aprovados e
+um pulado; o contrato Python com o cano Rust teve 23 aprovados. A fixture HTTP nova foi corrigida
+para não depender da feature JSON do Axum, que o projeto não habilita.
+
+A verificação Windows posterior rodou em checkout isolado, sem alterar a instalação em uso.
+O workspace teve 1.066 aprovados e duas falhas em testes que lançam `python3`
+(`peek_keeps_old_writer_tcp` e `two_processes_one_lease`). Ambos passaram ao repetir com
+`python3.exe` da venv de teste no PATH, em vez do atalho da Microsoft Store. As regressões da
+ponte passaram, incluindo os sockets IPv6; os seis arquivos de contenção/runtime tiveram
+106 aprovados e oito pulados.
+
+Esses passos Linux e Windows rodaram sobre o diff da worktree, sem commit nem registro de
+aprovação de árvore. O registro oficial continua exigido antes da publicação.
+A fixture da prova visual isolou instalação/atualização automática na subida, igualmente na
+base e na correção, para não substituir o processo de prova por outro ciclo do backend;
+bootstrap de sessões, hooks, lifespan e proteção dos escritores continuaram reais.
+
+### Guarda e erros da interface dos mods
+
 Antes de cada operação de mod, o Rust pergunta ao Python se a troca de agente está em curso
 (`/internal/sessions/{name}/transfer`, contrato interno 28) e devolve a recusa dele
 (`session_transfer_busy`); sem resposta, recusa com `erro_mod_guarda_indisponivel`. Essa guarda
@@ -1888,7 +1965,8 @@ Limites conhecidos:
 - cada `change` de um campo paga uma ida ao Python (a guarda), com a falha dela virando
   `erro_mod_guarda_indisponivel`;
 - o convidado não digita em campo de mod nas sessões sem terminal, e também não vê a faixa nem os painéis delas: o `/events` do convidado vai ao Python, que não tem a interface dos mods das sessões que o Rust atende (servir o `plugin_ui` ao convidado pelo hub fica para outra decisão);
-- o `opened` com bind de LAN é limite antigo da ponte, que continua valendo;
+- sem o servidor Rust, o `opened` com bind específico continua sendo limite da ponte; com o
+  Rust ativo, a [entrada local](#ponte-local-com-bind-específico-issue-80) mantém a URL anunciada;
 - a sessão sem terminal renomeada continua com o mesmo `claude -p`, que manda à ponte o nome com que nasceu (`CP_SESSION_NAME`) e o token desse nome. O renomear fecha e reabre a sessão no Rust no mesmo processo (chave durável e cano), e a reabertura herda o nome de nascimento; com isso `press-start` e `opened` acham a sessão. Se o `hangar-server` reiniciar depois do renomear, ele não conhece o nome antigo, e a URL de um clique do app abre na máquina do servidor até o processo ser relançado;
 - o token da ponte é o HMAC só do nome, como no Python: dois processos que nasceram com o mesmo nome (uma sessão renomeada e outra criada depois com o nome antigo) têm o mesmo token, e o servidor não os distingue. Com as duas vivas no Rust, a ponte não atende nenhuma (a URL de um clique do app abre no servidor), para um processo não tomar o clique nem mandar URL ao aparelho da outra. Quando o nome antigo é hoje o de uma sessão fora do Rust (com terminal, ou atendida pelo Python), o Rust pergunta ao Python, sem cache, se a sessão existe; existindo, ou sem resposta, `press-start` e `opened` vão ao Python, que atende essa sessão, e a renomeada perde o efeito do clique do app (a URL abre no servidor) enquanto as duas viverem. Na interface, cada vida de ator tem identificador próprio, e uma sessão nova com o nome antigo não herda faixa, avisos nem clique. Fechar o limite pede um token por processo (o nome de nascimento e a chave no sidecar e no HMAC, no Python e no plugin), fora da exceção S7;
 - a sessão com terminal que o Rust atende, inclusive no Windows (onde o terminal já nasce no Rust), não é superfície remota: a fonte da interface dos mods dela é o plugin do Hangar no terminal, e desde a fase 3 a ponte dela e o clique do app são do Rust (parágrafos seguintes).
