@@ -151,9 +151,13 @@ def _limpar(conta: str, t: Tentativa | None = None) -> None:
 
 
 def iniciar(conta: str, cwd: str) -> dict:
-    """Abre a janela escondida e digita o comando de login. Recusa se já há uma tentativa."""
-    if _em_curso(conta):
-        raise RuntimeError(f"login já em andamento para a conta {conta}")
+    """Abre a janela escondida e digita o comando de login, trocando a tentativa anterior."""
+    # A tela que abriu a anterior pode ter sumido sem cancelar; pedir de novo é a saída dela.
+    anterior = _tentativas.get(conta)
+    if anterior is not None:
+        diag.registrar("conta.login.substituiu", "aviso", provider="claude", operacao=anterior.operacao,
+                       etapa="trocar_tentativa", ms=int((time.monotonic() - anterior.inicio) * 1000))
+        _limpar(conta, anterior)
     operacao = uuid.uuid4().hex
     campos = {"provider": "claude", "conta_id": diag.conta_id(cwd), "operacao": operacao}
     inicio = time.monotonic()
