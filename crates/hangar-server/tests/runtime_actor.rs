@@ -853,6 +853,11 @@ for line in sys.stdin:
                         let data = if failing { json!({"error":"codex_ausente"}) } else if kind == "launch_env" { launch.clone() }
                             else if stale { json!({"updated":false,"stale":true}) } else if kind == "session.patch_meta" { json!({"updated":true}) } else { json!({}) };
                         if stale { seen.lock().unwrap().push(("stale".into(),body["payload"].clone())); }
+                        // Thread nova responde devagar: a vista com ela sai antes, como na corrida real.
+                        if state.is_some() && kind == "session.patch_meta" && body["payload"].get("thread_id").is_some() {
+                            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                            seen.lock().unwrap().push(("patched".into(),json!(std::time::SystemTime::now())));
+                        }
                         let reply = json!({"ok":true,"data":data}).to_string();
                         let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",reply.len());
                         if reader.get_mut().write_all(response.as_bytes()).await.is_err() { return; }
@@ -1080,11 +1085,23 @@ for line in sys.stdin:
             let (address,policy) = policy_checking(json!({"program":[codex,"app-server","--stdio"],"env":env(&key,&owner),"cano_extra":{}}),
                 Arc::new(std::sync::atomic::AtomicUsize::new(0)),Some(dir.path().join("q.json"))).await;
             let registry = RuntimeRegistry::new(address,"secret".into(),"instance".into());
+            let mut events = registry.subscribe();
+            let views = Arc::new(Mutex::new(Vec::new()));
+            let seen = views.clone();
+            let listener = tokio::spawn(async move {
+                while let Ok(event) = events.recv().await {
+                    if event.channel == "view" && event.data["conversation"] == "thread-new" { seen.lock().unwrap().push(std::time::SystemTime::now()); }
+                }
+            });
             registry.open_with_launch(target(dir.path(),&key,no_cano()),dir.path().into()).await.unwrap();
             until_ready(&registry,&key).await;
-            until("thread gravada no arquivo da sessão",||policy.lock().unwrap().iter()
-                .any(|(kind,payload)|kind == "session.patch_meta" && payload["thread_id"] == "thread-new")).await;
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            until("thread gravada no arquivo da sessão",||policy.lock().unwrap().iter().any(|(kind,_)|kind == "patched")).await;
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            // O Python só religa com a conversa já no arquivo: a vista com ela sai de novo depois do patch.
+            let patched:std::time::SystemTime = policy.lock().unwrap().iter().find(|(kind,_)|kind == "patched")
+                .map(|(_,at)|serde_json::from_value(at.clone()).unwrap()).unwrap();
+            assert!(views.lock().unwrap().iter().any(|at|*at >= patched),"vista com a thread nova depois do patch");
+            listener.abort();
             let stale:Vec<Value> = policy.lock().unwrap().iter().filter(|(kind,_)|kind == "stale").map(|(_,payload)|payload.clone()).collect();
             assert!(stale.is_empty(),"patch recusado como velho: {stale:?}");
             cleanup(&registry,&key,dir.path(),&policy).await;

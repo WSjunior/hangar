@@ -390,7 +390,7 @@ enum Job {
     Write { wire:String,result:Result<(),RuntimeError> },
     Ack { logical_id:String,outcome:WriteOutcome,result:Result<(),RuntimeError> },
     Finished { reply:RuntimeReply,result:Result<(),RuntimeError> },
-    Policy { request_id:RequestId,kind:String,phase_id:String,result:Result<Value,RuntimeError> },
+    Policy { request_id:RequestId,kind:String,phase_id:String,conversation:Option<Value>,result:Result<Value,RuntimeError> },
     PreparedInput { id:String,result:Result<Value,RuntimeError> },
     Saved(Result<(),RuntimeError>),
     Queued { wake:bool,result:Result<(),RuntimeError> },
@@ -658,6 +658,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                     let target = target.clone(); let policy = engine.policy.clone();
                     // O Python recusa como velho o campo que difere da vista salva (thread nova, modo, Fast,
                     // modelo): ela vai antes de todo patch. Sem mudança durável a gravação não toca o disco.
+                    let conversation = (kind == "session.patch_meta").then(||payload.get("thread_id").or_else(||payload.get("session_id")).cloned()).flatten();
                     let save = if kind == "session.patch_meta" {
                         state_version += 1;
                         Some((state_version,engine.view()))
@@ -684,7 +685,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                                 None => Err(failure("policy_unavailable")),
                             }
                         }.await;
-                        Job::Policy { request_id,kind,phase_id,result }
+                        Job::Policy { request_id,kind,phase_id,conversation,result }
                     });
                 }
                 Effect::WakeQueue => { drain_requested = true; },
@@ -1113,20 +1114,29 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                             Err(failure)=>enter_error(&mut error,&target,failure),
                         }
                     }
-                    Job::Policy { request_id,kind,phase_id,result } => {
+                    Job::Policy { request_id,kind,phase_id,conversation,result } => {
                         let _ = phase_id;
                         match result {
                             Ok(payload) => {
-                                // Patch recusado como velho deixa o arquivo da sessão para trás da vista (thread nova
-                                // sem gravar): nunca calado, porque o Python religa pela conversa que não bate.
+                                // O Python só religa quando o arquivo da sessão já tem a conversa da vista: a
+                                // conversa nova gravada sai de novo na vista, para a religação acontecer agora.
+                                let current = engine.view()["conversation"].clone();
+                                let conversation = conversation.is_some_and(|value|!value.is_null() && value == current);
+                                if kind == "session.patch_meta" && payload["updated"] == true && conversation && durable_view["conversation"] == current {
+                                    publish(&events,&target,&mut revision,"view",durable_view.clone());
+                                }
+                                // Recusado como velho: Fast de outra thread e thread já trocada são esperados (só log);
+                                // a conversa ATUAL recusada deixa o arquivo para trás e aparece como problema.
                                 if kind == "session.patch_meta" && payload["stale"] == true {
                                     if crate::warn_limit::allow(Some(&target.key),"session_patch_stale") {
                                         tracing::warn!(key=%target.key,session=%target.name,code="session_patch_stale",
                                             "o arquivo da sessão recusou o patch como velho");
                                     }
-                                    let message = "o arquivo da sessão não aceitou a alteração";
-                                    publish(&events,&target,&mut revision,"problem",json!({"error_code":"session_patch_stale","message":message}));
-                                    effects.extend(engine.set_problem("session_patch_stale",Some(message.into())));
+                                    if conversation {
+                                        let message = "o arquivo da sessão não aceitou a conversa nova";
+                                        publish(&events,&target,&mut revision,"problem",json!({"error_code":"session_patch_stale","message":message}));
+                                        effects.extend(engine.set_problem("session_patch_stale",Some(message.into())));
+                                    }
                                 }
                                 effects.extend(engine.apply(EngineInput::PolicyResult { request_id,payload },clock(start))?);
                             }

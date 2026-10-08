@@ -113,7 +113,14 @@ def test_partial_close_failure_reopens_only_what_closed(tmp_path):
     coordinator.close_python_leases()
 
 
-def test_rebind_closes_gate_before_marking_frozen(tmp_path):
+def session_file(monkeypatch, record):
+    """Arquivo da sessão falso que `_rebind` relê antes de religar."""
+    from app import runtime_policy
+    monkeypatch.setattr(runtime_policy, "_sessions", lambda provider: SimpleNamespace(load=lambda name: dict(record)))
+
+
+def test_rebind_closes_gate_before_marking_frozen(tmp_path, monkeypatch):
+    session_file(monkeypatch, {"session_id": "sid-new"})
     transport = Transport()
     coordinator, slot = coordinator_with(tmp_path, transport)
     seen = {}
@@ -121,7 +128,7 @@ def test_rebind_closes_gate_before_marking_frozen(tmp_path):
         seen["gate"], seen["frozen"] = list(transport.ingress()), slot.frozen
     coordinator.change = change
     async def flow():
-        coordinator._rebind(slot)
+        coordinator._rebind(slot, "sid-new")
         assert not slot.frozen                      # a marca só vem depois da porta fechada
         await coordinator.rebindings[slot.binding.key]
     asyncio.run(flow())
@@ -130,24 +137,49 @@ def test_rebind_closes_gate_before_marking_frozen(tmp_path):
     coordinator.close_python_leases()
 
 
-def test_rebind_loop_is_capped_and_reported(tmp_path, monkeypatch):
-    # Conversa que nunca chega ao arquivo da sessão religaria a cada vista: o teto para e registra.
+def test_rebind_waits_for_the_conversation_in_the_session_file(tmp_path, monkeypatch):
+    # A vista com a thread nova chega antes do patch: religar agora relia o arquivo sem ela, matava o
+    # patch em voo e a vida nova abria outra thread. Só religa quando o arquivo já tem a conversa.
+    record = {"session_id": None}
+    session_file(monkeypatch, record)
+    coordinator, slot = coordinator_with(tmp_path, Transport())
+    changes = []
+    async def change(name, action, **kw):
+        changes.append(name)
+    coordinator.change = change
+    async def flow():
+        coordinator._rebind(slot, "sid-new")
+        await coordinator.rebindings[slot.binding.key]
+        assert changes == []
+        record["session_id"] = "sid-new"
+        coordinator._rebind(slot, "sid-new")
+        await coordinator.rebindings[slot.binding.key]
+    asyncio.run(flow())
+    assert changes == ["session"]
+    coordinator.close_python_leases()
+
+
+def test_rebind_loop_is_capped_reported_once_and_retries_after_the_window(tmp_path, monkeypatch):
     from app import diag
-    transport = Transport()
-    coordinator, slot = coordinator_with(tmp_path, transport)
-    changes, reported = [], []
+    session_file(monkeypatch, {"session_id": "sid-new"})
+    coordinator, slot = coordinator_with(tmp_path, Transport())
+    changes, reported, now = [], [], [1000.0]
     async def change(name, action, **kw):
         changes.append(name)
     coordinator.change = change
     monkeypatch.setattr(diag, "registrar", lambda event, level, **kw: reported.append((event, kw)))
-    async def flow():
-        for _ in range(6):
-            coordinator._rebind(slot)
-            if task := coordinator.rebindings.get(slot.binding.key):
-                await task
-    asyncio.run(flow())
+    monkeypatch.setattr(runtime_coordinator.time, "monotonic", lambda: now[0])
+    async def rebind(times):
+        for _ in range(times):
+            coordinator._rebind(slot, "sid-new")
+            await coordinator.rebindings[slot.binding.key]
+            now[0] += 1
+    asyncio.run(rebind(10))
     assert len(changes) == 3
     assert reported == [("runtime.rebind_loop", {"sessao": "session", "codigo": "rebind_loop"})]
+    now[0] += 60
+    asyncio.run(rebind(1))
+    assert len(changes) == 4                        # tentativas recusadas não prendem o teto
     coordinator.close_python_leases()
 
 

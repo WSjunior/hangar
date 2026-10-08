@@ -258,6 +258,7 @@ class RuntimeCoordinator:
         self.adoption_task = None
         self.rebindings = {}
         self.rebind_times = {}
+        self.rebind_capped = set()
         self.drains = {}
         self.mode = _initial_mode
         self.mode_hooks = {}        # "rust"/"python" -> corrotina que o lifespan registra
@@ -971,7 +972,7 @@ class RuntimeCoordinator:
                         conversation = (slot.view.get("view") or {}).get("conversation")
                         field = "session_id" if slot.binding.provider == "claude" else "thread_id"
                         if conversation and conversation != slot.binding.meta.get(field):
-                            self._rebind(slot)
+                            self._rebind(slot, conversation)
                     if slot.binding.meta.get("terminal") and slot.view.get("error"):
                         self.request_drain(slot.binding.name, "confirm" if slot.view["error"] == "receipt_scan" else "drain")
                     delay = 0.25
@@ -990,22 +991,31 @@ class RuntimeCoordinator:
             await asyncio.sleep(delay)
             delay = min(5.0, delay * 2)
 
-    def _rebind(self, slot):
+    def _rebind(self, slot, conversation):
         key = slot.binding.key
         if key in self.rebindings and not self.rebindings[key].done():
-            return
-        # Conversa que nunca chega ao arquivo da sessão religaria a cada vista: teto por minuto.
-        now = time.monotonic()
-        recent = [t for t in self.rebind_times.get(key, ()) if now - t < 60] + [now]
-        self.rebind_times[key] = recent
-        if len(recent) > 3:
-            if len(recent) == 4:
-                from app import diag
-                diag.registrar("runtime.rebind_loop", "erro", sessao=slot.binding.name, codigo="rebind_loop")
             return
         async def rebind():
             async def changed():
                 return None
+            from app import diag
+            from app.runtime_policy import _sessions
+            field = "session_id" if slot.binding.provider == "claude" else "thread_id"
+            # Religar relê o arquivo da sessão: antes de a conversa chegar nele, a vida nova nasceria sem
+            # ela e abriria outra. A vista volta quando o patch grava, e aí religa.
+            current = await asyncio.to_thread(_sessions(slot.binding.provider).load, slot.binding.name)
+            if (current or {}).get(field) != conversation:
+                return
+            # Conversa que muda a cada vida religaria sem parar: teto de 3 religações por minuto.
+            now = time.monotonic()
+            recent = [t for t in self.rebind_times.get(key, ()) if now - t < 60]
+            if len(recent) >= 3:
+                if key not in self.rebind_capped:
+                    self.rebind_capped.add(key)
+                    diag.registrar("runtime.rebind_loop", "erro", sessao=slot.binding.name, codigo="rebind_loop")
+                return
+            self.rebind_capped.discard(key)
+            self.rebind_times[key] = recent + [now]
             try:
                 async with self._ingress_closed(slot.binding.name):
                     slot.frozen = True
@@ -1013,7 +1023,6 @@ class RuntimeCoordinator:
             except Exception as exc:
                 slot.cache_valid = False
                 self._signal(slot)
-                from app import diag
                 diag.registrar("runtime.rebind_failed", "erro", sessao=slot.binding.name, **failure_reason(exc))
         self.rebindings[key] = asyncio.create_task(rebind())
 

@@ -60,6 +60,11 @@ Remendo só desta medida, no lançador do backend isolado: `runtime_policy.run` 
 `patch_meta` com `thread_id` a cada 0,2 s enquanto ele voltar `stale` (até 10 vezes). Ele roda uma vez
 por sessão, na criação, fora das janelas medidas.
 
+**Corrigido depois da medida, e o remendo saiu do script:** o ator salva a vista antes de todo
+`session.patch_meta` e republica a vista quando a conversa nova é gravada; o `_rebind` só religa com
+a conversa já no arquivo da sessão e para em 3 religações por minuto (`runtime.rebind_loop`). A medida
+não foi repetida depois da correção.
+
 ## Como
 
 `scripts/medir-codex-sem-terminal.py`, backend isolado pela classe `Prova` de
