@@ -2599,6 +2599,30 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
         codex_lease = None
         return info
 
+    # Um montador só: com conta nomeada e sem ela a sessão nasce com as mesmas escolhas.
+    def _registry_kwargs() -> dict:
+        kw = dict(provider=body.provider, engine=body.engine, model=body.model,
+                  effort=body.effort, context_window=janela)
+        if body.permission_mode is not None:
+            kw["permission_mode"] = body.permission_mode
+        if body.subagent_model is not None:
+            kw["subagent_model"] = body.subagent_model
+        if _jev_efetivo(body.jev):
+            kw["jev"] = True
+        if body.initial_prompt is not None:
+            kw["initial_prompt"] = body.initial_prompt
+        if body.omp_profile:
+            kw["omp_profile"] = body.omp_profile
+        if body.codex_account is not None:
+            kw["codex_account"] = body.codex_account
+        if body.service_tier is not None:
+            kw["service_tier"] = body.service_tier
+        if body.read_only:
+            kw["read_only"] = True
+        if body.headless:
+            kw["headless"] = True
+        return kw
+
     # Reconciliar e criar a sessão sob a MESMA trava (ciclo_conta), só no caminho que consome o
     # config dir (Claude/Pi — o Codex tem conta propria e nao le config dir do Claude). Sem o ciclo, um DELETE da
     # conta no meio via a lista de sessões ainda vazia e apagaria a pasta embaixo da sessão que
@@ -2632,22 +2656,8 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
                     for aviso in avisos:
                         _log.warning("conta %s: %s", alvo.name, aviso)
                     try:
-                        _kw = dict(provider=body.provider, engine=body.engine, model=body.model,
-                                   effort=body.effort, context_window=janela)
-                        if body.permission_mode is not None:
-                            _kw["permission_mode"] = body.permission_mode
-                        if body.subagent_model is not None:
-                            _kw["subagent_model"] = body.subagent_model
-                        if _jev_efetivo(body.jev):
-                            _kw["jev"] = True
-                        if body.omp_profile:
-                            _kw["omp_profile"] = body.omp_profile
-                        if body.read_only:
-                            _kw["read_only"] = True
-                        if body.headless:
-                            _kw["headless"] = True
                         _passo(body.name, "criando")
-                        info = await _create_registry(_kw)
+                        info = await _create_registry(_registry_kwargs())
                         if body.headless:
                             # Hooks de SessionStart rodam enquanto a pessoa digita, não no 1º envio.
                             wake = {"engine_models": account_models} if body.engine_account else {}
@@ -2663,28 +2673,8 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
                 # Conta sumiu entre a validação e a trava (ex: DELETE concorrente).
                 raise HTTPException(e.status, e.detail) from None
     try:
-        _kw2 = dict(provider=body.provider, engine=body.engine, model=body.model,
-                     effort=body.effort, context_window=janela)
-        if body.permission_mode is not None:
-            _kw2["permission_mode"] = body.permission_mode
-        if body.subagent_model is not None:
-            _kw2["subagent_model"] = body.subagent_model
-        if _jev_efetivo(body.jev):
-            _kw2["jev"] = True
-        if body.initial_prompt is not None:
-            _kw2["initial_prompt"] = body.initial_prompt
-        if body.omp_profile:
-            _kw2["omp_profile"] = body.omp_profile
-        if body.codex_account is not None:
-            _kw2["codex_account"] = body.codex_account
-        if body.service_tier is not None:
-            _kw2["service_tier"] = body.service_tier
-        if body.read_only:
-            _kw2["read_only"] = True
-        if body.headless:
-            _kw2["headless"] = True
         _passo(body.name, "criando")
-        info = await _create_registry(_kw2)
+        info = await _create_registry(_registry_kwargs())
         if body.headless and body.provider == "codex":
             # Aquece já: o app-server sobe e abre a thread agora, não no primeiro prompt.
             _tarefas_soltas.add(asyncio.create_task(_aquecer_codex_sem_terminal(info.name)))
