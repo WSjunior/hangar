@@ -537,10 +537,10 @@ Commit: `feat(codex): Codex-only routes served by Rust for headless sessions`.
 **Interfaces:**
 - Consumes: texto do cartão com URL (Task 2).
 
-- [ ] **Step 1: Testes (falham)**: URL `https://…` no `question` vira link que abre fora do app (web: `<a target="_blank" rel="noopener">`; Expo: `Linking.openURL`; nativo: `cx.open_url`); texto sem URL fica igual; trecho entre crases continua `code`. Nativo: o cartão de pergunta (`render_ask`) mostra Cancelar sempre — pergunta assíncrona do Codex → `Action::Skip`; demais → `Action::Cancel` (`/interrupt`), igual ao Cancelar do cartão de opções.
-- [ ] **Step 2: Rodar e ver falhar** (`cd frontend && npx vitest run src/components/OptionButtons.test.ts`; `cd mobile && npx jest src/chat/OptionButtons.test.tsx`; `cd desktop-native && CARGO_BUILD_JOBS=4 cargo test <teste>`).
-- [ ] **Step 3: Implementar** (só URL `http(s)://` sem espaços; nada de markdown novo no cartão).
-- [ ] **Step 4: Rodar e ver passar; commit** `feat(ui): clickable links in option cards; native question card gets Cancel`.
+- [x] **Step 1: Testes (falham)**: URL `https://…` no `question` vira link que abre fora do app (web: `<a target="_blank" rel="noopener">`; Expo: `Linking.openURL`; nativo: `cx.open_url`); texto sem URL fica igual; trecho entre crases continua `code`. Nativo: o cartão de pergunta (`render_ask`) mostra Cancelar sempre — pergunta assíncrona do Codex → `Action::Skip`; demais → `Action::Cancel` (`/interrupt`), igual ao Cancelar do cartão de opções.
+- [x] **Step 2: Rodar e ver falhar** (`cd frontend && npx vitest run src/components/OptionButtons.test.ts`; `cd mobile && npx jest src/chat/OptionButtons.test.tsx`; `cd desktop-native && CARGO_BUILD_JOBS=4 cargo test <teste>`).
+- [x] **Step 3: Implementar** (só URL `http(s)://` sem espaços; nada de markdown novo no cartão).
+- [x] **Step 4: Rodar e ver passar; commit** `feat(ui): clickable links in option cards; native question card gets Cancel`.
 
 ---
 
