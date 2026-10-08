@@ -405,6 +405,8 @@ fn config_stamp(config_dir: Option<&str>) -> Result<String, RuntimeError> {
     let root = match config_dir {
         Some("~") => home()?,
         Some(dir) if dir.starts_with("~/") => home()?.join(&dir[2..]),
+        // `~usuario` e `~\…` o Python resolve de outro jeito; ler outro caminho calado daria marca errada.
+        Some(dir) if dir.starts_with('~') => return Err(error("policy_input")),
         Some(dir) => Path::new(dir).to_path_buf(),
         None => home()?.join(".claude"),
     };

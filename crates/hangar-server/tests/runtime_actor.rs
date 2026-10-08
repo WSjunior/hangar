@@ -512,9 +512,7 @@ async fn status_turn(bad_rate:bool) -> Vec<Value> {
             }
         }
     });
-    let (policy,calls) = policy_server().await;
-    let _ = &calls;
-    let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
+    let (policy,calls) = policy_server().await;    let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
         metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true}),
         binding:CanoBinding { pid:42,escuta:format!("tcp:{address}"),token:"secret-test".into(),versao:2 },
         lease_path:dir.path().join("key.lock"),state_path:dir.path().join("key.queue-state.json"),projection_dir:dir.path().join("projection"),
@@ -544,6 +542,7 @@ async fn status_turn(bad_rate:bool) -> Vec<Value> {
         }
     }).await.expect("o turno precisa terminar");
     handle.stop().await.unwrap();
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst),0,"nenhum serviço deste turno precisa mais do Python");
     server.await.unwrap();
     let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
     assert!(!state.operations.keys().any(|id|id.starts_with("policy:")),"serviço sem efeito não entra no diário");

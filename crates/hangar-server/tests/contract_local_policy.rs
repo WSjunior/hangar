@@ -99,6 +99,14 @@ fn local_policies_match_the_python_golden() {
 }
 
 #[test]
+fn reload_stamp_refuses_tilde_forms_it_does_not_expand() {
+    for dir in ["~someone", "~someone/cfg", "~\\cfg"] {
+        let meta = json!({"provider": "claude", "config_dir": dir, "cano": {"config_marca": "0".repeat(40)}});
+        assert!(matches!(run_at("reload_stamp", &json!({}), &meta, None, 0.0), Some(Err(_))), "{dir} deve falhar");
+    }
+}
+
+#[test]
 fn remote_kinds_are_not_local() {
     for kind in ["native_message", "session.patch_meta", "terminal_facts", "quota", "answer_body"] {
         assert!(!is_local(kind), "{kind} continua no Python ou saiu do serviço");
