@@ -26,6 +26,8 @@ _CODE_RE = re.compile(r"[A-Za-z0-9]{1,64}")
 _MSG_JA_PAREADA = "a sessão já está em grupo ou pareada — desfaça esse par antes de parear com outra máquina"
 _REMOTE_LABEL = "resposta da outra máquina: "
 _MSG_PARCIAL = "pareamento desfeito aqui, mas a outra máquina pode continuar pareada: desfaça lá"
+# Falhas da ponte depois de o pedido sair (`groups_bridge.call`): o Rust pode ter gravado.
+_BRIDGE_UNCERTAIN = frozenset({"groups_bridge_unavailable", "groups_bridge_invalid"})
 
 
 def _my_owner() -> str:
@@ -152,6 +154,9 @@ async def _join_external(name: str, peer: str, harness: dict[str, str]):
         except groups_bridge.GroupsBridgeError as e:
             if e.code == "erro_pareamento_mistura_cross":
                 raise pair.PairMixError(e.detail) from None
+            if e.code in _BRIDGE_UNCERTAIN:
+                # O pedido pode ter chegado e gravado: o unlink só age se o endereço estiver lá.
+                await _guarded_async("restaurar o grupo", _restore_external, (name, peer))
             raise
         return (name, peer)
     return (await asyncio.to_thread(pair.join_group, name, [peer], "", substituir_task=True, harness=harness))[1]
@@ -293,9 +298,11 @@ async def pair_accept(name: str, body: PairAcceptBody):
 
 async def teardown(rec: ExternalPair, notify: bool) -> None:
     from app import api
+    # A saída do grupo vem primeiro e sem engolir a falha: registro e convite ficam, e o outro lado
+    # tenta de novo com o token que ainda vale, em vez de deixar o sidecar com um par sem registro.
+    await asyncio.to_thread(_leave_external, rec.local_session, rec.address)
     await _guarded_async("remover o registro", external_pairs.remove, rec.share_id)
     await _guarded_async("revogar o convite", share_store.revoke, rec.share_id)
-    await _guarded_async("sair do grupo", _leave_external, rec.local_session, rec.address)
     if notify:
         falha = await api._deliver(rec.local_session,
                                    f"[painel: par externo encerrado] '{rec.address}' saiu do pareamento. "

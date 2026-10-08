@@ -454,6 +454,43 @@ def test_desfazer_pelo_outro_lado_limpa_este(guest_client_par, entregues):
     assert "[painel: par externo encerrado]" in entregues[-1][1]
 
 
+def test_desfazer_pelo_outro_lado_com_grupos_fora_mantem_registro_e_convite(guest_client_par, par_gravado,
+                                                                          entregues, monkeypatch):
+    from app import groups_bridge
+    calls = []
+
+    def call(op, **args):
+        calls.append(op)
+        if len(calls) == 1:
+            raise groups_bridge.GroupsBridgeError("groups_runtime_starting")
+        return {}
+    monkeypatch.setattr(groups_bridge, "rust_owns_groups", lambda: True)
+    monkeypatch.setattr(groups_bridge, "call", call)
+    r = guest_client_par.delete("/api/pair")
+    assert r.status_code == 503 and r.json()["detail"]["code"] == "erro_grupo_indisponivel"
+    # O outro lado tenta de novo com o mesmo token: registro e convite ficaram.
+    assert external_pairs.by_address("pc-ana::Y") is not None
+    assert share_store._load()[par_gravado.id].revoked_at is None
+    assert guest_client_par.delete("/api/pair").status_code == 200
+    assert external_pairs.by_address("pc-ana::Y") is None
+    assert share_store._load()[par_gravado.id].revoked_at is not None
+    assert calls == ["group.external_unlink", "group.external_unlink"]
+
+
+@pytest.mark.parametrize("mod,fn", [(external_pairs, "remove"), (share_store, "revoke")])
+def test_saida_que_nao_limpa_o_par_externo_avisa_em_vez_de_calar(par_gravado, monkeypatch, mod, fn):
+    import asyncio
+    import app.api as api_mod
+
+    def falha(_share_id):
+        raise OSError("disco cheio")
+    monkeypatch.setattr(external_pairs, "call", lambda *a, **k: None)
+    monkeypatch.setattr(mod, fn, falha)
+    errs = asyncio.run(api_mod._avisar_saida("X", ["pc-ana::Y"]))
+    assert [(e["sessao"], e["erro"]["code"], e["erro"]["params"]) for e in errs] == [
+        ("pc-ana::Y", "erro_par_limpeza_falhou", {"peer": "pc-ana::Y"})]
+
+
 def test_lista_do_dono_traz_o_token_para_o_nativo(owner_client, par_gravado):
     [p] = owner_client.get("/api/external-pairs").json()
     assert p == {"local_session": "X", "alias": "pc-ana", "owner": "pc-ana", "session": "Y",

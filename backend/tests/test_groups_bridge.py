@@ -121,10 +121,23 @@ def test_kill_in_rust_mode_asks_rust(monkeypatch):
     assert calls == [("group.leave", {"name": "a"})]
 
 
-def test_kill_in_rust_mode_only_logs_bridge_failure(monkeypatch, caplog):
+def test_kill_in_rust_mode_reports_bridge_failure(monkeypatch, caplog):
     _rust(monkeypatch, error="groups_bridge_unavailable")
-    registry.SessionRegistry._clear_pair("a")
+    # A sessão viva sai da lista e a varredura do Rust não a vê: o aviso precisa chegar ao kill.
+    [warning] = registry.SessionRegistry._clear_pair("a")
+    assert warning["sessao"] == "a" and warning["erro"]["code"] == "erro_grupo_indisponivel"
+    assert warning["erro"]["params"] == {"detalhe": "groups_bridge_unavailable"}
     assert "groups_bridge_unavailable" in caplog.text
+
+
+def test_create_cleanup_logs_how_many_leave_warnings(monkeypatch, caplog):
+    _rust(monkeypatch, reply={"ex_peers": ["srv::x"], "warnings": [_NOT_NOTIFIED]})
+    monkeypatch.setattr(registry.tmux, "has_session", lambda name: False)
+    for mod in (registry.headless_sessions, registry.codex_sessions):
+        monkeypatch.setattr(mod, "exists", lambda name: False)
+    registry.SessionRegistry.__new__(registry.SessionRegistry)._leave_old_group("a")
+    # Só a contagem: o aviso pode trazer texto da outra máquina.
+    assert "1 aviso" in caplog.text and "srv inacessível" not in caplog.text
 
 
 def test_create_refuses_when_group_cleanup_fails(monkeypatch, tmp_path):
@@ -284,7 +297,8 @@ def test_pending_before_health_does_not_write_and_waits(monkeypatch, tmp_path):
         with pytest.raises(groups_bridge.GroupsBridgeError) as e:
             groups_bridge.call("group.leave", name="a")
         assert e.value.code == "groups_runtime_starting" and waited
-        assert registry.SessionRegistry._clear_pair("a") == []
+        assert [w["erro"]["params"] for w in registry.SessionRegistry._clear_pair("a")] == [
+            {"detalhe": "groups_runtime_starting"}]
         with pytest.raises(pair.GroupsOwnedByRust):
             pair.leave("a")
         swept = []
@@ -377,6 +391,22 @@ def test_external_pair_refusal_in_rust_mode(monkeypatch):
     _rust(monkeypatch, error="erro_pareamento_mistura_cross")
     with pytest.raises(pair.PairMixError):
         asyncio.run(external_pair_api._join_external("a", "casa::b", {}))
+
+
+@pytest.mark.parametrize("code,undone", [("groups_bridge_unavailable", True), ("groups_bridge_invalid", True),
+                                         ("groups_runtime_starting", False)])
+def test_external_link_with_uncertain_outcome_is_undone(monkeypatch, code, undone):
+    """Prazo ou resposta perdida depois do pedido: o Rust pode ter gravado o par sem registro nem token."""
+    def reply(op, a):
+        if op == "group.external_link":
+            raise groups_bridge.GroupsBridgeError(code)
+        return {}
+    calls = _rust(monkeypatch, reply=reply)
+    with pytest.raises(groups_bridge.GroupsBridgeError) as e:
+        asyncio.run(external_pair_api._join_external("a", "casa::b", {}))
+    assert e.value.code == code
+    unlink = ("group.external_unlink", {"local": "a", "address": "casa::b"})
+    assert (unlink in calls) is undone
 
 
 def test_external_teardown_in_rust_mode_unlinks(monkeypatch):

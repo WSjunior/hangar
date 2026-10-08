@@ -5866,8 +5866,19 @@ async def _end_external_pair(name: str, p: str) -> list[dict] | None:
                 # Texto do outro lado vai rotulado: a tela não deve tomá-lo por mensagem do app.
                 texto = (external_pair_api._REMOTE_LABEL if getattr(ex, "status", None) else "") + str(ex)[:300]
                 errs.append({"sessao": p, "erro": erro("erro_peer_nao_avisado", texto, peer=p)})
-    await external_pair_api._guarded_async("remover o registro", external_pairs.remove, rec.share_id)
-    await external_pair_api._guarded_async("revogar o convite", share_store.revoke, rec.share_id)
+    limpo = True
+    for what, fn in (("remover o registro", external_pairs.remove), ("revogar o convite", share_store.revoke)):
+        try:
+            await asyncio.to_thread(fn, rec.share_id)
+        except Exception as ex:  # noqa: BLE001 — cada passo roda mesmo que o anterior falhe
+            _log.warning("par externo: %s de '%s' falhou: %r", what, p, ex)
+            limpo = False
+    if not limpo:
+        # Convite que não foi revogado deixa o outro lado mandando recado: a saída não pode dizer que limpou.
+        errs.append({"sessao": p, "erro": erro(
+            "erro_par_limpeza_falhou",
+            f"o par externo com {p} não foi apagado por inteiro deste lado; o convite dele pode continuar valendo",
+            peer=p)})
     return errs
 
 

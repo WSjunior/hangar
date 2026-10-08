@@ -2927,6 +2927,7 @@
   "erro_pareamento_desfeito": "pairing undone: failed to notify the sessions ({avisos})",
   "erro_pareamento_mistura_cross": "one of the sessions is already paired with another machine — unpair it before building the local group",
   "erro_peer_nao_avisado": "could not notify {peer} about leaving; the link on that side stays orphaned until you unpair there",
+  "erro_par_limpeza_falhou": "the external pair with {peer} was not fully removed on this side; its invite may still be valid",
   "erro_pareamento_nao_confirmado": "pairing NOT confirmed (network failure with '{srv}'): undone on this side; if the peer stayed paired, run unpair there. ({erro})",
   "erro_pareamento_rejeitado": "pairing undone (peer rejected): {erro}",
   "erro_initiator_invalido": "initiator must be qualified (srv::nome)",

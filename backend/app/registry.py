@@ -15,6 +15,7 @@ from app import atomico, diag, share_store, shortcut_terminals, tmux
 from app import agentpane
 from app import permission_mode as modo_permissao
 from app.config import settings
+from app.mensagens import erro
 from app import plugin_bridge
 from app import runtime_config
 from app.names import sanitize_session_name
@@ -163,6 +164,13 @@ def _encerrar_pares_externos(morta: str) -> None:
             except OSError as e:
                 _log.warning("varredura de pares: par externo '%s' não limpo: %r", r.address, e)
         threading.Thread(target=_avisar_par_externo, args=(r,), daemon=True).start()
+
+
+def _log_leave_warnings(name: str, warnings) -> None:
+    """Saída do grupo antigo na criação: os avisos não têm a quem voltar, mas não somem calados."""
+    if isinstance(warnings, list) and warnings:
+        # Só a contagem: o aviso pode trazer texto da outra máquina.
+        _log.warning("criação de %s: a saída do grupo antigo deixou %d aviso(s)", name, len(warnings))
 
 
 def _avisar_par_externo(rec) -> None:
@@ -2451,7 +2459,7 @@ class SessionRegistry:
         # disco — e a sessao nova de mesmo nome nascia dentro de um grupo que nao existe mais.
         # Nome reusado não herda o par externo da sessão antiga.
         _encerrar_pares_externos(name)
-        self._clear_pair(name)
+        _log_leave_warnings(name, self._clear_pair(name))
         # Fixa o jsonl FRESCO no cache na hora: resolve() devolve este uuid mesmo antes do claude
         # escrever o arquivo, evitando o fallback newest-by-mtime pescar um jsonl ja existente da pasta.
         # Pi (jsonl=None) nao entra no cache — nao ha path a fixar, e a resolucao dele nem passa por aqui.
@@ -2513,7 +2521,7 @@ class SessionRegistry:
         ThenLink(name).clear()
         # Nome reusado não herda o par externo da sessão antiga.
         _encerrar_pares_externos(name)
-        self._clear_pair(name)
+        _log_leave_warnings(name, self._clear_pair(name))
         jsonl = get_adapter(CLAUDE_HEADLESS).transcript_path_de(meta)
         self._seed(name, jsonl)
         diag.registrar("sessao.criada", sessao=name, provider="claude", etapa="sidecar_gravado")
@@ -2565,7 +2573,7 @@ class SessionRegistry:
         ThenLink(name).clear()
         # Nome reusado não herda o par externo da sessão antiga.
         _encerrar_pares_externos(name)
-        self._clear_pair(name)
+        _log_leave_warnings(name, self._clear_pair(name))
         diag.registrar("sessao.criada", sessao=name, provider="codex", etapa="sidecar_gravado")
         return SessionInfo(name=name, cwd=cwd, jsonl=rollout or None, tracked=True, provider="codex",
                            headless=True, conta=f"codex:{codex_home}", codex_home=codex_home)
@@ -3151,7 +3159,9 @@ class SessionRegistry:
                 out = groups_bridge.call("group.leave", name=name)
             except groups_bridge.GroupsBridgeError as e:
                 _log.warning("_clear_pair(%s): o Rust não tirou a sessão do grupo: %s", name, e.code)
-                return []
+                # A varredura resolver depois não é ter saído agora: o aviso vai na resposta.
+                return [{"sessao": name, "erro": erro("erro_grupo_indisponivel",
+                                                      "os grupos estão indisponíveis agora", detalhe=e.code)}]
             warnings = out.get("warnings")
             return warnings if isinstance(warnings, list) else []
         try:
@@ -3172,7 +3182,8 @@ class SessionRegistry:
         if tmux.has_session(name) or codex_sessions.exists(name) or headless_sessions.exists(name):
             return   # nome em uso: o ramo da criação recusa, e o grupo é de quem está viva
         try:
-            groups_bridge.call("group.leave", name=name)
+            out = groups_bridge.call("group.leave", name=name)
+            _log_leave_warnings(name, out.get("warnings"))
         except groups_bridge.GroupsBridgeError as e:
             if PairLink(name).path.exists():
                 _log.warning("criação de %s recusada: grupo antigo não desfeito (%s)", name, e.code)
