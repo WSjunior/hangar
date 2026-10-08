@@ -751,6 +751,18 @@ o bearer que vai na mesma requisição abre a máquina inteira, e o Tailscale j�
 Quem leva o pacote é o navegador (ele tem o token de todas as máquinas), então nenhuma máquina
 precisa conhecer a outra pelo `peers.json`.
 
+Contas e aparência (08/10/2026, pedido do usuário). As contas viajam sem login: o Claude Code
+renova o token sozinho (~8h) e a Anthropic troca o refresh token na renovação (`renova_token.py`),
+então a mesma credencial em duas máquinas faria a primeira que renovar derrubar a outra. Conta
+nova nasce pelo `contas.criar` do destino; conta que já existe lá só ganha apelido e chaves, e o
+`.credentials.json`/`.claude.json` dela nunca são lidos nem escritos. Do `settings.json` da conta
+vão só as chaves que o principal não tem (as outras o espelho da reconciliação sobrescreve), sem
+`env` e os comandos de credencial. A aparência é a do app nativo (`appearance.json` e a imagem):
+a do web mora no `localStorage` de cada navegador, não é estado da máquina, e o desktop web está
+parado. Ficam na máquina o que depende da tela e as escolhas de segurança dela. O app nativo relê
+o arquivo quando ele muda por fora: sem isso, o próximo ajuste feito nele gravaria a memória antiga
+por cima do que chegou.
+
 ## Compartilhar sessão: a porta do convidado é a única na internet
 
 (28/09/2026, pedido do usuário.) O convidado tem Hangar e recebe a sessão como um servidor a mais

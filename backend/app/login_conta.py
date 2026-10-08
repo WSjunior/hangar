@@ -151,9 +151,13 @@ def _limpar(conta: str, t: Tentativa | None = None) -> None:
 
 
 def iniciar(conta: str, cwd: str) -> dict:
-    """Abre a janela escondida e digita o comando de login. Recusa se já há uma tentativa."""
-    if _em_curso(conta):
-        raise RuntimeError(f"login já em andamento para a conta {conta}")
+    """Abre a janela escondida e digita o comando de login, trocando a tentativa anterior."""
+    # A tela que abriu a anterior pode ter sumido sem cancelar; pedir de novo é a saída dela.
+    anterior = _tentativas.get(conta)
+    if anterior is not None:
+        diag.registrar("conta.login.substituiu", "aviso", provider="claude", operacao=anterior.operacao,
+                       etapa="trocar_tentativa", ms=int((time.monotonic() - anterior.inicio) * 1000))
+        _limpar(conta, anterior)
     operacao = uuid.uuid4().hex
     campos = {"provider": "claude", "conta_id": diag.conta_id(cwd), "operacao": operacao}
     inicio = time.monotonic()
@@ -296,6 +300,10 @@ def confirmar(conta: str, codigo: str, *, estado_fake=None, timeout_s: float = _
             # A CLI ainda diz loggedIn para token vencido ou revogado: espere a troca.
             etapa = "aguardar_token_novo"
             oauth = renova_token._oauth(Path(tentativa.dir_conta), estrito=True)
+            atual = _tentativas.get(conta)
+            if atual is not None and atual is not tentativa:
+                # Substituída: o token novo, se houver, é da tentativa que está no lugar.
+                raise RuntimeError(f"login da conta {conta} cancelado")
             if estado.estado == "ok" and estado.loggedIn and _token_novo(oauth, tentativa.token_anterior):
                 diag.registrar("conta.login.concluiu", etapa="confirmar_credencial",
                                ms=int((time.monotonic() - tentativa.inicio) * 1000), **campos)

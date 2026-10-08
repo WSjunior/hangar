@@ -187,11 +187,13 @@ def test_diario_confirmacao_timeout_nao_exporta_codigo(bateia, monkeypatch, tmp_
     assert not bateia.vivas
 
 
-def test_iniciar_ja_em_andamento_nao_duplica_janela(bateia):
+def test_iniciar_de_novo_troca_a_tentativa_anterior(bateia):
     login_conta.iniciar("conta-a", "/home/u")
-    with pytest.raises(RuntimeError):
-        login_conta.iniciar("conta-a", "/home/u")
-    assert bateia.criadas == ["login-conta-a"]
+    anterior = login_conta._tentativas["conta-a"]
+    login_conta.iniciar("conta-a", "/home/u")
+    assert bateia.criadas == ["login-conta-a", "login-conta-a"]
+    assert bateia.vivas == ["term-login-conta-a"]
+    assert login_conta._tentativas["conta-a"] is not anterior
 
 def test_iniciar_mata_sobra_de_janela_antes_de_criar(bateia):
     # B3 — um backend que caiu no meio de uma tentativa deixa a janela VIVA no servidor
