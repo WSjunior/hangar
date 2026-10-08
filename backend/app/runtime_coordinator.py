@@ -474,6 +474,7 @@ class RuntimeCoordinator:
                 await self.change(name, changed, advance=bool(agent_changed) or binding.meta.get(field) != slot.binding.meta.get(field), reopen=False)
                 slot = self.slot(name)      # o pane renascido com outra conversa troca o registro
                 binding = slot.binding
+                await self._remember_terminal_customizations(binding)
             if slot.phase == Phase.Python:
                 with slot.guard:
                     slot.binding.meta = binding.meta
@@ -996,6 +997,16 @@ class RuntimeCoordinator:
             await asyncio.sleep(delay)
             delay = min(5.0, delay * 2)
 
+    async def _remember_terminal_customizations(self, binding):
+        settings = binding.meta.get("claude_settings")
+        if not binding.meta.get("terminal") or not settings:
+            return
+        from app import claude_customizations, diag
+        try:
+            await asyncio.to_thread(claude_customizations.remember, binding.meta["session_id"], settings)
+        except claude_customizations.CustomizationsError as exc:
+            diag.registrar("claude.customizations_not_saved", "aviso", sessao=binding.name, codigo=exc.code)
+
     def _rebind(self, slot, conversation):
         key = slot.binding.key
         if key in self.rebindings and not self.rebindings[key].done():
@@ -1025,6 +1036,7 @@ class RuntimeCoordinator:
                 async with self._ingress_closed(slot.binding.name):
                     slot.frozen = True
                     await self.change(slot.binding.name, changed)
+                await self._remember_terminal_customizations(slot.binding)
             except Exception as exc:
                 slot.cache_valid = False
                 self._signal(slot)
@@ -1711,6 +1723,9 @@ class RuntimeCoordinator:
                         life = None if remove else await asyncio.to_thread(terminal_life, slot.binding)
                         slot.change = {"target":new_name or name, "advance":advance, "life":life, "from_rust":from_rust, "relaunch":False,
                                        "killed":bool(closed and closed.get("killed") is True)}
+                        if remove and slot.binding.meta.get("terminal") and slot.binding.meta.get("claude_settings") and self.legacy is not None:
+                            current = await asyncio.to_thread(self.legacy.binding, name, slot.binding.provider)
+                            await self._remember_terminal_customizations(current or slot.binding)
                         result = await action()
                     except Exception:
                         if slot.change_from_rust and slot.phase == Phase.Python and not remove:

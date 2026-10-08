@@ -8,6 +8,7 @@ from typing import AsyncIterator, Callable
 from app.config import settings
 from app.state import StateEvent, StateMonitor
 from app.transcript import ChatEvent, TranscriptTailer
+from app import claude_customizations
 from app import model_args
 from app import plugin_bridge
 from app import terminal_input as ti
@@ -52,12 +53,14 @@ class ClaudeAdapter:
 
     def spawn_command(self, cwd: str, session_id: str,
                       model: str | None = None, effort: str | None = None,
-                      permission_mode: str | None = None) -> list[str]:
+                      permission_mode: str | None = None,
+                      claude_settings: dict | None = None) -> list[str]:
         argv = ["claude", "--session-id", session_id]
         # `--plugin-dir` põe o plugin por fora dos plugins do marketplace na cadeia de hooks.
         for raiz in plugin_bridge.raizes_dos_plugins():
             argv += ["--plugin-dir", raiz]
-        return argv + model_args.args_de("claude", model, effort, permission_mode)
+        return claude_customizations.apply_settings(
+            argv + model_args.args_de("claude", model, effort, permission_mode), claude_settings, cwd=cwd)
 
     def transcript_path(self, cwd: str, session_id: str) -> str:
         from app.registry import sanitize_cwd   # local: registry importa os adapters

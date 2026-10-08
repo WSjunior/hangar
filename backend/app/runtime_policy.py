@@ -258,5 +258,17 @@ def run(kind: str, payload: dict, metadata: dict) -> dict:
             updated = sessions.update(metadata["name"], **payload)
             if updated is None:
                 raise RuntimeError("sidecar desapareceu durante a alteração")
+        if provider == "claude" and payload.get("session_id"):
+            from app import claude_customizations
+            try:
+                claude_customizations.remember(payload["session_id"], updated.get("claude_settings"))
+            except claude_customizations.CustomizationsError as exc:
+                diag.registrar("claude.customizations_not_saved", "aviso", codigo=exc.code)
+                with lock:
+                    validate()
+                    current = sessions.load(metadata["name"])
+                    if current and current.get("key") == metadata["key"]:
+                        sessions.update(metadata["name"], problema=[exc.code, exc.detail])
+                return {"updated": True, "customizations_persisted": False, "warning": exc.detail}
         return {"updated": True}
     raise ValueError("serviço não permitido")

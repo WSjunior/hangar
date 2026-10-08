@@ -331,6 +331,7 @@ impl NewSession {
 
     /// O catálogo da conta escolhida reconfirma a escolha do proxy antes de deixá-la criar.
     pub(super) fn load_models(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_customizations(window, cx);
         let seq = self.models.start();
         if self.proxy_accounts().is_none() { self.model.clear(); self.effort.clear(); }
         self.subagent.clear();

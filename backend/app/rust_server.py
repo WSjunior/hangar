@@ -25,7 +25,7 @@ from pathlib import Path
 
 import uvicorn
 
-from app import diag, diag_logging, log_paths, migration_status, rust_bins, terminal_observer
+from app import claude_customizations, diag, diag_logging, log_paths, migration_status, rust_bins, terminal_observer
 
 _log = logging.getLogger("hangar.rust_server")
 
@@ -350,6 +350,7 @@ class Supervisor:
         terminal_panel = None
         from app import list_bridge, pages_bridge, workspace_bridge
         workspace_bridge.configure(None, None)
+        claude_customizations.configure(None, None)
         list_bridge.configure(None, None)
         pages_bridge.configure(None, None)
         terminal_observer.configure(None, None)
@@ -396,6 +397,7 @@ class Supervisor:
                         raise ValueError("missing terminal address")
                     terminal_observer.configure(address, env["HANGAR_INTERNAL_SECRET"])
                     workspace_bridge.configure(address, env["HANGAR_INTERNAL_SECRET"])
+                    claude_customizations.configure(address, env["HANGAR_INTERNAL_SECRET"])
                     list_bridge.configure(address, env["HANGAR_INTERNAL_SECRET"])
                     pages_bridge.configure(address, env["HANGAR_INTERNAL_SECRET"])
                 except ValueError:
@@ -403,6 +405,7 @@ class Supervisor:
                     # assume a porta inteira em vez de atender metade por trás dele.
                     terminal_observer.configure(None, None)
                     workspace_bridge.configure(None, None)
+                    claude_customizations.configure(None, None)
                     list_bridge.configure(None, None)
                     pages_bridge.configure(None, None)
                     _log.error("hangar-server sem endereço privado válido na saúde")
@@ -459,6 +462,7 @@ class Supervisor:
                         record_failed = True
                 from app import list_bridge, pages_bridge, workspace_bridge
                 workspace_bridge.configure(None, None)
+                claude_customizations.configure(None, None)
                 list_bridge.configure(None, None)
                 pages_bridge.configure(None, None)
                 costs_sources.set_served_by_rust(False)
@@ -487,6 +491,7 @@ class Supervisor:
     async def stop(self) -> None:
         from app import costs_sources, list_bridge, pages_bridge, workspace_bridge
         workspace_bridge.configure(None, None)
+        claude_customizations.configure(None, None)
         list_bridge.configure(None, None)
         pages_bridge.configure(None, None)
         costs_sources.set_served_by_rust(False)
