@@ -471,7 +471,7 @@ Commit: `feat(codex): headless Codex is born and reconnected by Rust; Python onl
 - Consumes: `process::{spawn,kill}`; `launch_env`.
 - Produces: `Respawn { failures:u8, next_at:f64 }` no ator (teto 3, espera 5 s dobrando, zera com subida boa ou ação do usuário); `close` com `kill: true`.
 
-- [ ] **Step 1: Testes (falham)**
+- [x] **Step 1: Testes (falham)**
 
 Rust (`runtime_actor.rs`, com o cano falso da Task 4):
 - `cano_exit_respawns_with_backoff_up_to_three`: o cano sai (`cano_saiu`) → o ator sobe de novo após 5 s, depois 10 s, depois 20 s; na quarta saída para e deixa `problema = codex_headless_nao_subiu`.
@@ -482,9 +482,9 @@ Rust (`runtime_actor.rs`, com o cano falso da Task 4):
 
 Python (`test_runtime_routing.py`): `DELETE` de sessão Codex sem terminal com o Rust dono chama `close` com `kill: True` e não chama `sem_terminal.matar`; `/recarregar` e `/codex-permissions` (POST) vão ao Rust (controle `restart` / `set_permission_mode`).
 
-- [ ] **Step 2: Rodar e ver falhar** (comandos da Task 4).
+- [x] **Step 2: Rodar e ver falhar** (comandos da Task 4).
 
-- [ ] **Step 3: Implementar**
+- [x] **Step 3: Implementar**
 
 - Ator: na saída do cano de sessão Codex sem terminal, se não foi pedida (`close`/`kill`), agenda nova subida pelo `Respawn` (sem laço: um timer por sessão). Subida = `launch_env` + `spawn` + reconexão do motor (`bootstrap(true)`).
 - Motor: `Restart`/`Reload` ociosos → efeito novo `Effect::Respawn { reason }` (o ator mata e sobe); `SetPermissionMode` → mesmo sandbox: `session.patch_meta {permission_mode}`; outro sandbox: ocioso → `patch_meta` + `Respawn`; ocupado → `RuntimeError("erro_permissao_ocupada", …)`. Nome de modo desconhecido → `erro_modo_desconhecido`.
@@ -492,7 +492,7 @@ Python (`test_runtime_routing.py`): `DELETE` de sessão Codex sem terminal com o
 - Órfãos: ao subir o Rust (antes de abrir sessões), `kill_orphans` com o conjunto vivo das duas pastas, uma vez; o `matar_orfaos` do `_boot_sessions` só roda quando o modo é `python` (regra 10 do desenho). Teste Python: com o Rust esperado, `_boot_sessions` não chama `matar_orfaos`.
 - Teto esgotado (`Respawn` na terceira falha) mantém o problema da última subida (regra 6).
 
-- [ ] **Step 4: Rodar e ver passar; commit**
+- [x] **Step 4: Rodar e ver passar; commit**
 
 Commit: `feat(codex): Rust owns headless Codex lifecycle — respawn, restart, permission, close`.
 
