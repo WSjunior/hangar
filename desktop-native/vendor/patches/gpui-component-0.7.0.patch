@@ -1,7 +1,7 @@
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-component-0.7.0/MODIFICADO.md gpui-component-0.7.0/MODIFICADO.md
 --- gpui-component-0.7.0/MODIFICADO.md
 +++ gpui-component-0.7.0/MODIFICADO.md
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,43 @@
 +# Cópia modificada do gpui-component 0.7.0
 +
 +Origem: crate `gpui-component` 0.7.0 do crates.io (repositório `longbridge/gpui-kit`), licença Apache-2.0 (`LICENSE-APACHE`). Entra pelo `[patch.crates-io]` de `desktop-native/Cargo.toml`.
@@ -42,6 +42,9 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 +quando a API equivalente existir no kit.
 +
 +Os testes que montam `KeyDownEvent` passam `physical_digit: None`, o campo novo da cópia de gpui-pre.
++
++Acessibilidade do `Button`: sem rótulo nem `accessibility_label`, o nome acessível é o texto da dica (botão só de
++ícone); `Button::aria_selected` marca a escolha (abas, modo) sem o visual de `selected`.
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-component-0.7.0/src/attachment.rs gpui-component-0.7.0/src/attachment.rs
 --- gpui-component-0.7.0/src/attachment.rs
 +++ gpui-component-0.7.0/src/attachment.rs
@@ -67,7 +70,33 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-component-0.7.0/src/button/button.rs gpui-component-0.7.0/src/button/button.rs
 --- gpui-component-0.7.0/src/button/button.rs
 +++ gpui-component-0.7.0/src/button/button.rs
-@@ -1472,6 +1472,7 @@
+@@ -591,6 +591,14 @@
+     }
+ }
+ 
++impl Button {
++    /// Accessibility-only selected state (tabs, list rows); unlike [`Selectable::selected`] it leaves the look alone.
++    pub fn aria_selected(mut self, selected: bool) -> Self {
++        self.base = self.base.aria_selected(selected);
++        self
++    }
++}
++
+ impl RenderOnce for Button {
+     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+         let style: ButtonVariant = self.variant;
+@@ -725,7 +733,9 @@
+         let accessibility_label = self
+             .accessibility_label
+             .clone()
+-            .or_else(|| self.label.clone());
++            .or_else(|| self.label.clone())
++            // Botão só de ícone: a dica é o único nome que ele tem.
++            .or_else(|| self.tooltip.as_ref().map(|(text, _)| text.clone()));
+         let content = h_flex()
+             .id("label")
+             .size_full()
+@@ -1472,6 +1482,7 @@
                  keystroke: keystroke.clone(),
                  is_held: false,
                  prefer_character_input: false,

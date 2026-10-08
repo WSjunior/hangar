@@ -591,6 +591,14 @@ impl InteractiveElement for Button {
     }
 }
 
+impl Button {
+    /// Accessibility-only selected state (tabs, list rows); unlike [`Selectable::selected`] it leaves the look alone.
+    pub fn aria_selected(mut self, selected: bool) -> Self {
+        self.base = self.base.aria_selected(selected);
+        self
+    }
+}
+
 impl RenderOnce for Button {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let style: ButtonVariant = self.variant;
@@ -725,7 +733,9 @@ impl RenderOnce for Button {
         let accessibility_label = self
             .accessibility_label
             .clone()
-            .or_else(|| self.label.clone());
+            .or_else(|| self.label.clone())
+            // Botão só de ícone: a dica é o único nome que ele tem.
+            .or_else(|| self.tooltip.as_ref().map(|(text, _)| text.clone()));
         let content = h_flex()
             .id("label")
             .size_full()

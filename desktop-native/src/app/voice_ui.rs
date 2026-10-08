@@ -1417,7 +1417,8 @@ impl Hangar {
     /// Conteúdo cru do painel: o `render_popup` já põe a superfície.
     pub(super) fn render_voice_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let live = self.voice.call.is_some();
-        let mut body = div().flex().flex_col().gap(px(12.)).p(px(16.))
+        let mut body = div().id("voice-panel").role(Role::Group).aria_label(tr_shared("codex_voice_title", &[]))
+            .flex().flex_col().gap(px(12.)).p(px(16.))
             .child(div().flex().items_center().gap(px(8.))
                 .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(tr_shared("codex_voice_title", &[])))
                 .child(beta_badge()));
@@ -1425,7 +1426,10 @@ impl Hangar {
             // O estado em destaque, e logo abaixo o que o organizador faz e pensa neste turno.
             let action = self.voice.action.as_ref().map(action_text);
             let thought = thought_tail(&self.voice.thought, 3, 140);
-            body = body.child(div().flex().flex_col().gap(px(8.)).p(px(12.)).rounded(px(10.)).border_1().border_color(theme::border())
+            // Texto solto não vira nó de acessibilidade: o estado inteiro vai no nome do bloco.
+            let spoken = [Some(self.voice_status().to_string()), self.voice.target.clone(), action.clone()]
+                .into_iter().flatten().collect::<Vec<_>>().join(" · ");
+            body = body.child(div().id("voice-status").role(Role::Status).aria_label(spoken).flex().flex_col().gap(px(8.)).p(px(12.)).rounded(px(10.)).border_1().border_color(theme::border())
                 .child(div().flex().items_center().gap(px(12.))
                     .child(self.render_equalizer(4., 28., 4.).gap(px(3.)))
                     .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
@@ -1439,10 +1443,10 @@ impl Hangar {
         let ready = live && matches!(self.voice.phase, Some(Phase::Live));
         body = body.child(div().flex().items_center().gap(px(6.))
             .child(Button::new("voice-mode-direct").ghost().small().rounded_full().label(tr("voice_mode_direct"))
-                .selected(self.voice.mode == Mode::Direct).disabled(!ready)
+                .selected(self.voice.mode == Mode::Direct).aria_selected(self.voice.mode == Mode::Direct).disabled(!ready)
                 .on_click(cx.listener(|this, _, _, cx| this.set_voice_mode(Mode::Direct, cx))))
             .child(Button::new("voice-mode-plan").ghost().small().rounded_full().label(tr("voice_mode_plan"))
-                .selected(self.voice.mode == Mode::Plan).disabled(!ready)
+                .selected(self.voice.mode == Mode::Plan).aria_selected(self.voice.mode == Mode::Plan).disabled(!ready)
                 .on_click(cx.listener(|this, _, _, cx| this.set_voice_mode(Mode::Plan, cx)))));
         if let Some((path, markdown)) = &self.voice.plan {
             let open = path.clone();
@@ -1492,7 +1496,7 @@ impl Hangar {
                 .child(div().text_sm().text_color(theme::text()).whitespace_normal().child(draft.clone())));
         }
         if let Some(error) = &self.voice.error {
-            body = body.child(div().text_xs().text_color(theme::danger()).whitespace_normal().child(error.clone()));
+            body = body.child(div().id("voice-error").role(Role::Alert).aria_label(error.clone()).text_xs().text_color(theme::danger()).whitespace_normal().child(error.clone()));
         }
         let actions = if live {
             let mute = if self.voice.muted { "codex_voice_unmute_short" } else { "codex_voice_mute_short" };

@@ -4549,6 +4549,7 @@
   "native_browser_cookies_error": "Não deu pra trazer o login: {e}",
   "native_browser_cookies_confirm": "Os cookies do seu Chrome vão para o navegador embutido, que é um só para todas as sessões: o login fica disponível no navegador de qualquer sessão e para os agentes que o usam. Clique de novo para trazer.",
   "native_side_tools": "Ferramentas",
+  "native_side_tabs": "Abas do painel",
   "native_auth_error": "Token recusado. Abra Conexão e confira a credencial.",
   "native_connection_not_saved": "Conectado, mas a conexão não foi guardada para a próxima abertura: {error}",
   "native_rate_limited": "Muitas tentativas. A conexão aguardará o prazo do servidor.",

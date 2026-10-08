@@ -47,3 +47,10 @@ Tecla física da fileira de números: `KeyDownEvent::physical_digit` (`src/inter
 da tecla, seja qual for o layout, preenchido pelas cópias de gpui-pre-linux, gpui-pre-windows e gpui-pre-macos. Com
 Shift a tecla chega como símbolo, e o Hangar escolhe a sessão por Ctrl+Shift+número em qualquer layout. Os
 construtores de `KeyDownEvent` daqui (`window.rs`, `elements/div.rs`) passam `None`.
+
+Acessibilidade estável: a view em cache (`view.rs`, `prepaint_view`) que reaproveita o quadro anterior pulava o prepaint e
+o paint dos filhos, e os nós de acessibilidade dela sumiam da árvore até a view repintar; leitores de tela e agentes
+viam a árvore oscilar. Agora a view guarda os nós que emitiu (`A11yCapture`, `window/a11y.rs`) e os reemite no
+reaproveitamento, com limites, foco e ações do quadro anterior (`prev_*` no `A11y`). Sem `author_id` explícito, o nó
+recebe o caminho de ids do elemento sem os de view (`element.rs`), que vira `AccessibleId` no AT-SPI e `AutomationId`
+no UIA.

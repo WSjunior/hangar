@@ -1,7 +1,7 @@
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-0.3.7/MODIFICADO.md gpui-pre-0.3.7/MODIFICADO.md
 --- gpui-pre-0.3.7/MODIFICADO.md
 +++ gpui-pre-0.3.7/MODIFICADO.md
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,56 @@
 +# Cópia modificada do gpui-pre 0.3.7
 +
 +Origem: crate `gpui-pre` 0.3.7 do crates.io, licença Apache-2.0 (`LICENSE-APACHE`).
@@ -51,6 +51,13 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 +da tecla, seja qual for o layout, preenchido pelas cópias de gpui-pre-linux, gpui-pre-windows e gpui-pre-macos. Com
 +Shift a tecla chega como símbolo, e o Hangar escolhe a sessão por Ctrl+Shift+número em qualquer layout. Os
 +construtores de `KeyDownEvent` daqui (`window.rs`, `elements/div.rs`) passam `None`.
++
++Acessibilidade estável: a view em cache (`view.rs`, `prepaint_view`) que reaproveita o quadro anterior pulava o prepaint e
++o paint dos filhos, e os nós de acessibilidade dela sumiam da árvore até a view repintar; leitores de tela e agentes
++viam a árvore oscilar. Agora a view guarda os nós que emitiu (`A11yCapture`, `window/a11y.rs`) e os reemite no
++reaproveitamento, com limites, foco e ações do quadro anterior (`prev_*` no `A11y`). Sem `author_id` explícito, o nó
++recebe o caminho de ids do elemento sem os de view (`element.rs`), que vira `AccessibleId` no AT-SPI e `AutomationId`
++no UIA.
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-0.3.7/src/element.rs gpui-pre-0.3.7/src/element.rs
 --- gpui-pre-0.3.7/src/element.rs
 +++ gpui-pre-0.3.7/src/element.rs
@@ -76,6 +83,24 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
                  let mut pushed_a11y_node = false;
                  if window.a11y.is_active() {
                      if let Some(global_id) = global_id.as_ref() {
+@@ -378,6 +389,17 @@
+                                 y1: ((bounds.origin.y.0 + bounds.size.height.0) * scale) as f64,
+                             });
+                             self.element.write_a11y_info(&mut node);
++                            // Sem id de autor, o caminho de ids do elemento (sem os de view, que mudam a cada execução):
++                            // estável entre quadros, e é o que agentes de automação usam para achar o controle.
++                            if node.author_id().is_none() {
++                                let path: Vec<String> = global_id
++                                    .0
++                                    .iter()
++                                    .filter(|id| !matches!(id, ElementId::View(_)))
++                                    .map(|id| id.to_string())
++                                    .collect();
++                                node.set_author_id(path.join("/"));
++                            }
+                             window.a11y.node_bounds.insert(node_id, bounds);
+                             pushed_a11y_node = window.a11y.nodes.push(node_id, node);
+                             #[cfg(debug_assertions)]
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-0.3.7/src/elements/div.rs gpui-pre-0.3.7/src/elements/div.rs
 --- gpui-pre-0.3.7/src/elements/div.rs
 +++ gpui-pre-0.3.7/src/elements/div.rs
@@ -1671,6 +1696,197 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
  #[repr(C)]
  #[expect(missing_docs)]
  pub struct PathVertex<P: Clone + Debug + Default + PartialEq> {
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-0.3.7/src/view.rs gpui-pre-0.3.7/src/view.rs
+--- gpui-pre-0.3.7/src/view.rs
++++ gpui-pre-0.3.7/src/view.rs
+@@ -297,6 +297,7 @@
+     paint_range: Range<PaintIndex>,
+     cache_key: ViewElementCacheKey,
+     accessed_entities: FxHashSet<EntityId>,
++    a11y: Option<crate::window::a11y::A11yCapture>,
+ }
+ 
+ struct ViewElementCacheKey {
+@@ -487,7 +488,11 @@
+                     && element_state.cache_key.text_style == text_style
+                     && !window.dirty_views.contains(&entity_id)
+                     && !window.refreshing
++                    && (!window.a11y.is_active() || element_state.a11y.is_some())
+                 {
++                    if let Some(capture) = element_state.a11y.as_ref() {
++                        window.a11y.replay(capture, window.focus);
++                    }
+                     let prepaint_start = window.prepaint_index();
+                     window.reuse_prepaint(element_state.prepaint_range.clone());
+                     cx.entities
+@@ -500,6 +505,11 @@
+ 
+                 let refreshing = mem::replace(&mut window.refreshing, true);
+                 let prepaint_start = window.prepaint_index();
++                let a11y_start = if window.a11y.is_active() {
++                    window.a11y.capture_start()
++                } else {
++                    None
++                };
+                 let (element, accessed_entities) = cx.detect_accessed_entities(|cx| {
+                     let mut element = render(window, cx);
+                     element.layout_as_root(Size::<AvailableSpace>::from(bounds.size), window, cx);
+@@ -509,11 +519,13 @@
+ 
+                 let prepaint_end = window.prepaint_index();
+                 window.refreshing = refreshing;
++                let a11y = a11y_start.map(|start| window.a11y.capture_end(start));
+ 
+                 (
+                     Some(element),
+                     ViewElementState {
+                         accessed_entities,
++                        a11y,
+                         prepaint_range: prepaint_start..prepaint_end,
+                         paint_range: PaintIndex::default()..PaintIndex::default(),
+                         cache_key: ViewElementCacheKey {
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-0.3.7/src/window/a11y.rs gpui-pre-0.3.7/src/window/a11y.rs
+--- gpui-pre-0.3.7/src/window/a11y.rs
++++ gpui-pre-0.3.7/src/window/a11y.rs
+@@ -149,6 +149,9 @@
+     pub(crate) focus_ids: FxHashMap<NodeId, FocusId>,
+     pub(crate) node_bounds: FxHashMap<NodeId, Bounds<Pixels>>,
+     pub(crate) action_listeners: FxHashMap<NodeId, Vec<(Action, A11yActionListener)>>,
++    prev_focus_ids: FxHashMap<NodeId, FocusId>,
++    prev_node_bounds: FxHashMap<NodeId, Bounds<Pixels>>,
++    prev_action_listeners: FxHashMap<NodeId, Vec<(Action, A11yActionListener)>>,
+     /// The window's title, used to label the root node so assistive
+     /// technology can tell windows apart.
+     window_title: Option<SharedString>,
+@@ -177,6 +180,9 @@
+             focus_ids: FxHashMap::default(),
+             node_bounds: FxHashMap::default(),
+             action_listeners: FxHashMap::default(),
++            prev_focus_ids: FxHashMap::default(),
++            prev_node_bounds: FxHashMap::default(),
++            prev_action_listeners: FxHashMap::default(),
+             window_title,
+             last_focus_without_node: None,
+             debug: debug::A11yDebug::default(),
+@@ -273,12 +279,63 @@
+ 
+     /// Clear per-frame state and push the root node to start a new frame.
+     pub(crate) fn begin_frame(&mut self) {
+-        self.focus_ids.clear();
+-        self.node_bounds.clear();
+-        self.action_listeners.clear();
++        // O quadro anterior fica guardado para as views em cache, que não repintam e reaproveitam o que registraram nele.
++        self.prev_focus_ids = std::mem::take(&mut self.focus_ids);
++        self.prev_node_bounds = std::mem::take(&mut self.node_bounds);
++        self.prev_action_listeners = std::mem::take(&mut self.action_listeners);
+         self.nodes.begin_frame(self.window_title.as_ref());
+     }
+ 
++    /// Marks where a cached view starts emitting nodes, so its subtree can be replayed on later frames.
++    pub(crate) fn capture_start(&self) -> Option<(usize, usize)> {
++        let parent = self.nodes.nodes_stack.last()?;
++        Some((self.nodes.all_nodes.len(), parent.children().len()))
++    }
++
++    pub(crate) fn capture_end(&self, start: (usize, usize)) -> A11yCapture {
++        let roots = self
++            .nodes
++            .nodes_stack
++            .last()
++            .map(|parent| parent.children()[start.1..].to_vec())
++            .unwrap_or_default();
++        A11yCapture {
++            nodes: self.nodes.all_nodes[start.0..].to_vec(),
++            roots,
++        }
++    }
++
++    /// Re-emits the subtree of a cached view that was reused without running prepaint/paint.
++    pub(crate) fn replay(&mut self, capture: &A11yCapture, focused: Option<FocusId>) {
++        let mut inserted = FxHashSet::default();
++        for (id, node) in &capture.nodes {
++            if !self.nodes.seen_ids.insert(*id) {
++                continue;
++            }
++            inserted.insert(*id);
++            self.nodes.all_nodes.push((*id, node.clone()));
++            if let Some(bounds) = self.prev_node_bounds.remove(id) {
++                self.node_bounds.insert(*id, bounds);
++            }
++            if let Some(listeners) = self.prev_action_listeners.remove(id) {
++                self.action_listeners.insert(*id, listeners);
++            }
++            if let Some(focus_id) = self.prev_focus_ids.remove(id) {
++                self.focus_ids.insert(*id, focus_id);
++                if focused == Some(focus_id) {
++                    self.set_focus(*id);
++                }
++            }
++        }
++        if let Some(parent) = self.nodes.nodes_stack.last_mut() {
++            for root in &capture.roots {
++                if inserted.contains(root) {
++                    parent.push_child(*root);
++                }
++            }
++        }
++    }
++
+     /// Finalize the tree and produce a [`TreeUpdate`] for the platform adapter.
+     pub(crate) fn end_frame(&mut self, frame: debug::FrameDebugInfo) -> TreeUpdate {
+         let update = self.nodes.finalize();
+@@ -299,6 +356,13 @@
+     }
+ }
+ 
++/// Nodes a cached view emitted on the frame it last rendered.
++pub(crate) struct A11yCapture {
++    nodes: Vec<(NodeId, accesskit::Node)>,
++    /// Top-level nodes of the view, children of whatever node encloses it.
++    roots: Vec<NodeId>,
++}
++
+ /// Builder API for synthetic children. See the docs for
+ /// [`Element::a11y_synthetic_children`].
+ pub struct A11ySubtreeBuilder<'a> {
+@@ -659,6 +723,37 @@
+     }
+ 
+     #[test]
++    fn cached_subtree_replays_on_later_frames() {
++        let mut a11y = new_a11y();
++        let container = NodeId(1);
++        let button = NodeId(2);
++        let focus = FocusId::default();
++
++        assert!(a11y.nodes.push(container, test_node()));
++        let start = a11y.capture_start().unwrap();
++        assert!(a11y.nodes.push(button, test_node()));
++        a11y.set_focusable(button, focus);
++        a11y.nodes.pop();
++        let capture = a11y.capture_end(start);
++        a11y.nodes.pop();
++        a11y.end_frame(Default::default());
++
++        for _ in 0..2 {
++            a11y.begin_frame();
++            assert!(a11y.nodes.push(container, test_node()));
++            a11y.replay(&capture, Some(focus));
++            a11y.nodes.pop();
++            let update = a11y.end_frame(Default::default());
++
++            let parent = update.nodes.iter().find(|(id, _)| *id == container).unwrap();
++            assert_eq!(parent.1.children(), &[button]);
++            assert!(update.nodes.iter().any(|(id, _)| *id == button));
++            assert_eq!(update.focus, button);
++            assert_eq!(a11y.focus_ids.get(&button), Some(&focus));
++        }
++    }
++
++    #[test]
+     fn accessibility_enabled_is_independent_of_activation() {
+         for force_disabled in [false, true] {
+             for active in [false, true] {
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-0.3.7/src/window.rs gpui-pre-0.3.7/src/window.rs
 --- gpui-pre-0.3.7/src/window.rs
 +++ gpui-pre-0.3.7/src/window.rs

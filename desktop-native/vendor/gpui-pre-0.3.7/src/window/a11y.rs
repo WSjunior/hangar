@@ -149,6 +149,9 @@ pub(crate) struct A11y {
     pub(crate) focus_ids: FxHashMap<NodeId, FocusId>,
     pub(crate) node_bounds: FxHashMap<NodeId, Bounds<Pixels>>,
     pub(crate) action_listeners: FxHashMap<NodeId, Vec<(Action, A11yActionListener)>>,
+    prev_focus_ids: FxHashMap<NodeId, FocusId>,
+    prev_node_bounds: FxHashMap<NodeId, Bounds<Pixels>>,
+    prev_action_listeners: FxHashMap<NodeId, Vec<(Action, A11yActionListener)>>,
     /// The window's title, used to label the root node so assistive
     /// technology can tell windows apart.
     window_title: Option<SharedString>,
@@ -177,6 +180,9 @@ impl A11y {
             focus_ids: FxHashMap::default(),
             node_bounds: FxHashMap::default(),
             action_listeners: FxHashMap::default(),
+            prev_focus_ids: FxHashMap::default(),
+            prev_node_bounds: FxHashMap::default(),
+            prev_action_listeners: FxHashMap::default(),
             window_title,
             last_focus_without_node: None,
             debug: debug::A11yDebug::default(),
@@ -273,10 +279,61 @@ impl A11y {
 
     /// Clear per-frame state and push the root node to start a new frame.
     pub(crate) fn begin_frame(&mut self) {
-        self.focus_ids.clear();
-        self.node_bounds.clear();
-        self.action_listeners.clear();
+        // O quadro anterior fica guardado para as views em cache, que não repintam e reaproveitam o que registraram nele.
+        self.prev_focus_ids = std::mem::take(&mut self.focus_ids);
+        self.prev_node_bounds = std::mem::take(&mut self.node_bounds);
+        self.prev_action_listeners = std::mem::take(&mut self.action_listeners);
         self.nodes.begin_frame(self.window_title.as_ref());
+    }
+
+    /// Marks where a cached view starts emitting nodes, so its subtree can be replayed on later frames.
+    pub(crate) fn capture_start(&self) -> Option<(usize, usize)> {
+        let parent = self.nodes.nodes_stack.last()?;
+        Some((self.nodes.all_nodes.len(), parent.children().len()))
+    }
+
+    pub(crate) fn capture_end(&self, start: (usize, usize)) -> A11yCapture {
+        let roots = self
+            .nodes
+            .nodes_stack
+            .last()
+            .map(|parent| parent.children()[start.1..].to_vec())
+            .unwrap_or_default();
+        A11yCapture {
+            nodes: self.nodes.all_nodes[start.0..].to_vec(),
+            roots,
+        }
+    }
+
+    /// Re-emits the subtree of a cached view that was reused without running prepaint/paint.
+    pub(crate) fn replay(&mut self, capture: &A11yCapture, focused: Option<FocusId>) {
+        let mut inserted = FxHashSet::default();
+        for (id, node) in &capture.nodes {
+            if !self.nodes.seen_ids.insert(*id) {
+                continue;
+            }
+            inserted.insert(*id);
+            self.nodes.all_nodes.push((*id, node.clone()));
+            if let Some(bounds) = self.prev_node_bounds.remove(id) {
+                self.node_bounds.insert(*id, bounds);
+            }
+            if let Some(listeners) = self.prev_action_listeners.remove(id) {
+                self.action_listeners.insert(*id, listeners);
+            }
+            if let Some(focus_id) = self.prev_focus_ids.remove(id) {
+                self.focus_ids.insert(*id, focus_id);
+                if focused == Some(focus_id) {
+                    self.set_focus(*id);
+                }
+            }
+        }
+        if let Some(parent) = self.nodes.nodes_stack.last_mut() {
+            for root in &capture.roots {
+                if inserted.contains(root) {
+                    parent.push_child(*root);
+                }
+            }
+        }
     }
 
     /// Finalize the tree and produce a [`TreeUpdate`] for the platform adapter.
@@ -297,6 +354,13 @@ impl A11y {
     pub(crate) fn debug_tree_json(&self) -> Option<String> {
         self.debug.to_json()
     }
+}
+
+/// Nodes a cached view emitted on the frame it last rendered.
+pub(crate) struct A11yCapture {
+    nodes: Vec<(NodeId, accesskit::Node)>,
+    /// Top-level nodes of the view, children of whatever node encloses it.
+    roots: Vec<NodeId>,
 }
 
 /// Builder API for synthetic children. See the docs for
@@ -656,6 +720,37 @@ mod tests {
         let mut a11y = A11y::new(Arc::new(AtomicBool::new(true)), false, None);
         a11y.begin_frame();
         a11y
+    }
+
+    #[test]
+    fn cached_subtree_replays_on_later_frames() {
+        let mut a11y = new_a11y();
+        let container = NodeId(1);
+        let button = NodeId(2);
+        let focus = FocusId::default();
+
+        assert!(a11y.nodes.push(container, test_node()));
+        let start = a11y.capture_start().unwrap();
+        assert!(a11y.nodes.push(button, test_node()));
+        a11y.set_focusable(button, focus);
+        a11y.nodes.pop();
+        let capture = a11y.capture_end(start);
+        a11y.nodes.pop();
+        a11y.end_frame(Default::default());
+
+        for _ in 0..2 {
+            a11y.begin_frame();
+            assert!(a11y.nodes.push(container, test_node()));
+            a11y.replay(&capture, Some(focus));
+            a11y.nodes.pop();
+            let update = a11y.end_frame(Default::default());
+
+            let parent = update.nodes.iter().find(|(id, _)| *id == container).unwrap();
+            assert_eq!(parent.1.children(), &[button]);
+            assert!(update.nodes.iter().any(|(id, _)| *id == button));
+            assert_eq!(update.focus, button);
+            assert_eq!(a11y.focus_ids.get(&button), Some(&focus));
+        }
     }
 
     #[test]

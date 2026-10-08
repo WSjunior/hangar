@@ -64,3 +64,11 @@ Não compilados aqui: gpui-pre-windows e gpui-pre-apple/-macos (revisados só po
 | Ajuste | Onde | Por quê |
 |---|---|---|
 | `KeyDownEvent::physical_digit` | gpui-pre `interactive.rs` (e os construtores), gpui-pre-linux `platform.rs`/`wayland/client.rs`/`x11/client.rs`, gpui-pre-windows `events.rs`, gpui-pre-macos `events.rs`/`window.rs`, testes do gpui-base e do gpui-component | com Shift a tecla de número chega como símbolo, e só a tabela de layouts conhecidos o traduzia de volta; a posição física vale em qualquer layout (Ctrl+Shift+número escolhe a sessão) |
+
+## Acessibilidade
+
+| Ajuste | Onde | Por quê |
+|---|---|---|
+| View em cache reemite os nós de acessibilidade (`A11yCapture`, `A11y::replay`, quadro anterior em `prev_*`) | gpui-pre `view.rs`/`window/a11y.rs` | o reaproveitamento pulava o prepaint dos filhos e os nós sumiam; a árvore lida pelo AT-SPI oscilava entre poucos e todos os controles |
+| `author_id` padrão = caminho de ids do elemento sem ids de view | gpui-pre `element.rs` | id estável por controle para automação (`AccessibleId` no AT-SPI, `AutomationId` no UIA) sem marcar elemento por elemento |
+| Nome do `Button` cai na dica; `Button::aria_selected` | gpui-component `button/button.rs` | botão só de ícone saía sem nome; aba e modo escolhidos precisam do estado sem mudar o visual |
