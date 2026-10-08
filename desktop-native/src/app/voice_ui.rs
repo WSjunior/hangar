@@ -23,18 +23,30 @@ pub(super) struct CodexAccount { home: String, label: String }
 
 impl SearchableListItem for CodexAccount {
     type Value = String;
-    fn title(&self) -> SharedString { if self.home.is_empty() { tr("voice_account_default").into() } else { self.label.clone().into() } }
+    fn title(&self) -> SharedString {
+        match (self.home.is_empty(), self.label.is_empty()) {
+            (false, _) => self.label.clone().into(),
+            (true, true) => tr("voice_account_default").into(),
+            (true, false) => tr("voice_account_default_named").replace("{account}", &self.label).into(),
+        }
+    }
     fn value(&self) -> &String { &self.home }
 }
 
-/// Contas Codex da lista de credenciais; o rótulo é o da tela de contas (apelido, senão e-mail, senão nome).
+/// Primeiro item é sempre a conta padrão (`home` vazio, rótulo da conta ativa quando a lista a traz), depois as outras contas
+/// Codex com pasta própria; o rótulo é o da tela de contas (apelido, senão e-mail, senão nome).
 fn codex_accounts(list: &Value) -> Vec<CodexAccount> {
     let text = |v: &Value| v.as_str().filter(|t| !t.is_empty()).map(str::to_owned);
-    list.as_array().into_iter().flatten().filter(|c| c["tipo"] == "codex").filter_map(|c| {
-        let home = c["id"].as_str()?.strip_prefix("codex:").filter(|h| !h.is_empty())?.to_owned();
-        let label = text(&c["apelido"]).or_else(|| text(&c["login"]["email"])).or_else(|| text(&c["nome"])).unwrap_or_else(|| home.clone());
-        Some(CodexAccount { home, label })
-    }).collect()
+    let mut default = CodexAccount { home: String::new(), label: String::new() };
+    let mut others = Vec::new();
+    // `codex_account` só existe nas contas com pasta; as de cota avulsa não servem de CODEX_HOME.
+    for c in list.as_array().into_iter().flatten().filter(|c| c["tipo"] == "codex" && text(&c["codex_account"]).is_some()) {
+        let Some(home) = c["id"].as_str().and_then(|i| i.strip_prefix("codex:")).filter(|h| !h.is_empty()) else { continue };
+        let label = text(&c["apelido"]).or_else(|| text(&c["login"]["email"])).or_else(|| text(&c["nome"])).unwrap_or_else(|| home.to_owned());
+        if c["ativa"].as_bool() == Some(true) { default.label = label; }
+        else { others.push(CodexAccount { home: crate::app::disk::plain_path(home), label }); }
+    }
+    std::iter::once(default).chain(others).collect()
 }
 
 /// A escolha só vale se a conta ainda existe; senão volta ao comportamento de antes (sem `CODEX_HOME`).
@@ -299,18 +311,28 @@ impl Hangar {
         });
     }
 
-    pub(super) fn receive_voice_gate(&mut self, enabled: bool, codex: Option<Codex>, saved: (Option<String>, Option<String>), accounts: Vec<CodexAccount>, cx: &mut Context<Self>) {
+    pub(super) fn receive_voice_gate(&mut self, enabled: bool, codex: Option<Codex>, saved: (Option<String>, Option<String>), accounts: Vec<CodexAccount>, window: &mut Window, cx: &mut Context<Self>) {
         (self.voice.enabled, self.voice.codex) = (enabled, codex);
         if self.voice.call.is_none() {
             self.voice.voice = saved.0;
             self.voice.account = saved.1;
-            // Lista nova só troca o seletor com o painel fechado: ele nasce de novo na próxima abertura.
-            if self.voice.accounts != accounts && !self.voice.open { self.voice.account_select = None; }
             self.voice.accounts = accounts;
+            // O seletor aberto segue a lista que `chosen_home` usa.
+            if self.voice.accounts.len() < 2 { self.voice.account_select = None; }
+            else if let Some((picker, _)) = &self.voice.account_select {
+                let (items, at) = (self.voice.accounts.clone(), self.account_index());
+                picker.update(cx, |select, cx| { select.set_items(items, window, cx); select.set_selected_index(Some(gpui_kit::component::IndexPath::new(at)), window, cx); });
+            }
         }
         // Sem a opção ou sem o Codex a pílula some; a chamada não pode seguir com o microfone aberto.
         if (!enabled || self.voice.codex.is_none()) && self.voice.call.is_some() { self.stop_voice(cx); }
         cx.notify();
+    }
+
+    /// Posição da conta escolhida em `accounts`; 0 (padrão) quando não há escolha ou ela sumiu.
+    fn account_index(&self) -> usize {
+        chosen_home(&self.voice.accounts, self.voice.account.as_deref())
+            .and_then(|h| self.voice.accounts.iter().position(|a| std::path::Path::new(&a.home) == h)).unwrap_or(0)
     }
 
     pub(super) fn voice_context(&self) -> String {
@@ -735,10 +757,7 @@ impl Hangar {
             self.voice.voice_select = Some((picker, sub));
         }
         if open && self.voice.account_select.is_none() && self.voice.accounts.len() > 1 {
-            let items: Vec<CodexAccount> = std::iter::once(CodexAccount { home: String::new(), label: String::new() })
-                .chain(self.voice.accounts.iter().cloned()).collect();
-            let at = chosen_home(&self.voice.accounts, self.voice.account.as_deref())
-                .and_then(|h| items.iter().position(|a| std::path::Path::new(&a.home) == h)).unwrap_or(0);
+            let (items, at) = (self.voice.accounts.clone(), self.account_index());
             let picker = cx.new(|cx| SelectState::new(items, Some(gpui_kit::component::IndexPath::new(at)), window, cx));
             let sub = cx.subscribe_in(&picker, window, |this: &mut Hangar, _, event: &SelectEvent<Vec<CodexAccount>>, _, cx| {
                 let SelectEvent::Confirm(Some(home)) = event else { return };
@@ -954,15 +973,19 @@ mod tests {
     fn ev(id: &str, kind: &str, text: &str) -> (String, String, String) { (id.into(), kind.into(), text.into()) }
 
     #[test]
-    fn codex_accounts_use_alias_then_email_and_skip_other_kinds() {
+    fn codex_accounts_put_default_first_and_skip_quota_only_and_other_kinds() {
         let list = json!([
-            {"id": "codex:/h/.codex", "tipo": "codex", "nome": "default", "apelido": "", "login": {"email": "a@example.com"}},
-            {"id": "codex:/h/.codex-b", "tipo": "codex", "nome": "b", "apelido": "Second"},
+            {"id": "codex:/h/.codex", "tipo": "codex", "codex_account": "default", "ativa": true, "nome": "default", "apelido": "", "login": {"email": "a@example.com"}},
+            {"id": "codex:/h/.codex-b", "tipo": "codex", "codex_account": "b", "nome": "b", "apelido": "Second"},
+            {"id": "codex:/h/quota-only", "tipo": "codex", "nome": "q"},
             {"id": "claude:/h/.claude", "tipo": "claude", "nome": "c"},
         ]);
         let accounts = codex_accounts(&list);
         assert_eq!(accounts.iter().map(|a| (a.home.as_str(), a.label.as_str())).collect::<Vec<_>>(),
-            [("/h/.codex", "a@example.com"), ("/h/.codex-b", "Second")]);
+            [("", "a@example.com"), ("/h/.codex-b", "Second")]);
+        // Só a padrão: o seletor não tem o que escolher.
+        let only = json!([{"id": "codex:/h/.codex", "tipo": "codex", "codex_account": "default", "ativa": true, "nome": "d"}]);
+        assert_eq!(codex_accounts(&only).len(), 1);
     }
 
     #[test]

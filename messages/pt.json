@@ -7551,5 +7551,6 @@
   "native_voice_context_tokens": "{used} tokens",
   "native_voice_account_limits": "Limites da conta",
   "native_voice_account": "Conta Codex",
-  "native_voice_account_default": "Conta padrão"
+  "native_voice_account_default": "Conta padrão",
+  "native_voice_account_default_named": "{account} (padrão)"
 }

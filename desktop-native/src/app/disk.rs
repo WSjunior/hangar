@@ -104,7 +104,7 @@ fn cited(cwd: &Path, path: &str) -> Option<PathBuf> {
 }
 
 /// `canonicalize` no Windows devolve `\\?\C:\...`, que o Explorer e outros programas não abrem.
-fn plain_path(text: &str) -> String {
+pub(super) fn plain_path(text: &str) -> String {
     if let Some(rest) = text.strip_prefix(r"\\?\UNC\") { return format!(r"\\{rest}"); }
     match text.strip_prefix(r"\\?\") {
         Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest.to_owned(),
