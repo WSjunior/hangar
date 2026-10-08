@@ -355,12 +355,13 @@ def test_registry_rename_does_not_write_groups_in_rust_mode(monkeypatch):
     monkeypatch.setattr(registry.shortcut_terminals, "rename_owner", lambda *a: None)
     monkeypatch.setattr("app.conversation_transfer.rename_transfer", lambda *a: None)
     monkeypatch.setattr(registry.tmux, "is_hidden", lambda *a, **k: False, raising=False)
-    try:
-        reg.rename("a", "c")
-    except pair.GroupsOwnedByRust:
-        pytest.fail("o rename do registry não pode gravar grupo no modo Rust")
-    except Exception:
-        pass   # o resto do rename (shell escondido etc.) não é o assunto
+    # O rename chega à etapa do grupo e ela não grava: quem renomeou o grupo foi o Rust.
+    reached = []
+    real = registry._rename_pair_python
+    monkeypatch.setattr(registry, "_rename_pair_python", lambda old, new: reached.append((old, new)) or real(old, new))
+    monkeypatch.setattr(registry, "rename_pair", lambda *a: pytest.fail("o rename do registry não pode gravar grupo no modo Rust"))
+    reg.rename("a", "c")
+    assert reached == [("a", "c")]
     assert pair.PairLink("a").get()["peers"] == ["b"]
 
 
