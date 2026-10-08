@@ -17,6 +17,7 @@ export * from './loop';
 export * from './loopGuide';
 export * from './messageKeys';
 export * from './toolGroups';
+export * from './htmlPage';
 export * from './pensamento';
 export * from './arquivosCitados';
 export * from './fileIcons';

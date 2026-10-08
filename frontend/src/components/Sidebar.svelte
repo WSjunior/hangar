@@ -22,7 +22,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   import ProviderGlyph from './icons/ProviderGlyph.svelte';
   import GroupGlyph from './icons/GroupGlyph.svelte';
   import SessionSignals from './SessionSignals.svelte';
-  import type { SessionInfo, AggSession, Provider, WorktreeChoice } from '@hangar/core';
+  import type { SessionInfo, AggSession, Provider, SessionOpeningExtras, WorktreeChoice } from '@hangar/core';
   import { cwdParts, rotuloEstado, stateColors, countAwaiting, railLabel, fmtWhen, relativeTime, latestAssistantEvent, untrackedReason, providerTag, isOrq } from '@hangar/core';
   import { arrastarGrupo, mensagemRecusa } from '../lib/arrastarGrupo.svelte';
   import { createDragToGroup, dragChave } from '../lib/dragToGroup';
@@ -228,10 +228,10 @@ import ConfirmDialog from './ConfirmDialog.svelte';
                               engine?: string | null, model?: string | null, effort?: string | null,
                               permissionMode?: string | null, ompProfile?: string | null,
                               headless?: boolean, subagentModel?: string | null, jev?: boolean,
-                              worktree?: WorktreeChoice | null) {
+                              worktree?: WorktreeChoice | null, opening?: SessionOpeningExtras) {
     // O CreateSessionSheet já posicionou o servidor-alvo como ativo (selectServer).
     await createSession(name, cwd, configDir, provider, engine, model, effort, permissionMode, ompProfile, null, headless, subagentModel, jev,
-                                     worktree ?? undefined);
+                                     worktree ?? undefined, opening);
     abrirSessaoDoSheet(name);
     // Os avisos da criação (`info.avisos`) aparecem no aviso global do App, via onSessionWarnings.
     // SSE stream emitirá a sessão nova automaticamente

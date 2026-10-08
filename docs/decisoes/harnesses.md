@@ -65,6 +65,13 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   Windows over SSH"); a variável força a tela cheia mesmo sem `"tui": "fullscreen"` nas
   configurações. Sem ela, o clique dos botões de mod pelo app não tem onde chegar.
 
+- **A ponte do plugin mantém seu loopback na porta pública quando o Rust está ativo.** Bind
+  específico, inclusive na interface Tailscale, ganha uma entrada local só para `/api/plugin`;
+  wildcard e loopback já atendidos não ganham outro socket. A cobertura IPv6 é conferida no
+  socket, sem presumir dual stack. Nome MagicDNS, HTTPS e publicação do Tailscale não mudam.
+  Sem Rust, o bind específico mantém o limite da reserva Python. Ver
+  [ponte local com bind específico](#ponte-local-com-bind-específico-issue-80).
+
 - **Clique do app que copia ou abre URL acontece no aparelho de quem clicou.** O plugin responde
   no lugar do `ui.copy` e do `process.run` de abridor de URL só quando a chamada vem do mod dono
   do botão, até 1,5 s depois de um press que o backend confirmou como vindo do app. Cópia e
@@ -448,6 +455,13 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   outra regex de régua. O Python (`state.py`, `preview.py`, `plugin_screen.py`) segue com a régua
   pura: é limite da reserva sem Rust e do Windows. Ver
   [régua com o nome da sessão](#régua-com-o-nome-da-sessão-06102026).
+
+- **Voz no app nativo:** WebRTC do próprio nativo (o transporte websocket do realtime recusa login
+  ChatGPT); envio só a partir de fala do usuário, com espera de 1,5 s cancelada se ele voltar a
+  falar. Medição em "Voz no app nativo".
+- **Voz: modo Planejar:** nada vai à sessão até o fim; `finish_plan`, `ask_session` e `set_mode` só
+  saem de fala do usuário, `finish_plan` em dois passos, e o envio só sai após silêncio do
+  microfone. A leitura fora do projeto fica liberada (mesmo acesso da sessão). Medição em "Voz: modo Planejar".
 
 ## O /clear e o rodapé do Claude Code
 
@@ -1880,6 +1894,76 @@ ao aparelho de quem clicou pelo `press-start` e pelo `opened`, que o Rust atende
 aviso e a cópia não passam pela ponte, para não chegarem em dobro. Com os mods desligados, o
 filho nunca herda `HANGAR_PLUGIN_*` do ambiente do backend.
 
+### Ponte local com bind específico (issue #80)
+
+A URL da ponte, no ambiente da sessão e no arquivo de descoberta, é
+`http://127.0.0.1:<porta pública>/api/plugin`. O bind público em um endereço específico não
+atende esse destino. Trocar a URL pelo endereço de rede também não basta: `whoami` e
+`submitted` exigem origem loopback, e processos vivos conservam o ambiente de lançamento.
+
+No modo Rust, `plugin_listener` confere o endereço e a porta efetivos do listener público e,
+quando necessário, abre `127.0.0.1` na mesma porta. `0.0.0.0` e `127.0.0.1` já cobrem o destino;
+outros IPv4, inclusive outro endereço do bloco loopback, não. Em IPv6, `IPV6_V6ONLY` vem do
+socket real: wildcard dual stack não ganha outro bind; v6-only e endereços específicos precisam
+garantir também o IPv4 anunciado. Não se altera essa opção do socket público.
+
+Essa entrada local só monta as rotas da ponte, compartilhadas com a entrada pública. Os
+handlers Rust usam o mesmo estado e as rotas ainda atendidas pelo Python seguem ao mesmo
+upstream, preservando corpo, método e origem. Token da sessão e chave de descoberta continuam
+obrigatórios; loopback não concede identidade de dono e o segredo interno não passa pelo proxy.
+Outros caminhos recebem 404, sem expor a API inteira nem as pontes privadas.
+
+Os binds terminam antes da saúde pública. Conflito de porta impede a partida, em vez de trocar a
+porta contratada ou aceitar outro processo como substituto. O serviço adicional participa da
+mesma seleção de serviço e parada; fechar o cano do pai ou falhar um listener encerra o conjunto.
+URL, sidecar, IPC e formato de evento não mudam.
+
+O nome HTTPS/MagicDNS usado pelo app é independente dessa conexão local. `tailscale serve`
+continua encaminhando ao backend como antes, e bind direto na interface Tailscale segue a mesma
+política de endereço específico. O adicional não torna a API inteira disponível em loopback
+numa configuração que antes não a atendia. Sem Rust, a reserva Python mantém o limite antigo.
+
+Prova de 07/10/2026, protocolo interno 36, com Claude Code real no Windows e dois clientes do
+app nativo acessando por HTTPS/MagicDNS do Tailscale, sem turnos de modelo:
+
+- Na base, bind IPv4 específico atendia a API pública, mas recusava loopback na mesma porta. A
+  faixa existia no terminal e faltava no app; o clique sem terminal não entregava URL ao cliente.
+- Com a entrada local, a faixa apareceu no app e o clique do terminal abriu a URL somente no
+  primeiro cliente; o clique sem terminal abriu somente no segundo. Cada cliente recebeu uma
+  abertura. Depois de reiniciar o servidor mantendo as sessões, outro clique do primeiro cliente
+  somou uma abertura somente nele.
+- Token inválido recebeu 403. API pública geral, saúde e pontes privadas receberam 404 pelo
+  adicional. A descoberta com a chave do sidecar e o UUID real da conversa devolveu a sessão e
+  seu token, sem trocar o endereço anunciado.
+- `0.0.0.0` e `127.0.0.1` mantiveram a API pública no loopback, com 401 sem credencial, sem bind
+  duplicado. `::1` e `::` no Windows abriram também a entrada IPv4 restrita; no wildcard IPv6
+  dessa máquina o socket era v6-only. Dual stack tem regressão de socket, mas não foi executada
+  nessa prova; não se presume seu resultado a partir do Windows.
+
+Os builds Linux e Windows foram executados. No fechamento Linux, com Rust 1.98.1 e ambiente
+isolado, passaram as regressões da ponte, incluindo os sockets dual stack e v6-only. O workspace
+teve 1.169 testes aprovados e uma falha em `failed_open_leaves_no_entry_and_frees_the_lease`
+(`cano_read` em vez de `cano_connect`); o teste passou na repetição isolada. Ele libera uma porta
+efêmera antes da conexão, deixando uma janela de reutilização. Não houve alteração desse teste.
+A suíte do backend teve 8.459 aprovados e 76 pulados; a contenção/runtime teve 113 aprovados e
+um pulado; o contrato Python com o cano Rust teve 23 aprovados. A fixture HTTP nova foi corrigida
+para não depender da feature JSON do Axum, que o projeto não habilita.
+
+A verificação Windows posterior rodou em checkout isolado, sem alterar a instalação em uso.
+O workspace teve 1.066 aprovados e duas falhas em testes que lançam `python3`
+(`peek_keeps_old_writer_tcp` e `two_processes_one_lease`). Ambos passaram ao repetir com
+`python3.exe` da venv de teste no PATH, em vez do atalho da Microsoft Store. As regressões da
+ponte passaram, incluindo os sockets IPv6; os seis arquivos de contenção/runtime tiveram
+106 aprovados e oito pulados.
+
+Esses passos Linux e Windows rodaram sobre o diff da worktree, sem commit nem registro de
+aprovação de árvore. O registro oficial continua exigido antes da publicação.
+A fixture da prova visual isolou instalação/atualização automática na subida, igualmente na
+base e na correção, para não substituir o processo de prova por outro ciclo do backend;
+bootstrap de sessões, hooks, lifespan e proteção dos escritores continuaram reais.
+
+### Guarda e erros da interface dos mods
+
 Antes de cada operação de mod, o Rust pergunta ao Python se a troca de agente está em curso
 (`/internal/sessions/{name}/transfer`, contrato interno 28) e devolve a recusa dele
 (`session_transfer_busy`); sem resposta, recusa com `erro_mod_guarda_indisponivel`. Essa guarda
@@ -1902,7 +1986,8 @@ Limites conhecidos:
 - cada `change` de um campo paga uma ida ao Python (a guarda), com a falha dela virando
   `erro_mod_guarda_indisponivel`;
 - o convidado não digita em campo de mod nas sessões sem terminal, e também não vê a faixa nem os painéis delas: o `/events` do convidado vai ao Python, que não tem a interface dos mods das sessões que o Rust atende (servir o `plugin_ui` ao convidado pelo hub fica para outra decisão);
-- o `opened` com bind de LAN é limite antigo da ponte, que continua valendo;
+- sem o servidor Rust, o `opened` com bind específico continua sendo limite da ponte; com o
+  Rust ativo, a [entrada local](#ponte-local-com-bind-específico-issue-80) mantém a URL anunciada;
 - a sessão sem terminal renomeada continua com o mesmo `claude -p`, que manda à ponte o nome com que nasceu (`CP_SESSION_NAME`) e o token desse nome. O renomear fecha e reabre a sessão no Rust no mesmo processo (chave durável e cano), e a reabertura herda o nome de nascimento; com isso `press-start` e `opened` acham a sessão. Se o `hangar-server` reiniciar depois do renomear, ele não conhece o nome antigo, e a URL de um clique do app abre na máquina do servidor até o processo ser relançado;
 - o token da ponte é o HMAC só do nome, como no Python: dois processos que nasceram com o mesmo nome (uma sessão renomeada e outra criada depois com o nome antigo) têm o mesmo token, e o servidor não os distingue. Com as duas vivas no Rust, a ponte não atende nenhuma (a URL de um clique do app abre no servidor), para um processo não tomar o clique nem mandar URL ao aparelho da outra. Quando o nome antigo é hoje o de uma sessão fora do Rust (com terminal, ou atendida pelo Python), o Rust pergunta ao Python, sem cache, se a sessão existe; existindo, ou sem resposta, `press-start` e `opened` vão ao Python, que atende essa sessão, e a renomeada perde o efeito do clique do app (a URL abre no servidor) enquanto as duas viverem. Na interface, cada vida de ator tem identificador próprio, e uma sessão nova com o nome antigo não herda faixa, avisos nem clique. Fechar o limite pede um token por processo (o nome de nascimento e a chave no sidecar e no HMAC, no Python e no plugin), fora da exceção S7;
 - a sessão com terminal que o Rust atende, inclusive no Windows (onde o terminal já nasce no Rust), não é superfície remota: a fonte da interface dos mods dela é o plugin do Hangar no terminal, e desde a fase 3 a ponte dela e o clique do app são do Rust (parágrafos seguintes).
@@ -2719,6 +2804,74 @@ na montagem e o mostra também no layout compacto do PWA.
   adicionava contexto, mas não produziu fala no teste. Teste com dois turnos de organização e
   entrada de áudio silenciosa confirmou pedido completo, resposta da sessão e retorno transcrito
   "A sessão respondeu: pinguim azul". Pausas e confirmações por áudio ainda exigem teste falado.
+
+## Voz no app nativo
+
+(`desktop-native/src/voice/`, `app/voice_ui.rs`, 07/10/2026): a voz roda no nativo, segue a sessão
+aberta na tela (Claude ou Codex) e fala pela conta Codex desta máquina; backend e Python não mudam.
+O nativo abre um `codex app-server` local (stdio, JSON-RPC em linhas; PATH do filho refeito por
+`refreshed_path`, senão o atalho do npm/fnm sai sem `node`) e uma thread efêmera organizadora com
+quatro ferramentas: `read_session` (a conversa que o nativo já tem em memória), `send_to_session`
+(pela mesma rota do composer, na sessão da tela no instante do envio), `hold_request` e
+`discard_request`. Envio direto; "espera/não manda ainda" segura o rascunho. O prompt sozinho não
+segura fragmento (já falhou no web): todo envio espera 1,5 s e é cancelado se o usuário voltar a
+falar; pedido com menos de 3 palavras é recusado. O transporte `websocket` do realtime foi recusado
+com login ChatGPT no CLI 0.160.1 (`realtime conversation requires API key auth`), então o áudio é
+WebRTC do próprio nativo: `str0m` 0.24.1 como ofertante + `opus-rs` 0.1.37, provado conectando em
+1,5 s e recebendo fala (48 kHz mono, quadros de 20 ms); sem `Connected` em 10 s a chamada falha
+(UDP bloqueado não dá erro, só não conecta). Eco: `sonora` 0.2.0 (AEC3 em Rust puro, o mesmo do
+`codex-voice-host` da OpenAI), 36 dB de eco removido em sinal sintético com a voz local a −1,1 dB.
+O `codex-voice-host` empacotado no Codex usa protocolo interno sem documentação; não é base.
+O tempo de silêncio que encerra a fala é fixo no Codex (`server_vad`). `appendSpeech` parafraseia;
+`appendText` sozinho não fala (aviso de troca de sessão vai por `appendSpeech`). Mídia antes do
+`Connected` é descartada pelo str0m. Eventos da voz levam número de chamada e passam antes do filtro
+de conexão do app: trocar de servidor não deixa ferramenta sem resposta. Resposta da sessão é
+deduplicada por id de evento; sessão que recebeu pedido e saiu da tela tem a resposta lida pelo
+histórico quando a lista mostra que ela parou. Gate: `codex_voice_beta` do servidor local
+(loopback) e `codex` encontrado.
+
+## Voz: modo Planejar
+
+(`desktop-native/src/voice/organizer.rs`, 07/10/2026, Codex 0.160.1): a voz tem dois modos, trocados
+pela chave do painel ou falando ("vamos planejar", "volta pro direto"). **Direto** é o de antes: o
+pedido completo vai à sessão. **Planejar** não manda nada até o fim: o organizador escreve e
+reorganiza um plano (objetivo, decisões, pendências, pesquisas com fontes) em
+`~/.hangar/voz/planos/<sessão>-<AAAA-MM-DD-HHMM>.md`, gravado por tmp+rename atômico, e o painel
+mostra o plano crescendo.
+
+**Opção C.** O organizador pesquisa na internet (`web_search: "live"`), lê o projeto só para
+leitura (thread em sandbox `read-only` com `approvalPolicy: never`) e pergunta à sessão o que só ela
+sabe. Provado: `thread/start` aceita `web_search: "live"` (a pesquisa de fato não foi exercitada
+na prova); com `environments: []` o modelo fica sem shell, então a chave saiu; sem ela, `ls` roda
+sem pedir aprovação; escrever fora do cwd falha com "Read-only file system". Isso foi provado só no
+Linux: no Windows `features.shell_tool` fica `false` até o sandbox ser provado lá, e o modo mantém
+pesquisa na web e `ask_session`, sem leitura de código.
+
+**Regras de segurança.**
+- `finish_plan`, `ask_session` e `set_mode` só valem a partir de turno falado; a resposta da sessão
+  que volta ao organizador não conta como fala.
+- `finish_plan` tem dois passos: arma, e só confirma noutro turno falado. A voz lê o resumo e o
+  usuário escolhe entre "leia e execute" e "escreva o plano de implementação a partir dele"; sai um
+  único pedido apontando o arquivo.
+- `send_to_session` e `hold_request` são recusados no Planejar.
+- `ask_session` responde logo ao organizador; a resposta da sessão volta como turno marcado
+  `[RESPOSTA DA SESSÃO À PERGUNTA]`, com prazo de 10 min, e não é falada como resultado.
+- O plano é preso à sessão para a qual nasceu; sessão em outra máquina recebe o plano inline, já
+  que o arquivo é local.
+
+**Envio só após silêncio do microfone.** Só a espera fixa de 1,5 s gerou envio duplicado: duas
+falas no mesmo turno, envios às 18:29:06 e 18:29:15. Agora o envio sai depois de 1,2 s de silêncio
+do microfone, com teto de 8 s.
+
+**RTP.** O pacote solto inicial que a OpenAI manda é descartado pelo `RtpStart`; a reserva de áudio
+é de 240 ms porque o socket mostrou buracos de 66 a 190 ms com o laço rodando em 12 a 52 ms.
+
+**O shell lê fora do projeto, e fica assim (decisão do Jefferson, 07/10).** Medido: `ls ~/.ssh` lista
+10 entradas e `~/.codex/auth.json` é legível (conteúdo não impresso). A proteção é só a linha do
+prompt ("leia só dentro da pasta do projeto; nunca abra credenciais"). Motivo: a sessão roda na
+mesma máquina, com o mesmo acesso e com internet; restringir só o organizador não muda o risco.
+Descartados: ferramentas de leitura restritas à pasta e desligar a pesquisa com o shell ligado.
+
 - `adapters/kimi/` + `hooks/kimi_state_hook.py` + `kimi_hook_installer.py` — Kimi Code runs in the
   same tmux-native shape as Pi: TUI in the pane, chat from
   `~/.kimi-code/sessions/<wd>/<session_id>/agents/main/wire.jsonl`, state pushed by hooks in

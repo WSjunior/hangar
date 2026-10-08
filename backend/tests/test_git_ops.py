@@ -149,6 +149,29 @@ def test_create_worktree_from_dirty_repo_and_remove(tmp_path):
     assert not (tmp_path / "repo-chat").exists()
 
 
+def test_branch_worktree_is_named_after_branch_and_skips_occupied(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    d = _repo(repo)
+    (tmp_path / "repo-PM-1").mkdir()
+    path, created = git_ops.create_branch_worktree(d, "PM-1", tmp_path, new_branch=True)
+    assert created and path == str(tmp_path / "repo-PM-1-2")
+    assert git_ops.branch_of(path) == "PM-1"
+    path, _ = git_ops.create_branch_worktree(d, "feat/x", tmp_path, new_branch=True)
+    assert path == str(tmp_path / "repo-feat-x")
+    with pytest.raises(GitError) as taken:
+        git_ops.create_branch_worktree(d, "PM-1", tmp_path, new_branch=True)
+    assert taken.value.detail == "já existe uma branch com esse nome"
+    path, _ = git_ops.create_branch_worktree(d, "日本", tmp_path, new_branch=True)
+    assert path == str(tmp_path / "repo-worktree")
+
+
+def test_worktree_target_taken_text_matches_rust():
+    # O retry compara o texto: a ponte repassa o `detail` do Rust sem código.
+    git_rs = Path(__file__).parents[2] / "crates/hangar-workspace/src/git.rs"
+    assert f'"{git_ops.WORKTREE_TARGET_TAKEN}"' in git_rs.read_text(encoding="utf-8")
+
+
 def test_create_worktree_rejects_occupied_or_outside_root(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -249,9 +272,9 @@ def test_fs_branches_and_create_session_worktree(tmp_path, monkeypatch):
     result = client.post("/api/sessions", json={"name": "chat", "cwd": d,
                                                  "branch": "feature"}, headers=auth)
     assert result.status_code == 200, result.text
-    assert result.json()["cwd"] == str(tmp_path / "repo-chat")
+    assert result.json()["cwd"] == str(tmp_path / "repo-feature")
     assert result.json()["branch"] == "feature"
-    assert calls == [str(tmp_path / "repo-chat")]
+    assert calls == [str(tmp_path / "repo-feature")]
     git_ops.remove_worktree(d, calls[0])
 
 

@@ -538,6 +538,15 @@ impl Hangar {
         browser.update(cx, |panel, cx| panel.focus_address(window, cx));
     }
 
+    /// "Abrir no painel" do site da conversa: o mesmo endereço no navegador desta sessão, à frente.
+    #[cfg(target_os = "linux")]
+    pub(super) fn open_in_browser_panel(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(key) = self.browser_key() else { return };
+        let browser = self.browser_for(key, window, cx);
+        browser.update(cx, |panel, cx| panel.go(url, window, cx));
+        self.show_browser_tab(window, cx);
+    }
+
     /// Painel aberto com a aba Navegador da sessão aberta à frente.
     fn show_browser_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(key) = self.side_key() else { return };

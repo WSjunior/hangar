@@ -18,7 +18,7 @@ mod repo;
 mod report;
 mod run;
 mod screens;
-mod system;
+pub(crate) mod system;
 mod tail;
 mod wizard;
 

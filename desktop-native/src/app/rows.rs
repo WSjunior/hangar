@@ -262,8 +262,11 @@ impl Hangar {
 
     /// Cartão do subagente, igual nos três visuais e nunca dentro de grupo: ladrilho do ícone, tipo, descrição, o
     /// modelo apagado à direita e, no fim, a marca enquanto roda ou o aviso de falha. O cartão inteiro abre a conversa
-    /// dele na aba Atividade. `None` quando a chamada não é Agent.
+    /// dele na aba Atividade. `None` quando a chamada não é Agent. A página publicada (`html_render`) passa por aqui
+    /// pelo mesmo motivo: troca a linha nos três visuais.
     pub(super) fn render_agent_card(&mut self, tool: Tool, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if let Some(page) = self.tool_page(tool) { return Some(self.render_page_card(tool, page, cx)); }
+        if let Some(failure) = self.render_page_failure(tool) { return Some(failure); }
         let call = &self.chat.events[tool.call];
         let request = super::activity::agent_request(call)?;
         let key = call.id.clone();

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { basename, createSession, defaultBase, pickFolderRoot, providerName, type Provider, type WorktreeChoice } from '@hangar/core';
+  import { basename, createSession, defaultBase, pickFolderRoot, providerName, type Provider, type SessionOpeningExtras, type WorktreeChoice } from '@hangar/core';
   import HomeUsage from '../components/HomeUsage.svelte';
   import FolderGitPill from '../components/FolderGitPill.svelte';
   import BottomSheet from '../components/BottomSheet.svelte';
@@ -72,9 +72,9 @@
                                  engine?: string | null, model?: string | null, effort?: string | null,
                                  permissionMode?: string | null, ompProfile?: string | null,
                                  headless?: boolean, subagentModel?: string | null, jev?: boolean,
-                                 worktree?: WorktreeChoice | null) {
+                                 worktree?: WorktreeChoice | null, opening?: SessionOpeningExtras) {
     const info = await createSession(name, cwd, configDir, provider, engine, model, effort, permissionMode, ompProfile,
-                                     null, headless, subagentModel, jev, worktree ?? undefined);
+                                     null, headless, subagentModel, jev, worktree ?? undefined, opening);
     openChat(info.name);
   }
   function openChat(name: string) {

@@ -417,6 +417,21 @@ def test_falha_na_reconciliacao_devolve_erro_e_nao_cria_sessao(casa, monkeypatch
     assert criados == []
 
 
+def test_conta_nomeada_repassa_as_mesmas_escolhas_da_padrao(casa, monkeypatch):
+    contas.criar("conta2")
+    monkeypatch.setattr(contas._Ciclo, "reconciliar", lambda self, projeto=None: [])
+    monkeypatch.setattr(api_mod.cliproxy, "supports_fast", lambda engine, model=None: True)
+    kwargs = []
+    monkeypatch.setattr(api_mod.registry, "create",
+                        lambda *a, **k: kwargs.append(k) or SessionInfo(name="s1", provider="claude"))
+    r = TestClient(app).post("/api/sessions", json={
+        "name": "s1", "cwd": str(casa), "config_dir": str(casa / ".claude-conta2"),
+        "provider": "claude", "service_tier": "priority", "initial_prompt": "oi"}, headers=AUTH)
+    assert r.status_code == 200, r.text
+    assert kwargs[0]["service_tier"] == "priority"
+    assert kwargs[0]["initial_prompt"] == "oi"
+
+
 def test_codex_com_config_dir_nao_reconcilia(casa, monkeypatch):
     """Provider codex não consome config dir (ele tem conta própria, do CLI do Codex): a
     reconciliação — efeito no disco — não pode rodar num pedido que vai criar uma sessão codex."""

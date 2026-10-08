@@ -105,7 +105,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   import { getIdentificador } from '../lib/peers';
   import { destinoDoRemetente } from '../lib/remetente';
   import { createActivityFolder } from '@hangar/core';
-  import type { ChatEvent, StateEvent, StatsEvent, State, SessionInfo, AskQuestionPayload, AnswerItem, Provider, PlanDetail, UploadFile } from '@hangar/core';
+  import type { ChatEvent, StateEvent, StatsEvent, State, SessionInfo, AskQuestionPayload, AnswerItem, Provider, PlanDetail, UploadFile, SessionOpeningExtras } from '@hangar/core';
   import type { WorkspaceAction } from '../lib/workspaceCommands';
   import { workspaceSessionKey } from '../lib/workspaceCommands';
   import { countAwaiting, nextAwaiting, providerName, untrackedReason, stateColors, isOrq } from '@hangar/core';
@@ -872,8 +872,10 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   async function handleCreate(name: string, cwd?: string, configDir?: string | null, provider?: Provider,
                               engine?: string | null, model?: string | null, effort?: string | null,
                               permissionMode?: string | null, ompProfile?: string | null,
-                              headless?: boolean, subagentModel?: string | null, jev?: boolean) {
-    await createSession(name, cwd, configDir, provider, engine, model, effort, permissionMode, ompProfile, null, headless, subagentModel, jev);
+                              headless?: boolean, subagentModel?: string | null, jev?: boolean,
+                              _worktree?: unknown, opening?: SessionOpeningExtras) {
+    await createSession(name, cwd, configDir, provider, engine, model, effort, permissionMode, ompProfile, null, headless, subagentModel, jev,
+                        undefined, opening);
     onNavigateToChat(name);
   }
 

@@ -293,3 +293,28 @@ async def test_codex_headless_flip_reprovides_and_sends_new_info(codex, monkeypa
     await task
     infos = [json.loads(e["data"]) for e in vistos if e["event"] == "info"]
     assert [i["headless"] for i in infos[:2]] == [True, False], infos
+
+
+@pytest.mark.parametrize("count_app", [False, True])
+async def test_nav_marker_only_reaches_owner_connections(rust, count_app):
+    # A url do rascunho de página leva o token do dono: convidado e par externo (count_app=False)
+    # nunca recebem o marcador; o dono pela porta do Connect recebe.
+    _adapter, jsonl = rust
+    sse.nav_pendente("s", "http://127.0.0.1:8765/api/sessions/s/pages/abc?token=segredo")
+    vistos = []
+    async with _CanalRust():
+        gen = sse.merged_events("s", str(jsonl), count_app=count_app)
+        try:
+            async with asyncio.timeout(2.5):
+                async for ev in gen:
+                    vistos.append(ev)
+                    if ev["event"] == "nav":
+                        break
+        except TimeoutError:
+            pass
+        finally:
+            await gen.aclose()
+    sse.nav_confirmar("s")
+    assert ("nav" in _nomes(vistos)) is count_app
+    if not count_app:
+        assert not any("segredo" in str(e.get("data", "")) for e in vistos)

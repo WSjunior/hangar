@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime
@@ -2505,11 +2506,11 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
         try:
             root = await asyncio.to_thread(_allowed_scan_root, body.cwd)
             source = body.cwd
-            name = sanitize_session_name(body.name)
-            if not name:
+            # Recusa antes de criar a worktree, em vez de criar e desfazer no registry.create.
+            if not sanitize_session_name(body.name):
                 raise GitError(400, "nome de sessão inválido")
             worker = asyncio.create_task(asyncio.to_thread(
-                create_worktree, source, body.branch, name, root,
+                git_ops.create_branch_worktree, source, body.branch, root,
                 new_branch=body.new_branch, base=body.base))
             try:
                 path, created = await asyncio.shield(worker)
@@ -2598,6 +2599,30 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
         codex_lease = None
         return info
 
+    # Um montador só: com conta nomeada e sem ela a sessão nasce com as mesmas escolhas.
+    def _registry_kwargs() -> dict:
+        kw = dict(provider=body.provider, engine=body.engine, model=body.model,
+                  effort=body.effort, context_window=janela)
+        if body.permission_mode is not None:
+            kw["permission_mode"] = body.permission_mode
+        if body.subagent_model is not None:
+            kw["subagent_model"] = body.subagent_model
+        if _jev_efetivo(body.jev):
+            kw["jev"] = True
+        if body.initial_prompt is not None:
+            kw["initial_prompt"] = body.initial_prompt
+        if body.omp_profile:
+            kw["omp_profile"] = body.omp_profile
+        if body.codex_account is not None:
+            kw["codex_account"] = body.codex_account
+        if body.service_tier is not None:
+            kw["service_tier"] = body.service_tier
+        if body.read_only:
+            kw["read_only"] = True
+        if body.headless:
+            kw["headless"] = True
+        return kw
+
     # Reconciliar e criar a sessão sob a MESMA trava (ciclo_conta), só no caminho que consome o
     # config dir (Claude/Pi — o Codex tem conta propria e nao le config dir do Claude). Sem o ciclo, um DELETE da
     # conta no meio via a lista de sessões ainda vazia e apagaria a pasta embaixo da sessão que
@@ -2631,22 +2656,8 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
                     for aviso in avisos:
                         _log.warning("conta %s: %s", alvo.name, aviso)
                     try:
-                        _kw = dict(provider=body.provider, engine=body.engine, model=body.model,
-                                   effort=body.effort, context_window=janela)
-                        if body.permission_mode is not None:
-                            _kw["permission_mode"] = body.permission_mode
-                        if body.subagent_model is not None:
-                            _kw["subagent_model"] = body.subagent_model
-                        if _jev_efetivo(body.jev):
-                            _kw["jev"] = True
-                        if body.omp_profile:
-                            _kw["omp_profile"] = body.omp_profile
-                        if body.read_only:
-                            _kw["read_only"] = True
-                        if body.headless:
-                            _kw["headless"] = True
                         _passo(body.name, "criando")
-                        info = await _create_registry(_kw)
+                        info = await _create_registry(_registry_kwargs())
                         if body.headless:
                             # Hooks de SessionStart rodam enquanto a pessoa digita, não no 1º envio.
                             wake = {"engine_models": account_models} if body.engine_account else {}
@@ -2662,28 +2673,8 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
                 # Conta sumiu entre a validação e a trava (ex: DELETE concorrente).
                 raise HTTPException(e.status, e.detail) from None
     try:
-        _kw2 = dict(provider=body.provider, engine=body.engine, model=body.model,
-                     effort=body.effort, context_window=janela)
-        if body.permission_mode is not None:
-            _kw2["permission_mode"] = body.permission_mode
-        if body.subagent_model is not None:
-            _kw2["subagent_model"] = body.subagent_model
-        if _jev_efetivo(body.jev):
-            _kw2["jev"] = True
-        if body.initial_prompt is not None:
-            _kw2["initial_prompt"] = body.initial_prompt
-        if body.omp_profile:
-            _kw2["omp_profile"] = body.omp_profile
-        if body.codex_account is not None:
-            _kw2["codex_account"] = body.codex_account
-        if body.service_tier is not None:
-            _kw2["service_tier"] = body.service_tier
-        if body.read_only:
-            _kw2["read_only"] = True
-        if body.headless:
-            _kw2["headless"] = True
         _passo(body.name, "criando")
-        info = await _create_registry(_kw2)
+        info = await _create_registry(_registry_kwargs())
         if body.headless and body.provider == "codex":
             # Aquece já: o app-server sobe e abre a thread agora, não no primeiro prompt.
             _tarefas_soltas.add(asyncio.create_task(_aquecer_codex_sem_terminal(info.name)))
@@ -5008,6 +4999,22 @@ class NavBody(_StrictBody):
     url: str = Field(min_length=1)
 
 
+_PAGINA_RELATIVA = re.compile(r"^/api/sessions/([^/?#]+)/pages/([A-Za-z0-9_-]{1,128})$")
+
+
+def _url_pagina_propria(name: str, u: str) -> str:
+    """Rascunho de `html_render` vem como caminho sem token: completa com o endereço local do
+    servidor e o token do dono, como os links de arquivo. Outro caminho relativo é recusado."""
+    m = _PAGINA_RELATIVA.match(u)
+    if m is None or urllib.parse.unquote(m.group(1)) != name:
+        raise HTTPException(400, "caminho relativo só vale para página desta sessão")
+    from app.rust_server import listen_addr
+    # Mesmo endereço do pi_inbox: bind em toda interface inclui loopback; IP de LAN só escuta nele.
+    bind = resolve_bind_ip(settings)
+    host = "127.0.0.1" if bind in ("0.0.0.0", "::") else bind
+    return f"http://{listen_addr(host, settings.port)}{u}?token={urllib.parse.quote(settings.auth_token, safe='')}"
+
+
 @app.post("/api/sessions/{name}/nav", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 async def abrir_nav_sessao(name: str, body: NavBody):
     """O AGENTE abre o navegador embutido da própria sessão (CLI `hangar-preview open <url>`).
@@ -5018,7 +5025,9 @@ async def abrir_nav_sessao(name: str, body: NavBody):
     if not await _send_thread(_session_exists, name):
         raise HTTPException(404, "sessão não encontrada")
     u = body.url.strip()
-    if not re.match(r"^https?://", u, re.I):
+    if u.startswith("/"):
+        u = _url_pagina_propria(name, u)
+    elif not re.match(r"^https?://", u, re.I):
         u = "http://" + u
     await asyncio.to_thread(nav_pendente, name, u)   # grava em disco: fora do loop
     return {"ok": True}

@@ -319,3 +319,39 @@ fn surface_deadline_enters_the_engine_clock() {
     let effects = engine.apply(EngineInput::Tick,clock(26.0)).unwrap();
     assert_eq!(surface_writes(&effects)[0]["request"]["subtype"],"ui_attach");
 }
+
+#[test]
+fn turn_already_running_when_the_engine_opens_is_working_until_result() {
+    let mut engine = engine(json!({"name":"session","session_id":"sid","initialized":true}));
+    assert_eq!(engine.view()["deliverable"],true);
+    for (index,event) in [
+        json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"meio"}}}),
+        json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}),
+        json!({"type":"tool_progress","tool_use_id":"t1"}),
+        json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}),
+    ].into_iter().enumerate() {
+        line(&mut engine,event,11.0+index as f64);
+        assert_eq!(engine.view()["public_state"]["state"],"working","evento {index}");
+        assert_eq!(engine.view()["deliverable"],false,"evento {index}");
+    }
+    line(&mut engine,json!({"type":"result","subtype":"success"}),20.0);
+    assert_eq!(engine.view()["public_state"]["state"],"idle");
+    assert_eq!(engine.view()["deliverable"],true);
+}
+
+#[test]
+fn events_outside_a_turn_do_not_open_one() {
+    for event in [
+        json!({"type":"system","subtype":"init","session_id":"sid","model":"m"}),
+        json!({"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}),
+        json!({"type":"keep_alive"}),
+        json!({"type":"assistant","local_command_source":"cost","message":{"content":[{"type":"text","text":"Total cost: $0"}]}}),
+        json!({"type":"user","message":{"content":"<local-command-stdout>ok</local-command-stdout>"}}),
+        json!({"type":"stream_event","parent_tool_use_id":"t9","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"sub"}}}),
+    ] {
+        let mut engine = engine(json!({"name":"session","session_id":"sid","initialized":true}));
+        line(&mut engine,event.clone(),11.0);
+        assert_eq!(engine.view()["in_progress"],false,"{event}");
+        assert_eq!(engine.view()["deliverable"],true,"{event}");
+    }
+}

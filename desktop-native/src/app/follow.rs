@@ -211,9 +211,14 @@ impl Hangar {
             self.follow.pinned = true;
             self.follow.kick = true;
         }
-        // Chegou perto do topo e o servidor tem mais: busca sozinho, como o web, sem esperar o botão.
-        if top < OLDER_BAND && top < previous && self.has_older && !self.loading { self.load_older(cx); }
+        self.older_near_top(top < previous, cx);
         self.redraw(Area::Conversation, cx);
+    }
+
+    /// Subindo perto do topo e o servidor tem mais: busca sozinho, como o web, sem esperar o botão. Vale para todo
+    /// caminho que rola (gesto, roda, tecla), não só o gesto que a lista trata.
+    fn older_near_top(&mut self, up: bool, cx: &mut Context<Self>) {
+        if up && self.visible_top() < OLDER_BAND && self.has_older && !self.loading { self.load_older(cx); }
     }
 
     /// Entalhe da roda do mouse: vira distância a percorrer em alguns quadros, não um salto.
@@ -249,13 +254,18 @@ impl Hangar {
                     else if self.distance_from_bottom() - page <= STICK_BAND { self.follow_engage(cx); return true; }
                     else { self.list_state.scroll_by(px(page)); }
                     self.follow.last_top = self.visible_top();
+                    self.older_near_top(up, cx);
                     self.redraw(Area::Conversation, cx);
                 } else {
                     self.wheel_lines(if up { page } else { -page } / WHEEL_LINE_PX, cx);
                 }
                 true
             }
-            "home" if !window.text_input_focused() => { self.jump_to_row(0, cx); true }
+            "home" if !window.text_input_focused() => {
+                self.jump_to_row(0, cx);
+                if self.has_older && !self.loading { self.load_older(cx); }
+                true
+            }
             // Salta e cola: depois do Home as linhas de baixo ainda não têm medida, e a distância que a mola usaria sai curta.
             "end" if !window.text_input_focused() => {
                 self.follow.pinned = true;
@@ -300,7 +310,8 @@ impl Hangar {
         self.follow.kick = false;
         let detached = self.follow_detached();
         let now = Instant::now();
-        if self.follow.wheel != 0. { self.wheel_frame(now); }
+        let wheel_up = self.follow.wheel < 0.;
+        if self.follow.wheel != 0. { self.wheel_frame(now); self.older_near_top(wheel_up, cx); }
         if self.follow.pinned && self.follow.wheel == 0. { self.spring_frame(now); }
         // O último passo da roda não pede quadro; se ele cruzou a distância da pílula, a conversa redesenha para mostrá-la.
         if self.follow.wheel != 0. || self.follow.pinned && self.distance_from_bottom() > 0.5 || detached != self.follow_detached() {

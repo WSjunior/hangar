@@ -104,7 +104,7 @@ fn cited(cwd: &Path, path: &str) -> Option<PathBuf> {
 }
 
 /// `canonicalize` no Windows devolve `\\?\C:\...`, que o Explorer e outros programas não abrem.
-fn plain_path(text: &str) -> String {
+pub(super) fn plain_path(text: &str) -> String {
     if let Some(rest) = text.strip_prefix(r"\\?\UNC\") { return format!(r"\\{rest}"); }
     match text.strip_prefix(r"\\?\") {
         Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest.to_owned(),
@@ -264,6 +264,13 @@ impl Hangar {
         let cwd = self.selected.as_ref()?.cwd.as_ref()?;
         let real = self.local_dirs.get(cwd).cloned().flatten()?;
         let real = cited(&real, path)?;
+        Some(real.to_str().map_or_else(|| real.clone(), |text| PathBuf::from(plain_path(text))))
+    }
+
+    /// A pasta da sessão na tela neste disco; sessão de outra máquina ou ainda não resolvida: `None`.
+    pub(super) fn local_session_dir(&self) -> Option<PathBuf> {
+        self.session_api().filter(Api::is_loopback)?;
+        let real = self.local_dirs.get(self.selected.as_ref()?.cwd.as_ref()?).cloned().flatten()?;
         Some(real.to_str().map_or_else(|| real.clone(), |text| PathBuf::from(plain_path(text))))
     }
 

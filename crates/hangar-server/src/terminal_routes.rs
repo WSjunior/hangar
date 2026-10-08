@@ -1,6 +1,6 @@
 //! Contrato terminal privado: autentica antes de consumir o corpo.
 use std::{net::SocketAddr, sync::Arc, time::Duration};
-use axum::{body::to_bytes, extract::{ConnectInfo, Request, State}, http::StatusCode, response::{IntoResponse, Response}};
+use axum::{body::to_bytes, extract::{ConnectInfo, Request, State}, http::{HeaderMap, StatusCode}, response::{IntoResponse, Response}};
 use serde::Deserialize;
 use serde_json::Value;
 use subtle::ConstantTimeEq;
@@ -39,13 +39,18 @@ impl Operation {
     }
 }
 
-pub async fn terminal(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let supplied = req.headers().get("x-hangar-internal").map(|v| v.as_bytes()).unwrap_or_default();
-    let external = req.headers().get_all("x-forwarded-for").iter().any(|header|
+/// Pedido do Python pela porta privada: loopback, sem repasse de fora e com o segredo interno.
+pub(crate) fn trusted_internal(st: &AppState, peer: SocketAddr, headers: &HeaderMap) -> bool {
+    let supplied = headers.get("x-hangar-internal").map(|v| v.as_bytes()).unwrap_or_default();
+    let external = headers.get_all("x-forwarded-for").iter().any(|header|
         header.to_str().map_or(true, |v| v.split(',').any(|ip|
             ip.trim().parse::<std::net::IpAddr>().map_or(true, |ip| !ip.is_loopback()))));
-    if !peer.ip().is_loopback() || external || st.cfg.internal_secret.is_empty()
-        || !bool::from(supplied.ct_eq(st.cfg.internal_secret.as_bytes())) {
+    peer.ip().is_loopback() && !external && !st.cfg.internal_secret.is_empty()
+        && bool::from(supplied.ct_eq(st.cfg.internal_secret.as_bytes()))
+}
+
+pub async fn terminal(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
+    if !trusted_internal(&st, peer, req.headers()) {
         return StatusCode::NOT_FOUND.into_response();
     }
     let invalid = || {

@@ -65,7 +65,7 @@ impl<T: Clone> Presence<T> {
 
 /// Painel do compositor e a cópia do que ele mostra.
 #[derive(Clone)]
-enum Floating { Controls(super::controls::Open), Commands, Recent(Recent), NewChat(super::create::Menu), Usage, Context, Hangar }
+enum Floating { Controls(super::controls::Open), Commands, Recent(Recent), NewChat(super::create::Menu), Usage, Context, Hangar, Voice }
 
 impl Hangar {
     fn floating(&self) -> Option<Floating> {
@@ -75,6 +75,8 @@ impl Hangar {
         if self.accounts.card && self.accounts.card_top { return Some(Floating::Usage); }
         // A lista do chip "N no Hangar" também vale em qualquer tela: o chip mora na barra de sessões.
         if self.hangar_open { return Some(Floating::Hangar); }
+        // O painel da voz também: a pílula mora na barra do topo. Sem a pílula, não há onde prendê-lo.
+        if self.voice.open && self.voice.enabled && self.voice.codex.is_some() { return Some(Floating::Voice); }
         if let Some(menu) = self.new_chat_folders.get().filter(|_| !page && self.selected.is_none() && self.api.is_some()) {
             return Some(Floating::NewChat(menu));
         }
@@ -92,9 +94,10 @@ impl Hangar {
     pub(super) fn close_popups(&mut self) -> bool {
         let folders = self.new_chat_folders.replace(None).is_some();
         let open = folders || self.controls_open() || self.command_panel || self.recent.is_some() || self.accounts.card || self.context_card
-            || self.hangar_open;
+            || self.hangar_open || self.voice.open;
         self.close_controls();
         self.hangar_open = false;
+        self.voice.open = false;
         self.command_panel = false;
         self.accounts.card = false;
         self.context_card = false;
@@ -117,6 +120,7 @@ impl Hangar {
                 Some(self.render_usage_card(window, cx))),
             Floating::Context => ("composer-ctx".to_owned(), Align::End, true, Some(self.render_context_card())),
             Floating::Hangar => ("hangar-chip".to_owned(), Align::Start, true, Some(self.render_hangar_popover(window, cx))),
+            Floating::Voice => ("topbar-voice".to_owned(), Align::End, true, Some(self.render_voice_panel(cx))),
             Floating::Recent(recent) => {
                 let live = self.recent.replace(recent);
                 let content = self.render_recent(cx);

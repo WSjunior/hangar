@@ -182,13 +182,19 @@ function lerSidecars() {
     .filter((s) => s && typeof s.chave === 'string');
 }
 
+// A URL da página aberta pelo app carrega `?token=` até o shell limpar: nada que vai pro
+// terminal (e daí pro transcript) mostra o valor.
+function semToken(texto) {
+  return String(texto).replace(/([?&]token=)[^&#\s"']*/gi, '$1…');
+}
+
 function sidecarDa(nome) {
   const todos = lerSidecars();
   if (!todos.length) erro('nenhum navegador aberto em nenhuma sessão (abra o seu com: hangar-preview open <url>)');
-  if (!nome) erro('não deu para identificar esta sessão — use --sessao <nome>. Vivos:\n' + todos.map((s) => `  ${s.chave}  ${s.url}`).join('\n'));
+  if (!nome) erro('não deu para identificar esta sessão — use --sessao <nome>. Vivos:\n' + todos.map((s) => `  ${s.chave}  ${semToken(s.url)}`).join('\n'));
   const achados = todos.filter((s) => s.chave === nome || s.chave.endsWith(`::${nome}`));
   if (achados.length === 1) return achados[0];
-  if (!achados.length) erro(`a sessão "${nome}" não tem navegador aberto. Vivos:\n` + todos.map((s) => `  ${s.chave}  ${s.url}`).join('\n'));
+  if (!achados.length) erro(`a sessão "${nome}" não tem navegador aberto. Vivos:\n` + todos.map((s) => `  ${s.chave}  ${semToken(s.url)}`).join('\n'));
   erro(`"${nome}" existe em mais de um servidor — use a chave completa:\n` + achados.map((s) => `  ${s.chave}`).join('\n'));
 }
 
@@ -240,7 +246,7 @@ async function chamar(chave, verbo, cmdArgs, aba = flags.aba) {
 
 async function comando(chave, verbo, cmdArgs, aba = flags.aba) {
   const { texto, codigo } = await chamar(chave, verbo, cmdArgs, aba);
-  console.log(texto);
+  console.log(semToken(texto));
   return codigo;
 }
 
@@ -266,7 +272,7 @@ if (cmd === 'open') {
   });
   if (res.status === 404) erro(`a sessão "${nome}" não existe no backend`);
   if (!res.ok) erro(`o backend recusou: ${res.status} ${await res.text()}`);
-  console.log(`navegador de "${nome}" abrindo com ${url} (com o app desktop aberto ele nasce em segundos, mesmo com a sessão fora da tela; o painel aparece quando o usuário abrir ela)`);
+  console.log(`navegador de "${nome}" abrindo com ${semToken(url)} (com o app desktop aberto ele nasce em segundos, mesmo com a sessão fora da tela; o painel aparece quando o usuário abrir ela)`);
   process.exit(0);
 }
 
@@ -278,7 +284,7 @@ if (cmd === 'list') {
     const vivo = s.pid ? pidVivo(s.pid) : vivos.some((t) => (s.targetId && t.id === s.targetId) || t.url === s.url);
     // Sidecar de shell antigo não tem `abas`: vale como uma aba só, e a saída fica idêntica à de hoje.
     const sufixo = Array.isArray(s.abas) && s.abas.length > 1 ? `  (aba ${s.ativa} de ${s.abas.length})` : '';
-    return `${s.chave}  ${s.url}  ${vivo ? 'vivo' : 'MORTO (reabra pelo painel)'}${sufixo}`;
+    return `${s.chave}  ${semToken(s.url)}  ${vivo ? 'vivo' : 'MORTO (reabra pelo painel)'}${sufixo}`;
   });
   console.log(linhas.length ? linhas.join('\n') : 'nenhum navegador registrado');
   process.exit(0);
@@ -401,8 +407,9 @@ if (cmd === 'confere') {
   // Falta de chave, erro do snapshot e da chamada ao Jev saem 2: com 1, um laço `until confere`
   // giraria achando que a tela só não chegou lá. Navegador fechado ou shell fora do ar ainda saem 1
   // (helpers comuns).
-  if (snap.codigo !== 0) erro(`o snapshot falhou: ${snap.texto.slice(0, 200)}`, 2);
-  let arvore = snap.texto;
+  if (snap.codigo !== 0) erro(`o snapshot falhou: ${semToken(snap.texto.slice(0, 200))}`, 2);
+  // A árvore vai ao Jev, fora da máquina: sem o token da URL.
+  let arvore = semToken(snap.texto);
   // A prova pode estar no topo ou no fim da página; o miolo de uma lista longa é repetição.
   if (arvore.length > 100_000) arvore = `${arvore.slice(0, 50_000)}\n…\n${arvore.slice(-50_000)}`;
   let respostas;
@@ -435,8 +442,9 @@ if (cmd === 'objetivo') {
     dados,
     maxPassos: Number(flags.passos) > 0 ? Number(flags.passos) : 15,
     escreverTexto: escritorDeTexto(),
-    log: (linha) => console.log(linha),
-    executar: async (verbo, args) => (await chamar(chave, verbo, args)).texto,
+    log: (linha) => console.log(semToken(linha)),
+    // Tudo que o navegador devolve vira estado enviado ao Jev: o token não sai da máquina.
+    executar: async (verbo, args) => semToken((await chamar(chave, verbo, args)).texto),
     perguntar: async (estado, perguntas) => {
       const { url, modelo } = jev.destinoDoJev(process.env, 'jev-latest');
       try {
