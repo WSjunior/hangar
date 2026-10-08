@@ -89,6 +89,15 @@ impl RtpStart {
 const SUMMARY_EVERY: Duration = Duration::from_secs(5);
 const WRITE_DEADLINE: Duration = Duration::from_secs(5);
 
+/// Detecção de fim de fala pedida ao Realtime ao abrir o canal: o padrão decidia cedo demais que a pessoa terminou.
+const TURN_DETECTION: &str = r#"{"type":"semantic_vad","eagerness":"low"}"#;
+
+/// `session.update` parcial no formato v3 (`audio.input`, como o `audio.output.voice` que o Codex manda).
+fn turn_detection_update() -> String {
+    let detection: serde_json::Value = serde_json::from_str(TURN_DETECTION).unwrap_or_default();
+    serde_json::json!({"type": "session.update", "session": {"audio": {"input": {"turn_detection": detection}}}}).to_string()
+}
+
 /// Só o campo `type` dos eventos do canal; o resto pode trazer fala transcrita.
 fn event_type(data: &[u8]) -> String {
     serde_json::from_slice::<serde_json::Value>(data).ok()
@@ -114,6 +123,8 @@ fn drive(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: &async_ch
     let (mut decoded, mut packet) = (vec![0f32; FRAME * 2], vec![0u8; 1500]);
     let (started, mut last_levels) = (Instant::now(), Instant::now());
     let mut loop_top = Instant::now();
+    // Enviado o `session.update`, o próximo `session.updated` ou erro diz se o servidor aceitou; recusa não derruba a chamada.
+    let mut update_pending = false;
     let result = loop {
         let now = Instant::now();
         window.loop_max_ms = window.loop_max_ms.max(now.duration_since(loop_top).as_millis() as u32);
@@ -143,7 +154,16 @@ fn drive(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: &async_ch
                         log(format!("rtc ice {state:?}"));
                         if state == IceConnectionState::Disconnected { break Err(RtcError::Network); }
                     }
-                    Event::ChannelOpen(id, label) => log(format!("rtc channel open id={id:?} label={label}")),
+                    Event::ChannelOpen(id, label) => {
+                        log(format!("rtc channel open id={id:?} label={label}"));
+                        if label == "oai-events" && let Some(mut channel) = rtc.channel(id) {
+                            let update = turn_detection_update();
+                            match channel.write(false, update.as_bytes()) {
+                                Ok(sent) => { update_pending = sent; log(format!("rtc turn detection update sent={sent} bytes={}", update.len())); }
+                                Err(error) => log(format!("rtc turn detection update write failed: {error:?}")),
+                            }
+                        }
+                    }
                     Event::ChannelClose(id) => log(format!("rtc channel close id={id:?}")),
                     Event::ChannelData(data) => {
                         // Deltas chegam aos montes: repetição do mesmo tipo vira uma contagem.
@@ -157,6 +177,10 @@ fn drive(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: &async_ch
                             }
                         }
                         // Pedido de ação que a voz respondeu sozinha some sem rastro: o turno sem delegação fica no diário.
+                        if update_pending && (kind == "session.updated" || kind == "error" || kind.ends_with(".failed")) {
+                            update_pending = false;
+                            log(format!("rtc turn detection outcome={kind}"));
+                        }
                         match kind.as_str() {
                             "input_transcript.added" => heard_user = true,
                             "delegation.created" => delegated = true,
@@ -274,6 +298,14 @@ mod tests {
         assert!(offer.sdp.contains("m=audio"));
         assert!(offer.sdp.to_lowercase().contains("opus/48000"));
         assert!(offer.sdp.contains("webrtc-datachannel"));
+    }
+
+    #[test]
+    fn turn_detection_update_is_v3_partial_session_update() {
+        let update: serde_json::Value = serde_json::from_str(&turn_detection_update()).unwrap();
+        assert_eq!(update["type"], "session.update");
+        assert_eq!(update["session"]["audio"]["input"]["turn_detection"], serde_json::json!({"type": "semantic_vad", "eagerness": "low"}));
+        assert_eq!(update["session"].as_object().unwrap().len(), 1, "parcial: não mexe em instruções nem voz");
     }
 
     #[test]

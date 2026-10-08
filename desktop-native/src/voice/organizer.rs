@@ -17,6 +17,9 @@ A entrada realtime_delegation traz a fala mais recente em input e a conversa em 
 Use read_session para ver a sessão que está na tela e o que ela respondeu; faça isso antes de enviar.
 Quando a fala trouxer um pedido completo para a sessão, chame send_to_session com o pedido inteiro:
 objetivo, restrições e correções da conversa, escrito como o usuário escreveria.
+Modo Direto: send_to_session só para uma instrução clara dirigida ao trabalho da sessão. Comentários, opiniões,
+perguntas para você, pensar em voz alta e ideias pela metade se respondem na conversa e nunca vão à sessão.
+Na dúvida, pergunte 'mando isso para a sessão?' e espere a resposta antes de enviar.
 Se o usuário disser 'espera', 'não manda ainda', 'segura' ou equivalente, chame hold_request com o
 pedido montado até ali; continue montando com ele e só envie quando ele liberar ('pode mandar', 'manda').
 'Não manda ainda' controla você e não entra no texto do pedido.
@@ -119,7 +122,7 @@ pub fn thread_config(config: &Value, effort: &str) -> Value {
     let mut result = json!({"features.shell_tool": !cfg!(windows),"features.unified_exec": false, "features.apps": false,
         "features.hooks": false, "features.multi_agent": false, "features.js_repl": false,
         "features.apply_patch_freeform": false, "web_search": "live", "project_doc_max_bytes": 0,
-        "model_reasoning_effort": effort});
+        "model_reasoning_effort": effort, "model_reasoning_summary": "concise"});
     // `mcp_servers: {}` não desliga os do usuário: só o nome com enabled=false desliga.
     for key in ["mcp_servers", "plugins"] {
         let off: serde_json::Map<String, Value> = config[key].as_object()
@@ -127,6 +130,31 @@ pub fn thread_config(config: &Value, effort: &str) -> Value {
         result[key] = Value::Object(off);
     }
     result
+}
+
+/// O que o organizador faz agora; só vai à tela, nunca ao diário.
+#[derive(Clone, PartialEq, Debug)]
+pub enum OrganizerAction { Tool(String), Search(String), Command(String) }
+
+/// `item/started` de ferramenta, pesquisa ou comando → a ação; `item/completed` deles → `Some(None)`, acabou.
+pub fn organizer_action(method: &str, item: &Value) -> Option<Option<OrganizerAction>> {
+    let text = |key: &str| item[key].as_str().unwrap_or_default().to_owned();
+    let action = match item["type"].as_str()? {
+        "dynamicToolCall" => OrganizerAction::Tool(text("tool")),
+        "webSearch" => OrganizerAction::Search(text("query")),
+        "commandExecution" => OrganizerAction::Command(text("command")),
+        _ => return None,
+    };
+    match method { "item/started" => Some(Some(action)), "item/completed" => Some(None), _ => None }
+}
+
+/// Pedaço do resumo do raciocínio; parte nova do resumo vira quebra de linha.
+pub fn reasoning_delta(method: &str, params: &Value) -> Option<String> {
+    match method {
+        "item/reasoning/summaryTextDelta" => params["delta"].as_str().map(str::to_owned),
+        "item/reasoning/summaryPartAdded" => Some("\n".into()),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
@@ -647,6 +675,30 @@ mod tests {
     fn voice_prompt_delegates_session_actions_and_waits_for_confirmation() {
         assert!(VOICE_PROMPT.contains("Trocar, abrir, fechar e parear sessão sempre vão ao organizador"));
         assert!(VOICE_PROMPT.contains("'Agora estou na sessão X' é a confirmação"));
+    }
+
+    #[test]
+    fn direct_mode_sends_only_clear_instructions() {
+        assert!(ORGANIZER_PROMPT.contains("send_to_session só para uma instrução clara dirigida ao trabalho da sessão"));
+        assert!(ORGANIZER_PROMPT.contains("pensar em voz alta e ideias pela metade se respondem na conversa e nunca vão à sessão"));
+        assert!(ORGANIZER_PROMPT.contains("Na dúvida, pergunte 'mando isso para a sessão?' e espere"));
+    }
+
+    #[test]
+    fn organizer_actions_and_reasoning_from_notifications() {
+        let item = |kind: &str, extra: Value| { let mut v = extra; v["type"] = json!(kind); v };
+        assert_eq!(organizer_action("item/started", &item("dynamicToolCall", json!({"tool": "switch_session"}))),
+            Some(Some(OrganizerAction::Tool("switch_session".into()))));
+        assert_eq!(organizer_action("item/started", &item("webSearch", json!({"query": "rust gpui"}))),
+            Some(Some(OrganizerAction::Search("rust gpui".into()))));
+        assert_eq!(organizer_action("item/started", &item("commandExecution", json!({"command": "ls /p"}))),
+            Some(Some(OrganizerAction::Command("ls /p".into()))));
+        assert_eq!(organizer_action("item/completed", &item("commandExecution", json!({}))), Some(None), "acabou limpa");
+        assert_eq!(organizer_action("item/started", &item("agentMessage", json!({}))), None);
+        assert_eq!(reasoning_delta("item/reasoning/summaryTextDelta", &json!({"delta": "Lendo"})).as_deref(), Some("Lendo"));
+        assert_eq!(reasoning_delta("item/reasoning/summaryPartAdded", &json!({})).as_deref(), Some("\n"));
+        assert_eq!(reasoning_delta("item/reasoning/textDelta", &json!({"delta": "cru"})), None, "só o resumo aparece");
+        assert_eq!(thread_config(&json!({}), DEFAULT_EFFORT)["model_reasoning_summary"], json!("concise"));
     }
 
     #[test]

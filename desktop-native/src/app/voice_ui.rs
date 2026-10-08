@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use serde::Deserialize;
 use gpui_kit::component::{select::{Select, SelectEvent, SelectState}, searchable_list::SearchableListItem};
 use crate::voice::{Activity as CallActivity, CallId, Phase, Voice, VoiceEvent, VoiceFailure, VoiceOptions, rpc::Codex,
-    organizer::{ConfirmGate, DEFAULT_EFFORT, Mode, OpenRequest, session_context, tool_reply}, usage::RateWindow};
+    organizer::{ConfirmGate, DEFAULT_EFFORT, Mode, OpenRequest, OrganizerAction, session_context, tool_reply}, usage::RateWindow};
 use super::{create::choices::{PERMISSIONS, checked_choice, creation_defaults}, grouping::{can_leave, can_pair}, sidebar::Target};
 
 /// Vozes do Realtime; vazio é o padrão do Codex.
@@ -120,6 +120,11 @@ pub(super) struct VoiceUi {
     pub(super) shown: Option<(Speaker, std::time::Instant)>,
     /// O que o organizador faz agora; só aparece quando ninguém está falando.
     pub(super) activity: CallActivity,
+    /// Resumo do raciocínio do turno em curso (cauda) e a ação que o organizador executa; o fim do turno limpa.
+    pub(super) thought: String,
+    pub(super) action: Option<OrganizerAction>,
+    /// Passo da animação de espera: muda a cada `ANIM_STEP` e força a repintura entre níveis iguais.
+    pub(super) anim_step: u128,
     /// Quando a chamada ficou ao vivo: base do cronômetro.
     pub(super) live_since: Option<std::time::Instant>,
     /// Repinta o cronômetro a cada segundo; largar a Task para o relógio.
@@ -347,10 +352,66 @@ pub(super) fn settled_speaker(shown: Speaker, since: std::time::Instant, raw: Sp
     else { (shown, since) }
 }
 
-/// Pensando/pesquisando: barras baixas acendendo em sequência, pela fase do cronômetro.
-pub(super) fn thinking_bars(elapsed: Duration, min: f32, max: f32) -> [f32; 5] {
-    let lit = (elapsed.as_millis() / 250 % 5) as usize;
-    std::array::from_fn(|i| if i == lit { min + ((max - min) * 0.45).round() } else { min })
+/// Passo das animações de espera (ms).
+const ANIM_STEP: u128 = 250;
+
+/// Barras baixas acendendo em sequência, pela fase do cronômetro: `step` ms por barra, `rise` da altura útil.
+pub(super) fn wave_bars(elapsed: Duration, min: f32, max: f32, step: u128, rise: f32) -> [f32; 5] {
+    let lit = (elapsed.as_millis() / step % 5) as usize;
+    std::array::from_fn(|i| if i == lit { min + ((max - min) * rise).round() } else { min })
+}
+
+/// Cauda do raciocínio guardada; o que aparece é ainda menor (`thought_tail`).
+const THOUGHT_KEEP: usize = 2000;
+
+pub(super) fn push_thought(thought: &mut String, delta: &str) {
+    thought.push_str(delta);
+    let excess = thought.len().saturating_sub(THOUGHT_KEEP);
+    if excess > 0 {
+        let cut = (excess..thought.len()).find(|i| thought.is_char_boundary(*i)).unwrap_or(thought.len());
+        thought.drain(..cut);
+    }
+}
+
+/// As últimas `lines` linhas não vazias, cada uma cortada em `width` caracteres.
+pub(super) fn thought_tail(thought: &str, lines: usize, width: usize) -> Vec<String> {
+    let all: Vec<&str> = thought.lines().map(|l| l.trim().trim_matches('*').trim()).filter(|l| !l.is_empty()).collect();
+    all[all.len().saturating_sub(lines)..].iter().map(|l| clip(l, width)).collect()
+}
+
+fn clip(text: &str, width: usize) -> String {
+    if text.chars().count() <= width { return text.to_owned(); }
+    format!("{}…", text.chars().take(width - 1).collect::<String>())
+}
+
+/// Ação em curso numa linha curta.
+pub(super) fn action_text(action: &OrganizerAction) -> String {
+    match action {
+        OrganizerAction::Tool(tool) => match tool.as_str() {
+            "read_session" => tr("voice_tool_read_session"),
+            "send_to_session" => tr("voice_tool_send_to_session"),
+            "hold_request" => tr("voice_tool_hold_request"),
+            "discard_request" => tr("voice_tool_discard_request"),
+            "update_plan" => tr("voice_tool_update_plan"),
+            "read_plan" => tr("voice_tool_read_plan"),
+            "ask_session" => tr("voice_tool_ask_session"),
+            "finish_plan" => tr("voice_tool_finish_plan"),
+            "set_mode" => tr("voice_tool_set_mode"),
+            "switch_session" => tr("voice_tool_switch_session"),
+            "list_sessions" => tr("voice_tool_list_sessions"),
+            "open_session" => tr("voice_tool_open_session"),
+            "close_session" => tr("voice_tool_close_session"),
+            "pair_sessions" => tr("voice_tool_pair_sessions"),
+            "unpair_session" => tr("voice_tool_unpair_session"),
+            other => tr("voice_tool_other").replace("{tool}", other),
+        },
+        OrganizerAction::Search(query) if query.trim().is_empty() => tr("voice_action_search"),
+        OrganizerAction::Search(query) => tr("voice_action_search_query").replace("{query}", &clip(query.trim(), 80)),
+        OrganizerAction::Command(command) => {
+            let line = command.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
+            tr("voice_action_command").replace("{command}", &clip(line, 80))
+        }
+    }
 }
 
 pub(super) fn call_clock(elapsed: Duration) -> String {
@@ -518,6 +579,7 @@ impl Hangar {
         self.voice.pending_question = None;
         (self.voice.close_gate, self.voice.close_reply) = (ConfirmGate::default(), None);
         self.voice.activity = CallActivity::Idle;
+        (self.voice.thought, self.voice.action) = (String::new(), None);
         self.voice.shown = None;
         self.voice.watched.clear();
         self.voice.error = None;
@@ -550,6 +612,7 @@ impl Hangar {
         self.voice.pending_plan = None;
         self.voice.pending_question = None;
         self.voice.activity = CallActivity::Idle;
+        (self.voice.thought, self.voice.action) = (String::new(), None);
         self.voice.shown = None;
         cx.notify();
     }
@@ -790,6 +853,7 @@ impl Hangar {
                 self.voice.levels = (0., 0.);
                 self.voice.shown = None;
                 self.voice.activity = CallActivity::Idle;
+                (self.voice.thought, self.voice.action) = (String::new(), None);
                 (self.voice.live_since, self.voice.ticker) = (None, None);
                 self.voice.pending_sends.clear();
                 self.voice.pending_plan = None;
@@ -812,12 +876,17 @@ impl Hangar {
                 let (old_shown, since) = self.voice.shown.unwrap_or((Speaker::Idle, now));
                 let (shown, since) = settled_speaker(old_shown, since, speaker(levels.0, levels.1, muted), now);
                 self.voice.shown = Some((shown, since));
-                let changed = bars(self.voice.levels) != bars(levels) || shown != old_shown;
+                let step = self.voice.live_since.map_or(0, |since| since.elapsed().as_millis() / ANIM_STEP);
+                let changed = bars(self.voice.levels) != bars(levels) || shown != old_shown || step != self.voice.anim_step;
+                self.voice.anim_step = step;
                 self.voice.levels = levels;
                 if !changed { return; }
                 self.voice.frame = self.voice.frame.wrapping_add(1);
             }
             VoiceEvent::Activity(activity) => self.voice.activity = activity,
+            VoiceEvent::Thought(delta) => push_thought(&mut self.voice.thought, &delta),
+            VoiceEvent::Action(action) => self.voice.action = action,
+            VoiceEvent::TurnDone => (self.voice.thought, self.voice.action) = (String::new(), None),
             VoiceEvent::Draft(draft) => self.voice.draft = draft,
             VoiceEvent::Failed(failure) => {
                 self.voice.error = Some(failure_text(&failure));
@@ -1217,7 +1286,7 @@ impl Hangar {
             button.child(div().flex().items_center().gap(px(6.)).text_size(px(12.5))
                 .child(self.render_equalizer(3., 16., 2.))
                 .children(self.call_time().map(|time| div().text_color(theme::text()).child(time)))
-                .child(div().text_color(theme::muted()).child(self.voice_status()))
+                .child(div().text_color(self.voice_state_color()).child(self.voice_status()))
                 .when(self.voice.mode == Mode::Plan, |el| el.child(div().flex_shrink_0().px(px(5.)).rounded(px(4.)).border_1().border_color(theme::border())
                     .text_size(px(10.)).text_color(theme::muted()).child(tr("voice_planning"))))
                 .children(target.map(|name| div().text_color(theme::faint()).child(name)))
@@ -1237,6 +1306,7 @@ impl Hangar {
             Speaker::Idle => match self.voice.activity {
                 CallActivity::Thinking => tr("voice_thinking"),
                 CallActivity::Searching => tr("voice_searching"),
+                CallActivity::Working => tr("voice_working"),
                 CallActivity::Idle => tr_shared("codex_voice_listening", &[]),
             },
         }
@@ -1246,15 +1316,33 @@ impl Hangar {
 
     fn call_time(&self) -> Option<String> { self.voice.live_since.map(|since| call_clock(since.elapsed())) }
 
-    /// Você: barras de baixo para cima na cor de destaque. Voz: do centro, em verde. Só a altura de um div muda: nada de transform.
+    /// Cor do estado da chamada: a mesma no equalizador e no rótulo.
+    fn voice_state_color(&self) -> Hsla {
+        if !matches!(self.voice.phase, Some(Phase::Live)) { return theme::muted(); }
+        match self.shown_speaker() {
+            Speaker::Voice => theme::success(),
+            _ if self.voice.muted => theme::muted(),
+            Speaker::You => theme::accent(),
+            Speaker::Idle => match self.voice.activity {
+                CallActivity::Idle => theme::muted(),
+                CallActivity::Thinking => theme::text(),
+                CallActivity::Searching | CallActivity::Working => theme::warning(),
+            },
+        }
+    }
+
+    /// Você: barras de baixo para cima na cor de destaque. Voz: do centro, em verde. Ouvindo: uma barra lenta;
+    /// pensando ou agindo: mais rápida e alta, na cor do estado. Só a altura de um div muda: nada de transform.
     fn render_equalizer(&self, min: f32, max: f32, width: f32) -> Div {
         let (input, output) = self.voice.levels;
         let who = self.shown_speaker();
-        let thinking = who == Speaker::Idle && !self.voice.muted && self.voice.activity != CallActivity::Idle;
         let row = div().h(px(max)).flex().gap(px(2.));
-        if thinking {
+        if who == Speaker::Idle && !self.voice.muted && matches!(self.voice.phase, Some(Phase::Live)) {
             let elapsed = self.voice.live_since.map_or(Duration::ZERO, |since| since.elapsed());
-            return row.items_center().children(thinking_bars(elapsed, min, max).map(|h| div().w(px(width)).h(px(h)).rounded_full().bg(theme::muted())));
+            let bars = if self.voice.activity == CallActivity::Idle { wave_bars(elapsed, min, max, ANIM_STEP * 2, 0.2) }
+                else { wave_bars(elapsed, min, max, ANIM_STEP, 0.6) };
+            let color = if self.voice.activity == CallActivity::Idle { theme::faint() } else { self.voice_state_color() };
+            return row.items_center().children(bars.map(|h| div().w(px(width)).h(px(h)).rounded_full().bg(color)));
         }
         let (level, color) = match who {
             Speaker::You => (input, theme::accent()),
@@ -1311,14 +1399,19 @@ impl Hangar {
                 .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(tr_shared("codex_voice_title", &[])))
                 .child(beta_badge()));
         if live {
-            let status = match self.voice.target.as_deref() {
-                Some(name) => format!("{} · {name}", self.voice_status()),
-                None => self.voice_status(),
-            };
-            body = body.child(div().flex().items_center().gap(px(12.))
-                    .child(self.render_equalizer(4., 32., 4.).gap(px(3.)))
-                    .children(self.call_time().map(|time| div().text_lg().text_color(theme::text()).child(time))))
-                .child(div().text_xs().text_color(theme::muted()).child(status));
+            // O estado em destaque, e logo abaixo o que o organizador faz e pensa neste turno.
+            let action = self.voice.action.as_ref().map(action_text);
+            let thought = thought_tail(&self.voice.thought, 3, 140);
+            body = body.child(div().flex().flex_col().gap(px(8.)).p(px(12.)).rounded(px(10.)).border_1().border_color(theme::border())
+                .child(div().flex().items_center().gap(px(12.))
+                    .child(self.render_equalizer(4., 28., 4.).gap(px(3.)))
+                    .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
+                        .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(self.voice_state_color()).child(self.voice_status()))
+                        .children(self.voice.target.as_deref().map(|name| div().text_xs().text_color(theme::faint()).truncate().child(name.to_owned()))))
+                    .children(self.call_time().map(|time| div().flex_shrink_0().text_lg().text_color(theme::text()).child(time))))
+                .children(action.map(|text| div().text_sm().text_color(theme::text()).truncate().child(text)))
+                .when(!thought.is_empty(), |el| el.child(div().flex().flex_col().gap(px(2.))
+                    .children(thought.into_iter().map(|line| div().text_xs().text_color(theme::muted()).truncate().child(line))))));
         }
         let ready = live && matches!(self.voice.phase, Some(Phase::Live));
         body = body.child(div().flex().items_center().gap(px(6.))
@@ -1402,6 +1495,34 @@ mod tests {
     use core::prelude::v1::test;
 
     fn ev(id: &str, kind: &str, text: &str) -> (String, String, String) { (id.into(), kind.into(), text.into()) }
+
+    #[test]
+    fn thought_keeps_a_short_tail_and_shows_last_lines() {
+        let mut thought = String::new();
+        push_thought(&mut thought, "**Lendo a sessão**");
+        push_thought(&mut thought, "\n");
+        push_thought(&mut thought, "Vou trocar ");
+        push_thought(&mut thought, "de sessão");
+        assert_eq!(thought_tail(&thought, 3, 140), ["Lendo a sessão", "Vou trocar de sessão"]);
+        push_thought(&mut thought, &format!("\n{}", "é".repeat(3000)));
+        assert!(thought.len() <= THOUGHT_KEEP, "cauda limitada e cortada em fronteira de caractere");
+        let tail = thought_tail(&thought, 1, 10);
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].chars().count(), 10);
+        assert!(tail[0].ends_with('…'));
+        assert!(thought_tail("a\nb\nc\nd", 3, 140) == ["b", "c", "d"]);
+    }
+
+    #[test]
+    fn action_text_names_tools_searches_and_commands() {
+        assert_eq!(action_text(&OrganizerAction::Tool("switch_session".into())), tr("voice_tool_switch_session"));
+        assert_ne!(tr("voice_tool_switch_session"), "voice_tool_switch_session", "chave traduzida");
+        assert!(action_text(&OrganizerAction::Tool("novo_tool".into())).contains("novo_tool"));
+        assert!(action_text(&OrganizerAction::Search("gpui animation".into())).contains("gpui animation"));
+        assert_eq!(action_text(&OrganizerAction::Search(" ".into())), tr("voice_action_search"));
+        let command = action_text(&OrganizerAction::Command(format!("\n  cat {}\nsegunda", "x".repeat(200))));
+        assert!(command.contains("cat x") && !command.contains("segunda") && command.ends_with('…'));
+    }
 
     #[test]
     fn codex_accounts_put_default_first_and_skip_quota_only_and_other_kinds() {

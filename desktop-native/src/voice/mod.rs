@@ -17,7 +17,7 @@ pub enum Phase { Connecting, Live, Closed }
 #[derive(Debug, Clone)]
 pub enum VoiceFailure { Microphone, Speaker, AppServer, Realtime(String), Network, Timeout, Organizer, Closed }
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub enum Activity { #[default] Idle, Thinking, Searching }
+pub enum Activity { #[default] Idle, Thinking, Searching, Working }
 pub enum VoiceEvent {
     Phase(Phase), Levels(f32, f32), Draft(Option<String>), Activity(Activity), ReadSession(CallId), Send(CallId, String), Failed(VoiceFailure),
     Mode(Mode), Plan { path: PathBuf, markdown: String }, AskSession(String), SendPlan { session: String, text: String },
@@ -29,6 +29,8 @@ pub enum VoiceEvent {
     /// Contexto da thread do organizador (não o da voz, que não é informado): input do último turno e a janela do modelo.
     OrganizerContext { used: u64, window: Option<u64> },
     AccountLimits { five_hour: usage::RateWindow, seven_day: usage::RateWindow },
+    /// Só para a tela: pedaço do resumo do raciocínio, a ação em curso e o fim do turno, que limpa os dois.
+    Thought(String), Action(Option<organizer::OrganizerAction>), TurnDone,
 }
 /// `cwd`: pasta da sessão na tela quando é desta máquina (o organizador lê o código dela); `target`: nome dessa sessão.
 /// `organizer_model`: `None` = o modelo do config do Codex.
@@ -75,7 +77,7 @@ fn failed(step: &'static str) -> impl FnOnce(VoiceFailure) -> VoiceFailure {
 /// Deltas vêm aos montes: só o primeiro de cada (método, papel) até virar o turno ou mudar o falante.
 fn first_delta(last: &mut Option<(String, String)>, method: &str, role: &str) -> bool {
     if method == "turn/started" || method == "turn/completed" { *last = None; return true; }
-    if !method.ends_with("/delta") { return true; }
+    if !method.ends_with("/delta") && !method.ends_with("Delta") { return true; }
     let key = (method.to_owned(), role.to_owned());
     if last.as_ref() == Some(&key) { return false; }
     *last = Some(key);
@@ -214,6 +216,7 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
             item = incoming.recv() => match item {
                 Ok(Incoming::Request { id, method, params }) if method == "item/tool/call" => {
                     let tool = params["tool"].as_str().unwrap_or("?").to_owned();
+                    let _ = events.send(VoiceEvent::Action(Some(organizer::OrganizerAction::Tool(tool.clone())))).await;
                     let outcome = match parse_tool(&params) {
                         ToolCall::ReadSession => { let _ = events.send(VoiceEvent::ReadSession(CallId(id))).await; "read" }
                         ToolCall::Send(_) | ToolCall::Hold(_) if !spoken.allows(&params) => {
@@ -373,10 +376,15 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                         log("gate cancelled: user kept talking");
                         let _ = rpc.respond(id, tool_reply("O usuário continuou falando; nada foi enviado. Monte o pedido com a fala completa.", false)).await;
                     }
+                    if let Some(action) = organizer::organizer_action(&method, &params["item"]) { let _ = events.send(VoiceEvent::Action(action)).await; }
+                    if let Some(delta) = organizer::reasoning_delta(&method, &params) { let _ = events.send(VoiceEvent::Thought(delta)).await; }
+                    let kind = params["item"]["type"].as_str().unwrap_or_default();
                     let next = match method.as_str() {
                         // O turno só entra em SpokenTurns quando o userMessage chega, depois do turn/started.
                         "item/started" | "item/completed" if params["item"]["type"] == "userMessage" && (method == "item/started" || organizer_busy) && spoken.allows(&params) => Some(Activity::Thinking),
-                        "item/started" if params["item"]["type"] == "webSearch" => Some(Activity::Searching),
+                        "item/started" if kind == "webSearch" => Some(Activity::Searching),
+                        "item/started" if matches!(kind, "dynamicToolCall" | "commandExecution") => Some(Activity::Working),
+                        "item/completed" if matches!(kind, "webSearch" | "dynamicToolCall" | "commandExecution") && activity != Activity::Idle => Some(Activity::Thinking),
                         "turn/completed" => Some(Activity::Idle),
                         _ => None,
                     };
@@ -389,6 +397,7 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                         "turn/started" => { organizer_busy = true; results.turn_started(); }
                         "turn/completed" => {
                             organizer_busy = false;
+                            let _ = events.send(VoiceEvent::TurnDone).await;
                             spoken.turn_completed(&params);
                             // Turno interrompido ou falho não pode deixar um envio esperando a janela de 1,5 s.
                             if params["turn"]["status"] != "completed" && let Some((id, _)) = gate.user_spoke() {
