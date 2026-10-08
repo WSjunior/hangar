@@ -1392,7 +1392,8 @@ def _confirm_and_drain(name: str) -> None:
             _log.warning("confirmacao adiada name=%s: transcript ilegivel agora (nada foi "
                          "reenfileirado nem dado por perdido)", name)
             return
-        if m and m[0] == "working":
+        if info.provider == "codex" or m and m[0] == "working":
+            # RPC do Codex pode ter chegado sem resposta: só o transcript autoriza confirmar.
             # Turno vivo: REDIGITAR e DESISTIR no meio do turno sao perigosos (o texto pode ainda
             # estar na fila interna da TUI — desistiu viraria aviso falso de "nao chegou" sobre
             # msg que chega depois). CONFIRMAR nao: o transcript e a fonte de verdade, e texto
@@ -4869,7 +4870,7 @@ async def _send_one_codex_locked(name: str, text: str, *, track_entry: bool = Fa
         # fila abaixo segura o prompt e o drain-on-complete tenta de novo no proximo idle.
         _log.exception("codex deliverable falhou name=%s", name)
         deliverable = False
-    # Enfileira sempre como pendente; so marca entregue apos a TUI REALMENTE receber o prompt.
+    # A reserva precede o RPC; confirmação de entrega vem do transcript.
     try:
         entry = await _send_thread(PromptQueue(name).append, text, delivered=False)
     except OSError as e:
@@ -4890,20 +4891,35 @@ async def _send_one_codex_locked(name: str, text: str, *, track_entry: bool = Fa
         # turno em andamento -> fica pendente na fila; o drain-on-complete entrega no proximo idle.
         return {"ok": True, "error": None, "delivered": False,
                 **({"entry_id": entry["id"]} if track_entry else {})}
+    if entry is not None:
+        try:
+            claimed = await _send_thread(PromptQueue(name).claim_undelivered, entry_id=entry["id"])
+        except OSError as exc:
+            return {"ok": False, "error": erro("erro_fila_nao_entregue", str(exc), erro=str(exc))}
+        if not claimed:
+            return {"ok": True, "error": None, "delivered": bool(
+                await _send_thread(PromptQueue(name).entry_delivered, entry["id"])),
+                **({"entry_id": entry["id"]} if track_entry else {})}
     try:
         result = await adapter.send_prompt(name, text)
     except Exception as e:
+        if entry is not None:
+            try:
+                await _send_thread(PromptQueue(name).set_delivered, entry["id"], False)
+            except OSError:
+                _log.exception("Não foi possível liberar a entrada sem envio name=%s", name)
         _log.exception("codex send_prompt falhou name=%s", name)
         return {"ok": False, "error": erro("erro_envio_falhou",
                                            f"falha ao enviar: {e}", erro=str(e))}
-    if result == "sent":
-        if entry is not None:
-            # turno iniciou -> marca entregue pra o drain-on-complete nao reenviar a mesma entrada.
-            try:
-                await _send_thread(PromptQueue(name).set_delivered, entry["id"], True)
-            except OSError:
-                pass
-    elif entry is None:
+    if result == "unknown":
+        return {"ok": True, "error": None, "delivered": False, "uncertain": True,
+                **({"entry_id": entry["id"]} if track_entry and entry is not None else {})}
+    if result == "deferred" and entry is not None:
+        try:
+            await _send_thread(PromptQueue(name).set_delivered, entry["id"], False)
+        except OSError as exc:
+            return {"ok": False, "error": erro("erro_fila_nao_entregue", str(exc), erro=str(exc))}
+    if result != "sent" and entry is None:
         # "deferred" (corrida idle->working entre o deliverable e o send) + sidecar morto: o texto NAO
         # foi digitado E nao ha entrada pendente pro drain-on-complete drenar -- a msg nao esta em lugar
         # NENHUM. Aqui morre a suposicao do append la em cima ("entregavel -> a TUI leva o texto"):
