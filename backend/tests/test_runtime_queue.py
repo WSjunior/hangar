@@ -31,6 +31,28 @@ def test_local_command_answer_confirms_the_command_outside_the_transcript(tmp_pa
     assert not rows["e0"].get("confirmed") and not rows["e2"].get("confirmed")
 
 
+def test_phase_receipts_do_not_copy_a_large_intent(tmp_path):
+    """Mesma regra de phase_receipts_do_not_copy_a_large_intent em runtime_queue.rs."""
+    store = open_store(tmp_path)
+    big = "x" * 100_000
+    store.exec(1, "prepare", CLOCK, {"kind": "prepare", "id": "op", "payload": {"kind": "input", "frame": {"text": big}},
+                                     "entry_id": None})
+    store.exec(1, "cursor", CLOCK, {"kind": "bind_dispatch", "id": "op", "cursor": cursor_at(1)})
+    store.exec(1, "dispatch", CLOCK, {"kind": "begin_dispatch", "id": "op", "wire_id": "wire:op:1"})
+    finish = {"kind": "finish", "id": "op", "status": "accepted",
+              "result": {"operation_id": "op", "disposition": "accepted", "payload": {"tool_result": big}}}
+    first = store.exec(1, "finish", CLOCK, finish)
+    assert first["payload"]["frame"]["text"] == big
+    for call in ["call::prepare", "call::cursor", "call::dispatch", "call::finish"]:
+        assert len(json.dumps(store.state["operations"][call]["result"])) < 1_000, call
+    assert (tmp_path / "key.queue-state.json").stat().st_size < 250_000
+    replay = store.exec(1, "finish", CLOCK, finish)
+    assert [replay[k] for k in ("id", "status", "entry_id")] == [first[k] for k in ("id", "status", "entry_id")]
+    assert replay["result"]["disposition"] == "accepted" and replay["result"]["operation_id"] == "op"
+    with pytest.raises(ValueError):
+        store.exec(1, "finish", CLOCK, {**finish, "status": "rejected", "result": None})
+
+
 def test_same_operation_does_not_append_twice(tmp_path):
     store = open_store(tmp_path)
     first = store.exec(1, "call-1", CLOCK, append())
@@ -71,6 +93,18 @@ def test_unknown_never_unclaims(tmp_path):
         store.exec(1, "unclaim", CLOCK, {"kind": "set_delivered", "entry_id": "entry-1", "value": False, "steered": False})
     assert store.state["rows"][0]["delivered"] is True
     assert not store.state["rows"][0].get("confirmed")
+
+
+def test_accepted_but_unconfirmed_goes_back_to_the_queue(tmp_path):
+    """A troca de conta devolve à fila o que a CLI aceitou e nunca gravou: `accepted` não é incerto."""
+    store = open_store(tmp_path)
+    store.exec(1, "append", CLOCK, {**append(), "delivered": True})
+    store.exec(1, "prepare", CLOCK, {"kind": "prepare", "id": "op", "payload": {"text": "Olá"}, "entry_id": "entry-1"})
+    store.exec(1, "dispatch", CLOCK, {"kind": "begin_dispatch", "id": "op", "wire_id": "wire:op:1"})
+    store.exec(1, "accepted", CLOCK, {"kind": "finish", "id": "op", "status": "accepted", "result": None})
+    assert store.state["rows"][0]["delivered"] is True
+    store.exec(1, "unclaim", CLOCK, {"kind": "set_delivered", "entry_id": "entry-1", "value": False, "steered": False})
+    assert store.state["rows"][0]["delivered"] is False
 
 
 def test_cap_keeps_pending(tmp_path):

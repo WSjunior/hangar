@@ -43,6 +43,9 @@ pub struct InternalInfo {
     /// `{"queue": "<sidecar da fila>"}`.
     #[serde(default)]
     pub history: Value,
+    /// Codex sem terminal (sidecar `headless`): o estado ao vivo dele é do feed do hub.
+    #[serde(default)]
+    pub headless: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -79,16 +82,23 @@ struct Parsed {
 
 /// `merged_history` + o corte `evs[-limit:]` da rota. Transcript ausente dá histórico vazio.
 pub fn merged_history(req: &HistoryRequest) -> io::Result<Vec<ChatEvent>> {
+    merged_history_capped(req, u64::MAX)
+}
+
+/// Como `merged_history`, mas a janela com `limit` para em `max_window` bytes mesmo sem `limit`
+/// eventos: quem só quer o fim (a última resposta da lista) não relê o transcript inteiro quando
+/// a cauda é só anexo e tool_result.
+pub(crate) fn merged_history_capped(req: &HistoryRequest, max_window: u64) -> io::Result<Vec<ChatEvent>> {
     let mut parsed = match req.limit {
         Some(limit) => {
-            let mut window = req.tail_window.max(1);
+            let mut window = req.tail_window.max(1).min(max_window);
             loop {
                 let off = tail_offset(&req.jsonl, window);
                 let parsed = parse_from(req, off)?;
-                if off == 0 || parsed.items.len() >= limit {
+                if off == 0 || parsed.items.len() >= limit || window >= max_window {
                     break parsed;
                 }
-                window = window.saturating_mul(4);
+                window = window.saturating_mul(4).min(max_window);
             }
         }
         None => parse_from(req, 0)?,
@@ -391,7 +401,26 @@ pub fn history_etag(req: &HistoryRequest) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::chaves_de_commit;
+    use super::{chaves_de_commit, merged_history, merged_history_capped, HistoryRequest, Provider, TAIL_WINDOW};
+
+    #[test]
+    fn capped_window_stops_before_reading_the_whole_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let jsonl = dir.path().join("s.jsonl");
+        let assistant = |id: &str, text: &str| {
+            format!(
+                "{{\"type\":\"assistant\",\"uuid\":\"{id}\",\"timestamp\":\"2026-01-01T00:00:00Z\",\
+                 \"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{text}\"}}]}}}}\n"
+            )
+        };
+        // Cauda de ~1 MiB sem evento entre a resposta antiga e o começo do arquivo.
+        let filler = "{\"type\":\"progress\",\"pad\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}\n".repeat(16_000);
+        std::fs::write(&jsonl, format!("{}{filler}", assistant("old", "antiga"))).unwrap();
+        let req = HistoryRequest { provider: Provider::Claude, jsonl, queue: None, limit: Some(8), tail_window: 1024 };
+        let texts = |evs: Vec<hangar_api::chat::ChatEvent>| evs.into_iter().filter_map(|e| e.text).collect::<Vec<_>>();
+        assert_eq!(texts(merged_history(&req).unwrap()), ["antiga"]);
+        assert!(texts(merged_history_capped(&req, TAIL_WINDOW).unwrap()).is_empty());
+    }
 
     #[test]
     fn typed_slash_command_matches_its_transcript_form() {

@@ -771,7 +771,12 @@ class RuntimeAdapter:
         view = self.view(name)
         if thread_id is not None and view.thread_id != thread_id:
             raise RuntimeError("snapshot de outra conversa")
-        state = StateEvent.model_validate(view.data["public_state"])
+        public = view.data.get("public_state")
+        if public is None:
+            # Logo após a subida a vista ainda não tem o retrato. Estado inventado (idle) enganaria a lista e o
+            # push; a falha deixa a lista do Rust com o último valor bom, como a vista sem snapshot.
+            raise RuntimeError("snapshot do runtime indisponível")
+        state = StateEvent.model_validate(public)
         slot = runtime_coordinator.current().slot(name)
         if problem := runtime_problem(name):
             state = state.model_copy(update={"problema":problem[0], "problema_detalhe":problem[1]})
@@ -876,13 +881,36 @@ class RuntimeAdapter:
         if method == "set_permission_mode" and self.provider == "claude":
             await self.control(name, "set_permission_mode", {"mode":arguments["mode"]})
             return "manual" if arguments["mode"] == "default" else arguments["mode"]
-        if method in {"skip_question", "read_settings", "read_rate_limits", "set_mode", "compact", "list_skills"}:
+        if method == "read_rate_limits":
+            # Como o adapter Python: o retrato da conta, e None quando a leitura falha (a rota responde neutro).
+            try:
+                result = await self.control(name, method, {})
+            except (RuntimeError, ValueError):
+                return None
+            return result.get("rateLimits") if isinstance(result, dict) else None
+        if method in {"skip_question", "read_settings", "set_mode", "compact", "list_skills"}:
             payload = {key:value for key,value in arguments.items() if key not in {"self", "name"}}
             result = await self.control(name, method, payload)
             if method == "list_skills":
                 from app.adapters.codex.chat_controls import skills_do_catalogo
                 return skills_do_catalogo(result)
             return None if method in {"skip_question", "compact"} else result
+        if self.provider == "codex" and method in {"recarregar", "restart"}:
+            # O Rust mata e sobe o processo na mesma conversa; a sessão não sai dele.
+            await self.control(name, "restart")
+            return None
+        if self.provider == "codex" and method == "set_permission_mode_sem_terminal":
+            from app.adapters.codex.sem_terminal import Ocupada
+            from app.rust_server import RustOpError
+            try:
+                return await self.control(name, "set_permission_mode", {"mode":arguments["modo"]})
+            except RustOpError as exc:
+                # Os mesmos erros do adapter Python, que a rota já traduz (409, 400).
+                if exc.code == "erro_permissao_ocupada":
+                    raise Ocupada(exc.message) from None
+                if exc.code == "erro_modo_desconhecido":
+                    raise ValueError(exc.message) from None
+                raise
         if method in {"parar", "recarregar", "restart", "open_terminal", "open_headless", "set_permission_mode_sem_terminal"}:
             return await runtime_coordinator.current().lifecycle_call(name, method, arguments)
         raise RuntimeError("método exige encaminhamento explícito ao responsável")
@@ -1086,6 +1114,7 @@ async def owner_state_stream(legacy, native, name):
 _ASYNC = {"ensure_running", "send_prompt", "deliverable", "drain", "steer", "steer_queue", "interrupt", "select",
     "answer_questions", "set_model", "set_service_tier", "set_permission_mode", "list_models", "read_settings", "read_rate_limits", "set_mode",
     "compact", "list_skills", "skip_question", "parar", "recarregar", "restart", "open_terminal", "open_headless", "set_permission_mode_sem_terminal"}
+_CODEX_OPENS_IN_RUST = {"restart", "set_permission_mode_sem_terminal", "open_terminal"}
 _SYNC = {"snapshot", "escolhas", "comandos", "problema_de", "current_model", "aprovacao_pendente", "permission_modes_sem_terminal", "rename", "close_sync"}
 
 
@@ -1159,8 +1188,16 @@ def install_adapter(cls, provider):
                 context = _legacy_operation.get()
                 if context is not None and coordinator is not None and context.get("operation_id") in coordinator.legacy_active:
                     return await _original(self, *args, **kwargs)
-                if (_method == "ensure_running" and _facade.provider == "claude" and coordinator is not None
-                        and getattr(coordinator, "legacy", None) is not None and getattr(coordinator, "transport", None) is not None
+                managed = coordinator is not None and getattr(coordinator, "legacy", None) is not None
+                # Reiniciar, trocar o sandbox e passar para terminal precisam do processo: abrem no Rust
+                # como o envio, senão a sessão parada caía no Python, que não pode subir o cano.
+                opens = _method == "ensure_running" or _facade.provider == "codex" and _method in _CODEX_OPENS_IN_RUST
+                if (managed and opens and _facade.provider == "codex" and coordinator.mode != "python"
+                        and await asyncio.to_thread(_hands_over, "codex", name)):
+                    await coordinator.await_mode()      # Rust esperado: o dono da sessão sai do desfecho dele
+                if (opens and managed and getattr(coordinator, "transport", None) is not None
+                        and (_facade.provider == "claude" or coordinator.rust_owns("codex", True)
+                             and await asyncio.to_thread(_hands_over, "codex", name))
                         and not bound.arguments.get("so_reconectar") and bound.arguments.get("transfer_id") is None):
                     # Subir a sessão é abri-la no Rust, com a conta/motor pedidos e a espera do initialize;
                     # dentro da barreira (troca de conta) é reabrir já o que a administração fechou.

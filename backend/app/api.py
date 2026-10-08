@@ -63,8 +63,8 @@ from app import uso_report
 from app.planprog import (plan_progress, list_plans, write_pin, is_safe_stem, _plans_dir,
                           PlanPinError, PIN_NONE, marcar_step, arquivar, caminho_do_plano,
                           PlanWriteError)
-from app.pqueue import (PromptQueue, _transcript_start_ts, committed_user_lines, fila_interna_pendente,
-                        linha_mais_parecida)
+from app.pqueue import (PromptQueue, _saida_local, _transcript_start_ts, committed_user_lines,
+                        fila_interna_pendente, linha_mais_parecida)
 from app.prune import prune_loop as _prune_loop
 from app.renova_token import laco as _renova_token_loop
 from app.chain import ThenLink
@@ -654,7 +654,9 @@ async def _correlaciona_diag(request: Request, call_next):
         # O long-poll do plugin espera de propósito: sucesso dele seria uma linha "lenta" a cada
         # janela, e enchia o teto do dia.
         long_poll_ok = route == "/api/plugin/pull" and status < 400 and not failure
-        if (response is not None or failure) and not long_poll_ok and not request.url.path.startswith("/api/diag") and (
+        # O Rust chama `/internal/*` a cada tique: o POST que deu certo e rápido enchia o teto do dia de madrugada.
+        internal_ok = request.url.path.startswith("/internal/") and status < 400 and not failure and elapsed < 1000
+        if (response is not None or failure) and not long_poll_ok and not internal_ok and not request.url.path.startswith("/api/diag") and (
                 failure or status >= 400 or elapsed >= 1000 or request.method in ("POST", "PUT", "PATCH", "DELETE")):
             diag.registrar("api.servidor", "erro" if status >= 500 else "aviso" if status >= 400 else "ok",
                            detalhe=f"{request.method} {route}", codigo=str(status), ms=elapsed,
@@ -1670,15 +1672,18 @@ def _on_hook_transition(session_id: str, state: str) -> None:
                 if real != state and _armar_recheca(session_id):
                     threading.Timer(_RECHECA_KIMI, _recheca_kimi,
                                     args=(session_id, state)).start()
-        except Exception:
+        except Exception as exc:
             # LOGA, nao `pass` mudo: e daqui que saem o drain da fila, o tick do loop, o vinculo
             # `then` e o push de "terminou". Falha calada aqui devolve exatamente o sintoma que este
             # bloco existe pra matar — sessao que nunca drena — sem uma linha pra investigar. E o
             # texto diz a CONSEQUENCIA, nao so "falhou": no Kimi o fim de turno real nao gera
             # transicao nova (idle sobre idle), entao sem reavaliacao a sessao pode ficar parada
             # sem drenar ate a proxima msg do usuario.
-            _log.warning("transicao de estado falhou sid=%s state=%s — sem reavaliacao automatica "
-                         "ate a proxima transicao", session_id, state, exc_info=True)
+            from app.runtime_coordinator import RustCacheInvalid
+            # Cache inválido já vai ao diário uma vez por sequência pelo coordenador; aqui repetiria a cada volta.
+            if not isinstance(exc, RustCacheInvalid):
+                _log.warning("transicao de estado falhou sid=%s state=%s — sem reavaliacao automatica "
+                             "ate a proxima transicao", session_id, state, exc_info=True)
             # Reagenda MESMO ASSIM quando o idle era suspeito: a falha pode ter sido pontual
             # (registry/tmux piscando), e desistir aqui e o que deixa a sessao presa. Mas com TETO:
             # falha PERMANENTE (jsonl corrompido, erro reproduzivel no registry) reergueria a mesma
@@ -2786,18 +2791,18 @@ async def _motivo_ocupada(name: str, headless: bool) -> str | None:
                 return "erro_sessao_trabalhando"
             if state.get("state") not in ("idle", "dead"):
                 return "erro_sessao_iniciando"
-            fila = await asyncio.to_thread(PromptQueue(name).load)
-            return "erro_fila_pendente" if any(
-                (not row.get("delivered") or not row.get("confirmed")) and not row.get("saida_local")
-                for row in fila) else None
-        sess = get_adapter(CLAUDE_HEADLESS)._sessions.get(name)
-        if sess is not None and sess.vivo:
-            if sess.iniciando:
-                return "erro_sessao_iniciando"
-            if sess.pending or sess.question:
-                return "erro_sessao_esperando_resposta"
-            if sess.in_progress:
-                return "erro_sessao_trabalhando"
+            # Entregue sem confirmação não segura a troca: ociosa, o ator já conferiu o transcript, e a
+            # que não chegou (limite da conta, desistida) prendia a sessão para sempre. Quem reinicia
+            # o processo a devolve à fila (`_requeue_unanswered`).
+        else:
+            sess = get_adapter(CLAUDE_HEADLESS)._sessions.get(name)
+            if sess is not None and sess.vivo:
+                if sess.iniciando:
+                    return "erro_sessao_iniciando"
+                if sess.pending or sess.question:
+                    return "erro_sessao_esperando_resposta"
+                if sess.in_progress:
+                    return "erro_sessao_trabalhando"
     else:
         info = next((i for i in await registry.list_with_state() if i.name == name), None)
         if info is not None and info.state == "awaiting_input":
@@ -2808,6 +2813,37 @@ async def _motivo_ocupada(name: str, headless: bool) -> str | None:
     if any(e.get("delivered") is False for e in fila):
         return "erro_fila_pendente"
     return None
+
+
+def _requeue_unanswered(name: str) -> int:
+    """Volta à fila a mensagem entregue que a sessão ociosa nunca confirmou: o processo que a
+    recebeu não a gravou, e a vida nova (outra conta, outro modo) precisa responder. Só sob a trava
+    de entrega e dentro da troca, para nenhum drain correr no meio. Desistida e saída local ficam.
+
+    Volta como linha NOVA: a antiga carrega a operação já aceita no diário da fila, e o drain com o
+    mesmo id devolveria a resposta guardada sem enviar nada. A antiga é confirmada (sai da tela).
+    O que já está no transcript só tinha a confirmação atrasada: é confirmado, nunca reenviado."""
+    meta = headless_sessions.load(name)
+    if meta is None:
+        return 0
+    committed = committed_user_lines(str(get_adapter(CLAUDE_HEADLESS).transcript_path_de(meta)))
+    if committed is None:
+        _log.warning("transcript de %s ilegível: mensagens sem confirmação ficam como estão", name)
+        return 0
+    queue = PromptQueue(name)
+    requeued = 0
+    for row in queue.load():
+        if (row.get("delivered") is not True or row.get("confirmed") or row.get("desistiu")
+                or _saida_local(row)):
+            continue
+        text, row_id = row.get("text") or "", str(row.get("id"))
+        if text.strip() and text.strip() not in committed:
+            queue.append(text, pre_transcript=bool(row.get("pre_transcript")))
+            requeued += 1
+        queue.confirm_delivered(apenas=lambda r, row_id=row_id: str(r.get("id")) == row_id)
+    if requeued:
+        _log.info("%d mensagem(ns) sem confirmação de %s voltaram à fila", requeued, name)
+    return requeued
 
 
 @app.post("/api/sessions/{name}/recarregar", dependencies=[Depends(require_auth)])
@@ -2911,19 +2947,22 @@ def _start_transfer_recovery() -> None:
 async def _boot_sessions(runtime) -> None:
     """Sessões Claude sem terminal na subida. O cano sobrevive ao restart; só morre aqui o de
     sessão encerrada com o backend fora. Com o Rust esperado, nada mais roda antes do desfecho
-    dele: o modo `rust` abre as sessões nele, e o `python` (desistência) faz o que vinha aqui."""
-    try:
-        from app.adapters.claude_headless.adapter import matar_orfaos
-        mortos = await asyncio.to_thread(matar_orfaos)
-        if mortos:
-            _log.info("claude headless: %d cano(s) de sessão já encerrada finalizado(s)", mortos)
-    except Exception:
-        _log.warning("claude headless: varredura de canos órfãos falhou", exc_info=True)
+    dele: o modo `rust` abre as sessões nele, e o `python` (desistência) faz o que vinha aqui.
+    A varredura de órfãos tem dono só: com o Rust de pé é dele, na subida dele."""
+    async def sweep_orphans():
+        try:
+            from app.adapters.claude_headless.adapter import matar_orfaos
+            mortos = await asyncio.to_thread(matar_orfaos)
+            if mortos:
+                _log.info("claude headless: %d cano(s) de sessão já encerrada finalizado(s)", mortos)
+        except Exception:
+            _log.warning("claude headless: varredura de canos órfãos falhou", exc_info=True)
 
     async def after_rust():
         _start_transfer_recovery()
 
     async def after_python():
+        await sweep_orphans()
         # Cada etapa independe das outras: uma falha não deixa canos sem religar nem transferência parada.
         try:
             await runtime.register_claude_sessions()
@@ -2936,6 +2975,7 @@ async def _boot_sessions(runtime) -> None:
     _transfer_recovery = None       # um lifespan novo no mesmo processo (testes) recupera de novo
     runtime.mode_hooks.update(rust=after_rust, python=after_python)
     if runtime.mode == "python":
+        await sweep_orphans()
         await _python_owns_headless()
 
 
@@ -3023,6 +3063,7 @@ async def _trocar_modo(name: str, body: ModoExecucaoBody):
         if motivo:
             raise HTTPException(409, detail=erro(motivo, _OCUPADA[motivo]))
         if headless:
+            await asyncio.to_thread(_requeue_unanswered, name)
             try:
                 await asyncio.to_thread(registry.para_terminal, name)
             except ValueError as e:
@@ -3295,6 +3336,8 @@ async def _trocar_conta(name: str, destino: str | None, *, engine_account: str |
         original_meta = None
         movida: tuple[str, str, str | None] | None = None
         try:
+            if headless:
+                await asyncio.to_thread(_requeue_unanswered, name)
             meta = headless_sessions.load(name)
             if meta is None:
                 raise RuntimeError("sessão sem o arquivo de estado")
@@ -6213,7 +6256,17 @@ async def interrupt(name: str, clear: bool = False):
     await asyncio.to_thread(_recusa_orq, name)
     # Codex: interrompe a propria TUI pelo tmux, mantendo celular e terminal no mesmo controlador.
     if _provider_of(name) == "codex":
-        if not await get_adapter("codex").interrupt(name):
+        try:
+            interrompeu = await get_adapter("codex").interrupt(name)
+        except TransferInProgress:
+            raise
+        except (ValueError, RuntimeError):
+            # Sem terminal o ator do Rust recusou ou não respondeu: código do Codex, não 500.
+            if not _codex_sem_terminal(name):
+                raise
+            _log.warning("codex interrupt falhou name=%s", name, exc_info=True)
+            raise HTTPException(409, detail=erro("erro_codex_controle", "O Codex não aceitou a alteração; atualize a sessão e tente novamente.")) from None
+        if not interrompeu:
             raise HTTPException(409, detail=erro(
                 "erro_codex_controle", "Não há turno Codex ativo para interromper."))
         return {"ok": True}
@@ -6460,7 +6513,8 @@ async def _aquecer_codex_sem_terminal(name: str) -> None:
     try:
         await get_adapter("codex").ensure_running(name)
     except Exception:
-        # O watch_sessions do adapter tenta de novo (até o teto de subidas); aqui só o log.
+        # Aqui só o log: no modo python o watch_sessions tenta de novo (até o teto de subidas); com o
+        # Rust dono, o próximo envio abre a sessão nele.
         _log.warning("codex sem terminal: aquecimento na criação falhou name=%s", name, exc_info=True)
     finally:
         _tarefas_soltas.discard(asyncio.current_task())
@@ -9780,6 +9834,7 @@ async def _reabrir_em_bypass(name: str, info):
             raise HTTPException(409, detail=erro(motivo, "para entrar em bypass a sessão reinicia: " + _OCUPADA[motivo]))
         if headless:
             antes = headless_sessions.load(name) or {}
+            await asyncio.to_thread(_requeue_unanswered, name)
             await hl.parar(name)
             if headless_sessions.update(name, permission_mode="bypassPermissions",
                                         previous_non_plan="bypassPermissions") is None:

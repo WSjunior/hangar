@@ -751,6 +751,18 @@ o bearer que vai na mesma requisição abre a máquina inteira, e o Tailscale j�
 Quem leva o pacote é o navegador (ele tem o token de todas as máquinas), então nenhuma máquina
 precisa conhecer a outra pelo `peers.json`.
 
+Contas e aparência (08/10/2026, pedido do usuário). As contas viajam sem login: o Claude Code
+renova o token sozinho (~8h) e a Anthropic troca o refresh token na renovação (`renova_token.py`),
+então a mesma credencial em duas máquinas faria a primeira que renovar derrubar a outra. Conta
+nova nasce pelo `contas.criar` do destino; conta que já existe lá só ganha apelido e chaves, e o
+`.credentials.json`/`.claude.json` dela nunca são lidos nem escritos. Do `settings.json` da conta
+vão só as chaves que o principal não tem (as outras o espelho da reconciliação sobrescreve), sem
+`env` e os comandos de credencial. A aparência é a do app nativo (`appearance.json` e a imagem):
+a do web mora no `localStorage` de cada navegador, não é estado da máquina, e o desktop web está
+parado. Ficam na máquina o que depende da tela e as escolhas de segurança dela. O app nativo relê
+o arquivo quando ele muda por fora: sem isso, o próximo ajuste feito nele gravaria a memória antiga
+por cima do que chegou.
+
 ## Compartilhar sessão: a porta do convidado é a única na internet
 
 (28/09/2026, pedido do usuário.) O convidado tem Hangar e recebe a sessão como um servidor a mais
@@ -1481,6 +1493,33 @@ donos: captura, `permission.observe` e `session.dead` saem uma vez, de um lugar 
   para 29 ms de CPU por segundo e o total de 297,5 para 146; latência marcador → `state` igual à do
   Python (mediana ~0,45 s), com a cópia dos marcadores relida só quando o observador das pastas vê
   escrita.
+
+### Codex sem terminal: o feed do runtime no lugar do `Monitor`
+
+(08/10/2026, parte 5B, Task 9.) Com o Rust dono do Codex sem terminal, cada prévia ia ao Python
+por `/runtime/events`, subia a `revision`, virava um `StateEvent` inteiro no `state_stream` e
+voltava ao hub pela conexão interna: com 10 sessões trabalhando, Python + Rust subiam de 62,5–65,5
+para 91–92 ms/s ([medicao-5b.md](../migracao-rust/parte5-codex/medicao-5b.md)).
+
+- O ator do Codex escreve num `watch` por nome (`RuntimeRegistry::live`) a vista pública, o erro
+  durável e as três prévias; prévia não vai mais ao `events` nem sobe a `revision` (o espelho do
+  Python segue consecutivo). `view`, `state`, `problem`, `rate` e voz continuam lá, porque o
+  Python ainda usa o espelho para controles, modelo, `/commands`, religação e fatos da lista.
+- O hub de Codex sem terminal (`Binding.headless`, vindo do `info`) liga o `RuntimeFeed` pelo
+  mesmo `SpawnMonitor`: acorda pelo `watch` ou pela resposta gravada, espera 150 ms e publica só o
+  que mudou (`ask_question`, `state`, `preview`, `pensamento`, `ferramenta`; `suggest` nunca).
+  Todo problema sai como `problema=runtime_falhou` (o código que web, app e nativo traduzem) com
+  `<código>: <frase>` no detalhe: erro do ator, pânico do ator (`runtime_panic`), abertura de
+  Codex que falhou, servidor sem registro (`runtime_absent`) e pânico do feed (`state_feed_failed`,
+  também no diário `rust.state_feed_failed`, até o próximo assinante). Sessão fora do registro
+  (parada, encerrada, abrindo) é `idle` sem problema, como no Python. O `close` de uma vida que
+  acabou com erro e a abertura que falhou deixam o erro até a próxima abertura.
+- Dono único: o hub descarta os seis do Python com `state_python_leak`; o Python não os produz
+  (`_estado_do_rust(provider, name)`), mantém o `tail_pump` da conexão interna (confirma a fila) e
+  não alimenta as fontes de prévia do Codex (`_push_channels`). Trocar de modo é troca de provider
+  no `sse.py` e religa o hub. O canal privado serve os seis ao convidado e ao Connect.
+- A lista lê o `state` do feed em `Published` pela chave do rollout; sem chat aberto vale o fato do
+  Python. Claude sem terminal segue pelo caminho antigo (pendência da metade Claude).
 
 ## Observação terminal Rust: erro visível, sem captura Python
 

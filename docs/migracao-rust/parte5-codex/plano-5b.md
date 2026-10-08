@@ -92,11 +92,11 @@ Fica no Python até a parte 6: o argv do Claude (`--resume`/`--session-id`, plug
 **Interfaces:**
 - Produces: problema `codex_esforco_nao_aplicado`; código `no_pending_permission` no `Select` sem aprovação; versão conferida 0.161.
 
-- [ ] **Step 1: Conferir a 0.161**
+- [x] **Step 1: Conferir a 0.161**
 
 Rodar `scripts/conferir-codex-schema` com o Codex desta máquina (0.161.0). O script recusa por versão: trocar `checked_version!()` para `"0.161.0"`, rodar de novo, olhar o `git status --short` do schema. Campo usado que sumiu → corrigir o tipo em `proto.rs` (nunca o recorte). Apagar o recorte 0.159.3. Commit: `chore(codex): check protocol against codex 0.161.0`.
 
-- [ ] **Step 2: Testes da subida (falham)**
+- [x] **Step 2: Testes da subida (falham)**
 
 Em `tests/runtime_codex.rs`:
 
@@ -155,12 +155,12 @@ fn select_without_pending_approval_says_no_pending_permission() {
 
 (`frames_of` = o `frames` já existente aplicado a `&[Effect]`; renomear se colidir.)
 
-- [ ] **Step 3: Rodar e ver falhar**
+- [x] **Step 3: Rodar e ver falhar**
 
 Run: `cd crates && CARGO_BUILD_JOBS=4 cargo test -p hangar-server --test runtime_codex`
 Expected: FAIL nos 5 testes novos.
 
-- [ ] **Step 4: Implementar**
+- [x] **Step 4: Implementar**
 
 - `thread/resume` da subida leva `cwd`, `approvalPolicy`, `sandbox` e `serviceTier` (quando houver), como `adapter.py:_subir_sem_terminal`; a verificação do Fast (`thread/resume` só com `threadId`) não muda.
 - Erro do `thread/resume` da subida: mensagem com "Model provider" e "not found" → repete com `modelProvider: "openai"` (uma vez); com "no rollout found" → `thread/start` com `cwd`, `approvalPolicy`, `sandbox`, `serviceTier` e `model` (só se o arquivo da sessão tiver modelo). Ambos só sem `transfer_id` no metadata. Os dois novos campos entram em `ThreadResumeParams` (`cwd`, `approval_policy`, `sandbox`, `service_tier`, `model_provider`) com `skip_serializing_if`, e o teste do recorte continua verde.
@@ -168,7 +168,7 @@ Expected: FAIL nos 5 testes novos.
 - `Select` sem aprovação pendente: `RuntimeError::new("no_pending_permission", "nenhuma aprovação pendente")`.
 - Texto do problema: `messages/pt.json` `problema_codex_esforco_nao_aplicado`: "O Codex não aceitou o nível de esforço escolhido; a sessão segue no padrão do modelo", `en.json`: "Codex did not accept the chosen effort level; the session keeps the model default"; mapear em `frontend/src/lib/problema.ts` e `mobile/src/chat/SessionProblem.tsx` (se a chave ainda não existir).
 
-- [ ] **Step 5: Rodar e ver passar; commit**
+- [x] **Step 5: Rodar e ver passar; commit**
 
 Run: `cd crates && CARGO_BUILD_JOBS=4 cargo test -p hangar-server --test runtime_codex --test runtime_contract && CARGO_BUILD_JOBS=4 cargo test -p hangar-codex --lib`
 Commit: `feat(codex): Rust bootstrap matches the Python fallbacks and error codes`.
@@ -186,7 +186,7 @@ Commit: `feat(codex): Rust bootstrap matches the Python fallbacks and error code
 - Consumes: tabela de pedidos da spec 5B.
 - Produces: cartão de permissão com opções `["Permitir neste turno","Permitir na sessão","Negar"]`; pergunta nativa para formulário MCP (`provider:"codex"`, `request_id`, `questions`); cartão de link `["Concluí","Cancelar"]` com a URL no texto.
 
-- [ ] **Step 1: Tipos**
+- [x] **Step 1: Tipos**
 
 Em `proto.rs`, trocar `ThreadOnlyParams` por:
 
@@ -201,7 +201,7 @@ wire!(pub struct McpServerElicitationRequestParams { pub thread_id:String, pub s
 
 Conferir com o schema 0.161 (`scripts/conferir-codex-schema`) os nomes `fileSystem`, `read`, `write`, `network.enabled`, `serverName`, `mode`, `message`, `url`, `requestedSchema`; o campo que divergir segue o schema. `LOCAL_NAMES` perde `ThreadOnlyParams`. `ServerRequest` ganha `CurrentTimeRead` (`"currentTime/read"`, params livres) e as variantes passam a carregar os tipos acima.
 
-- [ ] **Step 2: Testes (falham)**
+- [x] **Step 2: Testes (falham)**
 
 ```rust
 fn request(engine:&mut Engine,id:i64,method:&str,params:Value) -> Vec<Effect> {
@@ -282,12 +282,12 @@ fn request_from_a_subagent_thread_is_not_dropped() {
 }
 ```
 
-- [ ] **Step 3: Rodar e ver falhar**
+- [x] **Step 3: Rodar e ver falhar**
 
 Run: `cd crates && CARGO_BUILD_JOBS=4 cargo test -p hangar-server --test runtime_codex`
 Expected: FAIL nos 7 testes novos.
 
-- [ ] **Step 4: Implementar**
+- [x] **Step 4: Implementar**
 
 - No `notification`, o ramo de pedidos (`line.get("id")`) passa para **antes** do desvio por outra thread: pedido de qualquer thread entra em `server_requests` (voz continua desviada antes, pela thread organizadora).
 - `APPROVALS` (lista dos métodos que viram cartão) = comando, arquivo, permissões, formulário MCP em modo URL. `view()` monta o texto:
@@ -303,7 +303,7 @@ Expected: FAIL nos 7 testes novos.
 - Cancelar o formulário MCP pelo app (`SkipQuestion` com o `request_id` de um formulário) → `{"action":"cancel"}`.
 - Herdado da 5A (`pendencias-5b.md`): aprovação de comando com `command` vazio ou só espaços é tratada como ilegível (texto fixo, sem "Sempre permitir"); `turn/completed` lido cru com `status: "failed"` marca `headless_turno_erro` sem detalhe. Um teste para cada, no estilo dos de cima.
 
-- [ ] **Step 5: Rodar e ver passar; commit**
+- [x] **Step 5: Rodar e ver passar; commit**
 
 Run: o mesmo do Step 3 + `cargo test -p hangar-codex --lib`.
 Commit: `feat(codex): answer permission and MCP form/link requests, keep subagent requests`.
@@ -320,7 +320,7 @@ Commit: `feat(codex): answer permission and MCP form/link requests, keep subagen
 **Interfaces:**
 - Produces: `LaunchSpec`, `Cano`, `Liveness`, `ProcessError { NoCano, Spawn(String), NotListening, StillAlive }` com `code()` (`cano_ausente`, `cano_nao_subiu`, `cano_nao_escutou`, `cano_continua_vivo`), `liveness`, `spawn`, `kill`, `kill_orphans`, `cano_binary` — assinaturas e regras no desenho acima. O módulo não grava o arquivo da sessão.
 
-- [ ] **Step 1: Testes (falham)**
+- [x] **Step 1: Testes (falham)**
 
 `tests/runtime_process.rs` (Linux; Windows compila e roda só o que não depende de `/proc`):
 
@@ -381,12 +381,12 @@ fn orphans_are_processes_with_a_dead_key_and_our_owner() {
 
 (O teste de `spawn` usa o `hangar-cano` real do workspace como cano e `/bin/sleep` como programa; ajustar `CARGO_BIN_EXE_*` se o binário morar em outro crate — nesse caso apontar `CP_RUST_CANO_BIN` para `target/<perfil>/hangar-cano` montado pelo `cargo build -p hangar-cano` antes do teste.)
 
-- [ ] **Step 2: Rodar e ver falhar**
+- [x] **Step 2: Rodar e ver falhar**
 
 Run: `cd crates && CARGO_BUILD_JOBS=4 cargo build -p hangar-cano && CARGO_BUILD_JOBS=4 cargo test -p hangar-server --test runtime_process`
 Expected: FAIL de compilação (`process` não existe).
 
-- [ ] **Step 3: Implementar `process.rs`**
+- [x] **Step 3: Implementar `process.rs`**
 
 Seguir o desenho acima. Pontos que valem cada um uma regra vigente:
 - `spawn` não devolve antes de o cano escutar: tenta conectar (`runtime::cano::connect`, já existente) por até 10 s; sem escuta → mata o que subiu e devolve `NotListening` (o ator zera o `cano` pela política).
@@ -395,7 +395,7 @@ Seguir o desenho acima. Pontos que valem cada um uma regra vigente:
 - `kill_orphans` lê `/proc/*/environ` só dos processos do mesmo `uid`; manda `SIGTERM` por pid (não por grupo), como o Python; conta e loga os "alheios" (marca sem prova de dono).
 - O módulo não grava o arquivo da sessão (regra 2 do desenho): quem grava é o ator, pela política `session.patch_meta {cano}` / `session.clear_cano {pid}` (Task 4).
 
-- [ ] **Step 4: Rodar e ver passar; commit**
+- [x] **Step 4: Rodar e ver passar; commit**
 
 Run: o do Step 2.
 Commit: `feat(runtime): shared cano process module (spawn, kill with identity, orphans)`.
@@ -417,7 +417,7 @@ Commit: `feat(runtime): shared cano process module (spawn, kill with identity, o
 - Consumes: `process::{spawn,LaunchSpec}` (Task 3); motor da Task 1.
 - Produces: política `launch_env` → `{"program": [...], "env": {k: v}, "cano_extra": {...}}` (os dois provedores; Codex: `sem_terminal.argv(meta)` com o caminho resolvido do `codex`); políticas `session.patch_meta {cano}` e `session.clear_cano {pid}`; descriptor do `open` aceita `"launch": true` (sobe só se o processo gravado não for `Ours`); `table::decide(_, Provider::Codex, false, true) == Owner::Rust` para as rotas de escrita.
 
-- [ ] **Step 1: Testes (falham)**
+- [x] **Step 1: Testes (falham)**
 
 Python, `test_runtime_policy`: `launch_env` para uma sessão Codex devolve `program` (app-server com os `-c` do modo, `codex` com caminho resolvido) e `env` com `CODEX_HOME` da conta, `CP_SESSION_KEY`, `HANGAR_CANO_KEY`, `HANGAR_CANO_OWNER`, sem `TMUX`/`TMUX_PANE`; `session.clear_cano` só zera com o pid igual e não recria arquivo apagado.
 
@@ -439,11 +439,11 @@ Rust, `table.rs`: `codex_without_terminal_is_rust` (Input/Steer/Interrupt/Select
 
 Rust, `runtime_actor.rs`: `open` Codex com `launch: true` e sem cano → pede `launch_env` (fake de política devolve env + `codex` = script falso que fala JSON-RPC mínimo), sobe pelo `process::spawn`, grava `cano` no arquivo da sessão e o motor chega a `ready`. `open` com cano vivo → conecta, não sobe outro.
 
-- [ ] **Step 2: Rodar e ver falhar**
+- [x] **Step 2: Rodar e ver falhar**
 
 Run: `cd backend && uv run pytest tests/test_runtime_policy.py tests/test_runtime_routing.py` e `cd crates && CARGO_BUILD_JOBS=4 cargo test -p hangar-server --lib session_write && CARGO_BUILD_JOBS=4 cargo test -p hangar-server --test runtime_actor`.
 
-- [ ] **Step 3: Implementar**
+- [x] **Step 3: Implementar**
 
 - `launch_env` (Python, `runtime_policy.run`): Codex → `program = sem_terminal.argv(meta)` com `argv[0]` resolvido (`shutil.which`), `env = sem_terminal._ambiente(meta)`, `cano_extra = {}`; sem binário → erro `codex_ausente`. (O lado Claude pluga depois devolvendo o argv do adapter Claude e `cano_extra = {config_marca}`.)
 - `session.patch_meta` aceita `cano` nos dois provedores; `session.clear_cano {pid}` zera só se o `cano.pid` gravado for o mesmo e nunca recria arquivo apagado.
@@ -454,7 +454,7 @@ Run: `cd backend && uv run pytest tests/test_runtime_policy.py tests/test_runtim
 - Tabela: `Provider::Codex => if terminal { Owner::Python } else { <mesma regra do Claude sem terminal> }`.
 - Contrato: subir para o próximo número livre.
 
-- [ ] **Step 4: Rodar e ver passar; commit**
+- [x] **Step 4: Rodar e ver passar; commit**
 
 Commit: `feat(codex): headless Codex is born and reconnected by Rust; Python only computes the environment`.
 
@@ -471,7 +471,7 @@ Commit: `feat(codex): headless Codex is born and reconnected by Rust; Python onl
 - Consumes: `process::{spawn,kill}`; `launch_env`.
 - Produces: `Respawn { failures:u8, next_at:f64 }` no ator (teto 3, espera 5 s dobrando, zera com subida boa ou ação do usuário); `close` com `kill: true`.
 
-- [ ] **Step 1: Testes (falham)**
+- [x] **Step 1: Testes (falham)**
 
 Rust (`runtime_actor.rs`, com o cano falso da Task 4):
 - `cano_exit_respawns_with_backoff_up_to_three`: o cano sai (`cano_saiu`) → o ator sobe de novo após 5 s, depois 10 s, depois 20 s; na quarta saída para e deixa `problema = codex_headless_nao_subiu`.
@@ -482,9 +482,9 @@ Rust (`runtime_actor.rs`, com o cano falso da Task 4):
 
 Python (`test_runtime_routing.py`): `DELETE` de sessão Codex sem terminal com o Rust dono chama `close` com `kill: True` e não chama `sem_terminal.matar`; `/recarregar` e `/codex-permissions` (POST) vão ao Rust (controle `restart` / `set_permission_mode`).
 
-- [ ] **Step 2: Rodar e ver falhar** (comandos da Task 4).
+- [x] **Step 2: Rodar e ver falhar** (comandos da Task 4).
 
-- [ ] **Step 3: Implementar**
+- [x] **Step 3: Implementar**
 
 - Ator: na saída do cano de sessão Codex sem terminal, se não foi pedida (`close`/`kill`), agenda nova subida pelo `Respawn` (sem laço: um timer por sessão). Subida = `launch_env` + `spawn` + reconexão do motor (`bootstrap(true)`).
 - Motor: `Restart`/`Reload` ociosos → efeito novo `Effect::Respawn { reason }` (o ator mata e sobe); `SetPermissionMode` → mesmo sandbox: `session.patch_meta {permission_mode}`; outro sandbox: ocioso → `patch_meta` + `Respawn`; ocupado → `RuntimeError("erro_permissao_ocupada", …)`. Nome de modo desconhecido → `erro_modo_desconhecido`.
@@ -492,7 +492,7 @@ Python (`test_runtime_routing.py`): `DELETE` de sessão Codex sem terminal com o
 - Órfãos: ao subir o Rust (antes de abrir sessões), `kill_orphans` com o conjunto vivo das duas pastas, uma vez; o `matar_orfaos` do `_boot_sessions` só roda quando o modo é `python` (regra 10 do desenho). Teste Python: com o Rust esperado, `_boot_sessions` não chama `matar_orfaos`.
 - Teto esgotado (`Respawn` na terceira falha) mantém o problema da última subida (regra 6).
 
-- [ ] **Step 4: Rodar e ver passar; commit**
+- [x] **Step 4: Rodar e ver passar; commit**
 
 Commit: `feat(codex): Rust owns headless Codex lifecycle — respawn, restart, permission, close`.
 
@@ -510,17 +510,17 @@ Commit: `feat(codex): Rust owns headless Codex lifecycle — respawn, restart, p
 - Consumes: controles do motor (`ListModels`, `ReadSettings`, `SetModel`, `SetServiceTier`, `SetMode`, `ReadRateLimits`, `SkipQuestion`, `ListSkills`, `Restart`, `SetPermissionMode`).
 - Produces: `GET /models`, `POST /model`, `POST /service-tier`, `POST /codex/mode`, `GET /limits`, `POST /question/skip`, `GET /commands`, `POST /recarregar`, `GET|POST /codex-permissions` atendidos pelo Rust para Codex sem terminal; os mesmos corpos e códigos do Python (`api.py`: `/models` 6327, `/model` 6341, `/service-tier` 6357, `/codex/mode` 6461, `/limits` 6289 com `_normalize_rate_window`, `/question/skip` 9244, `/commands` 10742 com `skills_do_catalogo`, `/recarregar` 2786, `/codex-permissions` 6438 com `modos_para_tela`).
 
-- [ ] **Step 1: Gravar o golden**
+- [x] **Step 1: Gravar o golden**
 
 `gen_codex_routes.py` chama cada rota Python com um adapter Codex falso (respostas fixas do app-server) e grava `{rota, corpo pedido, status, corpo resposta}` para os casos: sucesso, sessão inexistente (404), sessão com terminal (repasse), erro do motor (502/503 com o código do Python), `/question/skip` de id não assíncrono (409), `/codex-permissions` ocupado (409 `erro_permissao_ocupada`).
 
-- [ ] **Step 2: Teste de contrato (falha)**
+- [x] **Step 2: Teste de contrato (falha)**
 
 `contract_codex_routes.rs` sobe o roteador com um ator falso que devolve as mesmas respostas do adapter falso e compara cada caso com o golden.
 
-- [ ] **Step 3: Implementar** as rotas em `session_write/codex.rs`, cada uma: porta de entrada por nome (5-0) → `decide` (Codex sem terminal → Rust; com terminal → repasse) → controle no ator → corpo no formato do Python. `migration_status.rs` marca as rotas como Rust.
+- [x] **Step 3: Implementar** as rotas em `session_write/codex.rs`, cada uma: porta de entrada por nome (5-0) → `decide` (Codex sem terminal → Rust; com terminal → repasse) → controle no ator → corpo no formato do Python. `migration_status.rs` marca as rotas como Rust.
 
-- [ ] **Step 4: Rodar e ver passar; commit**
+- [x] **Step 4: Rodar e ver passar; commit**
 
 Run: `cd backend && uv run python tests/fixtures/contract/gen_codex_routes.py` (só se o golden mudar) e `cd crates && CARGO_BUILD_JOBS=4 cargo test -p hangar-server --test contract_codex_routes`.
 Commit: `feat(codex): Codex-only routes served by Rust for headless sessions`.
@@ -537,10 +537,10 @@ Commit: `feat(codex): Codex-only routes served by Rust for headless sessions`.
 **Interfaces:**
 - Consumes: texto do cartão com URL (Task 2).
 
-- [ ] **Step 1: Testes (falham)**: URL `https://…` no `question` vira link que abre fora do app (web: `<a target="_blank" rel="noopener">`; Expo: `Linking.openURL`; nativo: `cx.open_url`); texto sem URL fica igual; trecho entre crases continua `code`. Nativo: o cartão de pergunta (`render_ask`) mostra Cancelar sempre — pergunta assíncrona do Codex → `Action::Skip`; demais → `Action::Cancel` (`/interrupt`), igual ao Cancelar do cartão de opções.
-- [ ] **Step 2: Rodar e ver falhar** (`cd frontend && npx vitest run src/components/OptionButtons.test.ts`; `cd mobile && npx jest src/chat/OptionButtons.test.tsx`; `cd desktop-native && CARGO_BUILD_JOBS=4 cargo test <teste>`).
-- [ ] **Step 3: Implementar** (só URL `http(s)://` sem espaços; nada de markdown novo no cartão).
-- [ ] **Step 4: Rodar e ver passar; commit** `feat(ui): clickable links in option cards; native question card gets Cancel`.
+- [x] **Step 1: Testes (falham)**: URL `https://…` no `question` vira link que abre fora do app (web: `<a target="_blank" rel="noopener">`; Expo: `Linking.openURL`; nativo: `cx.open_url`); texto sem URL fica igual; trecho entre crases continua `code`. Nativo: o cartão de pergunta (`render_ask`) mostra Cancelar sempre — pergunta assíncrona do Codex → `Action::Skip`; demais → `Action::Cancel` (`/interrupt`), igual ao Cancelar do cartão de opções.
+- [x] **Step 2: Rodar e ver falhar** (`cd frontend && npx vitest run src/components/OptionButtons.test.ts`; `cd mobile && npx jest src/chat/OptionButtons.test.tsx`; `cd desktop-native && CARGO_BUILD_JOBS=4 cargo test <teste>`).
+- [x] **Step 3: Implementar** (só URL `http(s)://` sem espaços; nada de markdown novo no cartão).
+- [x] **Step 4: Rodar e ver passar; commit** `feat(ui): clickable links in option cards; native question card gets Cancel`.
 
 ---
 
@@ -549,14 +549,90 @@ Commit: `feat(codex): Codex-only routes served by Rust for headless sessions`.
 **Files:**
 - Modify: `docs/decisoes/harnesses.md` (regra "Codex sem terminal: o app-server é do CANO" passa a "…o cano é do Rust"; regra do `-32601` restrita à última linha da tabela da 5B; regra nova do módulo de processo), `docs/decisoes/superado.md` (decisão 2 do dono único), `docs/migracao-rust/README.md` ("Ainda no Python" sem o Codex sem terminal), `docs/migracao-rust/parte5-codex/pendencias-5b.md` (riscar o que a 5B fechou)
 
-- [ ] **Step 1: Docs** — as quatro mudanças acima, cada regra com o porquê curto.
-- [ ] **Step 2: Medição** — release, backend isolado (lançador com no-op, regra da memória "backend isolado mata canos reais"), 5 sessões Codex sem terminal trabalhando: CPU e RSS do Rust × Python (mesmo roteiro da `parte4/medicao.md`). Gravar em `docs/migracao-rust/parte5-codex/medicao-5b.md`.
+- [x] **Step 1: Docs** — as quatro mudanças acima, cada regra com o porquê curto.
+- [x] **Step 2: Medição** — release, backend isolado (lançador com no-op, regra da memória "backend isolado mata canos reais"), 5 sessões Codex sem terminal trabalhando: CPU e RSS do Rust × Python (mesmo roteiro da `parte4/medicao.md`). Gravar em `docs/migracao-rust/parte5-codex/medicao-5b.md`.
 - [ ] **Step 3: Uso real (verificação manual)** — no PC de casa, Hangar instalado pelo canal de testes na branch: criar Codex sem terminal pelo app nativo e pelo celular; conversar; aprovar comando, arquivo e permissão; responder formulário MCP; Stop com comando longo; trocar modelo, Fast, modo e permissão; `/recarregar`; matar o `hangar-cano` à mão (religa); reiniciar o backend com turno rodando; apagar a sessão (processo some). `CP_RUST_SERVER=0` continua abrindo pelo Python.
-- [ ] **Step 4: Commit** `docs(codex): rules and status after Codex headless moved to Rust`.
+- [x] **Step 4: Commit** `docs(codex): rules and status after Codex headless moved to Rust`.
+
+---
+
+### Task 9: O Rust publica estado e prévia do Codex sem terminal
+
+**Decisão do dono (08/10):** entra nesta branch o item da spec 5B que o plano deixou de fora ("Estado, prévia e `ask_question` publicados pelo Rust… coalescimento de 150 ms… A lista lê o estado do Rust"). **Por quê** ([`medicao-5b.md`](medicao-5b.md)): com 10 sessões trabalhando, Python + Rust sobem de 62,5–65,5 ms/s (base `6186ce136`) para 91–92. Cada prévia (~6,65/s por sessão) vai ao Python por `/runtime/events` (`gateway.rs` `events`, sem filtro), sobe a `revision`, faz o `RuntimeAdapter.state_stream` emitir um `StateEvent` inteiro (`deepcopy` + `model_validate`, `sse.py` `state`) e volta ao Rust pela conexão interna: dois eventos por prévia, os dois processos pagam.
+
+**Desenho:**
+- **Um canal em processo por sessão, com o último valor.** O registro do runtime guarda por nome um `watch::Sender<Option<Arc<LiveState>>>` (`LiveState { public_state, channels: preview/thinking/tool, error: Option<(código, frase)> }`). O ator do Codex sem terminal escreve nele a vista, o erro durável do ator e as três prévias. **Prévia do Codex sai só daí**: não vai ao `events`, não sobe a `revision` (o espelho do Python continua consecutivo e nunca pede `snapshot` por buraco). `view`, `state`, `problem`, `rate` e voz seguem no `events` como hoje: o Python ainda precisa do espelho para controles, `current_model`, `/commands`, religação de conversa e fatos da lista.
+- **O hub publica.** `ensure_monitor` liga, para hub de Codex sem terminal, o `RuntimeFeed` (`state/runtime_feed.rs`) no lugar do `Monitor`, pelo mesmo `SpawnMonitor` (o `live::spawner` escolhe pelo binding). O feed acorda pelo `watch` (ou pela resposta gravada, `hub.wake`), espera 150 ms (`COALESCE`, a regra da lista), lê o último valor e publica pelo `publish_own` só o que mudou: `ask_question` (o `codex_question` ou `null`, como o `sse.py`), `state` (`public_state`; erro do ator vira `problema = runtime_falhou`, `problema_detalhe = "<código>: <frase>"`, como `runtime_problem`), `preview` (`PreviewEvent` com `vivo: true`, vazia quando igual à resposta gravada: `watch_commits` + `preview::is_committed`, como o `Monitor`), `pensamento` e `ferramenta` (`{"text"}`). `suggest` nunca: é do plugin Claude (`plugin_bridge.sugestao` é sempre vazio no Codex). Sem entrada no registro: `state` `idle` sem problema (a "parada" da lista). Sem registro (`StateEnv.runtime` vazio): `problema = runtime_absent`.
+- **Dono único dos eventos.** `Binding` ganha `headless` (do `info`). Hub com feed vivo descarta do Python `state`, `preview`, `ask_question`, `suggest`, `pensamento` e `ferramenta` e registra `state_python_leak` uma vez (a guarda do Claude, com os dois a mais). O Python não os produz: `_estado_do_rust(provider, name)` passa a valer também para Codex com sidecar `headless`, modo `pending`/`rust` e `rust_owns("codex", True)`; `_push_channels` não alimenta fonte de Codex.
+- **Troca de modo** (`/modo-execucao`): o `jsonl_watcher` do `sse.py` trata a mudança de `headless` do Codex como troca de provider (`__reprovider__`): reavalia `_estado_do_rust` e manda o `info` novo; o `headless` diferente religa o hub (`rebind`), que liga ou desliga o feed.
+- **Fila:** o ator já drena sozinho (`WakeQueue` em pronto/turno acabado/resposta, `Job::Queued` no append); o gatilho de entrega do `sse.py` some para o Codex sem prejuízo. A conexão interna do Codex **mantém** o `tail_pump` (é ele que chama `_confirm_codex_queue` no `user_msg`; linha de transcript, não delta), com `_enqueue_preview` desligado quando `rust_state`.
+- **Convidado e Connect (8766/8768):** `private_events` aceita hub de Codex sem terminal e repassa os seis eventos; `_canal_do_estado` aceita `pensamento`/`ferramenta`. Hub de Claude continua só com os quatro (lá o Python produz os dois em voo).
+- **Push:** não muda; sai do hook e do `stall_watch` pela lista, nunca do SSE do chat.
+- **Lista:** o feed grava em `Published` como o `Monitor`, com `sid` = stem do rollout (o `sid(row)` do `classify`; o `session_key` do Codex não é o stem). No `classify`, linha `codex` sem terminal com entrada viva vira `from_monitor` + o texto da `codex_question` (regra do `headless_state`); `pending_questions`, conta e `last_activity` seguem dos fatos do Python. Sem chat aberto, vale o fato do Python, que lê o mesmo espelho da vista do Rust.
+- **Fora:** Claude sem terminal paga o mesmo caminho (`RuntimeAdapter.state_stream`), e o feed não depende de provedor; ligar para ele é o ator escrever no `watch` e o predicado `ClaudeHeadless`. Não entra: é arquivo e prova da metade Claude ([`contrato-par.md`](../parte5-claude/contrato-par.md)) e lá ainda há `suggest`/faixa a conferir. Fica anotado em [`pendencias-5b.md`](pendencias-5b.md) com a mesma medida.
+- **Contrato interno:** muda (`info` ganha `headless`, o canal privado serve Codex, o side-events deixa de levar os seis eventos do Codex sem terminal). A branch está em 38, mas a `origin/main` já juntou outro 38 (`22b05a4ad`, pages): um Python da `main` e um Rust desta branch se aceitariam com contratos diferentes. Sobe para **39** nesta Task (`RUST_SERVER_PROTOCOL`, `INTERNAL_PROTOCOL`, `tests/proxy.rs`, `tests/terminal_routes.rs`), e a junção reconfere o próximo número livre (Global Constraints).
+
+**Files:**
+- Create: `crates/hangar-server/src/state/runtime_feed.rs`
+- Modify: `crates/hangar-server/src/runtime/protocol.rs` (`LiveState`), `runtime/gateway.rs` (`live(name)`, `Sender` no `open`, `None` no `close`/`close_with_kill`, entrada sai sem receptor), `runtime/actor.rs` (`Effect::Publish` de prévia do Codex → `watch`; `Job::View`/erro → `watch`; saída com erro do ator marca `error`)
+- Modify: `crates/hangar-server/src/state/mod.rs`, `state/live.rs` (`spawner` escolhe `Monitor` ou feed), `side.rs` (`Binding.headless`, `ensure_monitor`, guarda, `private_events`/`private_loop`), `transcript/history.rs` (`InternalInfo.headless`), `list/classify.rs`
+- Modify: `crates/hangar-server/src/lib.rs`, `crates/hangar-server/tests/proxy.rs`, `crates/hangar-server/tests/terminal_routes.rs`, `backend/app/rust_server.py` (39)
+- Modify: `backend/app/internal_api.py` (`info_payload`: `headless` do Codex), `backend/app/sse.py` (`_estado_do_rust`, `_RUST_STATE_EVENTS`, `tail_pump`, `jsonl_watcher`), `backend/app/runtime_coordinator.py` (`_push_channels`)
+- Modify: `docs/migracao-rust/parte5-codex/medicao-5b.md`, `docs/migracao-rust/parte5-codex/pendencias-5b.md`, `CLAUDE.md` + `docs/decisoes/plataforma.md` (regra do estado ao vivo: Codex sem terminal pelo feed)
+- Test: `crates/hangar-server/tests/runtime_actor.rs`, `state/runtime_feed.rs` (unitários), `side.rs` (unitários), `list/classify.rs` (unitários), `backend/tests/test_sse.py`, `test_internal_side_events.py`, `test_internal_api.py`, `test_runtime_adapter.py`
+
+**Interfaces:**
+- Consumes: ator e registro das Tasks 4–5; `Hub::publish_own`, `watch_commits`, `Published` (parte 4).
+- Produces: `RuntimeRegistry::live(name) -> watch::Receiver<Option<Arc<LiveState>>>`; `InternalInfo.headless: bool` (`#[serde(default)]`); `/__hangar_server/state/{name}/events` para Codex sem terminal com seis eventos; `sse._estado_do_rust(provider, name)`; contrato 39.
+
+- [x] **Step 1: Testes Rust (falham)**
+
+`runtime_actor.rs`:
+- `codex_preview_goes_to_live_not_to_events`: delta do Codex → o receptor do `events` não vê `preview`/`thinking`/`tool` e a `revision` não anda; `live(name)` tem a prévia. (Risco: buraco de `revision` faria o Python pedir `snapshot` a cada evento.)
+- `codex_view_and_actor_error_reach_live`: `Job::View` atualiza `public_state`; erro durável aparece em `error` e some quando o ator volta; ator que sai com erro deixa `error` marcado. (Risco: estado calado.)
+- `claude_headless_preview_still_on_events` (fora do escopo continua igual).
+- `queued_input_drains_without_any_subscriber`: entrada na fila com turno rodando sai no fim do turno sem SSE nenhum aberto. (Risco: o gatilho de entrega do `sse.py` some.)
+
+`state/runtime_feed.rs` (`start_paused`, hub de teste com `idle_ctx`):
+- `burst_coalesces_into_one_round`: 20 prévias em 100 ms → uma `preview`, com o último texto, 150 ms depois.
+- `republishes_only_on_change`: a mesma vista duas vezes → um `state`; `ask_question` sai no primeiro retrato (`null`) e a cada mudança, inclusive de volta a `null`.
+- `actor_error_is_runtime_falhou`; `absent_entry_is_idle`; `no_registry_is_runtime_absent`.
+- `committed_preview_goes_out_empty`: prévia igual à última resposta gravada sai vazia.
+- `never_publishes_suggest`; `closed_hub_ends_feed`.
+- `publishes_to_list_with_rollout_stem`: `Published::get(name, Some(<stem do rollout>))` devolve o último `state`.
+
+`side.rs`: o teste "Sessão sem Monitor (Codex): o Python segue dono" vira dois: Codex **com** terminal → o Python segue dono; Codex **sem** terminal → os seis eventos do Python caem com um `state_python_leak`. Mais `private_channel_serves_codex_headless_six_events` (e o de Claude continua com quatro), `headless_flip_rebinds_and_swaps_owner` (o `info` com `headless` trocado religa o hub e liga/desliga o feed) e `feed_panic_reports_and_shows_problem` (diário `rust.state_feed_failed` e `state` com `problema = state_feed_failed`; volta com o próximo assinante). `one_monitor_per_session`: hub de Codex sem terminal conta um feed, com terminal nenhum.
+
+`list/classify.rs`: linha `codex` sem terminal com entrada em `Published` sai com o estado e a pergunta do feed; sem entrada, fica o fato do Python.
+
+- [x] **Step 2: Testes Python (falham)**
+
+- `test_sse.py`: `_estado_do_rust("codex", nome)` só com sidecar `headless`, modo `pending`/`rust` e `rust_owns("codex", True)`; com terminal ou modo `python`, falso. Conexão interna de Codex sem terminal não emite nenhum dos seis eventos, mantém o `tail_pump` (o `user_msg` chama `_confirm_codex_queue`) e não chama `_enqueue_preview`. Conexão de convidado repassa os seis do canal privado falso. Sidecar que troca `headless` no meio do stream gera `__reprovider__` e um `info` novo.
+- `test_internal_api.py`: `info_payload` traz `headless` do sidecar Codex; Claude e Codex com terminal trazem `false`.
+- `test_runtime_adapter.py`: `_push_channels` de slot Codex não toca `PushPreviewSource`/`fonte_pensamento`/`fonte_ferramenta`; de Claude sem terminal, toca.
+- `test_internal_side_events.py`: o `info` da conexão interna leva `headless`.
+
+- [x] **Step 3: Rodar e ver falhar**
+
+Run: `cd backend && uv run pytest tests/test_sse.py tests/test_internal_side_events.py tests/test_internal_api.py tests/test_runtime_adapter.py` e `cd crates && CARGO_BUILD_JOBS=4 cargo test -p hangar-server --lib side:: state::runtime_feed list::classify && CARGO_BUILD_JOBS=4 cargo test -p hangar-server --test runtime_actor`.
+
+- [x] **Step 4: Implementar (Rust)** como no desenho. O feed roda sob `catch_unwind` como o `Monitor` (`live::spawner`); o `watch` sai do mapa no `close` quando ninguém mais o assina. Contrato 39.
+
+- [x] **Step 5: Implementar (Python)** como no desenho; `RUST_SERVER_PROTOCOL = 39`.
+
+- [x] **Step 6: Rodar e ver passar; commit**
+
+Run: os do Step 3, mais `CARGO_BUILD_JOBS=4 cargo test -p hangar-server --test proxy --test terminal_routes`.
+Commit: `feat(codex): Rust hub publishes headless Codex state and preview; Python leaves the delta path`.
+
+- [x] **Step 7: Medição e regras**
+
+Release, backend isolado (`scripts/medir-codex-sem-terminal.py`, mesma máquina e roteiro da Task 8), `--rust 1` desta branch contra a base `6186ce136` já medida: 10 sessões, duas rodadas. **Aceite:** trabalhando, Python + Rust ≤ 62,5–65,5 ms/s (a base) e o total com canos e `codex` ≤ 88–91; parado, ~25 ms/s como antes; a prévia continua chegando nos chats (no máximo uma a cada 150 ms por chat, texto final igual) e o pico de RSS do Rust anotado. Não cumpriu → a Task não fecha: o relatório diz qual processo e a hipótese, sem trocar o alvo. Gravar em `medicao-5b.md` (seção "Depois da Task 9"); `CLAUDE.md` + `plataforma.md`: a regra do estado ao vivo cita o feed do Codex sem terminal; `pendencias-5b.md`: Claude sem terminal no mesmo caminho.
+Commit: `docs(codex): 5B Task 9 measurement and live-state rule`.
 
 ---
 
 ## Self-review
 
-- Spec 5B coberta: nascimento e vida no Rust (Tasks 3–5), religar sem varrer (Task 5, `Respawn`), controles (Tasks 1, 5, 6), linha de status e skills (já no Rust pela 5-0; conferido na Task 6 via `/commands`), estado publicado (vem do slot em fase Rust, Task 4), tabela de pedidos (Task 2), rotas (Tasks 4 e 6), prova real (Task 8). Pendências herdadas: versão conferida (Task 1), `failed` cru e `command` vazio (Task 2), pedido de subagente (Task 2), `start_sessions` antes do `owns` (Task 4), `default_model/default_effort` (fica para a 5E, como combinado).
+- Spec 5B coberta: nascimento e vida no Rust (Tasks 3–5), religar sem varrer (Task 5, `Respawn`), controles (Tasks 1, 5, 6), linha de status e skills (já no Rust pela 5-0; conferido na Task 6 via `/commands`), estado, prévia e `ask_question` publicados pelo hub do Rust com a lista lendo o mesmo valor (Task 9; o plano original os dava como vindos do slot da Task 4, e a medida da Task 8 mostrou que não), tabela de pedidos (Task 2), rotas (Tasks 4 e 6), prova real (Task 8). Pendências herdadas: versão conferida (Task 1), `failed` cru e `command` vazio (Task 2), pedido de subagente (Task 2), `start_sessions` antes do `owns` (Task 4), `default_model/default_effort` (fica para a 5E, como combinado).
 - Fora: Codex com terminal (5C), contas/catálogo (5E), criação/rename/exclusão como rota (parte 6; aqui só o kill via Rust).

@@ -760,7 +760,7 @@ mod tests {
         let (spawn, count) = fake_monitors(IDLE_PANE);
         let ctx = SideCtx { upstream: "127.0.0.1:9".parse().unwrap(), secret: "s".into(), http: crate::proxy::client(),
             watchers: Default::default(), hubs: Hubs::default(), infos: Default::default(), monitors: Some(spawn), mods: Default::default() };
-        let binding = |p| Binding { provider: p, jsonl: dir.path().join("a.jsonl"), key: "a".into() };
+        let binding = |p| Binding { provider: p, jsonl: dir.path().join("a.jsonl"), key: "a".into(), headless: false };
         // Dono no celular, dono no desktop e o canal do convidado: um hub, um Monitor.
         let leases: Vec<_> = (0..3).map(|_| ctx.hubs.acquire("s", binding(Provider::Claude), &ctx)).collect();
         assert_eq!(count.load(Ordering::SeqCst), 1);
@@ -769,10 +769,14 @@ mod tests {
         assert!(first.monitor.lock().unwrap().is_none(),"o último assinante saiu: o Monitor para com o hub");
         let again = ctx.hubs.acquire("s", binding(Provider::Claude), &ctx);
         assert_eq!(count.load(Ordering::SeqCst), 2, "volta com o próximo assinante");
-        // Codex e Claude sem terminal não são do Monitor.
+        // Codex com terminal e Claude sem terminal não têm dono do estado no Rust.
         let _codex = ctx.hubs.acquire("c", binding(Provider::Codex), &ctx);
         let _headless = ctx.hubs.acquire("h", binding(Provider::ClaudeHeadless), &ctx);
         assert_eq!(count.load(Ordering::SeqCst), 2);
+        // Codex sem terminal ganha um feed, e só um com vários assinantes.
+        let feeds: Vec<_> = (0..2).map(|_| ctx.hubs.acquire("x", Binding { headless: true, ..binding(Provider::Codex) }, &ctx)).collect();
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+        drop(feeds);
         drop(again);
     }
 

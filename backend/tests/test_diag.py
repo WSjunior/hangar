@@ -48,7 +48,8 @@ def test_conteudo_de_conversa_nao_entra_por_campo_nenhum():
 
 
 def test_evento_sem_verbo_nao_vira_linha():
-    assert diag.anotar_da_tela([{"tela": "chat"}, {"evento": "   "}, {"evento": 3}, "texto"]) == 0
+    # Tratadas, não gravadas: devolver menos faria a tela reenviar o mesmo lote para sempre.
+    assert diag.anotar_da_tela([{"tela": "chat"}, {"evento": "   "}, {"evento": 3}, "texto"]) == 4
     assert not diag.caminho_do_dia().exists()
 
 
@@ -131,9 +132,11 @@ def test_teto_de_sucesso_batido_ainda_grava_falha(monkeypatch):
     assert [l.get("etapa") for l in linhas if l["evento"] == "diag.teto"] == ["sucesso"]
     assert linhas[-1]["evento"] == "api.servidor" and linhas[-1]["nivel"] == "erro"
     assert not any(l["evento"] == "ok39" for l in linhas)
-    # Lote misto acima do teto de sucesso: só a falha entra, e a contagem diz isso.
-    assert diag.anotar_da_tela([{"evento": "m-ok"}, {"evento": "m-erro", "nivel": "erro"}]) == 1
+    # Lote misto acima do teto de sucesso: só a falha entra, mas o lote inteiro conta como tratado,
+    # senão a tela o reenvia a cada 10 s e a falha se repete no arquivo.
+    assert diag.anotar_da_tela([{"evento": "m-ok"}, {"evento": "m-erro", "nivel": "erro"}]) == 2
     assert [l["evento"] for l in _linhas()][-1:] == ["m-erro"]
+    assert sum(l["evento"] == "m-erro" for l in _linhas()) == 1
 
 
 def test_teto_rigido_para_ate_a_falha(monkeypatch):

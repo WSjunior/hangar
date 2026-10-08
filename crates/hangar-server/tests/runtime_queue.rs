@@ -56,6 +56,33 @@ fn state_stays_bounded_with_100kb_replies() {
     assert!(std::fs::metadata(&path).unwrap().len() < 1_000_000);
 }
 
+/// A intenção grande (quadro com anexo) ia inteira para o recibo de cada fase: MB por gravação.
+#[test]
+fn phase_receipts_do_not_copy_a_large_intent() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state");
+    let mut store = Store::open(&path,&dir.path().join("projection"),State::new("key",1,"session",vec![])).unwrap();
+    let big = "x".repeat(100_000);
+    store.exec(1,"prepare",clock(),Action::Prepare { id:"op".into(),payload:json!({"kind":"input","frame":{"text":big}}),entry_id:None }).unwrap();
+    store.exec(1,"cursor",clock(),Action::BindDispatch { id:"op".into(),cursor:json!({"conversation":"c","file_identity":"1:2","offset":1,"anchor":"a"}) }).unwrap();
+    store.exec(1,"dispatch",clock(),Action::BeginDispatch { id:"op".into(),wire_id:"wire:op:1".into(),staged:false }).unwrap();
+    let finish = Action::Finish { id:"op".into(),status:Status::Accepted,
+        result:json!({"operation_id":"op","disposition":"accepted","payload":{"tool_result":big}}) };
+    let first = store.exec(1,"finish",clock(),finish.clone()).unwrap();
+    assert_eq!(first["payload"]["frame"]["text"],big, "quem chama agora recebe a operação inteira");
+    for call in ["call::prepare","call::cursor","call::dispatch","call::finish"] {
+        assert!(serde_json::to_vec(&store.state().operations[call].result).unwrap().len() < 1_000, "{call}");
+    }
+    // Sobra a intenção na operação e no recibo do Prepare (que confere reuso do identificador).
+    assert!(std::fs::metadata(&path).unwrap().len() < 250_000);
+    let replay = store.exec(1,"finish",clock(),finish).unwrap();
+    for field in ["id","status","entry_id"] { assert_eq!(replay[field],first[field]); }
+    assert_eq!(replay["result"]["disposition"],"accepted");
+    let reply_id = |value:&serde_json::Value|serde_json::from_value::<hangar_server::runtime::protocol::RuntimeReply>(value["result"].clone()).unwrap().operation_id;
+    assert_eq!(reply_id(&replay),reply_id(&first));
+    assert!(store.exec(1,"finish",clock(),Action::Finish { id:"op".into(),status:Status::Rejected,result:json!(null) }).is_err());
+}
+
 #[test]
 fn kept_reply_still_replays_instead_of_resending() {
     use hangar_server::runtime::protocol::{Disposition,RuntimeReply};
@@ -107,6 +134,33 @@ fn local_command_answer_confirms_the_command_outside_the_transcript() {
     assert_eq!(row("e1")["confirmed"],true);
     assert_ne!(row("e2")["confirmed"],true);
     assert!(state.operations["op"].status == Status::Confirmed);
+}
+
+/// Fila gravada antes da confirmação pela resposta local: a bolha do `/btw` ficava para sempre.
+#[test]
+fn reopening_confirms_command_answered_locally_before_the_fix() {
+    let dir = tempfile::tempdir().unwrap();
+    let state_path = dir.path().join("state");
+    let rows = vec![
+        json!({"id":"old","text":"/btw","ts":50.0,"delivered":true}),
+        json!({"id":"e1","text":"/btw","ts":100.0,"delivered":true}),
+        json!({"id":"local:1","text":"/btw isn't available in this environment.","ts":100.1,"delivered":true,"confirmed":true,"papel":"assistant"}),
+        json!({"id":"e2","text":"/context","ts":200.0,"delivered":true}),
+        json!({"id":"e3","text":"/compact","ts":300.0,"delivered":true}),
+        json!({"id":"local:2","text":"⚙️ A CLI pediu `x`; respondi vazio","ts":301.0,"delivered":true,"confirmed":true,"papel":"assistant"}),
+        json!({"id":"e4","text":"/btw","ts":400.0,"delivered":true,"desistiu":true}),
+        json!({"id":"local:3","text":"/btw isn't available in this environment.","ts":400.1,"delivered":true,"confirmed":true,"papel":"assistant"}),
+    ];
+    std::fs::write(&state_path,serde_json::to_vec(&State::new("key",1,"session",rows)).unwrap()).unwrap();
+    let store = Store::open(&state_path,&dir.path().join("projection"),State::new("key",1,"session",vec![])).unwrap();
+    let row = |state:&State,id:&str|state.rows.iter().find(|r|r["id"] == id).unwrap()["confirmed"].clone();
+    assert_eq!(row(store.state(),"e1"),true);
+    assert_ne!(row(store.state(),"old"),true, "confirma a linha do par, não a mais antiga com o mesmo texto");
+    assert_ne!(row(store.state(),"e2"),true, "sem resposta local logo depois, segue esperando o transcript");
+    assert_ne!(row(store.state(),"e3"),true, "aviso local que não nomeia o comando não é a resposta dele");
+    assert_ne!(row(store.state(),"e4"),true, "desistência continua visível");
+    let disk:serde_json::Value = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(disk["rows"][1]["confirmed"],true, "a confirmação vai ao disco na abertura");
 }
 
 #[test]

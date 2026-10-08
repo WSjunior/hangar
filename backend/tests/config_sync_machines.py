@@ -14,6 +14,8 @@ def use_machine(monkeypatch, roots: Roots) -> None:
     """Faz o processo de teste 'ser' esta máquina: HOME, engines e runtime-config."""
     from app import runtime_config
     monkeypatch.setenv("HOME", roots.home)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setenv("APPDATA", str(Path(roots.home) / "AppData" / "Roaming"))
     monkeypatch.delenv("CP_ENGINES_FILE", raising=False)
     monkeypatch.setattr(runtime_config, "_caminho", lambda: prefs_path(roots))
 

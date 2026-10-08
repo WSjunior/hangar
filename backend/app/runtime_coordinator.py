@@ -48,10 +48,13 @@ def expect_rust(expected=True):
     _initial_mode = "pending" if expected else "python"
 
 
-def refuse_python_client(name):
-    """Com o Rust esperado ou dono, as sessões Claude são dele: cliente Python no cano é defeito."""
-    if _current is not None and _current.mode in {"pending", "rust"}:
-        raise RuntimeError(f"cliente Python bloqueado em {name}: o Rust é o dono das sessões Claude")
+def refuse_python_client(name, provider="claude", *, spawn=False):
+    """Com o Rust esperado ou dono, as sessões sem terminal que ele anuncia são dele: cliente Python
+    no cano é defeito. Exceção: a passagem para terminal (`python_client_released`) religa no cano
+    que o Rust soltou, mas nunca sobe outro (`spawn`)."""
+    if (_current is not None and _current.mode in {"pending", "rust"} and _current.rust_owns(provider, True)
+            and (spawn or name not in _current.python_client_released)):
+        raise RuntimeError(f"cliente Python bloqueado em {name}: o Rust é o dono das sessões sem terminal")
 
 
 class Phase(Enum):
@@ -176,7 +179,8 @@ _TERMINAL_PRE_EFFECT_ERRORS = frozenset({"terminal_facts", "receipt_scan"})
 # defeito: sobem como erro sem ir ao diário de falha.
 _ANSWER_CODES = frozenset({
     "claude_command", "codex_command", "lifecycle_required", "operation_reused", "input_text",
-    "queue_busy", "queue_entry", "steer_unknown", "policy_refused"})
+    "queue_busy", "queue_entry", "steer_unknown", "policy_refused", "erro_permissao_ocupada", "erro_modo_desconhecido",
+    "erro_codex_reiniciando"})
 _BIRTH_POLL_S = 0.25
 _INITIALIZE_WAIT_S = 185.0   # teto do `initialize` no Rust (180 s) com folga
 # O Rust não chegou ao cano recém-lançado: o processo é morto e a falha conta no teto de subidas.
@@ -212,9 +216,17 @@ def _has_pending(state_path):
     return any(not row.get("delivered") for row in rows)
 
 
-def _codex_session(name):
+def _codex_mode(name):
+    """`None` sem sessão Codex com esse nome; senão se ela é sem terminal."""
     from app.adapters.codex import sessions as codex_sessions
-    return codex_sessions.load(name) is not None
+    meta = codex_sessions.load(name)
+    return None if meta is None else bool(meta.get("headless"))
+
+
+def _headless_provider(name):
+    """Provedor da sessão sem terminal pelo arquivo dela: o do Codex mora em pasta própria."""
+    from app.adapters.codex import sessions as codex_sessions
+    return "codex" if (codex_sessions.load(name) or {}).get("headless") else "claude"
 
 
 def _registration_failed(event, name, exc, *, rust_dead=False):
@@ -245,14 +257,19 @@ class RuntimeCoordinator:
         self.registration_locks = {}
         self.adoption_task = None
         self.rebindings = {}
+        self.rebind_times = {}
+        self.rebind_capped = set()
         self.drains = {}
         self.mode = _initial_mode
         self.mode_hooks = {}        # "rust"/"python" -> corrotina que o lifespan registra
         self._hooks_ran = set()
         self._settling = False      # entrando num modo: as sessões ainda abrindo ou voltando
         self._mode_event = None
+        # Sessões cuja recusa de fundo por cache inválido já foi ao diário nesta sequência.
+        self._cache_invalid_logged: set[str] = set()
         # Antes da saúde do Rust vale o que se espera dele; depois, o que ele anuncia.
         self._owns = {("claude", True), ("claude", False)}
+        self.python_client_released = set()     # nomes em passagem de Codex sem terminal para terminal
 
     def rust_owns(self, provider, headless):
         return (provider, headless) in self._owns
@@ -345,12 +362,13 @@ class RuntimeCoordinator:
             # Em paralelo: com muitas sessões, em série a janela passaria do teto de espera.
             await asyncio.gather(*(reopen(slot) for slot in tuple(self.slots.values())
                 if self.names.get(slot.binding.name) == slot.binding.key and slot.phase == Phase.Rust))
-            try:
-                await self.register_claude_sessions()
-            except Exception as exc:
-                # Falha que não é de uma sessão (pasta da fila, lista de sidecars): o modo assenta
-                # mesmo assim, e o próximo envio de cada sessão a abre no Rust.
-                _registration_failed("runtime.registration_failed", "*", exc)
+            for register in (self.register_claude_sessions, self.register_codex_sessions):
+                try:
+                    await register()
+                except Exception as exc:
+                    # Falha que não é de uma sessão (pasta da fila, lista de sidecars): o modo assenta
+                    # mesmo assim, e o próximo envio de cada sessão a abre no Rust.
+                    _registration_failed("runtime.registration_failed", "*", exc)
         except asyncio.CancelledError:
             cancelled = True        # o Rust caiu no meio: quem decide o modo agora é a queda
             raise
@@ -371,7 +389,7 @@ class RuntimeCoordinator:
             self._check_opened(ready, descriptor)
         else:
             pending = await asyncio.to_thread(_has_pending, slot.binding.state_path)
-            meta = await asyncio.to_thread(self.legacy.binding, name, "claude")
+            meta = await asyncio.to_thread(self.legacy.binding, name, slot.binding.provider)
             if not pending and not (meta is not None and await asyncio.to_thread(_cano_alive, meta.meta)):
                 # Parada, sem nada a entregar: sai do registro, e o próximo envio a sobe no Rust.
                 from app import diag
@@ -382,7 +400,7 @@ class RuntimeCoordinator:
                 if self.names.get(name) == slot.binding.key:
                     self.names.pop(name, None)
                 return
-            binding, ready = await self._launch_and_open(name, launch=pending)
+            binding, ready = await self._launch_and_open(name, launch=pending, provider=slot.binding.provider)
             if binding.key != slot.binding.key:
                 raise RuntimeError("sidecar mudou durante a reabertura da sessão")
         with slot.guard:
@@ -394,7 +412,8 @@ class RuntimeCoordinator:
         """`launch`: quem chama pode subir o processo (envio, acordar); leitura e parada nunca sobem."""
         if self.legacy is None:
             return self.managed_runtime(name)
-        if provider == "claude":
+        # Só espera o desfecho do Rust quem ele atende no modo da própria sessão: Codex com terminal é do Python.
+        if provider == "claude" or self.rust_owns(provider, bool(await asyncio.to_thread(_codex_mode, name))):
             await self.await_mode()
         async with self.registration_locks.setdefault(name, asyncio.Lock()):
             binding = await asyncio.to_thread(self.legacy.binding, name, provider)
@@ -534,11 +553,14 @@ class RuntimeCoordinator:
         return self.transport is not None and binding.headless and self.rust_owns(binding.provider, True)
 
     async def ensure_open(self, name, *, engine_models=None, wait_initialized=False):
-        """Sessão Claude sem terminal aberta no Rust: o Python só lança o processo do cano e grava
-        o sidecar; o Rust é o único cliente dele. Serializado por nome com o `prepare_session`."""
+        """Sessão sem terminal aberta no Rust, que é o único cliente do cano. Claude: o Python lança
+        o processo e grava o sidecar; Codex: o Rust sobe o processo e o Python só calcula o ambiente
+        (`launch_env`). Serializado por nome com o `prepare_session`."""
         if self.legacy is None or self.transport is None:
             raise RuntimeError("runtime Rust indisponível")
-        if not await self.prepare_session(name, "claude", launch=True, engine_models=engine_models):
+        provider = (self.slot(name).binding.provider if self.managed_queue(name)
+                    else await asyncio.to_thread(_headless_provider, name))
+        if not await self.prepare_session(name, provider, launch=True, engine_models=engine_models):
             raise RuntimeError("sessão sem terminal sem sidecar")
         slot = self.slot(name)
         if slot.phase != Phase.Rust:
@@ -548,7 +570,11 @@ class RuntimeCoordinator:
         return slot
 
     async def _release_python_slot(self, name, slot):
-        if name in self.legacy.adapters["claude"]._sessions:
+        adapter = self.legacy.adapters[slot.binding.provider]
+        if slot.binding.provider == "codex":
+            # Cliente ligado antes de o Rust anunciar o Codex: só a ligação fecha, o processo segue.
+            await adapter.release_client(name)
+        elif name in adapter._sessions:
             raise RuntimeError("cliente Python ainda subindo nesta sessão; tente de novo")
         async with self.freeze(name):
             with slot.guard:
@@ -564,15 +590,17 @@ class RuntimeCoordinator:
         return True
 
     async def _open_headless(self, name, binding, *, engine_models=None, launch=True):
-        binding, ready = await self._launch_and_open(name, engine_models=engine_models, launch=launch)
+        binding, ready = await self._launch_and_open(name, engine_models=engine_models, launch=launch, provider=binding.provider)
         slot = Slot(binding=copy.deepcopy(binding), phase=Phase.Rust, view=ready["state"], cache_valid=True)
         runtime_queue.configure(self)
         self.slots[binding.key], self.names[name] = slot, binding.key
         self._signal(slot)
         return slot
 
-    async def _launch_and_open(self, name, *, engine_models=None, launch=True):
+    async def _launch_and_open(self, name, *, engine_models=None, launch=True, provider="claude"):
         """Sobe o processo do cano se preciso (nunca com o `pid` do sidecar vivo) e abre no Rust."""
+        if provider == "codex":
+            return await self._open_codex(name, launch=launch)
         from app import diag
         from app.adapters.claude_headless.adapter import _SubidaEsgotada
         from app.rust_server import RustOpError
@@ -604,6 +632,44 @@ class RuntimeCoordinator:
             raise
         adapter.open_succeeded(name)
         return binding, ready
+
+    async def _open_codex(self, name, *, launch):
+        """Codex sem terminal: quem sobe o processo é o Rust (`launch`, só se o gravado não for dele);
+        o Python calcula o ambiente e grava o arquivo da sessão quando o Rust pede, pelas políticas."""
+        from app import diag
+        from app.adapters.codex import sessions as codex_sessions
+        from app.rust_server import RustOpError
+        binding = await asyncio.to_thread(self.legacy.binding, name, "codex")
+        if binding is None or not binding.headless:
+            raise RuntimeError("sessão sem sidecar")
+        descriptor = binding.descriptor()
+        command = {"kind":"open", "descriptor":{**descriptor, "sidecar_dir":str(codex_sessions._dir())}, "launch":bool(launch)}
+        # As políticas da subida conferem a posse do Rust pela chave já durante o `open`.
+        slot = self.slots.get(binding.key)
+        temporary = slot is None
+        if temporary:
+            slot = self.slots[binding.key] = Slot(binding=copy.deepcopy(binding), phase=Phase.Rust)
+        with slot.guard:
+            previous, slot.phase = slot.phase, Phase.Rust
+            slot.binding.meta = copy.deepcopy(binding.meta)     # o ambiente sai do modo gravado agora
+        try:
+            ready = await self._rpc(descriptor, command, uuid.uuid4().hex)
+            self._check_opened(ready, descriptor)
+            # O Rust gravou o cano novo no arquivo da sessão: o registro passa a apontá-lo.
+            opened = await asyncio.to_thread(self.legacy.binding, name, "codex")
+            if opened is None or opened.key != binding.key:
+                raise RuntimeError("sidecar mudou durante a abertura da sessão")
+        except Exception as exc:
+            diag.registrar("runtime.open_failed", "erro", sessao=name, **failure_reason(exc))
+            if not isinstance(exc, RustOpError):
+                # Resposta perdida ou recusada aqui: o Rust pode ter aberto, e ninguém o fecharia.
+                await self._close_unconfirmed(name, descriptor)
+            with slot.guard:
+                if temporary and self.slots.get(binding.key) is slot:
+                    self.slots.pop(binding.key, None)
+                slot.phase = previous
+            raise
+        return opened, ready
 
     async def _await_initialized(self, slot, timeout=_INITIALIZE_WAIT_S):
         deadline = time.monotonic() + timeout
@@ -691,6 +757,24 @@ class RuntimeCoordinator:
                 _registration_failed("runtime.registration_failed", meta["name"], exc, rust_dead=not self._rust_alive())
         await asyncio.gather(*(open_listed(meta) for meta in metas
             if meta.get("headless") and not self.managed_queue(meta["name"])))
+
+    async def register_codex_sessions(self):
+        """Rust dono do Codex sem terminal: abre nele os canos vivos e os mortos com entrada não
+        entregue. Registro Python feito antes do anúncio (`start_sessions` com o padrão) passa ao Rust."""
+        if self.transport is None or not self.rust_owns("codex", True):
+            return
+        from app.pqueue import _queue_dir
+        from app.adapters.codex import sessions as codex_sessions
+        metas = await asyncio.to_thread(codex_sessions.list_all)
+        async def open_listed(meta):
+            try:
+                pending = await asyncio.to_thread(_has_pending, _queue_dir() / "runtime" / f"{meta.get('key')}.json")
+                if pending or await asyncio.to_thread(_cano_alive, meta):
+                    await self.prepare_session(meta["name"], "codex", launch=pending)
+            except Exception as exc:
+                _registration_failed("runtime.registration_failed", meta["name"], exc, rust_dead=not self._rust_alive())
+        await asyncio.gather(*(open_listed(meta) for meta in metas if meta.get("headless") and meta.get("key")
+            and (not self.managed_queue(meta["name"]) or self.slot(meta["name"]).phase == Phase.Python)))
 
     async def _register_durable_terminals(self, *, owned):
         """Registros de terminal do estado durável da fila: `owned` True só os de provedor que o Rust
@@ -798,6 +882,9 @@ class RuntimeCoordinator:
             client.fail(RuntimeError("runtime encerrado; chamada de voz invalidada"))
 
     async def _push_channels(self, slot):
+        # Codex sem terminal: a prévia vai do ator ao hub do Rust em processo, nunca por aqui.
+        if slot.binding.provider == "codex":
+            return
         from app.adapters.preview_push import PushPreviewSource, fonte_ferramenta, fonte_pensamento
         for channel, data in (slot.view.get("channels") or {}).items():
             source = {"preview":PushPreviewSource.get, "thinking":fonte_pensamento, "tool":fonte_ferramenta}.get(channel)
@@ -891,7 +978,7 @@ class RuntimeCoordinator:
                         conversation = (slot.view.get("view") or {}).get("conversation")
                         field = "session_id" if slot.binding.provider == "claude" else "thread_id"
                         if conversation and conversation != slot.binding.meta.get(field):
-                            self._rebind(slot)
+                            self._rebind(slot, conversation)
                     if slot.binding.meta.get("terminal") and slot.view.get("error"):
                         self.request_drain(slot.binding.name, "confirm" if slot.view["error"] == "receipt_scan" else "drain")
                     delay = 0.25
@@ -920,13 +1007,31 @@ class RuntimeCoordinator:
         except claude_customizations.CustomizationsError as exc:
             diag.registrar("claude.customizations_not_saved", "aviso", sessao=binding.name, codigo=exc.code)
 
-    def _rebind(self, slot):
+    def _rebind(self, slot, conversation):
         key = slot.binding.key
         if key in self.rebindings and not self.rebindings[key].done():
             return
         async def rebind():
             async def changed():
                 return None
+            from app import diag
+            from app.runtime_policy import _sessions
+            field = "session_id" if slot.binding.provider == "claude" else "thread_id"
+            # Religar relê o arquivo da sessão: antes de a conversa chegar nele, a vida nova nasceria sem
+            # ela e abriria outra. A vista volta quando o patch grava, e aí religa.
+            current = await asyncio.to_thread(_sessions(slot.binding.provider).load, slot.binding.name)
+            if (current or {}).get(field) != conversation:
+                return
+            # Conversa que muda a cada vida religaria sem parar: teto de 3 religações por minuto.
+            now = time.monotonic()
+            recent = [t for t in self.rebind_times.get(key, ()) if now - t < 60]
+            if len(recent) >= 3:
+                if key not in self.rebind_capped:
+                    self.rebind_capped.add(key)
+                    diag.registrar("runtime.rebind_loop", "erro", sessao=slot.binding.name, codigo="rebind_loop")
+                return
+            self.rebind_capped.discard(key)
+            self.rebind_times[key] = recent + [now]
             try:
                 async with self._ingress_closed(slot.binding.name):
                     slot.frozen = True
@@ -935,7 +1040,6 @@ class RuntimeCoordinator:
             except Exception as exc:
                 slot.cache_valid = False
                 self._signal(slot)
-                from app import diag
                 diag.registrar("runtime.rebind_failed", "erro", sessao=slot.binding.name, **failure_reason(exc))
         self.rebindings[key] = asyncio.create_task(rebind())
 
@@ -1224,20 +1328,24 @@ class RuntimeCoordinator:
                 closed = await self._rpc(slot.binding.descriptor(), {"kind":"close"}, uuid.uuid4().hex)
                 if closed.get("closed") is not True:
                     raise RuntimeError("Rust não confirmou o fechamento da sessão")
+                codex = slot.binding.provider == "codex"
                 if slot.binding.meta.get("terminal"):
                     from app.runtime_terminal import resolve_binding
                     binding = await asyncio.to_thread(resolve_binding, name, slot.binding)
+                elif codex:
+                    binding, ready = await self._open_codex(name, launch=True)
                 else:
                     cano, launched = await self.legacy.adapters["claude"].launch_process(name, launch=True)
                     binding = await asyncio.to_thread(self.legacy.binding, name, slot.binding.provider)
                 if binding is None or binding.key != slot.binding.key or binding.generation != slot.binding.generation:
                     raise RuntimeError("vínculo da sessão mudou durante a reabertura")
-                descriptor = binding.descriptor()
-                ready = await self._rpc(descriptor, {"kind":"open", "descriptor":descriptor}, uuid.uuid4().hex)
-                if not (ready.get("opened") is True and isinstance(ready.get("state"), dict)
-                        and ready.get("instance") == self.instance and ready.get("key") == descriptor["key"]
-                        and ready.get("generation") == descriptor["generation"]):
-                    raise RuntimeError("reabertura não corresponde à vida atual")
+                if not codex:
+                    descriptor = binding.descriptor()
+                    ready = await self._rpc(descriptor, {"kind":"open", "descriptor":descriptor}, uuid.uuid4().hex)
+                    if not (ready.get("opened") is True and isinstance(ready.get("state"), dict)
+                            and ready.get("instance") == self.instance and ready.get("key") == descriptor["key"]
+                            and ready.get("generation") == descriptor["generation"]):
+                        raise RuntimeError("reabertura não corresponde à vida atual")
             except Exception as exc:
                 diag.registrar("runtime.reopen_failed", "erro", sessao=name, etapa=str(previous or ""), **failure_reason(exc))
                 if launched and getattr(exc, "code", "") in _CONNECT_CODES:
@@ -1246,7 +1354,7 @@ class RuntimeCoordinator:
                     except Exception as stop:
                         diag.registrar("runtime.open_discard_failed", "erro", sessao=name, **failure_reason(stop))
                 raise
-            if not slot.binding.meta.get("terminal"):
+            if not slot.binding.meta.get("terminal") and slot.binding.provider == "claude":
                 self.legacy.adapters["claude"].open_succeeded(name)
             with slot.guard:
                 slot.binding = copy.deepcopy(binding)
@@ -1284,7 +1392,7 @@ class RuntimeCoordinator:
         owner = self.slots.get(self.names.get(name, ""))
         if (self.mode == "pending" or self._settling) and (
                 self.rust_owns(owner.binding.provider, owner.binding.headless) if owner is not None
-                else self.rust_owns("codex", True) or not await asyncio.to_thread(_codex_session, name)):
+                else (codex := await asyncio.to_thread(_codex_mode, name)) is None or self.rust_owns("codex", codex)):
             await self.await_mode()
         if self.legacy is not None and self.managed_queue(name):
             slot = self.slot(name)
@@ -1323,12 +1431,20 @@ class RuntimeCoordinator:
             await self._await_resync(name, command.get("kind"))
         transport = self.transport
         try:
-            return await self._op_once(name, command, operation_id)
+            result = await self._op_once(name, command, operation_id)
+            self._cache_invalid_logged.discard(name)
+            return result
         except Exception as exc:
             if not getattr(exc, "_hangar_rust", False) or getattr(exc, "code", "") in _ANSWER_CODES:
                 raise
             from app import diag
-            diag.registrar("runtime.rust_op_failed", "erro", sessao=name, etapa=str(command.get("kind")), **failure_reason(exc))
+            # Fundo recusado por cache inválido se repete a cada troca de estado até alguém reabrir a
+            # sessão: vai ao diário uma vez por sequência; a operação que der certo zera.
+            background_refusal = isinstance(exc, RustCacheInvalid) and command.get("kind") in _BACKGROUND_KINDS
+            if not background_refusal or name not in self._cache_invalid_logged:
+                diag.registrar("runtime.rust_op_failed", "erro", sessao=name, etapa=str(command.get("kind")), **failure_reason(exc))
+            if background_refusal:
+                self._cache_invalid_logged.add(name)
             if getattr(exc, "_transport_lost", False):
                 slot = self.slots.get(self.names.get(name, ""))
                 if slot is not None:
@@ -1430,16 +1546,17 @@ class RuntimeCoordinator:
         with slot.guard:
             slot.phase = Phase.Python
 
-    async def detach(self, name, *, restore=True):
+    async def detach(self, name, *, restore=True, kill=False):
+        """Fecha no Rust. `kill`: o processo da sessão morre junto; a resposta diz se o Rust o matou."""
         slot = self.slot(name)
         async with self._barrier(slot):
             if slot.phase == Phase.Python:
-                return
+                return None
             with slot.guard:
                 slot.phase = Phase.RecoveringPython
             await self._wait_active(slot)
             try:
-                reply = await self._rpc(slot.binding.descriptor(), {"kind": "close"}, uuid.uuid4().hex)
+                reply = await self._rpc(slot.binding.descriptor(), {"kind": "close", **({"kill": True} if kill else {})}, uuid.uuid4().hex)
                 if reply.get("closed") is not True:
                     raise RuntimeError("Rust não confirmou a liberação da sessão")
             except BaseException:
@@ -1448,6 +1565,7 @@ class RuntimeCoordinator:
                     slot.phase = Phase.Rust
                 raise
             await self._restore(slot, reconnect=restore)
+            return reply
 
     async def recover(self, name, confirmed_dead: bool, containment=None):
         slot = self.slot(name)
@@ -1571,7 +1689,7 @@ class RuntimeCoordinator:
             if key is not None and self.slots[key].awaiting_identity:
                 self.names.pop(name, None)
 
-    async def change(self, name, action, *, new_name=None, advance=True, remove=False, reopen=True, stopped=False, preflight=None):
+    async def change(self, name, action, *, new_name=None, advance=True, remove=False, reopen=True, stopped=False, preflight=None, kill=False):
         """Administração da sessão. Do Rust: barreira → `close` (a trava e a fila voltam ao Python,
         sem cliente no cano) → ação → nova vida gravada na fila → `open` no Rust, salvo `stopped`
         ou sem processo para abrir. `reopen` só vale para o caminho Python."""
@@ -1593,9 +1711,9 @@ class RuntimeCoordinator:
                 if self.slots.get(self.names.get(name, "")) is not slot:
                     # Outro caminho trocou o registro enquanto esta esperava a barreira.
                     raise RuntimeError("registro da sessão mudou durante a espera; tente de novo")
-                from_rust = slot.phase == Phase.Rust
+                from_rust, closed = slot.phase == Phase.Rust, None
                 if from_rust:
-                    await self._close_for_change(name, slot, preflight=preflight)
+                    closed = await self._close_for_change(name, slot, preflight=preflight, kill=kill)
                 elif remove and self.legacy is not None:
                     # Fechar não escreve na conversa: basta esperar os escritores, mesmo com vínculo mudado.
                     await self.legacy.quiesce({**slot.binding.descriptor(), "removed":True})
@@ -1603,7 +1721,8 @@ class RuntimeCoordinator:
                     try:
                         from app.runtime_terminal import terminal_life
                         life = None if remove else await asyncio.to_thread(terminal_life, slot.binding)
-                        slot.change = {"target":new_name or name, "advance":advance, "life":life, "from_rust":from_rust, "relaunch":False}
+                        slot.change = {"target":new_name or name, "advance":advance, "life":life, "from_rust":from_rust, "relaunch":False,
+                                       "killed":bool(closed and closed.get("killed") is True)}
                         if remove and slot.binding.meta.get("terminal") and slot.binding.meta.get("claude_settings") and self.legacy is not None:
                             current = await asyncio.to_thread(self.legacy.binding, name, slot.binding.provider)
                             await self._remember_terminal_customizations(current or slot.binding)
@@ -1654,7 +1773,7 @@ class RuntimeCoordinator:
             await self.prepare_session(current.binding.name, current.binding.provider)
         return result
 
-    async def _close_for_change(self, name, slot, preflight=None):
+    async def _close_for_change(self, name, slot, preflight=None, kill=False):
         """Fecha no Rust e devolve a trava e a fila ao Python sem cliente no cano. A vista do Rust,
         relida agora, fica guardada: é ela que diz se a sessão estava ociosa (transferência)."""
         try:
@@ -1666,8 +1785,9 @@ class RuntimeCoordinator:
             diag.registrar("runtime.refresh_failed", "aviso", sessao=name, **failure_reason(exc))
         if preflight is not None:
             await preflight()
-        await self.detach(name, restore=False)
+        reply = await self.detach(name, restore=False, **({"kill": True} if kill else {}))
         slot.change_from_rust = True
+        return reply
 
     async def _commit_change(self, name, slot):
         """Grava a nova vida na fila (nome, conversa, geração) sob a trava do Python. Devolve o
@@ -1732,11 +1852,17 @@ class RuntimeCoordinator:
         if not binding.meta.get("terminal"):
             if not self._born_in_rust(binding):
                 return
-            if name in self.legacy.adapters["claude"]._sessions:
+            if name in self.legacy.adapters[binding.provider]._sessions:
                 # Cliente religado no boot: segue pela adoção até a Task 5.
                 diag.registrar("runtime.reopen_skipped", "aviso", sessao=name, codigo="python_client")
                 return
-            if not launch and not await asyncio.to_thread(_cano_alive, binding.meta):
+            meta = binding.meta
+            if binding.provider == "codex":
+                # O Rust pode ter subido outro processo nesta vida: vale o cano gravado no arquivo.
+                fresh = await asyncio.to_thread(self.legacy.binding, name, "codex")
+                if fresh is not None and fresh.key == binding.key:
+                    meta = fresh.meta
+            if not launch and not await asyncio.to_thread(_cano_alive, meta):
                 # Processo parado: fica como sessão parada, e o próximo envio a sobe no Rust.
                 diag.registrar("runtime.reopen_skipped", "aviso", sessao=name, codigo="cano_parado")
                 return
@@ -1758,7 +1884,7 @@ class RuntimeCoordinator:
         if slot.phase != Phase.Rust:
             if slot.phase != Phase.Python or slot.lease is None:
                 raise RuntimeError("sessão sem registro para reabrir")
-            if name in self.legacy.adapters["claude"]._sessions:
+            if name in self.legacy.adapters[slot.binding.provider]._sessions:
                 raise RuntimeError("cliente Python ainda ligado nesta sessão")
             if slot.change is not None:
                 slot = await self._commit_change(name, slot)
@@ -1794,7 +1920,8 @@ class RuntimeCoordinator:
             lease.close()
         try:
             if headless:
-                binding, ready = await self._launch_and_open(name, engine_models=engine_models, launch=launch)
+                binding, ready = await self._launch_and_open(name, engine_models=engine_models, launch=launch,
+                                                             provider=slot.binding.provider)
                 if binding.key != slot.binding.key:
                     raise RuntimeError("sidecar mudou durante a abertura da sessão")
             else:
@@ -1865,5 +1992,31 @@ class RuntimeCoordinator:
                 return await original(adapter, name, **params)
             return await asyncio.to_thread(original, adapter, name, **params)
         stopped = method in {"close_sync", "parar"}
+        binding = self.slot(name).binding
+        kill = method == "close_sync" and binding.provider == "codex" and binding.headless and self.rust_owns("codex", True)
+        if kill:
+            async def action():
+                # O Rust matou o processo que ele subiu no `close`; sem a sessão aberta lá, o processo
+                # não tem outro dono e o Python o encerra.
+                if (self.slot(name).change or {}).get("killed"):
+                    return adapter.forget_memory(name, preserve_preview=params.get("preserve_preview", False))
+                return await asyncio.to_thread(original, adapter, name, **params)
+        if method == "open_terminal" and binding.provider == "codex" and binding.headless and self.rust_owns("codex", True):
+            async def action():
+                # Codex com terminal é do Python até a 5C: fechada no Rust sem matar, a troca religa o
+                # cliente Python no mesmo cano para conferir a ociosidade e passar a conversa ao pane.
+                self.python_client_released.add(name)
+                try:
+                    return await original(adapter, name, **params)
+                except BaseException:
+                    # Recusada (ocupada, pergunta aberta…) com o cliente religado: só a ligação fecha,
+                    # e a reabertura devolve a sessão ao Rust no mesmo processo.
+                    try:
+                        await adapter.release_client(name)
+                    except Exception:
+                        _log.warning("release_client falhou name=%s; segue a recusa original", name, exc_info=True)
+                    raise
+                finally:
+                    self.python_client_released.discard(name)
         return await self.change(name, action, new_name=params.get("new") if method == "rename" else None,
-            advance=method != "rename", remove=False, reopen=not stopped, stopped=stopped)
+            advance=method != "rename", remove=False, reopen=not stopped, stopped=stopped, kill=kill)

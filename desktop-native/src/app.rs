@@ -249,9 +249,13 @@ enum Payload {
     // Evento da chamada de voz com o número dela: o da chamada parada é descartado.
     Voice(u64, crate::voice::VoiceEvent),
     // Opção beta do servidor local, o Codex achado e a voz gravada neste computador.
-    VoiceGate(Option<bool>, Option<crate::voice::rpc::Codex>, (Option<String>, Option<String>), Option<Vec<voice_ui::CodexAccount>>),
+    VoiceGate(Option<bool>, Option<crate::voice::rpc::Codex>, voice_ui::SavedVoice, Option<Vec<voice_ui::CodexAccount>>),
+    // Catálogo de modelos do organizador para a conta escolhida, com o número do pedido.
+    VoiceModels(u64, Result<Vec<voice_ui::OrganizerModel>, String>),
     // Histórico da sessão que recebeu pedido da voz e terminou fora da tela.
     VoiceHistory(u64, SessionKey, Result<api::History, Failure>),
+    // Resultado de uma ferramenta de sessão da voz (criar, agrupar), com a chamada que espera a resposta.
+    VoiceDone(u64, crate::voice::CallId, voice_ui::VoiceDone),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1439,6 +1443,8 @@ impl Hangar {
             Payload::Voice(generation, event) => { self.receive_voice(generation, event, window, cx); return; }
             Payload::VoiceGate(enabled, codex, saved, accounts) => { self.receive_voice_gate(enabled, codex, saved, accounts, window, cx); return; }
             Payload::VoiceHistory(generation, key, result) => { self.voice_history(generation, key, result); return; }
+            Payload::VoiceModels(seq, result) => { self.receive_organizer_models(seq, result, window, cx); return; }
+            Payload::VoiceDone(generation, call, done) => { self.voice_done(generation, call, done, window, cx); return; }
             Payload::Files(key, owner, generation, files) => { self.receive_files(key, owner, generation, files, cx); cx.notify(); return; }
             Payload::UploadStep(key, id, result) => { let key = self.delivery.current(key); self.receive_upload(key, id, result); cx.notify(); return; }
             Payload::UploadsDone(key, draft, steer, known, group) => {
@@ -1760,7 +1766,7 @@ impl Hangar {
             Payload::Sent(..) | Payload::Interrupted(..) | Payload::Acted(..) | Payload::Files(..) | Payload::UploadStep(..)
                 | Payload::UploadsDone(..) | Payload::Saved(..) | Payload::ConnectionNotSaved(..) | Payload::Reply(..) | Payload::HeadlessPlan(..)
                 | Payload::AppearanceSaved(..) | Payload::Backdrop(..) | Payload::BackdropPicked(..) | Payload::BackdropRemoved(..)
-                | Payload::Remote(..) | Payload::Lan(..) | Payload::Voice(..) | Payload::VoiceGate(..) | Payload::VoiceHistory(..) => unreachable!(),
+                | Payload::Remote(..) | Payload::Lan(..) | Payload::Voice(..) | Payload::VoiceGate(..) | Payload::VoiceHistory(..) | Payload::VoiceDone(..) | Payload::VoiceModels(..) => unreachable!(),
         }
         // Lista que trocou ou tirou a sessão aberta refaz a conversa.
         if rows || self.selection != selection { self.sync_rows(cx); }
@@ -3691,11 +3697,12 @@ impl Hangar {
                 .child(escapes));
         }
         let ready = self.answer_body(cx).is_some();
-        let skip = ask.payload.is_async.then(|| {
-            let fp = fingerprint.clone();
-            Button::new("ask-skip").ghost().label(tr("ask_skip")).disabled(busy)
-                .on_click(cx.listener(move |this, _, _, cx| this.act(Action::Skip, fp.clone(), cx)))
-        });
+        // Cancelar sempre existe: pergunta assíncrona do Codex só se dispensa (Skip); as demais interrompem o turno.
+        let cancel = {
+            let (action, fp) = if ask.payload.is_async { (Action::Skip, fingerprint.clone()) } else { (Action::Cancel, String::new()) };
+            Button::new("ask-cancel").ghost().label(tr("cancel")).disabled(busy)
+                .on_click(cx.listener(move |this, _, _, cx| this.act(action.clone(), fp.clone(), cx)))
+        };
         let fp = fingerprint.clone();
         let sending = busy && self.selected_key().and_then(|key| self.flight.running(&key).cloned()) == Some(Action::Answer);
         let scroll_key = format!("{fingerprint}#{tab}");
@@ -3705,7 +3712,7 @@ impl Hangar {
         Some(self.interaction_card(tr("ask_title"), body,
             div().flex().items_center().gap_2()
                 .child(div().flex_1().min_w_0().text_xs().text_color(theme::muted()).child(tr(if ready { "ask_ready" } else { "ask_incomplete" })))
-                .children(skip)
+                .child(cancel)
                 .child(if tab + 1 < total {
                     // Troca de aba só pelo botão ou pela faixa: pular sozinho no clique desorienta.
                     Button::new("ask-next").primary().label(tr("ask_next")).disabled(busy)
@@ -3747,7 +3754,13 @@ impl Hangar {
                 .child(scrolled("plan-scroll", &self.plan_scroll.1, 320., div().p_3().child(TextView::new(&view).selectable(true).scrollable(false).code_block_actions(copy_code)))))
                 .when_some(plan.path, |el, path| el.child(div().text_xs().text_color(theme::muted()).child(path)));
         }
+        // URL do texto abre fora do app; o texto da pergunta segue puro.
+        let links = interaction::question_links(&question);
         body = body.child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(question));
+        for (i, url) in links.into_iter().enumerate() {
+            body = body.child(Button::new(SharedString::from(format!("question-link-{i}"))).small().ghost().label(url.clone())
+                .on_click(move |_, _, cx| cx.open_url(&url)));
+        }
         for (i, option) in options.iter().enumerate() {
             let label = match interaction::checkbox(option) { Some((_, rest)) if multi => rest.to_owned(), _ => option.clone() };
             let on = multi && interaction::checkbox(option).is_some_and(|(on, _)| on);

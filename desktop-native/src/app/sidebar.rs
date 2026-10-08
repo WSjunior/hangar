@@ -802,6 +802,12 @@ impl Hangar {
     }
 
     /// Grava na máquina da linha; sem a conexão dela a falha volta pelo mesmo caminho da resposta, nunca calada.
+    /// Fechar: a linha some na hora e volta se o servidor recusar (`Wrote`).
+    pub(super) fn delete_target(&mut self, target: Target, cx: &mut Context<Self>) {
+        self.sidebar.deleting.insert(target.clone());
+        self.write(target, Write::Delete, cx);
+    }
+
     fn write(&mut self, target: Target, what: Write, cx: &mut Context<Self>) {
         let api = self.machine_api(&target.server).ok_or_else(|| self.machine_error(&target.server));
         let tell = self.sidebar_tell();
@@ -1006,8 +1012,7 @@ impl Hangar {
                         window.push_notification(Notification::error(tr("sidebar_close_failed").replace("{n}", &this.machine_error(&target.server))), cx);
                         return;
                     }
-                    this.sidebar.deleting.insert(target.clone());
-                    this.write(target.clone(), Write::Delete, cx);
+                    this.delete_target(target.clone(), cx);
                     // O Confirm fecha com animação e só então devolve o foco à linha, que já sumiu: passado esse prazo, a raiz
                     // o recebe (`fallbackFocus` do web). Se a linha voltou (o servidor recusou), o foco fica nela.
                     let target = target.clone();
@@ -1105,6 +1110,7 @@ impl Hangar {
                         self.sidebar.moving.remove(&target);
                     }
                 }
+                if matches!(what, Write::Delete) { self.voice_closed(&target, &result); }
                 // Diálogo desta sessão ainda aberto (não cancelado): o resultado aparece nele, não em notificação solta.
                 let in_dialog = match what {
                     Write::Rename(_, seq) => self.sidebar.editing.as_ref().is_some_and(|e| !e.inline && e.status.borrow().sent == Some(seq) && e.target == target),

@@ -6,10 +6,15 @@ const LIMIT: usize = 200_000;
 
 pub struct PlanFile { pub path: PathBuf }
 
-pub fn plans_dir() -> PathBuf {
+fn voice_dir() -> PathBuf {
     let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from).unwrap_or_default();
-    home.join(".hangar").join("voz").join("planos")
+    home.join(".hangar").join("voz")
 }
+
+pub fn plans_dir() -> PathBuf { voice_dir().join("planos") }
+
+/// Pasta própria do organizador: a única que ele grava (é o cwd da thread em `workspace-write`).
+pub fn files_dir() -> PathBuf { voice_dir().join("arquivos") }
 
 pub fn new_plan(session: &str, now: DateTime<Local>) -> PlanFile { new_plan_in(&plans_dir(), session, now) }
 

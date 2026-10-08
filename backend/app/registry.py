@@ -210,6 +210,17 @@ def _decorate_plan(info) -> None:
     info.plan_tasks = [(t.done, t.total) for t in p.tasks[:_MAX_PLAN_TASK_SEGMENTS]]
 
 
+def _orq_infos() -> list[SessionInfo]:
+    """Orquestrações `auto` vivas: sem pane nem processo. A linha do tempo da execução é o
+    transcript, e o grupo do árbitro põe a linha no bloco dele."""
+    try:
+        runs = orq_runs.active()
+    except Exception:
+        _log.warning("orq: leitura das orquestrações falhou (lista segue)", exc_info=True)
+        return []
+    return [SessionInfo(name=run["name"], cwd=run["repo"], jsonl=run["timeline"], provider="orq",
+                        tracked=True, pair_gid=run["gid"], orq_arbiter=run["arbiter"]) for run in runs]
+
 
 def _decorate_transfers(infos: list[SessionInfo]) -> None:
     from app import conversation_transfer as transfers
@@ -1406,7 +1417,9 @@ class SessionRegistry:
         # No Python quem garante isso é o `_guardar_snap(forcar=True)`, que relê os processos.
         if rust_owns_list():
             from app import list_bridge
-            return list_bridge.discover(newer_than)
+            # A descoberta do Rust não traz as `orq` (na lista elas vêm dos fatos); sem elas, quem
+            # procura a sessão pelo nome (painel, histórico) não a acha.
+            return list_bridge.discover(newer_than) + _orq_infos()
         PYTHON_DISCOVERY["list"] += 1
         # Resolucao de jsonl/tracked de todas as sessoes. Otimizado: UM mapa /proc + UMA chamada tmux
         # (pane_pid em lote) reusados por sessao -> O(P + S·descendentes) em vez de O(S·P). NAO calcula
@@ -1590,17 +1603,7 @@ class SessionRegistry:
                 pair_gid=(PairLink(meta["name"]).get() or {}).get("gid"),
                 pair_task=(PairLink(meta["name"]).get() or {}).get("task"),
             ))
-        # Orquestrações `auto` vivas: sem pane nem processo. A linha do tempo da execução é o
-        # transcript, e o grupo do árbitro põe a linha no bloco dele.
-        try:
-            orq_ativas = orq_runs.active()
-        except Exception:
-            _log.warning("orq: leitura das orquestrações falhou (lista segue)", exc_info=True)
-            orq_ativas = []
-        for run in orq_ativas:
-            out.append(SessionInfo(
-                name=run["name"], cwd=run["repo"], jsonl=run["timeline"], provider="orq",
-                tracked=True, pair_gid=run["gid"], orq_arbiter=run["arbiter"]))
+        out.extend(_orq_infos())
         _decorate_transfers(out)
         return out
 

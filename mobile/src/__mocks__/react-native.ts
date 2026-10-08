@@ -29,6 +29,7 @@ export const Animated = {
   View, Text,
   timing: animacao, sequence: animacao, loop: animacao,
 };
+export const Linking = { openURL: (_url: string) => Promise.resolve() };
 export const Platform = { OS: 'android', select: (x: any) => x.android ?? x.default };
 export const TextInput = (props: any) => React.createElement('textarea', domProps(props));
 export const TurboModuleRegistry = { get: () => null };

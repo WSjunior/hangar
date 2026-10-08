@@ -187,3 +187,47 @@ async fn opening_refused_by_the_queue_says_why() {
     assert!(error.message.contains("estado da fila inválido"),"{}",error.message);
     assert!(hangar_server::runtime::queue::acquire_lease(&dir.path().join("key.lock")).is_ok(),"a trava sai junto com a recusa");
 }
+
+#[tokio::test]
+async fn close_with_kill_that_cannot_kill_releases_and_says_not_killed() {
+    // Sessão que o Rust não subiu: o `close` solta a posse e diz que não matou, para quem pediu decidir.
+    let dir = tempfile::tempdir().unwrap();
+    let (registry,_,cano) = opened(dir.path()).await;
+    let closed = registry.close_with_kill("key",1).await.unwrap();
+    assert_eq!(closed,serde_json::json!({"closed":true,"killed":false}));
+    assert!(registry.snapshots().await.unwrap().is_empty(),"a sessão saiu do Rust");
+    cano.abort();
+}
+
+#[tokio::test]
+async fn codex_cano_without_version_reopens_without_launch() {
+    use serde_json::json;
+    use tokio::io::{AsyncBufReadExt,AsyncWriteExt,BufReader};
+    // Cano subido pelo Python grava o `cano` sem `versao`; reabrir sem subir conecta mesmo assim.
+    let dir = tempfile::tempdir().unwrap();
+    let cano_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let cano_address = cano_listener.local_addr().unwrap();
+    let cano = tokio::spawn(async move {
+        let (stream,_) = cano_listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut header = String::new(); reader.read_line(&mut header).await.unwrap();
+        let snapshot = json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,
+            "pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+        reader.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
+        let mut raw = String::new();
+        while reader.read_line(&mut raw).await.unwrap_or(0) > 0 { raw.clear(); }
+    });
+    let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); let address=listener.local_addr().unwrap();
+    let registry=Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"secret-test".into(),"instance-test".into()));
+    let server=tokio::spawn(gateway::serve(listener,registry.clone(),"secret-test".into(),"instance-test".into(),hangar_server::INTERNAL_PROTOCOL));
+    let meta=json!({"name":"cx","key":"key","headless":true,"thread_id":"thread-1",
+        "cano":{"pid":42,"escuta":format!("tcp:{cano_address}"),"token":"secret-test","ts":1.0}});
+    let descriptor=json!({"name":"cx","key":"key","provider":"codex","headless":true,"meta":meta,"jsonl":dir.path().join("rollout.jsonl"),"projection_dir":dir.path().join("projection"),"state_path":dir.path().join("state"),"lock_path":dir.path().join("lease"),"generation":1});
+    let response=reqwest::Client::new().post(format!("http://{address}/runtime/op")).header("x-hangar-internal","secret-test").header("x-hangar-runtime-instance","instance-test").header("content-type","application/json")
+        .body(json!({"protocol":hangar_server::INTERNAL_PROTOCOL,"instance":"instance-test","key":"key","generation":1,"operation_id":"op","clock":{"monotonic_s":0.0,"epoch_s":0.0},
+            "command":{"kind":"open","descriptor":descriptor}}).to_string()).send().await.unwrap();
+    let status=response.status(); let text=response.text().await.unwrap();
+    assert!(status.is_success(),"{status} {text}");
+    registry.close("key",1).await.unwrap();
+    server.abort(); cano.abort();
+}

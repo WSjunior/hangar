@@ -223,7 +223,7 @@ async fn transferred(api: &Api, request: &TransferRequest) -> Result<SessionInfo
 
 /// A sessão aberta pela resposta do backend e os avisos já em texto (reconciliação da conta, sessão achada pela lista).
 /// `warning`: a continuação nasceu com outra coisa que a pedida (o resumo do Hangar no lugar do escrito pelo modelo).
-pub(super) struct Opened { session: SessionInfo, notes: Vec<String>, warning: Option<String> }
+pub(super) struct Opened { pub(super) session: SessionInfo, notes: Vec<String>, warning: Option<String> }
 
 /// A sessão que o diálogo continua (modo bastão): o servidor monta o resumo dela e o manda à sessão nova.
 /// `server`: chave da máquina da sessão continuada; o diálogo fica travado nela (o resumo é arquivo de lá).
@@ -1399,7 +1399,7 @@ type Sender = Arc<dyn Fn(CreateReply) -> Pin<Box<dyn Future<Output = ()> + Send>
 
 /// A resposta do POST vira a sessão a abrir. Queda depois de mandar, ou resposta boa ilegível, não diz se ela nasceu: a lista
 /// responde, pelo nome que o backend dá (a mesma limpeza) e pela pasta, e o aviso diz que foi achada assim.
-async fn opened(api: &Api, result: Result<Value, Failure>, name: &str, cwd: &str, branch: Option<&str>) -> Result<Opened, String> {
+pub(super) async fn opened(api: &Api, result: Result<Value, Failure>, name: &str, cwd: &str, branch: Option<&str>) -> Result<Opened, String> {
     match result {
         Ok(value) => {
             let accounts: Vec<&str> = value.get("avisos").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect())

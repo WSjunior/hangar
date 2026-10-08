@@ -89,6 +89,17 @@ impl RtpStart {
 const SUMMARY_EVERY: Duration = Duration::from_secs(5);
 const WRITE_DEADLINE: Duration = Duration::from_secs(5);
 
+/// Detecção de fim de fala pedida ao Realtime ao abrir o canal: o padrão decidia cedo demais que a pessoa terminou.
+const TURN_DETECTION: &str = r#"{"type":"semantic_vad","eagerness":"low"}"#;
+/// Desligado: o Realtime v3 recusa `session.audio.input` e o erro dele encerra a chamada inteira.
+const SEND_TURN_DETECTION: bool = false;
+
+/// `session.update` parcial no formato v3 (`audio.input`, como o `audio.output.voice` que o Codex manda).
+fn turn_detection_update() -> String {
+    let detection: serde_json::Value = serde_json::from_str(TURN_DETECTION).unwrap_or_default();
+    serde_json::json!({"type": "session.update", "session": {"audio": {"input": {"turn_detection": detection}}}}).to_string()
+}
+
 /// Só o campo `type` dos eventos do canal; o resto pode trazer fala transcrita.
 fn event_type(data: &[u8]) -> String {
     serde_json::from_slice::<serde_json::Value>(data).ok()
@@ -104,6 +115,7 @@ fn drive(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: &async_ch
     let mut audio = Audio::start(muted).map_err(audio_error)?;
     let (mut window, mut last_summary) = (Window::default(), Instant::now());
     let (mut last_type, mut repeats, mut usage_logged) = (String::new(), 0u32, 0u32);
+    let (mut heard_user, mut delegated) = (false, false);
     let mut encoder = opus_rs::OpusEncoder::new(48_000, 1, opus_rs::Application::Voip).map_err(|_| RtcError::Media)?;
     let mut decoder = opus_rs::OpusDecoder::new(48_000, 1).map_err(|_| RtcError::Media)?;
     let (mut connected, mut timestamp, mut buffer) = (false, 0u64, vec![0u8; 2000]);
@@ -113,6 +125,8 @@ fn drive(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: &async_ch
     let (mut decoded, mut packet) = (vec![0f32; FRAME * 2], vec![0u8; 1500]);
     let (started, mut last_levels) = (Instant::now(), Instant::now());
     let mut loop_top = Instant::now();
+    // Enviado o `session.update`, o próximo `session.updated` ou erro diz se o servidor aceitou; recusa não derruba a chamada.
+    let mut update_pending = false;
     let result = loop {
         let now = Instant::now();
         window.loop_max_ms = window.loop_max_ms.max(now.duration_since(loop_top).as_millis() as u32);
@@ -142,7 +156,16 @@ fn drive(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: &async_ch
                         log(format!("rtc ice {state:?}"));
                         if state == IceConnectionState::Disconnected { break Err(RtcError::Network); }
                     }
-                    Event::ChannelOpen(id, label) => log(format!("rtc channel open id={id:?} label={label}")),
+                    Event::ChannelOpen(id, label) => {
+                        log(format!("rtc channel open id={id:?} label={label}"));
+                        if SEND_TURN_DETECTION && label == "oai-events" && let Some(mut channel) = rtc.channel(id) {
+                            let update = turn_detection_update();
+                            match channel.write(false, update.as_bytes()) {
+                                Ok(sent) => { update_pending = sent; log(format!("rtc turn detection update sent={sent} bytes={}", update.len())); }
+                                Err(error) => log(format!("rtc turn detection update write failed: {error:?}")),
+                            }
+                        }
+                    }
                     Event::ChannelClose(id) => log(format!("rtc channel close id={id:?}")),
                     Event::ChannelData(data) => {
                         // Deltas chegam aos montes: repetição do mesmo tipo vira uma contagem.
@@ -154,6 +177,20 @@ fn drive(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: &async_ch
                                 let leaves: Vec<String> = usage::numeric_leaves(&value).into_iter().map(|(path, n)| format!("{path}={n}")).collect();
                                 log(format!("rtc usage {}", leaves.join(" ")));
                             }
+                        }
+                        // Pedido de ação que a voz respondeu sozinha some sem rastro: o turno sem delegação fica no diário.
+                        if update_pending && (kind == "session.updated" || kind == "error" || kind.ends_with(".failed")) {
+                            update_pending = false;
+                            log(format!("rtc turn detection outcome={kind}"));
+                        }
+                        match kind.as_str() {
+                            "input_transcript.added" => heard_user = true,
+                            "delegation.created" => delegated = true,
+                            "turn.done" => {
+                                if heard_user && !delegated { log("realtime answered without delegation"); }
+                                (heard_user, delegated) = (false, false);
+                            }
+                            _ => {}
                         }
                         if kind == last_type { repeats += 1; } else {
                             if repeats > 0 { log(format!("rtc channel event type={last_type} repeated={repeats}")); }
@@ -263,6 +300,14 @@ mod tests {
         assert!(offer.sdp.contains("m=audio"));
         assert!(offer.sdp.to_lowercase().contains("opus/48000"));
         assert!(offer.sdp.contains("webrtc-datachannel"));
+    }
+
+    #[test]
+    fn turn_detection_update_is_v3_partial_session_update() {
+        let update: serde_json::Value = serde_json::from_str(&turn_detection_update()).unwrap();
+        assert_eq!(update["type"], "session.update");
+        assert_eq!(update["session"]["audio"]["input"]["turn_detection"], serde_json::json!({"type": "semantic_vad", "eagerness": "low"}));
+        assert_eq!(update["session"].as_object().unwrap().len(), 1, "parcial: não mexe em instruções nem voz");
     }
 
     #[test]

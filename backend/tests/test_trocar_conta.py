@@ -167,7 +167,9 @@ def test_proxy_fast_does_not_restart_busy_session(contas, tmp_path, reason):
     ("working", {"in_progress": True}, [], True, "erro_sessao_trabalhando"),
     ("awaiting_input", {"pending": {}}, [], True, "erro_sessao_esperando_resposta"),
     ("idle", {}, [{"delivered": False, "confirmed": True}], True, "erro_fila_pendente"),
-    ("idle", {}, [{"delivered": True, "confirmed": False}], True, "erro_fila_pendente"),
+    ("idle", {}, [{"delivered": True, "confirmed": False}], True, None),
+    ("idle", {}, [{"delivered": True, "desistiu": True}], True, None),
+    ("idle", {}, [{"delivered": True, "confirmed": True, "papel": "assistant"}], True, None),
     (None, {}, [], True, "erro_sessao_iniciando"),
     ("idle", {}, [], False, "erro_sessao_iniciando"),
     ("idle", {}, [], True, None),
@@ -329,6 +331,67 @@ def test_sem_terminal_para_move_e_religa_na_conta_nova(contas, tmp_path):
     destino = Path(b) / "projects" / origem.parent.name
     assert (destino / f"{SID}.jsonl").exists() and (destino / SID).is_dir() and not origem.exists()
     assert ordem == ["parou", ("acordou", b)]
+
+
+def test_unanswered_message_goes_back_to_the_queue_before_the_new_account_wakes(contas, tmp_path):
+    """Entregue e nunca confirmada (limite da conta) volta à fila para a conta nova responder;
+    desistida, saída local e confirmada ficam como estão."""
+    from app.pqueue import PromptQueue
+    a, b = contas
+    S.save("hl", str(tmp_path / "repo"), SID, config_dir=a)
+    _conversa(a, str(tmp_path / "repo"))
+    queue = PromptQueue("hl")
+    lost = queue.append("resposta perdida", delivered=True)
+    abandoned = queue.append("desistida", delivered=True)
+    queue.desistir(abandoned["id"])
+    local = queue.append_saida_local("/btw isn't available")
+    done = queue.append("respondida", delivered=True)
+    queue.confirm_delivered(lambda r: r["id"] == done["id"])
+    seen = []
+    hl = _hl([])
+    hl.acordar = MagicMock(side_effect=lambda n: seen.extend(queue.load()))
+    r = _post("hl", b, headless=True, conta=a, hl=hl)
+    assert r.status_code == 200, r.text
+    by_id = {row["id"]: row for row in seen}
+    # A antiga sai (o drain com o id dela devolveria a operação já aceita sem enviar); nasce uma nova.
+    assert by_id[lost["id"]]["confirmed"] is True
+    fresh = [row for row in seen if row["text"] == "resposta perdida" and row["id"] != lost["id"]]
+    assert len(fresh) == 1 and fresh[0]["delivered"] is False
+    assert by_id[abandoned["id"]].get("confirmed") is not True and by_id[abandoned["id"]]["desistiu"]
+    assert by_id[local["id"]]["delivered"] and by_id[done["id"]]["confirmed"]
+
+
+def test_unanswered_already_in_transcript_is_confirmed_not_resent(monkeypatch):
+    """Confirmação atrasada (o texto já está no transcript) não pode virar mensagem repetida."""
+    from types import SimpleNamespace
+    import app.api as api_mod
+    rows = [{"id": "landed", "text": "chegou", "delivered": True},
+            {"id": "lost", "text": "perdida", "delivered": True}]
+    appended, confirmed = [], []
+
+    class Queue:
+        def __init__(self, name):
+            pass
+
+        def load(self):
+            return rows
+
+        def append(self, text, pre_transcript=False):
+            appended.append(text)
+
+        def confirm_delivered(self, apenas):
+            confirmed.extend(r["id"] for r in rows if apenas(r))
+
+    monkeypatch.setattr(api_mod, "PromptQueue", Queue)
+    monkeypatch.setattr(api_mod.headless_sessions, "load", lambda name: {})
+    monkeypatch.setattr(api_mod, "get_adapter", lambda kind: SimpleNamespace(transcript_path_de=lambda meta: "/x.jsonl"))
+    monkeypatch.setattr(api_mod, "committed_user_lines", lambda path: {"chegou"})
+    assert api_mod._requeue_unanswered("hl") == 1
+    assert appended == ["perdida"] and confirmed == ["landed", "lost"]
+    monkeypatch.setattr(api_mod, "committed_user_lines", lambda path: None)
+    appended.clear(); confirmed.clear()
+    assert api_mod._requeue_unanswered("hl") == 0, "transcript ilegível não autoriza reenviar"
+    assert appended == [] and confirmed == []
 
 
 def test_terminal_passa_por_sem_terminal_e_reabre_o_pane_na_conta_nova(contas, tmp_path):

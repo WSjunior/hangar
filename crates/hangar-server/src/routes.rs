@@ -274,6 +274,17 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/sessions/{name}/keys", axum::routing::post(crate::session_write::control::keys).fallback(pass_any))
         .route("/api/sessions/{name}/term-input", axum::routing::post(crate::session_write::control::term_input).fallback(pass_any))
         .route("/api/sessions/{name}/queue/{entry_id}", axum::routing::delete(crate::session_write::control::queue_remove).fallback(pass_any))
+        // Rotas só do Codex: o Rust atende a sessão sem terminal dele; o resto segue ao Python.
+        .route("/api/sessions/{name}/models", get(crate::session_write::codex::models).fallback(pass_any))
+        .route("/api/sessions/{name}/model", axum::routing::post(crate::session_write::codex::model).fallback(pass_any))
+        .route("/api/sessions/{name}/service-tier", axum::routing::post(crate::session_write::codex::service_tier).fallback(pass_any))
+        .route("/api/sessions/{name}/codex/mode", axum::routing::post(crate::session_write::codex::mode).fallback(pass_any))
+        .route("/api/sessions/{name}/limits", get(crate::session_write::codex::limits).fallback(pass_any))
+        .route("/api/sessions/{name}/question/skip", axum::routing::post(crate::session_write::codex::skip_question).fallback(pass_any))
+        .route("/api/sessions/{name}/commands", get(crate::session_write::codex::commands).fallback(pass_any))
+        .route("/api/sessions/{name}/codex-permissions", get(crate::session_write::codex::permissions).fallback(pass_any))
+        // Mesmo caminho: o axum junta o POST à rota de cima (um repasse só, o dela).
+        .route("/api/sessions/{name}/codex-permissions", axum::routing::post(crate::session_write::codex::set_permission))
         .route("/api/sessions/{name}/cost", get(crate::costs_routes::session_cost).fallback(pass_any))
         .route("/api/costs", get(crate::costs_routes::costs).fallback(pass_any))
         .route("/api/cotacao", get(crate::costs_routes::cotacao).fallback(pass_any))
@@ -690,7 +701,7 @@ mod tests {
         };
         let jsonl = dir.join("t.jsonl");
         std::fs::write(&jsonl, "").unwrap();
-        let lease = ctx.hubs.acquire("s", Binding { provider: crate::transcript::Provider::Claude, jsonl, key: "k".into() }, &ctx);
+        let lease = ctx.hubs.acquire("s", Binding { provider: crate::transcript::Provider::Claude, jsonl, key: "k".into(), headless: false }, &ctx);
         let hub = lease.hub.clone();
         let (tx, rx) = mpsc::channel::<Queued>(64);
         tokio::spawn(client_loop(lease, None, tx));
