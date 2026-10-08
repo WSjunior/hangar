@@ -514,6 +514,9 @@ impl ClaudeEngine {
     fn on_line(&mut self,event:Value,effects:&mut Vec<Effect>) -> Result<(),RuntimeError> {
         let kind = event["type"].as_str().unwrap_or("");
         if !event["parent_tool_use_id"].is_null() && !kind.starts_with("control_") && kind != "sdk_control_request" { return Ok(()); }
+        // Turno que a CLI já tocava quando o motor abriu (Rust reiniciado, turno emendado pela própria
+        // CLI) não passou por `start_turn`: sem isto a sessão fica livre e a fila entrega no meio dele.
+        if !self.in_progress && turn_activity(kind,&event) { self.start_turn(); self.changed(effects,true); }
         match kind {
             "control_response" => {
                 let response = &event["response"];
@@ -903,6 +906,15 @@ impl ClaudeEngine {
             self.surface.as_ref().and_then(Surface::deadline)]
             .into_iter().flatten().chain(self.waiters.values().filter(|w|!w.timed_out).map(|w|w.deadline))
             .min_by(f64::total_cmp)
+    }
+}
+
+fn turn_activity(kind:&str,event:&Value) -> bool {
+    match kind {
+        "stream_event" | "tool_progress" => true,
+        "assistant" => event["local_command_source"].is_null(),
+        "user" => event["message"]["content"].as_array().is_some_and(|blocks|blocks.iter().any(|block|block["type"] == "tool_result")),
+        _ => false,
     }
 }
 

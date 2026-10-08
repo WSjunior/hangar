@@ -326,6 +326,13 @@
       {
         "kind": "line",
         "payload": {
+          "type": "command_lifecycle",
+          "state": "started"
+        }
+      },
+      {
+        "kind": "line",
+        "payload": {
           "type": "assistant",
           "message": {
             "content": [],
@@ -383,6 +390,13 @@
       "epoch_s": 1800000000.0
     },
     "steps": [
+      {
+        "kind": "line",
+        "payload": {
+          "type": "command_lifecycle",
+          "state": "started"
+        }
+      },
       {
         "kind": "line",
         "payload": {
@@ -647,6 +661,13 @@
       "epoch_s": 1800000000.0
     },
     "steps": [
+      {
+        "kind": "line",
+        "payload": {
+          "type": "command_lifecycle",
+          "state": "started"
+        }
+      },
       {
         "kind": "line",
         "payload": {
