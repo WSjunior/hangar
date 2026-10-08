@@ -2692,7 +2692,9 @@ mostra o plano crescendo.
 leitura (thread em sandbox `read-only` com `approvalPolicy: never`) e pergunta à sessão o que só ela
 sabe. Provado: `thread/start` aceita `web_search: "live"` (a pesquisa de fato não foi exercitada
 na prova); com `environments: []` o modelo fica sem shell, então a chave saiu; sem ela, `ls` roda
-sem pedir aprovação; escrever fora do cwd falha com "Read-only file system".
+sem pedir aprovação; escrever fora do cwd falha com "Read-only file system". Isso foi provado só no
+Linux: no Windows `features.shell_tool` fica `false` até o sandbox ser provado lá, e o modo mantém
+pesquisa na web e `ask_session`, sem leitura de código.
 
 **Regras de segurança.**
 - `finish_plan`, `ask_session` e `set_mode` só valem a partir de turno falado; a resposta da sessão

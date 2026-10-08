@@ -11,9 +11,16 @@ pub fn plans_dir() -> PathBuf {
     home.join(".hangar").join("voz").join("planos")
 }
 
-pub fn new_plan(session: &str, now: DateTime<Local>) -> PlanFile {
+pub fn new_plan(session: &str, now: DateTime<Local>) -> PlanFile { new_plan_in(&plans_dir(), session, now) }
+
+// Nome livre: plano já entregue ou de outra chamada no mesmo minuto não é sobrescrito.
+fn new_plan_in(dir: &std::path::Path, session: &str, now: DateTime<Local>) -> PlanFile {
     let safe: String = session.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '-' }).collect();
-    PlanFile { path: plans_dir().join(format!("{safe}-{}.md", now.format("%Y-%m-%d-%H%M"))) }
+    let stem = format!("{safe}-{}", now.format("%Y-%m-%d-%H%M"));
+    let mut path = dir.join(format!("{stem}.md"));
+    let mut n = 2;
+    while path.exists() { path = dir.join(format!("{stem}-{n}.md")); n += 1; }
+    PlanFile { path }
 }
 
 impl PlanFile {
@@ -46,6 +53,21 @@ mod tests {
         let when = chrono::Local.with_ymd_and_hms(2026, 10, 7, 19, 5, 0).unwrap();
         let plan = new_plan("pm/../x y", when);
         assert_eq!(plan.path.file_name().unwrap().to_str().unwrap(), "pm-..-x-y-2026-10-07-1905.md");
+    }
+
+    #[test]
+    fn taken_name_gets_a_suffix() {
+        let dir = std::env::temp_dir().join(format!("voice-plan-name-{}", std::process::id()));
+        let when = chrono::Local.with_ymd_and_hms(2026, 10, 7, 19, 5, 0).unwrap();
+        let name = |p: &PlanFile| p.path.file_name().unwrap().to_str().unwrap().to_owned();
+        let first = new_plan_in(&dir, "s", when);
+        assert_eq!(name(&first), "s-2026-10-07-1905.md");
+        first.write("a").unwrap();
+        let second = new_plan_in(&dir, "s", when);
+        assert_eq!(name(&second), "s-2026-10-07-1905-2.md");
+        second.write("b").unwrap();
+        assert_eq!(name(&new_plan_in(&dir, "s", when)), "s-2026-10-07-1905-3.md");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

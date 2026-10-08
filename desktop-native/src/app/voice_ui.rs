@@ -262,6 +262,8 @@ impl Hangar {
         self.voice.reply_pending = None;
         self.voice.pending_sends.clear();
         self.voice.pending_question = None;
+        self.voice.activity = CallActivity::Idle;
+        self.voice.shown = None;
         self.voice.watched.clear();
         self.voice.error = None;
         self.voice.mode = Mode::Direct;
@@ -290,6 +292,8 @@ impl Hangar {
         (self.voice.live_since, self.voice.ticker) = (None, None);
         self.voice.pending_sends.clear();
         self.voice.pending_question = None;
+        self.voice.activity = CallActivity::Idle;
+        self.voice.shown = None;
         cx.notify();
     }
 
@@ -374,9 +378,9 @@ impl Hangar {
                 let was_working = self.chat.state.state == "working";
                 self.voice.watched.insert(key.clone(), was_working);
                 let known = self.known_user_ids();
-                if self.post(key.clone(), text.clone(), String::new(), false, known, None, cx) {
-                    if let Some(voice) = &self.voice.call { voice.plan_delivered(); }
-                } else { self.delivery.hold(key, text, false, None); }
+                if !self.post(key.clone(), text.clone(), String::new(), false, known, None, cx) { self.delivery.hold(key, text, false, None); }
+                // Retido, o pedido sai do mesmo jeito; o plano já não é mais editável.
+                if let Some(voice) = &self.voice.call { voice.plan_delivered(); }
             }
             VoiceEvent::ReadSession(call) => self.voice_reply(call, tool_reply(self.voice_context(), true)),
             VoiceEvent::Send(call, request) => {
@@ -461,6 +465,12 @@ impl Hangar {
     }
 
     pub(super) fn voice_sent(&mut self, key: &SessionKey, text: &str, result: &Result<Delivery, Failure>) {
+        // Pergunta que não chegou não espera os 10 min do prazo.
+        if result.is_err() && text.starts_with(ASK_MARK) && self.voice.pending_question.as_ref().is_some_and(|(k, _)| k == key) {
+            self.voice.pending_question = None;
+            crate::voice::log("ask_session delivery failed");
+            self.voice_answer("A pergunta não chegou à sessão.");
+        }
         let Some(index) = self.voice.pending_sends.iter().position(|(k, t, _)| k == key && t == text) else { return };
         let Some((_, _, call)) = self.voice.pending_sends.remove(index) else { return };
         self.voice_reply(call, send_reply(&key.name, result));

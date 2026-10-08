@@ -80,7 +80,8 @@ pub fn tools() -> Value {
 }
 
 pub fn thread_config(config: &Value) -> Value {
-    let mut result = json!({"features.shell_tool": true, "features.unified_exec": false, "features.apps": false,
+    // O sandbox read-only só foi provado no Linux; no Windows o organizador fica sem shell.
+    let mut result = json!({"features.shell_tool": !cfg!(windows),"features.unified_exec": false, "features.apps": false,
         "features.hooks": false, "features.multi_agent": false, "features.js_repl": false,
         "features.apply_patch_freeform": false, "web_search": "live", "project_doc_max_bytes": 0,
         "model_reasoning_effort": "low"});
@@ -581,7 +582,7 @@ mod tests {
         let config = thread_config(&json!({"mcp_servers": {"hangar": {}, "cloudflare": {}}, "plugins": {"ecc": {}}}));
         assert_eq!(config["mcp_servers"]["hangar"], json!({"enabled": false}));
         assert_eq!(config["plugins"]["ecc"], json!({"enabled": false}));
-        assert_eq!(config["features.shell_tool"], json!(true));
+        assert_eq!(config["features.shell_tool"], json!(!cfg!(windows)));
         assert_eq!(config["web_search"], json!("live"));
     }
 }

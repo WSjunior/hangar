@@ -24,7 +24,7 @@ pub enum VoiceEvent {
 /// `cwd`: pasta da sessão na tela quando é desta máquina (a leitura do código parte dela); `target`: nome dessa sessão.
 pub struct VoiceOptions { pub codex: Codex, pub voice: Option<String>, pub context: String, pub cwd: Option<PathBuf>, pub target: String }
 
-enum Command { Retarget(String, String, Option<PathBuf>),Result(String, String), Reply(Value, Value), SetMode(Mode), Answer(String), PlanDelivered }
+enum Command { Retarget(String, String, Option<PathBuf>), Result(String, String), Reply(Value, Value), SetMode(Mode), Answer(String), PlanDelivered }
 
 pub struct Voice { commands: mpsc::UnboundedSender<Command>, muted: Arc<AtomicBool>, stopped: Arc<AtomicBool>, stop: Arc<Notify> }
 
@@ -210,6 +210,14 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                             let _ = rpc.respond(id, tool_reply("Modo Planejar: nada vai à sessão até finish_plan.", false)).await;
                             "refused-plan-mode"
                         }
+                        ToolCall::UpdatePlan(_) if planner.mode != Mode::Plan => {
+                            let _ = rpc.respond(id, tool_reply("Modo Direto: o plano já foi enviado ou não está aberto.", false)).await;
+                            "refused-direct-mode"
+                        }
+                        ToolCall::UpdatePlan(_) | ToolCall::SetMode(Mode::Plan) if target.is_empty() => {
+                            let _ = rpc.respond(id, tool_reply("Abra uma sessão primeiro.", false)).await;
+                            "refused-no-target"
+                        }
                         ToolCall::UpdatePlan(markdown) => {
                             let bytes = markdown.len();
                             let plan = planner.plan(&target);
@@ -361,6 +369,10 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
             },
             command = inbox.recv() => match command {
                 Some(Command::Reply(id, reply)) => { log(format!("tool reply success={}", reply["success"])); let _ = rpc.respond(id, reply).await; }
+                Some(Command::SetMode(Mode::Plan)) if target.is_empty() => {
+                    log("mode plan refused: no target");
+                    let _ = rpc.request("thread/realtime/appendSpeech", json!({"threadId": thread, "text": "Abra uma sessão primeiro."})).await;
+                }
                 Some(Command::SetMode(mode)) => {
                     log(format!("mode set {mode:?}"));
                     let note = switch_mode(&mut planner, mode, &target, &mut gate, &rpc, events).await;
