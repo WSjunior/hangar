@@ -227,6 +227,20 @@ fn organizer_request_before_thread_reply_is_preserved_once() {
     assert!(!duplicate.iter().any(|effect|matches!(effect,Effect::Publish { channel,.. } if channel == "voice")));
 }
 
+#[test]
+fn subagent_request_during_voice_start_reaches_the_card_once_the_voice_is_open() {
+    let mut engine = engine();
+    engine.command(RuntimeCommand { operation_id:"open".into(),kind:OperationKind::VoiceOpen,payload:json!({"call_id":"call"}) },clock(10.0)).unwrap();
+    let effects = engine.command(RuntimeCommand { operation_id:"start".into(),kind:OperationKind::VoiceRpc,
+        payload:json!({"call_id":"call","method":"thread/start","params":{"ephemeral":true,"sandbox":"read-only","approvalPolicy":"never"}}) },clock(11.0)).unwrap();
+    let id = frames(&effects)[0]["id"].clone();
+    line(&mut engine,json!({"id":12,"method":"item/commandExecution/requestApproval","params":{"threadId":"subagent","command":"ls"}}),11.1);
+    line(&mut engine,json!({"id":id,"result":{"thread":{"id":"organizer"}}}),12.0);
+    assert_eq!(engine.view()["state"],"awaiting_input");
+    let effects = engine.command(command(OperationKind::Select,json!({"option":1})),clock(13.0)).unwrap();
+    assert_eq!(reply_to(&effects,12)["result"]["decision"],"accept");
+}
+
 fn tier_notification(engine:&mut Engine,thread:&str,tier:Value,time:f64) -> Vec<Effect> {
     line(engine,json!({"method":"thread/settings/updated","params":{"threadId":thread,"threadSettings":{"serviceTier":tier}}}),time)
 }

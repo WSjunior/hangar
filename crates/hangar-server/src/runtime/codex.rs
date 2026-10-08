@@ -970,6 +970,7 @@ impl Engine {
                 if let Some(voice) = rpc.continuation.as_ref().and_then(|next|next["call_id"].as_str()).and_then(|call|self.voices.get_mut(call)) {
                     voice.starting = false;
                 }
+                self.release_early_voice(effects)?;
             }
             let message = line["error"]["message"].as_str().unwrap_or("");
             if self.bootstrap_fallback(&rpc,message,effects) { return Ok(()); }
@@ -998,12 +999,7 @@ impl Engine {
                 let closed = if let Some(voice) = self.voices.get_mut(&call_id) {
                     voice.thread_id = Some(thread_id.clone()); voice.starting = false; voice.closed
                 } else { true };
-                if let Some(events) = self.early_voice.remove(&thread_id) {
-                    for event in events {
-                        self.early_voice_bytes = self.early_voice_bytes.saturating_sub(event.to_string().len());
-                        self.notification(event,effects)?;
-                    }
-                }
+                self.release_early_voice(effects)?;
                 if closed && !rpc.timed_out { self.close_voice_thread(&call_id,&thread_id,effects); }
             } else if rpc.method == "thread/unsubscribe" {
                 if let Some(voice) = self.voices.get_mut(&call_id) { voice.unsubscribed = true; }
@@ -1251,6 +1247,15 @@ impl Engine {
         }
         self.changed(&mut effects,false);
         Ok(effects)
+    }
+
+    /// Pedidos guardados durante a abertura da voz: os da thread dela entram pelo ramo da voz, os de outras
+    /// threads (subagente) seguem o fluxo normal, que não descarta pedido.
+    fn release_early_voice(&mut self,effects:&mut Vec<Effect>) -> Result<(),RuntimeError> {
+        let held = std::mem::take(&mut self.early_voice);
+        self.early_voice_bytes = 0;
+        for event in held.into_values().flatten() { self.notification(event,effects)?; }
+        Ok(())
     }
 
     fn close_voice_thread(&mut self,call_id:&str,thread_id:&str,effects:&mut Vec<Effect>) {
