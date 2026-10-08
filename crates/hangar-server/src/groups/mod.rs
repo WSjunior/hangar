@@ -10,6 +10,7 @@ pub mod peers;
 pub mod routes;
 pub mod service;
 pub mod store;
+pub mod sweep;
 
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -76,6 +76,12 @@ impl GroupService {
         blocking(move || reader(&dir)(&name)).await
     }
 
+    /// Todos os sidecars válidos (stem, sidecar), sem o lock: leitura de quem só consulta.
+    pub async fn sidecars(&self) -> Result<Vec<(String, Sidecar)>, GroupError> {
+        let dir = self.dir.clone();
+        Ok(blocking(move || dir.sidecars()).await??)
+    }
+
     pub fn contract_path(&self, gid: &str) -> std::path::PathBuf { self.dir.contract_path(gid) }
 
     /// A pasta `.hangar-pair`, onde o Python também guarda `external_pairs.json`.
@@ -132,6 +138,39 @@ impl GroupService {
             blocking(move || dir.archive_contracts(&gid)).await?;
         }
         Ok(peers)
+    }
+
+    /// Grupo `orq` de um membro só vive enquanto a execução dele vive (`pair.dissolve_lone_orq`):
+    /// acabada, ou nunca iniciada depois de `grace` sem escrita, o sidecar sai e o contrato vai para
+    /// o arquivo. Devolve os stems dissolvidos. Falha numa sidecar vai ao diário e não para as outras.
+    pub async fn dissolve_lone_orq(&self, grace: std::time::Duration) -> Result<Vec<String>, GroupError> {
+        let mut dissolved = Vec::new();
+        {
+            let _guard = self.lock.lock().await;
+            let dir = self.dir.clone();
+            let lone = blocking(move || dir.sidecars()).await??;
+            for (stem, sidecar) in lone.into_iter().filter(|(_, s)| s.peers.is_empty() && s.orq) {
+                let phase = self.orq.phase(&sidecar.gid).await;
+                let (d, s) = (self.dir.clone(), stem.clone());
+                let Ok(Ok(modified)) = blocking(move || d.sidecar_modified(&s)).await else { continue };
+                // Relógio atrás do arquivo conta como recém-escrito.
+                let young = std::time::SystemTime::now().duration_since(modified).unwrap_or_default() < grace;
+                if matches!(phase, OrqPhase::Live | OrqPhase::Unknown) || (phase == OrqPhase::NotStarted && young) { continue; }
+                let (d, s) = (self.dir.clone(), stem.clone());
+                match blocking(move || d.clear_sidecar(&s)).await? {
+                    Ok(()) => dissolved.push((stem, sidecar.gid)),
+                    Err(error) => tracing::warn!(code = "groups_lone_orq_clear_failed", name = %stem, %error, "groups: o grupo orq sozinho não foi dissolvido"),
+                }
+            }
+        }
+        // Arquivar é faxina depois do lock, como na saída.
+        let mut names = Vec::new();
+        for (stem, gid) in dissolved {
+            let dir = self.dir.clone();
+            blocking(move || dir.archive_contracts(&gid)).await?;
+            names.push(stem);
+        }
+        Ok(names)
     }
 
     pub async fn rename(&self, old: &str, new: &str) -> Result<(), GroupError> {

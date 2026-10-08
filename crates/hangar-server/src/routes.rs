@@ -217,6 +217,8 @@ pub async fn serve_with_state(listener: TcpListener, mut state: AppState) -> std
     let private = TcpListener::bind("127.0.0.1:0").await?;
     state.terminal_address = Some(private.local_addr()?);
     let state = Arc::new(state);
+    // Abortada na saída: a tarefa segura o estado do servidor, que sobreviveria a ele.
+    let _group_sweep = crate::groups::sweep::spawn(state.clone()).map(crate::AbortOnDrop);
     let plugin_state = state.clone();
     tokio::select! {
         result = axum::serve(listener.tap_io(crate::nodelay), router(state.clone()).into_make_service_with_connect_info::<SocketAddr>()) => result,

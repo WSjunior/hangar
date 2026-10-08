@@ -37,6 +37,11 @@ impl PairDir {
         read_sidecar(&self.sidecar_path(name), name)
     }
 
+    /// Última escrita do sidecar: a janela de lançamento do grupo `orq` conta daqui.
+    pub fn sidecar_modified(&self, name: &str) -> std::io::Result<std::time::SystemTime> {
+        std::fs::metadata(self.sidecar_path(name))?.modified()
+    }
+
     pub fn write_sidecar(&self, name: &str, s: &Sidecar) -> Result<(), StoreError> {
         std::fs::create_dir_all(&self.root)?;
         let body = serde_json::to_vec(&s.to_json(name))?;
