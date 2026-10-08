@@ -2911,19 +2911,22 @@ def _start_transfer_recovery() -> None:
 async def _boot_sessions(runtime) -> None:
     """Sessões Claude sem terminal na subida. O cano sobrevive ao restart; só morre aqui o de
     sessão encerrada com o backend fora. Com o Rust esperado, nada mais roda antes do desfecho
-    dele: o modo `rust` abre as sessões nele, e o `python` (desistência) faz o que vinha aqui."""
-    try:
-        from app.adapters.claude_headless.adapter import matar_orfaos
-        mortos = await asyncio.to_thread(matar_orfaos)
-        if mortos:
-            _log.info("claude headless: %d cano(s) de sessão já encerrada finalizado(s)", mortos)
-    except Exception:
-        _log.warning("claude headless: varredura de canos órfãos falhou", exc_info=True)
+    dele: o modo `rust` abre as sessões nele, e o `python` (desistência) faz o que vinha aqui.
+    A varredura de órfãos tem dono só: com o Rust de pé é dele, na subida dele."""
+    async def sweep_orphans():
+        try:
+            from app.adapters.claude_headless.adapter import matar_orfaos
+            mortos = await asyncio.to_thread(matar_orfaos)
+            if mortos:
+                _log.info("claude headless: %d cano(s) de sessão já encerrada finalizado(s)", mortos)
+        except Exception:
+            _log.warning("claude headless: varredura de canos órfãos falhou", exc_info=True)
 
     async def after_rust():
         _start_transfer_recovery()
 
     async def after_python():
+        await sweep_orphans()
         # Cada etapa independe das outras: uma falha não deixa canos sem religar nem transferência parada.
         try:
             await runtime.register_claude_sessions()
@@ -2936,6 +2939,7 @@ async def _boot_sessions(runtime) -> None:
     _transfer_recovery = None       # um lifespan novo no mesmo processo (testes) recupera de novo
     runtime.mode_hooks.update(rust=after_rust, python=after_python)
     if runtime.mode == "python":
+        await sweep_orphans()
         await _python_owns_headless()
 
 
@@ -6216,7 +6220,17 @@ async def interrupt(name: str, clear: bool = False):
     await asyncio.to_thread(_recusa_orq, name)
     # Codex: interrompe a propria TUI pelo tmux, mantendo celular e terminal no mesmo controlador.
     if _provider_of(name) == "codex":
-        if not await get_adapter("codex").interrupt(name):
+        try:
+            interrompeu = await get_adapter("codex").interrupt(name)
+        except TransferInProgress:
+            raise
+        except (ValueError, RuntimeError):
+            # Sem terminal o ator do Rust recusou ou não respondeu: código do Codex, não 500.
+            if not _codex_sem_terminal(name):
+                raise
+            _log.warning("codex interrupt falhou name=%s", name, exc_info=True)
+            raise HTTPException(409, detail=erro("erro_codex_controle", "O Codex não aceitou a alteração; atualize a sessão e tente novamente.")) from None
+        if not interrompeu:
             raise HTTPException(409, detail=erro(
                 "erro_codex_controle", "Não há turno Codex ativo para interromper."))
         return {"ok": True}
@@ -6463,7 +6477,8 @@ async def _aquecer_codex_sem_terminal(name: str) -> None:
     try:
         await get_adapter("codex").ensure_running(name)
     except Exception:
-        # O watch_sessions do adapter tenta de novo (até o teto de subidas); aqui só o log.
+        # Aqui só o log: no modo python o watch_sessions tenta de novo (até o teto de subidas); com o
+        # Rust dono, o próximo envio abre a sessão nele.
         _log.warning("codex sem terminal: aquecimento na criação falhou name=%s", name, exc_info=True)
     finally:
         _tarefas_soltas.discard(asyncio.current_task())

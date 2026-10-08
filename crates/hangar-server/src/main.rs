@@ -37,6 +37,22 @@ async fn run() {
         let term = state.term.clone();
         async move { term.restore_after_crash().await }
     });
+    // Órfãos do cano têm dono só: com o runtime ligado, o Rust varre uma vez, antes de anunciar o
+    // gateway (o Python só abre sessões depois do anúncio). Só aqui, pelo mesmo motivo do tmux acima.
+    // `CP_RUST_NO_ORPHAN_SWEEP=1`: o teste que sobe este binário de verdade nunca varre processos da máquina.
+    if matches!(hangar_server::config::Config::runtime_instance(), Ok(Some(_)))
+        && std::env::var_os("CP_RUST_NO_ORPHAN_SWEEP").is_none_or(|value| value != "1") {
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        if home.is_none() { tracing::warn!("HOME ausente: varredura de canos órfãos pulada"); }
+        if let Some(home) = home {
+            let swept = tokio::task::spawn_blocking(move || {
+                let base = home.join(".hangar");
+                hangar_server::runtime::process::sweep_orphans(&base.join("claude-headless"), &base.join("codex-sessions"),
+                    &home.to_string_lossy())
+            }).await.unwrap_or_else(|e| { tracing::warn!(error = %e, "varredura de canos órfãos falhou"); None });
+            if let Some(count) = swept.filter(|count| *count > 0) { tracing::info!(count, "canos de sessão já encerrada finalizados"); }
+        }
+    }
     match hangar_server::serve_until_with_state(listener, state, stop).await {
         Ok(()) => {
             tracing::info!("stdin fechou: o backend saiu, hangar-server sai junto");

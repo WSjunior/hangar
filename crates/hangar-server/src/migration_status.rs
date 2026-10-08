@@ -102,7 +102,7 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
         }
         let tail = path.strip_prefix("/api/sessions/").and_then(|r| r.split_once('/')).map(|(_, t)| t);
         // `term`: o painel do dono abre no Rust; o resto (convidado, Connect) passa pelo Python e liga ao PTY dele.
-        if matches!(tail, Some("history" | "events" | "cost" | "term")) || tail.is_some_and(|t| t.starts_with("pages/")) {
+        if matches!(tail, Some("history" | "events" | "cost" | "term" | "models" | "limits" | "commands" | "codex-permissions")) || tail.is_some_and(|t| t.starts_with("pages/")) {
             return true;
         }
         if path.strip_prefix("/api/hangar-terminals/").is_some_and(|r| r.ends_with("/term")) {
@@ -120,6 +120,10 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
     // Escritas Claude: o Rust decide por pedido; o que não é dele ele repassa (os contadores mostram).
     let tail = path.strip_prefix("/api/sessions/").and_then(|r| r.split_once('/')).map(|(_, t)| t);
     if *method == Method::POST && matches!(tail, Some("input" | "steer" | "interrupt" | "select" | "select/submit" | "answer" | "keys" | "term-input")) {
+        return true;
+    }
+    // Rotas só do Codex: o Rust atende o Codex sem terminal dele e repassa o resto.
+    if *method == Method::POST && matches!(tail, Some("model" | "service-tier" | "codex/mode" | "question/skip" | "codex-permissions")) {
         return true;
     }
     if *method == Method::DELETE && tail.and_then(|t| t.strip_prefix("queue/")).is_some_and(|id| !id.is_empty() && !id.contains('/')) {

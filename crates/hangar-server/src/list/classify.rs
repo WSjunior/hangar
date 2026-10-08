@@ -210,6 +210,27 @@ impl Classifier {
         // Linhas com `Monitor` vivo: nenhuma captura, nem a da statusline nem a do limite.
         let mut watched = HashSet::new();
         for (i, row) in rows.iter_mut().enumerate() {
+            // Codex sem terminal com chat aberto: o feed do hub e o chat dizem o mesmo; sem ele, vale o
+            // fato do Python (o mesmo espelho da vista do Rust). Contagem, conta e atividade seguem dos fatos.
+            if row.provider == "codex" && row.headless
+                && let Some(ev) = facts.monitors.get(&row.name, sid(row).as_deref())
+            {
+                from_monitor(row, &ev);
+                if let Some(q) = &ev.codex_question {
+                    row.state = "awaiting_input".into();
+                    row.question = q.get("questions").and_then(|qs| qs[0]["question"].as_str()).map(str::to_owned);
+                }
+                continue;
+            }
+            // Sem feed, a linha de status sai da vista do ator, a mesma do chat: a do fato vem do
+            // rollout, com cache, e só vê o modelo novo no turno seguinte.
+            if row.provider == "codex" && row.headless
+                && let Some(line) = facts.headless.and_then(|r| r.get(&row.name))
+                    .filter(|s| s["error"].is_null() && s["view"]["alive"] == true)
+                    .and_then(|s| s["view"]["public_state"]["status_line"].as_str())
+            {
+                row.status_line = Some(line.to_owned());
+            }
             if row.provider != "claude" {
                 continue;
             }
@@ -649,6 +670,61 @@ mod tests {
         let broken = BTreeMap::from([("s".to_owned(), serde_json::json!({"error": "cano_exited", "view": {"alive": true}}))]);
         run(&mut row, &dirs, &io, Some(&broken)).await;
         assert_eq!((row.state.as_str(), row.problema.as_deref()), ("working", Some("list_runtime_unavailable")));
+    }
+
+    #[tokio::test]
+    async fn codex_headless_reads_the_feed() {
+        // Linha do Codex sem terminal com o feed vivo: estado e pergunta dele; sem feed, o fato do Python.
+        let row = || -> SessionRow { serde_json::from_value(serde_json::json!({"name": "cx", "provider": "codex", "headless": true,
+            "state": "idle", "pending_questions": 2, "jsonl": "/x/rollout-abc.jsonl"})).unwrap() };
+        let hooks = HookStates::default();
+        let (headless, problems) = (BTreeMap::new(), BTreeMap::new());
+        let monitors = Published::default();
+        let io = Fixed { frame: Ok(String::new()), wall: 1000.0, calls: Mutex::new(0) };
+        let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: Some(&headless),
+                            problems: &problems, stall_seconds: 1e12, held: &BTreeMap::new(), monitors: &monitors };
+        let mut without = row();
+        Classifier::default().classify(std::slice::from_mut(&mut without), &facts, &io).await;
+        assert_eq!(without.state, "idle", "sem chat aberto vale o fato do Python");
+        let question = serde_json::json!({"questions": [{"question": "Qual caminho?"}]});
+        monitors.set(1, "cx", Some("rollout-abc".into()), std::sync::Arc::new(hangar_api::state::StateEvent {
+            state: "working".into(), status_line: Some("gpt".into()), codex_question: question.as_object().cloned(), ..Default::default() }));
+        let mut with = row();
+        Classifier::default().classify(std::slice::from_mut(&mut with), &facts, &io).await;
+        assert_eq!((with.state.as_str(), with.question.as_deref(), with.status_line.as_deref()),
+                   ("awaiting_input", Some("Qual caminho?"), Some("gpt")));
+        assert_eq!(with.pending_questions, without.pending_questions, "contagem segue dos fatos");
+        assert_eq!(*io.calls.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn codex_headless_status_line_follows_the_runtime_within_a_life() {
+        // Sem chat aberto (sem feed), a linha de status vem da vista do ator, a mesma do chat: o fato do
+        // Python lê o rollout com cache e só vê o modelo novo no turno seguinte.
+        let row = || -> SessionRow { serde_json::from_value(serde_json::json!({"name": "cx", "provider": "codex", "headless": true,
+            "state": "idle", "jsonl": "/x/rollout-abc.jsonl", "status_line": "🤖 gpt-6.1-sol (high) │ 💬 46k/95 46k/828k"})).unwrap() };
+        let hooks = HookStates::default();
+        let problems = BTreeMap::new();
+        let monitors = Published::default();
+        let io = Fixed { frame: Ok(String::new()), wall: 1000.0, calls: Mutex::new(0) };
+        let view = |line: &str| BTreeMap::from([("cx".to_owned(), serde_json::json!({"error": null,
+            "view": {"alive": true, "public_state": {"state": "idle", "status_line": line}}}))]);
+        let mut classifier = Classifier::default();
+        for line in ["🤖 gpt-6-luna (medium) │ 💬 46k/95 46k/828k", "🤖 gpt-6-luna (medium) │ 💬 50k/5 50k/828k"] {
+            let headless = view(line);
+            let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: Some(&headless),
+                                problems: &problems, stall_seconds: 1e12, held: &BTreeMap::new(), monitors: &monitors };
+            let mut r = row();
+            classifier.classify(std::slice::from_mut(&mut r), &facts, &io).await;
+            assert_eq!(r.status_line.as_deref(), Some(line));
+        }
+        // Ator parado: fica o fato do Python.
+        let stopped = BTreeMap::from([("cx".to_owned(), serde_json::json!({"error": null, "view": {"alive": false}}))]);
+        let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: Some(&stopped),
+                            problems: &problems, stall_seconds: 1e12, held: &BTreeMap::new(), monitors: &monitors };
+        let mut r = row();
+        classifier.classify(std::slice::from_mut(&mut r), &facts, &io).await;
+        assert_eq!(r.status_line.as_deref(), Some("🤖 gpt-6.1-sol (high) │ 💬 46k/95 46k/828k"));
     }
 
     #[tokio::test]

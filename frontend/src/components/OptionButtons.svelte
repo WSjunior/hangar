@@ -1,6 +1,6 @@
 <script lang="ts">
   import * as m from '../paraglide/messages';
-  import { kindOf, isPermission as isPermissionFn } from '@hangar/core';
+  import { kindOf, isPermission as isPermissionFn, questionParts } from '@hangar/core';
   interface Props {
     question: string;
     options: string[];
@@ -32,8 +32,8 @@
     <span class="perm-chip">{m.permissao_pedido()}</span>
   {/if}
   <p class="question">
-    <!-- Trechos entre crases (comando/arquivo do pedido) viram <code> — legivel no celular. -->
-    {#each question.split('`') as part, i}{#if i % 2 === 1}<code class="q-code">{part}</code>{:else}{part}{/if}{/each}
+    <!-- Crases viram <code>; URL http(s) vira link que abre fora do app. -->
+    {#each questionParts(question) as part}{#if part.kind === 'code'}<code class="q-code">{part.text}</code>{:else if part.kind === 'link'}<a class="q-link" href={part.text} target="_blank" rel="noopener noreferrer">{part.text}</a>{:else}{part.text}{/if}{/each}
   </p>
   <div class="options-list">
     {#each options as opt, i}
@@ -122,6 +122,7 @@
     border-radius: 4px;
     word-break: break-all;
   }
+  .q-link { color: var(--accent); text-decoration: underline; word-break: break-all; }
   .option-btn--allow {
     background: var(--accent);
     border-color: var(--accent);

@@ -128,6 +128,7 @@ pub struct Engine {
     initialized:bool,
     ready:bool,
     reconnect:bool,
+    fresh_process:bool,
     thread_id:String,
     turn_id:Option<String>,
     in_progress:bool,
@@ -175,8 +176,23 @@ fn service_tier(value:&Value) -> Option<String> {
     if value.is_null() { Some("default".into()) }
     else { value.as_str().filter(|tier|["priority","default"].contains(tier)).map(str::to_owned) }
 }
-fn approval(mode:&str) -> &str { if mode == "Full Access" { "never" } else { "on-request" } }
-fn sandbox(mode:&str) -> &str { match mode { "Ask for approval"=>"read-only","Approve for me"=>"workspace-write",_=>"danger-full-access" } }
+/// Os modos da tela, como em `sem_terminal.MODOS`.
+const MODES:[&str;3] = ["Ask for approval","Approve for me","Full Access"];
+/// Nome canônico do modo (sem caixa nem espaços, como `sem_terminal.politica`); desconhecido cai em Full Access.
+fn canonical_mode(mode:&str) -> &'static str {
+    let mode = mode.trim();
+    MODES.iter().copied().find(|known|known.eq_ignore_ascii_case(mode)).unwrap_or("Full Access")
+}
+/// Modo gravado na sessão: desconhecido vira Full Access (como no Python), mas aparece no log.
+fn stored_mode(session:&str,raw:&str) -> &'static str {
+    let mode = canonical_mode(raw);
+    if !raw.trim().is_empty() && !mode.eq_ignore_ascii_case(raw.trim()) && crate::warn_limit::allow(Some(session),"codex_unknown_mode") {
+        tracing::warn!(session,mode = raw,"modo de permissão do Codex desconhecido; usando Full Access");
+    }
+    mode
+}
+fn approval(mode:&str) -> &'static str { if canonical_mode(mode) == "Full Access" { "never" } else { "on-request" } }
+fn sandbox(mode:&str) -> &'static str { match canonical_mode(mode) { "Ask for approval"=>"read-only","Approve for me"=>"workspace-write",_=>"danger-full-access" } }
 
 /// Código do problema pelo `codexErrorInfo` (texto, ou objeto de chave única); None = sem classe própria.
 fn error_class(info:&Value) -> Option<&'static str> {
@@ -218,10 +234,12 @@ fn lifecycle_from_raw(method:&str,params:&Value) -> Option<wire::ServerNotificat
 /// Comando, pasta e motivo do pedido de aprovação; fora do formato saem da linha crua, e comando que não é texto fica None.
 fn command_approval(request:&Value) -> (Option<String>,Option<String>,Option<String>) {
     let raw = |key:&str|request["params"][key].as_str().map(str::to_owned);
-    match decoded(request) {
+    let (command,cwd,reason) = match decoded(request) {
         wire::ServerRequest::CommandExecutionApproval(p) => (p.command,p.cwd,p.reason),
         _ => (raw("command"),raw("cwd"),raw("reason")),
-    }
+    };
+    // Comando em branco não diz o que vai rodar: tratado como ilegível.
+    (command.filter(|c|!c.trim().is_empty()),cwd,reason)
 }
 
 /// "Sempre permitir" um comando que ninguém leu liberaria qualquer coisa pelo resto da sessão.
@@ -229,9 +247,84 @@ fn unreadable_command(request:&Value) -> bool {
     request["method"] == "item/commandExecution/requestApproval" && command_approval(request).0.is_none()
 }
 
+const ELICITATION:&str = "mcpServer/elicitation/request";
+
+fn is_url_elicitation(request:&Value) -> bool { request["method"] == ELICITATION && request["params"]["mode"] == "url" }
+
+/// Pedidos que viram cartão de opções (permitir/negar); o resto é pergunta nativa ou resposta automática.
+fn is_card(request:&Value) -> bool {
+    matches!(request["method"].as_str(),Some("item/commandExecution/requestApproval" | "item/fileChange/requestApproval" | "item/permissions/requestApproval"))
+        || is_url_elicitation(request)
+}
+
+enum FieldKind { Choice(Vec<(String,Value)>), Bool, Number(bool), Text }
+struct Field { id:String, header:String, question:String, kind:FieldKind }
+
+/// Campos do formulário MCP; `None` quando o pedido não é um formulário ou alguma propriedade foge do que a tela mostra.
+fn form_fields(request:&Value) -> Option<Vec<Field>> {
+    if request["method"] != ELICITATION || is_url_elicitation(request) { return None; }
+    let properties = request["params"]["requestedSchema"]["properties"].as_object().filter(|p|!p.is_empty())?;
+    let message = request["params"]["message"].as_str().unwrap_or("");
+    properties.iter().map(|(id,prop)| {
+        let label = |value:&Value|value.as_str().map_or_else(||value.to_string(),str::to_owned);
+        let choices:Vec<(String,Value)> = if let Some(values) = prop["enum"].as_array() {
+            values.iter().map(|v|(label(v),v.clone())).collect()
+        } else if let Some(options) = prop["oneOf"].as_array() {
+            options.iter().filter_map(|o|o.get("const").map(|c|(o["title"].as_str().map_or_else(||label(c),str::to_owned),c.clone()))).collect()
+        } else { Vec::new() };
+        let kind = if !choices.is_empty() { FieldKind::Choice(choices) } else { match prop["type"].as_str()? {
+            "boolean" => FieldKind::Bool, "string" => FieldKind::Text,
+            "integer" => FieldKind::Number(true), "number" => FieldKind::Number(false), _ => return None } };
+        Some(Field { id:id.clone(),header:prop["title"].as_str().unwrap_or(id).into(),
+            question:prop["description"].as_str().unwrap_or(message).into(),kind })
+    }).collect()
+}
+
+fn field_question(field:&Field) -> Value {
+    let option = |label:&str|json!({"label":label,"description":""});
+    let options:Vec<Value> = match &field.kind {
+        FieldKind::Choice(choices) => choices.iter().map(|(label,_)|option(label)).collect(),
+        FieldKind::Bool => vec![option("sim"),option("não")],
+        _ => Vec::new(),
+    };
+    json!({"id":field.id,"header":field.header,"question":field.question,"multiSelect":false,
+        "isOther":matches!(field.kind,FieldKind::Text | FieldKind::Number(_)),"isSecret":false,"options":options})
+}
+
+/// Resposta já validada (`question_response`) → `content` do formulário, com número e booleano de volta ao tipo.
+fn form_content(fields:&[Field],response:&Value) -> Result<Value,RuntimeError> {
+    let mut content = serde_json::Map::new();
+    for field in fields {
+        let text = response["answers"][&field.id]["answers"][0].as_str().ok_or_else(||error("responda a todas as perguntas"))?;
+        let value = match &field.kind {
+            FieldKind::Choice(choices) => choices.iter().find(|(label,_)|label == text).map(|(_,v)|v.clone()).ok_or_else(||error("opção inválida"))?,
+            FieldKind::Bool => json!(text == "sim"),
+            FieldKind::Number(true) => json!(text.trim().parse::<i64>().map_err(|_|error("informe um número inteiro"))?),
+            FieldKind::Number(false) => json!(text.trim().parse::<f64>().ok().filter(|n|n.is_finite()).ok_or_else(||error("informe um número"))?),
+            FieldKind::Text => json!(text),
+        };
+        content.insert(field.id.clone(),value);
+    }
+    Ok(Value::Object(content))
+}
+
+/// Texto do cartão de permissões: o que pede (leitura, escrita, rede) e o motivo.
+fn permissions_text(request:&Value) -> String {
+    let params = &request["params"];
+    let list = |key:&str|params["permissions"]["fileSystem"][key].as_array().map(|items|items.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).filter(|l|!l.is_empty());
+    let mut parts = Vec::new();
+    if let Some(read) = list("read") { parts.push(format!("leitura de {read}")); }
+    if let Some(write) = list("write") { parts.push(format!("escrita em {write}")); }
+    if params["permissions"]["network"]["enabled"] == true { parts.push("rede".into()); }
+    let what = if parts.is_empty() { "acesso extra".into() } else { parts.join("; ") };
+    let reason = params["reason"].as_str().map_or(String::new(),|r|format!(" {r}"));
+    format!("Permitir {what}?{reason}")
+}
+
 fn unsupported_notice(request:&Value) -> Option<String> {
     let method = request["method"].as_str()?;
-    if matches!(method,"item/commandExecution/requestApproval" | "item/fileChange/requestApproval" | "item/tool/requestUserInput") { return None; }
+    if matches!(method,"item/commandExecution/requestApproval" | "item/fileChange/requestApproval" | "item/tool/requestUserInput"
+        | "item/permissions/requestApproval" | ELICITATION | "currentTime/read") { return None; }
     Some(format!("O Codex pediu `{method}`, que a sessão sem terminal não atende; o pedido foi recusado."))
 }
 
@@ -257,13 +350,13 @@ impl Engine {
             Some((call["call_id"].as_str()?.into(),Voice { thread_id:string(&call["thread_id"]),starting:call["starting"] == true,
                 unsubscribed:call["unsubscribed"] == true,closed:true,..Voice::default() }))).collect()).unwrap_or_default();
         Self { generation,clock,counter:metadata["runtime_counter"].as_u64().unwrap_or(0),headless:metadata["headless"] != false,
-            alive:true,initialized:metadata["initialized"] == true,ready:metadata["ready"] == true,reconnect:false,
+            alive:true,initialized:metadata["initialized"] == true,ready:metadata["ready"] == true,reconnect:false,fresh_process:false,
             thread_id:metadata["thread_id"].as_str().unwrap_or("").into(),turn_id:None,in_progress:false,
             state:StateEvent { session:metadata["name"].as_str().unwrap_or("").into(),state:"idle".into(),headless:true,
                 status_line:string(&metadata["status_line"]),..StateEvent::default() },state_revision:metadata["state_revision"].as_u64().unwrap_or(0),settings_revision:metadata["settings_revision"].as_u64().unwrap_or(0),
             model:string(&metadata["model"]),effort:string(&metadata["effort"]),mode:string(&metadata["mode"]),
             service_tier:metadata.get("service_tier").and_then(service_tier),service_tier_pending:None,
-            permission_mode:metadata["permission_mode"].as_str().unwrap_or("Full Access").into(),token_usage:Value::Null,rate_limits:Value::Null,
+            permission_mode:stored_mode(metadata["name"].as_str().unwrap_or(""),metadata["permission_mode"].as_str().unwrap_or("Full Access")).into(),token_usage:Value::Null,rate_limits:Value::Null,
             preview:LiveBuffer::default(),response_started:false,first_response_start:None,compacting:false,
             running_commands:BTreeMap::new(),thinking:LiveBuffer::default(),was_working:metadata["in_progress"] == true,
             rpc:BTreeMap::new(),server_requests:Vec::new(),
@@ -273,7 +366,7 @@ impl Engine {
     pub fn view(&self) -> Value {
         let mut state = self.state.clone();
         let question = self.blocking_question().or_else(||self.async_questions.pending.first().map(|(_,q)|q.clone()));
-        let pending_approval = self.server_requests.iter().find(|(_,r)|["item/commandExecution/requestApproval","item/fileChange/requestApproval"].contains(&r["method"].as_str().unwrap_or("")));
+        let pending_approval = self.server_requests.iter().find(|(_,r)|is_card(r));
         state.state = if !self.alive { "dead" } else if self.blocking_question().is_some() || pending_approval.is_some()
             || question.is_some() && !self.in_progress { "awaiting_input" } else if self.in_progress { "working" } else { "idle" }.into();
         state.codex_question = question.and_then(|q|q.as_object().cloned());
@@ -285,6 +378,19 @@ impl Engine {
             let place = |path:Option<String>|path.map_or(String::new(),|p|format!(" em {p}"));
             // Fora do formato os detalhes saem da linha crua: aprovar às cegas não é opção.
             let raw = |key:&str|request["params"][key].as_str().map(str::to_owned);
+            let method = request["method"].as_str().unwrap_or("");
+            if method == "item/permissions/requestApproval" {
+                state.question = Some(permissions_text(request));
+                state.options = Some(["Permitir neste turno","Permitir na sessão","Negar"].map(String::from).to_vec());
+                return serde_json::to_value(state).unwrap();
+            }
+            if method == ELICITATION {
+                let p = &request["params"];
+                state.question = Some(format!("{} pede para abrir {}: {}",p["serverName"].as_str().unwrap_or("Um servidor MCP"),
+                    p["url"].as_str().unwrap_or(""),p["message"].as_str().unwrap_or("")));
+                state.options = Some(["Concluí","Cancelar"].map(String::from).to_vec());
+                return serde_json::to_value(state).unwrap();
+            }
             let (target,reason) = if request["method"] == "item/fileChange/requestApproval" {
                 let (root,reason) = match decoded(request) {
                     wire::ServerRequest::FileChangeApproval(p) => (p.grant_root,p.reason),
@@ -318,7 +424,10 @@ impl Engine {
     }
 
     fn blocking_question(&self) -> Option<Value> {
-        let (id,request) = self.server_requests.iter().find(|(_,r)|r["method"] == "item/tool/requestUserInput")?;
+        let (id,request) = self.server_requests.iter().find(|(_,r)|r["method"] == "item/tool/requestUserInput" || form_fields(r).is_some())?;
+        if let Some(fields) = form_fields(request) {
+            return Some(json!({"provider":"codex","request_id":id,"questions":fields.iter().map(field_question).collect::<Vec<_>>()}));
+        }
         let raw = request["params"]["questions"].as_array()?;
         let questions:Vec<_> = match decoded(request) {
             wire::ServerRequest::ToolRequestUserInput(params) => params.questions.into_iter().map(|q|json!({
@@ -428,7 +537,7 @@ impl Engine {
         if !pending.acknowledged || !pending.candidate || pending.verifying { return; }
         pending.candidate = false; pending.verifying = true;
         let parent = pending.operation_id.clone(); let thread = pending.thread_id.clone();
-        self.send(format!("{parent}:verify:{}",self.counter+1),ClientRequest::ThreadResume(wire::ThreadResumeParams { thread_id:thread }),
+        self.send(format!("{parent}:verify:{}",self.counter+1),ClientRequest::ThreadResume(wire::ThreadResumeParams { thread_id:thread,..Default::default() }),
             Some(json!({"kind":"service_tier_confirm","parent":parent})),effects);
     }
 
@@ -527,6 +636,20 @@ impl Engine {
         }
     }
 
+    /// Processo recém-criado pelo Rust: a subida repete a política e tem os recuos do Python.
+    /// Anexar a um cano vivo mantém o resume só com `threadId`.
+    pub fn set_fresh_process(&mut self,fresh:bool) { self.fresh_process = fresh; }
+
+    pub fn problem(&self) -> Option<&str> { self.state.problema.as_deref() }
+    /// Problema que o ator conhece e o motor não (a religação desistiu, o processo não subiu).
+    pub fn set_problem(&mut self,code:&str,detail:Option<String>) -> Vec<Effect> {
+        self.state.problema = Some(code.into());
+        self.state.problema_detalhe = detail.map(|detail|detail.chars().take(300).collect());
+        let mut effects = Vec::new();
+        self.changed(&mut effects,false);
+        effects
+    }
+
     pub fn bootstrap(&mut self,reconnect:bool,operation_id:String) -> Result<Vec<Effect>,RuntimeError> {
         if !self.headless { return Err(error("Codex com terminal conserva o adapter existente")); }
         self.reconnect = reconnect;
@@ -573,6 +696,52 @@ impl Engine {
         if let Some(text) = self.thinking.clear() { self.publish_on("thinking",text,effects); }
     }
 
+    fn bootstrap_start(&self) -> ClientRequest {
+        ClientRequest::ThreadStart(wire::ThreadStartParams { cwd:string(&self.metadata["cwd"]),model:self.model.clone(),
+            approval_policy:Some(approval(&self.permission_mode).into()),sandbox:Some(sandbox(&self.permission_mode).into()),
+            service_tier:self.service_tier.clone() })
+    }
+
+    fn thread_opened(&mut self,parent:&str,effects:&mut Vec<Effect>) {
+        if self.reconnect && std::mem::take(&mut self.was_working) {
+            // A vida anterior estava no meio de um turno: se ele voltou `interrupted`, foi cortado.
+            self.counter += 1;
+            let operation_id = format!("cut-check:{}:{}",self.generation,self.counter);
+            self.send(operation_id,self.thread_read(true),Some(json!({"kind":"cut_check"})),effects);
+        }
+        // Cano vivo já tem o esforço que a vida anterior aplicou: como no Python, religar não o reenvia.
+        if let Some(effort) = self.metadata["effort"].as_str().filter(|_|self.fresh_process).map(str::to_owned) {
+            let request = ClientRequest::ThreadSettingsUpdate(wire::ThreadSettingsUpdateParams { thread_id:self.thread_id.clone(),
+                effort:Some(Some(effort)),..Default::default() });
+            self.send(format!("{parent}:effort"),request,Some(json!({"kind":"bootstrap_ready","parent":parent})),effects);
+        } else { self.ready = true; effects.push(Effect::Reply { operation_id:parent.into(),disposition:Disposition::Accepted,payload:json!({"ready":true}) }); effects.push(Effect::WakeQueue); }
+    }
+
+    /// Mesmos recuos da subida do Python: provedor sumido da config e conversa sem rollout. Transferência nunca recua.
+    fn bootstrap_fallback(&mut self,rpc:&Rpc,message:&str,effects:&mut Vec<Effect>) -> bool {
+        let Some(next) = rpc.continuation.as_ref().filter(|next|next["kind"] == "bootstrap_thread") else { return false };
+        // Cano vivo com thread ainda sem turno: ela já está carregada nele, e o `resume` só a recusa por não ter rollout.
+        if !self.fresh_process && rpc.method == "thread/resume" && message.contains("no rollout found") {
+            self.async_questions.hydrate(&self.thread_id,&json!({}));
+            self.thread_opened(next["parent"].as_str().unwrap_or(""),effects);
+            self.changed(effects,true);
+            return true;
+        }
+        if !self.fresh_process || rpc.method != "thread/resume" || self.metadata["transfer_id"].as_str().is_some_and(|id|!id.is_empty()) { return false }
+        let parent = next["parent"].as_str().unwrap_or("");
+        let request = if message.contains("Model provider") && message.contains("not found") && rpc.params.get("modelProvider").is_none() {
+            let mut params = rpc.params.clone();
+            params["modelProvider"] = json!("openai");
+            self.rpc(format!("{parent}:thread"),"thread/resume",params,Some(next.clone()),effects);
+            return true;
+        } else if message.contains("no rollout found") {
+            tracing::warn!(session = %self.metadata["name"].as_str().unwrap_or("-"), thread_id = %self.thread_id, "Codex sem rollout para retomar; abrindo conversa nova (thread/start)");
+            self.bootstrap_start()
+        } else { return false };
+        self.send(format!("{parent}:thread"),request,Some(next.clone()),effects);
+        true
+    }
+
     fn thread_read(&self,include_turns:bool) -> ClientRequest {
         ClientRequest::ThreadRead(wire::ThreadReadParams { thread_id:self.thread_id.clone(),include_turns })
     }
@@ -589,6 +758,10 @@ impl Engine {
 
     pub fn command(&mut self,command:RuntimeCommand,clock:ClockSample) -> Result<Vec<Effect>,RuntimeError> {
         self.clock = clock;
+        // Reiniciar é a saída de um turno que nunca fecha e de um processo caído: vale trabalhando e morto.
+        if self.headless && matches!(command.kind,OperationKind::Restart | OperationKind::Reload) {
+            return Ok(vec![Effect::Respawn { operation_id:command.operation_id,reason:"restart".into(),patch:Value::Null,reply:json!({}) }]);
+        }
         if !self.headless || !self.alive { return Err(error("runtime sem terminal indisponível")); }
         let id = command.operation_id;
         let payload = command.payload;
@@ -669,12 +842,24 @@ impl Engine {
                 self.send(format!("{id}:settings"),self.thread_read(false),Some(json!({"kind":"set_mode","parent":id,"mode":mode})),&mut effects);
             }
             OperationKind::Select => {
-                let (request_id,request) = self.server_requests.iter().find(|(id,request)|!self.answering.contains(id)
-                    && ["item/commandExecution/requestApproval","item/fileChange/requestApproval"].contains(&request["method"].as_str().unwrap_or("")))
-                    .cloned().ok_or_else(||error("nenhuma aprovação pendente"))?;
+                let (request_id,request) = self.server_requests.iter().find(|(id,request)|!self.answering.contains(id) && is_card(request))
+                    .cloned().ok_or_else(||RuntimeError::new("no_pending_permission","nenhuma aprovação pendente"))?;
                 let option = payload["option"].as_u64().ok_or_else(||error("opção inválida"))?;
-                let decision = match option { 1=>"accept",2=>"decline",3 if !unreadable_command(&request)=>"acceptForSession",_=>return Err(error("opção inválida")) };
-                self.answer(id,request_id,json!({"decision":decision}),None,&mut effects)?;
+                let invalid = || error("opção inválida");
+                let result = match request["method"].as_str().unwrap_or("") {
+                    "item/permissions/requestApproval" => {
+                        let granted = request["params"]["permissions"].clone();
+                        match option {
+                            1 => json!({"permissions":granted,"scope":"turn"}),
+                            2 => json!({"permissions":granted,"scope":"session"}),
+                            3 => json!({"permissions":{},"scope":"turn"}),
+                            _ => return Err(invalid()),
+                        }
+                    }
+                    ELICITATION => match option { 1=>json!({"action":"accept"}),2=>json!({"action":"cancel"}),_=>return Err(invalid()) },
+                    _ => json!({"decision":match option { 1=>"accept",2=>"decline",3 if !unreadable_command(&request)=>"acceptForSession",_=>return Err(invalid()) }}),
+                };
+                self.answer(id,request_id,result,None,&mut effects)?;
             }
             OperationKind::AnswerQuestions => {
                 let request_id:RequestId = serde_json::from_value(payload["request_id"].clone()).map_err(|_|error("ID da resposta inválido"))?;
@@ -694,17 +879,44 @@ impl Engine {
                 }
                 let question = self.blocking_question().ok_or_else(||error("a pergunta já foi respondida ou cancelada"))?;
                 if question["request_id"] != serde_json::to_value(&request_id).unwrap() { return Err(error("a pergunta mudou")); }
-                let response = question_response(&question,&payload["answers"])?;
+                let mut response = question_response(&question,&payload["answers"])?;
+                if let Some(fields) = self.server_requests.iter().find(|(key,_)|key == &request_id).and_then(|(_,r)|form_fields(r)) {
+                    response = json!({"action":"accept","content":form_content(&fields,&response)?});
+                }
                 self.answer(id,request_id,response,None,&mut effects)?;
             }
             OperationKind::SkipQuestion => {
-                let request = payload["request_id"].as_str().ok_or_else(||error("ID da pergunta inválido"))?;
-                if !self.async_questions.pending.iter().any(|(id,_)|id == request) { return Err(error("a pergunta já foi respondida ou pertence a outra conversa")); }
-                self.async_questions.skipped.insert(request.into()); self.async_questions.resolve(request);
-                self.policy("session.patch_meta",json!({"skipped_async_questions":self.async_questions.skipped}),&mut effects);
-                effects.push(Effect::Reply { operation_id:id,disposition:Disposition::Accepted,payload:json!({}) });
+                let form = serde_json::from_value::<RequestId>(payload["request_id"].clone()).ok()
+                    .filter(|rid|self.server_requests.iter().any(|(key,r)|key == rid && form_fields(r).is_some()));
+                if let Some(request_id) = form {
+                    self.answer(id,request_id,json!({"action":"cancel"}),None,&mut effects)?;
+                } else {
+                    let request = payload["request_id"].as_str().ok_or_else(||error("ID da pergunta inválido"))?;
+                    if !self.async_questions.pending.iter().any(|(id,_)|id == request) { return Err(error("a pergunta já foi respondida ou pertence a outra conversa")); }
+                    self.async_questions.skipped.insert(request.into()); self.async_questions.resolve(request);
+                    self.policy("session.patch_meta",json!({"skipped_async_questions":self.async_questions.skipped}),&mut effects);
+                    effects.push(Effect::Reply { operation_id:id,disposition:Disposition::Accepted,payload:json!({}) });
+                }
             }
-            OperationKind::SetPermissionMode | OperationKind::Restart | OperationKind::OpenTerminal | OperationKind::Reload => {
+            OperationKind::SetPermissionMode => {
+                let wanted = payload["mode"].as_str().unwrap_or("").trim();
+                let mode = *MODES.iter().find(|mode|mode.eq_ignore_ascii_case(wanted)).ok_or_else(||RuntimeError::new("erro_modo_desconhecido",
+                    &format!("modo desconhecido: {wanted} (os modos são: {})",MODES.join(", "))))?;
+                // O `approvalPolicy` vale no próximo turno; o sandbox só muda subindo o processo de novo.
+                if sandbox(mode) != sandbox(&self.permission_mode) {
+                    if !self.ready { return Err(error("não foi possível confirmar o estado do turno; permissão mantida")); }
+                    if self.in_progress || !self.server_requests.is_empty() {
+                        return Err(RuntimeError::new("erro_permissao_ocupada","a sessão está trabalhando; mudar o sandbox reiniciaria o Codex — espere ela terminar"));
+                    }
+                    // O modo novo entra na vida nova; a falha antes dela deixa tudo como estava.
+                    return Ok(vec![Effect::Respawn { operation_id:id,reason:"permission".into(),
+                        patch:json!({"permission_mode":mode}),reply:json!({"current":mode}) }]);
+                }
+                self.permission_mode = mode.into();
+                self.policy("session.patch_meta",json!({"permission_mode":mode}),&mut effects);
+                effects.push(Effect::Reply { operation_id:id,disposition:Disposition::Accepted,payload:json!({"current":mode}) });
+            }
+            OperationKind::OpenTerminal => {
                 if !self.idle() { return Err(error("aguarde a sessão ficar ociosa antes de mudar o sandbox ou o modo")); }
                 return Err(RuntimeError::new("lifecycle_required","operação exige a barreira de lifecycle sob a mesma posse"));
             }
@@ -830,8 +1042,36 @@ impl Engine {
                 if let Some(voice) = rpc.continuation.as_ref().and_then(|next|next["call_id"].as_str()).and_then(|call|self.voices.get_mut(call)) {
                     voice.starting = false;
                 }
+                self.release_early_voice(effects)?;
             }
-            effects.push(Effect::Reply { operation_id:rpc.operation_id,disposition:Disposition::Rejected,payload:json!({"error":line["error"]}) });
+            let message = line["error"]["message"].as_str().unwrap_or("");
+            if self.bootstrap_fallback(&rpc,message,effects) { return Ok(()); }
+            let transfer = self.metadata["transfer_id"].as_str().is_some_and(|id|!id.is_empty());
+            if let Some(parent) = rpc.continuation.as_ref().filter(|next|next["kind"] == "bootstrap_ready" && !transfer).and_then(|next|next["parent"].as_str()) {
+                // A conversa já está aberta: perder o nível escolhido é melhor que perder a sessão, mas aparece.
+                self.state.problema = Some("codex_esforco_nao_aplicado".into());
+                self.state.problema_detalhe = Some(message.chars().take(300).collect());
+                self.ready = true;
+                effects.push(Effect::Reply { operation_id:parent.into(),disposition:Disposition::Accepted,payload:json!({"ready":true}) });
+                effects.push(Effect::WakeQueue);
+                self.changed(effects,true);
+                return Ok(());
+            }
+            // Subida recusada: a sessão nunca fica pronta, então a recusa aparece com o motivo em vez de ficar ociosa.
+            if let Some(parent) = rpc.continuation.as_ref().filter(|next|matches!(next["kind"].as_str(),Some("bootstrap" | "bootstrap_thread" | "bootstrap_ready")))
+                .and_then(|next|next["parent"].as_str()) {
+                tracing::warn!(session = %self.metadata["name"].as_str().unwrap_or("-"), method = %rpc.method, reason = %message, "o Codex recusou abrir a conversa");
+                effects.push(Effect::Diag { event:DiagEvent::CodexBootstrap,code:rpc.method.clone() });
+                self.state.problema = Some("codex_conversa_nao_abriu".into());
+                self.state.problema_detalhe = Some(message.chars().take(300).collect());
+                effects.push(Effect::Reply { operation_id:parent.into(),disposition:Disposition::Rejected,payload:json!({"error":line["error"]}) });
+                self.changed(effects,true);
+                return Ok(());
+            }
+            // A leitura que antecede a troca de modo ou o Stop falhou: quem espera é a operação de cima.
+            let operation_id = rpc.continuation.as_ref().filter(|next|next["kind"] == "set_mode" || next["kind"] == "interrupt")
+                .and_then(|next|next["parent"].as_str()).map_or(rpc.operation_id,str::to_owned);
+            effects.push(Effect::Reply { operation_id,disposition:Disposition::Rejected,payload:json!({"error":line["error"]}) });
             return Ok(());
         }
         let result = line.get("result").cloned().unwrap_or_else(||json!({}));
@@ -845,12 +1085,7 @@ impl Engine {
                 let closed = if let Some(voice) = self.voices.get_mut(&call_id) {
                     voice.thread_id = Some(thread_id.clone()); voice.starting = false; voice.closed
                 } else { true };
-                if let Some(events) = self.early_voice.remove(&thread_id) {
-                    for event in events {
-                        self.early_voice_bytes = self.early_voice_bytes.saturating_sub(event.to_string().len());
-                        self.notification(event,effects)?;
-                    }
-                }
+                self.release_early_voice(effects)?;
                 if closed && !rpc.timed_out { self.close_voice_thread(&call_id,&thread_id,effects); }
             } else if rpc.method == "thread/unsubscribe" {
                 if let Some(voice) = self.voices.get_mut(&call_id) { voice.unsubscribed = true; }
@@ -880,14 +1115,18 @@ impl Engine {
                     self.finish_service_tier(Disposition::Unknown,json!({"error":"A conversa mudou antes de confirmar Fast"}),effects);
                     self.clear_preview(effects); self.thread_id = response.thread.id.clone();
                 }
+                let mut patch = json!({"thread_id":self.thread_id,"rollout_path":response.thread.path});
                 if rpc.settings_revision == self.settings_revision {
                     self.model = response.model.clone().or(self.model.clone());
                     self.effort = response.reasoning_effort.clone().or(self.effort.clone());
-                    self.restore_service_tier(&result,rpc.settings_revision,effects);
+                    // Fast vai no patch da thread: sozinho, o Python o recusa enquanto o arquivo tem a thread anterior.
+                    if let Some(tier) = result.get("serviceTier").and_then(service_tier) {
+                        patch["service_tier"] = json!(tier); self.service_tier = Some(tier);
+                    }
                 }
                 self.restore_thread(&response.thread,&rpc);
                 self.async_questions.hydrate(&self.thread_id,&result["thread"]);
-                self.policy("session.patch_meta",json!({"thread_id":self.thread_id,"rollout_path":response.thread.path}),effects);
+                self.policy("session.patch_meta",patch,effects);
             }
             "turn/start" => {
                 if rpc.state_revision == self.state_revision {
@@ -908,9 +1147,11 @@ impl Engine {
                 if rpc.settings_revision == self.settings_revision {
                     if rpc.params.get("model").is_some() { self.model = string(&rpc.params["model"]); }
                     if rpc.params.get("effort").is_some() { self.effort = string(&rpc.params["effort"]); }
-                    if let Some(mode) = rpc.params["collaborationMode"]["mode"].as_str() { self.mode = Some(mode.into()); }
+                    let mut patch = json!({"model":self.model,"effort":self.effort});
+                    // O modo vai ao arquivo da sessão: a vida nova do processo nasce dele.
+                    if let Some(mode) = rpc.params["collaborationMode"]["mode"].as_str() { self.mode = Some(mode.into()); patch["mode"] = json!(mode); }
                     self.settings_revision += 1;
-                    self.policy("session.patch_meta",json!({"model":self.model,"effort":self.effort}),effects);
+                    self.policy("session.patch_meta",patch,effects);
                 }
             }
             "account/rateLimits/read" => {
@@ -932,28 +1173,15 @@ impl Engine {
                     effects.push(Effect::Write { operation_id:Some(notification),
                         frame:json!({"jsonrpc":"2.0","method":"initialized","params":{}}) });
                     let request = if self.reconnect && !self.thread_id.is_empty() {
-                        ClientRequest::ThreadResume(wire::ThreadResumeParams { thread_id:self.thread_id.clone() })
-                    } else {
-                        ClientRequest::ThreadStart(wire::ThreadStartParams { cwd:string(&self.metadata["cwd"]),model:self.model.clone(),
-                            approval_policy:Some(approval(&self.permission_mode).into()),sandbox:Some(sandbox(&self.permission_mode).into()),
-                            service_tier:self.service_tier.clone() })
-                    };
+                        if self.fresh_process {
+                            ClientRequest::ThreadResume(wire::ThreadResumeParams { thread_id:self.thread_id.clone(),cwd:string(&self.metadata["cwd"]),
+                                approval_policy:Some(approval(&self.permission_mode).into()),sandbox:Some(sandbox(&self.permission_mode).into()),
+                                service_tier:self.service_tier.clone(),model_provider:None })
+                        } else { ClientRequest::ThreadResume(wire::ThreadResumeParams { thread_id:self.thread_id.clone(),..Default::default() }) }
+                    } else { self.bootstrap_start() };
                     self.send(format!("{parent}:thread"),request,Some(json!({"kind":"bootstrap_thread","parent":parent})),effects);
                 }
-                Some("bootstrap_thread") => {
-                    let parent = next["parent"].as_str().unwrap_or("");
-                    if self.reconnect && std::mem::take(&mut self.was_working) {
-                        // A vida anterior estava no meio de um turno: se ele voltou `interrupted`, foi cortado.
-                        self.counter += 1;
-                        let operation_id = format!("cut-check:{}:{}",self.generation,self.counter);
-                        self.send(operation_id,self.thread_read(true),Some(json!({"kind":"cut_check"})),effects);
-                    }
-                    if let Some(effort) = self.metadata["effort"].as_str().map(str::to_owned) {
-                        let request = ClientRequest::ThreadSettingsUpdate(wire::ThreadSettingsUpdateParams { thread_id:self.thread_id.clone(),
-                            effort:Some(Some(effort)),..Default::default() });
-                        self.send(format!("{parent}:effort"),request,Some(json!({"kind":"bootstrap_ready","parent":parent})),effects);
-                    } else { self.ready = true; effects.push(Effect::Reply { operation_id:parent.into(),disposition:Disposition::Accepted,payload:json!({"ready":true}) }); effects.push(Effect::WakeQueue); }
-                }
+                Some("bootstrap_thread") => self.thread_opened(next["parent"].as_str().unwrap_or(""),effects),
                 Some("bootstrap_ready") => {
                     self.ready = true;
                     effects.push(Effect::Reply { operation_id:next["parent"].as_str().unwrap_or("").into(),disposition:Disposition::Accepted,payload:json!({"ready":true}) });
@@ -1012,6 +1240,9 @@ impl Engine {
                 "efforts":model.supported_reasoning_efforts.into_iter().map(|e|json!({"value":e.reasoning_effort,"description":e.description})).collect::<Vec<_>>(),
                 "defaultEffort":model.default_reasoning_effort,"serviceTiers":model.service_tiers.unwrap_or_default(),
                 "defaultServiceTier":model.default_service_tier})).collect::<Vec<_>>())
+        } else if rpc.continuation.is_none() && matches!(rpc.method.as_str(),"thread/read" | "thread/settings/update") {
+            // Ler ou trocar a configuração responde com a configuração que vale depois dela, como o adapter Python.
+            json!({"model":self.model,"effort":self.effort,"service_tier":self.service_tier,"mode":self.mode})
         } else { result };
         effects.push(Effect::Reply { operation_id:rpc.operation_id,disposition:Disposition::Accepted,payload });
         self.changed(effects,true);
@@ -1100,6 +1331,15 @@ impl Engine {
         Ok(effects)
     }
 
+    /// Pedidos guardados durante a abertura da voz: os da thread dela entram pelo ramo da voz, os de outras
+    /// threads (subagente) seguem o fluxo normal, que não descarta pedido.
+    fn release_early_voice(&mut self,effects:&mut Vec<Effect>) -> Result<(),RuntimeError> {
+        let held = std::mem::take(&mut self.early_voice);
+        self.early_voice_bytes = 0;
+        for event in held.into_values().flatten() { self.notification(event,effects)?; }
+        Ok(())
+    }
+
     fn close_voice_thread(&mut self,call_id:&str,thread_id:&str,effects:&mut Vec<Effect>) {
         if self.rpc.values().any(|rpc|voice_rpc(rpc) && rpc.method == "thread/unsubscribe"
             && rpc.continuation.as_ref().is_some_and(|next|next["call_id"] == call_id)) { return; }
@@ -1142,18 +1382,22 @@ impl Engine {
             effects.push(Effect::Publish { channel:"voice".into(),data:json!({"call_id":call_id,"event":line}) });
             return Ok(());
         }
-        if let Some(thread) = params["threadId"].as_str().filter(|thread|*thread != self.thread_id) {
+        // Pedido de outra thread (subagente) entra na fila como os da principal; só o "resolvido" dele
+        // também passa, para o pedido sair da fila. O resto vindo de outra thread é descartado.
+        let foreign = params["threadId"].as_str().filter(|thread|*thread != self.thread_id);
+        if let Some(thread) = foreign {
             if line.get("id").is_some() && self.voices.values().any(|voice|voice.starting) {
                 let size = line.to_string().len();
                 if self.early_voice_bytes + size > MAX_FRAME { return Err(error("pedidos iniciais da voz excederam o orçamento")); }
                 let pending = self.early_voice.entry(thread.into()).or_default();
                 if !pending.contains(&line) { pending.push(line.clone()); self.early_voice_bytes += size; }
+                return Ok(());
             }
-            return Ok(());
+            if !line.get("id").is_some_and(|id|!id.is_null()) && method != "serverRequest/resolved" { return Ok(()); }
         }
         let item = &params["item"];
-        if method == "turn/completed" || ["item/started","item/completed"].contains(&method) && ["userMessage","agentMessage"].contains(&item["type"].as_str().unwrap_or(""))
-            || method == "item/tool/requestUserInput" || method.ends_with("/requestApproval") {
+        if foreign.is_none() && (method == "turn/completed" || ["item/started","item/completed"].contains(&method) && ["userMessage","agentMessage"].contains(&item["type"].as_str().unwrap_or(""))
+            || method == "item/tool/requestUserInput" || method.ends_with("/requestApproval")) {
             for (call_id,_) in self.voices.iter().filter(|(_,voice)|!voice.closed) {
                 effects.push(Effect::Publish { channel:"voice_target".into(),data:json!({"call_id":call_id,"event":line}) });
             }
@@ -1171,9 +1415,17 @@ impl Engine {
                 tracing::warn!(session=%self.state.session,method=%failure.method,error=wire::error_kind(&failure.error),"pedido do Codex fora do formato");
                 effects.push(Effect::Diag { event:DiagEvent::CodexDecode,code:decode_code(&failure.method) });
             }
-            if !["item/commandExecution/requestApproval","item/fileChange/requestApproval","item/tool/requestUserInput"].contains(&method) {
-                self.counter += 1;
-                self.answer(format!("server:{}:{}",self.generation,self.counter),request_id,Value::Null,
+            let operation_id = format!("server:{}:{}",self.generation,self.counter);
+            if method == "currentTime/read" {
+                self.answer(operation_id,request_id,json!({"currentTimeAt":self.clock.epoch_s as i64}),None,effects)?;
+            } else if method == ELICITATION {
+                if !is_url_elicitation(&line) && form_fields(&line).is_none() {
+                    self.answer(operation_id,request_id,json!({"action":"decline"}),None,effects)?;
+                    let server = params["serverName"].as_str().unwrap_or("");
+                    self.policy("local_output",json!({"text":format!("O servidor MCP `{server}` pediu um formulário que o Hangar não sabe mostrar; o pedido foi recusado.")}),effects);
+                }
+            } else if !is_card(&line) && method != "item/tool/requestUserInput" {
+                self.answer(operation_id,request_id,Value::Null,
                     Some(json!({"code":-32601,"message":format!("{method} não é atendido pelo Hangar sem terminal")})),effects)?;
                 self.policy("unknown_private",json!({"kind":method,"event":line}),effects);
             }
@@ -1215,6 +1467,10 @@ impl Engine {
                 self.server_requests.clear(); self.answering.clear(); self.request_epochs.clear();
                 // Status lido cru não é confiável: não apaga nem cria problema, só fecha o turno.
                 if from_raw {
+                    // Sem o detalhe (não decodificou), mas um turno que falhou não pode parecer concluído.
+                    if n.turn.status == "failed" && !matches!(self.state.problema.as_deref(),Some("codex_limite_uso" | "codex_sem_login")) {
+                        self.state.problema = Some("headless_turno_erro".into()); self.state.problema_detalhe = None;
+                    }
                 } else if n.turn.status == "failed" {
                     let error = n.turn.error.unwrap_or_default();
                     let class = error.codex_error_info.as_ref().and_then(error_class);

@@ -47,7 +47,14 @@ wire!(pub struct ThreadStartParams {
     #[serde(skip_serializing_if = "Option::is_none")] pub sandbox:Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")] pub service_tier:Option<String>,
 });
-wire!(pub struct ThreadResumeParams { pub thread_id:String });
+wire!(pub struct ThreadResumeParams {
+    pub thread_id:String,
+    #[serde(skip_serializing_if = "Option::is_none")] pub cwd:Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub approval_policy:Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub sandbox:Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub service_tier:Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub model_provider:Option<String>,
+});
 wire!(pub struct ThreadReadParams { pub thread_id:String, pub include_turns:bool });
 wire!(pub struct ThreadCompactStartParams { pub thread_id:String });
 wire!(pub struct ThreadUnsubscribeParams { pub thread_id:String });
@@ -263,7 +270,13 @@ wire!(pub struct FileChangeRequestApprovalParams { pub thread_id:String, pub gra
 wire!(pub struct ToolRequestUserInputQuestion { pub id:String, pub header:String, pub question:String, pub is_other:Option<bool>,
     pub is_secret:Option<bool>, pub options:Option<Vec<Value>> });
 wire!(pub struct ToolRequestUserInputParams { pub thread_id:String, pub questions:Vec<ToolRequestUserInputQuestion> });
-wire!(pub struct ThreadOnlyParams { pub thread_id:String });
+wire!(pub struct AdditionalFileSystemPermissions { pub read:Option<Vec<String>>, pub write:Option<Vec<String>> });
+wire!(pub struct AdditionalNetworkPermissions { pub enabled:Option<bool> });
+wire!(pub struct RequestPermissionProfile { pub file_system:Option<AdditionalFileSystemPermissions>, pub network:Option<AdditionalNetworkPermissions> });
+wire!(pub struct PermissionsRequestApprovalParams { pub thread_id:String, pub cwd:Option<String>, pub reason:Option<String>, pub permissions:RequestPermissionProfile });
+wire!(pub struct McpServerElicitationRequestParams { pub thread_id:String, pub server_name:String, pub mode:Option<String>,
+    pub message:Option<String>, pub url:Option<String>, pub requested_schema:Option<serde_json::Value> });
+wire!(pub struct CurrentTimeReadParams { pub thread_id:String });
 
 #[derive(Clone,Debug,PartialEq,Deserialize)]
 #[cfg_attr(test,derive(schemars::JsonSchema))]
@@ -272,9 +285,9 @@ pub enum ServerRequest {
     #[serde(rename = "item/commandExecution/requestApproval")] CommandExecutionApproval(CommandExecutionRequestApprovalParams),
     #[serde(rename = "item/fileChange/requestApproval")] FileChangeApproval(FileChangeRequestApprovalParams),
     #[serde(rename = "item/tool/requestUserInput")] ToolRequestUserInput(ToolRequestUserInputParams),
-    /// Atendidos na 5B; na 5A continuam recusados com `-32601`, mas já reconhecidos.
-    #[serde(rename = "item/permissions/requestApproval")] PermissionsApproval(ThreadOnlyParams),
-    #[serde(rename = "mcpServer/elicitation/request")] McpServerElicitation(ThreadOnlyParams),
+    #[serde(rename = "item/permissions/requestApproval")] PermissionsApproval(PermissionsRequestApprovalParams),
+    #[serde(rename = "mcpServer/elicitation/request")] McpServerElicitation(McpServerElicitationRequestParams),
+    #[serde(rename = "currentTime/read")] CurrentTimeRead(CurrentTimeReadParams),
     #[serde(skip)] Unknown,
 }
 
@@ -319,8 +332,9 @@ decoder!(ServerRequest,{
     "item/commandExecution/requestApproval" => CommandExecutionApproval(CommandExecutionRequestApprovalParams),
     "item/fileChange/requestApproval" => FileChangeApproval(FileChangeRequestApprovalParams),
     "item/tool/requestUserInput" => ToolRequestUserInput(ToolRequestUserInputParams),
-    "item/permissions/requestApproval" => PermissionsApproval(ThreadOnlyParams),
-    "mcpServer/elicitation/request" => McpServerElicitation(ThreadOnlyParams),
+    "item/permissions/requestApproval" => PermissionsApproval(PermissionsRequestApprovalParams),
+    "mcpServer/elicitation/request" => McpServerElicitation(McpServerElicitationRequestParams),
+    "currentTime/read" => CurrentTimeRead(CurrentTimeReadParams),
 });
 
 #[cfg(test)]

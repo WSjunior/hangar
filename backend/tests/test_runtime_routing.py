@@ -955,3 +955,347 @@ def test_bypass_reopen_refuses_a_working_rust_session(birth, monkeypatch):
     assert error.status_code == 409 and error.detail["code"] == "erro_sessao_trabalhando"
     assert birth.kills == [], "o turno em andamento não é morto"
     assert owner.slot("s1").phase == runtime_coordinator.Phase.Rust
+
+
+# --- Codex sem terminal nasce e religa no Rust (5B Task 4) ---
+
+CODEX_OWNS = [{"provider":"claude", "headless":True}, {"provider":"claude", "headless":False}, {"provider":"codex", "headless":True}]
+
+
+@pytest.fixture
+def codex_birth(birth, tmp_path, monkeypatch):
+    from app.adapters.codex import sem_terminal, sessions as codex_sessions
+    from app.adapters.codex.adapter import CodexAdapter
+    from app.runtime_adapter import LegacyBridge
+    codex_sessions.save("cx", None, "", str(tmp_path), headless=True, key="c" * 32)
+    async def no_python_launch(*args, **kwargs):
+        pytest.fail("o Python subiu o processo de uma sessão Codex do Rust")
+    monkeypatch.setattr(sem_terminal, "subir", no_python_launch)
+    monkeypatch.setattr(sem_terminal, "conectar", no_python_launch)
+    codex = CodexAdapter()
+    def build(transport, mode="rust"):
+        owner = birth.build(transport)
+        owner.legacy = LegacyBridge(owner, {"claude":birth.adapter, "codex":codex})
+        owner._owns = {(item["provider"], item["headless"]) for item in CODEX_OWNS}
+        owner.mode = mode
+        return owner
+    birth.codex, birth.build_codex, birth.codex_sessions = codex, build, codex_sessions
+    return birth
+
+
+class LaunchTransport(Transport):
+    """Rust falso que guarda o comando do `open` e o que o coordenador tinha registrado naquela hora."""
+
+    def __init__(self, owner_ref, **kwargs):
+        super().__init__(**kwargs)
+        self.commands, self.owner_ref, self.phase_at_open = [], owner_ref, None
+
+    async def op(self, descriptor, command, operation_id, clock):
+        if command["kind"] == "open":
+            self.commands.append(command)
+            slot = self.owner_ref[0].slots.get(descriptor["key"])
+            # As políticas da subida (launch_env, patch_meta) exigem a posse do Rust já durante o `open`.
+            self.phase_at_open = slot.phase if slot is not None else None
+        return await super().op(descriptor, command, operation_id, clock)
+
+
+def test_codex_headless_without_cano_opens_with_launch_in_rust(codex_birth, tmp_path):
+    ref = []
+    transport = LaunchTransport(ref)
+    owner = codex_birth.build_codex(transport)
+    ref.append(owner)
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.ensure_open("cx")
+    asyncio.run(scenario())
+    assert transport.kinds() == ["open"]
+    command = transport.commands[0]
+    assert command["launch"] is True
+    assert command["descriptor"]["sidecar_dir"] == str(tmp_path / "codex-sessions")
+    assert transport.phase_at_open == runtime_coordinator.Phase.Rust
+    slot = owner.slot("cx")
+    assert slot.phase == runtime_coordinator.Phase.Rust and slot.lease is None and slot.binding.provider == "codex"
+
+
+def test_codex_ensure_running_goes_to_rust(codex_birth):
+    ref = []
+    transport = LaunchTransport(ref)
+    owner = codex_birth.build_codex(transport)
+    ref.append(owner)
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await codex_birth.codex.ensure_running("cx")
+    asyncio.run(scenario())
+    assert transport.kinds() == ["open"] and transport.commands[0]["launch"] is True
+    assert "cx" not in codex_birth.codex._sessions, "nenhum cliente Python no cano"
+
+
+def test_codex_open_failure_leaves_no_registration(codex_birth):
+    ref = []
+    transport = LaunchTransport(ref, fail="cano_nao_escutou")
+    owner = codex_birth.build_codex(transport)
+    ref.append(owner)
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.ensure_open("cx")
+    with pytest.raises(Exception) as caught:
+        asyncio.run(scenario())
+    assert caught.value.code == "cano_nao_escutou"
+    assert not owner.managed_queue("cx") and owner.slots == {}
+
+
+@pytest.mark.parametrize("mode", ["rust", "pending"])
+def test_warm_sessions_skips_codex_sessions_of_the_rust(codex_birth, monkeypatch, mode):
+    owner = codex_birth.build_codex(Transport(), mode=mode)
+    called = []
+    async def ensure_running(name):
+        called.append(name)
+    monkeypatch.setattr(codex_birth.codex, "ensure_running", ensure_running)
+    asyncio.run(codex_birth.codex.warm_sessions())
+    assert called == [], "backend Python reiniciado com o Rust de pé não toca a sessão"
+    owner.mode = "python"
+    asyncio.run(codex_birth.codex.warm_sessions())
+    assert called == ["cx"]
+
+
+def test_rust_up_registers_live_codex_headless_in_rust(codex_birth):
+    import os
+    codex_birth.codex_sessions.update("cx", cano={"pid":os.getpid(), "escuta":"unix:/tmp/vivo.sock", "token":"t", "ts":1.0, "versao":2})
+    owner = _pending_owner(codex_birth)
+    ref = [owner]
+    transport = LaunchTransport(ref)
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.start_sessions({"claude":codex_birth.adapter, "codex":codex_birth.codex})
+        owner.loop = asyncio.get_running_loop()
+        owner.configure_transport(transport, CODEX_OWNS)
+        await owner.adoption_task
+    asyncio.run(scenario())
+    assert transport.kinds() == ["open"] and transport.commands[0]["descriptor"]["name"] == "cx"
+    assert owner.slot("cx").phase == runtime_coordinator.Phase.Rust
+
+
+def test_codex_with_terminal_never_waits_for_the_rust_in_pending(codex_birth, tmp_path):
+    codex_birth.codex_sessions.save("ct", "thread", "", str(tmp_path), key="t" * 32)
+    owner = codex_birth.build_codex(Transport(), mode="pending")
+    waited = []
+    async def await_mode():
+        waited.append(True)
+        return owner.mode
+    owner.await_mode = await_mode
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        assert await owner.prepare_session("ct", "codex") is False
+        with pytest.raises(RuntimeError, match="sem responsável"):
+            await owner.op("ct", {"kind":"drain"}, "op")
+        assert waited == [], "Codex com terminal é do Python até a 5C"
+        await owner.prepare_session("cx", "codex")
+        assert waited, "o sem terminal espera o desfecho do Rust"
+    asyncio.run(scenario())
+
+
+# --- Ciclo de vida do Codex sem terminal no Rust (5B Task 5) ---
+
+class LifecycleTransport(LaunchTransport):
+    """Rust falso que também responde aos controles e ao `close` (com ou sem `kill`)."""
+
+    def __init__(self, owner_ref, control_error=None, killed=True, **kwargs):
+        super().__init__(owner_ref, **kwargs)
+        self.control_error, self.killed = control_error, killed
+
+    async def op(self, descriptor, command, operation_id, clock):
+        from app.rust_server import RustOpError
+        if command["kind"] in {"close", "control"}:
+            self.commands.append(command)
+            self.ops.append((command["kind"], descriptor))
+        if command["kind"] == "close":
+            return {"closed": True, **({"killed": self.killed} if command.get("kill") else {})}
+        if command["kind"] == "control":
+            if self.control_error:
+                code, message = self.control_error
+                raise RustOpError(f"IPC recusou a operação (503: {code} {message})", 503, code, message)
+            payload = {"current": "Ask for approval"} if command["control"] == "set_permission_mode" else {}
+            return {"operation_id": operation_id, "disposition": "accepted", "payload": payload}
+        return await super().op(descriptor, command, operation_id, clock)
+
+
+def _lifecycle_owner(codex_birth, monkeypatch, **kwargs):
+    ref = []
+    transport = LifecycleTransport(ref, **kwargs)
+    owner = codex_birth.build_codex(transport)
+    ref.append(owner)
+    monkeypatch.setattr(api, "get_adapter", lambda provider: codex_birth.codex if provider == "codex" else pytest.fail(provider))
+    return owner, transport
+
+
+def test_codex_close_with_rust_owner_kills_in_rust(codex_birth, monkeypatch):
+    from app.adapters.codex import sem_terminal
+    monkeypatch.setattr(sem_terminal, "matar", lambda meta: pytest.fail("o Python matou o processo de uma sessão do Rust"))
+    owner, transport = _lifecycle_owner(codex_birth, monkeypatch)
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.ensure_open("cx")
+        codex_birth.codex._problemas["cx"] = ("codex_headless_nao_subiu", "velho")
+        await asyncio.to_thread(codex_birth.codex.close_sync, "cx")
+    asyncio.run(scenario())
+    closes = [command for command in transport.commands if command["kind"] == "close"]
+    assert closes[0].get("kill") is True, "o Rust encerra o processo que ele subiu"
+    assert "cx" not in codex_birth.codex._problemas, "a memória do adapter é esquecida mesmo sem matar nada no Python"
+
+
+def test_codex_reopen_after_change_reads_the_cano_the_rust_recorded(codex_birth, monkeypatch):
+    import os
+    owner, transport = _lifecycle_owner(codex_birth, monkeypatch)
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.ensure_open("cx")
+        # O Rust religou: o arquivo aponta o processo novo, o registro em memória ainda o antigo (morto).
+        codex_birth.codex_sessions.update("cx", cano={"pid":os.getpid(), "escuta":"unix:/tmp/vivo.sock", "token":"t", "ts":1.0, "versao":2})
+        owner.slot("cx").binding.meta["cano"] = {"pid":999_999_999, "escuta":"unix:/tmp/morto.sock", "token":"t", "ts":1.0, "versao":2}
+        async def failing():
+            raise RuntimeError("ação da administração falhou")
+        # A ação que falha devolve a sessão ao Rust na vida de antes, sem regravar o registro.
+        with pytest.raises(RuntimeError, match="administração falhou"):
+            await owner.change("cx", failing)
+    asyncio.run(scenario())
+    assert transport.kinds().count("open") == 2, "processo vivo no arquivo: a sessão volta ao Rust, não fica parada"
+
+
+def test_codex_close_falls_back_to_python_kill_when_rust_had_no_process(codex_birth, monkeypatch):
+    from app.adapters.codex import sem_terminal
+    killed = []
+    monkeypatch.setattr(sem_terminal, "matar", lambda meta: killed.append(meta["name"]))
+    owner, transport = _lifecycle_owner(codex_birth, monkeypatch, killed=False)
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.ensure_open("cx")
+        await asyncio.to_thread(codex_birth.codex.close_sync, "cx")
+    asyncio.run(scenario())
+    assert killed == ["cx"], "sem a sessão aberta no Rust, o processo não fica vivo sem dono"
+
+
+def test_codex_restart_and_permission_go_to_rust(codex_birth, monkeypatch):
+    owner, transport = _lifecycle_owner(codex_birth, monkeypatch)
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.ensure_open("cx")
+        await codex_birth.codex.restart("cx")       # o que o `/recarregar` chama no Codex
+        return await api.trocar_permissao_do_codex("cx", api.CodexPermissionBody(mode="ask for approval"))
+    result = asyncio.run(scenario())
+    controls = [(command["control"], command["payload"]) for command in transport.commands if command["kind"] == "control"]
+    assert controls == [("restart", {}), ("set_permission_mode", {"mode": "ask for approval"})]
+    assert result == {"current": "Ask for approval"}
+    assert transport.kinds().count("open") == 1, "trocar o processo é do Rust: nada fecha nem reabre aqui"
+
+
+def test_codex_restart_of_a_stopped_session_opens_in_rust(codex_birth, monkeypatch):
+    # Parada (máquina reiniciada, sem fila): nada aberto no Rust, e o Python não sobe o processo.
+    owner, transport = _lifecycle_owner(codex_birth, monkeypatch)
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await codex_birth.codex.restart("cx")
+    asyncio.run(scenario())
+    controls = [command["control"] for command in transport.commands if command["kind"] == "control"]
+    assert transport.kinds() == ["open", "control"] and controls == ["restart"]
+    assert owner.slot("cx").phase == runtime_coordinator.Phase.Rust
+    assert "cx" not in codex_birth.codex._sessions
+
+
+def test_codex_sandbox_switch_of_a_stopped_session_goes_to_rust(codex_birth, monkeypatch):
+    # Cano gravado mas morto e a sessão fora do Rust: a troca não pode virar 503 de cliente Python.
+    codex_birth.codex_sessions.update("cx", cano={"pid":999_999_999, "escuta":"unix:/tmp/morto.sock", "token":"t", "ts":1.0})
+    owner, transport = _lifecycle_owner(codex_birth, monkeypatch)
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        return await api.trocar_permissao_do_codex("cx", api.CodexPermissionBody(mode="Ask for approval"))
+    result = asyncio.run(scenario())
+    controls = [(command["control"], command["payload"]) for command in transport.commands if command["kind"] == "control"]
+    assert controls == [("set_permission_mode", {"mode": "Ask for approval"})]
+    assert result == {"current": "Ask for approval"}
+
+
+def test_codex_switch_to_terminal_hands_the_session_to_python(codex_birth, monkeypatch):
+    # Codex com terminal é do Python até a 5C: fecha no Rust sem matar, e só a troca liga cliente Python no cano.
+    owner, transport = _lifecycle_owner(codex_birth, monkeypatch)
+    seen = {}
+    async def open_terminal(adapter, name):
+        runtime_coordinator.refuse_python_client(name, "codex")     # religar no cano que o Rust soltou
+        with pytest.raises(RuntimeError, match="bloqueado"):
+            runtime_coordinator.refuse_python_client(name, "codex", spawn=True)
+        seen["phase"] = owner.slot(name).phase
+        codex_birth.codex_sessions.update(name, headless=False, cano=None)
+    monkeypatch.setattr(codex_birth.codex, "open_terminal", open_terminal, raising=False)
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.ensure_open("cx")
+        await owner.lifecycle_call("cx", "open_terminal", {})
+    asyncio.run(scenario())
+    closes = [command for command in transport.commands if command["kind"] == "close"]
+    assert len(closes) == 1 and not closes[0].get("kill"), "o processo segue para o terminal"
+    assert seen["phase"] == runtime_coordinator.Phase.Python
+    assert transport.kinds().count("open") == 1, "a sessão com terminal não volta ao Rust"
+    assert not owner.slot("cx").binding.headless
+    with pytest.raises(RuntimeError, match="bloqueado"):
+        runtime_coordinator.refuse_python_client("cx", "codex")
+
+
+def test_codex_refused_terminal_switch_returns_the_session_to_rust(codex_birth, monkeypatch):
+    # A troca liga cliente Python no cano para ler o estado e recusa (ocupada): o cliente sai e o Rust reabre.
+    import os
+    from app.adapters.codex import sem_terminal
+    from app.adapters.codex.appserver import AppServerClient
+    owner, transport = _lifecycle_owner(codex_birth, monkeypatch)
+    async def request(method, params=None, **kwargs):
+        return {"thread": {"status": {"type": "active"}, "model": "gpt-test"}} if method == "thread/read" else {}
+    async def conectar(cano, esperar=0.0):
+        client = AppServerClient()
+        client.request = request
+        return client, {"saiu": None}
+    monkeypatch.setattr(sem_terminal, "conectar", conectar)
+    async def open_terminal(adapter, name):
+        await adapter.read_settings(name)
+        assert name in adapter._sessions, "o cliente Python religou no cano"
+        raise ValueError("Espere a sessão ficar ociosa antes de abrir o terminal.")
+    monkeypatch.setattr(codex_birth.codex, "open_terminal", open_terminal, raising=False)
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.ensure_open("cx")
+        codex_birth.codex_sessions.update("cx", thread_id="thread-1",
+            cano={"pid":os.getpid(), "escuta":"unix:/tmp/vivo.sock", "token":"t", "ts":1.0, "versao":2})
+        with pytest.raises(ValueError, match="ociosa"):
+            await owner.lifecycle_call("cx", "open_terminal", {})
+    asyncio.run(scenario())
+    assert "cx" not in codex_birth.codex._sessions, "nenhum cliente Python fica no cano do Rust"
+    assert owner.slot("cx").phase == runtime_coordinator.Phase.Rust
+    assert transport.kinds().count("open") == 2
+
+
+@pytest.mark.parametrize("code,status,api_code", [
+    ("erro_permissao_ocupada", 409, "erro_permissao_ocupada"),
+    ("erro_modo_desconhecido", 400, "erro_permissao_picker"),
+])
+def test_codex_permission_refusal_from_rust_keeps_the_python_codes(codex_birth, monkeypatch, code, status, api_code):
+    from fastapi import HTTPException
+    message = "a sessão está trabalhando; mudar o sandbox reiniciaria o Codex — espere ela terminar"
+    owner, transport = _lifecycle_owner(codex_birth, monkeypatch, control_error=(code, message))
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.ensure_open("cx")
+        await api.trocar_permissao_do_codex("cx", api.CodexPermissionBody(mode="Ask for approval"))
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(scenario())
+    assert caught.value.status_code == status
+    assert caught.value.detail["code"] == api_code and caught.value.detail["msg"] == message
+
+
+@pytest.mark.parametrize("mode,swept", [("pending", False), ("rust", False), ("python", True)])
+def test_boot_sweeps_orphans_only_when_python_owns(monkeypatch, mode, swept):
+    from app.adapters.claude_headless import adapter as A
+    calls = []
+    monkeypatch.setattr(A, "matar_orfaos", lambda: calls.append(mode) or 0)
+    async def nothing():
+        return None
+    monkeypatch.setattr(api, "_python_owns_headless", nothing)
+    runtime = SimpleNamespace(mode=mode, mode_hooks={})
+    asyncio.run(api._boot_sessions(runtime))
+    assert bool(calls) is swept, "com o Rust de pé a varredura de órfãos é dele"

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import { Pressable, Text, View } from 'react-native';
+import { Linking, Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { kindOf, isPermission } from '@hangar/core';
+import { kindOf, isPermission, questionParts } from '@hangar/core';
 import * as m from '../paraglide/messages';
 import { superficie } from '../theme/superficie';
 import { Icon } from '../ui/Icon';
@@ -61,13 +61,22 @@ export function OptionButtons({ question, options, onSelect, onCancel, onSubmit 
         </View>
       ) : null}
       <Text style={[styles.question, { color: theme.tokens.text.primary }]}>
-        {question.split('`').map((part, i) =>
-          i % 2 === 1 ? (
+        {questionParts(question).map((part, i) =>
+          part.kind === 'code' ? (
             <Text key={i} style={[styles.qCode, { backgroundColor: superficie(theme, 0.8), color: theme.tokens.text.primary }]}>
-              {part}
+              {part.text}
+            </Text>
+          ) : part.kind === 'link' ? (
+            <Text
+              key={i}
+              accessibilityRole="link"
+              style={{ color: theme.tokens.accent.base, textDecorationLine: 'underline' }}
+              onPress={() => void Linking.openURL(part.text).catch((e: unknown) => setError(e instanceof Error ? e.message : m.comum_falha_envio_opcao()))}
+            >
+              {part.text}
             </Text>
           ) : (
-            part
+            part.text
           ),
         )}
       </Text>

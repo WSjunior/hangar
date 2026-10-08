@@ -48,6 +48,10 @@ def info_payload(name: str, provider: str, jsonl: str | None) -> dict:
     from app.adapters import chave_de
     from app.pqueue import PromptQueue
 
+    headless = False
+    if provider == "codex":
+        from app.adapters.codex import sessions as codex_sessions
+        headless = bool((codex_sessions.load(name) or {}).get("headless"))
     return {
         # Chave do adapter: o Claude sem terminal vem como "claude-headless".
         "provider": chave_de(name, provider),
@@ -55,6 +59,8 @@ def info_payload(name: str, provider: str, jsonl: str | None) -> dict:
         "session_key": session_key(jsonl) if jsonl else "",
         # Tudo que o merged_history do Rust precisa além do transcript.
         "history": {"queue": str(PromptQueue(name).path)},
+        # Codex sem terminal: o hub do Rust liga o feed do estado no lugar do Python.
+        "headless": headless,
     }
 
 

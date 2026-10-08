@@ -151,12 +151,33 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   inclusive em caminhos Windows. O manifesto anterior retira só entradas já importadas;
   hooks nativos e nomes desconhecidos permanecem. A política entra na assinatura da fonte
   para invalidar o cache da próxima reconciliação.
-- **Codex sem terminal: o app-server é do CANO, em stdio.** O backend abre a thread na criação e
-  religa pelo snapshot (aprovação pendente volta). `initialize` repetido responde "Already
-  initialized" e é sucesso; thread sem turno não tem rollout e o `resume` a recusa — abre outra.
-  Só `on-request` e `never` existem (`untrusted` morreu); o sandbox vai no `-c` da subida e trocar
-  de modo reabre o servidor ocioso. Pedido do servidor sem tela recebe `-32601` + nota, nunca
-  sucesso vazio. Um cliente por cano.
+- **Codex sem terminal: o app-server é do CANO, em stdio, e o cano é do Rust.** Com o
+  `hangar-server` de pé, o Rust sobe, religa e mata o `hangar-cano` da sessão e conduz a thread;
+  o Python só calcula argv/env (`launch_env` da política) e grava o arquivo da sessão
+  (`session.patch_meta {cano}` / `session.clear_cano {pid}`). O `env` (tokens, `CODEX_HOME`) é
+  pedido ao Python a cada subida e nunca vai a disco nem a log. O cano que sai é religado por
+  evento (teto de 3 subidas seguidas, espera 5/10/20 s), sem varrer. Reiniciar com turno rodando
+  é permitido (destrava turno preso); trocar o sandbox com turno rodando recusa com
+  `erro_permissao_ocupada` (409). `initialize` repetido responde "Already initialized" e é
+  sucesso; thread sem turno não tem rollout e o `resume` a recusa — processo novo abre outra,
+  cano vivo segue pronto na mesma (ela já está carregada nele). Subida recusada vira
+  `codex_conversa_nao_abriu` com o motivo, nunca sessão ociosa calada. Só `on-request` e
+  `never` existem (`untrusted` morreu); o sandbox vai no `-c` da subida e trocar de modo reabre o
+  servidor ocioso. Todo pedido do servidor tem resposta. Têm tela ou resposta própria: cartões de
+  permissão, URL como cartão de link, `requestUserInput`, formulário MCP como pergunta nativa e
+  `currentTime/read`. Todo o resto (`item/tool/call`, `chatgptAuthTokens/refresh`,
+  `attestation/generate`, v1 legado, desconhecido) recebe `-32601` + nota, nunca sucesso vazio;
+  pedido de thread de subagente nunca é descartado. Um cliente por cano.
+  Falha vira erro com código, nunca passagem ao Python; o código Python fica para o modo `python`.
+  Codex com terminal segue no Python até a 5C.
+- **Processo do cano é um módulo só (`runtime/process.rs`), Claude e Codex.** Subir espera o
+  `listen` por 10 s; matar confere a identidade do pid (pid reaproveitado nunca é morto) e apaga
+  `cano-<chave16>*` só na pasta da sessão, nunca numa derivada de caminho gravado no arquivo. A
+  varredura de órfãos roda UMA vez na subida do Rust, sobre `~/.hangar/claude-headless` e
+  `~/.hangar/codex-sessions`, com dono = HOME (`HANGAR_CANO_OWNER`); o `matar_orfaos` do Python
+  só roda no modo `python`. Teste ou backend isolado que sobe o Rust usa dono único ou
+  `CP_RUST_NO_ORPHAN_SWEEP=1`, senão mata os canos reais da máquina. Windows não varre (sem
+  `/proc`); mata por `taskkill /T /F`, aceitando 0 e 128.
 - **Protocolo do Codex no Rust é tipado e tolerante** (`crates/hangar-codex`): todo campo usado
   existe no recorte do schema da versão conferida (`schema/<versão>.json`, teste
   `schema_check`); campo novo é ignorado; formato inesperado num método conhecido: a
