@@ -248,6 +248,29 @@ async fn join_reports_only_loose_sessions_as_newcomers() {
     assert_eq!(second.gid, first.gid);
 }
 
+/// Cada escrita de grupo avisa a lista, para ela não servir o selo de antes.
+#[tokio::test]
+async fn every_group_write_tells_the_list() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (svc, _) = service(&tmp, FakeOrq::new(OrqPhase::Ended, None));
+    let bumps = Arc::new(AtomicUsize::new(0));
+    let counter = bumps.clone();
+    let svc = svc.with_change_hook(Arc::new(move || { counter.fetch_add(1, Ordering::SeqCst); }));
+    let out = svc.join(owned("a", &["b"], false)).await.unwrap();
+    assert_eq!(bumps.load(Ordering::SeqCst), 1, "join");
+    svc.rename("a", "c").await.unwrap();
+    assert_eq!(bumps.load(Ordering::SeqCst), 2, "rename");
+    svc.leave("c").await.unwrap();
+    assert_eq!(bumps.load(Ordering::SeqCst), 3, "leave");
+    svc.leave("zzz").await.unwrap();
+    assert_eq!(bumps.load(Ordering::SeqCst), 3, "sair sem grupo não escreve nada");
+    svc.restore(out.before).await.unwrap();
+    assert_eq!(bumps.load(Ordering::SeqCst), 4, "restore");
+    svc.external_link("b", "m::x", none()).await.unwrap();
+    svc.external_unlink("b", "m::x").await.unwrap();
+    assert_eq!(bumps.load(Ordering::SeqCst), 6, "par externo");
+}
+
 #[tokio::test]
 async fn restore_puts_sidecars_back_as_they_were() {
     let tmp = tempfile::tempdir().unwrap();

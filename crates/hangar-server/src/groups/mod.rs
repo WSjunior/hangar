@@ -22,13 +22,15 @@ use store::PairDir;
 /// Serviço do processo sobre o `.hangar-pair` da conta padrão (`settings.projects_dir.parent`, a
 /// pasta `claude` da lista). Arquivo de contratos e id da máquina vêm do Python
 /// (`HANGAR_PAIR_ARCHIVE`, `HANGAR_SERVER_ID`); sem as pastas da lista não há serviço.
-pub fn from_env(dirs: Option<&Dirs>, orq: Arc<dyn OrqFacts>) -> Option<Arc<GroupService>> {
+pub fn from_env(dirs: Option<&Dirs>, orq: Arc<dyn OrqFacts>, list: Arc<crate::list::bridge::ListBridge>) -> Option<Arc<GroupService>> {
     let dirs = dirs?;
     let var = |key: &str| std::env::var(key).ok().filter(|v| !v.is_empty());
     // Mesmo padrão do `pair._arquivo_dir`: o cofre `~/.hangar`, não a conta.
     let archive = var("HANGAR_PAIR_ARCHIVE").map(PathBuf::from).unwrap_or_else(|| dirs.home.join(".hangar").join("pair-arquivo"));
     let dir = PairDir::new(dirs.claude.join(".hangar-pair"), archive);
-    Some(Arc::new(GroupService::new(dir, orq, var("HANGAR_SERVER_ID").unwrap_or_default())))
+    // Mudou o grupo: a lista relê o disco na hora, em vez de servir a descoberta de até 1 s atrás.
+    let service = GroupService::new(dir, orq, var("HANGAR_SERVER_ID").unwrap_or_default());
+    Some(Arc::new(service.with_change_hook(Arc::new(move || list.invalidate()))))
 }
 
 /// Outras máquinas pelo `peers.json` que o Python indica (`HANGAR_PEERS_FILE`); sem ele, nenhuma.

@@ -61,11 +61,22 @@ pub struct GroupService {
     lock: Mutex<()>,
     orq: Arc<dyn OrqFacts>,
     server_id: String,
+    /// Avisa a lista de que o disco do grupo mudou: sem isso ela só relê no prazo da descoberta.
+    on_change: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl GroupService {
     pub fn new(dir: PairDir, orq: Arc<dyn OrqFacts>, server_id: String) -> Self {
-        Self { dir: Arc::new(dir), lock: Mutex::new(()), orq, server_id }
+        Self { dir: Arc::new(dir), lock: Mutex::new(()), orq, server_id, on_change: None }
+    }
+
+    pub fn with_change_hook(mut self, hook: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.on_change = Some(hook);
+        self
+    }
+
+    fn changed(&self) {
+        if let Some(hook) = &self.on_change { hook() }
     }
 
     pub fn server_id(&self) -> &str { &self.server_id }
@@ -105,8 +116,10 @@ impl GroupService {
         // Promover sob o mesmo lock: um join concorrente não enxerga o grupo meio configurado.
         if plan.orq && plan.new_gid && let Err(conflict) = self.orq.promote(&name, &plan.gid).await {
             self.restore_blocking(plan.before.clone()).await;
+            self.changed();
             return Err(GroupError::Orq(conflict));
         }
+        self.changed();
         let newcomers = plan.members.iter().filter(|m| matches!(plan.before.get(*m), Some(None))).cloned().collect();
         Ok(JoinOutcome { members: plan.members, gid: plan.gid, task: plan.task, orq: plan.orq, newcomers, before: plan.before })
     }
@@ -114,7 +127,7 @@ impl GroupService {
     /// Devolve os ex-companheiros. O contrato é arquivado depois de soltar o lock: faxina não
     /// desfaz uma saída que já valeu.
     pub async fn leave(&self, name: &str) -> Result<Vec<String>, GroupError> {
-        let (peers, archive) = {
+        let (peers, archive, wrote) = {
             let _guard = self.lock.lock().await;
             let dir = self.dir.clone();
             let owner = name.to_owned();
@@ -124,15 +137,16 @@ impl GroupService {
                 Some(s) if s.orq => matches!(self.orq.phase(&s.gid).await, OrqPhase::Live | OrqPhase::Unknown),
                 _ => false,
             };
-            blocking(move || -> Result<(Vec<String>, Option<String>), GroupError> {
-                let Some(plan) = local::plan_leave(&reader(&dir), &owner, alive) else { return Ok((Vec::new(), None)) };
+            blocking(move || -> Result<(Vec<String>, Option<String>, bool), GroupError> {
+                let Some(plan) = local::plan_leave(&reader(&dir), &owner, alive) else { return Ok((Vec::new(), None, false)) };
                 if let Err(e) = apply(&dir, &plan.clears, &plan.writes) {
                     restore_logged(&dir, &plan.before);
                     return Err(GroupError::from(e));
                 }
-                Ok((plan.ex_peers, plan.archive))
+                Ok((plan.ex_peers, plan.archive, true))
             }).await??
         };
+        if wrote { self.changed(); }
         if let Some(gid) = archive {
             let dir = self.dir.clone();
             blocking(move || dir.archive_contracts(&gid)).await?;
@@ -163,6 +177,7 @@ impl GroupService {
                 }
             }
         }
+        if !dissolved.is_empty() { self.changed(); }
         // Arquivar é faxina depois do lock, como na saída.
         let mut names = Vec::new();
         for (stem, gid) in dissolved {
@@ -176,29 +191,35 @@ impl GroupService {
     pub async fn rename(&self, old: &str, new: &str) -> Result<(), GroupError> {
         let _guard = self.lock.lock().await;
         let (dir, old, new) = (self.dir.clone(), old.to_owned(), new.to_owned());
-        blocking(move || {
+        let done = blocking(move || {
             let read = reader(&dir);
             let (clears, writes) = local::plan_rename(&read, &old, &new);
             let before: Snapshot = clears.iter().chain(writes.iter().map(|(n, _)| n)).map(|n| (n.clone(), read(n))).collect();
             apply(&dir, &clears, &writes).map_err(|e| { restore_logged(&dir, &before); GroupError::from(e) })
-        }).await?
+        }).await?;
+        self.changed();
+        done
     }
 
     /// Volta cada sidecar ao estado do snapshot (um join que não pôde ser concluído).
     pub async fn restore(&self, before: Snapshot) -> Result<(), GroupError> {
         let _guard = self.lock.lock().await;
         let dir = self.dir.clone();
-        blocking(move || restore_all(&dir, &before)).await?.map_err(GroupError::from)
+        let done = blocking(move || restore_all(&dir, &before)).await?.map_err(GroupError::from);
+        self.changed();
+        done
     }
 
     pub async fn external_link(&self, local: &str, address: &str, harness: BTreeMap<String, String>) -> Result<String, GroupError> {
         let _guard = self.lock.lock().await;
         let (dir, local, address) = (self.dir.clone(), local.to_owned(), address.to_owned());
-        blocking(move || -> Result<String, GroupError> {
+        let gid = blocking(move || -> Result<String, GroupError> {
             let writes = local::plan_external_link(&reader(&dir), &local, &address, &harness, &fresh_gid).map_err(GroupError::Refused)?;
             apply(&dir, &[], &writes)?;
             Ok(writes.into_iter().next().map(|(_, s)| s.gid).unwrap_or_default())
-        }).await?
+        }).await??;
+        self.changed();
+        Ok(gid)
     }
 
     /// Tira `address` da lista de `local`; sem mais ninguém (e sem orq), o grupo some e o contrato
@@ -219,6 +240,7 @@ impl GroupService {
                 Ok::<_, GroupError>(None)
             }).await??
         };
+        self.changed();
         if let Some(gid) = archive {
             let dir = self.dir.clone();
             blocking(move || dir.archive_contracts(&gid)).await?;
