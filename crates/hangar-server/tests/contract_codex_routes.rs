@@ -9,7 +9,10 @@ use std::time::Duration;
 use fake::*;
 use hangar_server::routes::AppState;
 use hangar_server::runtime::gateway::RuntimeRegistry;
-use hangar_server::runtime::protocol::{CanoBinding, RuntimeTarget};
+use hangar_server::runtime::protocol::{CanoBinding, RuntimeError, RuntimeTarget};
+use hangar_server::runtime::terminal::TerminalTarget;
+use hangar_server::terminal_input::TerminalBinding;
+use hangar_server::session_write::codex::{permission_answer, skip_answer};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
@@ -116,7 +119,7 @@ async fn call(server: std::net::SocketAddr, case: &Value, token: &str) -> (u16, 
 
 #[tokio::test]
 async fn headless_codex_routes_match_the_python_golden() {
-    for case in golden().iter().filter(|c| c["relay"].is_null()) {
+    for case in golden().iter().filter(|c| c["relay"].is_null() && c["fault"].is_null()) {
         let dir = tempfile::tempdir().unwrap();
         let registry = Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()));
         open(&registry, dir.path(), case).await;
@@ -154,4 +157,56 @@ async fn guest_and_bodies_fastapi_refuses_reach_python() {
     }
     let tier = json!({"name": "tier", "method": "POST", "route": "service-tier", "body": {"service_tier": "turbo"}});
     assert_eq!(call(server, &tier, OWNER).await.1, Value::String("from-python".into()));
+}
+
+/// Falhas do ator que o cano falso não produz: a função de resposta com o erro do caso dá o mesmo corpo.
+#[test]
+fn actor_failures_match_the_python_golden() {
+    for case in golden().iter().filter(|c| !c["fault"].is_null()) {
+        let error = &case["fault"]["rust"];
+        let sent = Err(RuntimeError::new(error["code"].as_str().unwrap(), error["message"].as_str().unwrap()));
+        let (status, body) = match case["route"].as_str().unwrap() {
+            "question/skip" => skip_answer(&sent),
+            "codex-permissions" => permission_answer(&sent),
+            route => panic!("rota sem função de falha: {route}"),
+        };
+        assert_eq!((status.as_u16(), &body), (case["expect"]["status"].as_u64().unwrap() as u16, &case["expect"]["body"]), "{}", case["name"]);
+    }
+}
+
+#[tokio::test]
+async fn limits_never_errors_nor_waits_with_the_gate_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()));
+    let case = golden().into_iter().find(|c| c["name"] == "limits_ok").unwrap();
+    open(&registry, dir.path(), &case).await;
+    registry.ingress().close("s", Duration::from_secs(1)).await.unwrap();
+    let (python, server) = serve(registry).await;
+    let started = std::time::Instant::now();
+    assert_eq!(call(server, &case, OWNER).await, (200, json!({"primary": null, "secondary": null, "planType": null})));
+    assert!(started.elapsed() < Duration::from_secs(1), "esperou a porta: {:?}", started.elapsed());
+    assert_eq!(python.hits_to("/api/sessions/s/limits"), 0);
+}
+
+#[tokio::test]
+async fn terminal_entry_goes_to_python() {
+    // O registro do Rust só abre entrada de terminal como `claude` (Codex com terminal é do Python até a
+    // 5C): é ela que exercita o desvio antes da porta.
+    let dir = tempfile::tempdir().unwrap();
+    let registry = Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()));
+    let binding = TerminalBinding { name: "s".into(), pane: "%1".into(), conversation: "sid".into(), generation: 1, created: 1,
+        mux_argv: vec!["/does-not-exist/hangar-test-tmux".into()], windows: false, clipboard_lock_path: None };
+    let transcript = dir.path().join("s.jsonl");
+    std::fs::write(&transcript, "").unwrap();
+    registry.open_terminal(TerminalTarget { key: "k-s".into(), generation: 1, name: "s".into(), binding,
+        lease_path: dir.path().join("s.lease"), state_path: dir.path().join("s.state"), projection_dir: dir.path().join("s.projection"),
+        transcript, created: 0.0 }).await.unwrap();
+    assert!(registry.writable("s").await.unwrap().terminal);
+    // A porta fechada prova que o desvio vem antes dela: o Python responde sem esperar.
+    registry.ingress().close("s", Duration::from_secs(1)).await.unwrap();
+    let (python, server) = serve(registry).await;
+    for case in golden().iter().filter(|c| c["relay"] == "terminal") {
+        assert_eq!(call(server, case, OWNER).await, (200, Value::String("from-python".into())), "{}", case["name"]);
+        assert_eq!(python.last_hit().0, format!("/api/sessions/s/{}", case["route"].as_str().unwrap()));
+    }
 }

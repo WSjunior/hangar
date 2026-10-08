@@ -4,6 +4,7 @@
 //! Python antes da porta: a lista de comandos do Claude não pode esperar uma troca de agente.
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Request, State};
@@ -12,9 +13,9 @@ use axum::response::Response;
 use serde_json::{Map, Value, json};
 
 use super::input::{MSG_CODEX_CONTROL, answer, codex_control, json_content_type};
-use super::{Ctx, WriteRoute, admit, detail_body, relay, session_name};
+use super::{Ctx, WriteRoute, admit, detail_body, enter_then_find, json_response, relay, session_name};
 use crate::mods::state::random_hex;
-use crate::routes::{AppState, gate, pass};
+use crate::routes::{AppState, cors, gate, pass};
 use crate::runtime::protocol::{Disposition, OperationKind, RuntimeCommand, RuntimeError, RuntimeReply};
 
 type Answer = (StatusCode, Value);
@@ -140,13 +141,16 @@ fn literal(fields: &Map<String, Value>, key: &str, values: &[&str]) -> Option<St
 
 // ── rotas ───────────────────────────────────────────────────────────────────────────────────────
 
+async fn ours(st: &AppState, name: Option<&str>) -> bool {
+    match (st.state.runtime.get(), name) {
+        (Some(runtime), Some(name)) => runtime.writable(name).await.is_some_and(|t| t.provider == "codex" && !t.terminal),
+        _ => false,
+    }
+}
+
 /// Só a sessão Codex sem terminal do Rust passa pela porta; o resto vai ao Python como chegou.
 async fn admit_codex(st: &Arc<AppState>, peer: SocketAddr, req: Request) -> Result<(Ctx, Bytes), Response> {
-    let ours = match (st.state.runtime.get(), session_name(req.uri().path())) {
-        (Some(runtime), Some(name)) => runtime.writable(&name).await.is_some_and(|t| t.provider == "codex" && !t.terminal),
-        _ => false,
-    };
-    if !ours {
+    if !ours(st, session_name(req.uri().path()).as_deref()).await {
         let (fwd, _) = gate(st, peer, &req);
         return Err(pass(st, req, &fwd).await);
     }
@@ -158,11 +162,11 @@ async fn run(ctx: &Ctx, kind: OperationKind, payload: Value) -> Result<RuntimeRe
 }
 
 /// Falha que a resposta engole (lista vazia, limites neutros) ainda vai ao log, como no adapter Python.
-fn note(ctx: &Ctx, what: &str, sent: &Result<RuntimeReply, RuntimeError>) {
+fn note(name: &str, what: &str, sent: &Result<RuntimeReply, RuntimeError>) {
     if accepted(sent).is_some() { return; }
     let code = match sent { Err(error) => error.code.clone(), Ok(reply) => format!("{:?}", reply.disposition).to_lowercase() };
-    if crate::warn_limit::allow(Some(&ctx.name), &format!("{what}:{code}")) {
-        tracing::warn!(session = %ctx.name, what, code = %code, "leitura do Codex falhou; a rota responde vazio");
+    if crate::warn_limit::allow(Some(name), &format!("{what}:{code}")) {
+        tracing::warn!(session = %name, what, code = %code, "leitura do Codex falhou; a rota responde vazio");
     }
 }
 
@@ -177,7 +181,7 @@ pub async fn models(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     let settings = run(&ctx, OperationKind::ReadSettings, json!({"include_turns": false})).await;
     if accepted(&settings).is_none() { return answer(&ctx, refused()); }
     let models = run(&ctx, OperationKind::ListModels, json!({})).await;
-    note(&ctx, "model_list", &models);
+    note(&ctx.name, "model_list", &models);
     answer(&ctx, models_answer(&settings, &models))
 }
 
@@ -203,11 +207,23 @@ pub async fn mode(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
     answer(&ctx, mode_answer(&sent))
 }
 
+/// `/limits` nunca é erro nem espera, como no Python: porta fechada (troca em curso) ou leitura que falha
+/// dão a resposta neutra.
 pub async fn limits(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let (ctx, _) = admitted!(st, peer, req);
-    let sent = run(&ctx, OperationKind::ReadRateLimits, json!({})).await;
-    note(&ctx, "rate_limits", &sent);
-    answer(&ctx, limits_answer(&sent))
+    let (fwd, owner) = gate(&st, peer, &req);
+    let name = session_name(req.uri().path());
+    let (Some(runtime), Some(name), true) = (st.state.runtime.get(), name, owner) else { return pass(&st, req, &fwd).await };
+    if !ours(&st, Some(&name)).await { return pass(&st, req, &fwd).await; }
+    let sent = match enter_then_find(runtime, &name, Duration::ZERO).await {
+        Ok(Some((_held, target))) if target.provider == "codex" && !target.terminal =>
+            target.handle.command(RuntimeCommand { operation_id: random_hex(16), kind: OperationKind::ReadRateLimits, payload: json!({}) }).await,
+        _ => Err(RuntimeError::new("session_transfer_busy", "porta de entrada fechada")),
+    };
+    note(&name, "rate_limits", &sent);
+    let (status, body) = limits_answer(&sent);
+    let mut response = json_response(status, body);
+    cors(req.headers(), response.headers_mut());
+    response
 }
 
 pub async fn skip_question(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {

@@ -1122,6 +1122,11 @@ for line in sys.stdin:
         let resumed:Vec<Value> = calls(dir.path()).into_iter().filter(|call|call["method"] == "thread/resume").collect();
         assert_eq!(resumed.last().unwrap()["params"]["sandbox"],"read-only");
         assert_eq!(resumed.last().unwrap()["params"]["threadId"],"thread-new");
+        // A lista de modos (`GET /codex-permissions`) lê a vista publicada: a vida nova a mostra com o modo novo.
+        let handle = registry.handle(&key,1).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5),async {
+            while handle.snapshot().await.unwrap()["view"]["permission_mode"] != "Ask for approval" { tokio::time::sleep(std::time::Duration::from_millis(20)).await; }
+        }).await.expect("vista publicada com o modo novo");
         cleanup(&registry,&key,dir.path(),&policy).await;
     }
 

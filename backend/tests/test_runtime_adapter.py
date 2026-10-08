@@ -696,3 +696,17 @@ def test_reads_during_hand_over_use_python_view(monkeypatch):
     assert Adapter().snapshot("session") == "vista python"
     with pytest.raises(TransferInProgress):
         Adapter().rename("session", "new")
+
+
+@pytest.mark.parametrize("reply,expected", [
+    ({"rateLimits": {"limitId": "codex", "primary": {"usedPercent": 3}}}, {"limitId": "codex", "primary": {"usedPercent": 3}}),
+    ({}, None), (ValueError("recusado"), None), (RuntimeError("incerto"), None),
+])
+def test_read_rate_limits_returns_the_snapshot_like_the_python_adapter(monkeypatch, reply, expected):
+    """O `/limits` do convidado passa por aqui: com o retrato cru (`{"rateLimits": ...}`) a rota saía toda null."""
+    async def control(self, name, kind, payload=None, **kwargs):
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+    monkeypatch.setattr(RuntimeAdapter, "control", control)
+    assert asyncio.run(RuntimeAdapter("codex").dispatch("read_rate_limits", "session", {})) == expected

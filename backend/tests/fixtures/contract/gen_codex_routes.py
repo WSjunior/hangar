@@ -60,9 +60,9 @@ BASE = {"model": "gpt-5", "effort": "high", "service_tier": "default", "mode": "
         "permission_mode": "Full Access", "busy": False, "async": []}
 
 
-def case(name, method, route, body=None, rpc=None, relay=None, **session):
+def case(name, method, route, body=None, rpc=None, relay=None, fault=None, **session):
     return {"name": name, "method": method, "route": route, "body": body, "rpc": rpc or {},
-            "session": {**BASE, **session}, "relay": relay}
+            "session": {**BASE, **session}, "relay": relay, "fault": fault}
 
 
 CASES = [
@@ -93,6 +93,12 @@ CASES = [
     case("permissions_same_sandbox", "POST", "codex-permissions", {"mode": "ask FOR approval"}, permission_mode="Ask for approval"),
     case("permissions_unknown", "POST", "codex-permissions", {"mode": "Tudo"}),
     case("permissions_busy", "POST", "codex-permissions", {"mode": "Ask for approval"}, busy=True),
+    # Falhas que o cano falso não produz: o Rust as confere pela função de resposta, com o erro do ator em
+    # `fault.rust` (código e texto). O texto depois de "não consegui reabrir o Codex:" difere por natureza.
+    case("skip_send_failed", "POST", "question/skip", {"request_id": "async:thread-1:i1:0"},
+         fault={"python": "skip", "rust": {"code": "runtime_closed", "message": "ator saiu"}}, **{"async": ["async:thread-1:i1:0"]}),
+    case("permissions_reopen_failed", "POST", "codex-permissions", {"mode": "Ask for approval"},
+         fault={"python": "reopen", "rust": {"code": "codex_headless_nao_subiu", "message": "o Codex não subiu"}}),
     # Fora do Rust: sessão inexistente e Codex com terminal seguem ao Python, que responde como antes.
     case("models_unknown_session", "GET", "models", relay="unknown"),
     case("commands_terminal", "GET", "commands", relay="terminal"),
@@ -105,6 +111,9 @@ class FakeClient:
 
     def __init__(self, rpc):
         self.rpc, self.server_requests, self.closed = rpc, {}, False
+
+    async def close(self):
+        self.closed = True
 
     async def request(self, method, params):
         answer = self.rpc[method]
@@ -153,6 +162,15 @@ def rows() -> list:
         async def ensure_running(name, **kwargs):
             return client
         adapter.ensure_running = ensure_running
+        fault = (c["fault"] or {}).get("python")
+        if fault == "skip":
+            async def skip_question(name, request_id):
+                raise RuntimeError("runtime_closed: ator saiu")
+            adapter.skip_question = skip_question
+        elif fault == "reopen":
+            async def reopen(name, meta):
+                raise RuntimeError("o Codex não subiu")
+            adapter._subir_sem_terminal = reopen
         api.get_adapter = lambda key: adapter
 
     async def call(c):

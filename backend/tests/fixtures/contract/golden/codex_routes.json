@@ -75,6 +75,7 @@
    "async": []
   },
   "relay": null,
+  "fault": null,
   "expect": {
    "status": 200,
    "body": {
@@ -190,6 +191,7 @@
    "async": []
   },
   "relay": null,
+  "fault": null,
   "expect": {
    "status": 409,
    "body": {
@@ -237,6 +239,7 @@
    "async": []
   },
   "relay": null,
+  "fault": null,
   "expect": {
    "status": 200,
    "body": {
@@ -273,6 +276,7 @@
    "async": []
   },
   "relay": null,
+  "fault": null,
   "expect": {
    "status": 200,
    "body": {
@@ -302,6 +306,7 @@
    "async": []
   },
   "relay": null,
+  "fault": null,
   "expect": {
    "status": 200,
    "body": {
@@ -334,6 +339,7 @@
    "async": []
   },
   "relay": null,
+  "fault": null,
   "expect": {
    "status": 409,
    "body": {
@@ -363,6 +369,7 @@
    "async": []
   },
   "relay": null,
+  "fault": null,
   "expect": {
    "status": 200,
    "body": {
@@ -428,6 +435,7 @@
    "async": []
   },
   "relay": null,
+  "fault": null,
   "expect": {
    "status": 409,
    "body": {
@@ -474,6 +482,7 @@
    "async": []
   },
   "relay": null,
+  "fault": null,
   "expect": {
    "status": 200,
    "body": {
@@ -512,6 +521,7 @@
    "async": []
   },
   "relay": null,
+  "fault": null,
   "expect": {
    "status": 409,
    "body": {
@@ -561,6 +571,7 @@
    "async": []
   },
   "relay": null,
+  "fault": null,
   "expect": {
    "status": 409,
    "body": {
@@ -605,6 +616,7 @@
    "async": []
   },
   "relay": null,
+  "fault": null,
   "expect": {
    "status": 200,
    "body": {
@@ -642,6 +654,7 @@
    "async": []
   },
   "relay": null,
+  "fault": null,
   "expect": {
    "status": 200,
    "body": {
@@ -674,6 +687,7 @@
    "async": []
   },
   "relay": null,
+  "fault": null,
   "expect": {
    "status": 200,
    "body": {
@@ -703,6 +717,7 @@
    ]
   },
   "relay": null,
+  "fault": null,
   "expect": {
    "status": 200,
    "body": {
@@ -730,6 +745,7 @@
    ]
   },
   "relay": null,
+  "fault": null,
   "expect": {
    "status": 409,
    "body": {
@@ -804,6 +820,7 @@
    "async": []
   },
   "relay": null,
+  "fault": null,
   "expect": {
    "status": 200,
    "body": [
@@ -861,6 +878,7 @@
    "async": []
   },
   "relay": null,
+  "fault": null,
   "expect": {
    "status": 409,
    "body": {
@@ -888,6 +906,7 @@
    "async": []
   },
   "relay": null,
+  "fault": null,
   "expect": {
    "status": 200,
    "body": {
@@ -936,6 +955,7 @@
    "async": []
   },
   "relay": null,
+  "fault": null,
   "expect": {
    "status": 200,
    "body": {
@@ -961,6 +981,7 @@
    "async": []
   },
   "relay": null,
+  "fault": null,
   "expect": {
    "status": 400,
    "body": {
@@ -990,6 +1011,7 @@
    "async": []
   },
   "relay": null,
+  "fault": null,
   "expect": {
    "status": 409,
    "body": {
@@ -997,6 +1019,80 @@
      "code": "erro_permissao_ocupada",
      "params": {},
      "msg": "a sess\u00e3o est\u00e1 trabalhando; mudar o sandbox reiniciaria o Codex \u2014 espere ela terminar"
+    }
+   }
+  }
+ },
+ {
+  "name": "skip_send_failed",
+  "method": "POST",
+  "route": "question/skip",
+  "body": {
+   "request_id": "async:thread-1:i1:0"
+  },
+  "rpc": {},
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Full Access",
+   "busy": false,
+   "async": [
+    "async:thread-1:i1:0"
+   ]
+  },
+  "relay": null,
+  "fault": {
+   "python": "skip",
+   "rust": {
+    "code": "runtime_closed",
+    "message": "ator saiu"
+   }
+  },
+  "expect": {
+   "status": 503,
+   "body": {
+    "detail": {
+     "code": "erro_codex_resposta_envio",
+     "params": {},
+     "msg": "N\u00e3o foi poss\u00edvel confirmar o envio da resposta ao Codex."
+    }
+   }
+  }
+ },
+ {
+  "name": "permissions_reopen_failed",
+  "method": "POST",
+  "route": "codex-permissions",
+  "body": {
+   "mode": "Ask for approval"
+  },
+  "rpc": {},
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Full Access",
+   "busy": false,
+   "async": []
+  },
+  "relay": null,
+  "fault": {
+   "python": "reopen",
+   "rust": {
+    "code": "codex_headless_nao_subiu",
+    "message": "o Codex n\u00e3o subiu"
+   }
+  },
+  "expect": {
+   "status": 503,
+   "body": {
+    "detail": {
+     "code": "erro_permissao_picker",
+     "params": {},
+     "msg": "n\u00e3o consegui reabrir o Codex: o Codex n\u00e3o subiu"
     }
    }
   }
@@ -1017,6 +1113,7 @@
    "async": []
   },
   "relay": "unknown",
+  "fault": null,
   "expect": {
    "status": 400,
    "body": {
@@ -1044,6 +1141,7 @@
    "async": []
   },
   "relay": "terminal",
+  "fault": null,
   "expect": null
  },
  {
@@ -1064,6 +1162,7 @@
    "async": []
   },
   "relay": "terminal",
+  "fault": null,
   "expect": null
  }
 ]

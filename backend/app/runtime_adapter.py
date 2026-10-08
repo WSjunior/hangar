@@ -876,7 +876,14 @@ class RuntimeAdapter:
         if method == "set_permission_mode" and self.provider == "claude":
             await self.control(name, "set_permission_mode", {"mode":arguments["mode"]})
             return "manual" if arguments["mode"] == "default" else arguments["mode"]
-        if method in {"skip_question", "read_settings", "read_rate_limits", "set_mode", "compact", "list_skills"}:
+        if method == "read_rate_limits":
+            # Como o adapter Python: o retrato da conta, e None quando a leitura falha (a rota responde neutro).
+            try:
+                result = await self.control(name, method, {})
+            except (RuntimeError, ValueError):
+                return None
+            return result.get("rateLimits") if isinstance(result, dict) else None
+        if method in {"skip_question", "read_settings", "set_mode", "compact", "list_skills"}:
             payload = {key:value for key,value in arguments.items() if key not in {"self", "name"}}
             result = await self.control(name, method, payload)
             if method == "list_skills":

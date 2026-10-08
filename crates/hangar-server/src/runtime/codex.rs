@@ -875,8 +875,6 @@ impl Engine {
                         patch:json!({"permission_mode":mode}),reply:json!({"current":mode}) }]);
                 }
                 self.permission_mode = mode.into();
-                // A vista publicada é de onde a lista de modos lê o atual.
-                self.changed(&mut effects,false);
                 self.policy("session.patch_meta",json!({"permission_mode":mode}),&mut effects);
                 effects.push(Effect::Reply { operation_id:id,disposition:Disposition::Accepted,payload:json!({"current":mode}) });
             }
@@ -1096,9 +1094,11 @@ impl Engine {
                 if rpc.settings_revision == self.settings_revision {
                     if rpc.params.get("model").is_some() { self.model = string(&rpc.params["model"]); }
                     if rpc.params.get("effort").is_some() { self.effort = string(&rpc.params["effort"]); }
-                    if let Some(mode) = rpc.params["collaborationMode"]["mode"].as_str() { self.mode = Some(mode.into()); }
+                    let mut patch = json!({"model":self.model,"effort":self.effort});
+                    // O modo vai ao arquivo da sessão: a vida nova do processo nasce dele.
+                    if let Some(mode) = rpc.params["collaborationMode"]["mode"].as_str() { self.mode = Some(mode.into()); patch["mode"] = json!(mode); }
                     self.settings_revision += 1;
-                    self.policy("session.patch_meta",json!({"model":self.model,"effort":self.effort}),effects);
+                    self.policy("session.patch_meta",patch,effects);
                 }
             }
             "account/rateLimits/read" => {

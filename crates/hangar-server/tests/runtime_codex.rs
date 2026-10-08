@@ -907,3 +907,20 @@ fn undecodable_failed_turn_completed_marks_the_turn_error() {
     assert_eq!(view["problema"],"headless_turno_erro");
     assert!(view["problema_detalhe"].is_null());
 }
+
+#[test]
+fn mode_change_is_written_to_the_session_file() {
+    let mut engine = engine();
+    let read = frames(&engine.command(command(OperationKind::SetMode,json!({"mode":"plan"})),clock(10.0)).unwrap())[0].clone();
+    let update = frames(&line(&mut engine,json!({"id":read["id"],"result":{"thread":{"id":"thread-1","status":{"type":"idle"},"turns":[]}}}),10.1))[0].clone();
+    let effects = line(&mut engine,json!({"id":update["id"],"result":{}}),10.2);
+    let patch = effects.iter().find_map(|e|match e { Effect::Policy { kind,payload,.. } if kind == "session.patch_meta" => Some(payload.clone()),_=>None }).unwrap();
+    assert_eq!(patch["mode"],"plan");
+    let reply = effects.iter().find_map(|e|match e { Effect::Reply { operation_id,payload,.. } if operation_id == "op-1" => Some(payload.clone()),_=>None }).unwrap();
+    assert_eq!(reply["mode"],"plan");
+    // Trocar só o modelo não mexe no modo gravado.
+    let model = frames(&engine.command(RuntimeCommand { operation_id:"op-2".into(),kind:OperationKind::SetModel,payload:json!({"model":"gpt-6"}) },clock(11.0)).unwrap())[0].clone();
+    let effects = line(&mut engine,json!({"id":model["id"],"result":{}}),11.1);
+    let patch = effects.iter().find_map(|e|match e { Effect::Policy { kind,payload,.. } if kind == "session.patch_meta" => Some(payload.clone()),_=>None }).unwrap();
+    assert!(patch.get("mode").is_none());
+}
