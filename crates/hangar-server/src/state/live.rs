@@ -78,7 +78,13 @@ impl Hooks {
                 for d in &self.watched {
                     // Pasta do Hangar ausente numa conta que existe: criada, senão ela ficaria relida a cada
                     // `HOOKS_TTL` para sempre. Conta que não existe mais não é recriada.
-                    if !d.exists() && d.parent().is_some_and(|p| p.is_dir()) { let _ = std::fs::create_dir(d); }
+                    if !d.exists() && d.parent().is_some_and(|p| p.is_dir())
+                        && let Err(e) = std::fs::create_dir(d)
+                        && e.kind() != std::io::ErrorKind::AlreadyExists
+                        && crate::warn_limit::allow(None, "state_hooks_mkdir")
+                    {
+                        tracing::warn!(code = "state_hooks_mkdir", kind = ?e.kind(), "estado: pasta de estado não criada; relê pelo prazo");
+                    }
                     // Pasta que ainda não existe é o caso comum (conta sem hook); vale o prazo.
                     if let Err(e) = w.watch(d, RecursiveMode::NonRecursive) {
                         self.partial = true;

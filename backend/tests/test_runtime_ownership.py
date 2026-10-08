@@ -499,7 +499,7 @@ def test_problem_event_reaches_session_problem(tmp_path):
     asyncio.run(flow())
 
 
-def test_snapshot_without_public_state_is_a_visible_problem(tmp_path):
+def test_snapshot_without_public_state_never_invents_a_state(tmp_path):
     async def flow():
         from app.runtime_adapter import RuntimeAdapter
         gateway = Reopenable()
@@ -508,8 +508,8 @@ def test_snapshot_without_public_state_is_a_visible_problem(tmp_path):
         await coordinator.refresh_snapshot("session")
         slot.view["view"].pop("public_state", None)     # vista recém-aberta, sem retrato ainda
         try:
-            state = RuntimeAdapter("claude").snapshot("session")
-            assert state.problema == "headless_turno_erro", "KeyError virava 500 na lista e derrubava o SSE"
+            with pytest.raises(RuntimeError, match="snapshot do runtime indisponível"):
+                RuntimeAdapter("claude").snapshot("session")
         finally:
             gateway.lease.close()
             coordinator.close_python_leases()
