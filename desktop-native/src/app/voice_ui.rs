@@ -179,6 +179,63 @@ pub(super) struct VoiceUi {
     pub(super) session_names: Vec<String>,
     /// Objetivo do `computer` em curso; abortar mata o HCC (parar a chamada usa isto).
     pub(super) computer: Option<tokio::task::JoinHandle<()>>,
+    /// Árvore de acessibilidade mantida sem leitor de tela: na chamada (para o `read_screen`) ou com `HANGAR_A11Y_DUMP`.
+    pub(super) a11y_retained: bool,
+    pub(super) a11y_dump: bool,
+}
+
+/// Teto do texto que o `read_screen` devolve ao organizador.
+const SCREEN_BUDGET: usize = 12_000;
+
+/// `(profundidade, papel, id)` de cada linha do retrato de acessibilidade que tem `#id`.
+fn snapshot_ids(snapshot: &str) -> Vec<(usize, &str, &str)> {
+    snapshot.lines().filter_map(|line| {
+        let body = line.trim_start();
+        let (_, id) = body.rsplit_once(" #").filter(|(_, id)| !id.is_empty() && !id.contains([' ', '"']))?;
+        Some(((line.len() - body.len()) / 2, body.split(' ').next().unwrap_or_default(), id))
+    }).collect()
+}
+
+/// Raiz do `read_screen`: a área pedida, senão as Configurações abertas, senão o diálogo ou sobreposição aberto, senão
+/// a janela inteira (`None`). Área que não está na tela volta com os ids de cima para o organizador escolher.
+fn screen_root(snapshot: &str, area: Option<&str>) -> Result<Option<String>, String> {
+    let ids = snapshot_ids(snapshot);
+    if let Some(area) = area.map(|a| a.trim().trim_start_matches('#')).filter(|a| !a.is_empty()) {
+        if ids.iter().any(|(_, _, id)| *id == area) { return Ok(Some(area.to_owned())); }
+        let mut depths: Vec<usize> = ids.iter().map(|(d, ..)| *d).collect();
+        depths.sort_unstable();
+        depths.dedup();
+        let top = depths.get(2).or(depths.last()).copied().unwrap_or(0);
+        let mut shown: Vec<&str> = Vec::new();
+        for (_, _, id) in ids.iter().filter(|(d, ..)| *d <= top) { if !shown.contains(id) && shown.len() < 40 { shown.push(id); } }
+        return Err(format!("A área {area} não está na tela. Áreas visíveis: {}.", shown.join(", ")));
+    }
+    if ids.iter().any(|(_, _, id)| *id == "settings-dialog") { return Ok(Some("settings-dialog".into())); }
+    Ok(ids.iter().find(|(_, role, id)| matches!(*role, "Dialog" | "AlertDialog") || id.ends_with("-dialog") || id.ends_with("-overlay"))
+        .map(|(_, _, id)| (*id).to_owned()))
+}
+
+/// Linhas inteiras até o teto; o corte é dito no fim.
+fn clip_lines(text: &str, budget: usize) -> String {
+    if text.len() <= budget { return text.to_owned(); }
+    let mut out = String::new();
+    let mut kept = 0;
+    for line in text.lines() {
+        if out.len() + line.len() + 1 > budget { break; }
+        out.push_str(line);
+        out.push('\n');
+        kept += 1;
+    }
+    out + &format!("[cortado: faltam {} linhas; peça uma área menor]\n", text.lines().count() - kept)
+}
+
+/// O que o `read_screen` lê: `(raiz, texto)`; `None` na raiz é a janela inteira.
+fn read_screen(window: &Window, area: Option<&str>) -> Result<(Option<String>, String), String> {
+    const NOT_READY: &str = "A tela ainda não tem árvore de acessibilidade; tente de novo em um instante.";
+    let all = window.a11y_snapshot(None).ok_or(NOT_READY)?;
+    let root = screen_root(&all, area)?;
+    let text = match &root { Some(root) => window.a11y_snapshot(Some(root)).ok_or(NOT_READY)?, None => all };
+    Ok((root, clip_lines(&text, SCREEN_BUDGET)))
 }
 
 /// Uma ação da tela do Hangar que a voz executa pelo mesmo caminho do botão; o id é o de acessibilidade dele.
@@ -444,6 +501,7 @@ pub(super) fn action_text(action: &OrganizerAction) -> String {
             "hangar_actions" => tr("voice_tool_hangar_actions"),
             "hangar_action" => tr("voice_tool_hangar_action"),
             "computer" => tr("voice_tool_computer"),
+            "read_screen" => tr("voice_tool_read_screen"),
             other => tr("voice_tool_other").replace("{tool}", other),
         },
         OrganizerAction::Search(query) if query.trim().is_empty() => tr("voice_action_search"),
@@ -670,6 +728,32 @@ impl Hangar {
             }
         });
         cx.notify();
+    }
+
+    /// A árvore só existe com leitor de tela; na chamada ela é mantida para o `read_screen`. Fora do desenho, porque
+    /// ligar pede um quadro novo.
+    pub(super) fn sync_a11y_retain(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let want = self.voice.call.is_some() || self.voice.a11y_dump;
+        if want == self.voice.a11y_retained { return; }
+        self.voice.a11y_retained = want;
+        window.defer(cx, move |window, _| window.retain_a11y_tree(want));
+    }
+
+    /// HANGAR_A11Y_DUMP=<arquivo>: grava a árvore da janela inteira nele, no máximo a cada 2 s e só quando muda (prova o
+    /// `read_screen` sem chamada de voz). Sem a variável, nada roda.
+    pub(super) fn watch_a11y_dump(window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(path) = std::env::var_os("HANGAR_A11Y_DUMP").filter(|p| !p.is_empty()) else { return false };
+        cx.spawn_in(window, async move |_, cx| {
+            let mut last = String::new();
+            loop {
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+                let Ok(snapshot) = cx.update(|window, _| window.a11y_snapshot(None)) else { break };
+                let Some(snapshot) = snapshot.filter(|s| *s != last) else { continue };
+                if let Err(error) = std::fs::write(&path, &snapshot) { crate::voice::log(format!("a11y dump failed: {error}")); }
+                last = snapshot;
+            }
+        }).detach();
+        true
     }
 
     pub(super) fn stop_voice(&mut self, cx: &mut Context<Self>) {
@@ -1107,6 +1191,16 @@ impl Hangar {
                 match result { Ok(text) => self.voice_reply(call, tool_reply(text, true)), Err(text) => self.voice_fail(call, text) }
             }
             VoiceEvent::Computer(call, objective) => self.voice_computer(call, objective),
+            VoiceEvent::ReadScreen(call, area) => match read_screen(window, area.as_deref()) {
+                Ok((root, text)) => {
+                    crate::voice::log(format!("read_screen area={} bytes={}", root.as_deref().unwrap_or("window"), text.len()));
+                    self.voice_reply(call, tool_reply(text, true));
+                }
+                Err(text) => {
+                    crate::voice::log(format!("read_screen failed area={}", clip(area.as_deref().unwrap_or("-"), 64)));
+                    self.voice_fail(call, text);
+                }
+            },
             VoiceEvent::ListSessions(call) => self.voice_list(call, cx),
             VoiceEvent::OpenSession(call, request) => self.voice_open(call, request, cx),
             VoiceEvent::CloseSession { call, name, confirmed, turn } => self.voice_close(call, &name, confirmed, &turn, cx),
@@ -1802,6 +1896,29 @@ mod tests {
         assert!(both.contains("aberta") && both.contains("não chegou"), "diz as duas coisas");
         assert!(opened_reply("s", true, Some(&Ok(Delivery { ok: false, delivered: false }))).is_err());
         assert!(opened_reply("s", false, Some(&delivered)).unwrap_err().contains("pedido enviado"));
+    }
+
+    const SCREEN: &str = "Window \"Hangar\"\n  GenericContainer #hangar-root\n    Group \"Barra\" #topbar\n      Button \"Voz\" #topbar-voice\n    Group \"Voz\" #voice-panel\n      Status \"Ouvindo · hangar-5\" #voice-status\n";
+
+    #[test]
+    fn read_screen_picks_the_area_then_settings_then_dialog_then_window() {
+        assert_eq!(screen_root(SCREEN, None), Ok(None), "sem diálogo: a janela inteira");
+        assert_eq!(screen_root(SCREEN, Some(" #voice-panel ")), Ok(Some("voice-panel".into())));
+        let dialog = format!("{SCREEN}    Dialog \"Buscar\" #search-overlay\n");
+        assert_eq!(screen_root(&dialog, None), Ok(Some("search-overlay".into())));
+        let settings = format!("{dialog}    Dialog \"Configurações\" #settings-dialog\n      Group #settings-page-advanced\n");
+        assert_eq!(screen_root(&settings, None), Ok(Some("settings-dialog".into())), "Configurações vencem outro diálogo");
+        assert_eq!(screen_root(&settings, Some("settings-page-advanced")), Ok(Some("settings-page-advanced".into())));
+        let missing = screen_root(SCREEN, Some("costs-page")).unwrap_err();
+        assert!(missing.starts_with("A área costs-page não está na tela. Áreas visíveis: hangar-root, topbar, topbar-voice, voice-panel, voice-status."), "{missing}");
+        assert!(!missing.contains("Ouvindo"), "só ids, nunca o texto da tela");
+    }
+
+    #[test]
+    fn read_screen_cuts_whole_lines_and_says_so() {
+        assert_eq!(clip_lines(SCREEN, 10_000), SCREEN);
+        let cut = clip_lines(SCREEN, 60);
+        assert_eq!(cut, "Window \"Hangar\"\n  GenericContainer #hangar-root\n[cortado: faltam 4 linhas; peça uma área menor]\n");
     }
 
     #[test]

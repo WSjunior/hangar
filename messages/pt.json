@@ -7575,6 +7575,7 @@
   "native_voice_tool_hangar_actions": "Lendo as ações do Hangar",
   "native_voice_tool_hangar_action": "Mexendo na tela do Hangar",
   "native_voice_tool_computer": "Controlando o computador",
+  "native_voice_tool_read_screen": "Lendo a tela do Hangar",
   "native_voice_tool_other": "Usando {tool}",
   "native_voice_action_search": "Pesquisando na internet",
   "native_voice_action_search_query": "Pesquisando: {query}",

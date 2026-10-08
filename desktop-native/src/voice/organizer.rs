@@ -53,6 +53,8 @@ Só quando o usuário pedir para trocar, ir ou abrir outra sessão, chame switch
 só um pedaço do nome ('abre a grupos' é a sessão grupos-rust-plano). Na dúvida, chame list_sessions antes.
 O Hangar se controla pelas próprias ferramentas: abrir configurações, nova sessão, painel lateral, terminal, custos e o
 resto da tela é hangar_action (veja os ids com hangar_actions); sessões são as ferramentas de sessão.
+Para ler ou explicar qualquer coisa na tela do Hangar use read_screen (abra a tela antes com hangar_action se preciso);
+nunca use computer para ler o Hangar.
 computer é SÓ para programas que não são o Hangar ('abre o Bloco de Notas e digita…'); nunca use computer para clicar
 no Hangar. Diga ao usuário que vai demorar e fale o resultado (concluído ou parou com o motivo).
 open_session só quando ele pedir sessão NOVA ou falar em pasta ('abre uma sessão nova na pasta hangar'); pair_sessions e
@@ -116,6 +118,10 @@ pub fn tools() -> Value {
         tool("hangar_actions", "Lista as ações da tela do Hangar que você pode executar direto (id, nome e o que faz).", json!({})),
         tool_with("hangar_action", "Executa uma ação da tela do Hangar pelo id de hangar_actions; arg só quando a ação pede. Nunca troca a sessão ativa.",
             json!({"id": {"type": "string"}, "arg": {"type": "string"}}), &["id"]),
+        tool_with("read_screen", "Lê o que está visível na janela do Hangar (texto, botões, campos e estados), sem clicar. \
+            Sem area lê as Configurações abertas, senão o diálogo aberto, senão a janela inteira. Áreas úteis: settings-dialog, \
+            settings-page-<seção> (ex.: settings-page-advanced), search-overlay, voice-panel.",
+            json!({"area": {"type": "string"}}), &[]),
         tool("computer", "Controla OUTRO programa deste computador (nunca o Hangar) a partir de um objetivo em português; demora e devolve concluído ou parou com o motivo.",
             json!({"objective": {"type": "string"}})),
     ])
@@ -209,6 +215,7 @@ pub enum ToolCall {
     UpdatePlan(String), ReadPlan, AskSession(String), FinishPlan { action: FinishAction }, SetMode(Mode), SwitchSession(String),
     ListSessions, OpenSession(OpenRequest), CloseSession { name: String, confirmed: bool }, PairSessions(String, String), UnpairSession(String),
     HangarActions, HangarAction { id: String, arg: Option<String> }, Computer(String),
+    ReadScreen(Option<String>),
 }
 
 #[derive(Debug, PartialEq)]
@@ -244,6 +251,7 @@ pub fn parse_tool(params: &Value) -> ToolCall {
         "unpair_session" => arg("name").map_or_else(unknown, ToolCall::UnpairSession),
         "hangar_actions" => ToolCall::HangarActions,
         "hangar_action" => arg("id").map_or_else(unknown, |id| ToolCall::HangarAction { id, arg: arg("arg") }),
+        "read_screen" => ToolCall::ReadScreen(arg("area")),
         "computer" => arg("objective").map_or_else(unknown, ToolCall::Computer),
         "set_mode" => match arg("mode").as_deref() {
             Some("planejar") => ToolCall::SetMode(Mode::Plan),
@@ -532,9 +540,11 @@ mod tests {
     }
 
     #[test]
-    fn announces_eighteen_tools() {
+    fn announces_nineteen_tools() {
         let tools = tools();
-        assert_eq!(tools.as_array().unwrap().len(), 18);
+        assert_eq!(tools.as_array().unwrap().len(), 19);
+        let screen = tools.as_array().unwrap().iter().find(|t| t["name"] == "read_screen").unwrap();
+        assert_eq!(screen["inputSchema"]["required"], json!([]), "area é opcional");
         let action = tools.as_array().unwrap().iter().find(|t| t["name"] == "hangar_action").unwrap();
         assert_eq!(action["inputSchema"]["required"], json!(["id"]), "arg é opcional");
         let open = tools.as_array().unwrap().iter().find(|t| t["name"] == "open_session").unwrap();
@@ -572,6 +582,9 @@ mod tests {
         assert!(matches!(call("hangar_action", json!({})), ToolCall::Unknown(_)));
         assert!(matches!(call("computer", json!({"objective": "abrir o Bloco de Notas"})), ToolCall::Computer(o) if o == "abrir o Bloco de Notas"));
         assert!(matches!(call("computer", json!({"objective": ""})), ToolCall::Unknown(_)));
+        assert!(matches!(call("read_screen", json!({})), ToolCall::ReadScreen(None)));
+        assert!(matches!(call("read_screen", json!({"area": " "})), ToolCall::ReadScreen(None)));
+        assert!(matches!(call("read_screen", json!({"area": "settings-dialog"})), ToolCall::ReadScreen(Some(a)) if a == "settings-dialog"));
     }
 
     #[test]
@@ -588,6 +601,8 @@ mod tests {
 
     #[test]
     fn prompt_separates_hangar_actions_computer_and_session_switching() {
+        assert!(ORGANIZER_PROMPT.contains("Para ler ou explicar qualquer coisa na tela do Hangar use read_screen"));
+        assert!(ORGANIZER_PROMPT.contains("nunca use computer para ler o Hangar"));
         assert!(ORGANIZER_PROMPT.contains("send_to_session manda para a sessão ativa"));
         assert!(ORGANIZER_PROMPT.contains("Nunca troque de sessão por\nconta própria nem para entregar um pedido ou mensagem"));
         assert!(ORGANIZER_PROMPT.contains("computer é SÓ para programas que não são o Hangar"));

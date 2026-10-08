@@ -26,6 +26,8 @@ pub enum VoiceEvent {
     SwitchSession { call: CallId, name: String, spoken: String },
     /// Ações da tela do Hangar (catálogo e execução) e o `computer` para os outros programas.
     HangarActions(CallId), HangarAction { call: CallId, id: String, arg: Option<String> }, Computer(CallId, String),
+    /// Leitura da tela do Hangar pela árvore de acessibilidade; `None` = a tela escolhe a área.
+    ReadScreen(CallId, Option<String>),
     /// Ferramentas de sessão: a tela resolve os nomes falados e responde por `Voice::reply`. `turn` separa o pedido do sim.
     ListSessions(CallId), OpenSession(CallId, organizer::OpenRequest),
     CloseSession { call: CallId, name: String, confirmed: bool, turn: String },
@@ -343,6 +345,7 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                         }
                         ToolCall::HangarActions => { let _ = events.send(VoiceEvent::HangarActions(CallId(id))).await; "hangar-actions" }
                         ToolCall::HangarAction { id: action, arg } => { let _ = events.send(VoiceEvent::HangarAction { call: CallId(id), id: action, arg }).await; "hangar-action" }
+                        ToolCall::ReadScreen(area) => { let _ = events.send(VoiceEvent::ReadScreen(CallId(id), area)).await; "read-screen" }
                         ToolCall::Computer(objective) => { let _ = events.send(VoiceEvent::Computer(CallId(id), objective)).await; "computer" }
                         ToolCall::ListSessions => { let _ = events.send(VoiceEvent::ListSessions(CallId(id))).await; "list" }
                         ToolCall::OpenSession(request) => { let _ = events.send(VoiceEvent::OpenSession(CallId(id), request)).await; "open" }
