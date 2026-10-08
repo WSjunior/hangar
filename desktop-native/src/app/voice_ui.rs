@@ -43,6 +43,7 @@ pub(super) struct VoiceUi {
     pub(super) voice: Option<String>,
     pub(super) open: bool,
     pub(super) target: Option<String>,
+    pub(super) target_key: Option<SessionKey>,
     /// Ids de evento já falados: o mesmo texto em outro turno é outra resposta.
     pub(super) spoken: HashSet<String>,
     /// Sessão aberta cujo turno acabou antes de a resposta chegar.
@@ -68,8 +69,13 @@ pub(super) struct VoiceUi {
 #[derive(Debug, PartialEq)]
 pub(super) enum SessionMatch { One(usize), Many(Vec<usize>), None }
 
-/// Só letras e números em minúsculas: "minha loja" casa com `minha-loja`.
-fn squash(text: &str) -> String { text.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect() }
+/// Só letras e números em minúsculas, sem acento comum do português: "minha loja" casa com `minha-loja`.
+fn squash(text: &str) -> String {
+    text.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).map(|c| match c {
+        'á' | 'à' | 'â' | 'ã' | 'ä' => 'a', 'é' | 'è' | 'ê' | 'ë' => 'e', 'í' | 'ì' | 'î' | 'ï' => 'i',
+        'ó' | 'ò' | 'ô' | 'õ' | 'ö' => 'o', 'ú' | 'ù' | 'û' | 'ü' => 'u', 'ç' => 'c', other => other,
+    }).collect()
+}
 
 /// Nome falado → sessão. Igual vence parcial; o mesmo nome em duas máquinas fica com o da ativa (`on_active`).
 pub(super) fn match_session(query: &str, names: &[&str], on_active: &[bool]) -> SessionMatch {
@@ -282,6 +288,7 @@ impl Hangar {
         self.voice.generation += 1;
         self.voice.call = Some(Voice::start(self.runtime.handle(), options, events_tx));
         self.voice.target = self.selected.as_ref().map(|s| s.name.clone());
+        self.voice.target_key = self.selected_key();
         self.voice.spoken.clear();
         self.voice.reply_pending = None;
         self.voice.pending_sends.clear();
@@ -361,7 +368,7 @@ impl Hangar {
                     tool_reply("Já estou nessa sessão.", true)
                 } else {
                     let name = session.name.clone();
-                    if self.select_on(&key, session, window, cx) { tool_reply(format!("Sessão {name} aberta."), true) }
+                    if self.select_on(&key, session, window, cx) { tool_reply(format!("Sessão {name} aberta; a troca já foi anunciada, não repita."), true) }
                     else { tool_reply("A máquina dessa sessão não está conectada.", false) }
                 }
             }
@@ -426,7 +433,11 @@ impl Hangar {
             VoiceEvent::Plan { path, markdown } => self.voice.plan = Some((path, markdown)),
             VoiceEvent::AskSession(question) => self.voice_ask(&question, cx),
             VoiceEvent::OrganizerContext { used, window } => self.voice.context = Some((used, window)),
-            VoiceEvent::AccountLimits { five_hour, seven_day } => (self.voice.five_hour, self.voice.seven_day) = (five_hour, seven_day),
+            // Atualização com uma janela só não apaga a outra.
+            VoiceEvent::AccountLimits { five_hour, seven_day } => {
+                self.voice.five_hour = five_hour.or(self.voice.five_hour);
+                self.voice.seven_day = seven_day.or(self.voice.seven_day);
+            }
             VoiceEvent::SwitchSession(call, name) => self.voice_switch(call, &name, window, cx),
             VoiceEvent::SendPlan { session, text } => {
                 // O plano foi escrito para uma sessão; se a tela mudou, não vai para outra.
@@ -541,8 +552,11 @@ impl Hangar {
     pub(super) fn voice_session_opened(&mut self, cx: &mut Context<Self>) {
         if self.voice.call.is_none() { return; }
         let name = self.selected.as_ref().map(|s| s.name.clone());
-        if name == self.voice.target { return; }
+        // Mesmo nome em outra máquina é outra sessão: a chave inclui a máquina.
+        let key = self.selected_key();
+        if name == self.voice.target && key == self.voice.target_key { return; }
         self.voice.target = name.clone();
+        self.voice.target_key = key;
         if self.voice.pending_question.take().is_some() {
             crate::voice::log("ask_session timeout switched");
             self.voice_answer("A sessão não respondeu: a conversa trocou de sessão.");
@@ -766,7 +780,7 @@ impl Hangar {
             let block = div().flex().flex_col();
             match window {
                 Some(total) => {
-                    let pct = used as f64 / total as f64 * 100.;
+                    let pct = (used as f64 / total as f64 * 100.).min(100.);
                     block.child(meter_row(title, pct)).child(div().mt(px(6.)).child(chrome::meter(pct)))
                         .child(div().mt(px(3.)).text_size(px(11.)).text_color(theme::faint())
                             .child(tr("side_ctx_of").replace("{used}", &side::tokens(used as f64)).replace("{total}", &side::tokens(total as f64))))
@@ -886,6 +900,12 @@ mod tests {
         assert_eq!(match_session("shop", &names, &active), SessionMatch::Many(vec![2, 3]));
         assert_eq!(match_session("cloudflare", &names, &active), SessionMatch::None);
         assert_eq!(match_session(" - ", &names, &active), SessionMatch::None, "consulta vazia não casa tudo");
+    }
+
+    #[test]
+    fn session_match_folds_accents() {
+        assert_eq!(match_session("sao", &["são-x", "outra"], &[true, true]), SessionMatch::One(0));
+        assert_eq!(match_session("AÇÃO", &["acao"], &[true]), SessionMatch::One(0));
     }
 
     #[test]

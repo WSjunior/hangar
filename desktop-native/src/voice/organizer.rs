@@ -349,8 +349,8 @@ mod tests {
     }
 
     #[test]
-    fn announces_nine_tools() {
-        assert_eq!(tools().as_array().unwrap().len(), 9);
+    fn announces_ten_tools() {
+        assert_eq!(tools().as_array().unwrap().len(), 10);
     }
 
     #[test]

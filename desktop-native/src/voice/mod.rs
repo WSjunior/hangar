@@ -118,11 +118,6 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
     log("app-server spawned");
     let config = handshake(&rpc).await.map_err(rpc_failure).map_err(failed("handshake"))?;
     log("handshake ok");
-    // O cartão já nasce com a conta; falhar aqui só deixa os limites ocultos até a primeira atualização.
-    match rpc.request("account/rateLimits/read", json!({})).await {
-        Ok(result) => send_limits(events, usage::read_limits(&result)).await,
-        Err(error) => log(format!("rateLimits/read failed: {error:?}")),
-    }
     let directory = std::env::temp_dir().join(format!("hangar-voice-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&directory);
     // A pasta temporária é a única apagada no fim; a da sessão só serve de cwd para ler o código.
@@ -132,7 +127,16 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
         "baseInstructions": ORGANIZER_PROMPT, "developerInstructions": options.context,
         "config": thread_config(&config), "dynamicTools": tools()});
     if let Some(model) = config["model"].as_str() { start["model"] = json!(model); }
-    let thread = rpc.request("thread/start", start).await.map_err(rpc_failure).map_err(failed("thread/start"))?["thread"]["id"].as_str().unwrap_or_default().to_owned();
+    // A conta lida em paralelo, com prazo curto: falhar só deixa os limites ocultos até a primeira atualização.
+    let limits = async {
+        match tokio::time::timeout(Duration::from_secs(3), rpc.request("account/rateLimits/read", json!({}))).await {
+            Ok(Ok(result)) => send_limits(events, usage::read_limits(&result)).await,
+            Ok(Err(error)) => log(format!("rateLimits/read failed: {error:?}")),
+            Err(_) => log("rateLimits/read timed out"),
+        }
+    };
+    let (started, ()) = tokio::join!(rpc.request("thread/start", start), limits);
+    let thread = started.map_err(rpc_failure).map_err(failed("thread/start"))?["thread"]["id"].as_str().unwrap_or_default().to_owned();
     log(format!("thread started id={thread}"));
 
     let offer = tokio::task::spawn_blocking(rtc::offer).await.map_err(|_| VoiceFailure::Network)
@@ -405,6 +409,10 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                 }
                 Some(Command::Retarget(name, context, cwd)) => {
                     log("retarget");
+                    // O envio retido sairia para a sessão que está na tela agora, não para a do pedido.
+                    if let Some((old, _)) = gate.user_spoke() {
+                        let _ = rpc.respond(old, tool_reply("Cancelado: a sessão mudou; nada foi enviado.", false)).await;
+                    }
                     target = name.clone();
                     target_cwd = cwd;
                     // A pasta da thread não muda no meio dela.
