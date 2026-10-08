@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use serde_json::Value;
 use super::{Activity, ActivityTask, AgentRun, Item, ShellRun, Task, TaskStatus, Tool, View,
-    command_label, fold_tasks, is_agent_call, is_task_call, joins_thinking, loose_id,
+    command_label, fold_tasks, is_agent_call, is_page_call, is_task_call, joins_thinking, loose_id,
     task_status, tool_key, whole_list, word_after, GROUP_MIN};
 use crate::api::dto::ChatEvent;
 
@@ -143,7 +143,8 @@ impl Incremental {
             flush_thinking(&mut thinking, &mut items);
             if event.kind == "tool_use" {
                 let tool = Tool { call: i, result: self.paired.get(&i).copied() };
-                if is_agent_call(event.tool_name.as_deref()) {
+                // A página publicada fica fora do grupo como o subagente: ela existe para ser vista.
+                if is_agent_call(event.tool_name.as_deref()) || is_page_call(event.tool_name.as_deref()) {
                     flush_run(&mut run, &mut items);
                     items.push((i, Item::Tool(tool)));
                 } else { run.push(tool); }

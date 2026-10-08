@@ -410,6 +410,12 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   do realpath. Escrita nova fora da raiz entra por aqui, nunca afrouxando o `/files/write`.
 - **HTML servido como arquivo executa isolado e sem o token na URL do documento interno.**
   Arquivos citados e uploads usam `file_response`; SVG/XML mantêm o MIME com scripts bloqueados.
+- **Página da conversa mora no Rust e some com a sessão.** `html_render` publica só pela ponte
+  privada (`/__hangar_server/pages`); lê o dono, convidado não vê. Link e URL do rascunho nunca
+  levam token ao transcript; o documento da página nunca tem `allow-same-origin` nem token na URL
+  (PWA `srcdoc` com fetch autenticado, casca `blob:`, nativo em contexto de navegador próprio).
+  Limpeza só pela varredura contra a lista; conjunto incerto não apaga nada. Evidência em
+  [plataforma.md](docs/decisoes/plataforma.md#página-da-conversa-mora-no-rust-e-some-com-a-sessão).
 - **Configuração compartilhada leva o conteúdo, e o destino resolve caminho e programa.** Caminho
   vira marcador `⟦HOME⟧`/`⟦CLAUDE⟧`/`⟦CODEX⟧`/`⟦HANGAR⟧` (nunca `{HOME}`); quem envia vence;
   hooks e skills do Hangar, MCP `hangar`, credenciais e o login do `.claude.json` são sempre do

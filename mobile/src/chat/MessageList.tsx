@@ -13,7 +13,8 @@ import { AgentesRodando, PensamentoVivo, WorkingLine } from './LiveWork';
 import { turnStart } from './liveWork';
 import { ToolDetailSheet, type ToolDetailHandle } from './tools/ToolDetailSheet';
 import { foldConversation, type ConversationRow } from './tools/fold';
-import { agruparConversa, entraNoPensamento, foldTasks, hexParaRgb, planDisplayText, type AgentRun, type ChatEvent, type SessionInfo, type StateEvent } from '@hangar/core';
+import { HtmlPageCard } from './tools/HtmlPageCard';
+import { agruparConversa, entraNoPensamento, foldTasks, hexParaRgb, htmlPageFromResult, planDisplayText, type AgentRun, type ChatEvent, type SessionInfo, type StateEvent } from '@hangar/core';
 import { useAparencia } from '../stores/aparencia';
 import { TaskList } from './TaskList';
 import type { PendingMsg } from './pending';
@@ -78,7 +79,7 @@ function comTarefas(rows: ConversationRow[], eventos: ChatEvent[]): Conversation
   }
   if (!tem) return rows;
   const pos = ancora === null ? -1
-    : rows.findIndex((r) => (r.type === 'event' ? r.ev.id === ancora : r.type === 'fold' && r.parts.some((p) => p.id === ancora)));
+    : rows.findIndex((r) => (r.type === 'event' || r.type === 'page' ? r.ev.id === ancora : r.type === 'fold' && r.parts.some((p) => p.id === ancora)));
   const out = [...rows];
   out.splice(pos + 1, 0, { type: 'tasks', id: 'tasks' });
   return out;
@@ -138,9 +139,14 @@ export function MessageList({
   const data = useMemo(() => {
     const vis = events.filter((e) => visivel(e) && !(tarefasLigadas && ehTask(e))
       && !(e.kind === 'tool_use' && rodandoIds.has(e.tool_use_id ?? '')));
-    const rows = foldConversation(agruparConversa(vis, { entraNoPensamento: (n) => entraNoPensamento(pref, n) }), look === 'tree');
+    // Página só com resultado de sucesso; sem sessão (lista do subagente) não há de onde baixá-la.
+    const pageOf = (ev: ChatEvent) => {
+      const r = results.get(ev.tool_use_id ?? '');
+      return sessionName && r && !r.is_error ? htmlPageFromResult(ev.tool_name, r.result) : null;
+    };
+    const rows = foldConversation(agruparConversa(vis, { entraNoPensamento: (n) => entraNoPensamento(pref, n) }), look === 'tree', pageOf);
     return tarefasLigadas && tasks.length ? comTarefas(rows, events) : rows;
-  }, [events, pref, look, tarefasLigadas, tasks.length, rodandoIds]);
+  }, [events, results, sessionName, pref, look, tarefasLigadas, tasks.length, rodandoIds]);
   const abrirDetalhe = useCallback((ev: ChatEvent) => detail.current?.abrir(ev), []);
   const working = stateEvent?.state === 'working';
   const desde = useMemo(() => (working ? turnStart(events, turnSeen) : null), [working, events, turnSeen]);
@@ -155,6 +161,8 @@ export function MessageList({
         return <ToolGroup parts={item.parts} resultOf={resultDe} onAbrir={abrirDetalhe} look={look} />;
       case 'tasks':
         return <TaskList tasks={tasks} />;
+      case 'page':
+        return <HtmlPageCard page={item.page} sessionName={sessionName ?? ''} serverId={serverId} />;
       case 'event': {
         const ev = item.ev;
         if (ev.kind === 'user_msg') {

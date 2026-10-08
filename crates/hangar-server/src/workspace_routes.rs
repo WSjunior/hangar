@@ -892,7 +892,7 @@ fn file_stream(file: tokio::fs::File, pieces: VecDeque<Piece>) -> Body {
         },
     ))
 }
-fn html_escape(text: &str) -> String {
+pub(crate) fn html_escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")

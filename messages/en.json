@@ -7545,5 +7545,14 @@
   "native_setup_agent_recovered": "The app closed in the middle of an agent fix. These files went back to how they were before it (any change you made to them since then was undone too): {arquivos}",
   "native_setup_code_roda_do_mouse": "Mouse scrolling inside Claude does not work on this Windows until the multiplexer restarts.",
   "native_setup_fix_mouse_wheel": "Fix now",
-  "native_setup_fix_mouse_wheel_confirm": "This closes the open terminal sessions. Each conversation stays in the app. Continue?"
+  "native_setup_fix_mouse_wheel_confirm": "This closes the open terminal sessions. Each conversation stays in the app. Continue?",
+  "page_loading": "Loading {title}…",
+  "page_error": "Couldn't load “{title}”",
+  "page_retry": "Try again",
+  "page_expired": "This page was deleted when the session closed",
+  "page_open_browser": "Open in browser",
+  "page_no_image": "No preview: the server has no Chromium",
+  "native_page_open_panel": "Open in panel",
+  "native_page_collapse": "Collapse page",
+  "native_page_expand": "Expand page"
 }

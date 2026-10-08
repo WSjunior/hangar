@@ -702,6 +702,39 @@ citados mudou para invalidar respostas antigas na revalidação; cache fresco an
 No navegador embutido, o HTML executou JavaScript, mas não leu token pela URL, baseURI ou referrer,
 nem acessou a página pai ou o armazenamento. Sem mudanças na autorização de caminhos.
 
+## Página da conversa mora no Rust e some com a sessão
+
+(07/10/2026, pedido do usuário.) O agente publica HTML pela tool MCP `html_render`; o Rust guarda
+a página por sessão em `~/.hangar/paginas` e a conversa mostra o cartão: PWA e Expo num iframe
+`srcdoc`, nativo Linux com a página viva, macOS com a imagem estática e "abrir no navegador".
+
+- **Rascunho é parâmetro (`draft=true`) da mesma tool e da mesma rota**, não uma segunda tool
+  `html_preview`: regra de 1 tool : 1 endpoint e uma entrada a menos no catálogo de toda sessão.
+- **Token fora do transcript.** O resultado da tool fica no transcript, que o histórico e o
+  convidado leem; por isso a `url` do rascunho é caminho relativo, sem token. O `browser_open`
+  completa base e token só para caminho de página da própria sessão (outro `/api/` volta 400); o
+  evento `nav`, que carrega a URL completa, vai só a conexões do dono; e a casca isolada apaga o
+  `token` do próprio endereço ao carregar, senão `browser url`/`tab list` o levariam à conversa.
+- **Casca isolada por URL `blob:`.** `data:` falhou: o Chromium limita URL em 2 MB e página com
+  foto abria em branco. `srcdoc` na casca herda o `baseURI` dela, que tem `?token=`. Com `blob:`
+  o documento fica em origem opaca e o `baseURI` é a própria URL `blob:`.
+- **Limpeza é um mecanismo só: varredura a cada 30 s**, fora da thread assíncrona, contra o
+  conjunto de `jsonl` vivos que a rodada da lista publica. Um gancho no fechamento perderia
+  sessão morta sem fechar (crash, restart). Conjunto incerto não apaga nada: fatos que falharam,
+  linha Claude/Codex sem `jsonl`, rodada com mais de 15 s ou lista nunca aberta — sem isso a
+  página de sessão recém-criada seria apagada. Os caminhos são canonicalizados nos dois lados
+  porque `~/.claude-<conta>` é symlink do `~/.claude`.
+- **Altura reservada medida no servidor com a mesma fórmula do script da página**, depois do
+  `load` e com viewport pequena: com viewport alta o `scrollHeight` nunca fica abaixo dela e a
+  página curta reservava espaço vazio.
+- **Nativo:** cada página num contexto de navegador próprio (não divide armazenamento com o
+  navegador embutido) e quadros em PNG, que levam alfa (JPEG não). A GPUI vendorizada respeita o
+  alfa de superfície `Rgba8Unorm`, com alfa puro: o `blend_color` já multiplica, e pré-multiplicar
+  aplicaria o alfa duas vezes; a superfície XRGB do WPE continua opaca. Navegação bloqueada responde
+  `Aborted`: `BlockedByClient` troca a página pela tela de erro do Chrome.
+- **Windows:** cartão estático, como o macOS, até a prova na VM DELPHI-02 de que a WebView2 fora
+  da tela continua mandando quadros por CDP. A prova (Task 9) está pendente; não há resultado.
+
 ## Configuração compartilhada: leva o conteúdo, o destino resolve caminho e programa
 
 (25/09/2026, pedido do usuário.) Levar a configuração de uma máquina para outras, só manual.

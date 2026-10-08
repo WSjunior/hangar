@@ -886,7 +886,8 @@ async fn summary_view_serves_only_home_fields_equal_to_the_full_report() {
         let keys = ["totals", "by_day", "by_model", "sem_tarifa", "applied", "usd_brl"];
         assert_eq!(summary.as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>(), keys);
         for key in keys { assert_eq!(summary[key], full[key], "{period} {key}"); }
-        assert!(full["combos"].as_array().is_some_and(|c| !c.is_empty()), "sem o parâmetro continua inteiro");
+        // As amostras têm data fixa: só o período "all" garante dado em qualquer dia.
+        if period == "all" { assert!(full["combos"].as_array().is_some_and(|c| !c.is_empty()), "sem o parâmetro continua inteiro"); }
         assert!(summary_raw.len() < full_raw.len());
         // Valor desconhecido é o relatório inteiro, como o Python, que ignora o parâmetro.
         let other: Value = serde_json::from_slice(&get(format!("/api/costs?period={period}&view=outro")).await).unwrap();

@@ -27,3 +27,8 @@ dispositivo do próprio GPUI. Para isso `wgpu_context.rs` cria o dispositivo Vul
 `PrimitiveBatch::Surfaces` como sprite policromático no pipeline `poly_sprites` (`draw_surfaces`), com a textura da
 superfície no lugar do atlas. Opacidade negativa marca a textura como opaca e o `fs_poly_sprite` força alpha 1, porque
 em XRGB/XR24 o byte X não é alpha. Fora do Linux, `Surfaces` continua sem desenho.
+
+Textura `Rgba8Unorm` é a exceção: vem de quadro decodificado (o screencast do Chromium) com alpha de verdade, não
+pré-multiplicado, e vai com opacidade 1; o `blend_color` multiplica o rgb pelo alpha quando o alvo é pré-multiplicado.
+A página da conversa usa isso para o fundo transparente; o JPEG do painel tem alpha 255 e sai igual. O DMA-BUF do WPE
+entrava como `Bgra8Unorm` e seguiria opaco.

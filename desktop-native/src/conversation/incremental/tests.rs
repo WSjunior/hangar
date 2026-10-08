@@ -96,6 +96,17 @@ fn append_matches_full_oracle_for_every_view_and_group_boundary() {
 }
 
 #[test]
+fn published_page_stays_out_of_groups_like_the_full_build() {
+    exercise(vec![
+        event(json!({"id":"t","kind":"thinking","text":"Montar"})),
+        event(json!({"id":"r1","kind":"tool_use","tool_use_id":"r1","tool_name":"Read"})),
+        event(json!({"id":"p","kind":"tool_use","tool_use_id":"p","tool_name":"mcp__hangar__html_render"})),
+        event(json!({"id":"pr","kind":"tool_result","tool_use_id":"p","result":"{\"hangar_page\":{\"id\":\"a\",\"title\":\"T\"}}"})),
+        event(json!({"id":"r2","kind":"tool_use","tool_use_id":"r2","tool_name":"Read"})),
+    ]);
+}
+
+#[test]
 fn orphan_never_binds_forward_and_duplicate_row_ids_stay_deduplicated() {
     exercise(vec![
         event(json!({"id":"orphan","kind":"tool_result","tool_use_id":"future","result":"Antes"})),

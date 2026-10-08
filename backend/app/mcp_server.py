@@ -265,6 +265,55 @@ async def browser_open(ctx: Context, url: str) -> dict[str, Any]:
     return {"ok": True, "aviso": "a janela do usuário muda: o painel do navegador abre agora"}
 
 
+_HTML_RENDER = (
+    "Mostra uma página HTML pronta (gráfico, tabela, diagrama, mock de tela, comparação) DENTRO desta conversa, "
+    "no lugar desta chamada e acima do seu texto final; chame antes de escrever a resposta. O leitor já vê a página: "
+    "a resposta não a anuncia, não diz onde ela está e não repete o que ela mostra — diga só o que ela não diz. "
+    "Confira antes de publicar com draft=true: devolve `shot` (PNG, leia com a ferramenta de imagem), `console` e "
+    "`heights`; com o app desktop aberto, passe a `url` do rascunho a browser_open exatamente como veio (caminho "
+    "relativo; o servidor completa endereço e acesso) e use browser para passar o mouse e clicar. "
+    "Página publicada não muda: corrigir é publicar de novo. "
+    "url (http/https, no lugar de html) abre um site de verdade dentro da conversa, com o login do navegador do "
+    "app; só aparece vivo no app desktop; use para app rodando em localhost ou site que exige login. "
+    "PÁGINA: um documento só, com <style> e <script> embutidos. Imagem local por caminho absoluto "
+    "(src=\"/abs/a.png\", url(/abs/b.webp) ou string JS) é embutida sozinha; arquivo que não é imagem é recusado. "
+    "URL http(s) (biblioteca de gráfico em CDN) carrega como está; file: não. "
+    "LAYOUT: a moldura não tem borda e fica sobre o fundo da conversa, na largura da coluna (cerca de 728px no "
+    "desktop, 360px no celular). Deixe html, body e o elemento mais externo SEM cor de fundo. Largura fluida, sem "
+    "padding horizontal no elemento externo, sem cartão, borda ou título de banner em volta: a página é parte da "
+    "resposta. Caixa que precisa de fundo próprio leva padding de 16px ou mais e cantos var(--radius). Gráfico com "
+    "altura fixa em pixel. Nada de 100vh nem height:100% em html/body: a moldura cresce com a página. "
+    "TEMA: use as variáveis --foreground, --muted-foreground, --surface, --border, --accent, --accent-foreground, "
+    "--danger, --warning, --success, --code-background, --chart-1 a --chart-4, --radius, --font-sans, --font-mono; "
+    "--background é transparente. Elas seguem o tema claro/escuro do app; seu CSS pode sobrescrever. "
+    "own_theme=true para mock de outro produto/site ou página que precisa das próprias cores: ela leva o próprio "
+    "fundo e paleta, como foi desenhada, e não recebe o tema do app; sem ele, a página segue o tema do app. "
+    "height (80-2000) só para limitar a moldura e deixar o resto rolar dentro dela.")
+
+
+@mcp.tool(description=_HTML_RENDER)
+async def html_render(ctx: Context, title: str, html: str | None = None, url: str | None = None,
+                      height: int | None = None, draft: bool = False, own_theme: bool = False) -> dict[str, Any]:
+    from app import pages_bridge
+    if (html is None) == (url is None):
+        raise ToolError("erro_pagina_html_ou_url: passe html ou url, nunca os dois")
+    eu = await _eu(ctx)
+    payload: dict[str, Any] = {"session": eu, "title": title, "draft": draft}
+    if url is not None:
+        payload["url"] = url
+    else:
+        payload["html"] = html
+    # Só quando pedido: hangar-server antigo recusa campo desconhecido no corpo.
+    if own_theme:
+        payload["own_theme"] = True
+    if height is not None:
+        payload["height"] = height
+    try:
+        return await asyncio.to_thread(pages_bridge.publish, payload)
+    except pages_bridge.PagesBridgeError as e:
+        raise ToolError(f"{e.code}: {e.detail}" if e.detail else e.code) from e
+
+
 @mcp.tool(description="Um verbo do navegador embutido desta sessão (`hangar-preview <verbo>`). "
                       "Verbos: snapshot (árvore com refs @eN), click/hover <ref>, fill <ref> <texto>, "
                       "type <texto>, press <tecla>, wait [--text|--url] <valor>, eval <js> (só estado "

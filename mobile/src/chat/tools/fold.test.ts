@@ -30,6 +30,17 @@ describe('foldConversation', () => {
     const depois = foldConversation(agruparConversa([...base, bash('b2'), bash('b3')], { entraNoPensamento: () => false }));
     expect(depois[0].id).toBe(antes[0].id);
   });
+
+  it('página publicada sai do trecho e corta a junção; sem página, segue linha comum', () => {
+    const page = { id: 'pg', title: 'T', height: null, heights: {}, ownTheme: false };
+    const render = ev('h1', 'tool_use', { tool_name: 'mcp__hangar__html_render', tool_use_id: 'h1' });
+    const eventos = [bash('b1'), render, bash('b2')];
+    const items = agruparConversa(eventos, { entraNoPensamento: () => false });
+    const rows = foldConversation(items, true, (e) => (e.id === 'h1' ? page : null));
+    expect(rows.map((r) => r.type)).toEqual(['fold', 'page', 'fold']);
+    expect(rows[1].type === 'page' && rows[1].page).toBe(page);
+    expect(foldConversation(items, true).map((r) => r.type)).toEqual(['fold']);
+  });
 });
 
 describe('foldTitle', () => {

@@ -7545,5 +7545,14 @@
   "native_setup_agent_recovered": "O app fechou no meio de um conserto do agente. Estes arquivos voltaram ao que eram antes dele (uma mudança sua neles depois disso também foi desfeita): {arquivos}",
   "native_setup_code_roda_do_mouse": "A rolagem do mouse dentro do Claude não funciona neste Windows até reiniciar o multiplexador.",
   "native_setup_fix_mouse_wheel": "Consertar agora",
-  "native_setup_fix_mouse_wheel_confirm": "Isto fecha as sessões de terminal abertas. A conversa de cada uma continua no app. Continuar?"
+  "native_setup_fix_mouse_wheel_confirm": "Isto fecha as sessões de terminal abertas. A conversa de cada uma continua no app. Continuar?",
+  "page_loading": "Carregando {title}…",
+  "page_error": "Não foi possível carregar «{title}»",
+  "page_retry": "Tentar de novo",
+  "page_expired": "Esta página foi apagada quando a sessão foi encerrada",
+  "page_open_browser": "Abrir no navegador",
+  "page_no_image": "Sem prévia: o servidor não tem Chromium",
+  "native_page_open_panel": "Abrir no painel",
+  "native_page_collapse": "Recolher página",
+  "native_page_expand": "Mostrar página"
 }
