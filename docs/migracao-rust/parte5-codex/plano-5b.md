@@ -510,17 +510,17 @@ Commit: `feat(codex): Rust owns headless Codex lifecycle — respawn, restart, p
 - Consumes: controles do motor (`ListModels`, `ReadSettings`, `SetModel`, `SetServiceTier`, `SetMode`, `ReadRateLimits`, `SkipQuestion`, `ListSkills`, `Restart`, `SetPermissionMode`).
 - Produces: `GET /models`, `POST /model`, `POST /service-tier`, `POST /codex/mode`, `GET /limits`, `POST /question/skip`, `GET /commands`, `POST /recarregar`, `GET|POST /codex-permissions` atendidos pelo Rust para Codex sem terminal; os mesmos corpos e códigos do Python (`api.py`: `/models` 6327, `/model` 6341, `/service-tier` 6357, `/codex/mode` 6461, `/limits` 6289 com `_normalize_rate_window`, `/question/skip` 9244, `/commands` 10742 com `skills_do_catalogo`, `/recarregar` 2786, `/codex-permissions` 6438 com `modos_para_tela`).
 
-- [ ] **Step 1: Gravar o golden**
+- [x] **Step 1: Gravar o golden**
 
 `gen_codex_routes.py` chama cada rota Python com um adapter Codex falso (respostas fixas do app-server) e grava `{rota, corpo pedido, status, corpo resposta}` para os casos: sucesso, sessão inexistente (404), sessão com terminal (repasse), erro do motor (502/503 com o código do Python), `/question/skip` de id não assíncrono (409), `/codex-permissions` ocupado (409 `erro_permissao_ocupada`).
 
-- [ ] **Step 2: Teste de contrato (falha)**
+- [x] **Step 2: Teste de contrato (falha)**
 
 `contract_codex_routes.rs` sobe o roteador com um ator falso que devolve as mesmas respostas do adapter falso e compara cada caso com o golden.
 
-- [ ] **Step 3: Implementar** as rotas em `session_write/codex.rs`, cada uma: porta de entrada por nome (5-0) → `decide` (Codex sem terminal → Rust; com terminal → repasse) → controle no ator → corpo no formato do Python. `migration_status.rs` marca as rotas como Rust.
+- [x] **Step 3: Implementar** as rotas em `session_write/codex.rs`, cada uma: porta de entrada por nome (5-0) → `decide` (Codex sem terminal → Rust; com terminal → repasse) → controle no ator → corpo no formato do Python. `migration_status.rs` marca as rotas como Rust.
 
-- [ ] **Step 4: Rodar e ver passar; commit**
+- [x] **Step 4: Rodar e ver passar; commit**
 
 Run: `cd backend && uv run python tests/fixtures/contract/gen_codex_routes.py` (só se o golden mudar) e `cd crates && CARGO_BUILD_JOBS=4 cargo test -p hangar-server --test contract_codex_routes`.
 Commit: `feat(codex): Codex-only routes served by Rust for headless sessions`.
