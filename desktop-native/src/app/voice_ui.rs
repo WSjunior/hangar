@@ -473,6 +473,7 @@ fn failure_text(failure: &VoiceFailure) -> String {
         VoiceFailure::Timeout => tr_shared("codex_voice_timeout", &[]),
         VoiceFailure::Organizer => tr("voice_organizer"),
         VoiceFailure::ModelSwitch => tr("voice_model_switch_failed"),
+        VoiceFailure::OwnFolder => tr("voice_own_folder_failed"),
         VoiceFailure::Closed => tr("voice_server_closed"),
     }
 }
@@ -902,7 +903,7 @@ impl Hangar {
             VoiceEvent::Failed(failure) => {
                 self.voice.error = Some(failure_text(&failure));
                 // Erro do organizador ou da troca de modelo não para a conversa: aparece na pílula e no painel, sem abrir.
-                if !matches!(failure, VoiceFailure::Organizer | VoiceFailure::ModelSwitch) { self.voice.open = true; }
+                if !matches!(failure, VoiceFailure::Organizer | VoiceFailure::ModelSwitch | VoiceFailure::OwnFolder) { self.voice.open = true; }
             }
             VoiceEvent::Mode(mode) => self.voice.mode = mode,
             VoiceEvent::Plan { path, markdown } => self.voice.plan = Some((path, markdown)),

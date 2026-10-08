@@ -15,7 +15,7 @@ use tokio::{runtime::Handle, sync::{Notify, mpsc}};
 pub struct CallId(Value);
 pub enum Phase { Connecting, Live, Closed }
 #[derive(Debug, Clone)]
-pub enum VoiceFailure { Microphone, Speaker, AppServer, Realtime(String), Network, Timeout, Organizer, ModelSwitch, Closed }
+pub enum VoiceFailure { Microphone, Speaker, AppServer, Realtime(String), Network, Timeout, Organizer, ModelSwitch, OwnFolder, Closed }
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Activity { #[default] Idle, Thinking, Searching, Working }
 pub enum VoiceEvent {
@@ -130,7 +130,10 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
     log("handshake ok");
     // Pasta própria e fixa: o que o organizador grava fica entre chamadas, nada aqui a apaga.
     let own = plan::files_dir();
-    if let Err(error) = std::fs::create_dir_all(&own) { log(format!("own folder create failed kind={:?}", error.kind())); }
+    if let Err(error) = std::fs::create_dir_all(&own) {
+        log(format!("own folder create failed kind={:?}", error.kind()));
+        let _ = events.send(VoiceEvent::Failed(VoiceFailure::OwnFolder)).await;
+    }
     let mut models = options.organizer.clone();
     let mut applied = models.direct.clone();
     let start = organizer_start(&config, &own, options.cwd.as_deref(), &options.context, applied.model.as_deref(), &applied.effort);
@@ -517,6 +520,12 @@ async fn switch_mode(planner: &mut Planner, mode: Mode, target: &str, gate: &mut
 async fn apply_models(rpc: &Rpc, thread: &str, applied: &mut ModeModel, models: &ModeModels, mode: Mode, default_model: Option<&str>,
     events: &async_channel::Sender<VoiceEvent>) -> Option<&'static str> {
     let wanted = models.get(mode);
+    // Voltar ao "modelo do config" sem saber qual é ele não troca nada: dizer, em vez de fingir que trocou.
+    if wanted.model.is_none() && default_model.is_none() && applied.model.is_some() {
+        log(format!("settings update skipped mode={mode:?} reason=unknown_default_model"));
+        let _ = events.send(VoiceEvent::Failed(VoiceFailure::ModelSwitch)).await;
+        return Some("O modo mudou, mas o modelo que pensa não trocou; segue o anterior.");
+    }
     let Some(update) = settings_update(thread, applied, wanted, default_model) else { *applied = wanted.clone(); return None };
     if rpc.request("thread/settings/update", update).await.is_ok() {
         log(format!("settings update ok mode={mode:?}"));
