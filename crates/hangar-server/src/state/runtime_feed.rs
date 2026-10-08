@@ -46,10 +46,14 @@ pub struct RuntimeFeed {
     sent: Sent,
     claude: bool,
     /// Estado da sessão Claude parada, lido do sidecar quando o feed acorda com ela parada.
-    parked: Option<StateEvent>,
+    parked: Parked,
     /// Pasta do sidecar; `None` = o HOME do processo.
     home: Option<std::path::PathBuf>,
 }
+
+/// O que a sessão Claude parada publica: o estado do sidecar (ou `dead`), nada (troca de modo em curso, o
+/// Python também não emite) ou o `idle` puro.
+enum Parked { Absent, State(StateEvent), Hold }
 
 #[derive(Default)]
 struct Sent { generation: Option<u64>, question: Option<String>, state: Option<String>, preview: Option<String>, thinking: Option<String>, tool: Option<String>, suggestion: Option<String> }
@@ -77,7 +81,7 @@ impl RuntimeFeed {
         let facts_wake = facts.as_ref().map_or_else(Arc::default, |f| f.store.watch(&name));
         Self { hub: Arc::downgrade(hub), name, wake: hub.wake(), live, published, owner: super::live::next_owner(),
             facts: facts.map(|src| Watching { src, at: None, error: None }), facts_wake, sent: Sent::default(),
-            claude, parked: None, home: None }
+            claude, parked: Parked::Absent, home: None }
     }
 
     #[cfg(test)]
@@ -87,12 +91,21 @@ impl RuntimeFeed {
     }
 
     /// Sessão Claude parada: o que o sidecar diz dela. Roda quando o feed acorda, não por tique, e fora do executor.
-    async fn load_parked(&self) -> Option<StateEvent> {
+    async fn load_parked(&self) -> Parked {
         if !self.claude || !self.live.as_ref().is_some_and(|rx| rx.borrow().is_none()) {
-            return None;
+            return Parked::Absent;
         }
-        let (name, home) = (self.name.clone(), self.home.clone().or_else(std::env::home_dir)?);
-        tokio::task::spawn_blocking(move || super::parked::parked_state_at(&name, &home)).await.ok().flatten()
+        let Some(home) = self.home.clone().or_else(std::env::home_dir) else { return Parked::Absent };
+        let name = self.name.clone();
+        let read = tokio::task::spawn_blocking(move || super::parked::parked_state_at(&name, &home)).await.ok().flatten();
+        if let Some(state) = read { return Parked::State(state); }
+        // Sem sidecar: `dead`, salvo na troca de modo, em que o Python não emite nada. Sem fatos, não se sabe: `idle` puro.
+        let facts = self.facts.as_ref().and_then(|w| w.src.store.get(&self.name));
+        match facts {
+            Some(received) if received.in_transfer(std::time::Instant::now()) => Parked::Hold,
+            Some(_) => Parked::State(StateEvent { state: "dead".into(), ..idle(&self.name) }),
+            None => Parked::Absent,
+        }
     }
 
     pub async fn run(mut self) {
@@ -167,7 +180,11 @@ impl RuntimeFeed {
             // Sessão parada (não aberta no Rust, encerrada, ou abrindo): `idle`, como o Python. Abertura
             // que falhou e vida que acabou com erro chegam como `Some` com o erro.
             // Claude parado leva o que o sidecar diz dele; sem sidecar (ou Codex) fica o `idle` puro.
-            Some(None) => (self.parked.clone().unwrap_or_else(|| idle(&self.name)), Default::default()),
+            Some(None) => match &self.parked {
+                Parked::State(state) => (state.clone(), Default::default()),
+                Parked::Hold => return true,
+                Parked::Absent => (idle(&self.name), Default::default()),
+            },
             Some(Some(live)) => {
                 let mut state = if live.public_state.is_null() { idle(&self.name) } else {
                     serde_json::from_value(live.public_state.clone()).unwrap_or_else(|_| {
@@ -489,7 +506,10 @@ mod tests {
     async fn fake_python() -> FakePython { fake_python_with(0, "").await }
 
     /// Os primeiros `fail_first` pedidos levam 503; depois responde o retrato com `suggestion`.
-    async fn fake_python_with(fail_first: usize, suggestion: &'static str) -> FakePython {
+    async fn fake_python_with(fail_first: usize, suggestion: &'static str) -> FakePython { fake_python_full(fail_first, suggestion, false).await }
+
+    /// Como `fake_python_with`, com a janela de troca de modo aberta ou não nos fatos.
+    async fn fake_python_full(fail_first: usize, suggestion: &'static str, transfer: bool) -> FakePython {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -509,7 +529,9 @@ mod tests {
                     let _ = s.write_all(b"HTTP/1.1 503 X\r\ncontent-length: 0\r\n\r\n").await;
                     continue;
                 }
-                let body = serde_json::to_string(&facts_json(1, suggestion)).unwrap();
+                let mut facts = facts_json(1, suggestion);
+                facts["transfer_active"] = json!(transfer);
+                let body = serde_json::to_string(&facts).unwrap();
                 let _ = s.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}", body.len()).as_bytes()).await;
             }
         });
@@ -668,6 +690,30 @@ mod tests {
         let state = &of(&got, "state")[0].2;
         assert_eq!(state["state"], "idle");
         assert!(state["status_line"].is_null());
+    }
+
+    /// Claude parado sem sidecar, com os fatos do Python dizendo se há troca de modo em curso.
+    async fn stopped_without_sidecar(transfer: bool) -> Vec<(Instant, String, Value)> {
+        let f = claude_fixture();
+        let home = tempfile::tempdir().unwrap();
+        let py = fake_python_full(0, "", transfer).await;
+        let store = Arc::new(crate::state::facts::FactsStore::default());
+        let mut rx = f.lease.hub.tx.subscribe();
+        let (_tx, live_rx) = channel(None);
+        let _feed = tokio::spawn(RuntimeFeed::new(&f.lease.hub, Some(live_rx), f.published.clone(), Some(feed_facts(&py, &store))).with_home(home.path()).run());
+        collect(&mut rx, Duration::from_millis(500)).await
+    }
+
+    #[tokio::test]
+    async fn stopped_claude_without_sidecar_is_dead() {
+        let got = stopped_without_sidecar(false).await;
+        assert_eq!(of(&got, "state")[0].2["state"], "dead", "{got:?}");
+    }
+
+    #[tokio::test]
+    async fn stopped_claude_without_sidecar_during_a_mode_swap_publishes_nothing() {
+        let got = stopped_without_sidecar(true).await;
+        assert!(of(&got, "state").is_empty(), "{got:?}");
     }
 
     #[tokio::test]
