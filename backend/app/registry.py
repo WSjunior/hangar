@@ -3068,7 +3068,9 @@ class SessionRegistry:
         if tmux.is_hidden(alvo) and not tmux.kill_session(alvo):
             _log.debug("kill: shell escondido de %r nao saiu (pode nao existir)", name)
 
-    def kill(self, name: str) -> None:
+    def kill(self, name: str) -> list[dict]:
+        """Devolve os avisos de saída do grupo que o Rust não entregou (vazio no modo Python, onde a
+        rota avisa depois)."""
         from app.conversation_transfer import require_available
         require_available(name)
 
@@ -3093,8 +3095,7 @@ class SessionRegistry:
             self._forget(name)
             PromptQueue(name).clear()
             ThenLink(name).clear()
-            self._clear_pair(name)
-            return
+            return self._clear_pair(name)
         if codex_sessions.exists(name):
             # Sessao Codex: fecha app-server e TUI tmux, apaga o sidecar e limpa estado duravel.
             from app.adapters import get_adapter
@@ -3111,10 +3112,10 @@ class SessionRegistry:
             self._forget(name)
             PromptQueue(name).clear()
             ThenLink(name).clear()
-            self._clear_pair(name)
+            warnings = self._clear_pair(name)
             if apos_saida_codex:
                 apos_saida_codex(name)
-            return
+            return warnings
         # Limpa o sidecar do AskUserQuestion ANTES de matar (precisa do processo vivo pra resolver o
         # jsonl), best-effort: cleanup nunca bloqueia/quebra o kill. Senao um stale reabriria o stepper
         # numa sessao futura de mesmo nome.
@@ -3133,10 +3134,10 @@ class SessionRegistry:
         # nome herdaria essas entradas como bubble-fantasma (mesmo motivo do clear no create()).
         PromptQueue(name).clear()
         ThenLink(name).clear()  # mesmo motivo, pro vinculo 'then' (feature #12)
-        self._clear_pair(name)
+        return self._clear_pair(name)
 
     @staticmethod
-    def _clear_pair(name: str) -> None:
+    def _clear_pair(name: str) -> list[dict]:
         # Sessão morta SAI do grupo (leave: sob lock, atualiza os demais membros): sem isto os
         # companheiros apontariam pra um fantasma (badge preso). Best-effort, nunca bloqueia o
         # kill nem a criação — mas LOGA: engolir calado deixava o badge-fantasma indiagnosticável.
@@ -3147,17 +3148,16 @@ class SessionRegistry:
                 out = groups_bridge.call("group.leave", name=name)
             except groups_bridge.GroupsBridgeError as e:
                 _log.warning("_clear_pair(%s): o Rust não tirou a sessão do grupo: %s", name, e.code)
-                return
-            if out.get("warnings"):
-                _log.warning("_clear_pair(%s): saída do grupo com %d aviso(s) não entregue(s)",
-                             name, len(out["warnings"]))
-            return
+                return []
+            warnings = out.get("warnings")
+            return warnings if isinstance(warnings, list) else []
         try:
             pair_leave(name)
         except Exception as e:
             # Sem "kill(...)" no texto: o create() também chama isto (nome reusado de sessão morta
             # fora do kill), e a falha aparecia no log como se fosse de um encerramento.
             _log.warning("_clear_pair(%s): falha ao sair do grupo de pareamento: %r", name, e)
+        return []
 
     @staticmethod
     def _leave_old_group(name: str) -> None:

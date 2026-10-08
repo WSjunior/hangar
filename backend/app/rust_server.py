@@ -419,9 +419,9 @@ class Supervisor:
                     _log.error("hangar-server sem owns válido na saúde")
                     diag.registrar("hangar_server.partida", "erro", codigo="capacidade_invalida")
                     return "address"
-                # Sem `groups: true` (pastas da lista sem resolver) o Rust repassa as rotas de
-                # grupo e o Python segue dono delas.
-                groups_bridge.set_capable(health.get("groups") is True)
+                # `groups: false` (pastas da lista sem resolver): o Rust repassa as rotas de grupo e
+                # o Python segue dono delas.
+                groups_bridge.set_capable(health.get("groups") is not False)
                 self.configure_runtime(ready, env["HANGAR_INTERNAL_SECRET"], env["HANGAR_RUNTIME_INSTANCE"], owns)
                 return "up"
             await asyncio.sleep(_POLL)

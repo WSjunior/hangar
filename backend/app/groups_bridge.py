@@ -9,9 +9,10 @@ import urllib.request
 
 _log = logging.getLogger("hangar.groups")
 _config: tuple[str, str] | None = None
-# O que a saúde do Rust disse: sem `groups` ele não atende grupo e o Python segue dono. Fica entre
-# quedas: no `pending` quem chama espera o Rust voltar em vez de virar segundo escritor.
-_capable = False
+# Com o Rust esperado, os grupos são dele desde o início: antes da primeira saúde ele já atende
+# `/pair` e varre, e o Python escrevendo ali seria o segundo escritor. Só a saúde com
+# `groups: false` devolve ao Python; desistir do Rust já leva o modo a `python`.
+_capable = True
 _MAX_RESPONSE = 4 * 1024 * 1024
 # A rota `/pair` entre máquinas pode esperar a outra máquina (16 s), a limpeza dela e a entrega.
 _TIMEOUT = 90

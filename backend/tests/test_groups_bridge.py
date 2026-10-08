@@ -216,11 +216,35 @@ def test_sweep_loop_does_not_run_in_rust_mode(monkeypatch):
     assert swept == []
 
 
-def test_kill_session_in_rust_mode_does_not_notify_twice(monkeypatch, client):
+_NOT_NOTIFIED = {"sessao": "srv::x", "erro": {"code": "erro_peer_nao_avisado", "params": {"peer": "srv::x"},
+                                               "msg": "srv inacessível"}}
+
+
+def _headless_kill_stubs(monkeypatch):
+    from app import adapters
+    monkeypatch.setattr("app.conversation_transfer.require_available", lambda n: None)
+    monkeypatch.setattr(registry.headless_sessions, "exists", lambda n: True)
+    monkeypatch.setattr(registry.headless_sessions, "load", lambda n: {})
+    monkeypatch.setattr(registry.headless_sessions, "delete", lambda n: None)
+    monkeypatch.setattr(adapters, "get_adapter", lambda kind: SimpleNamespace(close_sync=lambda n, m: None))
+    monkeypatch.setattr(registry.shortcut_terminals, "close_all", lambda n: None)
+    monkeypatch.setattr(registry.SessionRegistry, "_forget", lambda self, n: None)
+    monkeypatch.setattr(registry, "PromptQueue", lambda n: SimpleNamespace(clear=lambda: None))
+    monkeypatch.setattr(registry, "ThenLink", lambda n: SimpleNamespace(clear=lambda: None))
+
+
+def test_registry_kill_passes_the_rust_leave_warnings_up(monkeypatch):
+    _headless_kill_stubs(monkeypatch)
+    calls = _rust(monkeypatch, reply={"ex_peers": ["srv::x"], "warnings": [_NOT_NOTIFIED]})
+    assert registry.SessionRegistry().kill("a") == [_NOT_NOTIFIED]
+    assert calls == [("group.leave", {"name": "a"})]
+
+
+def test_kill_session_in_rust_mode_shows_the_leave_warning_once(monkeypatch, client):
     pair.PairLink("a").set(["srv::x"], "", "g1", {})
-    _rust(monkeypatch, reply={"ex_peers": ["srv::x"], "warnings": []})
+    _rust(monkeypatch, reply={"ex_peers": ["srv::x"], "warnings": [_NOT_NOTIFIED]})
     monkeypatch.setattr(api, "_recusa_orq", lambda n: None)
-    monkeypatch.setattr(api.registry, "kill", lambda n: None)
+    monkeypatch.setattr(api.registry, "kill", lambda n: registry.SessionRegistry._clear_pair(n))
     monkeypatch.setattr(api, "_invalidate_lists", lambda: None)
     monkeypatch.setattr(api.share_store, "revoke_session", lambda n: False)
 
@@ -229,7 +253,52 @@ def test_kill_session_in_rust_mode_does_not_notify_twice(monkeypatch, client):
     monkeypatch.setattr(api, "_avisar_saida", boom)
     r = client.delete("/api/sessions/a", headers=H)
     assert r.status_code == 200, r.text
-    assert r.json() == {"ok": True, "warning": None}
+    assert r.json()["warning"] == {"code": "erro_pareamento_saida_falhou", "params": {"avisos": [_NOT_NOTIFIED]},
+                                   "msg": "aviso de saída falhou: srv::x: srv inacessível"}
+
+
+def test_capable_from_the_start_when_the_rust_is_expected():
+    """Antes da primeira saúde o Rust já atende `/pair` e varre: o Python não pode ser dono nem um instante."""
+    import subprocess
+    import sys
+    out = subprocess.run([sys.executable, "-c", "from app import groups_bridge; print(groups_bridge._capable)"],
+                         capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "True"
+
+
+def test_pending_before_health_does_not_write_and_waits(monkeypatch, tmp_path):
+    pair.PairLink("a").set(["b"], "", "g1", {})
+    pair.PairLink("b").set(["a"], "", "g1", {})
+    loop = asyncio.new_event_loop()
+    threading.Thread(target=loop.run_forever, daemon=True).start()
+    waited = []
+
+    async def await_mode():
+        waited.append(True)
+        raise runtime_coordinator.RuntimeStarting("subindo")
+    monkeypatch.setattr(runtime_coordinator, "_current", SimpleNamespace(mode="pending", loop=loop, await_mode=await_mode))
+    monkeypatch.setattr(groups_bridge, "_capable", True)
+    groups_bridge.configure(None, None)
+    try:
+        assert groups_bridge.rust_owns_groups() is True
+        with pytest.raises(groups_bridge.GroupsBridgeError) as e:
+            groups_bridge.call("group.leave", name="a")
+        assert e.value.code == "groups_runtime_starting" and waited
+        assert registry.SessionRegistry._clear_pair("a") == []
+        with pytest.raises(pair.GroupsOwnedByRust):
+            pair.leave("a")
+        swept = []
+        monkeypatch.setattr(api.registry, "sweep_pairs", lambda *a: swept.append(a))
+
+        async def stop(_s):
+            raise asyncio.CancelledError
+        monkeypatch.setattr(api.asyncio, "sleep", stop)
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(api._pair_sweep_loop())
+        assert swept == []
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+    assert pair.PairLink("a").get()["peers"] == ["b"] and pair.PairLink("b").get()["peers"] == ["a"]
 
 
 def test_associate_in_rust_mode_goes_through_bridge(monkeypatch, client):

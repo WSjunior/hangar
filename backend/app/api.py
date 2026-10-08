@@ -2723,7 +2723,7 @@ async def kill_session(name: str, by: str | None = None):
     # No modo Rust a saída do grupo (dentro do kill) já avisa as outras máquinas e o par externo.
     link = None if groups_bridge.rust_owns_groups() else await asyncio.to_thread(lambda: PairLink(name).get())
     try:
-        await asyncio.to_thread(registry.kill, name)
+        errs = await asyncio.to_thread(registry.kill, name) or []
     except KillFailed as e:
         raise HTTPException(500, str(e))
     finally:
@@ -2735,11 +2735,11 @@ async def kill_session(name: str, by: str | None = None):
     warn = None
     if link:
         errs = await _avisar_saida(name, link["peers"])
-        if errs:
-            warn = erro("erro_pareamento_saida_falhou",
-                        "aviso de saída falhou: " + "; ".join(
-                            f"{x['sessao']}: {_erro_texto(x['erro'])}" for x in errs),
-                        avisos=errs)
+    if errs:
+        warn = erro("erro_pareamento_saida_falhou",
+                    "aviso de saída falhou: " + "; ".join(
+                        f"{x['sessao']}: {_erro_texto(x['erro'])}" for x in errs),
+                    avisos=errs)
     return {"ok": True, "warning": warn}
 
 
