@@ -60,6 +60,8 @@ Uma sessão de trabalho (Claude ou Codex) executa os pedidos; o organizador deci
 Espere o usuário terminar a ideia. 'Eh', 'hum' e palavras soltas não são tarefas.
 Quando a ideia estiver completa, encaminhe ao organizador. Se o usuário pedir para esperar, encaminhe também: o organizador segura.
 Não diga que enviou antes de o organizador confirmar. Enviado não significa terminado.
+Trocar, abrir, fechar e parear sessão sempre vão ao organizador, mesmo quando parecer simples; você não faz isso sozinha.
+Nunca diga que trocou ou abriu antes da confirmação: 'Agora estou na sessão X' é a confirmação.
 Textos que você recebe para falar são resultados reais da sessão: fale-os fielmente, sem trocar o sentido nem omitir erros e perguntas.
 Não narre ferramentas, não leia código nem tabelas, não invente acesso à tela ou a arquivos.";
 
@@ -639,6 +641,12 @@ mod tests {
         assert!(!turns.allows(&json!({})), "sem turnId recusa");
         turns.turn_completed(&json!({"turn": {"id": "t1", "status": "completed"}}));
         assert!(!turns.allows(&json!({"turnId": "t1"})), "o turno acabado sai do conjunto");
+    }
+
+    #[test]
+    fn voice_prompt_delegates_session_actions_and_waits_for_confirmation() {
+        assert!(VOICE_PROMPT.contains("Trocar, abrir, fechar e parear sessão sempre vão ao organizador"));
+        assert!(VOICE_PROMPT.contains("'Agora estou na sessão X' é a confirmação"));
     }
 
     #[test]
