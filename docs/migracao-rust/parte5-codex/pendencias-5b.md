@@ -78,3 +78,10 @@ de pedidos, rotas só do Codex), contrato 38. Falta e fica para depois:
 - **Renomear sessão Codex sem terminal** com chat aberto: o canal do feed é por nome e o hub
   também; conferir no uso real que o rename fecha e reabre os dois.
 - **Subida do Codex:** pedido da subida que estoura o prazo vira `Unknown` sem problema na sessão, e o erro que chega depois manda uma segunda resposta final.
+- **Turno Claude aberto pelo próprio motor some no snapshot do cano** (recado da metade Claude,
+  08/10, após `2558cdb8a`): o `hangar-cano` só marca `aberto` com `user` vindo do cliente ou
+  `command_lifecycle started`; o `hydrate` do Rust já usa `aberto`. Turno que o Claude abre sozinho
+  (aviso de tarefa em segundo plano) com o Rust reiniciado no meio fica idle até o primeiro evento
+  (ferramenta longa calada = idle o tempo todo). Conserto: `Tracker::observe_child` abrir o turno
+  nos mesmos eventos de `2558cdb8a` (stream, assistant, tool_progress, tool_result), com o
+  `cano.py` igual e teste no `cano_v2.rs`. Fora da 5B (Codex).
