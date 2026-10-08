@@ -585,7 +585,7 @@ Commit: `feat(codex): Codex-only routes served by Rust for headless sessions`.
 - Consumes: ator e registro das Tasks 4–5; `Hub::publish_own`, `watch_commits`, `Published` (parte 4).
 - Produces: `RuntimeRegistry::live(name) -> watch::Receiver<Option<Arc<LiveState>>>`; `InternalInfo.headless: bool` (`#[serde(default)]`); `/__hangar_server/state/{name}/events` para Codex sem terminal com seis eventos; `sse._estado_do_rust(provider, name)`; contrato 39.
 
-- [ ] **Step 1: Testes Rust (falham)**
+- [x] **Step 1: Testes Rust (falham)**
 
 `runtime_actor.rs`:
 - `codex_preview_goes_to_live_not_to_events`: delta do Codex → o receptor do `events` não vê `preview`/`thinking`/`tool` e a `revision` não anda; `live(name)` tem a prévia. (Risco: buraco de `revision` faria o Python pedir `snapshot` a cada evento.)
@@ -605,27 +605,27 @@ Commit: `feat(codex): Codex-only routes served by Rust for headless sessions`.
 
 `list/classify.rs`: linha `codex` sem terminal com entrada em `Published` sai com o estado e a pergunta do feed; sem entrada, fica o fato do Python.
 
-- [ ] **Step 2: Testes Python (falham)**
+- [x] **Step 2: Testes Python (falham)**
 
 - `test_sse.py`: `_estado_do_rust("codex", nome)` só com sidecar `headless`, modo `pending`/`rust` e `rust_owns("codex", True)`; com terminal ou modo `python`, falso. Conexão interna de Codex sem terminal não emite nenhum dos seis eventos, mantém o `tail_pump` (o `user_msg` chama `_confirm_codex_queue`) e não chama `_enqueue_preview`. Conexão de convidado repassa os seis do canal privado falso. Sidecar que troca `headless` no meio do stream gera `__reprovider__` e um `info` novo.
 - `test_internal_api.py`: `info_payload` traz `headless` do sidecar Codex; Claude e Codex com terminal trazem `false`.
 - `test_runtime_adapter.py`: `_push_channels` de slot Codex não toca `PushPreviewSource`/`fonte_pensamento`/`fonte_ferramenta`; de Claude sem terminal, toca.
 - `test_internal_side_events.py`: o `info` da conexão interna leva `headless`.
 
-- [ ] **Step 3: Rodar e ver falhar**
+- [x] **Step 3: Rodar e ver falhar**
 
 Run: `cd backend && uv run pytest tests/test_sse.py tests/test_internal_side_events.py tests/test_internal_api.py tests/test_runtime_adapter.py` e `cd crates && CARGO_BUILD_JOBS=4 cargo test -p hangar-server --lib side:: state::runtime_feed list::classify && CARGO_BUILD_JOBS=4 cargo test -p hangar-server --test runtime_actor`.
 
-- [ ] **Step 4: Implementar (Rust)** como no desenho. O feed roda sob `catch_unwind` como o `Monitor` (`live::spawner`); o `watch` sai do mapa no `close` quando ninguém mais o assina. Contrato 39.
+- [x] **Step 4: Implementar (Rust)** como no desenho. O feed roda sob `catch_unwind` como o `Monitor` (`live::spawner`); o `watch` sai do mapa no `close` quando ninguém mais o assina. Contrato 39.
 
-- [ ] **Step 5: Implementar (Python)** como no desenho; `RUST_SERVER_PROTOCOL = 39`.
+- [x] **Step 5: Implementar (Python)** como no desenho; `RUST_SERVER_PROTOCOL = 39`.
 
-- [ ] **Step 6: Rodar e ver passar; commit**
+- [x] **Step 6: Rodar e ver passar; commit**
 
 Run: os do Step 3, mais `CARGO_BUILD_JOBS=4 cargo test -p hangar-server --test proxy --test terminal_routes`.
 Commit: `feat(codex): Rust hub publishes headless Codex state and preview; Python leaves the delta path`.
 
-- [ ] **Step 7: Medição e regras**
+- [x] **Step 7: Medição e regras**
 
 Release, backend isolado (`scripts/medir-codex-sem-terminal.py`, mesma máquina e roteiro da Task 8), `--rust 1` desta branch contra a base `6186ce136` já medida: 10 sessões, duas rodadas. **Aceite:** trabalhando, Python + Rust ≤ 62,5–65,5 ms/s (a base) e o total com canos e `codex` ≤ 88–91; parado, ~25 ms/s como antes; a prévia continua chegando nos chats (no máximo uma a cada 150 ms por chat, texto final igual) e o pico de RSS do Rust anotado. Não cumpriu → a Task não fecha: o relatório diz qual processo e a hipótese, sem trocar o alvo. Gravar em `medicao-5b.md` (seção "Depois da Task 9"); `CLAUDE.md` + `plataforma.md`: a regra do estado ao vivo cita o feed do Codex sem terminal; `pendencias-5b.md`: Claude sem terminal no mesmo caminho.
 Commit: `docs(codex): 5B Task 9 measurement and live-state rule`.
