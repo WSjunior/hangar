@@ -55,15 +55,15 @@ impl ProcessError {
 
 fn key16(key: &str) -> &str { key.get(..16).unwrap_or(key) }
 
-/// O cano se reconhece pelo argv: `--escuta` e `--log …/cano-<key16>.log`. Devolve o log achado.
-fn cano_log(argv: &[String], key: &str) -> Option<PathBuf> {
-    let log = argv.iter().position(|a| a == "--log").and_then(|i| argv.get(i + 1)).map(PathBuf::from)?;
-    let ours = argv.iter().any(|a| a == "--escuta")
-        && log.file_name().is_some_and(|n| n.to_string_lossy() == format!("cano-{}.log", key16(key)));
-    ours.then_some(log)
+/// O cano se reconhece pelo argv: `--escuta` e `--log …/cano-<key16>.log`.
+fn is_cano_of(argv: &[String], key: &str) -> bool {
+    let log = argv.iter().position(|a| a == "--log").and_then(|i| argv.get(i + 1)).map(Path::new);
+    argv.iter().any(|a| a == "--escuta")
+        && log.and_then(Path::file_name).is_some_and(|n| n.to_string_lossy() == format!("cano-{}.log", key16(key)))
 }
 
-/// Estado do pid e, sendo o cano da chave, o caminho do log dele (`None` para zumbi).
+/// `None` = sem processo; senão o argv e, com argv vazio, se ele ainda é nosso (zumbi do Linux,
+/// executável do cano nos outros).
 #[cfg(target_os = "linux")]
 fn probe(pid: u32) -> Option<(Vec<String>, bool)> {
     let proc = PathBuf::from(format!("/proc/{pid}"));
@@ -94,19 +94,16 @@ fn probe(pid: u32) -> Option<(Vec<String>, bool)> {
     Some((argv, same_exe))
 }
 
-fn identify(pid: u32, key: &str) -> (Liveness, Option<PathBuf>) {
+fn identify(pid: u32, key: &str) -> Liveness {
     match probe(pid) {
-        None => (Liveness::Dead, None),
-        Some((argv, _)) if !argv.is_empty() => match cano_log(&argv, key) {
-            Some(log) => (Liveness::Ours, Some(log)),
-            None => (Liveness::Foreign, None),
-        },
-        Some((_, unreaped_ours)) => (if unreaped_ours { Liveness::Ours } else { Liveness::Foreign }, None),
+        None => Liveness::Dead,
+        Some((argv, _)) if !argv.is_empty() => if is_cano_of(&argv, key) { Liveness::Ours } else { Liveness::Foreign },
+        Some((_, unreaped_ours)) => if unreaped_ours { Liveness::Ours } else { Liveness::Foreign },
     }
 }
 
 /// Pelo pid E pela identidade: número reaproveitado depois de reiniciar a máquina é `Foreign`.
-pub fn liveness(pid: u32, key: &str) -> Liveness { identify(pid, key).0 }
+pub fn liveness(pid: u32, key: &str) -> Liveness { identify(pid, key) }
 
 /// `CP_RUST_CANO_BIN`, senão a pasta do `hangar-server`, senão `~/.hangar/bin`; sondado uma vez
 /// por processo (sem argumentos o cano sai com 2). Caminho errado na variável não vira outro binário.
@@ -163,8 +160,13 @@ fn resolve_program(name: &str, env: &[(String, String)]) -> Option<PathBuf> {
     let path = Path::new(name);
     if path.components().count() > 1 { return path.is_file().then(|| path.to_path_buf()); }
     let var = |k: &str| env.iter().find(|(n, _)| n.eq_ignore_ascii_case(k)).map(|(_, v)| v.as_str());
+    // No Windows o nome cru só vale se já termina numa extensão do PATHEXT, como o `shutil.which`:
+    // `codex` sem extensão é o shim de shell do npm, que o CreateProcess não roda.
     let exts: Vec<String> = if cfg!(windows) {
-        std::iter::once(String::new()).chain(var("PATHEXT").unwrap_or(".EXE;.CMD;.BAT").split(';').map(str::to_owned)).collect()
+        let pathext: Vec<String> = var("PATHEXT").unwrap_or(".COM;.EXE;.BAT;.CMD").split(';')
+            .filter(|e| !e.is_empty()).map(str::to_ascii_lowercase).collect();
+        let lower = name.to_ascii_lowercase();
+        if pathext.iter().any(|e| lower.ends_with(e.as_str())) { vec![String::new()] } else { pathext }
     } else { vec![String::new()] };
     std::env::split_paths(var("PATH")?).find_map(|dir| {
         exts.iter().map(|ext| dir.join(format!("{name}{ext}"))).find(|p| p.is_file())
@@ -186,16 +188,16 @@ fn new_listen(key: &str, dir: &Path) -> String {
 /// Sobe o cano e só devolve quando ele escuta; sem escuta em 10 s, mata o que subiu.
 pub async fn spawn(spec: &LaunchSpec) -> Result<Cano, ProcessError> {
     let bin = tokio::task::spawn_blocking(cano_binary).await.map_err(|_| ProcessError::NoCano)??;
+    #[cfg(unix)]
+    let prefix = tokio::task::spawn_blocking(scope_prefix).await.unwrap_or(&[]);
+    #[cfg(not(unix))]
+    let prefix: &[&str] = &[];
     let program = spec.program.first().ok_or_else(|| ProcessError::Spawn("comando vazio".into()))?;
     let exe = resolve_program(program, &spec.env)
         .ok_or_else(|| ProcessError::Spawn(format!("binário não encontrado: {program}")))?;
     let escuta = new_listen(&spec.key, &spec.sidecar_dir);
     let token = crate::mods::state::random_hex(16);
     let log = spec.sidecar_dir.join(format!("cano-{}.log", key16(&spec.key)));
-    #[cfg(unix)]
-    let prefix = scope_prefix();
-    #[cfg(not(unix))]
-    let prefix: &[&str] = &[];
     let mut argv: Vec<std::ffi::OsString> = prefix.iter().map(Into::into).collect();
     argv.push(bin.into());
     for (flag, value) in [("--escuta", std::ffi::OsStr::new(&escuta)), ("--log", log.as_os_str()),
@@ -225,20 +227,21 @@ pub async fn spawn(spec: &LaunchSpec) -> Result<Cano, ProcessError> {
         Ok(connection) => { cano.versao = connection.snapshot.versao; Ok(cano) }
         Err(error) => {
             tracing::warn!(pid, code = %error.code, "cano não escutou; matando o que subiu");
-            let _ = kill(&cano, &spec.key).await;
+            if let Err(failure) = kill(&cano, &spec.key, &spec.sidecar_dir).await {
+                tracing::warn!(pid, code = failure.code(), "cano que não escutou não foi encerrado");
+            }
             Err(ProcessError::NotListening)
         }
     }
 }
 
 /// Mata o grupo do cano (cano + agente) só se o pid ainda for o cano da chave, e apaga
-/// `cano-<key16>*` depois de confirmada a saída. Pid de outro programa: não mata.
-pub async fn kill(cano: &Cano, key: &str) -> Result<(), ProcessError> {
+/// `cano-<key16>*` da pasta da sessão (`sidecar_dir`, nunca a tirada do `escuta`) depois de
+/// confirmada a saída. Pid de outro programa: não mata.
+pub async fn kill(cano: &Cano, key: &str, sidecar_dir: &Path) -> Result<(), ProcessError> {
     let (pid, key_owned) = (cano.pid, key.to_owned());
-    let (state, log) = tokio::task::spawn_blocking(move || identify(pid, &key_owned)).await
+    let state = tokio::task::spawn_blocking(move || identify(pid, &key_owned)).await
         .map_err(|_| ProcessError::StillAlive)?;
-    let dir = log.as_deref().and_then(Path::parent).map(Path::to_path_buf)
-        .or_else(|| cano.escuta.strip_prefix("unix:").and_then(|s| Path::new(s).parent()).map(Path::to_path_buf));
     match state {
         Liveness::Dead => {}
         Liveness::Foreign => tracing::warn!(pid, "pid do cano não é mais o cano da sessão; não matei"),
@@ -251,7 +254,7 @@ pub async fn kill(cano: &Cano, key: &str) -> Result<(), ProcessError> {
             }
         }
     }
-    if let Some(dir) = dir { remove_traces(&dir, key); }
+    remove_traces(sidecar_dir, key);
     Ok(())
 }
 
@@ -284,6 +287,8 @@ fn signal_group(pid: u32) -> Result<(), ProcessError> {
 }
 
 fn remove_traces(dir: &Path, key: &str) {
+    // Chave vazia ou curta casaria `cano-*` de outras sessões e levaria o socket delas.
+    if key.len() < 16 { return; }
     let prefix = format!("cano-{}", key16(key));
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {

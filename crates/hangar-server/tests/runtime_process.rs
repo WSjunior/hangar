@@ -42,7 +42,7 @@ async fn spawn_listens_and_kill_ends_the_group() {
     assert!(log.exists());
     let children = std::fs::read_to_string(format!("/proc/{0}/task/{0}/children", cano.pid)).unwrap();
     let agent: u32 = children.split_whitespace().next().expect("o cano sobe o programa").parse().unwrap();
-    kill(&cano, &spec.key).await.unwrap();
+    kill(&cano, &spec.key, &spec.sidecar_dir).await.unwrap();
     assert!(matches!(liveness(cano.pid, &spec.key), Liveness::Dead));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while std::path::Path::new(&format!("/proc/{agent}/cmdline")).exists()
@@ -65,10 +65,17 @@ fn a_live_pid_of_another_program_is_foreign() {
 #[tokio::test]
 async fn kill_refuses_a_reused_pid() {
     let mut other = std::process::Command::new("/bin/sleep").arg("300").spawn().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let key = unique_key();
+    let other_session = dir.path().join("cano-outrasessao0000-ab12.sock");
+    std::fs::write(&other_session, "").unwrap();
     let cano = Cano { pid: other.id(), escuta: "unix:/x".into(), token: "t".into(), ts: 0.0, versao: 2,
         extra: Default::default() };
-    assert!(kill(&cano, &unique_key()).await.is_ok()); // `Foreign`: não mata
+    assert!(kill(&cano, &key, dir.path()).await.is_ok()); // `Foreign`: não mata
     assert!(other.try_wait().unwrap().is_none());
+    // Chave curta não pode varrer o socket de outra sessão.
+    assert!(kill(&cano, "", dir.path()).await.is_ok());
+    assert!(other_session.exists());
     other.kill().unwrap();
     other.wait().unwrap();
 }
