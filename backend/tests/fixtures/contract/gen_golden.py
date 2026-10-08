@@ -1207,6 +1207,81 @@ def write_pair_sidecars() -> None:
         pair.settings.projects_dir = antes
 
 
+# Rotas de grupo de uma máquina, em sequência sobre as sessões Claude s0..s3 (as mesmas que o teste
+# do Rust cria). `orchestrators`: quem o `_recusa_orq` recusa naquele passo; `contract`: texto gravado
+# em grupo-<gid>.md antes do passo; `python_only`: o FastAPI responde (o Rust repassa o pedido).
+GROUP_GID = "9a9a9a9a"
+GROUP_STEPS = [
+    dict(name="pair_two_loose", method="POST", path="s0/pair", body={"peers": ["s1"], "task": "t1"}),
+    dict(name="pair_task_conflict", method="POST", path="s2/pair", body={"peer": "s0", "task": "outra"}),
+    dict(name="pair_third_joins", method="POST", path="s2/pair", body={"peer": "s0"}),
+    dict(name="pair_self", method="POST", path="s0/pair", body={"peers": ["s0"]}),
+    dict(name="pair_no_peer", method="POST", path="s0/pair", body={}),
+    dict(name="pair_missing_session", method="POST", path="s0/pair", body={"peers": ["ghost", "s1"]}),
+    dict(name="pair_orchestrator", method="POST", path="s0/pair", body={"peers": ["g1-orq"]}, orchestrators=["g1-orq"]),
+    dict(name="pair_extra_field", method="POST", path="s0/pair", body={"peers": ["s1"], "bogus": 1}, python_only=True),
+    dict(name="group_message_ok", method="POST", path="s0/group-message", body={"text": "terminei"}),
+    dict(name="group_message_slash", method="POST", path="s0/group-message", body={"text": "  /clear"}),
+    dict(name="group_message_forward", method="POST", path="s0/group-message", body={"text": " [grupo: s1] oi"}),
+    dict(name="group_message_no_group", method="POST", path="s3/group-message", body={"text": "oi"}),
+    *[dict(name=f"group_message_{i}", method="POST", path="s1/group-message", body={"text": f"marco {i}"}) for i in range(2, 6)],
+    dict(name="group_message_storm", method="POST", path="s2/group-message", body={"text": "marco 6"}),
+    dict(name="contract_no_group", method="GET", path="s3/pair/contract"),
+    dict(name="contract_with_group", method="GET", path="s0/pair/contract", contract="decisão: usar X\n"),
+    dict(name="unpair_orchestrator", method="DELETE", path="g1-orq/pair", orchestrators=["g1-orq"]),
+    dict(name="unpair", method="DELETE", path="s0/pair"),
+    dict(name="unpair_not_grouped", method="DELETE", path="s3/pair"),
+]
+
+
+def group_route_rows() -> list:
+    """Cada passo pela rota do Python de verdade (TestClient, sem lifespan), com sessões, envio e
+    orquestrador falsos; `delivered` = quem recebeu recado no passo."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from fastapi.testclient import TestClient
+    from app import api, conversation_transfer, pair
+    from app.config import settings
+    from app.models import SessionInfo
+
+    rows, sent, orchestrators = [], [], set()
+
+    async def enviar(name, text):
+        sent.append(name)
+        return {"ok": True}
+
+    names = ["s0", "s1", "s2", "s3"]
+    antes = (pair.settings.projects_dir, settings.auth_token)
+    try:
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(api.registry, "list", lambda: [SessionInfo(name=n, cwd="/p") for n in names]), \
+             patch.object(api, "_enviar", enviar), \
+             patch.object(api, "_session_exists", lambda n: n in names), \
+             patch.object(api.orq_runs, "find", lambda n: n in orchestrators), \
+             patch.object(conversation_transfer, "require_available", lambda n: None), \
+             patch.object(pair, "_arquivo_dir", lambda: Path(tmp) / "arquivo"), \
+             patch.object(pair.uuid, "uuid4", lambda: SimpleNamespace(hex=GROUP_GID + "0" * 24)):
+            # Nunca o ~/.claude/.hangar-pair de verdade.
+            pair.settings.projects_dir = Path(tmp) / "projects"
+            settings.auth_token = "secret"
+            api._group_envios.clear()
+            client = TestClient(api.app)
+            for step in GROUP_STEPS:
+                orchestrators.clear()
+                orchestrators.update(step.get("orchestrators", []))
+                if "contract" in step:
+                    (pair._pair_dir() / f"grupo-{GROUP_GID}.md").write_text(step["contract"], encoding="utf-8")
+                sent.clear()
+                r = client.request(step["method"], f"/api/sessions/{step['path']}", headers={"Authorization": "Bearer secret"},
+                                   **({"json": step["body"]} if "body" in step else {}))
+                body = json.loads(json.dumps(r.json()).replace(str(pair._pair_dir()), "<pair>"))
+                rows.append({**step, "status": r.status_code, "response": body, "delivered": sorted(sent)})
+    finally:
+        pair.settings.projects_dir, settings.auth_token = antes
+    return rows
+
+
 def main() -> None:
     claude = TRANSCRIPTS / "claude.jsonl"
     rewrite = TRANSCRIPTS / "claude_rewrite_surrogate.jsonl"
@@ -1234,6 +1309,7 @@ def main() -> None:
     write_golden("preview.json", preview_rows())
     write_session_write()
     write_pair_sidecars()
+    write_golden("group_routes.json", group_route_rows())
 
 
 if __name__ == "__main__":

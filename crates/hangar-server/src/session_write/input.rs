@@ -161,7 +161,7 @@ fn parse_body(bytes: &Bytes) -> Option<(String, bool)> {
 }
 
 /// O FastAPI só lê o corpo como JSON sem `Content-Type` ou com `application/json`; outro tipo é 422 dele.
-pub(super) fn json_content_type(headers: &HeaderMap) -> bool {
+pub(crate) fn json_content_type(headers: &HeaderMap) -> bool {
     let Some(value) = headers.get(header::CONTENT_TYPE) else { return true };
     let Ok(text) = value.to_str() else { return false };
     let mime = text.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();

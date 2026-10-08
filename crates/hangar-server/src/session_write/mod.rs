@@ -30,7 +30,7 @@ use crate::runtime::ingress::{GateClosed, IngressPass};
 pub use table::{Owner, Provider, WriteRoute, decide};
 
 /// Mesmo teto do middleware de corpo do Python (`uploads.MAX_BYTES`), que recusa antes da rota.
-const BODY_LIMIT: usize = 100 * 1024 * 1024;
+pub(crate) const BODY_LIMIT: usize = 100 * 1024 * 1024;
 const BUSY_MSG: &str = "A sessão está trocando de agente; tente novamente quando terminar.";
 
 /// O que a rota precisa para escrever: o passe mantém a porta aberta até o fim da escrita.
@@ -82,12 +82,7 @@ pub(crate) async fn admit(st: &Arc<AppState>, peer: SocketAddr, req: Request, ro
         return Err(pass(st, req, &fwd).await);
     };
     let (parts, body) = req.into_parts();
-    let Ok(bytes) = to_bytes(body, BODY_LIMIT).await else {
-        // Igual ao `_BodySizeLimitMiddleware`: texto puro, e o CORS por fora dele.
-        let mut response = (StatusCode::PAYLOAD_TOO_LARGE, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "request body too large").into_response();
-        cors(&parts.headers, response.headers_mut());
-        return Err(response);
-    };
+    let Ok(bytes) = to_bytes(body, BODY_LIMIT).await else { return Err(too_large(&parts.headers)) };
     if !table::body_ok(route, &bytes) || early(&bytes) {
         return Err(forward_whole(st, parts, bytes, &fwd).await);
     }
@@ -100,6 +95,13 @@ pub(crate) async fn admit(st: &Arc<AppState>, peer: SocketAddr, req: Request, ro
             Err(response)
         }
     }
+}
+
+/// Igual ao `_BodySizeLimitMiddleware`: texto puro, e o CORS por fora dele.
+pub(crate) fn too_large(headers: &axum::http::HeaderMap) -> Response {
+    let mut response = (StatusCode::PAYLOAD_TOO_LARGE, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "request body too large").into_response();
+    cors(headers, response.headers_mut());
+    response
 }
 
 /// Quem atende uma escrita de corpo já aceito.

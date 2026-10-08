@@ -70,6 +70,14 @@ impl GroupService {
 
     pub fn server_id(&self) -> &str { &self.server_id }
 
+    /// Sidecar de `name` sem o lock, como o `PairLink.get`: leitura de quem só consulta.
+    pub async fn link(&self, name: &str) -> Result<Option<Sidecar>, GroupError> {
+        let (dir, name) = (self.dir.clone(), name.to_owned());
+        blocking(move || reader(&dir)(&name)).await
+    }
+
+    pub fn contract_path(&self, gid: &str) -> std::path::PathBuf { self.dir.contract_path(gid) }
+
     pub async fn join(&self, input: JoinOwned) -> Result<JoinOutcome, GroupError> {
         let _guard = self.lock.lock().await;
         let dir = self.dir.clone();

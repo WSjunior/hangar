@@ -65,20 +65,36 @@ impl OrqFacts for PythonOrq {
 
     fn promote<'a>(&'a self, name: &'a str, gid: &'a str) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
-            match self.post("orq/promote", json!({"name": name, "gid": gid})).await? {
-                (200, _) => Ok(()),
-                // 409 traz o texto do conflito, como a rota `/pair` do Python.
-                (status, reply) => Err(reply["detail"]["msg"].as_str().map(str::to_owned)
-                    .unwrap_or_else(|| format!("groups_orq_promote_status:{status}"))),
-            }
+            let (status, reply) = match self.post("orq/promote", json!({"name": name, "gid": gid})).await {
+                Ok(answer) => answer,
+                Err(code) => { self.uncertain(gid, &code); return Err(code) }
+            };
+            if status == 200 { return Ok(()); }
+            // Sem resposta ou com 5xx o Python pode ter promovido antes de falhar; o join volta atrás
+            // mesmo assim, e o diário guarda o gid para quem for conferir o time.
+            if status >= 500 { self.uncertain(gid, &format!("groups_orq_promote_status_{status}")); }
+            // 409 traz o texto do conflito, como a rota `/pair` do Python.
+            Err(reply["detail"]["msg"].as_str().map(str::to_owned).unwrap_or_else(|| format!("groups_orq_promote_status:{status}")))
         })
     }
 }
 
+impl PythonOrq {
+    fn uncertain(&self, gid: &str, code: &str) {
+        crate::diag::DiagClient::new(self.upstream, self.secret.clone())
+            .report("rust.groups_orq_promote_uncertain", gid, code, "a promoção do orq não confirmou; o Python pode ter promovido");
+    }
+}
+
+/// Envelope de lista que não respondeu (`erro_lista_indisponivel`): nunca "ninguém".
+pub(crate) fn list_unavailable(code: &str) -> Value {
+    json!({"code": "erro_lista_indisponivel", "params": {"detalhe": code},
+        "msg": format!("a lista de sessões está indisponível ({code}), não vazia")})
+}
+
 /// Os de `names` que são a linha do orquestrador (a recusa `_recusa_orq` do Python).
 pub async fn is_orchestrator(st: &AppState, names: &[String]) -> Result<Vec<String>, Value> {
-    let failed = |code: String| json!({"code": "erro_lista_indisponivel", "params": {"detalhe": code},
-        "msg": format!("a lista de sessões está indisponível ({code}), não vazia")});
+    let failed = |code: String| list_unavailable(&code);
     match PythonOrq::from_state(st).post("orq/is-orchestrator", json!({"names": names})).await {
         Ok((200, reply)) => serde_json::from_value(reply["names"].clone()).map_err(|_| failed("groups_orq_names_invalid".into())),
         Ok((status, _)) => Err(failed(format!("groups_orq_names_status:{status}"))),
