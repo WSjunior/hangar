@@ -1428,7 +1428,7 @@ impl Hangar {
                 return;
             }
             // A chamada é deste computador: a troca de servidor não a derruba, só a geração dela decide.
-            Payload::Voice(generation, event) => { self.receive_voice(generation, event, cx); return; }
+            Payload::Voice(generation, event) => { self.receive_voice(generation, event, window, cx); return; }
             Payload::VoiceGate(enabled, codex, saved) => { self.receive_voice_gate(enabled, codex, saved, cx); return; }
             Payload::VoiceHistory(generation, key, result) => { self.voice_history(generation, key, result); return; }
             Payload::Files(key, owner, generation, files) => { self.receive_files(key, owner, generation, files, cx); cx.notify(); return; }

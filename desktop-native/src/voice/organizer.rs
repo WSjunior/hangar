@@ -43,6 +43,7 @@ Há dois modos. No modo Direto, siga as regras acima. No modo Planejar, NADA vai
   para executar ou para escrever o plano de implementação; só então chame finish_plan com a escolha.
   Depois que ele confirmar, chame finish_plan de novo.
 - O usuário troca de modo falando; use set_mode quando ele pedir.
+Quando o usuário pedir para trocar, ir ou abrir outra sessão, chame switch_session com o nome falado.
 Responda sempre em português, em texto curto, porque a resposta final vira fala.";
 
 /// Abre a entrada que carrega a resposta da sessão a um ask_session.
@@ -76,6 +77,8 @@ pub fn tools() -> Value {
             json!({"action": {"type": "string", "enum": ["executar", "planejar"]}})),
         tool("set_mode", "Troca entre o modo direto e o modo planejar quando o usuário pedir.",
             json!({"mode": {"type": "string", "enum": ["direto", "planejar"]}})),
+        tool("switch_session", "Troca a sessão aberta no Hangar para a sessão com esse nome; use quando o usuário pedir para trocar, ir ou abrir outra sessão.",
+            json!({"name": {"type": "string"}})),
     ])
 }
 
@@ -102,7 +105,7 @@ pub enum FinishAction { Execute, WritePlan }
 
 pub enum ToolCall {
     ReadSession, Send(String), Hold(String), Discard, Unknown(String),
-    UpdatePlan(String), ReadPlan, AskSession(String), FinishPlan { action: FinishAction }, SetMode(Mode),
+    UpdatePlan(String), ReadPlan, AskSession(String), FinishPlan { action: FinishAction }, SetMode(Mode), SwitchSession(String),
 }
 
 pub fn parse_tool(params: &Value) -> ToolCall {
@@ -122,6 +125,7 @@ pub fn parse_tool(params: &Value) -> ToolCall {
             Some("planejar") => ToolCall::FinishPlan { action: FinishAction::WritePlan },
             _ => unknown(),
         },
+        "switch_session" => arg("name").map_or_else(unknown, ToolCall::SwitchSession),
         "set_mode" => match arg("mode").as_deref() {
             Some("planejar") => ToolCall::SetMode(Mode::Plan),
             Some("direto") => ToolCall::SetMode(Mode::Direct),
@@ -337,6 +341,8 @@ mod tests {
         assert!(matches!(call("finish_plan", json!({"action": "executar"})), ToolCall::FinishPlan { action: FinishAction::Execute }));
         assert!(matches!(call("finish_plan", json!({"action": "planejar"})), ToolCall::FinishPlan { action: FinishAction::WritePlan }));
         assert!(matches!(call("finish_plan", json!({"action": "outra"})), ToolCall::Unknown(_)));
+        assert!(matches!(call("switch_session", json!({"name": "shop web"})), ToolCall::SwitchSession(n) if n == "shop web"));
+        assert!(matches!(call("switch_session", json!({"name": " "})), ToolCall::Unknown(_)));
         assert!(matches!(call("set_mode", json!({"mode": "planejar"})), ToolCall::SetMode(Mode::Plan)));
         assert!(matches!(call("set_mode", json!({"mode": "direto"})), ToolCall::SetMode(Mode::Direct)));
         assert!(matches!(call("set_mode", json!({"mode": "x"})), ToolCall::Unknown(_)));

@@ -233,7 +233,7 @@ impl Hangar {
     }
 
     /// Rótulo da máquina `key` para a busca.
-    fn machine_label(&self, key: &str, cx: &App) -> String {
+    pub(super) fn machine_label(&self, key: &str, cx: &App) -> String {
         if self.is_active_key(key) { return self.server_label(cx); }
         self.server_entry(key).map_or_else(|| key.to_owned(), |s| s.label.clone())
     }

@@ -20,6 +20,7 @@ pub enum Activity { #[default] Idle, Thinking, Searching }
 pub enum VoiceEvent {
     Phase(Phase), Levels(f32, f32), Draft(Option<String>), Activity(Activity), ReadSession(CallId), Send(CallId, String), Failed(VoiceFailure),
     Mode(Mode), Plan { path: PathBuf, markdown: String }, AskSession(String), SendPlan { session: String, text: String },
+    SwitchSession(CallId, String),
 }
 /// `cwd`: pasta da sessão na tela quando é desta máquina (a leitura do código parte dela); `target`: nome dessa sessão.
 pub struct VoiceOptions { pub codex: Codex, pub voice: Option<String>, pub context: String, pub cwd: Option<PathBuf>, pub target: String }
@@ -202,7 +203,7 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                             let _ = rpc.respond(id, tool_reply("Pedido recusado: só uma fala do usuário pode gerar envio.", false)).await;
                             "refused-not-spoken"
                         }
-                        ToolCall::FinishPlan { .. } | ToolCall::AskSession(_) | ToolCall::SetMode(_) if !spoken.allows(&params) => {
+                        ToolCall::FinishPlan { .. } | ToolCall::AskSession(_) | ToolCall::SetMode(_) | ToolCall::SwitchSession(_) if !spoken.allows(&params) => {
                             let _ = rpc.respond(id, tool_reply("Só a pedido falado do usuário.", false)).await;
                             "refused-not-spoken"
                         }
@@ -273,6 +274,8 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                                 "plan-sent"
                             }
                         }
+                        // A resposta vem da tela (`Voice::reply`), depois de resolver o nome.
+                        ToolCall::SwitchSession(name) => { let _ = events.send(VoiceEvent::SwitchSession(CallId(id), name)).await; "switch" }
                         ToolCall::SetMode(mode) => {
                             let note = switch_mode(&mut planner, mode, &target, &mut gate, &rpc, events).await;
                             let _ = rpc.respond(id, tool_reply(note, true)).await;

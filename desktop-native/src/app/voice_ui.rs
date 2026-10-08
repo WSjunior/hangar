@@ -61,6 +61,26 @@ pub(super) struct VoiceUi {
     pub(super) plan_scroll: ScrollHandle,
 }
 
+#[derive(Debug, PartialEq)]
+pub(super) enum SessionMatch { One(usize), Many(Vec<usize>), None }
+
+/// Só letras e números em minúsculas: "minha loja" casa com `minha-loja`.
+fn squash(text: &str) -> String { text.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect() }
+
+/// Nome falado → sessão. Igual vence parcial; o mesmo nome em duas máquinas fica com o da ativa (`on_active`).
+pub(super) fn match_session(query: &str, names: &[&str], on_active: &[bool]) -> SessionMatch {
+    let query = squash(query);
+    if query.is_empty() { return SessionMatch::None; }
+    let squashed: Vec<String> = names.iter().map(|n| squash(n)).collect();
+    let pick = |hits: Vec<usize>| match hits.as_slice() { [] => SessionMatch::None, [one] => SessionMatch::One(*one), _ => SessionMatch::Many(hits) };
+    let exact: Vec<usize> = (0..names.len()).filter(|&i| squashed[i] == query).collect();
+    if !exact.is_empty() {
+        let mine: Vec<usize> = exact.iter().copied().filter(|&i| on_active.get(i) == Some(&true)).collect();
+        return if mine.len() == 1 { SessionMatch::One(mine[0]) } else { pick(exact) };
+    }
+    pick((0..names.len()).filter(|&i| squashed[i].contains(&query)).collect())
+}
+
 pub(super) fn conversation_pairs(events: &[ChatEvent]) -> Vec<(String, String)> {
     events.iter().filter(|e| matches!(e.kind.as_str(), "user_msg" | "assistant_msg") && e.text.as_deref().is_some_and(|t| !t.trim().is_empty()))
         .map(|e| (e.kind.as_str().to_owned(), e.text.clone().unwrap_or_default())).collect()
@@ -319,7 +339,41 @@ impl Hangar {
         if let Some(voice) = &self.voice.call { voice.reply(call, reply); }
     }
 
-    pub(super) fn receive_voice(&mut self, generation: u64, event: VoiceEvent, cx: &mut Context<Self>) {
+    /// `switch_session`: as sessões que a busca enxerga (máquina ativa e remotas, sem as escondidas), pelo nome falado.
+    fn voice_switch(&mut self, call: CallId, spoken: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let active = self.active_key();
+        let candidates: Vec<(String, SessionInfo)> = self.sessions.iter().filter(|s| !self.sidebar.is_hidden(&active, &s.name))
+            .map(|s| (active.clone(), s.clone()))
+            .chain(self.remote.iter().flat_map(|(key, l)| l.sessions.iter().filter(|s| !self.sidebar.is_hidden(key, &s.name)).map(move |s| (key.clone(), s.clone()))))
+            .collect();
+        let names: Vec<&str> = candidates.iter().map(|(_, s)| s.name.as_str()).collect();
+        let on_active: Vec<bool> = candidates.iter().map(|(key, _)| self.is_active_key(key)).collect();
+        let reply = match match_session(spoken, &names, &on_active) {
+            SessionMatch::One(i) => {
+                crate::voice::log("switch_session one");
+                let (key, session) = candidates[i].clone();
+                if self.selected.as_ref().is_some_and(|s| s.name == session.name) && self.open_server() == key {
+                    tool_reply("Já estou nessa sessão.", true)
+                } else {
+                    let name = session.name.clone();
+                    if self.select_on(&key, session, window, cx) { tool_reply(format!("Sessão {name} aberta."), true) }
+                    else { tool_reply("A máquina dessa sessão não está conectada.", false) }
+                }
+            }
+            SessionMatch::Many(found) => {
+                crate::voice::log(format!("switch_session many({})", found.len()));
+                let list: Vec<String> = found.iter().take(5).map(|&i| {
+                    let (key, session) = &candidates[i];
+                    if on_active[i] { session.name.clone() } else { format!("{} em {}", session.name, self.machine_label(key, cx)) }
+                }).collect();
+                tool_reply(format!("Mais de uma sessão combina: {}. Peça para o usuário dizer qual.", list.join(", ")), false)
+            }
+            SessionMatch::None => { crate::voice::log("switch_session none"); tool_reply("Não achei sessão com esse nome.", false) }
+        };
+        self.voice_reply(call, reply);
+    }
+
+    pub(super) fn receive_voice(&mut self, generation: u64, event: VoiceEvent, window: &mut Window, cx: &mut Context<Self>) {
         if generation != self.voice.generation { return; }
         match event {
             VoiceEvent::Phase(Phase::Closed) => {
@@ -366,6 +420,7 @@ impl Hangar {
             VoiceEvent::Mode(mode) => self.voice.mode = mode,
             VoiceEvent::Plan { path, markdown } => self.voice.plan = Some((path, markdown)),
             VoiceEvent::AskSession(question) => self.voice_ask(&question, cx),
+            VoiceEvent::SwitchSession(call, name) => self.voice_switch(call, &name, window, cx),
             VoiceEvent::SendPlan { session, text } => {
                 // O plano foi escrito para uma sessão; se a tela mudou, não vai para outra.
                 let on_screen = self.selected.as_ref().is_some_and(|s| s.name == session);
@@ -773,6 +828,27 @@ mod tests {
     use core::prelude::v1::test;
 
     fn ev(id: &str, kind: &str, text: &str) -> (String, String, String) { (id.into(), kind.into(), text.into()) }
+
+    #[test]
+    fn session_match_prefers_exact_and_ignores_separators() {
+        let names = ["hangar", "hangar-5", "shop-web", "Shop_Api"];
+        let active = [true; 4];
+        assert_eq!(match_session("hangar", &names, &active), SessionMatch::One(0), "igual vence parcial");
+        assert_eq!(match_session("shop web", &names, &active), SessionMatch::One(2));
+        assert_eq!(match_session("SHOP-API", &names, &active), SessionMatch::One(3), "caixa e traço não contam");
+        assert_eq!(match_session("hangar 5", &names, &active), SessionMatch::One(1));
+        assert_eq!(match_session("shop", &names, &active), SessionMatch::Many(vec![2, 3]));
+        assert_eq!(match_session("cloudflare", &names, &active), SessionMatch::None);
+        assert_eq!(match_session(" - ", &names, &active), SessionMatch::None, "consulta vazia não casa tudo");
+    }
+
+    #[test]
+    fn session_match_same_name_prefers_active_machine() {
+        let names = ["api", "api", "api-docs"];
+        assert_eq!(match_session("api", &names, &[false, true, true]), SessionMatch::One(1));
+        assert_eq!(match_session("api", &names, &[false, false, true]), SessionMatch::Many(vec![0, 1]));
+        assert_eq!(match_session("api", &names, &[true, true, true]), SessionMatch::Many(vec![0, 1]));
+    }
 
     #[test]
     fn question_text_is_marked_and_bounded() {
