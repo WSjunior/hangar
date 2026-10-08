@@ -1092,3 +1092,108 @@ def test_codex_with_terminal_never_waits_for_the_rust_in_pending(codex_birth, tm
         await owner.prepare_session("cx", "codex")
         assert waited, "o sem terminal espera o desfecho do Rust"
     asyncio.run(scenario())
+
+
+# --- Ciclo de vida do Codex sem terminal no Rust (5B Task 5) ---
+
+class LifecycleTransport(LaunchTransport):
+    """Rust falso que também responde aos controles e ao `close` (com ou sem `kill`)."""
+
+    def __init__(self, owner_ref, control_error=None, killed=True, **kwargs):
+        super().__init__(owner_ref, **kwargs)
+        self.control_error, self.killed = control_error, killed
+
+    async def op(self, descriptor, command, operation_id, clock):
+        from app.rust_server import RustOpError
+        if command["kind"] in {"close", "control"}:
+            self.commands.append(command)
+            self.ops.append((command["kind"], descriptor))
+        if command["kind"] == "close":
+            return {"closed": True, **({"killed": self.killed} if command.get("kill") else {})}
+        if command["kind"] == "control":
+            if self.control_error:
+                code, message = self.control_error
+                raise RustOpError(f"IPC recusou a operação (503: {code} {message})", 503, code, message)
+            payload = {"current": "Ask for approval"} if command["control"] == "set_permission_mode" else {}
+            return {"operation_id": operation_id, "disposition": "accepted", "payload": payload}
+        return await super().op(descriptor, command, operation_id, clock)
+
+
+def _lifecycle_owner(codex_birth, monkeypatch, **kwargs):
+    ref = []
+    transport = LifecycleTransport(ref, **kwargs)
+    owner = codex_birth.build_codex(transport)
+    ref.append(owner)
+    monkeypatch.setattr(api, "get_adapter", lambda provider: codex_birth.codex if provider == "codex" else pytest.fail(provider))
+    return owner, transport
+
+
+def test_codex_close_with_rust_owner_kills_in_rust(codex_birth, monkeypatch):
+    from app.adapters.codex import sem_terminal
+    monkeypatch.setattr(sem_terminal, "matar", lambda meta: pytest.fail("o Python matou o processo de uma sessão do Rust"))
+    owner, transport = _lifecycle_owner(codex_birth, monkeypatch)
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.ensure_open("cx")
+        await asyncio.to_thread(codex_birth.codex.close_sync, "cx")
+    asyncio.run(scenario())
+    closes = [command for command in transport.commands if command["kind"] == "close"]
+    assert closes[0].get("kill") is True, "o Rust encerra o processo que ele subiu"
+
+
+def test_codex_close_falls_back_to_python_kill_when_rust_had_no_process(codex_birth, monkeypatch):
+    from app.adapters.codex import sem_terminal
+    killed = []
+    monkeypatch.setattr(sem_terminal, "matar", lambda meta: killed.append(meta["name"]))
+    owner, transport = _lifecycle_owner(codex_birth, monkeypatch, killed=False)
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.ensure_open("cx")
+        await asyncio.to_thread(codex_birth.codex.close_sync, "cx")
+    asyncio.run(scenario())
+    assert killed == ["cx"], "sem a sessão aberta no Rust, o processo não fica vivo sem dono"
+
+
+def test_codex_restart_and_permission_go_to_rust(codex_birth, monkeypatch):
+    owner, transport = _lifecycle_owner(codex_birth, monkeypatch)
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.ensure_open("cx")
+        await codex_birth.codex.restart("cx")       # o que o `/recarregar` chama no Codex
+        return await api.trocar_permissao_do_codex("cx", api.CodexPermissionBody(mode="ask for approval"))
+    result = asyncio.run(scenario())
+    controls = [(command["control"], command["payload"]) for command in transport.commands if command["kind"] == "control"]
+    assert controls == [("restart", {}), ("set_permission_mode", {"mode": "ask for approval"})]
+    assert result == {"current": "Ask for approval"}
+    assert transport.kinds().count("open") == 1, "trocar o processo é do Rust: nada fecha nem reabre aqui"
+
+
+@pytest.mark.parametrize("code,status,api_code", [
+    ("erro_permissao_ocupada", 409, "erro_permissao_ocupada"),
+    ("erro_modo_desconhecido", 400, "erro_permissao_picker"),
+])
+def test_codex_permission_refusal_from_rust_keeps_the_python_codes(codex_birth, monkeypatch, code, status, api_code):
+    from fastapi import HTTPException
+    message = "a sessão está trabalhando; mudar o sandbox reiniciaria o Codex — espere ela terminar"
+    owner, transport = _lifecycle_owner(codex_birth, monkeypatch, control_error=(code, message))
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.ensure_open("cx")
+        await api.trocar_permissao_do_codex("cx", api.CodexPermissionBody(mode="Ask for approval"))
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(scenario())
+    assert caught.value.status_code == status
+    assert caught.value.detail["code"] == api_code and caught.value.detail["msg"] == message
+
+
+@pytest.mark.parametrize("mode,swept", [("pending", False), ("rust", False), ("python", True)])
+def test_boot_sweeps_orphans_only_when_python_owns(monkeypatch, mode, swept):
+    from app.adapters.claude_headless import adapter as A
+    calls = []
+    monkeypatch.setattr(A, "matar_orfaos", lambda: calls.append(mode) or 0)
+    async def nothing():
+        return None
+    monkeypatch.setattr(api, "_python_owns_headless", nothing)
+    runtime = SimpleNamespace(mode=mode, mode_hooks={})
+    asyncio.run(api._boot_sessions(runtime))
+    assert bool(calls) is swept, "com o Rust de pé a varredura de órfãos é dele"

@@ -883,6 +883,22 @@ class RuntimeAdapter:
                 from app.adapters.codex.chat_controls import skills_do_catalogo
                 return skills_do_catalogo(result)
             return None if method in {"skip_question", "compact"} else result
+        if self.provider == "codex" and method in {"recarregar", "restart"}:
+            # O Rust mata e sobe o processo na mesma conversa; a sessão não sai dele.
+            await self.control(name, "restart")
+            return None
+        if self.provider == "codex" and method == "set_permission_mode_sem_terminal":
+            from app.adapters.codex.sem_terminal import Ocupada
+            from app.rust_server import RustOpError
+            try:
+                return await self.control(name, "set_permission_mode", {"mode":arguments["modo"]})
+            except RustOpError as exc:
+                # Os mesmos erros do adapter Python, que a rota já traduz (409, 400).
+                if exc.code == "erro_permissao_ocupada":
+                    raise Ocupada(exc.message) from None
+                if exc.code == "erro_modo_desconhecido":
+                    raise ValueError(exc.message) from None
+                raise
         if method in {"parar", "recarregar", "restart", "open_terminal", "open_headless", "set_permission_mode_sem_terminal"}:
             return await runtime_coordinator.current().lifecycle_call(name, method, arguments)
         raise RuntimeError("método exige encaminhamento explícito ao responsável")

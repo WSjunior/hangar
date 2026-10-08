@@ -12,7 +12,8 @@ from app import diag, log_paths
 
 _PATCH = {
     "claude": {"session_id", "cwd", "model", "effort", "permission_mode", "previous_non_plan", "context_window", "problema", "cano"},
-    "codex": {"thread_id", "rollout_path", "cwd", "model", "effort", "mode", "service_tier", "skipped_async_questions", "problema", "cano"},
+    "codex": {"thread_id", "rollout_path", "cwd", "model", "effort", "mode", "service_tier", "skipped_async_questions", "problema", "cano",
+              "permission_mode"},
 }
 _unknown_guard = threading.Lock()
 _unknown_counts = {}
@@ -164,7 +165,11 @@ def launch_env(metadata: dict) -> dict:
     if metadata["provider"] != "codex":
         raise ValueError("subida pelo Rust ainda só para o Codex")
     import shutil
-    from app.adapters.codex import sem_terminal
+    from app.adapters.codex import sem_terminal, sessions
+    # O registro em memória não vê o que o Rust gravou depois de abrir (modo trocado): vale o arquivo.
+    current = sessions.load(metadata["name"])
+    if current and current.get("key") == metadata["key"]:
+        metadata = {**metadata, **current}
     env = sem_terminal._ambiente(metadata)
     program = sem_terminal.argv(metadata)
     # O PATH da sessão decide, como no `subir`; no Windows o `which` acha o `.cmd` pelo PATHEXT.

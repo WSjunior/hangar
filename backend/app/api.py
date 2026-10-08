@@ -2884,19 +2884,22 @@ def _start_transfer_recovery() -> None:
 async def _boot_sessions(runtime) -> None:
     """Sessões Claude sem terminal na subida. O cano sobrevive ao restart; só morre aqui o de
     sessão encerrada com o backend fora. Com o Rust esperado, nada mais roda antes do desfecho
-    dele: o modo `rust` abre as sessões nele, e o `python` (desistência) faz o que vinha aqui."""
-    try:
-        from app.adapters.claude_headless.adapter import matar_orfaos
-        mortos = await asyncio.to_thread(matar_orfaos)
-        if mortos:
-            _log.info("claude headless: %d cano(s) de sessão já encerrada finalizado(s)", mortos)
-    except Exception:
-        _log.warning("claude headless: varredura de canos órfãos falhou", exc_info=True)
+    dele: o modo `rust` abre as sessões nele, e o `python` (desistência) faz o que vinha aqui.
+    A varredura de órfãos tem dono só: com o Rust de pé é dele, na subida dele."""
+    async def sweep_orphans():
+        try:
+            from app.adapters.claude_headless.adapter import matar_orfaos
+            mortos = await asyncio.to_thread(matar_orfaos)
+            if mortos:
+                _log.info("claude headless: %d cano(s) de sessão já encerrada finalizado(s)", mortos)
+        except Exception:
+            _log.warning("claude headless: varredura de canos órfãos falhou", exc_info=True)
 
     async def after_rust():
         _start_transfer_recovery()
 
     async def after_python():
+        await sweep_orphans()
         # Cada etapa independe das outras: uma falha não deixa canos sem religar nem transferência parada.
         try:
             await runtime.register_claude_sessions()
@@ -2909,6 +2912,7 @@ async def _boot_sessions(runtime) -> None:
     _transfer_recovery = None       # um lifespan novo no mesmo processo (testes) recupera de novo
     runtime.mode_hooks.update(rust=after_rust, python=after_python)
     if runtime.mode == "python":
+        await sweep_orphans()
         await _python_owns_headless()
 
 

@@ -177,7 +177,8 @@ _TERMINAL_PRE_EFFECT_ERRORS = frozenset({"terminal_facts", "receipt_scan"})
 # defeito: sobem como erro sem ir ao diário de falha.
 _ANSWER_CODES = frozenset({
     "claude_command", "codex_command", "lifecycle_required", "operation_reused", "input_text",
-    "queue_busy", "queue_entry", "steer_unknown", "policy_refused"})
+    "queue_busy", "queue_entry", "steer_unknown", "policy_refused", "erro_permissao_ocupada", "erro_modo_desconhecido",
+    "erro_codex_reiniciando"})
 _BIRTH_POLL_S = 0.25
 _INITIALIZE_WAIT_S = 185.0   # teto do `initialize` no Rust (180 s) com folga
 # O Rust não chegou ao cano recém-lançado: o processo é morto e a falha conta no teto de subidas.
@@ -1498,16 +1499,17 @@ class RuntimeCoordinator:
         with slot.guard:
             slot.phase = Phase.Python
 
-    async def detach(self, name, *, restore=True):
+    async def detach(self, name, *, restore=True, kill=False):
+        """Fecha no Rust. `kill`: o processo da sessão morre junto; a resposta diz se o Rust o matou."""
         slot = self.slot(name)
         async with self._barrier(slot):
             if slot.phase == Phase.Python:
-                return
+                return None
             with slot.guard:
                 slot.phase = Phase.RecoveringPython
             await self._wait_active(slot)
             try:
-                reply = await self._rpc(slot.binding.descriptor(), {"kind": "close"}, uuid.uuid4().hex)
+                reply = await self._rpc(slot.binding.descriptor(), {"kind": "close", **({"kill": True} if kill else {})}, uuid.uuid4().hex)
                 if reply.get("closed") is not True:
                     raise RuntimeError("Rust não confirmou a liberação da sessão")
             except BaseException:
@@ -1516,6 +1518,7 @@ class RuntimeCoordinator:
                     slot.phase = Phase.Rust
                 raise
             await self._restore(slot, reconnect=restore)
+            return reply
 
     async def recover(self, name, confirmed_dead: bool, containment=None):
         slot = self.slot(name)
@@ -1639,7 +1642,7 @@ class RuntimeCoordinator:
             if key is not None and self.slots[key].awaiting_identity:
                 self.names.pop(name, None)
 
-    async def change(self, name, action, *, new_name=None, advance=True, remove=False, reopen=True, stopped=False, preflight=None):
+    async def change(self, name, action, *, new_name=None, advance=True, remove=False, reopen=True, stopped=False, preflight=None, kill=False):
         """Administração da sessão. Do Rust: barreira → `close` (a trava e a fila voltam ao Python,
         sem cliente no cano) → ação → nova vida gravada na fila → `open` no Rust, salvo `stopped`
         ou sem processo para abrir. `reopen` só vale para o caminho Python."""
@@ -1661,9 +1664,9 @@ class RuntimeCoordinator:
                 if self.slots.get(self.names.get(name, "")) is not slot:
                     # Outro caminho trocou o registro enquanto esta esperava a barreira.
                     raise RuntimeError("registro da sessão mudou durante a espera; tente de novo")
-                from_rust = slot.phase == Phase.Rust
+                from_rust, closed = slot.phase == Phase.Rust, None
                 if from_rust:
-                    await self._close_for_change(name, slot, preflight=preflight)
+                    closed = await self._close_for_change(name, slot, preflight=preflight, kill=kill)
                 elif remove and self.legacy is not None:
                     # Fechar não escreve na conversa: basta esperar os escritores, mesmo com vínculo mudado.
                     await self.legacy.quiesce({**slot.binding.descriptor(), "removed":True})
@@ -1671,7 +1674,8 @@ class RuntimeCoordinator:
                     try:
                         from app.runtime_terminal import terminal_life
                         life = None if remove else await asyncio.to_thread(terminal_life, slot.binding)
-                        slot.change = {"target":new_name or name, "advance":advance, "life":life, "from_rust":from_rust, "relaunch":False}
+                        slot.change = {"target":new_name or name, "advance":advance, "life":life, "from_rust":from_rust, "relaunch":False,
+                                       "killed":bool(closed and closed.get("killed") is True)}
                         result = await action()
                     except Exception:
                         if slot.change_from_rust and slot.phase == Phase.Python and not remove:
@@ -1719,7 +1723,7 @@ class RuntimeCoordinator:
             await self.prepare_session(current.binding.name, current.binding.provider)
         return result
 
-    async def _close_for_change(self, name, slot, preflight=None):
+    async def _close_for_change(self, name, slot, preflight=None, kill=False):
         """Fecha no Rust e devolve a trava e a fila ao Python sem cliente no cano. A vista do Rust,
         relida agora, fica guardada: é ela que diz se a sessão estava ociosa (transferência)."""
         try:
@@ -1731,8 +1735,9 @@ class RuntimeCoordinator:
             diag.registrar("runtime.refresh_failed", "aviso", sessao=name, **failure_reason(exc))
         if preflight is not None:
             await preflight()
-        await self.detach(name, restore=False)
+        reply = await self.detach(name, restore=False, **({"kill": True} if kill else {}))
         slot.change_from_rust = True
+        return reply
 
     async def _commit_change(self, name, slot):
         """Grava a nova vida na fila (nome, conversa, geração) sob a trava do Python. Devolve o
@@ -1931,5 +1936,14 @@ class RuntimeCoordinator:
                 return await original(adapter, name, **params)
             return await asyncio.to_thread(original, adapter, name, **params)
         stopped = method in {"close_sync", "parar"}
+        binding = self.slot(name).binding
+        kill = method == "close_sync" and binding.provider == "codex" and binding.headless and self.rust_owns("codex", True)
+        if kill:
+            async def action():
+                # O Rust matou o processo que ele subiu no `close`; sem a sessão aberta lá, o processo
+                # não tem outro dono e o Python o encerra.
+                if (self.slot(name).change or {}).get("killed"):
+                    return None
+                return await asyncio.to_thread(original, adapter, name, **params)
         return await self.change(name, action, new_name=params.get("new") if method == "rename" else None,
-            advance=method != "rename", remove=False, reopen=not stopped, stopped=stopped)
+            advance=method != "rename", remove=False, reopen=not stopped, stopped=stopped, kill=kill)

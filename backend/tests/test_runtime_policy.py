@@ -103,6 +103,8 @@ def _fake_codex(tmp_path, monkeypatch):
 def test_launch_env_da_sessao_codex(monkeypatch, tmp_path):
     from pathlib import Path
     exe = _fake_codex(tmp_path, monkeypatch)
+    from app.adapters.codex import sessions
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path / "codex-sessions")
     monkeypatch.setenv("TMUX", "x")
     monkeypatch.setenv("TMUX_PANE", "%1")
     meta = {"name": "cx", "key": "k" * 32, "codex_account": "default", "jev": False, "cwd": str(tmp_path)}
@@ -115,6 +117,31 @@ def test_launch_env_da_sessao_codex(monkeypatch, tmp_path):
     assert out["program"][0] == str(exe), "caminho resolvido: o Rust não procura o codex"
     assert 'sandbox_mode="danger-full-access"' in out["program"], "os -c do modo da sessão"
     assert out["cano_extra"] == {}
+
+
+def test_launch_env_reads_the_mode_the_rust_recorded(monkeypatch, tmp_path):
+    import json
+    from app.adapters.codex import sessions
+    _fake_codex(tmp_path, monkeypatch)
+    folder = tmp_path / "codex-sessions"
+    folder.mkdir()
+    monkeypatch.setattr(sessions, "_dir", lambda: folder)
+    (folder / "cx.json").write_text(json.dumps({"name": "cx", "key": "k" * 32, "headless": True, "permission_mode": "Ask for approval"}))
+    meta = {"name": "cx", "key": "k" * 32, "codex_account": "default", "jev": False, "cwd": str(tmp_path), "permission_mode": "Full Access"}
+    out = runtime_policy.run("launch_env", {}, {"provider": "codex", **meta})
+    assert 'sandbox_mode="read-only"' in out["program"], "trocar o sandbox sobe com o modo novo, não o da abertura"
+
+
+def test_codex_patch_meta_accepts_the_permission_mode(tmp_path, monkeypatch):
+    import json
+    from app.adapters.codex import sessions
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    (tmp_path / "cx.json").write_text(json.dumps({"name": "cx", "key": "k", "headless": True}))
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"runtime_state": {"view": {"permission_mode": "Ask for approval"}}}))
+    assert runtime_policy.run("session.patch_meta", {"permission_mode": "Ask for approval"}, {"provider": "codex", "name": "cx",
+        "key": "k", "validate": lambda: None, "state_path": str(state)}) == {"updated": True}
+    assert sessions.load("cx")["permission_mode"] == "Ask for approval"
 
 
 def test_launch_env_without_codex_is_a_code(monkeypatch, tmp_path):
