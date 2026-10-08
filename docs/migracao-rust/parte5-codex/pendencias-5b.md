@@ -16,7 +16,7 @@ concluir a 5-0 (07/10/2026, `7cb358073` na `hangar-server-parte5-claude`, contra
 
 ## Da 5A
 
-- ~~**Aviso de versão:**~~ fechado na 5B, Task 1 (versão local 0.161.0 conferida). Era: conferida 0.159.3; o notebook roda 0.160.1, então toda sessão Codex mostra
+- ~~**Aviso de versão:**~~ fechado na 5B, Task 1 (versão conferida agora 0.161.0, no lugar da 0.159.3; a pendência da 0.160 está coberta). Era: conferida 0.159.3; o notebook roda 0.160.1, então toda sessão Codex mostra
   `codex_versao_nao_conferida` (no nativo marca a sessão como problema na lista). Antes do uso
   real: `scripts/conferir-codex-schema` com a 0.160, ou mover o aviso para fora de `problema`.
 - ~~`turn/completed` ilegível~~ (fechado na 5B, Task 2): `turn/completed` ilegível com `status: "failed"` não marca `headless_turno_erro` no caminho cru.

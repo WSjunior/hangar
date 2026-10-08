@@ -175,5 +175,5 @@ Rust](harnesses.md#regras-vigentes), `docs/migracao-rust/parte5-codex/spec.md`.)
 `dono-unico/desenho.md` deixava o Codex sem terminal no Python, como provedor não migrado, até
 haver prova real do Codex no Rust: o dono era fixo pelo provedor, o `matar_orfaos` do Python
 varria os canos e o `-32601` valia para todo pedido do servidor sem tela. Hoje o Rust sobe, religa
-e mata o cano, responde os pedidos e atende as rotas só do Codex; o Python faz isso apenas no modo
+e mata o cano, responde os pedidos (o `-32601` ficou só para os sem tela) e atende as rotas só do Codex; o Python faz isso apenas no modo
 `python` (Rust ausente). Codex com terminal continua no Python até a 5C.

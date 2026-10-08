@@ -154,10 +154,11 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `erro_permissao_ocupada` (409). `initialize` repetido responde "Already initialized" e é
   sucesso; thread sem turno não tem rollout e o `resume` a recusa — abre outra. Só `on-request` e
   `never` existem (`untrusted` morreu); o sandbox vai no `-c` da subida e trocar de modo reabre o
-  servidor ocioso. Todo pedido do servidor tem resposta (cartão de permissão, formulário MCP como
-  pergunta nativa, URL como cartão de link, `currentTime/read`, `chatgptAuthTokens/refresh`,
-  `attestation/generate`, v1 legado, desconhecido); pedido de thread de subagente nunca é
-  descartado. `-32601` + nota só para `item/tool/call`, nunca sucesso vazio. Um cliente por cano.
+  servidor ocioso. Todo pedido do servidor tem resposta. Têm tela ou resposta própria: cartões de
+  permissão, URL como cartão de link, `requestUserInput`, formulário MCP como pergunta nativa e
+  `currentTime/read`. Todo o resto (`item/tool/call`, `chatgptAuthTokens/refresh`,
+  `attestation/generate`, v1 legado, desconhecido) recebe `-32601` + nota, nunca sucesso vazio;
+  pedido de thread de subagente nunca é descartado. Um cliente por cano.
   Falha vira erro com código, nunca passagem ao Python; o código Python fica para o modo `python`.
   Codex com terminal segue no Python até a 5C.
 - **Processo do cano é um módulo só (`runtime/process.rs`), Claude e Codex.** Subir espera o
