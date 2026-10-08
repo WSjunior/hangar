@@ -320,7 +320,7 @@ Commit: `feat(codex): answer permission and MCP form/link requests, keep subagen
 **Interfaces:**
 - Produces: `LaunchSpec`, `Cano`, `Liveness`, `ProcessError { NoCano, Spawn(String), NotListening, StillAlive }` com `code()` (`cano_ausente`, `cano_nao_subiu`, `cano_nao_escutou`, `cano_continua_vivo`), `liveness`, `spawn`, `kill`, `kill_orphans`, `cano_binary` — assinaturas e regras no desenho acima. O módulo não grava o arquivo da sessão.
 
-- [ ] **Step 1: Testes (falham)**
+- [x] **Step 1: Testes (falham)**
 
 `tests/runtime_process.rs` (Linux; Windows compila e roda só o que não depende de `/proc`):
 
@@ -381,12 +381,12 @@ fn orphans_are_processes_with_a_dead_key_and_our_owner() {
 
 (O teste de `spawn` usa o `hangar-cano` real do workspace como cano e `/bin/sleep` como programa; ajustar `CARGO_BIN_EXE_*` se o binário morar em outro crate — nesse caso apontar `CP_RUST_CANO_BIN` para `target/<perfil>/hangar-cano` montado pelo `cargo build -p hangar-cano` antes do teste.)
 
-- [ ] **Step 2: Rodar e ver falhar**
+- [x] **Step 2: Rodar e ver falhar**
 
 Run: `cd crates && CARGO_BUILD_JOBS=4 cargo build -p hangar-cano && CARGO_BUILD_JOBS=4 cargo test -p hangar-server --test runtime_process`
 Expected: FAIL de compilação (`process` não existe).
 
-- [ ] **Step 3: Implementar `process.rs`**
+- [x] **Step 3: Implementar `process.rs`**
 
 Seguir o desenho acima. Pontos que valem cada um uma regra vigente:
 - `spawn` não devolve antes de o cano escutar: tenta conectar (`runtime::cano::connect`, já existente) por até 10 s; sem escuta → mata o que subiu e devolve `NotListening` (o ator zera o `cano` pela política).
@@ -395,7 +395,7 @@ Seguir o desenho acima. Pontos que valem cada um uma regra vigente:
 - `kill_orphans` lê `/proc/*/environ` só dos processos do mesmo `uid`; manda `SIGTERM` por pid (não por grupo), como o Python; conta e loga os "alheios" (marca sem prova de dono).
 - O módulo não grava o arquivo da sessão (regra 2 do desenho): quem grava é o ator, pela política `session.patch_meta {cano}` / `session.clear_cano {pid}` (Task 4).
 
-- [ ] **Step 4: Rodar e ver passar; commit**
+- [x] **Step 4: Rodar e ver passar; commit**
 
 Run: o do Step 2.
 Commit: `feat(runtime): shared cano process module (spawn, kill with identity, orphans)`.
