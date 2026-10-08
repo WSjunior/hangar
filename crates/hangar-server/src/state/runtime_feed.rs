@@ -100,7 +100,8 @@ impl RuntimeFeed {
         let read = tokio::task::spawn_blocking(move || super::parked::parked_state_at(&name, &home)).await.ok().flatten();
         if let Some(state) = read { return Parked::State(state); }
         // Sem sidecar: `dead`, salvo na troca de modo, em que o Python não emite nada. Sem fatos, não se sabe: `idle` puro.
-        let facts = self.facts.as_ref().and_then(|w| w.src.store.get(&self.name));
+        // Retrato falhando: o último fato pode ser velho e não decide `dead` nem segura o estado.
+        let facts = self.facts.as_ref().filter(|w| w.error.is_none()).and_then(|w| w.src.store.get(&self.name));
         match facts {
             Some(received) if received.in_transfer(std::time::Instant::now()) => Parked::Hold,
             Some(_) => Parked::State(StateEvent { state: "dead".into(), ..idle(&self.name) }),
@@ -176,7 +177,7 @@ impl RuntimeFeed {
             self.sent = Sent { generation: Some(generation), ..Sent::default() };
         }
         let value = self.live.as_mut().map(|rx| rx.borrow_and_update().clone());
-        let (state, texts) = match &value {
+        let (mut state, texts) = match &value {
             None => (feed_problem(&self.name, "runtime_absent", "o servidor não tem o runtime ligado"), Default::default()),
             // Sessão parada (não aberta no Rust, encerrada, ou abrindo): `idle`, como o Python. Abertura
             // que falhou e vida que acabou com erro chegam como `Some` com o erro.
@@ -202,6 +203,13 @@ impl RuntimeFeed {
                 (state, [live.preview.clone(), live.thinking.clone(), live.tool.clone()])
             }
         };
+        // Como no `Monitor`: sem retrato, a sugestão e a sessão parada podem estar velhas, e a tela diz isso.
+        if let Some(code) = self.facts.as_ref().and_then(|w| w.error.as_ref()) {
+            if state.problema.is_none() {
+                state.problema = Some(super::facts::UNAVAILABLE.into());
+                state.problema_detalhe = Some(code.clone());
+            }
+        }
         let [preview, thinking, tool] = texts;
         let preview = match hub.committed() {
             Some(committed) if super::preview::is_committed(&preview, &committed) => String::new(),
@@ -634,6 +642,37 @@ mod tests {
         let windows = (Duration::from_millis(1050).as_millis() / RETRY.as_millis()) as usize + 1;
         let attempts = py.snapshots.load(std::sync::atomic::Ordering::SeqCst);
         assert!(attempts >= 2 && attempts <= windows, "{attempts} tentativas em ~1 s com retentativa de {RETRY:?}");
+    }
+
+    #[tokio::test]
+    async fn failing_snapshot_shows_on_the_state() {
+        let f = claude_fixture();
+        let py = fake_python_with(usize::MAX, "").await;
+        let store = Arc::new(crate::state::facts::FactsStore::default());
+        let mut rx = f.lease.hub.tx.subscribe();
+        let (_tx, live_rx) = channel(Some(live("working")));
+        let _feed = tokio::spawn(RuntimeFeed::new(&f.lease.hub, Some(live_rx), f.published.clone(), Some(feed_facts(&py, &store))).run());
+        let got = collect(&mut rx, Duration::from_millis(500)).await;
+        let state = &of(&got, "state")[0].2;
+        assert_eq!((state["state"].as_str(), state["problema"].as_str()), (Some("working"), Some(crate::state::facts::UNAVAILABLE)), "{got:?}");
+    }
+
+    #[tokio::test]
+    async fn stale_transfer_fact_does_not_hold_a_stopped_claude() {
+        let f = claude_fixture();
+        let home = tempfile::tempdir().unwrap();
+        let py = fake_python_with(usize::MAX, "").await;
+        let store = Arc::new(crate::state::facts::FactsStore::default());
+        let _watching = store.watch("s");
+        let mut stale = facts(1, "");
+        stale.transfer_active = true;
+        store.snapshot("s", stale, std::time::Instant::now());
+        let mut rx = f.lease.hub.tx.subscribe();
+        let (_tx, live_rx) = channel(None);
+        let _feed = tokio::spawn(RuntimeFeed::new(&f.lease.hub, Some(live_rx), f.published.clone(), Some(feed_facts(&py, &store))).with_home(home.path()).run());
+        let got = collect(&mut rx, Duration::from_millis(500)).await;
+        let state = &of(&got, "state")[0].2;
+        assert_eq!((state["state"].as_str(), state["problema"].as_str()), (Some("idle"), Some(crate::state::facts::UNAVAILABLE)), "{got:?}");
     }
 
     #[tokio::test]
