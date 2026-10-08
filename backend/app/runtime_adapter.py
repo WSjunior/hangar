@@ -771,7 +771,12 @@ class RuntimeAdapter:
         view = self.view(name)
         if thread_id is not None and view.thread_id != thread_id:
             raise RuntimeError("snapshot de outra conversa")
-        state = StateEvent.model_validate(view.data["public_state"])
+        public = view.data.get("public_state")
+        if public is None:
+            # Logo após a subida a vista ainda não tem o retrato: problema visível, não 500 na lista nem SSE derrubado.
+            return StateEvent(session=name, state="idle", problema="headless_turno_erro",
+                              problema_detalhe="Estado do runtime indisponível; aguarde a reposição.")
+        state = StateEvent.model_validate(public)
         slot = runtime_coordinator.current().slot(name)
         if problem := runtime_problem(name):
             state = state.model_copy(update={"problema":problem[0], "problema_detalhe":problem[1]})

@@ -408,9 +408,10 @@ def registrar(evento: str, nivel: str = "ok", **campos: Any) -> None:
         _log.debug("diag: falhou ao registrar %r", evento, exc_info=True)
 
 
-def _escrever(linhas: list[dict[str, Any]]) -> int:
+def _escrever(linhas: list[dict[str, Any]]) -> bool:
+    """False só quando o disco recusou; linha descartada pelo teto foi tratada."""
     if not linhas:
-        return 0
+        return True
     arq = caminho_do_dia()
     arq.parent.mkdir(parents=True, exist_ok=True)
     # `**linha` DEPOIS do ts: a linha que trouxe horário próprio (o da tela, ver _ts_da_tela) fica
@@ -423,11 +424,11 @@ def _escrever(linhas: list[dict[str, Any]]) -> int:
         except OSError:
             tamanho = 0
         if tamanho >= _TETO_RIGIDO:
-            return 0
+            return True
         if tamanho >= _TETO_DIA:
             linhas = [linha for linha in linhas if linha.get("nivel") != "ok"]
             if not linhas:
-                return 0
+                return True
         texto = "".join(
             json.dumps({"ts": agora, **linha}, ensure_ascii=False) + "\n" for linha in linhas
         )
@@ -446,19 +447,22 @@ def _escrever(linhas: list[dict[str, Any]]) -> int:
                 f.write(texto)
         except OSError:
             _log.debug("diag: nao deu pra gravar", exc_info=True)
-            return 0
+            return False
         _podar()
-    return len(linhas)
+    return True
 
 
 def anotar_da_tela(lote: Any) -> int:
-    """Grava um lote vindo do navegador. Devolve quantas linhas entraram."""
+    """Grava um lote vindo do navegador. Devolve quantas linhas foram tratadas: a tela reenvia o
+    lote quando o número não bate, então linha descartada (teto, evento inválido) conta como
+    tratada; só o disco recusando devolve 0."""
     if not isinstance(lote, list):
         return 0
-    limpas = [d for d in (_limpar(x) for x in lote[:_TETO_LOTE]) if d]
+    recebidas = lote[:_TETO_LOTE]
+    limpas = [d for d in (_limpar(x) for x in recebidas) if d]
     for d in limpas:
         d["origem"] = "tela"
-    return _escrever(limpas)
+    return len(recebidas) if _escrever(limpas) else 0
 
 
 def _versao_mux() -> str:

@@ -499,6 +499,23 @@ def test_problem_event_reaches_session_problem(tmp_path):
     asyncio.run(flow())
 
 
+def test_snapshot_without_public_state_is_a_visible_problem(tmp_path):
+    async def flow():
+        from app.runtime_adapter import RuntimeAdapter
+        gateway = Reopenable()
+        coordinator, slot, _, _ = _rust_session(tmp_path, gateway)
+        await _open(coordinator)
+        await coordinator.refresh_snapshot("session")
+        slot.view["view"].pop("public_state", None)     # vista recém-aberta, sem retrato ainda
+        try:
+            state = RuntimeAdapter("claude").snapshot("session")
+            assert state.problema == "headless_turno_erro", "KeyError virava 500 na lista e derrubava o SSE"
+        finally:
+            gateway.lease.close()
+            coordinator.close_python_leases()
+    asyncio.run(flow())
+
+
 def test_malformed_rate_event_keeps_runtime_state_valid(tmp_path):
     async def flow():
         from app.runtime_adapter import apply_event
@@ -540,6 +557,31 @@ def test_background_drain_never_reopens(tmp_path):
                 await coordinator.op("session", {"kind": "drain"}, "drain")
             assert "close" not in gateway.kinds and "open" not in gateway.kinds, "erro persistente não vira laço de reabertura"
             assert sent == []
+        finally:
+            gateway.lease.close()
+            coordinator.close_python_leases()
+    asyncio.run(flow())
+
+
+def test_background_refusal_goes_to_diary_once_per_sequence(tmp_path, monkeypatch):
+    from app import diag
+    logged = []
+    monkeypatch.setattr(diag, "registrar", lambda evento, *a, **k: logged.append((evento, k.get("etapa"))))
+    async def flow():
+        gateway = Reopenable()
+        coordinator, slot, _, _ = _rust_session(tmp_path, gateway)
+        await _open(coordinator)
+        gateway.broken, slot.cache_valid = "queue_io", False
+        try:
+            from app.runtime_coordinator import RustCacheInvalid
+            for i in range(3):
+                with pytest.raises(RustCacheInvalid):
+                    await coordinator.op("session", {"kind": "drain"}, f"drain-{i}")
+            assert logged.count(("runtime.rust_op_failed", "drain")) == 1, "a cada troca de estado ia mais uma linha"
+            coordinator._cache_invalid_logged.discard("session")    # o que a operação que dá certo faz
+            with pytest.raises(RustCacheInvalid):
+                await coordinator.op("session", {"kind": "drain"}, "drain-next")
+            assert logged.count(("runtime.rust_op_failed", "drain")) == 2, "sequência nova volta ao diário"
         finally:
             gateway.lease.close()
             coordinator.close_python_leases()

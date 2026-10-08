@@ -653,7 +653,9 @@ async def _correlaciona_diag(request: Request, call_next):
         # O long-poll do plugin espera de propósito: sucesso dele seria uma linha "lenta" a cada
         # janela, e enchia o teto do dia.
         long_poll_ok = route == "/api/plugin/pull" and status < 400 and not failure
-        if (response is not None or failure) and not long_poll_ok and not request.url.path.startswith("/api/diag") and (
+        # O Rust chama `/internal/*` a cada tique: o POST que deu certo e rápido enchia o teto do dia de madrugada.
+        internal_ok = request.url.path.startswith("/internal/") and status < 400 and not failure and elapsed < 1000
+        if (response is not None or failure) and not long_poll_ok and not internal_ok and not request.url.path.startswith("/api/diag") and (
                 failure or status >= 400 or elapsed >= 1000 or request.method in ("POST", "PUT", "PATCH", "DELETE")):
             diag.registrar("api.servidor", "erro" if status >= 500 else "aviso" if status >= 400 else "ok",
                            detalhe=f"{request.method} {route}", codigo=str(status), ms=elapsed,
@@ -1669,15 +1671,18 @@ def _on_hook_transition(session_id: str, state: str) -> None:
                 if real != state and _armar_recheca(session_id):
                     threading.Timer(_RECHECA_KIMI, _recheca_kimi,
                                     args=(session_id, state)).start()
-        except Exception:
+        except Exception as exc:
             # LOGA, nao `pass` mudo: e daqui que saem o drain da fila, o tick do loop, o vinculo
             # `then` e o push de "terminou". Falha calada aqui devolve exatamente o sintoma que este
             # bloco existe pra matar — sessao que nunca drena — sem uma linha pra investigar. E o
             # texto diz a CONSEQUENCIA, nao so "falhou": no Kimi o fim de turno real nao gera
             # transicao nova (idle sobre idle), entao sem reavaliacao a sessao pode ficar parada
             # sem drenar ate a proxima msg do usuario.
-            _log.warning("transicao de estado falhou sid=%s state=%s — sem reavaliacao automatica "
-                         "ate a proxima transicao", session_id, state, exc_info=True)
+            from app.runtime_coordinator import RustCacheInvalid
+            # Cache inválido já vai ao diário uma vez por sequência pelo coordenador; aqui repetiria a cada volta.
+            if not isinstance(exc, RustCacheInvalid):
+                _log.warning("transicao de estado falhou sid=%s state=%s — sem reavaliacao automatica "
+                             "ate a proxima transicao", session_id, state, exc_info=True)
             # Reagenda MESMO ASSIM quando o idle era suspeito: a falha pode ter sido pontual
             # (registry/tmux piscando), e desistir aqui e o que deixa a sessao presa. Mas com TETO:
             # falha PERMANENTE (jsonl corrompido, erro reproduzivel no registry) reergueria a mesma
