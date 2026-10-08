@@ -67,6 +67,8 @@ pub struct AppState {
     pub write_gate_wait: std::time::Duration,
     /// Grupos de sessões em `.hangar-pair`; `None` sem as pastas da lista (as rotas seguem ao Python).
     pub groups: Option<Arc<crate::groups::service::GroupService>>,
+    /// Outras máquinas do dono (`peers.json`), para o par 1:1 entre máquinas.
+    pub peers: Arc<crate::groups::peers::PeerClient>,
 }
 
 impl AppState {
@@ -106,7 +108,7 @@ impl AppState {
         side.monitors = Some(crate::state::live::spawner(state.clone()));
         let groups = crate::groups::from_env(list.env().dirs.as_ref(),
             Arc::new(crate::groups::orq::PythonOrq::new(cfg.upstream, cfg.internal_secret.clone(), http.clone())));
-        AppState { groups, auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None, diag,
+        AppState { groups, peers: Arc::new(crate::groups::peers_from_env()), auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None, diag,
             workspace_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             workspace_read_slots: Arc::new(tokio::sync::Semaphore::new(8)),
             workspace_meta_slots: Arc::new(tokio::sync::Semaphore::new(4)),

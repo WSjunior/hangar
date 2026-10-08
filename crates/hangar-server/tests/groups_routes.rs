@@ -210,13 +210,14 @@ async fn closed_ingress_of_the_caller_is_busy() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn guest_and_cross_machine_go_to_python() {
+async fn guest_goes_to_python_and_cross_machine_stays_in_rust() {
     let dir = tempfile::tempdir().unwrap();
     let srv = server(dir.path(), 2).await;
     let (status, body) = call(srv.addr, "POST", "s0/pair", Some(&json!({"peers": ["s1"]})), "outro").await;
     assert_eq!((status, body), (200, json!("from-python")));
+    // Sem `peers.json`, a máquina `lab` é desconhecida: recusa limpa, nada gravado.
     let (status, body) = call(srv.addr, "POST", "s0/pair", Some(&json!({"peers": ["lab::x"]})), OWNER).await;
-    assert_eq!((status, body), (200, json!("from-python")), "par entre máquinas ainda é do Python");
+    assert_eq!((status, body["detail"]["code"].clone()), (502, json!("erro_pareamento_rejeitado")));
     assert!(!srv.pair.join("s0.json").exists());
 }
 

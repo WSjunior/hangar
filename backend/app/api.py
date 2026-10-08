@@ -5699,6 +5699,34 @@ def pair_contract(name: str):
     return {"peers": link.get("peers", []), "path": str(p), "content": content}
 
 
+async def _end_external_pair(name: str, p: str) -> list[dict] | None:
+    """Desfaz o par externo de `name` no endereço `p`: avisa o outro lado e apaga registro e convite.
+    None = `p` não é par externo de `name`. A saída feita no Rust chega aqui por
+    `/internal/external-pairs/end`."""
+    # O sidecar de `name` prova que o par é dele: a busca é pela sessão, não só pelo endereço.
+    rec = next((r for r in external_pairs.by_local(name) if r.address == p), None)
+    if rec is None:
+        return None
+    errs: list[dict] = []
+    if external_pairs.ambiguous(rec.alias):
+        # Só o aviso ao outro lado é pulado (o alias também é máquina tua); a limpeza local vale.
+        errs.append({"sessao": p, "erro": erro(
+            "erro_par_endereco_ambiguo",
+            f"'{rec.alias}' é ao mesmo tempo máquina tua e par externo", peer=p)})
+    else:
+        try:
+            await asyncio.to_thread(external_pairs.call, rec.peer_address, rec.peer_token,
+                                    "DELETE", "/api/pair")
+        except (peers.PeerError, ValueError) as ex:
+            if getattr(ex, "status", None) != 410:
+                # Texto do outro lado vai rotulado: a tela não deve tomá-lo por mensagem do app.
+                texto = (external_pair_api._REMOTE_LABEL if getattr(ex, "status", None) else "") + str(ex)[:300]
+                errs.append({"sessao": p, "erro": erro("erro_peer_nao_avisado", texto, peer=p)})
+    await external_pair_api._guarded_async("remover o registro", external_pairs.remove, rec.share_id)
+    await external_pair_api._guarded_async("revogar o convite", share_store.revoke, rec.share_id)
+    return errs
+
+
 async def _avisar_saida(name: str, expeers: list[str]) -> list[dict]:
     """Depois de `name` sair do grupo (o sidecar dele já foi limpo), desfaz o vínculo nos pares
     REMOTOS via /unpair-remote, senão o sidecar de lá fica órfão. Uma esteira só pra unpair e kill."""
@@ -5706,25 +5734,9 @@ async def _avisar_saida(name: str, expeers: list[str]) -> list[dict]:
     for p in expeers:
         if not peers.is_remote(p):
             continue
-        # O sidecar de `name` prova que o par é dele: a busca é pela sessão, não só pelo endereço.
-        rec = next((r for r in external_pairs.by_local(name) if r.address == p), None)
-        if rec is not None:
-            if external_pairs.ambiguous(rec.alias):
-                # Só o aviso ao outro lado é pulado (o alias também é máquina tua); a limpeza local vale.
-                errs.append({"sessao": p, "erro": erro(
-                    "erro_par_endereco_ambiguo",
-                    f"'{rec.alias}' é ao mesmo tempo máquina tua e par externo", peer=p)})
-            else:
-                try:
-                    await asyncio.to_thread(external_pairs.call, rec.peer_address, rec.peer_token,
-                                            "DELETE", "/api/pair")
-                except (peers.PeerError, ValueError) as ex:
-                    if getattr(ex, "status", None) != 410:
-                        # Texto do outro lado vai rotulado: a tela não deve tomá-lo por mensagem do app.
-                        texto = (external_pair_api._REMOTE_LABEL if getattr(ex, "status", None) else "") + str(ex)[:300]
-                        errs.append({"sessao": p, "erro": erro("erro_peer_nao_avisado", texto, peer=p)})
-            await external_pair_api._guarded_async("remover o registro", external_pairs.remove, rec.share_id)
-            await external_pair_api._guarded_async("revogar o convite", share_store.revoke, rec.share_id)
+        externo = await _end_external_pair(name, p)
+        if externo is not None:
+            errs.extend(externo)
             continue
         if not settings.server_id:
             errs.append({"sessao": p,

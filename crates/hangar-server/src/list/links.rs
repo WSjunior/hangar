@@ -120,10 +120,10 @@ fn external_records(path: &Path) -> Option<Arc<ExternalRecords>> {
     })
 }
 
-/// `_pair_external`: o par de fora entre os peers da sessão. Arquivo torto vale como vazio, como
-/// no Python; quem o põe de lado é o Python, aqui só se avisa.
-fn pair_external(name: &str, peers: &[String], dirs: &Dirs) -> Option<Map<String, Value>> {
-    let path = dirs.claude.join(".hangar-pair").join("external_pairs.json");
+/// `_pair_external`: o par de fora entre os peers da sessão, no `.hangar-pair` em `pair_dir`.
+/// Arquivo torto vale como vazio, como no Python; quem o põe de lado é o Python, aqui só se avisa.
+pub(crate) fn pair_external(name: &str, peers: &[String], pair_dir: &Path) -> Option<Map<String, Value>> {
+    let path = pair_dir.join("external_pairs.json");
     let Some(records) = external_records(&path) else {
         // Ausente é o normal; existir e não ler é falha.
         if path.exists() { external_unreadable("file"); }
@@ -155,7 +155,7 @@ pub fn fill_links(row: &mut SessionRow, dirs: &Dirs, problems: &mut Problems) {
         .and_then(|l| l.get("target").and_then(Value::as_str).map(str::to_owned));
     match pair_of(&row.name, dirs, problems) {
         Some(pair) => {
-            row.pair_external = pair_external(&row.name, &pair.peers, dirs);
+            row.pair_external = pair_external(&row.name, &pair.peers, &dirs.claude.join(".hangar-pair"));
             row.pair_peers = Some(pair.peers);
             row.pair_gid = Some(pair.gid);
             row.pair_task = pair.task;

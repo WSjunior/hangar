@@ -1,8 +1,11 @@
 //! Grupos de sessões (pareamento): arquivos em `.hangar-pair` e as regras sobre eles.
 pub mod deliver;
+pub mod exit;
+pub mod legacy;
 pub mod local;
 pub mod model;
 pub mod orq;
+pub mod peers;
 pub mod routes;
 pub mod service;
 pub mod store;
@@ -24,4 +27,10 @@ pub fn from_env(dirs: Option<&Dirs>, orq: Arc<dyn OrqFacts>) -> Option<Arc<Group
     let archive = var("HANGAR_PAIR_ARCHIVE").map(PathBuf::from).unwrap_or_else(|| dirs.home.join(".hangar").join("pair-arquivo"));
     let dir = PairDir::new(dirs.claude.join(".hangar-pair"), archive);
     Some(Arc::new(GroupService::new(dir, orq, var("HANGAR_SERVER_ID").unwrap_or_default())))
+}
+
+/// Outras máquinas pelo `peers.json` que o Python indica (`HANGAR_PEERS_FILE`); sem ele, nenhuma.
+pub fn peers_from_env() -> peers::PeerClient {
+    let path = std::env::var_os("HANGAR_PEERS_FILE").filter(|v| !v.is_empty()).map(PathBuf::from);
+    peers::PeerClient::new(peers::PeerBook::new(path))
 }

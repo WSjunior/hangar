@@ -78,6 +78,9 @@ impl GroupService {
 
     pub fn contract_path(&self, gid: &str) -> std::path::PathBuf { self.dir.contract_path(gid) }
 
+    /// A pasta `.hangar-pair`, onde o Python também guarda `external_pairs.json`.
+    pub fn pair_root(&self) -> &std::path::Path { self.dir.root() }
+
     pub async fn join(&self, input: JoinOwned) -> Result<JoinOutcome, GroupError> {
         let _guard = self.lock.lock().await;
         let dir = self.dir.clone();

@@ -443,6 +443,20 @@ async def orq_associate(body: _OrqAssociate) -> dict:
     return await api._orq_associate(orq_context.associate_unlocked, body.name, body.gid, body.mtime)
 
 
+class _ExternalEnd(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    peer: str
+
+
+@router.post("/external-pairs/end")
+async def external_pairs_end(body: _ExternalEnd) -> dict:
+    """Saída feita no Rust de sessão com par externo: o lado de fora continua do Python, com os
+    avisos que o `_avisar_saida` devolveria."""
+    from app import api
+    return {"errors": await api._end_external_pair(body.name, body.peer) or []}
+
+
 @router.get("/costs/scopes")
 async def costs_scopes() -> dict:
     from app import costs_sources

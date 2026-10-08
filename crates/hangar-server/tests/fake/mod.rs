@@ -71,7 +71,8 @@ pub struct Fake {
     plugin_posts: Mutex<Vec<Value>>,
     /// Resposta do `/api/sessions/{n}/input` repassado; `None` = o "from-python" de sempre.
     input_reply: Mutex<Option<(StatusCode, Value)>>,
-    /// Rotas `/internal/pair/*` e `/internal/orq/*` (caminho sem `/internal/`): resposta e corpos recebidos.
+    /// Rotas `/internal/pair/*`, `/internal/orq/*` e `/internal/external-pairs/*` (caminho sem
+    /// `/internal/`): resposta e corpos recebidos.
     internal_replies: Mutex<HashMap<String, (StatusCode, Value)>>,
     internal_bodies: Mutex<Vec<(String, Value)>>,
 }
@@ -212,6 +213,7 @@ pub async fn spawn_fake() -> (Arc<Fake>, SocketAddr) {
             ("orq/promote".to_owned(), (StatusCode::OK, json!({}))),
             ("orq/is-orchestrator".to_owned(), (StatusCode::OK, json!({"names": []}))),
             ("orq/associate".to_owned(), (StatusCode::OK, json!({"ok": true}))),
+            ("external-pairs/end".to_owned(), (StatusCode::OK, json!({"errors": []}))),
         ])),
         internal_bodies: Mutex::default(),
     });
@@ -224,6 +226,7 @@ pub async fn spawn_fake() -> (Arc<Fake>, SocketAddr) {
         .route("/internal/sessions/{name}/plugin", get(fake_plugin_get).post(fake_plugin_post))
         .route("/internal/pair/{op}", axum::routing::post(fake_internal_json))
         .route("/internal/orq/{op}", axum::routing::post(fake_internal_json))
+        .route("/internal/external-pairs/{op}", axum::routing::post(fake_internal_json))
         .fallback(fake_python)
         .with_state(fake.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

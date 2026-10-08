@@ -1,7 +1,7 @@
-//! Rotas de grupo de uma máquina com as respostas do Python (`api.py`: `pair_session`,
-//! `unpair_session`, `group_message`, `pair_contract`). Convidado, corpo que o FastAPI recusaria e
-//! grupo com sessão de outra máquina seguem ao Python. Texto do protocolo e avisos saem depois de
-//! soltar o lock do grupo.
+//! Rotas de grupo com as respostas do Python (`api.py`: `pair_session`, `unpair_session`,
+//! `group_message`, `pair_contract`; o par 1:1 entre máquinas mora em `legacy.rs`). Convidado e
+//! corpo que o FastAPI recusaria seguem ao Python. Texto do protocolo, avisos e chamadas a outra
+//! máquina saem depois de soltar o lock do grupo.
 //!
 //! `/pair` e `DELETE /pair` seguram a porta de entrada da sessão até gravar o grupo (um rename não
 //! grava o nome velho por cima) e a soltam antes dos avisos: o aviso à própria sessão passa pela
@@ -34,8 +34,8 @@ use crate::session_write::{BODY_LIMIT, busy_body, detail_body, json_response, se
 use crate::transcript::py::{py_repr, py_str};
 
 /// `pair_texto.PREFIXO`.
-const PREFIX: &str = "[painel: grupo de trabalho]";
-const MIX_MSG: &str = "pareamento cross-server é 1:1 (uma sessão local + um peer remoto); uma sessão já pareada cross-server não entra em grupo local nem pareia com outro remoto";
+pub(super) const PREFIX: &str = "[painel: grupo de trabalho]";
+pub(super) const MIX_MSG: &str = "pareamento cross-server é 1:1 (uma sessão local + um peer remoto); uma sessão já pareada cross-server não entra em grupo local nem pareia com outro remoto";
 const ORQ_MSG: &str = "o orquestrador não recebe mensagens; fale com o árbitro";
 const STORM_MAX: usize = 5;
 const STORM_WINDOW: Duration = Duration::from_secs(60);
@@ -45,13 +45,15 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/sessions/{name}/pair", post(pair).delete(unpair).fallback(pass_any))
         .route("/api/sessions/{name}/group-message", post(group_message).fallback(pass_any))
         .route("/api/sessions/{name}/pair/contract", get(contract).fallback(pass_any))
+        .route("/api/sessions/{name}/pair-remote", post(super::legacy::pair_remote).fallback(pass_any))
+        .route("/api/sessions/{name}/unpair-remote", post(super::legacy::unpair_remote).fallback(pass_any))
 }
 
 /// Pedido do dono que o Rust atende, com o corpo já lido.
-struct Asked { st: Arc<AppState>, groups: Arc<GroupService>, name: String, parts: Parts, bytes: Bytes, fwd: Forward }
+pub(super) struct Asked { pub(super) st: Arc<AppState>, pub(super) groups: Arc<GroupService>, pub(super) name: String, parts: Parts, bytes: Bytes, fwd: Forward }
 
 impl Asked {
-    async fn take(st: Arc<AppState>, peer: SocketAddr, req: Request) -> Result<Asked, Response> {
+    pub(super) async fn take(st: Arc<AppState>, peer: SocketAddr, req: Request) -> Result<Asked, Response> {
         let (fwd, owner) = gate(&st, peer, &req);
         let (Some(groups), true, Some(name)) = (st.groups.clone(), owner, session_name(req.uri().path())) else {
             return Err(pass(&st, req, &fwd).await);
@@ -62,27 +64,27 @@ impl Asked {
     }
 
     /// Corpo estrito como o `_StrictBody`; o que não casa fica com o FastAPI e o 422 dele.
-    fn body<T: DeserializeOwned>(&self) -> Option<T> {
+    pub(super) fn body<T: DeserializeOwned>(&self) -> Option<T> {
         json_content_type(&self.parts.headers).then(|| serde_json::from_slice(&self.bytes).ok()).flatten()
     }
 
-    async fn to_python(self) -> Response {
+    pub(super) async fn to_python(self) -> Response {
         pass(&self.st, Request::from_parts(self.parts, Body::from(self.bytes)), &self.fwd).await
     }
 
-    fn reply(&self, status: StatusCode, body: Value) -> Response {
+    pub(super) fn reply(&self, status: StatusCode, body: Value) -> Response {
         let mut response = json_response(status, body);
         cors(&self.parts.headers, response.headers_mut());
         response
     }
 
-    fn refuse(&self, status: StatusCode, code: &str, msg: &str, params: Value) -> Response {
+    pub(super) fn refuse(&self, status: StatusCode, code: &str, msg: &str, params: Value) -> Response {
         self.reply(status, detail_body(code, msg, params))
     }
 
     /// `_transfer_guard`/`_transfer_check`: troca de agente em curso recusa com o código do Python.
     /// O passe devolvido segura a porta (rename, troca de conta esperam por ele); sem runtime, nenhum.
-    async fn enter(&self) -> Result<Option<IngressPass>, Response> {
+    pub(super) async fn enter(&self) -> Result<Option<IngressPass>, Response> {
         let Some(runtime) = self.st.state.runtime.get() else { return Ok(None) };
         match runtime.ingress().enter(&self.name, self.st.write_gate_wait).await {
             Ok(pass) => Ok(Some(pass)),
@@ -91,7 +93,7 @@ impl Asked {
     }
 
     /// `_recusa_orq` para cada nome; a pergunta que falha nunca vira "não é orquestrador".
-    async fn orchestrator(&self, names: &[String]) -> Option<Response> {
+    pub(super) async fn orchestrator(&self, names: &[String]) -> Option<Response> {
         match is_orchestrator(&self.st, names).await {
             Ok(found) if found.is_empty() => None,
             Ok(_) => Some(self.refuse(StatusCode::CONFLICT, "erro_sessao_orq", ORQ_MSG, json!({}))),
@@ -100,7 +102,7 @@ impl Asked {
     }
 
     /// Erro de disco no grupo: o 500 do FastAPI para exceção não tratada, com a causa no diário.
-    fn store_failed(&self, error: &GroupError) -> Response {
+    pub(super) fn store_failed(&self, error: &GroupError) -> Response {
         tracing::error!(code = "groups_store_failed", session = %self.name, %error, "groups: o grupo não foi lido ou gravado");
         self.st.diag.report("rust.groups_store_failed", &self.name, "groups_store_failed", "o grupo não foi lido ou gravado no disco");
         let mut response = (StatusCode::INTERNAL_SERVER_ERROR, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "Internal Server Error").into_response();
@@ -111,7 +113,7 @@ impl Asked {
 
 /// Provedor de cada sessão viva (`registry.list()`): o retrato de até 2 s e, faltando alguém de
 /// `wanted`, uma descoberta nova (como o `_cached_info_sync`).
-async fn providers(st: &AppState, wanted: &[String]) -> Result<BTreeMap<String, String>, Value> {
+pub(super) async fn providers(st: &AppState, wanted: &[String]) -> Result<BTreeMap<String, String>, Value> {
     let failed = |e: crate::list::bridge::ListError| list_unavailable(e.code);
     let rows = st.list.snapshot().await.map_err(failed)?.rows;
     let mut found: BTreeMap<String, String> = rows.iter().map(|r| (r.name.clone(), r.provider.clone())).collect();
@@ -123,7 +125,7 @@ async fn providers(st: &AppState, wanted: &[String]) -> Result<BTreeMap<String, 
 }
 
 /// `_erro_texto`: o `msg` do envelope, ou o texto cru.
-fn error_text(e: &Value) -> String {
+pub(super) fn error_text(e: &Value) -> String {
     match e {
         Value::Object(map) => map.get("msg").map_or_else(|| "None".to_owned(), py_str),
         other => py_str(other),
@@ -134,7 +136,7 @@ fn failures_text(errs: &[Value]) -> String {
     errs.iter().map(|x| format!("{}: {}", py_str(&x["sessao"]), error_text(&x["erro"]))).collect::<Vec<_>>().join("; ")
 }
 
-fn envelope(code: &str, msg: String, params: Value) -> Value { json!({"code": code, "params": params, "msg": msg}) }
+pub(super) fn envelope(code: &str, msg: String, params: Value) -> Value { json!({"code": code, "params": params, "msg": msg}) }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -156,8 +158,6 @@ async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<So
     for p in raw.into_iter().filter(|p| !p.is_empty()) {
         if !others.contains(&p) { others.push(p); }
     }
-    // Par entre máquinas ainda é do Python.
-    if others.iter().any(|o| is_remote(o)) { return asked.to_python().await; }
     let held = match asked.enter().await { Ok(held) => held, Err(busy) => return busy };
     let name = asked.name.clone();
     if others.is_empty() && !body.orq {
@@ -168,6 +168,9 @@ async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<So
     }
     let everyone: Vec<String> = std::iter::once(name.clone()).chain(others.iter().cloned()).collect();
     if let Some(refused) = asked.orchestrator(&everyone).await { return refused; }
+    if others.iter().any(|o| is_remote(o)) {
+        return super::legacy::pair_cross(asked, held, others, body.task, body.replace_task).await;
+    }
     let harness = match providers(&asked.st, &everyone).await {
         Ok(h) => h,
         Err(failed) => return asked.reply(StatusCode::SERVICE_UNAVAILABLE, json!({"detail": failed})),
@@ -219,22 +222,16 @@ async fn unpair(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<
     let asked = match Asked::take(st, peer, req).await { Ok(a) => a, Err(response) => return response };
     let held = match asked.enter().await { Ok(held) => held, Err(busy) => return busy };
     if let Some(refused) = asked.orchestrator(std::slice::from_ref(&asked.name)).await { return refused; }
-    // Avisar o par de outra máquina ainda é do Python; o passe sai antes, o Python confere a porta dele.
-    match asked.groups.link(&asked.name).await {
-        Ok(Some(link)) if link.peers.iter().any(|p| is_remote(p)) => { drop(held); return asked.to_python().await }
-        Ok(_) => {}
-        Err(error) => return asked.store_failed(&error),
-    }
     let ex = match asked.groups.leave(&asked.name).await { Ok(ex) => ex, Err(error) => return asked.store_failed(&error) };
     drop(held);
     if ex.is_empty() { return asked.reply(StatusCode::OK, json!({"ok": true, "warning": null})); }
+    let mut errs = super::exit::notify_exit(&asked.st, &asked.groups, &asked.name, &ex).await;
     let text = format!("{PREFIX} Você saiu do grupo de trabalho ({}). Volte a operar independente; use hangar-send só quando o usuário pedir.", ex.join(", "));
-    let warning = match deliver_text(&asked.st, &asked.name, &text).await {
-        Ok(()) => Value::Null,
-        Err(e) => {
-            let errs = vec![json!({"sessao": asked.name, "erro": e})];
-            envelope("erro_pareamento_saida_falhou", format!("aviso de saída falhou: {}", failures_text(&errs)), json!({"avisos": errs}))
-        }
+    if let Err(e) = deliver_text(&asked.st, &asked.name, &text).await {
+        errs.push(json!({"sessao": asked.name, "erro": e}));
+    }
+    let warning = if errs.is_empty() { Value::Null } else {
+        envelope("erro_pareamento_saida_falhou", format!("aviso de saída falhou: {}", failures_text(&errs)), json!({"avisos": errs}))
     };
     asked.reply(StatusCode::OK, json!({"ok": true, "warning": warning}))
 }
@@ -277,14 +274,15 @@ async fn group_message(State(st): State<Arc<AppState>>, ConnectInfo(peer): Conne
     let Some(link) = link.filter(|l| !l.peers.is_empty()) else {
         return asked.refuse(StatusCode::NOT_FOUND, "erro_sessao_sem_grupo", "sessão não está num grupo", json!({}));
     };
-    // Membro de outra máquina: a entrega ainda é do Python.
-    if link.peers.iter().any(|p| is_remote(p)) { return asked.to_python().await; }
     if storm(&link.gid) {
         return asked.refuse(StatusCode::TOO_MANY_REQUESTS, "erro_group_message_tempestade",
             &format!("mais de {STORM_MAX} avisos de grupo em {}s — parece loop; espere ou responda 1:1", STORM_WINDOW.as_secs()),
             json!({"max": STORM_MAX, "janela": STORM_WINDOW.as_secs()}));
     }
-    let live = match providers(&asked.st, &link.peers).await {
+    // Membro de outra máquina falha com "sessão não encontrada", como no Python: aqui ninguém o
+    // procura na lista.
+    let local: Vec<String> = link.peers.iter().filter(|p| !is_remote(p)).cloned().collect();
+    let live = match providers(&asked.st, &local).await {
         Ok(live) => live,
         Err(failed) => return asked.reply(StatusCode::SERVICE_UNAVAILABLE, json!({"detail": failed})),
     };
