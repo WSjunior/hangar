@@ -700,6 +700,17 @@ impl A11yNodeBuilder {
                 continue;
             }
             self.all_nodes[root].1.set_children(root_children.into_iter().filter(|c| !moved.contains(c)).collect::<Vec<_>>());
+            // Diálogo sem nome: o título chega no conteúdo adiado, e é o primeiro texto dele.
+            let parent_node = &self.all_nodes[at].1;
+            if matches!(parent_node.role(), accesskit::Role::Dialog | accesskit::Role::AlertDialog) && parent_node.label().is_none() {
+                let title = moved.iter().find_map(|kid| {
+                    let node = &self.all_nodes[*index.get(kid)?].1;
+                    (node.role() == accesskit::Role::Label).then(|| node.value().map(str::to_owned)).flatten()
+                });
+                if let Some(title) = title {
+                    self.all_nodes[at].1.set_label(title);
+                }
+            }
             for kid in moved {
                 self.all_nodes[at].1.push_child(kid);
             }

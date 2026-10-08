@@ -79,6 +79,12 @@ pub(crate) fn author_path(ids: &[ElementId], label: Option<&str>) -> String {
                     None => name.to_string(),
                 })
             }
+            // Item de lista pelo índice: o nome dele identifica melhor que a posição.
+            ElementId::Integer(n) if i == last => Some(match label.map(slug).filter(|s| !s.is_empty()) {
+                Some(name) => name,
+                None if *n <= u32::MAX as u64 => n.to_string(),
+                None => return None,
+            }),
             // Local no código-fonte muda a cada versão do app.
             ElementId::NamedChild(inner, _) if matches!(**inner, ElementId::CodeLocation(_)) => None,
             ElementId::NamedInteger(..) | ElementId::NamedChild(..) | ElementId::Uuid(_) => Some(id.to_string()),

@@ -41,4 +41,5 @@ Os testes que montam `KeyDownEvent` passam `physical_digit: None`, o campo novo 
 
 Acessibilidade do `Button`: sem rótulo nem `accessibility_label`, o nome acessível é o texto da dica (botão só de
 ícone); `Button::aria_selected` marca a escolha (abas, modo) sem o visual de `selected`. Botão com `selected` anuncia selecionado. `Slider::aria_label`
-repassa o nome ao slider de gpui-base.
+repassa o nome ao slider de gpui-base. O item de menu com a marca de escolhido (`checked`) anuncia marcado, e o
+invólucro do diálogo (`dialog/dialog.rs`) tem o papel de diálogo.

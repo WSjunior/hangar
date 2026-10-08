@@ -1,7 +1,7 @@
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-component-0.7.0/MODIFICADO.md gpui-component-0.7.0/MODIFICADO.md
 --- gpui-component-0.7.0/MODIFICADO.md
 +++ gpui-component-0.7.0/MODIFICADO.md
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,45 @@
 +# Cópia modificada do gpui-component 0.7.0
 +
 +Origem: crate `gpui-component` 0.7.0 do crates.io (repositório `longbridge/gpui-kit`), licença Apache-2.0 (`LICENSE-APACHE`). Entra pelo `[patch.crates-io]` de `desktop-native/Cargo.toml`.
@@ -45,7 +45,8 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 +
 +Acessibilidade do `Button`: sem rótulo nem `accessibility_label`, o nome acessível é o texto da dica (botão só de
 +ícone); `Button::aria_selected` marca a escolha (abas, modo) sem o visual de `selected`. Botão com `selected` anuncia selecionado. `Slider::aria_label`
-+repassa o nome ao slider de gpui-base.
++repassa o nome ao slider de gpui-base. O item de menu com a marca de escolhido (`checked`) anuncia marcado, e o
++invólucro do diálogo (`dialog/dialog.rs`) tem o papel de diálogo.
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-component-0.7.0/src/attachment.rs gpui-component-0.7.0/src/attachment.rs
 --- gpui-component-0.7.0/src/attachment.rs
 +++ gpui-component-0.7.0/src/attachment.rs
@@ -368,6 +369,46 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
  
                                  // Set up the subscription for dismiss handling.
                                  // Hold a Weak here, not a strong clone: the closure
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-component-0.7.0/src/menu/menu_item.rs gpui-component-0.7.0/src/menu/menu_item.rs
+--- gpui-component-0.7.0/src/menu/menu_item.rs
++++ gpui-component-0.7.0/src/menu/menu_item.rs
+@@ -15,6 +15,7 @@
+     style: StyleRefinement,
+     disabled: bool,
+     selected: bool,
++    checked: bool,
+     on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
+     on_hover: Option<Box<dyn Fn(&bool, &mut Window, &mut App) + 'static>>,
+     children: SmallVec<[AnyElement; 2]>,
+@@ -31,6 +32,7 @@
+             style: StyleRefinement::default(),
+             disabled: false,
+             selected: false,
++            checked: false,
+             on_click: None,
+             on_hover: None,
+             children: SmallVec::new(),
+@@ -43,6 +45,12 @@
+         self
+     }
+ 
++    /// The item is the current choice (the check mark), announced as checked.
++    pub(crate) fn checked(mut self, checked: bool) -> Self {
++        self.checked = checked;
++        self
++    }
++
+     /// Set the accessible label for the menu item.
+     pub(crate) fn aria_label(mut self, label: impl Into<SharedString>) -> Self {
+         self.aria_label = Some(label.into());
+@@ -99,6 +107,7 @@
+             .role(Role::MenuItem)
+             .when_some(self.aria_label, |this, label| this.aria_label(label))
+             .aria_selected(self.selected)
++            .when(self.checked, |this| this.aria_toggled(gpui::Toggled::True))
+             .group(&self.group_name)
+             .gap_x_1()
+             .py_1()
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-component-0.7.0/src/menu/mod.rs gpui-component-0.7.0/src/menu/mod.rs
 --- gpui-component-0.7.0/src/menu/mod.rs
 +++ gpui-component-0.7.0/src/menu/mod.rs
@@ -543,15 +584,18 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          })
      }
  
-@@ -1222,6 +1288,7 @@
+@@ -1222,8 +1288,10 @@
              Size::Small => (px(20.), options.radius.half()),
              _ => (px(26.), options.radius),
          };
 +        let item_height = self.appearance.as_ref().and_then(|appearance| appearance.item_height).unwrap_or(item_height);
  
          let this = MenuItemElement::new(ix, &group_name)
++            .checked(item.is_checked())
              .relative()
-@@ -1243,7 +1310,7 @@
+             .text_sm()
+             .py_0()
+@@ -1243,7 +1311,7 @@
              }))
              .when_some(item.a11y_label(), |this, label| this.aria_label(label));
  
@@ -560,7 +604,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
              PopupMenuItem::Separator => this
                  .h_auto()
                  .p_0()
-@@ -1252,14 +1319,21 @@
+@@ -1252,14 +1320,21 @@
                  .border_b(px(2.))
                  .border_color(cx.theme().border)
                  .disabled(true),
@@ -590,7 +634,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
              PopupMenuItem::ElementItem {
                  render,
                  icon,
-@@ -1399,6 +1473,12 @@
+@@ -1399,6 +1474,12 @@
                          .with_priority(self.priority + 1)
                      })
                  }),
@@ -603,7 +647,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          }
      }
  }
-@@ -1460,7 +1540,9 @@
+@@ -1460,7 +1541,9 @@
              radius: cx.theme().radius.min(px(8.)),
          };
  
@@ -614,7 +658,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
              .id("popup-menu")
              .test_support()
              .role(Role::Menu)
-@@ -1475,6 +1557,8 @@
+@@ -1475,6 +1558,8 @@
              .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
              .popover_style(cx)
              .text_color(cx.theme().popover_foreground)
@@ -623,7 +667,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
              .relative()
              .occlude()
              .child(
-@@ -1482,6 +1566,7 @@
+@@ -1482,6 +1567,7 @@
                      .id("items")
                      .p_1()
                      .gap_y_0p5()
@@ -631,7 +675,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
                      .min_w(rems(8.))
                      .when_some(self.min_width, |this, min_width| this.min_w(min_width))
                      .max_w(max_width)
-@@ -1502,7 +1587,7 @@
+@@ -1502,7 +1588,7 @@
              )
              .when(self.scrollable, |this| {
                  this.vertical_scrollbar(&self.scroll_handle)
