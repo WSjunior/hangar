@@ -4,6 +4,7 @@ pub mod organizer;
 pub mod plan;
 pub mod rpc;
 pub mod rtc;
+pub mod usage;
 
 use organizer::{FinishStep, MIC_VOICE_LEVEL, Mode, Planner, Results, SendGate, SpokenTurns, ToolCall, finish_request, parse_tool, send_allowed, tool_reply, tools, thread_config, ORGANIZER_PROMPT, VOICE_PROMPT};
 use rpc::{Codex, Incoming, Rpc, RpcError, handshake};
@@ -21,6 +22,9 @@ pub enum VoiceEvent {
     Phase(Phase), Levels(f32, f32), Draft(Option<String>), Activity(Activity), ReadSession(CallId), Send(CallId, String), Failed(VoiceFailure),
     Mode(Mode), Plan { path: PathBuf, markdown: String }, AskSession(String), SendPlan { session: String, text: String },
     SwitchSession(CallId, String),
+    /// Contexto da thread do organizador (não o da voz, que não é informado): input do último turno e a janela do modelo.
+    OrganizerContext { used: u64, window: Option<u64> },
+    AccountLimits { five_hour: usage::RateWindow, seven_day: usage::RateWindow },
 }
 /// `cwd`: pasta da sessão na tela quando é desta máquina (a leitura do código parte dela); `target`: nome dessa sessão.
 pub struct VoiceOptions { pub codex: Codex, pub voice: Option<String>, pub context: String, pub cwd: Option<PathBuf>, pub target: String }
@@ -114,6 +118,11 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
     log("app-server spawned");
     let config = handshake(&rpc).await.map_err(rpc_failure).map_err(failed("handshake"))?;
     log("handshake ok");
+    // O cartão já nasce com a conta; falhar aqui só deixa os limites ocultos até a primeira atualização.
+    match rpc.request("account/rateLimits/read", json!({})).await {
+        Ok(result) => send_limits(events, usage::read_limits(&result)).await,
+        Err(error) => log(format!("rateLimits/read failed: {error:?}")),
+    }
     let directory = std::env::temp_dir().join(format!("hangar-voice-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&directory);
     // A pasta temporária é a única apagada no fim; a da sessão só serve de cwd para ler o código.
@@ -318,6 +327,8 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                 Ok(Incoming::Notification { method, params }) => {
                     let ours = params["threadId"].as_str() == Some(thread.as_str());
                     log_notification(&method, &params, ours, &mut last_delta);
+                    // Limite da conta não leva threadId: tem de passar antes do filtro.
+                    if method == "account/rateLimits/updated" { send_limits(events, usage::account_limits(&params["rateLimits"])).await; continue; }
                     if !ours { continue; }
                     // A transcrição da fala chega atrasada e cancelava o próprio pedido: só uma fala nova
                     // encaminhada (outro userMessage) prova que o usuário continuou.
@@ -363,6 +374,10 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                                 log(format!("summary appendSpeech bytes={} ok={}", text.len(), spoke.is_ok()));
                             }
                         }
+                        "thread/tokenUsage/updated" => if let Some((used, window)) = usage::context_usage(&params) {
+                            log(format!("organizer context used={used} window={window:?}"));
+                            let _ = events.send(VoiceEvent::OrganizerContext { used, window }).await;
+                        },
                         "thread/realtime/error" => break Err(failed("realtime")(VoiceFailure::Realtime(params["message"].as_str().unwrap_or_default().to_owned()))),
                         "thread/realtime/closed" => break Ok(()),
                         _ => {}
@@ -414,6 +429,12 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
     let _ = tokio::task::spawn_blocking(move || peer.join()).await;
     let _ = std::fs::remove_dir_all(&directory);
     outcome
+}
+
+async fn send_limits(events: &async_channel::Sender<VoiceEvent>, limits: Option<(usage::RateWindow, usage::RateWindow)>) {
+    let Some((five_hour, seven_day)) = limits else { return };
+    log(format!("account limits five_hour={} seven_day={}", five_hour.is_some(), seven_day.is_some()));
+    let _ = events.send(VoiceEvent::AccountLimits { five_hour, seven_day }).await;
 }
 
 /// Entrar no Planejar cancela o envio que esperava a janela: a chamada pendente falha em vez de ficar sem resposta.

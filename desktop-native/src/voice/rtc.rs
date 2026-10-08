@@ -1,5 +1,5 @@
 //! Chamada WebRTC direto com a OpenAI: o app-server só troca o SDP; o áudio não passa por ele.
-use crate::voice::{log, audio::{Audio, AudioError, FRAME}};
+use crate::voice::{log, usage, audio::{Audio, AudioError, FRAME}};
 use std::{net::{IpAddr, SocketAddr, UdpSocket}, sync::{Arc, Once, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig,
     change::{SdpAnswer, SdpPendingOffer}, format::Codec, media::{Direction, Frequency, MediaKind, MediaTime, Mid}, net::{Protocol, Receive}};
@@ -102,7 +102,7 @@ fn drive(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: &async_ch
     // Abrir o som aqui: o fluxo do cpal fica na thread que o usa, e a tela não espera o WASAPI.
     let mut audio = Audio::start(muted).map_err(audio_error)?;
     let (mut window, mut last_summary) = (Window::default(), Instant::now());
-    let (mut last_type, mut repeats) = (String::new(), 0u32);
+    let (mut last_type, mut repeats, mut usage_logged) = (String::new(), 0u32, 0u32);
     let mut encoder = opus_rs::OpusEncoder::new(48_000, 1, opus_rs::Application::Voip).map_err(|_| RtcError::Media)?;
     let mut decoder = opus_rs::OpusDecoder::new(48_000, 1).map_err(|_| RtcError::Media)?;
     let (mut connected, mut timestamp, mut buffer) = (false, 0u64, vec![0u8; 2000]);
@@ -146,6 +146,14 @@ fn drive(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: &async_ch
                     Event::ChannelData(data) => {
                         // Deltas chegam aos montes: repetição do mesmo tipo vira uma contagem.
                         let kind = event_type(&data.data);
+                        // Formato desconhecido: só os números e o caminho das chaves vão ao diário, nunca texto.
+                        if kind == "session.usage.updated" && usage_logged < 3 {
+                            usage_logged += 1;
+                            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&data.data) {
+                                let leaves: Vec<String> = usage::numeric_leaves(&value).into_iter().map(|(path, n)| format!("{path}={n}")).collect();
+                                log(format!("rtc usage {}", leaves.join(" ")));
+                            }
+                        }
                         if kind == last_type { repeats += 1; } else {
                             if repeats > 0 { log(format!("rtc channel event type={last_type} repeated={repeats}")); }
                             log(format!("rtc channel event type={kind} bytes={}", data.data.len()));

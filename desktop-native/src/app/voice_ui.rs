@@ -2,7 +2,7 @@
 use super::*;
 use std::collections::VecDeque;
 use gpui_kit::component::{select::{Select, SelectEvent, SelectState}, searchable_list::SearchableListItem};
-use crate::voice::{Activity as CallActivity, CallId, Phase, Voice, VoiceEvent, VoiceFailure, VoiceOptions, rpc::Codex, organizer::{Mode, session_context, tool_reply}};
+use crate::voice::{Activity as CallActivity, CallId, Phase, Voice, VoiceEvent, VoiceFailure, VoiceOptions, rpc::Codex, organizer::{Mode, session_context, tool_reply}, usage::RateWindow};
 
 /// Vozes do Realtime; vazio é o padrão do Codex.
 const VOICES: [&str; 19] = ["alloy", "arbor", "ash", "ballad", "breeze", "cedar", "coral", "cove", "echo", "ember", "juniper", "maple",
@@ -59,6 +59,10 @@ pub(super) struct VoiceUi {
     /// Arquivo e texto do plano; fica na tela depois da chamada, até a próxima começar.
     pub(super) plan: Option<(std::path::PathBuf, String)>,
     pub(super) plan_scroll: ScrollHandle,
+    /// Contexto usado e janela do organizador; fica depois da chamada, até a próxima começar.
+    pub(super) context: Option<(u64, Option<u64>)>,
+    pub(super) five_hour: RateWindow,
+    pub(super) seven_day: RateWindow,
 }
 
 #[derive(Debug, PartialEq)]
@@ -288,6 +292,7 @@ impl Hangar {
         self.voice.error = None;
         self.voice.mode = Mode::Direct;
         self.voice.plan = None;
+        (self.voice.context, self.voice.five_hour, self.voice.seven_day) = (None, None, None);
         self.voice.muted = false;
         self.voice.draft = None;
         self.voice.levels = (0., 0.);
@@ -420,6 +425,8 @@ impl Hangar {
             VoiceEvent::Mode(mode) => self.voice.mode = mode,
             VoiceEvent::Plan { path, markdown } => self.voice.plan = Some((path, markdown)),
             VoiceEvent::AskSession(question) => self.voice_ask(&question, cx),
+            VoiceEvent::OrganizerContext { used, window } => self.voice.context = Some((used, window)),
+            VoiceEvent::AccountLimits { five_hour, seven_day } => (self.voice.five_hour, self.voice.seven_day) = (five_hour, seven_day),
             VoiceEvent::SwitchSession(call, name) => self.voice_switch(call, &name, window, cx),
             VoiceEvent::SendPlan { session, text } => {
                 // O plano foi escrito para uma sessão; se a tela mudou, não vai para outra.
@@ -748,6 +755,44 @@ impl Hangar {
         row.children(equalizer(level, self.voice.frame, min, max).map(|h| div().w(px(width)).h(px(h)).rounded_full().bg(color)))
     }
 
+    /// Só o que foi medido: contexto da thread do organizador e janelas da conta. Sem dado, nada aparece.
+    fn render_voice_usage(&self) -> Option<AnyElement> {
+        let tone = |pct: f64| if pct >= 90. { theme::danger() } else if pct >= 70. { theme::warning() } else { theme::text() };
+        let meter_row = |label: String, pct: f64| div().flex().justify_between().gap_2().text_xs().font_family(crate::theme::MONO)
+            .child(div().text_color(theme::faint()).child(label))
+            .child(div().font_weight(FontWeight::SEMIBOLD).text_color(tone(pct)).child(format!("{}%", pct.round())));
+        let context = self.voice.context.map(|(used, window)| {
+            let title = tr("voice_context_title");
+            let block = div().flex().flex_col();
+            match window {
+                Some(total) => {
+                    let pct = used as f64 / total as f64 * 100.;
+                    block.child(meter_row(title, pct)).child(div().mt(px(6.)).child(chrome::meter(pct)))
+                        .child(div().mt(px(3.)).text_size(px(11.)).text_color(theme::faint())
+                            .child(tr("side_ctx_of").replace("{used}", &side::tokens(used as f64)).replace("{total}", &side::tokens(total as f64))))
+                }
+                None => block.child(div().flex().justify_between().gap_2().text_xs().font_family(crate::theme::MONO)
+                    .child(div().text_color(theme::faint()).child(title))
+                    .child(div().text_color(theme::text()).child(tr("voice_context_tokens").replace("{used}", &side::tokens(used as f64))))),
+            }
+        });
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0., |d| d.as_secs_f64());
+        let windows: Vec<(String, f64, String)> = [(tr("limit_5h"), self.voice.five_hour), (tr("side_limit_7d"), self.voice.seven_day)].into_iter()
+            .filter_map(|(label, window)| { let (pct, reset) = window?; Some((label, pct, accounts::reset_text(reset.map(|r| r as f64), now))) }).collect();
+        if context.is_none() && windows.is_empty() { return None; }
+        Some(div().flex().flex_col().gap(px(10.))
+            .children(context)
+            .when(!windows.is_empty(), |el| el.child(div().flex().flex_col().gap(px(6.))
+                .child(div().text_xs().font_weight(FontWeight::MEDIUM).text_color(theme::muted()).child(tr("voice_account_limits")))
+                .child(div().flex().flex_wrap().gap_3().children(windows.into_iter().map(|(label, pct, reset)| {
+                    div().flex_grow(1.).flex_basis(px(118.)).min_w_0().flex().flex_col()
+                        .child(meter_row(label, pct))
+                        .child(div().mt(px(6.)).child(chrome::meter(pct)))
+                        .when(!reset.is_empty(), |el| el.child(div().mt(px(3.)).text_size(px(11.)).text_color(theme::faint()).truncate()
+                            .child(tr("side_resets").replace("{reset}", &reset))))
+                }))))).into_any_element())
+    }
+
     /// Conteúdo cru do painel: o `render_popup` já põe a superfície.
     pub(super) fn render_voice_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let live = self.voice.call.is_some();
@@ -784,6 +829,7 @@ impl Hangar {
                     .child(Button::new("voice-plan-open").ghost().small().label(tr("voice_plan_open"))
                         .on_click(cx.listener(move |_, _, _, cx| cx.open_with_system(&open))))));
         }
+        body = body.children(self.render_voice_usage());
         if let Some((picker, _)) = &self.voice.voice_select {
             body = body.child(div().flex().items_center().justify_between().gap(px(12.))
                 .child(div().text_xs().text_color(theme::muted()).child(tr_shared("codex_voice_label", &[])))

@@ -7546,5 +7546,8 @@
   "native_voice_draft_held": "Request on hold, not sent yet",
   "native_voice_dictation_busy": "Stop dictation before starting voice.",
   "native_voice_dictation_blocked": "Dictation is unavailable while voice is on",
-  "native_voice_not_saved": "Could not save the chosen voice."
+  "native_voice_not_saved": "Could not save the chosen voice.",
+  "native_voice_context_title": "Organizer context",
+  "native_voice_context_tokens": "{used} tokens",
+  "native_voice_account_limits": "Account limits"
 }
