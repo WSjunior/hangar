@@ -17,6 +17,8 @@ const VERSION: u32 = 2;
 const RECENT_CALLS: u64 = 256;
 const RECEIPT_METADATA: &[&str] = &["native", "message_id", "native_status", "cleanup", "code", "stage",
     "preserve_binding", "queued", "already_confirmed", "disposition", "draft"];
+/// Ações cujo resultado é a operação inteira. Mesmo conjunto de `_OPERATION_RECEIPTS` em runtime_queue.py.
+const OPERATION_RECEIPTS: &[&str] = &["prepare", "bind_dispatch", "begin_dispatch", "mark_writing", "finish", "late_rpc_resolution"];
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -152,6 +154,12 @@ impl State {
         self.operations.retain(|key, _| keep.contains(key));
         for (_, op) in self.operations.iter_mut().filter(|(key, op)| !key.starts_with(CALL_PREFIX)
             && matches!(op.status, Status::Accepted | Status::Rejected | Status::Confirmed)) { op.slim(); }
+        // A intenção já mora na operação e no recibo do Prepare; quem repete a chamada só lê
+        // `status` e `result`. Sem isto cada fase copiava a intenção inteira (anexo incluído).
+        for (_, receipt) in self.operations.iter_mut().filter(|(key, receipt)| key.starts_with(CALL_PREFIX)
+            && OPERATION_RECEIPTS.contains(&receipt.payload["kind"].as_str().unwrap_or(""))) {
+            if let Some(intent) = receipt.result.get_mut("payload") { *intent = Value::Null; }
+        }
         // Linha confirmada não volta a confirmar (ConfirmOccurrence recusa), mesmo que a resposta
         // tardia tenha devolvido a operação para `accepted`.
         let confirmed_rows: BTreeSet<&str> = self.rows.iter().filter(|r| r["confirmed"] == true).filter_map(|r| r["id"].as_str()).collect();
