@@ -1507,7 +1507,35 @@ para 91–92 ms/s ([medicao-5b.md](../migracao-rust/parte5-codex/medicao-5b.md))
   não alimenta as fontes de prévia do Codex (`_push_channels`). Trocar de modo é troca de provider
   no `sse.py` e religa o hub. O canal privado serve os seis ao convidado e ao Connect.
 - A lista lê o `state` do feed em `Published` pela chave do rollout; sem chat aberto vale o fato do
-  Python. Claude sem terminal segue pelo caminho antigo (pendência da metade Claude).
+  Python. Claude sem terminal entrou no mesmo feed na C1 (seção abaixo).
+
+### Estado do Claude sem terminal no feed do runtime
+
+(08/10/2026, parte 5, C1; decisão do dono; contrato 40.) O mesmo feed do Codex passou a servir o
+Claude sem terminal (`Provider::ClaudeHeadless`): `state`, `preview`, `ask_question`, `suggest`,
+`pensamento` e `ferramenta` saem do ator Rust direto no hub, sem passar pelo Python, e o hub
+descarta as cópias que o Python ainda mandar (`state_python_leak`). `last_usage`, `reload_stamp` e
+`unknown_private` também rodam no Rust.
+
+- Motivo: com uma sessão Claude sem terminal gerando resposta (medida de 08/10), o Python gastava
+  +33 ms/s e o Rust +14 ms/s, e o `state` saía a 1,3/s contra 0,7/s da `preview`. Cada evento
+  fazia a volta ator → Python → hub. Roteiro para repetir:
+  [medicao-c1.md](../migracao-rust/parte5-claude/medicao-c1.md).
+- `suggest` vem dos fatos do plugin que o Python empurra (o plugin ainda é dele até a C2); o feed
+  só reage ao empurrão, não pergunta.
+- Sessão parada (fora do registro do Rust) mostra o estado estacionado: linha de status
+  (modelo, esforço, contexto), modo de permissão, último modo diferente de `plan` e o problema da
+  última vida. Sem sidecar e sem troca de conta em curso (`transfer_active`/`in_transfer_ms`
+  empurrados) o estado é `dead`.
+- `native_message` foi para a C3 e `session.patch_meta` fica no Python (a 5B decidiu que o Rust
+  não grava o sidecar).
+
+Limites conhecidos:
+
+- O estado estacionado é recalculado quando o feed acorda, até 25 s depois da mudança; o Python
+  reagia em cerca de 1 s.
+- Sem fatos empurrados ainda, o estado é `idle`, nunca `dead`.
+- O problema da última vida vem só do sidecar durável; erro que não chegou ao sidecar não aparece.
 
 ## Observação terminal Rust: erro visível, sem captura Python
 
