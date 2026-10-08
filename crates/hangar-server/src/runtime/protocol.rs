@@ -96,14 +96,15 @@ pub enum Effect {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DiagEvent { CodexVersion, CodexDecode }
+pub enum DiagEvent { CodexVersion, CodexDecode, CodexBootstrap }
 
 impl DiagEvent {
-    pub fn event(self) -> &'static str { match self { Self::CodexVersion => "rust.codex_version", Self::CodexDecode => "rust.codex_decode" } }
+    pub fn event(self) -> &'static str { match self { Self::CodexVersion => "rust.codex_version", Self::CodexDecode => "rust.codex_decode", Self::CodexBootstrap => "rust.codex_bootstrap" } }
     pub fn reason(self) -> &'static str {
         match self {
             Self::CodexVersion => "versão do Codex diferente da conferida ou ilegível; campo renomeado pode faltar",
             Self::CodexDecode => "formato inesperado do Codex: notificação ignorada (ciclo de vida lido cru), resposta com o padrão, pedido mostrado pela linha crua",
+            Self::CodexBootstrap => "o Codex recusou abrir a conversa na subida; a sessão não fica pronta e mostra o problema",
         }
     }
 }

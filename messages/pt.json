@@ -951,6 +951,7 @@
   "problema_codex_sem_login": "O Codex recusou o login desta conta — entre de novo na conta (`codex login`) e reenvie a mensagem",
   "problema_codex_turno_cortado": "O processo do Codex caiu no meio do turno e o turno foi cortado; pedidos de aprovação abertos se perderam — reenvie a mensagem para continuar",
   "problema_codex_esforco_nao_aplicado": "O Codex não aceitou o nível de esforço escolhido; a sessão segue no padrão do modelo",
+  "problema_codex_conversa_nao_abriu": "O Codex recusou abrir a conversa e a sessão não ficou pronta; reinicie a sessão ou crie outra",
   "problema_headless_caiu": "O processo da sessão caiu",
   "chat_problema_reiniciar": "Reiniciar",
   "chat_problema_hook_dica": "Causa comum: o plugin foi atualizado depois que a sessão abriu e ela ainda usa o hook antigo. Reiniciar faz a sessão ler os hooks de novo, sem perder a conversa; depois reenvie a mensagem.",

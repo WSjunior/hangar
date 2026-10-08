@@ -744,7 +744,8 @@ fn missing_model_provider_retries_resume_with_openai() {
     // Segunda recusa igual não repete: vira erro da subida.
     let effects = line(&mut engine,json!({"id":retry["id"],"error":{"code":-32600,"message":"Model provider `x` not found"}}),13.0);
     assert!(frames(&effects).is_empty());
-    assert!(effects.iter().any(|e|matches!(e,Effect::Reply { disposition:Disposition::Rejected,.. })));
+    assert!(effects.iter().any(|e|matches!(e,Effect::Reply { operation_id,disposition:Disposition::Rejected,.. } if operation_id == "boot")));
+    assert_eq!(engine.view()["problema"],"codex_conversa_nao_abriu");
 }
 
 #[test]
@@ -782,16 +783,56 @@ fn select_without_pending_approval_says_no_pending_permission() {
     assert_eq!(error.code,"no_pending_permission");
 }
 
-#[test]
-fn live_attach_resumes_with_thread_id_only_and_effort_refusal_stays_a_failure() {
-    let mut engine = Engine::new(json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p","effort":"max","service_tier":"priority"}),1,clock(10.0));
+fn live_attach(meta:Value) -> (Engine,Value) {
+    let mut engine = Engine::new(meta,1,clock(10.0));
     let id = frames(&engine.bootstrap(true,"boot".into()).unwrap())[0]["id"].clone();
     let sent = frames(&line(&mut engine,json!({"id":id,"result":{}}),11.0));
     let resume = find_method(&sent,"thread/resume");
+    (engine,resume)
+}
+
+#[test]
+fn live_attach_to_thread_without_rollout_is_ready_on_the_same_thread() {
+    let (mut engine,resume) = live_attach(json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p","service_tier":"priority"}));
     assert_eq!(resume["params"],json!({"threadId":"t1"}));
     let effects = line(&mut engine,json!({"id":resume["id"],"error":{"code":-32600,"message":"no rollout found for thread id t1"}}),12.0);
+    assert!(frames(&effects).iter().all(|f|f["method"] != "thread/start"));
+    assert!(effects.iter().any(|e|matches!(e,Effect::Reply { operation_id,disposition:Disposition::Accepted,.. } if operation_id == "boot")));
+    assert!(effects.iter().any(|e|matches!(e,Effect::WakeQueue)));
+    assert_eq!(engine.control_view()["ready"],true);
+    assert!(engine.view()["problema"].is_null());
+    let effects = engine.command(command(OperationKind::Input,json!({"text":"Olá"})),clock(13.0)).unwrap();
+    assert_eq!(find_method(&frames(&effects),"turn/start")["params"]["threadId"],"t1");
+}
+
+#[test]
+fn live_attach_refusal_is_a_visible_problem_and_effort_refusal_stays_a_failure() {
+    let (mut engine,resume) = live_attach(json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p"}));
+    let effects = line(&mut engine,json!({"id":resume["id"],"error":{"code":-32600,"message":"thread t1 not loaded"}}),12.0);
     assert!(frames(&effects).is_empty());
-    assert!(effects.iter().any(|e|matches!(e,Effect::Reply { disposition:Disposition::Rejected,.. })));
+    assert!(effects.iter().any(|e|matches!(e,Effect::Reply { operation_id,disposition:Disposition::Rejected,.. } if operation_id == "boot")));
+    assert_eq!(engine.view()["problema"],"codex_conversa_nao_abriu");
+    assert!(engine.view()["problema_detalhe"].as_str().unwrap().contains("not loaded"));
+
+    let (mut engine,resume) = live_attach(json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p","effort":"max"}));
+    let effects = line(&mut engine,json!({"id":resume["id"],"error":{"code":-32600,"message":"no rollout found for thread id t1"}}),12.0);
+    let update = find_method(&frames(&effects),"thread/settings/update");
+    let effects = line(&mut engine,json!({"id":update["id"],"error":{"code":-32600,"message":"effort max not supported"}}),13.0);
+    assert!(effects.iter().any(|e|matches!(e,Effect::Reply { operation_id,disposition:Disposition::Rejected,.. } if operation_id == "boot")));
+    assert_eq!(engine.view()["problema"],"codex_conversa_nao_abriu");
+}
+
+/// O Python recusa Fast sozinho enquanto o arquivo ainda tem a thread anterior: vai no patch da thread.
+#[test]
+fn new_thread_saves_fast_with_the_thread_in_one_patch() {
+    let mut engine = Engine::new(json!({"name":"s","headless":true,"cwd":"/p"}),1,clock(10.0));
+    engine.set_fresh_process(true);
+    let id = frames(&engine.bootstrap(true,"boot".into()).unwrap())[0]["id"].clone();
+    let start = find_method(&frames(&line(&mut engine,json!({"id":id,"result":{}}),11.0)),"thread/start");
+    let effects = line(&mut engine,json!({"id":start["id"],"result":{"thread":{"id":"t2","path":"/r.jsonl","status":{"type":"idle"},"turns":[]},
+        "model":"gpt-6","serviceTier":null}}),12.0);
+    let patches:Vec<Value> = effects.iter().filter_map(|e|match e { Effect::Policy { kind,payload,.. } if kind == "session.patch_meta" => Some(payload.clone()),_=>None }).collect();
+    assert_eq!(patches,vec![json!({"thread_id":"t2","rollout_path":"/r.jsonl","service_tier":"default"})]);
 }
 
 fn request(engine:&mut Engine,id:i64,method:&str,params:Value) -> Vec<Effect> {

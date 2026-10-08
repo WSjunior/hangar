@@ -152,7 +152,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   evento (teto de 3 subidas seguidas, espera 5/10/20 s), sem varrer. Reiniciar com turno rodando
   é permitido (destrava turno preso); trocar o sandbox com turno rodando recusa com
   `erro_permissao_ocupada` (409). `initialize` repetido responde "Already initialized" e é
-  sucesso; thread sem turno não tem rollout e o `resume` a recusa — abre outra. Só `on-request` e
+  sucesso; thread sem turno não tem rollout e o `resume` a recusa — processo novo abre outra,
+  cano vivo segue pronto na mesma (ela já está carregada nele). Subida recusada vira
+  `codex_conversa_nao_abriu` com o motivo, nunca sessão ociosa calada. Só `on-request` e
   `never` existem (`untrusted` morreu); o sandbox vai no `-c` da subida e trocar de modo reabre o
   servidor ocioso. Todo pedido do servidor tem resposta. Têm tela ou resposta própria: cartões de
   permissão, URL como cartão de link, `requestUserInput`, formulário MCP como pergunta nativa e

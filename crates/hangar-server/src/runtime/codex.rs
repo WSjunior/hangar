@@ -702,9 +702,29 @@ impl Engine {
             service_tier:self.service_tier.clone() })
     }
 
+    fn thread_opened(&mut self,parent:&str,effects:&mut Vec<Effect>) {
+        if self.reconnect && std::mem::take(&mut self.was_working) {
+            // A vida anterior estava no meio de um turno: se ele voltou `interrupted`, foi cortado.
+            self.counter += 1;
+            let operation_id = format!("cut-check:{}:{}",self.generation,self.counter);
+            self.send(operation_id,self.thread_read(true),Some(json!({"kind":"cut_check"})),effects);
+        }
+        if let Some(effort) = self.metadata["effort"].as_str().map(str::to_owned) {
+            let request = ClientRequest::ThreadSettingsUpdate(wire::ThreadSettingsUpdateParams { thread_id:self.thread_id.clone(),
+                effort:Some(Some(effort)),..Default::default() });
+            self.send(format!("{parent}:effort"),request,Some(json!({"kind":"bootstrap_ready","parent":parent})),effects);
+        } else { self.ready = true; effects.push(Effect::Reply { operation_id:parent.into(),disposition:Disposition::Accepted,payload:json!({"ready":true}) }); effects.push(Effect::WakeQueue); }
+    }
+
     /// Mesmos recuos da subida do Python: provedor sumido da config e conversa sem rollout. Transferência nunca recua.
     fn bootstrap_fallback(&mut self,rpc:&Rpc,message:&str,effects:&mut Vec<Effect>) -> bool {
         let Some(next) = rpc.continuation.as_ref().filter(|next|next["kind"] == "bootstrap_thread") else { return false };
+        // Cano vivo com thread ainda sem turno: ela já está carregada nele, e o `resume` só a recusa por não ter rollout.
+        if !self.fresh_process && rpc.method == "thread/resume" && message.contains("no rollout found") {
+            self.thread_opened(next["parent"].as_str().unwrap_or(""),effects);
+            self.changed(effects,true);
+            return true;
+        }
         if !self.fresh_process || rpc.method != "thread/resume" || self.metadata["transfer_id"].as_str().is_some_and(|id|!id.is_empty()) { return false }
         let parent = next["parent"].as_str().unwrap_or("");
         let request = if message.contains("Model provider") && message.contains("not found") && rpc.params.get("modelProvider").is_none() {
@@ -1035,6 +1055,17 @@ impl Engine {
                 self.changed(effects,true);
                 return Ok(());
             }
+            // Subida recusada: a sessão nunca fica pronta, então a recusa aparece com o motivo em vez de ficar ociosa.
+            if let Some(parent) = rpc.continuation.as_ref().filter(|next|matches!(next["kind"].as_str(),Some("bootstrap" | "bootstrap_thread" | "bootstrap_ready")))
+                .and_then(|next|next["parent"].as_str()) {
+                tracing::warn!(session = %self.metadata["name"].as_str().unwrap_or("-"), method = %rpc.method, reason = %message, "o Codex recusou abrir a conversa");
+                effects.push(Effect::Diag { event:DiagEvent::CodexBootstrap,code:rpc.method.clone() });
+                self.state.problema = Some("codex_conversa_nao_abriu".into());
+                self.state.problema_detalhe = Some(message.chars().take(300).collect());
+                effects.push(Effect::Reply { operation_id:parent.into(),disposition:Disposition::Rejected,payload:json!({"error":line["error"]}) });
+                self.changed(effects,true);
+                return Ok(());
+            }
             // A leitura que antecede a troca de modo ou o Stop falhou: quem espera é a operação de cima.
             let operation_id = rpc.continuation.as_ref().filter(|next|next["kind"] == "set_mode" || next["kind"] == "interrupt")
                 .and_then(|next|next["parent"].as_str()).map_or(rpc.operation_id,str::to_owned);
@@ -1082,14 +1113,18 @@ impl Engine {
                     self.finish_service_tier(Disposition::Unknown,json!({"error":"A conversa mudou antes de confirmar Fast"}),effects);
                     self.clear_preview(effects); self.thread_id = response.thread.id.clone();
                 }
+                let mut patch = json!({"thread_id":self.thread_id,"rollout_path":response.thread.path});
                 if rpc.settings_revision == self.settings_revision {
                     self.model = response.model.clone().or(self.model.clone());
                     self.effort = response.reasoning_effort.clone().or(self.effort.clone());
-                    self.restore_service_tier(&result,rpc.settings_revision,effects);
+                    // Fast vai no patch da thread: sozinho, o Python o recusa enquanto o arquivo tem a thread anterior.
+                    if let Some(tier) = result.get("serviceTier").and_then(service_tier) {
+                        patch["service_tier"] = json!(tier); self.service_tier = Some(tier);
+                    }
                 }
                 self.restore_thread(&response.thread,&rpc);
                 self.async_questions.hydrate(&self.thread_id,&result["thread"]);
-                self.policy("session.patch_meta",json!({"thread_id":self.thread_id,"rollout_path":response.thread.path}),effects);
+                self.policy("session.patch_meta",patch,effects);
             }
             "turn/start" => {
                 if rpc.state_revision == self.state_revision {
@@ -1144,20 +1179,7 @@ impl Engine {
                     } else { self.bootstrap_start() };
                     self.send(format!("{parent}:thread"),request,Some(json!({"kind":"bootstrap_thread","parent":parent})),effects);
                 }
-                Some("bootstrap_thread") => {
-                    let parent = next["parent"].as_str().unwrap_or("");
-                    if self.reconnect && std::mem::take(&mut self.was_working) {
-                        // A vida anterior estava no meio de um turno: se ele voltou `interrupted`, foi cortado.
-                        self.counter += 1;
-                        let operation_id = format!("cut-check:{}:{}",self.generation,self.counter);
-                        self.send(operation_id,self.thread_read(true),Some(json!({"kind":"cut_check"})),effects);
-                    }
-                    if let Some(effort) = self.metadata["effort"].as_str().map(str::to_owned) {
-                        let request = ClientRequest::ThreadSettingsUpdate(wire::ThreadSettingsUpdateParams { thread_id:self.thread_id.clone(),
-                            effort:Some(Some(effort)),..Default::default() });
-                        self.send(format!("{parent}:effort"),request,Some(json!({"kind":"bootstrap_ready","parent":parent})),effects);
-                    } else { self.ready = true; effects.push(Effect::Reply { operation_id:parent.into(),disposition:Disposition::Accepted,payload:json!({"ready":true}) }); effects.push(Effect::WakeQueue); }
-                }
+                Some("bootstrap_thread") => self.thread_opened(next["parent"].as_str().unwrap_or(""),effects),
                 Some("bootstrap_ready") => {
                     self.ready = true;
                     effects.push(Effect::Reply { operation_id:next["parent"].as_str().unwrap_or("").into(),disposition:Disposition::Accepted,payload:json!({"ready":true}) });
