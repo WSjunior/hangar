@@ -397,7 +397,8 @@ impl<E: Element> Drawable<E> {
                                     .0
                                     .iter()
                                     .filter(|id| match id {
-                                        ElementId::Name(name) => !name.contains("::"),
+                                        // Endereço de sessão remota (`https://host::nome`) também tem `::`.
+                                        ElementId::Name(name) => !name.contains("::") || name.contains("://"),
                                         ElementId::NamedInteger(..) | ElementId::NamedChild(..) | ElementId::Uuid(_) => true,
                                         _ => false,
                                     })

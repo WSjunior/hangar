@@ -1463,12 +1463,12 @@ impl Hangar {
         if let Some((picker, _)) = &self.voice.voice_select {
             body = body.child(div().flex().items_center().justify_between().gap(px(12.))
                 .child(div().text_xs().text_color(theme::muted()).child(tr_shared("codex_voice_label", &[])))
-                .child(div().w(px(200.)).child(Select::new(picker).small().disabled(live).accessibility_label(tr_shared("codex_voice_label", &[])))));
+                .child(div().w(px(200.)).child(Select::new(picker).id("voice-select-voice").small().disabled(live).accessibility_label(tr_shared("codex_voice_label", &[])))));
         }
         if let Some((picker, _)) = &self.voice.account_select {
             body = body.child(div().flex().items_center().justify_between().gap(px(12.))
                 .child(div().text_xs().text_color(theme::muted()).child(tr("voice_account")))
-                .child(div().w(px(200.)).child(Select::new(picker).small().disabled(live).accessibility_label(tr("voice_account")))));
+                .child(div().w(px(200.)).child(Select::new(picker).id("voice-select-account").small().disabled(live).accessibility_label(tr("voice_account")))));
         }
         // Abertos também na chamada: o par do modo atual troca já no próximo turno.
         for (mode, title) in [(Mode::Direct, "voice_mode_direct"), (Mode::Plan, "voice_mode_plan")] {
@@ -1480,7 +1480,8 @@ impl Hangar {
                 let label = format!("{} · {}", tr(title), tr(key));
                 body = body.child(div().flex().items_center().justify_between().gap(px(12.))
                     .child(div().text_xs().text_color(theme::muted()).child(tr(key)))
-                    .child(div().w(px(200.)).child(Select::new(picker).small().accessibility_label(label))));
+                    .child(div().w(px(200.)).child(Select::new(picker).id(SharedString::from(format!("voice-select-{title}-{key}")))
+                        .small().accessibility_label(label))));
             }
         }
         match &self.voice.organizer_models {
