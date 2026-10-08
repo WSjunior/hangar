@@ -94,7 +94,7 @@ def being_born(name, after=0):
 
 
 def _collect(name):
-    from app import api, tmux, registry as registry_mod, procinfo
+    from app import api, claude_customizations, tmux, registry as registry_mod, procinfo
     import psutil
     panes = tmux.list_panes_all().get(name)
     if not panes:
@@ -163,7 +163,9 @@ def _collect(name):
         pane_birth=pane_birth, agent_pid=agent, agent_birth=agent_birth,
         session_proof=_session_hash(namespace, fields[5], created),
         jsonl=jsonl, session_id=Path(jsonl).stem, config_dir=config_dir, cwd=pane['cwd'],
-        mux_argv=['tmux'], windows=os.name == 'nt')
+        mux_argv=['tmux'], windows=os.name == 'nt',
+        claude_settings=claude_customizations.from_environment(
+            procinfo._env_var_of(agent, claude_customizations.SESSION_SETTINGS_ENV)))
 
 
 def resolve_binding(name, previous=None):
@@ -192,7 +194,8 @@ def resolve_binding(name, previous=None):
         fingerprint=fingerprint, session_id=facts['session_id'], config_dir=facts['config_dir'],
         cwd=facts['cwd'], created=previous.meta.get('created', 0) if same else max(facts['created'], facts.get('pane_birth', facts['created'])),
         legacy_import_after=facts.get('pane_birth'), agent_pid=facts.get('agent_pid'),
-        agent_birth=facts.get('agent_birth')), facts['jsonl'],
+        agent_birth=facts.get('agent_birth'),
+        **({'claude_settings': facts['claude_settings']} if facts.get('claude_settings') is not None else {})), facts['jsonl'],
         previous.projection_dir if same else directory, state_path,
         previous.lock_path if same else directory / 'runtime' / f'{key}.lock', generation)
 

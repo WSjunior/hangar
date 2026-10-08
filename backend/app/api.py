@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, StrictBool, model_validator
 from sse_starlette.sse import EventSourceResponse
 from app import (agentes_sync, atomico, atualizacoes, atualizar, btw, diag, harness_api,
                  loop_monitor, pensamento_pt, permission_mode, plugin_bridge, procinfo, quem_chama, tmux,
@@ -39,6 +39,7 @@ from app.model_picker import PickerError
 from app.mensagens import erro
 from app import kimi_models
 from app import claude_models
+from app import claude_customizations
 from app import cliproxy
 from app import codex_models
 from app import model_args
@@ -1710,6 +1711,12 @@ class _StrictBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ClaudeCustomizationBody(_StrictBody):
+    plugins: dict[str, StrictBool] = Field(default_factory=dict)
+    skills: dict[str, StrictBool] = Field(default_factory=dict)
+    blocked_skills: list[str] = Field(default_factory=list)
+
+
 class CreateBody(_StrictBody):
     _engine_catalog: list[dict] | None = PrivateAttr(default=None)
     name: str = Field(min_length=1)
@@ -1740,6 +1747,7 @@ class CreateBody(_StrictBody):
     permission_mode: str | None = None
     # CLAUDE_CODE_SUBAGENT_MODEL. Só claude sem motor: o motor exporta o dele e ganharia calado.
     subagent_model: str | None = None
+    claude_customizations: ClaudeCustomizationBody | None = None
     # Jev (typesafe.ai) no `hangar-preview objetivo`. Escolha da ABERTURA: ligado, a sessão nasce
     # com a chave no ambiente; desligado, só com o marcador, e o verbo recusa. É o que
     # permite rodar a mesma tarefa com e sem, sem apagar a configuração.
@@ -1758,6 +1766,22 @@ class CreateBody(_StrictBody):
     # Sessão que pediu a criação (MCP `new_session`, `hangar-send --new`). O que vier omitido
     # (modo de permissão, sem terminal) herda dela; sem ela, vale o padrão do servidor.
     creator: str | None = Field(default=None, min_length=1)
+
+
+@app.get("/api/claude/customizations", dependencies=[Depends(require_auth)])
+async def claude_customization_catalog(request: Request, cwd: str = Query(min_length=1),
+                                       config_dir: str | None = None):
+    if guest_of(request) is not None or guest_users.current.get() is not None:
+        raise HTTPException(403, detail=erro("erro_fora_da_pasta", "a seleção de plugins pertence ao dono"))
+    if config_dir is not None and config_dir not in {c.path for c in list_config_dirs()}:
+        raise HTTPException(400, detail=erro("erro_config_dir_invalido", "config_dir invalido"))
+    path = await asyncio.to_thread(lambda: str(Path(cwd).expanduser().resolve()))
+    if not await asyncio.to_thread(os.path.isdir, path):
+        raise HTTPException(400, detail=erro("erro_cwd_inexistente", "a pasta não existe", cwd=cwd))
+    try:
+        return await asyncio.to_thread(claude_customizations.catalog, path, tmux.config_dir_de(config_dir))
+    except claude_customizations.CustomizationsError as exc:
+        raise HTTPException(exc.status, detail=erro(exc.code, exc.detail)) from None
 
 
 def _jev_efetivo(pedido: bool | None) -> bool:
@@ -2392,6 +2416,13 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
     # ser rejeitado aqui não pode ter reconciliado a conta (deriva movida, memória criada) à toa.
     if body.provider not in ("claude", "codex", "pi", "kimi", "omp"):
         raise HTTPException(400, detail=erro("erro_provider_sessao_invalido", "provider invalido"))
+    if body.claude_customizations is not None:
+        if body.provider != "claude":
+            raise HTTPException(400, detail=erro("claude_customizations_invalid",
+                                                 "plugins e skills por sessão só valem para Claude"))
+        if guest_users.current.get() is not None:
+            raise HTTPException(403, detail=erro("claude_customizations_owner_only",
+                                                 "a seleção de plugins pertence ao dono"))
     if body.service_tier is not None and body.provider != "codex":
         if body.provider != "claude" or not await asyncio.to_thread(cliproxy.supports_fast, body.engine, body.model):
             raise HTTPException(400, detail=erro("erro_criacao_sessao", "Fast exige Codex ou Claude com GPT no CLIProxyAPI local"))
@@ -2566,7 +2597,10 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
             if body.engine_account is not None:
                 kwargs["engine_account"] = body.engine_account
                 kwargs["engine_models"] = account_models
-            info = registry.create(body.name, body.cwd, body.config_dir, **kwargs)
+            try:
+                info = registry.create(body.name, body.cwd, body.config_dir, **kwargs)
+            except claude_customizations.CustomizationsError as exc:
+                raise HTTPException(exc.status, detail=erro(exc.code, exc.detail)) from None
             worktree["session_created"] = True
             # O mesmo nome pode estar no snapshot com o transcript da sessão encerrada.
             _invalidate_lists()
@@ -2607,6 +2641,8 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
             kw["permission_mode"] = body.permission_mode
         if body.subagent_model is not None:
             kw["subagent_model"] = body.subagent_model
+        if body.claude_customizations is not None:
+            kw["claude_customizations"] = body.claude_customizations.model_dump()
         if _jev_efetivo(body.jev):
             kw["jev"] = True
         if body.initial_prompt is not None:
