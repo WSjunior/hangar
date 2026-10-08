@@ -1449,6 +1449,30 @@ donos: captura, `permission.observe` e `session.dead` saem uma vez, de um lugar 
   Python (mediana ~0,45 s), com a cópia dos marcadores relida só quando o observador das pastas vê
   escrita.
 
+### Codex sem terminal: o feed do runtime no lugar do `Monitor`
+
+(08/10/2026, parte 5B, Task 9.) Com o Rust dono do Codex sem terminal, cada prévia ia ao Python
+por `/runtime/events`, subia a `revision`, virava um `StateEvent` inteiro no `state_stream` e
+voltava ao hub pela conexão interna: com 10 sessões trabalhando, Python + Rust subiam de 62,5–65,5
+para 91–92 ms/s ([medicao-5b.md](../migracao-rust/parte5-codex/medicao-5b.md)).
+
+- O ator do Codex escreve num `watch` por nome (`RuntimeRegistry::live`) a vista pública, o erro
+  durável e as três prévias; prévia não vai mais ao `events` nem sobe a `revision` (o espelho do
+  Python segue consecutivo). `view`, `state`, `problem`, `rate` e voz continuam lá, porque o
+  Python ainda usa o espelho para controles, modelo, `/commands`, religação e fatos da lista.
+- O hub de Codex sem terminal (`Binding.headless`, vindo do `info`) liga o `RuntimeFeed` pelo
+  mesmo `SpawnMonitor`: acorda pelo `watch` ou pela resposta gravada, espera 150 ms e publica só o
+  que mudou (`ask_question`, `state`, `preview`, `pensamento`, `ferramenta`; `suggest` nunca).
+  Sem entrada no registro é `idle`; sem registro, `problema=runtime_absent`; erro do ator,
+  `runtime_falhou` com `<código>: <frase>`; pânico, diário `rust.state_feed_failed` e
+  `problema=state_feed_failed` até o próximo assinante.
+- Dono único: o hub descarta os seis do Python com `state_python_leak`; o Python não os produz
+  (`_estado_do_rust(provider, name)`), mantém o `tail_pump` da conexão interna (confirma a fila) e
+  não alimenta as fontes de prévia do Codex (`_push_channels`). Trocar de modo é troca de provider
+  no `sse.py` e religa o hub. O canal privado serve os seis ao convidado e ao Connect.
+- A lista lê o `state` do feed em `Published` pela chave do rollout; sem chat aberto vale o fato do
+  Python. Claude sem terminal segue pelo caminho antigo (pendência da metade Claude).
+
 ## Observação terminal Rust: erro visível, sem captura Python
 
 (Parte 4, Tasks 5 e 7, 06/10/2026.) Com o Rust de pé, quem lê a captura de Claude com terminal é o

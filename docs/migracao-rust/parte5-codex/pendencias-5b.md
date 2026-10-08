@@ -62,3 +62,12 @@ de pedidos, rotas só do Codex), contrato 38. Falta e fica para depois:
   teste do roteamento Skip×Cancel.
 - **Processo:** `resolve_program` não confere o bit de execução; `set_var` de `CP_RUST_CANO_BIN`
   em teste com outras threads.
+- **Claude sem terminal no mesmo caminho caro (da Task 9):** a prévia dele ainda vai ao Python por
+  `/runtime/events` e volta como `StateEvent` inteiro pelo `RuntimeAdapter.state_stream`, como o
+  Codex antes da Task 9 ([medicao-5b.md](medicao-5b.md), seção "Depois da Task 9"). O feed
+  (`state/runtime_feed.rs`) não depende de provedor: ligar é o ator Claude escrever no `watch` e o
+  predicado do hub aceitar `ClaudeHeadless`. Fica com a metade Claude, que ainda tem `suggest` e a
+  faixa a conferir.
+- **Contrato 39** nesta branch: a junção reconfere o próximo número livre na `main`.
+- **Renomear sessão Codex sem terminal** com chat aberto: o canal do feed é por nome e o hub
+  também; conferir no uso real que o rename fecha e reabre os dois.

@@ -2,6 +2,10 @@
 
 Release, máquina do dono (i5-13400F, CachyOS), backend isolado, Codex de mentira. 08/10/2026.
 
+**Depois da Task 9 a regressão abaixo sumiu: 10 sessões trabalhando custam 33,5 ms/s de Python +
+Rust contra 65–66,5 da base, e 58,5–60,5 no total contra 91,5–92** (seção
+[Depois da Task 9](#depois-da-task-9)). O texto a seguir é a medida da Task 8, antes da correção.
+
 **Com o Rust dono do Codex sem terminal, a 5B gasta mais CPU, não menos: com 10 sessões
 trabalhando, Python + Rust sobem de 62,5–65,5 ms/s (base, Python dono) para 91–92 ms/s, e o total
 com canos e `codex` de 88–91 para 115–118.** O Python não sai do caminho: ele mesmo sobe de 53–56
@@ -40,6 +44,51 @@ rodadas de 10 sessões (5 sessões: uma rodada). Canos e `codex` parados ficam e
   numa rodada), junto com o texto da resposta em voo. Causa provável, não medida: o canal privado
   `/runtime/events` (`gateway.rs`, `events`) manda ao Python todo evento do motor, sem filtro de
   canal, inclusive cada `preview` com o texto inteiro; o Python decodifica cada um.
+
+## Depois da Task 9
+
+**Com a prévia do Codex sem terminal fora do Python (feed do hub, Task 9), 10 sessões trabalhando
+custam 33,5 ms/s de Python + Rust, contra 65–66,5 da base: a regressão sumiu e o total com canos e
+`codex` cai de 91,5–92 para 58,5–60,5.** O Python trabalhando fica no nível de parado (17–17,5 ms/s);
+o Rust sobe de 9–9,5 (base) para 16–16,5, menos que os 18 de antes da Task 9. Parado, 20,5 ms/s
+(base 23,5–24,5). O pico de memória do Rust sobe para 56,5–57,7 MB (base ~25, antes da Task 9 50–52).
+
+Medida nova das quatro versões na mesma sessão da máquina (08/10/2026, 06:00–06:20), mesmo roteiro
+e mesmo `scripts/medir-codex-sem-terminal.py`, 10 sessões, duas rodadas cada:
+
+| Modo | Medida | Python sozinho (`CP_RUST_SERVER=0`) | Base `6186ce136` | Antes da Task 9 (`97ceb395c`) | Depois da Task 9 (`fc858ecf0`) |
+|---|---|---:|---:|---:|---:|
+| parado | Python | 19,0 / 21,0 | 20,5 / 21,0 | 19,5 / 19,0 | 17,0 / 17,0 |
+| parado | Rust | — | 3,5 / 3,5 | 3,5 / 3,5 | 4,0 / 3,5 |
+| parado | **Total** | **19,0 / 21,0** | **23,5 / 24,5** | **23,0 / 22,5** | **20,5 / 20,5** |
+| trabalhando | Python | 53,0 / 53,0 | 57,5 / 55,5 | 77,5 / 75,0 | 17,5 / 17,0 |
+| trabalhando | Rust | — | 9,0 / 9,5 | 18,0 / 18,0 | 16,0 / 16,5 |
+| trabalhando | Python + Rust | 53,0 / 53,0 | 66,5 / 65,0 | 95,5 / 93,0 | **33,5 / 33,5** |
+| trabalhando | 10 `hangar-cano` | 9,0 / 9,5 | 9,5 / 9,0 | 10,0 / 9,5 | 8,0 / 9,5 |
+| trabalhando | 10 `codex` de mentira | 17,0 / 16,5 | 17,5 / 17,5 | 18,0 / 18,5 | 17,0 / 18,0 |
+| trabalhando | **Total** | **82,5 / 81,5** | **91,5 / 92,0** | **124,0 / 118,0** | **58,5 / 60,5** |
+| trabalhando | `preview`/s nos 10 chats | 66,6 / 66,6 | 66,6 / 66,6 | 66,5 / 66,45 | 36,4 / 35,95 |
+
+CPU em ms por segundo, mediana de 3 janelas de 20 s por rodada; `/` separa as rodadas.
+
+| Pico de RSS (VmHWM), 10 sessões | Python sozinho | Base | Antes da Task 9 | Depois da Task 9 |
+|---|---:|---:|---:|---:|
+| Python | 159,1 / 160,8 MB | 175,7 / 163,2 MB | 175,8 / 163,5 MB | 162,9 / 163,5 MB |
+| Rust | — | 24,9 / 24,8 MB | 50,0 / 52,0 MB | 56,5 / 57,7 MB |
+
+- A prévia chega nos chats a ~3,6 eventos por segundo por chat (antes 6,65): o feed espera 150 ms
+  depois de cada mudança e o ator já junta os deltas em 150 ms, então cada rodada cobre ~275 ms de
+  texto. É o "no máximo uma a cada 150 ms por chat" do aceite; o último valor sempre sai (teste
+  `burst_coalesces_into_one_round`). O texto final da prévia não foi comparado na medida.
+- O pico de memória do Rust cresce ~6 MB sobre antes da Task 9 (o último valor por sessão no canal
+  e o retrato do hub); não investigado.
+- Canos reais conferidos antes e depois de cada rodada (`pgrep -af hangar-cano`): os dois do dono
+  (723830, 2284740) ficaram em todas. Na primeira rodada depois da Task 9 apareceu um terceiro
+  (3666027, sessão Codex real do backend do dono em `~/.hangar/codex-sessions`), que seguiu vivo;
+  nenhum sumiu. Um cano e um `codex` por sessão em todas, zero depois de apagar, nenhuma conversa
+  recriada (o laço da primeira conversa já corrigido).
+- Base compilada com alvo próprio: no alvo compartilhado o cargo reaproveitou o `hangar-codex` da
+  outra árvore e a base não compilava.
 
 ## Achado: a primeira conversa no Rust entra em laço
 
