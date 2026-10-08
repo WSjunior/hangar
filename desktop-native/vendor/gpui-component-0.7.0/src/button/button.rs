@@ -606,6 +606,8 @@ impl RenderOnce for Button {
         let hoverable = self.hoverable();
         let disabled = self.disabled;
         let selected = self.shows_selected_style();
+        // Escolhido de verdade (não o gatilho com menu aberto): o leitor precisa saber qual opção está marcada.
+        let chosen = self.selected;
         let loading = self.loading;
         let tooltip_placement = self.tooltip_placement;
         let hover_group = self.hover_group;
@@ -780,6 +782,7 @@ impl RenderOnce for Button {
             }
         }))
         .selected(selected)
+        .when(chosen, |this| this.aria_selected(true))
         .disabled(disabled)
         // Base layers semantic states over the builder chain, so the caller's
         // own style is replayed inside each state to keep it the closest layer.

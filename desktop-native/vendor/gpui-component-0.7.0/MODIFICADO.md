@@ -40,4 +40,5 @@ quando a API equivalente existir no kit.
 Os testes que montam `KeyDownEvent` passam `physical_digit: None`, o campo novo da cópia de gpui-pre.
 
 Acessibilidade do `Button`: sem rótulo nem `accessibility_label`, o nome acessível é o texto da dica (botão só de
-ícone); `Button::aria_selected` marca a escolha (abas, modo) sem o visual de `selected`.
+ícone); `Button::aria_selected` marca a escolha (abas, modo) sem o visual de `selected`. Botão com `selected` anuncia selecionado. `Slider::aria_label`
+repassa o nome ao slider de gpui-base.
