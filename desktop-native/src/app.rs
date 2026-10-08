@@ -249,7 +249,7 @@ enum Payload {
     // Evento da chamada de voz com o número dela: o da chamada parada é descartado.
     Voice(u64, crate::voice::VoiceEvent),
     // Opção beta do servidor local, o Codex achado e a voz gravada neste computador.
-    VoiceGate(bool, Option<crate::voice::rpc::Codex>, (Option<String>, Option<String>), Vec<voice_ui::CodexAccount>),
+    VoiceGate(Option<bool>, Option<crate::voice::rpc::Codex>, (Option<String>, Option<String>), Option<Vec<voice_ui::CodexAccount>>),
     // Histórico da sessão que recebeu pedido da voz e terminou fora da tela.
     VoiceHistory(u64, SessionKey, Result<api::History, Failure>),
 }

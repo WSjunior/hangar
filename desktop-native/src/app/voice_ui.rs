@@ -49,7 +49,7 @@ fn codex_accounts(list: &Value) -> Vec<CodexAccount> {
     std::iter::once(default).chain(others).collect()
 }
 
-/// A escolha só vale se a conta ainda existe; senão volta ao comportamento de antes (sem `CODEX_HOME`).
+/// `None` = sem escolha ou a conta não está na lista; quem inicia a chamada distingue os dois pelo valor salvo.
 fn chosen_home(accounts: &[CodexAccount], saved: Option<&str>) -> Option<std::path::PathBuf> {
     let saved = saved.filter(|s| !s.is_empty())?;
     accounts.iter().find(|a| a.home == saved).map(|a| std::path::PathBuf::from(&a.home))
@@ -93,6 +93,8 @@ pub(super) struct VoiceUi {
     /// Sobe a cada espera armada: o relógio de um turno velho não fala a resposta do seguinte.
     pub(super) reply_epoch: u64,
     pub(super) pending_sends: VecDeque<(SessionKey, String, CallId)>,
+    /// Plano enviado à sessão, esperando a confirmação de entrega.
+    pub(super) pending_plan: Option<(SessionKey, String)>,
     /// Pergunta do organizador à sessão da tela, esperando a resposta dela.
     pub(super) pending_question: Option<(SessionKey, std::time::Instant)>,
     /// Sessão que recebeu pedido da voz → já foi vista trabalhando.
@@ -258,6 +260,7 @@ fn failure_text(failure: &VoiceFailure) -> String {
         VoiceFailure::Network => tr("voice_network"),
         VoiceFailure::Timeout => tr_shared("codex_voice_timeout", &[]),
         VoiceFailure::Organizer => tr("voice_organizer"),
+        VoiceFailure::Closed => tr("voice_server_closed"),
     }
 }
 
@@ -304,19 +307,22 @@ impl Hangar {
             // find_codex roda `npm prefix -g`: fora da thread da tela.
             let codex = tokio::task::spawn_blocking(crate::voice::rpc::find_codex).await.ok().flatten();
             let saved = tokio::task::spawn_blocking(read_saved_voice).await.unwrap_or_default();
-            let enabled = api.server_read(&["harness", "codex", "opcoes"], &[], 8).await.ok()
-                .and_then(|v| v["codex_voice_beta"].as_bool()).unwrap_or(false);
-            let accounts = api.server_read(&["credenciais"], &[], 15).await.map(|v| codex_accounts(&v)).unwrap_or_default();
+            // Leitura que falhou é `None` = sem mudança; só uma resposta válida liga ou desliga.
+            let enabled = api.server_read(&["harness", "codex", "opcoes"], &[], 8).await.ok().and_then(|v| v["codex_voice_beta"].as_bool());
+            let accounts = api.server_read(&["credenciais"], &[], 15).await.ok().map(|v| codex_accounts(&v));
+            if enabled.is_none() || accounts.is_none() { crate::voice::log(format!("gate read failed options={} accounts={}", enabled.is_some(), accounts.is_some())); }
             let _ = tx.send(Envelope { connection, selection: None, payload: Payload::VoiceGate(enabled, codex, saved, accounts) }).await;
         });
     }
 
-    pub(super) fn receive_voice_gate(&mut self, enabled: bool, codex: Option<Codex>, saved: (Option<String>, Option<String>), accounts: Vec<CodexAccount>, window: &mut Window, cx: &mut Context<Self>) {
-        (self.voice.enabled, self.voice.codex) = (enabled, codex);
+    pub(super) fn receive_voice_gate(&mut self, enabled: Option<bool>, codex: Option<Codex>, saved: (Option<String>, Option<String>), accounts: Option<Vec<CodexAccount>>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(enabled) = enabled { self.voice.enabled = enabled; }
+        self.voice.codex = codex;
         if self.voice.call.is_none() {
             self.voice.voice = saved.0;
             self.voice.account = saved.1;
-            self.voice.accounts = accounts;
+            // Lista que não veio fica como estava: leitura falha não é "sem contas".
+            if let Some(accounts) = accounts { self.voice.accounts = accounts; }
             // O seletor aberto segue a lista que `chosen_home` usa.
             if self.voice.accounts.len() < 2 { self.voice.account_select = None; }
             else if let Some((picker, _)) = &self.voice.account_select {
@@ -325,7 +331,10 @@ impl Hangar {
             }
         }
         // Sem a opção ou sem o Codex a pílula some; a chamada não pode seguir com o microfone aberto.
-        if (!enabled || self.voice.codex.is_none()) && self.voice.call.is_some() { self.stop_voice(cx); }
+        if (enabled == Some(false) || self.voice.codex.is_none()) && self.voice.call.is_some() {
+            self.voice.error = Some(tr(if self.voice.codex.is_none() { "voice_no_codex" } else { "voice_gate_off" }));
+            self.stop_voice(cx);
+        }
         cx.notify();
     }
 
@@ -346,6 +355,13 @@ impl Hangar {
         let (events_tx, events) = async_channel::unbounded();
         let target = self.selected.as_ref().map(|s| s.name.clone()).unwrap_or_default();
         let codex_home = chosen_home(&self.voice.accounts, self.voice.account.as_deref());
+        // Conta salva que não resolve (lista não veio ou conta sumiu): nunca cai calado na padrão.
+        if codex_home.is_none() && self.voice.account.as_deref().is_some_and(|a| !a.is_empty()) {
+            crate::voice::log("voice: saved account unavailable, call not started");
+            self.voice.error = Some(tr("voice_account_missing"));
+            cx.notify();
+            return;
+        }
         crate::voice::log(format!("voice: account chosen {}", if codex_home.is_some() { "custom" } else { "default" }));
         let options = VoiceOptions { codex, voice: self.voice.voice.clone(), context: self.voice_context(), cwd: self.local_session_dir(), target, codex_home };
         self.voice.generation += 1;
@@ -355,6 +371,7 @@ impl Hangar {
         self.voice.spoken.clear();
         self.voice.reply_pending = None;
         self.voice.pending_sends.clear();
+        self.voice.pending_plan = None;
         self.voice.pending_question = None;
         self.voice.activity = CallActivity::Idle;
         self.voice.shown = None;
@@ -386,6 +403,7 @@ impl Hangar {
         self.voice.levels = (0., 0.);
         (self.voice.live_since, self.voice.ticker) = (None, None);
         self.voice.pending_sends.clear();
+        self.voice.pending_plan = None;
         self.voice.pending_question = None;
         self.voice.activity = CallActivity::Idle;
         self.voice.shown = None;
@@ -461,6 +479,7 @@ impl Hangar {
                 self.voice.activity = CallActivity::Idle;
                 (self.voice.live_since, self.voice.ticker) = (None, None);
                 self.voice.pending_sends.clear();
+                self.voice.pending_plan = None;
                 self.voice.pending_question = None;
             }
             VoiceEvent::Phase(phase) => {
@@ -507,6 +526,7 @@ impl Hangar {
                 let on_screen = self.selected.as_ref().is_some_and(|s| s.name == session);
                 let key = self.selected_key().filter(|_| on_screen);
                 let Some(key) = key.filter(|key| self.api_for(&key.server).is_some()) else {
+                    self.voice.error = Some(tr("voice_plan_off_screen"));
                     if let Some(voice) = &self.voice.call { voice.session_answer(format!("O plano não foi enviado: a sessão {session} não está na tela.")); }
                     cx.notify();
                     return;
@@ -514,9 +534,9 @@ impl Hangar {
                 let was_working = self.chat.state.state == "working";
                 self.voice.watched.insert(key.clone(), was_working);
                 let known = self.known_user_ids();
-                if !self.post(key.clone(), text.clone(), String::new(), false, known, None, cx) { self.delivery.hold(key, text, false, None); }
-                // Retido, o pedido sai do mesmo jeito; o plano já não é mais editável.
-                if let Some(voice) = &self.voice.call { voice.plan_delivered(); }
+                if !self.post(key.clone(), text.clone(), String::new(), false, known, None, cx) { self.delivery.hold(key.clone(), text.clone(), false, None); }
+                // O plano só deixa de ser editável quando `voice_sent` confirma a entrega.
+                self.voice.pending_plan = Some((key, text));
             }
             VoiceEvent::ReadSession(call) => self.voice_reply(call, tool_reply(self.voice_context(), true)),
             VoiceEvent::Send(call, request) => {
@@ -606,6 +626,14 @@ impl Hangar {
             self.voice.pending_question = None;
             crate::voice::log("ask_session delivery failed");
             self.voice_answer("A pergunta não chegou à sessão.");
+        }
+        if self.voice.pending_plan.as_ref().is_some_and(|(k, t)| k == key && t == text) {
+            self.voice.pending_plan = None;
+            if result.is_err() {
+                crate::voice::log("plan delivery failed");
+                self.voice.error = Some(tr("voice_plan_failed"));
+                self.voice_answer("O plano não chegou à sessão.");
+            } else if let Some(voice) = &self.voice.call { voice.plan_delivered(); }
         }
         let Some(index) = self.voice.pending_sends.iter().position(|(k, t, _)| k == key && t == text) else { return };
         let Some((_, _, call)) = self.voice.pending_sends.remove(index) else { return };
@@ -731,7 +759,15 @@ impl Hangar {
 
     pub(super) fn voice_history(&mut self, generation: u64, key: SessionKey, result: Result<api::History, Failure>) {
         if generation != self.voice.generation { return; }
-        let Some(events) = result.ok().and_then(|history| history.events) else { return };
+        let events = match result {
+            Ok(history) => history.events,
+            Err(error) => { crate::voice::log(format!("history read failed status={:?} code={:?}", error.status, error.code)); None }
+        };
+        // A chave já saiu de `watched`: sem este aviso o resultado da sessão fora da tela se perderia calado.
+        let Some(events) = events else {
+            if let Some(voice) = &self.voice.call { voice.session_result(key.name.clone(), format!("Não consegui ler a resposta da sessão {}.", key.name)); }
+            return;
+        };
         let events = triples(&events);
         if self.voice_ask_intercept(&key, &events, None) { return; }
         let Some((id, text)) = last_reply(&events) else { return };

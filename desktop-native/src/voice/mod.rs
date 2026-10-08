@@ -15,7 +15,7 @@ use tokio::{runtime::Handle, sync::{Notify, mpsc}};
 pub struct CallId(Value);
 pub enum Phase { Connecting, Live, Closed }
 #[derive(Debug, Clone)]
-pub enum VoiceFailure { Microphone, Speaker, AppServer, Realtime(String), Network, Timeout, Organizer }
+pub enum VoiceFailure { Microphone, Speaker, AppServer, Realtime(String), Network, Timeout, Organizer, Closed }
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Activity { #[default] Idle, Thinking, Searching }
 pub enum VoiceEvent {
@@ -205,7 +205,9 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                     let _ = events.try_send(VoiceEvent::Levels(i, o));
                 }
                 Ok(rtc::RtcEvent::Failed(error)) => { log(format!("rtc failed error={error:?}")); break Err(failed("rtc")(rtc_failure(error))); }
-                Ok(rtc::RtcEvent::Closed) | Err(_) => { log("rtc closed"); break Ok(()); }
+                Ok(rtc::RtcEvent::Closed) => { log("rtc closed"); break Ok(()); }
+                // A thread sempre manda o último evento antes de sair; canal fechado sem ele é thread morta.
+                Err(_) => break Err(failed("rtc thread died")(VoiceFailure::Network)),
             },
             item = incoming.recv() => match item {
                 Ok(Incoming::Request { id, method, params }) if method == "item/tool/call" => {
@@ -252,10 +254,18 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                             }
                         }
                         ToolCall::ReadPlan => {
-                            let text = planner.read();
-                            let text = if text.trim().is_empty() { "Plano vazio.".to_owned() } else { text };
-                            let _ = rpc.respond(id, tool_reply(text, true)).await;
-                            "plan-read"
+                            match planner.read() {
+                                Ok(text) => {
+                                    let text = if text.trim().is_empty() { "Plano vazio.".to_owned() } else { text };
+                                    let _ = rpc.respond(id, tool_reply(text, true)).await;
+                                    "plan-read"
+                                }
+                                Err(error) => {
+                                    log(format!("plan read failed kind={:?}", error.kind()));
+                                    let _ = rpc.respond(id, tool_reply("Não consegui ler o plano; ele existe mas a leitura falhou.", false)).await;
+                                    "plan-read-failed"
+                                }
+                            }
                         }
                         ToolCall::AskSession(question) => match planner.ask(params["turnId"].as_str().unwrap_or_default(), &question) {
                             Ok(line) => {
@@ -267,7 +277,15 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                             Err(why) => { let _ = rpc.respond(id, tool_reply(why, false)).await; "refused-ask" }
                         },
                         ToolCall::FinishPlan { action } => {
-                            let content = planner.read();
+                            let content = match planner.read() {
+                                Ok(content) => content,
+                                Err(error) => {
+                                    log(format!("plan read failed kind={:?}", error.kind()));
+                                    let _ = rpc.respond(id, tool_reply("Não consegui ler o plano; nada foi enviado.", false)).await;
+                                    log("tool call finish_plan outcome=plan-read-failed");
+                                    continue;
+                                }
+                            };
                             if content.trim().is_empty() {
                                 let _ = rpc.respond(id, tool_reply("Plano vazio; escreva o plano com update_plan antes.", false)).await;
                                 "refused-empty-plan"
@@ -383,7 +401,12 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                             let _ = events.send(VoiceEvent::OrganizerContext { used, window }).await;
                         },
                         "thread/realtime/error" => break Err(failed("realtime")(VoiceFailure::Realtime(params["message"].as_str().unwrap_or_default().to_owned()))),
-                        "thread/realtime/closed" => break Ok(()),
+                        "thread/realtime/closed" => {
+                            // Só um código curto vai ao diário; o texto livre pode trazer conteúdo.
+                            let reason = params["reason"].as_str().filter(|r| r.len() <= 40 && r.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))).unwrap_or("?");
+                            log(format!("realtime closed by server reason={reason} stopped={}", stopped.load(Ordering::Relaxed)));
+                            break if stopped.load(Ordering::Relaxed) { Ok(()) } else { Err(VoiceFailure::Closed) };
+                        }
                         _ => {}
                     }
                 }
@@ -434,7 +457,7 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
     };
     stopped.store(true, Ordering::Relaxed);
     let _ = rpc.request("thread/realtime/stop", json!({"threadId": thread})).await;
-    let _ = tokio::task::spawn_blocking(move || peer.join()).await;
+    if !matches!(tokio::task::spawn_blocking(move || peer.join()).await, Ok(Ok(()))) { log("rtc thread join failed (panic)"); }
     let _ = std::fs::remove_dir_all(&directory);
     outcome
 }

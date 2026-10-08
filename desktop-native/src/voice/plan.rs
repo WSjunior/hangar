@@ -24,11 +24,11 @@ fn new_plan_in(dir: &std::path::Path, session: &str, now: DateTime<Local>) -> Pl
 }
 
 impl PlanFile {
-    pub fn read(&self) -> String {
+    /// Arquivo ainda não escrito é plano vazio; qualquer outra falha de leitura sobe.
+    pub fn read(&self) -> io::Result<String> {
         match std::fs::read_to_string(&self.path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
-            Err(error) => { super::log(format!("plan read failed: {error}")); String::new() }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+            other => other,
         }
     }
 
@@ -71,12 +71,21 @@ mod tests {
     }
 
     #[test]
+    fn read_error_other_than_missing_is_not_empty() {
+        // Um diretório no lugar do arquivo: existe, mas não é legível como texto.
+        let dir = std::env::temp_dir().join(format!("voice-plan-dir-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(PlanFile { path: dir.clone() }.read().is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn write_is_atomic_and_readable() {
         let dir = std::env::temp_dir().join(format!("voice-plan-{}", std::process::id()));
         let plan = PlanFile { path: dir.join("p.md") };
-        assert_eq!(plan.read(), "");
+        assert_eq!(plan.read().unwrap(), "");
         plan.write("# Plano\n- item").unwrap();
-        assert_eq!(plan.read(), "# Plano\n- item");
+        assert_eq!(plan.read().unwrap(), "# Plano\n- item");
         assert!(std::fs::read_dir(&dir).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
         assert!(plan.write(&"x".repeat(200_001)).is_err());
         std::fs::remove_dir_all(&dir).unwrap();

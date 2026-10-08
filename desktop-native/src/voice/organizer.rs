@@ -191,7 +191,7 @@ impl Planner {
     /// Plano alterado: a confirmação dada sobre o resumo anterior não vale mais.
     pub fn plan_changed(&mut self) { self.armed = None; }
     pub fn path(&self) -> Option<&Path> { self.plan.as_ref().map(|(p, _)| p.path.as_path()) }
-    pub fn read(&self) -> String { self.plan.as_ref().map(|(p, _)| p.read()).unwrap_or_default() }
+    pub fn read(&self) -> std::io::Result<String> { self.plan.as_ref().map_or_else(|| Ok(String::new()), |(p, _)| p.read()) }
     pub fn set_mode(&mut self, mode: Mode, target: &str) -> String {
         self.mode = mode;
         self.armed = None;

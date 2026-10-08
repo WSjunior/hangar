@@ -87,6 +87,7 @@ impl RtpStart {
 }
 
 const SUMMARY_EVERY: Duration = Duration::from_secs(5);
+const WRITE_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Só o campo `type` dos eventos do canal; o resto pode trazer fala transcrita.
 fn event_type(data: &[u8]) -> String {
@@ -108,7 +109,7 @@ fn drive(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: &async_ch
     let (mut connected, mut timestamp, mut buffer) = (false, 0u64, vec![0u8; 2000]);
     let mut rtp_start = RtpStart::default();
     let (mut last_raw, mut last_media): (Option<Instant>, Option<Instant>) = (None, None);
-    let mut write_errors = 0u32;
+    let (mut write_errors, mut last_written) = (0u32, Instant::now());
     let (mut decoded, mut packet) = (vec![0f32; FRAME * 2], vec![0u8; 1500]);
     let (started, mut last_levels) = (Instant::now(), Instant::now());
     let mut loop_top = Instant::now();
@@ -136,7 +137,7 @@ fn drive(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: &async_ch
             Ok(Output::Transmit(t)) => { let _ = socket.send_to(&t.contents, t.destination); continue; }
             Ok(Output::Event(event)) => {
                 match event {
-                    Event::Connected => { log("rtc connected"); connected = true; audio.reset(); let _ = events.send_blocking(RtcEvent::Connected); }
+                    Event::Connected => { log("rtc connected"); connected = true; last_written = Instant::now(); audio.reset(); let _ = events.send_blocking(RtcEvent::Connected); }
                     Event::IceConnectionStateChange(state) => {
                         log(format!("rtc ice {state:?}"));
                         if state == IceConnectionState::Disconnected { break Err(RtcError::Network); }
@@ -185,12 +186,17 @@ fn drive(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: &async_ch
                 let Some(pt) = writer.payload_params().find(|p| p.spec().codec == Codec::Opus).map(|p| p.pt()) else { window.no_opus += 1; break };
                 // Falha persistente de escrita deixaria a chamada conectada com o microfone mudo para a OpenAI.
                 match writer.write(pt, Instant::now(), MediaTime::new(timestamp, Frequency::FORTY_EIGHT_KHZ), packet[..len].to_vec()) {
-                    Ok(_) => { write_errors = 0; window.written += 1; }
+                    Ok(_) => { write_errors = 0; window.written += 1; last_written = Instant::now(); }
                     Err(_) => { write_errors += 1; window.write_errors += 1; if write_errors >= 50 { return_media_failure = true; break; } }
                 }
                 timestamp += FRAME as u64;
             }
             if return_media_failure { break Err(RtcError::Media); }
+            // Mudo também escreve quadros (silêncio): sem escrita por 5 s o microfone, o codec ou o writer pararam.
+            if last_written.elapsed() > WRITE_DEADLINE {
+                log(format!("rtc media stalled: no frame written for 5s encode_errors={} no_writer={} no_opus={}", window.encode_errors, window.no_writer, window.no_opus));
+                break Err(RtcError::Media);
+            }
             if last_levels.elapsed() >= Duration::from_millis(60) {
                 let (input, output) = audio.levels();
                 let _ = events.try_send(RtcEvent::Levels(input, output));
