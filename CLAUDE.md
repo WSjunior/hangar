@@ -504,7 +504,11 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   (`-C`; psmux avulso no Windows), fatos por empurrão e retrato com prazo; retrato que não vem é
   `problema=state_facts_unavailable`, nunca estado inventado. O `Sources` não tem método com corpo
   padrão: fonte que esquece um não compila. A lista lê o último `state` do `Monitor` vivo
-  (`state/published.rs`) e não captura o pane dessa sessão. No modo `python` tudo roda como antes. Evidência em
+  (`state/published.rs`) e não captura o pane dessa sessão. No modo `python` tudo roda como antes.
+  Codex sem terminal no Rust (`info.headless`) tem no lugar do `Monitor` o feed do runtime
+  (`state/runtime_feed.rs`): o ator escreve vista, erro e prévia num canal em processo
+  (`RuntimeRegistry::live`), fora do `/runtime/events`, e o feed publica os seis eventos (os quatro
+  mais `pensamento`/`ferramenta`) coalescidos em 150 ms; o Python não os produz nem os repassa. Evidência em
   [plataforma.md](docs/decisoes/plataforma.md#estado-ao-vivo-de-claude-com-terminal-no-monitor-do-rust).
 
 ## tmux + Claude Code truecolor

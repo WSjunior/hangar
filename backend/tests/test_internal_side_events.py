@@ -70,6 +70,7 @@ async def test_side_comeca_por_info_nao_manda_transcript_e_ainda_drena(tmp_path,
     assert info["provider"] == "claude"
     assert info["jsonl"] == str(jsonl)
     assert info["session_key"] == session_key(str(jsonl))
+    assert info["headless"] is False
     assert not any(e["event"] == "message" for e in vistos)
     await asyncio.sleep(0.05)   # o drain é fire-and-forget
     assert adapter.drains == [("lado-a", str(jsonl))]

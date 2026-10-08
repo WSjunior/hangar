@@ -711,8 +711,9 @@ def _confirm_codex_queue(name: str, jsonl: str) -> None:
         queue.reconcile_delivered(committed, start, time.time(), grace=0, confirm_only=True)
 
 
-# Com o Rust de pé, estes quatro de Claude com terminal saem do `Monitor` do hub (parte 4, Task 5).
-_RUST_STATE_EVENTS = ("state", "preview", "ask_question", "suggest")
+# Com o Rust de pé, estes saem do hub: os quatro primeiros do `Monitor` (Claude com terminal) e os
+# seis do feed do Codex sem terminal.
+_RUST_STATE_EVENTS = ("state", "preview", "ask_question", "suggest", "pensamento", "ferramenta")
 # O hub pinga o canal a cada 10 s: três calados = conexão morta.
 _RUST_CHANNEL_IDLE_S = 30.0
 _RUST_CHANNEL_LINE = 1 << 20
@@ -726,14 +727,31 @@ class RustStateChannelError(Exception):
         self.code = code
 
 
-def _estado_do_rust(provider: str) -> bool:
-    """Claude com terminal com o Rust esperado ou de pé (`pending`/`rust`): estado, prévia, pergunta
-    e sugestão são do `Monitor` do hub em qualquer porta, e nada disso sobe aqui."""
-    if provider != "claude":
+def _estado_do_rust(provider: str, name: str) -> bool:
+    """Com o Rust esperado ou de pé (`pending`/`rust`), o hub é dono do estado ao vivo em qualquer
+    porta e nada disso sobe aqui: Claude com terminal (o `Monitor`) e Codex sem terminal que o Rust
+    atende (o feed do runtime)."""
+    if provider not in ("claude", "codex"):
         return False
     from app import runtime_coordinator
     owner = runtime_coordinator.current()
-    return owner is not None and owner.mode in ("pending", "rust")
+    if owner is None or owner.mode not in ("pending", "rust"):
+        return False
+    if provider == "claude":
+        return True
+    return _codex_headless(name) and owner.rust_owns("codex", True)
+
+
+async def _estado_do_rust_async(provider: str, name: str) -> bool:
+    """O Codex lê o arquivo da sessão: fora do laço de eventos. Os outros não leem disco."""
+    if provider == "codex":
+        return await asyncio.to_thread(_estado_do_rust, provider, name)
+    return _estado_do_rust(provider, name)
+
+
+def _codex_headless(name: str) -> bool:
+    from app.adapters.codex import sessions as codex_sessions
+    return bool((codex_sessions.load(name) or {}).get("headless"))
 
 
 async def _canal_do_estado(name: str):
@@ -821,7 +839,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
 
     # Claude com terminal e o Rust de pé: o Python não observa o pane nem lê a prévia, em nenhuma
     # porta. A conexão interna é o próprio hub; quem entrou pelo Python lê o canal privado dele.
-    rust_state = _estado_do_rust(provider)
+    rust_state = await _estado_do_rust_async(provider, name)
     pqueue = PromptQueue(name)
     # Fonte do preview ao vivo ramifica por provider: Claude nao tem push (o app-server manda os
     # deltas, o TUI do Claude nao) -> continua no PreviewBroker (poll do pane). Codex nao tem pane
@@ -929,7 +947,8 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                     await asyncio.to_thread(_confirm_codex_queue, name, path)
                 if ev.kind == "assistant_msg" and ev.text:
                     committed["text"] = _norm(ev.text)
-                    if _already_committed(preview_slot["text"]):
+                    # Com o estado no hub, quem limpa a prévia gravada é ele.
+                    if not rust_state and _already_committed(preview_slot["text"]):
                         _enqueue_preview("")
                 # 3o item da tupla = `id:` do SSE (None nos demais eventos). So o transcript ganha
                 # id: e o unico stream com posicao retomavel. state/preview/ping NAO podem ter id --
@@ -994,6 +1013,8 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
         # ficava mudo ate o usuario sair e voltar (era o unico jeito de abrir um stream novo).
         current = jsonl
         current_prov = provider
+        # Codex: trocar de modo (`/modo-execucao`) troca o dono do estado.
+        current_headless = await asyncio.to_thread(_codex_headless, name) if provider == "codex" else None
         pending = None       # candidato a nova resolucao, aguardando confirmar persistencia
         pending_n = 0
         falhou = False
@@ -1013,7 +1034,11 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                 falhou = False
             live = viva.jsonl if viva else None
             live_prov = chave_de(name, viva.provider) if viva and viva.provider else current_prov
-            if live and live_prov != current_prov:
+            live_headless = bool(getattr(viva, "headless", False)) if viva else current_headless
+            flipped = (live_prov == "codex" == current_prov and current_headless is not None
+                       and live_headless != current_headless)
+            current_headless = live_headless
+            if live and (live_prov != current_prov or flipped):
                 # Troca de provider NAO espera os 2 polls do jsonl: ela nao oscila como a resolucao
                 # por mtime — e a sessao terminando de se identificar. Segurar aqui e deixar o chat
                 # mudo mais tempo, sem nada em troca.
@@ -1068,11 +1093,22 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
     def _fontes_do_estado(prov, rust):
         """Tarefas do estado ao vivo por chave: as do Python, o canal do hub, ou nada (conexão interna
         de sessão do Rust, que é o próprio hub). `rust` vem de quem montou o `broker`: reler o modo
-        aqui deixaria os dois discordarem se ele mudasse no meio."""
+        aqui deixaria os dois discordarem se ele mudasse no meio. Pensamento e ferramenta em voo do
+        Codex sem terminal também são do hub; nos outros, o Python os produz."""
         if rust:
-            return {} if side else {"rust": asyncio.create_task(rust_state_pump())}
-        return {"state": asyncio.create_task(pump("state", _monitor_de(prov))),
-                "preview": asyncio.create_task(preview_pump(broker))}
+            fontes = {} if side else {"rust": asyncio.create_task(rust_state_pump())}
+        else:
+            fontes = {"state": asyncio.create_task(pump("state", _monitor_de(prov))),
+                      "preview": asyncio.create_task(preview_pump(broker))}
+        if not (rust and prov == "codex"):
+            fontes["pensamento"] = asyncio.create_task(em_voo_pump("pensamento", fonte_pensamento(name)))
+            fontes["ferramenta"] = asyncio.create_task(em_voo_pump("ferramenta", fonte_ferramenta(name)))
+        return fontes
+
+    def _segue_transcript(prov, rust):
+        """A conexão interna de sessão do Rust só seguia o transcript para a prévia, que é do hub; a do
+        Codex continua, porque o `user_msg` confirma a fila dele."""
+        return not (side and rust and prov != "codex")
 
     em_voo_slots = {"pensamento": {"text": "", "pending": False},
                     "ferramenta": {"text": "", "pending": False}}
@@ -1145,7 +1181,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
         # Confirma antigas antes de o follow republicar a fila na reconexão.
         await asyncio.to_thread(_confirm_codex_queue, name, jsonl)
     # A conexão interna só seguia o transcript para a supressão da prévia, que agora é do hub.
-    tail_task = None if side and rust_state else asyncio.create_task(tail_pump(jsonl, start_offset))
+    tail_task = asyncio.create_task(tail_pump(jsonl, start_offset)) if _segue_transcript(provider, rust_state) else None
     stats_task = asyncio.create_task(stats_pump(jsonl))
     # Nomeadas porque sao refeitas quando o provider muda no meio do stream (__reprovider__): cada
     # uma carrega o adapter antigo dentro de si (parser do transcript, fold das estatisticas,
@@ -1160,8 +1196,6 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
         asyncio.create_task(pump("message", pqueue.follow(min_ts=start_ts, emit_confirmed=True))),
         *state_tasks.values(),
         asyncio.create_task(ping_loop()),
-        asyncio.create_task(em_voo_pump("pensamento", fonte_pensamento(name))),
-        asyncio.create_task(em_voo_pump("ferramenta", fonte_ferramenta(name))),
         asyncio.create_task(jsonl_watcher()),
         asyncio.create_task(band_pump()),
     ]
@@ -1222,7 +1256,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                 current_provider = novo_prov
                 current_jsonl = novo_jsonl
                 committed["text"] = ""
-                rust_state = _estado_do_rust(novo_prov)
+                rust_state = await _estado_do_rust_async(novo_prov, name)
                 broker = None if rust_state else _broker_de(novo_prov)
                 # A prévia do provider anterior sai; na conexão interna de sessão do Rust quem
                 # limpa é o hub, e uma prévia do Python ali seria descartada como vazamento.
@@ -1231,7 +1265,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                 if broker is not None:
                     broker.reset()
                 ask_q_emitted = False
-                tail_task = None if side and rust_state else asyncio.create_task(tail_pump(novo_jsonl))
+                tail_task = asyncio.create_task(tail_pump(novo_jsonl)) if _segue_transcript(novo_prov, rust_state) else None
                 stats_task = asyncio.create_task(stats_pump(novo_jsonl))
                 state_tasks = _fontes_do_estado(novo_prov, rust_state)
                 tasks += [t for t in (tail_task, stats_task, *state_tasks.values()) if t is not None]

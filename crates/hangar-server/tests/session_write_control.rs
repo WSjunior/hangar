@@ -112,7 +112,7 @@ fn submit_answers_match_the_python_golden() {
 fn interrupt_answers_match_the_python_golden() {
     for case in golden().into_iter().filter(|c| c["route"] == "interrupt") {
         let name = case["name"].as_str().unwrap();
-        let answer = if case["terminal"].as_bool().unwrap() { interrupt_terminal_answer(&rust_reply(&case)) } else { interrupt_headless_answer(&rust_reply(&case)) };
+        let answer = if case["terminal"].as_bool().unwrap() { interrupt_terminal_answer(&rust_reply(&case)) } else { interrupt_headless_answer(case["provider"] == "codex", &rust_reply(&case)) };
         // O aviso ao plugin só sai quando o Esc foi dado.
         if case["terminal"].as_bool().unwrap() { assert_eq!(answer.0 == StatusCode::OK, !case["notified"].as_array().unwrap().is_empty(), "{name}: aviso"); }
         check(name, answer, &case);

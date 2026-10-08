@@ -89,6 +89,44 @@ async fn open_headless(registry: &RuntimeRegistry, dir: &Path, name: &str) {
         projection_dir: dir.join(format!("{name}-projection")), transcript: dir.join(format!("{name}.jsonl")), created: 0.0 }).await.unwrap();
 }
 
+/// Cano Codex falso: confirma cada escrita, responde cada pedido (o `turn/start` abre o turno) e anota
+/// o método de cada um.
+async fn codex_cano(methods: Arc<std::sync::Mutex<Vec<String>>>) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else { return };
+        let mut reader = BufReader::new(stream);
+        let mut header = String::new();
+        if reader.read_line(&mut header).await.is_err() || header != "secret-test\n" { return; }
+        let snapshot = json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,
+            "pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+        reader.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
+        loop {
+            let mut raw = String::new();
+            if reader.read_line(&mut raw).await.unwrap_or(0) == 0 { return; }
+            let envelope: Value = serde_json::from_str(&raw).unwrap();
+            let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
+            reader.get_mut().write_all(format!("{ack}\n").as_bytes()).await.unwrap();
+            let frame: Value = serde_json::from_str(envelope["frame"].as_str().unwrap_or("{}")).unwrap();
+            methods.lock().unwrap().push(frame["method"].as_str().unwrap_or("").to_owned());
+            if frame["id"].is_null() { continue; }
+            let result = if frame["method"] == "turn/start" { json!({"turn":{"id":"turn-1","status":"inProgress"}}) } else { json!({"data":[]}) };
+            let out = json!({"type":"cano_output","frame":json!({"id":frame["id"],"result":result}).to_string()});
+            reader.get_mut().write_all(format!("{out}\n").as_bytes()).await.unwrap();
+        }
+    });
+    format!("tcp:{address}")
+}
+
+async fn open_codex_headless(registry: &RuntimeRegistry, dir: &Path, name: &str, methods: Arc<std::sync::Mutex<Vec<String>>>) {
+    registry.open(RuntimeTarget { key: format!("k-{name}"), generation: 1, name: name.into(), provider: "codex".into(),
+        metadata: json!({"name": name, "headless": true, "thread_id": "thread-1", "initialized": true, "ready": true}),
+        binding: CanoBinding { pid: 42, escuta: codex_cano(methods).await, token: "secret-test".into(), versao: 2 },
+        lease_path: dir.join(format!("{name}.lock")), state_path: dir.join(format!("{name}.queue-state.json")),
+        projection_dir: dir.join(format!("{name}-projection")), transcript: dir.join(format!("{name}.jsonl")), created: 0.0 }).await.unwrap();
+}
+
 /// Entrada com terminal sobre um tmux falso que aceita tudo e anota cada chamada.
 #[cfg(unix)]
 async fn open_terminal(registry: &RuntimeRegistry, dir: &Path, name: &str) {
@@ -136,6 +174,38 @@ async fn notice_to_a_claude_terminal_session_goes_through_rust() {
     // Sem pane de verdade o ator deixa o recado na fila dele: a prova de que foi o Rust que recebeu.
     let queued = std::fs::read_to_string(dir.path().join("t.projection").join("t.jsonl")).unwrap();
     assert!(queued.contains("\"aviso\""), "{queued}");
+}
+
+#[tokio::test]
+async fn notice_to_a_headless_codex_session_goes_through_rust() {
+    let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
+    let methods = Arc::new(std::sync::Mutex::new(Vec::new()));
+    open_codex_headless(&registry, dir.path(), "c", methods.clone()).await;
+    let (python, st) = state(Some(registry), Duration::from_secs(5)).await;
+    assert_eq!(deliver_text(&st, "c", "aviso").await, Ok(()));
+    assert_eq!(python.input_calls(), 0);
+    assert!(methods.lock().unwrap().iter().any(|m| m == "turn/start"), "{:?}", methods.lock().unwrap());
+}
+
+/// O `/compact` do Codex é controle do Python, como no handler: vai ao `/input` dele sem o passe na mão.
+#[tokio::test]
+async fn codex_compact_notice_goes_to_python_without_the_pass() {
+    let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
+    let methods = Arc::new(std::sync::Mutex::new(Vec::new()));
+    open_codex_headless(&registry, dir.path(), "c", methods.clone()).await;
+    let (python, st) = state(Some(registry.clone()), Duration::from_secs(5)).await;
+    python.set_input_reply(Some((StatusCode::OK, json!({"ok": true}))));
+    python.hold_input(true);
+    let st = Arc::new(st);
+    let sending = tokio::spawn({ let st = st.clone(); async move { deliver_text(&st, "c", "/compact").await } });
+    for _ in 0..100 { if python.hits_to("/api/sessions/c/input") == 1 { break; } tokio::time::sleep(Duration::from_millis(20)).await; }
+    assert_eq!(python.hits_to("/api/sessions/c/input"), 1, "o aviso chegou ao Python");
+    assert!(registry.ingress().close("c", Duration::from_millis(300)).await.is_ok(), "passe na mão durante o repasse");
+    registry.ingress().open("c");
+    python.hold_input(false);
+    python.release.notify_one();
+    assert_eq!(sending.await.unwrap(), Ok(()));
+    assert!(!methods.lock().unwrap().iter().any(|m| m == "turn/start"), "{:?}", methods.lock().unwrap());
 }
 
 #[tokio::test]

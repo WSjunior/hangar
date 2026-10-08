@@ -649,7 +649,7 @@ fn run_discovery(panes: &[Pane], procs: &dyn ProcessView, children: &ChildrenMap
 /// vida (`k:<chave>`). Linha sem chave fica fora, como sessão parada.
 fn headless_by_name(rows: &[SessionRow], by_key: BTreeMap<String, Value>) -> BTreeMap<String, Value> {
     let mut by_key = by_key;
-    rows.iter().filter(|r| r.headless && r.provider == "claude").filter_map(|r| {
+    rows.iter().filter(|r| r.headless && (r.provider == "claude" || r.provider == "codex")).filter_map(|r| {
         let key = r.lifecycle_id.as_deref()?.strip_prefix("k:")?;
         Some((r.name.clone(), by_key.remove(key)?))
     }).collect()
@@ -893,6 +893,15 @@ pub async fn private(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connect
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_view_reaches_codex_headless_rows() {
+        let row = |name: &str, provider: &str, headless: bool| -> SessionRow { serde_json::from_value(serde_json::json!({
+            "name": name, "provider": provider, "headless": headless, "lifecycle_id": format!("k:{name}")})).unwrap() };
+        let rows = [row("cl", "claude", true), row("cx", "codex", true), row("tui", "codex", false)];
+        let by_key = ["cl", "cx", "tui"].map(|k| (k.to_owned(), Value::Null)).into_iter().collect();
+        assert_eq!(headless_by_name(&rows, by_key).into_keys().collect::<Vec<_>>(), ["cl", "cx"]);
+    }
 
     #[test]
     fn guarded_change_never_waits_for_the_holder_and_lands_before_the_next_read() {

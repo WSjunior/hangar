@@ -1,0 +1,1168 @@
+[
+ {
+  "name": "models_ok",
+  "method": "GET",
+  "route": "models",
+  "body": null,
+  "rpc": {
+   "thread/read": {
+    "result": {
+     "thread": {
+      "id": "thread-1",
+      "status": {
+       "type": "idle"
+      },
+      "turns": [],
+      "model": "gpt-5",
+      "reasoningEffort": "high"
+     }
+    }
+   },
+   "model/list": {
+    "result": {
+     "data": [
+      {
+       "model": "gpt-5",
+       "displayName": "GPT-5",
+       "description": "r\u00e1pido",
+       "hidden": false,
+       "supportedReasoningEfforts": [
+        {
+         "reasoningEffort": "low",
+         "description": "pouco"
+        },
+        {
+         "reasoningEffort": "high",
+         "description": "muito"
+        }
+       ],
+       "defaultReasoningEffort": "high",
+       "serviceTiers": [
+        {
+         "id": "priority",
+         "name": "Fast"
+        }
+       ],
+       "defaultServiceTier": null
+      },
+      {
+       "model": "gpt-5-mini",
+       "displayName": "Mini",
+       "description": "",
+       "hidden": false,
+       "supportedReasoningEfforts": [],
+       "defaultReasoningEffort": "low"
+      },
+      {
+       "model": "escondido",
+       "displayName": "X",
+       "description": "x",
+       "hidden": true,
+       "supportedReasoningEfforts": [],
+       "defaultReasoningEffort": "low"
+      }
+     ]
+    }
+   }
+  },
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "priority",
+   "mode": "plan",
+   "permission_mode": "Full Access",
+   "busy": false,
+   "async": []
+  },
+  "relay": null,
+  "fault": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "models": [
+     {
+      "model": "gpt-5",
+      "displayName": "GPT-5",
+      "description": "r\u00e1pido",
+      "efforts": [
+       {
+        "value": "low",
+        "description": "pouco"
+       },
+       {
+        "value": "high",
+        "description": "muito"
+       }
+      ],
+      "defaultEffort": "high",
+      "serviceTiers": [
+       {
+        "id": "priority",
+        "name": "Fast"
+       }
+      ],
+      "defaultServiceTier": null
+     },
+     {
+      "model": "gpt-5-mini",
+      "displayName": "Mini",
+      "description": "",
+      "efforts": [],
+      "defaultEffort": "low",
+      "serviceTiers": [],
+      "defaultServiceTier": null
+     }
+    ],
+    "current": {
+     "model": "gpt-5",
+     "effort": "high",
+     "service_tier": "priority",
+     "mode": "plan"
+    }
+   }
+  }
+ },
+ {
+  "name": "models_settings_refused",
+  "method": "GET",
+  "route": "models",
+  "body": null,
+  "rpc": {
+   "thread/read": {
+    "error": {
+     "code": -32000,
+     "message": "falhou"
+    }
+   },
+   "model/list": {
+    "result": {
+     "data": [
+      {
+       "model": "gpt-5",
+       "displayName": "GPT-5",
+       "description": "r\u00e1pido",
+       "hidden": false,
+       "supportedReasoningEfforts": [
+        {
+         "reasoningEffort": "low",
+         "description": "pouco"
+        },
+        {
+         "reasoningEffort": "high",
+         "description": "muito"
+        }
+       ],
+       "defaultReasoningEffort": "high",
+       "serviceTiers": [
+        {
+         "id": "priority",
+         "name": "Fast"
+        }
+       ],
+       "defaultServiceTier": null
+      },
+      {
+       "model": "gpt-5-mini",
+       "displayName": "Mini",
+       "description": "",
+       "hidden": false,
+       "supportedReasoningEfforts": [],
+       "defaultReasoningEffort": "low"
+      },
+      {
+       "model": "escondido",
+       "displayName": "X",
+       "description": "x",
+       "hidden": true,
+       "supportedReasoningEfforts": [],
+       "defaultReasoningEffort": "low"
+      }
+     ]
+    }
+   }
+  },
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Full Access",
+   "busy": false,
+   "async": []
+  },
+  "relay": null,
+  "fault": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_codex_controle",
+     "params": {},
+     "msg": "O Codex n\u00e3o aceitou a altera\u00e7\u00e3o; atualize a sess\u00e3o e tente novamente."
+    }
+   }
+  }
+ },
+ {
+  "name": "models_list_refused",
+  "method": "GET",
+  "route": "models",
+  "body": null,
+  "rpc": {
+   "thread/read": {
+    "result": {
+     "thread": {
+      "id": "thread-1",
+      "status": {
+       "type": "idle"
+      },
+      "turns": [],
+      "model": "gpt-5-mini",
+      "reasoningEffort": null
+     }
+    }
+   },
+   "model/list": {
+    "error": {
+     "code": -32000,
+     "message": "falhou"
+    }
+   }
+  },
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Full Access",
+   "busy": false,
+   "async": []
+  },
+  "relay": null,
+  "fault": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "models": [],
+    "current": {
+     "model": "gpt-5-mini",
+     "effort": null,
+     "service_tier": "default",
+     "mode": "default"
+    }
+   }
+  }
+ },
+ {
+  "name": "model_ok",
+  "method": "POST",
+  "route": "model",
+  "body": {
+   "model": "gpt-5-mini",
+   "effort": "low"
+  },
+  "rpc": {
+   "thread/settings/update": {
+    "result": {}
+   }
+  },
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Full Access",
+   "busy": false,
+   "async": []
+  },
+  "relay": null,
+  "fault": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true
+   }
+  }
+ },
+ {
+  "name": "model_without_effort",
+  "method": "POST",
+  "route": "model",
+  "body": {
+   "model": "gpt-5"
+  },
+  "rpc": {
+   "thread/settings/update": {
+    "result": {}
+   }
+  },
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Full Access",
+   "busy": false,
+   "async": []
+  },
+  "relay": null,
+  "fault": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true
+   }
+  }
+ },
+ {
+  "name": "model_refused",
+  "method": "POST",
+  "route": "model",
+  "body": {
+   "model": "gpt-5"
+  },
+  "rpc": {
+   "thread/settings/update": {
+    "error": {
+     "code": -32000,
+     "message": "falhou"
+    }
+   }
+  },
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Full Access",
+   "busy": false,
+   "async": []
+  },
+  "relay": null,
+  "fault": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_codex_controle",
+     "params": {},
+     "msg": "O Codex n\u00e3o aceitou a altera\u00e7\u00e3o; atualize a sess\u00e3o e tente novamente."
+    }
+   }
+  }
+ },
+ {
+  "name": "service_tier_unchanged",
+  "method": "POST",
+  "route": "service-tier",
+  "body": {
+   "service_tier": "default"
+  },
+  "rpc": {},
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Full Access",
+   "busy": false,
+   "async": []
+  },
+  "relay": null,
+  "fault": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "service_tier": "default"
+   }
+  }
+ },
+ {
+  "name": "service_tier_fast_unavailable",
+  "method": "POST",
+  "route": "service-tier",
+  "body": {
+   "service_tier": "priority"
+  },
+  "rpc": {
+   "thread/read": {
+    "result": {
+     "thread": {
+      "id": "thread-1",
+      "status": {
+       "type": "idle"
+      },
+      "turns": [],
+      "model": "gpt-5",
+      "reasoningEffort": "high"
+     }
+    }
+   },
+   "model/list": {
+    "result": {
+     "data": [
+      {
+       "model": "gpt-5",
+       "displayName": "GPT-5",
+       "description": "r\u00e1pido",
+       "hidden": false,
+       "supportedReasoningEfforts": [
+        {
+         "reasoningEffort": "low",
+         "description": "pouco"
+        },
+        {
+         "reasoningEffort": "high",
+         "description": "muito"
+        }
+       ],
+       "defaultReasoningEffort": "high",
+       "serviceTiers": [],
+       "defaultServiceTier": null
+      }
+     ]
+    }
+   }
+  },
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Full Access",
+   "busy": false,
+   "async": []
+  },
+  "relay": null,
+  "fault": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_codex_controle",
+     "params": {},
+     "msg": "O Codex n\u00e3o aceitou a altera\u00e7\u00e3o; atualize a sess\u00e3o e tente novamente."
+    }
+   }
+  }
+ },
+ {
+  "name": "mode_plan",
+  "method": "POST",
+  "route": "codex/mode",
+  "body": {
+   "mode": "plan"
+  },
+  "rpc": {
+   "thread/read": {
+    "result": {
+     "thread": {
+      "id": "thread-1",
+      "status": {
+       "type": "idle"
+      },
+      "turns": [],
+      "model": "gpt-5",
+      "reasoningEffort": "high"
+     }
+    }
+   },
+   "thread/settings/update": {
+    "result": {}
+   }
+  },
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "priority",
+   "mode": "default",
+   "permission_mode": "Full Access",
+   "busy": false,
+   "async": []
+  },
+  "relay": null,
+  "fault": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "model": "gpt-5",
+    "effort": "high",
+    "service_tier": "priority",
+    "mode": "plan"
+   }
+  }
+ },
+ {
+  "name": "mode_settings_refused",
+  "method": "POST",
+  "route": "codex/mode",
+  "body": {
+   "mode": "plan"
+  },
+  "rpc": {
+   "thread/read": {
+    "error": {
+     "code": -32000,
+     "message": "falhou"
+    }
+   },
+   "thread/settings/update": {
+    "result": {}
+   }
+  },
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Full Access",
+   "busy": false,
+   "async": []
+  },
+  "relay": null,
+  "fault": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_codex_controle",
+     "params": {},
+     "msg": "O Codex n\u00e3o aceitou a altera\u00e7\u00e3o; atualize a sess\u00e3o e tente novamente."
+    }
+   }
+  }
+ },
+ {
+  "name": "mode_update_refused",
+  "method": "POST",
+  "route": "codex/mode",
+  "body": {
+   "mode": "default"
+  },
+  "rpc": {
+   "thread/read": {
+    "result": {
+     "thread": {
+      "id": "thread-1",
+      "status": {
+       "type": "idle"
+      },
+      "turns": [],
+      "model": "gpt-5",
+      "reasoningEffort": "high"
+     }
+    }
+   },
+   "thread/settings/update": {
+    "error": {
+     "code": -32000,
+     "message": "falhou"
+    }
+   }
+  },
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Full Access",
+   "busy": false,
+   "async": []
+  },
+  "relay": null,
+  "fault": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_codex_controle",
+     "params": {},
+     "msg": "O Codex n\u00e3o aceitou a altera\u00e7\u00e3o; atualize a sess\u00e3o e tente novamente."
+    }
+   }
+  }
+ },
+ {
+  "name": "limits_ok",
+  "method": "GET",
+  "route": "limits",
+  "body": null,
+  "rpc": {
+   "account/rateLimits/read": {
+    "result": {
+     "rateLimits": {
+      "limitId": "codex",
+      "limitName": null,
+      "planType": "plus",
+      "primary": {
+       "usedPercent": 12,
+       "windowDurationMins": 300,
+       "resetsAt": 1800000000
+      },
+      "secondary": null,
+      "credits": null
+     }
+    }
+   }
+  },
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Full Access",
+   "busy": false,
+   "async": []
+  },
+  "relay": null,
+  "fault": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "primary": {
+     "usedPercent": 12,
+     "windowMins": 300,
+     "resetsAt": 1800000000
+    },
+    "secondary": null,
+    "planType": "plus"
+   }
+  }
+ },
+ {
+  "name": "limits_without_windows",
+  "method": "GET",
+  "route": "limits",
+  "body": null,
+  "rpc": {
+   "account/rateLimits/read": {
+    "result": {
+     "rateLimits": {
+      "limitId": "codex"
+     }
+    }
+   }
+  },
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Full Access",
+   "busy": false,
+   "async": []
+  },
+  "relay": null,
+  "fault": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "primary": null,
+    "secondary": null,
+    "planType": null
+   }
+  }
+ },
+ {
+  "name": "limits_refused",
+  "method": "GET",
+  "route": "limits",
+  "body": null,
+  "rpc": {
+   "account/rateLimits/read": {
+    "error": {
+     "code": -32000,
+     "message": "falhou"
+    }
+   }
+  },
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Full Access",
+   "busy": false,
+   "async": []
+  },
+  "relay": null,
+  "fault": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "primary": null,
+    "secondary": null,
+    "planType": null
+   }
+  }
+ },
+ {
+  "name": "skip_async",
+  "method": "POST",
+  "route": "question/skip",
+  "body": {
+   "request_id": "async:thread-1:i1:0"
+  },
+  "rpc": {},
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Full Access",
+   "busy": false,
+   "async": [
+    "async:thread-1:i1:0"
+   ]
+  },
+  "relay": null,
+  "fault": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "ok": true
+   }
+  }
+ },
+ {
+  "name": "skip_unknown",
+  "method": "POST",
+  "route": "question/skip",
+  "body": {
+   "request_id": "async:outra"
+  },
+  "rpc": {},
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Full Access",
+   "busy": false,
+   "async": [
+    "async:thread-1:i1:0"
+   ]
+  },
+  "relay": null,
+  "fault": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_codex_resposta_invalida",
+     "params": {},
+     "msg": "A pergunta mudou ou n\u00e3o aceita essas respostas. Confira as op\u00e7\u00f5es e tente novamente."
+    }
+   }
+  }
+ },
+ {
+  "name": "commands_ok",
+  "method": "GET",
+  "route": "commands",
+  "body": null,
+  "rpc": {
+   "skills/list": {
+    "result": {
+     "data": [
+      {
+       "cwd": "/tmp/projeto",
+       "skills": [
+        {
+         "name": "revisar",
+         "path": "/a/revisar/SKILL.md",
+         "description": "Revisa",
+         "enabled": true
+        },
+        {
+         "name": "compact",
+         "path": "/a/compact/SKILL.md",
+         "description": "hom\u00f4nima do builtin",
+         "enabled": true
+        },
+        {
+         "name": "dup",
+         "path": "/a/dup/SKILL.md",
+         "description": "um",
+         "enabled": true
+        },
+        {
+         "name": "dup",
+         "path": "/b/dup/SKILL.md",
+         "description": null,
+         "enabled": true
+        },
+        {
+         "name": "desligada",
+         "path": "/a/off/SKILL.md",
+         "description": "x",
+         "enabled": false
+        },
+        {
+         "name": "sem-caminho",
+         "description": "x",
+         "enabled": true
+        }
+       ]
+      }
+     ]
+    }
+   }
+  },
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Full Access",
+   "busy": false,
+   "async": []
+  },
+  "relay": null,
+  "fault": null,
+  "expect": {
+   "status": 200,
+   "body": [
+    {
+     "name": "compact",
+     "display": "/compact",
+     "source": "builtin",
+     "description": "Resume e compacta o contexto",
+     "destructive": true
+    },
+    {
+     "name": "dup:02afb63f",
+     "display": "/dup:02afb63f",
+     "description": null,
+     "source": "skill",
+     "destructive": false
+    },
+    {
+     "name": "dup:03811f8e",
+     "display": "/dup:03811f8e",
+     "description": "um",
+     "source": "skill",
+     "destructive": false
+    },
+    {
+     "name": "revisar",
+     "display": "/revisar",
+     "description": "Revisa",
+     "source": "skill",
+     "destructive": false
+    }
+   ]
+  }
+ },
+ {
+  "name": "commands_refused",
+  "method": "GET",
+  "route": "commands",
+  "body": null,
+  "rpc": {
+   "skills/list": {
+    "error": {
+     "code": -32000,
+     "message": "falhou"
+    }
+   }
+  },
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Full Access",
+   "busy": false,
+   "async": []
+  },
+  "relay": null,
+  "fault": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_codex_controle",
+     "params": {},
+     "msg": "O Codex n\u00e3o aceitou a altera\u00e7\u00e3o; atualize a sess\u00e3o e tente novamente."
+    }
+   }
+  }
+ },
+ {
+  "name": "permissions_list",
+  "method": "GET",
+  "route": "codex-permissions",
+  "body": null,
+  "rpc": {},
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Approve for me",
+   "busy": false,
+   "async": []
+  },
+  "relay": null,
+  "fault": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "modes": [
+     {
+      "numero": 1,
+      "nome": "Ask for approval",
+      "desc": "Codex s\u00f3 l\u00ea o workspace; editar ou rodar comando pede aprova\u00e7\u00e3o.",
+      "cursor": false,
+      "atual": false
+     },
+     {
+      "numero": 2,
+      "nome": "Approve for me",
+      "desc": "Codex edita o workspace sozinho; fora dele ou com rede, pede aprova\u00e7\u00e3o.",
+      "cursor": true,
+      "atual": true
+     },
+     {
+      "numero": 3,
+      "nome": "Full Access",
+      "desc": "Codex faz tudo sem perguntar.",
+      "cursor": false,
+      "atual": false
+     }
+    ],
+    "current": "Approve for me"
+   }
+  }
+ },
+ {
+  "name": "permissions_same_sandbox",
+  "method": "POST",
+  "route": "codex-permissions",
+  "body": {
+   "mode": "ask FOR approval"
+  },
+  "rpc": {},
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Ask for approval",
+   "busy": false,
+   "async": []
+  },
+  "relay": null,
+  "fault": null,
+  "expect": {
+   "status": 200,
+   "body": {
+    "current": "Ask for approval"
+   }
+  }
+ },
+ {
+  "name": "permissions_unknown",
+  "method": "POST",
+  "route": "codex-permissions",
+  "body": {
+   "mode": "Tudo"
+  },
+  "rpc": {},
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Full Access",
+   "busy": false,
+   "async": []
+  },
+  "relay": null,
+  "fault": null,
+  "expect": {
+   "status": 400,
+   "body": {
+    "detail": {
+     "code": "erro_permissao_picker",
+     "params": {},
+     "msg": "modo desconhecido: Tudo (os modos s\u00e3o: Ask for approval, Approve for me, Full Access)"
+    }
+   }
+  }
+ },
+ {
+  "name": "permissions_busy",
+  "method": "POST",
+  "route": "codex-permissions",
+  "body": {
+   "mode": "Ask for approval"
+  },
+  "rpc": {},
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Full Access",
+   "busy": true,
+   "async": []
+  },
+  "relay": null,
+  "fault": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_permissao_ocupada",
+     "params": {},
+     "msg": "a sess\u00e3o est\u00e1 trabalhando; mudar o sandbox reiniciaria o Codex \u2014 espere ela terminar"
+    }
+   }
+  }
+ },
+ {
+  "name": "skip_send_failed",
+  "method": "POST",
+  "route": "question/skip",
+  "body": {
+   "request_id": "async:thread-1:i1:0"
+  },
+  "rpc": {},
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Full Access",
+   "busy": false,
+   "async": [
+    "async:thread-1:i1:0"
+   ]
+  },
+  "relay": null,
+  "fault": {
+   "python": "skip",
+   "rust": {
+    "code": "runtime_closed",
+    "message": "ator saiu"
+   }
+  },
+  "expect": {
+   "status": 503,
+   "body": {
+    "detail": {
+     "code": "erro_codex_resposta_envio",
+     "params": {},
+     "msg": "N\u00e3o foi poss\u00edvel confirmar o envio da resposta ao Codex."
+    }
+   }
+  }
+ },
+ {
+  "name": "permissions_reopen_failed",
+  "method": "POST",
+  "route": "codex-permissions",
+  "body": {
+   "mode": "Ask for approval"
+  },
+  "rpc": {},
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Full Access",
+   "busy": false,
+   "async": []
+  },
+  "relay": null,
+  "fault": {
+   "python": "reopen",
+   "rust": {
+    "code": "codex_headless_nao_subiu",
+    "message": "o Codex n\u00e3o subiu"
+   }
+  },
+  "expect": {
+   "status": 503,
+   "body": {
+    "detail": {
+     "code": "erro_permissao_picker",
+     "params": {},
+     "msg": "n\u00e3o consegui reabrir o Codex: o Codex n\u00e3o subiu"
+    }
+   }
+  }
+ },
+ {
+  "name": "models_unknown_session",
+  "method": "GET",
+  "route": "models",
+  "body": null,
+  "rpc": {},
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Full Access",
+   "busy": false,
+   "async": []
+  },
+  "relay": "unknown",
+  "fault": null,
+  "expect": {
+   "status": 400,
+   "body": {
+    "detail": {
+     "code": "erro_models_so_codex",
+     "params": {},
+     "msg": "models so existe pra sessoes Codex"
+    }
+   }
+  }
+ },
+ {
+  "name": "commands_terminal",
+  "method": "GET",
+  "route": "commands",
+  "body": null,
+  "rpc": {},
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Full Access",
+   "busy": false,
+   "async": []
+  },
+  "relay": "terminal",
+  "fault": null,
+  "expect": null
+ },
+ {
+  "name": "model_terminal",
+  "method": "POST",
+  "route": "model",
+  "body": {
+   "model": "gpt-5"
+  },
+  "rpc": {},
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Full Access",
+   "busy": false,
+   "async": []
+  },
+  "relay": "terminal",
+  "fault": null,
+  "expect": null
+ }
+]

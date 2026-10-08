@@ -1,4 +1,4 @@
-use super::{actor::{PolicyClient,RuntimeActor,RuntimeEngine,RuntimeHandle},cano,protocol::*,queue::{Action,QueueActor,State as QueueState,Store,acquire_lease}};
+use super::{actor::{LaunchConfig,PolicyClient,RuntimeActor,RuntimeEngine,RuntimeHandle},cano,process,protocol::*,queue::{Action,QueueActor,State as QueueState,Store,acquire_lease}};
 use axum::{Router,body::to_bytes,extract::{ConnectInfo,State,Request},http::StatusCode,
     middleware::{self,Next},response::{IntoResponse,Response,sse::{Event,KeepAlive,Sse}},routing::{get,post}};
 use serde::Deserialize;
@@ -16,6 +16,8 @@ use tokio::sync::{broadcast,Mutex};
 pub(crate) enum EntryHandle { Headless(RuntimeHandle), Terminal {target:super::terminal::TerminalTarget,handle:super::terminal::TerminalHandle} }
 impl EntryHandle {
     pub(crate) async fn snapshot(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.snapshot().await,Self::Terminal {handle,..}=>handle.snapshot().await}}
+    /// Só o ator sem terminal tem motor próprio; o de terminal não é sessão Codex.
+    pub(crate) async fn view(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.view().await,Self::Terminal {..}=>Err(failure("runtime_terminal"))}}
     pub(crate) async fn stop(&self)->Result<(),RuntimeError> {match self {Self::Headless(h)=>h.stop().await,Self::Terminal {handle,..}=>handle.stop().await}}
     pub(crate) async fn command(&self,command:RuntimeCommand)->Result<RuntimeReply,RuntimeError> {match self {Self::Headless(h)=>h.command(command).await,Self::Terminal {handle,..}=>handle.command(command).await}}
     pub(crate) async fn queue(&self,id:String,action:Action)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.queue(id,action).await,Self::Terminal {handle,..}=>handle.queue(id,action).await}}
@@ -40,6 +42,10 @@ pub struct RuntimeRegistry {
     revisions:Mutex<BTreeMap<String,Arc<AtomicU64>>>,
     mods:Option<crate::mods::state::Mods>,
     ingress:super::ingress::IngressGates,
+    /// Primeira espera da religação do processo que cai (dobra a cada subida seguida).
+    respawn_base:Duration,
+    /// Último valor do Codex sem terminal por nome, para o feed do hub (`live`).
+    live:std::sync::Mutex<BTreeMap<String,LiveSender>>,
 }
 
 /// A trava pode demorar a soltar: as tarefas de E/S de um ator que saiu, ou o `LockFileEx` de um
@@ -90,6 +96,63 @@ fn healthy(terminal:bool,view:&Value)->bool {
 
 fn failure(code:&str) -> RuntimeError { RuntimeError::new(code,"runtime indisponível para esta chave ou geração") }
 
+/// Regra 1 do módulo de processo: cano gravado `Ours` conecta (mesmo sem `versao`); morto, de outro
+/// programa ou ausente, sobe outro com o ambiente que o Python calcula agora (nunca guardado).
+pub(super) async fn launch_if_needed(policy:&PolicyClient,target:&mut RuntimeTarget,sidecar_dir:&std::path::Path) -> Result<Option<process::Cano>,RuntimeError> {
+    let recorded = target.binding.pid;
+    if recorded != 0 {
+        let key = target.key.clone();
+        let state = tokio::task::spawn_blocking(move||process::liveness(recorded,&key)).await.map_err(|_|failure("launch_job"))?;
+        if state == process::Liveness::Ours { return Ok(None); }
+    }
+    let env = launch_policy(policy,target,"launch_env",json!({})).await?;
+    if let Some(code) = env["error"].as_str() { return Err(RuntimeError::new(code,"o Python não montou o comando da sessão")); }
+    let shape = ||failure("launch_env_shape");
+    let program:Vec<String> = serde_json::from_value(env["program"].clone()).map_err(|_|shape())?;
+    let vars:BTreeMap<String,String> = serde_json::from_value(env["env"].clone()).map_err(|_|shape())?;
+    let cano_extra = match &env["cano_extra"] { Value::Null=>Default::default(),Value::Object(extra)=>extra.clone(),_=>return Err(shape()) };
+    let cwd = target.metadata["cwd"].as_str().filter(|cwd|!cwd.is_empty()).ok_or_else(||failure("launch_cwd"))?;
+    let spec = process::LaunchSpec { provider:process::Provider::from_str(&target.provider).ok_or_else(||failure("runtime_provider"))?,
+        key:target.key.clone(),cwd:cwd.into(),program,env:vars.into_iter().collect(),cano_extra,sidecar_dir:sidecar_dir.to_owned() };
+    let cano = match process::spawn(&spec).await {
+        Ok(cano)=>cano,
+        Err(error)=>{
+            // O gravado já não serve (morto ou de outro programa): o arquivo da sessão para de apontá-lo.
+            if recorded != 0 && matches!(error,process::ProcessError::NotListening) { clear_cano(policy,target,recorded).await; }
+            let detail = match &error { process::ProcessError::Spawn(detail)=>detail.as_str(),_=>"o processo da sessão não subiu" };
+            return Err(RuntimeError::new(error.code(),detail));
+        }
+    };
+    let value = serde_json::to_value(&cano).map_err(|_|failure("cano_json"))?;
+    if let Err(error) = launch_policy(policy,target,"session.patch_meta",json!({"cano":value})).await {
+        // Sem o arquivo da sessão apontando para ele, o processo ficaria sem dono.
+        if let Err(stop) = process::kill(&cano,&target.key,sidecar_dir).await {
+            tracing::warn!(key=%target.key,code=stop.code(),"cano não gravado não foi encerrado");
+        }
+        return Err(error);
+    }
+    target.binding = CanoBinding { pid:cano.pid,escuta:cano.escuta.clone(),token:cano.token.clone(),versao:cano.versao };
+    target.metadata["cano"] = value;
+    Ok(Some(cano))
+}
+pub(super) async fn launch_policy(policy:&PolicyClient,target:&RuntimeTarget,kind:&str,payload:Value) -> Result<Value,RuntimeError> {
+    let phase = format!("launch:{}",crate::mods::state::random_hex(8));
+    policy.run_for(&target.key,target.generation,kind,&RequestId::String(phase.clone()),payload,&phase).await
+}
+async fn clear_cano(policy:&PolicyClient,target:&RuntimeTarget,pid:u32) {
+    if let Err(error) = launch_policy(policy,target,"session.clear_cano",json!({"pid":pid})).await {
+        tracing::warn!(key=%target.key,code=%error.code,"cano não saiu do arquivo da sessão");
+    }
+}
+/// O cano subido agora e que não deu conexão: morre e sai do arquivo da sessão.
+pub(super) async fn discard(policy:&PolicyClient,target:&RuntimeTarget,cano:&process::Cano,sidecar_dir:&std::path::Path) {
+    if let Err(stop) = process::kill(cano,&target.key,sidecar_dir).await {
+        tracing::warn!(key=%target.key,code=stop.code(),"cano sem conexão não foi encerrado");
+        return;
+    }
+    clear_cano(policy,target,cano.pid).await;
+}
+
 /// Prazo da devolução da janela esticada ao abrir a sessão com terminal (`unstretch`).
 const UNSTRETCH_MAX:Duration = Duration::from_secs(2);
 
@@ -115,12 +178,24 @@ async fn attach_terminal_mods(mods:&crate::mods::state::Mods,target:&super::term
 impl RuntimeRegistry {
     pub fn new(upstream:SocketAddr,secret:String,instance:String) -> Self {
         Self { entries:Mutex::new(BTreeMap::new()),events:broadcast::channel(1024).0,
-            policy:PolicyClient::new(upstream,secret,instance.clone()),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()),mods:None,ingress:Default::default() }
+            policy:PolicyClient::new(upstream,secret,instance.clone()),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()),mods:None,ingress:Default::default(),
+            respawn_base:Duration::from_secs(5),live:Default::default() }
     }
+    pub fn with_respawn_base(mut self,base:Duration) -> Self { self.respawn_base = base; self }
     /// Interface dos mods: sessão Claude sem terminal aberta aqui vira superfície remota e publica no `Mods`.
     pub fn with_mods(mut self,mods:crate::mods::state::Mods) -> Self { self.mods = Some(mods); self }
     pub fn ingress(&self) -> &super::ingress::IngressGates { &self.ingress }
     pub fn subscribe(&self) -> broadcast::Receiver<RuntimeEvent> { self.events.subscribe() }
+    /// Último valor da sessão `name` para o feed do hub; `None` enquanto ela não está aberta aqui.
+    pub fn live(&self,name:&str) -> LiveReceiver { self.live_sender(name).subscribe() }
+    /// Canal do nome, criado na primeira procura (feed ou ator, o que vier antes). Canal vazio e sem
+    /// receptor sai do mapa aqui: sem isto o mapa guardaria todo nome que já teve chat aberto. Canal
+    /// que um ator já segura (cópia fora do mapa) fica, mesmo vazio: o ator só escreve no primeiro passo.
+    fn live_sender(&self,name:&str) -> LiveSender {
+        let mut map = self.live.lock().unwrap_or_else(|e|e.into_inner());
+        map.retain(|key,sender|key == name || sender.receiver_count() > 0 || sender.sender_count() > 1 || sender.borrow().is_some());
+        map.entry(name.to_owned()).or_insert_with(||tokio::sync::watch::channel(None).0).clone()
+    }
     pub async fn handle(&self,key:&str,generation:u64) -> Result<RuntimeHandle,RuntimeError> {
         match self.entry(key,generation).await? {EntryHandle::Headless(handle)=>Ok(handle),_=>Err(failure("runtime_provider"))}
     }
@@ -130,7 +205,28 @@ impl RuntimeRegistry {
     }
     /// Abre a sessão no Rust: trava, fila com `Recover`, conexão ao cano e ator. Responde sem
     /// esperar o `initialize`; o ator o faz e drena a fila quando a sessão fica entregável.
-    pub async fn open(&self,target:RuntimeTarget) -> Result<Value,RuntimeError> {
+    pub async fn open(&self,target:RuntimeTarget) -> Result<Value,RuntimeError> { self.open_inner(target,None,false).await }
+    /// `open` que pode subir o processo: sobe só se o cano gravado não for `Ours` (vivo e da chave).
+    pub async fn open_with_launch(&self,target:RuntimeTarget,sidecar_dir:std::path::PathBuf) -> Result<Value,RuntimeError> {
+        self.open_inner(target,Some(sidecar_dir),true).await
+    }
+    /// `open` de sessão cujo processo o Rust administra (religar, reiniciar, encerrar) sem subir agora.
+    pub async fn open_managed(&self,target:RuntimeTarget,sidecar_dir:std::path::PathBuf) -> Result<Value,RuntimeError> {
+        self.open_inner(target,Some(sidecar_dir),false).await
+    }
+    /// Abertura de Codex que falha fica no canal do hub até a próxima abertura (a mesma regra do
+    /// `close` com erro): sem isso o chat mostraria a sessão parada. Geração ou provedor errado é
+    /// pedido torto, não a sessão falhando.
+    async fn open_inner(&self,target:RuntimeTarget,managed:Option<std::path::PathBuf>,spawn:bool) -> Result<Value,RuntimeError> {
+        let (codex,name) = (target.provider == "codex",target.name.clone());
+        let result = self.open_attempt(target,managed,spawn).await;
+        if let Err(error) = &result && codex && !["runtime_generation","runtime_provider"].contains(&error.code.as_str()) {
+            super::actor::mark_live_error(&self.live_sender(&name),&error.code,&error.message);
+        }
+        result
+    }
+    async fn open_attempt(&self,mut target:RuntimeTarget,managed:Option<std::path::PathBuf>,spawn:bool) -> Result<Value,RuntimeError> {
+        let launch = managed.as_ref().filter(|_|spawn);
         let barrier = self.barrier(&target.key).await;
         let _guard = barrier.lock().await;
         let existing = self.entries.lock().await.get(&target.key).map(|entry|(entry.generation,entry.handle.clone()));
@@ -148,20 +244,35 @@ impl RuntimeRegistry {
             }
         }
         let queue = QueueActor::start(store,lease);
-        let connection = match cano::connect(&target.binding).await {
+        // Depois da fila: o `session.patch_meta` do Python lê o estado dela.
+        let launched = match &launch {
+            Some(sidecar_dir)=>launch_if_needed(&self.policy,&mut target,sidecar_dir).await,
+            None=>Ok(None),
+        };
+        let connection = match &launched {
+            Err(error)=>Err(error.clone()),
+            Ok(_)=>cano::connect(&target.binding).await,
+        };
+        let connection = match connection {
             Ok(connection)=>connection,
             Err(error)=>{
                 if let Err(stop) = queue.shutdown().await {
                     tracing::warn!(key=%target.key,code=%error.code,stop=?stop.kind(),"fila não fechou depois da falha ao conectar no cano");
                 }
+                // Só o cano subido nesta chamada morre: um vivo de antes pode estar no meio de um turno.
+                if let (Ok(Some(cano)),Some(sidecar_dir)) = (launched,launch) { discard(&self.policy,&target,&cano,sidecar_dir).await; }
                 return Err(error);
             },
         };
+        let fresh = matches!(launched,Ok(Some(_)));
         let epoch_s = SystemTime::now().duration_since(UNIX_EPOCH).map(|d|d.as_secs_f64()).unwrap_or(0.0);
         let revision = self.revisions.lock().await.entry(target.key.clone()).or_insert_with(||Arc::new(AtomicU64::new(0))).clone();
         let mut engine = RuntimeEngine::new(&target.provider,metadata,target.generation,ClockSample { monotonic_s:0.0,epoch_s })?
             .with_policy(self.policy.clone()).with_publisher(self.events.clone()).with_revision(revision);
+        engine.set_fresh_process(fresh);
+        if let Some(sidecar_dir) = &managed { engine = engine.with_launch(LaunchConfig { sidecar_dir:sidecar_dir.clone(),backoff:self.respawn_base }); }
         if let Some(mods) = &self.mods { engine = engine.with_mods(mods.clone()); }
+        if target.provider == "codex" { engine = engine.with_live(self.live_sender(&target.name)); }
         // Dono único dos pedidos dos apps até o `close` (S9). Só o Claude tem superfície. Registrado antes
         // de a tarefa do ator existir: a primeira faixa publicada já encontra a sessão no `Mods`.
         // A vida no `Mods` é única no servidor; o processo é a chave durável mais o cano, que o renomear mantém.
@@ -184,7 +295,7 @@ impl RuntimeRegistry {
                     Err(error)=>error,
                     Ok(snapshot)=>snapshot["error"].as_str().map_or_else(||failure("cano_exited"),|code|RuntimeError::new(code,"ator do runtime terminou ao abrir")),
                 };
-                if let Err(close) = self.close_locked(&target.key,target.generation).await {
+                if let Err(close) = self.close_locked(&target.key,target.generation,false).await {
                     tracing::warn!(key=%target.key,code=%close.code,"sessão não fechou depois de abrir com erro");
                 }
                 return Err(error);
@@ -233,15 +344,27 @@ impl RuntimeRegistry {
     pub async fn close(&self,key:&str,generation:u64) -> Result<Value,RuntimeError> {
         let barrier = self.barrier(key).await;
         let _guard = barrier.lock().await;
-        self.close_locked(key,generation).await
+        self.close_locked(key,generation,false).await
     }
-    async fn close_locked(&self,key:&str,generation:u64) -> Result<Value,RuntimeError> {
+    /// Encerrar a sessão: o ator para e o processo dela morre, com os arquivos do cano. Sem a sessão
+    /// aberta aqui não há o que matar (`killed: false`): quem pediu decide.
+    pub async fn close_with_kill(&self,key:&str,generation:u64) -> Result<Value,RuntimeError> {
+        let barrier = self.barrier(key).await;
+        let _guard = barrier.lock().await;
+        self.close_locked(key,generation,true).await
+    }
+    async fn close_locked(&self,key:&str,generation:u64,kill:bool) -> Result<Value,RuntimeError> {
         let (handle,lease_path,name,life) = match self.entries.lock().await.get(key) {
-            None=>return Ok(json!({"closed":true})),
+            None=>return Ok(if kill { json!({"closed":true,"killed":false}) } else { json!({"closed":true}) }),
             Some(entry) if entry.generation == generation=>(entry.handle.clone(),entry.lease_path.clone(),entry.name.clone(),entry.mods_life),
             _=>return Err(failure("runtime_generation")),
         };
-        if let Err(error) = handle.stop().await {
+        let stopped = match (&handle,kill) {
+            (EntryHandle::Headless(handle),true)=>handle.stop_killing().await,
+            (EntryHandle::Terminal {..},true)=>return Err(failure("close_kill")),
+            _=>handle.stop().await,
+        };
+        if let Err(error) = stopped {
             // `stop` sempre junta a tarefa do ator: se ele saiu por erro, a posse acaba com ele. Sem
             // isto a entrada morta ficava para sempre, a sessão não reabria e o retrato de eventos
             // de todas as sessões caía. Só solta depois de a trava estar livre de fato.
@@ -249,13 +372,36 @@ impl RuntimeRegistry {
                 tracing::warn!(key,code=%error.code,"ator terminou mas a trava não liberou em 3 s; sessão segue presa");
                 return Err(error);
             }
+            if kill {
+                // O ator parou e soltou a trava: a sessão saiu daqui, só o processo não morreu. Responder
+                // erro deixava o Python achando que ela seguia aqui; `killed: false` e quem pediu decide.
+                tracing::warn!(key,code=%error.code,"sessão fechada sem encerrar o processo");
+                self.entries.lock().await.remove(key);
+                self.clear_live(&name).await;
+                if let Some(mods) = &self.mods { mods.forget(&name,life); }
+                return Ok(json!({"closed":true,"killed":false}));
+            }
             tracing::warn!(key,code=%error.code,"ator do runtime já tinha terminado; sessão liberada");
         }
         self.entries.lock().await.remove(key);
+        self.clear_live(&name).await;
         // A sessão saiu do Rust: os apps perdem a faixa e os pedidos voltam a não ter dono (S9). Com ou sem
         // terminal, esquece só esta vida: outra sessão que tenha tomado o nome (outra vida) fica.
         if let Some(mods) = &self.mods { mods.forget(&name,life); }
-        Ok(json!({"closed":true}))
+        Ok(if kill { json!({"closed":true,"killed":true}) } else { json!({"closed":true}) })
+    }
+    /// Sessão fora do Rust: o feed mostra a parada (`None`), e o canal sem receptor sai do mapa.
+    async fn clear_live(&self,name:&str) {
+        // Outra vida com o mesmo nome (reaberta antes deste fechamento) segue dona do canal.
+        if self.entries.lock().await.values().any(|entry|entry.name == name) { return; }
+        let mut map = self.live.lock().unwrap_or_else(|e|e.into_inner());
+        if let Some(sender) = map.get(name) {
+            // Vida que acabou com erro: o problema fica até a próxima abertura, que escreve por cima.
+            // ponytail: o canal com erro de sessão apagada fica no mapa; um por nome, sem crescer.
+            if sender.borrow().as_ref().is_some_and(|state|state.error.is_some()) { return; }
+            sender.send_replace(None);
+            if sender.receiver_count() == 0 { map.remove(name); }
+        }
     }
     async fn barrier(&self,key:&str) -> Arc<Mutex<()>> {
         self.lifecycle.lock().await.entry(key.into()).or_insert_with(||Arc::new(Mutex::new(()))).clone()
@@ -398,12 +544,13 @@ async fn dispatch(registry:&RuntimeRegistry,envelope:&Envelope) -> Result<Value,
     let command = &envelope.command;
     let kind = command["kind"].as_str().ok_or_else(||failure("command_kind"))?;
     let fields:&[&str] = match kind {
-        "open"=>&["kind","descriptor"],
+        "open"=>&["kind","descriptor","launch"],
         "submit"=>&["kind","text","steer","pre_transcript"],
         "control"=>&["kind","control","payload"],
         "queue"=>&["kind","action"],
         "ingress"=>&["kind","name","closed","held"],
-        "close" | "snapshot" | "drain" | "confirm" | "ensure_projection"=>&["kind"],
+        "close"=>&["kind","kill"],
+        "snapshot" | "drain" | "confirm" | "ensure_projection"=>&["kind"],
         _=>return Err(failure("command_kind")),
     };
     if !command.as_object().is_some_and(|object|object.keys().all(|key|fields.contains(&key.as_str()))) {
@@ -424,18 +571,34 @@ async fn dispatch(registry:&RuntimeRegistry,envelope:&Envelope) -> Result<Value,
         return Ok(json!({"closed":closed}));
     }
     if kind == "open" {
-        return match descriptor(&command["descriptor"])? {
-            Target::Headless(target)=>{
+        // `launch`: quem abre pode subir o processo (só sem terminal, e só se o gravado não for nosso).
+        let launch = match &command["launch"] { Value::Null=>false, value=>value.as_bool().ok_or_else(||failure("open_launch"))? };
+        return match descriptor(&command["descriptor"],launch)? {
+            Target::Headless(target,sidecar_dir) if launch=>{
+                if target.key!=envelope.key || target.generation!=envelope.generation{return Err(failure("runtime_binding"));}
+                let sidecar_dir = sidecar_dir.filter(|dir|!dir.as_os_str().is_empty()).ok_or_else(||failure("launch_sidecar_dir"))?;
+                registry.open_with_launch(target,sidecar_dir).await
+            },
+            // Codex sem terminal com a pasta do arquivo: o Rust administra o processo mesmo sem subir agora.
+            Target::Headless(target,Some(sidecar_dir)) if target.provider == "codex" && !sidecar_dir.as_os_str().is_empty()=>{
+                if target.key!=envelope.key || target.generation!=envelope.generation{return Err(failure("runtime_binding"));}
+                registry.open_managed(target,sidecar_dir).await
+            },
+            Target::Headless(target,_)=>{
                 if target.key!=envelope.key || target.generation!=envelope.generation{return Err(failure("runtime_binding"));}
                 registry.open(target).await
             },
+            Target::Terminal(_) if launch=>Err(failure("open_launch")),
             Target::Terminal(target)=>{
                 if target.key!=envelope.key || target.generation!=envelope.generation{return Err(failure("runtime_binding"));}
                 registry.open_terminal(target).await
             }
         };
     }
-    if kind == "close" { return registry.close(&envelope.key,envelope.generation).await; }
+    if kind == "close" {
+        let kill = match &command["kill"] { Value::Null=>false, value=>value.as_bool().ok_or_else(||failure("close_kill"))? };
+        return if kill { registry.close_with_kill(&envelope.key,envelope.generation).await } else { registry.close(&envelope.key,envelope.generation).await };
+    }
     let handle = registry.entry(&envelope.key,envelope.generation).await?;
     match kind {
         "submit"=> {
@@ -472,10 +635,13 @@ async fn dispatch(registry:&RuntimeRegistry,envelope:&Envelope) -> Result<Value,
 struct Descriptor {
     name:String,key:String,provider:String,headless:bool,meta:Value,jsonl:String,
     projection_dir:std::path::PathBuf,state_path:std::path::PathBuf,lock_path:std::path::PathBuf,generation:u64,
+    /// Pasta do arquivo da sessão, onde o cano subido pelo Rust põe socket e log; só no `open` com `launch`.
+    #[serde(default)] sidecar_dir:Option<std::path::PathBuf>,
 }
 
-enum Target {Headless(RuntimeTarget),Terminal(super::terminal::TerminalTarget)}
-fn descriptor(value:&Value) -> Result<Target,RuntimeError> {
+/// Sem terminal leva a pasta do arquivo da sessão (`sidecar_dir`), que só o `open` com `launch` usa.
+enum Target {Headless(RuntimeTarget,Option<std::path::PathBuf>),Terminal(super::terminal::TerminalTarget)}
+fn descriptor(value:&Value,launch:bool) -> Result<Target,RuntimeError> {
     let descriptor:Descriptor = serde_json::from_value(value.clone()).map_err(|_|failure("descriptor_shape"))?;
     if descriptor.meta["key"] != descriptor.key || descriptor.key.is_empty() { return Err(failure("descriptor_binding")); }
     if !descriptor.headless {
@@ -491,13 +657,22 @@ fn descriptor(value:&Value) -> Result<Target,RuntimeError> {
     }
     if descriptor.meta.get("terminal").is_some(){return Err(failure("descriptor_provider"));}
     let cano = &descriptor.meta["cano"];
-    let binding = CanoBinding { pid:cano["pid"].as_u64().and_then(|pid|u32::try_from(pid).ok()).ok_or_else(||failure("cano_pid"))?,
+    // Subida pedida sem cano gravado: pid 0 é "nenhum", e a subida grava o novo antes de conectar.
+    let binding = if launch && cano["pid"].as_u64().is_none_or(|pid|pid == 0) { CanoBinding { pid:0,escuta:String::new(),token:String::new(),versao:2 } }
+    else if launch { CanoBinding { pid:cano["pid"].as_u64().and_then(|pid|u32::try_from(pid).ok()).ok_or_else(||failure("cano_pid"))?,
+        escuta:cano["escuta"].as_str().unwrap_or_default().into(),token:cano["token"].as_str().unwrap_or_default().into(),
+        // Cano vivo da sessão sem `versao` gravada já fala a 2.
+        versao:cano["versao"].as_u64().and_then(|version|u32::try_from(version).ok()).unwrap_or(2) } }
+    else { CanoBinding { pid:cano["pid"].as_u64().and_then(|pid|u32::try_from(pid).ok()).ok_or_else(||failure("cano_pid"))?,
         escuta:cano["escuta"].as_str().ok_or_else(||failure("cano_address"))?.into(),
         token:cano["token"].as_str().ok_or_else(||failure("cano_token"))?.into(),
-        versao:cano["versao"].as_u64().and_then(|version|u32::try_from(version).ok()).ok_or_else(||failure("cano_version"))? };
+        // O Codex subido pelo Python grava o `cano` antes de conectar, sem `versao`, e já fala a 2.
+        versao:match cano["versao"].as_u64().and_then(|version|u32::try_from(version).ok()) {
+            Some(version)=>version, None if descriptor.provider == "codex"=>2, None=>return Err(failure("cano_version")) } } };
     Ok(Target::Headless(RuntimeTarget { key:descriptor.key,generation:descriptor.generation,name:descriptor.name,provider:descriptor.provider,
         created:descriptor.meta["created"].as_f64().unwrap_or(0.0),metadata:descriptor.meta,binding,
-        lease_path:descriptor.lock_path,state_path:descriptor.state_path,projection_dir:descriptor.projection_dir,transcript:descriptor.jsonl.into() }))
+        lease_path:descriptor.lock_path,state_path:descriptor.state_path,projection_dir:descriptor.projection_dir,transcript:descriptor.jsonl.into() },
+        descriptor.sidecar_dir))
 }
 
 async fn events(State(state):State<Gateway>) -> Response {
@@ -536,10 +711,67 @@ mod tests {
         let value = json!({"name":"session","key":"key","provider":"codex","headless":false,
             "meta":{"key":"key","cano":{"pid":42,"escuta":"tcp:127.0.0.1:1","token":"test","versao":2}},
             "jsonl":"chat.jsonl","projection_dir":"projection","state_path":"state","lock_path":"lock","generation":1});
-        assert!(descriptor(&value).is_err());
+        assert!(descriptor(&value,false).is_err());
         let mut headless = value;
         headless["headless"] = json!(true);
-        assert!(descriptor(&headless).is_ok());
+        assert!(descriptor(&headless,false).is_ok());
+    }
+
+    #[test]
+    fn launch_accepts_a_session_without_cano() {
+        let value = json!({"name":"session","key":"key","provider":"codex","headless":true,"meta":{"key":"key","cano":null},
+            "jsonl":"","projection_dir":"projection","state_path":"state","lock_path":"lock","generation":1,"sidecar_dir":"dir"});
+        assert!(descriptor(&value,false).is_err(),"sem `launch`, sem cano não abre");
+        let Ok(Target::Headless(target,sidecar_dir)) = descriptor(&value,true) else { panic!("subida sem cano gravado") };
+        assert_eq!((target.binding.pid,target.binding.versao),(0,2));
+        assert_eq!(sidecar_dir.as_deref(),Some(std::path::Path::new("dir")));
+    }
+
+    #[test]
+    fn held_empty_live_channel_survives_another_lookup() {
+        // O `open` pega o canal e o ator só escreve no primeiro passo: outra procura no meio não o apaga.
+        let registry = RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into());
+        let held = registry.live_sender("a");
+        let _other = registry.live_sender("b");
+        held.send_replace(Some(Arc::new(LiveState::default())));
+        assert!(registry.live("a").borrow().is_some(),"o feed lê o mesmo canal que o ator segura");
+        drop(held);
+        registry.live_sender("a").send_replace(None);
+        let _ = registry.live_sender("c");
+        assert!(!registry.live.lock().unwrap().contains_key("a"),"vazio, sem dono e sem receptor: sai");
+    }
+
+    #[tokio::test]
+    async fn failed_codex_open_shows_its_error_until_the_next_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into());
+        let rx = registry.live("cx");
+        // Cano gravado que não atende: a conexão falha.
+        let target = RuntimeTarget { key:"k".into(),generation:1,name:"cx".into(),provider:"codex".into(),
+            metadata:json!({"name":"cx","key":"k","headless":true}),
+            binding:CanoBinding { pid:42,escuta:"tcp:127.0.0.1:9".into(),token:"t".into(),versao:2 },
+            lease_path:dir.path().join("q.lock"),state_path:dir.path().join("q.json"),projection_dir:dir.path().join("projection"),
+            transcript:dir.path().join("rollout.jsonl"),created:0.0 };
+        let error = registry.open(target.clone()).await.unwrap_err();
+        assert_eq!(rx.borrow().as_ref().and_then(|s|s.error.clone()).map(|(code,_)|code),Some(error.code.clone()));
+        // Pedido torto (provedor de fora) não acende problema.
+        registry.live_sender("cx").send_replace(None);
+        let other = RuntimeTarget { provider:"pi".into(),..target };
+        assert_eq!(registry.open(other).await.unwrap_err().code,"runtime_provider");
+        assert!(rx.borrow().is_none());
+    }
+
+    #[tokio::test]
+    async fn close_keeps_the_error_of_a_life_that_failed() {
+        let registry = RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into());
+        let rx = registry.live("a");
+        let failed = LiveState { error:Some(("queue_io".into(),"fila recusou".into())),..Default::default() };
+        registry.live_sender("a").send_replace(Some(Arc::new(failed)));
+        registry.clear_live("a").await;
+        assert!(rx.borrow().as_ref().is_some_and(|s|s.error.is_some()),"o hub segue mostrando a falha depois do close");
+        registry.live_sender("a").send_replace(Some(Arc::new(LiveState::default())));
+        registry.clear_live("a").await;
+        assert!(rx.borrow().is_none(),"vida que acabou bem: o canal esvazia");
     }
 
     #[tokio::test]

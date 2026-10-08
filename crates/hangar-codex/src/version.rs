@@ -2,7 +2,7 @@
 //! aviso: os tipos continuam tolerantes, mas campo renomeado pode faltar.
 #[macro_export]
 #[doc(hidden)]
-macro_rules! checked_version { () => { "0.159.3" } }
+macro_rules! checked_version { () => { "0.161.0" } }
 
 pub const CHECKED:&str = checked_version!();
 
@@ -43,7 +43,7 @@ mod tests {
     #[test]
     fn only_major_minor_counts() {
         assert!(!differs(CHECKED));
-        assert!(!differs("0.159.9"));
+        assert!(!differs("0.161.9"));
         assert!(differs("0.160.1-alpha.2"));
         assert!(!differs("lixo"));
     }

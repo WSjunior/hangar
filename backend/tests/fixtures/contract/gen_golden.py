@@ -656,6 +656,18 @@ STEER_CASES = [
     ("terminal_confirm_error", True, None, ("accepted", {}), "terminal_closed: pane saiu"),
 ]
 
+# Codex sem terminal: qualquer recusa do ator é 409 `erro_codex_controle` com a frase do Codex.
+CODEX_STEER_CASES = [
+    ("codex_text_accepted", False, "oriente", ("accepted", {}), None),
+    ("codex_text_rejected_coded", False, "oriente", ("rejected", {"error": "sem turno"}), None),
+    ("codex_text_unknown", False, "oriente", ("unknown", {}), None),
+    ("codex_text_deferred", False, "oriente", ("deferred", {}), None),
+    ("codex_text_op_error", False, "oriente", "runtime_closed: ator saiu", None),
+    ("codex_queue_accepted", False, None, ("accepted", {"ids": ["a", "b"]}), None),
+    ("codex_queue_rejected", False, None, ("rejected", {"error": "sem turno"}), None),
+    ("codex_queue_op_error", False, None, "runtime_closed: ator saiu", None),
+]
+
 
 def session_write_rows() -> tuple[list, list]:
     import asyncio
@@ -709,10 +721,11 @@ def session_write_rows() -> tuple[list, list]:
     def as_json(value):
         return None if value is None else value if isinstance(value, str) else {"disposition": value[0], "payload": value[1]}
 
-    async def run(call, terminal, owner):
+    async def run(call, terminal, owner, provider="claude"):
         runtime_coordinator._current = owner
         api._headless = lambda name: not terminal
-        adapter = RuntimeAdapter("claude")
+        api._provider_of = lambda name: provider
+        adapter = RuntimeAdapter(provider)
         adapter.view = lambda name, mutating=False: RuntimeView("k", 1, 1, {})
         api.get_adapter = lambda key: SimpleNamespace(
             steer=lambda name, text: adapter.dispatch("steer", name, {"text": text}),
@@ -733,10 +746,11 @@ def session_write_rows() -> tuple[list, list]:
                                terminal, Owner(terminal, reply, queue))
             inputs.append({"name": name, "terminal": terminal, "text": text, "steer": steer, "reply": as_json(reply),
                            "queue": as_json(queue), "expect": expect, "diary": list(diary)})
-        for name, terminal, text, reply, confirm in STEER_CASES:
+        cases = [(*case, "claude") for case in STEER_CASES] + [(*case, "codex") for case in CODEX_STEER_CASES]
+        for name, terminal, text, reply, confirm, provider in cases:
             body = None if text is None else api.InputBody(text=text)
-            expect = await run(lambda: api.steer_session("s", body), terminal, Owner(terminal, reply, None, confirm))
-            steers.append({"name": name, "terminal": terminal, "text": text, "reply": as_json(reply),
+            expect = await run(lambda: api.steer_session("s", body), terminal, Owner(terminal, reply, None, confirm), provider)
+            steers.append({"name": name, "provider": provider, "terminal": terminal, "text": text, "reply": as_json(reply),
                            "confirm": confirm, "expect": expect})
         return inputs, steers
 
@@ -759,8 +773,8 @@ def session_write_rows() -> tuple[list, list]:
 # - /interrupt sem terminal: ator recusou, incerto ou falhou -> 409 `erro_sem_turno` com o motivo (antes: 500).
 # Diferença que o golden NÃO compara: o texto de `params.detalhe`.
 def _c(name, route, **kw):
-    return {"name": name, "route": route, "terminal": True, "pending": None, "panel_open": False, "reply": ("accepted", {}),
-            "rust_reply": None, "args": {}, **kw}
+    return {"name": name, "route": route, "provider": "claude", "terminal": True, "pending": None, "panel_open": False,
+            "reply": ("accepted", {}), "rust_reply": None, "args": {}, **kw}
 
 
 ACC = ("accepted", {})
@@ -819,6 +833,18 @@ CONTROL_CASES = [
     _c("queue_removed", "queue_remove", terminal=False, args={"removed": True}),
     _c("queue_not_found", "queue_remove", terminal=False, args={"removed": False}),
     _c("queue_runtime_error", "queue_remove", terminal=False, args={"error": "runtime_closed: ator saiu"}),
+    # Codex sem terminal: interrupção sem turno ou recusada é 409 `erro_codex_controle` (falha antes: 500).
+    _c("codex_interrupt_accepted", "interrupt", provider="codex", terminal=False),
+    _c("codex_interrupt_no_turn", "interrupt", provider="codex", terminal=False, reply=("accepted", {"interrupted": False})),
+    _c("codex_interrupt_rejected", "interrupt", provider="codex", terminal=False, reply=("rejected", {"error": "sem turno"})),
+    _c("codex_interrupt_unknown", "interrupt", provider="codex", terminal=False, reply=("unknown", {})),
+    _c("codex_interrupt_error", "interrupt", provider="codex", terminal=False, reply="!erro: runtime_closed: ator saiu"),
+    _c("codex_select_accepted", "select", provider="codex", terminal=False, args={"option": 1}),
+    _c("codex_select_no_permission", "select", provider="codex", terminal=False, args={"option": 1}, reply="!no_pending"),
+    _c("codex_select_rejected", "select", provider="codex", terminal=False, args={"option": 1}, reply=("rejected", {"error": "opção inválida"})),
+    _c("codex_select_error", "select", provider="codex", terminal=False, args={"option": 1}, reply="!erro: runtime_closed: ator saiu"),
+    _c("codex_queue_removed", "queue_remove", provider="codex", terminal=False, args={"removed": True}),
+    _c("codex_queue_not_found", "queue_remove", provider="codex", terminal=False, args={"removed": False}),
 ]
 
 
@@ -895,8 +921,11 @@ def control_rows() -> list:
     async def run(case):
         reply = case["reply"]
         runtime_coordinator._current = Owner(case["terminal"], reply)
-        api._headless = lambda name: not case["terminal"]
-        adapter = RuntimeAdapter("claude")
+        api._headless = lambda name: not case["terminal"] and case["provider"] == "claude"
+        api._provider_of = lambda name: case["provider"]
+        api._cached_info_sync = lambda name: SimpleNamespace(provider=case["provider"], headless=not case["terminal"])
+        api._codex_sem_terminal = lambda name: case["provider"] == "codex" and not case["terminal"]
+        adapter = RuntimeAdapter(case["provider"])
         adapter.view = lambda name, mutating=False: RuntimeView("k", 1, 1, {})
         api.get_adapter = lambda key: SimpleNamespace(select=lambda name, option: adapter.dispatch("select", name, {"option": option}),
                                                       interrupt=lambda name: adapter.dispatch("interrupt", name, {}))
@@ -918,7 +947,7 @@ def control_rows() -> list:
         rows = []
         for case in CONTROL_CASES:
             expect = await run(case)
-            rows.append({"name": case["name"], "route": case["route"], "terminal": case["terminal"], "args": case["args"],
+            rows.append({"name": case["name"], "route": case["route"], "provider": case["provider"], "terminal": case["terminal"], "args": case["args"],
                          "pending": case["pending"], "panel_open": case["panel_open"], "reply": as_json(case["reply"]),
                          "rust_reply": as_json(case["rust_reply"]), "expect": expect,
                          "sent": list(sent), "notified": list(notified), "diary": list(diary)})
@@ -952,8 +981,8 @@ ASK_SIDECAR = ["Cor?", "Tamanho?"]
 
 
 def _ans(name, **kw):
-    return {"name": name, "terminal": True, "answers": [ANS_OPT], "request_id": None, "pending": None, "panel_open": False,
-            "sidecar": None, "reply": ACC, "submit_reply": ACC, "interrupt_reply": ACC, **kw}
+    return {"name": name, "provider": "claude", "terminal": True, "answers": [ANS_OPT], "request_id": None, "pending": None,
+            "panel_open": False, "sidecar": None, "reply": ACC, "submit_reply": ACC, "interrupt_reply": ACC, **kw}
 
 
 ANSWER_CASES = [
@@ -1011,6 +1040,13 @@ ANSWER_CASES = [
     _ans("headless_uncertain", terminal=False, request_id="r1", reply=("unknown", {})),
     _ans("headless_refused_by_the_actor", terminal=False, request_id="r1", reply="!erro: claude_command: a pergunta mudou"),
     _ans("headless_runtime_error", terminal=False, request_id="r1", reply="!erro: runtime_closed: ator saiu"),
+    # Codex sem terminal: recusa do ator (`codex_command`) e falha são 503 com a frase do Codex.
+    _ans("codex_accepted", provider="codex", terminal=False, request_id="r1", answers=[ANS_OPT, ANS_TEXT]),
+    _ans("codex_rejected", provider="codex", terminal=False, request_id="r1", reply=("rejected", {"error": "x"})),
+    _ans("codex_deferred", provider="codex", terminal=False, request_id="r1", reply=("deferred", {})),
+    _ans("codex_uncertain", provider="codex", terminal=False, request_id="r1", reply=("unknown", {})),
+    _ans("codex_refused_by_the_actor", provider="codex", terminal=False, request_id="r1", reply="!erro: codex_command: a pergunta mudou"),
+    _ans("codex_runtime_error", provider="codex", terminal=False, request_id="r1", reply="!erro: runtime_closed: ator saiu"),
 ]
 
 # Linhas do "Conversar sobre isso": respostas dadas + o que o sidecar sabe das perguntas.
@@ -1088,7 +1124,7 @@ def answer_rows() -> list:
                 reply = self.case["reply"]
             if isinstance(reply, str):
                 code, _, message = reply.removeprefix("!erro: ").partition(": ")
-                if code == "claude_command":
+                if code in {"claude_command", "codex_command"}:
                     raise RustOpError(f"IPC recusou a operação (400: {code})", 400, code)
                 raise RuntimeError(f"{code}: {message}")
             return {"operation_id": operation_id, "disposition": reply[0], "payload": reply[1]}
@@ -1118,8 +1154,9 @@ def answer_rows() -> list:
 
     async def run(case):
         runtime_coordinator._current = Owner(case)
-        api._headless = lambda name: not case["terminal"]
-        adapter = RuntimeAdapter("claude")
+        api._headless = lambda name: not case["terminal"] and case["provider"] == "claude"
+        api._cached_info_sync = lambda name: SimpleNamespace(provider=case["provider"], jsonl="/c/projects/p/sid.jsonl")
+        adapter = RuntimeAdapter(case["provider"])
         adapter.view = lambda name, mutating=False: RuntimeView("k", 1, 1, {})
         api.get_adapter = lambda key: SimpleNamespace(
             answer_questions=lambda name, request_id, answers: adapter.dispatch(
@@ -1147,7 +1184,7 @@ def answer_rows() -> list:
         rows = []
         for case in ANSWER_CASES:
             expect = await run(case)
-            rows.append({"name": case["name"], "terminal": case["terminal"], "answers": case["answers"],
+            rows.append({"name": case["name"], "provider": case["provider"], "terminal": case["terminal"], "answers": case["answers"],
                          "request_id": case["request_id"], "pending": case["pending"], "panel_open": case["panel_open"],
                          "sidecar": case["sidecar"], "reply": as_json(case["reply"]),
                          "submit_reply": as_json(case["submit_reply"]), "interrupt_reply": as_json(case["interrupt_reply"]),
