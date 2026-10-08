@@ -813,7 +813,16 @@ As escolhas feitas na tela ficam salvas na configuração do Hangar.
 Configurações → Servidor → **Configuração compartilhada** leva a configuração do Claude Code e do
 Codex de uma máquina para outras: skills, agents, hooks (com os arquivos que eles usam), barra de
 status, plugins, MCPs, variáveis de ambiente, motores, preferências do Hangar e o `AGENTS.md` e o
-`config.toml` do Codex.
+`config.toml` do Codex. Também leva as contas Claude e a aparência do app nativo:
+
+- **Contas Claude**: cada `~/.claude-<nome>` criada pelo Hangar chega ao destino com o mesmo nome,
+  o apelido e as chaves do `settings.json` que só ela tem. Conta nova nasce sem login (o destino
+  avisa e cada uma entra por Configurações → Contas); conta que já existe lá continua logada como
+  estava. Pasta `~/.claude-<nome>` que não é conta do Hangar fica intocada.
+- **Aparência do app nativo**: tema, cores, fundo (com a imagem), fontes e o jeito da conversa. O
+  app aberto no destino aplica sozinho em poucos segundos. Ficam em cada máquina os tamanhos
+  arrastados de painel, idioma, moeda, bandeja, preenchimento de senha e o aviso antes de comando
+  destrutivo. A aparência do web/PWA mora em cada navegador e não viaja.
 
 1. Escolha a **origem** (qualquer máquina cadastrada), os **destinos** e o que levar.
 2. **Comparar** mostra, por destino, o que é novo, o que mudou, o que já é igual e o que só
@@ -823,7 +832,8 @@ status, plugins, MCPs, variáveis de ambiente, motores, preferências do Hangar 
 
 Os caminhos são resolvidos no destino (inclusive Windows), e o programa de um hook que não existe
 lá (o `node` de outra versão, por exemplo) é trocado pelo que o destino tem no PATH. Não vão:
-credenciais (`.credentials.json`, `auth.json`), o login do `.claude.json`, o `CLAUDE.local.md`,
+credenciais (`.credentials.json`, `auth.json`), o login do `.claude.json` (nem o das contas), as
+chaves de credencial do `settings.json` de cada conta (`env`, `apiKeyHelper`), o `CLAUDE.local.md`,
 os hooks e skills do próprio Hangar e o MCP `hangar` de cada máquina. As pastas `.venv`,
 `node_modules` e `.git` de uma skill ficam de fora e, no destino, as que já existiam continuam.
 Máquina com Hangar anterior a esta tela aparece como "atualize o Hangar lá".

@@ -23,8 +23,8 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from app import (atomico, codex_arquivos, codex_contas_sync, hook_installer, runtime_config,
-                 skill_bridge)
+from app import (apelidos, atomico, codex_arquivos, codex_contas_sync, contas, hook_installer,
+                 runtime_config, skill_bridge)
 from app.codex_importador import CodexNativo
 from app.config_sync_describe import describe, plugin_descriptions
 from app.config_sync_paths import (HEAVY_DIRS, PROGRAMS, Roots, canonicalize, fix_programs,
@@ -36,7 +36,7 @@ MAX_UNPACKED = 300 * 1024 * 1024
 MAX_REF_DIR = 20 * 1024 * 1024
 ITEMS = ("claude_instructions", "claude_skills", "claude_agents", "claude_hooks",
          "claude_plugins", "claude_mcp", "claude_env", "claude_settings", "codex", "engines",
-         "hangar_prefs")
+         "hangar_prefs", "claude_accounts", "hangar_appearance")
 _DIRS = {"claude_instructions": ("rules",), "claude_skills": ("skills",),
          "claude_agents": ("agents", "commands", "output-styles"), "claude_hooks": ("hooks",)}
 # Chaves do settings.json com item próprio; o resto vai em claude_settings.
@@ -508,6 +508,76 @@ def _export_codex(roots: Roots, bundle: Bundle, keep: set[str] | None = None) ->
     return data
 
 
+# Conta leva a pasta, o apelido e as chaves que só ela tem no settings.json (o resto vem do
+# principal na reconciliação). O login nunca: `.credentials.json` e o `.claude.json` da conta não
+# são lidos, e cada conta faz login no destino. Estas chaves carregam credencial ou o comando que
+# a fabrica.
+_ACCOUNT_SECRET_SETTINGS = frozenset({"env", "apiKeyHelper", "awsAuthRefresh",
+                                      "awsCredentialExport", "otelHeadersHelper"})
+
+
+def _alias_id(path: Path) -> str:
+    """O id de apelido que `config.list_config_dirs` usa para a pasta."""
+    return f"claude:{path.resolve()}"
+
+
+def _export_accounts(roots: Roots, bundle: Bundle, keep: set[str] | None = None) -> dict:
+    principal = _settings(roots)
+    aliases = apelidos.ler()
+    accounts: dict[str, dict] = {}
+    for path in sorted(Path(roots.home).glob(".claude-*")):
+        name = path.name.removeprefix(".claude-")
+        if not contas._NOME_OK.fullmatch(name) or not contas.e_conta(path):
+            continue
+        if keep is not None and name not in keep:
+            continue
+        own = _read_json(path / "settings.json")
+        entry: dict = {"settings": _canon({k: v for k, v in own.items() if k not in principal
+                                           and k not in _ACCOUNT_SECRET_SETTINGS}, roots)}
+        if alias := aliases.get(_alias_id(path)):
+            entry["alias"] = alias
+        accounts[name] = entry
+    return {"accounts": accounts, "hashes": {n: _hash(e) for n, e in accounts.items()}}
+
+
+# Aparência do app nativo. A do web mora em cada navegador e não é configuração da máquina. Fica
+# aqui o que depende da tela (tamanhos arrastados), da bandeja, o idioma e a moeda, e as escolhas
+# de segurança deste computador (preencher senha, dispensar o aviso de comando destrutivo).
+_NATIVE_LOCAL = frozenset({"sidebar_width", "live_corner", "side_width", "side_browser_width",
+                           "terminal_height", "language", "currency", "hands_free",
+                           "skip_chat_confirmations", "keep_in_tray", "chrome_autofill"})
+_BACKGROUND = "files/hangar_appearance/background-image"
+
+
+def _native_dir(roots: Roots) -> Path:
+    """A mesma pasta de `appearance::dir()` no app nativo."""
+    if os.name == "nt":
+        base = os.environ.get("APPDATA")
+        return (Path(base) if base else Path(roots.home) / "AppData" / "Roaming") / "hangar-native"
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    return (Path(xdg) if xdg and Path(xdg).is_absolute() else Path(roots.home) / ".config") \
+        / "hangar-native"
+
+
+def _export_appearance(roots: Roots, bundle: Bundle, keep: set[str] | None = None) -> dict:
+    folder = _native_dir(roots)
+    data: dict = {"hashes": {}}
+    native = {k: v for k, v in _read_json(folder / "appearance.json").items()
+              if k not in _NATIVE_LOCAL}
+    if native and (keep is None or "appearance.json" in keep):
+        data["native"] = native
+        data["hashes"]["appearance.json"] = _hash(native)
+    image = folder / "background-image"
+    if image.is_file() and (keep is None or "background-image" in keep):
+        raw = image.read_bytes()
+        name_file = folder / "background-name"
+        name = name_file.read_text(encoding="utf-8") if name_file.is_file() else ""
+        bundle.files[_BACKGROUND] = FileBlob(raw, 0o644)
+        data["background"] = {"name": name}
+        data["hashes"]["background-image"] = _hash([hashlib.sha256(raw).hexdigest(), name])
+    return data
+
+
 # Todos recebem `keep` (as chaves marcadas na prévia); sem ele o item vai inteiro.
 _EXPORTERS = {
     "claude_instructions": lambda r, b, k=None: _export_dir_item(r, "claude_instructions", b, k),
@@ -521,6 +591,8 @@ _EXPORTERS = {
     "codex": _export_codex,
     "engines": _export_engines,
     "hangar_prefs": _export_prefs,
+    "claude_accounts": _export_accounts,
+    "hangar_appearance": _export_appearance,
 }
 
 
@@ -1012,6 +1084,87 @@ def _apply_prefs(ctx: _Apply) -> None:
         res["changed"].append(key)
 
 
+def _apply_accounts(ctx: _Apply) -> None:
+    """Cria a conta que falta pelo `contas.criar` daqui, que semeia o `.claude.json` sem login.
+    Conta que já existe só ganha apelido e chaves: o login dela fica como está."""
+    item = "claude_accounts"
+    res = _result(ctx, item)
+    for name, entry in sorted((ctx.bundle.items[item].get("accounts") or {}).items()):
+        if not contas._NOME_OK.fullmatch(name) or not isinstance(entry, dict):
+            res["warnings"].append(_warn("config_sync_invalid_entry", entry=name))
+            continue
+        path = Path(ctx.roots.home) / f".claude-{name}"
+        _emit(ctx.progress, "apply", item, name)
+        touched = False
+        if not contas.e_conta(path):
+            if path.is_symlink() or path.exists():
+                res["warnings"].append(_warn("config_sync_account_not_hangar", account=name))
+                continue
+            try:
+                contas.criar(name)
+            except (contas.ContaError, OSError) as exc:
+                res["warnings"].append(_warn("config_sync_account_failed", account=name,
+                                             error=str(exc)[:200]))
+                continue
+            touched = True
+            res["warnings"].append(_warn("config_sync_account_needs_login", account=name))
+        alias = entry.get("alias")
+        if isinstance(alias, str) and alias.strip():
+            key = _alias_id(path)
+            if apelidos.ler().get(key) != alias.strip()[:apelidos._MAX]:
+                apelidos.definir(key, alias)
+                touched = True
+        settings = entry.get("settings")
+        incoming = {k: v for k, v in _uncanon(settings, ctx.roots).items()
+                    if k not in _ACCOUNT_SECRET_SETTINGS} if isinstance(settings, dict) else {}
+        if incoming:
+            changed: list[str] = []
+
+            def change(current: dict) -> dict:
+                changed.clear()
+                return _merge_keys(current, incoming, changed)
+
+            _edit_json(path / "settings.json", change, ctx)
+            touched = touched or bool(changed)
+        if touched:
+            res["changed"].append(name)
+
+
+def _apply_appearance(ctx: _Apply) -> None:
+    item = "hangar_appearance"
+    res = _result(ctx, item)
+    data = ctx.bundle.items[item]
+    folder = _native_dir(ctx.roots)
+    target = folder / "appearance.json"
+    image_changed = False
+    background = data.get("background")
+    if isinstance(background, dict) and _BACKGROUND in ctx.bundle.files:
+        name = background.get("name")
+        name = name if isinstance(name, str) and len(name) <= 255 and "\n" not in name else ""
+        for file_name, blob in (("background-image", ctx.bundle.files[_BACKGROUND]),
+                                ("background-name", FileBlob(name.encode("utf-8"), 0o644))):
+            image_changed |= _write_entry(folder / file_name, "file", {"": blob}, ctx, item,
+                                          file_name)
+        if image_changed:
+            res["changed"].append("background-image")
+    native = data.get("native")
+    incoming = ({k: v for k, v in native.items() if k not in _NATIVE_LOCAL}
+                if isinstance(native, dict) else {})
+    changed: list[str] = []
+    if incoming:
+        def change(current: dict) -> dict:
+            changed.clear()
+            return _merge_keys(current, incoming, changed)
+
+        _edit_json(target, change, ctx)
+        if changed:
+            res["changed"].append("appearance.json")
+    # O app nativo aberto relê a aparência quando o appearance.json muda; imagem nova sem mudança
+    # nele passaria despercebida.
+    if image_changed and not changed and target.exists():
+        os.utime(target)
+
+
 _NATIVE = CodexNativo
 # Os mesmos que main.py roda na subida: recolocam os hooks do Hangar se algo os tirou.
 _HANGAR_HOOK_INSTALLERS = ("ensure_askq_hook_installed", "ensure_state_hooks_installed",
@@ -1180,6 +1333,8 @@ _APPLIERS = {
     "codex": _apply_codex,
     "engines": _apply_engines,
     "hangar_prefs": _apply_prefs,
+    "claude_accounts": _apply_accounts,
+    "hangar_appearance": _apply_appearance,
 }
 
 
