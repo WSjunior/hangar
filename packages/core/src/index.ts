@@ -60,3 +60,4 @@ export * from './sessionOptions';
 export * from './firstConversation';
 export * from './backgroundEffect';
 export * from './conversationList';
+export * from './questionParts';

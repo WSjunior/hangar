@@ -3660,11 +3660,12 @@ impl Hangar {
                 .child(escapes));
         }
         let ready = self.answer_body(cx).is_some();
-        let skip = ask.payload.is_async.then(|| {
-            let fp = fingerprint.clone();
-            Button::new("ask-skip").ghost().label(tr("ask_skip")).disabled(busy)
-                .on_click(cx.listener(move |this, _, _, cx| this.act(Action::Skip, fp.clone(), cx)))
-        });
+        // Cancelar sempre existe: pergunta assíncrona do Codex só se dispensa (Skip); as demais interrompem o turno.
+        let cancel = {
+            let (action, fp) = if ask.payload.is_async { (Action::Skip, fingerprint.clone()) } else { (Action::Cancel, String::new()) };
+            Button::new("ask-cancel").ghost().label(tr("cancel")).disabled(busy)
+                .on_click(cx.listener(move |this, _, _, cx| this.act(action.clone(), fp.clone(), cx)))
+        };
         let fp = fingerprint.clone();
         let sending = busy && self.selected_key().and_then(|key| self.flight.running(&key).cloned()) == Some(Action::Answer);
         let scroll_key = format!("{fingerprint}#{tab}");
@@ -3674,7 +3675,7 @@ impl Hangar {
         Some(self.interaction_card(tr("ask_title"), body,
             div().flex().items_center().gap_2()
                 .child(div().flex_1().min_w_0().text_xs().text_color(theme::muted()).child(tr(if ready { "ask_ready" } else { "ask_incomplete" })))
-                .children(skip)
+                .child(cancel)
                 .child(if tab + 1 < total {
                     // Troca de aba só pelo botão ou pela faixa: pular sozinho no clique desorienta.
                     Button::new("ask-next").primary().label(tr("ask_next")).disabled(busy)
@@ -3716,7 +3717,13 @@ impl Hangar {
                 .child(scrolled("plan-scroll", &self.plan_scroll.1, 320., div().p_3().child(TextView::new(&view).selectable(true).scrollable(false).code_block_actions(copy_code)))))
                 .when_some(plan.path, |el, path| el.child(div().text_xs().text_color(theme::muted()).child(path)));
         }
+        // URL do texto abre fora do app; o texto da pergunta segue puro.
+        let links = interaction::question_links(&question);
         body = body.child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(question));
+        for (i, url) in links.into_iter().enumerate() {
+            body = body.child(Button::new(SharedString::from(format!("question-link-{i}"))).small().ghost().label(url.clone())
+                .on_click(move |_, _, cx| cx.open_url(&url)));
+        }
         for (i, option) in options.iter().enumerate() {
             let label = match interaction::checkbox(option) { Some((_, rest)) if multi => rest.to_owned(), _ => option.clone() };
             let on = multi && interaction::checkbox(option).is_some_and(|(on, _)| on);
