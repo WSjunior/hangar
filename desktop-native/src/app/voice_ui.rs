@@ -260,6 +260,7 @@ fn squash(text: &str) -> String {
 
 /// Nome falado → sessão. Igual vence parcial; o mesmo nome em duas máquinas fica com o da ativa (`on_active`).
 pub(super) fn match_session(query: &str, names: &[&str], on_active: &[bool]) -> SessionMatch {
+    let original = query;
     let query = squash(query);
     if query.is_empty() { return SessionMatch::None; }
     let squashed: Vec<String> = names.iter().map(|n| squash(n)).collect();
@@ -269,7 +270,12 @@ pub(super) fn match_session(query: &str, names: &[&str], on_active: &[bool]) -> 
         let mine: Vec<usize> = exact.iter().copied().filter(|&i| on_active.get(i) == Some(&true)).collect();
         return if mine.len() == 1 { SessionMatch::One(mine[0]) } else { pick(exact) };
     }
-    pick((0..names.len()).filter(|&i| squashed[i].contains(&query)).collect())
+    let partial: Vec<usize> = (0..names.len()).filter(|&i| squashed[i].contains(&query)).collect();
+    if !partial.is_empty() { return pick(partial); }
+    // Palavras soltas em qualquer ordem: "plano do rust" casa com grupos-rust-plano; "do", "da", "a" não contam.
+    let words: Vec<String> = original.split(|c: char| !c.is_alphanumeric()).map(squash).filter(|w| w.chars().count() > 2).collect();
+    if words.len() < 2 { return SessionMatch::None; }
+    pick((0..names.len()).filter(|&i| words.iter().all(|w| squashed[i].contains(w.as_str()))).collect())
 }
 
 pub(super) fn conversation_pairs(events: &[ChatEvent]) -> Vec<(String, String)> {
@@ -1456,6 +1462,13 @@ mod tests {
         assert_eq!(match_session("shop", &names, &active), SessionMatch::Many(vec![2, 3]));
         assert_eq!(match_session("cloudflare", &names, &active), SessionMatch::None);
         assert_eq!(match_session(" - ", &names, &active), SessionMatch::None, "consulta vazia não casa tudo");
+        let names = ["grupos-rust-plano", "rust-parte5-claude", "gpt-sol"];
+        let active = [true; 3];
+        assert_eq!(match_session("grupos", &names, &active), SessionMatch::One(0), "pedaço do nome");
+        assert_eq!(match_session("rust grupos", &names, &active), SessionMatch::One(0), "palavras em qualquer ordem");
+        assert_eq!(match_session("plano do rust", &names, &active), SessionMatch::One(0), "palavra curta não conta");
+        assert_eq!(match_session("plano do claude", &names, &active), SessionMatch::None, "palavra que não está no nome não casa");
+        assert_eq!(match_session("rust", &names, &active), SessionMatch::Many(vec![0, 1]));
     }
 
     #[test]
