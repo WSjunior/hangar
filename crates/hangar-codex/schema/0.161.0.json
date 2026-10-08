@@ -1,5 +1,5 @@
 {
-  "version": "0.159.3",
+  "version": "0.161.0",
   "definitions": {
     "UserInput": {
       "oneOf": [
@@ -2290,8 +2290,7 @@
       "type": "object"
     },
     "CodexErrorInfo": {
-      "description": "This translation layer make sure that we expose codex error code in camel case.\n\nWhen an upstream HTTP status is available (for example, from the Responses API or a provider), it is forwarded in `httpStatusCode` on the relevant `codexErrorInfo` variant.",
-      "oneOf": [
+      "anyOf": [
         {
           "enum": [
             "contextWindowExceeded",
@@ -2428,8 +2427,15 @@
           ],
           "title": "ActiveTurnNotSteerableCodexErrorInfo",
           "type": "object"
+        },
+        {
+          "type": [
+            "string",
+            "object"
+          ]
         }
-      ]
+      ],
+      "description": "This translation layer make sure that we expose codex error code in camel case.\n\nWhen an upstream HTTP status is available (for example, from the Responses API or a provider), it is forwarded in `httpStatusCode` on the relevant `codexErrorInfo` variant."
     },
     "NonSteerableTurnKind": {
       "enum": [
@@ -2520,7 +2526,7 @@
               "type": "null"
             }
           ],
-          "description": "EXPERIMENTAL - Request a workspace-authorized cyber program for this turn. Omission preserves automatic behavior. This does not grant access."
+          "description": "EXPERIMENTAL - Request an authorized cyber program for this turn. Omission preserves automatic behavior. This does not grant access."
         },
         "disabledPluginIds": {
           "description": "Replace this thread's disabled plugin IDs. Omitted/null preserves the list; [] clears it.",
@@ -2888,7 +2894,7 @@
       "type": "object"
     },
     "CyberAccessProgram": {
-      "description": "Requested cyber treatment for a ChatGPT-authenticated Codex turn. Authorization and model-tier restrictions remain server-owned.",
+      "description": "Requested cyber treatment for an OpenAI model turn. Authorization and model-tier restrictions remain server-owned.",
       "enum": [
         "standard",
         "daybreakBlue",
@@ -8521,6 +8527,7 @@
       "thread/increment_elicitation",
       "thread/decrement_elicitation",
       "thread/name/set",
+      "thread/prediction/request",
       "thread/goal/set",
       "thread/goal/get",
       "thread/goal/clear",
@@ -8643,6 +8650,7 @@
       "account/login/start",
       "account/bedrock/discover",
       "account/bedrock/setup",
+      "account/bedrock/checkGovCloudRequirements",
       "account/login/cancel",
       "account/logout",
       "account/rateLimits/read",
@@ -8686,6 +8694,7 @@
       "thread/name/updated",
       "thread/attachment/updated",
       "thread/goal/updated",
+      "thread/prediction/updated",
       "thread/goal/cleared",
       "thread/queue/changed",
       "project/changed",
