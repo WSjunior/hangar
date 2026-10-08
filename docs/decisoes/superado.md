@@ -167,3 +167,13 @@ no ambiente para o plugin de quem usa o Hangar. Em 18/09/2026 o Hangar passou a 
 plugin próprio (`plugins/hangar`) atrás do mesmo interruptor, como caminho opcional por cima do
 tmux: o risco da API virou fallback por ausência, não motivo para não usar. Regra atual e
 medições em [harnesses.md](harnesses.md#function-hooks-o-plugin-pluginshangar-é-um-plus-por-cima-do-tmux-18092026).
+
+## Codex sem terminal no Python (decisão 2 do dono único)
+
+(Até a parte 5B da migração para Rust → [Codex sem terminal: o cano é do
+Rust](harnesses.md#regras-vigentes), `docs/migracao-rust/parte5-codex/spec.md`.) A decisão 2 de
+`dono-unico/desenho.md` deixava o Codex sem terminal no Python, como provedor não migrado, até
+haver prova real do Codex no Rust: o dono era fixo pelo provedor, o `matar_orfaos` do Python
+varria os canos e o `-32601` valia para todo pedido do servidor sem tela. Hoje o Rust sobe, religa
+e mata o cano, responde os pedidos e atende as rotas só do Codex; o Python faz isso apenas no modo
+`python` (Rust ausente). Codex com terminal continua no Python até a 5C.
