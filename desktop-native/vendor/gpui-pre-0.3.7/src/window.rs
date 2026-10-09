@@ -7043,8 +7043,10 @@ impl Window {
                     let center = bounds.center();
                     // O clique é por coordenada: coberto por popup ou diálogo, ou fora da área rolada, ele cairia em
                     // outro controle. Só clica se o elemento do nó for o que está sob o ponto.
-                    let reachable = self.a11y.node_hitboxes.get(&request.target_node).is_some_and(|hitbox| {
-                        self.rendered_frame.hit_test(center).ids.contains(hitbox)
+                    // Nó sem hitbox mapeada (InteractiveText) segue pelo despacho antigo.
+                    let reachable = self.a11y.node_hitboxes.get(&request.target_node).map_or(true, |hitbox| {
+                        let hit = self.rendered_frame.hit_test(center);
+                        hit.ids.iter().take(hit.hover_hitbox_count).any(|id| id == hitbox)
                     });
                     if !reachable {
                         log::warn!("a11y: click on {:?} refused, its element is not under the point", request.target_node);

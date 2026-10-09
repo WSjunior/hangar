@@ -737,7 +737,7 @@ impl RenderOnce for Button {
             .clone()
             .or_else(|| self.label.clone())
             // Botão só de ícone: a dica é o único nome que ele tem.
-            .or_else(|| self.tooltip.as_ref().map(|(text, _)| text.clone()));
+            .or_else(|| self.tooltip.as_ref().filter(|_| children.is_empty()).map(|(text, _)| text.clone()));
         let content = h_flex()
             .id("label")
             .size_full()

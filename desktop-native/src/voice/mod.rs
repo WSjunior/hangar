@@ -420,8 +420,9 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                             Err(error) => {
                                 context_failures += 1;
                                 log(format!("context delivery failed kind={} attempt={context_failures}", rpc_error_kind(&error)));
-                                pending_context.get_or_insert(text);
-                                if context_failures == 2 { let _ = events.send(VoiceEvent::Failed(VoiceFailure::Organizer)).await; }
+                                // Cada tentativa prende o laço da chamada: na segunda falha avisa e desiste.
+                                if context_failures < 2 { pending_context.get_or_insert(text); }
+                                else { let _ = events.send(VoiceEvent::Failed(VoiceFailure::Organizer)).await; }
                             }
                         }
                     }
@@ -526,6 +527,7 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                     target_cwd = cwd;
                     // Sem anúncio falado: a pessoa vê a tela. O contexto da sessão só entra quando ela voltar a falar.
                     pending_context = Some(format!("{}\n{context}", organizer::code_note(target_cwd.as_deref(), &own)));
+                    context_failures = 0;
                 }
                 Some(Command::Result(session, text)) => {
                     log(format!("session result bytes={}", text.len()));

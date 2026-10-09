@@ -3005,14 +3005,16 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      /// Toggle full screen status on the current window at the platform level.
      pub fn toggle_fullscreen(&self) {
          self.platform_window.toggle_fullscreen();
-@@ -6844,6 +7041,15 @@
+@@ -6844,6 +7041,17 @@
              accesskit::Action::Click => {
                  if let Some(bounds) = self.a11y.node_bounds.get(&request.target_node).copied() {
                      let center = bounds.center();
 +                    // O clique é por coordenada: coberto por popup ou diálogo, ou fora da área rolada, ele cairia em
 +                    // outro controle. Só clica se o elemento do nó for o que está sob o ponto.
-+                    let reachable = self.a11y.node_hitboxes.get(&request.target_node).is_some_and(|hitbox| {
-+                        self.rendered_frame.hit_test(center).ids.contains(hitbox)
++                    // Nó sem hitbox mapeada (InteractiveText) segue pelo despacho antigo.
++                    let reachable = self.a11y.node_hitboxes.get(&request.target_node).map_or(true, |hitbox| {
++                        let hit = self.rendered_frame.hit_test(center);
++                        hit.ids.iter().take(hit.hover_hitbox_count).any(|id| id == hitbox)
 +                    });
 +                    if !reachable {
 +                        log::warn!("a11y: click on {:?} refused, its element is not under the point", request.target_node);
@@ -3021,7 +3023,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
                      let mouse_down = PlatformInput::MouseDown(crate::MouseDownEvent {
                          button: MouseButton::Left,
                          position: center,
-@@ -7724,6 +7930,42 @@
+@@ -7724,6 +7932,42 @@
      }
  
      #[gpui::test]
@@ -3064,7 +3066,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      fn test_fully_visible_bounds_preserve_layout_viewport(cx: &mut TestAppContext) {
          let window = cx.add_window(|_, _| EmptyView);
          let mut platform_window = cx.test_window(window.into());
-@@ -8351,6 +8593,7 @@
+@@ -8351,6 +8595,7 @@
                      keystroke: Keystroke::parse("down").expect("valid keystroke"),
                      is_held: false,
                      prefer_character_input: false,
