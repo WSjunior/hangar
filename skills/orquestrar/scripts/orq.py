@@ -2196,8 +2196,11 @@ def prove_born(name: str, row: dict) -> str | None:
     cmd = r.stdout.strip()
     if prov not in cmd or (want and not _model_matches(want, cmd)):
         return f"{name}: pane started `{cmd[:160]}`, row says {prov} {want}".rstrip()
-    if tier == "priority" and "--service-tier priority" not in cmd:
-        return f"{name}: pane started `{cmd[:160]}` without --service-tier priority"
+    # Só o prefixo do hangar-engine, antes do `--`: o resto do comando pode ter qualquer texto.
+    born = re.search(r"--service-tier (\S+)", cmd.split(" -- ", 1)[0])
+    born_tier = born.group(1).strip("'\"") if born else "default"
+    if tier and born_tier != tier:
+        return f"{name}: born on service tier {born_tier}, row says {tier}"
     return None
 
 
