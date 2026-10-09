@@ -835,9 +835,9 @@ symlinka as skills do repo (`skills/*`) em `~/.claude/skills/` e registra o MCP 
 **MCP `hangar`:** o mesmo `hangar-send` e o `hangar-preview` como ferramentas tipadas, sem shell.
 O instalador o registra no Claude Code (`~/.claude.json` de cada conta) e no Codex (`config.toml`
 de cada `CODEX_HOME`); o token não entra no ambiente da sessão. Ferramentas: `who_am_i`,
-`sessions`, `send`, `group`, `pair`, `unpair`, `new_session`, `browser_open`, `browser`,
-`browser_batch` e `html_render` (mostra uma página HTML dentro da conversa). O que não tem
-ferramenta (`--close`, `--aceitar-par`, `hangar-preview objetivo`…) continua no CLI. Sessão aberta
+`sessions`, `send`, `group`, `pair`, `unpair`, `new_session`, `close_session`, `browser_open`,
+`browser`, `browser_batch` e `html_render` (mostra uma página HTML dentro da conversa). O que não
+tem ferramenta (`--aceitar-par`, `hangar-preview objetivo`…) continua no CLI. Sessão aberta
 antes do registro, Pi, omp e Kimi usam só o CLI.
 
 **Pareamento:** `--pair` registra um grupo no app (badge 🤝 na lista, PairSheet com a
