@@ -108,7 +108,7 @@ fn parked_state_matches_the_python_golden() {
     let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let (mut failures, mut total) = (Vec::new(), 0);
     let document = golden("parked_state.json");
-    let saved_home = std::env::var_os("HOME");
+    let (saved_home, saved_profile) = (std::env::var_os("HOME"), std::env::var_os("USERPROFILE"));
     // SAFETY: ver `ENV`; a status line lê TZ, HOME e as variáveis de pasta e de esforço.
     unsafe { std::env::set_var("TZ", document["tz"].as_str().unwrap()); }
     for case in document["cases"].as_array().unwrap() {
@@ -120,6 +120,8 @@ fn parked_state_matches_the_python_golden() {
         // SAFETY: idem.
         unsafe {
             std::env::set_var("HOME", &home);
+            // No Windows `home_dir` (e o `Path.home()` do Python) leem o USERPROFILE.
+            std::env::set_var("USERPROFILE", &home);
             for key in ["CLAUDE_CODE_EFFORT_LEVEL", "CLAUDE_CONFIG_DIR", "CP_PROJECTS_DIR"] { std::env::remove_var(key); }
             for (key, value) in case["env"].as_object().into_iter().flatten() { std::env::set_var(key, value.as_str().unwrap()); }
         }
@@ -141,6 +143,7 @@ fn parked_state_matches_the_python_golden() {
     unsafe {
         for key in ["CLAUDE_CODE_EFFORT_LEVEL", "CLAUDE_CONFIG_DIR", "CP_PROJECTS_DIR"] { std::env::remove_var(key); }
         match saved_home { Some(home) => std::env::set_var("HOME", home), None => std::env::remove_var("HOME") }
+        match saved_profile { Some(home) => std::env::set_var("USERPROFILE", home), None => std::env::remove_var("USERPROFILE") }
     }
     assert!(total >= 15, "golden menor que o esperado: {total}");
     assert!(failures.is_empty(), "{} divergências:\n{}", failures.len(), failures.join("\n"));
