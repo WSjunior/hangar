@@ -39,7 +39,11 @@ export function registerState(on: On) {
   });
 
   on("turn.complete", async ($, e, next) => {
-    if (e.agentId) agentDone(e.agentId, { answer: e.answer, isAborted: e.isAborted });
+    // Fim de subagente não é a sessão parada: o turno principal pode seguir trabalhando.
+    if (e.agentId) {
+      agentDone(e.agentId, { answer: e.answer, isAborted: e.isAborted });
+      return next(e);
+    }
     await send($, "idle", { motivo: e.reason });
     return next(e);
   });

@@ -1,5 +1,5 @@
 import type { EngineInterface, ModelForkResult, On } from "claude-code";
-import { btwChange, ownPane, waitAgent } from "./bridge";
+import { btwChange, forgetAgent, ownPane, waitAgent } from "./bridge";
 
 // Pergunta lateral: o `/btw` do Claude Code respondido por `$.model.fork` num painel de mod, que o
 // `ui.ts` espelha no app. O fork lê a conversa e não grava nada nela; o overlay embutido não abre.
@@ -8,6 +8,8 @@ export const BTW_MAX = 20;
 export const BTW_RECENT = 5;
 // O fork não aceita sinal: o prazo só desiste de esperar, a chamada segue até o fim e a resposta é descartada.
 export const BTW_TIMEOUT_MS = 120_000;
+// Subagente com ferramentas pode trabalhar bastante; passado isto, o painel desiste e diz.
+export const BTW_FORK_TIMEOUT_MS = 15 * 60_000;
 
 // Build mais antigo medido com `$.model.fork` e o mesmo contrato de resultado.
 export const BTW_MIN_VERSION = "2.1.289";
@@ -52,7 +54,7 @@ const TEXTS = {
     api: (status: number | null, error: string) => `A API recusou a pergunta${status ? ` (HTTP ${status})` : ""}: ${error}.`,
     emptyReply: "O modelo não devolveu texto. Tente de novo.",
     aborted: "A pergunta foi interrompida antes da resposta.",
-    timeout: "Sem resposta em 2 minutos. Tente de novo.",
+    timeout: "Sem resposta em 2 minutos; o que chegar depois é descartado. Tente de novo.",
     failed: (why: string) => `A pergunta falhou: ${why}`,
     fork: "Bifurcar",
     forked: "Bifurcada: um subagente com ferramentas está trabalhando nesta pergunta.",
@@ -60,6 +62,10 @@ const TEXTS = {
     forkAborted: "A bifurcação foi interrompida antes da resposta.",
     forkNotSent: (why: string) => `A bifurcação terminou, mas a resposta não chegou à conversa principal: ${why}`,
     forkFailed: (why: string) => `Não deu para bifurcar: ${why}`,
+    forkTimeout: "O subagente não terminou em 15 minutos; a resposta dele não vai mais para a conversa.",
+    forkEmpty: "O subagente terminou sem texto; nada foi para a conversa.",
+    unsupported: "A pergunta lateral precisa do Claude Code 2.1.289 ou mais novo.",
+    actionFailed: (why: string) => `Não deu certo: ${why}`,
     forkMessage: (q: string, a: string) => `Resultado da pergunta lateral bifurcada (/btw ${q}):\n\n${a}`,
     dropped: "Pergunta lateral respondida no painel do Hangar.",
   },
@@ -74,7 +80,7 @@ const TEXTS = {
     api: (status: number | null, error: string) => `The API refused the question${status ? ` (HTTP ${status})` : ""}: ${error}.`,
     emptyReply: "The model returned no text. Try again.",
     aborted: "The question was interrupted before the answer.",
-    timeout: "No answer within 2 minutes. Try again.",
+    timeout: "No answer within 2 minutes; anything that arrives later is discarded. Try again.",
     failed: (why: string) => `The question failed: ${why}`,
     fork: "Fork",
     forked: "Forked: a subagent with tools is working on this question.",
@@ -82,6 +88,10 @@ const TEXTS = {
     forkAborted: "The fork was interrupted before answering.",
     forkNotSent: (why: string) => `The fork finished, but its answer did not reach the main conversation: ${why}`,
     forkFailed: (why: string) => `Could not fork: ${why}`,
+    forkTimeout: "The subagent did not finish within 15 minutes; its answer will not reach the conversation.",
+    forkEmpty: "The subagent finished without text; nothing went to the conversation.",
+    unsupported: "The side question needs Claude Code 2.1.289 or newer.",
+    actionFailed: (why: string) => `It did not work: ${why}`,
     forkMessage: (q: string, a: string) => `Result of the forked side question (/btw ${q}):\n\n${a}`,
     dropped: "Side question answered in the Hangar panel.",
   },
@@ -157,8 +167,14 @@ function ask($: EngineInterface, entry: BtwEntry): void {
     Object.assign(live, patch);
     changed($);
   };
+  // Repetir depois de uma bifurcação que falhou devolve o botão.
+  if (entry.forkState === "failed") {
+    entry.fork = "";
+    entry.forkState = "";
+  }
   const late = $.clock.sleep(BTW_TIMEOUT_MS).then(() => ({ reason: "timeout" }) as const);
-  void Promise.race([$.model.fork({ prompt: framed(entry.question) }), late]).then(
+  // `then` em volta do fork: um erro síncrono dele também vira erro no painel, não pergunta parada.
+  void Promise.race([Promise.resolve().then(() => $.model.fork({ prompt: framed(entry.question) })), late]).then(
     (r) => settle("isAnswered" in r && r.isAnswered ? { status: "done", answer: r.text } : { status: "error", error: failure(r as never, texts) }),
     (err: unknown) => settle({ status: "error", error: texts.failed(err instanceof Error ? err.message : String(err)) }),
   );
@@ -167,19 +183,27 @@ function ask($: EngineInterface, entry: BtwEntry): void {
 // O "f" do `/btw` do Claude Code: a pergunta vira um subagente `fork` (herda a conversa e as ferramentas),
 // que roda em segundo plano e devolve a resposta na conversa principal.
 async function fork($: EngineInterface, entry: BtwEntry): Promise<void> {
+  if (entry.forkState === "running" || entry.forkState === "done") return;
   const t = texts;
   const show = (note: string, state: ForkState) => {
     entry.fork = note;
     entry.forkState = state;
     changed($);
   };
+  // Antes do `spawn`: um segundo clique no meio não cria outro subagente.
+  show(t.forked, "running");
   try {
     const r = await $.agent.spawn({ prompt: entry.question, description: short(entry.question, 40), subagentType: "fork" });
     if (r.deny || !r.agentId) return show(t.forkFailed(String(r.deny ?? "sem agentId")), "failed");
-    show(t.forked, "running");
     // Agente criado por plugin responde ao plugin: a resposta vai à conversa principal como no "f" do Claude Code.
-    const done = await waitAgent(r.agentId);
+    const agentId = r.agentId;
+    const done = await Promise.race([waitAgent(agentId), $.clock.sleep(BTW_FORK_TIMEOUT_MS).then(() => null)]);
+    if (!done) {
+      forgetAgent(agentId);
+      return show(t.forkTimeout, "failed");
+    }
     if (done.isAborted) return show(t.forkAborted, "failed");
+    if (!done.answer.trim()) return show(t.forkEmpty, "failed");
     // Prompt do plugin espera a sessão ficar livre: não corta o turno em curso. O `session.send` não aceita
     // a própria sessão como destino.
     const sent = await $.prompt.submit({ text: t.forkMessage(entry.question, done.answer) });
@@ -195,16 +219,18 @@ export function sideQuestion(text: string): string | null {
   return m ? (m[1] ?? "").trim() : null;
 }
 
+// Erro ao ler a versão não vira "sem suporte": cairia no overlay embutido, que o app não mostra; seguindo, a
+// falha do fork, se houver, aparece no painel.
 async function supported($: EngineInterface): Promise<boolean> {
-  return btwSupported(await $.session.version().then((v) => v.base, () => undefined));
+  return $.session.version().then((v) => btwSupported(v.base), () => true);
 }
 
 // A pergunta nova (ou, vazia, a última de volta) e o painel aberto na hora.
 async function openBtw($: EngineInterface, question: string): Promise<void> {
   if (!langRead) {
-    langRead = true;
     const lang = (await $.env.get("LC_ALL")) || (await $.env.get("LC_MESSAGES")) || (await $.env.get("LANG")) || "";
     texts = /^en/i.test(lang) ? TEXTS.en : TEXTS.pt;
+    langRead = true;
   }
   if (question) {
     const entry: BtwEntry = { id: ++seq, question, status: "pending", answer: "", error: "", attempt: 0, fork: "", forkState: "", askedAt: await $.clock.now() };
@@ -232,7 +258,9 @@ export function registerBtw(on: On) {
   // texto é pego aqui e descartado. Só o aviso do descarte fica (linha que o modelo não lê).
   on("prompt.submit", { origin: { kind: "sdk" } }, async ($, e, next) => {
     const question = sideQuestion(e.text);
-    if (question === null || !(await supported($))) return next(e);
+    if (question === null) return next(e);
+    // O `/hangar-btw` nunca segue ao modelo: sem suporte, cai com o motivo.
+    if (!(await supported($))) return /^\s*\/hangar-btw/.test(e.text) ? { drop: texts.unsupported } : next(e);
     await openBtw($, question);
     return { drop: texts.dropped };
   });
@@ -241,7 +269,7 @@ export function registerBtw(on: On) {
     const { Box, Text, Markdown, Button } = $.ui.resolve(e);
     const t = texts;
     const redraw = () => changed($);
-    const close = <Button key="fechar" label={t.close} role="dismiss" onPress={() => void $.ui.close({ id: BTW_PANE }).then(() => ownPane(BTW_PANE, false))} />;
+    const close = <Button key="fechar" label={t.close} role="dismiss" onPress={() => void $.ui.close({ id: BTW_PANE }).then(() => ownPane(BTW_PANE, false), (err: unknown) => $.ui.toast(t.actionFailed(String(err))))} />;
     const entry = entries[current];
     if (!entry) {
       return (
@@ -271,9 +299,9 @@ export function registerBtw(on: On) {
           : <Markdown key="resposta" text={entry.answer} />}
         {entry.fork ? <Text dimColor>{entry.fork}</Text> : null}
         <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
-          {entry.status === "done" ? <Button key="copiar" label={t.copy} onPress={(press) => void $.ui.copy({ text: entry.answer, surface: press.surface })} /> : null}
+          {entry.status === "done" ? <Button key="copiar" label={t.copy} onPress={(press) => void $.ui.copy({ text: entry.answer, surface: press.surface }).catch((err: unknown) => $.ui.toast(t.actionFailed(String(err))))} /> : null}
           {entry.status !== "pending" ? <Button key="repetir" label={t.retry} onPress={() => { ask($, entry); redraw(); }} /> : null}
-          {entry.status !== "pending" && !entry.fork ? <Button key="bifurcar" label={t.fork} onPress={() => void fork($, entry)} /> : null}
+          {entry.status !== "pending" && (entry.forkState === "" || entry.forkState === "failed") ? <Button key="bifurcar" label={t.fork} onPress={() => void fork($, entry)} /> : null}
           <Button key="limpar" label={t.clear} onPress={() => { entries = []; current = -1; redraw(); }} />
           {close}
         </Box>

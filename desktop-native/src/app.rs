@@ -2343,11 +2343,17 @@ impl Hangar {
         }
         self.confirm = None;
         self.action_feedback.remove(&key);
-        let text = if self.plugin_source == Some(crate::plugin_ui::UiSource::Surface) && composer::side_question(&text) {
-            composer::surface_side_question(&text)
-        } else { text };
         // O grupo é o da hora do Enter: o texto pode sair depois, com outra conversa aberta ou o grupo mudado.
         let group = if steer { None } else { self.group_targets(&key, &text) };
+        // Sem terminal, o `/btw` só sai traduzido e com o plugin anunciando que o atende; mesmo com a lista de
+        // comandos ainda vazia (sem `blocked_command`), nunca vai cru ao Claude Code.
+        let surface_btw = group.is_none() && self.plugin_source == Some(crate::plugin_ui::UiSource::Surface) && composer::side_question(&text);
+        if surface_btw && !self.btw_ready() {
+            self.action_feedback.insert(key, (tr("command_btw_unavailable").replace("{cmd}", "/btw"), true));
+            cx.notify();
+            return;
+        }
+        let text = if surface_btw { composer::surface_side_question(&text) } else { text };
         // Enter com um envio em voo não se perde: o texto sai do campo e vai na vez dele.
         if flying {
             self.delivery.hold(key.clone(), text, steer, group);

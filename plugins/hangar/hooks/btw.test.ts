@@ -2,6 +2,7 @@ import { expect, mock, test, tier } from "claude-code/testing";
 import type { Engine } from "claude-code/testing";
 import type { On } from "claude-code";
 import { BTW_MAX, BTW_PANE, BTW_TIMEOUT_MS, btwSupported, pushEntry, recentEntries, type BtwEntry } from "./btw";
+import { agentDone, forgetAgent, waitAgent } from "./bridge";
 
 // Como na sessão do Hangar: o plugin entra por `--plugin-dir` e fica por fora dos outros mods.
 tier("prepend");
@@ -209,7 +210,7 @@ test("o painel do /btw vai ao app pelo /ui, com o `btw` entre o que o plugin ate
   await de_novo.unmount();
 });
 
-test("Bifurcar pede um subagente fork com a pergunta; recusa aparece no painel e o botão some", {}, async ($, on) => {
+test("Bifurcar pede um subagente fork com a pergunta; recusa aparece no painel e o botão volta para tentar de novo", {}, async ($, on) => {
   mock.clock(on, { now: 1_000_000 });
   sessao(on, () => answered("resposta"));
   // O kit apaga o `agentId` de um spawn respondido pelo mock: o caminho até a conversa principal é provado
@@ -225,7 +226,7 @@ test("Bifurcar pede um subagente fork com a pergunta; recusa aparece no painel e
   await ui.press({ key: "bifurcar" });
   expect(pedidos).toEqual(["rode os testes"]);
   expect((await textos(ui)).join("\n")).toContain("Não deu para bifurcar: bloqueado por política");
-  expect(await botoes(ui)).not.toContain("bifurcar");
+  expect(await botoes(ui)).toContain("bifurcar");
   await ui.unmount();
 });
 
@@ -301,4 +302,19 @@ test("versão mínima do CLI", async () => {
   expect(btwSupported("2.1.288")).toBe(false);
   expect(btwSupported(undefined)).toBe(false);
   expect(btwSupported("x")).toBe(false);
+});
+
+test("fim de subagente que chega antes da espera não se perde", async () => {
+  agentDone("cedo", { answer: "14", isAborted: false });
+  expect(await waitAgent("cedo")).toEqual({ answer: "14", isAborted: false });
+  const depois = waitAgent("tarde");
+  agentDone("tarde", { answer: "ok", isAborted: false });
+  expect(await depois).toEqual({ answer: "ok", isAborted: false });
+  agentDone("esquecido", { answer: "x", isAborted: false });
+  forgetAgent("esquecido");
+  let chegou = false;
+  void waitAgent("esquecido").then(() => { chegou = true; });
+  await Promise.resolve();
+  expect(chegou).toBe(false);
+  forgetAgent("esquecido");
 });

@@ -211,10 +211,11 @@ struct Session {
     click: Option<Click>,
     /// Só na sessão com terminal (fase 3): o espelho que o plugin manda, o elo e as esperas do clique.
     terminal: Option<Terminal>,
-    /// Sem terminal: o que o plugin do Hangar manda pela ponte, juntado à vista da superfície.
-    extra: SurfaceExtra,
+    /// Sem terminal: o que o plugin do Hangar manda pela ponte, juntado à vista da superfície. Por `Arc`: sob
+    /// a trava global só se copia o ponteiro, e a identidade diz se uma publicação ainda é a da vez.
+    extra: Arc<SurfaceExtra>,
     /// Sem terminal: a última vista da superfície antes da junção, republicada quando o `extra` muda.
-    surface_view: Option<Value>,
+    surface_view: Option<Arc<Value>>,
 }
 
 /// O que o plugin do Hangar manda pela ponte numa sessão sem terminal: o que ele atende (`caps`) e o estado
@@ -225,10 +226,11 @@ pub struct SurfaceExtra {
     pub data: BTreeMap<String, Value>,
 }
 
-/// A vista da superfície com o que o plugin mandou pela ponte.
-fn with_extra(mut view: Value, extra: &SurfaceExtra) -> Value {
+/// A vista da superfície com o que o plugin mandou pela ponte; montada fora da trava global.
+fn with_extra(view: &Value, extra: &SurfaceExtra) -> Value {
+    let mut view = view.clone();
     // Sem nada do plugin, a vista sai como sempre saiu.
-    if *extra == SurfaceExtra::default() { return view; }
+    if extra.caps.is_empty() && extra.data.is_empty() { return view; }
     view["caps"] = json!(extra.caps);
     if let Some(panes) = view["panes"].as_array_mut() {
         for pane in panes {
@@ -397,28 +399,36 @@ impl Mods {
     /// Guarda e entrega o `plugin_ui`; devolve se mudou. É o único ponto que compara a vista nova com a
     /// anterior: a superfície publica a cada desenho guardado, sem guardar cópia para comparar.
     pub fn publish_ui(&self, name: &str, life: u64, data: Value) -> bool {
-        let data = if data["source"] == "surface" {
-            let extra = {
-                let mut inner = self.inner.lock().unwrap();
-                let Some(session) = inner.sessions.get_mut(name).filter(|session| session.life == life) else { return false };
-                session.surface_view = Some(data.clone());
-                session.extra.clone()
-            };
-            with_extra(data, &extra)
-        } else { data };
-        self.publish_if(name, life, data, |_| true)
+        if data["source"] != "surface" { return self.publish_if(name, life, data, |_| true); }
+        let view = Arc::new(data);
+        let extra = {
+            let mut inner = self.inner.lock().unwrap();
+            let Some(session) = inner.sessions.get_mut(name).filter(|session| session.life == life) else { return false };
+            session.surface_view = Some(view.clone());
+            session.extra.clone()
+        };
+        self.publish_surface(name, life, view, extra)
     }
 
     /// O `/ui` do plugin numa sessão sem terminal: guarda o `extra` e republica a última vista com ele.
     pub fn surface_extra(&self, name: &str, extra: SurfaceExtra) {
+        let extra = Arc::new(extra);
         let (life, view) = {
             let mut inner = self.inner.lock().unwrap();
             let Some(session) = inner.sessions.get_mut(name) else { return };
-            if session.extra == extra { return; }
-            session.extra = extra;
+            session.extra = extra.clone();
             (session.life, session.surface_view.clone())
         };
-        if let Some(view) = view { self.publish_ui(name, life, view); }
+        if let Some(view) = view { self.publish_surface(name, life, view, extra); }
+    }
+
+    /// Junta fora da trava e publica só se vista e `extra` ainda forem os da sessão: um desenho e um `/ui` que se
+    /// cruzam não deixam o mais velho por último.
+    fn publish_surface(&self, name: &str, life: u64, view: Arc<Value>, extra: Arc<SurfaceExtra>) -> bool {
+        let data = with_extra(&view, &extra);
+        self.publish_if(name, life, data, |session| {
+            session.surface_view.as_ref().is_some_and(|now| Arc::ptr_eq(now, &view)) && Arc::ptr_eq(&session.extra, &extra)
+        })
     }
 
     /// `current`: conferido sob a trava, diz se a publicação ainda é a da vez (a da sessão com terminal é
@@ -440,6 +450,11 @@ impl Mods {
     /// O ator morreu sem passar pelo `close`: a faixa e os painéis somem dos apps, e a sessão segue com o
     /// mesmo dono até o `close` a esquecer.
     pub fn clear_ui(&self, name: &str, life: u64) {
+        // O que o plugin anunciou morreu com o processo: sem isso o app seguiria mandando `/btw` a ninguém.
+        if let Some(session) = self.inner.lock().unwrap().sessions.get_mut(name).filter(|session| session.life == life) {
+            session.extra = Arc::default();
+            session.surface_view = None;
+        }
         self.publish_ui(name, life, empty_ui("surface"));
     }
 

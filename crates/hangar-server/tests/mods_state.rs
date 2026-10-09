@@ -223,3 +223,14 @@ fn surface_view_carries_the_plugin_extra() {
     assert!(mods.publish_ui("s", 1, next));
     assert_eq!(replayed(&mods, "plugin_ui").last().unwrap()["caps"], json!(["btw"]));
 }
+
+/// O ator morreu: o que o plugin anunciou some junto, e o app para de oferecer o `/btw`.
+#[test]
+fn clear_drops_the_plugin_extra() {
+    let mods = mods();
+    mods.publish_ui("s", 1, json!({"above": null, "panes": [], "shown_id": null, "columns": 80, "source": "surface"}));
+    mods.surface_extra("s", SurfaceExtra { caps: vec!["btw".into()], data: Default::default() });
+    assert_eq!(replayed(&mods, "plugin_ui").last().unwrap()["caps"], json!(["btw"]));
+    mods.clear_ui("s", 1);
+    assert!(replayed(&mods, "plugin_ui").last().unwrap().get("caps").is_none());
+}

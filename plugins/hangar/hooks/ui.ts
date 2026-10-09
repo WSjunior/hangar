@@ -28,6 +28,11 @@ let holdUntil: number | null = null;
 let sent: string | null = null;
 // O que o plugin atende nesta sessão (`bandBody`), lido uma vez.
 let caps: string[] | null = null;
+// Sem terminal: quem leva o estado do `/btw` ao app, trocado a cada `session.start` (só o último vale).
+let surfaceSync: (() => void) | null = null;
+let surfaceGen = 0;
+const SURFACE_RETRY_MS = 5_000;
+const SURFACE_RESYNC_MS = 30_000;
 let scheduled = false;
 // Reenvio pedido quando a ponte volta, fora de qualquer hook: o engine não deixa guardar o `$`
 // numa variável, só usá-lo num closure, como nos timers.
@@ -55,8 +60,9 @@ async function post($: EngineInterface, path: string, extra: string, ponte: Brid
 // ponte ou com recusa, a faixa sai de novo quando a ponte aparece ou o backend diz que não a tem.
 async function flush($: EngineInterface) {
   scheduled = false;
-  caps ??= await $.session.version().then((v) => (btwSupported(v.base) ? ["btw"] : []), () => []);
-  const body = bandBody(above, columns, [...panes.values()], shown, MAX_BODY_CHARS, caps);
+  // Só uma versão lida fica guardada: erro de leitura manda vazio agora e tenta de novo no próximo envio.
+  caps ??= await $.session.version().then((v) => (btwSupported(v.base) ? ["btw"] : []), () => null);
+  const body = bandBody(above, columns, [...panes.values()], shown, MAX_BODY_CHARS, caps ?? []);
   if (body === sent || !bridge()) return;
   sent = body;
   if ((await post($, "ui", body))?.status !== 200) sent = null;
@@ -74,6 +80,7 @@ function schedule($: EngineInterface) {
 }
 
 onResend(() => resend?.());
+onBtwChange(() => surfaceSync?.());
 
 // Fechar sai da lista do app como no hook de `ui.close`; abrir só libera o espelho, que o desenho preenche.
 function forget(id: string): boolean {
@@ -167,11 +174,40 @@ export function registerUi(on: On) {
     const sessao = await $.env.get("CP_SESSION_NAME");
     setSurfaceBridge(url && token && sessao ? { url, token, sessao } : null);
     // Sem terminal a árvore chega ao app pela superfície; pela ponte vão só o que o plugin atende e o estado
-    // do `/btw`, que o Rust junta à vista dela. Agora e a cada mudança do painel.
+    // do `/btw`, que o Rust junta à vista dela: agora, a cada mudança do painel e a cada SURFACE_RESYNC_MS,
+    // porque um `hangar-server` reiniciado começa sem eles e não pede de novo.
+    // Só com a versão confirmada: anunciar sem ela faria o app mandar `/hangar-btw` a um CLI que não o atende.
     if (surfaceBridge() && (await $.session.version().then((v) => btwSupported(v.base), () => false))) {
-      const sync = () => void post($, "ui", fields({ caps: ["btw"], panes: [{ id: BTW_PANE, data: btwView() }] }), surfaceBridge());
-      onBtwChange(sync);
-      sync();
+      const gen = ++surfaceGen;
+      let busy = false;
+      let again = false;
+      // Em fila: um envio velho que chegasse depois do novo deixaria o app em "respondendo".
+      const send = async () => {
+        if (busy) {
+          again = true;
+          return;
+        }
+        busy = true;
+        try {
+          do {
+            again = false;
+            const r = await post($, "ui", fields({ caps: ["btw"], panes: [{ id: BTW_PANE, data: btwView() }] }), surfaceBridge());
+            if (r?.status !== 200) {
+              $.clock.after(SURFACE_RETRY_MS, () => void (gen === surfaceGen && send()));
+              break;
+            }
+          } while (again);
+        } finally {
+          busy = false;
+        }
+      };
+      surfaceSync = () => void send();
+      const tick = () => {
+        if (gen !== surfaceGen) return;
+        void send();
+        $.clock.after(SURFACE_RESYNC_MS, tick);
+      };
+      tick();
     }
     return next(e);
   });

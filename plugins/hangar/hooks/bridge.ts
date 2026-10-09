@@ -42,14 +42,34 @@ export function ownPane(id: string, open: boolean): void {
 // quem esperava por ele (a bifurcação do `/btw`) recebe a resposta aqui.
 export type AgentDone = { answer: string; isAborted: boolean };
 const agentWaiters = new Map<string, (done: AgentDone) => void>();
+// Fim que chegou antes de alguém esperar (o subagente terminou antes do `spawn` voltar ao plugin). Guarda os
+// últimos, de qualquer subagente da sessão.
+const agentsFinished = new Map<string, AgentDone>();
+const FINISHED_KEPT = 32;
 
 export function waitAgent(agentId: string): Promise<AgentDone> {
+  const done = agentsFinished.get(agentId);
+  if (done) {
+    agentsFinished.delete(agentId);
+    return Promise.resolve(done);
+  }
   return new Promise((resolve) => agentWaiters.set(agentId, resolve));
 }
 
 export function agentDone(agentId: string, done: AgentDone): void {
-  agentWaiters.get(agentId)?.(done);
+  const waiter = agentWaiters.get(agentId);
+  if (waiter) {
+    agentWaiters.delete(agentId);
+    waiter(done);
+    return;
+  }
+  agentsFinished.set(agentId, done);
+  if (agentsFinished.size > FINISHED_KEPT) agentsFinished.delete(agentsFinished.keys().next().value!);
+}
+
+export function forgetAgent(agentId: string): void {
   agentWaiters.delete(agentId);
+  agentsFinished.delete(agentId);
 }
 
 // O estado do `/btw` mudou: sem terminal, o ui.ts o leva ao app pela ponte da superfície.
