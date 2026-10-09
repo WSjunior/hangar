@@ -8,7 +8,8 @@ a medição que a sustenta mora aqui. Conteúdo movido sem alteração.
 Antes do PR, revisão local e as verificações do projeto. No PR, o app CodeRabbit do GitHub
 (instalado em 08/10/2026 na conta `jeffer1312`, só nos repos `hangar` e
 `hangar-computer-control`) revisa cada PR aberto e cada commit novo nele; configuração em
-`.coderabbit.yaml` (pt-BR, perfil `chill`, lockfiles e `desktop-native/vendor/` fora). PR já
+`.coderabbit.yaml` (pt-BR, perfil `chill`, lockfiles e as cópias da GPUI em `desktop-native/vendor/gpui-*` fora; `patches/` e
+`PATCHES.md` continuam revisados). PR já
 aberto antes da instalação só é revisado com o comentário `@coderabbitai review`. A CLI local do
 CodeRabbit, usada nos repositórios da PMédico, continua fora deste.
 
