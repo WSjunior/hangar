@@ -1,5 +1,5 @@
 import type { EngineInterface, On } from "claude-code";
-import { bridge, setLastState } from "./bridge";
+import { agentDone, bridge, setLastState } from "./bridge";
 
 // O scanner do engine não segue `$` através de um import: o envio fica aqui, e
 // do bridge.ts vem só o endereço.
@@ -39,6 +39,11 @@ export function registerState(on: On) {
   });
 
   on("turn.complete", async ($, e, next) => {
+    // Fim de subagente não é a sessão parada: o turno principal pode seguir trabalhando.
+    if (e.agentId) {
+      agentDone(e.agentId, { answer: e.answer, isAborted: e.isAborted });
+      return next(e);
+    }
     await send($, "idle", { motivo: e.reason });
     return next(e);
   });
