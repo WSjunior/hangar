@@ -508,11 +508,14 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   `problema=state_facts_unavailable`, nunca estado inventado. O `Sources` não tem método com corpo
   padrão: fonte que esquece um não compila. A lista lê o último `state` do `Monitor` vivo
   (`state/published.rs`) e não captura o pane dessa sessão. No modo `python` tudo roda como antes.
-  Codex sem terminal no Rust (`info.headless`) tem no lugar do `Monitor` o feed do runtime
+  Codex (`info.headless`) e Claude (provider `ClaudeHeadless`) sem terminal no Rust têm no lugar do `Monitor` o feed do runtime
   (`state/runtime_feed.rs`): o ator escreve vista, erro e prévia num canal em processo
   (`RuntimeRegistry::live`), fora do `/runtime/events`, e o feed publica os seis eventos (os quatro
-  mais `pensamento`/`ferramenta`) coalescidos em 150 ms; o Python não os produz nem os repassa. Evidência em
-  [plataforma.md](docs/decisoes/plataforma.md#estado-ao-vivo-de-claude-com-terminal-no-monitor-do-rust).
+  mais `pensamento`/`ferramenta`) coalescidos em 150 ms; o Python não os produz nem os repassa. No
+  Claude a sugestão sai dos fatos do plugin empurrados pelo Python, e a sessão parada mostra o estado
+  estacionado (linha de status, modo de permissão, `dead` sem sidecar nem troca), tudo no Rust. Só
+  o modo `python` volta a produzi-los. Evidência em
+  [plataforma.md](docs/decisoes/plataforma.md#estado-do-claude-sem-terminal-no-feed-do-runtime).
 
 ## tmux + Claude Code truecolor
 
