@@ -440,6 +440,35 @@ def test_pull_semeia_o_estado_so_quando_o_state_nao_disse_nada(monkeypatch):
     assert pb.estado_recente("s1") == ("working", None)
 
 
+def test_state_publishes_measured_context_for_its_conversation(tmp_path, monkeypatch):
+    from app import api, tmux
+    from app.registry import SessionRegistry
+    transcript = tmp_path / f"{UUID}.jsonl"
+    transcript.write_text("", encoding="utf-8")
+    monkeypatch.setattr(tmux, "list_panes_all", lambda: {})
+    monkeypatch.setattr(api.registry, "resolve_tracked", lambda *args: (str(transcript), True))
+    monkeypatch.setattr(SessionRegistry, "_context_cache", {"s1": (0, str(transcript), None, None)})
+    body = pb.StateBody(sessao="s1", token=pb.mint("s1"), estado="idle", session_id=UUID,
+                        context={"used": 76_604, "window": 1_000_000})
+    asyncio.run(pb.state(body, None))
+    assert json.loads(transcript.with_suffix(".context.json").read_text()) == {"used": 76_604, "window": 1_000_000}
+    assert "s1" not in SessionRegistry._context_cache
+
+
+def test_state_rejects_context_from_another_conversation(tmp_path, monkeypatch):
+    from app import api, tmux
+    transcript = tmp_path / f"{UUID}.jsonl"
+    transcript.write_text("", encoding="utf-8")
+    monkeypatch.setattr(tmux, "list_panes_all", lambda: {})
+    monkeypatch.setattr(api.registry, "resolve_tracked", lambda *args: (str(transcript), True))
+    body = pb.StateBody(sessao="s1", token=pb.mint("s1"), estado="idle", session_id="outro",
+                        context={"used": 76_604, "window": 1_000_000})
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(pb.state(body, None))
+    assert error.value.status_code == 409
+    assert not transcript.with_suffix(".context.json").exists()
+
+
 def test_modo_user_so_com_dono_que_declarou_sessao_parada_e_texto_simples(monkeypatch):
     monkeypatch.setattr(pb, "mods_by_default", lambda: True)
     monkeypatch.setattr(pb, "declared_modes", lambda name: {"fill", "user"})

@@ -41,6 +41,25 @@ def test_sem_resposta_ou_sem_arquivo_e_none(tmp_path):
     assert cc.from_transcript(None) is None
 
 
+def test_measured_context_wins_without_a_1m_model_alias(tmp_path):
+    p = _transcript(tmp_path, _resposta(entrada=4, lido=76_573, escrito=27))
+    p.with_suffix(".context.json").write_text(json.dumps({"used": 76_604, "window": 1_000_000}), encoding="utf-8")
+    assert cc.from_transcript(p, tmp_path, model="opus") == {"used": 76_604, "window": 1_000_000}
+
+
+def test_invalid_measurement_keeps_transcript_fallback(tmp_path):
+    p = _transcript(tmp_path, _resposta(lido=90_000))
+    for value in (None, {"used": -1, "window": 1_000_000}, {"used": 90_002, "window": 0}):
+        p.with_suffix(".context.json").write_text(json.dumps(value), encoding="utf-8")
+        assert cc.from_transcript(p, tmp_path, model="opus[1m]") == {"used": 90_002, "window": 1_000_000}
+
+
+def test_declared_window_wins_over_a_measurement_from_before_resume(tmp_path):
+    p = _transcript(tmp_path, _resposta(lido=90_000))
+    p.with_suffix(".context.json").write_text(json.dumps({"used": 90_002, "window": 1_000_000}), encoding="utf-8")
+    assert cc.from_transcript(p, tmp_path, window_tokens=256_000) == {"used": 90_002, "window": 256_000}
+
+
 def test_modelo_da_sessao_vence_o_da_conta(tmp_path):
     # O Hangar abre a sessão com `--model opus[1m]` e não mexe no settings.json da conta.
     (tmp_path / "settings.json").write_text(json.dumps({"model": "sonnet"}), encoding="utf-8")

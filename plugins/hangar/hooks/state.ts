@@ -3,11 +3,22 @@ import { bridge, setLastState } from "./bridge";
 
 // O scanner do engine não segue `$` através de um import: o envio fica aqui, e
 // do bridge.ts vem só o endereço.
-async function send($: EngineInterface, estado: string, extra: Record<string, unknown> = {}) {
+async function send($: EngineInterface, estado: string, extra: Record<string, unknown> = {}, measure = false) {
   setLastState(estado);
   const p = bridge();
   if (!p) return;
   try {
+    if (measure) {
+      try {
+        const usage = await $.session.usage();
+        if (usage.context.tokens > 0 && usage.context.window > 0) {
+          extra = { ...extra, session_id: await $.session.id(),
+            context: { used: usage.context.tokens, window: usage.context.window } };
+        }
+      } catch {
+        // A medida indisponível não pode impedir o aviso de estado nem o próximo hook.
+      }
+    }
     await $.http.fetch(`${p.url}/state`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -39,7 +50,7 @@ export function registerState(on: On) {
   });
 
   on("turn.complete", async ($, e, next) => {
-    await send($, "idle", { motivo: e.reason });
+    await send($, "idle", { motivo: e.reason }, true);
     return next(e);
   });
 

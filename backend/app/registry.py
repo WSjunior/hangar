@@ -2035,6 +2035,7 @@ class SessionRegistry:
         claudes = [i for i in infos
                    if getattr(i, "provider", "claude") == "claude" and i.jsonl
                    and (i.name not in self._context_cache
+                        or self._context_cache[i.name][2] is None
                         or now_m - self._context_cache[i.name][0] > _STATUS_TTL
                         or self._context_cache[i.name][1] != i.jsonl)]
         if claudes:
