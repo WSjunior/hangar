@@ -177,3 +177,27 @@ async def test_clear_zera_o_contexto_ate_a_primeira_resposta(tmp_path, monkeypat
     # /clear: transcript novo, ainda sem resposta. O número da conversa anterior não vale mais.
     info.jsonl, info.context = str(depois), None
     assert (await reg.list_with_state())[0].context is None
+
+
+async def test_measurement_during_read_does_not_freeze_old_python_context(tmp_path, monkeypatch):
+    import time
+    from app import registry
+    from app.models import SessionInfo
+    from app.registry import SessionRegistry
+    transcript = _transcript(tmp_path, _resposta(lido=76_602))
+    reg = SessionRegistry(projects_dir=tmp_path)
+    monkeypatch.setattr(SessionRegistry, "_context_cache", {})
+    monkeypatch.setattr(SessionRegistry, "_status_cache", {"s": (time.monotonic(), None)})
+    monkeypatch.setattr(registry.hook_state, "get_state", lambda _sid: ("idle", 1.0))
+    monkeypatch.setattr(registry, "pergunta_aberta", lambda _sid: None)
+    info = SessionInfo(name="s", jsonl=str(transcript), tracked=True, conta=f"claude:{tmp_path}")
+    monkeypatch.setattr(reg, "list", lambda: [info])
+
+    def read_then_publish(_info, _pid):
+        result = cc.read(transcript, tmp_path, model="opus")
+        cc.publish(transcript, {"used": 76_604, "window": 1_000_000})
+        return result
+
+    monkeypatch.setattr(registry, "_claude_reading", read_then_publish)
+    await reg.list_with_state()
+    assert (await reg.list_with_state())[0].context == {"used": 76_604, "window": 1_000_000}

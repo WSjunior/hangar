@@ -99,6 +99,19 @@ def publish(transcript: Path, context: dict) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def source_version(transcript: str | Path) -> tuple:
+    """Versão das fontes antes da leitura, para detectar uma publicação concorrente."""
+    path = Path(transcript)
+    versions = []
+    for file in (path, path.with_suffix(".context.json")):
+        try:
+            stat = file.stat()
+            versions.append((stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            versions.append(None)
+    return tuple(versions)
+
+
 def session_model(answered: str | None, opened: str | None, config_dir: str | Path | None = None,
                   used: int = 0, engine: bool = False) -> str | None:
     """Id do modelo em uso na sessão, para a tela mostrar sem depender da statusline: o da última
