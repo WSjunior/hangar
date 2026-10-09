@@ -24,13 +24,16 @@ async fn health_answers_without_token_and_with_cors() {
     assert_eq!(v["ok"], true);
     assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(v["protocol"], hangar_server::INTERNAL_PROTOCOL);
-    // Derivado da tabela de escritas: o Codex entra aqui quando a tabela passar a servi-lo.
+    // Derivado da tabela de escritas: o Codex com terminal entra aqui quando a tabela passar a servi-lo.
     assert_eq!(v["owns"], serde_json::json!([
-        {"provider": "claude", "headless": true}, {"provider": "claude", "headless": false}]));
+        {"provider": "claude", "headless": true}, {"provider": "claude", "headless": false},
+        {"provider": "codex", "headless": true}]));
     // O endereço da ponte de terminal é anunciado aqui, mas só pode ser de loopback.
     let terminal = v["terminal_address"].as_str().expect("terminal_address");
     assert!(terminal.starts_with("127.0.0.1:"), "{terminal}");
-    assert_eq!(hangar_server::INTERNAL_PROTOCOL, 38);
+    // Grupos: o Python só passa a pedir ao Rust quando a saúde diz que ele os atende.
+    assert!(v["groups"].is_boolean(), "{v}");
+    assert_eq!(hangar_server::INTERNAL_PROTOCOL, 40);
 }
 
 #[tokio::test]

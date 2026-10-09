@@ -325,6 +325,20 @@ pub(super) struct SettingsUi {
     /// Onde ligar o desfoque, aberto pelo botão da linha (o tooltip não chega pelo teclado).
     blur_hint: bool,
     _subscriptions: Vec<Subscription>,
+    _disk_watch: Task<()>,
+}
+
+/// Aparência gravada por fora com o app aberto (configuração compartilhada): sem reler, o próximo ajuste aqui
+/// gravaria por cima o valor antigo da memória.
+fn watch_disk(window: &mut Window, cx: &mut Context<Hangar>) -> Task<()> {
+    cx.spawn_in(window, async move |this, cx| {
+        loop {
+            cx.background_executor().timer(Duration::from_secs(3)).await;
+            let read = cx.background_executor().spawn(async { appearance::changed_on_disk().then(appearance::load) }).await;
+            let Some(read) = read else { continue };
+            if this.update_in(cx, |this, window, cx| this.receive_disk_appearance(read, window, cx)).is_err() { break; }
+        }
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -435,7 +449,8 @@ impl SettingsUi {
         }));
         Self { sliders, fonts, type_picks, custom_sizes, custom_open: Vec::new(),
             accent_picker, tint_picker, search, found: Vec::new(), pick: 0, hit: None, scroll: ScrollHandle::new(),
-            reveal: Rc::new(Cell::new(false)), jump: None, preview: None, live: false, drag: None, blur_hint: false, _subscriptions: subscriptions }
+            reveal: Rc::new(Cell::new(false)), jump: None, preview: None, live: false, drag: None, blur_hint: false, _subscriptions: subscriptions,
+            _disk_watch: watch_disk(window, cx) }
     }
 
     fn slider(&self, knob: Knob) -> &Entity<SliderState> {
@@ -581,6 +596,19 @@ impl Hangar {
             });
         }
         cx.notify();
+    }
+
+    fn receive_disk_appearance(&mut self, read: Result<Appearance, String>, window: &mut Window, cx: &mut Context<Self>) {
+        let next = match read {
+            Ok(next) => next,
+            Err(reason) => return window.push_notification(Notification::warning(tr("appearance_disk_failed").replace("{reason}", &reason)), cx),
+        };
+        let before = appearance::get();
+        self.apply_appearance(next, false, cx);
+        if next.language != before.language { self.set_language(next.language, window, cx); }
+        self.sync_sliders(window, cx);
+        // A imagem pode ter mudado sem mudar a aparência: a configuração compartilhada só toca o arquivo.
+        self.refresh_backdrop(window, cx);
     }
 
     fn reset_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -24,7 +24,9 @@ from typing import AsyncIterator, Callable, Optional
 
 from app.adapters.codex import sem_terminal
 from app.adapters.codex import sessions as codex_sessions
-from app.adapters.codex.appserver import AppServerClient
+from app.adapters.codex.appserver import (
+    AppServerClient, RequestNotSent, RequestRejected, RequestOutcomeUnknown,
+)
 from app.adapters.codex.async_questions import AsyncQuestions
 from app.adapters.codex.lancador import (APPROVAL, CLIENT_INFO, NO_UPDATE_CHECK, SANDBOX,
                                           comando_do_lancador, service_tier_override)
@@ -856,6 +858,8 @@ class CodexAdapter:
     async def _ligar_sem_terminal(self, name: str, meta: dict, *, reabrir: bool = True) -> Optional[AppServerClient]:
         """Religa no cano vivo da sessão sem terminal; sem cano (ou cano morto), sobe outro."""
         from app.runtime_adapter import assert_legacy, bind_client
+        from app.runtime_coordinator import refuse_python_client
+        refuse_python_client(name, "codex")
         assert_legacy(name)
         cano = meta.get("cano") or {}
         if cano:
@@ -916,6 +920,8 @@ class CodexAdapter:
 
     async def _subir_sem_terminal(self, name: str, meta: dict) -> Optional[AppServerClient]:
         from app.runtime_adapter import assert_legacy, bind_client
+        from app.runtime_coordinator import refuse_python_client
+        refuse_python_client(name, "codex", spawn=True)
         assert_legacy(name)
         esforco_recusado = None
         falhas = self._falhas_subida.get(name, 0)
@@ -1496,11 +1502,29 @@ class CodexAdapter:
                     raise RuntimeError(f"A troca falhou ({exc}) e o terminal não voltou: {restore_error}") from restore_error
                 raise RuntimeError(f"A troca falhou; a conversa continua no terminal: {exc}") from exc
 
+    async def release_client(self, name: str) -> None:
+        """O Rust assume a sessão sem terminal: só a ligação do Python ao cano fecha; o processo segue."""
+        sess = self._sessions.pop(name, None)
+        if sess is None:
+            return
+        self._invalidate_preview(sess)
+        tasks = [self._subscribers.pop(name, None), sess.get("bomba")]
+        tasks = [task for task in tasks if task is not None and task is not asyncio.current_task()]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await sess["client"].close()
+
     async def warm_sessions(self) -> None:
         """Reconecta sidecars Codex em série, sem atrasar a subida do backend."""
+        from app import runtime_coordinator
+        coordinator = runtime_coordinator.current()
+        # Sem terminal com o Rust de pé ou esperado é dele: o Python não liga cliente nem sobe processo.
+        rust_headless = coordinator is not None and (coordinator.mode == "pending"
+            or coordinator.mode == "rust" and coordinator.rust_owns("codex", True))
         for meta in await asyncio.to_thread(codex_sessions.list_all):
             name = meta.get("name")
-            if not name:
+            if not name or rust_headless and meta.get("headless"):
                 continue
             sess = self._sessions.get(name)
             if sess and sess["thread_id"] == meta.get("thread_id") and not sess["client"].closed:
@@ -1537,6 +1561,11 @@ class CodexAdapter:
             _esperar_saida(pids)
             if any(pid_vivo(pid) for pid in pids):
                 raise RuntimeError("o processo antigo continua vivo; sidecar e fila conservados")
+        self.forget_memory(name, preserve_preview=preserve_preview)
+
+    def forget_memory(self, name: str, *, preserve_preview: bool = False) -> None:
+        """Esquece a sessão na memória do adapter, sem matar processo: o encerramento pelo Rust também
+        passa aqui, senão um problema velho voltava na sessão recriada com o mesmo nome."""
         self._falhas_subida.pop(name, None)
         self._problemas.pop(name, None)
         sess = self._sessions.pop(name, None)
@@ -2201,11 +2230,14 @@ class CodexAdapter:
         try:
             result = await client.request("turn/start", params)
             sess["turn_id"] = (result.get("turn") or {}).get("id")
-        except Exception:
-            # app-server morto/timeout: NAO engolir -- o caller (api/_send_one_codex, drain) trata
-            # "deferred" reenfileirando, entao a msg nao se perde silenciosamente.
-            _log.exception("codex turn/start falhou name=%s", name)
+        except (RequestNotSent, RequestRejected):
+            _log.warning("codex turn/start não foi aceito name=%s", name, exc_info=True)
             return "deferred"
+        except Exception:
+            # A tentativa pode ter sido recebida: a fila conserva o claim até a prova no transcript.
+            _log.exception("codex turn/start sem confirmação name=%s", name)
+            diag.registrar("codex.send_uncertain", "aviso", sessao=name, codigo="turn_start_response_lost")
+            return "unknown"
         # Marca in_progress AQUI (nao so esperar o turn/started chegar no loop de notifications):
         # o drain roda dentro desse mesmo loop, entao um turn/started concorrente pode nao ser
         # processado a tempo -- sem isto, deliverable() ficaria True e o drain mandaria todas as
@@ -2339,6 +2371,8 @@ class CodexAdapter:
                     await send_thread(q.set_delivered, entry["id"], False)
                 except OSError:
                     pass
+                return sent
+            if result == "unknown":
                 return sent
             if result != "sent":
                 # turno em curso / sessao indisponivel: reverte (nada foi enviado) e espera o proximo idle.
@@ -2651,6 +2685,9 @@ class CodexAdapter:
             entry = claimed[0]
             try:
                 await self.steer(name, entry["text"], turn_id=turn_id)
+            except (RequestOutcomeUnknown, asyncio.CancelledError):
+                # Uma orientação pode ter chegado mesmo sem resposta ou com cancelamento local.
+                raise
             except BaseException:
                 await send_thread(q.set_delivered, entry["id"], False)
                 raise

@@ -41,7 +41,7 @@ def test_info_has_what_hangar_server_needs(tmp_path):
         r = _get(_client())
     assert r.status_code == 200
     assert r.json() == {"provider": "claude-headless", "jsonl": "/p/abc-123.jsonl", "session_key": "abc-123",
-                        "history": {"queue": str(tmp_path / "s1.jsonl")}}
+                        "history": {"queue": str(tmp_path / "s1.jsonl")}, "headless": False}
 
 
 def test_codex_session_key_is_the_rollout_id():
@@ -159,6 +159,16 @@ def test_secret_never_goes_to_environ(monkeypatch):
 def test_info_payload_is_what_the_route_returns(tmp_path):
     with patch("app.adapters.chave_de", lambda name, provider: "claude-headless"):
         assert internal_api.info_payload("s1", "claude", "/p/abc-123.jsonl") == _get(_client()).json()
+
+
+@pytest.mark.parametrize("provider,sidecar,headless", [
+    ("codex", {"headless": True}, True), ("codex", {"headless": False}, False), ("codex", None, False),
+    ("claude", {"headless": True}, False)])
+def test_info_payload_headless_comes_from_the_codex_sidecar(monkeypatch, provider, sidecar, headless):
+    # O hub do Rust liga o feed do estado só para Codex sem terminal; o resto leva `false`.
+    from app.adapters.codex import sessions as codex_sessions
+    monkeypatch.setattr(codex_sessions, "load", lambda name: sidecar)
+    assert internal_api.info_payload("s1", provider, "/p/abc-123.jsonl")["headless"] is headless
 
 
 def test_outside_loopback_404_even_with_secret():

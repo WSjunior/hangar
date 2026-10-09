@@ -5,6 +5,12 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 
 ## Regras vigentes
 
+- **Retomada Codex pelo WebSocket local recebe o histórico inteiro, sem teto de 8 MB.**
+  A fila reserva a entrada antes do envio; perda de resposta ou cancelamento conserva a
+  tentativa como incerta. Só recusa explícita ou ausência de escrita permite reenviar
+  automaticamente. Estar idle não prova ausência de entrega; o transcript confirma a entrada.
+  Medição: [retomada longa e envio sem confirmação](#codex-retomada-longa-e-envio-sem-confirmação).
+
 - **Observação terminal tem uma captura canônica por rodada, sem grade auxiliar.** O controle
   tmux confere sessão/pane a cada leitura; a análise acompanha esse quadro. Em Claude com
   terminal e o Rust de pé, o estado temporal é do `Monitor` do Rust, que pega o quadro do pool em
@@ -151,12 +157,33 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   inclusive em caminhos Windows. O manifesto anterior retira só entradas já importadas;
   hooks nativos e nomes desconhecidos permanecem. A política entra na assinatura da fonte
   para invalidar o cache da próxima reconciliação.
-- **Codex sem terminal: o app-server é do CANO, em stdio.** O backend abre a thread na criação e
-  religa pelo snapshot (aprovação pendente volta). `initialize` repetido responde "Already
-  initialized" e é sucesso; thread sem turno não tem rollout e o `resume` a recusa — abre outra.
-  Só `on-request` e `never` existem (`untrusted` morreu); o sandbox vai no `-c` da subida e trocar
-  de modo reabre o servidor ocioso. Pedido do servidor sem tela recebe `-32601` + nota, nunca
-  sucesso vazio. Um cliente por cano.
+- **Codex sem terminal: o app-server é do CANO, em stdio, e o cano é do Rust.** Com o
+  `hangar-server` de pé, o Rust sobe, religa e mata o `hangar-cano` da sessão e conduz a thread;
+  o Python só calcula argv/env (`launch_env` da política) e grava o arquivo da sessão
+  (`session.patch_meta {cano}` / `session.clear_cano {pid}`). O `env` (tokens, `CODEX_HOME`) é
+  pedido ao Python a cada subida e nunca vai a disco nem a log. O cano que sai é religado por
+  evento (teto de 3 subidas seguidas, espera 5/10/20 s), sem varrer. Reiniciar com turno rodando
+  é permitido (destrava turno preso); trocar o sandbox com turno rodando recusa com
+  `erro_permissao_ocupada` (409). `initialize` repetido responde "Already initialized" e é
+  sucesso; thread sem turno não tem rollout e o `resume` a recusa — processo novo abre outra,
+  cano vivo segue pronto na mesma (ela já está carregada nele). Subida recusada vira
+  `codex_conversa_nao_abriu` com o motivo, nunca sessão ociosa calada. Só `on-request` e
+  `never` existem (`untrusted` morreu); o sandbox vai no `-c` da subida e trocar de modo reabre o
+  servidor ocioso. Todo pedido do servidor tem resposta. Têm tela ou resposta própria: cartões de
+  permissão, URL como cartão de link, `requestUserInput`, formulário MCP como pergunta nativa e
+  `currentTime/read`. Todo o resto (`item/tool/call`, `chatgptAuthTokens/refresh`,
+  `attestation/generate`, v1 legado, desconhecido) recebe `-32601` + nota, nunca sucesso vazio;
+  pedido de thread de subagente nunca é descartado. Um cliente por cano.
+  Falha vira erro com código, nunca passagem ao Python; o código Python fica para o modo `python`.
+  Codex com terminal segue no Python até a 5C.
+- **Processo do cano é um módulo só (`runtime/process.rs`), Claude e Codex.** Subir espera o
+  `listen` por 10 s; matar confere a identidade do pid (pid reaproveitado nunca é morto) e apaga
+  `cano-<chave16>*` só na pasta da sessão, nunca numa derivada de caminho gravado no arquivo. A
+  varredura de órfãos roda UMA vez na subida do Rust, sobre `~/.hangar/claude-headless` e
+  `~/.hangar/codex-sessions`, com dono = HOME (`HANGAR_CANO_OWNER`); o `matar_orfaos` do Python
+  só roda no modo `python`. Teste ou backend isolado que sobe o Rust usa dono único ou
+  `CP_RUST_NO_ORPHAN_SWEEP=1`, senão mata os canos reais da máquina. Windows não varre (sem
+  `/proc`); mata por `taskkill /T /F`, aceitando 0 e 128.
 - **Protocolo do Codex no Rust é tipado e tolerante** (`crates/hangar-codex`): todo campo usado
   existe no recorte do schema da versão conferida (`schema/<versão>.json`, teste
   `schema_check`); campo novo é ignorado; formato inesperado num método conhecido: a
@@ -3261,6 +3288,38 @@ entrega, é 503 `erro_opcao_nao_convergiu`.
 
 Prova real depois do conserto (`scripts/prova-parte4.py --casos 27`, backend isolado): Codex sem
 terminal com cartão → `/select` 200 e a sessão sai do cartão; Claude sem terminal segue 200.
+
+## Codex: retomada longa e envio sem confirmação
+
+Em 08/10/2026, com Codex CLI 0.160.1, um restart do backend foi seguido por 338 reconexões e
+45 falhas de confirmação de `turn/start`. O rollout continha 45 cópias da mesma mensagem de
+usuário, cada uma recebida pelo Codex. A resposta de `thread/resume` inclui o histórico inteiro:
+uma cópia isolada do rollout anterior ao restart, com 17 turnos, já devolvia mais de 16 MB.
+O teto de 8.388.608 bytes do WebSocket encerrava a conexão; a exceção genérica virava `deferred`,
+a fila liberava o claim e a mesma mensagem era enviada novamente.
+
+A prova com o CLI real usa uma conta temporária sem credenciais, plugins desligados e uma
+cópia do histórico anterior ao restart. Não inicia turno de modelo. O cliente da base encerrou
+o WebSocket com código 1009 durante a retomada. O cliente corrigido recebeu 16.763.740 bytes,
+recuperou os 17 turnos e manteve a conexão para um `thread/read` posterior. O limite do leitor
+stdio continua separado; esta mudança remove o teto do WebSocket de loopback nos dois caminhos
+de conexão, abertura e reconexão.
+
+O pedido distingue conexão indisponível antes da escrita, recusa JSON-RPC e resultado incerto
+após começar a escrita. A entrada é reservada antes do RPC e conserva o claim quando a resposta
+se perde ou o envio é cancelado. A execução gerenciada registra `unknown`, usando o contrato
+existente, e não repete a operação. A confirmação de Codex só confirma o que encontrou no
+rollout, inclusive quando idle; ausência de texto não autoriza liberar a tentativa para reenvio.
+Fechamento do WebSocket registra o código no diário, sem conteúdo da conversa.
+
+As regressões cobrem resposta maior que 16 MB em WebSocket real, limpeza de pedido pendente,
+distinção entre recusa e ausência de conexão, perda de resposta, cancelamento, confirmação
+idle e persistência de operação incerta na execução gerenciada.
+
+Conferência contra a base `e840c9e86`: seis casos novos falharam pelo motivo esperado, sem
+erro de importação. Os dois transportes fecharam com 1009; os dois drains emitiram dois
+`turn/start` em vez de um; a confirmação idle chamou o drain; a reserva declarou `accepted`
+para um resultado incerto. Os mesmos casos passaram com a correção.
 
 ## Pergunta lateral (/btw) pelo plugin (08/10/2026)
 
