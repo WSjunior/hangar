@@ -136,8 +136,10 @@ time.sleep(60)
         try:psutil.Process(info['rust']).kill()
         except psutil.NoSuchProcess:pass
         assert runtime_process.reconcile_startup(record) is True
-        child=psutil.Process(info['child']) if psutil.pid_exists(info['child']) else None
-        assert child is None or not child.is_running() or child.status()==psutil.STATUS_ZOMBIE
+        # O filho pode sumir entre as consultas; sumir conta como limpo.
+        try:alive=psutil.Process(info['child']).status()!=psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:alive=False
+        assert not alive
         assert not record.exists()
     finally:
         if backend.poll() is None:

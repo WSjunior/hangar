@@ -281,9 +281,34 @@ impl InFlight {
     }
 }
 
+/// URLs `http(s)://` do texto do cartão, sem pontuação final e sem o que está entre crases.
+pub fn question_links(question: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (i, chunk) in question.split('`').enumerate() {
+        if i % 2 == 1 { continue; }
+        let mut rest = chunk;
+        while let Some(at) = rest.find("http://").into_iter().chain(rest.find("https://")).min() {
+            let tail = &rest[at..];
+            let end = tail.find(char::is_whitespace).unwrap_or(tail.len());
+            let url = tail[..end].trim_end_matches(|c| matches!(c, ':' | '.' | ',' | ';' | '!' | '?' | ')' | ']' | '}' | '\'' | '"'));
+            if url != "http://" && url != "https://" { out.push(url.to_owned()); }
+            rest = &tail[end..];
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn question_links_keeps_only_http_urls_without_trailing_punctuation() {
+        assert_eq!(question_links("srv pede para abrir https://a.com/x?y=1: confirme (http://b.com/c)."),
+            vec!["https://a.com/x?y=1", "http://b.com/c"]);
+        assert!(question_links("rode `curl https://a.com` e ftp://x.com javascript:alert(1)").is_empty());
+        assert!(question_links("Aprovar o plano?").is_empty());
+    }
+
     // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
     use core::prelude::v1::test;
     use crate::api::dto::AskOption;

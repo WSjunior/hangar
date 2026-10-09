@@ -111,6 +111,9 @@ fn failure_detail(body: Option<Value>, status: u16) -> String {
                     .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_owned))).collect()).unwrap_or_default();
                 if let Some(message) = crate::i18n::tr_web(code, &params) { return Some(message); }
             }
+            if let Some(code) = fields.get("code").and_then(Value::as_str).filter(|code| code.starts_with("claude_")) {
+                if let Some(message) = crate::i18n::tr_web(code, &std::collections::HashMap::new()) { return Some(message); }
+            }
             // Custos e uso no Rust (503 do dono único): a frase do web pelo código, que já traz o código.
             if let Some(code) = fields.get("code").and_then(Value::as_str).filter(|code| code.starts_with("costs_") || *code == "internal_info") {
                 // `internal_info` é o mesmo código do histórico, com a frase de lá.

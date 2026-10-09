@@ -9,6 +9,7 @@ Uso, de backend/:  uv run python tests/fixtures/contract/gen_golden.py
 import json
 import logging
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -655,6 +656,18 @@ STEER_CASES = [
     ("terminal_confirm_error", True, None, ("accepted", {}), "terminal_closed: pane saiu"),
 ]
 
+# Codex sem terminal: qualquer recusa do ator é 409 `erro_codex_controle` com a frase do Codex.
+CODEX_STEER_CASES = [
+    ("codex_text_accepted", False, "oriente", ("accepted", {}), None),
+    ("codex_text_rejected_coded", False, "oriente", ("rejected", {"error": "sem turno"}), None),
+    ("codex_text_unknown", False, "oriente", ("unknown", {}), None),
+    ("codex_text_deferred", False, "oriente", ("deferred", {}), None),
+    ("codex_text_op_error", False, "oriente", "runtime_closed: ator saiu", None),
+    ("codex_queue_accepted", False, None, ("accepted", {"ids": ["a", "b"]}), None),
+    ("codex_queue_rejected", False, None, ("rejected", {"error": "sem turno"}), None),
+    ("codex_queue_op_error", False, None, "runtime_closed: ator saiu", None),
+]
+
 
 def session_write_rows() -> tuple[list, list]:
     import asyncio
@@ -708,10 +721,11 @@ def session_write_rows() -> tuple[list, list]:
     def as_json(value):
         return None if value is None else value if isinstance(value, str) else {"disposition": value[0], "payload": value[1]}
 
-    async def run(call, terminal, owner):
+    async def run(call, terminal, owner, provider="claude"):
         runtime_coordinator._current = owner
         api._headless = lambda name: not terminal
-        adapter = RuntimeAdapter("claude")
+        api._provider_of = lambda name: provider
+        adapter = RuntimeAdapter(provider)
         adapter.view = lambda name, mutating=False: RuntimeView("k", 1, 1, {})
         api.get_adapter = lambda key: SimpleNamespace(
             steer=lambda name, text: adapter.dispatch("steer", name, {"text": text}),
@@ -732,10 +746,11 @@ def session_write_rows() -> tuple[list, list]:
                                terminal, Owner(terminal, reply, queue))
             inputs.append({"name": name, "terminal": terminal, "text": text, "steer": steer, "reply": as_json(reply),
                            "queue": as_json(queue), "expect": expect, "diary": list(diary)})
-        for name, terminal, text, reply, confirm in STEER_CASES:
+        cases = [(*case, "claude") for case in STEER_CASES] + [(*case, "codex") for case in CODEX_STEER_CASES]
+        for name, terminal, text, reply, confirm, provider in cases:
             body = None if text is None else api.InputBody(text=text)
-            expect = await run(lambda: api.steer_session("s", body), terminal, Owner(terminal, reply, None, confirm))
-            steers.append({"name": name, "terminal": terminal, "text": text, "reply": as_json(reply),
+            expect = await run(lambda: api.steer_session("s", body), terminal, Owner(terminal, reply, None, confirm), provider)
+            steers.append({"name": name, "provider": provider, "terminal": terminal, "text": text, "reply": as_json(reply),
                            "confirm": confirm, "expect": expect})
         return inputs, steers
 
@@ -758,8 +773,8 @@ def session_write_rows() -> tuple[list, list]:
 # - /interrupt sem terminal: ator recusou, incerto ou falhou -> 409 `erro_sem_turno` com o motivo (antes: 500).
 # Diferença que o golden NÃO compara: o texto de `params.detalhe`.
 def _c(name, route, **kw):
-    return {"name": name, "route": route, "terminal": True, "pending": None, "panel_open": False, "reply": ("accepted", {}),
-            "rust_reply": None, "args": {}, **kw}
+    return {"name": name, "route": route, "provider": "claude", "terminal": True, "pending": None, "panel_open": False,
+            "reply": ("accepted", {}), "rust_reply": None, "args": {}, **kw}
 
 
 ACC = ("accepted", {})
@@ -818,6 +833,18 @@ CONTROL_CASES = [
     _c("queue_removed", "queue_remove", terminal=False, args={"removed": True}),
     _c("queue_not_found", "queue_remove", terminal=False, args={"removed": False}),
     _c("queue_runtime_error", "queue_remove", terminal=False, args={"error": "runtime_closed: ator saiu"}),
+    # Codex sem terminal: interrupção sem turno ou recusada é 409 `erro_codex_controle` (falha antes: 500).
+    _c("codex_interrupt_accepted", "interrupt", provider="codex", terminal=False),
+    _c("codex_interrupt_no_turn", "interrupt", provider="codex", terminal=False, reply=("accepted", {"interrupted": False})),
+    _c("codex_interrupt_rejected", "interrupt", provider="codex", terminal=False, reply=("rejected", {"error": "sem turno"})),
+    _c("codex_interrupt_unknown", "interrupt", provider="codex", terminal=False, reply=("unknown", {})),
+    _c("codex_interrupt_error", "interrupt", provider="codex", terminal=False, reply="!erro: runtime_closed: ator saiu"),
+    _c("codex_select_accepted", "select", provider="codex", terminal=False, args={"option": 1}),
+    _c("codex_select_no_permission", "select", provider="codex", terminal=False, args={"option": 1}, reply="!no_pending"),
+    _c("codex_select_rejected", "select", provider="codex", terminal=False, args={"option": 1}, reply=("rejected", {"error": "opção inválida"})),
+    _c("codex_select_error", "select", provider="codex", terminal=False, args={"option": 1}, reply="!erro: runtime_closed: ator saiu"),
+    _c("codex_queue_removed", "queue_remove", provider="codex", terminal=False, args={"removed": True}),
+    _c("codex_queue_not_found", "queue_remove", provider="codex", terminal=False, args={"removed": False}),
 ]
 
 
@@ -894,8 +921,11 @@ def control_rows() -> list:
     async def run(case):
         reply = case["reply"]
         runtime_coordinator._current = Owner(case["terminal"], reply)
-        api._headless = lambda name: not case["terminal"]
-        adapter = RuntimeAdapter("claude")
+        api._headless = lambda name: not case["terminal"] and case["provider"] == "claude"
+        api._provider_of = lambda name: case["provider"]
+        api._cached_info_sync = lambda name: SimpleNamespace(provider=case["provider"], headless=not case["terminal"])
+        api._codex_sem_terminal = lambda name: case["provider"] == "codex" and not case["terminal"]
+        adapter = RuntimeAdapter(case["provider"])
         adapter.view = lambda name, mutating=False: RuntimeView("k", 1, 1, {})
         api.get_adapter = lambda key: SimpleNamespace(select=lambda name, option: adapter.dispatch("select", name, {"option": option}),
                                                       interrupt=lambda name: adapter.dispatch("interrupt", name, {}))
@@ -917,7 +947,7 @@ def control_rows() -> list:
         rows = []
         for case in CONTROL_CASES:
             expect = await run(case)
-            rows.append({"name": case["name"], "route": case["route"], "terminal": case["terminal"], "args": case["args"],
+            rows.append({"name": case["name"], "route": case["route"], "provider": case["provider"], "terminal": case["terminal"], "args": case["args"],
                          "pending": case["pending"], "panel_open": case["panel_open"], "reply": as_json(case["reply"]),
                          "rust_reply": as_json(case["rust_reply"]), "expect": expect,
                          "sent": list(sent), "notified": list(notified), "diary": list(diary)})
@@ -951,8 +981,8 @@ ASK_SIDECAR = ["Cor?", "Tamanho?"]
 
 
 def _ans(name, **kw):
-    return {"name": name, "terminal": True, "answers": [ANS_OPT], "request_id": None, "pending": None, "panel_open": False,
-            "sidecar": None, "reply": ACC, "submit_reply": ACC, "interrupt_reply": ACC, **kw}
+    return {"name": name, "provider": "claude", "terminal": True, "answers": [ANS_OPT], "request_id": None, "pending": None,
+            "panel_open": False, "sidecar": None, "reply": ACC, "submit_reply": ACC, "interrupt_reply": ACC, **kw}
 
 
 ANSWER_CASES = [
@@ -1010,6 +1040,13 @@ ANSWER_CASES = [
     _ans("headless_uncertain", terminal=False, request_id="r1", reply=("unknown", {})),
     _ans("headless_refused_by_the_actor", terminal=False, request_id="r1", reply="!erro: claude_command: a pergunta mudou"),
     _ans("headless_runtime_error", terminal=False, request_id="r1", reply="!erro: runtime_closed: ator saiu"),
+    # Codex sem terminal: recusa do ator (`codex_command`) e falha são 503 com a frase do Codex.
+    _ans("codex_accepted", provider="codex", terminal=False, request_id="r1", answers=[ANS_OPT, ANS_TEXT]),
+    _ans("codex_rejected", provider="codex", terminal=False, request_id="r1", reply=("rejected", {"error": "x"})),
+    _ans("codex_deferred", provider="codex", terminal=False, request_id="r1", reply=("deferred", {})),
+    _ans("codex_uncertain", provider="codex", terminal=False, request_id="r1", reply=("unknown", {})),
+    _ans("codex_refused_by_the_actor", provider="codex", terminal=False, request_id="r1", reply="!erro: codex_command: a pergunta mudou"),
+    _ans("codex_runtime_error", provider="codex", terminal=False, request_id="r1", reply="!erro: runtime_closed: ator saiu"),
 ]
 
 # Linhas do "Conversar sobre isso": respostas dadas + o que o sidecar sabe das perguntas.
@@ -1087,7 +1124,7 @@ def answer_rows() -> list:
                 reply = self.case["reply"]
             if isinstance(reply, str):
                 code, _, message = reply.removeprefix("!erro: ").partition(": ")
-                if code == "claude_command":
+                if code in {"claude_command", "codex_command"}:
                     raise RustOpError(f"IPC recusou a operação (400: {code})", 400, code)
                 raise RuntimeError(f"{code}: {message}")
             return {"operation_id": operation_id, "disposition": reply[0], "payload": reply[1]}
@@ -1117,8 +1154,9 @@ def answer_rows() -> list:
 
     async def run(case):
         runtime_coordinator._current = Owner(case)
-        api._headless = lambda name: not case["terminal"]
-        adapter = RuntimeAdapter("claude")
+        api._headless = lambda name: not case["terminal"] and case["provider"] == "claude"
+        api._cached_info_sync = lambda name: SimpleNamespace(provider=case["provider"], jsonl="/c/projects/p/sid.jsonl")
+        adapter = RuntimeAdapter(case["provider"])
         adapter.view = lambda name, mutating=False: RuntimeView("k", 1, 1, {})
         api.get_adapter = lambda key: SimpleNamespace(
             answer_questions=lambda name, request_id, answers: adapter.dispatch(
@@ -1146,7 +1184,7 @@ def answer_rows() -> list:
         rows = []
         for case in ANSWER_CASES:
             expect = await run(case)
-            rows.append({"name": case["name"], "terminal": case["terminal"], "answers": case["answers"],
+            rows.append({"name": case["name"], "provider": case["provider"], "terminal": case["terminal"], "answers": case["answers"],
                          "request_id": case["request_id"], "pending": case["pending"], "panel_open": case["panel_open"],
                          "sidecar": case["sidecar"], "reply": as_json(case["reply"]),
                          "submit_reply": as_json(case["submit_reply"]), "interrupt_reply": as_json(case["interrupt_reply"]),
@@ -1164,6 +1202,232 @@ def write_session_write(out: Path | None = None) -> None:
     for name, rows in (("input.json", inputs), ("steer.json", steers), ("control.json", control_rows()),
                        ("answer.json", answer_rows()), ("askq_chat_text.json", chat_text_rows())):
         (out / name).write_text(json.dumps(rows, ensure_ascii=True, indent=1) + "\n", encoding="utf-8")
+
+
+CASOS_PAIR = {
+    "a": dict(peers=["b"], task="T-1 filtro", gid="ab12cd34", harness={"a": "claude", "b": "codex", "z": "pi"}),
+    "orq-solo": dict(peers=[], task="", gid="cd34ef56", harness={}, orq=True),
+    "nome com espaço": dict(peers=["a"], task="", gid="ab12cd34", harness={}),
+}
+
+# Escritos crus: o Python de hoje não grava `fed`, e os outros dois são formatos que ele só lê.
+CRUS_PAIR = {
+    "legado": {"peer": "x"},
+    "quebrado": [1, 2],
+    "fed": {"peers": ["b", "lab::c"], "task": "t", "gid": "ab12cd34", "harness": {},
+            "fed": {"owner": "casa", "local": True, "version": 7}},
+}
+
+
+def write_pair_sidecars() -> None:
+    """Sidecars de `.hangar-pair` como o `PairLink.set` os grava, e o que o `PairLink.get` lê deles."""
+    from app import pair
+
+    out = GOLDEN / "pair_sidecars"
+    out.mkdir(parents=True, exist_ok=True)
+    for old in out.glob("*.json"):
+        old.unlink()
+    antes = pair.settings.projects_dir
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            # Nunca o ~/.claude/.hangar-pair de verdade.
+            pair.settings.projects_dir = Path(tmp) / "projects"
+            for name, caso in CASOS_PAIR.items():
+                pair.PairLink(name).set(**caso)
+            for name, corpo in CRUS_PAIR.items():
+                (pair._pair_dir() / f"{name}.json").write_text(json.dumps(corpo), encoding="utf-8")
+            for f in sorted(pair._pair_dir().glob("*.json")):
+                shutil.copy(f, out / f.name)
+            nomes = [*CASOS_PAIR, *CRUS_PAIR]
+            write_golden("pair_sidecars/expected.json", {n: pair.PairLink(n).get() for n in nomes})
+    finally:
+        pair.settings.projects_dir = antes
+
+
+# Rotas de grupo de uma máquina, em sequência sobre as sessões Claude s0..s3 (as mesmas que o teste
+# do Rust cria). `orchestrators`: quem o `_recusa_orq` recusa naquele passo; `contract`: texto gravado
+# em grupo-<gid>.md antes do passo; `python_only`: o FastAPI responde (o Rust repassa o pedido).
+GROUP_GID = "9a9a9a9a"
+GROUP_STEPS = [
+    dict(name="pair_two_loose", method="POST", path="s0/pair", body={"peers": ["s1"], "task": "t1"}),
+    dict(name="pair_task_conflict", method="POST", path="s2/pair", body={"peer": "s0", "task": "outra"}),
+    dict(name="pair_third_joins", method="POST", path="s2/pair", body={"peer": "s0"}),
+    dict(name="pair_self", method="POST", path="s0/pair", body={"peers": ["s0"]}),
+    dict(name="pair_no_peer", method="POST", path="s0/pair", body={}),
+    dict(name="pair_missing_session", method="POST", path="s0/pair", body={"peers": ["ghost", "s1"]}),
+    dict(name="pair_orchestrator", method="POST", path="s0/pair", body={"peers": ["g1-orq"]}, orchestrators=["g1-orq"]),
+    dict(name="pair_extra_field", method="POST", path="s0/pair", body={"peers": ["s1"], "bogus": 1}, python_only=True),
+    dict(name="group_message_ok", method="POST", path="s0/group-message", body={"text": "terminei"}),
+    dict(name="group_message_slash", method="POST", path="s0/group-message", body={"text": "  /clear"}),
+    dict(name="group_message_forward", method="POST", path="s0/group-message", body={"text": " [grupo: s1] oi"}),
+    dict(name="group_message_no_group", method="POST", path="s3/group-message", body={"text": "oi"}),
+    *[dict(name=f"group_message_{i}", method="POST", path="s1/group-message", body={"text": f"marco {i}"}) for i in range(2, 6)],
+    dict(name="group_message_storm", method="POST", path="s2/group-message", body={"text": "marco 6"}),
+    dict(name="contract_no_group", method="GET", path="s3/pair/contract"),
+    dict(name="contract_with_group", method="GET", path="s0/pair/contract", contract="decisão: usar X\n"),
+    dict(name="unpair_orchestrator", method="DELETE", path="g1-orq/pair", orchestrators=["g1-orq"]),
+    dict(name="unpair", method="DELETE", path="s0/pair"),
+    dict(name="unpair_not_grouped", method="DELETE", path="s3/pair"),
+]
+
+
+def group_route_rows() -> list:
+    """Cada passo pela rota do Python de verdade (TestClient, sem lifespan), com sessões, envio e
+    orquestrador falsos; `delivered` = quem recebeu recado no passo."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from fastapi.testclient import TestClient
+    from app import api, conversation_transfer, pair
+    from app.config import settings
+    from app.models import SessionInfo
+
+    rows, sent, orchestrators = [], [], set()
+
+    async def enviar(name, text):
+        sent.append(name)
+        return {"ok": True}
+
+    names = ["s0", "s1", "s2", "s3"]
+    antes = (pair.settings.projects_dir, settings.auth_token)
+    try:
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(api.registry, "list", lambda: [SessionInfo(name=n, cwd="/p") for n in names]), \
+             patch.object(api, "_enviar", enviar), \
+             patch.object(api, "_session_exists", lambda n: n in names), \
+             patch.object(api.orq_runs, "find", lambda n: n in orchestrators), \
+             patch.object(conversation_transfer, "require_available", lambda n: None), \
+             patch.object(pair, "_arquivo_dir", lambda: Path(tmp) / "arquivo"), \
+             patch.object(pair.uuid, "uuid4", lambda: SimpleNamespace(hex=GROUP_GID + "0" * 24)):
+            # Nunca o ~/.claude/.hangar-pair de verdade.
+            pair.settings.projects_dir = Path(tmp) / "projects"
+            settings.auth_token = "secret"
+            api._group_envios.clear()
+            client = TestClient(api.app)
+            for step in GROUP_STEPS:
+                orchestrators.clear()
+                orchestrators.update(step.get("orchestrators", []))
+                if "contract" in step:
+                    (pair._pair_dir() / f"grupo-{GROUP_GID}.md").write_text(step["contract"], encoding="utf-8")
+                sent.clear()
+                r = client.request(step["method"], f"/api/sessions/{step['path']}", headers={"Authorization": "Bearer secret"},
+                                   **({"json": step["body"]} if "body" in step else {}))
+                body = json.loads(json.dumps(r.json()).replace(str(pair._pair_dir()), "<pair>"))
+                rows.append({**step, "status": r.status_code, "response": body, "delivered": sorted(sent)})
+    finally:
+        pair.settings.projects_dir, settings.auth_token = antes
+    return rows
+
+
+# Par 1:1 entre máquinas: `casa` e `lab` (e `anon`, sem CP_SERVER_ID) com as sessões s0..s3 cada.
+# `peers.json` de todas conhece `lab` e `off` (fora do ar); `at` é a máquina que recebe o pedido;
+# `seed` grava sidecars crus nela antes do passo; `fail_delivery`: a máquina cujo envio falha.
+CROSS_REFUSAL = {"code": "erro_fila_nao_digitada", "params": {}, "msg": "composer ilegível"}
+CROSS_STEPS = [
+    dict(name="no_server_id", at="anon", method="POST", path="s0/pair", body={"peer": "lab::s1"}),
+    dict(name="cross_with_local", at="casa", method="POST", path="s0/pair", body={"peers": ["lab::s1", "s2"]}),
+    dict(name="cross_missing_local", at="casa", method="POST", path="ghost/pair", body={"peer": "lab::s1"}),
+    dict(name="cross_unknown_server", at="casa", method="POST", path="s0/pair", body={"peer": "nowhere::s1"}),
+    dict(name="cross_refused", at="casa", method="POST", path="s0/pair", body={"peer": "lab::ghost"}),
+    dict(name="cross_network_down", at="casa", method="POST", path="s0/pair", body={"peer": "off::s1", "task": "t0"}),
+    dict(name="cross_pair", at="casa", method="POST", path="s0/pair", body={"peer": "lab::s1", "task": "t1"}),
+    dict(name="cross_local_mix", at="casa", method="POST", path="s2/pair", body={"peer": "s0"}),
+    dict(name="group_message_remote", at="casa", method="POST", path="s0/group-message", body={"text": "oi"}),
+    dict(name="pair_remote_bad_initiator", at="lab", method="POST", path="s2/pair-remote", body={"initiator": "s0"}),
+    dict(name="pair_remote_mix", at="lab", method="POST", path="s1/pair-remote", body={"initiator": "casa::s2"}),
+    dict(name="pair_remote_notice_fails", at="lab", method="POST", path="s2/pair-remote",
+         body={"initiator": "casa::s3", "task": "x"}, fail_delivery="lab"),
+    dict(name="pair_remote_extra_field", at="lab", method="POST", path="s2/pair-remote",
+         body={"initiator": "casa::s3", "bogus": 1}, python_only=True),
+    dict(name="pair_remote_direct", at="lab", method="POST", path="s3/pair-remote", body={"initiator": "casa::s2", "task": "y"}),
+    dict(name="unpair_remote_wrong_peer", at="lab", method="POST", path="s1/unpair-remote", body={"peer": "casa::s3"}),
+    dict(name="unpair_remote_not_grouped", at="lab", method="POST", path="s0/unpair-remote", body={"peer": "casa::s0"}),
+    dict(name="leave_cross", at="casa", method="DELETE", path="s0/pair"),
+    dict(name="unpair_remote_after_leave", at="lab", method="POST", path="s1/unpair-remote", body={"peer": "casa::s0"}),
+    dict(name="leave_peer_down", at="casa", method="DELETE", path="s3/pair",
+         seed={"s3": {"peers": ["off::s1"], "task": "", "gid": "abababab", "harness": {}}}),
+    dict(name="leave_no_server_id", at="anon", method="DELETE", path="s3/pair",
+         seed={"s3": {"peers": ["lab::s1"], "task": "", "gid": "cdcdcdcd", "harness": {}}}),
+]
+
+
+def cross_route_rows() -> list:
+    """Cada passo pela rota do Python de verdade, as três máquinas no mesmo processo: o `call_url`
+    falso troca pasta de grupo e CP_SERVER_ID para `lab` e chama a rota dela; `off` é a rede caída.
+    `calls` = o que saiu para outra máquina; `delivered` = `máquina:sessão` que recebeu recado."""
+    from contextlib import contextmanager
+    from unittest.mock import patch
+
+    from fastapi.testclient import TestClient
+    from app import api, conversation_transfer, external_pairs, pair, peers
+    from app.config import settings
+    from app.models import SessionInfo
+
+    rows, sent, calls = [], [], []
+    names = ["s0", "s1", "s2", "s3"]
+    ids = {"casa": "casa", "lab": "lab", "anon": ""}
+    here = {"at": "casa", "fail": None}
+    auth = {"Authorization": "Bearer secret"}
+
+    async def enviar(name, text):
+        sent.append(f"{here['at']}:{name}")
+        return {"ok": False, "error": CROSS_REFUSAL} if here["fail"] == here["at"] else {"ok": True}
+
+    antes = (pair.settings.projects_dir, settings.auth_token, settings.server_id)
+    with tempfile.TemporaryDirectory() as tmp:
+        @contextmanager
+        def machine(m):
+            saved = (pair.settings.projects_dir, settings.server_id, here["at"])
+            # Nunca o ~/.claude/.hangar-pair de verdade.
+            pair.settings.projects_dir, settings.server_id, here["at"] = Path(tmp) / m / "projects", ids[m], m
+            external_pairs._reset()
+            try:
+                yield
+            finally:
+                pair.settings.projects_dir, settings.server_id, here["at"] = saved
+                external_pairs._reset()
+
+        def call_url(base, token, method, path, body=None, timeout=8, label="", follow_redirects=False):
+            calls.append({"to": label, "method": method, "path": path, "body": body})
+            if label == "off":
+                raise peers.PeerError(f"{label} inacessível: <rede>", transport=True)
+            with machine("lab"):
+                r = client.request(method, path, headers=auth, **({"json": body} if body is not None else {}))
+            if r.status_code >= 300:
+                try:
+                    detail = json.loads(r.text).get("detail", r.text)
+                except (ValueError, AttributeError):
+                    detail = r.text
+                raise peers.PeerError(f"{label} respondeu HTTP {r.status_code}: {detail}", status=r.status_code, detail=detail)
+            return r.status_code, (r.json() if r.text.strip() else None)
+
+        try:
+            with patch.object(api.registry, "list", lambda: [SessionInfo(name=n, cwd="/p") for n in names]), \
+                 patch.object(api, "_enviar", enviar), \
+                 patch.object(api, "_session_exists", lambda n: n in names), \
+                 patch.object(api.orq_runs, "find", lambda n: False), \
+                 patch.object(conversation_transfer, "require_available", lambda n: None), \
+                 patch.object(pair, "_arquivo_dir", lambda: Path(tmp) / here["at"] / "arquivo"), \
+                 patch.object(peers, "peer_cfg", lambda s: {"lab": ("http://lab", "secret"), "off": ("http://off", "secret")}.get(s)), \
+                 patch.object(peers, "call_url", call_url):
+                settings.auth_token = "secret"
+                api._group_envios.clear()
+                client = TestClient(api.app)
+                for step in CROSS_STEPS:
+                    sent.clear()
+                    calls.clear()
+                    here["fail"] = step.get("fail_delivery")
+                    with machine(step["at"]):
+                        for name, sidecar in step.get("seed", {}).items():
+                            pair._pair_dir().mkdir(parents=True, exist_ok=True)
+                            (pair._pair_dir() / f"{name}.json").write_text(json.dumps(sidecar), encoding="utf-8")
+                        r = client.request(step["method"], f"/api/sessions/{step['path']}", headers=auth,
+                                           **({"json": step["body"]} if "body" in step else {}))
+                    rows.append({**step, "status": r.status_code, "response": r.json(), "delivered": sorted(sent),
+                                 "calls": list(calls)})
+        finally:
+            pair.settings.projects_dir, settings.auth_token, settings.server_id = antes
+    return rows
 
 
 def main() -> None:
@@ -1192,6 +1456,9 @@ def main() -> None:
     write_golden("ask_question.json", ask_rows())
     write_golden("preview.json", preview_rows())
     write_session_write()
+    write_pair_sidecars()
+    write_golden("group_routes.json", group_route_rows())
+    write_golden("group_cross_routes.json", cross_route_rows())
 
 
 if __name__ == "__main__":

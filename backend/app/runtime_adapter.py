@@ -395,6 +395,7 @@ class LegacyBridge:
         if descriptor["meta"].get("terminal"):
             from app.runtime_terminal import reserve_op
             return await reserve_op(self.coordinator, descriptor, command, operation_id)
+        from app.adapters.codex.appserver import RequestOutcomeUnknown
         name, provider = descriptor["name"], descriptor["provider"]
         adapter, io = self.adapters[provider], LegacyIO(self.coordinator)
         kind = command["kind"]
@@ -456,7 +457,15 @@ class LegacyBridge:
                 arguments.setdefault("effort", None)
             if provider == "codex" and control_kind == "set_permission_mode":
                 arguments["modo"] = payload["mode"]
+            if provider == "codex" and kind == "submit":
+                await io._exec(name, {"kind": "set_delivered", "entry_id": entry_id, "value": True})
             result = await original(adapter, name, **arguments)
+            if provider == "codex" and method == "send_prompt" and result == "unknown":
+                reply = {"operation_id": operation_id, "disposition": "unknown",
+                         "payload": {"transport_lost": True}}
+                await io._exec(name, {"kind": "finish", "id": operation_id,
+                                     "status": "unknown", "result": reply})
+                return reply
             if method == "set_service_tier":
                 result = {"service_tier": result}
             await io.finish_call(name, context, deferred=result == "deferred")
@@ -467,8 +476,18 @@ class LegacyBridge:
             if disposition == "deferred" and entry_id is not None:
                 await io._exec(name, {"kind":"set_delivered", "entry_id":entry_id, "value":False, "steered":False})
             return reply
+        except (asyncio.CancelledError, RequestOutcomeUnknown):
+            if provider == "codex" and kind == "submit":
+                await io._exec(name, {"kind": "finish", "id": operation_id, "status": "unknown",
+                    "result": {"operation_id": operation_id, "disposition": "unknown",
+                               "payload": {"transport_lost": True}}})
+            else:
+                await io.finish_call(name, context, failed=True)
+            raise
         except BaseException:
             await io.finish_call(name, context, failed=True)
+            if provider == "codex" and kind == "submit":
+                await io._exec(name, {"kind": "set_delivered", "entry_id": entry_id, "value": False})
             raise
         finally:
             self.coordinator.legacy_active.discard(operation_id)
@@ -881,13 +900,36 @@ class RuntimeAdapter:
         if method == "set_permission_mode" and self.provider == "claude":
             await self.control(name, "set_permission_mode", {"mode":arguments["mode"]})
             return "manual" if arguments["mode"] == "default" else arguments["mode"]
-        if method in {"skip_question", "read_settings", "read_rate_limits", "set_mode", "compact", "list_skills"}:
+        if method == "read_rate_limits":
+            # Como o adapter Python: o retrato da conta, e None quando a leitura falha (a rota responde neutro).
+            try:
+                result = await self.control(name, method, {})
+            except (RuntimeError, ValueError):
+                return None
+            return result.get("rateLimits") if isinstance(result, dict) else None
+        if method in {"skip_question", "read_settings", "set_mode", "compact", "list_skills"}:
             payload = {key:value for key,value in arguments.items() if key not in {"self", "name"}}
             result = await self.control(name, method, payload)
             if method == "list_skills":
                 from app.adapters.codex.chat_controls import skills_do_catalogo
                 return skills_do_catalogo(result)
             return None if method in {"skip_question", "compact"} else result
+        if self.provider == "codex" and method in {"recarregar", "restart"}:
+            # O Rust mata e sobe o processo na mesma conversa; a sessão não sai dele.
+            await self.control(name, "restart")
+            return None
+        if self.provider == "codex" and method == "set_permission_mode_sem_terminal":
+            from app.adapters.codex.sem_terminal import Ocupada
+            from app.rust_server import RustOpError
+            try:
+                return await self.control(name, "set_permission_mode", {"mode":arguments["modo"]})
+            except RustOpError as exc:
+                # Os mesmos erros do adapter Python, que a rota já traduz (409, 400).
+                if exc.code == "erro_permissao_ocupada":
+                    raise Ocupada(exc.message) from None
+                if exc.code == "erro_modo_desconhecido":
+                    raise ValueError(exc.message) from None
+                raise
         if method in {"parar", "recarregar", "restart", "open_terminal", "open_headless", "set_permission_mode_sem_terminal"}:
             return await runtime_coordinator.current().lifecycle_call(name, method, arguments)
         raise RuntimeError("método exige encaminhamento explícito ao responsável")
@@ -1091,6 +1133,7 @@ async def owner_state_stream(legacy, native, name):
 _ASYNC = {"ensure_running", "send_prompt", "deliverable", "drain", "steer", "steer_queue", "interrupt", "select",
     "answer_questions", "set_model", "set_service_tier", "set_permission_mode", "list_models", "read_settings", "read_rate_limits", "set_mode",
     "compact", "list_skills", "skip_question", "parar", "recarregar", "restart", "open_terminal", "open_headless", "set_permission_mode_sem_terminal"}
+_CODEX_OPENS_IN_RUST = {"restart", "set_permission_mode_sem_terminal", "open_terminal"}
 _SYNC = {"snapshot", "escolhas", "comandos", "problema_de", "current_model", "aprovacao_pendente", "permission_modes_sem_terminal", "rename", "close_sync"}
 
 
@@ -1164,8 +1207,16 @@ def install_adapter(cls, provider):
                 context = _legacy_operation.get()
                 if context is not None and coordinator is not None and context.get("operation_id") in coordinator.legacy_active:
                     return await _original(self, *args, **kwargs)
-                if (_method == "ensure_running" and _facade.provider == "claude" and coordinator is not None
-                        and getattr(coordinator, "legacy", None) is not None and getattr(coordinator, "transport", None) is not None
+                managed = coordinator is not None and getattr(coordinator, "legacy", None) is not None
+                # Reiniciar, trocar o sandbox e passar para terminal precisam do processo: abrem no Rust
+                # como o envio, senão a sessão parada caía no Python, que não pode subir o cano.
+                opens = _method == "ensure_running" or _facade.provider == "codex" and _method in _CODEX_OPENS_IN_RUST
+                if (managed and opens and _facade.provider == "codex" and coordinator.mode != "python"
+                        and await asyncio.to_thread(_hands_over, "codex", name)):
+                    await coordinator.await_mode()      # Rust esperado: o dono da sessão sai do desfecho dele
+                if (opens and managed and getattr(coordinator, "transport", None) is not None
+                        and (_facade.provider == "claude" or coordinator.rust_owns("codex", True)
+                             and await asyncio.to_thread(_hands_over, "codex", name))
                         and not bound.arguments.get("so_reconectar") and bound.arguments.get("transfer_id") is None):
                     # Subir a sessão é abri-la no Rust, com a conta/motor pedidos e a espera do initialize;
                     # dentro da barreira (troca de conta) é reabrir já o que a administração fechou.

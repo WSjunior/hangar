@@ -206,26 +206,21 @@ def test_launcher_applies_creation_tier_to_server_and_tui_before_prompt(tmp_path
         proc.wait(timeout=20)
 
 
-def test_conta_secundaria_espera_preparo_e_confia_a_pasta(monkeypatch):
+def test_conta_secundaria_nao_espera_preparo_em_andamento(monkeypatch):
     lancador = runpy.run_path(str(_LANCADOR))
     chamadas = []
-    respostas = iter([
-        {"status": "running", "etapa": "plugins", "issues": []},
-        {"status": "ready", "trust_pending": False, "issues": []},
-    ])
 
     def api(method, path):
         chamadas.append((method, path))
-        return next(respostas)
+        return {"status": "running", "etapa": "plugins", "issues": []}
 
     monkeypatch.setitem(lancador["_preparar_conta_codex"].__globals__, "_api_backend", api)
-    monkeypatch.setattr(time, "sleep", lambda _: None)
 
     result = lancador["_preparar_conta_codex"]("work", "/repo com espaço")
 
     path = "/api/codex-contas/work/prepare?cwd=%2Frepo%20com%20espa%C3%A7o"
-    assert chamadas == [("POST", path), ("GET", path)]
-    assert result["status"] == "ready"
+    assert chamadas == [("POST", path)]
+    assert result["status"] == "running"
 
 
 def test_conta_ja_preparada_ainda_confirma_trust_da_pasta(monkeypatch):
@@ -240,37 +235,6 @@ def test_conta_ja_preparada_ainda_confirma_trust_da_pasta(monkeypatch):
 
     assert lancador["_preparar_conta_codex"]("work", "/repo")["status"] == "ready"
     assert chamadas == ["POST", "GET"]
-
-
-def test_preparo_da_conta_tem_prazo_total(monkeypatch):
-    lancador = runpy.run_path(str(_LANCADOR))
-    monkeypatch.setitem(lancador["_preparar_conta_codex"].__globals__, "_api_backend",
-                        lambda *_: {"status": "running", "etapa": "plugins", "issues": []})
-    monkeypatch.setattr(time, "sleep", lambda _: None)
-    relogio = iter([0.0, 181.0])
-    monkeypatch.setattr(time, "monotonic", lambda: next(relogio))
-
-    with pytest.raises(TimeoutError, match="180s"):
-        lancador["_preparar_conta_codex"]("work", "/repo", prazo=180)
-
-
-def test_preparo_com_erro_nao_libera_a_tui(monkeypatch):
-    lancador = runpy.run_path(str(_LANCADOR))
-    monkeypatch.setitem(lancador["_preparar_conta_codex"].__globals__, "_api_backend",
-                        lambda *_: {"status": "error", "issues": [{"code": "sync_failed"}]})
-
-    with pytest.raises(RuntimeError, match="error"):
-        lancador["_preparar_conta_codex"]("work", "/repo")
-
-
-def test_falha_do_preparo_fica_no_pane_ate_enter(monkeypatch, capsys):
-    lancador = runpy.run_path(str(_LANCADOR))
-    prompts = []
-    monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt))
-
-    assert lancador["_parar_com_erro"]("sincronização falhou") == 1
-    assert "sincronização falhou" in capsys.readouterr().err
-    assert prompts == ["Pressione Enter para fechar esta sessão."]
 
 
 @pytest.mark.skipif(os.name != "posix", reason="o lancador so e usado em pane POSIX por ora")
@@ -947,6 +911,8 @@ def _hooks_server(respostas_batch):
          "currentHash": "h2"},
         {"key": "project:Stop:0", "source": "project", "enabled": True, "trustStatus": "untrusted",
          "currentHash": "h3"},
+        {"key": f"{Path.home() / '.codex' / 'hooks.json'}:stop:0:0", "source": "project", "enabled": True,
+         "trustStatus": "untrusted", "currentHash": "h4"},
     ]
 
     def atender(ws):
@@ -967,7 +933,7 @@ def _hooks_server(respostas_batch):
 
 
 @pytest.mark.parametrize("resposta", [{"result": {}}, {"error": {"code": -32603, "message": "segredo"}}])
-def test_confia_so_nos_hooks_do_usuario_e_de_plugin(capsys, resposta):
+def test_confia_so_nos_hooks_sincronizados_pelo_hangar(capsys, resposta):
     confiar = runpy.run_path(str(_LANCADOR))["_confiar_hooks"]
     servidor, endpoint, gravado = _hooks_server(resposta)
     try:
@@ -975,14 +941,15 @@ def test_confia_so_nos_hooks_do_usuario_e_de_plugin(capsys, resposta):
     finally:
         servidor.shutdown()
     chaves = [json.loads("[" + e["keyPath"].replace('"."', '","') + "]")[2] for e in gravado]
-    assert chaves == ["user:Stop:0", "plugin:x:Stop:0"]
+    sincronizado = f"{Path.home() / '.codex' / 'hooks.json'}:stop:0:0"
+    assert chaves == ["user:Stop:0", "plugin:x:Stop:0", sincronizado]
     err = capsys.readouterr().err
     assert "segredo" not in err
     if "error" in resposta:
         assert "aceitos" not in err
         assert "config/batchWrite, código -32603" in err
     else:
-        assert "2 hooks sincronizados pelo Hangar foram aceitos: user:Stop:0, plugin:x:Stop:0" in err
+        assert "3 hooks sincronizados pelo Hangar foram aceitos: user:Stop:0, plugin:x:Stop:0" in err
         assert "1 hooks de outra origem" in err
 
 

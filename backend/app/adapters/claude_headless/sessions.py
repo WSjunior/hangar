@@ -45,7 +45,8 @@ def save(name: str, cwd: str, session_id: str, *, config_dir: str | None = None,
          previous_non_plan: str | None = None, subagent_model: str | None = None,
          jev: bool = False, key: str | None = None, transfer_id: str | None = None,
          engine_account: str | None = None, engine_credential_id: str | None = None,
-         engine_account_base_url: str | None = None, service_tier: str | None = None) -> dict:
+         engine_account_base_url: str | None = None, service_tier: str | None = None,
+         claude_settings: dict | None = None) -> dict:
     if service_tier is not None and service_tier not in ("default", "priority"):
         raise ValueError("service_tier: use default ou priority")
     meta = {
@@ -65,6 +66,8 @@ def save(name: str, cwd: str, session_id: str, *, config_dir: str | None = None,
     }
     if service_tier is not None:
         meta["service_tier"] = service_tier
+    if claude_settings is not None:
+        meta["claude_settings"] = claude_settings
     if engine_account is not None:
         meta.update(engine_account=engine_account, engine_credential_id=engine_credential_id,
                     engine_account_base_url=engine_account_base_url)

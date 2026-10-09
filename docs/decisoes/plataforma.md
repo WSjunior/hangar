@@ -751,6 +751,18 @@ o bearer que vai na mesma requisição abre a máquina inteira, e o Tailscale j�
 Quem leva o pacote é o navegador (ele tem o token de todas as máquinas), então nenhuma máquina
 precisa conhecer a outra pelo `peers.json`.
 
+Contas e aparência (08/10/2026, pedido do usuário). As contas viajam sem login: o Claude Code
+renova o token sozinho (~8h) e a Anthropic troca o refresh token na renovação (`renova_token.py`),
+então a mesma credencial em duas máquinas faria a primeira que renovar derrubar a outra. Conta
+nova nasce pelo `contas.criar` do destino; conta que já existe lá só ganha apelido e chaves, e o
+`.credentials.json`/`.claude.json` dela nunca são lidos nem escritos. Do `settings.json` da conta
+vão só as chaves que o principal não tem (as outras o espelho da reconciliação sobrescreve), sem
+`env` e os comandos de credencial. A aparência é a do app nativo (`appearance.json` e a imagem):
+a do web mora no `localStorage` de cada navegador, não é estado da máquina, e o desktop web está
+parado. Ficam na máquina o que depende da tela e as escolhas de segurança dela. O app nativo relê
+o arquivo quando ele muda por fora: sem isso, o próximo ajuste feito nele gravaria a memória antiga
+por cima do que chegou.
+
 ## Compartilhar sessão: a porta do convidado é a única na internet
 
 (28/09/2026, pedido do usuário.) O convidado tem Hangar e recebe a sessão como um servidor a mais
@@ -1482,6 +1494,33 @@ donos: captura, `permission.observe` e `session.dead` saem uma vez, de um lugar 
   Python (mediana ~0,45 s), com a cópia dos marcadores relida só quando o observador das pastas vê
   escrita.
 
+### Codex sem terminal: o feed do runtime no lugar do `Monitor`
+
+(08/10/2026, parte 5B, Task 9.) Com o Rust dono do Codex sem terminal, cada prévia ia ao Python
+por `/runtime/events`, subia a `revision`, virava um `StateEvent` inteiro no `state_stream` e
+voltava ao hub pela conexão interna: com 10 sessões trabalhando, Python + Rust subiam de 62,5–65,5
+para 91–92 ms/s ([medicao-5b.md](../migracao-rust/parte5-codex/medicao-5b.md)).
+
+- O ator do Codex escreve num `watch` por nome (`RuntimeRegistry::live`) a vista pública, o erro
+  durável e as três prévias; prévia não vai mais ao `events` nem sobe a `revision` (o espelho do
+  Python segue consecutivo). `view`, `state`, `problem`, `rate` e voz continuam lá, porque o
+  Python ainda usa o espelho para controles, modelo, `/commands`, religação e fatos da lista.
+- O hub de Codex sem terminal (`Binding.headless`, vindo do `info`) liga o `RuntimeFeed` pelo
+  mesmo `SpawnMonitor`: acorda pelo `watch` ou pela resposta gravada, espera 150 ms e publica só o
+  que mudou (`ask_question`, `state`, `preview`, `pensamento`, `ferramenta`; `suggest` nunca).
+  Todo problema sai como `problema=runtime_falhou` (o código que web, app e nativo traduzem) com
+  `<código>: <frase>` no detalhe: erro do ator, pânico do ator (`runtime_panic`), abertura de
+  Codex que falhou, servidor sem registro (`runtime_absent`) e pânico do feed (`state_feed_failed`,
+  também no diário `rust.state_feed_failed`, até o próximo assinante). Sessão fora do registro
+  (parada, encerrada, abrindo) é `idle` sem problema, como no Python. O `close` de uma vida que
+  acabou com erro e a abertura que falhou deixam o erro até a próxima abertura.
+- Dono único: o hub descarta os seis do Python com `state_python_leak`; o Python não os produz
+  (`_estado_do_rust(provider, name)`), mantém o `tail_pump` da conexão interna (confirma a fila) e
+  não alimenta as fontes de prévia do Codex (`_push_channels`). Trocar de modo é troca de provider
+  no `sse.py` e religa o hub. O canal privado serve os seis ao convidado e ao Connect.
+- A lista lê o `state` do feed em `Published` pela chave do rollout; sem chat aberto vale o fato do
+  Python. Claude sem terminal segue pelo caminho antigo (pendência da metade Claude).
+
 ## Observação terminal Rust: erro visível, sem captura Python
 
 (Parte 4, Tasks 5 e 7, 06/10/2026.) Com o Rust de pé, quem lê a captura de Claude com terminal é o
@@ -1724,3 +1763,42 @@ por `_send_one` e ficam protegidos só pelo `freeze`, não pela porta. Seguem as
 
 Roteiro de medição (sem números ainda, vêm do uso real):
 [medicao-5-0.md](../migracao-rust/parte5-claude/medicao-5-0.md).
+
+## Grupos: o Rust grava
+
+(08/10/2026, parte 6 entrega 1a, branch `hangar-server-parte6-grupos`; contrato interno 40.) No
+modo `rust`/`pending` o `hangar-server` é o único que grava `.hangar-pair`: sidecars, fusão e
+arquivo de contrato (`groups/service.rs`, `groups/store.rs`) e a varredura de membro morto
+(`groups/sweep.rs`). `/pair`, `DELETE /pair`, `/group-message`, `/pair/contract`, `/pair-remote`
+e `/unpair-remote` do dono são atendidas no Rust; o Python lê os arquivos e, para gravar, pede à
+ponte privada `/__hangar_server/groups` (`backend/app/groups_bridge.py`). No modo `python` tudo
+segue como antes. Desenho: [desenho.md](../migracao-rust/parte6-grupos/desenho.md).
+
+- **Um escritor só.** O `pair._LOCK` só protege o Python; com o Rust gravando também, os dois
+  locks não se enxergam. As escritas do `pair.py` (`PairLink.set/clear`, `_merge_contract`,
+  `_arquivar_contratos`) recusam nesses modos com `GroupsOwnedByRust`: um chamador esquecido vira
+  503 `erro_grupo_indisponivel`, nunca escrita calada.
+- **Janela de dois escritores na subida.** A primeira versão só passava os grupos ao Rust na
+  primeira saúde com `groups: true`; entre o `pending` e essa saúde o Rust já atendia `/pair` e
+  varria enquanto o Python ainda gravava. `groups_bridge._capable` nasce `True`: com o Rust
+  esperado, os grupos são dele desde o início, e só a saúde com `groups: false` os devolve ao
+  Python (desistir do Rust já leva o modo a `python`). No `pending` quem chama a ponte espera e
+  falha com `groups_runtime_starting`.
+- **Sem laço Python → Rust → Python.** No modo Rust o Python sempre pede à ponte; o pedido que
+  chega por ela leva a marca `Bridged`, e onde o Rust repassaria ao Python (corpo que ele não
+  aceita) responde 500 `erro_grupo_indisponivel` com `groups_bridge_relay`. Convidado é recusado
+  pelo Python antes do handler e nunca vira pedido do dono na ponte.
+- **Varredura no Rust, morte por tempo.** A cada 2 s; sem sidecar nenhum não pergunta a lista.
+  Nome ausente da lista viva por 5 s sai do grupo: `kill` e `rename` deixam o nome ausente por um
+  instante, e só o tempo separa isso de morte. Lista com erro, vazia ou sem nenhuma resposta dos
+  fatos (`list_facts_unknown`: sessão em transferência ou de `orq` só aparece por eles) não varre;
+  o diário ganha `rust.groups_sweep_failed` uma vez por sequência e `rust.groups_sweep_recovered`
+  na volta. O stem saneado do sidecar e o nome cru da lista contam como a mesma sessão.
+- **Falha não vira sucesso.** Volta atrás de um join que falha no disco responde o 500 do Python
+  (`rust.groups_restore_failed` no diário), nunca "pareamento desfeito". Promoção de grupo `orq`
+  sem resposta do Python (prazo, 5xx, rota ausente) é 503 `erro_grupo_indisponivel` com o código,
+  não 409 "o arquivo mudou"; o diário guarda `rust.groups_orq_promote_uncertain` com o gid, porque
+  o Python pode ter promovido antes de falhar.
+- **Contrato interno 40** (`RUST_SERVER_PROTOCOL` e `INTERNAL_PROTOCOL`; o 39 é o da 5B, juntada
+  antes): a saúde ganhou `groups`, e o filho recebe `HANGAR_SERVER_ID`, `HANGAR_PEERS_FILE` e
+  `HANGAR_PAIR_ARCHIVE`.

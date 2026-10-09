@@ -73,12 +73,19 @@ def outside_scope(name):
         return False
     if not agents:
         return all(pane.get('hidden') for pane in panes)
-    for pid, provider in agents.items():
-        if provider == 'claude':
-            arguments = procinfo._argv(pid)
-            if len(arguments) < 2 or arguments[1] not in {'auth','login','setup-token'}:
-                return False
-    return True
+    return all(provider != 'claude' or _claude_login(pid) for pid, provider in agents.items())
+
+
+# Opções que o wrapper do Hangar põe antes dos argumentos de quem chamou.
+_WRAPPER_OPTIONS = ('--session-id', '--plugin-dir')
+
+
+def _claude_login(pid):
+    from app import procinfo
+    arguments = procinfo._argv(pid)[1:]
+    while arguments and arguments[0].startswith(_WRAPPER_OPTIONS):
+        arguments = arguments[1:] if '=' in arguments[0] else arguments[2:]
+    return bool(arguments) and arguments[0] in {'auth', 'login', 'setup-token'}
 
 
 # Do pane ao agente com a conversa provada leva poucos segundos; além disso não é nascimento.
@@ -94,7 +101,7 @@ def being_born(name, after=0):
 
 
 def _collect(name):
-    from app import api, tmux, registry as registry_mod, procinfo
+    from app import api, claude_customizations, tmux, registry as registry_mod, procinfo
     import psutil
     panes = tmux.list_panes_all().get(name)
     if not panes:
@@ -105,7 +112,7 @@ def _collect(name):
         return None
     pane = registry_mod.SessionRegistry._agent_pane(panes, children)
     provider, agent = registry_mod.agente_do_pane(pane['pid'], children)
-    if provider != 'claude' or agent is None:
+    if provider != 'claude' or agent is None or _claude_login(agent):
         return None
     if os.name == 'nt':
         matching = [item for item in tmux.list_panes_of(name) if item.get('pid') == pane['pid']
@@ -163,7 +170,9 @@ def _collect(name):
         pane_birth=pane_birth, agent_pid=agent, agent_birth=agent_birth,
         session_proof=_session_hash(namespace, fields[5], created),
         jsonl=jsonl, session_id=Path(jsonl).stem, config_dir=config_dir, cwd=pane['cwd'],
-        mux_argv=['tmux'], windows=os.name == 'nt')
+        mux_argv=['tmux'], windows=os.name == 'nt',
+        claude_settings=claude_customizations.from_environment(
+            procinfo._env_var_of(agent, claude_customizations.SESSION_SETTINGS_ENV)))
 
 
 def resolve_binding(name, previous=None):
@@ -192,7 +201,8 @@ def resolve_binding(name, previous=None):
         fingerprint=fingerprint, session_id=facts['session_id'], config_dir=facts['config_dir'],
         cwd=facts['cwd'], created=previous.meta.get('created', 0) if same else max(facts['created'], facts.get('pane_birth', facts['created'])),
         legacy_import_after=facts.get('pane_birth'), agent_pid=facts.get('agent_pid'),
-        agent_birth=facts.get('agent_birth')), facts['jsonl'],
+        agent_birth=facts.get('agent_birth'),
+        **({'claude_settings': facts['claude_settings']} if facts.get('claude_settings') is not None else {})), facts['jsonl'],
         previous.projection_dir if same else directory, state_path,
         previous.lock_path if same else directory / 'runtime' / f'{key}.lock', generation)
 
@@ -280,6 +290,9 @@ def assert_writer(name):
             raise RuntimeError('Claude terminal sem vínculo comprovado; escrita suspensa')
         return
     slot = coordinator.slot(name)
+    # Registro de uma vida morta só reserva o nome; a janela nova com ele pode ser só um login.
+    if slot.awaiting_identity and outside_scope(name):
+        return
     if slot.binding.meta.get('pending_terminal'):
         raise RuntimeError('vínculo terminal ainda não confirmado; escrita suspensa')
     if not slot.binding.meta.get('terminal'):
