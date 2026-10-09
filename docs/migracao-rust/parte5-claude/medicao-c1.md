@@ -6,7 +6,7 @@ medida de 08/10 que motivou a C1 (uma sessão gerando, Python +33 ms/s contra Ru
 
 ## Montagem
 
-- Antes: backend da `main`. Depois: backend da `hangar-server-parte5-c1` (contrato 40). Os dois no
+- Antes: backend da `main`. Depois: backend da `hangar-server-parte5-c1` (contrato 41). Os dois no
   backend de uso do dono, com o Rust de pé.
 - Uma sessão Claude **sem terminal**, aberta, pedindo uma resposta longa (algo que gere por 1–2
   minutos). Nenhuma outra sessão trabalhando.
