@@ -111,7 +111,7 @@ pub fn panel(pane: &Value, view: &View, max_h: f32, tabs: Option<AnyElement>) ->
     let foot = (!busy).then(|| div().flex().flex_wrap().items_center().gap_1p5().px_3().pb_2p5()
         .when(status == "done", |el| el.child(action("copy", IconName::Copy, tr("btw_copy"), press(view, "copiar"))))
         .child(action("retry", IconName::RefreshCw, tr("btw_retry"), press(view, "repetir")))
-        .when(fork.is_empty(), |el| el
+        .when(fork.is_empty() || fork == "failed", |el| el
             .child(action("fork", IconName::GitFork, tr("btw_fork"), press(view, "bifurcar")).tooltip(tr("btw_fork_tip")))
             .child(div().ml_auto().text_xs().text_color(theme::muted()).child(tr("btw_fork_hint")))));
 

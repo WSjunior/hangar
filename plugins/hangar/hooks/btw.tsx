@@ -185,7 +185,10 @@ function ask($: EngineInterface, entry: BtwEntry): void {
 async function fork($: EngineInterface, entry: BtwEntry): Promise<void> {
   if (entry.forkState === "running" || entry.forkState === "done") return;
   const t = texts;
+  // Limpar no meio solta a entrada: daí em diante nada mais é mostrado nem vai à conversa.
+  const live = () => entries.includes(entry);
   const show = (note: string, state: ForkState) => {
+    if (!live()) return;
     entry.fork = note;
     entry.forkState = state;
     changed($);
@@ -204,6 +207,7 @@ async function fork($: EngineInterface, entry: BtwEntry): Promise<void> {
     }
     if (done.isAborted) return show(t.forkAborted, "failed");
     if (!done.answer.trim()) return show(t.forkEmpty, "failed");
+    if (!live()) return;
     // Prompt do plugin espera a sessão ficar livre: não corta o turno em curso. O `session.send` não aceita
     // a própria sessão como destino.
     const sent = await $.prompt.submit({ text: t.forkMessage(entry.question, done.answer) });
