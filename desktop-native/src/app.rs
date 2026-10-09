@@ -891,7 +891,7 @@ impl Hangar {
             servers: known_servers, remote: HashMap::new(), remote_tasks: Vec::new(), remote_gen: 0, servers_rev: 0, invite_ended: HashSet::new(), pending_open: None, pending_remote: None,
             external_pairs: Vec::new(), external_seen: None, attached: HashSet::new(), external_seq: 0,
             dictation: Default::default(),
-            voice: Default::default(),
+            voice: voice_ui::VoiceUi { a11y_dump: Self::watch_a11y_dump(window, cx), ..Default::default() },
             player: Default::default(),
             connection_origin: None,
             electron_offer: saved.is_none() && crate::electron::exists(),
@@ -4187,7 +4187,7 @@ impl Hangar {
         let can_stop = self.can_interrupt();
         let focused = self.composer.read(cx).focus_handle(cx).is_focused(window);
         let paste_target = cx.entity().downgrade();
-        let textarea = Textarea::new(&self.composer).appearance(false).disabled((!readable && !new_chat && !reopen) || creating || resuming).on_paste(move |item, _, cx| {
+        let textarea = Textarea::new(&self.composer).accessibility_id("composer-input").appearance(false).disabled((!readable && !new_chat && !reopen) || creating || resuming).on_paste(move |item, _, cx| {
             paste_target.update(cx, |this, cx| this.paste(item, cx)).unwrap_or(false)
         });
         let field = div().id("composer-field").text_base()
@@ -4977,7 +4977,7 @@ impl Hangar {
             .map(|el| self.drop_background(el, cx));
         let filter = layout.show_filter().then(|| div().flex_shrink_0().px(px(8.)).pb(px(4.))
             .child(Input::new(&self.sidebar.filter).small().cleanable(true).prefix(chrome::small_icon(IconName::Search, 14., theme::faint()))
-                .aria_label(tr("sidebar_filter"))));
+                .aria_label(tr("sidebar_filter")).accessibility_id("sidebar-filter")));
         div().w_full().min_h_0().flex().flex_col().when(!fit_content, |el| el.h_full())
             .child(div().h(px(44.)).flex_shrink_0().px(px(14.)).flex().items_center().gap_2()
                 .child(chrome::hangar_mark(20., theme::accent()))
@@ -6193,6 +6193,7 @@ impl Hangar {
 
 impl Render for Hangar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_a11y_retain(window, cx);
         // O assistente ocupa a janela: nada da conversa por baixo recebe tecla nem clique.
         if let Some(setup) = self.setup.clone() {
             return div().id("hangar-root").size_full().bg(theme::window_fill()).text_color(theme::text()).text_base()
