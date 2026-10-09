@@ -172,8 +172,6 @@ async def group(ctx: Context, texto: str, tmux: bool = False) -> dict[str, Any]:
 async def pair(ctx: Context, alvo: str = "", tarefa: str = "", substituir_tarefa: bool = False,
                orq: bool = False) -> dict[str, Any]:
     from app import api
-    if not alvo and not orq:
-        raise ToolError("alvo vazio só vale com orq")
     eu = await _eu(ctx)
     try:
         return await api.pair_session(eu, api.PairBody(peer=alvo, task=tarefa, replace_task=substituir_tarefa,
@@ -229,8 +227,8 @@ async def new_session(ctx: Context, nome: str, cwd: str, provider: str | None = 
         info = await api.create_session(api.CreateBody(
             name=nome, cwd=cwd, provider=provider, engine=engine, model=model, effort=effort,
             permission_mode=permissao, headless=headless, read_only=read_only,
-            config_dir=conta, jev=jev, service_tier=service_tier, branch=branch, new_branch=new_branch,
-            base=base, codex_account=codex_account, subagent_model=subagent_model, creator=eu))
+            config_dir=conta, jev=jev, service_tier=service_tier, branch=branch or None, new_branch=new_branch,
+            base=base or None, codex_account=codex_account, subagent_model=subagent_model, creator=eu))
     except HTTPException as e:
         raise ToolError(_detalhe(e)) from e
     return {"name": info.name, "cwd": info.cwd, "provider": info.provider, "headless": info.headless,
@@ -253,6 +251,8 @@ async def close_session(ctx: Context, alvo: str) -> dict[str, Any]:
     if not await asyncio.to_thread(quem_chama._por_nome, alvo):
         raise ToolError(f"sessão '{alvo}' não existe (tool `sessions`)")
     try:
+        # A rota DELETE recusa sessão no meio de uma troca de conta/agente; a chamada direta, não.
+        await api._transfer_check(alvo)
         return await api.kill_session(alvo)
     except HTTPException as e:
         raise ToolError(_detalhe(e)) from e
