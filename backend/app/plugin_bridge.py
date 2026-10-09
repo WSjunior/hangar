@@ -1581,14 +1581,6 @@ async def state(body: StateBody, request: Request):
     passo separado, e ele não pode nascer junto com a troca do caminho de entrada.
     """
     _confere(body.sessao, body.token)
-    if body.context is not None:
-        from app import claude_context
-        from app.registry import SessionRegistry
-        transcript = await asyncio.to_thread(_tracked_transcript, body.sessao)
-        if transcript is None or transcript.stem != body.session_id:
-            raise HTTPException(409, "a medida de contexto pertence a outra conversa")
-        await asyncio.to_thread(claude_context.publish, transcript, body.context.model_dump())
-        SessionRegistry._context_cache.pop(body.sessao, None)
     with _lock:
         _estados[body.sessao] = (time.monotonic(), body.estado, body.motivo)
         if body.estado == "working":
@@ -1598,6 +1590,20 @@ async def state(body: StateBody, request: Request):
     _acordar(body.sessao)
     state_facts.notify(body.sessao, state_facts.FORCE)
     _log.debug("plugin estado sessao=%s estado=%s motivo=%s", body.sessao, body.estado, body.motivo)
+    # A medida é auxiliar: recusá-la ou falhar ao gravá-la não pode perder a transição de estado.
+    if body.context is not None:
+        from app import claude_context
+        from app.registry import SessionRegistry
+        transcript = await asyncio.to_thread(_tracked_transcript, body.sessao)
+        if transcript is None or transcript.stem != body.session_id:
+            _log.info("medida de contexto recusada: outra conversa sessao=%s", body.sessao)
+            raise HTTPException(409, "a medida de contexto pertence a outra conversa")
+        try:
+            await asyncio.to_thread(claude_context.publish, transcript, body.context.model_dump())
+        except OSError:
+            _log.exception("falha ao publicar medida de contexto sessao=%s", body.sessao)
+        else:
+            SessionRegistry._context_cache.pop(body.sessao, None)
     return {"ok": True}
 
 

@@ -469,6 +469,46 @@ def test_state_rejects_context_from_another_conversation(tmp_path, monkeypatch):
     assert not transcript.with_suffix(".context.json").exists()
 
 
+def test_rejected_measurement_still_updates_state_and_wakes_listeners(tmp_path, monkeypatch):
+    from app import api, tmux
+    transcript = tmp_path / f"{UUID}.jsonl"
+    transcript.write_text("", encoding="utf-8")
+    monkeypatch.setattr(tmux, "list_panes_all", lambda: {})
+    monkeypatch.setattr(api.registry, "resolve_tracked", lambda *args: (str(transcript), True))
+    wakeups, notifications = [], []
+    monkeypatch.setattr(pb, "_acordar", wakeups.append)
+    monkeypatch.setattr(pb.state_facts, "notify", lambda *args: notifications.append(args))
+    body = pb.StateBody(sessao="s1", token=pb.mint("s1"), estado="idle", session_id="outro",
+                        context={"used": 76_604, "window": 1_000_000})
+    with pytest.raises(HTTPException):
+        asyncio.run(pb.state(body, None))
+    assert pb.estado_recente("s1") == ("idle", None)
+    assert wakeups == ["s1"]
+    assert notifications == [("s1", pb.state_facts.FORCE)]
+    assert not transcript.with_suffix(".context.json").exists()
+
+
+def test_context_write_failure_keeps_state_update_and_existing_cache(tmp_path, monkeypatch):
+    from app import api, tmux, claude_context
+    from app.registry import SessionRegistry
+    transcript = tmp_path / f"{UUID}.jsonl"
+    transcript.write_text("", encoding="utf-8")
+    monkeypatch.setattr(tmux, "list_panes_all", lambda: {})
+    monkeypatch.setattr(api.registry, "resolve_tracked", lambda *args: (str(transcript), True))
+    cache = {"s1": (0, str(transcript), None, None)}
+    monkeypatch.setattr(SessionRegistry, "_context_cache", cache)
+
+    def failed_write(*_args):
+        raise OSError("falha de escrita simulada")
+
+    monkeypatch.setattr(claude_context, "publish", failed_write)
+    body = pb.StateBody(sessao="s1", token=pb.mint("s1"), estado="idle", session_id=UUID,
+                        context={"used": 76_604, "window": 1_000_000})
+    assert asyncio.run(pb.state(body, None)) == {"ok": True}
+    assert pb.estado_recente("s1") == ("idle", None)
+    assert "s1" in cache
+
+
 def test_modo_user_so_com_dono_que_declarou_sessao_parada_e_texto_simples(monkeypatch):
     monkeypatch.setattr(pb, "mods_by_default", lambda: True)
     monkeypatch.setattr(pb, "declared_modes", lambda name: {"fill", "user"})
