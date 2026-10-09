@@ -32,7 +32,14 @@ impl Drop for Rpc {
         if let Some(pid) = self.pid {
             let _ = crate::app::setup::system::hidden(std::process::Command::new("taskkill").args(["/T", "/F", "/PID", &pid.to_string()])).output();
         }
-        #[cfg(not(windows))]
+        // SIGTERM ao grupo e, após uma folga, SIGKILL em quem ficou; a espera não pode travar quem largou o Rpc.
+        // ponytail: o grupo pode, em tese, ser reaproveitado na folga; conferir com `group_alive` se isso aparecer.
+        #[cfg(target_os = "linux")]
+        if let Some(pgid) = self.pid.filter(|&p| p > 1 && p <= i32::MAX as u32) {
+            unsafe { libc::kill(-(pgid as i32), libc::SIGTERM); }
+            std::thread::spawn(move || { std::thread::sleep(Duration::from_millis(500)); unsafe { libc::kill(-(pgid as i32), libc::SIGKILL); } });
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         let _ = self.pid;
     }
 }
@@ -76,6 +83,9 @@ impl Rpc {
         for (key, value) in env { command.env(key, value); }
         #[cfg(windows)]
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: sem console piscando ao ligar a voz
+        // Grupo próprio: o Drop derruba os netos (o agente do HCC) junto, não só o filho direto.
+        #[cfg(unix)]
+        command.process_group(0);
         let mut child = command.spawn().map_err(|_| RpcError::Spawn)?;
         let pid = child.id();
         let stdin = child.stdin.take().ok_or(RpcError::Spawn)?;

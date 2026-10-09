@@ -11,11 +11,18 @@ const OPTIONAL_KEYS: [&str; 4] = ["LLM_PROXY_KEY", "LLM_PROXY_URL", "LLM_MODEL",
 
 pub struct Launch { pub python: PathBuf, pub script: PathBuf, pub env: Vec<(&'static str, OsString)> }
 
-fn home() -> PathBuf { std::env::home_dir().unwrap_or_default() }
+/// Sem pasta do usuário os caminhos viravam relativos à pasta do app: é erro, não `""`.
+fn resolve_home(home: Option<PathBuf>) -> Result<PathBuf, String> {
+    home.filter(|h| h.is_absolute()).ok_or_else(|| "Não achei a pasta do usuário (HOME/USERPROFILE).".to_owned())
+}
 
-pub fn hcc_dir() -> PathBuf {
-    std::env::var_os("HANGAR_HCC_DIR").filter(|v| !v.is_empty()).map(PathBuf::from)
-        .unwrap_or_else(|| home().join("Projetos").join("hangar-computer-control"))
+fn home() -> Result<PathBuf, String> { resolve_home(std::env::home_dir()) }
+
+pub fn hcc_dir() -> Result<PathBuf, String> {
+    match std::env::var_os("HANGAR_HCC_DIR").filter(|v| !v.is_empty()) {
+        Some(dir) => Ok(PathBuf::from(dir)),
+        None => Ok(home()?.join("Projetos").join("hangar-computer-control")),
+    }
 }
 
 /// O agente desta máquina, nunca o Windows remoto do MCP das sessões: no Linux o Hyprland do checkout; no Windows o
@@ -25,12 +32,19 @@ pub fn pick_agent_config(configs: &[(String, Value)], windows: bool) -> Option<&
         .map(|(name, _)| name.as_str())
 }
 
-fn read_json(path: &Path) -> Value { std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default() }
+/// Arquivo ausente é normal; ilegível ou quebrado vai ao log (só nome e tipo do erro), senão a falta da chave engana.
+fn read_json(path: &Path) -> Value {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| { super::log(format!("computer {name} unreadable json kind={:?}", e.classify())); Value::Null }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Value::Null,
+        Err(e) => { super::log(format!("computer {name} unreadable kind={:?}", e.kind())); Value::Null }
+    }
+}
 
 /// As chaves que o Hangar já guarda para o HCC: a entrada do MCP (ativa no `~/.claude.json`, senão a guardada ao
 /// desligar), o Jev do `settings.json` como o backend faz, e por último o ambiente do app.
-fn stored_keys() -> Vec<(&'static str, String)> {
-    let home = home();
+fn stored_keys(home: &Path) -> Vec<(&'static str, String)> {
     let active = &read_json(&home.join(".claude.json"))["mcpServers"]["hangar-computer-control"]["env"];
     let entry = if active.is_object() { active.clone() } else { read_json(&home.join(".hangar").join("computer-control.json"))["env"].clone() };
     let settings = read_json(&home.join(".claude").join("settings.json"))["env"].clone();
@@ -52,7 +66,8 @@ pub fn child_env(keys: Vec<(&'static str, String)>, dir: &Path, agent: &Path) ->
 
 /// Bloqueia (lê arquivos): quem chama faz fora da thread da tela.
 pub fn launch() -> Result<Launch, String> {
-    let dir = hcc_dir();
+    let home = home()?;
+    let dir = hcc_dir()?;
     let python = dir.join(".venv").join(if cfg!(windows) { "Scripts/python.exe" } else { "bin/python" });
     let script = dir.join("servidor_mcp.py");
     if !python.is_file() || !script.is_file() {
@@ -63,13 +78,16 @@ pub fn launch() -> Result<Launch, String> {
         .map(|name| { let config = read_json(&dir.join(&name)); (name, config) }).collect();
     configs.sort_by(|a, b| a.0.cmp(&b.0));
     // O linux-agent.json do repositório é exemplo (caminho fictício): no Linux o app grava o seu, apontando para este checkout.
-    let own = (!cfg!(windows) && dir.join("linux_agent.py").is_file()).then(|| write_linux_config(&dir)).transpose()?;
+    let own = (!cfg!(windows) && dir.join("linux_agent.py").is_file()).then(|| write_linux_config(&home, &dir)).transpose()?;
     let agent = match own {
         Some(path) => path,
         None => pick_agent_config(&configs, cfg!(windows)).map(|name| dir.join(name))
             .ok_or_else(|| format!("Sem configuração de agente local em {} ({}).", dir.display(), if cfg!(windows) { "um *-agent.json com transport local" } else { "linux-agent.json" }))?,
     };
-    let env = child_env(stored_keys(), &dir, &agent)?;
+    let keys = stored_keys(&home);
+    let missing: Vec<&str> = OPTIONAL_KEYS.into_iter().filter(|k| !keys.iter().any(|(have, _)| have == k)).collect();
+    if !missing.is_empty() { super::log(format!("computer optional keys missing: {}", missing.join(","))); }
+    let env = child_env(keys, &dir, &agent)?;
     Ok(Launch { python, script, env })
 }
 
@@ -77,10 +95,9 @@ pub fn linux_agent_config(hcc: &Path) -> Value {
     json!({"transport": "local", "command": ["/usr/bin/python3", hcc.join("linux_agent.py")], "request_timeout": 15})
 }
 
-fn write_linux_config(hcc: &Path) -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+fn write_linux_config(home: &Path, hcc: &Path) -> Result<PathBuf, String> {
     let path = home.join(".hangar").join("computer-control").join("linux-agent.json");
-    std::fs::create_dir_all(path.parent().unwrap_or(&home)).map_err(|e| format!("Não consegui criar {}: {e}", path.display()))?;
+    std::fs::create_dir_all(path.parent().unwrap_or(home)).map_err(|e| format!("Não consegui criar {}: {e}", path.display()))?;
     std::fs::write(&path, linux_agent_config(hcc).to_string()).map_err(|e| format!("Não consegui gravar {}: {e}", path.display()))?;
     Ok(path)
 }
@@ -91,10 +108,12 @@ pub fn initialize_params() -> Value {
 
 pub fn objective_params(objective: &str) -> Value { json!({"name": "objetivo", "arguments": {"texto": objective}}) }
 
-/// Texto do `tools/call`; `isError` vira `Err` com o texto do HCC.
+/// Texto do `tools/call`; `isError` ou resposta vazia vira `Err`.
 pub fn call_text(result: &Value) -> Result<String, String> {
     let text: String = result["content"].as_array().map(|parts| parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n")).unwrap_or_default();
-    if result["isError"] == true { Err(if text.is_empty() { "O hangar-computer-control falhou sem dizer o motivo.".into() } else { text }) } else { Ok(text) }
+    if result["isError"] == true { Err(if text.is_empty() { "O hangar-computer-control falhou sem dizer o motivo.".into() } else { text }) }
+    // Sem texto não há o que relatar ao usuário: tratar como sucesso diria "feito" sem prova.
+    else if text.trim().is_empty() { Err("O controle do computador respondeu sem resultado".into()) } else { Ok(text) }
 }
 
 fn rpc_text(step: &str, error: RpcError) -> String {
@@ -114,7 +133,7 @@ async fn session(launch: &Launch) -> Result<(Rpc, async_channel::Receiver<super:
     Ok((rpc, incoming))
 }
 
-/// Um processo por objetivo: largar o future (parar a chamada) derruba o Python junto (`kill_on_drop`).
+/// Um processo por objetivo: largar o future (parar a chamada) derruba o Python e o agente dele (grupo/árvore no Drop do Rpc).
 pub async fn run_objective(launch: Launch, objective: &str) -> Result<String, String> {
     let (rpc, _incoming) = session(&launch).await?;
     let result = rpc.request_within("tools/call", objective_params(objective), OBJECTIVE_DEADLINE).await.map_err(|e| rpc_text("o objetivo", e))?;
@@ -144,6 +163,21 @@ mod tests {
     fn call_result_text_and_error() {
         assert_eq!(call_text(&json!({"content": [{"type": "text", "text": "concluído: aberto"}]})), Ok("concluído: aberto".into()));
         assert_eq!(call_text(&json!({"content": [{"type": "text", "text": "alvo desconhecido"}], "isError": true})), Err("alvo desconhecido".into()));
+    }
+
+    #[test]
+    fn empty_call_result_is_a_failure() {
+        let empty = Err("O controle do computador respondeu sem resultado".into());
+        assert_eq!(call_text(&json!({"content": []})), empty);
+        assert_eq!(call_text(&json!({"content": [{"type": "text", "text": "  \n"}]})), empty);
+    }
+
+    #[test]
+    fn home_must_resolve_to_an_absolute_dir() {
+        assert!(resolve_home(None).is_err());
+        assert!(resolve_home(Some(PathBuf::new())).is_err(), "vazio viraria caminho relativo");
+        let absolute = std::env::temp_dir();
+        assert_eq!(resolve_home(Some(absolute.clone())), Ok(absolute));
     }
 
     #[test]

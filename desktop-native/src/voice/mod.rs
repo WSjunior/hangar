@@ -127,6 +127,11 @@ fn rpc_failure(error: RpcError) -> VoiceFailure {
     match error { RpcError::Timeout => VoiceFailure::Timeout, RpcError::Server(m) => VoiceFailure::Realtime(m), _ => VoiceFailure::AppServer }
 }
 
+/// Só o tipo: a mensagem do servidor pode repetir o texto enviado.
+fn rpc_error_kind(error: &RpcError) -> &'static str {
+    match error { RpcError::Spawn => "spawn", RpcError::Closed => "closed", RpcError::Timeout => "timeout", RpcError::Server(_) => "server" }
+}
+
 fn rtc_failure(error: rtc::RtcError) -> VoiceFailure {
     // Mídia parada é microfone trocado/desconectado ou codec, não rede: o texto de rede mandava olhar o firewall.
     match error { rtc::RtcError::Microphone => VoiceFailure::Microphone, rtc::RtcError::Speaker => VoiceFailure::Speaker,
@@ -207,6 +212,7 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
     let mut target = options.target.clone();
     let mut target_cwd = options.cwd.clone();
     let mut pending_context: Option<String> = None;
+    let mut context_failures = 0u32;
     let mut session_names: Vec<String> = Vec::new();
     let outcome = loop {
         // No Planejar nada sai pelo gate; ao entrar nele o envio pendente já foi cancelado.
@@ -408,8 +414,16 @@ async fn run_call(options: VoiceOptions, events: &async_channel::Sender<VoiceEve
                     if method == "account/rateLimits/updated" { send_limits(events, usage::account_limits(&params["rateLimits"])).await; continue; }
                     if !ours { continue; }
                     if method == "thread/realtime/transcript/delta" && params["role"] == "user" && let Some(text) = pending_context.take() {
-                        log("context delivered on user speech");
-                        let _ = rpc.request("thread/realtime/appendText", json!({"threadId": thread, "role": "developer", "text": text})).await;
+                        match rpc.request("thread/realtime/appendText", json!({"threadId": thread, "role": "developer", "text": text.clone()})).await {
+                            Ok(_) => { log("context delivered on user speech"); context_failures = 0; }
+                            // Sem o contexto o organizador fala da sessão errada: volta para a próxima fala tentar de novo.
+                            Err(error) => {
+                                context_failures += 1;
+                                log(format!("context delivery failed kind={} attempt={context_failures}", rpc_error_kind(&error)));
+                                pending_context.get_or_insert(text);
+                                if context_failures == 2 { let _ = events.send(VoiceEvent::Failed(VoiceFailure::Organizer)).await; }
+                            }
+                        }
                     }
                     // A transcrição da fala chega atrasada e cancelava o próprio pedido: só uma fala nova
                     // encaminhada (outro userMessage) prova que o usuário continuou.
