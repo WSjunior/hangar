@@ -344,6 +344,11 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   barra própria tem o contexto e o modelo lidos do transcript (`claude_context.py`, campos
   `context` e `model` da lista) e a cota da API de uso; a barra do Hangar, quando traz o número
   ou o nome, continua valendo.
+- **Janela de contexto do Claude com terminal vem da medida do plugin.** Ao terminar o turno,
+  `$.session.usage()` publica a janela junto do transcript, após conferir o UUID da conversa.
+  A janela declarada na retomada vence a medida anterior. A primeira resposta e uma medida nova
+  invalidam o cache sem esperar o TTL; a versão dos arquivos é capturada antes da leitura.
+  Ver [contexto na abertura com statusline personalizada](#contexto-na-abertura-com-statusline-personalizada).
 - **Hook nosso nunca bloqueia prompt, e a falha dele não some calada.** Em `SessionStart` e
   `UserPromptSubmit` o sufixo é `|| echo "<aviso>"` (texto puro, ASCII): sai com 0 e o aviso
   entra no contexto do modelo. Nos demais eventos o stdout não chega a ninguém e fica
@@ -3203,6 +3208,25 @@ dado" o tempo todo, embora a informação existisse.
 Medição (03/10/2026, sessão Claude com barra própria, Opus em `[1m]`): o transcript deu 539.351
 tokens contra 489k a 510k da barra minutos antes (a conversa crescendo entre uma e outra); no
 nativo os anéis passaram de "sem dado" para Contexto 54% e a conta 100% (semanal).
+
+## Contexto na abertura com statusline personalizada
+
+08/10/2026, Claude Code 2.1.295. Sessão nova com Opus 5.5, sem alias `[1m]` e com
+statusline personalizada: o terminal mostrava `77k/1000k`, mas o contexto da lista era
+`76604/200000`. O transcript traz o uso, mas não a janela; o modelo da conta era `opus`
+e não havia limite no ambiente. A inferência acabava na reserva de 200k. O cache ainda guardava
+uma leitura sem resposta por 20 s, ocultando as mensagens iniciais.
+
+O `turn.complete` passou a publicar `{used, window}` de `$.session.usage()` pelo `/api/plugin/state`.
+O backend valida token e UUID contra o transcript rastreado e grava `<uuid>.context.json`
+com tmp exclusivo e troca atômica. Python e Rust leem essa janela, preservando a prioridade de
+um limite declarado na retomada e o uso mais recente do transcript. A versão do arquivo medida
+antes da leitura impede uma escrita concorrente de carimbar uma leitura velha como atual.
+
+Na prova com uma sessão Claude real com terminal e o plugin alterado, a primeira resposta
+publicou `72004/1000000`, igual a `72k/1000k` da statusline personalizada. Os testes reproduziram
+200k em vez de 1M, a primeira resposta presa no cache e a escrita entre leitura e armazenamento;
+depois da correção, passaram. `/clear` troca o transcript e não herda a medida da conversa anterior.
 
 ## Entrada terminal parada sem aviso
 
