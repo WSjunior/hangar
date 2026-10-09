@@ -9,7 +9,8 @@ Antes do PR, revisão local e as verificações do projeto. No PR, o app CodeRab
 (instalado em 08/10/2026 na conta `jeffer1312`, só nos repos `hangar` e
 `hangar-computer-control`) revisa cada PR aberto e cada commit novo nele; configuração em
 `.coderabbit.yaml` (pt-BR, perfil `chill`, lockfiles e as cópias da GPUI em `desktop-native/vendor/gpui-*` fora; `patches/` e
-`PATCHES.md` continuam revisados). PR já
+`PATCHES.md` continuam revisados). `auto_pause_after_reviewed_commits: 0` porque o padrão do app
+(5) para de revisar sozinho depois de cinco commits revisados no mesmo PR. PR já
 aberto antes da instalação só é revisado com o comentário `@coderabbitai review`. A CLI local do
 CodeRabbit, usada nos repositórios da PMédico, continua fora deste.
 

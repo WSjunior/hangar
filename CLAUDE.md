@@ -392,8 +392,9 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   reaproveita. A aba dele fica no painel de terminal de toda sessão. O estado chega pelo stream da
   lista (`shortcut_terminals`), nunca por SSE próprio; convidado não vê.
 - **Revisão de código:** revisão local e as verificações do projeto antes do PR; no PR, o app
-  CodeRabbit do GitHub revisa sozinho (`.coderabbit.yaml`). Os comentários dele são achados a
-  tratar, não ruído. A CLI local do CodeRabbit continua fora deste repositório.
+  CodeRabbit do GitHub revisa sozinho (`.coderabbit.yaml`); PR aberto antes da instalação só com
+  o comentário `@coderabbitai review`. Os comentários dele são achados a tratar, não ruído. A CLI
+  local do CodeRabbit continua fora deste repositório.
 - **MCP `hangar` (`/mcp`): identidade do chamador vai no cabeçalho e o backend resolve.** Chave
   vence pane, pane vence nome, pane ambíguo não resolve, nada resolvido é erro (nunca `cli`). O
   bearer é conferido ANTES do sub-app (mount passa por fora do `Depends`) e nunca entra no
