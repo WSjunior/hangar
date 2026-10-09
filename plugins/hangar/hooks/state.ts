@@ -1,6 +1,8 @@
 import type { EngineInterface, On } from "claude-code";
 import { agentDone, bridge, setLastState } from "./bridge";
 
+const MEASURE_TIMEOUT_MS = 2_000;
+
 // O scanner do engine não segue `$` através de um import: o envio fica aqui, e
 // do bridge.ts vem só o endereço.
 async function send($: EngineInterface, estado: string, extra: Record<string, unknown> = {}, measure = false) {
@@ -10,8 +12,12 @@ async function send($: EngineInterface, estado: string, extra: Record<string, un
   try {
     if (measure) {
       try {
-        const usage = await $.session.usage();
-        if (usage.context.tokens > 0 && usage.context.window > 0) {
+        // A medida atrasaria o `idle` e o `next(e)`: com prazo, o aviso sai sem ela.
+        const usage = await Promise.race([
+          $.session.usage(),
+          $.clock.sleep(MEASURE_TIMEOUT_MS).then(() => null),
+        ]);
+        if (usage && usage.context.tokens > 0 && usage.context.window > 0) {
           extra = { ...extra, session_id: await $.session.id(),
             context: { used: usage.context.tokens, window: usage.context.window } };
         }
