@@ -397,7 +397,10 @@ def sem_os_desligados(comandos: list[CommandInfo], claude_settings: Optional[dic
     """Tira o que a escolha da sessão desligou: a sonda e os scans são da conta, não da sessão."""
     if not claude_settings:
         return comandos
-    plugins = {pid.split("@", 1)[0] for pid, on in (claude_settings.get("enabledPlugins") or {}).items() if not on}
+    escolha = claude_settings.get("enabledPlugins") or {}
+    # O comando leva só o nome do plugin: o mesmo nome ligado noutro marketplace continua aparecendo.
+    plugins = ({pid.split("@", 1)[0] for pid, on in escolha.items() if not on}
+               - {pid.split("@", 1)[0] for pid, on in escolha.items() if on})
     skills = {nome for nome, estado in (claude_settings.get("skillOverrides") or {}).items() if estado == "off"}
     skills |= {regra[len("Skill("):-1].removesuffix(" *")
                for regra in (claude_settings.get("permissions") or {}).get("deny", [])}
